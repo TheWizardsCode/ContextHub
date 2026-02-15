@@ -95,12 +95,14 @@ export default function register(ctx: PluginContext): void {
           (['true','yes','1'].includes(String(options.needsProducerReview).toLowerCase())) :
           false,
       });
+
+      const refreshed = db.get(item.id) || item;
       
       if (utils.isJsonMode()) {
-        output.json({ success: true, workItem: item });
+        output.json({ success: true, workItem: refreshed });
       } else {
         const format = resolveFormat(program);
-        console.log(humanFormatWorkItem(item, db, format));
+        console.log(humanFormatWorkItem(refreshed, db, format));
       }
     });
 }

@@ -21,6 +21,7 @@ describe('WorklogDatabase', () => {
   });
 
   afterEach(() => {
+    db.close();
     cleanupTempDir(tempDir);
   });
 

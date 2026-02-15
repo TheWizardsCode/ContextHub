@@ -107,6 +107,11 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
   console.warn = ((...args: any[]) => { err.push(`${args.map(a => String(a)).join(' ')}\n`); }) as any;
   console.info = ((...args: any[]) => { out.push(`${args.map(a => String(a)).join(' ')}\n`); }) as any;
 
+  // Track database instances created during this run so we can close them
+  // before returning. On Windows, SQLite file locks prevent temp-dir cleanup
+  // unless all connections are explicitly closed.
+  const openDatabases: Array<{ close(): void }> = [];
+
   try {
     const program = new Command();
     // Configure global options to match src/cli.ts so --json/--verbose/etc are recognized
@@ -120,6 +125,13 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
       .option('-w, --watch [seconds]', 'Rerun the command every N seconds (default: 5)');
 
     const ctx = createPluginContext(program);
+    // Wrap getDatabase to track instances for cleanup
+    const origGetDatabase = ctx.utils.getDatabase;
+    ctx.utils.getDatabase = (prefix?: string) => {
+      const db = origGetDatabase(prefix);
+      openDatabases.push(db);
+      return db;
+    };
     // Register built-in commands
     for (const r of builtInCommands) r(ctx);
 
@@ -187,6 +199,11 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
       throw e;
     }
   } finally {
+    // Close all database connections opened during this run to release
+    // Windows file locks before tests attempt temp-dir cleanup.
+    for (const db of openDatabases) {
+      try { db.close(); } catch (_) { /* ignore */ }
+    }
     process.stdout.write = origStdoutWrite;
     process.stderr.write = origStderrWrite;
     process.exit = origExit;

@@ -127,11 +127,10 @@ export class WorklogDatabase {
     if (fs.existsSync(this.jsonlPath)) {
       try {
         const { items: diskItems, comments: diskComments } = importFromJsonl(this.jsonlPath);
-        const itemMergeResult = mergeWorkItems(items, diskItems, { sameTimestampStrategy: 'local' });
+        const itemMergeResult = mergeWorkItems(items, diskItems);
         const commentMergeResult = mergeComments(comments, diskComments);
         itemsToExport = itemMergeResult.merged;
-        const localCommentIds = new Set(comments.map(comment => comment.id));
-        commentsToExport = commentMergeResult.merged.filter(comment => localCommentIds.has(comment.id));
+        commentsToExport = commentMergeResult.merged;
       } catch (error) {
         if (!this.silent) {
           const message = error instanceof Error ? error.message : String(error);
@@ -268,6 +267,15 @@ export class WorklogDatabase {
       ...item,
       sortIndex: (index + 1) * gap,
     }));
+  }
+
+  /**
+   * Close the underlying database connection.
+   * Must be called before removing temp directories on Windows
+   * to release file locks.
+   */
+  close(): void {
+    this.store.close();
   }
 
   /**
@@ -1289,7 +1297,6 @@ export class WorklogDatabase {
    * Create a new comment
    */
   createComment(input: CreateCommentInput): Comment | null {
-    this.refreshFromJsonlIfNewer();
     // Validate required fields
     if (!input.author || input.author.trim() === '') {
       throw new Error('Author is required');
@@ -1342,7 +1349,6 @@ export class WorklogDatabase {
    * Update a comment
    */
   updateComment(id: string, input: UpdateCommentInput): Comment | null {
-    this.refreshFromJsonlIfNewer();
     const comment = this.store.getComment(id);
     if (!comment) {
       return null;
@@ -1380,18 +1386,17 @@ export class WorklogDatabase {
    * Delete a comment
    */
   deleteComment(id: string): boolean {
-     this.refreshFromJsonlIfNewer();
      const comment = this.store.getComment(id);
      if (!comment) {
        return false;
      }
      const result = this.store.deleteComment(id);
-     if (result) {
-       this.touchWorkItemUpdatedAt(comment.workItemId);
-       this.exportToJsonl();
-       this.triggerAutoSync();
-     }
-     return result;
+      if (result) {
+        this.touchWorkItemUpdatedAt(comment.workItemId);
+        this.exportToJsonl();
+        this.triggerAutoSync();
+      }
+      return result;
   }
 
   /**

@@ -46,6 +46,11 @@ describe('Sync Operations', () => {
 
       expect(finalItem?.priority).toBe('high');
       expect(finalItem?.status).toBe('completed');
+
+      dbA.close();
+      dbB.close();
+      dbC.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     });
   });
   describe('git ref naming', () => {

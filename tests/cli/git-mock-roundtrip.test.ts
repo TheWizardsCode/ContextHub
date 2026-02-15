@@ -2,7 +2,12 @@ import { describe, it, expect } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
+import { fileURLToPath } from 'url'
 import { _testOnly_getRemoteTrackingRef, getRemoteDataFileContent } from '../../src/sync.js'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const mockBinDir = path.join(__dirname, 'mock-bin')
 
 describe('git mock fetch/show roundtrip', () => {
   it('getRemoteTrackingRef matches expectations', () => {
@@ -35,14 +40,18 @@ describe('git mock fetch/show roundtrip', () => {
     // ensure local worklog exists so repo root resolution works
     fs.mkdirSync(path.join(localRepo, '.worklog'), { recursive: true })
 
-    // Replace process cwd for the call to be inside localRepo
+    // Replace process cwd for the call to be inside localRepo and inject
+    // mock git into PATH so sync module finds our mock instead of real git.
     const oldCwd = process.cwd()
+    const oldPath = process.env.PATH
     try {
       process.chdir(localRepo)
+      process.env.PATH = `${mockBinDir}${path.delimiter}${oldPath || ''}`
       const content = await getRemoteDataFileContent(dataFilePath, { remote: 'origin', branch: 'refs/worklog/data' })
       expect(content).toContain('"id":"WI-RT-1"')
     } finally {
       process.chdir(oldCwd)
+      process.env.PATH = oldPath
     }
   })
 })

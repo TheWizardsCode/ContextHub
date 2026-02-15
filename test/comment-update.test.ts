@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import { WorklogDatabase } from '../src/database';
+import { cleanupTempDir } from '../tests/test-utils';
 
 describe('create comment then update workitem (regression)', () => {
   const tmpDir = path.join(process.cwd(), 'tmp-test');
@@ -30,12 +31,14 @@ describe('create comment then update workitem (regression)', () => {
       deleteReason: ''
     };
     fs.writeFileSync(jsonlPath, JSON.stringify({ type: 'workitem', data: item }) + '\n', 'utf-8');
+    // Mark as initialized so resolveWorklogDir prefers this dir over the repo root
+    fs.writeFileSync(path.join(worklogDir, 'initialized'), '', 'utf-8');
     process.chdir(tmpDir);
   });
 
   afterEach(() => {
     process.chdir(path.resolve(__dirname, '..'));
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    cleanupTempDir(tmpDir);
   });
 
   it('preserves comment after updating work item', () => {

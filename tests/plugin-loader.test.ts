@@ -14,17 +14,19 @@ import { fileURLToPath } from 'url';
 describe('Plugin Loader', () => {
   let tempDir: string;
   let pluginDir: string;
+  const originalCwd = process.cwd();
 
   beforeEach(() => {
     tempDir = createTempDir();
     pluginDir = path.join(tempDir, '.worklog', 'plugins');
     fs.mkdirSync(pluginDir, { recursive: true });
-    
+
     // Set up environment to use temp directory
     process.chdir(tempDir);
   });
 
   afterEach(() => {
+    process.chdir(originalCwd);
     cleanupTempDir(tempDir);
   });
 
