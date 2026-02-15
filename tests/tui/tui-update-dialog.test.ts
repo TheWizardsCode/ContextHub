@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { WorklogDatabase } from '../../src/database.js';
 import blessed from 'blessed';
+import { KEY_UPDATE_ITEM } from '../../src/tui/constants.js';
 import { createUpdateDialogFocusManager } from '../../src/tui/update-dialog-navigation.js';
 import { buildUpdateDialogUpdates } from '../../src/tui/update-dialog-submit.js';
 import { loadStatusStageRules } from '../../src/status-stage-rules.js';
@@ -971,7 +972,7 @@ describe('TUI Update Dialog', () => {
       let updateDialogOpened = false;
 
       // Simulate the keyboard key binding
-      screen.key(['u', 'U'], () => {
+      screen.key(KEY_UPDATE_ITEM, () => {
         updateDialogOpened = true;
       });
 
