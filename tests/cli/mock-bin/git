@@ -53,6 +53,23 @@ case "$1" in
       # Return success to indicate we're inside a git repo
       exit 0
     fi
+    if [ "$2" = "--git-dir" ]; then
+      # Find nearest parent directory that contains .git (dir or file)
+      dir=$(pwd)
+      while [ "$dir" != "/" ]; do
+        if [ -d "$dir/.git" ]; then
+          echo "$dir/.git"
+          exit 0
+        fi
+        if [ -f "$dir/.git" ]; then
+          echo "$dir/.git"
+          exit 0
+        fi
+        dir=$(dirname "$dir")
+      done
+      echo "fatal: not a git repository (or any of the parent directories): .git" >&2
+      exit 128
+    fi
     if [ "$2" = "--git-path" ]; then
       echo "hooks"
       exit 0

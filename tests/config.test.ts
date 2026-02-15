@@ -226,7 +226,7 @@ describe('Configuration', () => {
       expect(config).toBe(null);
     });
 
-    it('should reject configs missing required status/stage sections', () => {
+    it('should apply built-in defaults when status/stage sections are missing', () => {
       const configDir = getConfigDir();
       fs.mkdirSync(configDir, { recursive: true });
       fs.writeFileSync(
@@ -237,7 +237,13 @@ describe('Configuration', () => {
 
       const loaded = loadConfig();
 
-      expect(loaded).toBe(null);
+      expect(loaded).not.toBe(null);
+      expect(loaded?.projectName).toBe('Test Project');
+      expect(loaded?.statuses).toBeDefined();
+      expect(loaded?.statuses!.length).toBeGreaterThan(0);
+      expect(loaded?.stages).toBeDefined();
+      expect(loaded?.stages!.length).toBeGreaterThan(0);
+      expect(loaded?.statusStageCompatibility).toBeDefined();
     });
 
     it('should reject empty status/stage compatibility sections', () => {
@@ -387,7 +393,7 @@ describe('Configuration', () => {
       expect(loaded?.prefix).toBe('DEF');
     });
 
-    it('should require status/stage sections in defaults', () => {
+    it('should apply built-in defaults when status/stage sections are missing in defaults', () => {
       const configDir = getConfigDir();
       fs.mkdirSync(configDir, { recursive: true });
       fs.writeFileSync(
@@ -398,7 +404,13 @@ describe('Configuration', () => {
 
       const loaded = loadConfig();
 
-      expect(loaded).toBe(null);
+      expect(loaded).not.toBe(null);
+      expect(loaded?.projectName).toBe('Default Project');
+      expect(loaded?.statuses).toBeDefined();
+      expect(loaded?.statuses!.length).toBeGreaterThan(0);
+      expect(loaded?.stages).toBeDefined();
+      expect(loaded?.stages!.length).toBeGreaterThan(0);
+      expect(loaded?.statusStageCompatibility).toBeDefined();
     });
 
     it('should load autoExport from defaults', () => {

@@ -32,12 +32,25 @@ function isGitWorktree(): boolean {
   }
 }
 
+function hasWorklogConfig(worklogDir: string): boolean {
+  const configPath = path.join(worklogDir, 'config.yaml');
+  const initPath = path.join(worklogDir, 'initialized');
+  return fs.existsSync(configPath) || fs.existsSync(initPath);
+}
+
 export function resolveWorklogDir(): string {
   const cwd = process.cwd();
   const cwdWorklog = path.join(cwd, '.worklog');
+  const repoRoot = getRepoRoot();
+  const repoWorklog = repoRoot ? path.join(repoRoot, '.worklog') : null;
   
   // Check if .worklog exists in current directory
   if (fs.existsSync(cwdWorklog)) {
+    if (repoWorklog && repoWorklog !== cwdWorklog && fs.existsSync(repoWorklog)) {
+      if (!hasWorklogConfig(cwdWorklog) && hasWorklogConfig(repoWorklog)) {
+        return repoWorklog;
+      }
+    }
     return cwdWorklog;
   }
 
@@ -48,9 +61,7 @@ export function resolveWorklogDir(): string {
   }
 
   // Not in a worktree, so try to find .worklog in the repo root
-  const repoRoot = getRepoRoot();
-  if (repoRoot && repoRoot !== cwd) {
-    const repoWorklog = path.join(repoRoot, '.worklog');
+  if (repoWorklog && repoRoot && repoRoot !== cwd) {
     if (fs.existsSync(repoWorklog)) {
       return repoWorklog;
     }

@@ -43,6 +43,27 @@ npm install -g .
 
 This will make the `worklog` and `wl` commands available globally on your system. Changes to the code will require a rebuild and reinstallation to take effect.
 
+#### Windows notes
+
+On Windows, global installs can require an updated PATH and a new shell session.
+
+```powershell
+npm config get prefix
+```
+
+Ensure the returned prefix directory is on your PATH (and for most setups, the `prefix` root contains the generated `wl.cmd`/`worklog.cmd` shims). After updating PATH, open a new PowerShell/CMD/Git Bash session and verify:
+
+```powershell
+where wl
+wl --help
+```
+
+If you are developing locally and want a reliable no-global-install path on Windows, use:
+
+```bash
+npm run cli -- <command>
+```
+
 ## QUICKSTART
 
 ```bash

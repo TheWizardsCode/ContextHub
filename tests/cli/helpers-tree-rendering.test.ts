@@ -54,6 +54,7 @@ describe('tree rendering helpers', () => {
   });
 
   afterEach(() => {
+    db.close();
     cleanupTempDir(tempDir);
   });
 

@@ -22,6 +22,7 @@ describe('Sort Operations', () => {
   });
 
   afterEach(() => {
+    db.close();
     cleanupTempDir(tempDir);
   });
 

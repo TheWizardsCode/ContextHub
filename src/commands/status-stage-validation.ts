@@ -65,6 +65,8 @@ const validateStatusValue = (value: string, rules: StatusStageRules, warnings: s
 };
 
 const validateStageValue = (value: string, rules: StatusStageRules, warnings: string[]): string => {
+  // Empty stage is always valid (means "no stage set")
+  if (value === '') return '';
   const resolved = resolveStage(value, rules);
   if (!resolved.isValid && resolved.isNormalizedValid) {
     warnings.push(warnNormalization('stage', resolved.value, resolved.normalized));
@@ -105,6 +107,8 @@ export const validateStatusStageCompatibility = (
   stage: string,
   rules: StatusStageRules
 ): void => {
+  // Empty stage means "no stage set" and is always compatible
+  if (stage === '') return;
   const validationRules = {
     statusStage: rules.statusStageCompatibility,
     stageStatus: rules.stageStatusCompatibility,

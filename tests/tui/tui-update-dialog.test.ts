@@ -7,6 +7,7 @@ import { KEY_UPDATE_ITEM } from '../../src/tui/constants.js';
 import { createUpdateDialogFocusManager } from '../../src/tui/update-dialog-navigation.js';
 import { buildUpdateDialogUpdates } from '../../src/tui/update-dialog-submit.js';
 import { loadStatusStageRules } from '../../src/status-stage-rules.js';
+import { cleanupTempDir } from '../test-utils.js';
 
 describe('TUI Update Dialog', () => {
   const rulesConfig = loadStatusStageRules();
@@ -14,6 +15,7 @@ describe('TUI Update Dialog', () => {
   const stageValuesNoBlank = rulesConfig.stageValues.filter(stage => stage !== '');
   const stageLabels = stageValuesNoBlank.map(value => rulesConfig.stageLabels[value] ?? value);
   const tmpDir = path.join(process.cwd(), 'tmp-test-tui-update');
+  const openDbs: WorklogDatabase[] = [];
   const worklogDir = path.join(tmpDir, '.worklog');
   const jsonlPath = path.join(worklogDir, 'worklog-data.jsonl');
 
@@ -63,17 +65,23 @@ describe('TUI Update Dialog', () => {
       fs.appendFileSync(jsonlPath, JSON.stringify({ type: 'workitem', data: item }) + '\n', 'utf-8');
     });
 
+    // Mark as initialized so resolveWorklogDir prefers this dir over the repo root
+    fs.writeFileSync(path.join(worklogDir, 'initialized'), '', 'utf-8');
     process.chdir(tmpDir);
   });
 
   afterEach(() => {
+    for (const db of openDbs) {
+      try { db.close(); } catch { /* ignore */ }
+    }
+    openDbs.length = 0;
     process.chdir(path.resolve(__dirname, '../..'));
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    cleanupTempDir(tmpDir);
   });
 
   describe('Update Dialog Functions', () => {
     it('should successfully update a work item stage via db.update', () => {
-      const db = new WorklogDatabase('WL', undefined, undefined, true, false);
+      const db = new WorklogDatabase('WL', undefined, undefined, true, false); openDbs.push(db);
 
       // Verify initial stage
       const itemBefore = db.get('WL-TEST-1');
@@ -88,7 +96,7 @@ describe('TUI Update Dialog', () => {
     });
 
     it('should update stage from prd_complete to plan_complete', () => {
-      const db = new WorklogDatabase('WL', undefined, undefined, true, false);
+      const db = new WorklogDatabase('WL', undefined, undefined, true, false); openDbs.push(db);
 
       const itemBefore = db.get('WL-TEST-2');
       expect(itemBefore?.stage).toBe('prd_complete');
@@ -101,7 +109,7 @@ describe('TUI Update Dialog', () => {
     });
 
     it('should update to done stage', () => {
-      const db = new WorklogDatabase('WL', undefined, undefined, true, false);
+      const db = new WorklogDatabase('WL', undefined, undefined, true, false); openDbs.push(db);
 
       db.update('WL-TEST-1', { stage: 'done' });
 
@@ -110,7 +118,7 @@ describe('TUI Update Dialog', () => {
     });
 
     it('should update to blocked stage', () => {
-      const db = new WorklogDatabase('WL', undefined, undefined, true, false);
+      const db = new WorklogDatabase('WL', undefined, undefined, true, false); openDbs.push(db);
 
       db.update('WL-TEST-1', { stage: 'blocked' });
 
@@ -313,7 +321,7 @@ describe('TUI Update Dialog', () => {
 
   describe('Update Dialog Selection Handling', () => {
     it('should handle all stage selections correctly', () => {
-      const db = new WorklogDatabase('WL', undefined, undefined, true, false);
+      const db = new WorklogDatabase('WL', undefined, undefined, true, false); openDbs.push(db);
 
       const stages = stageValuesNoBlank;
       const stageMapping = Object.fromEntries(stageValuesNoBlank.map((value, idx) => [idx, value]));
@@ -882,7 +890,7 @@ describe('TUI Update Dialog', () => {
 
   describe('Update Dialog Error Handling', () => {
     it('should handle update failure gracefully', () => {
-      const db = new WorklogDatabase('WL', undefined, undefined, true, false);
+      const db = new WorklogDatabase('WL', undefined, undefined, true, false); openDbs.push(db);
 
       // Attempt to update non-existent item
       const result = db.update('WL-NONEXISTENT', { stage: 'in_progress' });
@@ -896,7 +904,7 @@ describe('TUI Update Dialog', () => {
     });
 
     it('should preserve item data on update failure', () => {
-      const db = new WorklogDatabase('WL', undefined, undefined, true, false);
+      const db = new WorklogDatabase('WL', undefined, undefined, true, false); openDbs.push(db);
 
       const itemBefore = db.get('WL-TEST-1');
       const originalTitle = itemBefore?.title;
@@ -914,7 +922,7 @@ describe('TUI Update Dialog', () => {
 
   describe('Update Dialog Integration', () => {
     it('should execute full update flow: open, select, update, close', () => {
-      const db = new WorklogDatabase('WL', undefined, undefined, true, false);
+      const db = new WorklogDatabase('WL', undefined, undefined, true, false); openDbs.push(db);
 
       // Step 1: Verify item exists with initial stage
       let item = db.get('WL-TEST-1');
@@ -939,7 +947,7 @@ describe('TUI Update Dialog', () => {
     });
 
     it('should handle multiple sequential updates', () => {
-      const db = new WorklogDatabase('WL', undefined, undefined, true, false);
+      const db = new WorklogDatabase('WL', undefined, undefined, true, false); openDbs.push(db);
 
       // First update
       const firstStage = stageValuesNoBlank[0] ?? 'idea';

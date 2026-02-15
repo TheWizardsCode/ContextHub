@@ -132,7 +132,16 @@ describe('CLI Status Tests', () => {
 
     const dbPath = path.join('.worklog', 'worklog.db');
     if (fs.existsSync(dbPath)) {
-      fs.unlinkSync(dbPath);
+      try {
+        fs.unlinkSync(dbPath);
+      } catch (err: any) {
+        // On Windows, SQLite may still hold a lock; rename instead
+        if (err.code === 'EBUSY' || err.code === 'EPERM') {
+          try { fs.renameSync(dbPath, dbPath + '.old'); } catch (_) { /* ignore */ }
+        } else {
+          throw err;
+        }
+      }
     }
 
     const { stdout, stderr } = await execAsync(

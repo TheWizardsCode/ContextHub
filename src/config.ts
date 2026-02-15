@@ -149,6 +149,37 @@ export function loadConfig(): WorklogConfig | null {
     return null;
   }
 
+  // Apply built-in defaults for statuses/stages when not provided by config
+  // or config.defaults.yaml (supports projects created before this feature).
+  if (!config.statuses) {
+    config.statuses = [
+      { value: 'open', label: 'Open' },
+      { value: 'in-progress', label: 'In Progress' },
+      { value: 'blocked', label: 'Blocked' },
+      { value: 'completed', label: 'Completed' },
+      { value: 'deleted', label: 'Deleted' },
+    ];
+  }
+  if (!config.stages) {
+    config.stages = [
+      { value: 'idea', label: 'Idea' },
+      { value: 'intake_complete', label: 'Intake Complete' },
+      { value: 'plan_complete', label: 'Plan Complete' },
+      { value: 'in_progress', label: 'In Progress' },
+      { value: 'in_review', label: 'In Review' },
+      { value: 'done', label: 'Done' },
+    ];
+  }
+  if (!config.statusStageCompatibility) {
+    config.statusStageCompatibility = {
+      'open': ['idea', 'intake_complete', 'plan_complete', 'in_progress'],
+      'in-progress': ['in_progress'],
+      'blocked': ['idea', 'intake_complete', 'plan_complete'],
+      'completed': ['in_review', 'done'],
+      'deleted': ['idea', 'intake_complete', 'plan_complete', 'done'],
+    };
+  }
+
   const statusStageError = validateStatusStageConfig(config);
   if (statusStageError) {
     console.error(statusStageError);

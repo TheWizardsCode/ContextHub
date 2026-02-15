@@ -15,11 +15,29 @@ export function createTempDir(): string {
 }
 
 /**
- * Clean up a temporary directory
+ * Clean up a temporary directory.
+ * On Windows, SQLite may hold file locks briefly after the connection
+ * object goes out of scope; retry a few times to handle EPERM.
  */
 export function cleanupTempDir(dir: string): void {
-  if (fs.existsSync(dir)) {
-    fs.rmSync(dir, { recursive: true, force: true });
+  if (!fs.existsSync(dir)) {
+    return;
+  }
+  const maxRetries = process.platform === 'win32' ? 5 : 0;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (err: any) {
+      if (attempt < maxRetries && (err.code === 'EPERM' || err.code === 'EBUSY')) {
+        // brief spin-wait to let the OS release the file lock
+        const delay = 200 * (attempt + 1);
+        const until = Date.now() + delay;
+        while (Date.now() < until) { /* wait */ }
+        continue;
+      }
+      throw err;
+    }
   }
 }
 
