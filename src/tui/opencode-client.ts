@@ -653,6 +653,23 @@ export class OpencodeClient {
     onSessionEnd: () => void,
   ) {
     let streamText = pane.getContent ? pane.getContent() : '';
+    // Track a succinct activity label for the response pane header and update
+    // it only when the activity changes to avoid excessive label churn.
+    let currentActivity: string | null = null;
+    const setActivity = (activity?: string | null) => {
+      const next = activity && activity.length > 0 ? activity : null;
+      if (next === currentActivity) return;
+      currentActivity = next;
+      try {
+        if (typeof pane.setLabel === 'function') {
+          if (currentActivity) {
+            pane.setLabel(` opencode - ${currentActivity} [esc] `);
+          } else {
+            pane.setLabel(' opencode [esc] ');
+          }
+        }
+      } catch (_) {}
+    };
     const appendText = (text: string) => {
       streamText += text;
     };
@@ -673,21 +690,34 @@ export class OpencodeClient {
     };
     const handlers: OpencodeSseHandlers = {
       onTextDelta: (text) => {
+        // Receiving streaming text usually indicates the assistant is
+        // composing a response — present that as "Writing response..."
+        setActivity('Writing response...');
         appendText(text);
         updatePane();
       },
       onTextReset: (text) => {
+        setActivity('Writing response...');
         appendLine(text);
         updatePane();
       },
       onToolUse: (toolName, description) => {
-        appendLine(`{yellow-fg}[Tool: ${toolName}]{/}`);
-        if (description) {
-          appendLine(`  ${description}`);
+        // Show a concise activity label for tool usage and also insert
+        // an inline message for common file operations.
+        setActivity(`Using tool: ${toolName}`);
+        // Inline bracketed file ops when a description (usually filename)
+        // is present and the tool appears to mutate files.
+        const lower = (toolName || '').toLowerCase();
+        if (description && ['write', 'edit', 'delete', 'create', 'remove'].includes(lower)) {
+          appendLine(`{yellow-fg}[${toolName.charAt(0).toUpperCase() + toolName.slice(1)}: ${description}]{/}`);
+        } else {
+          appendLine(`{yellow-fg}[Tool: ${toolName}]{/}`);
+          if (description) appendLine(`  ${description}`);
         }
         updatePane();
       },
       onToolResult: (content) => {
+        setActivity('Processing result...');
         appendLine('{green-fg}[Tool Result]{/}');
         const resultLines = content.split('\n');
         for (const line of resultLines.slice(0, 10)) {
@@ -697,8 +727,16 @@ export class OpencodeClient {
           appendLine(`  ... (${resultLines.length - 10} more lines)`);
         }
         updatePane();
+        // After showing a tool result, return the pane to a neutral state
+        // — don't clear immediately since more parts may arrive, but
+        // schedule a short idle reset if nothing else changes. Simpler
+        // approach: clear activity after a small delay.
+        setTimeout(() => {
+          setActivity(null);
+        }, 600);
       },
       onPermissionRequest: () => {
+        setActivity('Permission required');
         indicator?.setContent?.('{yellow-fg}[!] Permission Required{/}');
         indicator?.show?.();
         inputField?.setLabel?.(' Permission Request ');
@@ -755,6 +793,7 @@ export class OpencodeClient {
         const inputType = input.type || 'text';
         const promptText = input.prompt || 'Input required';
 
+        setActivity('Input required');
         appendLine(`{yellow-fg}${promptText}{/}`);
         indicator?.setContent?.('{yellow-fg}[!] Input Required{/}');
         indicator?.show?.();
@@ -782,9 +821,16 @@ export class OpencodeClient {
 
           appendLine(`{cyan-fg}> ${value}{/}`);
           updatePane();
+          // restore neutral activity after input handled
+          setActivity(null);
         });
       },
-      onSessionEnd,
+      onSessionEnd: () => {
+        // Reset activity and call the provided session end handler so the
+        // controller can restore prompt state and spinner.
+        try { setActivity(null); } catch (_) {}
+        try { onSessionEnd(); } catch (_) {}
+      },
     };
 
     return { appendText, appendLine, updatePane, handlers };
