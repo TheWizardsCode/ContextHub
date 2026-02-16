@@ -5,9 +5,11 @@ describe('OpencodeClient child process lifecycle', () => {
   it('removes listeners and kills child on stopServer and allows restart without leaking', async () => {
     let spawnCount = 0;
     const procs: any[] = [];
+    let lastSpawnOpts: any = null;
 
     const spawnImpl = (_name: string, _args: string[], _opts: any) => {
       spawnCount++;
+      lastSpawnOpts = _opts;
       const stdoutListeners: string[] = [];
       const stderrListeners: string[] = [];
       const proc: any = {
@@ -31,6 +33,7 @@ describe('OpencodeClient child process lifecycle', () => {
 
     const client = new OpencodeClient({
       port: 4321,
+      cwd: '/tmp/worklog-root',
       log: () => {},
       showToast: () => {},
       modalDialogs: { selectList: async () => null, editTextarea: async () => null, confirmTextbox: async () => true },
@@ -51,6 +54,7 @@ describe('OpencodeClient child process lifecycle', () => {
     expect(started).toBe(true);
     expect(spawnCount).toBe(1);
     expect(procs.length).toBe(1);
+    expect(lastSpawnOpts?.cwd).toBe('/tmp/worklog-root');
 
     // stop the server — should call kill and remove listeners
     client.stopServer();

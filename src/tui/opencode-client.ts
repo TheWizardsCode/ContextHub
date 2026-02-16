@@ -78,6 +78,7 @@ export interface SendPromptOptions {
 
 export interface OpencodeClientOptions {
   port: number;
+  cwd?: string;
   log: (message: string) => void;
   showToast: (message: string) => void;
   modalDialogs: ModalDialogsApi;
@@ -115,28 +116,65 @@ export class OpencodeClient {
   }
 
   async startServer(): Promise<boolean> {
-    const isRunning = await this.checkOpencodeServer(this.options.port);
-    if (isRunning) {
-      this.setStatus('running', this.options.port);
-      return true;
+    const configuredPort = this.options.port;
+    if (configuredPort > 0) {
+      const isRunning = await this.checkOpencodeServer(configuredPort);
+      if (isRunning) {
+        this.setStatus('running', configuredPort);
+        return true;
+      }
+    } else if (this.opencodeServerPort > 0) {
+      const isRunning = await this.checkOpencodeServer(this.opencodeServerPort);
+      if (isRunning) {
+        this.setStatus('running', this.opencodeServerPort);
+        return true;
+      }
     }
-
-    this.setStatus('starting', this.options.port);
+    this.setStatus('starting', configuredPort);
     this.options.showToast('Starting OpenCode server...');
 
+    let detectedPort = 0;
     try {
-      this.options.log(`starting opencode server port=${this.options.port}`);
-      this.opencodeServerProc = this.spawnImpl('opencode', ['serve', '--port', String(this.options.port)], {
+      this.options.log(`starting opencode server port=${configuredPort} cwd=${this.options.cwd ?? process.cwd()}`);
+      const opencodeEnv = {
+        ...process.env,
+        WORKLOG_DIR: this.options.cwd ? `${this.options.cwd}/.worklog` : process.env.WORKLOG_DIR,
+      };
+      const args = ['serve'];
+      const portArg = configuredPort > 0 ? configuredPort : this.opencodeServerPort;
+      if (portArg && portArg > 0) {
+        args.push('--port', String(portArg));
+      }
+      this.opencodeServerProc = this.spawnImpl('opencode', args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: false,
+        env: opencodeEnv,
+        ...(this.options.cwd ? { cwd: this.options.cwd } : {}),
       });
 
       // Attach listeners but avoid re-attaching if they already exist (in
       // case startServer is retried). Use named functions so we can remove
       // them reliably in stopServer.
-      const handleStdout = (chunk: any) => { this.options.log(`server stdout: ${chunk.toString().trim()}`); };
+      const handleStdout = (chunk: any) => {
+        const line = chunk.toString().trim();
+        this.options.log(`server stdout: ${line}`);
+        const match = line.match(/listening on http:\/\/[^:]+:(\d+)/i);
+        if (match && match[1]) {
+          const parsed = Number(match[1]);
+          if (!Number.isNaN(parsed) && parsed > 0 && detectedPort !== parsed) {
+            detectedPort = parsed;
+            this.opencodeServerPort = parsed;
+            this.options.log(`detected opencode server port=${parsed}`);
+          }
+        }
+      };
       const handleStderr = (chunk: any) => { this.options.log(`server stderr: ${chunk.toString().trim()}`); };
       const handleExit = (code: any, signal: any) => { this.options.log(`server exit code=${code ?? 'null'} signal=${signal ?? 'null'}`); };
+      const handleError = (err: any) => {
+        this.options.log(`server spawn error: ${String(err)}`);
+        this.setStatus('error', this.options.port);
+        this.options.showToast(`OpenCode server spawn error: ${String(err)}`);
+      };
 
       if (this.opencodeServerProc.stdout && !(this.opencodeServerProc.stdout as any).__opencode_listeners_installed) {
         this.opencodeServerProc.stdout.on('data', handleStdout);
@@ -150,22 +188,47 @@ export class OpencodeClient {
         this.opencodeServerProc.on('exit', handleExit);
         (this.opencodeServerProc as any).__opencode_exit_listener_installed = true;
       }
+      if (!(this.opencodeServerProc as any).__opencode_error_listener_installed) {
+        this.opencodeServerProc.on('error', handleError);
+        (this.opencodeServerProc as any).__opencode_error_listener_installed = true;
+      }
 
-      this.opencodeServerPort = this.options.port;
+      this.opencodeServerPort = configuredPort;
+      this.options.log(`opencode server spawned pid=${this.opencodeServerProc.pid ?? 'unknown'} port=${configuredPort}`);
 
-      let retries = 10;
+      let retries = 40;
       while (retries > 0) {
         await new Promise(resolve => setTimeout(resolve, 500));
-        const isUp = await this.checkOpencodeServer(this.options.port);
-        if (isUp) {
-          this.setStatus('running', this.options.port);
-          this.options.showToast('OpenCode server started');
-          return true;
+        if (configuredPort > 0) {
+          const isUp = await this.checkOpencodeServer(configuredPort);
+          if (isUp) {
+            this.setStatus('running', configuredPort);
+            this.options.showToast('OpenCode server started');
+            return true;
+          }
+        } else {
+          if (detectedPort === 0) {
+            this.options.log('waiting for opencode port detection...');
+            retries--;
+            continue;
+          }
+          const isUp = await this.checkOpencodeServer(detectedPort);
+          if (isUp) {
+            this.setStatus('running', detectedPort);
+            this.options.showToast('OpenCode server started');
+            return true;
+          }
         }
         retries--;
       }
 
-      this.setStatus('error', this.options.port);
+      if (configuredPort === 0 && detectedPort === 0 && this.opencodeServerProc) {
+        this.setStatus('starting', 0);
+        this.options.showToast('OpenCode server still starting');
+        return false;
+      }
+
+      this.setStatus('error', detectedPort || configuredPort);
       this.options.showToast('OpenCode server failed to start');
       if (this.opencodeServerProc) {
         // Ensure we remove any listeners before killing the child process so
@@ -179,7 +242,7 @@ export class OpencodeClient {
       }
       return false;
     } catch (err) {
-      this.setStatus('error', this.options.port);
+      this.setStatus('error', detectedPort || configuredPort);
       this.options.showToast(`Failed to start OpenCode server: ${String(err)}`);
       return false;
     }
@@ -434,10 +497,12 @@ export class OpencodeClient {
   private setStatus(status: OpencodeServerStatus, port: number): void {
     this.opencodeServerStatus = status;
     this.opencodeServerPort = port;
+    this.options.log(`server status=${status} port=${port}`);
     if (this.options.onStatusChange) {
       this.options.onStatusChange(status, port);
     }
   }
+
 
   private resolveSessionSelection(preferredSessionId: string | null): Promise<SessionSelectionResult> {
     const sessionFromMemory = this.getSessionFromCurrent(preferredSessionId);
@@ -473,8 +538,8 @@ export class OpencodeClient {
         resolve(false);
       });
 
-      req.on('error', () => {
-        this.options.log('health check error');
+      req.on('error', (err) => {
+        this.options.log(`health check error: ${String(err)}`);
         resolve(false);
       });
 
@@ -538,6 +603,14 @@ export class OpencodeClient {
         const data = JSON.parse(payload);
         const dataType = data?.type || 'unknown';
         this.options.log(`sse data type=${dataType}`);
+        if (dataType === 'session.updated' && data?.properties?.info) {
+          const info = data.properties.info;
+          const dir = info.directory || info.cwd || info.workdir || info.path;
+          const projectId = info.projectID || info.projectId;
+          if (dir || projectId) {
+            this.options.log(`session info dir=${dir ?? 'unknown'} project=${projectId ?? 'unknown'}`);
+          }
+        }
 
         this.handleSseEvent({
           data,
