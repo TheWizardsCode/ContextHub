@@ -959,6 +959,13 @@ export class TuiController {
       const value = typeof this.value === 'string' ? this.value : '';
       const name = key?.name;
       const hasCtrl = !!key?.ctrl;
+      const keyObj = key as any;
+      if (keyObj && keyObj.__opencode_input_handled) {
+        return true;
+      }
+      if (keyObj) {
+        keyObj.__opencode_input_handled = true;
+      }
 
       if (hasCtrl && name === 'n') {
         setOpencodeInputMode(opencodeInputMode === 'insert' ? 'normal' : 'insert');

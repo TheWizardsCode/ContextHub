@@ -233,6 +233,138 @@ describe('OpenCode prompt input modes', () => {
     expect((opencodeText as any).__opencode_cursor).toBe(2);
   });
 
+  it('guards against duplicate input handling for a single key event', async () => {
+    const screen = makeScreen();
+    const list = makeList();
+    const footer = makeBox();
+    const detail = makeBox();
+    const copyIdButton = makeBox();
+
+    const overlays = {
+      detailOverlay: makeBox(),
+      closeOverlay: makeBox(),
+      updateOverlay: makeBox(),
+    };
+    const dialogs = {
+      detailModal: makeBox(),
+      detailClose: makeBox(),
+      closeDialog: makeBox(),
+      closeDialogText: makeBox(),
+      closeDialogOptions: makeList(),
+      updateDialog: makeBox(),
+      updateDialogText: makeBox(),
+      updateDialogOptions: makeList(),
+      updateDialogStageOptions: makeList(),
+      updateDialogStatusOptions: makeList(),
+      updateDialogPriorityOptions: makeList(),
+      updateDialogComment: makeTextarea(),
+    };
+    const helpMenu = {
+      isVisible: vi.fn(() => false),
+      show: vi.fn(),
+      hide: vi.fn(),
+    };
+    const modalDialogs = {
+      selectList: vi.fn(async () => null),
+      editTextarea: vi.fn(async () => null),
+      confirmTextbox: vi.fn(async () => true),
+      forceCleanup: vi.fn(),
+    };
+    const opencodeText = makeTextarea();
+    const opencodeUi = {
+      serverStatusBox: makeBox(),
+      dialog: makeBox(),
+      textarea: opencodeText,
+      suggestionHint: makeBox(),
+      sendButton: makeBox(),
+      cancelButton: makeBox(),
+      ensureResponsePane: vi.fn(() => makeBox()),
+    };
+    const layout = {
+      screen,
+      listComponent: { getList: () => list, getFooter: () => footer },
+      detailComponent: { getDetail: () => detail, getCopyIdButton: () => copyIdButton },
+      toastComponent: { show: vi.fn() } as any,
+      overlaysComponent: overlays,
+      dialogsComponent: dialogs,
+      helpMenu,
+      modalDialogs,
+      opencodeUi,
+      nextDialog: {
+        overlay: makeBox(),
+        dialog: makeBox(),
+        close: makeBox(),
+        text: makeBox(),
+        options: makeList(),
+      },
+    };
+
+    const ctx = {
+      program: { opts: () => ({ verbose: false }) },
+      utils: {
+        requireInitialized: vi.fn(),
+        getDatabase: vi.fn(() => ({
+          list: () => [
+            {
+              id: 'WL-TEST-1',
+              title: 'Test',
+              description: '',
+              status: 'open',
+              priority: 'medium',
+              sortIndex: 0,
+              parentId: null,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              tags: [],
+              assignee: '',
+              stage: '',
+              issueType: 'task',
+              createdBy: '',
+              deletedBy: '',
+              deleteReason: '',
+              risk: '',
+              effort: '',
+            },
+          ],
+          getPrefix: () => undefined,
+          getCommentsForWorkItem: () => [],
+          update: () => ({}),
+          createComment: () => ({}),
+          get: () => null,
+        })),
+      },
+    } as any;
+
+    class FakeOpencodeClient {
+      getStatus() { return { status: 'stopped', port: 9999 }; }
+      startServer() { return Promise.resolve(true); }
+      stopServer() { return undefined; }
+      sendPrompt() { return Promise.resolve(); }
+    }
+
+    const controller = new TuiController(ctx, {
+      createLayout: () => layout as any,
+      OpencodeClient: FakeOpencodeClient as any,
+      resolveWorklogDir: () => '/tmp',
+      createPersistence: () => ({
+        loadPersistedState: async () => null,
+        savePersistedState: async () => undefined,
+        statePath: '/tmp/tui-state.json',
+      }),
+    });
+
+    await controller.start({});
+
+    const inputHandler = (opencodeText as any)._listener as (ch: any, key: any) => void;
+    expect(typeof inputHandler).toBe('function');
+
+    const key = { name: 'a' } as any;
+    inputHandler.call(opencodeText, 'a', key);
+    inputHandler.call(opencodeText, 'a', key);
+
+    expect(opencodeText.getValue()).toBe('a');
+  });
+
   it('auto-resizes prompt height based on wrapped visual lines', async () => {
     const screen = makeScreen();
     const list = makeList();
