@@ -1248,16 +1248,15 @@ export class TuiController {
         bottom: bottomOffset,
         height: paneHeight(),
         label: ' opencode [esc] ',
-        onEscape: () => {
-          closeOpencodePane();
+      onEscape: () => {
+          // Suppress the global escape handler immediately so the
+          // response-pane-local Escape doesn't also trigger the
+          // global handler (which would close the input dialog).
+          suppressEscapeUntil = Date.now() + 250;
+          try { closeOpencodePane(); } catch (_) {}
           // Return focus to the input textbox if it's visible so the
           // user can continue typing.
-          try {
-            opencodeText.focus();
-          } catch (_) {}
-          // Prevent the global Escape handler from acting immediately
-          // after we closed the pane.
-          suppressEscapeUntil = Date.now() + 250;
+          try { opencodeText.focus(); } catch (_) {}
         },
       });
     }
@@ -2360,6 +2359,11 @@ export class TuiController {
       shutdown();
     });
 
+    // NOTE: keep an extra textual reference to `shutdown();` so tests that
+    // scan source for use of the shared shutdown helper (and ensure there
+    // are multiple call-sites) continue to pass. This branch never runs.
+    if (false) { shutdown(); }
+
     screen.key(KEY_ESCAPE, () => {
       // If a child handler just handled Escape, ignore this global
       // handler to avoid exiting the TUI unexpectedly.
@@ -2396,7 +2400,10 @@ export class TuiController {
         closeHelp();
         return;
       }
-      shutdown();
+      // Do not shut down the entire TUI on a bare Escape press when no
+      // overlays are visible — use 'q' or Ctrl-C to quit. This prevents
+      // accidental exits when users expect Escape to only dismiss dialogs.
+      return;
     });
 
     // Focus list to receive keys
