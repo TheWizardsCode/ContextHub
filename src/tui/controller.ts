@@ -147,6 +147,7 @@ export class TuiController {
 
     // Persisted state file per-worklog directory
     const worklogDir = resolveWorklogDirImpl();
+    const worklogRoot = pathImpl.dirname(worklogDir);
     const statePath = pathImpl.join(worklogDir, 'tui-state.json');
     void statePath;
 
@@ -1224,6 +1225,7 @@ export class TuiController {
 
     const opencodeClient = new OpencodeClientImpl({
       port: OPENCODE_SERVER_PORT,
+      cwd: worklogRoot,
       log: debugLog,
       showToast,
       modalDialogs,
