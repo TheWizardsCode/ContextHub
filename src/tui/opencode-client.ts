@@ -362,6 +362,16 @@ export class OpencodeClient {
             }
           }
 
+          if (!sessionWorkItemId) {
+            safePushLine('{red-fg}OpenCode prompt requires a work item id. Select a work item and retry.{/}');
+            this.options.render();
+            reject(new Error('Missing work item id for OpenCode prompt'));
+            return;
+          }
+          const appendedInstruction = 'Ask no Questions. Require no further input. If you cannot proceed without further input then explain why.';
+          const workItemInstruction = `The work item for this request is ${sessionWorkItemId}`;
+          finalPrompt = `${finalPrompt}\n\n${appendedInstruction}\n${workItemInstruction}`;
+
           safePushLine('');
           safePushLine(`{gray-fg}${prompt}{/}`);
           safePushLine('');
@@ -645,6 +655,41 @@ export class OpencodeClient {
     return value?.sessionID || value?.sessionId || value?.session_id;
   }
 
+  private formatToolDescription(value: any): string | undefined {
+    if (value === null || value === undefined) return undefined;
+    if (typeof value === 'string') return value;
+    try {
+      const json = JSON.stringify(value);
+      if (json.length > 200) return `${json.slice(0, 197)}...`;
+      return json;
+    } catch (_) {
+      return String(value);
+    }
+  }
+
+  private getToolInfo(part: any): { name: string; description?: string } {
+    const tool = part?.tool || {};
+    const call = part?.call || {};
+    let name = tool.name || tool.tool || tool.id || call.name || call.tool || call.id || part?.name || part?.toolName || 'tool';
+    const rawDescription = tool.description ?? call.description ?? call.input ?? part?.input ?? part?.title ?? part?.summary ?? part?.description;
+    let description = this.formatToolDescription(rawDescription);
+    if (name === 'tool' && call.input && typeof call.input === 'object') {
+      const inputKeys = Object.keys(call.input);
+      if (inputKeys.length > 0) {
+        const inferred = call.input.action || call.input.command || call.input.operation || call.input.op || call.input.tool;
+        if (typeof inferred === 'string' && inferred.trim()) {
+          name = inferred.trim();
+        } else {
+          name = `tool:${inputKeys[0]}`;
+        }
+        if (!description) {
+          description = this.formatToolDescription(call.input);
+        }
+      }
+    }
+    return { name, description };
+  }
+
   private createSessionTools(
     sessionId: string,
     pane: OpencodePaneApi,
@@ -656,20 +701,22 @@ export class OpencodeClient {
     // Track a succinct activity label for the response pane header and update
     // it only when the activity changes to avoid excessive label churn.
     let currentActivity: string | null = null;
+    let lastToolKey: string | null = null;
     const setActivity = (activity?: string | null) => {
       const next = activity && activity.length > 0 ? activity : null;
       if (next === currentActivity) return;
       currentActivity = next;
-      try {
-        if (typeof pane.setLabel === 'function') {
-          if (currentActivity) {
-            pane.setLabel(` opencode - ${currentActivity} [esc] `);
-          } else {
-            pane.setLabel(' opencode [esc] ');
-          }
-        }
-      } catch (_) {}
-    };
+       try {
+         if (typeof pane.setLabel === 'function') {
+           if (currentActivity) {
+             pane.setLabel(` opencode - ${currentActivity} [esc] `);
+           } else {
+             pane.setLabel(' opencode [esc] ');
+           }
+           this.options.render();
+         }
+       } catch (_) {}
+     };
     const appendText = (text: string) => {
       streamText += text;
     };
@@ -693,30 +740,43 @@ export class OpencodeClient {
         // Receiving streaming text usually indicates the assistant is
         // composing a response — present that as "Writing response..."
         setActivity('Writing response...');
+        lastToolKey = null;
         appendText(text);
         updatePane();
       },
       onTextReset: (text) => {
         setActivity('Writing response...');
+        lastToolKey = null;
         appendLine(text);
         updatePane();
       },
       onToolUse: (toolName, description) => {
+        const safeName = toolName || 'tool';
+        const key = `${safeName}|${description || ''}`;
+        if (key === lastToolKey) return;
+        lastToolKey = key;
         // Show a concise activity label for tool usage and also insert
         // an inline message for common file operations.
-        setActivity(`Using tool: ${toolName}`);
+        if (safeName === 'step') {
+          setActivity(description ? `Step: ${description}` : 'Running step...');
+        } else {
+          setActivity(`Using tool: ${safeName}`);
+        }
         // Inline bracketed file ops when a description (usually filename)
         // is present and the tool appears to mutate files.
-        const lower = (toolName || '').toLowerCase();
-        if (description && ['write', 'edit', 'delete', 'create', 'remove'].includes(lower)) {
-          appendLine(`{yellow-fg}[${toolName.charAt(0).toUpperCase() + toolName.slice(1)}: ${description}]{/}`);
+        const lower = (safeName || '').toLowerCase();
+        if (safeName === 'step') {
+          appendLine(`{yellow-fg}[Step: ${description || 'running'}]{/}`);
+        } else if (description && ['write', 'edit', 'delete', 'create', 'remove'].includes(lower)) {
+          appendLine(`{yellow-fg}[${safeName.charAt(0).toUpperCase() + safeName.slice(1)}: ${description}]{/}`);
         } else {
-          appendLine(`{yellow-fg}[Tool: ${toolName}]{/}`);
+          appendLine(`{yellow-fg}[Tool: ${safeName}]{/}`);
           if (description) appendLine(`  ${description}`);
         }
         updatePane();
       },
       onToolResult: (content) => {
+        lastToolKey = null;
         setActivity('Processing result...');
         appendLine('{green-fg}[Tool Result]{/}');
         const resultLines = content.split('\n');
@@ -892,9 +952,11 @@ export class OpencodeClient {
             this.options.log(`sse text unchanged chars=${part.text.length}`);
           }
           partTextById.set(partId, part.text);
-        } else if (part.type === 'tool-use' && part.tool) {
+        } else if ((part.type === 'tool-use' || part.type === 'tool') && part.tool) {
           handlers.onToolUse(part.tool.name, part.tool.description);
           this.options.log(`sse tool use=${part.tool.name}`);
+        } else if (part.type === 'step-start') {
+          handlers.onToolUse('step', part.title || part.description || 'running');
         } else if (part.type === 'tool-result' && part.content) {
           handlers.onToolResult(part.content);
           this.options.log(`sse tool result lines=${String(part.content).split('\n').length}`);
