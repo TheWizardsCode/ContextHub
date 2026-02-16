@@ -105,6 +105,83 @@ export default function register(ctx: PluginContext): void {
       }
     });
 
+  doctor
+    .command('prune')
+    .description('Prune soft-deleted work items older than a specified age')
+    .option('--days <n>', 'Age threshold in days (items with updatedAt older than this will be pruned)', '30')
+    .option('--dry-run', 'Show which items would be pruned without deleting them')
+    .option('--prefix <prefix>', 'Override the default prefix')
+    .action(async (opts: { days?: string; dryRun?: boolean; prefix?: string }) => {
+      utils.requireInitialized();
+      try {
+        const days = Math.max(0, parseInt(String(opts.days ?? '30'), 10) || 0);
+        const db = utils.getDatabase(opts.prefix);
+
+        const now = Date.now();
+        const cutoff = new Date(now - days * 24 * 60 * 60 * 1000).getTime();
+
+        const all = db.getAll();
+        const candidates = all.filter(i => i.status === 'deleted').filter(i => {
+          const ts = i.updatedAt ? Date.parse(i.updatedAt) : Date.parse(i.createdAt);
+          return !Number.isNaN(ts) && ts < cutoff;
+        });
+
+        const ids = candidates.map(c => c.id);
+
+        if (opts.dryRun) {
+          if (utils.isJsonMode()) {
+            output.json({ dryRun: true, candidates: ids, count: ids.length });
+            return;
+          }
+          console.log(`Prune dry-run: ${ids.length} deleted item(s) older than ${days} day(s)`);
+          ids.forEach(id => console.log(` - ${id}`));
+          return;
+        }
+
+        // Perform deletions against the persistent store. Use internal store
+        // deleteWorkItem to perform a hard-delete (removes dependency edges and comments).
+        const pruned: string[] = [];
+        const storeAny = (db as any).store;
+        for (const id of ids) {
+          try {
+            if (storeAny && typeof storeAny.deleteWorkItem === 'function') {
+              const ok = storeAny.deleteWorkItem(id);
+              if (ok) {
+                // Also remove any lingering dependency edges/comments via store helpers
+                try { storeAny.deleteDependencyEdgesForItem(id); } catch (_) {}
+                pruned.push(id);
+              }
+            } else if (typeof (db as any).delete === 'function') {
+              // Fall back to WorklogDatabase.delete() which marks item as deleted
+              const ok = await Promise.resolve((db as any).delete(id));
+              if (ok) pruned.push(id);
+            } else {
+              console.error('Unable to perform prune: persistent store delete method not found');
+              break;
+            }
+          } catch (err) {
+            // Continue with other deletions but report error
+            console.error(`Failed to prune ${id}: ${(err instanceof Error) ? err.message : String(err)}`);
+          }
+        }
+
+        if (utils.isJsonMode()) {
+          output.json({ dryRun: false, prunedIds: pruned, count: pruned.length });
+          return;
+        }
+
+        console.log(`Pruned ${pruned.length} work item(s).`);
+        if (pruned.length > 0) {
+          console.log('Pruned IDs:');
+          pruned.forEach(id => console.log(` - ${id}`));
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (utils.isJsonMode()) output.json({ success: false, error: message });
+        else console.error(`Doctor prune failed: ${message}`);
+      }
+    });
+
   doctor.action(async (options: DoctorOptions & { fix?: boolean }) => {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
