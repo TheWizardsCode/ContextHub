@@ -7,7 +7,8 @@ import type { PluginContext } from '../plugin-types.js';
 import type { WorkItem, WorkItemStatus } from '../types.js';
 import type { ChildProcess } from 'child_process';
 import blessed from 'blessed';
-import { spawn, spawnSync } from 'child_process';
+import { spawn } from 'child_process';
+import { copyToClipboard } from '../clipboard.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { humanFormatWorkItem, formatTitleOnlyTUI } from '../commands/helpers.js';
@@ -1927,38 +1928,17 @@ export class TuiController {
       return node?.item || null;
     }
 
-    function copyToClipboard(text: string): { success: boolean; error?: string } {
-      try {
-        if (process.platform === 'darwin') {
-          const result = spawnSync('pbcopy', [], { input: text, stdio: ['pipe', 'ignore', 'ignore'] });
-          if (result.status === 0) return { success: true };
-          return { success: false, error: result.error?.message || 'pbcopy failed' };
-        }
-
-        if (process.platform === 'win32') {
-          const result = spawnSync('cmd', ['/c', 'clip'], { input: text, stdio: ['pipe', 'ignore', 'ignore'] });
-          if (result.status === 0) return { success: true };
-          return { success: false, error: result.error?.message || 'clip failed' };
-        }
-
-        const xclip = spawnSync('xclip', ['-selection', 'clipboard'], { input: text, stdio: ['pipe', 'ignore', 'ignore'] });
-        if (xclip.status === 0) return { success: true };
-
-        const xsel = spawnSync('xsel', ['--clipboard', '--input'], { input: text, stdio: ['pipe', 'ignore', 'ignore'] });
-        if (xsel.status === 0) return { success: true };
-
-        return { success: false, error: xclip.error?.message || xsel.error?.message || 'clipboard command not available' };
-      } catch (err: any) {
-        return { success: false, error: err?.message || 'clipboard copy failed' };
-      }
-    }
-
-    function copySelectedId() {
+    async function copySelectedId() {
       const item = getSelectedItem();
       if (!item) return;
-      const result = copyToClipboard(item.id);
-      if (result.success) showToast('ID copied');
-      else showToast('Copy failed');
+      // use injected spawn implementation when available so tests can mock it
+      try {
+        const res = await copyToClipboard(item.id, { spawn: spawnImpl });
+        if (res.success) showToast('ID copied');
+        else showToast(res.error ? `Copy failed: ${res.error}` : 'Copy failed');
+      } catch (err: any) {
+        showToast(err?.message || 'Copy failed');
+      }
     }
 
     function closeSelectedItem(stage: 'in_review' | 'done' | 'deleted') {
