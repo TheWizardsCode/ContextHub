@@ -811,21 +811,16 @@ export class WorklogDatabase {
       const blockingPairs: { blocking: WorkItem; critical: WorkItem }[] = [];
 
       for (const critical of blockedCriticals) {
-        if (critical.status === 'blocked') {
-          const blockingIssues = this.extractBlockingIssues(critical);
-          for (const id of blockingIssues) {
-            const blockingItem = this.get(id);
-            if (blockingItem && blockingItem.status !== 'completed' && blockingItem.status !== 'deleted') {
-              if (excluded?.has(blockingItem.id)) continue;
-              blockingPairs.push({ blocking: blockingItem, critical });
-            }
-          }
-        }
-
         const blockingChildren = this.getNonClosedChildren(critical.id);
         for (const child of blockingChildren) {
           if (excluded?.has(child.id)) continue;
           blockingPairs.push({ blocking: child, critical });
+        }
+
+        const dependencyBlockers = this.getActiveDependencyBlockers(critical.id);
+        for (const blocker of dependencyBlockers) {
+          if (excluded?.has(blocker.id)) continue;
+          blockingPairs.push({ blocking: blocker, critical });
         }
       }
 
@@ -891,29 +886,20 @@ export class WorklogDatabase {
       };
     }
 
-    // Check if the item is blocked - if so, prioritize its blocking issues
+    // Check if the item is blocked - if so, prioritize formal blockers
     if (selectedInProgress.status === 'blocked') {
-      // Find blocking issues mentioned in description or comments
-      const blockingIssues = this.extractBlockingIssues(selectedInProgress);
-      if (blockingIssues.length > 0) {
-        // Filter to find existing work items that match the blocking issue IDs
-        const blockingItems = blockingIssues
-          .map(id => this.get(id))
-          .filter((item): item is WorkItem => item !== null && item.status !== 'completed' && item.status !== 'deleted')
-          .filter(item => !excluded?.has(item.id));
-        
-        if (blockingItems.length > 0) {
-          // Apply filters to blocking items and select highest priority
-          const filteredBlockingItems = this.applyFilters(blockingItems, assignee, searchTerm);
-          if (filteredBlockingItems.length > 0) {
-            const selected = this.selectBySortIndex(filteredBlockingItems, recencyPolicy);
-            this.debug(`${debugPrefix} selected blocking issue=${selected?.id || ''}`);
-            return {
-              workItem: selected,
-              reason: `Blocking issue for ${selectedInProgress.id} (${selectedInProgress.title})`
-            };
-          }
-        }
+      const blockingChildren = this.getNonClosedChildren(selectedInProgress.id);
+      const dependencyBlockers = this.getActiveDependencyBlockers(selectedInProgress.id);
+      const blockingCandidates = [...blockingChildren, ...dependencyBlockers];
+      const filteredBlockingCandidates = this.applyFilters(blockingCandidates, assignee, searchTerm)
+        .filter(item => !excluded?.has(item.id));
+      if (filteredBlockingCandidates.length > 0) {
+        const selected = this.selectBySortIndex(filteredBlockingCandidates, recencyPolicy);
+        this.debug(`${debugPrefix} selected blocking issue=${selected?.id || ''}`);
+        return {
+          workItem: selected,
+          reason: `Blocking issue for ${selectedInProgress.id} (${selectedInProgress.title})`
+        };
       }
       // If no blocking issues found or they don't exist, return the blocked item itself
       return {
@@ -998,36 +984,6 @@ export class WorklogDatabase {
     }
 
     return results;
-  }
-
-  /**
-   * Extract blocking issue IDs from description and comments
-   * Looks for work item ID patterns (e.g., "PREFIX-ABC123DEF")
-   */
-  private extractBlockingIssues(item: WorkItem): string[] {
-    const blockingIds: string[] = [];
-    // Pattern matches prefix followed by alphanumeric characters (e.g., WI-0MKRDE4YI1)
-    const pattern = new RegExp(`${this.prefix}-[A-Z0-9]+`, 'gi');
-    
-    // Search in description
-    if (item.description) {
-      const matches = item.description.match(pattern);
-      if (matches) {
-        blockingIds.push(...matches.map(id => id.toUpperCase()));
-      }
-    }
-    
-    // Search in comments
-    const comments = this.getCommentsForWorkItem(item.id);
-    for (const comment of comments) {
-      const matches = comment.comment.match(pattern);
-      if (matches) {
-        blockingIds.push(...matches.map(id => id.toUpperCase()));
-      }
-    }
-    
-    // Remove duplicates and the item itself
-    return [...new Set(blockingIds)].filter(id => id !== item.id);
   }
 
   /**
@@ -1195,6 +1151,18 @@ export class WorklogDatabase {
       return false;
     }
     return true;
+  }
+
+  private getActiveDependencyBlockers(itemId: string): WorkItem[] {
+    const edges = this.listDependencyEdgesFrom(itemId);
+    const blockers: WorkItem[] = [];
+    for (const edge of edges) {
+      const target = this.get(edge.toId);
+      if (this.isDependencyActive(target) && target) {
+        blockers.push(target);
+      }
+    }
+    return blockers;
   }
 
   getInboundDependents(targetId: string): WorkItem[] {

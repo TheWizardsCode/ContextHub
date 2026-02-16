@@ -701,55 +701,72 @@ describe('WorklogDatabase', () => {
       expect(result.workItem?.id).toBe(bugChild.id);
     });
 
-    it('should find blocking issues when in-progress item is blocked', () => {
-      const blocker = db.create({ title: 'Blocking issue', priority: 'low', status: 'open' });
-      const blocked = db.create({ 
-        title: 'Blocked task', 
-        priority: 'high', 
-        status: 'blocked',
-        description: `This is blocked by ${blocker.id}`
+    it('should select blocking child for blocked item', () => {
+      const blocked = db.create({
+        title: 'Blocked task',
+        priority: 'high',
+        status: 'blocked'
       });
-      
+      const blocker = db.create({
+        title: 'Blocking child',
+        priority: 'low',
+        status: 'open',
+        parentId: blocked.id
+      });
+
       const result = db.findNextWorkItem();
-      // Should select the blocking issue
+      // Should select the blocking child
       expect(result.workItem?.id).toBe(blocker.id);
       expect(result.reason).toContain('Blocking issue');
       expect(result.reason).toContain(blocked.id);
     });
 
-    it('should find blocking issues mentioned in comments', () => {
+    it('should select dependency blocker for blocked item', () => {
+      const blocker = db.create({ title: 'Dependency blocker', priority: 'medium', status: 'open' });
+      const blocked = db.create({ title: 'Blocked task', priority: 'high', status: 'blocked' });
+      db.addDependencyEdge(blocked.id, blocker.id);
+
+      const result = db.findNextWorkItem();
+      // Should select the dependency blocker
+      expect(result.workItem?.id).toBe(blocker.id);
+      expect(result.reason).toContain('Blocking issue');
+      expect(result.reason).toContain(blocked.id);
+    });
+
+    it('should ignore blocking issues mentioned in description', () => {
+      const blocker = db.create({ title: 'Blocking issue', priority: 'low', status: 'open' });
+      const blocked = db.create({
+        title: 'Blocked task',
+        priority: 'high',
+        status: 'blocked',
+        description: `This is blocked by ${blocker.id}`
+      });
+
+      const result = db.findNextWorkItem();
+      // Should return the blocked item itself since description hints are ignored
+      expect(result.workItem?.id).toBe(blocked.id);
+      expect(result.reason).toContain('Blocked item');
+    });
+
+    it('should ignore blocking issues mentioned in comments', () => {
       const blocker = db.create({ title: 'Blocking issue', priority: 'medium', status: 'open' });
-      const blocked = db.create({ 
-        title: 'Blocked task', 
-        priority: 'high', 
+      const blocked = db.create({
+        title: 'Blocked task',
+        priority: 'high',
         status: 'blocked'
       });
-      
+
       // Add comment mentioning the blocker
       db.createComment({
         workItemId: blocked.id,
         author: 'test',
         comment: `Cannot proceed due to ${blocker.id}`
       });
-      
-      const result = db.findNextWorkItem();
-      // Should select the blocking issue
-      expect(result.workItem?.id).toBe(blocker.id);
-      expect(result.reason).toContain('Blocking issue');
-    });
 
-    it('should skip completed blocking issues', () => {
-      const completedBlocker = db.create({ title: 'Completed blocker', priority: 'high', status: 'completed' });
-      const blocked = db.create({ 
-        title: 'Blocked task', 
-        priority: 'high', 
-        status: 'blocked',
-        description: `Blocked by ${completedBlocker.id}`
-      });
-      
       const result = db.findNextWorkItem();
-      // Should return the blocked item itself since blocker is complete
+      // Should return the blocked item itself since comments are ignored
       expect(result.workItem?.id).toBe(blocked.id);
+      expect(result.reason).toContain('Blocked item');
     });
   });
 });
