@@ -238,6 +238,7 @@ Options:
 `-a, --assignee <assignee>` (optional)
 `-n, --number <n>` (optional) — Limit the number of items returned
 `--stage <stage>` (optional)
+`--needs-producer-review [value]` (optional; defaults to `true` when omitted; accepts true|false|yes|no)
 `--prefix <prefix>` (optional)
 `--json` (optional)
 
@@ -249,6 +250,7 @@ wl list -s open -p high
 wl list "signup"
 wl -F concise list -s in-progress
 wl --json list -s open --tags backlog
+wl list --needs-producer-review
 ```
 
 ---

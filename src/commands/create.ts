@@ -30,7 +30,7 @@ export default function register(ctx: PluginContext): void {
     .option('--created-by <createdBy>', 'Created by (interoperability field)')
     .option('--deleted-by <deletedBy>', 'Deleted by (interoperability field)')
     .option('--delete-reason <deleteReason>', 'Delete reason (interoperability field)')
-    .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag for the new item')
+    .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag for the new item (true|false|yes|no)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .action(async (options: CreateOptions) => {
       utils.requireInitialized();

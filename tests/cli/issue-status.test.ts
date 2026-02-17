@@ -25,9 +25,9 @@ describe('CLI Issue Status Tests', () => {
   describe('list command', () => {
     beforeEach(() => {
       seedWorkItems(tempState.tempDir, [
-        { title: 'Task 1', status: 'open', priority: 'high' },
+        { title: 'Task 1', status: 'open', priority: 'high', needsProducerReview: true },
         { title: 'Task 2', status: 'in-progress', priority: 'medium' },
-        { title: 'Task 3', status: 'completed', priority: 'low' },
+        { title: 'Task 3', status: 'completed', priority: 'low', needsProducerReview: true },
       ]);
     });
 
@@ -100,6 +100,33 @@ describe('CLI Issue Status Tests', () => {
       expect(listedIds).toContain(child2Id);
       expect(listedIds).not.toContain(parent.id);
       expect(listedIds).not.toContain(unrelatedId);
+    });
+
+    it('should filter by needs-producer-review true', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list --needs-producer-review true`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(2);
+      result.workItems.forEach((item: any) => expect(item.needsProducerReview).toBe(true));
+    });
+
+    it('should default needs-producer-review to true when value omitted', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list --needs-producer-review`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(2);
+      result.workItems.forEach((item: any) => expect(item.needsProducerReview).toBe(true));
+    });
+
+    it('should filter by needs-producer-review false', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list --needs-producer-review false`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(1);
+      result.workItems.forEach((item: any) => expect(item.needsProducerReview).not.toBe(true));
     });
 
     it('should error for invalid parent id', async () => {
