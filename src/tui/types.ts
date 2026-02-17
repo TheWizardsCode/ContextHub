@@ -53,6 +53,12 @@ export interface VisibleNode {
   hasChildren: boolean;
 }
 
+export interface MoveMode {
+  active: boolean;
+  sourceId: string;
+  descendantIds: Set<string>;
+}
+
 export interface TUIState {
   expanded: Set<string>;
   showClosed: boolean;

@@ -12,7 +12,7 @@ import { copyToClipboard } from '../clipboard.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { humanFormatWorkItem, formatTitleOnlyTUI } from '../commands/helpers.js';
-import { createTuiState, rebuildTreeState, buildVisibleNodes, expandAncestorsForInProgress, isClosedStatus } from './state.js';
+import { createTuiState, rebuildTreeState, buildVisibleNodes, expandAncestorsForInProgress, isClosedStatus, enterMoveMode, exitMoveMode } from './state.js';
 import { createPersistence } from './persistence.js';
 import { resolveWorklogDir } from '../worklog-paths.js';
 import { getDefaultDataPath } from '../jsonl.js';
@@ -36,7 +36,7 @@ import ChordHandler from './chords.js';
 import { stripAnsi, stripTags, decorateIdsForClick, extractIdFromLine, extractIdAtColumn, stripTagsAndAnsiWithMap, wrapPlainLineWithMap } from './id-utils.js';
 import { AVAILABLE_COMMANDS, MIN_INPUT_HEIGHT, MAX_INPUT_LINES, FOOTER_HEIGHT, OPENCODE_SERVER_PORT,
   KEY_NAV_RIGHT, KEY_NAV_LEFT, KEY_TOGGLE_EXPAND, KEY_QUIT, KEY_ESCAPE, KEY_TOGGLE_HELP, KEY_CHORD_PREFIX, KEY_CHORD_FOLLOWUPS, KEY_OPEN_OPENCODE, KEY_OPEN_SEARCH,
-  KEY_TAB, KEY_SHIFT_TAB, KEY_LEFT_SINGLE, KEY_RIGHT_SINGLE, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_FILTER_BLOCKED, KEY_FILTER_NEEDS_REVIEW, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW } from './constants.js';
+  KEY_TAB, KEY_SHIFT_TAB, KEY_LEFT_SINGLE, KEY_RIGHT_SINGLE, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_FILTER_BLOCKED, KEY_FILTER_NEEDS_REVIEW, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW, KEY_MOVE } from './constants.js';
 import { theme } from '../theme.js';
 
 type Item = WorkItem;
@@ -1552,7 +1552,18 @@ export class TuiController {
           ? '{magenta-fg}●{/magenta-fg} '
           : '';
         const title = formatTitleOnlyTUI(n.item);
-        return `${indent}${marker} ${needsReviewBadge}${doNotDelegateBadge}${title} {cyan-fg}({underline}${n.item.id}{/underline}){/cyan-fg}`;
+        let line = `${indent}${marker} ${needsReviewBadge}${doNotDelegateBadge}${title} {cyan-fg}({underline}${n.item.id}{/underline}){/cyan-fg}`;
+        // Move mode visual feedback
+        if (state.moveMode) {
+          if (n.item.id === state.moveMode.sourceId) {
+            // Source item: add [M] marker in yellow
+            line = `${indent}${marker} {yellow-fg}[M]{/yellow-fg} ${needsReviewBadge}${doNotDelegateBadge}${title} {cyan-fg}({underline}${n.item.id}{/underline}){/cyan-fg}`;
+          } else if (state.moveMode.descendantIds.has(n.item.id)) {
+            // Descendant: dim the entire line
+            line = `{gray-fg}${indent}${marker} ${stripTags(needsReviewBadge)}${stripTags(doNotDelegateBadge)}${stripTags(title)} (${n.item.id}){/gray-fg}`;
+          }
+        }
+        return line;
       });
       state.listLines = lines;
       list.setItems(lines);
@@ -1560,33 +1571,40 @@ export class TuiController {
       const idx = Math.max(0, Math.min(selectIndex, lines.length - 1));
       list.select(idx);
       updateDetailForIndex(idx, visible);
-      // Update footer/help with right-aligned closed toggle
+      // Update footer/help
       try {
-        const closedCount = state.items.filter((item: any) => item.status === 'completed' || item.status === 'deleted').length;
-        // Left side: show active filter if present (labelled "Filter:"), otherwise empty
-        const filterLabel = activeFilterTerm ? `Filter: ${activeFilterTerm}` : '';
-        const reviewLabel = getNeedsReviewFilterLabel();
-        const leftText = [reviewLabel, filterLabel].filter(Boolean).join(' • ');
-        // Right side: when closed items are hidden, show "-Closed (x)", otherwise show nothing
-        const rightText = state.showClosed ? '' : `-Closed (${closedCount})`;
-        const cols = screen.width as number;
-        if (cols && leftText && rightText && cols > leftText.length + rightText.length + 2) {
-          const gap = cols - leftText.length - rightText.length;
-          help.setContent(`${leftText}${' '.repeat(gap)}${rightText}`);
-        } else if (leftText && rightText) {
-          help.setContent(`${leftText} • ${rightText}`);
-        } else if (leftText) {
-          help.setContent(leftText);
-        } else if (rightText) {
-          // Right-align the rightText by padding on the left
-          if (cols && cols > rightText.length + 1) {
-            const gap = cols - rightText.length;
-            help.setContent(`${' '.repeat(gap)}${rightText}`);
-          } else {
-            help.setContent(rightText);
-          }
+        if (state.moveMode) {
+          // Move mode footer: show source item and instructions
+          const sourceItem = state.itemsById.get(state.moveMode.sourceId);
+          const sourceLabel = sourceItem ? sourceItem.title : state.moveMode.sourceId;
+          help.setContent(`{yellow-fg}MOVE:{/yellow-fg} ${sourceLabel} — navigate to target, m/Enter to confirm, Esc to cancel`);
         } else {
-          help.setContent('');
+          const closedCount = state.items.filter((item: any) => item.status === 'completed' || item.status === 'deleted').length;
+          // Left side: show active filter if present (labelled "Filter:"), otherwise empty
+          const filterLabel = activeFilterTerm ? `Filter: ${activeFilterTerm}` : '';
+          const reviewLabel = getNeedsReviewFilterLabel();
+          const leftText = [reviewLabel, filterLabel].filter(Boolean).join(' • ');
+          // Right side: when closed items are hidden, show "-Closed (x)", otherwise show nothing
+          const rightText = state.showClosed ? '' : `-Closed (${closedCount})`;
+          const cols = screen.width as number;
+          if (cols && leftText && rightText && cols > leftText.length + rightText.length + 2) {
+            const gap = cols - leftText.length - rightText.length;
+            help.setContent(`${leftText}${' '.repeat(gap)}${rightText}`);
+          } else if (leftText && rightText) {
+            help.setContent(`${leftText} • ${rightText}`);
+          } else if (leftText) {
+            help.setContent(leftText);
+          } else if (rightText) {
+            // Right-align the rightText by padding on the left
+            if (cols && cols > rightText.length + 1) {
+              const gap = cols - rightText.length;
+              help.setContent(`${' '.repeat(gap)}${rightText}`);
+            } else {
+              help.setContent(rightText);
+            }
+          } else {
+            help.setContent('');
+          }
         }
       } catch (err) {
         // ignore
@@ -2465,8 +2483,53 @@ export class TuiController {
     const detailCloseClickHandler = () => { closeDetails(); };
     try { (detailClose as any).__opencode_click = detailCloseClickHandler; detailClose.on('click', detailCloseClickHandler); } catch (_) {}
 
-    screen.key(KEY_NAV_RIGHT, () => {
+    screen.key(KEY_NAV_RIGHT, (_ch: any, key: any) => {
       if (!updateDialog.hidden) return;
+      // In move mode, Enter confirms the target (same as pressing 'm')
+      if (state.moveMode && key?.name === 'enter') {
+        const item = getSelectedItem();
+        if (!item) return;
+        const sourceId = state.moveMode.sourceId;
+        const targetId = item.id;
+        // Prevent selecting a descendant as target
+        if (state.moveMode.descendantIds.has(targetId)) return;
+        // Self-select: unparent to root
+        if (targetId === sourceId) {
+          const sourceItem = state.itemsById.get(sourceId);
+          if (!sourceItem?.parentId) {
+            showToast(`${sourceItem?.title || sourceId} is already at root level`);
+            exitMoveMode(state);
+            renderListAndDetail(list.selected as number);
+            return;
+          }
+          try {
+            const updated = db.update(sourceId, { parentId: null });
+            if (!updated) { showToast('Move failed'); exitMoveMode(state); renderListAndDetail(list.selected as number); return; }
+            showToast(`Moved ${sourceItem?.title || sourceId} to root level`);
+          } catch (err) { showToast('Move failed'); }
+          exitMoveMode(state);
+          refreshFromDatabase();
+          const vis = buildVisible();
+          const mIdx = vis.findIndex(n => n.item.id === sourceId);
+          if (mIdx >= 0) renderListAndDetail(mIdx);
+          return;
+        }
+        // Reparent under target
+        try {
+          const updated = db.update(sourceId, { parentId: targetId });
+          if (!updated) { showToast('Move failed'); exitMoveMode(state); renderListAndDetail(list.selected as number); return; }
+          const sourceItem = state.itemsById.get(sourceId);
+          const targetItem = state.itemsById.get(targetId);
+          showToast(`Moved ${sourceItem?.title || sourceId} under ${targetItem?.title || targetId}`);
+        } catch (err) { showToast('Move failed'); }
+        exitMoveMode(state);
+        refreshFromDatabase();
+        state.expanded.add(targetId);
+        const vis = buildVisible();
+        const mIdx = vis.findIndex(n => n.item.id === sourceId);
+        if (mIdx >= 0) renderListAndDetail(mIdx);
+        return;
+      }
       const idx = list.selected as number;
       const visible = buildVisible();
       const node = visible[idx];
@@ -2593,6 +2656,13 @@ export class TuiController {
         closeHelp();
         return;
       }
+      // Cancel move mode if active
+      if (state.moveMode) {
+        exitMoveMode(state);
+        showToast('Move cancelled');
+        renderListAndDetail(list.selected as number);
+        return;
+      }
       // Do not shut down the entire TUI on a bare Escape press when no
       // overlays are visible — use 'q' or Ctrl-C to quit. This prevents
       // accidental exits when users expect Escape to only dismiss dialogs.
@@ -2675,8 +2745,9 @@ export class TuiController {
 
 
     // Open opencode prompt dialog (shortcut O)
-    screen.key(KEY_OPEN_OPENCODE, async () => {
-      if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden) {
+     screen.key(KEY_OPEN_OPENCODE, async () => {
+       if (state.moveMode) return;
+       if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden) {
         await openOpencodeDialog();
       }
     });
@@ -2696,8 +2767,9 @@ export class TuiController {
     };
 
     // Open search/filter modal (shortcut /)
-    screen.key(KEY_OPEN_SEARCH, async () => {
-      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+     screen.key(KEY_OPEN_SEARCH, async () => {
+       if (state.moveMode) return;
+       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
       try {
         const term = await modalDialogs.editTextarea({
           title: 'Filter items',
@@ -2780,13 +2852,15 @@ export class TuiController {
     });
 
     // Copy selected ID
-    screen.key(KEY_COPY_ID, () => {
-      copySelectedId();
-    });
+     screen.key(KEY_COPY_ID, () => {
+       if (state.moveMode) return;
+       copySelectedId();
+     });
 
       // Open parent preview
-      screen.key(KEY_PARENT_PREVIEW, () => {
-        if (suppressNextP) {
+       screen.key(KEY_PARENT_PREVIEW, () => {
+         if (state.moveMode) return;
+         if (suppressNextP) {
           debugLog(`Suppressing 'p' handler (just handled Ctrl-W p)`);
           return;
         }
@@ -2794,23 +2868,26 @@ export class TuiController {
       });
 
     // Close selected item
-    screen.key(KEY_CLOSE_ITEM, () => {
-      if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden) {
+     screen.key(KEY_CLOSE_ITEM, () => {
+       if (state.moveMode) return;
+       if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden) {
         openCloseDialog();
       }
     });
 
     // Update selected item (quick edit) - shortcut U
-    screen.key(KEY_UPDATE_ITEM, () => {
-      if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden) {
+     screen.key(KEY_UPDATE_ITEM, () => {
+       if (state.moveMode) return;
+       if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden) {
         openUpdateDialog();
       }
     });
 
     // Toggle do-not-delegate tag on selected item (shortcut D)
-    screen.key(KEY_TOGGLE_DO_NOT_DELEGATE, () => {
-      // Only act when no interfering overlays are visible
-      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+     screen.key(KEY_TOGGLE_DO_NOT_DELEGATE, () => {
+       // Only act when no interfering overlays are visible
+       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+       if (state.moveMode) return;
       const item = getSelectedItem();
       if (!item) {
         showToast('No item selected');
@@ -2833,8 +2910,9 @@ export class TuiController {
     });
 
     // Toggle needs producer review flag (shortcut r)
-    screen.key(KEY_TOGGLE_NEEDS_REVIEW, () => {
-      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+     screen.key(KEY_TOGGLE_NEEDS_REVIEW, () => {
+       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+       if (state.moveMode) return;
       const item = getSelectedItem();
       if (!item) {
         showToast('No item selected');
@@ -2854,6 +2932,100 @@ export class TuiController {
       }
     });
 
+    // Move/reparent mode (shortcut M)
+    screen.key(KEY_MOVE, () => {
+      // Guard: only active when no overlays are visible
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+      if (!opencodeDialog.hidden) return;
+
+      const item = getSelectedItem();
+      if (!item) {
+        showToast('No item selected');
+        return;
+      }
+
+      if (!state.moveMode) {
+        // Enter move mode: store the source item
+        enterMoveMode(state, item.id);
+        showToast('Move mode: select target, press m/Enter; Esc to cancel');
+        renderListAndDetail(list.selected as number);
+        return;
+      }
+
+      // Already in move mode — this is a target confirmation
+      const sourceId = state.moveMode.sourceId;
+      const targetId = item.id;
+
+      // Prevent selecting a descendant as target (circular)
+      if (state.moveMode.descendantIds.has(targetId)) {
+        return; // no-op on invalid targets
+      }
+
+      // Self-select: unparent to root (F5)
+      if (targetId === sourceId) {
+        const sourceItem = state.itemsById.get(sourceId);
+        if (!sourceItem?.parentId) {
+          showToast(`${sourceItem?.title || sourceId} is already at root level`);
+          exitMoveMode(state);
+          renderListAndDetail(list.selected as number);
+          return;
+        }
+        try {
+          const updated = db.update(sourceId, { parentId: null });
+          if (!updated) {
+            showToast('Move failed');
+            exitMoveMode(state);
+            renderListAndDetail(list.selected as number);
+            return;
+          }
+          const title = sourceItem?.title || sourceId;
+          showToast(`Moved ${title} to root level`);
+        } catch (err) {
+          showToast('Move failed');
+        }
+        exitMoveMode(state);
+        refreshFromDatabase();
+        // After refresh, find and select the moved item
+        const visible = buildVisible();
+        const movedIdx = visible.findIndex(n => n.item.id === sourceId);
+        if (movedIdx >= 0) {
+          renderListAndDetail(movedIdx);
+        }
+        return;
+      }
+
+      // Reparent: move source under target (F4)
+      try {
+        const updated = db.update(sourceId, { parentId: targetId });
+        if (!updated) {
+          showToast('Move failed');
+          exitMoveMode(state);
+          renderListAndDetail(list.selected as number);
+          return;
+        }
+        const sourceItem = state.itemsById.get(sourceId);
+        const targetItem = state.itemsById.get(targetId);
+        const sourceTitle = sourceItem?.title || sourceId;
+        const targetTitle = targetItem?.title || targetId;
+        showToast(`Moved ${sourceTitle} under ${targetTitle}`);
+      } catch (err) {
+        showToast('Move failed');
+      }
+      exitMoveMode(state);
+      // Refresh and auto-expand the new parent, then select the moved item
+      refreshFromDatabase();
+      state.expanded.add(targetId);
+      const visible = buildVisible();
+      const movedIdx = visible.findIndex(n => n.item.id === sourceId);
+      if (movedIdx >= 0) {
+        renderListAndDetail(movedIdx);
+      }
+      return;
+    });
+
+    // Also handle Enter to confirm move mode target
+    // (Enter is already used for expand — override when in move mode)
+
     // Refresh from database
     if (KEY_REFRESH.length > 0) {
       screen.key(KEY_REFRESH, () => {
@@ -2862,29 +3034,34 @@ export class TuiController {
     }
 
     // Evaluate next item
-    screen.key(KEY_FIND_NEXT, () => {
-      if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && nextDialog.hidden) {
-        openNextDialog();
-      }
-    });
+     screen.key(KEY_FIND_NEXT, () => {
+       if (state.moveMode) return;
+       if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && nextDialog.hidden) {
+         openNextDialog();
+       }
+     });
 
-    // Filter shortcuts
-    screen.key(KEY_FILTER_IN_PROGRESS, () => {
-      setFilterNext('in-progress');
-    });
+     // Filter shortcuts
+     screen.key(KEY_FILTER_IN_PROGRESS, () => {
+       if (state.moveMode) return;
+       setFilterNext('in-progress');
+     });
 
-    screen.key(KEY_FILTER_OPEN, () => {
-      setFilterNext('open');
-    });
+     screen.key(KEY_FILTER_OPEN, () => {
+       if (state.moveMode) return;
+       setFilterNext('open');
+     });
 
-    screen.key(KEY_FILTER_BLOCKED, () => {
-      setFilterNext('blocked');
-    });
+     screen.key(KEY_FILTER_BLOCKED, () => {
+       if (state.moveMode) return;
+       setFilterNext('blocked');
+     });
 
-    screen.key(KEY_FILTER_NEEDS_REVIEW, () => {
-      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
-      cycleNeedsReviewFilter();
-    });
+     screen.key(KEY_FILTER_NEEDS_REVIEW, () => {
+       if (state.moveMode) return;
+       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+       cycleNeedsReviewFilter();
+     });
 
     // Click footer to open help
     const helpClickHandler = (data: any) => {

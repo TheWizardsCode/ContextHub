@@ -34,6 +34,20 @@ This document describes the interactive terminal UI shipped as the `wl tui` (or 
 - / — search items
 - v — cycle needs-producer-review filter (on/off/all)
 - h — toggle help menu
+- **m — move/reparent item** (see below)
+
+### Move / Reparent Mode
+
+Press **m** on a selected item to enter move mode. The source item is marked with a yellow `[M]` prefix and its descendants are dimmed (they cannot be chosen as targets). The footer shows move mode instructions.
+
+While in move mode:
+
+- **Navigate** with the usual up/down/left/right keys to reach the desired target parent.
+- **m or Enter** on the target item — reparent the source under the target. The target's tree node is automatically expanded so you can see the moved item.
+- **m or Enter on the source item itself** — unparent the item (move it to root level). If it is already a root item, a toast message informs you and move mode exits.
+- **Esc** — cancel move mode without making changes.
+
+Other action keys (close, update, search, filters, etc.) are suppressed during move mode to prevent accidental edits.
 
 ### OpenCode AI Integration
 
