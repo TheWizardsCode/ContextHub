@@ -57,7 +57,14 @@ The Worklog TUI now includes full integration with OpenCode, an AI-powered codin
 - User responses are shown in cyan in the conversation
 - Press Escape to cancel input mode
 
-### 7. Prompt Input Auto-Resize
+### 7. Integrated Shell Commands
+
+- Prefix a prompt with `!` to run a local shell command in the project root
+- Output streams directly into the response pane as raw stdout/stderr
+- The command displays in orange and output in white
+- Press `Ctrl+C` while the prompt is focused to cancel a running shell command
+
+### 8. Prompt Input Auto-Resize
 
 - The prompt input box grows as long lines wrap within the terminal
 - Auto-resize caps at a maximum height; beyond that, the input scrolls
@@ -79,6 +86,7 @@ The Worklog TUI now includes full integration with OpenCode, an AI-powered codin
    - `Ctrl+S` - Send prompt
    - `Enter` - Accept autocomplete or add newline
    - `Escape` - Close dialog
+   - `Ctrl+C` - Cancel running `!` command
 
 - **In the response pane:**
   - Arrow keys or vim keys (`j`/`k`) - Scroll through response
@@ -228,3 +236,8 @@ Planned improvements include:
 ---
 
 For more information about OpenCode, visit: https://opencode.ai/docs/
+#### Running a Shell Command
+
+```
+!ls
+```

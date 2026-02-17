@@ -41,6 +41,9 @@ This document describes the interactive terminal UI shipped as the `wl tui` (or 
   - Ctrl+S — send prompt
   - Enter — accept autocomplete or add newline
   - Escape — close dialog
+  - Prefix `!` to run a local shell command in the project root
+  - Ctrl+C cancels a running `!` command without closing the prompt
+  - Command shows in orange; output streams in white
 - When OpenCode is active:
   - Response appears in bottom pane
   - Input fields appear when agent needs information

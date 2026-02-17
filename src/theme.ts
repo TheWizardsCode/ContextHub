@@ -36,6 +36,8 @@ export const theme = {
       success: tuiWrap('green-fg'),
       warning: tuiWrap('yellow-fg'),
       error: tuiWrap('red-fg'),
+      shellCommand: tuiWrap('214-fg'),
+      shellOutput: tuiWrap('white-fg'),
     },
     status: {
       open: tuiWrap('green-fg'),

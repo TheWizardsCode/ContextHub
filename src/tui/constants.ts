@@ -106,7 +106,7 @@ export const DEFAULT_SHORTCUTS = [
   {
     category: 'Exit',
     items: [
-      { keys: 'q, Esc, Ctrl-C', description: 'Quit' },
+      { keys: 'q, Esc, Ctrl-C', description: 'Quit (Ctrl-C in prompt cancels shell)' },
     ],
   },
 ];

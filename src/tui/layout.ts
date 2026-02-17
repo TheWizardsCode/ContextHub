@@ -85,6 +85,14 @@ export function createLayout(options: CreateLayoutOptions = {}): TuiLayout {
     ...options.screenOptions,
   });
 
+  // Force 256-color support so blessed tags like {214-fg} render correctly.
+  // Blessed relies on terminfo (tput) which may report only 8 colors even
+  // when the terminal actually supports 256.  Modern terminals universally
+  // handle 256-color SGR sequences, so this override is safe.
+  if (screen.program?.tput && screen.program.tput.colors < 256) {
+    screen.program.tput.colors = 256;
+  }
+
   // ── List (left pane + footer) ───────────────────────────────────────
   const listComponent = new ListComponent({
     parent: screen,

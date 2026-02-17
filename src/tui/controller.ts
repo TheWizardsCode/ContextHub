@@ -716,6 +716,9 @@ export class TuiController {
     let isCommandMode = false;
     let userTypedText = '';
     let isWaitingForResponse = false; // Track if we're waiting for OpenCode response
+    let isLocalShellRunning = false;
+    let localShellProcess: ChildProcess | null = null;
+    let localShellOutput = '';
     const promptSpinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     let promptSpinnerIndex = 0;
     let promptSpinnerTimer: ReturnType<typeof setInterval> | null = null;
@@ -734,10 +737,12 @@ export class TuiController {
       (opencodeText as any).__opencode_cursor = opencodeCursorIndex;
     };
 
+    const isPromptBusy = () => isWaitingForResponse || isLocalShellRunning;
+
     const setOpencodeInputMode = (mode: OpencodeInputMode) => {
       opencodeInputMode = mode;
       (opencodeText as any).__opencode_mode = opencodeInputMode;
-      updateOpencodePromptLabel(isWaitingForResponse ? 'waiting' : 'idle');
+      updateOpencodePromptLabel(isPromptBusy() ? 'waiting' : 'idle');
     };
 
     const updateOpencodePromptLabel = (state: 'idle' | 'waiting') => {
@@ -754,7 +759,7 @@ export class TuiController {
       if (promptSpinnerTimer) return;
       promptSpinnerIndex = 0;
       promptSpinnerTimer = setInterval(() => {
-        if (!isWaitingForResponse) return;
+        if (!isPromptBusy()) return;
         promptSpinnerIndex = (promptSpinnerIndex + 1) % promptSpinnerFrames.length;
         updateOpencodePromptLabel('waiting');
         screen.render();
@@ -1276,7 +1281,7 @@ export class TuiController {
     const initialStatus = opencodeClient.getStatus();
     updateServerStatus(initialStatus.status, initialStatus.port);
     
-    function ensureOpencodePane() {
+    function ensureOpencodePane(label = ' opencode [esc] ') {
       // In compact mode, adjust pane position to be above the input
       const currentHeight = opencodeDialog.height || MIN_INPUT_HEIGHT;
       const bottomOffset = currentHeight + FOOTER_HEIGHT;
@@ -1284,8 +1289,8 @@ export class TuiController {
       opencodePane = opencodeUi.ensureResponsePane({
         bottom: bottomOffset,
         height: paneHeight(),
-        label: ' opencode [esc] ',
-      onEscape: () => {
+        label,
+        onEscape: () => {
           // Suppress the global escape handler immediately so the
           // response-pane-local Escape doesn't also trigger the
           // global handler (which would close the input dialog).
@@ -1298,14 +1303,97 @@ export class TuiController {
       });
     }
 
+    const appendLocalShellOutput = (chunk: string) => {
+      localShellOutput += theme.tui.text.shellOutput(escapeBlessedTags(chunk));
+      if (opencodePane?.setContent) {
+        opencodePane.setContent(localShellOutput);
+      }
+      if (opencodePane?.setScrollPerc) {
+        opencodePane.setScrollPerc(100);
+      }
+      screen.render();
+    };
+
+    const stopLocalShell = () => {
+      isLocalShellRunning = false;
+      localShellProcess = null;
+      stopPromptSpinner();
+      updateOpencodePromptLabel('idle');
+    };
+
+    const cancelLocalShell = () => {
+      if (!localShellProcess) return;
+      try { localShellProcess.kill('SIGINT'); } catch (_) {}
+    };
+
+    const runLocalShellCommand = (prompt: string) => {
+      if (isPromptBusy()) {
+        showToast('Please wait for current response to complete');
+        return;
+      }
+
+      const command = prompt.slice(1);
+      if (command.trim() === '') {
+        showToast('Empty command');
+        return;
+      }
+
+      ensureOpencodePane(' shell [esc] ');
+      opencodePane.show();
+      opencodePane.setFront();
+      screen.render();
+
+      localShellOutput = `${theme.tui.text.shellCommand(`$ ${escapeBlessedTags(command)}`)}\n`;
+      if (opencodePane?.setContent) opencodePane.setContent(localShellOutput);
+      if (opencodePane?.setScrollPerc) opencodePane.setScrollPerc(100);
+
+      isLocalShellRunning = true;
+      startPromptSpinner();
+      updateOpencodePromptLabel('waiting');
+      screen.render();
+
+      try {
+        localShellProcess = spawnImpl(command, {
+          cwd: worklogRoot,
+          shell: process.env.SHELL || true,
+          env: process.env,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (err) {
+        stopLocalShell();
+        showToast(`Command failed to start: ${String(err)}`);
+        return;
+      }
+
+      localShellProcess.stdout?.on('data', (chunk: Buffer) => {
+        appendLocalShellOutput(chunk.toString());
+      });
+      localShellProcess.stderr?.on('data', (chunk: Buffer) => {
+        appendLocalShellOutput(chunk.toString());
+      });
+      localShellProcess.on('error', (err: unknown) => {
+        stopLocalShell();
+        showToast(`Command failed: ${String(err)}`);
+      });
+      localShellProcess.on('close', () => {
+        stopLocalShell();
+        try { openOpencodeDialog(); } catch (_) {}
+      });
+    };
+
     async function runOpencode(prompt: string) {
       if (!prompt || prompt.trim() === '') {
         showToast('Empty prompt');
         return;
       }
 
+      if (prompt.startsWith('!')) {
+        runLocalShellCommand(prompt);
+        return;
+      }
+
       // Block if we're already waiting for a response
-      if (isWaitingForResponse) {
+      if (isPromptBusy()) {
         showToast('Please wait for current response to complete');
         return;
       }
@@ -1374,6 +1462,14 @@ export class TuiController {
       screen.render();
     };
     try { (opencodeText as any).__opencode_key_escape = opencodeTextEscapeHandler; opencodeText.key(KEY_ESCAPE, opencodeTextEscapeHandler); } catch (_) {}
+
+    const opencodeTextCtrlCHandler = function(this: any) {
+      if (isLocalShellRunning) {
+        cancelLocalShell();
+        return;
+      }
+    };
+    try { (opencodeText as any).__opencode_key_cc = opencodeTextCtrlCHandler; opencodeText.key(['C-c'], opencodeTextCtrlCHandler); } catch (_) {}
 
     // Accept Ctrl+S to send (keep for backward compatibility)
     const opencodeTextCSHandler = function(this: any) {
@@ -2449,6 +2545,10 @@ export class TuiController {
     // Quit keys: q and Ctrl-C always quit; Escape should close the help overlay
     // when it's open instead of exiting the whole TUI.
     screen.key(KEY_QUIT, () => {
+      if (isLocalShellRunning) {
+        cancelLocalShell();
+        return;
+      }
       shutdown();
     });
 
