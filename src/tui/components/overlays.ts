@@ -1,4 +1,5 @@
 import blessed from 'blessed';
+import { theme } from '../../theme.js';
 import type { BlessedBox, BlessedFactory, BlessedScreen } from '../types.js';
 
 export interface OverlaysComponentOptions {
@@ -27,7 +28,7 @@ export class OverlaysComponent {
       hidden: true,
       mouse: true,
       clickable: true,
-      style: { bg: 'black' },
+      style: { bg: 'black', fg: theme.tui.colors.lightText },
     });
 
     this.closeOverlay = this.blessedImpl.box({
@@ -39,7 +40,7 @@ export class OverlaysComponent {
       hidden: true,
       mouse: true,
       clickable: true,
-      style: { bg: 'black' },
+      style: { bg: 'black', fg: theme.tui.colors.lightText },
     });
 
     this.updateOverlay = this.blessedImpl.box({
@@ -51,7 +52,7 @@ export class OverlaysComponent {
       hidden: true,
       mouse: true,
       clickable: true,
-      style: { bg: 'black' },
+      style: { bg: 'black', fg: theme.tui.colors.lightText },
     });
   }
 

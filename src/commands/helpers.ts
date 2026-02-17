@@ -2,7 +2,7 @@
  * Shared helper functions for CLI commands
  */
 
-import chalk from 'chalk';
+import { theme } from '../theme.js';
 import type { WorkItem, Comment } from '../types.js';
 import type { SyncResult } from '../sync.js';
 import type { WorklogDatabase } from '../database.js';
@@ -50,7 +50,7 @@ export function sortByPriorityDateAndId(a: WorkItem, b: WorkItem): number {
 
 // Format title and id with consistent coloring used in tree/list outputs
 export function formatTitleAndId(item: WorkItem, prefix: string = ''): string {
-  return `${prefix}${renderTitle(item)} ${chalk.gray('-')} ${chalk.gray(item.id)}`;
+  return `${prefix}${renderTitle(item)} ${theme.text.muted('-')} ${theme.text.muted(item.id)}`;
 }
 
 // Format only the title (consistent color)
@@ -68,15 +68,15 @@ function titleColorForStatus(status?: string): (text: string) => string {
   const s = (status || '').toLowerCase().trim().replace(/_/g, '-');
   switch (s) {
     case 'completed':
-      return chalk.gray;
+      return theme.status.completed;
     case 'in-progress':
     case 'in progress':
-      return chalk.cyan; // cyan for in-progress
+      return theme.status.inProgress;
     case 'blocked':
-      return chalk.redBright;
+      return theme.status.blocked;
     case 'open':
     default:
-      return chalk.greenBright;
+      return theme.status.open;
   }
 }
 
@@ -85,15 +85,15 @@ function titleColorForStatusTUI(status?: string): (text: string) => string {
   const s = (status || '').toLowerCase().trim().replace(/_/g, '-');
   switch (s) {
     case 'completed':
-      return text => `{gray-fg}${text}{/gray-fg}`;
+      return theme.tui.status.completed;
     case 'in-progress':
     case 'in progress':
-      return text => `{cyan-fg}${text}{/cyan-fg}`; // cyan for in-progress
+      return theme.tui.status.inProgress;
     case 'blocked':
-      return text => `{red-fg}${text}{/red-fg}`;
+      return theme.tui.status.blocked;
     case 'open':
     default:
-      return text => `{green-fg}${text}{/green-fg}`;
+      return theme.tui.status.open;
   }
 }
 
@@ -239,7 +239,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
 
   const lines: string[] = [];
   const titleLine = `Title: ${formatTitleOnly(item)}`;
-  const idLine = `ID:    ${chalk.gray(item.id)}`;
+  const idLine = `ID:    ${theme.text.muted(item.id)}`;
 
   if (fmt === 'raw') {
     return JSON.stringify(item, null, 2);
@@ -248,7 +248,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   if (fmt === 'concise') {
     const lines: string[] = [];
     // First line: title + id (compact)
-    lines.push(`${formatTitleOnly(item)} ${chalk.gray(item.id)}`);
+    lines.push(`${formatTitleOnly(item)} ${theme.text.muted(item.id)}`);
     // Second line: status, stage (if present) and priority (core metadata shown previously by list)
     if (item.stage !== undefined) {
       const stageLabel = item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage;
@@ -292,7 +292,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   lines.push('');
   const issueTypeLabel = item.issueType && item.issueType.trim() !== '' ? item.issueType : 'unknown';
   const frontmatter: Array<[string, string]> = [
-    ['ID', chalk.gray(item.id)],
+    ['ID', theme.text.muted(item.id)],
     ['Status', item.stage !== undefined ? `${getStatusLabel(item.status, rules) || item.status} · Stage: ${item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage} | Priority: ${item.priority}` : `${getStatusLabel(item.status, rules) || item.status} | Priority: ${item.priority}`],
     ['Type', issueTypeLabel],
     ['SortIndex', String(item.sortIndex)]
@@ -352,11 +352,11 @@ export function humanFormatComment(comment: Comment, format?: string): string {
   if (fmt === 'raw') return JSON.stringify(comment, null, 2);
   if (fmt === 'concise') {
     const excerpt = comment.comment.split('\n')[0];
-    return `${chalk.gray('[' + comment.id + ']')} ${comment.author} - ${excerpt}`;
+    return `${theme.text.muted('[' + comment.id + ']')} ${comment.author} - ${excerpt}`;
   }
 
   const lines: string[] = [];
-  lines.push(`ID:      ${chalk.gray(comment.id)}`);
+  lines.push(`ID:      ${theme.text.muted(comment.id)}`);
   lines.push(`Author:  ${comment.author}`);
   lines.push(`Created: ${comment.createdAt}`);
   lines.push('');
@@ -375,25 +375,25 @@ export function displayConflictDetails(
   options?: { repoUrl?: string }
 ): void {
   if (result.conflictDetails.length === 0) {
-    console.log('\n' + chalk.green('✓ No conflicts detected'));
+    console.log('\n' + theme.text.success('✓ No conflicts detected'));
     return;
   }
 
-  console.log('\n' + chalk.bold('Conflict Resolution Details:'));
+  console.log('\n' + theme.text.strong('Conflict Resolution Details:'));
   if (options?.repoUrl) {
-    console.log(chalk.gray(options.repoUrl));
+    console.log(theme.text.muted(options.repoUrl));
   }
-  console.log(chalk.gray('━'.repeat(80)));
+  console.log(theme.text.muted('━'.repeat(80)));
   
   const itemsById = new Map(mergedItems.map(item => [item.id, item]));
   
   result.conflictDetails.forEach((conflict: any, index: number) => {
     const workItem = itemsById.get(conflict.itemId);
     const displayText = workItem ? `${formatTitleOnly(workItem)} (${conflict.itemId})` : conflict.itemId;
-    console.log(chalk.bold(`\n${index + 1}. Work Item: ${displayText}`));
+    console.log(theme.text.strong(`\n${index + 1}. Work Item: ${displayText}`));
     
     if (conflict.conflictType === 'same-timestamp') {
-      console.log(chalk.yellow(`   Same timestamp (${conflict.localUpdatedAt}) - merged deterministically`));
+      console.log(theme.text.warning(`   Same timestamp (${conflict.localUpdatedAt}) - merged deterministically`));
     } else {
       console.log(`   Local updated: ${conflict.localUpdatedAt || 'unknown'}`);
       console.log(`   Remote updated: ${conflict.remoteUpdatedAt || 'unknown'}`);
@@ -402,26 +402,26 @@ export function displayConflictDetails(
     console.log();
     
     conflict.fields.forEach((field: any) => {
-      console.log(chalk.bold(`   Field: ${field.field}`));
+      console.log(theme.text.strong(`   Field: ${field.field}`));
       
       if (field.chosenSource === 'merged') {
-        console.log(chalk.cyan(`     Local:  ${formatValue(field.localValue)}`));
-        console.log(chalk.cyan(`     Remote: ${formatValue(field.remoteValue)}`));
-        console.log(chalk.green(`     Merged: ${formatValue(field.chosenValue)}`));
+        console.log(theme.text.info(`     Local:  ${formatValue(field.localValue)}`));
+        console.log(theme.text.info(`     Remote: ${formatValue(field.remoteValue)}`));
+        console.log(theme.text.success(`     Merged: ${formatValue(field.chosenValue)}`));
       } else {
         if (field.chosenSource === 'local') {
-          console.log(chalk.green(`   ✓ Local:  ${formatValue(field.localValue)}`));
-          console.log(chalk.red(`   ✗ Remote: ${formatValue(field.remoteValue)}`));
+          console.log(theme.text.success(`   ✓ Local:  ${formatValue(field.localValue)}`));
+          console.log(theme.text.error(`   ✗ Remote: ${formatValue(field.remoteValue)}`));
         } else {
-          console.log(chalk.red(`   ✗ Local:  ${formatValue(field.localValue)}`));
-          console.log(chalk.green(`   ✓ Remote: ${formatValue(field.remoteValue)}`));
+          console.log(theme.text.error(`   ✗ Local:  ${formatValue(field.localValue)}`));
+          console.log(theme.text.success(`   ✓ Remote: ${formatValue(field.remoteValue)}`));
         }
       }
-      
-      console.log(chalk.gray(`     Reason: ${field.reason}`));
+
+      console.log(theme.text.muted(`     Reason: ${field.reason}`));
       console.log();
     });
   });
-  
-  console.log(chalk.gray('━'.repeat(80)));
+
+  console.log(theme.text.muted('━'.repeat(80)));
 }

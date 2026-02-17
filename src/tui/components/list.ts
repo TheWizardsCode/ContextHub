@@ -1,4 +1,5 @@
 import blessed from 'blessed';
+import { theme } from '../../theme.js';
 import type { BlessedBox, BlessedFactory, BlessedList, BlessedScreen } from '../types.js';
 
 export interface ListComponentOptions {
@@ -43,7 +44,8 @@ export class ListComponent {
       height: 1,
       width: '100%',
       content: 'Press ? for help',
-      style: { fg: 'grey' },
+      tags: false,
+      style: { fg: 'white', bg: 'black', bold: true },
     });
   }
 

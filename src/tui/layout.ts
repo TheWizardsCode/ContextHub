@@ -6,6 +6,7 @@
  */
 
 import blessed from 'blessed';
+import { theme } from '../theme.js';
 import type {
   BlessedBox,
   BlessedFactory,
@@ -101,7 +102,7 @@ export function createLayout(options: CreateLayoutOptions = {}): TuiLayout {
     parent: screen,
     blessed: blessedImpl,
     position: { bottom: 1, right: 1 },
-    style: { fg: 'black', bg: 'green' },
+    style: { fg: theme.tui.colors.lightText, bg: 'green' },
     duration: 1200,
   }).create();
 
@@ -127,7 +128,7 @@ export function createLayout(options: CreateLayoutOptions = {}): TuiLayout {
     hidden: true,
     mouse: true,
     clickable: true,
-    style: { bg: 'black' },
+    style: { bg: 'black', fg: theme.tui.colors.lightText },
   });
 
   const nextDialogBox: BlessedBox = blessedImpl.box({

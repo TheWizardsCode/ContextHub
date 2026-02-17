@@ -1,4 +1,5 @@
 import blessed from 'blessed';
+import { theme } from '../../theme.js';
 import { KEY_ESCAPE } from '../constants.js';
 import type { BlessedBox, BlessedFactory, BlessedScreen, BlessedTextarea, BlessedText } from '../types.js';
 
@@ -34,7 +35,7 @@ export class OpencodePaneComponent {
       content: '',
       tags: true,
       align: 'center',
-      style: { fg: 'white' },
+      style: { fg: 'white', bg: 'black' },
     });
 
     // Larger dialog and textbox for multi-line prompts

@@ -37,6 +37,7 @@ import { stripAnsi, stripTags, decorateIdsForClick, extractIdFromLine, extractId
 import { AVAILABLE_COMMANDS, MIN_INPUT_HEIGHT, MAX_INPUT_LINES, FOOTER_HEIGHT, OPENCODE_SERVER_PORT,
   KEY_NAV_RIGHT, KEY_NAV_LEFT, KEY_TOGGLE_EXPAND, KEY_QUIT, KEY_ESCAPE, KEY_TOGGLE_HELP, KEY_CHORD_PREFIX, KEY_CHORD_FOLLOWUPS, KEY_OPEN_OPENCODE, KEY_OPEN_SEARCH,
   KEY_TAB, KEY_SHIFT_TAB, KEY_LEFT_SINGLE, KEY_RIGHT_SINGLE, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_FILTER_BLOCKED, KEY_FILTER_NEEDS_REVIEW, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW } from './constants.js';
+import { theme } from '../theme.js';
 
 type Item = WorkItem;
 
@@ -386,7 +387,7 @@ export class TuiController {
         if (!list || !list.style) return;
         if (!list.style.selected) list.style.selected = {};
         list.style.selected.bg = list === focused ? 'cyan' : 'blue';
-        list.style.selected.fg = list === focused ? 'black' : 'white';
+        list.style.selected.fg = list === focused ? theme.tui.colors.lightText : 'white';
       });
       if (updateDialogComment && updateDialogComment.style && updateDialogComment.style.border) {
         updateDialogComment.style.border.fg = focused === updateDialogComment ? 'cyan' : 'gray';
@@ -1225,27 +1226,21 @@ export class TuiController {
 
     function updateServerStatus(status: OpencodeServerStatus, port: number) {
       let statusText = '';
-      let statusColor = 'white';
-
       switch (status) {
         case 'stopped':
           statusText = '[-] Server stopped';
-          statusColor = 'gray';
           break;
         case 'starting':
           statusText = '[~] Starting...';
-          statusColor = 'yellow';
           break;
         case 'running':
           statusText = `[OK] Port: ${port}`;
-          statusColor = 'green';
           break;
         case 'error':
           statusText = '[X] Server error';
-          statusColor = 'red';
           break;
       }
-      const taggedContent = `{${statusColor}-fg}${statusText}{/}`;
+      const taggedContent = `{white-fg}${statusText}{/}`;
       const plainLength = statusText.length;
       serverStatusBox.setContent(taggedContent);
       serverStatusBox.width = Math.max(1, plainLength + 2);
