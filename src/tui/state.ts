@@ -1,4 +1,5 @@
 import type { WorkItem } from '../types.js';
+import type { MoveMode } from './types.js';
 import { sortByPriorityAndDate } from '../commands/helpers.js';
 
 export type Item = WorkItem;
@@ -12,6 +13,7 @@ export type TuiState = {
   roots: Item[];
   expanded: Set<string>;
   listLines: string[];
+  moveMode: MoveMode | null;
 };
 
 export type VisibleNode = { item: Item; depth: number; hasChildren: boolean };
@@ -56,6 +58,7 @@ export const createTuiState = (items: Item[], showClosed: boolean, persistedExpa
     roots: [],
     expanded: new Set<string>(),
     listLines: [],
+    moveMode: null,
   };
 
   if (persistedExpanded && Array.isArray(persistedExpanded)) {
@@ -93,4 +96,42 @@ export const expandAncestorsForInProgress = (state: TuiState): void => {
       cursor = state.itemsById.get(cursor.parentId) as Item;
     }
   }
+};
+
+/**
+ * Collect all descendant IDs of a given item, traversing the childrenMap
+ * recursively. Returns an empty set if the item has no children or is not
+ * found.
+ */
+export const getDescendants = (state: TuiState, itemId: string): Set<string> => {
+  const result = new Set<string>();
+  const stack = state.childrenMap.get(itemId)?.slice() || [];
+  while (stack.length > 0) {
+    const child = stack.pop()!;
+    result.add(child.id);
+    const grandchildren = state.childrenMap.get(child.id);
+    if (grandchildren) {
+      for (const gc of grandchildren) stack.push(gc);
+    }
+  }
+  return result;
+};
+
+/**
+ * Enter move mode: store the source item ID and pre-compute all descendant
+ * IDs (invalid targets) so the UI can grey them out.
+ */
+export const enterMoveMode = (state: TuiState, sourceId: string): void => {
+  state.moveMode = {
+    active: true,
+    sourceId,
+    descendantIds: getDescendants(state, sourceId),
+  };
+};
+
+/**
+ * Exit move mode, clearing all move-related state.
+ */
+export const exitMoveMode = (state: TuiState): void => {
+  state.moveMode = null;
 };

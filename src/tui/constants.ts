@@ -93,6 +93,7 @@ export const DEFAULT_SHORTCUTS = [
       { keys: 'N (dialog)', description: 'Next recommendation' },
       { keys: 'X', description: 'Close selected item' },
       { keys: 'U', description: 'Update selected item' },
+      { keys: 'M', description: 'Move/reparent item' },
       { keys: 'D', description: 'Toggle do-not-delegate' },
       { keys: 'r/R', description: 'Toggle needs review' },
     ],
@@ -146,6 +147,7 @@ export const KEY_FILTER_BLOCKED = ['b', 'B'];
 export const KEY_FILTER_NEEDS_REVIEW = ['v', 'V'];
 export const KEY_TOGGLE_DO_NOT_DELEGATE = ['d', 'D'];
 export const KEY_TOGGLE_NEEDS_REVIEW = ['r', 'R'];
+export const KEY_MOVE = ['m', 'M'];
 
 // Composite keys often used in help menu / close handlers
 export const KEY_MENU_CLOSE = ['escape', 'q'];
