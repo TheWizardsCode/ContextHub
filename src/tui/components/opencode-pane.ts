@@ -140,6 +140,7 @@ export class OpencodePaneComponent {
       label: options.label,
       border: { type: 'line' },
       tags: true,
+      parseTags: true,
       scrollable: true,
       alwaysScroll: true,
       keys: true,
