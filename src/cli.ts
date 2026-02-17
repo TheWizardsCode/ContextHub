@@ -30,6 +30,7 @@ import migrateCommand from './commands/migrate.js';
 import depCommand from './commands/dep.js';
 import reSortCommand from './commands/re-sort.js';
 import doctorCommand from './commands/doctor.js';
+import reviewedCommand from './commands/reviewed.js';
 
 // Watch flag parsing - supports -w, -wN, --watch, --watch=N
 function parseWatchFlag(argv: string[]) {
@@ -224,6 +225,7 @@ const builtInCommands = [
   depCommand,
   reSortCommand,
   doctorCommand,
+  reviewedCommand,
   // onboard command removed
 ];
 
@@ -250,6 +252,7 @@ const builtInCommandNames = new Set([
   'dep',
   're-sort',
   'doctor',
+  'reviewed',
   // 'onboard' removed
 ]);
 
@@ -281,7 +284,7 @@ const formatHelp = (cmd: any, helper: any) => {
 
   // Build groups and mapping of command name -> group
   const groupsDef: { name: string; names: string[] }[] = [
-    { name: 'Issue Management', names: ['create', 'update', 'comment', 'close', 'delete', 'dep'] },
+    { name: 'Issue Management', names: ['create', 'update', 'comment', 'close', 'delete', 'dep', 'reviewed'] },
     { name: 'Status', names: ['in-progress', 'next', 'recent', 'list', 'show'] },
     { name: 'Team', names: ['sync', 'github', 'import', 'export'] },
     { name: 'Maintenance', names: ['migrate', 're-sort', 'doctor'] },

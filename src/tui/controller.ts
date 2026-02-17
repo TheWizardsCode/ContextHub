@@ -34,9 +34,9 @@ import {
 import { OpencodeClient, type OpencodeServerStatus } from './opencode-client.js';
 import ChordHandler from './chords.js';
 import { stripAnsi, stripTags, decorateIdsForClick, extractIdFromLine, extractIdAtColumn, stripTagsAndAnsiWithMap, wrapPlainLineWithMap } from './id-utils.js';
-  import { AVAILABLE_COMMANDS, MIN_INPUT_HEIGHT, MAX_INPUT_LINES, FOOTER_HEIGHT, OPENCODE_SERVER_PORT,
+import { AVAILABLE_COMMANDS, MIN_INPUT_HEIGHT, MAX_INPUT_LINES, FOOTER_HEIGHT, OPENCODE_SERVER_PORT,
   KEY_NAV_RIGHT, KEY_NAV_LEFT, KEY_TOGGLE_EXPAND, KEY_QUIT, KEY_ESCAPE, KEY_TOGGLE_HELP, KEY_CHORD_PREFIX, KEY_CHORD_FOLLOWUPS, KEY_OPEN_OPENCODE, KEY_OPEN_SEARCH,
-  KEY_TAB, KEY_SHIFT_TAB, KEY_LEFT_SINGLE, KEY_RIGHT_SINGLE, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_FILTER_BLOCKED, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE } from './constants.js';
+  KEY_TAB, KEY_SHIFT_TAB, KEY_LEFT_SINGLE, KEY_RIGHT_SINGLE, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_FILTER_BLOCKED, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW } from './constants.js';
 
 type Item = WorkItem;
 
@@ -1412,9 +1412,14 @@ export class TuiController {
       const lines = visible.map(n => {
         const indent = '  '.repeat(n.depth);
         const marker = n.hasChildren ? (state.expanded.has(n.item.id) ? '▾' : '▸') : ' ';
-        const badge = Array.isArray(n.item.tags) && n.item.tags.includes('do-not-delegate') ? '{yellow-fg}⚑{/yellow-fg} ' : '';
+        const doNotDelegateBadge = Array.isArray(n.item.tags) && n.item.tags.includes('do-not-delegate')
+          ? '{yellow-fg}⚑{/yellow-fg} '
+          : '';
+        const needsReviewBadge = n.item.needsProducerReview
+          ? '{magenta-fg}●{/magenta-fg} '
+          : '';
         const title = formatTitleOnlyTUI(n.item);
-        return `${indent}${marker} ${badge}${title} {cyan-fg}({underline}${n.item.id}{/underline}){/cyan-fg}`;
+        return `${indent}${marker} ${needsReviewBadge}${doNotDelegateBadge}${title} {cyan-fg}({underline}${n.item.id}{/underline}){/cyan-fg}`;
       });
       state.listLines = lines;
       list.setItems(lines);
@@ -2663,10 +2668,34 @@ export class TuiController {
       }
     });
 
-    // Refresh from database
-    screen.key(KEY_REFRESH, () => {
-      refreshFromDatabase();
+    // Toggle needs producer review flag (shortcut r)
+    screen.key(KEY_TOGGLE_NEEDS_REVIEW, () => {
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+      const item = getSelectedItem();
+      if (!item) {
+        showToast('No item selected');
+        return;
+      }
+      try {
+        const nextValue = !Boolean(item.needsProducerReview);
+        const updated = db.update(item.id, { needsProducerReview: nextValue });
+        if (!updated) {
+          showToast('Update failed');
+          return;
+        }
+        showToast(nextValue ? 'Needs review: ON' : 'Needs review: OFF');
+        refreshFromDatabase(list.selected as number);
+      } catch (err) {
+        showToast('Update failed');
+      }
     });
+
+    // Refresh from database
+    if (KEY_REFRESH.length > 0) {
+      screen.key(KEY_REFRESH, () => {
+        refreshFromDatabase();
+      });
+    }
 
     // Evaluate next item
     screen.key(KEY_FIND_NEXT, () => {
