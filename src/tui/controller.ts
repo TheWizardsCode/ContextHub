@@ -1414,7 +1414,7 @@ export class TuiController {
         const marker = n.hasChildren ? (state.expanded.has(n.item.id) ? '▾' : '▸') : ' ';
         const badge = Array.isArray(n.item.tags) && n.item.tags.includes('do-not-delegate') ? '{yellow-fg}⚑{/yellow-fg} ' : '';
         const title = formatTitleOnlyTUI(n.item);
-        return `${indent}${marker} ${badge}${title} {gray-fg}({underline}${n.item.id}{/underline}){/gray-fg}`;
+        return `${indent}${marker} ${badge}${title} {cyan-fg}({underline}${n.item.id}{/underline}){/cyan-fg}`;
       });
       state.listLines = lines;
       list.setItems(lines);
@@ -1484,6 +1484,22 @@ export class TuiController {
       });
     }
 
+    function brightenDetailIdLine(value: string): string {
+      const lines = value.split('\n');
+      const updated = lines.map((line) => {
+        const plain = stripAnsi(line);
+        const match = plain.match(/^ID\s*:\s*(\S+)/);
+        if (!match) return line;
+        const id = match[1];
+        const idIndex = plain.indexOf(id);
+        if (idIndex === -1) return line;
+        const prefix = plain.slice(0, idIndex);
+        const suffix = plain.slice(idIndex + id.length);
+        return `${prefix}{cyan-fg}${id}{/cyan-fg}${suffix}`;
+      });
+      return updated.join('\n');
+    }
+
     function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       const v = visible || buildVisible();
       if (v.length === 0) {
@@ -1493,7 +1509,8 @@ export class TuiController {
       const node = v[idx] || v[0];
       const text = humanFormatWorkItem(node.item, db, 'full');
       const escaped = escapeBlessedTags(text);
-      detail.setContent(decorateIdsForClick(escaped));
+      const brightened = brightenDetailIdLine(escaped);
+      detail.setContent(decorateIdsForClick(brightened));
       detail.setScroll(0);
     }
 
@@ -1571,7 +1588,8 @@ export class TuiController {
       detailOverlay.show();
       const text = humanFormatWorkItem(item, db, 'full');
       const escaped = escapeBlessedTags(text);
-      detailModal.setContent(decorateIdsForClick(escaped));
+      const brightened = brightenDetailIdLine(escaped);
+      detailModal.setContent(decorateIdsForClick(brightened));
       detailModal.setScroll(0);
       detailModal.show();
       detailOverlay.setFront();
