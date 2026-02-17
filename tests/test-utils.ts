@@ -76,31 +76,39 @@ export function createTuiTestContext() {
     createSampleItem: ({ tags = [] } = {}) => {
       const id = `WL-TEST-${nextId++}`;
       const now = new Date().toISOString();
-      const item = {
-        id,
-        title: 'Sample',
-        description: '',
-        status: 'open',
-        priority: 'medium',
-        sortIndex: 0,
-        parentId: null,
-        createdAt: now,
-        updatedAt: now,
-        tags,
-        assignee: '',
-        stage: '',
-        issueType: 'task',
-        createdBy: '',
-        deletedBy: '',
-        deleteReason: '',
-        risk: '',
-        effort: '',
-      };
+    const item = {
+      id,
+      title: 'Sample',
+      description: '',
+      status: 'open',
+      priority: 'medium',
+      sortIndex: 0,
+      parentId: null,
+      createdAt: now,
+      updatedAt: now,
+      tags,
+      assignee: '',
+      stage: '',
+      issueType: 'task',
+      createdBy: '',
+      deletedBy: '',
+      deleteReason: '',
+      risk: '',
+      effort: '',
+      needsProducerReview: false,
+    };
       items.set(id, item);
       return id;
     },
     db: {
       get: (id: string) => items.get(id),
+      update: (id: string, updates: any) => {
+        const cur = items.get(id);
+        if (!cur) return false;
+        const next = Object.assign({}, cur, updates);
+        items.set(id, next);
+        return next;
+      },
     },
     requireInitialized: () => {},
     getDatabase: (prefix?: string) => ({
@@ -112,7 +120,7 @@ export function createTuiTestContext() {
         if (!cur) return false;
         const next = Object.assign({}, cur, updates);
         items.set(id, next);
-        return true;
+        return next;
       },
       createComment: (_: any) => ({}),
       get: (id: string) => items.get(id),
@@ -220,7 +228,7 @@ export function createTuiTestContext() {
     nextDialog: { overlay: makeBox(), dialog: makeBox(), close: makeBox(), text: makeBox(), options: makeBox() },
   };
 
-  const program = { opts: () => ({ verbose: false, format: undefined }) } as any;
+  const program = { opts: () => ({ verbose: false, format: undefined, json: false }) } as any;
 
   // Minimal command registry so CLI command modules can register commands
   // and tests can invoke them via `ctx.runCli([...])`.
@@ -249,7 +257,17 @@ export function createTuiTestContext() {
   async function runCli(args: string[]): Promise<any> {
     const cmd = args[0];
     const id = args[1];
-    const rest = args.slice(2);
+    let value: string | undefined;
+    const rest: string[] = [];
+    if (args.length > 2) {
+      const maybeValue = args[2];
+      if (maybeValue && !String(maybeValue).startsWith('-')) {
+        value = maybeValue;
+        rest.push(...args.slice(3));
+      } else {
+        rest.push(...args.slice(2));
+      }
+    }
     const handler = program._commands.get(cmd);
     if (!handler) throw new Error(`Command not registered: ${cmd}`);
     const options: Record<string, any> = {};
@@ -270,6 +288,9 @@ export function createTuiTestContext() {
       }
     }
 
+    if (value !== undefined) {
+      return await Promise.resolve(handler(id, value, options));
+    }
     return await Promise.resolve(handler(id, options));
   }
 

@@ -73,12 +73,6 @@ export const DEFAULT_SHORTCUTS = [
     ],
   },
   {
-    category: 'Refresh',
-    items: [
-      { keys: 'R', description: 'Reload items from database' },
-    ],
-  },
-  {
     category: 'Clipboard',
     items: [
       { keys: 'C', description: 'Copy selected item ID' },
@@ -99,6 +93,7 @@ export const DEFAULT_SHORTCUTS = [
       { keys: 'X', description: 'Close selected item' },
       { keys: 'U', description: 'Update selected item' },
       { keys: 'D', description: 'Toggle do-not-delegate' },
+      { keys: 'r/R', description: 'Toggle needs review' },
     ],
   },
   {
@@ -142,12 +137,13 @@ export const KEY_COPY_ID = ['c', 'C'];
 export const KEY_PARENT_PREVIEW = ['p', 'P'];
 export const KEY_CLOSE_ITEM = ['x', 'X'];
 export const KEY_UPDATE_ITEM = ['u', 'U'];
-export const KEY_REFRESH = ['r', 'R'];
+export const KEY_REFRESH: string[] = [];
 export const KEY_FIND_NEXT = ['n', 'N'];
 export const KEY_FILTER_IN_PROGRESS = ['i', 'I'];
 export const KEY_FILTER_OPEN = ['a', 'A'];
 export const KEY_FILTER_BLOCKED = ['b', 'B'];
 export const KEY_TOGGLE_DO_NOT_DELEGATE = ['d', 'D'];
+export const KEY_TOGGLE_NEEDS_REVIEW = ['r', 'R'];
 
 // Composite keys often used in help menu / close handlers
 export const KEY_MENU_CLOSE = ['escape', 'q'];

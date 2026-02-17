@@ -120,6 +120,11 @@ worklog update WI-0J8L1JQ3H8ZQ2K6D -s completed -d "All done!"
 # Delete a work item
 worklog delete WI-0J8L1JQ3H8ZQ2K6E
 
+# Toggle needs-producer-review flag
+worklog reviewed WI-0J8L1JQ3H8ZQ2K6E
+# Set needs-producer-review flag explicitly
+worklog reviewed WI-0J8L1JQ3H8ZQ2K6E true
+
 # Export to backup
 worklog export -f backup.jsonl
 

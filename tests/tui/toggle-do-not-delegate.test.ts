@@ -17,3 +17,16 @@ describe('TUI D key toggle do-not-delegate', () => {
     expect(item.tags).toContain('do-not-delegate');
   });
 });
+
+describe('TUI r key toggle needs review', () => {
+  it('shows toast and toggles needsProducerReview', async () => {
+    const ctx = createTuiTestContext();
+    const controller = new TuiController(ctx as any, { blessed: ctx.blessed });
+    const id = ctx.utils.createSampleItem({ tags: [] });
+    await controller.start({});
+    ctx.screen.emit('keypress', 'r', { name: 'r' });
+    expect(ctx.toast.lastMessage()).toMatch(/Needs review: ON/);
+    const item = ctx.utils.db.get(id);
+    expect(Boolean(item.needsProducerReview)).toBe(true);
+  });
+});

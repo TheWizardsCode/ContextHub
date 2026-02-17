@@ -124,6 +124,8 @@ export interface CloseOptions { reason?: string; author?: string; prefix?: strin
 
 export interface DeleteOptions { prefix?: string }
 
+export interface ReviewedOptions { prefix?: string }
+
 export interface DepOptions {
   prefix?: string;
   incoming?: boolean;

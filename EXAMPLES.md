@@ -66,6 +66,11 @@ worklog update WI-0J8L1JQ3H8ZQ2K6F -P WI-0J8L1JQ3H8ZQ2K6E
 
 # Add tags
 worklog update WI-0J8L1JQ3H8ZQ2K6D --tags "urgent,reviewed"
+
+# Toggle needs-producer-review flag
+worklog reviewed WI-0J8L1JQ3H8ZQ2K6D
+# Set needs-producer-review flag explicitly
+worklog reviewed WI-0J8L1JQ3H8ZQ2K6D true
 ```
 
 ### Deleting Work Items
