@@ -559,7 +559,11 @@ export class OpencodeClient {
   ) {
     let resRef: any = null;
     let req: any = null;
+    let sessionEnded = false;
     const onSessionEnd = () => {
+      if (sessionEnded) return;
+      sessionEnded = true;
+      sseClosed = true;
       try { req?.abort?.(); } catch (_) {}
       try { resRef?.removeAllListeners?.(); } catch (_) {}
       try { req?.removeAllListeners?.(); } catch (_) {}
@@ -1054,6 +1058,10 @@ export class OpencodeClient {
           setLastUserMessageId(messageId);
         }
         this.options.log(`sse message updated role=${messageRole} id=${messageId}`);
+        const completed = info?.time?.completed;
+        if (messageRole === 'assistant' && completed) {
+          handlers.onSessionEnd();
+        }
       }
       return;
     }

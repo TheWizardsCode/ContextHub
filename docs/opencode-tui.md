@@ -19,7 +19,7 @@ The Worklog TUI now includes full integration with OpenCode, an AI-powered codin
   - `[~]` - Server starting
   - `[OK] Port: 51625` - Server running
   - `[X]` - Server error
-- Default port: 9999 (configurable via `OPENCODE_SERVER_PORT` environment variable)
+- Default port: Let OpenCode choose (override with `OPENCODE_SERVER_PORT`)
 
 ### 3. Slash Command Autocomplete
 
@@ -118,7 +118,7 @@ Focus on performance and readability.
 
 ### Environment Variables
 
-- `OPENCODE_SERVER_PORT` - Override the default server port (9999)
+- `OPENCODE_SERVER_PORT` - Override the server port (if unset, OpenCode chooses)
 
 Note: Worklog’s OpenCode client does not currently attach auth headers, so enabling OpenCode server auth will likely prevent the TUI from connecting.
 
