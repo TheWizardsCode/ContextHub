@@ -76,6 +76,23 @@ wl update WL-ABC123 --do-not-delegate true   # add tag
 wl update WL-ABC123 --do-not-delegate false  # remove tag
 ```
 
+### `reviewed` <id> [value]
+
+Toggle or set the `needsProducerReview` flag on a work item. If `value` is omitted, it toggles the current value.
+
+Options:
+
+- `--prefix <prefix>` — Operate on a specific prefix (optional).
+
+Examples:
+
+```sh
+wl reviewed WL-ABC123           # toggle flag
+wl reviewed WL-ABC123 true      # set to true
+wl reviewed WL-ABC123 false     # set to false
+wl --json reviewed WL-ABC123    # JSON output with updated work item
+```
+
 ### `delete` [options] <id>
 
 Delete a work item (hard delete): this removes the work item row from the local database. Any comments attached to the work item are cascade-deleted by the database. If you prefer to mark an item as deleted without removing it, use `wl update <id> -s deleted` to set the `deleted` status.
