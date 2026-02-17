@@ -152,6 +152,7 @@ describe('next dialog text wrapping', () => {
           createdBy: '',
           deletedBy: '',
           deleteReason: '',
+          needsProducerReview: true,
         },
       ],
       get: () => null,

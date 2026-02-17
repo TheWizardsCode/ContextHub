@@ -79,7 +79,7 @@ describe("TUI '/' search/filter", () => {
     ctx.blessed = blessedImpl;
     ctx.utils.requireInitialized = () => undefined;
     ctx.utils.getDatabase = () => ({
-      list: () => [{ id: 'WL-1', title: 'one', status: 'open' }],
+      list: () => [{ id: 'WL-1', title: 'one', status: 'open', needsProducerReview: true }],
       get: () => null,
       getCommentsForWorkItem: () => [],
       update: () => ({}),
@@ -112,7 +112,7 @@ describe("TUI '/' search/filter", () => {
     ctx.spawn = mockSpawn;
     ctx.utils.requireInitialized = () => undefined;
     ctx.utils.getDatabase = () => ({
-      list: () => [ { id: 'WL-1', title: 'one', status: 'open' } ],
+      list: () => [ { id: 'WL-1', title: 'one', status: 'open', needsProducerReview: true } ],
       get: () => null,
       getCommentsForWorkItem: () => [],
       update: () => ({}),
@@ -142,5 +142,7 @@ describe("TUI '/' search/filter", () => {
 
     // Expect spawn to have been called by the handler
     expect(mockSpawn).toHaveBeenCalled();
+    const spawnArgs = (mockSpawn as any).mock.calls?.[0]?.[1] || [];
+    expect(spawnArgs).toContain('--needs-producer-review');
   });
 });

@@ -12,7 +12,7 @@ import { copyToClipboard } from '../clipboard.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { humanFormatWorkItem, formatTitleOnlyTUI } from '../commands/helpers.js';
-import { createTuiState, rebuildTreeState, buildVisibleNodes, expandAncestorsForInProgress } from './state.js';
+import { createTuiState, rebuildTreeState, buildVisibleNodes, expandAncestorsForInProgress, isClosedStatus } from './state.js';
 import { createPersistence } from './persistence.js';
 import { resolveWorklogDir } from '../worklog-paths.js';
 import { getDefaultDataPath } from '../jsonl.js';
@@ -36,7 +36,7 @@ import ChordHandler from './chords.js';
 import { stripAnsi, stripTags, decorateIdsForClick, extractIdFromLine, extractIdAtColumn, stripTagsAndAnsiWithMap, wrapPlainLineWithMap } from './id-utils.js';
 import { AVAILABLE_COMMANDS, MIN_INPUT_HEIGHT, MAX_INPUT_LINES, FOOTER_HEIGHT, OPENCODE_SERVER_PORT,
   KEY_NAV_RIGHT, KEY_NAV_LEFT, KEY_TOGGLE_EXPAND, KEY_QUIT, KEY_ESCAPE, KEY_TOGGLE_HELP, KEY_CHORD_PREFIX, KEY_CHORD_FOLLOWUPS, KEY_OPEN_OPENCODE, KEY_OPEN_SEARCH,
-  KEY_TAB, KEY_SHIFT_TAB, KEY_LEFT_SINGLE, KEY_RIGHT_SINGLE, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_FILTER_BLOCKED, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW } from './constants.js';
+  KEY_TAB, KEY_SHIFT_TAB, KEY_LEFT_SINGLE, KEY_RIGHT_SINGLE, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_FILTER_BLOCKED, KEY_FILTER_NEEDS_REVIEW, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW } from './constants.js';
 
 type Item = WorkItem;
 
@@ -119,8 +119,15 @@ export class TuiController {
     const query: Partial<Record<string, unknown>> = {};
     if (options.inProgress) query.status = 'in-progress';
 
-    const items: Item[] = db.list(query);
+    const allItems: Item[] = db.list(query);
     const showClosed = Boolean(options.all);
+    const visibleCandidates = showClosed
+      ? allItems
+      : allItems.filter(item => !isClosedStatus(item.status));
+    let needsReviewFilter: boolean | null = visibleCandidates.some(item => Boolean(item.needsProducerReview)) ? true : null;
+    const items: Item[] = needsReviewFilter === true
+      ? allItems.filter(item => Boolean(item.needsProducerReview))
+      : allItems;
 
     // Persisted state handling extracted to src/tui/persistence.ts
     const persistence = createPersistenceImpl(resolveWorklogDirImpl(), { debugLog: debugLog, fs: fsAsync });
@@ -1407,6 +1414,12 @@ export class TuiController {
 
 
     state.listLines = [];
+    function getNeedsReviewFilterLabel(): string {
+      if (needsReviewFilter === true) return 'Review: On';
+      if (needsReviewFilter === false) return 'Review: Off';
+      return 'Review: All';
+    }
+
     function renderListAndDetail(selectIndex = 0) {
       const visible = buildVisible();
       const lines = visible.map(n => {
@@ -1431,7 +1444,9 @@ export class TuiController {
       try {
         const closedCount = state.items.filter((item: any) => item.status === 'completed' || item.status === 'deleted').length;
         // Left side: show active filter if present (labelled "Filter:"), otherwise empty
-        const leftText = activeFilterTerm ? `Filter: ${activeFilterTerm}` : '';
+        const filterLabel = activeFilterTerm ? `Filter: ${activeFilterTerm}` : '';
+        const reviewLabel = getNeedsReviewFilterLabel();
+        const leftText = [reviewLabel, filterLabel].filter(Boolean).join(' • ');
         // Right side: when closed items are hidden, show "-Closed (x)", otherwise show nothing
         const rightText = state.showClosed ? '' : `-Closed (${closedCount})`;
         const cols = screen.width as number;
@@ -1716,6 +1731,7 @@ export class TuiController {
       status?: 'in-progress' | 'blocked';
       includeClosed?: boolean;
       resetSearch?: boolean;
+      needsReviewFilter?: boolean | null;
       updateOptions?: { inProgress: boolean; all: boolean };
       clearShowClosed?: boolean;
       preferredIndex?: number;
@@ -1728,6 +1744,7 @@ export class TuiController {
         status,
         includeClosed = false,
         resetSearch = true,
+        needsReviewFilter: nextNeedsReviewFilter = needsReviewFilter,
         updateOptions,
         clearShowClosed = false,
         preferredIndex,
@@ -1739,6 +1756,9 @@ export class TuiController {
         activeFilterTerm = '';
         preFilterItems = null;
       }
+      if (typeof nextNeedsReviewFilter !== 'undefined') {
+        needsReviewFilter = nextNeedsReviewFilter;
+      }
       if (updateOptions) {
         options.inProgress = updateOptions.inProgress;
         options.all = updateOptions.all;
@@ -1749,6 +1769,7 @@ export class TuiController {
       const selectedId = selected?.id;
       const query: any = {};
       if (status) query.status = status;
+      if (needsReviewFilter !== null) query.needsProducerReview = needsReviewFilter;
       state.items = db.list(query);
       const nextVisible = includeClosed
         ? state.items.slice()
@@ -1756,6 +1777,7 @@ export class TuiController {
       if (nextVisible.length === 0) {
         list.setItems([]);
         detail.setContent('');
+        showToast('No work items found');
         screen.render();
         return;
       }
@@ -1845,6 +1867,21 @@ export class TuiController {
         clearShowClosed: true,
         allowFallback: false,
       });
+    }
+
+    function cycleNeedsReviewFilter() {
+      const next = needsReviewFilter === true
+        ? false
+        : needsReviewFilter === false
+          ? null
+          : true;
+      refreshListWithOptions({
+        needsReviewFilter: next,
+        includeClosed: options.all,
+        clearShowClosed: false,
+        allowFallback: false,
+      });
+      showToast(next === true ? 'Needs review: ON' : next === false ? 'Needs review: OFF' : 'Needs review: ALL');
     }
 
     function getSelectedItem(): Item | null {
@@ -2575,6 +2612,9 @@ export class TuiController {
         if (!preFilterItems) preFilterItems = state.items.slice();
 
         const args = ['list', trimmed, '--json'];
+        if (needsReviewFilter !== null) {
+          args.push('--needs-producer-review', String(needsReviewFilter));
+        }
         if (options.prefix) {
           args.push('--prefix', options.prefix);
         }
@@ -2715,6 +2755,11 @@ export class TuiController {
 
     screen.key(KEY_FILTER_BLOCKED, () => {
       setFilterNext('blocked');
+    });
+
+    screen.key(KEY_FILTER_NEEDS_REVIEW, () => {
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+      cycleNeedsReviewFilter();
     });
 
     // Click footer to open help

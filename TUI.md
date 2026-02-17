@@ -32,6 +32,7 @@ This document describes the interactive terminal UI shipped as the `wl tui` (or 
 - d — delete selected item
 - r — refresh/reload items
 - / — search items
+- v — cycle needs-producer-review filter (on/off/all)
 - h — toggle help menu
 
 ### OpenCode AI Integration

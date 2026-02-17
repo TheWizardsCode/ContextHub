@@ -70,6 +70,7 @@ export const DEFAULT_SHORTCUTS = [
       { keys: 'I', description: 'Show in-progress only' },
       { keys: 'A', description: 'Show open items' },
       { keys: 'B', description: 'Show blocked only' },
+      { keys: 'V', description: 'Needs review filter (cycle)' },
     ],
   },
   {
@@ -142,6 +143,7 @@ export const KEY_FIND_NEXT = ['n', 'N'];
 export const KEY_FILTER_IN_PROGRESS = ['i', 'I'];
 export const KEY_FILTER_OPEN = ['a', 'A'];
 export const KEY_FILTER_BLOCKED = ['b', 'B'];
+export const KEY_FILTER_NEEDS_REVIEW = ['v', 'V'];
 export const KEY_TOGGLE_DO_NOT_DELEGATE = ['d', 'D'];
 export const KEY_TOGGLE_NEEDS_REVIEW = ['r', 'R'];
 
