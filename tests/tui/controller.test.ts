@@ -193,6 +193,6 @@ describe('TuiController', () => {
 
     expect(createLayout).toHaveBeenCalled();
     expect(opencodeCtorCalls.length).toBe(1);
-    expect(opencodeCtorCalls[0].port).toBe(9999);
+    expect(opencodeCtorCalls[0].port).toBe(0);
   });
 });

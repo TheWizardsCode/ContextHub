@@ -715,6 +715,9 @@ export class TuiController {
     let isCommandMode = false;
     let userTypedText = '';
     let isWaitingForResponse = false; // Track if we're waiting for OpenCode response
+    const promptSpinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let promptSpinnerIndex = 0;
+    let promptSpinnerTimer: ReturnType<typeof setInterval> | null = null;
 
     type OpencodeInputMode = 'insert' | 'normal';
     let opencodeInputMode: OpencodeInputMode = 'insert';
@@ -738,8 +741,31 @@ export class TuiController {
 
     const updateOpencodePromptLabel = (state: 'idle' | 'waiting') => {
       const modeSuffix = opencodeInputMode === 'normal' ? ' [normal]' : '';
-      const stateSuffix = state === 'waiting' ? ' (waiting...)' : '';
+      let stateSuffix = '';
+      if (state === 'waiting') {
+        const spinner = promptSpinnerFrames[promptSpinnerIndex % promptSpinnerFrames.length] || promptSpinnerFrames[0];
+        stateSuffix = ` (waiting ${spinner})`;
+      }
       opencodeDialog.setLabel(` prompt${stateSuffix} [esc]${modeSuffix} `);
+    };
+
+    const startPromptSpinner = () => {
+      if (promptSpinnerTimer) return;
+      promptSpinnerIndex = 0;
+      promptSpinnerTimer = setInterval(() => {
+        if (!isWaitingForResponse) return;
+        promptSpinnerIndex = (promptSpinnerIndex + 1) % promptSpinnerFrames.length;
+        updateOpencodePromptLabel('waiting');
+        screen.render();
+      }, 120);
+    };
+
+    const stopPromptSpinner = () => {
+      if (promptSpinnerTimer) {
+        clearInterval(promptSpinnerTimer);
+        promptSpinnerTimer = null;
+      }
+      promptSpinnerIndex = 0;
     };
 
     const getLineColumnFromIndex = (value: string, index: number) => {
@@ -1303,6 +1329,7 @@ export class TuiController {
 
       // Set flag to block new requests and update label
       isWaitingForResponse = true;
+      startPromptSpinner();
       updateOpencodePromptLabel('waiting');
       screen.render();
 
@@ -1317,6 +1344,7 @@ export class TuiController {
           onComplete: () => {
           // Clear flag when response completes and restore label
           isWaitingForResponse = false;
+          stopPromptSpinner();
           updateOpencodePromptLabel('idle');
           openOpencodeDialog();
           },
@@ -1324,6 +1352,7 @@ export class TuiController {
       } catch (err) {
         // Clear flag on error too and restore label
         isWaitingForResponse = false;
+        stopPromptSpinner();
         updateOpencodePromptLabel('idle');
         opencodePane.pushLine(`{red-fg}Server communication error: ${err}{/red-fg}`);
         screen.render();

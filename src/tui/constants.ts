@@ -158,8 +158,9 @@ export const MIN_INPUT_HEIGHT = 3; // Minimum height for input dialog (single li
 export const MAX_INPUT_LINES = 7;  // Maximum visible lines of input text
 export const FOOTER_HEIGHT = 1;    // Height reserved for the footer
 
-// Default port for the OpenCode server; honoring OPENCODE_SERVER_PORT env var.
-export const OPENCODE_SERVER_PORT = parseInt(process.env.OPENCODE_SERVER_PORT || '9999', 10);
+// Port for the OpenCode server; if unset, let the server select its own port.
+const parsedOpencodePort = Number.parseInt(process.env.OPENCODE_SERVER_PORT ?? '', 10);
+export const OPENCODE_SERVER_PORT = Number.isFinite(parsedOpencodePort) ? parsedOpencodePort : 0;
 
 export default {
   AVAILABLE_COMMANDS,

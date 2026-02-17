@@ -54,7 +54,7 @@ The OpenCode server automatically starts when you press O. Server status indicat
 
 - `[-]` — Server stopped
 - `[~]` — Server starting
-- `[OK] Port: 9999` — Server running (default; configurable via `OPENCODE_SERVER_PORT`)
+- `[OK] Port: 9999` — Server running (example; configurable via `OPENCODE_SERVER_PORT` or auto-selected)
 - `[X]` — Server error
 
 ### Slash Commands
