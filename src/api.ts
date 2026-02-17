@@ -8,6 +8,14 @@ import { CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, WorkItemStatus
 import { exportToJsonl, importFromJsonl, getDefaultDataPath } from './jsonl.js';
 import { loadConfig } from './config.js';
 
+function parseNeedsProducerReview(value: unknown): boolean | undefined {
+  if (value === undefined || value === null) return undefined;
+  const raw = String(value).toLowerCase();
+  if (['true', 'yes', '1'].includes(raw)) return true;
+  if (['false', 'no', '0'].includes(raw)) return false;
+  return undefined;
+}
+
 export function createAPI(db: WorklogDatabase) {
   const app = express();
   app.use(express.json());
@@ -101,6 +109,14 @@ export function createAPI(db: WorklogDatabase) {
     }
     if (req.query.stage) {
       query.stage = req.query.stage as string;
+    }
+    if (req.query.needsProducerReview !== undefined) {
+      const parsed = parseNeedsProducerReview(req.query.needsProducerReview);
+      if (parsed === undefined) {
+        res.status(400).json({ error: 'Invalid needsProducerReview value' });
+        return;
+      }
+      query.needsProducerReview = parsed;
     }
 
     // Interoperability metadata filters
@@ -270,6 +286,14 @@ export function createAPI(db: WorklogDatabase) {
     }
     if (req.query.stage) {
       query.stage = req.query.stage as string;
+    }
+    if (req.query.needsProducerReview !== undefined) {
+      const parsed = parseNeedsProducerReview(req.query.needsProducerReview);
+      if (parsed === undefined) {
+        res.status(400).json({ error: 'Invalid needsProducerReview value' });
+        return;
+      }
+      query.needsProducerReview = parsed;
     }
 
     // Interoperability metadata filters
