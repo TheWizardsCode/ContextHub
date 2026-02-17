@@ -1,4 +1,5 @@
 import blessed from 'blessed';
+import { theme } from '../../theme.js';
 import type { BlessedBox, BlessedFactory, BlessedList, BlessedScreen, BlessedTextarea } from '../types.js';
 import type { OverlaysComponent } from './overlays.js';
 
@@ -239,7 +240,7 @@ export class DialogsComponent {
       // Provide a visible, grey border and a title label
       border: { type: 'line' },
       label: ' Comment ',
-      style: { fg: 'white', bg: 'black', border: { fg: 'gray' } },
+      style: { fg: theme.tui.colors.lightText, bg: 'black', border: { fg: 'gray' } },
       // show a scrollbar when text exceeds the box
       scrollbar: { ch: ' ', inverse: true },
     }) as BlessedTextarea;

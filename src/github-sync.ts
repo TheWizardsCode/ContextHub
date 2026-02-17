@@ -1,5 +1,5 @@
 import { WorkItem, Comment, WorkItemRiskLevel, WorkItemEffortLevel } from './types.js';
-import chalk from 'chalk';
+import { theme } from './theme.js';
 import {
   GithubConfig,
   GithubIssueRecord,
@@ -679,13 +679,13 @@ export function importIssuesToWorkItems(
     if (existingMeta) {
       const removedIssueNumber = shouldReplace ? existingMeta.number : issue.number;
       const removedIssueUrl = `https://github.com/${config.repo}/issues/${removedIssueNumber}`;
-      console.error(
-        chalk.red(
-          `Duplicate Worklog marker detected for ${remoteItem.id}. `
-          + `Duplicates should not occur. Ignoring ${removedIssueUrl} during sync. `
-          + 'Remove the duplicate from GitHub after confirming it has no additional content of value.'
-        )
-      );
+       console.error(
+         theme.text.error(
+           `Duplicate Worklog marker detected for ${remoteItem.id}. `
+           + `Duplicates should not occur. Ignoring ${removedIssueUrl} during sync. `
+           + 'Remove the duplicate from GitHub after confirming it has no additional content of value.'
+         )
+       );
       if (!shouldReplace) {
         seenIssueNumbers.add(issue.number);
         processed += 1;

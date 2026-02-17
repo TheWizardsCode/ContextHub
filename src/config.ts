@@ -8,7 +8,7 @@ import * as yaml from 'js-yaml';
 import { WorklogConfig } from './types.js';
 import * as readline from 'readline';
 import { resolveWorklogDir } from './worklog-paths.js';
-import chalk from 'chalk';
+import { theme } from './theme.js';
 
 const CONFIG_DIR = '.worklog';
 const CONFIG_FILE = 'config.yaml';
@@ -362,7 +362,7 @@ function prompt(question: string): Promise<string> {
 }
 
 function printHeading(title: string): void {
-  console.log(chalk.blue(`## ${title}`));
+  console.log(theme.text.heading(`## ${title}`));
   console.log();
 }
 
@@ -404,7 +404,7 @@ export async function initConfig(existingConfig?: WorklogConfig | null, options?
       const shouldChange = await prompt('Do you want to change these settings? (y/N): ');
       
       if (shouldChange.toLowerCase() !== 'y' && shouldChange.toLowerCase() !== 'yes') {
-        console.log(chalk.gray('\nKeeping existing configuration.'));
+        console.log(theme.text.muted('\nKeeping existing configuration.'));
         return existingConfig;
       }
     }

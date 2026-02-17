@@ -1,4 +1,5 @@
 import blessed from 'blessed';
+import { theme } from '../../theme.js';
 import type { BlessedBox, BlessedFactory, BlessedScreen } from '../types.js';
 import { DEFAULT_SHORTCUTS, KEY_MENU_CLOSE } from '../constants.js';
 
@@ -47,7 +48,7 @@ export class HelpMenuComponent {
       hidden: true,
       mouse: true,
       clickable: true,
-      style: { bg: 'black' },
+      style: { bg: 'black', fg: theme.tui.colors.lightText },
     });
 
     // Create help menu box

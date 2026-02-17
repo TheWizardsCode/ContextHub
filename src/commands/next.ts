@@ -5,7 +5,7 @@
 import type { PluginContext } from '../plugin-types.js';
 import type { NextOptions } from '../cli-types.js';
 import { humanFormatWorkItem, resolveFormat, formatTitleAndId } from './helpers.js';
-import chalk from 'chalk';
+import { theme } from '../theme.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -59,7 +59,7 @@ export default function register(ctx: PluginContext): void {
 
       if (!availableResults || availableResults.length === 0) {
         console.log('No work items found to work on.');
-        if (note) console.log(chalk.gray(`Note: ${note}`));
+        if (note) console.log(theme.text.muted(`Note: ${note}`));
         return;
       }
 
@@ -69,7 +69,7 @@ export default function register(ctx: PluginContext): void {
         if (!result.workItem) {
           console.log('No work items found to work on.');
           if (result.reason) console.log(`Reason: ${result.reason}`);
-          if (note) console.log(chalk.gray(`Note: ${note}`));
+          if (note) console.log(theme.text.muted(`Note: ${note}`));
           return;
         }
 
@@ -79,16 +79,16 @@ export default function register(ctx: PluginContext): void {
           return referenced ? `"${referenced.title}" (${match})` : match;
         });
         console.log(humanFormatWorkItem(result.workItem, db, chosenFormat));
-        console.log(`\n${chalk.gray('## Reason for Selection')}`);
-        console.log(chalk.gray(reasonText));
+        console.log(`\n${theme.text.muted('## Reason for Selection')}`);
+        console.log(theme.text.muted(reasonText));
         console.log('');
-        console.log(`${chalk.gray('ID')}: ${chalk.gray(result.workItem.id)}`);
-        if (note) console.log(chalk.gray(`Note: ${note}`));
+        console.log(`${theme.text.muted('ID')}: ${theme.text.muted(result.workItem.id)}`);
+        if (note) console.log(theme.text.muted(`Note: ${note}`));
         return;
       }
 
       console.log(`\nNext ${availableResults.length} work item(s) to work on:`);
-      if (note) console.log(chalk.gray(`Note: ${note}`));
+      if (note) console.log(theme.text.muted(`Note: ${note}`));
       console.log('===============================\n');
       availableResults.forEach((res: any, idx: number) => {
         if (!res.workItem) {
@@ -108,12 +108,12 @@ export default function register(ctx: PluginContext): void {
           if (res.workItem.assignee) console.log(`   Assignee: ${res.workItem.assignee}`);
           if (res.workItem.parentId) console.log(`   Parent: ${res.workItem.parentId}`);
           if (res.workItem.description) console.log(`   ${res.workItem.description}`);
-          console.log(`   Reason: ${chalk.cyan(res.reason)}`);
+          console.log(`   Reason: ${theme.text.info(res.reason)}`);
           console.log('');
         } else {
           console.log(`${idx + 1}.`);
           console.log(humanFormatWorkItem(res.workItem, db, chosenFormat));
-          console.log(`Reason: ${chalk.cyan(res.reason)}`);
+          console.log(`Reason: ${theme.text.info(res.reason)}`);
           console.log('');
         }
       });

@@ -1,4 +1,5 @@
 import blessed from 'blessed';
+import { theme } from '../../theme.js';
 import { KEY_ESCAPE, KEY_CS } from '../constants.js';
 import type {
   BlessedBox,
@@ -326,7 +327,7 @@ export class ModalDialogsComponent {
       height: '100% - 1',
       mouse: true,
       clickable: true,
-      style: { bg: 'black' },
+      style: { bg: 'black', fg: theme.tui.colors.lightText },
     }) as BlessedBox;
   }
 

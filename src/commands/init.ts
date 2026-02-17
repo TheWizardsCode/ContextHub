@@ -16,7 +16,7 @@ import * as path from 'path';
 import { execSync } from 'child_process';
 import * as readline from 'readline';
 import { fileURLToPath } from 'url';
-import chalk from 'chalk';
+import { theme } from '../theme.js';
 
 const WORKLOG_PRE_PUSH_HOOK_MARKER = 'worklog:pre-push-hook:v1';
 const WORKLOG_POST_PULL_HOOK_MARKER = 'worklog:post-pull-hook:v1';
@@ -962,7 +962,7 @@ export default function register(ctx: PluginContext): void {
             } satisfies InitConfigOptions);
             writeInitSemaphore(version);
             
-            console.log('\n' + chalk.blue('## Git Sync') + '\n');
+             console.log('\n' + theme.text.heading('## Git Sync') + '\n');
             console.log('Syncing database...');
             
             try {
@@ -972,7 +972,7 @@ export default function register(ctx: PluginContext): void {
               console.log(`  ${(syncError as Error).message}`);
             }
 
-            console.log('\n' + chalk.blue('## Gitignore') + '\n');
+             console.log('\n' + theme.text.heading('## Gitignore') + '\n');
             const gitignoreResult = ensureGitignore({ silent: false });
             if (gitignoreResult.updated) {
               console.log(`.gitignore updated at ${gitignoreResult.gitignorePath} (added ${gitignoreResult.added?.length || 0} entries)`);
@@ -986,7 +986,7 @@ export default function register(ctx: PluginContext): void {
               }
             }
 
-            console.log('\n' + chalk.blue('## Git Hooks') + '\n');
+             console.log('\n' + theme.text.heading('## Git Hooks') + '\n');
             const hookResult = installPrePushHook({ silent: false });
             // Try to install post-pull hooks too, but don't fail init if they can't be installed
             const postPullResult = installPostPullHooks({ silent: true });
@@ -1024,7 +1024,7 @@ export default function register(ctx: PluginContext): void {
               // skip quietly
             }
 
-            console.log('\n' + chalk.blue('## Agent Template') + '\n');
+             console.log('\n' + theme.text.heading('## Agent Template') + '\n');
             const agentTemplatePath = locateAgentTemplate();
             if (!agentTemplatePath && isVerbose) {
               console.log('Verbose: AGENTS template not found, skipping AGENTS.md update.');
@@ -1102,7 +1102,7 @@ export default function register(ctx: PluginContext): void {
             }
             // (note: reporting already emitted above)
             // Offer to install example stats plugin
-            console.log('\n' + chalk.blue('## Install plugins') + '\n');
+             console.log('\n' + theme.text.heading('## Install plugins') + '\n');
             const statsPluginResult = await ensureStatsPluginInstalled({ silent: false, overwrite: normalizedOptions.statsPluginOverwrite });
             if (statsPluginResult.installed) {
               console.log(`✓ Installed example stats plugin at ${statsPluginResult.destinationPath}`);
@@ -1115,7 +1115,7 @@ export default function register(ctx: PluginContext): void {
             }
 
             // Summary of actions
-            console.log('\n\n' + chalk.blue('## Summary') + '\n');
+             console.log('\n\n' + theme.text.heading('## Summary') + '\n');
             // gitignore
             if (gitignoreResult.updated) {
               console.log(' - .gitignore: updated');
@@ -1226,7 +1226,7 @@ export default function register(ctx: PluginContext): void {
         }
         
         if (!isJsonMode) {
-          console.log('\n' + chalk.blue('## Git Sync') + '\n');
+          console.log('\n' + theme.text.heading('## Git Sync') + '\n');
           console.log('Syncing database...');
         }
         
@@ -1254,7 +1254,7 @@ export default function register(ctx: PluginContext): void {
         }
 
           if (!isJsonMode) {
-            console.log('\n' + chalk.blue('## Gitignore') + '\n');
+            console.log('\n' + theme.text.heading('## Gitignore') + '\n');
             const gitignoreResult = ensureGitignore({ silent: false });
             if (gitignoreResult.updated) {
               console.log(`.gitignore updated at ${gitignoreResult.gitignorePath} (added ${gitignoreResult.added?.length || 0} entries)`);
@@ -1268,7 +1268,7 @@ export default function register(ctx: PluginContext): void {
               }
             }
 
-          console.log('\n' + chalk.blue('## Git Hooks') + '\n');
+          console.log('\n' + theme.text.heading('## Git Hooks') + '\n');
             const hookResult = installPrePushHook({ silent: false });
             const postPullResult = installPostPullHooks({ silent: true });
             const committedHooksResult = installCommittedHooks({ silent: true });
@@ -1296,7 +1296,7 @@ export default function register(ctx: PluginContext): void {
               console.log(`Git committed hooks: written to ${committedHooksResult.dirPath}. To enable run: git config core.hooksPath ${DEFAULT_COMMITTED_HOOKS_DIR}`);
             }
 
-          console.log('\n' + chalk.blue('## Agent Template') + '\n');
+          console.log('\n' + theme.text.heading('## Agent Template') + '\n');
           const agentTemplateResult = await ensureAgentTemplateInstalled({ silent: false, action: normalizedOptions.agentsTemplateAction });
           if (!agentTemplateResult.templatePath && isVerbose) {
             console.log('Verbose: AGENTS template not found, skipping AGENTS.md update.');
@@ -1369,7 +1369,7 @@ export default function register(ctx: PluginContext): void {
             console.log(`Note: AGENTS template not installed: ${agentTemplateResult.reason}`);
           }
           // Offer to install example stats plugin
-          console.log('\n' + chalk.blue('## Install plugins') + '\n');
+          console.log('\n' + theme.text.heading('## Install plugins') + '\n');
           const statsPluginResult = await ensureStatsPluginInstalled({ silent: false, overwrite: normalizedOptions.statsPluginOverwrite });
           if (statsPluginResult.installed) {
             console.log(`✓ Installed example stats plugin at ${statsPluginResult.destinationPath}`);

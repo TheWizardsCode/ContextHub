@@ -1,4 +1,5 @@
 import blessed from 'blessed';
+import { theme } from '../../theme.js';
 import type { BlessedBox, BlessedFactory, BlessedScreen } from '../types.js';
 
 export interface ToastOptions {
@@ -40,7 +41,7 @@ export class ToastComponent {
       width: 12, // Will be adjusted based on content
       content: '',
       hidden: true,
-      style: options.style || { fg: 'black', bg: 'green' },
+      style: options.style || { fg: theme.tui.colors.lightText, bg: 'green' },
     });
   }
 
