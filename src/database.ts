@@ -372,7 +372,7 @@ export class WorklogDatabase {
       githubIssueId: undefined,
       githubIssueUpdatedAt: undefined,
       // default for the new flag
-      needsProducerReview: false,
+      needsProducerReview: input.needsProducerReview ?? false,
     };
 
     this.store.saveWorkItem(item);
