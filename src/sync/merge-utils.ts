@@ -8,7 +8,11 @@ export function isDefaultValue(value: unknown, field: string, options?: MergeOpt
   if (options?.defaultValueFields?.includes(field as keyof WorkItem)) {
     return false;
   }
-  if (value === null || value === undefined || value === '') {
+  // Treat undefined and empty-string as default/absent. Do NOT treat
+  // explicit `null` as a default value — null is used to represent an
+  // explicit removal (for example clearing `parentId`) and should be
+  // preserved by merge logic when it's the more recent change.
+  if (value === undefined || value === '') {
     return true;
   }
   if (Array.isArray(value) && value.length === 0) {

@@ -390,6 +390,55 @@ describe('Sync Operations', () => {
       expect(result.merged[0].tags.sort()).toEqual(['local-tag', 'remote-tag', 'shared-tag']);
     });
 
+    it('preserves explicit null parentId when local unparent is newer', () => {
+      const localItem: WorkItem = {
+        id: 'WI-010',
+        title: 'Child item',
+        description: '',
+        status: 'open',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null, // local removed parent
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-01-02T12:00:00.000Z', // newer
+        tags: [],
+        assignee: '',
+        stage: '',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+
+      const remoteItem: WorkItem = {
+        id: 'WI-010',
+        title: 'Child item',
+        description: '',
+        status: 'open',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: 'WI-000', // remote still has parent
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-01-02T10:00:00.000Z', // older
+        tags: [],
+        assignee: '',
+        stage: '',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+
+      const result = mergeWorkItems([localItem], [remoteItem]);
+      expect(result.merged).toHaveLength(1);
+      // Local explicit null parentId (unparent) is newer and must be preserved
+      expect(result.merged[0].parentId).toBeNull();
+    });
+
     it('should handle same timestamp with different content deterministically', () => {
       const localItem: WorkItem = {
         id: 'WI-001',
