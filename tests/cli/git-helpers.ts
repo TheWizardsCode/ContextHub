@@ -13,7 +13,3 @@ export async function initBareRepo(dir: string): Promise<void> {
   await execAsync('git init --bare -q', { cwd: dir });
 }
 
-// Add a worktree using quiet flag
-export async function addWorktree(worktreeDir: string, cwd: string): Promise<void> {
-  await execAsync(`git worktree add -q ${worktreeDir}`, { cwd });
-}
