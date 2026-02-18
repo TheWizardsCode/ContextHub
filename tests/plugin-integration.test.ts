@@ -276,7 +276,7 @@ export default function register(ctx) {
     fs.writeFileSync(path.join(customPluginDir, 'custom.mjs'), plugin);
     
     // Set environment variable
-    const env = { ...process.env, WORKLOG_PLUGIN_DIR: customPluginDir };
+    const env = { ...isolatedEnv, WORKLOG_PLUGIN_DIR: customPluginDir };
     
     const { stdout } = await execAsync(`node ${cliPath} --help`, { env });
     expect(stdout).toContain('custom-cmd');

@@ -65,7 +65,7 @@ export function resolvePluginDir(options?: PluginLoaderOptions): string {
 }
 
 /**
- * Discover plugin files in the plugin directory
+ * Discover plugin files in the plugin directory.
  * Only includes .js and .mjs files, excludes .d.ts, .map, etc.
  */
 export function discoverPlugins(pluginDir: string): string[] {
@@ -123,7 +123,7 @@ export function discoverAllPlugins(dirs: string[]): Array<{ filePath: string; so
 }
 
 /**
- * Load a single plugin file
+ * Load a single plugin file.
  * @returns Plugin info with load status
  */
 export async function loadPlugin(
@@ -152,7 +152,7 @@ export async function loadPlugin(
     // Call the register function
     await module.default(ctx);
     
-    logger.debug(`✓ Loaded plugin: ${name}`);
+    logger.debug(`Loaded plugin: ${name}`);
     
     return {
       name,
@@ -163,9 +163,7 @@ export async function loadPlugin(
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     
-    if (verbose) {
-      console.error(`✗ Failed to load plugin ${name}: ${errorMessage}`);
-    }
+    logger.error(`Failed to load plugin ${name}: ${errorMessage}`);
     
     return {
       name,
