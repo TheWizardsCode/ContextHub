@@ -255,6 +255,7 @@ Options:
 `-a, --assignee <assignee>` (optional)
 `-n, --number <n>` (optional) — Limit the number of items returned
 `--stage <stage>` (optional)
+`--deleted` (optional) — Include items with `deleted` status in the output (hidden by default).
 `--needs-producer-review [value]` (optional; defaults to `true` when omitted; accepts true|false|yes|no)
 `--prefix <prefix>` (optional)
 `--json` (optional)
