@@ -43,6 +43,8 @@ export interface ListOptions {
   stage?: string;
   /** 'true'|'false'|'yes'|'no' (string form from CLI); parsed to boolean by command */
   needsProducerReview?: string | boolean;
+  /** Include deleted items in list output when present */
+  deleted?: boolean;
   prefix?: string;
   number?: string;
 }
