@@ -167,28 +167,10 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
         // Reset any previously set process.exitCode so stale values from other
         // in-process runs don't leak into this invocation. Tests rely on
         // create/update commands returning exitCode=0 by default.
-        // Instrument writes to process.exitCode during diagnostics so we can
-        // capture who sets it. This is temporary and will be restored in the
-        // finally block.
-        const origExitCodeDescriptor = Object.getOwnPropertyDescriptor(process, 'exitCode');
-        let __inproc_orig_exitcode = typeof process.exitCode === 'number' ? process.exitCode : 0;
-        try {
-          Object.defineProperty(process, 'exitCode', {
-            configurable: true,
-            enumerable: true,
-            get() { return __inproc_orig_exitcode; },
-            set(code: any) {
-              try {
-                origStderrWrite?.call(process.stderr, `INPROC_DEBUG: process.exitCode set to ${String(code)}\n`);
-                origStderrWrite?.call(process.stderr, new Error().stack + '\n');
-              } catch (_) { /* ignore */ }
-              __inproc_orig_exitcode = typeof code === 'number' ? code : Number(code) || 0;
-            }
-          });
-        } catch (e) {
-          __inproc_orig_exitcode = 0;
-        }
-        __inproc_orig_exitcode = 0;
+        // Reset any previously set process.exitCode so stale values from other
+        // in-process runs don't leak into this invocation. Tests rely on
+        // create/update commands returning exitCode=0 by default.
+        process.exitCode = 0;
 
         // Run parse with a timeout so a hung command can be diagnosed instead of
         // silently blocking the test runner. Timeout is conservative (15s).
@@ -235,13 +217,14 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
     for (const db of openDatabases) {
       try { db.close(); } catch (_) { /* ignore */ }
     }
-    process.stdout.write = origStdoutWrite;
-    process.stderr.write = origStderrWrite;
-    process.exit = origExit;
-    console.log = origConsoleLog;
-    console.error = origConsoleError;
-    console.warn = origConsoleWarn;
-    console.info = origConsoleInfo;
-    process.argv = origArgv;
+    	process.stdout.write = origStdoutWrite;
+    	process.stderr.write = origStderrWrite;
+    	process.exit = origExit;
+    	console.log = origConsoleLog;
+    	console.error = origConsoleError;
+    	console.warn = origConsoleWarn;
+    	console.info = origConsoleInfo;
+    	process.argv = origArgv;
+    	// No instrumentation present; nothing else to restore for exitCode.
   }
 }
