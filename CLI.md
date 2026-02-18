@@ -473,6 +473,16 @@ wl plugins
 Worklog comes bundled with an example stats plugin installed.
 
 - `stats` — Show custom work item statistics (example plugin provided in this repo).
+ - `ampa` — AMPA plugin: manage AMPA containers and workspace tasks (start, stop, status, run, list, start-work, finish-work).
+
+Examples:
+
+```sh
+wl ampa start                 # start AMPA services for this repo
+wl ampa status                # show AMPA service status
+wl ampa list                  # list available AMPA containers/tasks
+wl ampa start-work WL-012     # attach/start AMPA work for a specific work item
+```
 
 ---
 
