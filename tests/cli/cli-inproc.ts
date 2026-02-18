@@ -159,19 +159,45 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
     }
 
     // Run command
-    try {
-      // Provide a full argv (node + script) and parse from 'node' so commander
-      // treats the following entries as process argv (matching subprocess behaviour).
-      const start = Date.now();
-
-      // Run parse with a timeout so a hung command can be diagnosed instead of
-      // silently blocking the test runner. Timeout is conservative (15s).
       try {
-        await Promise.race([
-          program.parseAsync(argv, { from: 'node' }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('__INPROC_PARSE_TIMEOUT__')), timeoutMs)),
-        ]);
-      } catch (e: any) {
+        // Provide a full argv (node + script) and parse from 'node' so commander
+        // treats the following entries as process argv (matching subprocess behaviour).
+        const start = Date.now();
+
+        // Reset any previously set process.exitCode so stale values from other
+        // in-process runs don't leak into this invocation. Tests rely on
+        // create/update commands returning exitCode=0 by default.
+        // Instrument writes to process.exitCode during diagnostics so we can
+        // capture who sets it. This is temporary and will be restored in the
+        // finally block.
+        const origExitCodeDescriptor = Object.getOwnPropertyDescriptor(process, 'exitCode');
+        let __inproc_orig_exitcode = typeof process.exitCode === 'number' ? process.exitCode : 0;
+        try {
+          Object.defineProperty(process, 'exitCode', {
+            configurable: true,
+            enumerable: true,
+            get() { return __inproc_orig_exitcode; },
+            set(code: any) {
+              try {
+                origStderrWrite?.call(process.stderr, `INPROC_DEBUG: process.exitCode set to ${String(code)}\n`);
+                origStderrWrite?.call(process.stderr, new Error().stack + '\n');
+              } catch (_) { /* ignore */ }
+              __inproc_orig_exitcode = typeof code === 'number' ? code : Number(code) || 0;
+            }
+          });
+        } catch (e) {
+          __inproc_orig_exitcode = 0;
+        }
+        __inproc_orig_exitcode = 0;
+
+        // Run parse with a timeout so a hung command can be diagnosed instead of
+        // silently blocking the test runner. Timeout is conservative (15s).
+        try {
+          await Promise.race([
+            program.parseAsync(argv, { from: 'node' }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('__INPROC_PARSE_TIMEOUT__')), timeoutMs)),
+          ]);
+        } catch (e: any) {
         if (e && e.message === '__INPROC_PARSE_TIMEOUT__') {
           // Dump diagnostics to original stderr so they appear in test logs immediately
           try {
@@ -190,7 +216,12 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
       }
 
       const end = Date.now();
-      return { stdout: out.join(''), stderr: err.join(''), exitCode: 0 };
+      // Respect any process.exitCode set by command handlers so in-process
+      // runs mirror spawn behaviour. If a command set process.exitCode = 1
+      // we should surface that to the caller (execAsync) so tests can treat
+      // the invocation as failed.
+       const exitCode = typeof (__inproc_orig_exitcode) === 'number' ? __inproc_orig_exitcode : (typeof process.exitCode === 'number' ? process.exitCode : 0);
+       return { stdout: out.join(''), stderr: err.join(''), exitCode };
     } catch (e: any) {
       if (e && typeof e.message === 'string' && e.message.startsWith('__INPROC_EXIT__')) {
         const code = Number(e.message.split(':')[1]) || 0;

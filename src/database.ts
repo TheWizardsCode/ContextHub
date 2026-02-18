@@ -422,6 +422,25 @@ export class WorklogDatabase {
       githubIssueUpdatedAt: item.githubIssueUpdatedAt,
     };
 
+    if (process.env.WL_DEBUG_SQL_BINDINGS) {
+      try {
+        const repr: any = {};
+        for (const k of Object.keys(updated)) {
+          try {
+            const v = (updated as any)[k];
+            repr[k] = { type: v === null ? 'null' : typeof v, constructor: v && v.constructor ? v.constructor.name : null };
+          } catch (_e) {
+            repr[k] = { type: 'unreadable' };
+          }
+        }
+        console.error('WL_DEBUG_SQL_BINDINGS WorklogDatabase.update prepared updated types:', JSON.stringify(repr, null, 2));
+        // Also log description to capture non-string values
+        try { console.error('WL_DEBUG_SQL_BINDINGS WorklogDatabase.update description value:', (updated as any).description); } catch (_e) { /* ignore */ }
+      } catch (_e) {
+        console.error('WL_DEBUG_SQL_BINDINGS WorklogDatabase.update: failed to prepare updated log');
+      }
+    }
+
     this.store.saveWorkItem(updated);
     this.exportToJsonl();
     this.triggerAutoSync();
