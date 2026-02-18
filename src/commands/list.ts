@@ -19,6 +19,7 @@ export default function register(ctx: PluginContext): void {
     .option('--parent <id>', 'Filter by parent id (direct children only)')
     
     .option('-n, --number <n>', 'Limit the number of items returned')
+    .option('--deleted', 'Include deleted items in results')
     .option('--tags <tags>', 'Filter by tags (comma-separated)')
     .option('-a, --assignee <assignee>', 'Filter by assignee')
     .option('--stage <stage>', 'Filter by stage')
@@ -74,6 +75,15 @@ export default function register(ctx: PluginContext): void {
       // can decide how to handle completed items programmatically.
       if (!options.status && !utils.isJsonMode()) {
         items = items.filter(item => item.status !== 'completed');
+      }
+
+      // By default exclude deleted items from results unless the user explicitly
+      // requests them via the `--deleted` switch. The intent is that deleted
+      // items are not part of normal workflows and must be opt-in even for
+      // machine-readable (JSON) outputs.
+      const includeDeleted = Boolean(options.deleted);
+      if (!includeDeleted) {
+        items = items.filter(item => item.status !== 'deleted');
       }
 
       if (search) {
