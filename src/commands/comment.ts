@@ -104,13 +104,15 @@ export default function register(ctx: PluginContext): void {
           
           console.log(`Found ${comments.length} comment(s) for ${normalizedWorkItemId}:\n`);
           comments.forEach(comment => {
-            console.log(`[${comment.id}] by ${comment.author} at ${comment.createdAt}`);
+            // When displaying comments to the user we don't show the internal
+            // comment IDs — they are kept for JSON/raw modes and internal use.
+            console.log(`${comment.author} at ${comment.createdAt}`);
             console.log(`  ${comment.comment}`);
-          if (comment.references.length > 0) {
-            console.log(`  References: ${comment.references.join(', ')}`);
-          }
-          console.log();
-        });
+            if (comment.references.length > 0) {
+              console.log(`  References: ${comment.references.join(', ')}`);
+            }
+            console.log();
+          });
       }
     });
 

@@ -321,7 +321,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push(item.stage);
   }
 
-    if (db) {
+  if (db) {
       // Ensure comments are presented newest-first in human output as well.
       const comments = db.getCommentsForWorkItem(item.id);
       if (comments.length > 0) {
@@ -329,7 +329,8 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
         lines.push('## Comments');
         lines.push('');
         for (const c of comments) {
-          lines.push(`  [${c.id}] ${c.author} at ${c.createdAt}`);
+          // IDs are internal-only for human display; omit them here per WL-0MKZ5IR3H0O4M8GD.
+          lines.push(`  ${c.author} at ${c.createdAt}`);
           lines.push(`    ${c.comment}`);
         }
       }
