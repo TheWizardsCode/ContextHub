@@ -4,9 +4,10 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { createTempDir, cleanupTempDir } from './test-utils.js';
-import { discoverPlugins, resolvePluginDir, getDefaultPluginDir, loadPlugin } from '../src/plugin-loader.js';
+import { discoverPlugins, discoverAllPlugins, resolvePluginDir, getDefaultPluginDir, getGlobalPluginDir, loadPlugin } from '../src/plugin-loader.js';
 import { createPluginContext } from '../src/cli-utils.js';
 import { Command } from 'commander';
 import { fileURLToPath } from 'url';
@@ -256,6 +257,182 @@ describe('Plugin Loader', () => {
       expect(typeof ctx.utils.getConfig).toBe('function');
       expect(typeof ctx.utils.getPrefix).toBe('function');
       expect(typeof ctx.utils.isJsonMode).toBe('function');
+    });
+  });
+
+  describe('getGlobalPluginDir', () => {
+    const originalXdg = process.env.XDG_CONFIG_HOME;
+
+    afterEach(() => {
+      if (originalXdg === undefined) {
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = originalXdg;
+      }
+    });
+
+    it('should use XDG_CONFIG_HOME when set', () => {
+      process.env.XDG_CONFIG_HOME = '/custom/config';
+      const dir = getGlobalPluginDir();
+      expect(dir).toBe(path.join('/custom/config', 'opencode', '.worklog', 'plugins'));
+    });
+
+    it('should fall back to $HOME/.config when XDG_CONFIG_HOME is unset', () => {
+      delete process.env.XDG_CONFIG_HOME;
+      const dir = getGlobalPluginDir();
+      expect(dir).toBe(path.join(os.homedir(), '.config', 'opencode', '.worklog', 'plugins'));
+    });
+
+    it('should return an absolute path', () => {
+      delete process.env.XDG_CONFIG_HOME;
+      const dir = getGlobalPluginDir();
+      expect(path.isAbsolute(dir)).toBe(true);
+    });
+  });
+
+  describe('discoverAllPlugins', () => {
+    let localDir: string;
+    let globalDir: string;
+
+    beforeEach(() => {
+      localDir = path.join(tempDir, 'local-plugins');
+      globalDir = path.join(tempDir, 'global-plugins');
+      fs.mkdirSync(localDir, { recursive: true });
+      fs.mkdirSync(globalDir, { recursive: true });
+    });
+
+    it('should discover plugins from both directories', () => {
+      fs.writeFileSync(path.join(localDir, 'local-only.mjs'), '// local');
+      fs.writeFileSync(path.join(globalDir, 'global-only.mjs'), '// global');
+
+      const results = discoverAllPlugins([localDir, globalDir]);
+      expect(results).toHaveLength(2);
+
+      const names = results.map(r => path.basename(r.filePath));
+      expect(names).toContain('local-only.mjs');
+      expect(names).toContain('global-only.mjs');
+    });
+
+    it('should give precedence to the first directory (local over global)', () => {
+      fs.writeFileSync(path.join(localDir, 'shared.mjs'), '// local version');
+      fs.writeFileSync(path.join(globalDir, 'shared.mjs'), '// global version');
+
+      const results = discoverAllPlugins([localDir, globalDir]);
+      expect(results).toHaveLength(1);
+      expect(results[0].filePath).toBe(path.join(localDir, 'shared.mjs'));
+      expect(results[0].source).toBe(localDir);
+    });
+
+    it('should return global plugin when only global has it', () => {
+      fs.writeFileSync(path.join(globalDir, 'only-global.mjs'), '// global');
+
+      const results = discoverAllPlugins([localDir, globalDir]);
+      expect(results).toHaveLength(1);
+      expect(results[0].filePath).toBe(path.join(globalDir, 'only-global.mjs'));
+      expect(results[0].source).toBe(globalDir);
+    });
+
+    it('should return local plugin when only local has it', () => {
+      fs.writeFileSync(path.join(localDir, 'only-local.mjs'), '// local');
+
+      const results = discoverAllPlugins([localDir, globalDir]);
+      expect(results).toHaveLength(1);
+      expect(results[0].filePath).toBe(path.join(localDir, 'only-local.mjs'));
+      expect(results[0].source).toBe(localDir);
+    });
+
+    it('should handle empty directories gracefully', () => {
+      const results = discoverAllPlugins([localDir, globalDir]);
+      expect(results).toEqual([]);
+    });
+
+    it('should handle non-existent directories gracefully', () => {
+      const results = discoverAllPlugins(['/nonexistent/local', '/nonexistent/global']);
+      expect(results).toEqual([]);
+    });
+
+    it('should merge and deduplicate correctly with mixed overlap', () => {
+      fs.writeFileSync(path.join(localDir, 'alpha.mjs'), '// local alpha');
+      fs.writeFileSync(path.join(localDir, 'shared.mjs'), '// local shared');
+      fs.writeFileSync(path.join(globalDir, 'shared.mjs'), '// global shared');
+      fs.writeFileSync(path.join(globalDir, 'beta.mjs'), '// global beta');
+
+      const results = discoverAllPlugins([localDir, globalDir]);
+      expect(results).toHaveLength(3);
+
+      const names = results.map(r => path.basename(r.filePath));
+      expect(names).toEqual(['alpha.mjs', 'beta.mjs', 'shared.mjs']); // lexicographic
+
+      // shared.mjs should come from local
+      const shared = results.find(r => path.basename(r.filePath) === 'shared.mjs')!;
+      expect(shared.source).toBe(localDir);
+
+      // beta.mjs should come from global
+      const beta = results.find(r => path.basename(r.filePath) === 'beta.mjs')!;
+      expect(beta.source).toBe(globalDir);
+    });
+
+    it('should return results in deterministic lexicographic order', () => {
+      fs.writeFileSync(path.join(localDir, 'zebra.mjs'), '// z');
+      fs.writeFileSync(path.join(globalDir, 'apple.mjs'), '// a');
+      fs.writeFileSync(path.join(localDir, 'middle.mjs'), '// m');
+
+      const results = discoverAllPlugins([localDir, globalDir]);
+      const names = results.map(r => path.basename(r.filePath));
+      expect(names).toEqual(['apple.mjs', 'middle.mjs', 'zebra.mjs']);
+    });
+  });
+
+  describe('loadPlugin source tracking', () => {
+    it('should include source in returned PluginInfo', async () => {
+      const program = new Command();
+      const ctx = createPluginContext(program);
+      
+      const pluginPath = path.join(pluginDir, 'source-test.mjs');
+      fs.writeFileSync(pluginPath, `
+        export default function register(ctx) {
+          ctx.program.command('source-test-cmd').description('Test');
+        }
+      `);
+      
+      const result = await loadPlugin(pluginPath, ctx, false, '/some/source/dir');
+      
+      expect(result.loaded).toBe(true);
+      expect(result.source).toBe('/some/source/dir');
+    });
+
+    it('should include source even on failure', async () => {
+      const program = new Command();
+      const ctx = createPluginContext(program);
+      
+      const pluginPath = path.join(pluginDir, 'bad-source.mjs');
+      fs.writeFileSync(pluginPath, `
+        export default function register(ctx) {
+          throw new Error('fail');
+        }
+      `);
+      
+      const result = await loadPlugin(pluginPath, ctx, false, '/some/source');
+      
+      expect(result.loaded).toBe(false);
+      expect(result.source).toBe('/some/source');
+    });
+
+    it('should have undefined source when not provided', async () => {
+      const program = new Command();
+      const ctx = createPluginContext(program);
+      
+      const pluginPath = path.join(pluginDir, 'no-source.mjs');
+      fs.writeFileSync(pluginPath, `
+        export default function register(ctx) {
+          ctx.program.command('no-source-cmd').description('Test');
+        }
+      `);
+      
+      const result = await loadPlugin(pluginPath, ctx, false);
+      
+      expect(result.loaded).toBe(true);
+      expect(result.source).toBeUndefined();
     });
   });
 });
