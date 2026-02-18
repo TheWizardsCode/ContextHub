@@ -342,9 +342,21 @@ describe('Sort Operations', () => {
         db.create({ title: `Task ${i}`, sortIndex: i * 10 });
       }
 
+      // measure and log duration to help diagnose flakes in CI
       const startTime = Date.now();
       const listed = db.list({});
       const duration = Date.now() - startTime;
+
+      // write a tiny diagnostic line when running under CI to surface timing
+      if (process.env.CI) {
+        try {
+          const p = createTempJsonlPath(tempDir).replace(/\.jsonl$/, '.sort-diagnostics.log');
+          // append a short, safely-sized line
+          require('fs').appendFileSync(p, `LIST_100 ${duration}\n`);
+        } catch (e) {
+          // ignore logging failures in tests
+        }
+      }
 
       expect(listed).toHaveLength(100);
       expect(duration).toBeLessThan(1000); // Should complete in less than 1 second
@@ -377,6 +389,10 @@ describe('Sort Operations', () => {
       const result = db.assignSortIndexValues(100);
       const duration = Date.now() - startTime;
 
+      if (process.env.CI) {
+        try { require('fs').appendFileSync(createTempJsonlPath(tempDir).replace(/\.jsonl$/, '.sort-diagnostics.log'), `REINDEX_100 ${duration}\n`); } catch (_) {}
+      }
+
       expect(result.updated).toBeGreaterThan(0);
       expect(duration).toBeLessThan(1000);
     });
@@ -389,6 +405,10 @@ describe('Sort Operations', () => {
       const startTime = Date.now();
       const listed = db.list({});
       const duration = Date.now() - startTime;
+
+      if (process.env.CI) {
+        try { require('fs').appendFileSync(createTempJsonlPath(tempDir).replace(/\.jsonl$/, '.sort-diagnostics.log'), `LIST_500 ${duration}\n`); } catch (_) {}
+      }
 
       expect(listed).toHaveLength(500);
       expect(duration).toBeLessThan(3000); // Allow 3 seconds for 500 items
@@ -421,6 +441,10 @@ describe('Sort Operations', () => {
       const result = db.assignSortIndexValues(100);
       const duration = Date.now() - startTime;
 
+      if (process.env.CI) {
+        try { require('fs').appendFileSync(createTempJsonlPath(tempDir).replace(/\.jsonl$/, '.sort-diagnostics.log'), `REINDEX_500 ${duration}\n`); } catch (_) {}
+      }
+
       expect(result.updated).toBeGreaterThan(0);
       expect(duration).toBeLessThan(3000); // Allow 3 seconds for reindexing 500 items
     });
@@ -433,6 +457,10 @@ describe('Sort Operations', () => {
       const startTime = Date.now();
       const listed = db.list({});
       const duration = Date.now() - startTime;
+
+      if (process.env.CI) {
+        try { require('fs').appendFileSync(createTempJsonlPath(tempDir).replace(/\.jsonl$/, '.sort-diagnostics.log'), `LIST_1000 ${duration}\n`); } catch (_) {}
+      }
 
       expect(listed).toHaveLength(1000);
       expect(duration).toBeLessThan(5000); // Allow 5 seconds for large dataset
