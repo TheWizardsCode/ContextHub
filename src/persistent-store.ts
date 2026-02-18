@@ -268,30 +268,105 @@ export class SqlitePersistentStore {
         needsProducerReview = excluded.needsProducerReview
     `);
 
-    stmt.run(
+    // Ensure we never pass `undefined` into better-sqlite3 bindings (it only
+    // accepts numbers, strings, bigints, buffers and null). Normalize tags to
+    // a JSON string and convert any undefined to null before running.
+    const tagsVal = Array.isArray(item.tags) ? JSON.stringify(item.tags) : JSON.stringify([]);
+    const values: any[] = [
       item.id,
       item.title,
       item.description,
       item.status,
       item.priority,
       item.sortIndex,
-      item.parentId,
+      item.parentId ?? null,
       item.createdAt,
       item.updatedAt,
-      JSON.stringify(item.tags),
-      item.assignee,
-      item.stage,
-      item.issueType,
-      item.createdBy,
-      item.deletedBy,
-      item.deleteReason,
-      item.risk,
-      item.effort,
+      tagsVal,
+      item.assignee ?? '',
+      item.stage ?? '',
+      item.issueType ?? '',
+      item.createdBy ?? '',
+      item.deletedBy ?? '',
+      item.deleteReason ?? '',
+      item.risk ?? '',
+      item.effort ?? '',
       item.githubIssueNumber ?? null,
       item.githubIssueId ?? null,
-      item.githubIssueUpdatedAt || null
-      , item.needsProducerReview ? 1 : 0
-    );
+      item.githubIssueUpdatedAt ?? null,
+      item.needsProducerReview ? 1 : 0,
+    ];
+
+    // Normalize values to types accepted by better-sqlite3:
+    // numbers, strings, bigints, buffers, or null. Convert booleans to 1/0
+    // and objects to JSON strings to avoid binding errors.
+    const normalized = values.map((v) => {
+      if (v === undefined) return null;
+      if (v === null) return null;
+      const t = typeof v;
+      if (t === 'number' || t === 'string' || t === 'bigint' || Buffer.isBuffer(v)) return v;
+      if (t === 'boolean') return v ? 1 : 0;
+      // Fallback: stringify objects (arrays, plain objects, dates)
+      try {
+        return JSON.stringify(v as any);
+      } catch (_err) {
+        return String(v);
+      }
+    });
+
+    // Diagnostic logging: when WL_DEBUG_SQL_BINDINGS is set print the type
+    // and a safe representation of each binding before calling stmt.run.
+    // This is temporary and intended to help identify unsupported binding
+    // types during test runs (e.g. Date objects, functions, symbols).
+    if (process.env.WL_DEBUG_SQL_BINDINGS) {
+      try {
+        // Log the incoming work item shape so we can see unexpected types on properties
+        const itemRepr: any = {};
+        for (const k of Object.keys(item)) {
+          try {
+            const v = (item as any)[k];
+            itemRepr[k] = { type: v === null ? 'null' : typeof v, constructor: v && v.constructor ? v.constructor.name : null };
+          } catch (_e) {
+            itemRepr[k] = { type: 'unreadable' };
+          }
+        }
+        console.error('WL_DEBUG_SQL_BINDINGS saveWorkItem incoming item keys:', JSON.stringify(itemRepr, null, 2));
+        const rawRows = values.map((v, i) => ({ index: i, type: v === null ? 'null' : typeof v, constructor: v && v.constructor ? v.constructor.name : null, value: (() => { try { return v; } catch (_) { return '<unreadable>'; } })() }));
+        console.error('WL_DEBUG_SQL_BINDINGS saveWorkItem raw values:', JSON.stringify(rawRows, null, 2));
+      } catch (_err) {
+        console.error('WL_DEBUG_SQL_BINDINGS saveWorkItem: failed to prepare raw values log');
+      }
+    }
+
+    if (process.env.WL_DEBUG_SQL_BINDINGS) {
+      const safeRepr = (x: any) => {
+        try {
+          if (x === null) return 'null';
+          if (Buffer.isBuffer(x)) return `<Buffer length=${x.length}>`;
+          const t = typeof x;
+          if (t === 'string' || t === 'number' || t === 'boolean' || t === 'bigint') return String(x);
+          // JSON.stringify may throw for circular structures
+          return JSON.stringify(x);
+        } catch (err) {
+          try {
+            return String(x);
+          } catch (_e) {
+            return '<unserializable>';
+          }
+        }
+      };
+
+      try {
+        const rows = normalized.map((v, i) => ({ index: i, type: v === null ? 'null' : typeof v, value: safeRepr(v) }));
+        // Use console.error so test runners capture the output even on failures
+        console.error('WL_DEBUG_SQL_BINDINGS saveWorkItem bindings:', JSON.stringify(rows, null, 2));
+      } catch (_err) {
+        // best-effort logging; do not interfere with normal flow
+        console.error('WL_DEBUG_SQL_BINDINGS saveWorkItem: failed to prepare bindings log');
+      }
+    }
+
+    stmt.run(...normalized);
   }
 
   /**

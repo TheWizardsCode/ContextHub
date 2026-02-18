@@ -5,6 +5,7 @@
 import chalk from 'chalk';
 import type { PluginContext } from '../plugin-types.js';
 import type { DepOptions } from '../cli-types.js';
+import { normalizeActionArgs } from './cli-utils.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -17,7 +18,9 @@ export default function register(ctx: PluginContext): void {
     .command('add <itemId> <dependsOnId>')
     .description('Add a dependency edge (item depends on dependsOn)')
     .option('--prefix <prefix>', 'Override the default prefix')
-    .action((itemId: string, dependsOnId: string, options: DepOptions) => {
+    .action((itemId: string, dependsOnId: string, ...rawArgs: any[]) => {
+      const normalized = normalizeActionArgs(rawArgs, ['prefix']);
+      let options: DepOptions = normalized.options as any || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
       const normalizedItemId = utils.normalizeCliId(itemId, options.prefix) || itemId;
@@ -71,7 +74,9 @@ export default function register(ctx: PluginContext): void {
     .command('rm <itemId> <dependsOnId>')
     .description('Remove a dependency edge (item depends on dependsOn)')
     .option('--prefix <prefix>', 'Override the default prefix')
-    .action((itemId: string, dependsOnId: string, options: DepOptions) => {
+    .action((itemId: string, dependsOnId: string, ...rawArgs: any[]) => {
+      const normalized = normalizeActionArgs(rawArgs, ['prefix']);
+      let options: DepOptions = normalized.options as any || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
       const normalizedItemId = utils.normalizeCliId(itemId, options.prefix) || itemId;
@@ -121,7 +126,9 @@ export default function register(ctx: PluginContext): void {
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--outgoing', 'Only show outbound dependencies')
     .option('--incoming', 'Only show inbound dependencies')
-    .action((itemId: string, options: DepOptions) => {
+    .action((itemId: string, ...rawArgs: any[]) => {
+      const normalized = normalizeActionArgs(rawArgs, ['prefix','outgoing','incoming']);
+      let options: DepOptions = normalized.options as any || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
       const normalizedItemId = utils.normalizeCliId(itemId, options.prefix) || itemId;

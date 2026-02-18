@@ -8,6 +8,7 @@ import type { WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffor
 import { humanFormatWorkItem, resolveFormat } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { promises as fs } from 'fs';
+import { normalizeActionArgs } from './cli-utils.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -32,7 +33,9 @@ export default function register(ctx: PluginContext): void {
     .option('--delete-reason <deleteReason>', 'Delete reason (interoperability field)')
     .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag for the new item (true|false|yes|no)')
     .option('--prefix <prefix>', 'Override the default prefix')
-    .action(async (options: CreateOptions) => {
+    .action(async (...rawArgs: any[]) => {
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','prefix']);
+      let options: CreateOptions = normalized.options as any || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
 

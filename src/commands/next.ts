@@ -6,6 +6,7 @@ import type { PluginContext } from '../plugin-types.js';
 import type { NextOptions } from '../cli-types.js';
 import { humanFormatWorkItem, resolveFormat, formatTitleAndId } from './helpers.js';
 import { theme } from '../theme.js';
+import { normalizeActionArgs } from './cli-utils.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -19,7 +20,10 @@ export default function register(ctx: PluginContext): void {
     .option('--recency-policy <policy>', 'Recency policy: prefer|avoid|ignore (default: ignore)', 'ignore')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--include-in-review', 'Include items with status blocked and stage in_review (default: excluded)')
-    .action(async (options: any) => {
+    .action(async (...rawArgs: any[]) => {
+      // Normalize incoming args: commander may pass a Command instance
+      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'search', 'number', 'recencyPolicy', 'prefix', 'includeInReview']);
+      let options: any = normalized.options || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
        const numRequested = parseInt(options.number || '1', 10);

@@ -27,37 +27,34 @@ export async function execAsync(command: string, options?: childProcess.ExecOpti
 
   const execOptions = { ...(options || {}), env } as childProcess.ExecOptions;
   // If the command invokes the local CLI via `tsx <cliPath>` run it in-process
-  try {
-    const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-    const cliPath = path.join(projectRoot, 'src', 'cli.ts');
-    const isLocalCli = command.trim().startsWith('tsx') && command.includes(cliPath);
-    const isInitCommand = /\binit\b/.test(command);
-    if (isLocalCli) {
-      // Avoid in-process for init to preserve interactive behavior in tests.
-      if (isInitCommand) {
-        const result = await _exec(command, execOptions as any);
-        const stdout = typeof (result as any).stdout === 'string' ? (result as any).stdout : (result as any).stdout?.toString('utf-8') ?? '';
-        const stderr = typeof (result as any).stderr === 'string' ? (result as any).stderr : (result as any).stderr?.toString('utf-8') ?? '';
-        return { stdout, stderr };
-      }
-      const originalCwd = process.cwd();
-      try {
-        if (options?.cwd) process.chdir(options.cwd as string);
-        const res = await runInProcess(command, options?.timeout ?? 15000);
-        if (res.exitCode && res.exitCode !== 0) {
-          const error: any = new Error(`Command failed: ${command}`);
-          error.stdout = res.stdout ?? '';
-          error.stderr = res.stderr ?? '';
-          error.exitCode = res.exitCode;
-          throw error;
-        }
-        return { stdout: res.stdout ?? '', stderr: res.stderr ?? '' };
-      } finally {
-        try { process.chdir(originalCwd); } catch (_) {}
-      }
+  const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const cliPath = path.join(projectRoot, 'src', 'cli.ts');
+  const isLocalCli = command.trim().startsWith('tsx') && command.includes(cliPath);
+  const isInitCommand = /\binit\b/.test(command);
+  if (isLocalCli) {
+    // Avoid in-process for init to preserve interactive behavior in tests.
+    if (isInitCommand) {
+      const result = await _exec(command, execOptions as any);
+      const stdout = typeof (result as any).stdout === 'string' ? (result as any).stdout : (result as any).stdout?.toString('utf-8') ?? '';
+      const stderr = typeof (result as any).stderr === 'string' ? (result as any).stderr : (result as any).stderr?.toString('utf-8') ?? '';
+      return { stdout, stderr };
     }
-  } catch (e) {
-    // fall back to spawning if in-process runner fails
+    const originalCwd = process.cwd();
+    try {
+      if (options?.cwd) process.chdir(options.cwd as string);
+      const res = await runInProcess(command, options?.timeout ?? 15000);
+      if (res.exitCode && res.exitCode !== 0) {
+        const error: any = new Error(`Command failed: ${command}`);
+        error.stdout = res.stdout ?? '';
+        error.stderr = res.stderr ?? '';
+        error.exitCode = res.exitCode;
+        // Re-throw so callers can handle CLI errors; do NOT fall back to spawning
+        throw error;
+      }
+      return { stdout: res.stdout ?? '', stderr: res.stderr ?? '' };
+    } finally {
+      try { process.chdir(originalCwd); } catch (_) {}
+    }
   }
 
   // reuse promisified exec for other commands
