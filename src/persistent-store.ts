@@ -16,6 +16,42 @@ interface DbMetadata {
 
 const SCHEMA_VERSION = 6;
 
+/**
+ * Normalize a single value for use as a better-sqlite3 binding parameter.
+ * better-sqlite3 only accepts: number, string, bigint, Buffer, or null.
+ * This function converts unsupported types:
+ *  - undefined  -> null
+ *  - null       -> null (passthrough)
+ *  - boolean    -> 1 or 0
+ *  - Date       -> ISO 8601 string via toISOString()
+ *  - object/array -> JSON string via JSON.stringify (fallback to String())
+ *  - number, string, bigint, Buffer -> passthrough
+ */
+export function normalizeSqliteValue(v: unknown): number | string | bigint | Buffer | null {
+  if (v === undefined) return null;
+  if (v === null) return null;
+  const t = typeof v;
+  if (t === 'number' || t === 'string' || t === 'bigint' || Buffer.isBuffer(v)) {
+    return v as number | string | bigint | Buffer;
+  }
+  if (t === 'boolean') return (v as boolean) ? 1 : 0;
+  if (v instanceof Date) return v.toISOString();
+  // Fallback: stringify objects (arrays, plain objects, etc.)
+  try {
+    return JSON.stringify(v);
+  } catch (_err) {
+    return String(v);
+  }
+}
+
+/**
+ * Normalize an array of values for use as better-sqlite3 binding parameters.
+ * Applies {@link normalizeSqliteValue} to each element.
+ */
+export function normalizeSqliteBindings(values: unknown[]): Array<number | string | bigint | Buffer | null> {
+  return values.map(normalizeSqliteValue);
+}
+
 export class SqlitePersistentStore {
   private db: Database.Database;
   private dbPath: string;
@@ -297,22 +333,7 @@ export class SqlitePersistentStore {
       item.needsProducerReview ? 1 : 0,
     ];
 
-    // Normalize values to types accepted by better-sqlite3:
-    // numbers, strings, bigints, buffers, or null. Convert booleans to 1/0
-    // and objects to JSON strings to avoid binding errors.
-    const normalized = values.map((v) => {
-      if (v === undefined) return null;
-      if (v === null) return null;
-      const t = typeof v;
-      if (t === 'number' || t === 'string' || t === 'bigint' || Buffer.isBuffer(v)) return v;
-      if (t === 'boolean') return v ? 1 : 0;
-      // Fallback: stringify objects (arrays, plain objects, dates)
-      try {
-        return JSON.stringify(v as any);
-      } catch (_err) {
-        return String(v);
-      }
-    });
+    const normalized = normalizeSqliteBindings(values);
 
     // Diagnostic logging: when WL_DEBUG_SQL_BINDINGS is set print the type
     // and a safe representation of each binding before calling stmt.run.
@@ -473,7 +494,10 @@ export class SqlitePersistentStore {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    stmt.run(
+    // Pre-construction: stringify references, coerce optional fields.
+    // Preserve existing || behavior for githubCommentUpdatedAt so that
+    // falsy values (including empty string) become null.
+    const values: unknown[] = [
       comment.id,
       comment.workItemId,
       comment.author,
@@ -481,8 +505,11 @@ export class SqlitePersistentStore {
       comment.createdAt,
       JSON.stringify(comment.references),
       comment.githubCommentId ?? null,
-      comment.githubCommentUpdatedAt || null
-    );
+      comment.githubCommentUpdatedAt || null,
+    ];
+
+    const normalized = normalizeSqliteBindings(values);
+    stmt.run(...normalized);
   }
 
   /**
@@ -575,7 +602,8 @@ export class SqlitePersistentStore {
         createdAt = excluded.createdAt
     `);
 
-    stmt.run(edge.fromId, edge.toId, edge.createdAt);
+    const normalized = normalizeSqliteBindings([edge.fromId, edge.toId, edge.createdAt]);
+    stmt.run(...normalized);
   }
 
   /**
