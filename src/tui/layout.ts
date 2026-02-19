@@ -89,8 +89,11 @@ export function createLayout(options: CreateLayoutOptions = {}): TuiLayout {
   // Blessed relies on terminfo (tput) which may report only 8 colors even
   // when the terminal actually supports 256.  Modern terminals universally
   // handle 256-color SGR sequences, so this override is safe.
-  if (screen.program?.tput && screen.program.tput.colors < 256) {
-    screen.program.tput.colors = 256;
+  // Cast to any: blessed's program.tput exists at runtime but is missing
+  // from @types/blessed's BlessedProgram declaration.
+  const prog = screen.program as any;
+  if (prog?.tput && prog.tput.colors < 256) {
+    prog.tput.colors = 256;
   }
 
   // ── List (left pane + footer) ───────────────────────────────────────

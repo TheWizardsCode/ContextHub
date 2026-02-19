@@ -202,7 +202,7 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
       // runs mirror spawn behaviour. If a command set process.exitCode = 1
       // we should surface that to the caller (execAsync) so tests can treat
       // the invocation as failed.
-       const exitCode = typeof (__inproc_orig_exitcode) === 'number' ? __inproc_orig_exitcode : (typeof process.exitCode === 'number' ? process.exitCode : 0);
+       const exitCode = typeof process.exitCode === 'number' ? process.exitCode : 0;
        return { stdout: out.join(''), stderr: err.join(''), exitCode };
     } catch (e: any) {
       if (e && typeof e.message === 'string' && e.message.startsWith('__INPROC_EXIT__')) {
