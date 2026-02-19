@@ -70,7 +70,7 @@ export interface PluginInfo {
   loaded: boolean;
   /** Error message if loading failed */
   error?: string;
-  /** Directory the plugin was discovered in (e.g. project-local or global) */
+  /** Directory the plugin was discovered in (local, global, or override) */
   source?: string;
 }
 

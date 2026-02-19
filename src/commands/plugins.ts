@@ -61,7 +61,6 @@ export default function register(ctx: PluginContext): void {
       const globalDir = getGlobalPluginDir();
       const localExists = fs.existsSync(localDir);
       const globalExists = fs.existsSync(globalDir);
-
       const allPlugins = discoverAllPlugins([localDir, globalDir]);
 
       if (ctx.utils.isJsonMode()) {
@@ -119,7 +118,7 @@ export default function register(ctx: PluginContext): void {
 /**
  * Helper: print a single-directory plugin list (used for override mode).
  */
-function printPluginList(pluginDir: string, dirExists: boolean, verbose: boolean): void {
+function printPluginList(pluginDir: string, dirExists: boolean, verbose: boolean | undefined): void {
   if (!dirExists) {
     console.log('\nNo plugins configured.');
     console.log(
