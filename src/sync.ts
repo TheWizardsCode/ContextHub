@@ -436,65 +436,6 @@ export function mergeDependencyEdges(
   return { merged: Array.from(merged.values()) };
 }
 
-/**
- * Fetch remote changes and update the data file without requiring a clean working tree
- * This allows syncing even when there are local uncommitted changes
- */
-export async function gitPullDataFile(dataFilePath: string): Promise<void> {
-  try {
-    // Check if we're in a git repository
-    await execAsync('git rev-parse --git-dir');
-    
-    // Get the repository root directory
-    const { stdout: repoRoot } = await execAsync('git rev-parse --show-toplevel');
-    const repoRootPath = repoRoot.trim();
-    
-    // Convert data file path to repository-relative path for git show
-    // git show requires a path relative to the repository root, not an absolute path
-    // path.resolve ensures we have an absolute path even if dataFilePath is relative
-    const absolutePath = path.resolve(dataFilePath);
-    const relativePath = path.relative(repoRootPath, absolutePath);
-    
-    // Get the current branch name
-    const { stdout: branchName } = await execAsync('git rev-parse --abbrev-ref HEAD');
-    const branch = branchName.trim();
-    
-    // Fetch latest changes from remote without merging
-    await execAsync(`git fetch origin ${escapeShellArg(branch)}`);
-    
-    // Check if the remote ref exists
-    try {
-      await execAsync(`git rev-parse --verify origin/${escapeShellArg(branch)}`);
-    } catch (verifyError) {
-      // Remote branch doesn't exist yet - this is OK for a new repo
-      return;
-    }
-    
-    // Get the remote version of the data file using git show
-    // This will fail if the file doesn't exist on remote
-    try {
-      // Note: git show uses the syntax "ref:path" where the path is relative to the repo root
-      // We escape the entire "ref:path" as a single unit to protect against special characters
-      // in both the branch name and file path. Git correctly parses the ref:path even when quoted.
-      const refAndPath = `origin/${branch}:${relativePath}`;
-      const { stdout: remoteContent } = await execAsync(
-        `git show ${escapeShellArg(refAndPath)}`
-      );
-      
-      // Write the remote content to the local file (using the absolute path)
-      // This overwrites any local uncommitted changes, but that's OK because
-      // the sync logic will merge local in-memory state with this remote state
-      fs.writeFileSync(absolutePath, remoteContent, 'utf8');
-    } catch (showError) {
-      // File doesn't exist on remote yet - that's OK, treat as empty
-      // This is expected for a new file that hasn't been pushed to remote
-      return;
-    }
-  } catch (error) {
-    throw new Error(`Failed to pull from git: ${(error as Error).message}`);
-  }
-}
-
 async function getRepoRoot(): Promise<string> {
   const { stdout } = await execAsync('git rev-parse --show-toplevel');
   return stdout.trim();
@@ -685,58 +626,6 @@ async function withTempWorktree<T>(
   }
 }
 
-/**
- * Execute git add, commit, and push for the data file
- */
-export async function gitPushDataFile(dataFilePath: string, commitMessage: string): Promise<void> {
-  try {
-    // Check if we're in a git repository
-    await execAsync('git rev-parse --git-dir');
-
-    // Get repository root and compute repo-relative path (more reliable for pathspec)
-    const repoRootPath = await getRepoRoot();
-    const { absolutePath, relativePath } = getRepoRelativePath(repoRootPath, dataFilePath);
-    const escapedRelativePath = escapeShellArg(relativePath);
-    
-    // Determine if file is already tracked. If it's ignored + untracked, git status won't show it,
-    // so we still need to force-add it for sync to work across instances.
-    let isTracked = true;
-    try {
-      await execAsync(`git ls-files --error-unmatch -- ${escapedRelativePath}`);
-    } catch {
-      isTracked = false;
-    }
-
-    if (isTracked) {
-      const { stdout: statusOutput } = await execAsync(`git status --porcelain -- ${escapedRelativePath}`);
-      if (!statusOutput.trim()) {
-        return;
-      }
-      await execAsync(`git add -- ${escapedRelativePath}`);
-    } else {
-      if (!fs.existsSync(absolutePath)) {
-        return;
-      }
-      await execAsync(`git add -f -- ${escapedRelativePath}`);
-      const { stdout: staged } = await execAsync(`git diff --cached --name-only -- ${escapedRelativePath}`);
-      if (!staged.trim()) {
-        return;
-      }
-    }
-    
-    // Commit the changes with escaped message
-    const escapedMessage = escapeShellArg(commitMessage);
-    await execAsync(`git commit -m ${escapedMessage}`);
-    
-    // Push to remote on the current branch
-    const { stdout: branchName } = await execAsync('git rev-parse --abbrev-ref HEAD');
-    const branch = branchName.trim();
-    await execAsync(`git push origin ${escapeShellArg(branch)}`);
-  } catch (error) {
-    throw new Error(`Failed to push to git: ${(error as Error).message}`);
-  }
-}
-
 export async function gitPushDataFileToBranch(
   repoDataFilePath: string,
   commitMessage: string,
@@ -796,11 +685,4 @@ export async function gitPushDataFileToBranch(
       `git -C ${escapeShellArg(worktreePath)} push ${escapeShellArg(target.remote)} HEAD:${escapeShellArg(pushTarget)}`
     );
   });
-}
-
-/**
- * Check if a file exists
- */
-export function fileExists(filepath: string): boolean {
-  return fs.existsSync(filepath);
 }
