@@ -203,6 +203,41 @@ describe('Plugin Loader', () => {
       expect(result.error).toContain('Plugin error!');
     });
 
+    it('should emit a single-line warning to stderr when a plugin fails to load', async () => {
+      const program = new Command();
+      const ctx = createPluginContext(program);
+      
+      const pluginPath = path.join(pluginDir, 'warn-plugin.mjs');
+      fs.writeFileSync(pluginPath, `
+        export default function register(ctx) {
+          throw new Error('intentional failure');
+        }
+      `);
+      
+      // Logger.warn() uses console.error(), so intercept that to capture output.
+      const stderrChunks: string[] = [];
+      const origConsoleError = console.error;
+      console.error = (...args: any[]) => {
+        stderrChunks.push(args.map(a => String(a)).join(' '));
+        origConsoleError(...args);
+      };
+
+      try {
+        const result = await loadPlugin(pluginPath, ctx, false);
+        
+        expect(result.loaded).toBe(false);
+        expect(result.error).toContain('intentional failure');
+
+        const stderrOutput = stderrChunks.join('');
+        expect(stderrOutput).toContain('Warning: plugin warn-plugin.mjs skipped:');
+        expect(stderrOutput).toContain('intentional failure');
+        // Should NOT contain old-style error format
+        expect(stderrOutput).not.toContain('Failed to load plugin');
+      } finally {
+        console.error = origConsoleError;
+      }
+    });
+
     it('should fail when plugin file has syntax errors', async () => {
       const program = new Command();
       const ctx = createPluginContext(program);

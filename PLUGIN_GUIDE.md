@@ -331,6 +331,63 @@ export default function register(ctx) {
 
 Users can then run `worklog --verbose my-cmd` to see detailed output for troubleshooting.
 
+### Handling Dependencies
+
+Plugins are copied into the target project's `.worklog/plugins/` directory, where Node.js resolves imports relative to that location — **not** relative to the Worklog binary. This means any `import` of an npm package (e.g., `import chalk from 'chalk'`) will fail unless that package is installed in the target project's `node_modules`.
+
+To avoid runtime failures, follow one of the strategies below.
+
+#### Self-Contained Plugins (Recommended)
+
+Write plugins with zero external runtime imports. For example, instead of importing `chalk` for colored output, use built-in ANSI escape codes:
+
+```javascript
+const supportsColor = typeof process !== 'undefined'
+  && process.stdout
+  && (process.stdout.isTTY || process.env.FORCE_COLOR);
+
+const wrap = (open, close) => supportsColor
+  ? (str) => `\x1b[${open}m${str}\x1b[${close}m`
+  : (str) => str;
+
+const ansi = {
+  red:           wrap('31', '39'),
+  green:         wrap('32', '39'),
+  blue:          wrap('34', '39'),
+  cyan:          wrap('36', '39'),
+  gray:          wrap('90', '39'),
+  yellowBright:  wrap('93', '39'),
+  // ... add more as needed
+};
+```
+
+This is the approach used by the built-in `stats-plugin.mjs`.
+
+#### Bundling Dependencies
+
+Use a bundler such as [esbuild](https://esbuild.github.io/) or [rollup](https://rollupjs.org/) to produce a single-file plugin with all dependencies inlined:
+
+```bash
+esbuild src/my-plugin.ts --bundle --format=esm --outfile=dist/my-plugin.mjs
+cp dist/my-plugin.mjs .worklog/plugins/
+```
+
+#### Graceful Import Failure
+
+If you want to use an external package when available but degrade gracefully when it is not, use a dynamic `import()` wrapped in a try/catch:
+
+```javascript
+let chalk;
+try {
+  chalk = (await import('chalk')).default;
+} catch {
+  // Provide no-op fallbacks when chalk is unavailable
+  chalk = new Proxy({}, { get: () => (str) => str });
+}
+```
+
+This approach keeps the plugin functional regardless of the host project's dependencies.
+
 ## Configuration
 
 ### Plugin Directory
@@ -401,10 +458,10 @@ worklog --verbose --help
 
 #### Module Resolution Errors
 
-**Problem:** `Cannot find module 'xyz'` error.
+**Problem:** `Cannot find module 'xyz'` or `Cannot find package 'xyz'` error.
 
 **Solutions:**
-- Ensure all dependencies are bundled or available in Node.js
+- Make your plugin self-contained with no external imports (see [Handling Dependencies](#handling-dependencies))
 - Use a bundler (esbuild, rollup) to create a single-file plugin
 - Check that you're exporting as ESM (`export default`)
 
@@ -432,7 +489,7 @@ worklog --verbose --help
 The `examples/` directory contains complete, working plugin examples:
 
 ### [stats-plugin.mjs](examples/stats-plugin.mjs)
-Shows custom work item statistics with database access, JSON mode support, and formatted output.
+Shows custom work item statistics with database access, JSON mode support, and formatted output. This plugin is fully self-contained with no external dependencies (uses built-in ANSI escape codes for colored output).
 Note: running `wl init` will automatically install `examples/stats-plugin.mjs` into your project's `.worklog/plugins/` directory if it is not already present.
 
 ### [bulk-tag-plugin.mjs](examples/bulk-tag-plugin.mjs)
@@ -557,7 +614,7 @@ export default function register(ctx) {
 
 ### Q: Can I use npm packages in my plugin?
 
-**A:** Yes, but you need to bundle them into your plugin file. Use a bundler like esbuild or rollup to create a single-file bundle with all dependencies included.
+**A:** Yes, but you need to bundle them into your plugin file. Use a bundler like esbuild or rollup to create a single-file bundle with all dependencies included. Alternatively, you can make your plugin self-contained by replacing external dependencies with built-in equivalents (see [Handling Dependencies](#handling-dependencies)).
 
 ### Q: Can plugins modify existing commands?
 
