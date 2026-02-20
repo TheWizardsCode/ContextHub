@@ -1188,6 +1188,8 @@ export default function register(ctx: PluginContext): void {
         if (isJsonMode) {
           const gitignoreResult = ensureGitignore({ silent: true });
           const hookResult = installPrePushHook({ silent: true });
+          const postPullResult = installPostPullHooks({ silent: true });
+          const committedHooksResult = installCommittedHooks({ silent: true });
           const agentTemplatePath = locateAgentTemplate();
           if (!agentTemplatePath && isVerbose && !isJsonMode) {
             console.log('Verbose: AGENTS template not found, skipping AGENTS.md update.');
@@ -1210,6 +1212,7 @@ export default function register(ctx: PluginContext): void {
               await ensureWorkflowTemplateInstalled({ silent: true, agentDestinationPath: agentDestination });
             }
           }
+          const statsPluginResult = await ensureStatsPluginInstalled({ silent: true, overwrite: normalizedOptions.statsPluginOverwrite });
           output.json({
             success: true,
             message: 'Configuration initialized',
@@ -1221,7 +1224,10 @@ export default function register(ctx: PluginContext): void {
             initializedAt: initInfo?.initializedAt,
             gitignore: gitignoreResult,
             gitHook: hookResult,
-            agentTemplate: agentTemplateResult
+            postPullHooks: postPullResult,
+            committedHooks: committedHooksResult,
+            agentTemplate: agentTemplateResult,
+            statsPlugin: statsPluginResult
           });
         }
         

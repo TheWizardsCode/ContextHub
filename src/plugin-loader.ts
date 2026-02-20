@@ -163,7 +163,10 @@ export async function loadPlugin(
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     
-    logger.error(`Failed to load plugin ${name}: ${errorMessage}`);
+    logger.warn(`Warning: plugin ${name} skipped: ${errorMessage}`);
+    if (error instanceof Error && error.stack) {
+      logger.debug(`Plugin ${name} load error stack:\n${error.stack}`);
+    }
     
     return {
       name,

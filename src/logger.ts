@@ -33,6 +33,11 @@ export class Logger {
     console.log(message);
   }
 
+  warn(message: string): void {
+    // Always write warnings to stderr (like error but semantically distinct)
+    console.error(message);
+  }
+
   error(message: string): void {
     // Always write errors to stderr
     console.error(message);

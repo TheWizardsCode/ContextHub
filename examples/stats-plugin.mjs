@@ -12,7 +12,43 @@
  * 2. Run: worklog stats
  */
 
-import chalk from 'chalk';
+/**
+ * Lightweight ANSI color helper — replaces the external `chalk` dependency so
+ * the plugin stays self-contained and loads without errors in projects that
+ * don't have chalk installed.
+ *
+ * Each property is a function that wraps a string in the appropriate ANSI
+ * escape sequence.  When stdout is not a TTY (piped / redirected) the
+ * functions return the input unchanged so machine-readable output stays clean.
+ */
+const supportsColor = typeof process !== 'undefined'
+  && process.stdout
+  && (process.stdout.isTTY || process.env.FORCE_COLOR);
+
+const wrap = (open, close) => supportsColor
+  ? (str) => `\x1b[${open}m${str}\x1b[${close}m`
+  : (str) => str;
+
+const ansi = {
+  // Standard colors
+  red:           wrap('31', '39'),
+  green:         wrap('32', '39'),
+  yellow:        wrap('33', '39'),
+  blue:          wrap('34', '39'),
+  magenta:       wrap('35', '39'),
+  cyan:          wrap('36', '39'),
+  white:         wrap('37', '39'),
+  gray:          wrap('90', '39'),
+
+  // Bright colors
+  redBright:     wrap('91', '39'),
+  greenBright:   wrap('92', '39'),
+  yellowBright:  wrap('93', '39'),
+  blueBright:    wrap('94', '39'),
+  magentaBright: wrap('95', '39'),
+  whiteBright:   wrap('97', '39'),
+  cyanBright:    wrap('96', '39'),
+};
 
 export default function register(ctx) {
   ctx.program
@@ -68,15 +104,15 @@ export default function register(ctx) {
             const s = (status || '').toLowerCase().trim();
             switch (s) {
               case 'completed':
-                return chalk.gray;
+                return ansi.gray;
               case 'in-progress':
               case 'in progress':
-                return chalk.cyan;
+                return ansi.cyan;
               case 'blocked':
-                return chalk.redBright;
+                return ansi.redBright;
               case 'open':
               default:
-                return chalk.greenBright;
+                return ansi.greenBright;
             }
           };
 
@@ -84,15 +120,15 @@ export default function register(ctx) {
             const p = (priority || '').toLowerCase().trim();
             switch (p) {
               case 'critical':
-                return chalk.magentaBright;
+                return ansi.magentaBright;
               case 'high':
-                return chalk.yellowBright;
+                return ansi.yellowBright;
               case 'medium':
-                return chalk.blueBright;
+                return ansi.blueBright;
               case 'low':
-                return chalk.whiteBright;
+                return ansi.whiteBright;
               default:
-                return chalk.white;
+                return ansi.white;
             }
           };
 
@@ -218,7 +254,7 @@ export default function register(ctx) {
             statusMaxByColumn[status] = columnMax;
           });
 
-          console.log(`\n${chalk.blue('Status by Priority')}`);
+          console.log(`\n${ansi.blue('Status by Priority')}`);
           const headerLabel = colorizePriority('medium', 'Priority').padEnd(labelWidth);
           const header = [headerLabel, ...statusOrder.map(status => colorizeStatus(status, status.padStart(columnWidth)))].join('  ');
           console.log(`  ${header}`);
@@ -239,7 +275,7 @@ export default function register(ctx) {
             console.log(`  ${row}`);
           });
 
-          console.log(`\n${chalk.blue('By Status')}`);
+          console.log(`\n${ansi.blue('By Status')}`);
           const statusMax = statusEntries.reduce((max, entry) => Math.max(max, entry[1]), 0);
           const statusLabelWidthForTotals = statusEntries.reduce((max, entry) => Math.max(max, entry[0].length), 0);
           const statusCountWidth = Math.max(3, statusEntries.reduce((max, entry) => Math.max(max, entry[1].toString().length), 0));
@@ -265,7 +301,7 @@ export default function register(ctx) {
               console.log(`  ${paddedLabel} ${paddedCount} (${paddedPercent}%) ${stackedBar}`);
             });
 
-          console.log(`\n${chalk.blue('By Priority')}`);
+          console.log(`\n${ansi.blue('By Priority')}`);
           const priorityMax = Object.values(stats.byPriority).reduce((max, value) => Math.max(max, value), 0);
           priorityOrder.forEach(priority => {
             const count = stats.byPriority[priority] || 0;
