@@ -105,7 +105,7 @@ case "$1" in
     ;;
   worktree)
     # support `git worktree add [--detach] <path> [<ref>]`: create the worktree dir by copying
-    # the current repo contents. This is minimal but sufficient for tests.
+    # the current repo contents. This is minimal but sufficient for sync operations.
     if [ "$2" = "add" ]; then
       # find the destination argument: first arg after 'add' that does not start with '-'
       dest=""

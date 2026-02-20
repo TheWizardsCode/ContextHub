@@ -1507,26 +1507,6 @@
       "durationMs": 2972.755371000001
     },
     {
-      "file": "/home/rogardle/projects/Worklog/tests/cli/worktree.test.ts",
-      "title": "Git Worktree Support should place .worklog in main repo when initializing main repository",
-      "durationMs": 4607.356217
-    },
-    {
-      "file": "/home/rogardle/projects/Worklog/tests/cli/worktree.test.ts",
-      "title": "Git Worktree Support should place .worklog in worktree when initializing a worktree",
-      "durationMs": 8963.81006
-    },
-    {
-      "file": "/home/rogardle/projects/Worklog/tests/cli/worktree.test.ts",
-      "title": "Git Worktree Support should maintain separate state between main repo and worktree",
-      "durationMs": 20048.983930000002
-    },
-    {
-      "file": "/home/rogardle/projects/Worklog/tests/cli/worktree.test.ts",
-      "title": "Git Worktree Support should find main repo .worklog when in subdirectory of main repo (not worktree)",
-      "durationMs": 17497.043090000006
-    },
-    {
       "file": "/home/rogardle/projects/Worklog/tests/tui/controller.test.ts",
       "title": "TuiController starts with injected deps and layout",
       "durationMs": 172.08111099999996
