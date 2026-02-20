@@ -151,6 +151,165 @@ describe('CLI Issue Management Tests', () => {
       expect(stderr).toContain('Warning: normalized status "in_progress" to "in-progress".');
       expect(stderr).toContain('Warning: normalized stage "in-progress" to "in_progress".');
     });
+
+    describe('batch processing (multiple ids)', () => {
+      let id1: string;
+      let id2: string;
+      let id3: string;
+
+      beforeEach(async () => {
+        const r1 = await execAsync(`tsx ${cliPath} --json create -t "Batch item 1"`);
+        const r2 = await execAsync(`tsx ${cliPath} --json create -t "Batch item 2"`);
+        const r3 = await execAsync(`tsx ${cliPath} --json create -t "Batch item 3"`);
+        id1 = JSON.parse(r1.stdout).workItem.id;
+        id2 = JSON.parse(r2.stdout).workItem.id;
+        id3 = JSON.parse(r3.stdout).workItem.id;
+      });
+
+      it('should apply flags to all provided ids', async () => {
+        const { stdout } = await execAsync(
+          `tsx ${cliPath} --json update ${id1} ${id2} ${id3} -t "Batch updated" -p high`
+        );
+
+        const result = JSON.parse(stdout);
+        expect(result.success).toBe(true);
+        expect(result.results).toHaveLength(3);
+        for (const r of result.results) {
+          expect(r.success).toBe(true);
+          expect(r.workItem.title).toBe('Batch updated');
+          expect(r.workItem.priority).toBe('high');
+        }
+      });
+
+      it('should return per-id results in batch JSON output', async () => {
+        const { stdout } = await execAsync(
+          `tsx ${cliPath} --json update ${id1} ${id2} -a "batch-user"`
+        );
+
+        const result = JSON.parse(stdout);
+        expect(result.success).toBe(true);
+        expect(result.results).toHaveLength(2);
+        expect(result.results[0].id).toBe(id1);
+        expect(result.results[0].success).toBe(true);
+        expect(result.results[0].workItem.assignee).toBe('batch-user');
+        expect(result.results[1].id).toBe(id2);
+        expect(result.results[1].success).toBe(true);
+        expect(result.results[1].workItem.assignee).toBe('batch-user');
+      });
+
+      it('should continue processing after a failure for one id', async () => {
+        const fakeId = 'TEST-DOESNOTEXIST';
+
+        try {
+          await execAsync(
+            `tsx ${cliPath} --json update ${id1} ${fakeId} ${id2} -t "Partial batch"`
+          );
+          expect.fail('Should have exited with non-zero');
+        } catch (error: any) {
+          const output = error.stdout || error.stderr || '';
+          const result = JSON.parse(output);
+          expect(result.success).toBe(false);
+          expect(result.results).toHaveLength(3);
+
+          // First id succeeds
+          expect(result.results[0].id).toBe(id1);
+          expect(result.results[0].success).toBe(true);
+          expect(result.results[0].workItem.title).toBe('Partial batch');
+
+          // Invalid id fails
+          expect(result.results[1].id).toBe(fakeId);
+          expect(result.results[1].success).toBe(false);
+          expect(result.results[1].error).toContain('not found');
+
+          // Third id still succeeds (not stopped by prior failure)
+          expect(result.results[2].id).toBe(id2);
+          expect(result.results[2].success).toBe(true);
+          expect(result.results[2].workItem.title).toBe('Partial batch');
+        }
+      });
+
+      it('should exit non-zero when any id fails in batch', async () => {
+        const fakeId = 'TEST-NOTREAL';
+
+        try {
+          await execAsync(
+            `tsx ${cliPath} --json update ${id1} ${fakeId} -t "Some title"`
+          );
+          expect.fail('Should have exited with non-zero');
+        } catch (error: any) {
+          const output = error.stdout || error.stderr || '';
+          const result = JSON.parse(output);
+          expect(result.success).toBe(false);
+          expect(result.results).toHaveLength(2);
+          expect(result.results[0].success).toBe(true);
+          expect(result.results[1].success).toBe(false);
+        }
+      });
+
+      it('should handle all invalid ids gracefully', async () => {
+        try {
+          await execAsync(
+            `tsx ${cliPath} --json update TEST-BAD1 TEST-BAD2 -t "Won't work"`
+          );
+          expect.fail('Should have exited with non-zero');
+        } catch (error: any) {
+          const output = error.stdout || error.stderr || '';
+          const result = JSON.parse(output);
+          expect(result.success).toBe(false);
+          expect(result.results).toHaveLength(2);
+          expect(result.results[0].success).toBe(false);
+          expect(result.results[0].error).toContain('not found');
+          expect(result.results[1].success).toBe(false);
+          expect(result.results[1].error).toContain('not found');
+        }
+      });
+
+      it('should handle status/stage conflict for one id without stopping others', async () => {
+        // Create an item with completed/done status so updating to invalid combo fails
+        const { stdout: doneStdout } = await execAsync(
+          `tsx ${cliPath} --json create -t "Done item" -s completed --stage "done"`
+        );
+        const doneId = JSON.parse(doneStdout).workItem.id;
+
+        try {
+          await execAsync(
+            `tsx ${cliPath} --json update ${id1} ${doneId} ${id2} --stage "idea"`
+          );
+          expect.fail('Should have exited with non-zero');
+        } catch (error: any) {
+          const output = error.stdout || error.stderr || '';
+          const result = JSON.parse(output);
+          expect(result.success).toBe(false);
+          expect(result.results).toHaveLength(3);
+
+          // id1 (open) updated to idea stage - should succeed (open + idea is valid)
+          expect(result.results[0].id).toBe(id1);
+          expect(result.results[0].success).toBe(true);
+
+          // doneId (completed/done) updated to idea stage - should fail (invalid combo)
+          expect(result.results[1].id).toBe(doneId);
+          expect(result.results[1].success).toBe(false);
+          expect(result.results[1].error).toContain('Invalid status/stage combination');
+
+          // id2 (open) updated to idea stage - should still succeed
+          expect(result.results[2].id).toBe(id2);
+          expect(result.results[2].success).toBe(true);
+        }
+      });
+
+      it('should preserve legacy single-id JSON shape for single id', async () => {
+        const { stdout } = await execAsync(
+          `tsx ${cliPath} --json update ${id1} -t "Single update"`
+        );
+
+        const result = JSON.parse(stdout);
+        // Single-id preserves legacy shape: { success, workItem } (no results array)
+        expect(result.success).toBe(true);
+        expect(result.workItem).toBeDefined();
+        expect(result.results).toBeUndefined();
+        expect(result.workItem.title).toBe('Single update');
+      });
+    });
   });
 
   describe('delete command', () => {
