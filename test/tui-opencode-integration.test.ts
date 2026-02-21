@@ -190,13 +190,7 @@ describe('OpenCode autocomplete integration', () => {
       const first = lines[0] ?? '';
       if (!first.startsWith('/') || lines.length !== 1) return null;
       const low = first.toLowerCase();
-      // eslint-disable-next-line no-console
-      console.log('compute called with', { first, low });
-      // eslint-disable-next-line no-console
-      console.log('AVAILABLE length', AVAILABLE.length);
       const matches = AVAILABLE.filter((c: string) => c.toLowerCase().startsWith(low));
-      // eslint-disable-next-line no-console
-      console.log('matches', matches.slice(0, 5));
       if (matches.length === 0) return null;
       if (matches[0] === low) return null;
       return matches[0];
@@ -232,27 +226,19 @@ describe('OpenCode autocomplete integration', () => {
     // If the controller replaced our local instance, prefer the controller's
     // attached instance so we exercise the same codepath.
     // Log some diagnostic info to help debug CI/test environment differences.
-    // eslint-disable-next-line no-console
-    console.log('textarea.__opencode_autocomplete === inst', textarea.__opencode_autocomplete === inst);
     // If controller attached different instance, use that one.
     if (textarea.__opencode_autocomplete && textarea.__opencode_autocomplete !== inst) {
-      // eslint-disable-next-line no-console
-      console.log('Controller attached a different autocomplete instance; using that one for the test');
       // eslint-disable-next-line prefer-destructuring
       inst = textarea.__opencode_autocomplete;
     }
-    // eslint-disable-next-line no-console
-    console.log('inst keys', Object.keys(inst || {}));
 
     // Simulate user typed a prefix '/crea' so the autocomplete can suggest
     // the full '/create' command (typing the exact command yields no
     // suggestion — computeSuggestion returns null for exact matches).
     textarea.getValue = () => '/crea';
-    // eslint-disable-next-line no-console
-    console.log('calling inst.updateFromValue');
+    // call updateFromValue to compute suggestion
     inst.updateFromValue();
-    // eslint-disable-next-line no-console
-    console.log('after updateFromValue: suggestionHint calls', suggestionHintStub.setContent.mock.calls.length);
+    // suggestionHint was updated if a suggestion was available
 
     // Apply suggestion directly (integration with controller uses the same
     // applySuggestion API) — ensure suggestion is applied and the opencode
