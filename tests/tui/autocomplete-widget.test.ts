@@ -7,7 +7,7 @@ describe('opencode autocomplete widget integration', () => {
     const suggestionHint = { setContent: vi.fn() } as any;
     const inst = initAutocomplete({ textarea, suggestionHint }, { availableCommands: ['/create', '/commit'] });
     inst.updateFromValue();
-    expect(suggestionHint.setContent).toHaveBeenCalledWith('{gray-fg}↳ /create{/gray-fg}');
+    expect(suggestionHint.setContent).toHaveBeenCalledWith('{gray-fg}↳ /create [Tab]{/gray-fg}');
     inst.dispose();
   });
 

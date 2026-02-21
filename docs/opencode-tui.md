@@ -31,8 +31,27 @@ The Worklog TUI now includes full integration with OpenCode, an AI-powered codin
   - `/test` - Run tests
   - `/fix` - Fix issues
   - And many more...
-- Autocomplete suggestions appear below the input with an arrow indicator (↳)
-- Press Enter to accept the suggestion
+- Autocomplete suggestions appear below the input with an arrow indicator (↳) and a `[Tab]` hint
+- The input dialog grows by one row to accommodate the suggestion hint
+- Press Tab to accept the suggestion (inserts the command with a trailing space)
+- The dialog shrinks back to its normal size when the suggestion is cleared
+- Autocomplete only triggers on single-line input starting with `/`
+- Exact command matches do not show a suggestion
+
+#### Architecture
+
+The autocomplete logic is extracted into `src/tui/opencode-autocomplete.ts` as a
+standalone, testable module. The controller wires it to the textarea and
+suggestion hint widget at startup via `initAutocomplete()`. Key integration
+points:
+
+- **`onSuggestionChange` callback** — fires when a suggestion appears or
+  disappears, triggering `updateOpencodeInputLayout()` to resize the dialog.
+- **`applyOpencodeCompactLayout()`** — dynamically repositions the suggestion
+  hint below the textarea and adds an extra row to the dialog when a suggestion
+  is active.
+- **`renderSuggestion()`** — calls `show()`/`hide()` on the hint widget so
+  blessed renders it correctly in compact mode.
 
 ### 4. Session Management
 
@@ -84,7 +103,8 @@ The Worklog TUI now includes full integration with OpenCode, an AI-powered codin
 
 - **In the dialog:**
    - `Ctrl+S` - Send prompt
-   - `Enter` - Accept autocomplete or add newline
+   - `Tab` - Accept autocomplete suggestion
+   - `Enter` - Send prompt
    - `Escape` - Close dialog
    - `Ctrl+C` - Cancel running `!` command
 
@@ -157,11 +177,15 @@ The server is managed automatically, but you can also:
 
 ### File Locations
 
-- Main implementation: `src/commands/tui.ts`
-- Server management: Lines 591-698
-- OpenCode dialog: Lines 383-397
-- SSE streaming: Lines 734-896
-- Input handling: Lines 858-927
+- TUI controller: `src/tui/controller.ts`
+- OpenCode pane component: `src/tui/components/opencode-pane.ts`
+- Autocomplete module: `src/tui/opencode-autocomplete.ts`
+- Constants (commands, layout): `src/tui/constants.ts`
+- OpenCode client: `src/tui/opencode-client.ts`
+- Integration tests: `tests/tui/opencode-integration.test.ts`
+- Autocomplete unit tests: `tests/tui/autocomplete.test.ts`
+- Widget integration tests: `tests/tui/autocomplete-widget.test.ts`
+- Layout integration tests: `tests/tui/opencode-layout-integration.test.ts`
 
 ## Troubleshooting
 
