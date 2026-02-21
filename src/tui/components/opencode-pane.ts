@@ -72,13 +72,17 @@ export class OpencodePaneComponent {
       style: { focus: { border: { fg: 'green' } } },
     });
 
-    // Create a text element to show the suggestion below the input
+    // Create a text element to show the suggestion below the input.
+    // The controller repositions this dynamically in compact mode via
+    // applyOpencodeCompactLayout(); the initial top is a safe default
+    // for the large (centered) dialog layout.
     this.suggestionHint = this.blessedImpl.text({
       parent: this.dialog,
-      top: '100%-4',
+      top: 0,
       left: 2,
       width: '100%-4',
       height: 1,
+      hidden: true,
       tags: true,
       style: {
         fg: 'gray',

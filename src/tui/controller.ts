@@ -950,15 +950,19 @@ export class TuiController {
         if (matches.length > 0 && matches[0] !== input) {
           currentSuggestion = matches[0];
           try { suggestionHint.setContent(`{gray-fg}↳ ${currentSuggestion}{/gray-fg}`); } catch (_) {}
+          try { suggestionHint.show(); } catch (_) {}
         } else {
           currentSuggestion = '';
           try { suggestionHint.setContent(''); } catch (_) {}
+          try { suggestionHint.hide(); } catch (_) {}
         }
       } else {
         isCommandMode = false;
         currentSuggestion = '';
         try { suggestionHint.setContent(''); } catch (_) {}
+        try { suggestionHint.hide(); } catch (_) {}
       }
+      try { updateOpencodeInputLayout(); } catch (_) {}
       screen.render();
     }
 
@@ -1145,7 +1149,15 @@ export class TuiController {
     };
 
     const applyOpencodeCompactLayout = (desiredHeight: number) => {
-      opencodeDialog.height = desiredHeight;
+      // When a suggestion is active, grow the dialog by 1 row to make
+      // room for the hint line below the textarea.
+      const hasSugg = typeof (opencodeText as any).__opencode_autocomplete?.hasSuggestion === 'function'
+        ? (opencodeText as any).__opencode_autocomplete.hasSuggestion()
+        : (currentSuggestion !== undefined && currentSuggestion !== null && currentSuggestion !== '');
+      const extra = hasSugg ? 1 : 0;
+      const effectiveHeight = desiredHeight + extra;
+
+      opencodeDialog.height = effectiveHeight;
 
       (opencodeText as any).border = false;
       opencodeText.top = 0;
@@ -1154,8 +1166,17 @@ export class TuiController {
       opencodeText.height = desiredHeight - 2;
       clearOpencodeTextBorders();
 
+      // Position the suggestion hint just below the textarea, inside the
+      // dialog borders.  desiredHeight-2 is the textarea height; that's
+      // also the row index right after the textarea.
+      try {
+        suggestionHint.top = desiredHeight - 2;
+        suggestionHint.left = 1;
+        suggestionHint.width = '100%-4';
+      } catch (_) {}
+
       if (opencodePane) {
-        opencodePane.bottom = desiredHeight + FOOTER_HEIGHT;
+        opencodePane.bottom = effectiveHeight + FOOTER_HEIGHT;
         opencodePane.height = paneHeight();
       }
     };
@@ -1541,7 +1562,14 @@ export class TuiController {
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const initAutocomplete = require('./opencode-autocomplete').default ?? require('./opencode-autocomplete');
-      const instance = initAutocomplete({ textarea: opencodeText, suggestionHint }, { availableCommands: AVAILABLE_COMMANDS });
+      const instance = initAutocomplete({ textarea: opencodeText, suggestionHint }, {
+        availableCommands: AVAILABLE_COMMANDS,
+        onSuggestionChange: (_active: boolean) => {
+          // Re-run the compact layout so the dialog grows/shrinks to
+          // accommodate the suggestion hint row.
+          try { updateOpencodeInputLayout(); } catch (_) {}
+        },
+      });
       // expose a reference for tests / future updates
       (opencodeText as any).__opencode_autocomplete = instance;
     } catch (_) {
