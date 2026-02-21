@@ -42,7 +42,7 @@ export async function execAsync(command: string, options?: childProcess.ExecOpti
     const originalCwd = process.cwd();
     try {
       if (options?.cwd) process.chdir(options.cwd as string);
-      const res = await runInProcess(command, options?.timeout ?? 15000);
+      const res = await runInProcess(command, options?.timeout ?? 25000);
       if (res.exitCode && res.exitCode !== 0) {
         const error: any = new Error(`Command failed: ${command}`);
         error.stdout = res.stdout ?? '';

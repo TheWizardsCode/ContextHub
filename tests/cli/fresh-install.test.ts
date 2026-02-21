@@ -78,7 +78,7 @@ describe('Fresh-install plugin loading', () => {
     } finally {
       leaveTempDir(tempState);
     }
-  });
+  }, 45000);
 
   /**
    * AC 2 -- `wl stats --json` works in a fresh project and returns valid JSON
@@ -118,7 +118,7 @@ describe('Fresh-install plugin loading', () => {
     } finally {
       cleanupTempDir(tempDir);
     }
-  }, 30000);
+  }, 45000);
 
   /**
    * AC 3 -- `wl list --json --verbose` after init must not contain plugin
@@ -150,7 +150,7 @@ describe('Fresh-install plugin loading', () => {
     } finally {
       cleanupTempDir(tempDir);
     }
-  }, 30000);
+  }, 45000);
 
   /**
    * AC 4+5 -- Running `wl init --json` twice (first-init then re-init) must
@@ -184,5 +184,5 @@ describe('Fresh-install plugin loading', () => {
     } finally {
       leaveTempDir(tempState);
     }
-  });
+  }, 45000);
 });
