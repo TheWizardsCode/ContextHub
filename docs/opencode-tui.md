@@ -31,9 +31,9 @@ The Worklog TUI now includes full integration with OpenCode, an AI-powered codin
   - `/test` - Run tests
   - `/fix` - Fix issues
   - And many more...
-- Autocomplete suggestions appear below the input with an arrow indicator (↳)
+- Autocomplete suggestions appear below the input with an arrow indicator (↳) and a `[Tab]` hint
 - The input dialog grows by one row to accommodate the suggestion hint
-- Press Enter to accept the suggestion (inserts the command with a trailing space)
+- Press Tab to accept the suggestion (inserts the command with a trailing space)
 - The dialog shrinks back to its normal size when the suggestion is cleared
 - Autocomplete only triggers on single-line input starting with `/`
 - Exact command matches do not show a suggestion
@@ -103,7 +103,8 @@ points:
 
 - **In the dialog:**
    - `Ctrl+S` - Send prompt
-   - `Enter` - Accept autocomplete or add newline
+   - `Tab` - Accept autocomplete suggestion
+   - `Enter` - Send prompt
    - `Escape` - Close dialog
    - `Ctrl+C` - Cancel running `!` command
 

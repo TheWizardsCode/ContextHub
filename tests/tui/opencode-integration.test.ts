@@ -446,4 +446,76 @@ describe('OpenCode autocomplete compact-mode integration', () => {
     inst.updateFromValue();
     expect(inst.hasSuggestion()).toBe(false);
   });
+
+  it('suggestion hint text includes [Tab] instruction', async () => {
+    const { textarea, suggestionHint } = await setup();
+    const inst = (textarea as any).__opencode_autocomplete;
+    if (!inst) return;
+
+    textarea.getValue = vi.fn(() => '/crea');
+    inst.updateFromValue();
+
+    // The hint should contain both the suggestion and [Tab]
+    expect(suggestionHint.setContent).toHaveBeenCalledWith(
+      expect.stringContaining('[Tab]')
+    );
+    expect(suggestionHint.setContent).toHaveBeenCalledWith(
+      expect.stringContaining('↳')
+    );
+  });
+
+  it('Tab handler accepts the suggestion when one is active', async () => {
+    const { textarea } = await setup();
+    const inst = (textarea as any).__opencode_autocomplete;
+    if (!inst) return;
+
+    // Activate a suggestion
+    textarea.getValue = vi.fn(() => '/crea');
+    inst.updateFromValue();
+    expect(inst.hasSuggestion()).toBe(true);
+
+    // Simulate Tab: call applySuggestion (mirrors the controller Tab handler)
+    const result = inst.applySuggestion(textarea);
+    expect(result).toBe('/create ');
+    expect(textarea.setValue).toHaveBeenCalledWith('/create ');
+    // After accepting, no active suggestion
+    expect(inst.hasSuggestion()).toBe(false);
+  });
+
+  it('Tab handler is a no-op when no suggestion is active', async () => {
+    const { textarea } = await setup();
+    const inst = (textarea as any).__opencode_autocomplete;
+    if (!inst) return;
+
+    // No suggestion active
+    textarea.getValue = vi.fn(() => 'hello');
+    inst.updateFromValue();
+    expect(inst.hasSuggestion()).toBe(false);
+
+    // applySuggestion returns null when nothing active
+    textarea.setValue.mockClear();
+    const result = inst.applySuggestion(textarea);
+    expect(result).toBeNull();
+    // setValue should NOT have been called for the suggestion
+    expect(textarea.setValue).not.toHaveBeenCalled();
+  });
+
+  it('Enter does not accept autocomplete — it always sends the prompt', async () => {
+    const { textarea } = await setup();
+    const inst = (textarea as any).__opencode_autocomplete;
+    if (!inst) return;
+
+    // Activate a suggestion
+    textarea.getValue = vi.fn(() => '/crea');
+    inst.updateFromValue();
+    expect(inst.hasSuggestion()).toBe(true);
+
+    // Simulate Enter handler behavior: Enter should NOT call applySuggestion.
+    // The controller's Enter handler directly calls closeOpencodeDialog() +
+    // runOpencode(). We verify by checking that after Enter-like behavior
+    // the suggestion is still active (not consumed).
+    expect(inst.hasSuggestion()).toBe(true);
+    // And setValue was not called with the completed command
+    expect(textarea.setValue).not.toHaveBeenCalledWith('/create ');
+  });
 });

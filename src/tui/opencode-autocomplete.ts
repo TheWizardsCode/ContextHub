@@ -39,7 +39,7 @@ export function initAutocomplete(
   const renderSuggestion = () => {
     try {
       if (currentSuggestion) {
-        suggestionHint.setContent(`{gray-fg}↳ ${currentSuggestion}{/gray-fg}`);
+        suggestionHint.setContent(`{gray-fg}↳ ${currentSuggestion} [Tab]{/gray-fg}`);
         try { suggestionHint.show?.(); } catch (_) {}
       } else {
         suggestionHint.setContent('');

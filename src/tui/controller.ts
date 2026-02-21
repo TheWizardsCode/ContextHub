@@ -949,7 +949,7 @@ export class TuiController {
         const matches = AVAILABLE_COMMANDS.filter(cmd => cmd.toLowerCase().startsWith(input));
         if (matches.length > 0 && matches[0] !== input) {
           currentSuggestion = matches[0];
-          try { suggestionHint.setContent(`{gray-fg}↳ ${currentSuggestion}{/gray-fg}`); } catch (_) {}
+          try { suggestionHint.setContent(`{gray-fg}↳ ${currentSuggestion} [Tab]{/gray-fg}`); } catch (_) {}
           try { suggestionHint.show(); } catch (_) {}
         } else {
           currentSuggestion = '';
@@ -1517,9 +1517,6 @@ export class TuiController {
 
     // Accept Ctrl+S to send (keep for backward compatibility)
     const opencodeTextCSHandler = function(this: any) {
-      if (applyCommandSuggestion(this)) {
-        return;
-      }
       const prompt = this.getValue ? this.getValue() : '';
       closeOpencodeDialog();
       runOpencode(prompt);
@@ -1528,14 +1525,23 @@ export class TuiController {
 
      // Accept Enter to send, Ctrl+Enter for newline
     const opencodeTextEnterHandler = function(this: any) {
-        if (applyCommandSuggestion(this)) {
-          return;
-        }
         const prompt = this.getValue ? this.getValue() : '';
         closeOpencodeDialog();
         runOpencode(prompt);
       };
        try { (opencodeText as any).__opencode_key_enter = opencodeTextEnterHandler; opencodeText.key(KEY_ENTER, opencodeTextEnterHandler); } catch (_) {}
+
+    // Tab accepts the autocomplete suggestion (conventional shell/IDE behavior).
+    // When no suggestion is active Tab is a no-op (prevents blessed from
+    // inserting whitespace into the prompt).
+    const opencodeTextTabHandler = function(this: any) {
+      if (applyCommandSuggestion(this)) {
+        return;
+      }
+      // Consume the event so blessed doesn't insert a tab character
+      return false;
+    };
+    try { (opencodeText as any).__opencode_key_tab = opencodeTextTabHandler; opencodeText.key(KEY_TAB, opencodeTextTabHandler); } catch (_) {}
 
       // Suppress j/k keys when they're part of Ctrl-W commands
        const opencodeTextJHandler = function(this: any) {
