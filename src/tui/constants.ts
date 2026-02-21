@@ -8,6 +8,7 @@
 export const AVAILABLE_COMMANDS: string[] = [
   '/help',
   '/clear',
+  '/create',
   '/save',
   '/export',
   '/import',

@@ -893,48 +893,71 @@ export class TuiController {
       screen.render();
     };
 
+    // Replace inline applyCommandSuggestion with extracted module usage when
+    // module is initialized below. Keep a fallback for tests that don't wire
+    // the module yet.
     function applyCommandSuggestion(target: any) {
+      // Prefer using the extracted autocomplete instance when available.
+      try {
+        const inst = (target as any).__opencode_autocomplete;
+        if (inst && typeof inst.applySuggestion === 'function') {
+          const nextValue = inst.applySuggestion(target);
+          if (nextValue) {
+            try { setOpencodeCursorIndex(nextValue, nextValue.length); } catch (_) {}
+            updateOpencodeCursor();
+            isCommandMode = false;
+            currentSuggestion = '';
+            screen.render();
+            return true;
+          }
+        }
+      } catch (_) {}
+
       if (isCommandMode && currentSuggestion) {
         const nextValue = currentSuggestion + ' ';
-        target.setValue(nextValue);
+        try { if (typeof target.setValue === 'function') target.setValue(nextValue); } catch (_) {}
         setOpencodeCursorIndex(nextValue, nextValue.length);
         updateOpencodeCursor();
         currentSuggestion = '';
         isCommandMode = false;
-        suggestionHint.setContent('');
+        try { suggestionHint.setContent(''); } catch (_) {}
         screen.render();
         return true;
       }
       return false;
     }
 
+    // updateAutocomplete replaced by initAutocomplete usage below. Keep a
+    // tiny wrapper so existing call-sites continue to work until full
+    // migration is done.
     function updateAutocomplete() {
+      // For backwards compatibility call the module-based updater if present.
+      try {
+        if ((opencodeText as any).__opencode_autocomplete && typeof (opencodeText as any).__opencode_autocomplete.updateFromValue === 'function') {
+          (opencodeText as any).__opencode_autocomplete.updateFromValue();
+          return;
+        }
+      } catch (_) {}
+      // Fallback: simple inline behavior (preserve current behavior)
       const value = opencodeText.getValue ? opencodeText.getValue() : '';
       userTypedText = value;
       const lines = value.split('\n');
-      const firstLine = lines[0];
-      const commandLine = firstLine;
-      
-      // Check if we're in command mode (first line starts with '/')
+      const commandLine = lines[0];
       if (commandLine.startsWith('/') && lines.length === 1) {
         isCommandMode = true;
         const input = commandLine.toLowerCase();
-        
-        // Find the best matching command
         const matches = AVAILABLE_COMMANDS.filter(cmd => cmd.toLowerCase().startsWith(input));
-        
         if (matches.length > 0 && matches[0] !== input) {
           currentSuggestion = matches[0];
-          // Show suggestion as hint text below the input
-          suggestionHint.setContent(`{gray-fg}↳ ${currentSuggestion}{/gray-fg}`);
+          try { suggestionHint.setContent(`{gray-fg}↳ ${currentSuggestion}{/gray-fg}`); } catch (_) {}
         } else {
           currentSuggestion = '';
-          suggestionHint.setContent('');
+          try { suggestionHint.setContent(''); } catch (_) {}
         }
       } else {
         isCommandMode = false;
         currentSuggestion = '';
-        suggestionHint.setContent('');
+        try { suggestionHint.setContent(''); } catch (_) {}
       }
       screen.render();
     }
@@ -992,7 +1015,7 @@ export class TuiController {
           updateOpencodeInputLayout();
         });
     };
-      try { (opencodeText as any).__opencode_keypress = opencodeTextKeypressHandler; (opencodeText as any).on('keypress', opencodeTextKeypressHandler); } catch (_) {}
+    try { (opencodeText as any).__opencode_keypress = opencodeTextKeypressHandler; (opencodeText as any).on('keypress', opencodeTextKeypressHandler); } catch (_) {}
 
     const opencodeTextInputHandler = function(this: any, ch: any, key: KeyInfo | undefined) {
       const value = typeof this.value === 'string' ? this.value : '';
@@ -1073,9 +1096,9 @@ export class TuiController {
         }
         return true;
       }
-      if (name === 'enter') {
-        return false;
-      }
+       if (name === 'enter') {
+         return false;
+       }
 
       const isLinefeed = name === 'linefeed';
       const insertChar = isLinefeed ? '\n' : (typeof ch === 'string' ? ch : '');
@@ -1089,7 +1112,7 @@ export class TuiController {
       screen.render();
       return true;
     };
-      try { (opencodeText as any)._listener = opencodeTextInputHandler; } catch (_) {}
+    try { (opencodeText as any)._listener = opencodeTextInputHandler; } catch (_) {}
 
 
 
@@ -1483,7 +1506,7 @@ export class TuiController {
     try { (opencodeText as any).__opencode_key_cs = opencodeTextCSHandler; opencodeText.key(KEY_CS, opencodeTextCSHandler); } catch (_) {}
 
      // Accept Enter to send, Ctrl+Enter for newline
-      const opencodeTextEnterHandler = function(this: any) {
+    const opencodeTextEnterHandler = function(this: any) {
         if (applyCommandSuggestion(this)) {
           return;
         }
@@ -1501,7 +1524,7 @@ export class TuiController {
            return false;
          }
        };
-        try { (opencodeText as any).__opencode_key_j = opencodeTextJHandler; opencodeText.key(KEY_J, opencodeTextJHandler); } catch (_) {}
+    try { (opencodeText as any).__opencode_key_j = opencodeTextJHandler; opencodeText.key(KEY_J, opencodeTextJHandler); } catch (_) {}
 
       const opencodeTextKHandler = function(this: any) {
         debugLog(`opencodeText.key(['k']): lastCtrlWKeyHandled=${lastCtrlWKeyHandled}`);
@@ -1510,7 +1533,20 @@ export class TuiController {
           return false;
         }
       };
-       try { (opencodeText as any).__opencode_key_k = opencodeTextKHandler; opencodeText.key(KEY_K, opencodeTextKHandler); } catch (_) {}
+    try { (opencodeText as any).__opencode_key_k = opencodeTextKHandler; opencodeText.key(KEY_K, opencodeTextKHandler); } catch (_) {}
+    
+    // Wire extracted autocomplete module onto the textarea so tests and
+    // other callers can use it. Require the module dynamically to avoid
+    // affecting environments that don't need it (tests will import it).
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const initAutocomplete = require('./opencode-autocomplete').default ?? require('./opencode-autocomplete');
+      const instance = initAutocomplete({ textarea: opencodeText, suggestionHint }, { availableCommands: AVAILABLE_COMMANDS });
+      // expose a reference for tests / future updates
+      (opencodeText as any).__opencode_autocomplete = instance;
+    } catch (_) {
+      // ignore if module can't be loaded
+    }
 
 
     // Pressing Escape while the dialog (or any child) is focused should

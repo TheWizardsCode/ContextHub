@@ -38,6 +38,17 @@ export const isStatusStageCompatible = (
   rules?: StatusStageValidationRules
 ): boolean => {
   if (!status || stage === undefined) return true;
+
+  // Allow the common transitional combination `in-progress` (status)
+  // with `in_review` (stage) even when not explicitly listed in the
+  // compatibility tables. This combination is used by the TUI/agent
+  // workflows and should be considered valid by default.
+  const statusNorm = status;
+  const stageNorm = stage;
+  if ((statusNorm === 'in-progress' || statusNorm === 'in_progress') &&
+      (stageNorm === 'in_review' || stageNorm === 'in-review')) {
+    return true;
+  }
   const allowedStages = getAllowedStagesForStatus(status, rules);
   if (allowedStages.length > 0 && !allowedStages.includes(stage)) return false;
   const allowedStatuses = getAllowedStatusesForStage(stage, rules);
