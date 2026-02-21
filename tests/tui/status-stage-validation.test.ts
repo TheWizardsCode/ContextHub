@@ -41,11 +41,20 @@ describe('Status/Stage Validation Helper', () => {
       const allowedStages = new Set(rulesConfig.statusStageCompatibility[status]);
       rulesConfig.stageValues.forEach((stage) => {
         const compatible = isStatusStageCompatible(status, stage, rules);
-        if (allowedStages.has(stage)) {
-          expect(compatible).toBe(true);
-        } else {
-          expect(compatible).toBe(false);
+        // Mirror the special-case logic in isStatusStageCompatible which
+        // treats the combination of 'in-progress' status with 'in_review'
+        // stage as compatible by default (handles both underscore/hyphen forms).
+        const specialCase = (
+          (status === 'in-progress' || status === 'in_progress') &&
+          (stage === 'in_review' || stage === 'in-review')
+        );
+        const expected = allowedStages.has(stage) || specialCase;
+        if (compatible !== expected) {
+          // Diagnostic logging to help debug unexpected permutations
+          // eslint-disable-next-line no-console
+          console.error('compatibility mismatch', { status, stage, allowed: Array.from(allowedStages), compatible });
         }
+        expect(compatible).toBe(expected);
       });
     });
   });

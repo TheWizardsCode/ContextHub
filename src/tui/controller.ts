@@ -897,6 +897,22 @@ export class TuiController {
     // module is initialized below. Keep a fallback for tests that don't wire
     // the module yet.
     function applyCommandSuggestion(target: any) {
+      // Prefer using the extracted autocomplete instance when available.
+      try {
+        const inst = (target as any).__opencode_autocomplete;
+        if (inst && typeof inst.applySuggestion === 'function') {
+          const nextValue = inst.applySuggestion(target);
+          if (nextValue) {
+            try { setOpencodeCursorIndex(nextValue, nextValue.length); } catch (_) {}
+            updateOpencodeCursor();
+            isCommandMode = false;
+            currentSuggestion = '';
+            screen.render();
+            return true;
+          }
+        }
+      } catch (_) {}
+
       if (isCommandMode && currentSuggestion) {
         const nextValue = currentSuggestion + ' ';
         try { if (typeof target.setValue === 'function') target.setValue(nextValue); } catch (_) {}
@@ -1524,7 +1540,7 @@ export class TuiController {
     // affecting environments that don't need it (tests will import it).
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const initAutocomplete = require('./opencode-autocomplete.js').default ?? require('./opencode-autocomplete.js');
+      const initAutocomplete = require('./opencode-autocomplete').default ?? require('./opencode-autocomplete');
       const instance = initAutocomplete({ textarea: opencodeText, suggestionHint }, { availableCommands: AVAILABLE_COMMANDS });
       // expose a reference for tests / future updates
       (opencodeText as any).__opencode_autocomplete = instance;
