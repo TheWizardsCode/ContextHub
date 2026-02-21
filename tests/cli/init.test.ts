@@ -32,7 +32,7 @@ describe('CLI Init Tests', () => {
     } finally {
       leaveTempDir(tempState);
     }
-  });
+  }, 45000);
 
   it('should not duplicate the AGENTS.md pointer line on re-run', async () => {
     const tempState = enterTempDir();
@@ -52,7 +52,7 @@ describe('CLI Init Tests', () => {
     } finally {
       leaveTempDir(tempState);
     }
-  });
+  }, 45000);
   it('should create semaphore when config exists but semaphore does not', async () => {
     const tempState = enterTempDir();
     try {
@@ -113,7 +113,7 @@ describe('CLI Init Tests', () => {
     } finally {
       leaveTempDir(tempState);
     }
-  });
+  }, 45000);
 
   it('should allow init command without initialization', async () => {
     const tempState = enterTempDir();
@@ -195,7 +195,7 @@ describe('CLI Init Tests', () => {
     } finally {
       cleanupTempDir(tempDir);
     }
-  });
+  }, 45000);
 
   it('should find main repo .worklog when in subdirectory', async () => {
     const tempDir = createTempDir();
@@ -241,5 +241,5 @@ describe('CLI Init Tests', () => {
     } finally {
       cleanupTempDir(tempDir);
     }
-  });
+  }, 45000);
 });

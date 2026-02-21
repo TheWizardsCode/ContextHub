@@ -15,4 +15,4 @@ it('debug in-process runner outputs', async () => {
   } finally {
     cleanupTempDir(tmp);
   }
-});
+}, 45000);

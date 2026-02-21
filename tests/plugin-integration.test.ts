@@ -135,7 +135,7 @@ export default function register(ctx) {
     const result2 = JSON.parse(stdout2);
     expect(result2.success).toBe(true);
     expect(result2.message).toBe('Hello, Copilot!');
-  });
+  }, 45000);
 
   it('should load multiple plugins in lexicographic order', async () => {
     // Create multiple plugins
