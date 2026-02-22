@@ -136,10 +136,11 @@ describe('github pre-filter', () => {
   });
 
   // -------------------------------------------------------------------
-  // AC2: Items with status === 'deleted' are excluded from this filter
+  // AC: Deleted items without githubIssueNumber are excluded;
+  //     deleted items WITH githubIssueNumber are included as candidates
   // -------------------------------------------------------------------
-  describe('deleted item exclusion', () => {
-    it('excludes deleted items from candidates', () => {
+  describe('deleted item handling', () => {
+    it('excludes deleted items without githubIssueNumber', () => {
       const items = [makeItem('A', baseTime, 1), makeItem('B', baseTime, undefined, 'deleted')];
       const comments = [makeComment('C1', 'A'), makeComment('C2', 'B')];
       const res = filterItemsForPush(items, comments, null);
@@ -148,24 +149,61 @@ describe('github pre-filter', () => {
       expect(res.filteredComments.map(c => c.workItemId)).toEqual(['A']);
     });
 
-    it('excludes deleted items even when they have a githubIssueNumber', () => {
+    it('includes deleted items with githubIssueNumber when updatedAt > lastPush', () => {
       const lastPush = new Date('2025-01-02T00:00:00.000Z').toISOString();
       const newer = new Date('2025-01-03T00:00:00.000Z').toISOString();
       const items = [makeItem('A', newer, 10, 'deleted')];
       const res = filterItemsForPush(items, [], lastPush);
-      expect(res.filteredItems.length).toBe(0);
-      expect(res.totalCandidates).toBe(0);
+      expect(res.filteredItems.map(i => i.id)).toEqual(['A']);
+      expect(res.totalCandidates).toBe(1);
       expect(res.skippedCount).toBe(0);
     });
 
-    it('excludes deleted items from totalCandidates count', () => {
+    it('excludes deleted items with githubIssueNumber when updatedAt <= lastPush', () => {
+      const lastPush = new Date('2025-01-02T00:00:00.000Z').toISOString();
+      const older = new Date('2025-01-01T00:00:00.000Z').toISOString();
+      const items = [makeItem('A', older, 10, 'deleted')];
+      const res = filterItemsForPush(items, [], lastPush);
+      expect(res.filteredItems.length).toBe(0);
+      expect(res.totalCandidates).toBe(1);
+      expect(res.skippedCount).toBe(1);
+    });
+
+    it('includes all deleted items with githubIssueNumber when lastPush is null (force/first-run)', () => {
       const items = [
-        makeItem('A', baseTime, 1),
-        makeItem('B', baseTime, 2, 'deleted'),
-        makeItem('C', baseTime, 3, 'deleted'),
+        makeItem('A', baseTime, 10, 'deleted'),
+        makeItem('B', baseTime, 20, 'deleted'),
+        makeItem('C', baseTime, undefined, 'deleted'), // no githubIssueNumber -> excluded
       ];
       const res = filterItemsForPush(items, [], null);
-      expect(res.totalCandidates).toBe(1);
+      expect(res.filteredItems.map(i => i.id).sort()).toEqual(['A', 'B']);
+      expect(res.totalCandidates).toBe(2);
+    });
+
+    it('includes totalCandidates count for eligible deleted items', () => {
+      const items = [
+        makeItem('A', baseTime, 1),
+        makeItem('B', baseTime, 2, 'deleted'),   // has githubIssueNumber -> candidate
+        makeItem('C', baseTime, 3, 'deleted'),   // has githubIssueNumber -> candidate
+      ];
+      const res = filterItemsForPush(items, [], null);
+      expect(res.totalCandidates).toBe(3);
+    });
+
+    it('includes comments for eligible deleted items', () => {
+      const lastPush = new Date('2025-01-02T00:00:00.000Z').toISOString();
+      const newer = new Date('2025-01-03T00:00:00.000Z').toISOString();
+      const items = [makeItem('A', newer, 10, 'deleted')];
+      const comments = [makeComment('C1', 'A')];
+      const res = filterItemsForPush(items, comments, lastPush);
+      expect(res.filteredComments.map(c => c.workItemId)).toEqual(['A']);
+    });
+
+    it('excludes comments for deleted items without githubIssueNumber', () => {
+      const items = [makeItem('A', baseTime, undefined, 'deleted')];
+      const comments = [makeComment('C1', 'A')];
+      const res = filterItemsForPush(items, comments, null);
+      expect(res.filteredComments.length).toBe(0);
     });
   });
 
@@ -192,8 +230,8 @@ describe('github pre-filter', () => {
       expect(res.filteredComments.map(c => c.id)).toEqual(['C2']);
     });
 
-    it('excludes comments for deleted items', () => {
-      const items = [makeItem('A', newer, 1, 'deleted')];
+    it('excludes comments for deleted items without githubIssueNumber', () => {
+      const items = [makeItem('A', newer, undefined, 'deleted')];
       const comments = [makeComment('C1', 'A')];
       const res = filterItemsForPush(items, comments, lastPush);
       expect(res.filteredComments.length).toBe(0);
@@ -229,18 +267,20 @@ describe('github pre-filter', () => {
         makeItem('new-item', older),               // no githubIssueNumber -> included
         makeItem('changed', newer, 10),             // newer -> included
         makeItem('unchanged', older, 20),            // older + has issue -> skipped
-        makeItem('deleted-item', newer, 30, 'deleted'), // deleted -> excluded
+        makeItem('deleted-with-issue', newer, 30, 'deleted'), // deleted + has issue + newer -> included
+        makeItem('deleted-no-issue', newer, undefined, 'deleted'), // deleted + no issue -> excluded
       ];
       const comments = [
         makeComment('C1', 'new-item'),
         makeComment('C2', 'changed'),
         makeComment('C3', 'unchanged'),
-        makeComment('C4', 'deleted-item'),
+        makeComment('C4', 'deleted-with-issue'),
+        makeComment('C5', 'deleted-no-issue'),
       ];
       const res = filterItemsForPush(items, comments, lastPush);
-      expect(res.filteredItems.map(i => i.id).sort()).toEqual(['changed', 'new-item']);
-      expect(res.filteredComments.map(c => c.workItemId).sort()).toEqual(['changed', 'new-item']);
-      expect(res.totalCandidates).toBe(3); // excludes deleted
+      expect(res.filteredItems.map(i => i.id).sort()).toEqual(['changed', 'deleted-with-issue', 'new-item']);
+      expect(res.filteredComments.map(c => c.workItemId).sort()).toEqual(['changed', 'deleted-with-issue', 'new-item']);
+      expect(res.totalCandidates).toBe(4); // excludes deleted-no-issue only
       expect(res.skippedCount).toBe(1); // only 'unchanged'
     });
   });
@@ -286,8 +326,19 @@ describe('github pre-filter', () => {
 
     it('counts totalCandidates correctly with only deleted items', () => {
       const items = [
-        makeItem('A', baseTime, 1, 'deleted'),
-        makeItem('B', baseTime, 2, 'deleted'),
+        makeItem('A', baseTime, 1, 'deleted'),    // has githubIssueNumber -> candidate
+        makeItem('B', baseTime, 2, 'deleted'),    // has githubIssueNumber -> candidate
+      ];
+      const res = filterItemsForPush(items, [], null);
+      expect(res.totalCandidates).toBe(2);
+      expect(res.filteredItems.length).toBe(2);
+      expect(res.skippedCount).toBe(0);
+    });
+
+    it('counts totalCandidates as zero with only deleted items without githubIssueNumber', () => {
+      const items = [
+        makeItem('A', baseTime, undefined, 'deleted'),
+        makeItem('B', baseTime, undefined, 'deleted'),
       ];
       const res = filterItemsForPush(items, [], null);
       expect(res.totalCandidates).toBe(0);
@@ -310,15 +361,16 @@ describe('github pre-filter', () => {
         makeItem('C', newer, 3),   // included
         makeItem('D', older),      // new item, included
         makeItem('E', newer, 5),   // included
-        makeItem('F', older, 6, 'deleted'), // excluded from candidates
+        makeItem('F', older, 6, 'deleted'), // deleted + has issue -> candidate, but older -> skipped
+        makeItem('G', older, undefined, 'deleted'), // deleted + no issue -> excluded from candidates
       ];
       const res = filterItemsForPush(items, [], lastPush);
-      // totalCandidates = 5 (F excluded as deleted)
+      // totalCandidates = 6 (G excluded as deleted without githubIssueNumber)
       // filtered = C, D, E => 3
-      // skipped = A, B => 2
-      expect(res.totalCandidates).toBe(5);
+      // skipped = A, B, F => 3
+      expect(res.totalCandidates).toBe(6);
       expect(res.filteredItems.length).toBe(3);
-      expect(res.skippedCount).toBe(2);
+      expect(res.skippedCount).toBe(3);
       // Verify the log message can be constructed from these values:
       // "Processing 3 of 5 items (2 skipped, unchanged since last push)"
     });
