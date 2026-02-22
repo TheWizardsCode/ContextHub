@@ -164,8 +164,14 @@ export async function loadPlugin(
     const errorMessage = error instanceof Error ? error.message : String(error);
     
     logger.warn(`Warning: plugin ${name} skipped: ${errorMessage}`);
+
+    // In verbose mode, emit full error details (stack trace when available,
+    // otherwise the complete error representation) so users can diagnose
+    // plugin load failures.
     if (error instanceof Error && error.stack) {
       logger.debug(`Plugin ${name} load error stack:\n${error.stack}`);
+    } else {
+      logger.debug(`Plugin ${name} load error details: ${String(error)}`);
     }
     
     return {
