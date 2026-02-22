@@ -274,4 +274,186 @@ describe('github-sync deleted item handling', () => {
     expect(result.skipped).toBe(1);
     expect(result.created).toBe(0);
   });
+
+  // AC3: Deleted item whose GitHub issue is already closed results in no error (no-op)
+  it('deleted item whose GitHub issue is already closed succeeds without error', async () => {
+    // Simulate an already-closed issue: updateGithubIssueAsync still succeeds
+    // (GitHub API returns success when closing an already-closed issue)
+    const deletedItem = makeItem({
+      id: 'DELETED-ALREADY-CLOSED',
+      status: 'deleted',
+      githubIssueNumber: 77,
+      githubIssueUpdatedAt: baseTime,
+      updatedAt: laterTime,
+    });
+
+    const { result } = await upsertIssuesFromWorkItems(
+      [deletedItem],
+      [],
+      dummyConfig as any,
+    );
+
+    // The update call should succeed — closing an already-closed issue is a no-op
+    expect(updateGithubIssueAsync).toHaveBeenCalledTimes(1);
+    expect(updateGithubIssueAsync).toHaveBeenCalledWith(
+      expect.anything(),
+      77,
+      expect.objectContaining({ state: 'closed' }),
+    );
+    expect(result.errors).toHaveLength(0);
+    expect(result.updated).toBe(1);
+  });
+
+  // AC5: Force mode — all deleted items with githubIssueNumber are processed at sync level.
+  // When items are not pre-filtered (simulating force mode by passing all items directly),
+  // every deleted item with a githubIssueNumber reaches upsertMapper and gets updated.
+  it('all deleted items with githubIssueNumber are processed when passed to sync (force mode)', async () => {
+    const deleted1 = makeItem({
+      id: 'FORCE-DEL-1',
+      status: 'deleted',
+      githubIssueNumber: 301,
+      githubIssueUpdatedAt: baseTime,
+      updatedAt: laterTime,
+    });
+    const deleted2 = makeItem({
+      id: 'FORCE-DEL-2',
+      status: 'deleted',
+      githubIssueNumber: 302,
+      githubIssueUpdatedAt: baseTime,
+      updatedAt: laterTime,
+    });
+    const deletedNoIssue = makeItem({
+      id: 'FORCE-DEL-NO-ISSUE',
+      status: 'deleted',
+      // no githubIssueNumber — should be skipped even in force mode
+    });
+
+    const { result } = await upsertIssuesFromWorkItems(
+      [deleted1, deleted2, deletedNoIssue],
+      [],
+      dummyConfig as any,
+    );
+
+    // Both deleted items with githubIssueNumber should be updated
+    expect(updateGithubIssueAsync).toHaveBeenCalledTimes(2);
+    expect(updateGithubIssueAsync).toHaveBeenCalledWith(
+      expect.anything(),
+      301,
+      expect.objectContaining({ state: 'closed' }),
+    );
+    expect(updateGithubIssueAsync).toHaveBeenCalledWith(
+      expect.anything(),
+      302,
+      expect.objectContaining({ state: 'closed' }),
+    );
+    // No issues should be created
+    expect(createGithubIssueAsync).not.toHaveBeenCalled();
+    expect(result.updated).toBe(2);
+    expect(result.created).toBe(0);
+    // deletedNoIssue is excluded by the filter
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  // AC7: Comprehensive mixed set — deleted, new, changed, unchanged items
+  it('mixed set of deleted, new, changed, unchanged items produces correct counts', async () => {
+    const newItem = makeItem({
+      id: 'NEW-ITEM',
+      status: 'open',
+      // no githubIssueNumber — will be created
+      updatedAt: laterTime,
+    });
+    const changedItem = makeItem({
+      id: 'CHANGED-ITEM',
+      status: 'open',
+      githubIssueNumber: 500,
+      githubIssueUpdatedAt: baseTime,
+      updatedAt: laterTime, // updatedAt > githubIssueUpdatedAt => changed
+    });
+    const unchangedItem = makeItem({
+      id: 'UNCHANGED-ITEM',
+      status: 'open',
+      githubIssueNumber: 501,
+      githubIssueUpdatedAt: laterTime,
+      updatedAt: baseTime, // updatedAt < githubIssueUpdatedAt => unchanged
+    });
+    const deletedWithIssue = makeItem({
+      id: 'DELETED-ITEM',
+      status: 'deleted',
+      githubIssueNumber: 502,
+      githubIssueUpdatedAt: baseTime,
+      updatedAt: laterTime, // changed since last sync
+    });
+    const deletedNoIssue = makeItem({
+      id: 'DELETED-NO-ISSUE',
+      status: 'deleted',
+      // no githubIssueNumber — excluded by filter
+    });
+
+    const { result } = await upsertIssuesFromWorkItems(
+      [newItem, changedItem, unchangedItem, deletedWithIssue, deletedNoIssue],
+      [],
+      dummyConfig as any,
+    );
+
+    // newItem -> created (1)
+    expect(createGithubIssueAsync).toHaveBeenCalledTimes(1);
+    expect(result.created).toBe(1);
+
+    // changedItem -> updated, deletedWithIssue -> updated (state: closed)
+    expect(updateGithubIssueAsync).toHaveBeenCalledTimes(2);
+    expect(updateGithubIssueAsync).toHaveBeenCalledWith(
+      expect.anything(),
+      500,
+      expect.objectContaining({ state: 'open' }),
+    );
+    expect(updateGithubIssueAsync).toHaveBeenCalledWith(
+      expect.anything(),
+      502,
+      expect.objectContaining({ state: 'closed' }),
+    );
+    expect(result.updated).toBe(2);
+
+    // unchangedItem skipped by timestamp check, deletedNoIssue excluded by filter
+    expect(result.skipped).toBe(2);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  // AC6: Deleted parent does not participate in hierarchy linking
+  it('deleted parent item does not participate in hierarchy linking', async () => {
+    const deletedParent = makeItem({
+      id: 'DEL-PARENT',
+      status: 'deleted',
+      githubIssueNumber: 600,
+      githubIssueUpdatedAt: baseTime,
+      updatedAt: laterTime,
+    });
+    const activeChild = makeItem({
+      id: 'ACTIVE-CHILD',
+      status: 'open',
+      parentId: 'DEL-PARENT',
+      githubIssueNumber: 601,
+      githubIssueUpdatedAt: baseTime,
+      updatedAt: laterTime,
+    });
+
+    const verboseMessages: string[] = [];
+    await upsertIssuesFromWorkItems(
+      [deletedParent, activeChild],
+      [],
+      dummyConfig as any,
+      undefined,
+      (msg) => verboseMessages.push(msg),
+    );
+
+    // No hierarchy pair should be formed between deleted parent and active child
+    // The hierarchy code skips items whose parent has status === 'deleted'
+    const hierarchyPairMessages = verboseMessages.filter(
+      m => m.includes('[hierarchy]') && m.includes('600') && m.includes('601'),
+    );
+    expect(hierarchyPairMessages).toHaveLength(0);
+
+    // getIssueHierarchyAsync should not be called for the deleted parent -> child pair
+    expect(getIssueHierarchyAsync).not.toHaveBeenCalled();
+  });
 });
