@@ -238,6 +238,74 @@ describe('Plugin Loader', () => {
       }
     });
 
+    it('should log full error stack to stderr when verbose is true', async () => {
+      const program = new Command();
+      const ctx = createPluginContext(program);
+      
+      const pluginPath = path.join(pluginDir, 'verbose-plugin.mjs');
+      fs.writeFileSync(pluginPath, `
+        export default function register(ctx) {
+          throw new Error('verbose failure');
+        }
+      `);
+      
+      const stderrChunks: string[] = [];
+      const origConsoleError = console.error;
+      console.error = (...args: any[]) => {
+        stderrChunks.push(args.map(a => String(a)).join(' '));
+      };
+
+      try {
+        const result = await loadPlugin(pluginPath, ctx, true);
+        
+        expect(result.loaded).toBe(false);
+        expect(result.error).toContain('verbose failure');
+
+        const stderrOutput = stderrChunks.join('\n');
+        // Warning line should still be present
+        expect(stderrOutput).toContain('Warning: plugin verbose-plugin.mjs skipped:');
+        // With verbose, the full stack trace should be logged via logger.debug()
+        expect(stderrOutput).toContain('Plugin verbose-plugin.mjs load error stack:');
+        expect(stderrOutput).toContain('verbose failure');
+      } finally {
+        console.error = origConsoleError;
+      }
+    });
+
+    it('should NOT log stack trace to stderr when verbose is false', async () => {
+      const program = new Command();
+      const ctx = createPluginContext(program);
+      
+      const pluginPath = path.join(pluginDir, 'quiet-plugin.mjs');
+      fs.writeFileSync(pluginPath, `
+        export default function register(ctx) {
+          throw new Error('quiet failure');
+        }
+      `);
+      
+      const stderrChunks: string[] = [];
+      const origConsoleError = console.error;
+      console.error = (...args: any[]) => {
+        stderrChunks.push(args.map(a => String(a)).join(' '));
+      };
+
+      try {
+        const result = await loadPlugin(pluginPath, ctx, false);
+        
+        expect(result.loaded).toBe(false);
+        expect(result.error).toContain('quiet failure');
+
+        const stderrOutput = stderrChunks.join('\n');
+        // Warning line should be present
+        expect(stderrOutput).toContain('Warning: plugin quiet-plugin.mjs skipped:');
+        // Without verbose, NO stack trace should appear
+        expect(stderrOutput).not.toContain('load error stack:');
+        expect(stderrOutput).not.toContain('load error details:');
+      } finally {
+        console.error = origConsoleError;
+      }
+    });
+
     it('should fail when plugin file has syntax errors', async () => {
       const program = new Command();
       const ctx = createPluginContext(program);
