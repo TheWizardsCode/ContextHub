@@ -595,6 +595,17 @@ async function withTempWorktree<T>(
     if (!hasRemote) {
       // Create an orphan local branch name; it doesn't need to include refs/.
       const localBranchName = target.branch.startsWith('refs/') ? target.branch.slice('refs/'.length) : target.branch;
+
+      // If the local branch already exists (e.g. from a previous sync), delete it
+      // first so that `checkout --orphan` can succeed.
+      try {
+        await execAsync(`git show-ref --verify --quiet ${escapeShellArg('refs/heads/' + localBranchName)}`);
+        // Branch exists — delete it so the orphan checkout below can recreate it.
+        await execAsync(`git branch -D ${escapeShellArg(localBranchName)}`);
+      } catch {
+        // Branch does not exist — this is the first sync, proceed normally.
+      }
+
       await execAsync(`git -C ${escapeShellArg(worktreePath)} checkout --orphan ${escapeShellArg(localBranchName)}`);
       // `checkout --orphan` keeps the index populated with the previously checked-out files.
       // Clear the index + working tree so the branch starts empty.

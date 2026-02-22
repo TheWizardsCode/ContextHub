@@ -349,6 +349,14 @@ case "$1" in
       fi
     fi
 
+    # Fail if the resolved remote path does not exist as a directory.
+    # This mirrors real git's behavior when the remote is unreachable.
+    if [ -n "$remotePath" ] && ! [ -d "$remotePath" ]; then
+      log "FETCH failed: remote path '$remotePath' does not exist"
+      echo "fatal: '$remotePath' does not appear to be a git repository" >&2
+      exit 128
+    fi
+
     for a in "${@:2}"; do
       # detect refspecs containing ':'
       case "$a" in
@@ -491,6 +499,25 @@ case "$1" in
         fi
       done
     fi
+    exit 0
+    ;;
+  branch)
+    # support `git branch -D <name>`: delete the local branch ref
+    if [ "$2" = "-D" ] && [ -n "$3" ]; then
+      branchName="$3"
+      # strip surrounding quotes
+      branchName=$(echo "$branchName" | sed "s/^'//;s/'$//")
+      refFile=".git/refs/heads/$branchName"
+      if [ -f "$refFile" ]; then
+        rm -f "$refFile"
+        log "branch -D deleted $refFile"
+        exit 0
+      else
+        echo "error: branch '$branchName' not found." >&2
+        exit 1
+      fi
+    fi
+    # default no-op for other branch commands
     exit 0
     ;;
   config)
