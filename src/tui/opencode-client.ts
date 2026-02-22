@@ -432,7 +432,7 @@ export class OpencodeClient {
             return;
           }
           const appendedInstruction = 'Ask no Questions. Require no further input. If you cannot proceed without further input then explain why.';
-          const workItemInstruction = `The work item for this request is ${sessionWorkItemId}`;
+          const workItemInstruction = `The currently selected work item is ${sessionWorkItemId}`;
           finalPrompt = `${finalPrompt}\n\n${appendedInstruction}\n${workItemInstruction}`;
 
           safePushLine('');
@@ -1050,6 +1050,11 @@ export class OpencodeClient {
 
     if (dataType === 'message.updated' && data.properties?.info) {
       const info = data.properties.info;
+      const updatedSessionId = this.getSessionId(info) || this.getSessionId(data.properties) || this.getSessionId(data);
+      if (updatedSessionId && updatedSessionId !== sessionId) {
+        this.options.log(`sse message.updated ignored session=${updatedSessionId ?? 'unknown'}`);
+        return;
+      }
       const messageId = info.id;
       const messageRole = info.role;
       if (messageId && messageRole) {
@@ -1058,10 +1063,12 @@ export class OpencodeClient {
           setLastUserMessageId(messageId);
         }
         this.options.log(`sse message updated role=${messageRole} id=${messageId}`);
-        const completed = info?.time?.completed;
-        if (messageRole === 'assistant' && completed) {
-          handlers.onSessionEnd();
-        }
+        // Do NOT call onSessionEnd here. The message.updated event with
+        // time.completed can arrive before all message.part text events
+        // have been delivered, causing the SSE connection to abort and the
+        // assistant's text response to be lost.  Session termination is
+        // handled by the message.finish and session.status (idle) events
+        // which fire after all parts have been streamed.
       }
       return;
     }
