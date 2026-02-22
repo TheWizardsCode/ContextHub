@@ -264,21 +264,21 @@ describe('OpenCode autocomplete compact-mode integration', () => {
       await openHandler();
     }
 
-    // If the controller's dynamic require() didn't attach the autocomplete
-    // module (common in test environments), wire it manually so the
-    // integration tests exercise the real module.
+    // The controller now uses a static import and always initializes the
+    // autocomplete module. Verify it was wired correctly.
     if (!(built.textarea as any).__opencode_autocomplete) {
+      // In test environments the controller may not have fully initialized
+      // the autocomplete module (e.g. if blessed mocks prevent start() from
+      // reaching the wiring code). Wire it manually as a test-only fallback.
       const inst = initAutocomplete(
         { textarea: built.textarea, suggestionHint: built.suggestionHint },
         {
           availableCommands: AVAILABLE_COMMANDS,
           onSuggestionChange: (_active: boolean) => {
-            // Mirror the controller's callback: re-run compact layout
             try {
               const value = built.textarea.getValue ? built.textarea.getValue() : '';
               const visualLines = value.split('\n').length;
               const desiredHeight = Math.min(Math.max(MIN_INPUT_HEIGHT, visualLines + 2), 9);
-              // Replicate compact layout logic
               const hasSugg = inst.hasSuggestion();
               const extra = hasSugg ? 1 : 0;
               built.dialog.height = desiredHeight + extra;
