@@ -317,6 +317,11 @@ Mirror work items and comments with GitHub Issues.
 Subcommands:
 
 - `push` — Mirror work items to GitHub Issues. Options: `--repo <owner/name>`, `--label-prefix <prefix>`, `--prefix <prefix>`.
+ - `push` — Mirror work items to GitHub Issues. Options: `--repo <owner/name>`, `--label-prefix <prefix>`, `--prefix <prefix>`.
+   Additional push options:
+
+   - `--force` — Bypass the pre-filter and process all work items regardless of whether they changed since the last push. Useful when you want to re-sync everything.
+   - `--no-update-timestamp` — Do not write the repository last-push timestamp after a successful push. Use this when you want to run a push but avoid advancing the "last pushed" watermark.
 - `import` — Import updates from GitHub Issues. Options: `--repo <owner/name>`, `--label-prefix <prefix>`, `--since <ISO timestamp>`, `--create-new`, `--prefix <prefix>`.
 
 Examples:
@@ -324,6 +329,16 @@ Examples:
 ```sh
 wl github push --repo myorg/myrepo
 wl gh import --repo myorg/myrepo --since 2025-12-01T00:00:00Z --create-new
+
+Examples demonstrating the new push flags:
+
+```sh
+# Force a full re-sync (bypass pre-filter)
+wl github push --repo myorg/myrepo --force
+
+# Push but do not update the recorded last-push timestamp
+wl github push --repo myorg/myrepo --no-update-timestamp
+```
 ```
 
 Example (JSON / label prefix):

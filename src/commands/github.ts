@@ -40,6 +40,8 @@ export default function register(ctx: PluginContext): void {
     .description('Mirror work items to GitHub Issues')
     .option('--repo <owner/name>', 'GitHub repo (owner/name)')
     .option('--label-prefix <prefix>', 'Label prefix for Worklog labels (default: wl:)')
+    .option('--force', 'Bypass pre-filter and process all items')
+    .option('--no-update-timestamp', 'Do not write last-push timestamp after push')
     .option('--prefix <prefix>', 'Override the default prefix')
     .action(async (options) => {
       utils.requireInitialized();
@@ -87,12 +89,44 @@ export default function register(ctx: PluginContext): void {
         const items = db.getAll();
         const comments = db.getAllComments();
 
+        let itemsToProcess = items;
+        let commentsToProcess = comments;
+        let lastPush: string | null = null;
+        // Pass DB to timestamp helpers when available so they may use metadata
+        const dbForMetadata = typeof db.getAll === 'function' && typeof (db as any).store === 'object' ? (db as any).store : undefined;
+
+        if (options.force) {
+          // Bypass pre-filter when --force specified
+          if (!isJsonMode) console.log('Force push: processing all items (pre-filter bypassed)');
+          logLine('github push: force mode enabled - processing all items');
+        } else {
+          // Pre-filter items to only those changed since last push or never pushed
+          try {
+            const { readLastPushTimestamp, filterItemsForPush } = await import('../github-pre-filter.js');
+            lastPush = readLastPushTimestamp(dbForMetadata);
+            const { filteredItems, filteredComments, totalCandidates, skippedCount } = filterItemsForPush(items, comments, lastPush);
+            itemsToProcess = filteredItems;
+            commentsToProcess = filteredComments;
+            if (!isJsonMode) {
+              console.log(`Processing ${itemsToProcess.length} of ${totalCandidates} items (${skippedCount} skipped, unchanged since last push)`);
+            }
+            logLine(`github push: pre-filtered items lastPush=${lastPush ?? 'none'} processed=${itemsToProcess.length} totalCandidates=${totalCandidates} skipped=${skippedCount}`);
+          } catch (err) {
+            // If pre-filter module fails, fall back to original behavior but log the error
+            const msg = `Pre-filter failed: ${(err as Error).message}. Continuing without pre-filter.`;
+            if (!isJsonMode) console.error(msg);
+            logLine(`github push: ${msg}`);
+            itemsToProcess = items;
+            commentsToProcess = comments;
+          }
+        }
+
         const verboseLog = isVerbose && !isJsonMode
           ? (message: string) => console.log(message)
           : undefined;
         const { updatedItems, result, timing } = await upsertIssuesFromWorkItems(
-          items,
-          comments,
+          itemsToProcess,
+          commentsToProcess,
           githubConfig,
           renderProgress,
           verboseLog,
@@ -104,6 +138,30 @@ export default function register(ctx: PluginContext): void {
         );
         if (updatedItems.length > 0) {
           db.import(updatedItems);
+        }
+
+        // Update the last-push timestamp unless --no-update-timestamp was provided.
+          try {
+            const { writeLastPushTimestamp } = await import('../github-pre-filter.js');
+            const nowIso = new Date().toISOString();
+          // Commander creates a negated option as `updateTimestamp` (true by default)
+          // while some callers may inspect `noUpdateTimestamp`. Support both forms here.
+          const skipUpdateTimestamp = Boolean(options.noUpdateTimestamp) || options.updateTimestamp === false;
+           if (skipUpdateTimestamp) {
+              logLine('github push: skipping last-push timestamp update due to --no-update-timestamp');
+              if (!isJsonMode) console.log('Note: last-push timestamp was not updated (--no-update-timestamp)');
+            } else {
+            writeLastPushTimestamp(nowIso, dbForMetadata);
+            if (options.force) {
+              // In force mode still update timestamp but record that it was a forced push
+              logLine(`github push: force push completed - lastPush updated to ${nowIso}`);
+            } else {
+              logLine(`github push: lastPush updated from ${lastPush ?? 'none'} to ${nowIso}`);
+            }
+          }
+        } catch (_err) {
+          // non-fatal
+          logLine('github push: failed to write last-push timestamp');
         }
 
         logLine(`Repo ${githubConfig.repo}`);
@@ -128,6 +186,7 @@ export default function register(ctx: PluginContext): void {
           console.log(`  Created: ${result.created}`);
           console.log(`  Updated: ${result.updated}`);
           console.log(`  Skipped: ${result.skipped}`);
+          if (options.force) console.log('  Note: --force was used; pre-filter was bypassed');
           if ((result.commentsCreated || 0) > 0 || (result.commentsUpdated || 0) > 0) {
             console.log(`  Comments created: ${result.commentsCreated || 0}`);
             console.log(`  Comments updated: ${result.commentsUpdated || 0}`);
