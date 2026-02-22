@@ -74,7 +74,7 @@ export async function upsertIssuesFromWorkItems(
   const startTime = Date.now();
   const beforeMetrics = snapshot();
   const labelPrefix = normalizeGithubLabelPrefix(config.labelPrefix);
-  const issueItems = items.filter(item => item.status !== 'deleted');
+  const issueItems = items.filter(item => item.status !== 'deleted' || item.githubIssueNumber != null);
   const linkedPairs = new Set<string>();
   let linkedCount = 0;
   const nodeIdCache = new Map<number, string>();
@@ -235,6 +235,14 @@ export async function upsertIssuesFromWorkItems(
   async function upsertMapper(item: WorkItem, idx: number) {
     if (onProgress) {
       onProgress({ phase: 'push', current: idx + 1, total: issueItems.length });
+    }
+    // Guard: skip deleted items that have no GitHub issue (prevent accidental creation)
+    if (item.status === 'deleted' && !item.githubIssueNumber) {
+      if (onVerboseLog) {
+        onVerboseLog(`[upsert] skip deleted item ${item.id} (no githubIssueNumber)`);
+      }
+      skippedUpdates += 1;
+      return;
     }
     const itemComments = byItemId.get(item.id) || [];
     const shouldSyncComments = commentNeedsSync(item, itemComments);
