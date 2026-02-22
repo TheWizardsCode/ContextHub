@@ -6,7 +6,7 @@ import { resolveWorklogDir } from './worklog-paths.js';
 export interface PreFilterResult {
   filteredItems: WorkItem[];
   filteredComments: Comment[];
-  totalCandidates: number; // items considered (excluding deleted)
+  totalCandidates: number; // items considered (excluding deleted items without githubIssueNumber)
   skippedCount: number;
 }
 
@@ -73,9 +73,17 @@ function isValidIso(iso?: string | null): boolean {
 }
 
 export function filterItemsForPush(items: WorkItem[], comments: Comment[], lastPushTimestamp: string | null): PreFilterResult {
-  // Exclude deleted items entirely from consideration
-  const candidates = items.filter(i => i.status !== 'deleted');
-  // If no timestamp recorded, return all candidates and all comments
+  // Exclude deleted items that have no githubIssueNumber (they can never be
+  // closed on GitHub). Deleted items WITH a githubIssueNumber are kept so
+  // their corresponding GitHub issues can be closed.
+  const candidates = items.filter(i => {
+    if (i.status === 'deleted') {
+      return i.githubIssueNumber != null;
+    }
+    return true;
+  });
+
+  // If no timestamp recorded (first run / force mode), return all candidates
   if (!isValidIso(lastPushTimestamp)) {
     return {
       filteredItems: candidates,
