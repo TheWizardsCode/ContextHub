@@ -412,7 +412,11 @@ export async function upsertIssuesFromWorkItems(
       continue;
     }
     if (parent.githubIssueNumber && item.githubIssueNumber) {
-      linkedPairs.add(`${parent.githubIssueNumber}:${item.githubIssueNumber}`);
+      if (parent.githubIssueNumber === item.githubIssueNumber) {
+        if (onVerboseLog) onVerboseLog(`[hierarchy] skipping self-link: item ${item.id} and parent ${parent.id} both map to GitHub issue #${item.githubIssueNumber}`);
+      } else {
+        linkedPairs.add(`${parent.githubIssueNumber}:${item.githubIssueNumber}`);
+      }
     }
   }
 
