@@ -80,10 +80,48 @@ Type `/` in the OpenCode dialog to see available commands:
 
 - `/help` — Get help with OpenCode
 - `/edit` — Edit files with AI assistance
-- `/create` — Create new files
+- `/create` — Create a new Worklog work item
 - `/test` — Generate or run tests
 - `/fix` — Fix issues in code
 - Plus 20+ more commands
+
+### `/create` — Create Work Items from the TUI
+
+The `/create` command lets you create Worklog work items directly from the OpenCode prompt without leaving the TUI.
+
+**Usage:**
+
+```
+/create <short title or description of the work item>
+```
+
+The command automatically:
+
+- Generates a concise title (up to 72 characters) from your input.
+- Builds a detailed description containing the full verbatim text, creation metadata, and an "Open Questions" section if the input is ambiguous.
+- Chooses an appropriate issue-type and priority based on the description:
+  - Text mentioning bugs, errors, or failing tests defaults to `bug` / `high`.
+  - Text describing user-visible changes defaults to `feature` / `medium`.
+  - All other text defaults to `task` / `medium`.
+- Runs `wl create` and displays the resulting work-item JSON in the response pane.
+
+The new item is created at root level by default. To make it a child of a specific work item, say so explicitly (e.g., `/create child of WL-1234: add input validation`).
+
+**Examples:**
+
+```
+/create Fix login page redirect when session expires
+/create Investigate intermittent database connection errors seen in staging
+/create child of WL-1234: add unit tests for the auth module
+```
+
+**Security notes:**
+
+- The command only invokes `wl create`. It does not run arbitrary shell commands, modify repository files, or mutate existing work items.
+- All user input is passed via heredoc-style escaping to prevent shell injection.
+- Changes to permission scope (e.g., allowing edits to existing items) require Producer approval.
+
+For the full command specification, see `.opencode/command/create.md`. For the parent feature context, see Add /create OpenCode command for creating work items from TUI (WL-0MLSDIRLA0BXRCDB).
 
 ### Interactive Sessions
 
