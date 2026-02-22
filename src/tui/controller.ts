@@ -38,6 +38,7 @@ import { AVAILABLE_COMMANDS, MIN_INPUT_HEIGHT, MAX_INPUT_LINES, FOOTER_HEIGHT, O
   KEY_NAV_RIGHT, KEY_NAV_LEFT, KEY_TOGGLE_EXPAND, KEY_QUIT, KEY_ESCAPE, KEY_TOGGLE_HELP, KEY_CHORD_PREFIX, KEY_CHORD_FOLLOWUPS, KEY_OPEN_OPENCODE, KEY_OPEN_SEARCH,
   KEY_TAB, KEY_SHIFT_TAB, KEY_LEFT_SINGLE, KEY_RIGHT_SINGLE, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_FILTER_BLOCKED, KEY_FILTER_NEEDS_REVIEW, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW, KEY_MOVE } from './constants.js';
 import { theme } from '../theme.js';
+import { initAutocomplete, type AutocompleteInstance } from './opencode-autocomplete.js';
 
 type Item = WorkItem;
 
@@ -711,10 +712,9 @@ export class TuiController {
 
     // Command autocomplete support moved to src/tui/constants.ts
 
-    // Autocomplete state
-    let currentSuggestion = '';
-    let isCommandMode = false;
-    let userTypedText = '';
+    // Autocomplete instance — initialized when the dialog is first opened.
+    let autocompleteInstance: AutocompleteInstance | null = null;
+
     let isWaitingForResponse = false; // Track if we're waiting for OpenCode response
     let isLocalShellRunning = false;
     let localShellProcess: ChildProcess | null = null;
@@ -893,74 +893,23 @@ export class TuiController {
       screen.render();
     };
 
-    // Replace inline applyCommandSuggestion with extracted module usage when
-    // module is initialized below. Keep a fallback for tests that don't wire
-    // the module yet.
+    // Apply the current autocomplete suggestion using the extracted module.
     function applyCommandSuggestion(target: any) {
-      // Prefer using the extracted autocomplete instance when available.
-      try {
-        const inst = (target as any).__opencode_autocomplete;
-        if (inst && typeof inst.applySuggestion === 'function') {
-          const nextValue = inst.applySuggestion(target);
-          if (nextValue) {
-            try { setOpencodeCursorIndex(nextValue, nextValue.length); } catch (_) {}
-            updateOpencodeCursor();
-            isCommandMode = false;
-            currentSuggestion = '';
-            screen.render();
-            return true;
-          }
-        }
-      } catch (_) {}
-
-      if (isCommandMode && currentSuggestion) {
-        const nextValue = currentSuggestion + ' ';
-        try { if (typeof target.setValue === 'function') target.setValue(nextValue); } catch (_) {}
-        setOpencodeCursorIndex(nextValue, nextValue.length);
+      if (!autocompleteInstance) return false;
+      const nextValue = autocompleteInstance.applySuggestion(target);
+      if (nextValue) {
+        try { setOpencodeCursorIndex(nextValue, nextValue.length); } catch (_) {}
         updateOpencodeCursor();
-        currentSuggestion = '';
-        isCommandMode = false;
-        try { suggestionHint.setContent(''); } catch (_) {}
         screen.render();
         return true;
       }
       return false;
     }
 
-    // updateAutocomplete replaced by initAutocomplete usage below. Keep a
-    // tiny wrapper so existing call-sites continue to work until full
-    // migration is done.
+    // Delegate autocomplete updates to the extracted module.
     function updateAutocomplete() {
-      // For backwards compatibility call the module-based updater if present.
-      try {
-        if ((opencodeText as any).__opencode_autocomplete && typeof (opencodeText as any).__opencode_autocomplete.updateFromValue === 'function') {
-          (opencodeText as any).__opencode_autocomplete.updateFromValue();
-          return;
-        }
-      } catch (_) {}
-      // Fallback: simple inline behavior (preserve current behavior)
-      const value = opencodeText.getValue ? opencodeText.getValue() : '';
-      userTypedText = value;
-      const lines = value.split('\n');
-      const commandLine = lines[0];
-      if (commandLine.startsWith('/') && lines.length === 1) {
-        isCommandMode = true;
-        const input = commandLine.toLowerCase();
-        const matches = AVAILABLE_COMMANDS.filter(cmd => cmd.toLowerCase().startsWith(input));
-        if (matches.length > 0 && matches[0] !== input) {
-          currentSuggestion = matches[0];
-          try { suggestionHint.setContent(`{gray-fg}↳ ${currentSuggestion} [Tab]{/gray-fg}`); } catch (_) {}
-          try { suggestionHint.show(); } catch (_) {}
-        } else {
-          currentSuggestion = '';
-          try { suggestionHint.setContent(''); } catch (_) {}
-          try { suggestionHint.hide(); } catch (_) {}
-        }
-      } else {
-        isCommandMode = false;
-        currentSuggestion = '';
-        try { suggestionHint.setContent(''); } catch (_) {}
-        try { suggestionHint.hide(); } catch (_) {}
+      if (autocompleteInstance) {
+        autocompleteInstance.updateFromValue();
       }
       try { updateOpencodeInputLayout(); } catch (_) {}
       screen.render();
@@ -1151,9 +1100,7 @@ export class TuiController {
     const applyOpencodeCompactLayout = (desiredHeight: number) => {
       // When a suggestion is active, grow the dialog by 1 row to make
       // room for the hint line below the textarea.
-      const hasSugg = typeof (opencodeText as any).__opencode_autocomplete?.hasSuggestion === 'function'
-        ? (opencodeText as any).__opencode_autocomplete.hasSuggestion()
-        : (currentSuggestion !== undefined && currentSuggestion !== null && currentSuggestion !== '');
+      const hasSugg = autocompleteInstance?.hasSuggestion() ?? false;
       const extra = hasSugg ? 1 : 0;
       const effectiveHeight = desiredHeight + extra;
 
@@ -1232,9 +1179,7 @@ export class TuiController {
       setOpencodeCursorIndex('', 0);
       
       // Reset autocomplete state
-      currentSuggestion = '';
-      isCommandMode = false;
-      userTypedText = '';
+      if (autocompleteInstance) { autocompleteInstance.reset(); }
       suggestionHint.setContent('');
       opencodeText.focus();
       paneFocusIndex = getFocusPanes().indexOf(opencodeDialog);
@@ -1562,25 +1507,19 @@ export class TuiController {
       };
     try { (opencodeText as any).__opencode_key_k = opencodeTextKHandler; opencodeText.key(KEY_K, opencodeTextKHandler); } catch (_) {}
     
-    // Wire extracted autocomplete module onto the textarea so tests and
-    // other callers can use it. Require the module dynamically to avoid
-    // affecting environments that don't need it (tests will import it).
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const initAutocomplete = require('./opencode-autocomplete').default ?? require('./opencode-autocomplete');
-      const instance = initAutocomplete({ textarea: opencodeText, suggestionHint }, {
-        availableCommands: AVAILABLE_COMMANDS,
-        onSuggestionChange: (_active: boolean) => {
-          // Re-run the compact layout so the dialog grows/shrinks to
-          // accommodate the suggestion hint row.
-          try { updateOpencodeInputLayout(); } catch (_) {}
-        },
-      });
-      // expose a reference for tests / future updates
-      (opencodeText as any).__opencode_autocomplete = instance;
-    } catch (_) {
-      // ignore if module can't be loaded
-    }
+    // Initialize the extracted autocomplete module and wire it to the
+    // textarea widget. The module is statically imported at the top of
+    // this file so it is always available.
+    autocompleteInstance = initAutocomplete({ textarea: opencodeText, suggestionHint }, {
+      availableCommands: AVAILABLE_COMMANDS,
+      onSuggestionChange: (_active: boolean) => {
+        // Re-run the compact layout so the dialog grows/shrinks to
+        // accommodate the suggestion hint row.
+        try { updateOpencodeInputLayout(); } catch (_) {}
+      },
+    });
+    // Expose the instance on the widget for tests that inspect it.
+    (opencodeText as any).__opencode_autocomplete = autocompleteInstance;
 
 
     // Pressing Escape while the dialog (or any child) is focused should
