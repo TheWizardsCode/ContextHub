@@ -24,7 +24,7 @@ Behavioral notes for the agent handling this command:
   - If the text contains words like "bug", "fix", "error", or describes a failing test, prefer issue-type `bug` and priority `high`.
   - If the text describes a user-visible change or feature, prefer `feature` and priority `medium`.
   - Otherwise default to issue-type `task` and priority `medium`.
-- Attempt to identify a single obvious dependency by looking for WL-IDs in the text (e.g. WL-1234) and include it as `--parent` if found.
+- Do NOT automatically set a parent. The work item ID provided as context (e.g. "The work item for this request is WL-XXXX") is the currently selected item in the TUI and must NOT be used as `--parent`. Only include `--parent <ID>` if the user explicitly states that the new item should be a child of a specific work item (e.g. "child of WL-1234", "subtask of WL-1234", "under WL-1234").
 
 Execution (what the command should run):
 

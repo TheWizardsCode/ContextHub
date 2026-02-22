@@ -432,7 +432,7 @@ export class OpencodeClient {
             return;
           }
           const appendedInstruction = 'Ask no Questions. Require no further input. If you cannot proceed without further input then explain why.';
-          const workItemInstruction = `The work item for this request is ${sessionWorkItemId}`;
+          const workItemInstruction = `The currently selected work item for context is ${sessionWorkItemId}. This is NOT a parent — do not use it as --parent when creating new work items unless the user explicitly requests it.`;
           finalPrompt = `${finalPrompt}\n\n${appendedInstruction}\n${workItemInstruction}`;
 
           safePushLine('');
