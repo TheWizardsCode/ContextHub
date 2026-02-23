@@ -27,6 +27,8 @@ export interface FileLockOptions {
   timeout?: number;
   /** If true, stale locks from dead processes are automatically removed (default true). */
   staleLockCleanup?: boolean;
+  /** Maximum age of a lock file in milliseconds before it is treated as stale regardless of PID status (default 300 000 = 5 minutes). */
+  maxLockAge?: number;
 }
 
 export interface FileLockInfo {
@@ -42,6 +44,7 @@ export interface FileLockInfo {
 const DEFAULT_RETRIES = 50;
 const DEFAULT_RETRY_DELAY_MS = 100;
 const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_MAX_LOCK_AGE_MS = 300_000; // 5 minutes
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -145,6 +148,7 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
   const retryDelay = options?.retryDelay ?? DEFAULT_RETRY_DELAY_MS;
   const timeout = options?.timeout ?? DEFAULT_TIMEOUT_MS;
   const staleLockCleanup = options?.staleLockCleanup ?? true;
+  const maxLockAge = options?.maxLockAge ?? DEFAULT_MAX_LOCK_AGE_MS;
 
   const deadline = Date.now() + timeout;
 
@@ -195,6 +199,21 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
             try {
               fs.unlinkSync(lockPath);
               // Don't increment attempt counter; retry immediately
+              continue;
+            } catch {
+              // Another process may have removed it; retry
+              continue;
+            }
+          }
+
+          // Age-based expiry: if the lock is older than maxLockAge,
+          // treat it as stale regardless of PID status.  This handles
+          // PID recycling and environments where PID checks are unreliable.
+          // Guard against clock skew: only expire if age is positive.
+          const lockAge = Date.now() - new Date(existing.acquiredAt).getTime();
+          if (lockAge > 0 && lockAge > maxLockAge) {
+            try {
+              fs.unlinkSync(lockPath);
               continue;
             } catch {
               // Another process may have removed it; retry
