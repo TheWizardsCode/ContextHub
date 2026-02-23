@@ -40,6 +40,7 @@ import { mergeWorkItems } from './sync.js';
 export interface GithubSyncResult {
   updated: number;
   created: number;
+  closed: number;
   skipped: number;
   errors: string[];
   commentsCreated?: number;
@@ -95,7 +96,7 @@ export async function upsertIssuesFromWorkItems(
   }
 
   const updatedItems: WorkItem[] = [...items];
-  const result: GithubSyncResult = { updated: 0, created: 0, skipped: 0, errors: [] };
+  const result: GithubSyncResult = { updated: 0, created: 0, closed: 0, skipped: 0, errors: [] };
   const updatedById = new Map<string, WorkItem>();
   let processed = 0;
   let skippedUpdates = 0;
@@ -276,7 +277,11 @@ export async function upsertIssuesFromWorkItems(
         if (item.githubIssueNumber) {
           increment('api.issue.update');
           issue = await updateGithubIssueAsync(config, item.githubIssueNumber, payload);
-          result.updated += 1;
+          if (item.status === 'deleted') {
+            result.closed += 1;
+          } else {
+            result.updated += 1;
+          }
         } else {
           increment('api.issue.create');
           issue = await createGithubIssueAsync(config, {

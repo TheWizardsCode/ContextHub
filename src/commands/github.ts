@@ -165,7 +165,7 @@ export default function register(ctx: PluginContext): void {
         }
 
         logLine(`Repo ${githubConfig.repo}`);
-        logLine(`Push summary created=${result.created} updated=${result.updated} skipped=${result.skipped}`);
+        logLine(`Push summary created=${result.created} updated=${result.updated} closed=${result.closed} skipped=${result.skipped}`);
         if ((result.commentsCreated || 0) > 0 || (result.commentsUpdated || 0) > 0) {
           logLine(`Comment summary created=${result.commentsCreated || 0} updated=${result.commentsUpdated || 0}`);
         }
@@ -185,6 +185,7 @@ export default function register(ctx: PluginContext): void {
           console.log(`GitHub sync complete (${githubConfig.repo})`);
           console.log(`  Created: ${result.created}`);
           console.log(`  Updated: ${result.updated}`);
+          console.log(`  Closed: ${result.closed}`);
           console.log(`  Skipped: ${result.skipped}`);
           if (options.force) console.log('  Note: --force was used; pre-filter was bypassed');
           if ((result.commentsCreated || 0) > 0 || (result.commentsUpdated || 0) > 0) {
