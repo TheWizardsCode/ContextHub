@@ -107,6 +107,52 @@ function sleepSync(ms: number): void {
   }
 }
 
+/**
+ * Format a lock's `acquiredAt` timestamp into a human-readable relative
+ * age string such as "12 minutes ago" or "3 seconds ago".
+ *
+ * Exported so that the `wl unlock` command can reuse it.
+ */
+export function formatLockAge(acquiredAt: string): string {
+  const ageMs = Date.now() - new Date(acquiredAt).getTime();
+  if (ageMs <= 0) {
+    return 'just now';
+  }
+  const seconds = Math.floor(ageMs / 1000);
+  if (seconds < 60) {
+    return `${seconds} ${seconds === 1 ? 'second' : 'seconds'} ago`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  return `${hours} ${hours === 1 ? 'hour' : 'hours'} ago`;
+}
+
+/**
+ * Build an enriched error message for lock acquisition failure.
+ * Includes lock file path, holder metadata, computed age, and recovery guidance.
+ */
+function buildLockErrorMessage(
+  lockPath: string,
+  reason: string,
+  lockInfo: FileLockInfo | null,
+): string {
+  const lines: string[] = [`Failed to acquire file lock at ${lockPath} (${reason})`];
+
+  if (lockInfo) {
+    const age = formatLockAge(lockInfo.acquiredAt);
+    lines.push(`  Held by PID ${lockInfo.pid} on ${lockInfo.hostname} since ${lockInfo.acquiredAt} (${age})`);
+  } else {
+    lines.push('  Lock file appears corrupted (corrupted lock file)');
+  }
+
+  lines.push("  Run 'wl unlock' to remove the stale lock.");
+
+  return lines.join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Reentrancy tracking
 // ---------------------------------------------------------------------------
@@ -169,11 +215,8 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
     // Check timeout
     if (Date.now() > deadline) {
       const existingInfo = readLockInfo(lockPath);
-      const holder = existingInfo
-        ? `held by PID ${existingInfo.pid} on ${existingInfo.hostname} since ${existingInfo.acquiredAt}`
-        : 'unknown holder';
       throw new Error(
-        `Failed to acquire file lock at ${lockPath} after ${timeout}ms timeout (${holder})`
+        buildLockErrorMessage(lockPath, `${timeout}ms timeout`, existingInfo)
       );
     }
 
@@ -248,11 +291,8 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
 
   // Exhausted all retries
   const existingInfo = readLockInfo(lockPath);
-  const holder = existingInfo
-    ? `held by PID ${existingInfo.pid} on ${existingInfo.hostname} since ${existingInfo.acquiredAt}`
-    : 'unknown holder';
   throw new Error(
-    `Failed to acquire file lock at ${lockPath} after ${retries} retries (${holder})`
+    buildLockErrorMessage(lockPath, `${retries} retries exhausted`, existingInfo)
   );
 }
 

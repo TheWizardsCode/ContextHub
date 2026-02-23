@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as childProcess from 'child_process';
-import { acquireFileLock, releaseFileLock, withFileLock, getLockPathForJsonl, isFileLockHeld, _resetLockState } from '../src/file-lock.js';
+import { acquireFileLock, releaseFileLock, withFileLock, getLockPathForJsonl, isFileLockHeld, _resetLockState, formatLockAge } from '../src/file-lock.js';
 import type { FileLockInfo } from '../src/file-lock.js';
 import { createTempDir, cleanupTempDir } from './test-utils.js';
 
@@ -507,6 +507,130 @@ describe('file-lock', () => {
       expect(() => {
         acquireFileLock(lockPath, { retries: 0, timeout: 100, maxLockAge: 5000 });
       }).toThrow(/Failed to acquire file lock/);
+    });
+  });
+
+  describe('error messages', () => {
+    it('should include lock file path in timeout error', () => {
+      const lockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
+
+      try {
+        acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+        expect.unreachable('should have thrown');
+      } catch (err: any) {
+        expect(err.message).toContain(lockPath);
+      }
+    });
+
+    it('should include holder PID, hostname, and acquiredAt in error', () => {
+      const lockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
+
+      try {
+        acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+        expect.unreachable('should have thrown');
+      } catch (err: any) {
+        expect(err.message).toContain(`PID ${process.pid}`);
+        expect(err.message).toContain(os.hostname());
+        expect(err.message).toContain(lockInfo.acquiredAt);
+      }
+    });
+
+    it('should include human-readable lock age in error', () => {
+      const lockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date(Date.now() - 12 * 60 * 1000).toISOString(), // 12 minutes ago
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
+
+      try {
+        // Use a maxLockAge larger than 12 minutes so the lock is NOT
+        // cleaned up by age-based expiry — we want the error to fire
+        // with the holder metadata intact so we can assert on the age string.
+        acquireFileLock(lockPath, { retries: 0, timeout: 100, maxLockAge: 60 * 60 * 1000 });
+        expect.unreachable('should have thrown');
+      } catch (err: any) {
+        expect(err.message).toMatch(/12 minutes? ago/);
+      }
+    });
+
+    it('should suggest wl unlock in error message', () => {
+      const lockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
+
+      try {
+        acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+        expect.unreachable('should have thrown');
+      } catch (err: any) {
+        expect(err.message).toContain('wl unlock');
+      }
+    });
+
+    it('should say corrupted lock file when lock info is unparseable', () => {
+      // Write garbage — but with staleLockCleanup disabled so it can't auto-recover
+      fs.writeFileSync(lockPath, 'not-json-content');
+
+      try {
+        acquireFileLock(lockPath, { retries: 0, timeout: 100, staleLockCleanup: false });
+        expect.unreachable('should have thrown');
+      } catch (err: any) {
+        expect(err.message).toContain('corrupted lock file');
+      }
+    });
+
+    it('should include enriched message in retries-exhausted error', () => {
+      const lockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date(Date.now() - 30000).toISOString(), // 30 seconds ago
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
+
+      try {
+        acquireFileLock(lockPath, { retries: 1, retryDelay: 10, timeout: 50000 });
+        expect.unreachable('should have thrown');
+      } catch (err: any) {
+        expect(err.message).toContain(lockPath);
+        expect(err.message).toContain(`PID ${process.pid}`);
+        expect(err.message).toContain('wl unlock');
+        expect(err.message).toMatch(/ago/);
+      }
+    });
+  });
+
+  describe('formatLockAge', () => {
+    it('should format seconds ago', () => {
+      const result = formatLockAge(new Date(Date.now() - 5000).toISOString());
+      expect(result).toMatch(/5 seconds? ago/);
+    });
+
+    it('should format minutes ago', () => {
+      const result = formatLockAge(new Date(Date.now() - 3 * 60 * 1000).toISOString());
+      expect(result).toMatch(/3 minutes? ago/);
+    });
+
+    it('should format hours ago', () => {
+      const result = formatLockAge(new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString());
+      expect(result).toMatch(/2 hours? ago/);
+    });
+
+    it('should handle future timestamps gracefully', () => {
+      const result = formatLockAge(new Date(Date.now() + 60000).toISOString());
+      expect(result).toMatch(/just now|0 seconds ago|in the future/);
     });
   });
 
