@@ -37,12 +37,27 @@ import {
 import { increment, snapshot, diff } from './github-metrics.js';
 import { mergeWorkItems } from './sync.js';
 
+export interface SyncedItem {
+  action: 'created' | 'updated' | 'closed';
+  id: string;
+  title: string;
+  issueNumber: number;
+}
+
+export interface SyncErrorItem {
+  id: string;
+  title: string;
+  error: string;
+}
+
 export interface GithubSyncResult {
   updated: number;
   created: number;
   closed: number;
   skipped: number;
   errors: string[];
+  syncedItems: SyncedItem[];
+  errorItems: SyncErrorItem[];
   commentsCreated?: number;
   commentsUpdated?: number;
 }
@@ -96,7 +111,7 @@ export async function upsertIssuesFromWorkItems(
   }
 
   const updatedItems: WorkItem[] = [...items];
-  const result: GithubSyncResult = { updated: 0, created: 0, closed: 0, skipped: 0, errors: [] };
+  const result: GithubSyncResult = { updated: 0, created: 0, closed: 0, skipped: 0, errors: [], syncedItems: [], errorItems: [] };
   const updatedById = new Map<string, WorkItem>();
   let processed = 0;
   let skippedUpdates = 0;
@@ -233,6 +248,9 @@ export async function upsertIssuesFromWorkItems(
   // Concurrency: upsert issues and comments with a bounded concurrency pool
   const upsertConcurrency = Number(process.env.WL_GITHUB_CONCURRENCY || '6');
 
+  const truncateTitle = (title: string, maxLen = 60): string =>
+    title.length <= maxLen ? title : title.slice(0, maxLen - 1) + '\u2026';
+
   async function upsertMapper(item: WorkItem, idx: number) {
     if (onProgress) {
       onProgress({ phase: 'push', current: idx + 1, total: issueItems.length });
@@ -279,8 +297,20 @@ export async function upsertIssuesFromWorkItems(
           issue = await updateGithubIssueAsync(config, item.githubIssueNumber, payload);
           if (item.status === 'deleted') {
             result.closed += 1;
+            result.syncedItems.push({
+              action: 'closed',
+              id: item.id,
+              title: truncateTitle(item.title),
+              issueNumber: item.githubIssueNumber,
+            });
           } else {
             result.updated += 1;
+            result.syncedItems.push({
+              action: 'updated',
+              id: item.id,
+              title: truncateTitle(item.title),
+              issueNumber: item.githubIssueNumber,
+            });
           }
         } else {
           increment('api.issue.create');
@@ -290,6 +320,12 @@ export async function upsertIssuesFromWorkItems(
             labels: payload.labels,
           });
           result.created += 1;
+          result.syncedItems.push({
+            action: 'created',
+            id: item.id,
+            title: truncateTitle(item.title),
+            issueNumber: issue.number,
+          });
         }
         timing.upsertMs += Date.now() - upsertStart;
         if (onVerboseLog) {
@@ -327,6 +363,11 @@ export async function upsertIssuesFromWorkItems(
       });
     } catch (error) {
       result.errors.push(`${item.id}: ${(error as Error).message}`);
+      result.errorItems.push({
+        id: item.id,
+        title: truncateTitle(item.title),
+        error: (error as Error).message,
+      });
       updatedById.set(item.id, item);
     }
   }
