@@ -9,6 +9,7 @@ import { WorkItem, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comm
 import { SqlitePersistentStore, FtsSearchResult } from './persistent-store.js';
 import { importFromJsonl, exportToJsonl, getDefaultDataPath } from './jsonl.js';
 import { mergeWorkItems, mergeComments } from './sync.js';
+import { withFileLock, getLockPathForJsonl } from './file-lock.js';
 
 const UNIQUE_TIME_LENGTH = 9;
 const UNIQUE_RANDOM_BYTES = 4;
@@ -24,6 +25,7 @@ export class WorklogDatabase {
   private silent: boolean;
   private autoSync: boolean;
   private syncProvider?: () => Promise<void>;
+  private lockPath: string;
 
   constructor(
     prefix: string = 'WI',
@@ -40,6 +42,7 @@ export class WorklogDatabase {
     this.silent = silent;
     this.autoSync = autoSync;
     this.syncProvider = syncProvider;
+    this.lockPath = getLockPathForJsonl(this.jsonlPath);
     
     // Use default DB path if not provided
     const defaultDbPath = path.join(path.dirname(this.jsonlPath), 'worklog.db');
@@ -73,27 +76,34 @@ export class WorklogDatabase {
       return; // No JSONL file, nothing to refresh from
     }
 
-    const jsonlStats = fs.statSync(this.jsonlPath);
-    const jsonlMtime = jsonlStats.mtimeMs;
+    // Hold the file lock while checking mtime and importing to prevent
+    // another process from writing between our stat and read.
+    withFileLock(this.lockPath, () => {
+      if (!fs.existsSync(this.jsonlPath)) {
+        return; // File may have been removed between our check and lock acquisition
+      }
 
-    const metadata = this.store.getAllMetadata();
-    const lastImportMtime = metadata.lastJsonlImportMtime;
-    const lastExportMtimeStr = this.store.getMetadata('lastJsonlExportMtime');
-    const lastExportMtime = lastExportMtimeStr ? Number(lastExportMtimeStr) : undefined;
+      const jsonlStats = fs.statSync(this.jsonlPath);
+      const jsonlMtime = jsonlStats.mtimeMs;
 
-    // If DB is empty or JSONL is newer, refresh from JSONL
-    const itemCount = this.store.countWorkItems();
-    // Avoid re-importing a file we just exported ourselves. If the JSONL mtime equals the
-    // last export mtime recorded in the DB, skip the refresh. Otherwise fall back to the
-    // previous logic (DB empty or JSONL newer than last import).
-    const isOurExport = lastExportMtime !== undefined && Math.abs(jsonlMtime - lastExportMtime) < 1;
-    const shouldRefresh = !isOurExport && (itemCount === 0 || !lastImportMtime || jsonlMtime > lastImportMtime);
+      const metadata = this.store.getAllMetadata();
+      const lastImportMtime = metadata.lastJsonlImportMtime;
+      const lastExportMtimeStr = this.store.getMetadata('lastJsonlExportMtime');
+      const lastExportMtime = lastExportMtimeStr ? Number(lastExportMtimeStr) : undefined;
 
-     if (shouldRefresh) {
-       if (!this.silent) {
-         // Debug: send to stderr so JSON stdout is preserved for --json mode
-         this.debug(`Refreshing database from ${this.jsonlPath}...`);
-       }
+      // If DB is empty or JSONL is newer, refresh from JSONL
+      const itemCount = this.store.countWorkItems();
+      // Avoid re-importing a file we just exported ourselves. If the JSONL mtime equals the
+      // last export mtime recorded in the DB, skip the refresh. Otherwise fall back to the
+      // previous logic (DB empty or JSONL newer than last import).
+      const isOurExport = lastExportMtime !== undefined && Math.abs(jsonlMtime - lastExportMtime) < 1;
+      const shouldRefresh = !isOurExport && (itemCount === 0 || !lastImportMtime || jsonlMtime > lastImportMtime);
+
+      if (shouldRefresh) {
+        if (!this.silent) {
+          // Debug: send to stderr so JSON stdout is preserved for --json mode
+          this.debug(`Refreshing database from ${this.jsonlPath}...`);
+        }
         const { items: jsonlItems, comments: jsonlComments, dependencyEdges } = importFromJsonl(this.jsonlPath);
         this.store.importData(jsonlItems, jsonlComments);
         for (const edge of dependencyEdges) {
@@ -101,15 +111,16 @@ export class WorklogDatabase {
             this.store.saveDependencyEdge(edge);
           }
         }
-       
-       // Update metadata
-       this.store.setMetadata('lastJsonlImportMtime', jsonlMtime.toString());
-       this.store.setMetadata('lastJsonlImportAt', new Date().toISOString());
-       
-       if (!this.silent) {
-         this.debug(`Loaded ${jsonlItems.length} work items and ${jsonlComments.length} comments from JSONL`);
-       }
-     }
+
+        // Update metadata
+        this.store.setMetadata('lastJsonlImportMtime', jsonlMtime.toString());
+        this.store.setMetadata('lastJsonlImportAt', new Date().toISOString());
+
+        if (!this.silent) {
+          this.debug(`Loaded ${jsonlItems.length} work items and ${jsonlComments.length} comments from JSONL`);
+        }
+      }
+    });
   }
 
   /**
@@ -122,38 +133,44 @@ export class WorklogDatabase {
     
     const items = this.store.getAllWorkItems();
     const comments = this.store.getAllComments();
-    let itemsToExport = items;
-    let commentsToExport = comments;
-    if (fs.existsSync(this.jsonlPath)) {
+    const dependencyEdges = this.store.getAllDependencyEdges();
+
+    // Hold the file lock for the entire read-merge-write cycle to prevent
+    // another process from reading a partially-written file or interleaving
+    // its own merge while we are writing.
+    withFileLock(this.lockPath, () => {
+      let itemsToExport = items;
+      let commentsToExport = comments;
+      if (fs.existsSync(this.jsonlPath)) {
+        try {
+          const { items: diskItems, comments: diskComments } = importFromJsonl(this.jsonlPath);
+          const itemMergeResult = mergeWorkItems(items, diskItems);
+          const commentMergeResult = mergeComments(comments, diskComments);
+          itemsToExport = itemMergeResult.merged;
+          commentsToExport = commentMergeResult.merged;
+        } catch (error) {
+          if (!this.silent) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.debug(`WorklogDatabase.exportToJsonl: merge failed, exporting local snapshot. ${message}`);
+          }
+        }
+      }
+      if (!this.silent) {
+        // Debug: use stderr for diagnostic logs
+        this.debug(`WorklogDatabase.exportToJsonl: exporting ${itemsToExport.length} items and ${commentsToExport.length} comments to ${this.jsonlPath}`);
+      }
       try {
-        const { items: diskItems, comments: diskComments } = importFromJsonl(this.jsonlPath);
-        const itemMergeResult = mergeWorkItems(items, diskItems);
-        const commentMergeResult = mergeComments(comments, diskComments);
-        itemsToExport = itemMergeResult.merged;
-        commentsToExport = commentMergeResult.merged;
+        const mtime = exportToJsonl(itemsToExport, commentsToExport, this.jsonlPath, dependencyEdges);
+        // Record export mtime so other processes can avoid re-importing our own export
+        this.store.setMetadata('lastJsonlExportMtime', String(Math.floor(mtime)));
+        this.store.setMetadata('lastJsonlExportAt', new Date().toISOString());
       } catch (error) {
         if (!this.silent) {
           const message = error instanceof Error ? error.message : String(error);
-          this.debug(`WorklogDatabase.exportToJsonl: merge failed, exporting local snapshot. ${message}`);
+          this.debug(`WorklogDatabase.exportToJsonl: failed to write JSONL: ${message}`);
         }
       }
-    }
-    if (!this.silent) {
-      // Debug: use stderr for diagnostic logs
-      this.debug(`WorklogDatabase.exportToJsonl: exporting ${itemsToExport.length} items and ${commentsToExport.length} comments to ${this.jsonlPath}`);
-    }
-    const dependencyEdges = this.store.getAllDependencyEdges();
-    try {
-      const mtime = exportToJsonl(itemsToExport, commentsToExport, this.jsonlPath, dependencyEdges);
-      // Record export mtime so other processes can avoid re-importing our own export
-      this.store.setMetadata('lastJsonlExportMtime', String(Math.floor(mtime)));
-      this.store.setMetadata('lastJsonlExportAt', new Date().toISOString());
-    } catch (error) {
-      if (!this.silent) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.debug(`WorklogDatabase.exportToJsonl: failed to write JSONL: ${message}`);
-      }
-    }
+    });
   }
 
   private debug(message: string): void {

@@ -12,6 +12,7 @@ import { importFromJsonlContent, exportToJsonl } from '../jsonl.js';
 import { loadConfig } from '../config.js';
 import { displayConflictDetails } from './helpers.js';
 import { createLogFileWriter, getWorklogLogPath, logConflictDetails } from '../logging.js';
+import { withFileLock, getLockPathForJsonl } from '../file-lock.js';
 import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import { promisify } from 'util';
@@ -282,15 +283,18 @@ export default function register(ctx: PluginContext): void {
       const gitBranch = options.gitBranch || defaults.gitBranch;
       
       try {
-        await performSync(program, dataPath, utils.getDatabase, {
-          file: options.file || dataPath,
-          prefix: options.prefix,
-          gitRemote,
-          gitBranch,
-          push: options.push ?? true,
-          dryRun: options.dryRun ?? false,
-          silent: false
-        });
+        const lockPath = getLockPathForJsonl(options.file || dataPath);
+        await withFileLock(lockPath, () =>
+          performSync(program, dataPath, utils.getDatabase, {
+            file: options.file || dataPath,
+            prefix: options.prefix,
+            gitRemote,
+            gitBranch,
+            push: options.push ?? true,
+            dryRun: options.dryRun ?? false,
+            silent: false
+          })
+        );
       } catch (error) {
         if (isJsonMode) {
           output.json({
