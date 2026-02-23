@@ -283,8 +283,8 @@ describe('Sort Operations', () => {
 
       const result = db.findNextWorkItem();
 
-      // Parent should be returned first
-      expect(result.workItem?.id).toBe(parent.id);
+      // Child should be returned since parent has open children to work on
+      expect(result.workItem?.id).toBe(child.id);
     });
   });
 
