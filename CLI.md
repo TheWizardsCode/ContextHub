@@ -265,10 +265,36 @@ Examples:
 ```sh
 wl list
 wl list -s open -p high
-wl list "signup"
+wl search "signup"
 wl -F concise list -s in-progress
 wl --json list -s open --tags backlog
 wl list --needs-producer-review
+```
+
+---
+
+### `search` <query> [options]
+
+Full-text search over work items using FTS5 (title, description, comments, tags). Returns ranked results with relevance snippets. Falls back to application-level search when FTS5 is unavailable.
+
+Options:
+
+`-s, --status <status>` (optional) — Filter results by status
+`--parent <id>` (optional) — Filter results by parent work item id
+`--tags <tags>` (optional) — Filter by tags (comma-separated)
+`-l, --limit <n>` (optional) — Maximum number of results (default: 20)
+`--rebuild-index` (optional) — Rebuild the FTS index from scratch before searching
+`--prefix <prefix>` (optional)
+`--json` (optional) — Output structured JSON with `id`, `title`, `status`, `priority`, `score`, `snippet`, `matchedField`
+
+Examples:
+
+```sh
+wl search "database corruption"
+wl search "memory leak" --status open
+wl search "authentication" --tags security,auth --limit 5
+wl --json search "cli refactor"
+wl search "rebuild" --rebuild-index
 ```
 
 ---
