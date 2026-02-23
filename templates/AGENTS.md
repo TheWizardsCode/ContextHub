@@ -171,6 +171,11 @@ wl list --assignee alice --json
 # List items filtered by stage (e.g. triage, review, done)
 wl list --stage review --json
 
+# Full-text search across all work items (title, description, comments, tags)
+wl search <keywords> --json
+# Search with status filter
+wl search <keywords> --status open --json
+
 # Show details for a specific work item
 wl show <work-item-id> --comments --json
 # Show details including child/subtask items

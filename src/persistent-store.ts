@@ -8,6 +8,20 @@ import * as path from 'path';
 import { WorkItem, Comment, DependencyEdge } from './types.js';
 import { listPendingMigrations } from './migrations/index.js';
 
+/**
+ * Result from a full-text search query
+ */
+export interface FtsSearchResult {
+  /** The work item ID */
+  itemId: string;
+  /** BM25 relevance score (lower = more relevant in SQLite FTS5) */
+  rank: number;
+  /** Snippet with highlighted matches */
+  snippet: string;
+  /** Which column the snippet was extracted from */
+  matchedColumn: string;
+}
+
 interface DbMetadata {
   lastJsonlImportMtime?: number;
   lastJsonlImportAt?: string;
@@ -56,6 +70,7 @@ export class SqlitePersistentStore {
   private db: Database.Database;
   private dbPath: string;
   private verbose: boolean;
+  private _ftsAvailable: boolean = false;
 
   constructor(dbPath: string, verbose: boolean = false) {
     this.dbPath = dbPath;
@@ -86,6 +101,16 @@ export class SqlitePersistentStore {
     } catch (error) {
       throw new Error(`Failed to initialize database schema: ${(error as Error).message}`);
     }
+
+    // Initialize FTS5 index (best-effort; falls back to app-level search if unavailable)
+    this._ftsAvailable = this.initializeFts();
+  }
+
+  /**
+   * Whether FTS5 full-text search is available in this SQLite build
+   */
+  get ftsAvailable(): boolean {
+    return this._ftsAvailable;
   }
 
   /**
@@ -649,6 +674,400 @@ export class SqlitePersistentStore {
     const stmt = this.db.prepare('DELETE FROM dependency_edges WHERE fromId = ? OR toId = ?');
     const result = stmt.run(itemId, itemId);
     return result.changes;
+  }
+
+  // ── FTS5 Full-Text Search ──────────────────────────────────────────
+
+  /**
+   * Detect whether FTS5 is available and create the virtual table if so.
+   * Returns true when FTS5 is usable, false otherwise (caller should fall
+   * back to application-level search).
+   */
+  private initializeFts(): boolean {
+    try {
+      // Probe FTS5 availability by attempting to compile a no-op statement
+      this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS _fts5_probe USING fts5(x)`);
+      this.db.exec(`DROP TABLE IF EXISTS _fts5_probe`);
+    } catch (_err) {
+      // FTS5 extension is not compiled in
+      return false;
+    }
+
+    try {
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS worklog_fts USING fts5(
+          title,
+          description,
+          comments,
+          tags,
+          itemId UNINDEXED,
+          status UNINDEXED,
+          parentId UNINDEXED,
+          tokenize = 'porter'
+        )
+      `);
+      return true;
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  /**
+   * Upsert a single work item into the FTS index.
+   * Collects all comments for the item and concatenates them into a single
+   * text blob so comment content is searchable.
+   */
+  upsertFtsEntry(item: WorkItem): void {
+    if (!this._ftsAvailable) return;
+
+    // Gather comment bodies for this item
+    const comments = this.getCommentsForWorkItem(item.id);
+    const commentText = comments.map(c => c.comment).join('\n');
+    const tagsText = Array.isArray(item.tags) ? item.tags.join(' ') : '';
+
+    // Delete any existing row then insert fresh (FTS5 content tables
+    // don't support UPDATE in the same way as regular tables).
+    const deleteFts = this.db.prepare(
+      `DELETE FROM worklog_fts WHERE itemId = ?`
+    );
+    const insertFts = this.db.prepare(`
+      INSERT INTO worklog_fts (title, description, comments, tags, itemId, status, parentId)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    deleteFts.run(item.id);
+    insertFts.run(
+      item.title,
+      item.description,
+      commentText,
+      tagsText,
+      item.id,
+      item.status,
+      item.parentId ?? ''
+    );
+  }
+
+  /**
+   * Remove a work item from the FTS index
+   */
+  deleteFtsEntry(itemId: string): void {
+    if (!this._ftsAvailable) return;
+    this.db.prepare(`DELETE FROM worklog_fts WHERE itemId = ?`).run(itemId);
+  }
+
+  /**
+   * Rebuild the entire FTS index from the current workitems and comments tables.
+   * This drops and recreates the FTS table then inserts all items.
+   */
+  rebuildFtsIndex(): { indexed: number } {
+    if (!this._ftsAvailable) {
+      throw new Error('FTS5 is not available in this SQLite build. Cannot rebuild index.');
+    }
+
+    const rebuildTx = this.db.transaction(() => {
+      // Drop and recreate
+      this.db.exec(`DROP TABLE IF EXISTS worklog_fts`);
+      this.db.exec(`
+        CREATE VIRTUAL TABLE worklog_fts USING fts5(
+          title,
+          description,
+          comments,
+          tags,
+          itemId UNINDEXED,
+          status UNINDEXED,
+          parentId UNINDEXED,
+          tokenize = 'porter'
+        )
+      `);
+
+      const items = this.getAllWorkItems();
+      const allComments = this.getAllComments();
+
+      // Group comments by work item id
+      const commentsByItem = new Map<string, string[]>();
+      for (const c of allComments) {
+        const list = commentsByItem.get(c.workItemId);
+        if (list) {
+          list.push(c.comment);
+        } else {
+          commentsByItem.set(c.workItemId, [c.comment]);
+        }
+      }
+
+      const insertFts = this.db.prepare(`
+        INSERT INTO worklog_fts (title, description, comments, tags, itemId, status, parentId)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      for (const item of items) {
+        const commentText = (commentsByItem.get(item.id) || []).join('\n');
+        const tagsText = Array.isArray(item.tags) ? item.tags.join(' ') : '';
+        insertFts.run(
+          item.title,
+          item.description,
+          commentText,
+          tagsText,
+          item.id,
+          item.status,
+          item.parentId ?? ''
+        );
+      }
+
+      return items.length;
+    });
+
+    const indexed = rebuildTx();
+    return { indexed };
+  }
+
+  /**
+   * Search the FTS index using an FTS5 MATCH expression.
+   * Returns results ranked by BM25 relevance (most relevant first).
+   *
+   * @param query - FTS5 query string (supports phrases, prefix*, OR, AND, NOT)
+   * @param options - Optional filters and limits
+   */
+  searchFts(
+    query: string,
+    options?: {
+      status?: string;
+      parentId?: string;
+      tags?: string[];
+      limit?: number;
+    }
+  ): FtsSearchResult[] {
+    if (!this._ftsAvailable) return [];
+
+    // Sanitize and prepare the query
+    const trimmed = query.trim();
+    if (!trimmed) return [];
+
+    const limit = options?.limit ?? 50;
+
+    try {
+      // Build the base query with BM25 ranking and snippets.
+      // We extract snippets from each searchable column and pick the best one.
+      // BM25 column weights: title=10, description=5, comments=2, tags=3
+      let sql = `
+        SELECT
+          itemId,
+          bm25(worklog_fts, 10.0, 5.0, 2.0, 3.0) AS rank,
+          snippet(worklog_fts, 0, '<<', '>>', '...', 32) AS title_snippet,
+          snippet(worklog_fts, 1, '<<', '>>', '...', 32) AS desc_snippet,
+          snippet(worklog_fts, 2, '<<', '>>', '...', 32) AS comment_snippet,
+          snippet(worklog_fts, 3, '<<', '>>', '...', 32) AS tags_snippet,
+          status,
+          parentId
+        FROM worklog_fts
+        WHERE worklog_fts MATCH ?
+      `;
+
+      const params: (string | number)[] = [trimmed];
+
+      if (options?.status) {
+        sql += ` AND status = ?`;
+        params.push(options.status);
+      }
+
+      if (options?.parentId) {
+        sql += ` AND parentId = ?`;
+        params.push(options.parentId);
+      }
+
+      sql += ` ORDER BY rank LIMIT ?`;
+      params.push(limit);
+
+      const stmt = this.db.prepare(sql);
+      const rows = stmt.all(...params) as any[];
+
+      const results: FtsSearchResult[] = [];
+
+      for (const row of rows) {
+        // Pick the best snippet (the one with highlight markers)
+        let snippet = '';
+        let matchedColumn = 'title';
+
+        if (row.title_snippet && row.title_snippet.includes('<<')) {
+          snippet = row.title_snippet;
+          matchedColumn = 'title';
+        } else if (row.desc_snippet && row.desc_snippet.includes('<<')) {
+          snippet = row.desc_snippet;
+          matchedColumn = 'description';
+        } else if (row.comment_snippet && row.comment_snippet.includes('<<')) {
+          snippet = row.comment_snippet;
+          matchedColumn = 'comments';
+        } else if (row.tags_snippet && row.tags_snippet.includes('<<')) {
+          snippet = row.tags_snippet;
+          matchedColumn = 'tags';
+        } else {
+          // Fallback: use title snippet even without highlights
+          snippet = row.title_snippet || '';
+          matchedColumn = 'title';
+        }
+
+        results.push({
+          itemId: row.itemId,
+          rank: row.rank,
+          snippet,
+          matchedColumn,
+        });
+      }
+
+      // Post-filter by tags (FTS5 can't efficiently filter JSON arrays,
+      // so we do this in application code)
+      if (options?.tags && options.tags.length > 0) {
+        const tagSet = new Set(options.tags.map(t => t.toLowerCase()));
+        const filtered: FtsSearchResult[] = [];
+        for (const result of results) {
+          const item = this.getWorkItem(result.itemId);
+          if (item && item.tags.some(t => tagSet.has(t.toLowerCase()))) {
+            filtered.push(result);
+          }
+        }
+        return filtered;
+      }
+
+      return results;
+    } catch (_err) {
+      // If the query syntax is invalid, return empty results
+      return [];
+    }
+  }
+
+  /**
+   * Perform a simple application-level text search as a fallback when FTS5
+   * is not available. Searches title, description, tags and comment bodies
+   * using case-insensitive substring matching with basic relevance scoring.
+   */
+  searchFallback(
+    query: string,
+    options?: {
+      status?: string;
+      parentId?: string;
+      tags?: string[];
+      limit?: number;
+    }
+  ): FtsSearchResult[] {
+    const trimmed = query.trim().toLowerCase();
+    if (!trimmed) return [];
+
+    const limit = options?.limit ?? 50;
+    const terms = trimmed.split(/\s+/).filter(t => t.length > 0);
+    if (terms.length === 0) return [];
+
+    let items = this.getAllWorkItems();
+
+    // Apply filters
+    if (options?.status) {
+      items = items.filter(i => i.status === options.status);
+    }
+    if (options?.parentId) {
+      items = items.filter(i => i.parentId === options.parentId);
+    }
+    if (options?.tags && options.tags.length > 0) {
+      const tagSet = new Set(options.tags.map(t => t.toLowerCase()));
+      items = items.filter(i => i.tags.some(t => tagSet.has(t.toLowerCase())));
+    }
+
+    const allComments = this.getAllComments();
+    const commentsByItem = new Map<string, string>();
+    for (const c of allComments) {
+      const existing = commentsByItem.get(c.workItemId) || '';
+      commentsByItem.set(c.workItemId, existing + '\n' + c.comment);
+    }
+
+    const results: FtsSearchResult[] = [];
+
+    for (const item of items) {
+      const titleLower = item.title.toLowerCase();
+      const descLower = item.description.toLowerCase();
+      const tagsLower = (item.tags || []).join(' ').toLowerCase();
+      const commentLower = (commentsByItem.get(item.id) || '').toLowerCase();
+
+      // Count matching terms across fields (simple TF-like scoring)
+      let score = 0;
+      let bestField = 'title';
+      let bestFieldScore = 0;
+
+      for (const term of terms) {
+        const titleHits = this.countOccurrences(titleLower, term) * 10;
+        const descHits = this.countOccurrences(descLower, term) * 5;
+        const tagHits = this.countOccurrences(tagsLower, term) * 3;
+        const commentHits = this.countOccurrences(commentLower, term) * 2;
+
+        score += titleHits + descHits + tagHits + commentHits;
+
+        if (titleHits > bestFieldScore) { bestFieldScore = titleHits; bestField = 'title'; }
+        if (descHits > bestFieldScore) { bestFieldScore = descHits; bestField = 'description'; }
+        if (commentHits > bestFieldScore) { bestFieldScore = commentHits; bestField = 'comments'; }
+        if (tagHits > bestFieldScore) { bestFieldScore = tagHits; bestField = 'tags'; }
+      }
+
+      if (score > 0) {
+        // Generate a simple snippet from the best matching field
+        const fieldText = bestField === 'title' ? item.title
+          : bestField === 'description' ? item.description
+          : bestField === 'tags' ? (item.tags || []).join(' ')
+          : commentsByItem.get(item.id) || '';
+
+        const snippet = this.generateSnippet(fieldText, terms[0], 64);
+
+        results.push({
+          itemId: item.id,
+          rank: -score, // Negate so higher scores sort first (matching FTS5 BM25 convention)
+          snippet,
+          matchedColumn: bestField,
+        });
+      }
+    }
+
+    // Sort by rank (most relevant first - lowest rank value for BM25-like convention)
+    results.sort((a, b) => a.rank - b.rank);
+
+    return results.slice(0, limit);
+  }
+
+  /**
+   * Count occurrences of a substring in a string
+   */
+  private countOccurrences(text: string, sub: string): number {
+    if (!sub || !text) return 0;
+    let count = 0;
+    let pos = 0;
+    while ((pos = text.indexOf(sub, pos)) !== -1) {
+      count++;
+      pos += sub.length;
+    }
+    return count;
+  }
+
+  /**
+   * Generate a snippet around the first occurrence of a term
+   */
+  private generateSnippet(text: string, term: string, maxLen: number): string {
+    if (!text) return '';
+    const lower = text.toLowerCase();
+    const termLower = term.toLowerCase();
+    const idx = lower.indexOf(termLower);
+
+    if (idx === -1) {
+      // Term not found directly, return start of text
+      return text.length > maxLen ? text.slice(0, maxLen) + '...' : text;
+    }
+
+    const halfWindow = Math.floor(maxLen / 2);
+    let start = Math.max(0, idx - halfWindow);
+    let end = Math.min(text.length, idx + term.length + halfWindow);
+
+    let snippet = '';
+    if (start > 0) snippet += '...';
+    const raw = text.slice(start, end);
+    // Add highlight markers around the term occurrence
+    const matchStart = idx - start;
+    snippet += raw.slice(0, matchStart) + '<<' + raw.slice(matchStart, matchStart + term.length) + '>>' + raw.slice(matchStart + term.length);
+    if (end < text.length) snippet += '...';
+
+    return snippet;
   }
 
   /**

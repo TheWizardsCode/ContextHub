@@ -133,3 +133,12 @@ export interface DepOptions {
   incoming?: boolean;
   outgoing?: boolean;
 }
+
+export interface SearchOptions {
+  status?: string;
+  parent?: string;
+  tags?: string;
+  limit?: string;
+  rebuildIndex?: boolean;
+  prefix?: string;
+}

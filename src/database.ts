@@ -6,7 +6,7 @@ import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { WorkItem, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge } from './types.js';
-import { SqlitePersistentStore } from './persistent-store.js';
+import { SqlitePersistentStore, FtsSearchResult } from './persistent-store.js';
 import { importFromJsonl, exportToJsonl, getDefaultDataPath } from './jsonl.js';
 import { mergeWorkItems, mergeComments } from './sync.js';
 
@@ -269,6 +269,44 @@ export class WorklogDatabase {
     }));
   }
 
+  // ── Full-Text Search ──────────────────────────────────────────────
+
+  /**
+   * Whether FTS5 full-text search is available in the underlying SQLite build
+   */
+  get ftsAvailable(): boolean {
+    return this.store.ftsAvailable;
+  }
+
+  /**
+   * Search work items using full-text search (FTS5) with automatic fallback
+   * to application-level search when FTS5 is unavailable.
+   */
+  search(
+    query: string,
+    options?: {
+      status?: string;
+      parentId?: string;
+      tags?: string[];
+      limit?: number;
+    }
+  ): { results: FtsSearchResult[]; ftsUsed: boolean } {
+    if (this.store.ftsAvailable) {
+      return { results: this.store.searchFts(query, options), ftsUsed: true };
+    }
+    if (!this.silent) {
+      this.debug('FTS5 is not available; falling back to application-level search');
+    }
+    return { results: this.store.searchFallback(query, options), ftsUsed: false };
+  }
+
+  /**
+   * Rebuild the FTS index from scratch. Useful for backfill or recovery.
+   */
+  rebuildFtsIndex(): { indexed: number } {
+    return this.store.rebuildFtsIndex();
+  }
+
   /**
    * Close the underlying database connection.
    * Must be called before removing temp directories on Windows
@@ -376,6 +414,7 @@ export class WorklogDatabase {
     };
 
     this.store.saveWorkItem(item);
+    this.store.upsertFtsEntry(item);
     this.exportToJsonl();
     this.triggerAutoSync();
     return item;
@@ -442,6 +481,7 @@ export class WorklogDatabase {
     }
 
     this.store.saveWorkItem(updated);
+    this.store.upsertFtsEntry(updated);
     this.exportToJsonl();
     this.triggerAutoSync();
 
@@ -475,6 +515,7 @@ export class WorklogDatabase {
     };
 
     this.store.saveWorkItem(updated);
+    this.store.deleteFtsEntry(id);
     this.exportToJsonl();
     this.triggerAutoSync();
     if (this.listDependencyEdgesTo(id).length > 0) {
@@ -1400,6 +1441,9 @@ export class WorklogDatabase {
 
      this.store.saveComment(comment);
      this.touchWorkItemUpdatedAt(input.workItemId);
+     // Re-index the parent work item in FTS to include the new comment text
+     const parentItem = this.store.getWorkItem(input.workItemId);
+     if (parentItem) this.store.upsertFtsEntry(parentItem);
      this.exportToJsonl();
      this.triggerAutoSync();
      return comment;
@@ -1444,6 +1488,9 @@ export class WorklogDatabase {
 
      this.store.saveComment(updated);
      this.touchWorkItemUpdatedAt(comment.workItemId);
+     // Re-index the parent work item in FTS to reflect updated comment text
+     const parentItem = this.store.getWorkItem(comment.workItemId);
+     if (parentItem) this.store.upsertFtsEntry(parentItem);
      this.exportToJsonl();
      this.triggerAutoSync();
      return updated;
@@ -1460,6 +1507,9 @@ export class WorklogDatabase {
      const result = this.store.deleteComment(id);
       if (result) {
         this.touchWorkItemUpdatedAt(comment.workItemId);
+        // Re-index the parent work item in FTS to reflect removed comment
+        const parentItem = this.store.getWorkItem(comment.workItemId);
+        if (parentItem) this.store.upsertFtsEntry(parentItem);
         this.exportToJsonl();
         this.triggerAutoSync();
       }
