@@ -201,6 +201,17 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
               continue;
             }
           }
+        } else if (fs.existsSync(lockPath)) {
+          // Lock file exists but could not be parsed (corrupted, empty,
+          // or missing required fields).  Treat as stale and remove it
+          // so acquisition can be retried.
+          try {
+            fs.unlinkSync(lockPath);
+            continue;
+          } catch {
+            // Another process may have removed it; retry
+            continue;
+          }
         }
       }
 

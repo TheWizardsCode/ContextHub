@@ -310,13 +310,73 @@ describe('file-lock', () => {
       }).toThrow(/Failed to acquire file lock/);
     });
 
-    it('should handle corrupted lock file content gracefully', () => {
+    it('should recover from corrupted lock file with garbage content', () => {
       // Write garbage content to the lock file
       fs.writeFileSync(lockPath, 'not-json-content');
 
-      // Should fail (can't parse lock info, can't determine if stale)
+      // Should succeed: corrupted lock file is treated as stale, removed, and lock acquired
+      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+
+      // Verify our lock is now in place
+      const content = fs.readFileSync(lockPath, 'utf-8');
+      const info: FileLockInfo = JSON.parse(content);
+      expect(info.pid).toBe(process.pid);
+
+      releaseFileLock(lockPath);
+    });
+
+    it('should recover from an empty lock file (0 bytes)', () => {
+      // Write an empty file to simulate a crash during lock creation
+      fs.writeFileSync(lockPath, '');
+
+      // Should succeed: empty lock file is treated as corrupted/stale
+      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+
+      // Verify our lock is now in place
+      const content = fs.readFileSync(lockPath, 'utf-8');
+      const info: FileLockInfo = JSON.parse(content);
+      expect(info.pid).toBe(process.pid);
+
+      releaseFileLock(lockPath);
+    });
+
+    it('should recover from lock file with valid JSON but missing required fields', () => {
+      // Write valid JSON that lacks required pid and hostname fields
+      fs.writeFileSync(lockPath, JSON.stringify({ someOtherField: 'value' }));
+
+      // Should succeed: missing required fields means readLockInfo returns null
+      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+
+      // Verify our lock is now in place
+      const content = fs.readFileSync(lockPath, 'utf-8');
+      const info: FileLockInfo = JSON.parse(content);
+      expect(info.pid).toBe(process.pid);
+
+      releaseFileLock(lockPath);
+    });
+
+    it('should NOT treat a valid lock file as corrupted', () => {
+      // Write a properly formatted lock file held by the current (alive) process
+      const validLockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(validLockInfo));
+
+      // Should fail: lock is held by a live process, not corrupted
       expect(() => {
         acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+      }).toThrow(/Failed to acquire file lock/);
+    });
+
+    it('should not clean up corrupted lock files when staleLockCleanup is false', () => {
+      // Write garbage content to the lock file
+      fs.writeFileSync(lockPath, 'not-json-content');
+
+      // Should fail because staleLockCleanup is disabled
+      expect(() => {
+        acquireFileLock(lockPath, { retries: 0, timeout: 100, staleLockCleanup: false });
       }).toThrow(/Failed to acquire file lock/);
     });
   });
