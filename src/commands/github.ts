@@ -40,7 +40,8 @@ export default function register(ctx: PluginContext): void {
     .description('Mirror work items to GitHub Issues')
     .option('--repo <owner/name>', 'GitHub repo (owner/name)')
     .option('--label-prefix <prefix>', 'Label prefix for Worklog labels (default: wl:)')
-    .option('--force', 'Bypass pre-filter and process all items')
+    .option('--all', 'Force a full push of all items, ignoring the last-push timestamp')
+    .option('--force', 'Deprecated alias for --all (bypass pre-filter and process all items)', false)
     .option('--no-update-timestamp', 'Do not write last-push timestamp after push')
     .option('--prefix <prefix>', 'Override the default prefix')
     .action(async (options) => {
@@ -95,10 +96,11 @@ export default function register(ctx: PluginContext): void {
         // Pass DB to timestamp helpers when available so they may use metadata
         const dbForMetadata = typeof db.getAll === 'function' && typeof (db as any).store === 'object' ? (db as any).store : undefined;
 
-        if (options.force) {
-          // Bypass pre-filter when --force specified
-          if (!isJsonMode) console.log('Force push: processing all items (pre-filter bypassed)');
-          logLine('github push: force mode enabled - processing all items');
+        const forceAll = Boolean(options.all) || Boolean(options.force);
+        if (forceAll) {
+          // Bypass pre-filter when --all (or deprecated --force) specified
+          if (!isJsonMode) console.log(`Full push (--all): processing all ${items.length} items`);
+          logLine('github push: --all mode enabled - processing all items');
         } else {
           // Pre-filter items to only those changed since last push or never pushed
           try {
@@ -157,9 +159,9 @@ export default function register(ctx: PluginContext): void {
             if (!isJsonMode) console.log('Note: last-push timestamp was not updated (--no-update-timestamp)');
           } else {
             writeLastPushTimestamp(pushStartTimestamp, dbForMetadata);
-            if (options.force) {
-              // In force mode still update timestamp but record that it was a forced push
-              logLine(`github push: force push completed - lastPush updated to ${pushStartTimestamp}`);
+            if (forceAll) {
+              // In --all mode still update timestamp but record that it was a full push
+              logLine(`github push: full push (--all) completed - lastPush updated to ${pushStartTimestamp}`);
             } else {
               logLine(`github push: lastPush updated from ${lastPush ?? 'none'} to ${pushStartTimestamp}`);
             }
@@ -192,7 +194,7 @@ export default function register(ctx: PluginContext): void {
           console.log(`  Updated: ${result.updated}`);
           console.log(`  Closed: ${result.closed}`);
           console.log(`  Skipped: ${result.skipped}`);
-          if (options.force) console.log('  Note: --force was used; pre-filter was bypassed');
+          if (forceAll) console.log('  Note: --all was used; pre-filter was bypassed');
           if ((result.commentsCreated || 0) > 0 || (result.commentsUpdated || 0) > 0) {
             console.log(`  Comments created: ${result.commentsCreated || 0}`);
             console.log(`  Comments updated: ${result.commentsUpdated || 0}`);
