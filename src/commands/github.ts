@@ -4,7 +4,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import { getRepoFromGitRemote, normalizeGithubLabelPrefix } from '../github.js';
-import { upsertIssuesFromWorkItems, importIssuesToWorkItems, GithubProgress } from '../github-sync.js';
+import { upsertIssuesFromWorkItems, importIssuesToWorkItems, GithubProgress, SyncedItem, SyncErrorItem } from '../github-sync.js';
 import { loadConfig } from '../config.js';
 import { displayConflictDetails } from './helpers.js';
 import { createLogFileWriter, getWorklogLogPath, logConflictDetails } from '../logging.js';
@@ -187,7 +187,24 @@ export default function register(ctx: PluginContext): void {
         if (metricPairs.length > 0) logLine(`Metrics ${metricPairs.join(' ')}`);
 
         if (isJsonMode) {
-          output.json({ success: true, ...result, repo: githubConfig.repo });
+          const syncedItemsWithUrls = result.syncedItems.map(si => ({
+            action: si.action,
+            id: si.id,
+            title: si.title,
+            url: `https://github.com/${githubConfig.repo}/issues/${si.issueNumber}`,
+          }));
+          const errorItemsJson = result.errorItems.map(ei => ({
+            id: ei.id,
+            title: ei.title,
+            error: ei.error,
+          }));
+          output.json({
+            success: true,
+            ...result,
+            syncedItems: syncedItemsWithUrls,
+            errorItems: errorItemsJson,
+            repo: githubConfig.repo,
+          });
         } else {
           console.log(`GitHub sync complete (${githubConfig.repo})`);
           console.log(`  Created: ${result.created}`);
@@ -202,6 +219,23 @@ export default function register(ctx: PluginContext): void {
           if (result.errors.length > 0) {
             console.log(`  Errors: ${result.errors.length}`);
             console.log('  Hint: re-run with --json to view error details');
+          }
+          // Per-item sync output
+          if (result.syncedItems.length > 0) {
+            console.log('');
+            console.log('  Synced items:');
+            for (const si of result.syncedItems) {
+              const url = `https://github.com/${githubConfig.repo}/issues/${si.issueNumber}`;
+              const actionLabel = si.action.padEnd(7);
+              console.log(`    ${actionLabel}  ${si.id}  ${si.title}  ${url}`);
+            }
+          }
+          if (result.errorItems.length > 0) {
+            console.log('');
+            console.log('  Errors:');
+            for (const ei of result.errorItems) {
+              console.log(`    ${ei.id}  ${ei.title}  ${ei.error}`);
+            }
           }
             if (isVerbose) {
               console.log('  Timing breakdown:');
