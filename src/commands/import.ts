@@ -5,6 +5,7 @@
 import type { PluginContext } from '../plugin-types.js';
 import type { ImportOptions } from '../cli-types.js';
 import { importFromJsonl } from '../jsonl.js';
+import { withFileLock, getLockPathForJsonl } from '../file-lock.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, dataPath, output, utils } = ctx;
@@ -16,21 +17,25 @@ export default function register(ctx: PluginContext): void {
     .option('--prefix <prefix>', 'Override the default prefix')
     .action((options: ImportOptions) => {
       utils.requireInitialized();
-      const db = utils.getDatabase(options.prefix);
-      const { items, comments, dependencyEdges } = importFromJsonl(options.file || dataPath);
-      db.import(items, dependencyEdges);
-      db.importComments(comments);
-      
-      if (utils.isJsonMode()) {
-        output.json({ 
-          success: true, 
-          message: `Imported ${items.length} work items and ${comments.length} comments`,
-          itemsCount: items.length,
-          commentsCount: comments.length,
-          file: options.file
-        });
-      } else {
-        console.log(`Imported ${items.length} work items and ${comments.length} comments from ${options.file}`);
-      }
+      const filePath = options.file || dataPath;
+      const lockPath = getLockPathForJsonl(filePath);
+      withFileLock(lockPath, () => {
+        const db = utils.getDatabase(options.prefix);
+        const { items, comments, dependencyEdges } = importFromJsonl(filePath);
+        db.import(items, dependencyEdges);
+        db.importComments(comments);
+        
+        if (utils.isJsonMode()) {
+          output.json({ 
+            success: true, 
+            message: `Imported ${items.length} work items and ${comments.length} comments`,
+            itemsCount: items.length,
+            commentsCount: comments.length,
+            file: options.file
+          });
+        } else {
+          console.log(`Imported ${items.length} work items and ${comments.length} comments from ${filePath}`);
+        }
+      });
     });
 }
