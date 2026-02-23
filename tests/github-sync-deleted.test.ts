@@ -128,8 +128,9 @@ describe('github-sync deleted item handling', () => {
     );
     expect(createGithubIssueAsync).not.toHaveBeenCalled();
 
-    // Should count as updated, not skipped
-    expect(result.updated).toBeGreaterThanOrEqual(1);
+    // Should count as closed, not updated
+    expect(result.closed).toBe(1);
+    expect(result.updated).toBe(0);
     expect(result.created).toBe(0);
   });
 
@@ -219,9 +220,12 @@ describe('github-sync deleted item handling', () => {
       dummyConfig as any,
     );
 
-    // Both active and deleted-with-issue should be updated
+    // activeItem should be updated, deletedWithIssue should be closed
     expect(updateGithubIssueAsync).toHaveBeenCalledTimes(2);
     expect(createGithubIssueAsync).not.toHaveBeenCalled();
+
+    expect(result.updated).toBe(1);
+    expect(result.closed).toBe(1);
 
     // deleted-without-issue is excluded by the filter (items.length - issueItems.length = 1)
     expect(result.skipped).toBeGreaterThanOrEqual(1);
@@ -301,7 +305,8 @@ describe('github-sync deleted item handling', () => {
       expect.objectContaining({ state: 'closed' }),
     );
     expect(result.errors).toHaveLength(0);
-    expect(result.updated).toBe(1);
+    expect(result.closed).toBe(1);
+    expect(result.updated).toBe(0);
   });
 
   // AC5: Force mode — all deleted items with githubIssueNumber are processed at sync level.
@@ -348,7 +353,8 @@ describe('github-sync deleted item handling', () => {
     );
     // No issues should be created
     expect(createGithubIssueAsync).not.toHaveBeenCalled();
-    expect(result.updated).toBe(2);
+    expect(result.closed).toBe(2);
+    expect(result.updated).toBe(0);
     expect(result.created).toBe(0);
     // deletedNoIssue is excluded by the filter
     expect(result.skipped).toBeGreaterThanOrEqual(1);
@@ -400,7 +406,7 @@ describe('github-sync deleted item handling', () => {
     expect(createGithubIssueAsync).toHaveBeenCalledTimes(1);
     expect(result.created).toBe(1);
 
-    // changedItem -> updated, deletedWithIssue -> updated (state: closed)
+    // changedItem -> updated, deletedWithIssue -> closed (state: closed)
     expect(updateGithubIssueAsync).toHaveBeenCalledTimes(2);
     expect(updateGithubIssueAsync).toHaveBeenCalledWith(
       expect.anything(),
@@ -412,7 +418,8 @@ describe('github-sync deleted item handling', () => {
       502,
       expect.objectContaining({ state: 'closed' }),
     );
-    expect(result.updated).toBe(2);
+    expect(result.updated).toBe(1);
+    expect(result.closed).toBe(1);
 
     // unchangedItem skipped by timestamp check, deletedNoIssue excluded by filter
     expect(result.skipped).toBe(2);
