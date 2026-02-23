@@ -142,3 +142,5 @@ export interface SearchOptions {
   rebuildIndex?: boolean;
   prefix?: string;
 }
+
+export interface UnlockOptions { force?: boolean }

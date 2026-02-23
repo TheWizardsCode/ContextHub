@@ -65,7 +65,7 @@ export function getLockPathForJsonl(jsonlPath: string): string {
  * throws ESRCH if the process does not exist, and EPERM if we
  * lack permission (but the process *does* exist).
  */
-function isProcessAlive(pid: number): boolean {
+export function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true; // signal sent successfully — process is alive
@@ -82,7 +82,7 @@ function isProcessAlive(pid: number): boolean {
  * Try to read and parse lock file contents.  Returns null if the file
  * does not exist or cannot be parsed.
  */
-function readLockInfo(lockPath: string): FileLockInfo | null {
+export function readLockInfo(lockPath: string): FileLockInfo | null {
   try {
     const content = fs.readFileSync(lockPath, 'utf-8');
     const info = JSON.parse(content) as FileLockInfo;
