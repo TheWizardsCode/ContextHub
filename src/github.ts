@@ -781,6 +781,13 @@ export function getGithubIssueComment(config: GithubConfig, commentId: number): 
   return normalizeGithubIssueComment(data);
 }
 
+export async function getGithubIssueCommentAsync(config: GithubConfig, commentId: number): Promise<GithubIssueComment> {
+  const { owner, name } = parseRepoSlug(config.repo);
+  const command = `gh api repos/${owner}/${name}/issues/comments/${commentId} --json id,body,updatedAt,user`;
+  const data = await runGhJsonAsync(command);
+  return normalizeGithubIssueComment(data);
+}
+
 export function issueToWorkItemFields(
   issue: GithubIssueRecord,
   labelPrefix: string
