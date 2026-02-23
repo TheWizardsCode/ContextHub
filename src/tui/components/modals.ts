@@ -316,6 +316,117 @@ export class ModalDialogsComponent {
     });
   }
 
+  /**
+   * Show a simple Yes / No confirmation dialog.
+   *
+   * Returns `true` if the user selects "Yes", `false` for "No", Escape, or
+   * overlay click.  The dialog is keyboard-navigable (Tab between buttons,
+   * Enter to select) and mouse-clickable.
+   */
+  async confirmYesNo(options: {
+    title: string;
+    message: string;
+    width?: string | number;
+    height?: string | number;
+  }): Promise<boolean> {
+    return new Promise((resolve) => {
+      let resolved = false;
+      const overlay = this.createOverlay();
+      const dialog = this.blessedImpl.box({
+        parent: this.screen,
+        top: 'center',
+        left: 'center',
+        width: options.width || '50%',
+        height: options.height || 7,
+        label: ` ${options.title} `,
+        border: { type: 'line' },
+        tags: true,
+        mouse: true,
+        clickable: true,
+        style: { border: { fg: 'cyan' } },
+      }) as BlessedBox;
+
+      const text = this.blessedImpl.box({
+        parent: dialog,
+        top: 1,
+        left: 2,
+        width: '100%-4',
+        height: 2,
+        content: options.message,
+        tags: true,
+      }) as BlessedText;
+      void text;
+
+      const yesBtn = this.blessedImpl.box({
+        parent: dialog,
+        bottom: 0,
+        left: 2,
+        height: 1,
+        width: 5,
+        content: '[Yes]',
+        mouse: true,
+        clickable: true,
+        style: { fg: 'green' },
+      }) as BlessedBox;
+
+      const noBtn = this.blessedImpl.box({
+        parent: dialog,
+        bottom: 0,
+        left: 8,
+        height: 1,
+        width: 4,
+        content: '[No]',
+        mouse: true,
+        clickable: true,
+        style: { fg: 'yellow' },
+      }) as BlessedBox;
+
+      // Focus tracking for Tab navigation between Yes/No buttons
+      let focusedBtn: 'yes' | 'no' = 'no';
+      const focusYes = () => { focusedBtn = 'yes'; yesBtn.style.bold = true; noBtn.style.bold = false; this.screen.render(); };
+      const focusNo = () => { focusedBtn = 'no'; yesBtn.style.bold = false; noBtn.style.bold = true; this.screen.render(); };
+      focusNo();
+
+      const cleanup = () => {
+        this.destroyWidgets([yesBtn, noBtn, dialog, overlay]);
+        if (this.activeCleanup === cleanup) this.activeCleanup = null;
+      };
+      this.activeCleanup = cleanup;
+
+      const safeResolve = (value: boolean) => {
+        if (resolved) return;
+        resolved = true;
+        cleanup();
+        resolve(value);
+      };
+
+      yesBtn.on('click', () => { safeResolve(true); });
+      noBtn.on('click', () => { safeResolve(false); });
+      dialog.key(KEY_ESCAPE, () => { safeResolve(false); });
+      overlay.on('click', () => { safeResolve(false); });
+
+      // Tab / Shift-Tab to toggle between Yes and No
+      dialog.key(['tab'], () => {
+        if (focusedBtn === 'yes') focusNo();
+        else focusYes();
+      });
+      dialog.key(['S-tab'], () => {
+        if (focusedBtn === 'yes') focusNo();
+        else focusYes();
+      });
+
+      // Enter confirms the currently focused button
+      dialog.key(['enter'], () => {
+        safeResolve(focusedBtn === 'yes');
+      });
+
+      overlay.setFront();
+      dialog.setFront();
+      dialog.focus();
+      this.screen.render();
+    });
+  }
+
   // -- Private helpers -------------------------------------------------------
 
   private createOverlay(): BlessedBox {
