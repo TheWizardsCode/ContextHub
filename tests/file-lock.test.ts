@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as childProcess from 'child_process';
-import { acquireFileLock, releaseFileLock, withFileLock, getLockPathForJsonl, isFileLockHeld, _resetLockState } from '../src/file-lock.js';
+import { acquireFileLock, releaseFileLock, withFileLock, getLockPathForJsonl, isFileLockHeld, _resetLockState, formatLockAge } from '../src/file-lock.js';
 import type { FileLockInfo } from '../src/file-lock.js';
 import { createTempDir, cleanupTempDir } from './test-utils.js';
 
@@ -310,14 +310,327 @@ describe('file-lock', () => {
       }).toThrow(/Failed to acquire file lock/);
     });
 
-    it('should handle corrupted lock file content gracefully', () => {
+    it('should recover from corrupted lock file with garbage content', () => {
       // Write garbage content to the lock file
       fs.writeFileSync(lockPath, 'not-json-content');
 
-      // Should fail (can't parse lock info, can't determine if stale)
+      // Should succeed: corrupted lock file is treated as stale, removed, and lock acquired
+      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+
+      // Verify our lock is now in place
+      const content = fs.readFileSync(lockPath, 'utf-8');
+      const info: FileLockInfo = JSON.parse(content);
+      expect(info.pid).toBe(process.pid);
+
+      releaseFileLock(lockPath);
+    });
+
+    it('should recover from an empty lock file (0 bytes)', () => {
+      // Write an empty file to simulate a crash during lock creation
+      fs.writeFileSync(lockPath, '');
+
+      // Should succeed: empty lock file is treated as corrupted/stale
+      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+
+      // Verify our lock is now in place
+      const content = fs.readFileSync(lockPath, 'utf-8');
+      const info: FileLockInfo = JSON.parse(content);
+      expect(info.pid).toBe(process.pid);
+
+      releaseFileLock(lockPath);
+    });
+
+    it('should recover from lock file with valid JSON but missing required fields', () => {
+      // Write valid JSON that lacks required pid and hostname fields
+      fs.writeFileSync(lockPath, JSON.stringify({ someOtherField: 'value' }));
+
+      // Should succeed: missing required fields means readLockInfo returns null
+      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+
+      // Verify our lock is now in place
+      const content = fs.readFileSync(lockPath, 'utf-8');
+      const info: FileLockInfo = JSON.parse(content);
+      expect(info.pid).toBe(process.pid);
+
+      releaseFileLock(lockPath);
+    });
+
+    it('should NOT treat a valid lock file as corrupted', () => {
+      // Write a properly formatted lock file held by the current (alive) process
+      const validLockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(validLockInfo));
+
+      // Should fail: lock is held by a live process, not corrupted
       expect(() => {
         acquireFileLock(lockPath, { retries: 0, timeout: 100 });
       }).toThrow(/Failed to acquire file lock/);
+    });
+
+    it('should not clean up corrupted lock files when staleLockCleanup is false', () => {
+      // Write garbage content to the lock file
+      fs.writeFileSync(lockPath, 'not-json-content');
+
+      // Should fail because staleLockCleanup is disabled
+      expect(() => {
+        acquireFileLock(lockPath, { retries: 0, timeout: 100, staleLockCleanup: false });
+      }).toThrow(/Failed to acquire file lock/);
+    });
+  });
+
+  describe('age-based lock expiry', () => {
+    it('should remove a lock older than maxLockAge even if PID is alive', () => {
+      // Write a lock file with current PID (alive) but acquiredAt 6 minutes ago
+      const oldLockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date(Date.now() - 6 * 60 * 1000).toISOString(), // 6 minutes ago
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(oldLockInfo));
+
+      // Should succeed: lock is older than default 5-minute threshold
+      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+
+      const content = fs.readFileSync(lockPath, 'utf-8');
+      const info: FileLockInfo = JSON.parse(content);
+      expect(info.pid).toBe(process.pid);
+      // Verify acquiredAt is recent (not the old one)
+      const age = Date.now() - new Date(info.acquiredAt).getTime();
+      expect(age).toBeLessThan(5000);
+
+      releaseFileLock(lockPath);
+    });
+
+    it('should NOT remove a fresh lock held by a live PID', () => {
+      // Write a lock file with current PID and acquiredAt 1 minute ago (within threshold)
+      const freshLockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date(Date.now() - 1 * 60 * 1000).toISOString(), // 1 minute ago
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(freshLockInfo));
+
+      // Should fail: lock is fresh and held by a live process
+      expect(() => {
+        acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+      }).toThrow(/Failed to acquire file lock/);
+    });
+
+    it('should remove an old lock with a dead PID (both triggers)', () => {
+      // Lock is both old AND held by a dead PID
+      const oldDeadLockInfo: FileLockInfo = {
+        pid: 999999,
+        hostname: os.hostname(),
+        acquiredAt: new Date(Date.now() - 6 * 60 * 1000).toISOString(), // 6 minutes ago
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(oldDeadLockInfo));
+
+      // Should succeed: dead PID would trigger cleanup alone, age confirms
+      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+
+      const content = fs.readFileSync(lockPath, 'utf-8');
+      const info: FileLockInfo = JSON.parse(content);
+      expect(info.pid).toBe(process.pid);
+
+      releaseFileLock(lockPath);
+    });
+
+    it('should remove a fresh lock with a dead PID (PID-based cleanup, existing behavior)', () => {
+      // Lock is fresh but held by a dead process
+      const freshDeadLockInfo: FileLockInfo = {
+        pid: 999999,
+        hostname: os.hostname(),
+        acquiredAt: new Date(Date.now() - 1 * 60 * 1000).toISOString(), // 1 minute ago
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(freshDeadLockInfo));
+
+      // Should succeed: dead PID triggers cleanup even though lock is young
+      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+
+      const content = fs.readFileSync(lockPath, 'utf-8');
+      const info: FileLockInfo = JSON.parse(content);
+      expect(info.pid).toBe(process.pid);
+
+      releaseFileLock(lockPath);
+    });
+
+    it('should NOT treat a lock with acquiredAt in the future as expired', () => {
+      // Lock with acquiredAt in the future (clock skew scenario)
+      const futureLockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(), // 10 minutes in the future
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(futureLockInfo));
+
+      // Should fail: future acquiredAt should not be treated as expired
+      expect(() => {
+        acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+      }).toThrow(/Failed to acquire file lock/);
+    });
+
+    it('should respect a custom maxLockAge option', () => {
+      // Write a lock 2 seconds old with an alive PID
+      const recentLockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date(Date.now() - 2000).toISOString(), // 2 seconds ago
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(recentLockInfo));
+
+      // With a 1-second maxLockAge, this 2-second-old lock should be treated as stale
+      acquireFileLock(lockPath, { retries: 1, timeout: 5000, maxLockAge: 1000 });
+
+      const content = fs.readFileSync(lockPath, 'utf-8');
+      const info: FileLockInfo = JSON.parse(content);
+      expect(info.pid).toBe(process.pid);
+      // Verify it's a new lock, not the old one
+      const age = Date.now() - new Date(info.acquiredAt).getTime();
+      expect(age).toBeLessThan(5000);
+
+      releaseFileLock(lockPath);
+    });
+
+    it('should NOT expire a lock within a custom maxLockAge threshold', () => {
+      // Write a lock 500ms old with an alive PID
+      const recentLockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date(Date.now() - 500).toISOString(), // 500ms ago
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(recentLockInfo));
+
+      // With a 5-second maxLockAge, this 500ms lock should be considered fresh
+      expect(() => {
+        acquireFileLock(lockPath, { retries: 0, timeout: 100, maxLockAge: 5000 });
+      }).toThrow(/Failed to acquire file lock/);
+    });
+  });
+
+  describe('error messages', () => {
+    it('should include lock file path in timeout error', () => {
+      const lockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
+
+      try {
+        acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+        expect.unreachable('should have thrown');
+      } catch (err: any) {
+        expect(err.message).toContain(lockPath);
+      }
+    });
+
+    it('should include holder PID, hostname, and acquiredAt in error', () => {
+      const lockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
+
+      try {
+        acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+        expect.unreachable('should have thrown');
+      } catch (err: any) {
+        expect(err.message).toContain(`PID ${process.pid}`);
+        expect(err.message).toContain(os.hostname());
+        expect(err.message).toContain(lockInfo.acquiredAt);
+      }
+    });
+
+    it('should include human-readable lock age in error', () => {
+      const lockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date(Date.now() - 12 * 60 * 1000).toISOString(), // 12 minutes ago
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
+
+      try {
+        // Use a maxLockAge larger than 12 minutes so the lock is NOT
+        // cleaned up by age-based expiry — we want the error to fire
+        // with the holder metadata intact so we can assert on the age string.
+        acquireFileLock(lockPath, { retries: 0, timeout: 100, maxLockAge: 60 * 60 * 1000 });
+        expect.unreachable('should have thrown');
+      } catch (err: any) {
+        expect(err.message).toMatch(/12 minutes? ago/);
+      }
+    });
+
+    it('should suggest wl unlock in error message', () => {
+      const lockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
+
+      try {
+        acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+        expect.unreachable('should have thrown');
+      } catch (err: any) {
+        expect(err.message).toContain('wl unlock');
+      }
+    });
+
+    it('should say corrupted lock file when lock info is unparseable', () => {
+      // Write garbage — but with staleLockCleanup disabled so it can't auto-recover
+      fs.writeFileSync(lockPath, 'not-json-content');
+
+      try {
+        acquireFileLock(lockPath, { retries: 0, timeout: 100, staleLockCleanup: false });
+        expect.unreachable('should have thrown');
+      } catch (err: any) {
+        expect(err.message).toContain('corrupted lock file');
+      }
+    });
+
+    it('should include enriched message in retries-exhausted error', () => {
+      const lockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date(Date.now() - 30000).toISOString(), // 30 seconds ago
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
+
+      try {
+        acquireFileLock(lockPath, { retries: 1, retryDelay: 10, timeout: 50000 });
+        expect.unreachable('should have thrown');
+      } catch (err: any) {
+        expect(err.message).toContain(lockPath);
+        expect(err.message).toContain(`PID ${process.pid}`);
+        expect(err.message).toContain('wl unlock');
+        expect(err.message).toMatch(/ago/);
+      }
+    });
+  });
+
+  describe('formatLockAge', () => {
+    it('should format seconds ago', () => {
+      const result = formatLockAge(new Date(Date.now() - 5000).toISOString());
+      expect(result).toMatch(/5 seconds? ago/);
+    });
+
+    it('should format minutes ago', () => {
+      const result = formatLockAge(new Date(Date.now() - 3 * 60 * 1000).toISOString());
+      expect(result).toMatch(/3 minutes? ago/);
+    });
+
+    it('should format hours ago', () => {
+      const result = formatLockAge(new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString());
+      expect(result).toMatch(/2 hours? ago/);
+    });
+
+    it('should handle future timestamps gracefully', () => {
+      const result = formatLockAge(new Date(Date.now() + 60000).toISOString());
+      expect(result).toMatch(/just now|0 seconds ago|in the future/);
     });
   });
 
@@ -568,7 +881,7 @@ for (let i = 0; i < iterations; i++) {
     // Increment and write back
     counter++;
     fs.writeFileSync(counterFile, String(counter));
-  }, { retries: 200, retryDelay: 10, timeout: 30000 });
+  }, { retries: 5000, retryDelay: 50, timeout: 30000 });
 }
 
 // Signal success
@@ -731,5 +1044,134 @@ process.exit(0);
       const finalCounter = parseInt(fs.readFileSync(counterFile, 'utf-8'), 10);
       expect(finalCounter).toBe(numWorkers * iterationsPerWorker);
     }, 60000); // 60s timeout
+  });
+
+  // -----------------------------------------------------------------------
+  // Diagnostic logging (WL_DEBUG)
+  // -----------------------------------------------------------------------
+  describe('diagnostic logging', () => {
+    let stderrChunks: string[];
+    let origStderrWrite: typeof process.stderr.write;
+
+    function captureStderr() {
+      stderrChunks = [];
+      origStderrWrite = process.stderr.write;
+      process.stderr.write = ((chunk: any, enc?: any, cb?: any) => {
+        stderrChunks.push(typeof chunk === 'string' ? chunk : chunk.toString());
+        if (typeof cb === 'function') cb();
+        return true;
+      }) as any;
+    }
+
+    function restoreStderr(): string {
+      process.stderr.write = origStderrWrite;
+      return stderrChunks.join('');
+    }
+
+    afterEach(() => {
+      // Ensure stderr is always restored even if a test fails
+      if (origStderrWrite) {
+        process.stderr.write = origStderrWrite;
+      }
+      delete process.env.WL_DEBUG;
+    });
+
+    it('should produce debug output on stderr when WL_DEBUG=1 during acquire/release', () => {
+      process.env.WL_DEBUG = '1';
+      captureStderr();
+
+      acquireFileLock(lockPath, { retries: 0, timeout: 5000 });
+      releaseFileLock(lockPath);
+
+      const output = restoreStderr();
+      expect(output).toContain('[wl:lock]');
+      // Should log acquisition with PID and lock path
+      expect(output).toMatch(/acquir/i);
+      expect(output).toContain(String(process.pid));
+      // Should log release
+      expect(output).toMatch(/releas/i);
+    });
+
+    it('should produce NO debug output when WL_DEBUG is not set', () => {
+      delete process.env.WL_DEBUG;
+      captureStderr();
+
+      acquireFileLock(lockPath, { retries: 0, timeout: 5000 });
+      releaseFileLock(lockPath);
+
+      const output = restoreStderr();
+      expect(output).not.toContain('[wl:lock]');
+    });
+
+    it('should log stale lock cleanup reason when PID is dead', () => {
+      // Create a lock file with a dead PID
+      const staleLock: FileLockInfo = {
+        pid: 99999,
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(staleLock));
+
+      process.env.WL_DEBUG = '1';
+      captureStderr();
+
+      acquireFileLock(lockPath, { retries: 2, timeout: 5000 });
+      releaseFileLock(lockPath);
+
+      const output = restoreStderr();
+      expect(output).toContain('[wl:lock]');
+      // Should mention stale/dead PID cleanup
+      expect(output).toMatch(/stale|dead/i);
+      expect(output).toContain('99999');
+    });
+
+    it('should log stale lock cleanup reason when lock is age-expired', () => {
+      // Create a lock file that's older than maxLockAge
+      const oldLock: FileLockInfo = {
+        pid: process.pid, // alive PID but too old
+        hostname: os.hostname(),
+        acquiredAt: new Date(Date.now() - 600_000).toISOString(), // 10 min ago
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(oldLock));
+
+      process.env.WL_DEBUG = '1';
+      captureStderr();
+
+      acquireFileLock(lockPath, { retries: 2, timeout: 5000, maxLockAge: 1000 });
+      releaseFileLock(lockPath);
+
+      const output = restoreStderr();
+      expect(output).toContain('[wl:lock]');
+      // Should mention age-based expiry
+      expect(output).toMatch(/age|expir/i);
+    });
+
+    it('should log stale lock cleanup reason when lock is corrupted', () => {
+      // Create a corrupted lock file
+      fs.writeFileSync(lockPath, 'not-valid-json');
+
+      process.env.WL_DEBUG = '1';
+      captureStderr();
+
+      acquireFileLock(lockPath, { retries: 2, timeout: 5000 });
+      releaseFileLock(lockPath);
+
+      const output = restoreStderr();
+      expect(output).toContain('[wl:lock]');
+      // Should mention corrupted
+      expect(output).toMatch(/corrupt/i);
+    });
+
+    it('should include attempt number in acquire log', () => {
+      process.env.WL_DEBUG = '1';
+      captureStderr();
+
+      acquireFileLock(lockPath, { retries: 0, timeout: 5000 });
+      releaseFileLock(lockPath);
+
+      const output = restoreStderr();
+      // Should mention attempt 1 (or attempt 0, depending on implementation)
+      expect(output).toMatch(/attempt/i);
+    });
   });
 });

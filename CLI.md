@@ -498,6 +498,33 @@ wl re-sort --dry-run
 wl re-sort --gap 100
 ```
 
+### `unlock` [options]
+
+Inspect or remove a stale worklog lock file. When a `wl` command crashes or is killed, it may leave behind a lock file that blocks subsequent commands. Use `wl unlock` to inspect the lock and remove it.
+
+Options:
+
+- `--force` — Remove the lock file without prompting for confirmation.
+- `--json` — Output machine-readable JSON.
+
+Examples:
+
+```sh
+wl unlock                # show lock status and suggest removal
+wl unlock --force        # remove the lock file without prompting
+wl --json unlock         # JSON output with lock metadata
+```
+
+JSON output includes `success`, `lockFound`, `removed`, and `lockInfo` (with `pid`, `hostname`, `acquiredAt`, `age`) when a lock file is present.
+
+Notes:
+
+- If no lock file exists, the command prints "No lock file found" and exits 0.
+- If the lock file is corrupted (unparseable metadata), `--force` is required to remove it.
+- If the lock is held by a still-running process, the command warns but still allows removal with confirmation or `--force`.
+
+---
+
 ## Plugins
 
 Plugin commands let you inspect installed extensions that add or alter CLI functionality. To list commands provided by plugins in your environment run `wl --help` (or `worklog --help`).
