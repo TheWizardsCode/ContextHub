@@ -859,5 +859,61 @@ describe('WorklogDatabase', () => {
       expect(result.workItem?.id).toBe(childBlocker.id);
       expect(result.reason).toContain('Blocking issue');
     });
+
+    it('Phase 4: sibling wins over child of lower-priority parent (Example 1)', () => {
+      // A (low, open), B (high, open, child of A), C (medium, open, sibling of A)
+      // Expected: C wins because A (low) < C (medium)
+      const grandparent = db.create({ title: 'Grandparent', priority: 'high', status: 'open' });
+      const itemA = db.create({ title: 'Item A', priority: 'low', status: 'open', parentId: grandparent.id });
+      db.create({ title: 'Item B', priority: 'high', status: 'open', parentId: itemA.id });
+      const itemC = db.create({ title: 'Item C', priority: 'medium', status: 'open', parentId: grandparent.id });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem?.id).toBe(itemC.id);
+    });
+
+    it('Phase 4: child wins when parent priority >= sibling (Example 2)', () => {
+      // A (medium, open), B (high, open, child of A), C (medium, open, sibling of A)
+      // Expected: B wins because A (medium) >= C (medium)
+      const grandparent = db.create({ title: 'Grandparent', priority: 'high', status: 'open' });
+      const itemA = db.create({ title: 'Item A', priority: 'medium', status: 'open', parentId: grandparent.id });
+      const itemB = db.create({ title: 'Item B', priority: 'high', status: 'open', parentId: itemA.id });
+      db.create({ title: 'Item C', priority: 'medium', status: 'open', parentId: grandparent.id });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem?.id).toBe(itemB.id);
+    });
+
+    it('Phase 4: low-priority child wins when parent priority >= sibling (Example 3)', () => {
+      // A (medium, open), B (low, open, child of A), C (medium, open, sibling of A)
+      // Expected: B wins because A (medium) >= C (medium), and B is A's child
+      const grandparent = db.create({ title: 'Grandparent', priority: 'high', status: 'open' });
+      const itemA = db.create({ title: 'Item A', priority: 'medium', status: 'open', parentId: grandparent.id });
+      const itemB = db.create({ title: 'Item B', priority: 'low', status: 'open', parentId: itemA.id });
+      db.create({ title: 'Item C', priority: 'medium', status: 'open', parentId: grandparent.id });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem?.id).toBe(itemB.id);
+    });
+
+    it('Phase 4: top-level items without children are selected normally', () => {
+      // No hierarchy, should work as before
+      db.create({ title: 'Low item', priority: 'low', status: 'open' });
+      const highItem = db.create({ title: 'High item', priority: 'high', status: 'open' });
+      db.create({ title: 'Medium item', priority: 'medium', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem?.id).toBe(highItem.id);
+    });
+
+    it('Phase 4: top-level item with children descends to best child', () => {
+      const parent = db.create({ title: 'Parent', priority: 'high', status: 'open' });
+      const bestChild = db.create({ title: 'Best child', priority: 'high', status: 'open', parentId: parent.id });
+      db.create({ title: 'Other child', priority: 'low', status: 'open', parentId: parent.id });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem?.id).toBe(bestChild.id);
+      expect(result.reason).toContain('child');
+    });
   });
 });

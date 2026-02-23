@@ -874,16 +874,68 @@ export class WorklogDatabase {
 
     if (inProgressItems.length === 0) {
       // No in-progress items, find highest priority and oldest non-in-progress item
+      // Respect hierarchy: select among root-level candidates, then descend into children
       const openItems = filteredItems.filter(item => item.status !== 'completed');
       this.debug(`${debugPrefix} open items=${openItems.length}`);
       if (openItems.length === 0) {
         return { workItem: null, reason: 'No work items available' };
       }
-      const selected = this.selectBySortIndex(openItems, recencyPolicy);
-      this.debug(`${debugPrefix} selected open=${selected?.id || ''}`);
+
+      // Identify root-level candidates: items whose parent is not in the open set
+      const openIds = new Set(openItems.map(item => item.id));
+      const rootCandidates = openItems.filter(item => !item.parentId || !openIds.has(item.parentId));
+      this.debug(`${debugPrefix} root candidates=${rootCandidates.length}`);
+
+      if (rootCandidates.length === 0) {
+        // Fallback: all items have parents in the pool (shouldn't happen normally)
+        const selected = this.selectBySortIndex(openItems, recencyPolicy);
+        this.debug(`${debugPrefix} selected open (fallback)=${selected?.id || ''}`);
+        return {
+          workItem: selected,
+          reason: `Next open item by sort_index${selected ? ` (priority ${selected.priority})` : ''}`
+        };
+      }
+
+      const selectedRoot = this.selectBySortIndex(rootCandidates, recencyPolicy);
+      this.debug(`${debugPrefix} selected root=${selectedRoot?.id || ''}`);
+
+      if (!selectedRoot) {
+        return { workItem: null, reason: 'No work items available' };
+      }
+
+      // Descend recursively into the subtree: at each level, if the selected item
+      // has open children, pick the best child and continue descending
+      let current = selectedRoot;
+      let depth = 0;
+      const maxDepth = 50; // Guard against circular references
+      while (depth < maxDepth) {
+        const children = openItems.filter(item =>
+          item.parentId === current.id &&
+          item.status !== 'completed' &&
+          item.status !== 'deleted'
+        ).filter(item => !excluded?.has(item.id));
+        this.debug(`${debugPrefix} descend depth=${depth} current=${current.id} children=${children.length}`);
+
+        if (children.length === 0) break;
+
+        const bestChild = this.selectBySortIndex(children, recencyPolicy);
+        if (!bestChild) break;
+
+        current = bestChild;
+        depth++;
+      }
+
+      if (current.id !== selectedRoot.id) {
+        this.debug(`${debugPrefix} selected descendant=${current.id} of root=${selectedRoot.id}`);
+        return {
+          workItem: current,
+          reason: `Next child by sort_index of open item ${selectedRoot.id}${current ? ` (priority ${current.priority})` : ''}`
+        };
+      }
+
       return {
-        workItem: selected,
-        reason: `Next open item by sort_index${selected ? ` (priority ${selected.priority})` : ''}`
+        workItem: selectedRoot,
+        reason: `Next open item by sort_index${selectedRoot ? ` (priority ${selectedRoot.priority})` : ''}`
       };
     }
 
