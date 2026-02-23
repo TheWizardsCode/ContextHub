@@ -121,6 +121,10 @@ export default function register(ctx: PluginContext): void {
           }
         }
 
+        // Capture push-start timestamp BEFORE processing begins so that items
+        // modified during the push window are re-processed on the next run.
+        const pushStartTimestamp = new Date().toISOString();
+
         const verboseLog = isVerbose && !isJsonMode
           ? (message: string) => console.log(message)
           : undefined;
@@ -141,22 +145,23 @@ export default function register(ctx: PluginContext): void {
         }
 
         // Update the last-push timestamp unless --no-update-timestamp was provided.
-          try {
-            const { writeLastPushTimestamp } = await import('../github-pre-filter.js');
-            const nowIso = new Date().toISOString();
+        // Uses pushStartTimestamp captured before processing so items modified
+        // during the push are re-processed on the next run.
+        try {
+          const { writeLastPushTimestamp } = await import('../github-pre-filter.js');
           // Commander creates a negated option as `updateTimestamp` (true by default)
           // while some callers may inspect `noUpdateTimestamp`. Support both forms here.
           const skipUpdateTimestamp = Boolean(options.noUpdateTimestamp) || options.updateTimestamp === false;
-           if (skipUpdateTimestamp) {
-              logLine('github push: skipping last-push timestamp update due to --no-update-timestamp');
-              if (!isJsonMode) console.log('Note: last-push timestamp was not updated (--no-update-timestamp)');
-            } else {
-            writeLastPushTimestamp(nowIso, dbForMetadata);
+          if (skipUpdateTimestamp) {
+            logLine('github push: skipping last-push timestamp update due to --no-update-timestamp');
+            if (!isJsonMode) console.log('Note: last-push timestamp was not updated (--no-update-timestamp)');
+          } else {
+            writeLastPushTimestamp(pushStartTimestamp, dbForMetadata);
             if (options.force) {
               // In force mode still update timestamp but record that it was a forced push
-              logLine(`github push: force push completed - lastPush updated to ${nowIso}`);
+              logLine(`github push: force push completed - lastPush updated to ${pushStartTimestamp}`);
             } else {
-              logLine(`github push: lastPush updated from ${lastPush ?? 'none'} to ${nowIso}`);
+              logLine(`github push: lastPush updated from ${lastPush ?? 'none'} to ${pushStartTimestamp}`);
             }
           }
         } catch (_err) {
