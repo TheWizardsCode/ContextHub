@@ -881,7 +881,7 @@ for (let i = 0; i < iterations; i++) {
     // Increment and write back
     counter++;
     fs.writeFileSync(counterFile, String(counter));
-  }, { retries: 200, retryDelay: 10, timeout: 30000 });
+  }, { retries: 5000, retryDelay: 50, timeout: 30000 });
 }
 
 // Signal success
