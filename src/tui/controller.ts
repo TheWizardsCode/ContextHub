@@ -3100,6 +3100,21 @@ export class TuiController {
     const closeOverlayClickHandler = () => { closeCloseDialog(); };
     try { (closeOverlay as any).__opencode_click = closeOverlayClickHandler; closeOverlay.on('click', closeOverlayClickHandler); } catch (_) {}
 
+    const updateOverlayClickHandler = async () => {
+      // Check for unsaved changes before dismissing
+      const commentValue = updateDialogComment?.getValue ? updateDialogComment.getValue() : '';
+      const hasUnsavedChanges = (commentValue || '').trim() !== '' || updateDialogLastChanged !== null;
+      if (hasUnsavedChanges) {
+        const confirmed = await modalDialogs.confirmYesNo({
+          title: 'Discard unsaved changes?',
+          message: 'You have unsaved changes. Discard them?',
+        });
+        if (!confirmed) return;
+      }
+      closeUpdateDialog();
+    };
+    try { (updateOverlay as any).__opencode_click = updateOverlayClickHandler; updateOverlay.on('click', updateOverlayClickHandler); } catch (_) {}
+
     closeDialogOptions.on('select', (_el: any, idx: number) => {
       if (idx === 0) closeSelectedItem('in_review');
       if (idx === 1) closeSelectedItem('done');
@@ -3323,6 +3338,10 @@ export class TuiController {
         closeDetails();
         return;
       }
+      // Guard: do not process list/detail clicks when any dialog is open.
+      // Dialog-internal mouse events are handled by blessed's per-widget
+      // dispatch and are unaffected by this guard.
+      if (!updateDialog.hidden || !closeDialog.hidden || !nextDialog.hidden) return;
       // List click-to-select: blessed routes mouse events to list item child
       // elements so list.on('click') never fires. Handle it at screen level.
       if (data.action === 'mousedown' && isInside(list, data.x, data.y)) {
