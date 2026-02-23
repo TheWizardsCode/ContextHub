@@ -906,7 +906,35 @@ export class WorklogDatabase {
     }
 
     // Check if the item is blocked - if so, prioritize formal blockers
+    // BUT only if the blocked item's priority is >= the best competing open item
     if (selectedInProgress.status === 'blocked') {
+      const blockedPriority = this.getPriorityValue(selectedInProgress.priority);
+
+      // Find the best competing non-blocked, non-in-progress open item
+      const competingOpenItems = filteredItems.filter(item => {
+        const normalizedStatus = item.status.replace(/_/g, '-');
+        return normalizedStatus !== 'in-progress' &&
+               normalizedStatus !== 'blocked' &&
+               item.status !== 'completed' &&
+               item.status !== 'deleted' &&
+               item.id !== selectedInProgress.id;
+      }).filter(item => !excluded?.has(item.id));
+
+      const bestCompetitor = this.selectByScore(competingOpenItems, recencyPolicy);
+      const bestCompetitorPriority = bestCompetitor ? this.getPriorityValue(bestCompetitor.priority) : 0;
+
+      this.debug(`${debugPrefix} blocked item priority=${selectedInProgress.priority}(${blockedPriority}) bestCompetitor=${bestCompetitor?.id || 'none'} priority=${bestCompetitor?.priority || 'none'}(${bestCompetitorPriority})`);
+
+      // If a competing open item has strictly higher priority than the blocked item,
+      // prefer the competitor over the blocker
+      if (bestCompetitor && bestCompetitorPriority > blockedPriority) {
+        this.debug(`${debugPrefix} preferring higher-priority open item over blocker`);
+        return {
+          workItem: bestCompetitor,
+          reason: `Higher priority open item preferred over blocker of lower-priority blocked item ${selectedInProgress.id} (${selectedInProgress.title})`
+        };
+      }
+
       const blockingChildren = this.getNonClosedChildren(selectedInProgress.id);
       const dependencyBlockers = this.getActiveDependencyBlockers(selectedInProgress.id);
       const blockingCandidates = [...blockingChildren, ...dependencyBlockers];

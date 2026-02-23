@@ -780,5 +780,84 @@ describe('WorklogDatabase', () => {
       expect(result.workItem?.id).toBe(blocked.id);
       expect(result.reason).toContain('Blocked item');
     });
+
+    it('should prefer higher-priority open item over blocker of lower-priority blocked item', () => {
+      // A (medium, open) blocks B (medium, blocked)
+      // C (high, open) -- should win
+      const blockerA = db.create({ title: 'Blocker A', priority: 'medium', status: 'open' });
+      const blockedB = db.create({ title: 'Blocked B', priority: 'medium', status: 'blocked' });
+      db.addDependencyEdge(blockedB.id, blockerA.id);
+      const highC = db.create({ title: 'High priority C', priority: 'high', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem?.id).toBe(highC.id);
+      expect(result.reason).toContain('Higher priority open item');
+    });
+
+    it('should prefer blocker when blocked item has higher priority than competing open items', () => {
+      // X (medium, open) blocks Y (critical, blocked)
+      // Z (high, open) -- should lose because Y is critical
+      const blockerX = db.create({ title: 'Blocker X', priority: 'medium', status: 'open' });
+      const blockedY = db.create({ title: 'Blocked Y', priority: 'critical', status: 'blocked' });
+      db.addDependencyEdge(blockedY.id, blockerX.id);
+      db.create({ title: 'High priority Z', priority: 'high', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      // Should select blocker X because it unblocks a critical item
+      expect(result.workItem?.id).toBe(blockerX.id);
+      expect(result.reason).toContain('Blocking issue');
+      expect(result.reason).toContain('critical');
+    });
+
+    it('should prefer blocker when blocked item has equal priority to best competing open item', () => {
+      // Blocker (low, open) blocks BlockedItem (high, blocked)
+      // Competitor (high, open) -- equal priority to blocked item, blocker should still win
+      const blocker = db.create({ title: 'Blocker', priority: 'low', status: 'open' });
+      const blockedItem = db.create({ title: 'Blocked item', priority: 'high', status: 'blocked' });
+      db.addDependencyEdge(blockedItem.id, blocker.id);
+      db.create({ title: 'Competitor', priority: 'high', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      // Blocker should win because blocked item's priority (high) is NOT less than competitor (high)
+      expect(result.workItem?.id).toBe(blocker.id);
+      expect(result.reason).toContain('Blocking issue');
+    });
+
+    it('should prefer blocker when no competing open items exist', () => {
+      // Only a blocked item and its blocker exist
+      const blocker = db.create({ title: 'Blocker', priority: 'low', status: 'open' });
+      const blockedItem = db.create({ title: 'Blocked item', priority: 'medium', status: 'blocked' });
+      db.addDependencyEdge(blockedItem.id, blocker.id);
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem?.id).toBe(blocker.id);
+      expect(result.reason).toContain('Blocking issue');
+    });
+
+    it('should prefer higher-priority open item over child blocker of lower-priority blocked item', () => {
+      // Child blocker (open) blocks Parent (medium, blocked)
+      // HighItem (high, open) -- should win
+      const parent = db.create({ title: 'Blocked parent', priority: 'medium', status: 'blocked' });
+      db.create({ title: 'Blocking child', priority: 'low', status: 'open', parentId: parent.id });
+      const highItem = db.create({ title: 'High priority item', priority: 'high', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem?.id).toBe(highItem.id);
+      expect(result.reason).toContain('Higher priority open item');
+    });
+
+    it('should prefer blocker of higher-priority blocked item over lower-priority open items with child blockers', () => {
+      // Child blocker (open) blocks Parent (critical, blocked)
+      // LowItem (high, open) -- should lose because parent is critical
+      const parent = db.create({ title: 'Blocked parent', priority: 'critical', status: 'blocked' });
+      const childBlocker = db.create({ title: 'Blocking child', priority: 'low', status: 'open', parentId: parent.id });
+      db.create({ title: 'High priority item', priority: 'high', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      // Should select child blocker because blocked parent is critical
+      // Note: critical blocked items are handled by Phase 2, so this may return via Phase 2
+      expect(result.workItem?.id).toBe(childBlocker.id);
+      expect(result.reason).toContain('Blocking issue');
+    });
   });
 });
