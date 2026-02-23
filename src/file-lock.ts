@@ -51,6 +51,17 @@ const DEFAULT_MAX_LOCK_AGE_MS = 300_000; // 5 minutes
 // ---------------------------------------------------------------------------
 
 /**
+ * Emit a debug log line to stderr when `WL_DEBUG` is set.
+ * All messages are prefixed with `[wl:lock]` for easy filtering.
+ * When `WL_DEBUG` is not set, this is a no-op with negligible overhead.
+ */
+function debugLog(...args: unknown[]): void {
+  if (process.env.WL_DEBUG) {
+    process.stderr.write(`[wl:lock] ${args.map(String).join(' ')}\n`);
+  }
+}
+
+/**
  * Derive the lock file path for a given JSONL data file path.
  *
  * Example: `/path/to/.worklog/worklog-data.jsonl` → `/path/to/.worklog/worklog-data.jsonl.lock`
@@ -215,6 +226,7 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
     // Check timeout
     if (Date.now() > deadline) {
       const existingInfo = readLockInfo(lockPath);
+      debugLog(`Timeout after ${timeout}ms waiting for lock at ${lockPath}`);
       throw new Error(
         buildLockErrorMessage(lockPath, `${timeout}ms timeout`, existingInfo)
       );
@@ -225,6 +237,7 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
       const fd = fs.openSync(lockPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
       fs.writeSync(fd, lockContent);
       fs.closeSync(fd);
+      debugLog(`Lock acquired at ${lockPath} (PID ${process.pid}, attempt ${attempt + 1})`);
       return; // lock acquired
     } catch (err: any) {
       if (err.code !== 'EEXIST') {
@@ -239,6 +252,7 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
           const sameHost = existing.hostname === os.hostname();
           if (sameHost && !isProcessAlive(existing.pid)) {
             // Stale lock from a dead process on this host — remove it
+            debugLog(`Stale lock detected: PID ${existing.pid} is dead, removing ${lockPath}`);
             try {
               fs.unlinkSync(lockPath);
               // Don't increment attempt counter; retry immediately
@@ -255,6 +269,7 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
           // Guard against clock skew: only expire if age is positive.
           const lockAge = Date.now() - new Date(existing.acquiredAt).getTime();
           if (lockAge > 0 && lockAge > maxLockAge) {
+            debugLog(`Stale lock detected: age-expired (${lockAge}ms > ${maxLockAge}ms), removing ${lockPath}`);
             try {
               fs.unlinkSync(lockPath);
               continue;
@@ -267,6 +282,7 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
           // Lock file exists but could not be parsed (corrupted, empty,
           // or missing required fields).  Treat as stale and remove it
           // so acquisition can be retried.
+          debugLog(`Stale lock detected: corrupted lock file, removing ${lockPath}`);
           try {
             fs.unlinkSync(lockPath);
             continue;
@@ -303,6 +319,7 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
 export function releaseFileLock(lockPath: string): void {
   try {
     fs.unlinkSync(lockPath);
+    debugLog(`Lock released at ${lockPath} (PID ${process.pid})`);
   } catch (err: any) {
     if (err.code !== 'ENOENT') {
       // If the file doesn't exist, that's fine — lock was already released.

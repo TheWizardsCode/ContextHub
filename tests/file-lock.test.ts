@@ -1045,4 +1045,133 @@ process.exit(0);
       expect(finalCounter).toBe(numWorkers * iterationsPerWorker);
     }, 60000); // 60s timeout
   });
+
+  // -----------------------------------------------------------------------
+  // Diagnostic logging (WL_DEBUG)
+  // -----------------------------------------------------------------------
+  describe('diagnostic logging', () => {
+    let stderrChunks: string[];
+    let origStderrWrite: typeof process.stderr.write;
+
+    function captureStderr() {
+      stderrChunks = [];
+      origStderrWrite = process.stderr.write;
+      process.stderr.write = ((chunk: any, enc?: any, cb?: any) => {
+        stderrChunks.push(typeof chunk === 'string' ? chunk : chunk.toString());
+        if (typeof cb === 'function') cb();
+        return true;
+      }) as any;
+    }
+
+    function restoreStderr(): string {
+      process.stderr.write = origStderrWrite;
+      return stderrChunks.join('');
+    }
+
+    afterEach(() => {
+      // Ensure stderr is always restored even if a test fails
+      if (origStderrWrite) {
+        process.stderr.write = origStderrWrite;
+      }
+      delete process.env.WL_DEBUG;
+    });
+
+    it('should produce debug output on stderr when WL_DEBUG=1 during acquire/release', () => {
+      process.env.WL_DEBUG = '1';
+      captureStderr();
+
+      acquireFileLock(lockPath, { retries: 0, timeout: 5000 });
+      releaseFileLock(lockPath);
+
+      const output = restoreStderr();
+      expect(output).toContain('[wl:lock]');
+      // Should log acquisition with PID and lock path
+      expect(output).toMatch(/acquir/i);
+      expect(output).toContain(String(process.pid));
+      // Should log release
+      expect(output).toMatch(/releas/i);
+    });
+
+    it('should produce NO debug output when WL_DEBUG is not set', () => {
+      delete process.env.WL_DEBUG;
+      captureStderr();
+
+      acquireFileLock(lockPath, { retries: 0, timeout: 5000 });
+      releaseFileLock(lockPath);
+
+      const output = restoreStderr();
+      expect(output).not.toContain('[wl:lock]');
+    });
+
+    it('should log stale lock cleanup reason when PID is dead', () => {
+      // Create a lock file with a dead PID
+      const staleLock: FileLockInfo = {
+        pid: 99999,
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(staleLock));
+
+      process.env.WL_DEBUG = '1';
+      captureStderr();
+
+      acquireFileLock(lockPath, { retries: 2, timeout: 5000 });
+      releaseFileLock(lockPath);
+
+      const output = restoreStderr();
+      expect(output).toContain('[wl:lock]');
+      // Should mention stale/dead PID cleanup
+      expect(output).toMatch(/stale|dead/i);
+      expect(output).toContain('99999');
+    });
+
+    it('should log stale lock cleanup reason when lock is age-expired', () => {
+      // Create a lock file that's older than maxLockAge
+      const oldLock: FileLockInfo = {
+        pid: process.pid, // alive PID but too old
+        hostname: os.hostname(),
+        acquiredAt: new Date(Date.now() - 600_000).toISOString(), // 10 min ago
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(oldLock));
+
+      process.env.WL_DEBUG = '1';
+      captureStderr();
+
+      acquireFileLock(lockPath, { retries: 2, timeout: 5000, maxLockAge: 1000 });
+      releaseFileLock(lockPath);
+
+      const output = restoreStderr();
+      expect(output).toContain('[wl:lock]');
+      // Should mention age-based expiry
+      expect(output).toMatch(/age|expir/i);
+    });
+
+    it('should log stale lock cleanup reason when lock is corrupted', () => {
+      // Create a corrupted lock file
+      fs.writeFileSync(lockPath, 'not-valid-json');
+
+      process.env.WL_DEBUG = '1';
+      captureStderr();
+
+      acquireFileLock(lockPath, { retries: 2, timeout: 5000 });
+      releaseFileLock(lockPath);
+
+      const output = restoreStderr();
+      expect(output).toContain('[wl:lock]');
+      // Should mention corrupted
+      expect(output).toMatch(/corrupt/i);
+    });
+
+    it('should include attempt number in acquire log', () => {
+      process.env.WL_DEBUG = '1';
+      captureStderr();
+
+      acquireFileLock(lockPath, { retries: 0, timeout: 5000 });
+      releaseFileLock(lockPath);
+
+      const output = restoreStderr();
+      // Should mention attempt 1 (or attempt 0, depending on implementation)
+      expect(output).toMatch(/attempt/i);
+    });
+  });
 });
