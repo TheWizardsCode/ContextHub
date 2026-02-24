@@ -306,6 +306,12 @@ export class WorklogDatabase {
       parentId?: string;
       tags?: string[];
       limit?: number;
+      priority?: string;
+      assignee?: string;
+      stage?: string;
+      deleted?: boolean;
+      needsProducerReview?: boolean;
+      issueType?: string;
     }
   ): { results: FtsSearchResult[]; ftsUsed: boolean } {
     if (this.store.ftsAvailable) {
