@@ -1125,10 +1125,12 @@ describe('WorklogDatabase', () => {
       }
     });
 
-    it('should not boost for completed or deleted downstream items', () => {
+    it('should not boost for completed or deleted downstream items', async () => {
       // A blocks a critical downstream item that is already completed.
       // No boost should apply because the dependency is inactive.
+      const delay = () => new Promise(resolve => setTimeout(resolve, 10));
       const itemA = db.create({ title: 'Unblocker A', priority: 'medium', status: 'open' });
+      await delay();
       const itemB = db.create({ title: 'Plain B', priority: 'medium', status: 'open' });
       const completedCritical = db.create({ title: 'Completed critical', priority: 'critical', status: 'completed' });
       db.addDependencyEdge(completedCritical.id, itemA.id);
@@ -1145,6 +1147,7 @@ describe('WorklogDatabase', () => {
       const db2 = new WorklogDatabase('TEST', db2Path, db2JsonlPath, true, true);
       try {
         const olderB2 = db2.create({ title: 'Older B', priority: 'medium', status: 'open' });
+        await delay();
         const newerA2 = db2.create({ title: 'Blocks deleted A', priority: 'medium', status: 'open' });
         const deletedCritical = db2.create({ title: 'Deleted critical', priority: 'critical', status: 'deleted' });
         db2.addDependencyEdge(deletedCritical.id, newerA2.id);
