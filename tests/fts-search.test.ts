@@ -520,4 +520,122 @@ describe('FTS Search', () => {
       expect(result.results.length).toBeGreaterThanOrEqual(1);
     });
   });
+
+  describe('ID-aware search', () => {
+    it('should return exact ID match as top result when searching by full prefixed ID', () => {
+      const item = db.create({ title: 'Target item for ID search' });
+      db.create({ title: 'Another item mentioning nothing related' });
+      const { results } = db.search(item.id);
+      expect(results.length).toBeGreaterThanOrEqual(1);
+      expect(results[0].itemId).toBe(item.id);
+      expect(results[0].matchedColumn).toBe('id');
+      expect(results[0].rank).toBe(-Infinity);
+    });
+
+    it('should return exact ID match when searching by lowercase prefixed ID', () => {
+      const item = db.create({ title: 'Case insensitive ID lookup' });
+      const { results } = db.search(item.id.toLowerCase());
+      expect(results.length).toBeGreaterThanOrEqual(1);
+      expect(results[0].itemId).toBe(item.id);
+      expect(results[0].matchedColumn).toBe('id');
+    });
+
+    it('should resolve bare (unprefixed) ID using configured prefix', () => {
+      const item = db.create({ title: 'Prefix resolution test' });
+      // Strip the "TEST-" prefix to get bare ID
+      const bareId = item.id.replace(/^TEST-/, '');
+      const { results } = db.search(bareId);
+      expect(results.length).toBeGreaterThanOrEqual(1);
+      expect(results[0].itemId).toBe(item.id);
+      expect(results[0].matchedColumn).toBe('id');
+      expect(results[0].rank).toBe(-Infinity);
+    });
+
+    it('should find partial ID substring matches (>= 8 chars)', () => {
+      const item = db.create({ title: 'Partial ID match test' });
+      // Take 8+ chars from the middle of the ID (after prefix)
+      const bareId = item.id.replace(/^TEST-/, '');
+      const partialId = bareId.substring(0, 8);
+      const { results } = db.search(partialId);
+      expect(results.length).toBeGreaterThanOrEqual(1);
+      const found = results.find(r => r.itemId === item.id);
+      expect(found).toBeDefined();
+      expect(found!.matchedColumn).toBe('id');
+      // Partial matches get rank -1000 (not -Infinity)
+      expect(found!.rank).toBe(-1000);
+    });
+
+    it('should not match partial IDs shorter than 8 chars', () => {
+      const item = db.create({ title: 'Short partial ID test' });
+      const bareId = item.id.replace(/^TEST-/, '');
+      const shortPartial = bareId.substring(0, 5);
+      const { results } = db.search(shortPartial);
+      // Should not find via ID matching (might find via FTS if text happens to match)
+      const idMatch = results.find(r => r.matchedColumn === 'id');
+      expect(idMatch).toBeUndefined();
+    });
+
+    it('should rank exact ID match above FTS text matches', () => {
+      const target = db.create({ title: 'Bug fix for authentication' });
+      db.create({
+        title: 'Authentication improvement',
+        description: `Related to ${target.id}`,
+      });
+      // Search by exact ID — target should be first
+      const { results } = db.search(target.id);
+      expect(results[0].itemId).toBe(target.id);
+      expect(results[0].matchedColumn).toBe('id');
+    });
+
+    it('should deduplicate ID matches with FTS results', () => {
+      const item = db.create({
+        title: 'Unique dedup test keyword',
+        description: 'Testing deduplication of ID and FTS results',
+      });
+      // Search with a multi-token query: the ID + a text term
+      const { results } = db.search(`${item.id} dedup`);
+      // The item should appear only once
+      const occurrences = results.filter(r => r.itemId === item.id);
+      expect(occurrences.length).toBe(1);
+      // And it should be the ID match (first)
+      expect(occurrences[0].matchedColumn).toBe('id');
+    });
+
+    it('should handle multi-token queries with ID and text terms', () => {
+      const target = db.create({ title: 'Multi-token target item' });
+      db.create({ title: 'Keyword findable item' });
+      // Search with ID + text keyword
+      const { results } = db.search(`${target.id} keyword`);
+      // ID match should be first
+      expect(results[0].itemId).toBe(target.id);
+      expect(results[0].matchedColumn).toBe('id');
+      // FTS may or may not find additional results depending on how it handles
+      // the mixed ID+text query — the key guarantee is that the ID match is first
+      expect(results.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('should return no results for a non-existent ID', () => {
+      db.create({ title: 'Some item' });
+      const { results } = db.search('TEST-ZZZZZZZZZZZZZZZZZ');
+      // No ID match, no FTS match
+      const idMatches = results.filter(r => r.matchedColumn === 'id');
+      expect(idMatches.length).toBe(0);
+    });
+
+    it('should preserve existing filter options with ID search', () => {
+      const openItem = db.create({ title: 'Open item for filter test' });
+      db.update(openItem.id, { status: 'in-progress' });
+      // Search by ID with status filter — should still return the item
+      const { results: inProgress } = db.search(openItem.id, { status: 'in-progress' });
+      expect(inProgress.length).toBeGreaterThanOrEqual(1);
+      expect(inProgress[0].itemId).toBe(openItem.id);
+    });
+
+    it('should handle searching by ID with extra whitespace', () => {
+      const item = db.create({ title: 'Whitespace handling test' });
+      const { results } = db.search(`  ${item.id}  `);
+      expect(results.length).toBeGreaterThanOrEqual(1);
+      expect(results[0].itemId).toBe(item.id);
+    });
+  });
 });

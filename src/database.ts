@@ -10,6 +10,7 @@ import { SqlitePersistentStore, FtsSearchResult } from './persistent-store.js';
 import { importFromJsonl, exportToJsonl, getDefaultDataPath } from './jsonl.js';
 import { mergeWorkItems, mergeComments } from './sync.js';
 import { withFileLock, getLockPathForJsonl } from './file-lock.js';
+import * as searchMetrics from './search-metrics.js';
 
 const UNIQUE_TIME_LENGTH = 9;
 const UNIQUE_RANDOM_BYTES = 4;
@@ -313,6 +314,18 @@ export class WorklogDatabase {
   /**
    * Search work items using full-text search (FTS5) with automatic fallback
    * to application-level search when FTS5 is unavailable.
+   *
+   * ID-aware behaviour:
+   *  1. Exact-ID short-circuit: if a token matches a work item ID exactly
+   *     (case-insensitive, with or without the project prefix), the matching
+   *     item is returned first with rank = -Infinity.
+   *  2. Prefix resolution: bare tokens that look like IDs (alphanumeric,
+   *     length >= 8) are tried with the repository's configured prefix.
+   *  3. Partial-ID substring: tokens of length >= 8 that are not an exact
+   *     match are used for substring matching against all work item IDs.
+   *  4. Multi-token queries: each token is checked for ID-likeness; exact
+   *     matches come first, then regular FTS/fallback results on the full
+   *     original query (duplicates removed).
    */
   search(
     query: string,
@@ -329,13 +342,94 @@ export class WorklogDatabase {
       issueType?: string;
     }
   ): { results: FtsSearchResult[]; ftsUsed: boolean } {
+    searchMetrics.increment('search.total');
+    const idResults: FtsSearchResult[] = [];
+    const seenIds = new Set<string>();
+
+    const tokens = query.trim().split(/\s+/).filter(t => t.length > 0);
+    const prefix = this.getPrefix();
+
+    for (const token of tokens) {
+      const upper = token.toUpperCase();
+
+      // --- Exact-ID check (with prefix already present) ---
+      if (upper.includes('-')) {
+        const item = this.store.getWorkItem(upper);
+        if (item && !seenIds.has(item.id)) {
+          seenIds.add(item.id);
+          idResults.push({
+            itemId: item.id,
+            rank: -Infinity,
+            snippet: item.title,
+            matchedColumn: 'id',
+          });
+          searchMetrics.increment('search.exact_id');
+          continue;
+        }
+      }
+
+      // --- Prefix resolution: bare token → PREFIX-TOKEN ---
+      if (!upper.includes('-') && /^[A-Z0-9]+$/.test(upper) && upper.length >= 8) {
+        const prefixed = `${prefix}-${upper}`;
+        const item = this.store.getWorkItem(prefixed);
+        if (item && !seenIds.has(item.id)) {
+          seenIds.add(item.id);
+          idResults.push({
+            itemId: item.id,
+            rank: -Infinity,
+            snippet: item.title,
+            matchedColumn: 'id',
+          });
+          searchMetrics.increment('search.prefix_resolved');
+          continue;
+        }
+      }
+
+      // --- Partial-ID substring match (>= 8 chars, alphanumeric) ---
+      const cleaned = upper.replace(/[^A-Z0-9]/g, '');
+      if (cleaned.length >= 8) {
+        const partials = this.store.findByIdSubstring(cleaned);
+        for (const p of partials) {
+          if (!seenIds.has(p.id)) {
+            seenIds.add(p.id);
+            idResults.push({
+              itemId: p.id,
+              rank: -1000,
+              snippet: p.title,
+              matchedColumn: 'id',
+            });
+            searchMetrics.increment('search.partial_id');
+          }
+        }
+      }
+    }
+
+    // --- Regular FTS / fallback search ---
+    let ftsUsed = false;
+    let ftsResults: FtsSearchResult[] = [];
+
     if (this.store.ftsAvailable) {
-      return { results: this.store.searchFts(query, options), ftsUsed: true };
+      ftsResults = this.store.searchFts(query, options);
+      ftsUsed = true;
+      searchMetrics.increment('search.fts');
+    } else {
+      if (!this.silent) {
+        this.debug('FTS5 is not available; falling back to application-level search');
+      }
+      ftsResults = this.store.searchFallback(query, options);
+      searchMetrics.increment('search.fallback');
     }
-    if (!this.silent) {
-      this.debug('FTS5 is not available; falling back to application-level search');
+
+    // --- Merge: ID results first, then FTS results (deduped) ---
+    const merged: FtsSearchResult[] = [...idResults];
+    for (const r of ftsResults) {
+      if (!seenIds.has(r.itemId)) {
+        seenIds.add(r.itemId);
+        merged.push(r);
+      }
     }
-    return { results: this.store.searchFallback(query, options), ftsUsed: false };
+
+    return { results: merged, ftsUsed };
   }
 
   /**

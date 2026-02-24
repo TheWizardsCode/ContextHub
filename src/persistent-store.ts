@@ -1135,6 +1135,18 @@ export class SqlitePersistentStore {
   }
 
   /**
+   * Find work items whose ID contains the given substring (case-insensitive).
+   * Used for partial-ID matching when the query token length is >= 8 characters.
+   */
+  findByIdSubstring(substr: string): WorkItem[] {
+    if (!substr || substr.length < 8) return [];
+    const upperSubstr = substr.toUpperCase();
+    const stmt = this.db.prepare('SELECT * FROM workitems WHERE UPPER(id) LIKE ?');
+    const rows = stmt.all(`%${upperSubstr}%`) as any[];
+    return rows.map(row => this.rowToWorkItem(row));
+  }
+
+  /**
    * Close database connection
    */
   close(): void {
