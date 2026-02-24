@@ -175,6 +175,9 @@ wl list --stage review --json
 wl search <keywords> --json
 # Search with status filter
 wl search <keywords> --status open --json
+# Search by work item ID (exact, unprefixed, or partial >= 8 chars)
+wl search <work-item-id> --json
+wl search <id-without-prefix> --json
 
 # Show details for a specific work item
 wl show <work-item-id> --comments --json
