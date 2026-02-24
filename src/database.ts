@@ -69,20 +69,26 @@ export class WorklogDatabase {
   }
 
   /**
-   * Refresh database from JSONL file if JSONL is newer
+   * Refresh database from JSONL file if JSONL is newer.
+   *
+   * This method is intentionally **lockless** — it does not acquire the
+   * exclusive file lock.  Because `exportToJsonl()` (in jsonl.ts) already
+   * uses atomic write (temp-file + `renameSync`), readers will always see
+   * either the old complete file or the new complete file, never a partial
+   * write.  Removing the lock from this read path eliminates the contention
+   * that previously caused "retries exhausted" errors during concurrent
+   * usage by agents and developers.
+   *
+   * If the JSONL file is transiently unavailable or corrupted (e.g. during
+   * an atomic rename race on some filesystems), the method falls back to
+   * the existing SQLite cache — see the try-catch around `importFromJsonl`.
    */
   private refreshFromJsonlIfNewer(): void {
     if (!fs.existsSync(this.jsonlPath)) {
       return; // No JSONL file, nothing to refresh from
     }
 
-    // Hold the file lock while checking mtime and importing to prevent
-    // another process from writing between our stat and read.
-    withFileLock(this.lockPath, () => {
-      if (!fs.existsSync(this.jsonlPath)) {
-        return; // File may have been removed between our check and lock acquisition
-      }
-
+    try {
       const jsonlStats = fs.statSync(this.jsonlPath);
       const jsonlMtime = jsonlStats.mtimeMs;
 
@@ -120,7 +126,16 @@ export class WorklogDatabase {
           this.debug(`Loaded ${jsonlItems.length} work items and ${jsonlComments.length} comments from JSONL`);
         }
       }
-    });
+    } catch (error) {
+      // Graceful fallback: if the JSONL file is transiently unavailable,
+      // corrupted, or deleted between our existsSync check and the read,
+      // silently fall back to the existing SQLite cache.  This is safe
+      // because stale reads are acceptable for all read-only commands.
+      if (process.env.WL_DEBUG) {
+        const message = error instanceof Error ? error.message : String(error);
+        process.stderr.write(`[wl:db] JSONL parse failed, using cached data: ${message}\n`);
+      }
+    }
   }
 
   /**
