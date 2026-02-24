@@ -19,16 +19,16 @@ import * as path from 'path';
 // ---------------------------------------------------------------------------
 
 export interface FileLockOptions {
-  /** Maximum number of acquisition attempts before giving up (default 50). */
-  retries?: number;
-  /** Delay in milliseconds between retry attempts (default 100). */
+  /** Delay in milliseconds between retry attempts (default 100). This is the initial delay; with exponential backoff it increases on each attempt. */
   retryDelay?: number;
-  /** Overall timeout in milliseconds (default 10 000). Takes precedence over retries × retryDelay. */
+  /** Overall timeout in milliseconds (default 30 000). The retry loop runs until this deadline is reached. */
   timeout?: number;
   /** If true, stale locks from dead processes are automatically removed (default true). */
   staleLockCleanup?: boolean;
   /** Maximum age of a lock file in milliseconds before it is treated as stale regardless of PID status (default 300 000 = 5 minutes). */
   maxLockAge?: number;
+  /** Maximum delay in milliseconds between retry attempts after exponential growth (default 2 000). */
+  maxRetryDelay?: number;
 }
 
 export interface FileLockInfo {
@@ -41,10 +41,10 @@ export interface FileLockInfo {
 // Defaults
 // ---------------------------------------------------------------------------
 
-const DEFAULT_RETRIES = 50;
 const DEFAULT_RETRY_DELAY_MS = 100;
-const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_LOCK_AGE_MS = 300_000; // 5 minutes
+const DEFAULT_MAX_RETRY_DELAY_MS = 2_000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -107,15 +107,17 @@ export function readLockInfo(lockPath: string): FileLockInfo | null {
 }
 
 /**
- * Synchronous sleep using a busy-wait loop.  Used during retry loops
- * where we intentionally want to block the event loop (the entire
- * codebase is synchronous I/O).
+ * Synchronous sleep using `Atomics.wait`.  Blocks the calling thread
+ * for the requested number of milliseconds **without** busy-waiting,
+ * so CPU usage during the sleep is negligible.
+ *
+ * Note: `Atomics.wait` is supported in Node.js on all platforms
+ * (Linux, macOS, Windows / WSL2).  It throws in browser main threads,
+ * but this is a Node.js CLI tool so that is not a concern.
  */
-function sleepSync(ms: number): void {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    // busy-wait
-  }
+export function sleepSync(ms: number): void {
+  if (ms <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 /**
@@ -201,11 +203,11 @@ function canonicalLockPath(lockPath: string): string {
  * an error is thrown.
  */
 export function acquireFileLock(lockPath: string, options?: FileLockOptions): void {
-  const retries = options?.retries ?? DEFAULT_RETRIES;
   const retryDelay = options?.retryDelay ?? DEFAULT_RETRY_DELAY_MS;
   const timeout = options?.timeout ?? DEFAULT_TIMEOUT_MS;
   const staleLockCleanup = options?.staleLockCleanup ?? true;
   const maxLockAge = options?.maxLockAge ?? DEFAULT_MAX_LOCK_AGE_MS;
+  const maxRetryDelay = options?.maxRetryDelay ?? DEFAULT_MAX_RETRY_DELAY_MS;
 
   const deadline = Date.now() + timeout;
 
@@ -222,7 +224,10 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
     fs.mkdirSync(lockDir, { recursive: true });
   }
 
-  for (let attempt = 0; attempt <= retries; attempt++) {
+  let currentDelay = retryDelay;
+  let attempt = 0;
+
+  while (true) {
     // Check timeout
     if (Date.now() > deadline) {
       const existingInfo = readLockInfo(lockPath);
@@ -294,22 +299,23 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
       }
 
       // Lock is held by a live process (or on another host) — wait and retry
-      if (attempt < retries) {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) {
-          // Will be caught by the timeout check at the top of the loop
-          continue;
-        }
-        sleepSync(Math.min(retryDelay, remaining));
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        // Will be caught by the timeout check at the top of the loop
+        continue;
       }
+
+      // Exponential backoff with jitter
+      const jitter = Math.random() * currentDelay * 0.25;
+      const sleepMs = Math.min(currentDelay + jitter, remaining);
+      debugLog(`Retry attempt ${attempt + 1}: sleeping ${Math.round(sleepMs)}ms (base delay ${Math.round(currentDelay)}ms)`);
+      sleepSync(sleepMs);
+
+      // Grow delay for next iteration (1.5x multiplier, capped)
+      currentDelay = Math.min(currentDelay * 1.5, maxRetryDelay);
+      attempt++;
     }
   }
-
-  // Exhausted all retries
-  const existingInfo = readLockInfo(lockPath);
-  throw new Error(
-    buildLockErrorMessage(lockPath, `${retries} retries exhausted`, existingInfo)
-  );
 }
 
 /**

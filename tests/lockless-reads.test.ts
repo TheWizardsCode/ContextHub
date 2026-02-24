@@ -100,7 +100,7 @@ describe('Lockless reads concurrency', () => {
 
       // No lock-related errors in stderr
       if (result.error) {
-        expect(result.error).not.toContain('retries exhausted');
+        expect(result.error).not.toContain('timeout');
         expect(result.error).not.toContain('EACCES');
         expect(result.error).not.toContain('lock');
       }
