@@ -843,7 +843,8 @@ export class WorklogDatabase {
     recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore',
     excluded?: Set<string>,
     debugPrefix: string = '[next]',
-    includeInReview: boolean = false
+    includeInReview: boolean = false,
+    includeBlocked: boolean = false
   ): NextWorkItemResult {
     this.debug(`${debugPrefix} recencyPolicy=${recencyPolicy} assignee=${assignee || ''} search=${searchTerm || ''} excluded=${excluded?.size || 0}`);
     let filteredItems = items;
@@ -861,13 +862,31 @@ export class WorklogDatabase {
     if (excluded && excluded.size > 0) {
       filteredItems = filteredItems.filter(item => !excluded.has(item.id));
     }
-    this.debug(`${debugPrefix} after deleted/excluded=${filteredItems.length}`);
+    // Save pre-dep-blocker pool so the critical-path can still surface blockers
+    const preDepBlockerItems = filteredItems;
+    if (!includeBlocked) {
+      // Use store-direct access to avoid per-item refreshFromJsonlIfNewer overhead
+      // (data is already fresh from the getAllWorkItems call at the top of the stack)
+      filteredItems = filteredItems.filter(item => {
+        const edges = this.store.getDependencyEdgesFrom(item.id);
+        for (const edge of edges) {
+          const target = this.store.getWorkItem(edge.toId);
+          if (this.isDependencyActive(target ?? null)) {
+            return false;
+          }
+        }
+        return true;
+      });
+    }
+    this.debug(`${debugPrefix} after deleted/excluded/dep-blocker=${filteredItems.length}`);
 
     // Apply filters
     filteredItems = this.applyFilters(filteredItems, assignee, searchTerm);
     this.debug(`${debugPrefix} after assignee/search filters=${filteredItems.length}`);
 
-    const criticalItems = filteredItems.filter(
+    // Critical items: use pre-dep-blocker pool so that blocked criticals still surface their blockers
+    const criticalPool = this.applyFilters(preDepBlockerItems, assignee, searchTerm);
+    const criticalItems = criticalPool.filter(
       item => item.priority === 'critical' && item.status !== 'completed' && item.status !== 'deleted'
     );
     this.debug(`${debugPrefix} critical items=${criticalItems.length}`);
@@ -930,10 +949,19 @@ export class WorklogDatabase {
     }
 
     // Find in-progress and blocked items
-    const inProgressItems = filteredItems.filter(item => {
+    // For blocked items: use pre-dep-blocker pool so blocked items with dependency
+    // edges are still visible for blocker-surfacing logic.
+    // For in-progress items: use filtered (post dep-blocker) pool so dep-blocked
+    // in-progress items are not selected as the final result.
+    const inProgressFromFiltered = this.applyFilters(filteredItems, assignee, searchTerm).filter(item => {
       const normalizedStatus = item.status.replace(/_/g, '-');
-      return normalizedStatus === 'in-progress' || normalizedStatus === 'blocked';
+      return normalizedStatus === 'in-progress';
     });
+    const blockedFromPreFilter = this.applyFilters(preDepBlockerItems, assignee, searchTerm).filter(item => {
+      const normalizedStatus = item.status.replace(/_/g, '-');
+      return normalizedStatus === 'blocked';
+    });
+    const inProgressItems = [...inProgressFromFiltered, ...blockedFromPreFilter];
     this.debug(`${debugPrefix} in-progress/blocked items=${inProgressItems.length}`);
 
     if (inProgressItems.length === 0) {
@@ -1083,11 +1111,25 @@ export class WorklogDatabase {
       if (excluded?.has(selectedInProgress.id)) {
         return { workItem: null, reason: 'No available items after exclusions' };
       }
-      // No suitable direct children, return the in-progress item itself
-      return {
-        workItem: selectedInProgress,
-        reason: `In-progress item with no open children`
-      };
+      // No suitable direct children — fall through to find the best non-in-progress
+      // open item instead of returning the in-progress item itself (it's already
+      // being worked on, so wl next should recommend something actionable).
+      const fallbackItems = filteredItems.filter(item => {
+        const ns = item.status.replace(/_/g, '-');
+        return ns !== 'in-progress' &&
+               ns !== 'blocked' &&
+               item.status !== 'completed' &&
+               item.status !== 'deleted' &&
+               item.id !== selectedInProgress.id;
+      }).filter(item => !excluded?.has(item.id));
+      const fallback = this.selectBySortIndex(fallbackItems, recencyPolicy);
+      if (fallback) {
+        return {
+          workItem: fallback,
+          reason: `Next open item by sort_index (in-progress item ${selectedInProgress.id} has no open children)`
+        };
+      }
+      return { workItem: null, reason: 'No actionable work items available (only in-progress items remain)' };
     }
 
     const selected = this.selectBySortIndex(filteredChildren, recencyPolicy);
@@ -1108,10 +1150,11 @@ export class WorklogDatabase {
     assignee?: string,
     searchTerm?: string,
     recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore',
-    includeInReview: boolean = false
+    includeInReview: boolean = false,
+    includeBlocked: boolean = false
   ): NextWorkItemResult {
     const items = this.store.getAllWorkItems();
-    return this.findNextWorkItemFromItems(items, assignee, searchTerm, recencyPolicy, undefined, '[next]', includeInReview);
+    return this.findNextWorkItemFromItems(items, assignee, searchTerm, recencyPolicy, undefined, '[next]', includeInReview, includeBlocked);
   }
 
   /**
@@ -1123,7 +1166,8 @@ export class WorklogDatabase {
     assignee?: string,
     searchTerm?: string,
     recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore',
-    includeInReview: boolean = false
+    includeInReview: boolean = false,
+    includeBlocked: boolean = false
   ): NextWorkItemResult[] {
     const results: NextWorkItemResult[] = [];
     const excluded = new Set<string>();
@@ -1136,7 +1180,8 @@ export class WorklogDatabase {
         recencyPolicy,
         excluded,
         `[next batch ${i + 1}/${count}]`,
-        includeInReview
+        includeInReview,
+        includeBlocked
       );
 
       results.push(result);
