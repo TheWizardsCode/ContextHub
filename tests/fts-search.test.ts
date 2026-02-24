@@ -4,6 +4,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { WorklogDatabase } from '../src/database.js';
+import * as searchMetrics from '../src/search-metrics.js';
 import { createTempDir, cleanupTempDir, createTempJsonlPath, createTempDbPath } from './test-utils.js';
 
 describe('FTS Search', () => {
@@ -649,5 +650,155 @@ describe('FTS Search', () => {
       expect(results.length).toBeGreaterThanOrEqual(1);
       expect(results[0].itemId).toBe(item.id);
     });
+  });
+
+  describe('search metrics counters', () => {
+    beforeEach(() => {
+      searchMetrics.reset();
+    });
+
+    it('should increment search.total on every search call', () => {
+      db.create({ title: 'Metrics total test' });
+      const before = searchMetrics.snapshot();
+      db.search('metrics');
+      db.search('total');
+      const after = searchMetrics.snapshot();
+      const delta = searchMetrics.diff(before, after);
+      expect(delta['search.total']).toBe(2);
+    });
+
+    it('should increment search.exact_id when a full prefixed ID matches', () => {
+      const item = db.create({ title: 'Exact ID metrics test' });
+      const before = searchMetrics.snapshot();
+      db.search(item.id);
+      const after = searchMetrics.snapshot();
+      const delta = searchMetrics.diff(before, after);
+      expect(delta['search.exact_id']).toBe(1);
+      expect(delta['search.total']).toBe(1);
+    });
+
+    it('should increment search.prefix_resolved when a bare ID is resolved via prefix', () => {
+      const item = db.create({ title: 'Prefix resolve metrics test' });
+      const bareId = item.id.replace(/^TEST-/, '');
+      const before = searchMetrics.snapshot();
+      db.search(bareId);
+      const after = searchMetrics.snapshot();
+      const delta = searchMetrics.diff(before, after);
+      expect(delta['search.prefix_resolved']).toBe(1);
+      expect(delta['search.total']).toBe(1);
+    });
+
+    it('should increment search.partial_id on partial-ID substring match', () => {
+      const item = db.create({ title: 'Partial ID metrics test' });
+      const bareId = item.id.replace(/^TEST-/, '');
+      const partial = bareId.substring(0, 8);
+      const before = searchMetrics.snapshot();
+      db.search(partial);
+      const after = searchMetrics.snapshot();
+      const delta = searchMetrics.diff(before, after);
+      expect(delta['search.partial_id']).toBeGreaterThanOrEqual(1);
+      expect(delta['search.total']).toBe(1);
+    });
+
+    it('should increment search.fts when FTS path is used', () => {
+      db.create({ title: 'FTS metrics test keyword' });
+      const before = searchMetrics.snapshot();
+      db.search('keyword');
+      const after = searchMetrics.snapshot();
+      const delta = searchMetrics.diff(before, after);
+      expect(delta['search.fts']).toBe(1);
+      expect(delta['search.total']).toBe(1);
+    });
+
+    it('should increment both search.exact_id and search.fts for an exact ID search', () => {
+      const item = db.create({ title: 'Combined metrics test' });
+      const before = searchMetrics.snapshot();
+      db.search(item.id);
+      const after = searchMetrics.snapshot();
+      const delta = searchMetrics.diff(before, after);
+      // Exact ID match fires, then FTS also runs on the query
+      expect(delta['search.exact_id']).toBe(1);
+      expect(delta['search.fts']).toBe(1);
+      expect(delta['search.total']).toBe(1);
+    });
+
+    it('should not increment search.exact_id for a text-only query', () => {
+      db.create({ title: 'Text only metrics test' });
+      const before = searchMetrics.snapshot();
+      db.search('text only');
+      const after = searchMetrics.snapshot();
+      const delta = searchMetrics.diff(before, after);
+      expect(delta['search.exact_id'] || 0).toBe(0);
+      expect(delta['search.prefix_resolved'] || 0).toBe(0);
+      expect(delta['search.partial_id'] || 0).toBe(0);
+      expect(delta['search.fts']).toBe(1);
+    });
+
+    it('should not increment search.partial_id when partial token is too short', () => {
+      const item = db.create({ title: 'Short partial metrics test' });
+      const bareId = item.id.replace(/^TEST-/, '');
+      const shortPartial = bareId.substring(0, 5);
+      const before = searchMetrics.snapshot();
+      db.search(shortPartial);
+      const after = searchMetrics.snapshot();
+      const delta = searchMetrics.diff(before, after);
+      expect(delta['search.partial_id'] || 0).toBe(0);
+    });
+  });
+});
+
+describe('search-metrics module', () => {
+  beforeEach(() => {
+    searchMetrics.reset();
+  });
+
+  it('increment() should create and increment a counter', () => {
+    searchMetrics.increment('test.counter');
+    expect(searchMetrics.snapshot()['test.counter']).toBe(1);
+    searchMetrics.increment('test.counter');
+    expect(searchMetrics.snapshot()['test.counter']).toBe(2);
+  });
+
+  it('increment() should accept a custom step', () => {
+    searchMetrics.increment('test.step', 5);
+    expect(searchMetrics.snapshot()['test.step']).toBe(5);
+  });
+
+  it('snapshot() should return a copy that is not affected by later increments', () => {
+    searchMetrics.increment('test.snap', 3);
+    const snap = searchMetrics.snapshot();
+    searchMetrics.increment('test.snap', 7);
+    expect(snap['test.snap']).toBe(3);
+    expect(searchMetrics.snapshot()['test.snap']).toBe(10);
+  });
+
+  it('reset() should clear all counters', () => {
+    searchMetrics.increment('test.a');
+    searchMetrics.increment('test.b', 2);
+    searchMetrics.reset();
+    const snap = searchMetrics.snapshot();
+    expect(Object.keys(snap).length).toBe(0);
+  });
+
+  it('diff() should compute the delta between two snapshots', () => {
+    searchMetrics.increment('search.total', 3);
+    searchMetrics.increment('search.fts', 2);
+    const before = searchMetrics.snapshot();
+    searchMetrics.increment('search.total', 5);
+    searchMetrics.increment('search.exact_id', 1);
+    const after = searchMetrics.snapshot();
+    const delta = searchMetrics.diff(before, after);
+    expect(delta['search.total']).toBe(5);
+    expect(delta['search.fts']).toBe(0);
+    expect(delta['search.exact_id']).toBe(1);
+  });
+
+  it('diff() should handle keys present only in before snapshot', () => {
+    searchMetrics.increment('search.removed', 3);
+    const before = searchMetrics.snapshot();
+    searchMetrics.reset();
+    const after = searchMetrics.snapshot();
+    const delta = searchMetrics.diff(before, after);
+    expect(delta['search.removed']).toBe(-3);
   });
 });
