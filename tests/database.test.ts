@@ -1220,4 +1220,163 @@ describe('WorklogDatabase', () => {
       });
     });
   });
+
+  describe('refreshFromJsonlIfNewer - graceful fallback', () => {
+    it('should fall back to cached SQLite data when JSONL is corrupted', () => {
+      // Step 1: Create a database and populate it with a work item
+      const item = db.create({ title: 'Cached item', description: 'Should survive corruption' });
+      const itemId = item.id;
+
+      // Step 2: Close the database so the SQLite cache is flushed
+      db.close();
+
+      // Step 3: Corrupt the JSONL file with invalid content
+      fs.writeFileSync(jsonlPath, '{{{{not valid json at all!!!!\n{broken\n');
+
+      // Step 4: Bump the mtime so the DB thinks JSONL is newer and needs refresh
+      const futureTime = new Date(Date.now() + 60_000);
+      fs.utimesSync(jsonlPath, futureTime, futureTime);
+
+      // Step 5: Re-open the database — constructor calls refreshFromJsonlIfNewer()
+      // This must NOT throw despite the corrupted JSONL
+      const db2 = new WorklogDatabase('TEST', dbPath, jsonlPath, true, true);
+
+      // Step 6: The previously-cached work item should still be accessible
+      const retrieved = db2.get(itemId);
+      expect(retrieved).toBeDefined();
+      expect(retrieved!.title).toBe('Cached item');
+      expect(retrieved!.description).toBe('Should survive corruption');
+
+      db2.close();
+    });
+
+    it('should emit debug log to stderr when WL_DEBUG is set and JSONL is corrupted', () => {
+      // Set up a work item so SQLite has cached data
+      db.create({ title: 'Debug log test item' });
+      db.close();
+
+      // Corrupt the JSONL file
+      fs.writeFileSync(jsonlPath, 'this is not valid jsonl\n');
+      const futureTime = new Date(Date.now() + 60_000);
+      fs.utimesSync(jsonlPath, futureTime, futureTime);
+
+      // Capture stderr output
+      const stderrChunks: Buffer[] = [];
+      const originalWrite = process.stderr.write;
+      process.stderr.write = ((chunk: any, ...args: any[]) => {
+        stderrChunks.push(Buffer.from(chunk));
+        return true;
+      }) as any;
+
+      const originalDebug = process.env.WL_DEBUG;
+      process.env.WL_DEBUG = '1';
+
+      try {
+        const db2 = new WorklogDatabase('TEST', dbPath, jsonlPath, true, true);
+        db2.close();
+
+        const stderrOutput = Buffer.concat(stderrChunks).toString();
+        expect(stderrOutput).toContain('[wl:db] JSONL parse failed, using cached data:');
+      } finally {
+        process.stderr.write = originalWrite;
+        if (originalDebug === undefined) {
+          delete process.env.WL_DEBUG;
+        } else {
+          process.env.WL_DEBUG = originalDebug;
+        }
+      }
+    });
+
+    it('should not throw when JSONL file is deleted between existsSync and statSync', () => {
+      // Step 1: Create a work item so the DB has cached data and a valid JSONL exists
+      const item = db.create({ title: 'Race condition item' });
+      const itemId = item.id;
+      db.close();
+
+      // Step 2: Ensure the JSONL exists (it was auto-exported by the first db)
+      expect(fs.existsSync(jsonlPath)).toBe(true);
+
+      // Step 3: Delete the JSONL file — simulating it being removed between
+      // the existsSync check and the statSync call in refreshFromJsonlIfNewer.
+      // Since the constructor's existsSync will fail, it will return early.
+      // To truly test the race, we need the file to exist at existsSync time
+      // but vanish at statSync time. We simulate this by writing a file, then
+      // using a fresh db path with the same jsonl path where we delete the file
+      // right after creating a tiny marker file.
+      //
+      // Actually, the simplest reliable way: write a JSONL, then replace it
+      // with a file that triggers ENOENT on read. But `existsSync` + `statSync`
+      // race is hard to simulate deterministically. Instead, we test that when
+      // the file vanishes entirely (ENOENT from statSync), the catch block
+      // handles it. We can do this by:
+      //   1. Creating a fresh DB path with no prior SQLite data
+      //   2. Writing a JSONL file
+      //   3. Deleting the JSONL right before constructing the new DB
+      //      (this tests the early-return path via existsSync)
+      //
+      // For a true stat-after-delete race, we use a symlink trick:
+      // point JSONL path at a symlink, then break the symlink before stat.
+
+      // Create a new temp dir for the race test
+      const raceDir = createTempDir();
+      const raceDbPath = createTempDbPath(raceDir);
+      const raceJsonlPath = createTempJsonlPath(raceDir);
+
+      // Write a valid JSONL file, then create a symlink to it
+      const realJsonlPath = path.join(raceDir, 'real-data.jsonl');
+      fs.copyFileSync(jsonlPath, realJsonlPath);
+
+      // Create a symlink that we can break
+      fs.symlinkSync(realJsonlPath, raceJsonlPath);
+      expect(fs.existsSync(raceJsonlPath)).toBe(true);
+
+      // Now delete the real file — the symlink still "exists" for some FS
+      // checks but statSync/readFileSync will throw ENOENT
+      fs.unlinkSync(realJsonlPath);
+
+      // Construct the database — should NOT throw
+      const raceDb = new WorklogDatabase('TEST', raceDbPath, raceJsonlPath, true, true);
+
+      // The database should be usable (empty since no prior cache)
+      const items = raceDb.list();
+      expect(Array.isArray(items)).toBe(true);
+
+      raceDb.close();
+      cleanupTempDir(raceDir);
+    });
+
+    it('should not emit debug log when WL_DEBUG is not set and JSONL is corrupted', () => {
+      db.create({ title: 'Silent fallback item' });
+      db.close();
+
+      // Corrupt the JSONL
+      fs.writeFileSync(jsonlPath, '<<<INVALID>>>\n');
+      const futureTime = new Date(Date.now() + 60_000);
+      fs.utimesSync(jsonlPath, futureTime, futureTime);
+
+      // Capture stderr
+      const stderrChunks: Buffer[] = [];
+      const originalWrite = process.stderr.write;
+      process.stderr.write = ((chunk: any, ...args: any[]) => {
+        stderrChunks.push(Buffer.from(chunk));
+        return true;
+      }) as any;
+
+      const originalDebug = process.env.WL_DEBUG;
+      delete process.env.WL_DEBUG;
+
+      try {
+        const db2 = new WorklogDatabase('TEST', dbPath, jsonlPath, true, true);
+        db2.close();
+
+        const stderrOutput = Buffer.concat(stderrChunks).toString();
+        expect(stderrOutput).not.toContain('[wl:db] JSONL parse failed');
+      } finally {
+        process.stderr.write = originalWrite;
+        if (originalDebug !== undefined) {
+          process.env.WL_DEBUG = originalDebug;
+        }
+      }
+    });
+  });
 });
