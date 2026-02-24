@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as childProcess from 'child_process';
-import { acquireFileLock, releaseFileLock, withFileLock, getLockPathForJsonl, isFileLockHeld, _resetLockState, formatLockAge } from '../src/file-lock.js';
+import { acquireFileLock, releaseFileLock, withFileLock, getLockPathForJsonl, isFileLockHeld, _resetLockState, formatLockAge, sleepSync } from '../src/file-lock.js';
 import type { FileLockInfo } from '../src/file-lock.js';
 import { createTempDir, cleanupTempDir } from './test-utils.js';
 
@@ -40,7 +40,7 @@ describe('file-lock', () => {
 
   describe('acquireFileLock', () => {
     it('should create a lock file with PID, hostname, and timestamp', () => {
-      acquireFileLock(lockPath, { retries: 0, timeout: 1000 });
+      acquireFileLock(lockPath, { timeout: 1000 });
 
       expect(fs.existsSync(lockPath)).toBe(true);
       const content = fs.readFileSync(lockPath, 'utf-8');
@@ -56,7 +56,7 @@ describe('file-lock', () => {
       releaseFileLock(lockPath);
     });
 
-    it('should fail immediately when lock is held and retries=0', () => {
+    it('should fail quickly when lock is held and timeout is short', () => {
       // Create a lock file manually (simulating another process holding it)
       const otherLockInfo: FileLockInfo = {
         pid: process.pid, // Use current PID so it's seen as alive
@@ -66,7 +66,7 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, JSON.stringify(otherLockInfo));
 
       expect(() => {
-        acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+        acquireFileLock(lockPath, { timeout: 100 });
       }).toThrow(/Failed to acquire file lock/);
     });
 
@@ -80,7 +80,7 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, JSON.stringify(staleLockInfo));
 
       // Should succeed because the stale lock is detected and removed
-      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+      acquireFileLock(lockPath, { timeout: 5000 });
 
       // Verify our lock is now in place
       const content = fs.readFileSync(lockPath, 'utf-8');
@@ -101,7 +101,7 @@ describe('file-lock', () => {
 
       // Should fail because we can't verify the PID on a different host
       expect(() => {
-        acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+        acquireFileLock(lockPath, { timeout: 100 });
       }).toThrow(/Failed to acquire file lock/);
     });
 
@@ -116,7 +116,7 @@ describe('file-lock', () => {
 
       const start = Date.now();
       expect(() => {
-        acquireFileLock(lockPath, { retries: 100, retryDelay: 50, timeout: 300 });
+        acquireFileLock(lockPath, { retryDelay: 50, timeout: 300 });
       }).toThrow(/timeout/);
       const elapsed = Date.now() - start;
 
@@ -128,7 +128,7 @@ describe('file-lock', () => {
     it('should create parent directories if they do not exist', () => {
       const deepLockPath = path.join(tempDir, 'a', 'b', 'c', 'test.lock');
 
-      acquireFileLock(deepLockPath, { retries: 0, timeout: 1000 });
+      acquireFileLock(deepLockPath, { timeout: 1000 });
       expect(fs.existsSync(deepLockPath)).toBe(true);
 
       releaseFileLock(deepLockPath);
@@ -142,7 +142,7 @@ describe('file-lock', () => {
       const badLockPath = path.join(filePath, 'test.lock');
 
       expect(() => {
-        acquireFileLock(badLockPath, { retries: 0, timeout: 1000 });
+        acquireFileLock(badLockPath, { timeout: 1000 });
       }).toThrow();
     });
   });
@@ -244,7 +244,7 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
 
       expect(() => {
-        withFileLock(lockPath, () => {}, { retries: 0, timeout: 100 });
+        withFileLock(lockPath, () => {}, { timeout: 100 });
       }).toThrow(/Failed to acquire file lock/);
     });
   });
@@ -252,7 +252,7 @@ describe('file-lock', () => {
   describe('retry logic', () => {
     it('should eventually acquire the lock after it is released', () => {
       // Acquire the lock
-      acquireFileLock(lockPath, { retries: 0, timeout: 1000 });
+      acquireFileLock(lockPath, { timeout: 1000 });
 
       // Schedule release after a short delay
       const releaseAfterMs = 200;
@@ -270,7 +270,7 @@ describe('file-lock', () => {
       releaseFileLock(lockPath);
 
       // Re-acquire should succeed immediately
-      acquireFileLock(lockPath, { retries: 0, timeout: 1000 });
+      acquireFileLock(lockPath, { timeout: 1000 });
       expect(fs.existsSync(lockPath)).toBe(true);
       releaseFileLock(lockPath);
     });
@@ -288,7 +288,7 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, JSON.stringify(staleInfo));
 
       // Acquire should succeed (stale lock cleaned up)
-      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+      acquireFileLock(lockPath, { timeout: 5000 });
 
       const content = fs.readFileSync(lockPath, 'utf-8');
       const info: FileLockInfo = JSON.parse(content);
@@ -306,7 +306,7 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, JSON.stringify(staleInfo));
 
       expect(() => {
-        acquireFileLock(lockPath, { retries: 0, timeout: 100, staleLockCleanup: false });
+        acquireFileLock(lockPath, { timeout: 100, staleLockCleanup: false });
       }).toThrow(/Failed to acquire file lock/);
     });
 
@@ -315,7 +315,7 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, 'not-json-content');
 
       // Should succeed: corrupted lock file is treated as stale, removed, and lock acquired
-      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+      acquireFileLock(lockPath, { timeout: 5000 });
 
       // Verify our lock is now in place
       const content = fs.readFileSync(lockPath, 'utf-8');
@@ -330,7 +330,7 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, '');
 
       // Should succeed: empty lock file is treated as corrupted/stale
-      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+      acquireFileLock(lockPath, { timeout: 5000 });
 
       // Verify our lock is now in place
       const content = fs.readFileSync(lockPath, 'utf-8');
@@ -345,7 +345,7 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, JSON.stringify({ someOtherField: 'value' }));
 
       // Should succeed: missing required fields means readLockInfo returns null
-      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+      acquireFileLock(lockPath, { timeout: 5000 });
 
       // Verify our lock is now in place
       const content = fs.readFileSync(lockPath, 'utf-8');
@@ -366,7 +366,7 @@ describe('file-lock', () => {
 
       // Should fail: lock is held by a live process, not corrupted
       expect(() => {
-        acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+        acquireFileLock(lockPath, { timeout: 100 });
       }).toThrow(/Failed to acquire file lock/);
     });
 
@@ -376,7 +376,7 @@ describe('file-lock', () => {
 
       // Should fail because staleLockCleanup is disabled
       expect(() => {
-        acquireFileLock(lockPath, { retries: 0, timeout: 100, staleLockCleanup: false });
+        acquireFileLock(lockPath, { timeout: 100, staleLockCleanup: false });
       }).toThrow(/Failed to acquire file lock/);
     });
   });
@@ -392,7 +392,7 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, JSON.stringify(oldLockInfo));
 
       // Should succeed: lock is older than default 5-minute threshold
-      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+      acquireFileLock(lockPath, { timeout: 5000 });
 
       const content = fs.readFileSync(lockPath, 'utf-8');
       const info: FileLockInfo = JSON.parse(content);
@@ -415,7 +415,7 @@ describe('file-lock', () => {
 
       // Should fail: lock is fresh and held by a live process
       expect(() => {
-        acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+        acquireFileLock(lockPath, { timeout: 100 });
       }).toThrow(/Failed to acquire file lock/);
     });
 
@@ -429,7 +429,7 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, JSON.stringify(oldDeadLockInfo));
 
       // Should succeed: dead PID would trigger cleanup alone, age confirms
-      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+      acquireFileLock(lockPath, { timeout: 5000 });
 
       const content = fs.readFileSync(lockPath, 'utf-8');
       const info: FileLockInfo = JSON.parse(content);
@@ -448,7 +448,7 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, JSON.stringify(freshDeadLockInfo));
 
       // Should succeed: dead PID triggers cleanup even though lock is young
-      acquireFileLock(lockPath, { retries: 1, timeout: 5000 });
+      acquireFileLock(lockPath, { timeout: 5000 });
 
       const content = fs.readFileSync(lockPath, 'utf-8');
       const info: FileLockInfo = JSON.parse(content);
@@ -468,7 +468,7 @@ describe('file-lock', () => {
 
       // Should fail: future acquiredAt should not be treated as expired
       expect(() => {
-        acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+        acquireFileLock(lockPath, { timeout: 100 });
       }).toThrow(/Failed to acquire file lock/);
     });
 
@@ -482,7 +482,7 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, JSON.stringify(recentLockInfo));
 
       // With a 1-second maxLockAge, this 2-second-old lock should be treated as stale
-      acquireFileLock(lockPath, { retries: 1, timeout: 5000, maxLockAge: 1000 });
+      acquireFileLock(lockPath, { timeout: 5000, maxLockAge: 1000 });
 
       const content = fs.readFileSync(lockPath, 'utf-8');
       const info: FileLockInfo = JSON.parse(content);
@@ -505,7 +505,7 @@ describe('file-lock', () => {
 
       // With a 5-second maxLockAge, this 500ms lock should be considered fresh
       expect(() => {
-        acquireFileLock(lockPath, { retries: 0, timeout: 100, maxLockAge: 5000 });
+        acquireFileLock(lockPath, { timeout: 100, maxLockAge: 5000 });
       }).toThrow(/Failed to acquire file lock/);
     });
   });
@@ -520,7 +520,7 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
 
       try {
-        acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+        acquireFileLock(lockPath, { timeout: 100 });
         expect.unreachable('should have thrown');
       } catch (err: any) {
         expect(err.message).toContain(lockPath);
@@ -536,7 +536,7 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
 
       try {
-        acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+        acquireFileLock(lockPath, { timeout: 100 });
         expect.unreachable('should have thrown');
       } catch (err: any) {
         expect(err.message).toContain(`PID ${process.pid}`);
@@ -557,7 +557,7 @@ describe('file-lock', () => {
         // Use a maxLockAge larger than 12 minutes so the lock is NOT
         // cleaned up by age-based expiry — we want the error to fire
         // with the holder metadata intact so we can assert on the age string.
-        acquireFileLock(lockPath, { retries: 0, timeout: 100, maxLockAge: 60 * 60 * 1000 });
+        acquireFileLock(lockPath, { timeout: 100, maxLockAge: 60 * 60 * 1000 });
         expect.unreachable('should have thrown');
       } catch (err: any) {
         expect(err.message).toMatch(/12 minutes? ago/);
@@ -573,7 +573,7 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
 
       try {
-        acquireFileLock(lockPath, { retries: 0, timeout: 100 });
+        acquireFileLock(lockPath, { timeout: 100 });
         expect.unreachable('should have thrown');
       } catch (err: any) {
         expect(err.message).toContain('wl unlock');
@@ -585,14 +585,14 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, 'not-json-content');
 
       try {
-        acquireFileLock(lockPath, { retries: 0, timeout: 100, staleLockCleanup: false });
+        acquireFileLock(lockPath, { timeout: 100, staleLockCleanup: false });
         expect.unreachable('should have thrown');
       } catch (err: any) {
         expect(err.message).toContain('corrupted lock file');
       }
     });
 
-    it('should include enriched message in retries-exhausted error', () => {
+    it('should include enriched message in timeout error', () => {
       const lockInfo: FileLockInfo = {
         pid: process.pid,
         hostname: os.hostname(),
@@ -601,13 +601,14 @@ describe('file-lock', () => {
       fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
 
       try {
-        acquireFileLock(lockPath, { retries: 1, retryDelay: 10, timeout: 50000 });
+        acquireFileLock(lockPath, { retryDelay: 10, timeout: 100 });
         expect.unreachable('should have thrown');
       } catch (err: any) {
         expect(err.message).toContain(lockPath);
         expect(err.message).toContain(`PID ${process.pid}`);
         expect(err.message).toContain('wl unlock');
         expect(err.message).toMatch(/ago/);
+        expect(err.message).toContain('timeout');
       }
     });
   });
@@ -845,6 +846,213 @@ describe('file-lock', () => {
     });
   });
 
+  describe('sleepSync', () => {
+    it('should not busy-wait (CPU time should be negligible during sleep)', () => {
+      const sleepMs = 200;
+      const cpuBefore = process.cpuUsage();
+      sleepSync(sleepMs);
+      const cpuAfter = process.cpuUsage(cpuBefore);
+
+      // Total CPU time (user + system) should be well under 50ms even
+      // though we slept for 200ms.  A busy-wait loop would consume
+      // ~200ms of CPU time.  cpuUsage reports in microseconds.
+      const totalCpuUs = cpuAfter.user + cpuAfter.system;
+      expect(totalCpuUs).toBeLessThan(50_000); // < 50ms of CPU time
+    });
+
+    it('should sleep for approximately the requested duration', () => {
+      const sleepMs = 100;
+      const start = Date.now();
+      sleepSync(sleepMs);
+      const elapsed = Date.now() - start;
+
+      expect(elapsed).toBeGreaterThanOrEqual(80); // allow some slack
+      expect(elapsed).toBeLessThan(500); // but not absurdly long
+    });
+
+    it('should not throw or hang for sleepSync(0)', () => {
+      const start = Date.now();
+      sleepSync(0);
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeLessThan(100);
+    });
+
+    it('should not throw or hang for sleepSync(-1)', () => {
+      const start = Date.now();
+      sleepSync(-1);
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeLessThan(100);
+    });
+  });
+
+  describe('exponential backoff with jitter', () => {
+    it('should use increasing delays between retry attempts', () => {
+      // Hold the lock with a live PID so retries are needed
+      const lockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
+
+      // Capture sleepSync calls by temporarily intercepting debug output
+      const delays: number[] = [];
+      const origDebugEnv = process.env.WL_DEBUG;
+      process.env.WL_DEBUG = '1';
+
+      const origWrite = process.stderr.write;
+      process.stderr.write = ((chunk: any, enc?: any, cb?: any) => {
+        const line = typeof chunk === 'string' ? chunk : chunk.toString();
+        // Parse delay from debug log: "sleeping Xms (base delay Yms)"
+        const match = line.match(/base delay (\d+)ms/);
+        if (match) {
+          delays.push(parseInt(match[1], 10));
+        }
+        if (typeof cb === 'function') cb();
+        return true;
+      }) as any;
+
+      try {
+        acquireFileLock(lockPath, { retryDelay: 100, timeout: 2000, maxRetryDelay: 5000 });
+      } catch {
+        // Expected: timeout
+      } finally {
+        process.stderr.write = origWrite;
+        process.env.WL_DEBUG = origDebugEnv;
+        if (!origDebugEnv) delete process.env.WL_DEBUG;
+      }
+
+      // Should have multiple delays that increase
+      expect(delays.length).toBeGreaterThanOrEqual(2);
+
+      // Verify delays are non-decreasing (allowing for equal at cap)
+      for (let i = 1; i < delays.length; i++) {
+        expect(delays[i]).toBeGreaterThanOrEqual(delays[i - 1]);
+      }
+
+      // First delay should be the initial retryDelay
+      expect(delays[0]).toBe(100);
+
+      // Second delay should be approximately 1.5x
+      if (delays.length >= 2) {
+        expect(delays[1]).toBe(150); // 100 * 1.5
+      }
+    });
+
+    it('should cap delay at maxRetryDelay', () => {
+      const lockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
+
+      const delays: number[] = [];
+      const origDebugEnv = process.env.WL_DEBUG;
+      process.env.WL_DEBUG = '1';
+
+      const origWrite = process.stderr.write;
+      process.stderr.write = ((chunk: any, enc?: any, cb?: any) => {
+        const line = typeof chunk === 'string' ? chunk : chunk.toString();
+        const match = line.match(/base delay (\d+)ms/);
+        if (match) {
+          delays.push(parseInt(match[1], 10));
+        }
+        if (typeof cb === 'function') cb();
+        return true;
+      }) as any;
+
+      try {
+        acquireFileLock(lockPath, { retryDelay: 100, timeout: 5000, maxRetryDelay: 200 });
+      } catch {
+        // Expected: timeout
+      } finally {
+        process.stderr.write = origWrite;
+        process.env.WL_DEBUG = origDebugEnv;
+        if (!origDebugEnv) delete process.env.WL_DEBUG;
+      }
+
+      // All delays should be <= maxRetryDelay (200ms)
+      for (const delay of delays) {
+        expect(delay).toBeLessThanOrEqual(200);
+      }
+    });
+
+    it('should add jitter within 0-25% of base delay', () => {
+      const lockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
+
+      const sleepValues: number[] = [];
+      const baseValues: number[] = [];
+      const origDebugEnv = process.env.WL_DEBUG;
+      process.env.WL_DEBUG = '1';
+
+      const origWrite = process.stderr.write;
+      process.stderr.write = ((chunk: any, enc?: any, cb?: any) => {
+        const line = typeof chunk === 'string' ? chunk : chunk.toString();
+        const match = line.match(/sleeping (\d+)ms \(base delay (\d+)ms\)/);
+        if (match) {
+          sleepValues.push(parseInt(match[1], 10));
+          baseValues.push(parseInt(match[2], 10));
+        }
+        if (typeof cb === 'function') cb();
+        return true;
+      }) as any;
+
+      try {
+        // Use small delays and a generous timeout so clamping doesn't interfere
+        acquireFileLock(lockPath, { retryDelay: 50, timeout: 5000, maxRetryDelay: 5000 });
+      } catch {
+        // Expected: timeout
+      } finally {
+        process.stderr.write = origWrite;
+        process.env.WL_DEBUG = origDebugEnv;
+        if (!origDebugEnv) delete process.env.WL_DEBUG;
+      }
+
+      // Only check entries where sleep was NOT clamped to remaining time
+      // (i.e., actual sleep is near the base delay range)
+      const unclamped = sleepValues.filter((s, i) => s >= baseValues[i]);
+
+      expect(unclamped.length).toBeGreaterThanOrEqual(2);
+
+      for (let i = 0; i < unclamped.length; i++) {
+        const idx = sleepValues.indexOf(unclamped[i]);
+        const base = baseValues[idx];
+        const actual = unclamped[i];
+        // actual should be >= base (jitter is always positive)
+        expect(actual).toBeGreaterThanOrEqual(base);
+        // actual should be <= base + 25% of base (allowing rounding)
+        expect(actual).toBeLessThanOrEqual(Math.ceil(base * 1.25) + 1);
+      }
+    });
+
+    it('should clamp sleep to remaining time before deadline', () => {
+      const lockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
+
+      const start = Date.now();
+      try {
+        // Short timeout with large retry delay — should clamp
+        acquireFileLock(lockPath, { retryDelay: 10000, timeout: 200 });
+      } catch {
+        // Expected: timeout
+      }
+
+      const elapsed = Date.now() - start;
+      // Should not have slept for 10s; should have been clamped to ~200ms
+      expect(elapsed).toBeLessThan(2000);
+    });
+  });
+
   describe('concurrent multi-process access', () => {
     /**
      * Helper script that each child process runs.
@@ -881,7 +1089,7 @@ for (let i = 0; i < iterations; i++) {
     // Increment and write back
     counter++;
     fs.writeFileSync(counterFile, String(counter));
-  }, { retries: 5000, retryDelay: 50, timeout: 30000 });
+  }, { retryDelay: 50, timeout: 30000 });
 }
 
 // Signal success
@@ -1080,7 +1288,7 @@ process.exit(0);
       process.env.WL_DEBUG = '1';
       captureStderr();
 
-      acquireFileLock(lockPath, { retries: 0, timeout: 5000 });
+      acquireFileLock(lockPath, { timeout: 5000 });
       releaseFileLock(lockPath);
 
       const output = restoreStderr();
@@ -1096,7 +1304,7 @@ process.exit(0);
       delete process.env.WL_DEBUG;
       captureStderr();
 
-      acquireFileLock(lockPath, { retries: 0, timeout: 5000 });
+      acquireFileLock(lockPath, { timeout: 5000 });
       releaseFileLock(lockPath);
 
       const output = restoreStderr();
@@ -1115,7 +1323,7 @@ process.exit(0);
       process.env.WL_DEBUG = '1';
       captureStderr();
 
-      acquireFileLock(lockPath, { retries: 2, timeout: 5000 });
+      acquireFileLock(lockPath, { timeout: 5000 });
       releaseFileLock(lockPath);
 
       const output = restoreStderr();
@@ -1137,7 +1345,7 @@ process.exit(0);
       process.env.WL_DEBUG = '1';
       captureStderr();
 
-      acquireFileLock(lockPath, { retries: 2, timeout: 5000, maxLockAge: 1000 });
+      acquireFileLock(lockPath, { timeout: 5000, maxLockAge: 1000 });
       releaseFileLock(lockPath);
 
       const output = restoreStderr();
@@ -1153,7 +1361,7 @@ process.exit(0);
       process.env.WL_DEBUG = '1';
       captureStderr();
 
-      acquireFileLock(lockPath, { retries: 2, timeout: 5000 });
+      acquireFileLock(lockPath, { timeout: 5000 });
       releaseFileLock(lockPath);
 
       const output = restoreStderr();
@@ -1166,7 +1374,7 @@ process.exit(0);
       process.env.WL_DEBUG = '1';
       captureStderr();
 
-      acquireFileLock(lockPath, { retries: 0, timeout: 5000 });
+      acquireFileLock(lockPath, { timeout: 5000 });
       releaseFileLock(lockPath);
 
       const output = restoreStderr();

@@ -76,7 +76,7 @@ export class WorklogDatabase {
    * uses atomic write (temp-file + `renameSync`), readers will always see
    * either the old complete file or the new complete file, never a partial
    * write.  Removing the lock from this read path eliminates the contention
-   * that previously caused "retries exhausted" errors during concurrent
+   * that previously caused lock timeout errors during concurrent
    * usage by agents and developers.
    *
    * If the JSONL file is transiently unavailable or corrupted (e.g. during
