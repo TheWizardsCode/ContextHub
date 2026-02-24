@@ -603,15 +603,16 @@ describe('FTS Search', () => {
 
     it('should handle multi-token queries with ID and text terms', () => {
       const target = db.create({ title: 'Multi-token target item' });
-      db.create({ title: 'Keyword findable item' });
+      const other = db.create({ title: 'Keyword findable item' });
       // Search with ID + text keyword
       const { results } = db.search(`${target.id} keyword`);
       // ID match should be first
       expect(results[0].itemId).toBe(target.id);
       expect(results[0].matchedColumn).toBe('id');
-      // FTS may or may not find additional results depending on how it handles
-      // the mixed ID+text query — the key guarantee is that the ID match is first
-      expect(results.length).toBeGreaterThanOrEqual(1);
+      // FTS should find the "keyword" item using only the text tokens
+      expect(results.length).toBeGreaterThanOrEqual(2);
+      const keywordResult = results.find(r => r.itemId === other.id);
+      expect(keywordResult).toBeDefined();
     });
 
     it('should return no results for a non-existent ID', () => {

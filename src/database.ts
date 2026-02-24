@@ -348,9 +348,11 @@ export class WorklogDatabase {
 
     const tokens = query.trim().split(/\s+/).filter(t => t.length > 0);
     const prefix = this.getPrefix();
+    const textTokens: string[] = [];
 
     for (const token of tokens) {
       const upper = token.toUpperCase();
+      let consumed = false;
 
       // --- Exact-ID check (with prefix already present) ---
       if (upper.includes('-')) {
@@ -364,12 +366,12 @@ export class WorklogDatabase {
             matchedColumn: 'id',
           });
           searchMetrics.increment('search.exact_id');
-          continue;
+          consumed = true;
         }
       }
 
       // --- Prefix resolution: bare token → PREFIX-TOKEN ---
-      if (!upper.includes('-') && /^[A-Z0-9]+$/.test(upper) && upper.length >= 8) {
+      if (!consumed && !upper.includes('-') && /^[A-Z0-9]+$/.test(upper) && upper.length >= 8) {
         const prefixed = `${prefix}-${upper}`;
         const item = this.store.getWorkItem(prefixed);
         if (item && !seenIds.has(item.id)) {
@@ -381,42 +383,57 @@ export class WorklogDatabase {
             matchedColumn: 'id',
           });
           searchMetrics.increment('search.prefix_resolved');
-          continue;
+          consumed = true;
         }
       }
 
       // --- Partial-ID substring match (>= 8 chars, alphanumeric) ---
-      const cleaned = upper.replace(/[^A-Z0-9]/g, '');
-      if (cleaned.length >= 8) {
-        const partials = this.store.findByIdSubstring(cleaned);
-        for (const p of partials) {
-          if (!seenIds.has(p.id)) {
-            seenIds.add(p.id);
-            idResults.push({
-              itemId: p.id,
-              rank: -1000,
-              snippet: p.title,
-              matchedColumn: 'id',
-            });
-            searchMetrics.increment('search.partial_id');
+      if (!consumed) {
+        const cleaned = upper.replace(/[^A-Z0-9]/g, '');
+        if (cleaned.length >= 8) {
+          const partials = this.store.findByIdSubstring(cleaned);
+          for (const p of partials) {
+            if (!seenIds.has(p.id)) {
+              seenIds.add(p.id);
+              idResults.push({
+                itemId: p.id,
+                rank: -1000,
+                snippet: p.title,
+                matchedColumn: 'id',
+              });
+              searchMetrics.increment('search.partial_id');
+            }
+          }
+          if (partials.length > 0) {
+            consumed = true;
           }
         }
+      }
+
+      if (!consumed) {
+        textTokens.push(token);
       }
     }
 
     // --- Regular FTS / fallback search ---
+    // Use only non-ID tokens for FTS so that ID tokens don't poison the
+    // implicit AND in the FTS query.  Fall back to the full original query
+    // when every token was consumed as an ID (preserves existing behaviour
+    // for single-ID searches where FTS may find items that reference the ID
+    // in their text).
+    const ftsQuery = textTokens.length > 0 ? textTokens.join(' ') : query;
     let ftsUsed = false;
     let ftsResults: FtsSearchResult[] = [];
 
     if (this.store.ftsAvailable) {
-      ftsResults = this.store.searchFts(query, options);
+      ftsResults = this.store.searchFts(ftsQuery, options);
       ftsUsed = true;
       searchMetrics.increment('search.fts');
     } else {
       if (!this.silent) {
         this.debug('FTS5 is not available; falling back to application-level search');
       }
-      ftsResults = this.store.searchFallback(query, options);
+      ftsResults = this.store.searchFallback(ftsQuery, options);
       searchMetrics.increment('search.fallback');
     }
 
