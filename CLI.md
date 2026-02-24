@@ -294,6 +294,13 @@ wl list --needs-producer-review
 
 Full-text search over work items using FTS5 (title, description, comments, tags). Returns ranked results with relevance snippets. Falls back to application-level search when FTS5 is unavailable.
 
+**ID-aware search:** Queries that contain work item IDs (full, partial, or unprefixed) are detected automatically:
+
+- **Exact ID** — `wl search WL-0MM0AN2IT0OOC2TW` returns the matching item as the top result.
+- **Unprefixed ID** — `wl search 0MM0AN2IT0OOC2TW` resolves using the repository's configured prefix (e.g. `WL`) and behaves the same as the prefixed form.
+- **Partial ID** — Tokens of 8+ alphanumeric characters are matched as substrings against all work item IDs; partial matches appear below exact matches.
+- **Mixed queries** — `wl search WL-XXXXX some text` returns the ID match first, followed by FTS results for the full query (duplicates removed).
+
 Options:
 
 `-s, --status <status>` (optional) — Filter results by status
@@ -322,6 +329,12 @@ wl search "feature" --issue-type epic
 wl search "review" --needs-producer-review
 wl --json search "cli refactor"
 wl search "rebuild" --rebuild-index
+
+# ID-aware search
+wl search WL-0MM0AN2IT0OOC2TW              # exact ID lookup
+wl search 0MM0AN2IT0OOC2TW                  # unprefixed ID (prefix resolved automatically)
+wl search 0MM0AN2I                           # partial ID substring match (>= 8 chars)
+wl --json search WL-0MM0AN2IT0OOC2TW        # JSON output with ID match as top result
 ```
 
 ---
