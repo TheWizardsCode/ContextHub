@@ -77,9 +77,15 @@ Use parent/child relationships to track blocking dependencies.
 - If a work item blocks multiple items, create the parent/child relationships with the highest priority item as the parent unless one of the items is in-progress, in which case that item should be the parent.
   - If in doubt raise for product manager review.
 
-Other types of dependencies can be tracked in descriptions, for example `discovered-from:<work-item-id>`, `related-to:<work-item-id>`, `blocked-by:<work-item-id>`.
+For non-hierarchical blocking relationships, prefer dependency edges over description-based conventions. Dependency edges are the recommended way to track blockers:
 
-Worklog does not enforce these relationships but they can be used for planning and tracking.
+```bash
+wl dep add <dependent-work-item-id> <prereq-work-item-id>
+wl dep list <work-item-id> --json
+wl dep rm <dependent-work-item-id> <prereq-work-item-id>
+```
+
+Description-based conventions (`discovered-from:<work-item-id>`, `related-to:<work-item-id>`, `blocked-by:<work-item-id>`) remain supported for informal cross-references and planning notes, but dependency edges should be used for any relationship that affects scheduling or blocking.
 
 ### Workflow management
 
@@ -131,6 +137,12 @@ wl close <work-item-id-1> <work-item-id-2> --json
 
 # *Destructive command ask for confirmation before running* Dekete a work item permanently
 wl delete <work-item-id> --json
+
+# Dependencies
+wl dep --help  # Show help for dependency commands
+wl dep add <dependent-work-item-id> <prereq-work-item-id>
+wl dep list <work-item-id> --json
+wl dep rm <dependent-work-item-id> <prereq-work-item-id>
 ```
 
 ### Project Status
