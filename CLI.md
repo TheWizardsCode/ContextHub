@@ -495,16 +495,11 @@ wl doctor upgrade --dry-run       # Preview pending schema migrations
 wl doctor upgrade --confirm       # Apply pending schema migrations (creates backups, requires confirmation)
 ```
 
-Examples:
-
-```sh
-wl migrate sort-index --dry-run
-wl migrate sort-index --gap 100
-```
-
 ### `doctor`
 
 Validate work items against config-driven status/stage rules. Reports invalid values or incompatible combinations.
+
+For detailed migration policy, backup behavior, and CI guidance, see [DOCTOR_AND_MIGRATIONS.md](DOCTOR_AND_MIGRATIONS.md).
 
 Options:
 
