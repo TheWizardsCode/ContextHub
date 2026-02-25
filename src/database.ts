@@ -951,7 +951,7 @@ export class WorklogDatabase {
   }
 
   private orderBySortIndex(items: WorkItem[]): WorkItem[] {
-    const orderedAll = this.store.getAllWorkItemsOrderedByHierarchySortIndex();
+    const orderedAll = this.store.getAllWorkItemsOrderedByHierarchySortIndexSkipCompleted();
     const positions = new Map(orderedAll.map((item, index) => [item.id, index]));
     return items.slice().sort((a, b) => {
       const aPos = positions.get(a.id);
@@ -982,7 +982,7 @@ export class WorklogDatabase {
    * Shared next-item selection logic to keep single-item and batch results aligned.
    *
    * Selection proceeds through several phases:
-   *   1. Filter out deleted, epic, in_review (unless opted in), and excluded items.
+   *   1. Filter out deleted, in_review (unless opted in), and excluded items.
    *   2. Partition into dependency-blocked and unblocked candidates.
    *   3. Critical-path escalation: if a critical item is blocked, surface its direct
    *      blocker immediately (bypasses scoring).
@@ -1009,8 +1009,6 @@ export class WorklogDatabase {
 
     // Filter out deleted items first
     filteredItems = filteredItems.filter(item => item.status !== 'deleted');
-    // Exclude epics from being recommended by `wl next` by default
-    filteredItems = filteredItems.filter(item => item.issueType !== 'epic');
     if (!includeInReview) {
       filteredItems = filteredItems.filter(
         item => !(item.stage === 'in_review' && item.status === 'blocked')

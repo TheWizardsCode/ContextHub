@@ -487,6 +487,76 @@ export class SqlitePersistentStore {
   }
 
   /**
+   * Get all work items ordered by hierarchy sort index, but skip completed/deleted
+   * subtrees. Open children under completed/deleted parents are promoted to root
+   * level so they don't inherit traversal priority from their completed ancestors.
+   */
+  getAllWorkItemsOrderedByHierarchySortIndexSkipCompleted(): WorkItem[] {
+    const items = this.getAllWorkItems();
+    const itemMap = new Map<string, WorkItem>();
+    const childrenByParent = new Map<string | null, WorkItem[]>();
+
+    for (const item of items) {
+      itemMap.set(item.id, item);
+    }
+
+    // Build parent-child map but promote orphans: if an item's parent is
+    // completed or deleted, treat the item as a root-level item.
+    for (const item of items) {
+      let effectiveParent: string | null = item.parentId ?? null;
+
+      // Walk up the ancestor chain; if any ancestor is completed/deleted,
+      // promote this item to root level.
+      if (effectiveParent) {
+        let cursor: string | null = effectiveParent;
+        while (cursor) {
+          const parent = itemMap.get(cursor);
+          if (!parent) break;
+          if (parent.status === 'completed' || parent.status === 'deleted') {
+            effectiveParent = null;
+            break;
+          }
+          cursor = parent.parentId ?? null;
+        }
+      }
+
+      const list = childrenByParent.get(effectiveParent);
+      if (list) {
+        list.push(item);
+      } else {
+        childrenByParent.set(effectiveParent, [item]);
+      }
+    }
+
+    const sortSiblings = (list: WorkItem[]): WorkItem[] => {
+      return list.slice().sort((a, b) => {
+        if (a.sortIndex !== b.sortIndex) {
+          return a.sortIndex - b.sortIndex;
+        }
+        const createdDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        if (createdDiff !== 0) return createdDiff;
+        return a.id.localeCompare(b.id);
+      });
+    };
+
+    const ordered: WorkItem[] = [];
+    const traverse = (parentId: string | null) => {
+      const children = childrenByParent.get(parentId) || [];
+      const sorted = sortSiblings(children);
+      for (const child of sorted) {
+        ordered.push(child);
+        // Don't descend into completed/deleted items' subtrees
+        if (child.status !== 'completed' && child.status !== 'deleted') {
+          traverse(child.id);
+        }
+      }
+    };
+
+    traverse(null);
+    return ordered;
+  }
+
+  /**
    * Delete a work item
    */
   deleteWorkItem(id: string): boolean {
