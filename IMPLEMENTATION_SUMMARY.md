@@ -54,8 +54,8 @@ All requirements from the problem statement have been successfully implemented:
   - `GET /health` - Health check
 
 ### CLI Tool (`src/cli.ts`, `src/commands/*`)
-- Command modules for create, list, show, update, delete, import/export, sync, and plugins
-- Shared helpers for ordering, filtering, and output formatting
+- Command modules for create, list, show, update, delete, close, search, next, in-progress, recent, comment, dep, reviewed, import/export, sync, github, doctor, re-sort, migrate, unlock, init, status, tui, and plugins
+- Shared helpers for ordering, filtering, tree rendering, and output formatting
 
 ### TUI (`src/tui/*`)
 - Interactive terminal UI with tree view, details pane, and OpenCode integration
@@ -72,6 +72,9 @@ Worklog/
 │   ├── persistent-store.ts # SQLite persistence
 │   ├── jsonl.ts          # Import/export functions
 │   ├── sync.ts           # JSONL merge/sync helpers
+│   ├── config.ts         # Configuration management
+│   ├── plugin-loader.ts  # Plugin discovery and loading
+│   ├── status-stage-rules.ts # Status/stage compatibility rules
 │   ├── api.ts            # REST API
 │   ├── index.ts          # Server entry point
 │   └── cli.ts            # CLI tool entry
@@ -110,7 +113,7 @@ Worklog/
 - Build project hierarchies (epics → features → tasks)
 
 ### 3. Flexible Filtering
-- Filter by status (open, in-progress, completed, blocked)
+- Filter by status (open, in-progress, completed, blocked, deleted)
 - Filter by priority (low, medium, high, critical)
 - Filter by parent (including root items with null parent)
 - Filter by tags (comma-separated)
