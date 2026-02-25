@@ -723,7 +723,10 @@ wl -F full show WL-ABC123       # full detail
 
 ## Related documentation
 
-- `README.md` — project overview, installation, and architecture
+- `README.md` — project overview, quick start, and documentation index
+- `CONFIG.md` — configuration system and setup options
+- `DATA_FORMAT.md` — JSONL data format, storage architecture, and field reference
+- `API.md` — REST API endpoints and usage
 - `PLUGIN_GUIDE.md` — plugin development and examples
 - `GIT_WORKFLOW.md` — recommended git workflow for syncing JSONL data
 - `MULTI_PROJECT_GUIDE.md` — using prefixes and multi-project setups
