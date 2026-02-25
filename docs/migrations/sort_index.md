@@ -41,22 +41,16 @@ wl list
 
 ## CLI examples
 
-Move an item before another:
+Re-sort active work items to restore gaps after manual edits:
 
 ```
-wl move WL-123 --before WL-456
+wl re-sort
 ```
 
-Move an item after another:
+Re-sort using recency-based ordering:
 
 ```
-wl move WL-123 --after WL-456
-```
-
-Rebalance a level to restore gaps:
-
-```
-wl move auto --parent WL-123
+wl re-sort --recency
 ```
 
 ## Backup

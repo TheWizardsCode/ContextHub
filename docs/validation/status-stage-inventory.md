@@ -31,10 +31,10 @@ validation helpers and UI wiring.
 ### Status -> Allowed Stages
 Defined in config defaults.
 - Source of truth: .worklog/config.defaults.yaml (statusStageCompatibility)
-- Runtime loader: src/tui/status-stage-rules.ts
+- Runtime loader: src/status-stage-rules.ts
 - Current defaults:
   - open -> idea, intake_complete, plan_complete, in_progress
-  - in-progress -> in_progress
+  - in-progress -> intake_complete, plan_complete, in_progress
   - blocked -> idea, intake_complete, plan_complete
   - completed -> in_review, done
   - deleted -> idea, intake_complete, plan_complete, done
@@ -42,7 +42,7 @@ Defined in config defaults.
 ### Stage -> Allowed Statuses
 Derived at runtime from the compatibility mapping.
 - Source of truth: .worklog/config.defaults.yaml (statusStageCompatibility)
-- Runtime derivation: src/tui/status-stage-rules.ts
+- Runtime derivation: src/status-stage-rules.ts
 
 ### Update Dialog Validation
 TUI update dialog rejects invalid status/stage combinations.
@@ -56,7 +56,7 @@ Close dialog sets status/stage pairs as follows:
 - Close (in_review) -> status=completed, stage=in_review
 - Close (done) -> status=completed, stage=done
 - Close (deleted) -> status=deleted, stage=''
-- Source: src/tui/status-stage-rules.ts (STATUS_STAGE_RULE_NOTES)
+- Source: src/status-stage-rules.ts (STATUS_STAGE_RULE_NOTES)
 - UI options: src/tui/components/dialogs.ts
 
 ## Dependency Rules (Implied)
@@ -81,7 +81,7 @@ The next-item selection logic treats in_review specially and filters statuses.
 
 ## Gaps and Ambiguities
 - Historical note: any hard-coded status/stage arrays in older docs or helpers are obsolete.
-  - Current source of truth is .worklog/config.defaults.yaml and the loader in src/tui/status-stage-rules.ts.
+  - Current source of truth is .worklog/config.defaults.yaml and the loader in src/status-stage-rules.ts.
 - CLI update/create paths do not enforce status/stage compatibility.
   - Observed: src/commands/update.ts allows any status/stage values.
   - Behavior: database stores values without validation.

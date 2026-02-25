@@ -18,69 +18,94 @@ npm run test:coverage
 npm run test:tui
 
 # Generate per-test timings
-You can generate a JSON report of per-test timings which helps identify slow tests to refactor or move to integration-only runs:
-
 ```bash
+# You can generate a JSON report of per-test timings which helps
+# identify slow tests to refactor or move to integration-only runs.
 # Run the timings collector (writes test-timings.json at repo root)
 npm run test:timings
 
 # Open test-timings.json for the slowest tests and candidates to move
 cat test-timings.json | jq '.rows | sort_by(-.durationMs) | .[0:20]'
 ```
-```
 
 ## Test Organization
 
-### Unit Tests
+Tests are spread across two top-level directories:
 
-- **`database.test.ts`** (28 tests) - Tests for WorklogDatabase class
-  - CRUD operations (create, read, update, delete)
-  - Query and filtering
-  - Comments management
-  - ID generation
-  - Parent-child relationships
+- **`tests/`** — the main test directory (this folder)
+- **`test/`** — additional tests (migrations, TUI integration, doctor checks, etc.)
 
-- **`jsonl.test.ts`** (9 tests) - Tests for JSONL import/export
-  - Export to JSONL format
-  - Import from JSONL format
-  - Backward compatibility with old format
-  - Round-trip data integrity
-  - Error handling
+### Core unit tests (`tests/`)
 
-- **`sync.test.ts`** (14 tests) - Tests for sync operations (PRIORITY)
-  - Work item merging with no conflicts
-  - Field-level conflict resolution
-  - Same timestamp conflict handling  
-  - Tag merging (union of tags)
-  - Comment merging
-  - Default value handling in merge logic
+- **`database.test.ts`** — WorklogDatabase CRUD, queries, comments, parent-child relationships
+- **`jsonl.test.ts`** — JSONL import/export, backward compatibility, round-trip integrity
+- **`sync.test.ts`** — Work item merging, field-level conflict resolution, tag/comment merging
+- **`sync-worktree.test.ts`** — Git worktree sync scenarios
+- **`config.test.ts`** — Configuration loading, defaults, validation, prefix management
+- **`validator.test.ts`** — Work item field validation rules
+- **`fts-search.test.ts`** — Full-text search across titles, descriptions, comments, tags
+- **`sort-operations.test.ts`** — Sort index operations and rebalancing
+- **`grouping.test.ts`** — Work item grouping logic
+- **`file-lock.test.ts`** — File locking and concurrent access
+- **`lockless-reads.test.ts`** — Lock-free read path correctness
+- **`normalize-sqlite-bindings.test.ts`** — SQLite binding normalization
+- **`plugin-loader.test.ts`** / **`plugin-integration.test.ts`** — Plugin discovery and loading
+- **`github-*.test.ts`** — GitHub sync, push state, pre-filter, comments, deleted items, self-link, output
 
-- **`config.test.ts`** (16 tests) - Tests for configuration management
-  - Config file creation and loading
-  - Default configuration handling
-  - User config overrides
-  - Config validation
-  - Prefix management
+### CLI tests (`tests/cli/`)
 
-### Integration Tests
+- **`issue-management.test.ts`** — End-to-end create/update/delete/show workflows
+- **`issue-status.test.ts`** — Status transitions
+- **`status.test.ts`** — `wl status` command output
+- **`team.test.ts`** — Team/sync CLI commands
+- **`create-description-file.test.ts`** — `--description-file` flag
+- **`init.test.ts`** — `wl init` workflow
+- **`fresh-install.test.ts`** — Clean install scenario
+- **`update-batch.test.ts`** — Batch update operations
+- **`update-do-not-delegate.test.ts`** — Do-not-delegate flag handling
+- **`reviewed.test.ts`** — `wl reviewed` toggle
+- **`misc.test.ts`** — Miscellaneous CLI edge cases
+- **`helpers-tree-rendering.test.ts`** — Tree display formatting
+- **`action-opts-normalization.test.ts`** — Option normalization
+- **`inproc-harness.test.ts`** / **`debug-inproc.test.ts`** — In-process test harness
+- **`initialization-check.test.ts`** — Pre-init guard
+- **`unlock.test.ts`** — Lock file removal
+- **`git-mock-roundtrip.test.ts`** — Git mock for sync tests
+- **`github-*.test.ts`** — GitHub push/filter CLI tests
 
-- **`cli.test.ts`** (20 tests - currently skipped)
-  - End-to-end CLI command testing
-  - Note: These tests are skipped because database initialization messages
-    interfere with JSON output parsing. The functionality is adequately
-    covered by unit tests.
+### TUI tests (`tests/tui/`)
+
+- **`tui-state.test.ts`** / **`state.test.ts`** — TUI state management
+- **`controller.test.ts`** — TUI controller logic
+- **`layout.test.ts`** — Layout rendering
+- **`filter.test.ts`** — Item filtering
+- **`move-mode.test.ts`** — Move/reparent mode
+- **`autocomplete.test.ts`** / **`autocomplete-widget.test.ts`** — Autocomplete
+- **`opencode-*.test.ts`** — OpenCode integration, SSE, prompt, sessions, layout
+- **`persistence*.test.ts`** — TUI persistence
+- **`focus-cycling-integration.test.ts`** — Focus cycling
+- **`widget-create-destroy*.test.ts`** — Widget lifecycle
+- **`status-stage-validation.test.ts`** — Status/stage rule enforcement in TUI
+- **`tui-update-dialog.test.ts`** — Update dialog
+- **`tui-mouse-guard.test.ts`** — Mouse event handling
+- **`shutdown-flow.test.ts`** / **`event-cleanup.test.ts`** — Cleanup on exit
+- **`next-dialog-wrap.test.ts`** — Next dialog wrapping
+- **`toggle-do-not-delegate.test.ts`** — Do-not-delegate toggle in TUI
+
+### Additional tests (`test/`)
+
+- **`migrations.test.ts`** — Database migration tests
+- **`doctor-dependency-check.test.ts`** / **`doctor-status-stage.test.ts`** — `wl doctor` checks
+- **`comment-update.test.ts`** — Comment update operations
+- **`validator.test.ts`** — Additional validation tests
+- **`tui-integration.test.ts`** / **`tui-opencode-integration.test.ts`** — TUI integration
+- **`tui-opencode-sse-handler.test.ts`** — OpenCode SSE handler
+- **`tui-chords.test.ts`** — Keyboard chord handling
+- **`tui-style.test.ts`** — TUI styling
 
 ## Test Coverage
 
-Current test coverage: **67 tests passing, 20 skipped**
-
-| Module | Tests | Status | Coverage Areas |
-|--------|-------|--------|----------------|
-| Database | 28 | ✅ Pass | CRUD, queries, comments, relationships |
-| JSONL | 9 | ✅ Pass | Import, export, compatibility |
-| Sync | 14 | ✅ Pass | Merge logic, conflict resolution |
-| Config | 16 | ✅ Pass | Loading, validation, defaults |
-| CLI | 20 | ⚠️ Skip | Integration tests (covered by units) |
+Current test coverage: **894 tests passing, 0 skipped** across 82 test files.
 
 ## Test Utilities
 
@@ -136,18 +161,10 @@ Tests run automatically on:
 
 ## Known Issues
 
-1. **CLI Integration Tests**: Currently skipped because `WorklogDatabase` outputs 
-   "Refreshing database..." messages to stdout, which interferes with JSON parsing
-   in integration tests. The functionality is adequately tested through unit tests.
-
-2. **Git Operations**: Tests for `gitPullDataFile` and `gitPushDataFile` require
-   a git repository setup and are not yet implemented.
+None at this time. All 894 tests pass with 0 skipped.
 
 ## Future Improvements
 
 - Add API endpoint integration tests
-- Add performance benchmarks
-- Add tests for Git sync operations
-- Increase code coverage to >90%
+- Increase code coverage measurement
 - Add mutation testing
-- Enable CLI integration tests (requires fixing stdout/stderr separation)

@@ -24,7 +24,7 @@ worklog create -t "Fix bug in login"
 worklog list
 
 # List only root items (no parent)
-worklog list -P null
+worklog list --parent null
 
 # Filter by status
 worklog list -s in-progress
@@ -229,7 +229,7 @@ worklog create -t "Dashboard layout" -P WI-0J8L1JQ3H8ZQ2K6F -s open -p high
 worklog create -t "Dashboard widgets" -P WI-0J8L1JQ3H8ZQ2K6F -s open -p medium
 
 # List root items to see the hierarchy
-worklog list -P null
+worklog list --parent null
 
 # View a feature with its tasks
 worklog show WI-0J8L1JQ3H8ZQ2K6E -c

@@ -392,17 +392,18 @@ This approach keeps the plugin functional regardless of the host project's depen
 
 ### Plugin Directory
 
-Worklog looks for plugins in the following locations (in priority order):
+Worklog discovers plugins from two directories, checked in priority order:
 
-1. `$WORKLOG_PLUGIN_DIR` environment variable
-2. Command-line option (if supported by command)
-3. `.worklog/plugins/` in current directory (default)
+1. **Project-local:** `.worklog/plugins/` in the current working directory (highest priority)
+2. **Global:** `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/.worklog/plugins/`
 
-Set a custom plugin directory:
+When the same plugin filename exists in both directories, the project-local version takes precedence and the global copy is silently skipped.
+
+The `$WORKLOG_PLUGIN_DIR` environment variable overrides **both** directories — only the single path it specifies is scanned:
 
 ```bash
 export WORKLOG_PLUGIN_DIR=/path/to/my/plugins
-worklog --help  # Loads from custom directory
+worklog --help  # Loads only from the specified directory
 ```
 
 ### Supported File Extensions

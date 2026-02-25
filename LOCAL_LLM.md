@@ -24,7 +24,7 @@ Worklog does **not** call any model provider directly.
 1. Worklog starts (or connects to) an LLM provider. By default it does this through an **OpenCode server** (`opencode serve`)
 2. OpenCode server talks to a **model provider** (Ollama locally, Foundry Local, cloud providers, or any other provider you configure)
 
-See [docs/opencode-tui.md](../docs/opencode-tui.md) for the current TUI integration details.
+See [docs/opencode-tui.md](docs/opencode-tui.md) for the current TUI integration details.
 
 ---
 
@@ -46,7 +46,7 @@ Microsoft Foundry Local is an on-device AI inference solution that you use to ru
 
 In this example we will use the excellent Phi4 model, but you can choose any model supported by Foundry Local (`foundry model list`).
 
-1. [Install Foundry Local(https://learn.microsoft.com/en-us/azure/ai-foundry/foundry-local/get-started)]
+1. [Install Foundry Local](https://learn.microsoft.com/en-us/azure/ai-foundry/foundry-local/get-started)
 
 2. Dowload and run the Phi4 model:
 
@@ -302,6 +302,6 @@ echo "$resp" | jq -r '.choices[0].message.content'
 
 ## References
 
-- Worklog OpenCode integration: [docs/opencode-tui.md](../docs/opencode-tui.md)
+- Worklog OpenCode integration: [docs/opencode-tui.md](docs/opencode-tui.md)
 - OpenCode documentation: https://opencode.ai/docs/
 - Ollama documentation: https://ollama.com/
