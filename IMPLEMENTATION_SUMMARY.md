@@ -54,8 +54,8 @@ All requirements from the problem statement have been successfully implemented:
   - `GET /health` - Health check
 
 ### CLI Tool (`src/cli.ts`, `src/commands/*`)
-- Command modules for create, list, show, update, delete, import/export, sync, and plugins
-- Shared helpers for ordering, filtering, and output formatting
+- Command modules for create, list, show, update, delete, close, search, next, in-progress, recent, comment, dep, reviewed, import/export, sync, github, doctor, re-sort, migrate, unlock, init, status, tui, and plugins
+- Shared helpers for ordering, filtering, tree rendering, and output formatting
 
 ### TUI (`src/tui/*`)
 - Interactive terminal UI with tree view, details pane, and OpenCode integration
@@ -72,16 +72,29 @@ Worklog/
 │   ├── persistent-store.ts # SQLite persistence
 │   ├── jsonl.ts          # Import/export functions
 │   ├── sync.ts           # JSONL merge/sync helpers
+│   ├── config.ts         # Configuration management
+│   ├── plugin-loader.ts  # Plugin discovery and loading
+│   ├── status-stage-rules.ts # Status/stage compatibility rules
 │   ├── api.ts            # REST API
 │   ├── index.ts          # Server entry point
 │   └── cli.ts            # CLI tool entry
 ├── dist/                 # Compiled JavaScript
+├── docs/                 # Internal/development docs
+├── examples/             # Example plugins
+├── tests/                # Test suite
+├── templates/            # AGENTS.md and workflow templates
 ├── package.json          # Dependencies and scripts
 ├── tsconfig.json         # TypeScript config
-├── README.md             # Main documentation
-├── QUICKSTART.md         # Getting started guide
+├── README.md             # Project overview and doc index
+├── CLI.md                # CLI command reference
+├── CONFIG.md             # Configuration guide
+├── DATA_FORMAT.md        # JSONL data format and schema
+├── API.md                # REST API reference
 ├── EXAMPLES.md           # Usage examples
 ├── GIT_WORKFLOW.md       # Team collaboration guide
+├── DATA_SYNCING.md       # Git sync and GitHub mirroring
+├── PLUGIN_GUIDE.md       # Plugin development guide
+├── TUI.md                # Terminal UI documentation
 └── .gitignore            # Git ignore rules
 ```
 
@@ -100,7 +113,7 @@ Worklog/
 - Build project hierarchies (epics → features → tasks)
 
 ### 3. Flexible Filtering
-- Filter by status (open, in-progress, completed, blocked)
+- Filter by status (open, in-progress, completed, blocked, deleted)
 - Filter by priority (low, medium, high, critical)
 - Filter by parent (including root items with null parent)
 - Filter by tags (comma-separated)
@@ -191,13 +204,18 @@ git pull origin main
 
 ## Documentation
 
-Complete documentation set includes:
+See [README.md](README.md) for the full documentation index. Key documents:
 
-1. **README.md**: Full system documentation
-2. **QUICKSTART.md**: 5-minute getting started
-3. **EXAMPLES.md**: Comprehensive usage examples
-4. **GIT_WORKFLOW.md**: Team collaboration patterns
-5. **IMPLEMENTATION_SUMMARY.md**: This document
+1. **README.md**: Project overview, quick start, and documentation index
+2. **CLI.md**: Complete CLI command reference
+3. **CONFIG.md**: Configuration system and setup
+4. **DATA_FORMAT.md**: JSONL data format, storage architecture, and field reference
+5. **API.md**: REST API endpoints
+6. **EXAMPLES.md**: Practical usage examples
+7. **GIT_WORKFLOW.md**: Team collaboration patterns
+8. **DATA_SYNCING.md**: Git-backed syncing and GitHub Issue mirroring
+9. **PLUGIN_GUIDE.md**: Plugin development guide
+10. **IMPLEMENTATION_SUMMARY.md**: This document
 
 ## Future Enhancements (Not Implemented)
 
@@ -205,12 +223,8 @@ Possible future improvements:
 - Authentication and authorization
 - Web UI
 - Real-time synchronization
-- Database persistence options
-- Search functionality
-- Comments on work items
 - Attachments
 - Time tracking
-- Assignment to users
 
 ## Conclusion
 

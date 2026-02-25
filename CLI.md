@@ -10,9 +10,10 @@ These options apply to any command:
 - `--json` — Produce machine-readable JSON output instead of human text.
 - `--verbose` — Enable verbose output (extra timing / debug info where supported).
 - `-F, --format <format>` — Choose human display format for work items: `concise`, `normal`, `full`, `raw`.
+- `-w, --watch [seconds]` — Rerun the command every N seconds (default: 5).
 
 
-These flags control overall CLI behavior: output format (JSON vs human), verbosity for debugging, and the display format for human-readable commands. Use `--json` for automation and `--format` when you need more or less detail in terminal output.
+These flags control overall CLI behavior: output format (JSON vs human), verbosity for debugging, the display format for human-readable commands, and auto-refresh via watch mode. Use `--json` for automation and `--format` when you need more or less detail in terminal output.
 
 
 ---
@@ -29,6 +30,7 @@ Options:
 
 - `-t, --title <title>` (required) — Title of the work item.
 - `-d, --description <description>` — Description text (optional; defaults to empty).
+- `--description-file <file>` — Read description from a file (optional).
 - `-s, --status <status>` — Status value from config defaults (optional; default: `open`).
 - `-p, --priority <priority>` — `low|medium|high|critical` (optional; default: `medium`).
 - `-P, --parent <parentId>` — Parent work item ID (optional).
@@ -41,6 +43,7 @@ Options:
 - `--created-by <createdBy>` — Interoperability: created by (optional).
 - `--deleted-by <deletedBy>` — Interoperability: deleted by (optional).
 - `--delete-reason <deleteReason>` — Interoperability: delete reason (optional).
+- `--needs-producer-review <true|false>` — Set needsProducerReview flag (true|false|yes|no) (optional).
 - `--prefix <prefix>` — Override default ID prefix (repo-local scope) (optional).
 - `--json` — Output JSON (optional).
 
@@ -57,9 +60,9 @@ Notes:
 
 - Status and stage values are configured in `.worklog/config.defaults.yaml` under `statuses` and `stages`.
 
-### `update` [options] <id>
+### `update` [options] <id...>
 
-Update fields on an existing work item. Options mirror `create` for updatable fields.
+Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--needs-producer-review <true|false>` (set needsProducerReview flag), and `--do-not-delegate <true|false>` (set or clear the do-not-delegate tag).
 
 Example:
 
@@ -95,7 +98,7 @@ wl --json reviewed WL-ABC123    # JSON output with updated work item
 
 ### `delete` [options] <id>
 
-Delete a work item (hard delete): this removes the work item row from the local database. Any comments attached to the work item are cascade-deleted by the database. If you prefer to mark an item as deleted without removing it, use `wl update <id> -s deleted` to set the `deleted` status.
+Delete a work item (marks as deleted): this sets the work item status to `deleted` in the local database. If you prefer to set the status explicitly, use `wl update <id> -s deleted` instead.
 
 Options:
 
@@ -114,19 +117,21 @@ Manage comments attached to work items. Use `wl comment <subcommand>`.
 
 Subcommands:
 
-- `create <workItemId>` — Create a comment. Required: `-a, --author`, `-c, --comment`.
+- `create|add <workItemId>` — Create a comment. Required: `-a, --author`, `-c, --comment`. Optional: `--body <body>` (alias for `--comment`), `-r, --references <references>` (comma-separated list of references: work item IDs, file paths, or URLs).
 - `list <workItemId>` — List comments for a work item.
 - `show <commentId>` — Show a single comment.
-- `update <commentId>` — Update a comment's fields.
+- `update <commentId>` — Update a comment's fields. Options: `-c, --comment`, `-a, --author`, `-r, --references`.
 - `delete <commentId>` — Delete a comment.
 
 Examples:
 
 ```sh
 wl comment create WL-ABC123 -a alice -c "I narrowed this down to the auth layer."
+wl comment add WL-ABC123 -a alice --body "Using the add alias."
+wl comment create WL-ABC123 -a alice -c "See related" -r "WL-DEF456,src/auth.ts"
 wl comment list WL-ABC123
 wl comment show CMT-0001
-wl comment update CMT-0001 -c "Updated content"
+wl comment update CMT-0001 -c "Updated content" -a alice
 wl comment delete CMT-0001
 ```
 
@@ -226,6 +231,7 @@ Options:
 `-a, --assignee <assignee>` (optional)
 `-s, --search <term>` (optional)
 `-n, --number <n>` — Number of items to return (optional; default: `1`).
+`--recency-policy <policy>` — Recency policy: `prefer|avoid|ignore` (optional; default: `ignore`).
 `--include-in-review` — Include items with status `blocked` and stage `in_review` (optional).
 `--include-blocked` — Include dependency-blocked items (excluded by default).
 `--prefix <prefix>` (optional)
@@ -237,26 +243,41 @@ wl next
 wl next -n 3
 wl next -a alice --search "bug"
 wl next --include-blocked
+wl next --recency-policy prefer
 ```
 
 ### `in-progress` [options]
 
 List all in-progress work items in a dependency tree.
 
-Example:
+Options:
+
+`-a, --assignee <assignee>` — Filter by assignee (optional).
+`--prefix <prefix>` — Override the default prefix (optional).
+
+Examples:
 
 ```sh
 wl in-progress
+wl in-progress -a alice
 ```
 
 ### `recent` [options]
 
 Show most recently changed work items.
 
-Example:
+Options:
+
+`-n, --number <n>` — Number of recent items to show (optional).
+`-c, --children` — Also show children (optional).
+`--prefix <prefix>` — Override the default prefix (optional).
+
+Examples:
 
 ```sh
 wl recent
+wl recent -n 10
+wl recent -c
 ```
 
 ### `list` [options] [search]
@@ -267,7 +288,7 @@ Options:
 
 `-s, --status <status>` (optional)
 `-p, --priority <priority>` (optional)
-
+`--parent <id>` — Filter by parent ID (direct children only) (optional).
 `--tags <tags>` (optional)
 `-a, --assignee <assignee>` (optional)
 `-n, --number <n>` (optional) — Limit the number of items returned
@@ -383,10 +404,10 @@ Mirror work items and comments with GitHub Issues.
 Subcommands:
 
 - `push` — Mirror work items to GitHub Issues. Options: `--repo <owner/name>`, `--label-prefix <prefix>`, `--prefix <prefix>`.
- - `push` — Mirror work items to GitHub Issues. Options: `--repo <owner/name>`, `--label-prefix <prefix>`, `--prefix <prefix>`.
    Additional push options:
 
-   - `--force` — Bypass the pre-filter and process all work items regardless of whether they changed since the last push. Useful when you want to re-sync everything.
+   - `--all` — Force a full push of all items, ignoring the last-push timestamp. Useful when you want to re-sync everything.
+   - `--force` — **Deprecated** alias for `--all`. Bypass the pre-filter and process all work items regardless of whether they changed since the last push.
    - `--no-update-timestamp` — Do not write the repository last-push timestamp after a successful push. Use this when you want to run a push but avoid advancing the "last pushed" watermark.
 - `import` — Import updates from GitHub Issues. Options: `--repo <owner/name>`, `--label-prefix <prefix>`, `--since <ISO timestamp>`, `--create-new`, `--prefix <prefix>`.
 
@@ -396,15 +417,11 @@ Examples:
 wl github push --repo myorg/myrepo
 wl gh import --repo myorg/myrepo --since 2025-12-01T00:00:00Z --create-new
 
-Examples demonstrating the new push flags:
-
-```sh
 # Force a full re-sync (bypass pre-filter)
-wl github push --repo myorg/myrepo --force
+wl github push --repo myorg/myrepo --all
 
 # Push but do not update the recorded last-push timestamp
 wl github push --repo myorg/myrepo --no-update-timestamp
-```
 ```
 
 Example (JSON / label prefix):
@@ -495,7 +512,7 @@ wl doctor upgrade --dry-run       # Preview pending schema migrations
 wl doctor upgrade --confirm       # Apply pending schema migrations (creates backups, requires confirmation)
 ```
 
-### `doctor`
+### `doctor` [options]
 
 Validate work items against config-driven status/stage rules. Reports invalid values or incompatible combinations.
 
@@ -503,14 +520,25 @@ For detailed migration policy, backup behavior, and CI guidance, see [DOCTOR_AND
 
 Options:
 
+- `--fix` — Apply safe fixes and prompt for non-safe findings (optional).
 - `--prefix <prefix>` — Override the default prefix (optional).
 - `--json` — Output findings as JSON (optional).
+
+Subcommands:
+
+- `upgrade [options]` — Preview or apply pending database schema migrations. Options: `--dry-run` (preview without applying), `--confirm` (apply non-interactively).
+- `prune [options]` — Prune soft-deleted work items older than a specified age. Options: `--days <n>` (age threshold in days), `--dry-run` (show what would be pruned).
 
 Examples:
 
 ```sh
 wl doctor
+wl doctor --fix
 wl --json doctor
+wl doctor upgrade --dry-run       # Preview pending schema migrations
+wl doctor upgrade --confirm       # Apply pending schema migrations
+wl doctor prune --days 30         # Prune items deleted more than 30 days ago
+wl doctor prune --dry-run         # Preview which items would be pruned
 ```
 
 JSON output is a raw array of findings. Each finding includes:
@@ -524,6 +552,7 @@ Options:
 
 - `--dry-run` — Print the updates without applying them.
 - `--gap <gap>` — Integer gap between consecutive `sort_index` values (optional; default: `100`).
+- `--recency <policy>` — Recency handling for score ordering: `prefer|avoid|ignore` (optional; default: `avoid`).
 - `--prefix <prefix>` — Override the default prefix (optional).
 
 Examples:
@@ -531,6 +560,7 @@ Examples:
 ```sh
 wl re-sort --dry-run
 wl re-sort --gap 100
+wl re-sort --recency prefer
 ```
 
 ### `unlock` [options]
@@ -689,13 +719,16 @@ wl -F full show WL-ABC123       # full detail
 
 ## Where to look for examples in this repository
 
-+ `QUICKSTART.md` — quick start and first-run setup
++ `README.md` — quick start and first-run setup
 + `EXAMPLES.md` — practical command examples and scripts
 + `DATA_SYNCING.md` — detailed sync and GitHub workflows
 
 ## Related documentation
 
-- `README.md` — project overview, installation, and architecture
+- `README.md` — project overview, quick start, and documentation index
+- `CONFIG.md` — configuration system and setup options
+- `DATA_FORMAT.md` — JSONL data format, storage architecture, and field reference
+- `API.md` — REST API endpoints and usage
 - `PLUGIN_GUIDE.md` — plugin development and examples
 - `GIT_WORKFLOW.md` — recommended git workflow for syncing JSONL data
 - `MULTI_PROJECT_GUIDE.md` — using prefixes and multi-project setups
