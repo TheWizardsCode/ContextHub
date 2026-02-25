@@ -554,6 +554,20 @@ worklog plugins          # List discovered plugins
 worklog plugins --json   # JSON output with details
 ```
 
+## Tutorials
+
+Step-by-step guides for learning Worklog:
+
+| Tutorial | Audience | Description |
+|----------|----------|-------------|
+| [Your First Work Item](docs/tutorials/01-your-first-work-item.md) | New users | Install, init, create, update, and close work items |
+| [Team Collaboration](docs/tutorials/02-team-collaboration.md) | Team leads | Git sync, GitHub mirroring, multi-user workflow |
+| [Building a Plugin](docs/tutorials/03-building-a-plugin.md) | Developers | Plugin API, database access, testing |
+| [Using the TUI](docs/tutorials/04-using-the-tui.md) | Any user | Interactive tree view, keyboard shortcuts, OpenCode AI |
+| [Planning an Epic](docs/tutorials/05-planning-an-epic.md) | Project leads | Epics, child items, dependencies, wl next |
+
+See [docs/tutorials/README.md](docs/tutorials/README.md) for the full tutorial index.
+
 ## Development
 
 Build the project:
