@@ -516,6 +516,8 @@ wl doctor upgrade --confirm       # Apply pending schema migrations (creates bac
 
 Validate work items against config-driven status/stage rules. Reports invalid values or incompatible combinations.
 
+For detailed migration policy, backup behavior, and CI guidance, see [DOCTOR_AND_MIGRATIONS.md](DOCTOR_AND_MIGRATIONS.md).
+
 Options:
 
 - `--fix` — Apply safe fixes and prompt for non-safe findings (optional).
