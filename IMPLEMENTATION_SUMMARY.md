@@ -54,8 +54,8 @@ All requirements from the problem statement have been successfully implemented:
   - `GET /health` - Health check
 
 ### CLI Tool (`src/cli.ts`, `src/commands/*`)
-- Command modules for create, list, show, update, delete, import/export, sync, and plugins
-- Shared helpers for ordering, filtering, and output formatting
+- Command modules for create, list, show, update, delete, close, search, next, in-progress, recent, comment, dep, reviewed, import/export, sync, github, doctor, re-sort, migrate, unlock, init, status, tui, and plugins
+- Shared helpers for ordering, filtering, tree rendering, and output formatting
 
 ### TUI (`src/tui/*`)
 - Interactive terminal UI with tree view, details pane, and OpenCode integration
@@ -72,14 +72,17 @@ Worklog/
 │   ├── persistent-store.ts # SQLite persistence
 │   ├── jsonl.ts          # Import/export functions
 │   ├── sync.ts           # JSONL merge/sync helpers
+│   ├── config.ts         # Configuration management
+│   ├── plugin-loader.ts  # Plugin discovery and loading
+│   ├── status-stage-rules.ts # Status/stage compatibility rules
 │   ├── api.ts            # REST API
 │   ├── index.ts          # Server entry point
 │   └── cli.ts            # CLI tool entry
 ├── dist/                 # Compiled JavaScript
 ├── package.json          # Dependencies and scripts
 ├── tsconfig.json         # TypeScript config
-├── README.md             # Main documentation
-├── QUICKSTART.md         # Getting started guide
+├── README.md             # Getting started and documentation index
+├── CLI.md                # CLI command reference
 ├── EXAMPLES.md           # Usage examples
 ├── GIT_WORKFLOW.md       # Team collaboration guide
 └── .gitignore            # Git ignore rules
@@ -100,7 +103,7 @@ Worklog/
 - Build project hierarchies (epics → features → tasks)
 
 ### 3. Flexible Filtering
-- Filter by status (open, in-progress, completed, blocked)
+- Filter by status (open, in-progress, completed, blocked, deleted)
 - Filter by priority (low, medium, high, critical)
 - Filter by parent (including root items with null parent)
 - Filter by tags (comma-separated)
@@ -193,11 +196,13 @@ git pull origin main
 
 Complete documentation set includes:
 
-1. **README.md**: Full system documentation
-2. **QUICKSTART.md**: 5-minute getting started
+1. **README.md**: Getting started and documentation index
+2. **CLI.md**: CLI command reference
 3. **EXAMPLES.md**: Comprehensive usage examples
 4. **GIT_WORKFLOW.md**: Team collaboration patterns
-5. **IMPLEMENTATION_SUMMARY.md**: This document
+5. **PLUGIN_GUIDE.md**: Plugin development guide
+6. **TUI.md**: Terminal UI documentation
+7. **IMPLEMENTATION_SUMMARY.md**: This document
 
 ## Future Enhancements (Not Implemented)
 
@@ -205,12 +210,9 @@ Possible future improvements:
 - Authentication and authorization
 - Web UI
 - Real-time synchronization
-- Database persistence options
-- Search functionality
-- Comments on work items
+- Database persistence options (alternative backends)
 - Attachments
 - Time tracking
-- Assignment to users
 
 ## Conclusion
 

@@ -144,6 +144,7 @@ npm run cli -- tui
 ## Options
 
 - `--in-progress` — show only items with status `in-progress`.
+- `--all` — include completed and deleted items in the list.
 - `--prefix <prefix>` — use a different project prefix.
 
 ## Notes
