@@ -44,13 +44,41 @@ describe('copyToClipboard', () => {
     expect(spawnOpts).toMatchObject({ detached: true });
   });
 
-  it('calls unref() on the spawned process', async () => {
-    const { mockSpawn } = createMockSpawn(0);
+  it('calls unref() after the close event (not before)', async () => {
+    // unref() must be called after the close event fires, otherwise
+    // Node.js stops tracking the child and the close event never fires.
+    const callOrder: string[] = [];
+    const mockSpawn = vi.fn((_cmd: string, _args: any, _opts?: any) => {
+      let closeHandler: ((code: number) => void) | null = null;
+      const cp: any = {
+        stdin: {
+          write: vi.fn(),
+          end: vi.fn(() => { if (closeHandler) closeHandler(0); }),
+        },
+        on: vi.fn((event: string, handler: any) => {
+          if (event === 'close') closeHandler = handler;
+        }),
+        unref: vi.fn(() => { callOrder.push('unref'); }),
+      };
+      // Intercept the close handler to track order
+      const origOn = cp.on;
+      cp.on = vi.fn((event: string, handler: any) => {
+        if (event === 'close') {
+          closeHandler = (code: number) => {
+            callOrder.push('close');
+            handler(code);
+          };
+        } else {
+          origOn(event, handler);
+        }
+      });
+      return cp;
+    });
+
     await copyToClipboard('WL-TEST-123', { spawn: mockSpawn });
 
-    // The mock returns an object with unref; verify it was called
-    const cp = mockSpawn.mock.results[0].value;
-    expect(cp.unref).toHaveBeenCalled();
+    // close must fire before unref is called
+    expect(callOrder).toEqual(['close', 'unref']);
   });
 
   it('returns failure when clipboard command exits with non-zero code', async () => {

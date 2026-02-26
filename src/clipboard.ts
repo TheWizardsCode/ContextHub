@@ -11,11 +11,16 @@ export async function copyToClipboard(text: string, opts?: { spawn?: SpawnLike }
       // survive when the parent TUI process group receives signals or tears
       // down the terminal.
       const cp = spawnImpl(cmd, args, { stdio: ['pipe', 'ignore', 'ignore'], detached: true });
-      // Allow the parent to exit without waiting for the detached child.
-      if (typeof cp.unref === 'function') cp.unref();
       let handled = false;
       cp.on('error', (err: Error) => { if (!handled) { handled = true; resolve({ code: null, error: err }); } });
-      cp.on('close', (code: number) => { if (!handled) { handled = true; resolve({ code }); } });
+      cp.on('close', (code: number) => {
+        if (!handled) { handled = true; resolve({ code }); }
+        // Allow the Node process to exit without waiting for the detached
+        // clipboard daemon (e.g. xclip forks a background process to serve
+        // the X11 selection). We call unref() only after the close event
+        // fires so we don't lose the event.
+        try { if (typeof cp.unref === 'function') cp.unref(); } catch (_) {}
+      });
       if (!cp.stdin || typeof cp.stdin.write !== 'function') {
         if (!handled) { handled = true; resolve({ code: null, error: new Error('stdin not available') }); }
         return;
