@@ -923,19 +923,112 @@ export class WorklogDatabase {
   }
 
   /**
+   * Consolidated filter pipeline for wl next candidate selection.
+   *
+   * Removes non-actionable items in a single pass and returns two pools:
+   *   - candidates: fully filtered items ready for selection
+   *   - criticalPool: items filtered before dep-blocking, with assignee/search
+   *     applied, so that critical-path escalation can still find blocked
+   *     critical items and surface their blockers
+   *
+   * Filter stages (in order):
+   *   1. Remove deleted items
+   *   2. Remove completed items
+   *   3. Remove in-progress items (wl next skips items already being worked on)
+   *   4. Remove in_review+blocked items (unless includeInReview)
+   *   5. Remove excluded items (batch mode)
+   *   6. Apply assignee and search filters
+   *   --- criticalPool snapshot taken here ---
+   *   7. Remove dependency-blocked items (unless includeBlocked)
+   */
+  private filterCandidates(
+    items: WorkItem[],
+    options: {
+      assignee?: string;
+      searchTerm?: string;
+      excluded?: Set<string>;
+      includeInReview?: boolean;
+      includeBlocked?: boolean;
+      debugPrefix?: string;
+    } = {}
+  ): { candidates: WorkItem[]; criticalPool: WorkItem[] } {
+    const {
+      assignee,
+      searchTerm,
+      excluded,
+      includeInReview = false,
+      includeBlocked = false,
+      debugPrefix = '[filter]',
+    } = options;
+
+    let pool = items;
+    this.debug(`${debugPrefix} filter: total=${pool.length}`);
+
+    // 1. Remove deleted items
+    pool = pool.filter(item => item.status !== 'deleted');
+    this.debug(`${debugPrefix} filter: after deleted=${pool.length}`);
+
+    // 2. Remove completed items
+    pool = pool.filter(item => item.status !== 'completed');
+    this.debug(`${debugPrefix} filter: after completed=${pool.length}`);
+
+    // 3. Remove in-progress items (wl next recommends what to work on next,
+    //    not what's already being worked on)
+    pool = pool.filter(item => item.status !== 'in-progress');
+    this.debug(`${debugPrefix} filter: after in-progress=${pool.length}`);
+
+    // 4. Remove in_review+blocked items unless opted in
+    if (!includeInReview) {
+      pool = pool.filter(
+        item => !(item.stage === 'in_review' && item.status === 'blocked')
+      );
+      this.debug(`${debugPrefix} filter: after in_review+blocked=${pool.length}`);
+    }
+
+    // 5. Remove excluded items (batch mode)
+    if (excluded && excluded.size > 0) {
+      pool = pool.filter(item => !excluded.has(item.id));
+      this.debug(`${debugPrefix} filter: after excluded=${pool.length}`);
+    }
+
+    // 6. Apply assignee and search filters
+    pool = this.applyFilters(pool, assignee, searchTerm);
+    this.debug(`${debugPrefix} filter: after assignee/search=${pool.length}`);
+
+    // Snapshot for critical-path escalation (before dep-blocker removal)
+    const criticalPool = pool;
+
+    // 7. Remove dependency-blocked items unless opted in
+    let candidates = pool;
+    if (!includeBlocked) {
+      candidates = pool.filter(item => {
+        const edges = this.store.getDependencyEdgesFrom(item.id);
+        for (const edge of edges) {
+          const target = this.store.getWorkItem(edge.toId);
+          if (this.isDependencyActive(target ?? null)) {
+            return false;
+          }
+        }
+        return true;
+      });
+      this.debug(`${debugPrefix} filter: after dep-blocked=${candidates.length}`);
+    }
+
+    return { candidates, criticalPool };
+  }
+
+  /**
    * Shared next-item selection logic to keep single-item and batch results aligned.
    *
    * Selection proceeds through several phases:
-   *   1. Filter out deleted, in_review (unless opted in), and excluded items.
-   *   2. Partition into dependency-blocked and unblocked candidates.
-   *   3. Critical-path escalation: if a critical item is blocked, surface its direct
+   *   1. Filter candidates via filterCandidates() pipeline.
+   *   2. Critical-path escalation: if a critical item is blocked, surface its direct
    *      blocker immediately (bypasses scoring).
-   *   4. Hierarchical descent: if an in-progress parent exists, recurse into its children.
-   *   5. SortIndex-based ranking among remaining candidates:
+   *   3. Hierarchical descent: among remaining candidates, select the best root-level
+   *      item and descend into its children.
+   *   4. SortIndex-based ranking among remaining candidates:
    *        Items are ordered by hierarchical sort_index position; when all sortIndex
    *        values are equal, priority (descending) then age (ascending) break ties.
-   *   6. If no unblocked candidates remain and includeBlocked is set, fall back to
-   *      blocked items ranked by the same logic.
    */
   private findNextWorkItemFromItems(
     items: WorkItem[],
@@ -947,45 +1040,20 @@ export class WorklogDatabase {
     includeBlocked: boolean = false
   ): NextWorkItemResult {
     this.debug(`${debugPrefix} assignee=${assignee || ''} search=${searchTerm || ''} excluded=${excluded?.size || 0}`);
-    let filteredItems = items;
-    this.debug(`${debugPrefix} total items=${filteredItems.length}`);
 
-    // Filter out deleted items first
-    filteredItems = filteredItems.filter(item => item.status !== 'deleted');
-    if (!includeInReview) {
-      filteredItems = filteredItems.filter(
-        item => !(item.stage === 'in_review' && item.status === 'blocked')
-      );
-    }
-    if (excluded && excluded.size > 0) {
-      filteredItems = filteredItems.filter(item => !excluded.has(item.id));
-    }
-    // Save pre-dep-blocker pool so the critical-path can still surface blockers
-    const preDepBlockerItems = filteredItems;
-    if (!includeBlocked) {
-      // Use store-direct access to avoid per-item refreshFromJsonlIfNewer overhead
-      // (data is already fresh from the getAllWorkItems call at the top of the stack)
-      filteredItems = filteredItems.filter(item => {
-        const edges = this.store.getDependencyEdgesFrom(item.id);
-        for (const edge of edges) {
-          const target = this.store.getWorkItem(edge.toId);
-          if (this.isDependencyActive(target ?? null)) {
-            return false;
-          }
-        }
-        return true;
-      });
-    }
-    this.debug(`${debugPrefix} after deleted/excluded/dep-blocker=${filteredItems.length}`);
+    // ── Stage 1: Filter pipeline ──
+    const { candidates: filteredItems, criticalPool } = this.filterCandidates(items, {
+      assignee,
+      searchTerm,
+      excluded,
+      includeInReview,
+      includeBlocked,
+      debugPrefix,
+    });
 
-    // Apply filters
-    filteredItems = this.applyFilters(filteredItems, assignee, searchTerm);
-    this.debug(`${debugPrefix} after assignee/search filters=${filteredItems.length}`);
-
-    // Critical items: use pre-dep-blocker pool so that blocked criticals still surface their blockers
-    const criticalPool = this.applyFilters(preDepBlockerItems, assignee, searchTerm);
+    // ── Stage 2: Critical-path escalation ──
     const criticalItems = criticalPool.filter(
-      item => item.priority === 'critical' && item.status !== 'completed' && item.status !== 'deleted'
+      item => item.priority === 'critical'
     );
     this.debug(`${debugPrefix} critical items=${criticalItems.length}`);
     const unblockedCriticals = criticalItems.filter(
@@ -1046,30 +1114,36 @@ export class WorklogDatabase {
       };
     }
 
-    // Find in-progress items from the post-dep-blocker filtered pool.
-    // Blocked items are handled separately via the critical-path escalation above.
-    const inProgressItems = this.applyFilters(filteredItems, assignee, searchTerm).filter(item => {
-      return item.status === 'in-progress';
-    });
-    this.debug(`${debugPrefix} in-progress items=${inProgressItems.length}`);
+    // ── Stage 3: In-progress parent descent ──
+    // In-progress items are excluded from candidates (wl next doesn't recommend
+    // items already being worked on), but we still check for in-progress parents
+    // so we can descend into their actionable children.
+    const inProgressItems = this.applyFilters(
+      items.filter(item =>
+        item.status === 'in-progress' &&
+        (!excluded || !excluded.has(item.id))
+      ),
+      assignee,
+      searchTerm
+    );
+    this.debug(`${debugPrefix} in-progress parents=${inProgressItems.length}`);
 
     if (inProgressItems.length === 0) {
-      // No in-progress items, find highest priority and oldest non-in-progress item
-      // Respect hierarchy: select among root-level candidates, then descend into children
-      const openItems = filteredItems.filter(item => item.status !== 'completed');
-      this.debug(`${debugPrefix} open items=${openItems.length}`);
-      if (openItems.length === 0) {
+      // ── Stage 4: Open item selection ──
+      // No in-progress parents; select among filtered candidates
+      if (filteredItems.length === 0) {
         return { workItem: null, reason: 'No work items available' };
       }
+      this.debug(`${debugPrefix} open candidates=${filteredItems.length}`);
 
-      // Identify root-level candidates: items whose parent is not in the open set
-      const openIds = new Set(openItems.map(item => item.id));
-      const rootCandidates = openItems.filter(item => !item.parentId || !openIds.has(item.parentId));
+      // Identify root-level candidates: items whose parent is not in the candidate set
+      const candidateIds = new Set(filteredItems.map(item => item.id));
+      const rootCandidates = filteredItems.filter(item => !item.parentId || !candidateIds.has(item.parentId));
       this.debug(`${debugPrefix} root candidates=${rootCandidates.length}`);
 
       if (rootCandidates.length === 0) {
         // Fallback: all items have parents in the pool (shouldn't happen normally)
-        const selected = this.selectBySortIndex(openItems);
+        const selected = this.selectBySortIndex(filteredItems);
         this.debug(`${debugPrefix} selected open (fallback)=${selected?.id || ''}`);
         return {
           workItem: selected,
@@ -1090,10 +1164,8 @@ export class WorklogDatabase {
       let depth = 0;
       const maxDepth = 15; // Guard against circular references
       while (depth < maxDepth) {
-        const children = openItems.filter(item =>
-          item.parentId === current.id &&
-          item.status !== 'completed' &&
-          item.status !== 'deleted'
+        const children = filteredItems.filter(item =>
+          item.parentId === current.id
         ).filter(item => !excluded?.has(item.id));
         this.debug(`${debugPrefix} descend depth=${depth} current=${current.id} children=${children.length}`);
 
@@ -1120,37 +1192,28 @@ export class WorklogDatabase {
       };
     }
 
-    // There are in-progress items
-    // Find the best in-progress item and descend into its children
+    // ── Stage 5: In-progress parent descent ──
+    // Find the best in-progress item and descend into its actionable children
     const selectedInProgress = this.selectBySortIndex(inProgressItems);
     this.debug(`${debugPrefix} selected in-progress=${selectedInProgress?.id || ''}`);
     if (!selectedInProgress) {
       return { workItem: null, reason: 'No work items available' };
     }
 
-    // Select best direct child of the in-progress item
-    const directChildren = this.getChildren(selectedInProgress.id);
-    const filteredChildren = this.applyFilters(directChildren, assignee, searchTerm).filter(
-      item => item.status !== 'in-progress' && item.status !== 'completed' && item.status !== 'deleted'
+    // Select best direct child from the already-filtered candidate pool
+    const actionableChildren = filteredItems.filter(
+      item => item.parentId === selectedInProgress.id
     ).filter(item => !excluded?.has(item.id));
 
-    this.debug(`${debugPrefix} direct children=${directChildren.length} filtered children=${filteredChildren.length}`);
+    this.debug(`${debugPrefix} actionable children of ${selectedInProgress.id}=${actionableChildren.length}`);
 
-    if (filteredChildren.length === 0) {
+    if (actionableChildren.length === 0) {
       if (excluded?.has(selectedInProgress.id)) {
         return { workItem: null, reason: 'No available items after exclusions' };
       }
-      // No suitable direct children — fall through to find the best non-in-progress
-      // open item instead of returning the in-progress item itself (it's already
-      // being worked on, so wl next should recommend something actionable).
-      const fallbackItems = filteredItems.filter(item => {
-        return item.status !== 'in-progress' &&
-               item.status !== 'blocked' &&
-               item.status !== 'completed' &&
-               item.status !== 'deleted' &&
-               item.id !== selectedInProgress.id;
-      }).filter(item => !excluded?.has(item.id));
-      const fallback = this.selectBySortIndex(fallbackItems);
+      // No suitable children — fall back to the best candidate that isn't
+      // the in-progress item itself
+      const fallback = this.selectBySortIndex(filteredItems);
       if (fallback) {
         return {
           workItem: fallback,
@@ -1160,7 +1223,7 @@ export class WorklogDatabase {
       return { workItem: null, reason: 'No actionable work items available (only in-progress items remain)' };
     }
 
-    const selected = this.selectBySortIndex(filteredChildren);
+    const selected = this.selectBySortIndex(actionableChildren);
     this.debug(`${debugPrefix} selected child=${selected?.id || ''}`);
     return {
       workItem: selected,

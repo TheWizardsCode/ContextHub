@@ -648,6 +648,34 @@ describe('WorklogDatabase', () => {
       expect(result.workItem?.id).toBe(openItem.id);
     });
 
+    it('should never return an in-progress item as a candidate', () => {
+      // In-progress items are already being worked on; wl next should skip them
+      db.create({ title: 'In progress', priority: 'critical', status: 'in-progress' });
+      const openItem = db.create({ title: 'Open', priority: 'low', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem?.id).toBe(openItem.id);
+      expect(result.workItem?.status).not.toBe('in-progress');
+    });
+
+    it('should return null when only in-progress items exist', () => {
+      db.create({ title: 'In progress 1', priority: 'critical', status: 'in-progress' });
+      db.create({ title: 'In progress 2', priority: 'high', status: 'in-progress' });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).toBeNull();
+      expect(result.reason).toContain('No actionable work items');
+    });
+
+    it('should find open children of in-progress parent without returning the parent', () => {
+      const parent = db.create({ title: 'WIP Parent', priority: 'high', status: 'in-progress' });
+      const child = db.create({ title: 'Open child', priority: 'medium', status: 'open', parentId: parent.id });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem?.id).toBe(child.id);
+      expect(result.workItem?.id).not.toBe(parent.id);
+    });
+
     it('should exclude blocked in_review items by default', () => {
       const inReviewBlocked = db.create({ title: 'In review', status: 'blocked', stage: 'in_review', priority: 'high' });
       const openItem = db.create({ title: 'Open', status: 'open', priority: 'low' });
