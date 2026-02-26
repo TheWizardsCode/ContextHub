@@ -1201,3 +1201,170 @@ function normalizeGithubIssue(raw: any): GithubIssueRecord {
     subIssuesSummary: raw.subIssuesSummary,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Label event fetching and caching for import conflict resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Represents a single label add/remove event from the GitHub issue events API.
+ */
+export interface LabelEvent {
+  /** The full label name, e.g. "wl:stage:done" */
+  label: string;
+  /** Whether the label was added or removed */
+  action: 'labeled' | 'unlabeled';
+  /** ISO-8601 timestamp of the event */
+  createdAt: string;
+}
+
+/**
+ * In-memory cache for label events, scoped to a single import run.
+ * Prevents redundant API calls for the same issue within one run.
+ */
+export class LabelEventCache {
+  private cache = new Map<number, LabelEvent[]>();
+
+  has(issueNumber: number): boolean {
+    return this.cache.has(issueNumber);
+  }
+
+  get(issueNumber: number): LabelEvent[] | undefined {
+    return this.cache.get(issueNumber);
+  }
+
+  set(issueNumber: number, events: LabelEvent[]): void {
+    this.cache.set(issueNumber, events);
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+
+  get size(): number {
+    return this.cache.size;
+  }
+}
+
+/**
+ * Fetch label events for a GitHub issue via the events API endpoint.
+ *
+ * Filters events to only those with action='labeled' or action='unlabeled'
+ * where the label name starts with the configured prefix.
+ *
+ * Uses the in-memory cache to avoid redundant API calls within a single
+ * import run. Falls back to an empty array on API failure.
+ *
+ * @param config - GitHub configuration with repo and label prefix
+ * @param issueNumber - The issue number to fetch events for
+ * @param cache - In-memory cache scoped to the import run
+ * @returns Array of filtered label events, sorted by createdAt ascending
+ */
+export async function fetchLabelEventsAsync(
+  config: GithubConfig,
+  issueNumber: number,
+  cache: LabelEventCache
+): Promise<LabelEvent[]> {
+  // Return cached result if available
+  const cached = cache.get(issueNumber);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const { owner, name } = parseRepoSlug(config.repo);
+  const normalizedPrefix = normalizeGithubLabelPrefix(config.labelPrefix);
+
+  try {
+    const command = `gh api repos/${owner}/${name}/issues/${issueNumber}/events --paginate`;
+    const result = await runGhJsonDetailedAsync(command);
+
+    if (!result.ok || !Array.isArray(result.data)) {
+      // API failure — cache empty array to avoid retrying in same run
+      cache.set(issueNumber, []);
+      return [];
+    }
+
+    const labelEvents: LabelEvent[] = [];
+    for (const event of result.data) {
+      const action = event?.event;
+      if (action !== 'labeled' && action !== 'unlabeled') {
+        continue;
+      }
+      const labelName = event?.label?.name;
+      if (typeof labelName !== 'string') {
+        continue;
+      }
+      // Only include labels that match the worklog prefix
+      if (!labelName.startsWith(normalizedPrefix)) {
+        continue;
+      }
+      const createdAt = event?.created_at;
+      if (typeof createdAt !== 'string') {
+        continue;
+      }
+      labelEvents.push({
+        label: labelName,
+        action,
+        createdAt,
+      });
+    }
+
+    // Sort by createdAt ascending for consistent ordering
+    labelEvents.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+    cache.set(issueNumber, labelEvents);
+    return labelEvents;
+  } catch {
+    // On any error, cache empty array and return it
+    cache.set(issueNumber, []);
+    return [];
+  }
+}
+
+/**
+ * Check whether label-derived fields from a GitHub issue differ from local
+ * work item values. Used to determine whether event fetching is necessary.
+ *
+ * @param labelFields - Fields extracted from GitHub issue labels
+ * @param localItem - The local work item to compare against
+ * @returns true if any label-derived field differs from the local value
+ */
+export function labelFieldsDiffer(
+  labelFields: { status: WorkItemStatus; priority: WorkItemPriority; stage: string; issueType: string; risk: string; effort: string },
+  localItem: { status: WorkItemStatus; priority: WorkItemPriority; stage: string; issueType: string; risk: string; effort: string }
+): boolean {
+  if (labelFields.status !== localItem.status) return true;
+  if (labelFields.priority !== localItem.priority) return true;
+  if (labelFields.stage && labelFields.stage !== localItem.stage) return true;
+  if (labelFields.issueType && labelFields.issueType !== localItem.issueType) return true;
+  if (labelFields.risk && labelFields.risk !== localItem.risk) return true;
+  if (labelFields.effort && labelFields.effort !== localItem.effort) return true;
+  return false;
+}
+
+/**
+ * Get the most recent label event timestamp for a specific label category.
+ * Looks through events for the last 'labeled' action matching the given
+ * category prefix (e.g. 'stage:', 'priority:').
+ *
+ * @param events - Sorted array of label events (ascending by createdAt)
+ * @param labelPrefix - The worklog label prefix (e.g. 'wl:')
+ * @param category - The category to search for (e.g. 'stage:', 'priority:')
+ * @returns The createdAt timestamp of the most recent matching event, or null
+ */
+export function getLatestLabelEventTimestamp(
+  events: LabelEvent[],
+  labelPrefix: string,
+  category: string
+): string | null {
+  const normalizedPrefix = normalizeGithubLabelPrefix(labelPrefix);
+  const fullPrefix = `${normalizedPrefix}${category}`;
+
+  let latest: string | null = null;
+  for (const event of events) {
+    if (event.action === 'labeled' && event.label.startsWith(fullPrefix)) {
+      latest = event.createdAt;
+    }
+  }
+  return latest;
+}
