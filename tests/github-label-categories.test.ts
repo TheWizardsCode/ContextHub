@@ -15,8 +15,10 @@ import {
   isSingleValueCategoryLabel,
   normalizeGithubLabelPrefix,
   workItemToIssuePayload,
+  issueToWorkItemFields,
 } from '../src/github.js';
 import type { WorkItem } from '../src/types.js';
+import type { GithubIssueRecord } from '../src/github.js';
 
 const defaultPrefix = 'wl:';
 
@@ -253,5 +255,208 @@ describe('workItemToIssuePayload label generation', () => {
 
     const stageLabels = payload.labels.filter(l => l.startsWith('wl:stage:'));
     expect(stageLabels).toHaveLength(0);
+  });
+});
+
+function makeIssue(overrides: Partial<GithubIssueRecord> = {}): GithubIssueRecord {
+  return {
+    id: 1,
+    number: 1,
+    title: 'Test issue',
+    body: null,
+    state: 'open',
+    labels: [],
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+describe('issueToWorkItemFields — stage extraction', () => {
+  it('extracts stage from wl:stage:* label', () => {
+    const issue = makeIssue({ labels: ['wl:stage:idea'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.stage).toBe('idea');
+  });
+
+  it('extracts stage with underscored value', () => {
+    const issue = makeIssue({ labels: ['wl:stage:in_progress'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.stage).toBe('in_progress');
+  });
+
+  it('returns empty string when no stage label is present', () => {
+    const issue = makeIssue({ labels: ['wl:status:open', 'wl:priority:high'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.stage).toBe('');
+  });
+
+  it('uses last stage label when multiple are present', () => {
+    const issue = makeIssue({ labels: ['wl:stage:idea', 'wl:stage:done'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.stage).toBe('done');
+  });
+
+  it('does not confuse stage: with tag: or other categories', () => {
+    const issue = makeIssue({ labels: ['wl:tag:staging', 'wl:priority:high'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.stage).toBe('');
+    expect(result.tags).toContain('staging');
+  });
+
+  it('respects custom label prefix for stage', () => {
+    const issue = makeIssue({ labels: ['myapp:stage:review'] });
+    const result = issueToWorkItemFields(issue, 'myapp:');
+    expect(result.stage).toBe('review');
+  });
+});
+
+describe('issueToWorkItemFields — issueType extraction', () => {
+  it('extracts issueType from wl:type:* label', () => {
+    const issue = makeIssue({ labels: ['wl:type:bug'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.issueType).toBe('bug');
+  });
+
+  it('extracts feature issueType', () => {
+    const issue = makeIssue({ labels: ['wl:type:feature'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.issueType).toBe('feature');
+  });
+
+  it('extracts task issueType', () => {
+    const issue = makeIssue({ labels: ['wl:type:task'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.issueType).toBe('task');
+  });
+
+  it('extracts epic issueType', () => {
+    const issue = makeIssue({ labels: ['wl:type:epic'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.issueType).toBe('epic');
+  });
+
+  it('extracts chore issueType', () => {
+    const issue = makeIssue({ labels: ['wl:type:chore'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.issueType).toBe('chore');
+  });
+
+  it('returns empty string when no type label is present', () => {
+    const issue = makeIssue({ labels: ['wl:status:open'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.issueType).toBe('');
+  });
+
+  it('uses last type label when multiple are present', () => {
+    const issue = makeIssue({ labels: ['wl:type:bug', 'wl:type:feature'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.issueType).toBe('feature');
+  });
+});
+
+describe('issueToWorkItemFields — legacy priority labels', () => {
+  it('maps P0 to critical', () => {
+    const issue = makeIssue({ labels: ['wl:P0'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.priority).toBe('critical');
+  });
+
+  it('maps P1 to high', () => {
+    const issue = makeIssue({ labels: ['wl:P1'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.priority).toBe('high');
+  });
+
+  it('maps P2 to medium', () => {
+    const issue = makeIssue({ labels: ['wl:P2'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.priority).toBe('medium');
+  });
+
+  it('maps P3 to low', () => {
+    const issue = makeIssue({ labels: ['wl:P3'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.priority).toBe('low');
+  });
+
+  it('modern priority:* label takes precedence over legacy when it comes after', () => {
+    const issue = makeIssue({ labels: ['wl:P0', 'wl:priority:low'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.priority).toBe('low');
+  });
+
+  it('legacy label takes precedence when it comes after modern priority:*', () => {
+    const issue = makeIssue({ labels: ['wl:priority:low', 'wl:P0'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.priority).toBe('critical');
+  });
+
+  it('does not match P4 or other non-legacy labels', () => {
+    const issue = makeIssue({ labels: ['wl:P4', 'wl:P5'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.priority).toBe('medium'); // default
+  });
+
+  it('does not confuse legacy priority with non-wl prefixed labels', () => {
+    const issue = makeIssue({ labels: ['P0', 'P1'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.priority).toBe('medium'); // default, P0/P1 are non-wl labels
+    expect(result.tags).toContain('P0');
+    expect(result.tags).toContain('P1');
+  });
+});
+
+describe('issueToWorkItemFields — combined extraction', () => {
+  it('extracts all fields from a fully-labeled issue', () => {
+    const issue = makeIssue({
+      labels: [
+        'wl:status:in-progress',
+        'wl:priority:high',
+        'wl:stage:in_review',
+        'wl:type:bug',
+        'wl:risk:High',
+        'wl:effort:M',
+        'wl:tag:frontend',
+        'enhancement',
+      ],
+    });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.status).toBe('in-progress');
+    expect(result.priority).toBe('high');
+    expect(result.stage).toBe('in_review');
+    expect(result.issueType).toBe('bug');
+    expect(result.risk).toBe('High');
+    expect(result.effort).toBe('M');
+    expect(result.tags).toContain('frontend');
+    expect(result.tags).toContain('enhancement');
+  });
+
+  it('returns defaults for an issue with no wl labels', () => {
+    const issue = makeIssue({ labels: ['bug', 'enhancement'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.status).toBe('open');
+    expect(result.priority).toBe('medium');
+    expect(result.stage).toBe('');
+    expect(result.issueType).toBe('');
+    expect(result.risk).toBe('');
+    expect(result.effort).toBe('');
+    expect(result.tags).toEqual(['bug', 'enhancement']);
+  });
+
+  it('returns defaults for an issue with no labels at all', () => {
+    const issue = makeIssue({ labels: [] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.status).toBe('open');
+    expect(result.priority).toBe('medium');
+    expect(result.stage).toBe('');
+    expect(result.issueType).toBe('');
+    expect(result.tags).toEqual([]);
+  });
+
+  it('ignores empty stage: and type: values', () => {
+    const issue = makeIssue({ labels: ['wl:stage:', 'wl:type:'] });
+    const result = issueToWorkItemFields(issue, defaultPrefix);
+    expect(result.stage).toBe('');
+    expect(result.issueType).toBe('');
   });
 });
