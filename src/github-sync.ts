@@ -33,6 +33,10 @@ import {
   updateGithubIssueCommentAsync,
   normalizeGithubLabelPrefix,
   issueToWorkItemFields,
+  LabelEventCache,
+  fetchLabelEventsAsync,
+  labelFieldsDiffer,
+  getLatestLabelEventTimestamp,
 } from './github.js';
 import { increment, snapshot, diff } from './github-metrics.js';
 import { mergeWorkItems } from './sync.js';
@@ -577,11 +581,146 @@ export async function upsertIssuesFromWorkItems(
   return { updatedItems, result, timing };
 }
 
-export function importIssuesToWorkItems(
+/**
+ * Represents a field that was changed during import label resolution.
+ * Used for audit logging and JSON output.
+ */
+export interface FieldChange {
+  workItemId: string;
+  field: string;
+  oldValue: string;
+  newValue: string;
+  source: 'github-label';
+  timestamp: string;
+}
+
+/**
+ * Label categories mapped to their WorkItem field names and label prefix suffixes.
+ */
+const LABEL_FIELD_CATEGORIES: Array<{ field: string; category: string }> = [
+  { field: 'stage', category: 'stage:' },
+  { field: 'priority', category: 'priority:' },
+  { field: 'status', category: 'status:' },
+  { field: 'issueType', category: 'type:' },
+  { field: 'risk', category: 'risk:' },
+  { field: 'effort', category: 'effort:' },
+];
+
+/**
+ * Resolve a single label-derived field using event timestamps.
+ *
+ * Compares the most recent label event timestamp for the given category
+ * against the local updatedAt. If the label event is newer, returns the
+ * remote (label-derived) value. If local is newer or equal, returns the
+ * local value. When no events exist for the category, falls back to using
+ * the issue updatedAt timestamp.
+ *
+ * @param localValue - Current local work item field value
+ * @param localUpdatedAt - Local work item's updatedAt timestamp
+ * @param remoteValue - Value extracted from GitHub labels
+ * @param events - Sorted label events for the issue
+ * @param category - Label category suffix (e.g. 'stage:', 'priority:')
+ * @param labelPrefix - Worklog label prefix (e.g. 'wl:')
+ * @param issueUpdatedAt - GitHub issue updatedAt as fallback timestamp
+ * @returns Resolution result with the chosen value and whether it changed
+ */
+export function resolveLabelField(
+  localValue: string,
+  localUpdatedAt: string,
+  remoteValue: string,
+  events: import('./github.js').LabelEvent[],
+  category: string,
+  labelPrefix: string,
+  issueUpdatedAt: string
+): { resolvedValue: string; changed: boolean; eventTimestamp: string | null } {
+  // If the remote value is empty (no label for this category), keep local
+  if (!remoteValue) {
+    return { resolvedValue: localValue, changed: false, eventTimestamp: null };
+  }
+
+  // If the values are the same, no change needed
+  if (remoteValue === localValue) {
+    return { resolvedValue: localValue, changed: false, eventTimestamp: null };
+  }
+
+  // Find the most recent label event timestamp for this category
+  const eventTimestamp = getLatestLabelEventTimestamp(events, labelPrefix, category);
+
+  // Use event timestamp if available, otherwise fall back to issue updatedAt
+  const effectiveTimestamp = eventTimestamp || issueUpdatedAt;
+
+  const localTime = new Date(localUpdatedAt).getTime();
+  const remoteTime = new Date(effectiveTimestamp).getTime();
+
+  // If remote timestamp is newer, apply remote value
+  if (remoteTime > localTime) {
+    return { resolvedValue: remoteValue, changed: true, eventTimestamp: effectiveTimestamp };
+  }
+
+  // Local wins on equal or newer timestamps
+  return { resolvedValue: localValue, changed: false, eventTimestamp: effectiveTimestamp };
+}
+
+/**
+ * Resolve all label-derived fields for a work item against its local values.
+ *
+ * For each label-derived field category, compares event timestamps to local
+ * updatedAt and determines the winning value. Produces a list of FieldChange
+ * records for any fields that were updated from GitHub labels.
+ *
+ * @param localItem - The local work item
+ * @param labelFields - Fields extracted from GitHub labels
+ * @param events - Sorted label events for the issue
+ * @param labelPrefix - Worklog label prefix
+ * @param issueUpdatedAt - GitHub issue updatedAt as fallback timestamp
+ * @returns Object with resolved field values and array of field changes
+ */
+export function resolveAllLabelFields(
+  localItem: WorkItem,
+  labelFields: { status: string; priority: string; stage: string; issueType: string; risk: string; effort: string },
+  events: import('./github.js').LabelEvent[],
+  labelPrefix: string,
+  issueUpdatedAt: string
+): { resolvedFields: Record<string, string>; fieldChanges: FieldChange[] } {
+  const resolvedFields: Record<string, string> = {};
+  const fieldChanges: FieldChange[] = [];
+
+  for (const { field, category } of LABEL_FIELD_CATEGORIES) {
+    const localValue = String((localItem as any)[field] || '');
+    const remoteValue = String((labelFields as any)[field] || '');
+
+    const result = resolveLabelField(
+      localValue,
+      localItem.updatedAt,
+      remoteValue,
+      events,
+      category,
+      labelPrefix,
+      issueUpdatedAt
+    );
+
+    resolvedFields[field] = result.resolvedValue;
+
+    if (result.changed) {
+      fieldChanges.push({
+        workItemId: localItem.id,
+        field,
+        oldValue: localValue,
+        newValue: result.resolvedValue,
+        source: 'github-label',
+        timestamp: result.eventTimestamp || issueUpdatedAt,
+      });
+    }
+  }
+
+  return { resolvedFields, fieldChanges };
+}
+
+export async function importIssuesToWorkItems(
   items: WorkItem[],
   config: GithubConfig,
   options?: { since?: string; createNew?: boolean; generateId?: () => string; onProgress?: (progress: GithubProgress) => void }
-): {
+): Promise<{
   updatedItems: WorkItem[];
   createdItems: WorkItem[];
   issues: GithubIssueRecord[];
@@ -589,7 +728,8 @@ export function importIssuesToWorkItems(
   mergedItems: WorkItem[];
   conflictDetails: { conflicts: string[]; conflictDetails: import('./types.js').ConflictDetail[] };
   markersFound: number;
-} {
+  fieldChanges: FieldChange[];
+}> {
   const since = options?.since;
   const createNew = options?.createNew === true;
   const generateId = options?.generateId;
@@ -633,6 +773,17 @@ export function importIssuesToWorkItems(
   const childIssueHints = new Map<string, number[]>();
   const seenIssueNumbers = new Set<number>();
   let markersFound = 0;
+  const allFieldChanges: FieldChange[] = [];
+  const labelEventCache = new LabelEventCache();
+
+  // Track which issues need event-based resolution (issue number -> local item + label fields)
+  const pendingResolutions: Array<{
+    issueNumber: number;
+    itemId: string;
+    localItem: WorkItem;
+    labelFields: { status: string; priority: string; stage: string; issueType: string; risk: string; effort: string };
+    issueUpdatedAt: string;
+  }> = [];
 
   const shouldReplaceRemote = (existingUpdatedAt: string | null | undefined, nextUpdatedAt: string): boolean => {
     if (!existingUpdatedAt) {
@@ -779,6 +930,17 @@ export function importIssuesToWorkItems(
       } else {
         childIssueHints.delete(remoteItem.id);
       }
+
+      // Queue event-based resolution for items where label fields differ from local
+      if (existing && labelFieldsDiffer(labelFields, existing)) {
+        pendingResolutions.push({
+          issueNumber: issue.number,
+          itemId: remoteItem.id,
+          localItem: existing,
+          labelFields,
+          issueUpdatedAt: issue.updatedAt,
+        });
+      }
     }
     seenIssueNumbers.add(issue.number);
     processed += 1;
@@ -852,10 +1014,47 @@ export function importIssuesToWorkItems(
         id: issue.id,
         updatedAt: issue.updatedAt,
       });
+
+      // Queue event-based resolution for close-check items where label fields differ
+      if (labelFieldsDiffer(labelFields, item)) {
+        pendingResolutions.push({
+          issueNumber: issue.number,
+          itemId: item.id,
+          localItem: item,
+          labelFields,
+          issueUpdatedAt: issue.updatedAt,
+        });
+      }
+
       checked += 1;
     } catch {
       checked += 1;
       continue;
+    }
+  }
+
+  // Resolve label conflicts using event timelines for items where fields differ
+  for (const pending of pendingResolutions) {
+    const events = await fetchLabelEventsAsync(config, pending.issueNumber, labelEventCache);
+    const { resolvedFields, fieldChanges } = resolveAllLabelFields(
+      pending.localItem,
+      pending.labelFields,
+      events,
+      config.labelPrefix,
+      pending.issueUpdatedAt
+    );
+
+    // Apply resolved values to the remote item already stored in remoteItemsById
+    const remoteItem = remoteItemsById.get(pending.itemId);
+    if (remoteItem) {
+      // Apply all resolved fields — this reverts fields to local values where
+      // local is newer, and keeps remote values where remote is newer
+      for (const { field, category } of LABEL_FIELD_CATEGORIES) {
+        if (resolvedFields[field] !== undefined) {
+          (remoteItem as any)[field] = resolvedFields[field];
+        }
+      }
+      allFieldChanges.push(...fieldChanges);
     }
   }
 
@@ -955,6 +1154,7 @@ export function importIssuesToWorkItems(
       conflictDetails: mergeResult.conflictDetails,
     },
     markersFound,
+    fieldChanges: allFieldChanges,
   };
 }
 

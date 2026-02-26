@@ -4,7 +4,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import { getRepoFromGitRemote, normalizeGithubLabelPrefix } from '../github.js';
-import { upsertIssuesFromWorkItems, importIssuesToWorkItems, GithubProgress, SyncedItem, SyncErrorItem } from '../github-sync.js';
+import { upsertIssuesFromWorkItems, importIssuesToWorkItems, GithubProgress, SyncedItem, SyncErrorItem, FieldChange } from '../github-sync.js';
 import { loadConfig } from '../config.js';
 import { displayConflictDetails } from './helpers.js';
 import { createLogFileWriter, getWorklogLogPath, logConflictDetails } from '../logging.js';
@@ -317,7 +317,7 @@ export default function register(ctx: PluginContext): void {
         }
         const items = db.getAll();
         const createNew = resolveGithubImportCreateNew({ createNew: options.createNew });
-        const { updatedItems, createdItems, issues, updatedIds, mergedItems, conflictDetails, markersFound } = importIssuesToWorkItems(items, githubConfig, {
+        const { updatedItems, createdItems, issues, updatedIds, mergedItems, conflictDetails, markersFound, fieldChanges } = await importIssuesToWorkItems(items, githubConfig, {
           since: options.since,
           createNew,
           generateId: () => db.generateWorkItemId(),
@@ -338,6 +338,9 @@ export default function register(ctx: PluginContext): void {
         logLine(`Repo ${githubConfig.repo}`);
         logLine(`Import summary updated=${updatedItems.length} created=${createdItems.length} totalIssues=${issues.length} markers=${markersFound}`);
         logLine(`Import config createNew=${createNew} since=${options.since || ''}`);
+        for (const fc of fieldChanges) {
+          logLine(`[import] ${fc.workItemId} ${fc.field}: ${fc.oldValue} → ${fc.newValue} (source: ${fc.source}, ${fc.timestamp})`);
+        }
         logConflictDetails(
           {
             itemsAdded: createdItems.length,
@@ -361,6 +364,7 @@ export default function register(ctx: PluginContext): void {
             created: createdItems.length,
             totalIssues: issues.length,
             createNew,
+            fieldChanges,
           });
         } else {
           const unchanged = Math.max(items.length - updatedIds.size, 0);
@@ -375,6 +379,12 @@ export default function register(ctx: PluginContext): void {
           console.log(`  Create new: ${createNew ? 'enabled' : 'disabled'}`);
           console.log(`  Total work items: ${totalItems}`);
           if (isVerbose) {
+            if (fieldChanges.length > 0) {
+              console.log(`  Label-resolved field changes:`);
+              for (const fc of fieldChanges) {
+                console.log(`    [import] ${fc.workItemId} ${fc.field}: ${fc.oldValue} → ${fc.newValue} (source: ${fc.source}, ${fc.timestamp})`);
+              }
+            }
             displayConflictDetails(
               {
                 itemsAdded: createdItems.length,
