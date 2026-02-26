@@ -2886,7 +2886,7 @@ export class TuiController {
     // Copy selected ID
      screen.key(KEY_COPY_ID, () => {
        if (state.moveMode) return;
-       copySelectedId();
+       copySelectedId().catch(() => {});
      });
 
       // Open parent preview
@@ -3127,7 +3127,7 @@ export class TuiController {
     };
     try { (help as any).__opencode_click = helpClickHandler; help.on('click', helpClickHandler); } catch (_) {}
 
-    const copyIdButtonClickHandler = () => { copySelectedId(); };
+    const copyIdButtonClickHandler = () => { copySelectedId().catch(() => {}); };
     try { (copyIdButton as any).__opencode_click = copyIdButtonClickHandler; copyIdButton.on('click', copyIdButtonClickHandler); } catch (_) {}
 
     const closeOverlayClickHandler = () => { closeCloseDialog(); };

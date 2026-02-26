@@ -11,7 +11,22 @@ export async function copyToClipboard(text: string, opts?: { spawn?: SpawnLike }
       let handled = false;
       cp.on('error', (err: Error) => { if (!handled) { handled = true; resolve({ code: null, error: err }); } });
       cp.on('close', (code: number) => { if (!handled) { handled = true; resolve({ code }); } });
-      try { cp.stdin.write(String(text)); cp.stdin.end(); } catch (_) {}
+      if (!cp.stdin || typeof cp.stdin.write !== 'function') {
+        if (!handled) { handled = true; resolve({ code: null, error: new Error('stdin not available') }); }
+        return;
+      }
+      try {
+        cp.stdin.write(String(text));
+        cp.stdin.end();
+      } catch (writeErr: any) {
+        // If write succeeds but end() fails, the process may still receive
+        // data and close normally. If write itself fails, ensure we still
+        // signal EOF so the process can exit and the close event fires.
+        try { cp.stdin.end(); } catch (_) {}
+        // If the promise hasn't been resolved yet by close/error events,
+        // resolve with the write error so callers know something went wrong.
+        if (!handled) { handled = true; resolve({ code: null, error: writeErr instanceof Error ? writeErr : new Error(String(writeErr)) }); }
+      }
     } catch (err: any) {
       resolve({ code: null, error: err });
     }
