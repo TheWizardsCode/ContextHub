@@ -827,16 +827,29 @@ export async function getGithubIssueCommentAsync(config: GithubConfig, commentId
   return normalizeGithubIssueComment(data);
 }
 
+/**
+ * Legacy priority label mapping. Labels like `wl:P0`, `wl:P1`, etc. are mapped
+ * to the current priority values for backward compatibility during import.
+ */
+const LEGACY_PRIORITY_MAP: Record<string, WorkItemPriority> = {
+  P0: 'critical',
+  P1: 'high',
+  P2: 'medium',
+  P3: 'low',
+};
+
 export function issueToWorkItemFields(
   issue: GithubIssueRecord,
   labelPrefix: string
-): { status: WorkItemStatus; priority: WorkItemPriority; tags: string[]; risk: string; effort: string } {
+): { status: WorkItemStatus; priority: WorkItemPriority; tags: string[]; risk: string; effort: string; stage: string; issueType: string } {
   const normalizedPrefix = normalizeGithubLabelPrefix(labelPrefix);
   const tags: string[] = [];
   let status: WorkItemStatus = issue.state === 'closed' ? 'completed' : 'open';
   let priority: WorkItemPriority = 'medium';
   let risk = '';
   let effort = '';
+  let stage = '';
+  let issueType = '';
 
   for (const label of issue.labels) {
     if (label.startsWith(normalizedPrefix)) {
@@ -856,6 +869,25 @@ export function issueToWorkItemFields(
         const prio = value.slice('priority:'.length);
         if (prio === 'low' || prio === 'medium' || prio === 'high' || prio === 'critical') {
           priority = prio;
+        }
+        continue;
+      }
+      // Legacy priority labels: wl:P0, wl:P1, wl:P2, wl:P3
+      if (LEGACY_PRIORITY_MAP[value]) {
+        priority = LEGACY_PRIORITY_MAP[value];
+        continue;
+      }
+      if (value.startsWith('stage:')) {
+        const stageValue = value.slice('stage:'.length);
+        if (stageValue) {
+          stage = stageValue;
+        }
+        continue;
+      }
+      if (value.startsWith('type:')) {
+        const typeValue = value.slice('type:'.length);
+        if (typeValue) {
+          issueType = typeValue;
         }
         continue;
       }
@@ -884,7 +916,7 @@ export function issueToWorkItemFields(
     tags.push(label);
   }
 
-  return { status, priority, tags: Array.from(new Set(tags)), risk, effort };
+  return { status, priority, tags: Array.from(new Set(tags)), risk, effort, stage, issueType };
 }
 
 export function createGithubIssue(config: GithubConfig, payload: { title: string; body: string; labels: string[] }): GithubIssueRecord {
