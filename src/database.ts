@@ -487,6 +487,13 @@ export class WorklogDatabase {
   }
 
   /**
+   * Generate a unique ID for a comment (public wrapper)
+   */
+  generatePublicCommentId(): string {
+    return this.generateCommentId();
+  }
+
+  /**
    * Generate a unique ID for a comment
    */
   private generateCommentId(): string {

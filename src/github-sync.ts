@@ -719,7 +719,7 @@ export function resolveAllLabelFields(
 export async function importIssuesToWorkItems(
   items: WorkItem[],
   config: GithubConfig,
-  options?: { since?: string; createNew?: boolean; generateId?: () => string; onProgress?: (progress: GithubProgress) => void }
+  options?: { since?: string; createNew?: boolean; generateId?: () => string; generateCommentId?: () => string; onProgress?: (progress: GithubProgress) => void }
 ): Promise<{
   updatedItems: WorkItem[];
   createdItems: WorkItem[];
@@ -729,10 +729,12 @@ export async function importIssuesToWorkItems(
   conflictDetails: { conflicts: string[]; conflictDetails: import('./types.js').ConflictDetail[] };
   markersFound: number;
   fieldChanges: FieldChange[];
+  importedComments: Comment[];
 }> {
   const since = options?.since;
   const createNew = options?.createNew === true;
   const generateId = options?.generateId;
+  const generateCommentId = options?.generateCommentId;
   const onProgress = options?.onProgress;
   const issues = listGithubIssues(config, since);
   const byId = new Map(items.map(item => [item.id, item]));
@@ -1143,6 +1145,50 @@ export async function importIssuesToWorkItems(
     }
   }
 
+  // ── Import comments from GitHub issues ────────────────────────────────
+  const importedComments: Comment[] = [];
+  // Build a lookup: issueNumber -> workItemId from mergedItems
+  const itemIdByIssueNumber = new Map<number, string>();
+  for (const item of mergedItems) {
+    if (item.githubIssueNumber) {
+      itemIdByIssueNumber.set(item.githubIssueNumber, item.id);
+    }
+  }
+
+  // Fetch comments for every issue that was processed during this import
+  for (const issueNumber of seenIssueNumbers) {
+    const workItemId = itemIdByIssueNumber.get(issueNumber);
+    if (!workItemId) continue;
+
+    let ghComments: GithubIssueComment[];
+    try {
+      ghComments = await listGithubIssueCommentsAsync(config, issueNumber);
+    } catch {
+      continue;
+    }
+
+    for (const ghComment of ghComments) {
+      // Skip worklog-originated comments (pushed from Worklog → GitHub)
+      const worklogCommentId = extractWorklogCommentId(ghComment.body || undefined);
+      if (worklogCommentId) continue;
+
+      // Skip comments with no meaningful body
+      if (!ghComment.body || !ghComment.body.trim()) continue;
+
+      const commentId = generateCommentId ? generateCommentId() : `gh-${ghComment.id}`;
+      importedComments.push({
+        id: commentId,
+        workItemId,
+        author: ghComment.author || 'unknown',
+        comment: ghComment.body,
+        createdAt: ghComment.updatedAt,
+        references: [],
+        githubCommentId: ghComment.id,
+        githubCommentUpdatedAt: ghComment.updatedAt,
+      });
+    }
+  }
+
   return {
     updatedItems,
     createdItems,
@@ -1155,6 +1201,7 @@ export async function importIssuesToWorkItems(
     },
     markersFound,
     fieldChanges: allFieldChanges,
+    importedComments,
   };
 }
 
