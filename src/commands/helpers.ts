@@ -65,12 +65,11 @@ export function formatTitleOnlyTUI(item: WorkItem): string {
 
 // Return a chalk function appropriate for a given status (for console output)
 function titleColorForStatus(status?: string): (text: string) => string {
-  const s = (status || '').toLowerCase().trim().replace(/_/g, '-');
+  const s = (status || '').toLowerCase().trim();
   switch (s) {
     case 'completed':
       return theme.status.completed;
     case 'in-progress':
-    case 'in progress':
       return theme.status.inProgress;
     case 'blocked':
       return theme.status.blocked;
@@ -82,12 +81,11 @@ function titleColorForStatus(status?: string): (text: string) => string {
 
 // Return blessed markup tags appropriate for a given status (for TUI output)
 function titleColorForStatusTUI(status?: string): (text: string) => string {
-  const s = (status || '').toLowerCase().trim().replace(/_/g, '-');
+  const s = (status || '').toLowerCase().trim();
   switch (s) {
     case 'completed':
       return theme.tui.status.completed;
     case 'in-progress':
-    case 'in progress':
       return theme.tui.status.inProgress;
     case 'blocked':
       return theme.tui.status.blocked;

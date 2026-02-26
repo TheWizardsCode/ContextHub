@@ -86,8 +86,7 @@ export const buildVisibleNodes = (state: TuiState): VisibleNode[] => {
 
 export const expandAncestorsForInProgress = (state: TuiState): void => {
   const inProgressItems = state.currentVisibleItems.filter((item) => {
-    const status = typeof item.status === 'string' ? item.status.replace(/_/g, '-') : item.status;
-    return status === 'in-progress';
+    return item.status === 'in-progress';
   });
   for (const item of inProgressItems) {
     let cursor = item;

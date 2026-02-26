@@ -7,6 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { WorkItem, Comment, DependencyEdge } from './types.js';
 import { listPendingMigrations } from './migrations/index.js';
+import { normalizeStatusValue } from './status-stage-rules.js';
 
 /**
  * Result from a full-text search query
@@ -329,6 +330,11 @@ export class SqlitePersistentStore {
         needsProducerReview = excluded.needsProducerReview
     `);
 
+    // Normalize status to canonical hyphenated form on write (e.g. in_progress -> in-progress).
+    // This ensures all stored data uses consistent status values, eliminating the need for
+    // runtime normalization elsewhere.
+    const normalizedStatus = normalizeStatusValue(item.status) ?? item.status;
+
     // Ensure we never pass `undefined` into better-sqlite3 bindings (it only
     // accepts numbers, strings, bigints, buffers and null). Normalize tags to
     // a JSON string and convert any undefined to null before running.
@@ -337,7 +343,7 @@ export class SqlitePersistentStore {
       item.id,
       item.title,
       item.description,
-      item.status,
+      normalizedStatus,
       item.priority,
       item.sortIndex,
       item.parentId ?? null,

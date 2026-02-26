@@ -8,6 +8,7 @@ import * as path from 'path';
 import { WorkItem, Comment, DependencyEdge, WorkItemDependency } from './types.js';
 import { stripWorklogMarkers } from './github.js';
 import { resolveWorklogDir } from './worklog-paths.js';
+import { normalizeStatusValue } from './status-stage-rules.js';
 
 function normalizeForStableJson(value: any): any {
   if (value === null || value === undefined) return value;
@@ -195,6 +196,9 @@ export function importFromJsonlContent(content: string): { items: WorkItem[], co
         if ((item as any).needsProducerReview !== undefined) {
           (item as any).needsProducerReview = Boolean((item as any).needsProducerReview);
         }
+        // Normalize status to canonical hyphenated form (e.g. in_progress -> in-progress)
+        // on import so all downstream consumers see consistent values.
+        item.status = (normalizeStatusValue(item.status) ?? item.status) as WorkItem['status'];
         item.dependencies = dependencies;
         items.push(item);
         for (const dep of dependencies) {
@@ -260,6 +264,8 @@ export function importFromJsonlContent(content: string): { items: WorkItem[], co
         if (item.description) {
           item.description = stripWorklogMarkers(item.description);
         }
+        // Normalize status to canonical hyphenated form (legacy format path)
+        item.status = (normalizeStatusValue(item.status) ?? item.status) as WorkItem['status'];
         item.dependencies = dependencies;
         items.push(item);
         for (const dep of dependencies) {
