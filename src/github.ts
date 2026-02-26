@@ -254,6 +254,15 @@ function labelColor(label: string): string {
   return color === '000000' ? 'ededed' : color;
 }
 
+/**
+ * Known worklog label categories that should be single-valued on an issue.
+ * When a new value is pushed for one of these categories the old label must
+ * be removed first to avoid label accumulation.
+ *
+ * `tag:` is intentionally excluded — multiple tags are valid and additive.
+ */
+const SINGLE_VALUE_LABEL_CATEGORIES = ['status:', 'priority:', 'stage:', 'type:', 'risk:', 'effort:'] as const;
+
 function isStatusLabel(label: string, labelPrefix: string): boolean {
   const normalizedPrefix = normalizeGithubLabelPrefix(labelPrefix);
   if (!label.startsWith(normalizedPrefix)) {
@@ -264,6 +273,36 @@ function isStatusLabel(label: string, labelPrefix: string): boolean {
     return true;
   }
   return value === 'open' || value === 'in-progress' || value === 'completed' || value === 'blocked' || value === 'deleted';
+}
+
+/**
+ * Returns true when `label` is a worklog single-valued category label (e.g.
+ * `wl:stage:idea`, `wl:priority:high`) or a bare legacy status label (e.g.
+ * `wl:open`).
+ *
+ * Tags (`wl:tag:*`) are excluded because multiple tags are valid on a single
+ * issue.
+ */
+export function isSingleValueCategoryLabel(label: string, labelPrefix: string): boolean {
+  const normalizedPrefix = normalizeGithubLabelPrefix(labelPrefix);
+  if (!label.startsWith(normalizedPrefix)) {
+    return false;
+  }
+  const value = label.slice(normalizedPrefix.length);
+
+  // Check known single-value categories
+  for (const cat of SINGLE_VALUE_LABEL_CATEGORIES) {
+    if (value.startsWith(cat)) {
+      return true;
+    }
+  }
+
+  // Legacy bare status values (e.g. wl:open, wl:in-progress)
+  if (value === 'open' || value === 'in-progress' || value === 'completed' || value === 'blocked' || value === 'deleted') {
+    return true;
+  }
+
+  return false;
 }
 
 function ensureGithubLabels(config: GithubConfig, labels: string[]): void {
@@ -1006,9 +1045,12 @@ export async function updateGithubIssueAsync(
   // Labels: compute status labels to remove and labels to add
   if (payload.labels.length > 0) {
     const desiredSet = new Set(payload.labels);
-    const statusLabelsToRemove = current.labels.filter(label => isStatusLabel(label, config.labelPrefix) && !desiredSet.has(label));
-    if (statusLabelsToRemove.length > 0) {
-      ops.push(runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --remove-label ${JSON.stringify(statusLabelsToRemove.join(','))}`).then(() => {}).catch(() => {}));
+    // Remove any single-valued category labels (stage, priority, status, type,
+    // risk, effort) that are on the issue but not in the desired set. This
+    // prevents label accumulation when e.g. stage changes from idea -> done.
+    const staleLabelsToRemove = current.labels.filter(label => isSingleValueCategoryLabel(label, config.labelPrefix) && !desiredSet.has(label));
+    if (staleLabelsToRemove.length > 0) {
+      ops.push(runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --remove-label ${JSON.stringify(staleLabelsToRemove.join(','))}`).then(() => {}).catch(() => {}));
     }
 
     // Compute labels that are not already present
@@ -1019,7 +1061,8 @@ export async function updateGithubIssueAsync(
     }
   }
 
-  // Execute operations (they may run in parallel)
+  // Execute operations — remove stale labels first, then add new ones,
+  // to avoid transient states where both old and new labels coexist.
   if (ops.length > 0) await Promise.all(ops);
 
   // If no ops ran, return current object, else fetch fresh state
@@ -1079,9 +1122,9 @@ export function updateGithubIssue(
 
   if (payload.labels.length > 0) {
     const desiredSet = new Set(payload.labels);
-    const statusLabelsToRemove = current.labels.filter(label => isStatusLabel(label, config.labelPrefix) && !desiredSet.has(label));
-    if (statusLabelsToRemove.length > 0) {
-      ops.push(() => runGhSafe(`gh issue edit ${issueNumber} --repo ${config.repo} --remove-label ${JSON.stringify(statusLabelsToRemove.join(','))}`));
+    const staleLabelsToRemove = current.labels.filter(label => isSingleValueCategoryLabel(label, config.labelPrefix) && !desiredSet.has(label));
+    if (staleLabelsToRemove.length > 0) {
+      ops.push(() => runGhSafe(`gh issue edit ${issueNumber} --repo ${config.repo} --remove-label ${JSON.stringify(staleLabelsToRemove.join(','))}`));
     }
 
     const labelsToAdd = payload.labels.filter(l => !current.labels.includes(l));
