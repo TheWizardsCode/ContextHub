@@ -721,6 +721,8 @@ export function importIssuesToWorkItems(
       tags,
       risk: (labelFields.risk || base.risk) as WorkItemRiskLevel | '',
       effort: (labelFields.effort || base.effort) as WorkItemEffortLevel | '',
+      stage: labelFields.stage || base.stage,
+      issueType: labelFields.issueType || base.issueType,
       updatedAt: updatedAt,
     };
 
@@ -829,6 +831,8 @@ export function importIssuesToWorkItems(
           tags,
           risk: (labelFields.risk || item.risk) as WorkItemRiskLevel | '',
           effort: (labelFields.effort || item.effort) as WorkItemEffortLevel | '',
+          stage: labelFields.stage || item.stage,
+          issueType: labelFields.issueType || item.issueType,
           updatedAt: issue.updatedAt,
         });
       if (parentId) {
