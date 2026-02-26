@@ -794,49 +794,6 @@ export class WorklogDatabase {
   }
 
   /**
-   * Select the deepest in-progress item, using priority+age as tie-breaker
-   */
-   private selectDeepestInProgress(items: WorkItem[], recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore'): WorkItem | null {
-    if (items.length === 0) {
-      return null;
-    }
-
-    const depths = items.map(item => ({ item, depth: this.getDepth(item.id) }));
-    const maxDepth = Math.max(...depths.map(entry => entry.depth));
-    const deepest = depths
-      .filter(entry => entry.depth === maxDepth)
-      .map(entry => entry.item);
-
-    return this.selectBySortIndex(deepest, recencyPolicy);
-  }
-
-  /**
-   * Find a higher priority sibling of an in-progress item
-   */
-  private findHigherPrioritySibling(items: WorkItem[], selectedInProgress: WorkItem, recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore'): WorkItem | null {
-    if (!selectedInProgress.parentId) {
-      return null;
-    }
-
-    const inProgressPriority = this.getPriorityValue(selectedInProgress.priority);
-    const siblingCandidates = items.filter(item =>
-      item.parentId === selectedInProgress.parentId &&
-      item.id !== selectedInProgress.id &&
-      item.status !== 'completed' &&
-      item.status !== 'deleted' &&
-      item.status !== 'in-progress' &&
-      item.status !== 'blocked' &&
-      this.getPriorityValue(item.priority) > inProgressPriority
-    );
-
-    if (siblingCandidates.length === 0) {
-      return null;
-    }
-
-    return this.selectByScore(siblingCandidates, recencyPolicy);
-  }
-
-  /**
    * Select the highest priority blocking candidate with critical reference
    */
   private selectHighestPriorityBlocking(pairs: { blocking: WorkItem; critical: WorkItem }[]): { blocking: WorkItem; critical: WorkItem } | null {
@@ -868,7 +825,6 @@ export class WorklogDatabase {
       updated: 100, // recency boost/penalty
       blocked: -10000,
       effort: 20,
-      assigneeBoost: 200,
     };
 
     let score = 0;
@@ -929,27 +885,6 @@ export class WorklogDatabase {
     return score;
   }
 
-  /**
-   * Select item by computed score. Tie-breakers: createdAt (older first), then id.
-   */
-  private selectByScore(items: WorkItem[], recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore'): WorkItem | null {
-    if (!items || items.length === 0) return null;
-    const now = Date.now();
-    const scored = items.map(it => ({
-      it,
-      score: this.computeScore(it, now, recencyPolicy),
-      createdAt: new Date(it.createdAt).getTime(),
-    }));
-
-    scored.sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
-      return a.it.id.localeCompare(b.it.id);
-    });
-
-    return scored[0].it;
-  }
-
   private orderBySortIndex(items: WorkItem[]): WorkItem[] {
     const orderedAll = this.store.getAllWorkItemsOrderedByHierarchySortIndexSkipCompleted();
     const positions = new Map(orderedAll.map((item, index) => [item.id, index]));
@@ -968,12 +903,21 @@ export class WorklogDatabase {
     });
   }
 
-  private selectBySortIndex(items: WorkItem[], recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore'): WorkItem | null {
+  private selectBySortIndex(items: WorkItem[]): WorkItem | null {
     if (!items || items.length === 0) return null;
+    // When all sortIndex values are the same (including all-zero), fall back to
+    // priority (descending) then createdAt (ascending / oldest first).
     const firstSortIndex = items[0].sortIndex ?? 0;
     const allSame = items.every(item => (item.sortIndex ?? 0) === firstSortIndex);
     if (allSame) {
-      return this.selectByScore(items, recencyPolicy);
+      const sorted = items.slice().sort((a, b) => {
+        const priDiff = this.getPriorityValue(b.priority) - this.getPriorityValue(a.priority);
+        if (priDiff !== 0) return priDiff;
+        const createdDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        if (createdDiff !== 0) return createdDiff;
+        return a.id.localeCompare(b.id);
+      });
+      return sorted[0] ?? null;
     }
     return this.orderBySortIndex(items)[0] ?? null;
   }
@@ -987,23 +931,22 @@ export class WorklogDatabase {
    *   3. Critical-path escalation: if a critical item is blocked, surface its direct
    *      blocker immediately (bypasses scoring).
    *   4. Hierarchical descent: if an in-progress parent exists, recurse into its children.
-   *   5. Score-based ranking among remaining candidates via {@link computeScore}:
-   *        priority (1000/level) → blocks-high-priority boost (500) → blocked penalty
-   *        → age/effort/recency tie-breakers.
+   *   5. SortIndex-based ranking among remaining candidates:
+   *        Items are ordered by hierarchical sort_index position; when all sortIndex
+   *        values are equal, priority (descending) then age (ascending) break ties.
    *   6. If no unblocked candidates remain and includeBlocked is set, fall back to
-   *      blocked items ranked by the same scoring logic.
+   *      blocked items ranked by the same logic.
    */
   private findNextWorkItemFromItems(
     items: WorkItem[],
     assignee?: string,
     searchTerm?: string,
-    recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore',
     excluded?: Set<string>,
     debugPrefix: string = '[next]',
     includeInReview: boolean = false,
     includeBlocked: boolean = false
   ): NextWorkItemResult {
-    this.debug(`${debugPrefix} recencyPolicy=${recencyPolicy} assignee=${assignee || ''} search=${searchTerm || ''} excluded=${excluded?.size || 0}`);
+    this.debug(`${debugPrefix} assignee=${assignee || ''} search=${searchTerm || ''} excluded=${excluded?.size || 0}`);
     let filteredItems = items;
     this.debug(`${debugPrefix} total items=${filteredItems.length}`);
 
@@ -1052,7 +995,7 @@ export class WorklogDatabase {
     this.debug(`${debugPrefix} unblocked criticals=${unblockedCriticals.length}`);
 
     if (unblockedCriticals.length > 0) {
-      const selected = this.selectBySortIndex(unblockedCriticals, recencyPolicy);
+      const selected = this.selectBySortIndex(unblockedCriticals);
       this.debug(`${debugPrefix} selected critical=${selected?.id || ''}`);
       return {
         workItem: selected,
@@ -1095,7 +1038,7 @@ export class WorklogDatabase {
         };
       }
 
-      const selectedBlockedCritical = this.selectBySortIndex(blockedCriticals, recencyPolicy);
+      const selectedBlockedCritical = this.selectBySortIndex(blockedCriticals);
       this.debug(`${debugPrefix} selected blocked critical=${selectedBlockedCritical?.id || ''}`);
       return {
         workItem: selectedBlockedCritical,
@@ -1103,19 +1046,12 @@ export class WorklogDatabase {
       };
     }
 
-    // Find in-progress and blocked items
-    // For blocked items: use pre-dep-blocker pool so blocked items with dependency
-    // edges are still visible for blocker-surfacing logic.
-    // For in-progress items: use filtered (post dep-blocker) pool so dep-blocked
-    // in-progress items are not selected as the final result.
-    const inProgressFromFiltered = this.applyFilters(filteredItems, assignee, searchTerm).filter(item => {
+    // Find in-progress items from the post-dep-blocker filtered pool.
+    // Blocked items are handled separately via the critical-path escalation above.
+    const inProgressItems = this.applyFilters(filteredItems, assignee, searchTerm).filter(item => {
       return item.status === 'in-progress';
     });
-    const blockedFromPreFilter = this.applyFilters(preDepBlockerItems, assignee, searchTerm).filter(item => {
-      return item.status === 'blocked';
-    });
-    const inProgressItems = [...inProgressFromFiltered, ...blockedFromPreFilter];
-    this.debug(`${debugPrefix} in-progress/blocked items=${inProgressItems.length}`);
+    this.debug(`${debugPrefix} in-progress items=${inProgressItems.length}`);
 
     if (inProgressItems.length === 0) {
       // No in-progress items, find highest priority and oldest non-in-progress item
@@ -1133,7 +1069,7 @@ export class WorklogDatabase {
 
       if (rootCandidates.length === 0) {
         // Fallback: all items have parents in the pool (shouldn't happen normally)
-        const selected = this.selectBySortIndex(openItems, recencyPolicy);
+        const selected = this.selectBySortIndex(openItems);
         this.debug(`${debugPrefix} selected open (fallback)=${selected?.id || ''}`);
         return {
           workItem: selected,
@@ -1141,7 +1077,7 @@ export class WorklogDatabase {
         };
       }
 
-      const selectedRoot = this.selectBySortIndex(rootCandidates, recencyPolicy);
+      const selectedRoot = this.selectBySortIndex(rootCandidates);
       this.debug(`${debugPrefix} selected root=${selectedRoot?.id || ''}`);
 
       if (!selectedRoot) {
@@ -1152,7 +1088,7 @@ export class WorklogDatabase {
       // has open children, pick the best child and continue descending
       let current = selectedRoot;
       let depth = 0;
-      const maxDepth = 50; // Guard against circular references
+      const maxDepth = 15; // Guard against circular references
       while (depth < maxDepth) {
         const children = openItems.filter(item =>
           item.parentId === current.id &&
@@ -1163,7 +1099,7 @@ export class WorklogDatabase {
 
         if (children.length === 0) break;
 
-        const bestChild = this.selectBySortIndex(children, recencyPolicy);
+        const bestChild = this.selectBySortIndex(children);
         if (!bestChild) break;
 
         current = bestChild;
@@ -1184,71 +1120,12 @@ export class WorklogDatabase {
       };
     }
 
-    // There are in-progress or blocked items
-    // Find the highest priority and oldest active item
-    // Note: Blocked items trigger blocking issue detection, in-progress items trigger descendant traversal
-    const selectedInProgress = this.selectDeepestInProgress(inProgressItems, recencyPolicy);
+    // There are in-progress items
+    // Find the best in-progress item and descend into its children
+    const selectedInProgress = this.selectBySortIndex(inProgressItems);
     this.debug(`${debugPrefix} selected in-progress=${selectedInProgress?.id || ''}`);
     if (!selectedInProgress) {
       return { workItem: null, reason: 'No work items available' };
-    }
-
-    const higherPrioritySibling = this.findHigherPrioritySibling(filteredItems, selectedInProgress, recencyPolicy);
-    this.debug(`${debugPrefix} higher priority sibling=${higherPrioritySibling?.id || ''}`);
-    if (higherPrioritySibling) {
-      return {
-        workItem: higherPrioritySibling,
-        reason: `Higher priority sibling of in-progress item ${selectedInProgress.id} (${selectedInProgress.title}); selected item priority is ${higherPrioritySibling.priority}`
-      };
-    }
-
-    // Check if the item is blocked - if so, prioritize formal blockers
-    // BUT only if the blocked item's priority is >= the best competing open item
-    if (selectedInProgress.status === 'blocked') {
-      const blockedPriority = this.getPriorityValue(selectedInProgress.priority);
-
-      // Find the best competing non-blocked, non-in-progress open item
-      const competingOpenItems = filteredItems.filter(item => {
-        return item.status !== 'in-progress' &&
-               item.status !== 'blocked' &&
-               item.status !== 'completed' &&
-               item.status !== 'deleted' &&
-               item.id !== selectedInProgress.id;
-      }).filter(item => !excluded?.has(item.id));
-
-      const bestCompetitor = this.selectByScore(competingOpenItems, recencyPolicy);
-      const bestCompetitorPriority = bestCompetitor ? this.getPriorityValue(bestCompetitor.priority) : 0;
-
-      this.debug(`${debugPrefix} blocked item priority=${selectedInProgress.priority}(${blockedPriority}) bestCompetitor=${bestCompetitor?.id || 'none'} priority=${bestCompetitor?.priority || 'none'}(${bestCompetitorPriority})`);
-
-      // If a competing open item has strictly higher priority than the blocked item,
-      // prefer the competitor over the blocker
-      if (bestCompetitor && bestCompetitorPriority > blockedPriority) {
-        this.debug(`${debugPrefix} preferring higher-priority open item over blocker`);
-        return {
-          workItem: bestCompetitor,
-          reason: `Higher priority open item preferred over blocker of lower-priority blocked item ${selectedInProgress.id} (${selectedInProgress.title})`
-        };
-      }
-
-      const blockingChildren = this.getNonClosedChildren(selectedInProgress.id);
-      const dependencyBlockers = this.getActiveDependencyBlockers(selectedInProgress.id);
-      const blockingCandidates = [...blockingChildren, ...dependencyBlockers];
-      const filteredBlockingCandidates = this.applyFilters(blockingCandidates, assignee, searchTerm)
-        .filter(item => !excluded?.has(item.id));
-      if (filteredBlockingCandidates.length > 0) {
-        const selected = this.selectBySortIndex(filteredBlockingCandidates, recencyPolicy);
-        this.debug(`${debugPrefix} selected blocking issue=${selected?.id || ''}`);
-        return {
-          workItem: selected,
-          reason: `Blocking issue for ${selectedInProgress.id} (${selectedInProgress.title})`
-        };
-      }
-      // If no blocking issues found or they don't exist, return the blocked item itself
-      return {
-        workItem: selectedInProgress,
-        reason: `Blocked item with no identifiable blocking issues`
-      };
     }
 
     // Select best direct child of the in-progress item
@@ -1273,7 +1150,7 @@ export class WorklogDatabase {
                item.status !== 'deleted' &&
                item.id !== selectedInProgress.id;
       }).filter(item => !excluded?.has(item.id));
-      const fallback = this.selectBySortIndex(fallbackItems, recencyPolicy);
+      const fallback = this.selectBySortIndex(fallbackItems);
       if (fallback) {
         return {
           workItem: fallback,
@@ -1283,7 +1160,7 @@ export class WorklogDatabase {
       return { workItem: null, reason: 'No actionable work items available (only in-progress items remain)' };
     }
 
-    const selected = this.selectBySortIndex(filteredChildren, recencyPolicy);
+    const selected = this.selectBySortIndex(filteredChildren);
     this.debug(`${debugPrefix} selected child=${selected?.id || ''}`);
     return {
       workItem: selected,
@@ -1300,12 +1177,11 @@ export class WorklogDatabase {
   findNextWorkItem(
     assignee?: string,
     searchTerm?: string,
-    recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore',
     includeInReview: boolean = false,
     includeBlocked: boolean = false
   ): NextWorkItemResult {
     const items = this.store.getAllWorkItems();
-    return this.findNextWorkItemFromItems(items, assignee, searchTerm, recencyPolicy, undefined, '[next]', includeInReview, includeBlocked);
+    return this.findNextWorkItemFromItems(items, assignee, searchTerm, undefined, '[next]', includeInReview, includeBlocked);
   }
 
   /**
@@ -1316,7 +1192,6 @@ export class WorklogDatabase {
     count: number,
     assignee?: string,
     searchTerm?: string,
-    recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore',
     includeInReview: boolean = false,
     includeBlocked: boolean = false
   ): NextWorkItemResult[] {
@@ -1328,7 +1203,6 @@ export class WorklogDatabase {
         this.store.getAllWorkItems(),
         assignee,
         searchTerm,
-        recencyPolicy,
         excluded,
         `[next batch ${i + 1}/${count}]`,
         includeInReview,
@@ -1376,35 +1250,6 @@ export class WorklogDatabase {
     }
 
     return filtered;
-  }
-
-  /**
-   * Helper method to select the highest priority and oldest item from a list
-   */
-  private selectHighestPriorityOldest(items: WorkItem[]): WorkItem | null {
-    if (items.length === 0) {
-      return null;
-    }
-
-    // Define priority order
-    const priorityOrder: { [key: string]: number } = {
-      'critical': 4,
-      'high': 3,
-      'medium': 2,
-      'low': 1,
-    };
-
-    // Sort by priority (descending) then by createdAt (ascending - oldest first)
-    const sorted = items.sort((a, b) => {
-      const priorityDiff = priorityOrder[b.priority] - priorityOrder[a.priority];
-      if (priorityDiff !== 0) {
-        return priorityDiff;
-      }
-      // If priorities are equal, sort by creation time (oldest first)
-      return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-    });
-
-    return sorted[0];
   }
 
   /**
