@@ -7,7 +7,12 @@ export async function copyToClipboard(text: string, opts?: { spawn?: SpawnLike }
 
   const run = (cmd: string, args: string[]) => new Promise<{ code: number | null; error?: Error }>((resolve) => {
     try {
-      const cp = spawnImpl(cmd, args, { stdio: ['pipe', 'ignore', 'ignore'] });
+      // Spawn in a detached process group so clipboard daemons (e.g. xclip)
+      // survive when the parent TUI process group receives signals or tears
+      // down the terminal.
+      const cp = spawnImpl(cmd, args, { stdio: ['pipe', 'ignore', 'ignore'], detached: true });
+      // Allow the parent to exit without waiting for the detached child.
+      if (typeof cp.unref === 'function') cp.unref();
       let handled = false;
       cp.on('error', (err: Error) => { if (!handled) { handled = true; resolve({ code: null, error: err }); } });
       cp.on('close', (code: number) => { if (!handled) { handled = true; resolve({ code }); } });
@@ -46,7 +51,11 @@ export async function copyToClipboard(text: string, opts?: { spawn?: SpawnLike }
       return { success: false, error: res.error?.message || 'clip failed' };
     }
 
-    // Linux / other: try xclip then xsel
+    // Linux / other: try wl-copy first on Wayland, then xclip, then xsel
+    if (process.env.WAYLAND_DISPLAY) {
+      const wlcopy = await run('wl-copy', []);
+      if (wlcopy.code === 0) return { success: true };
+    }
     const xclip = await run('xclip', ['-selection', 'clipboard']);
     if (xclip.code === 0) return { success: true };
     const xsel = await run('xsel', ['--clipboard', '--input']);
