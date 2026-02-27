@@ -814,6 +814,146 @@ export class WorklogDatabase {
   }
 
   /**
+   * Handle critical-path escalation (Stage 2 of the next-item algorithm).
+   *
+   * Critical items are always prioritized above non-critical items:
+   *   - Unblocked criticals are selected first by sortIndex (priority+age fallback).
+   *   - Blocked criticals surface their direct blocker (child or dependency edge)
+   *     with the highest effective priority.
+   *   - An unblocked critical always wins over a blocker of a non-critical item.
+   *
+   * Operates on the FULL item set so that critical items outside the
+   * assignee/search filter are still considered — only the final blocker
+   * selection is filtered by assignee/search.
+   *
+   * @returns NextWorkItemResult if critical escalation selects an item, null otherwise
+   */
+  private handleCriticalEscalation(
+    allItems: WorkItem[],
+    options: {
+      assignee?: string;
+      searchTerm?: string;
+      excluded?: Set<string>;
+      includeInReview?: boolean;
+      debugPrefix?: string;
+    } = {}
+  ): NextWorkItemResult | null {
+    const {
+      assignee,
+      searchTerm,
+      excluded,
+      includeInReview = false,
+      debugPrefix = '[critical]',
+    } = options;
+
+    // Find all critical items from the full set, excluding only
+    // deleted/completed/in-progress (these are never actionable).
+    // Also exclude blocked+in_review items unless includeInReview is set.
+    const criticalItems = allItems.filter(
+      item =>
+        item.priority === 'critical' &&
+        item.status !== 'deleted' &&
+        item.status !== 'completed' &&
+        item.status !== 'in-progress' &&
+        (includeInReview || !(item.stage === 'in_review' && item.status === 'blocked'))
+    );
+    this.debug(`${debugPrefix} critical items from full set=${criticalItems.length}`);
+
+    if (criticalItems.length === 0) {
+      return null;
+    }
+
+    // ── Unblocked criticals ──
+    // An item is "unblocked" if it is not blocked AND has no non-closed children
+    // (children act as implicit blockers).
+    const unblockedCriticals = criticalItems.filter(
+      item => item.status !== 'blocked' && this.getNonClosedChildren(item.id).length === 0
+    );
+    this.debug(`${debugPrefix} unblocked criticals=${unblockedCriticals.length}`);
+
+    if (unblockedCriticals.length > 0) {
+      // Apply assignee/search to unblocked criticals — only return items
+      // that match the caller's filters.
+      let selectable = this.applyFilters(unblockedCriticals, assignee, searchTerm);
+      if (excluded && excluded.size > 0) {
+        selectable = selectable.filter(item => !excluded.has(item.id));
+      }
+      this.debug(`${debugPrefix} unblocked criticals after filters=${selectable.length}`);
+
+      if (selectable.length > 0) {
+        const selected = this.selectBySortIndex(selectable);
+        this.debug(`${debugPrefix} selected unblocked critical=${selected?.id || ''} title="${selected?.title || ''}"`);
+        return {
+          workItem: selected,
+          reason: `Next unblocked critical item by sort_index${selected ? ` (priority ${selected.priority})` : ''}`
+        };
+      }
+    }
+
+    // ── Blocked criticals ──
+    // For each blocked critical, gather its direct blockers (children + dependency edges)
+    // from the full item store, then select the best blocker that passes filters.
+    const blockedCriticals = criticalItems.filter(
+      item => item.status === 'blocked'
+    );
+    this.debug(`${debugPrefix} blocked criticals=${blockedCriticals.length}`);
+
+    if (blockedCriticals.length > 0) {
+      const blockingPairs: { blocking: WorkItem; critical: WorkItem }[] = [];
+
+      for (const critical of blockedCriticals) {
+        // Child blockers (non-closed children implicitly block a parent)
+        const blockingChildren = this.getNonClosedChildren(critical.id);
+        for (const child of blockingChildren) {
+          if (excluded?.has(child.id)) continue;
+          blockingPairs.push({ blocking: child, critical });
+          this.debug(`${debugPrefix}   blocker: child ${child.id} ("${child.title}") blocks critical ${critical.id}`);
+        }
+
+        // Dependency-edge blockers
+        const dependencyBlockers = this.getActiveDependencyBlockers(critical.id);
+        for (const blocker of dependencyBlockers) {
+          if (excluded?.has(blocker.id)) continue;
+          blockingPairs.push({ blocking: blocker, critical });
+          this.debug(`${debugPrefix}   blocker: dep ${blocker.id} ("${blocker.title}") blocks critical ${critical.id}`);
+        }
+      }
+
+      // Apply assignee/search filters to the blockers only
+      const filteredBlockingPairs = blockingPairs.filter(pair =>
+        this.applyFilters([pair.blocking], assignee, searchTerm).length > 0
+      );
+      this.debug(`${debugPrefix} blocking candidates=${blockingPairs.length} after filters=${filteredBlockingPairs.length}`);
+
+      const selectedBlocking = this.selectHighestPriorityBlocking(filteredBlockingPairs);
+
+      if (selectedBlocking) {
+        this.debug(`${debugPrefix} selected blocker=${selectedBlocking.blocking.id} ("${selectedBlocking.blocking.title}") for critical ${selectedBlocking.critical.id}`);
+        return {
+          workItem: selectedBlocking.blocking,
+          reason: `Blocking issue for critical item ${selectedBlocking.critical.id} (${selectedBlocking.critical.title})`
+        };
+      }
+
+      // No actionable blocker found — return the blocked critical itself as a
+      // last resort so the user is aware of the stuck critical item.
+      let selectableBlocked = this.applyFilters(blockedCriticals, assignee, searchTerm);
+      if (excluded && excluded.size > 0) {
+        selectableBlocked = selectableBlocked.filter(item => !excluded.has(item.id));
+      }
+      const selectedBlockedCritical = this.selectBySortIndex(selectableBlocked.length > 0 ? selectableBlocked : blockedCriticals);
+      this.debug(`${debugPrefix} selected blocked critical (fallback)=${selectedBlockedCritical?.id || ''}`);
+      return {
+        workItem: selectedBlockedCritical,
+        reason: 'Blocked critical work item with no identifiable blocking issues'
+      };
+    }
+
+    // No critical items to escalate
+    return null;
+  }
+
+  /**
    * Compute a score for an item. Defaults: recencyPolicy='ignore'.
    * Higher score == more desirable.
    */
@@ -1061,66 +1201,18 @@ export class WorklogDatabase {
     });
 
     // ── Stage 2: Critical-path escalation ──
-    const criticalItems = criticalPool.filter(
-      item => item.priority === 'critical'
-    );
-    this.debug(`${debugPrefix} critical items=${criticalItems.length}`);
-    const unblockedCriticals = criticalItems.filter(
-      item => item.status !== 'blocked' && this.getNonClosedChildren(item.id).length === 0
-    );
-
-    this.debug(`${debugPrefix} unblocked criticals=${unblockedCriticals.length}`);
-
-    if (unblockedCriticals.length > 0) {
-      const selected = this.selectBySortIndex(unblockedCriticals);
-      this.debug(`${debugPrefix} selected critical=${selected?.id || ''}`);
-      return {
-        workItem: selected,
-        reason: `Next unblocked critical item by sort_index${selected ? ` (priority ${selected.priority})` : ''}`
-      };
-    }
-
-    const blockedCriticals = criticalItems.filter(
-      item => item.status === 'blocked'
-    );
-    this.debug(`${debugPrefix} blocked criticals=${blockedCriticals.length}`);
-    if (blockedCriticals.length > 0) {
-      const blockingPairs: { blocking: WorkItem; critical: WorkItem }[] = [];
-
-      for (const critical of blockedCriticals) {
-        const blockingChildren = this.getNonClosedChildren(critical.id);
-        for (const child of blockingChildren) {
-          if (excluded?.has(child.id)) continue;
-          blockingPairs.push({ blocking: child, critical });
-        }
-
-        const dependencyBlockers = this.getActiveDependencyBlockers(critical.id);
-        for (const blocker of dependencyBlockers) {
-          if (excluded?.has(blocker.id)) continue;
-          blockingPairs.push({ blocking: blocker, critical });
-        }
-      }
-
-      const filteredBlockingPairs = blockingPairs.filter(pair =>
-        this.applyFilters([pair.blocking], assignee, searchTerm).length > 0
-      );
-      const selectedBlocking = this.selectHighestPriorityBlocking(filteredBlockingPairs);
-
-      this.debug(`${debugPrefix} blocking candidates=${filteredBlockingPairs.length} selectedBlocking=${selectedBlocking?.blocking.id || ''}`);
-
-      if (selectedBlocking) {
-        return {
-          workItem: selectedBlocking.blocking,
-          reason: `Blocking issue for critical item ${selectedBlocking.critical.id} (${selectedBlocking.critical.title})`
-        };
-      }
-
-      const selectedBlockedCritical = this.selectBySortIndex(blockedCriticals);
-      this.debug(`${debugPrefix} selected blocked critical=${selectedBlockedCritical?.id || ''}`);
-      return {
-        workItem: selectedBlockedCritical,
-        reason: 'Blocked critical work item with no identifiable blocking issues'
-      };
+    // Delegated to handleCriticalEscalation() which operates on the full
+    // item set so that critical items outside the assignee/search filter
+    // can still surface their blockers.
+    const criticalResult = this.handleCriticalEscalation(items, {
+      assignee,
+      searchTerm,
+      excluded,
+      includeInReview,
+      debugPrefix: `${debugPrefix} [critical]`,
+    });
+    if (criticalResult) {
+      return criticalResult;
     }
 
     // ── Stage 3: Non-critical blocker surfacing ──

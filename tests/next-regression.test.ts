@@ -719,4 +719,279 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       expect(result.workItem!.id).toBe(rootB.id);
     });
   });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Critical Escalation (WL-0MM346MLV0THH548)
+  // handleCriticalEscalation() operates on the full item set.
+  // Unblocked criticals win over all non-criticals; blocked criticals
+  // surface their direct blocker (child or dependency edge).
+  // ─────────────────────────────────────────────────────────────────────
+  describe('critical escalation (WL-0MM346MLV0THH548)', () => {
+    it('should surface blocker of critical item assigned to a different user', async () => {
+      // Critical item assigned to Bob is blocked by a task assigned to Alice.
+      // When Alice queries wl next --assignee alice, the blocker should surface
+      // because handleCriticalEscalation operates on the FULL item set.
+      const critical = db.create({
+        title: 'Critical Bob item',
+        priority: 'critical',
+        status: 'blocked',
+        assignee: 'bob',
+      });
+      const aliceBlocker = db.create({
+        title: 'Alice blocker',
+        priority: 'medium',
+        status: 'open',
+        assignee: 'alice',
+        parentId: critical.id,
+      });
+      await wait(10);
+      db.create({
+        title: 'Alice normal task',
+        priority: 'high',
+        status: 'open',
+        assignee: 'alice',
+      });
+
+      const result = db.findNextWorkItem('alice');
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(aliceBlocker.id);
+      expect(result.reason).toContain('critical');
+    });
+
+    it('should surface dep-edge blocker of critical item from full set', async () => {
+      // Critical item has a dependency-edge blocker. The blocker is not
+      // assigned to anyone, but should still be surfaced.
+      const critical = db.create({
+        title: 'Critical with dep',
+        priority: 'critical',
+        status: 'blocked',
+        assignee: 'bob',
+      });
+      const blocker = db.create({
+        title: 'Dependency blocker',
+        priority: 'medium',
+        status: 'open',
+      });
+      db.addDependencyEdge(critical.id, blocker.id);
+      await wait(10);
+      db.create({
+        title: 'Other task',
+        priority: 'high',
+        status: 'open',
+      });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(blocker.id);
+      expect(result.reason).toContain('critical');
+    });
+
+    it('should prefer unblocked critical over non-critical items regardless of sortIndex', async () => {
+      // Even if a non-critical has a better sortIndex, the unblocked critical wins.
+      db.create({
+        title: 'Non-critical first',
+        priority: 'high',
+        status: 'open',
+        sortIndex: 1,
+      });
+      await wait(10);
+      const critical = db.create({
+        title: 'Critical item',
+        priority: 'critical',
+        status: 'open',
+        sortIndex: 999,
+      });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(critical.id);
+      expect(result.reason).toContain('critical');
+    });
+
+    it('should select among multiple unblocked criticals by sortIndex', () => {
+      db.create({
+        title: 'Critical A',
+        priority: 'critical',
+        status: 'open',
+        sortIndex: 300,
+      });
+      const criticalB = db.create({
+        title: 'Critical B',
+        priority: 'critical',
+        status: 'open',
+        sortIndex: 100,
+      });
+      db.create({
+        title: 'Critical C',
+        priority: 'critical',
+        status: 'open',
+        sortIndex: 200,
+      });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(criticalB.id);
+    });
+
+    it('should fall back to priority+age when all criticals have same sortIndex', async () => {
+      const criticalOld = db.create({
+        title: 'Critical old',
+        priority: 'critical',
+        status: 'open',
+        sortIndex: 0,
+      });
+      await wait(10);
+      db.create({
+        title: 'Critical new',
+        priority: 'critical',
+        status: 'open',
+        sortIndex: 0,
+      });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      // Same priority, same sortIndex — oldest wins
+      expect(result.workItem!.id).toBe(criticalOld.id);
+    });
+
+    it('should return blocked critical as last resort when no blockers found', () => {
+      // A blocked critical with no children and no dep edges
+      const critical = db.create({
+        title: 'Stuck critical',
+        priority: 'critical',
+        status: 'blocked',
+      });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(critical.id);
+      expect(result.reason).toContain('no identifiable blocking issues');
+    });
+
+    it('should not surface blocked+in_review critical when includeInReview is false', () => {
+      db.create({
+        title: 'In review critical',
+        priority: 'critical',
+        status: 'blocked',
+        stage: 'in_review',
+      });
+      const openItem = db.create({
+        title: 'Open low',
+        priority: 'low',
+        status: 'open',
+      });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(openItem.id);
+    });
+
+    it('should surface blocked+in_review critical when includeInReview is true', () => {
+      const critical = db.create({
+        title: 'In review critical',
+        priority: 'critical',
+        status: 'blocked',
+        stage: 'in_review',
+      });
+      db.create({
+        title: 'Open low',
+        priority: 'low',
+        status: 'open',
+      });
+
+      const result = db.findNextWorkItem(undefined, undefined, true);
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(critical.id);
+    });
+
+    it('should surface blocker from outside search filter for critical item', async () => {
+      // Critical item mentions "infra" in its title but its blocker mentions "auth".
+      // When searching for "auth", the blocker should be surfaced because
+      // critical escalation finds the critical from the full set.
+      const critical = db.create({
+        title: 'Critical infra issue',
+        priority: 'critical',
+        status: 'blocked',
+      });
+      const blocker = db.create({
+        title: 'Auth service fix',
+        priority: 'medium',
+        status: 'open',
+        parentId: critical.id,
+      });
+      await wait(10);
+      db.create({
+        title: 'Auth docs update',
+        priority: 'low',
+        status: 'open',
+      });
+
+      const result = db.findNextWorkItem(undefined, 'auth');
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(blocker.id);
+      expect(result.reason).toContain('critical');
+    });
+
+    it('should handle critical with both child and dep-edge blockers', async () => {
+      // Critical item has both a child and a dep-edge blocker.
+      // Either blocker may be selected depending on hierarchy sort order;
+      // the important thing is that one of them is surfaced.
+      const critical = db.create({
+        title: 'Critical with both',
+        priority: 'critical',
+        status: 'blocked',
+      });
+      const childBlocker = db.create({
+        title: 'Child blocker',
+        priority: 'medium',
+        status: 'open',
+        parentId: critical.id,
+        sortIndex: 200,
+      });
+      const depBlocker = db.create({
+        title: 'Dep blocker',
+        priority: 'medium',
+        status: 'open',
+        sortIndex: 100,
+      });
+      db.addDependencyEdge(critical.id, depBlocker.id);
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      // Either blocker is acceptable; both unblock the critical
+      const selectedId = result.workItem!.id;
+      expect([childBlocker.id, depBlocker.id]).toContain(selectedId);
+      expect(result.reason).toContain('critical');
+    });
+
+    it('should skip excluded blockers in batch mode', async () => {
+      const critical = db.create({
+        title: 'Critical parent',
+        priority: 'critical',
+        status: 'blocked',
+      });
+      const child1 = db.create({
+        title: 'First child',
+        priority: 'high',
+        status: 'open',
+        parentId: critical.id,
+        sortIndex: 100,
+      });
+      await wait(10);
+      const child2 = db.create({
+        title: 'Second child',
+        priority: 'high',
+        status: 'open',
+        parentId: critical.id,
+        sortIndex: 200,
+      });
+
+      const results = db.findNextWorkItems(2);
+      expect(results.length).toBe(2);
+      // First batch result should pick child1 (lower sortIndex)
+      expect(results[0].workItem!.id).toBe(child1.id);
+      // Second batch result should pick child2 (child1 is excluded)
+      expect(results[1].workItem!.id).toBe(child2.id);
+    });
+  });
 });
