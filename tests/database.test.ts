@@ -101,6 +101,43 @@ describe('WorklogDatabase', () => {
     });
   });
 
+  describe('status normalization on write', () => {
+    it('should normalize underscore-form status on create', () => {
+      // Use 'as any' to simulate legacy/user input with underscore-form status
+      const item = db.create({ title: 'Test', status: 'in_progress' as any });
+      expect(item.status).toBe('in-progress');
+
+      // Verify persisted value is also normalized
+      const retrieved = db.get(item.id);
+      expect(retrieved?.status).toBe('in-progress');
+    });
+
+    it('should normalize underscore-form status on update', () => {
+      const item = db.create({ title: 'Test' });
+      expect(item.status).toBe('open');
+
+      const updated = db.update(item.id, { status: 'in_progress' as any });
+      expect(updated?.status).toBe('in-progress');
+
+      // Verify persisted value is also normalized
+      const retrieved = db.get(item.id);
+      expect(retrieved?.status).toBe('in-progress');
+    });
+
+    it('should leave already-hyphenated status unchanged', () => {
+      const item = db.create({ title: 'Test', status: 'in-progress' });
+      expect(item.status).toBe('in-progress');
+    });
+
+    it('should normalize status when querying with underscore form', () => {
+      db.create({ title: 'Test', status: 'in-progress' });
+      // Query using underscore form — should still find the item
+      const results = db.list({ status: 'in_progress' as any });
+      expect(results.length).toBe(1);
+      expect(results[0].status).toBe('in-progress');
+    });
+  });
+
   describe('get', () => {
     it('should retrieve a work item by ID', () => {
       const created = db.create({ title: 'Test task' });
@@ -611,6 +648,34 @@ describe('WorklogDatabase', () => {
       expect(result.workItem?.id).toBe(openItem.id);
     });
 
+    it('should never return an in-progress item as a candidate', () => {
+      // In-progress items are already being worked on; wl next should skip them
+      db.create({ title: 'In progress', priority: 'critical', status: 'in-progress' });
+      const openItem = db.create({ title: 'Open', priority: 'low', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem?.id).toBe(openItem.id);
+      expect(result.workItem?.status).not.toBe('in-progress');
+    });
+
+    it('should return null when only in-progress items exist', () => {
+      db.create({ title: 'In progress 1', priority: 'critical', status: 'in-progress' });
+      db.create({ title: 'In progress 2', priority: 'high', status: 'in-progress' });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).toBeNull();
+      expect(result.reason).toContain('No actionable work items');
+    });
+
+    it('should find open children of in-progress parent without returning the parent', () => {
+      const parent = db.create({ title: 'WIP Parent', priority: 'high', status: 'in-progress' });
+      const child = db.create({ title: 'Open child', priority: 'medium', status: 'open', parentId: parent.id });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem?.id).toBe(child.id);
+      expect(result.workItem?.id).not.toBe(parent.id);
+    });
+
     it('should exclude blocked in_review items by default', () => {
       const inReviewBlocked = db.create({ title: 'In review', status: 'blocked', stage: 'in_review', priority: 'high' });
       const openItem = db.create({ title: 'Open', status: 'open', priority: 'low' });
@@ -624,7 +689,7 @@ describe('WorklogDatabase', () => {
       const inReviewBlocked = db.create({ title: 'In review', status: 'blocked', stage: 'in_review', priority: 'high' });
       db.create({ title: 'Open', status: 'open', priority: 'low' });
 
-      const result = db.findNextWorkItem(undefined, undefined, 'ignore', true);
+      const result = db.findNextWorkItem(undefined, undefined, true);
       expect(result.workItem?.id).toBe(inReviewBlocked.id);
     });
 
@@ -740,10 +805,11 @@ describe('WorklogDatabase', () => {
       });
 
       const result = db.findNextWorkItem();
-      // Should select the blocking child
+      // The blocked parent (high priority) has no open competitors of equal
+      // or higher priority, so Stage 3 (non-critical blocker surfacing)
+      // surfaces the blocking child.
       expect(result.workItem?.id).toBe(blocker.id);
       expect(result.reason).toContain('Blocking issue');
-      expect(result.reason).toContain(blocked.id);
     });
 
     it('should select dependency blocker for blocked item', () => {
@@ -752,10 +818,11 @@ describe('WorklogDatabase', () => {
       db.addDependencyEdge(blocked.id, blocker.id);
 
       const result = db.findNextWorkItem();
-      // Should select the dependency blocker
+      // The blocked item (high priority) has no open competitors of equal
+      // or higher priority, so Stage 3 (non-critical blocker surfacing)
+      // surfaces the dependency blocker.
       expect(result.workItem?.id).toBe(blocker.id);
       expect(result.reason).toContain('Blocking issue');
-      expect(result.reason).toContain(blocked.id);
     });
 
     it('should ignore blocking issues mentioned in description', () => {
@@ -768,9 +835,11 @@ describe('WorklogDatabase', () => {
       });
 
       const result = db.findNextWorkItem();
-      // Should return the blocked item itself since description hints are ignored
+      // Non-critical blocked items are treated as normal candidates.
+      // Description mentions are not formal dependencies, so the blocked
+      // item (higher priority) is selected as a normal open candidate.
       expect(result.workItem?.id).toBe(blocked.id);
-      expect(result.reason).toContain('Blocked item');
+      expect(result.reason).toContain('Next open item by sort_index');
     });
 
     it('should ignore blocking issues mentioned in comments', () => {
@@ -789,9 +858,11 @@ describe('WorklogDatabase', () => {
       });
 
       const result = db.findNextWorkItem();
-      // Should return the blocked item itself since comments are ignored
+      // Non-critical blocked items are treated as normal candidates.
+      // Comment mentions are not formal dependencies, so the blocked
+      // item (higher priority) is selected as a normal open candidate.
       expect(result.workItem?.id).toBe(blocked.id);
-      expect(result.reason).toContain('Blocked item');
+      expect(result.reason).toContain('Next open item by sort_index');
     });
 
     it('should prefer higher-priority open item over blocker of lower-priority blocked item', () => {
@@ -803,8 +874,10 @@ describe('WorklogDatabase', () => {
       const highC = db.create({ title: 'High priority C', priority: 'high', status: 'open' });
 
       const result = db.findNextWorkItem();
+      // Non-critical blocked items are filtered out by the dep-blocker filter.
+      // The high-priority open item wins by normal sort_index selection.
       expect(result.workItem?.id).toBe(highC.id);
-      expect(result.reason).toContain('Higher priority open item');
+      expect(result.reason).toContain('Next open item by sort_index');
     });
 
     it('should prefer blocker when blocked item has higher priority than competing open items', () => {
@@ -824,14 +897,16 @@ describe('WorklogDatabase', () => {
 
     it('should prefer blocker when blocked item has equal priority to best competing open item', () => {
       // Blocker (low, open) blocks BlockedItem (high, blocked)
-      // Competitor (high, open) -- equal priority to blocked item, blocker should still win
+      // Competitor (high, open) -- blocked item priority (high) >= competitor (high),
+      // so Stage 3 surfaces the blocker.
       const blocker = db.create({ title: 'Blocker', priority: 'low', status: 'open' });
       const blockedItem = db.create({ title: 'Blocked item', priority: 'high', status: 'blocked' });
       db.addDependencyEdge(blockedItem.id, blocker.id);
-      db.create({ title: 'Competitor', priority: 'high', status: 'open' });
+      const competitor = db.create({ title: 'Competitor', priority: 'high', status: 'open' });
 
       const result = db.findNextWorkItem();
-      // Blocker should win because blocked item's priority (high) is NOT less than competitor (high)
+      // Blocked item priority (high) >= best competitor (high), so the blocker
+      // is surfaced to unblock the dependency.
       expect(result.workItem?.id).toBe(blocker.id);
       expect(result.reason).toContain('Blocking issue');
     });
@@ -843,6 +918,8 @@ describe('WorklogDatabase', () => {
       db.addDependencyEdge(blockedItem.id, blocker.id);
 
       const result = db.findNextWorkItem();
+      // The only open candidate is the blocker (low), so blocked item priority
+      // (medium) >= best competitor (low) and Stage 3 surfaces the blocker.
       expect(result.workItem?.id).toBe(blocker.id);
       expect(result.reason).toContain('Blocking issue');
     });
@@ -855,8 +932,10 @@ describe('WorklogDatabase', () => {
       const highItem = db.create({ title: 'High priority item', priority: 'high', status: 'open' });
 
       const result = db.findNextWorkItem();
+      // Non-critical blocked items are treated as normal candidates.
+      // The high-priority open item wins by normal sort_index selection.
       expect(result.workItem?.id).toBe(highItem.id);
-      expect(result.reason).toContain('Higher priority open item');
+      expect(result.reason).toContain('Next open item by sort_index');
     });
 
     it('should prefer blocker of higher-priority blocked item over lower-priority open items with child blockers', () => {
@@ -953,7 +1032,7 @@ describe('WorklogDatabase', () => {
       db.addDependencyEdge(itemA.id, itemB.id);
 
       // With includeBlocked=true, A should be in the candidate pool
-      const result = db.findNextWorkItem(undefined, undefined, 'ignore', false, true);
+      const result = db.findNextWorkItem(undefined, undefined, false, true);
       // A is high priority and includeBlocked is true, so it may be selected
       // The key assertion: A is NOT filtered out (it could be selected or its blocker could be)
       expect(result.workItem).toBeDefined();

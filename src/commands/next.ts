@@ -3,7 +3,6 @@
  */
 
 import type { PluginContext } from '../plugin-types.js';
-import type { NextOptions } from '../cli-types.js';
 import { humanFormatWorkItem, resolveFormat, formatTitleAndId } from './helpers.js';
 import { theme } from '../theme.js';
 import { normalizeActionArgs } from './cli-utils.js';
@@ -17,28 +16,24 @@ export default function register(ctx: PluginContext): void {
     .option('-a, --assignee <assignee>', 'Filter by assignee')
     .option('-s, --search <term>', 'Search term for fuzzy matching against title, description, and comments')
     .option('-n, --number <n>', 'Number of items to return (default: 1)', '1')
-    .option('--recency-policy <policy>', 'Recency policy: prefer|avoid|ignore (default: ignore)', 'ignore')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--include-in-review', 'Include items with status blocked and stage in_review (default: excluded)')
     .option('--include-blocked', 'Include dependency-blocked items (excluded by default)')
     .action(async (...rawArgs: any[]) => {
       // Normalize incoming args: commander may pass a Command instance
-      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'search', 'number', 'recencyPolicy', 'prefix', 'includeInReview', 'includeBlocked']);
+      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'search', 'number', 'prefix', 'includeInReview', 'includeBlocked']);
       let options: any = normalized.options || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
        const numRequested = parseInt(options.number || '1', 10);
       const count = Number.isNaN(numRequested) || numRequested < 1 ? 1 : numRequested;
 
-      const recencyPolicy = options.recencyPolicy || 'ignore';
-
-      // `findNextWorkItems` and `findNextWorkItem` gained an optional recencyPolicy
       const includeInReview = Boolean(options.includeInReview);
       const includeBlocked = Boolean(options.includeBlocked);
 
       const results = (db as any).findNextWorkItems 
-        ? (db as any).findNextWorkItems(count, options.assignee, options.search, recencyPolicy, includeInReview, includeBlocked) 
-        : [db.findNextWorkItem(options.assignee, options.search, recencyPolicy, includeInReview, includeBlocked)];
+        ? (db as any).findNextWorkItems(count, options.assignee, options.search, includeInReview, includeBlocked) 
+        : [db.findNextWorkItem(options.assignee, options.search, includeInReview, includeBlocked)];
 
       const availableResults = results.filter((result: any) => Boolean(result.workItem));
       const missingCount = Math.max(0, count - availableResults.length);

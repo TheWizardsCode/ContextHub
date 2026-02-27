@@ -100,10 +100,13 @@ describe('tui state helpers', () => {
     expect(state.expanded.has('WL-2')).toBe(false);
   });
 
-  it('expands ancestors when status uses underscore form', () => {
+  it('expands ancestors when status uses hyphenated form', () => {
+    // Status values are normalized to hyphenated form on write/import,
+    // so 'in-progress' is the canonical form. Underscore form ('in_progress')
+    // should not appear in stored data.
     const items = [
       makeItem('WL-1', 'open'),
-      { ...makeItem('WL-2', 'open', 'WL-1'), status: 'in_progress' },
+      { ...makeItem('WL-2', 'open', 'WL-1'), status: 'in-progress' },
       makeItem('WL-3', 'open', 'WL-2'),
     ];
 
