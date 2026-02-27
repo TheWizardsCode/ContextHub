@@ -805,11 +805,11 @@ describe('WorklogDatabase', () => {
       });
 
       const result = db.findNextWorkItem();
-      // Non-critical blocked items no longer trigger blocker surfacing.
-      // The blocked parent is selected as root (highest priority), then
-      // the algorithm descends into its open child.
+      // The blocked parent (high priority) has no open competitors of equal
+      // or higher priority, so Stage 3 (non-critical blocker surfacing)
+      // surfaces the blocking child.
       expect(result.workItem?.id).toBe(blocker.id);
-      expect(result.reason).toContain('Next child by sort_index');
+      expect(result.reason).toContain('Blocking issue');
     });
 
     it('should select dependency blocker for blocked item', () => {
@@ -818,11 +818,11 @@ describe('WorklogDatabase', () => {
       db.addDependencyEdge(blocked.id, blocker.id);
 
       const result = db.findNextWorkItem();
-      // Non-critical blocked items no longer trigger blocker surfacing.
-      // The blocked item is filtered out by the dep-blocker filter, leaving
-      // only the blocker as a normal open candidate.
+      // The blocked item (high priority) has no open competitors of equal
+      // or higher priority, so Stage 3 (non-critical blocker surfacing)
+      // surfaces the dependency blocker.
       expect(result.workItem?.id).toBe(blocker.id);
-      expect(result.reason).toContain('Next open item by sort_index');
+      expect(result.reason).toContain('Blocking issue');
     });
 
     it('should ignore blocking issues mentioned in description', () => {
@@ -897,18 +897,18 @@ describe('WorklogDatabase', () => {
 
     it('should prefer blocker when blocked item has equal priority to best competing open item', () => {
       // Blocker (low, open) blocks BlockedItem (high, blocked)
-      // Competitor (high, open) -- in new algorithm, blocked item is dep-filtered out,
-      // so competitor (high) wins over blocker (low) by normal priority selection.
+      // Competitor (high, open) -- blocked item priority (high) >= competitor (high),
+      // so Stage 3 surfaces the blocker.
       const blocker = db.create({ title: 'Blocker', priority: 'low', status: 'open' });
       const blockedItem = db.create({ title: 'Blocked item', priority: 'high', status: 'blocked' });
       db.addDependencyEdge(blockedItem.id, blocker.id);
       const competitor = db.create({ title: 'Competitor', priority: 'high', status: 'open' });
 
       const result = db.findNextWorkItem();
-      // Non-critical blocked items are filtered out by dep-blocker filter.
-      // Competitor (high) beats blocker (low) by normal sort_index selection.
-      expect(result.workItem?.id).toBe(competitor.id);
-      expect(result.reason).toContain('Next open item by sort_index');
+      // Blocked item priority (high) >= best competitor (high), so the blocker
+      // is surfaced to unblock the dependency.
+      expect(result.workItem?.id).toBe(blocker.id);
+      expect(result.reason).toContain('Blocking issue');
     });
 
     it('should prefer blocker when no competing open items exist', () => {
@@ -918,10 +918,10 @@ describe('WorklogDatabase', () => {
       db.addDependencyEdge(blockedItem.id, blocker.id);
 
       const result = db.findNextWorkItem();
-      // Non-critical blocked items are filtered out by dep-blocker filter.
-      // Only the blocker remains, selected as a normal open candidate.
+      // The only open candidate is the blocker (low), so blocked item priority
+      // (medium) >= best competitor (low) and Stage 3 surfaces the blocker.
       expect(result.workItem?.id).toBe(blocker.id);
-      expect(result.reason).toContain('Next open item by sort_index');
+      expect(result.reason).toContain('Blocking issue');
     });
 
     it('should prefer higher-priority open item over child blocker of lower-priority blocked item', () => {
