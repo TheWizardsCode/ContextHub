@@ -11,6 +11,7 @@ import { importFromJsonl, exportToJsonl, getDefaultDataPath } from './jsonl.js';
 import { mergeWorkItems, mergeComments } from './sync.js';
 import { withFileLock, getLockPathForJsonl } from './file-lock.js';
 import * as searchMetrics from './search-metrics.js';
+import { normalizeStatusValue } from './status-stage-rules.js';
 
 const UNIQUE_TIME_LENGTH = 9;
 const UNIQUE_RANDOM_BYTES = 4;
@@ -528,7 +529,7 @@ export class WorklogDatabase {
       id,
       title: input.title,
       description: input.description || '',
-      status: input.status || 'open',
+      status: (normalizeStatusValue(input.status) ?? input.status ?? 'open') as WorkItem['status'],
       priority: input.priority || 'medium',
       sortIndex: input.sortIndex ?? 0,
       parentId: input.parentId || null,
@@ -592,6 +593,8 @@ export class WorklogDatabase {
       ...item,
       ...input,
       id: item.id, // Prevent ID changes
+      // Normalize status to canonical hyphenated form (e.g. in_progress -> in-progress)
+      status: (normalizeStatusValue(input.status ?? item.status) ?? item.status) as WorkItem['status'],
       createdAt: item.createdAt, // Prevent createdAt changes
       updatedAt: new Date().toISOString(),
       githubIssueNumber: item.githubIssueNumber,
@@ -670,13 +673,10 @@ export class WorklogDatabase {
 
       if (query) {
       if (query.status) {
-        // Normalize status: convert underscores to hyphens for matching
-        // (handles legacy data stored with underscores vs the canonical hyphenated format)
-        const normalizedQueryStatus = query.status.replace(/_/g, '-');
-        items = items.filter(item => {
-          const normalizedItemStatus = item.status.replace(/_/g, '-');
-          return normalizedItemStatus === normalizedQueryStatus;
-        });
+        // Status values are normalized to hyphenated form on write/import,
+        // so we only need to normalize the query parameter for user input.
+        const normalizedQueryStatus = normalizeStatusValue(query.status) ?? query.status;
+        items = items.filter(item => item.status === normalizedQueryStatus);
       }
       if (query.priority) {
         items = items.filter(item => item.priority === query.priority);
@@ -1109,12 +1109,10 @@ export class WorklogDatabase {
     // For in-progress items: use filtered (post dep-blocker) pool so dep-blocked
     // in-progress items are not selected as the final result.
     const inProgressFromFiltered = this.applyFilters(filteredItems, assignee, searchTerm).filter(item => {
-      const normalizedStatus = item.status.replace(/_/g, '-');
-      return normalizedStatus === 'in-progress';
+      return item.status === 'in-progress';
     });
     const blockedFromPreFilter = this.applyFilters(preDepBlockerItems, assignee, searchTerm).filter(item => {
-      const normalizedStatus = item.status.replace(/_/g, '-');
-      return normalizedStatus === 'blocked';
+      return item.status === 'blocked';
     });
     const inProgressItems = [...inProgressFromFiltered, ...blockedFromPreFilter];
     this.debug(`${debugPrefix} in-progress/blocked items=${inProgressItems.length}`);
@@ -1211,9 +1209,8 @@ export class WorklogDatabase {
 
       // Find the best competing non-blocked, non-in-progress open item
       const competingOpenItems = filteredItems.filter(item => {
-        const normalizedStatus = item.status.replace(/_/g, '-');
-        return normalizedStatus !== 'in-progress' &&
-               normalizedStatus !== 'blocked' &&
+        return item.status !== 'in-progress' &&
+               item.status !== 'blocked' &&
                item.status !== 'completed' &&
                item.status !== 'deleted' &&
                item.id !== selectedInProgress.id;
@@ -1270,9 +1267,8 @@ export class WorklogDatabase {
       // open item instead of returning the in-progress item itself (it's already
       // being worked on, so wl next should recommend something actionable).
       const fallbackItems = filteredItems.filter(item => {
-        const ns = item.status.replace(/_/g, '-');
-        return ns !== 'in-progress' &&
-               ns !== 'blocked' &&
+        return item.status !== 'in-progress' &&
+               item.status !== 'blocked' &&
                item.status !== 'completed' &&
                item.status !== 'deleted' &&
                item.id !== selectedInProgress.id;

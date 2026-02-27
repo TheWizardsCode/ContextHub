@@ -101,6 +101,43 @@ describe('WorklogDatabase', () => {
     });
   });
 
+  describe('status normalization on write', () => {
+    it('should normalize underscore-form status on create', () => {
+      // Use 'as any' to simulate legacy/user input with underscore-form status
+      const item = db.create({ title: 'Test', status: 'in_progress' as any });
+      expect(item.status).toBe('in-progress');
+
+      // Verify persisted value is also normalized
+      const retrieved = db.get(item.id);
+      expect(retrieved?.status).toBe('in-progress');
+    });
+
+    it('should normalize underscore-form status on update', () => {
+      const item = db.create({ title: 'Test' });
+      expect(item.status).toBe('open');
+
+      const updated = db.update(item.id, { status: 'in_progress' as any });
+      expect(updated?.status).toBe('in-progress');
+
+      // Verify persisted value is also normalized
+      const retrieved = db.get(item.id);
+      expect(retrieved?.status).toBe('in-progress');
+    });
+
+    it('should leave already-hyphenated status unchanged', () => {
+      const item = db.create({ title: 'Test', status: 'in-progress' });
+      expect(item.status).toBe('in-progress');
+    });
+
+    it('should normalize status when querying with underscore form', () => {
+      db.create({ title: 'Test', status: 'in-progress' });
+      // Query using underscore form — should still find the item
+      const results = db.list({ status: 'in_progress' as any });
+      expect(results.length).toBe(1);
+      expect(results[0].status).toBe('in-progress');
+    });
+  });
+
   describe('get', () => {
     it('should retrieve a work item by ID', () => {
       const created = db.create({ title: 'Test task' });
