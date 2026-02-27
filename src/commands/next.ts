@@ -10,6 +10,8 @@ import { normalizeActionArgs } from './cli-utils.js';
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
   
+  const VALID_RECENCY_POLICIES = new Set(['prefer', 'avoid', 'ignore']);
+
   program
     .command('next')
     .description('Find the next work item to work on based on priority and status (excludes dependency-blocked items by default)')
@@ -19,9 +21,11 @@ export default function register(ctx: PluginContext): void {
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--include-in-review', 'Include items with status blocked and stage in_review (default: excluded)')
     .option('--include-blocked', 'Include dependency-blocked items (excluded by default)')
+    .option('--no-re-sort', 'Skip the automatic re-sort before selection (preserve current sortIndex order)')
+    .option('--recency-policy <policy>', 'Recency handling for score ordering during re-sort (prefer|avoid|ignore). Default: ignore', 'ignore')
     .action(async (...rawArgs: any[]) => {
       // Normalize incoming args: commander may pass a Command instance
-      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'search', 'number', 'prefix', 'includeInReview', 'includeBlocked']);
+      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'search', 'number', 'prefix', 'includeInReview', 'includeBlocked', 'reSort', 'recencyPolicy']);
       let options: any = normalized.options || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
@@ -30,6 +34,18 @@ export default function register(ctx: PluginContext): void {
 
       const includeInReview = Boolean(options.includeInReview);
       const includeBlocked = Boolean(options.includeBlocked);
+
+      // Auto re-sort unless --no-re-sort is passed.
+      // Commander's --no-re-sort sets options.reSort to false.
+      const shouldReSort = options.reSort !== false;
+      if (shouldReSort) {
+        const recencyPolicy = (options.recencyPolicy || 'ignore').toLowerCase();
+        if (!VALID_RECENCY_POLICIES.has(recencyPolicy)) {
+          output.error('recency-policy must be one of: prefer, avoid, ignore', { success: false, error: 'recency-policy must be one of: prefer, avoid, ignore' });
+          process.exit(1);
+        }
+        db.reSort(recencyPolicy as 'prefer' | 'avoid' | 'ignore');
+      }
 
       const results = (db as any).findNextWorkItems 
         ? (db as any).findNextWorkItems(count, options.assignee, options.search, includeInReview, includeBlocked) 

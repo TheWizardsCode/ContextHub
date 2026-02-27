@@ -36,11 +36,10 @@ export default function register(ctx: PluginContext): void {
         process.exit(1);
       }
 
-      const ordered = db
-        .getAllOrderedByScore(recency as 'prefer' | 'avoid' | 'ignore')
-        .filter(item => item.status !== 'completed' && item.status !== 'deleted');
-
       if (dryRun) {
+        const ordered = db
+          .getAllOrderedByScore(recency as 'prefer' | 'avoid' | 'ignore')
+          .filter(item => item.status !== 'completed' && item.status !== 'deleted');
         const preview = db.previewSortIndexOrderForItems(ordered, gap);
         if (utils.isJsonMode()) {
           output.json({ success: true, dryRun: true, gap, recency, count: preview.length, items: preview });
@@ -54,7 +53,7 @@ export default function register(ctx: PluginContext): void {
         return;
       }
 
-      const result = db.assignSortIndexValuesForItems(ordered, gap);
+      const result = db.reSort(recency as 'prefer' | 'avoid' | 'ignore', gap);
       if (utils.isJsonMode()) {
         output.json({ success: true, updated: result.updated, gap, recency });
         return;

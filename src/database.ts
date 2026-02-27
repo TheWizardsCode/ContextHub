@@ -268,6 +268,25 @@ export class WorklogDatabase {
     return { updated };
   }
 
+  /**
+   * Re-sort all active (non-completed, non-deleted) work items by score and
+   * reassign their sortIndex values.  This is the same logic used by `wl re-sort`
+   * and is called automatically by `wl next` unless `--no-re-sort` is passed.
+   *
+   * @param recencyPolicy - How to weight recency in the score calculation
+   * @param gap - Gap between consecutive sortIndex values (default 100)
+   * @returns The number of items whose sortIndex was updated
+   */
+  reSort(
+    recencyPolicy: 'prefer' | 'avoid' | 'ignore' = 'ignore',
+    gap: number = 100
+  ): { updated: number } {
+    const ordered = this
+      .getAllOrderedByScore(recencyPolicy)
+      .filter(item => item.status !== 'completed' && item.status !== 'deleted');
+    return this.assignSortIndexValuesForItems(ordered, gap);
+  }
+
   assignSortIndexValuesForItems(orderedItems: WorkItem[], gap: number): { updated: number } {
     let updated = 0;
     for (let index = 0; index < orderedItems.length; index += 1) {

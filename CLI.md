@@ -209,7 +209,15 @@ wl show WL-ABC123 -c
 
 ### `next` [options]
 
-Suggest the next work item(s) to work on using priority/status heuristics. By default, items with active dependency blockers are excluded.
+Suggest the next work item(s) to work on. Non-actionable items (deleted, completed, in-review, in-progress, dependency-blocked) are excluded by default.
+
+#### Automatic re-sort
+
+By default, `wl next` re-sorts all active items by score before selecting candidates. This ensures that recently created or re-prioritized items are immediately reflected in the selection order without requiring a manual `wl re-sort`. The re-sort uses the same scoring logic as `wl re-sort` (priority weight, age, and optional recency policy).
+
+Pass `--no-re-sort` to skip the automatic re-sort and preserve the current `sort_index` order. This is useful when you have manually adjusted `sort_index` values and want to preserve that ordering.
+
+The `--recency-policy` flag controls how recently updated items are weighted during the re-sort step. The default is `ignore` (no recency bias).
 
 #### Ranking precedence
 
@@ -233,6 +241,8 @@ Options:
 `-n, --number <n>` — Number of items to return (optional; default: `1`).
 `--include-in-review` — Include items with status `blocked` and stage `in_review` (optional).
 `--include-blocked` — Include dependency-blocked items (excluded by default).
+`--no-re-sort` — Skip automatic re-sort before selection, preserving current `sort_index` order (optional).
+`--recency-policy <policy>` — Recency handling for the re-sort step: `prefer`, `avoid`, or `ignore` (optional; default: `ignore`).
 `--prefix <prefix>` (optional)
 
 Examples:
@@ -242,6 +252,8 @@ wl next
 wl next -n 3
 wl next -a alice --search "bug"
 wl next --include-blocked
+wl next --no-re-sort
+wl next --recency-policy prefer
 ```
 
 ### `in-progress` [options]
