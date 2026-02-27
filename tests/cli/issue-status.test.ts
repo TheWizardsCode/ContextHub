@@ -246,7 +246,8 @@ describe('CLI Issue Status Tests', () => {
       const result = JSON.parse(stdout);
       expect(result.success).toBe(true);
       expect(result.workItem).toBeDefined();
-      expect(result.workItem.title).toBe('Task 1');
+      // Auto re-sort runs before selection, so high-priority Task 2 wins
+      expect(result.workItem.title).toBe('Task 2');
     });
 
     it('should return null when no work items exist', async () => {

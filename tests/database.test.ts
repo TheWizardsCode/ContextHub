@@ -1580,4 +1580,69 @@ describe('WorklogDatabase', () => {
       }
     });
   });
+
+  describe('reSort', () => {
+    it('should re-sort active items by score and reassign sortIndex', () => {
+      // Create items with sortIndex order that contradicts priority order
+      // High priority item has a high sortIndex (should be last by position)
+      db.create({ title: 'Low priority', priority: 'low', sortIndex: 100 });
+      const high = db.create({ title: 'High priority', priority: 'high', sortIndex: 500 });
+
+      const result = db.reSort();
+
+      expect(result.updated).toBeGreaterThan(0);
+      // After re-sort, high priority should have a lower sortIndex
+      const updatedHigh = db.get(high.id)!;
+      expect(updatedHigh.sortIndex).toBeLessThan(500);
+    });
+
+    it('should not re-sort completed or deleted items', () => {
+      const active = db.create({ title: 'Active', sortIndex: 200 });
+      const completed = db.create({ title: 'Completed', status: 'completed', sortIndex: 100 });
+      const toDelete = db.create({ title: 'Deleted', sortIndex: 50 });
+      db.delete(toDelete.id);
+
+      db.reSort();
+
+      // Completed item should not have its sortIndex changed
+      const updatedCompleted = db.get(completed.id)!;
+      expect(updatedCompleted.sortIndex).toBe(100);
+    });
+
+    it('should accept a recency policy parameter', () => {
+      db.create({ title: 'Task A', priority: 'medium', sortIndex: 200 });
+      db.create({ title: 'Task B', priority: 'medium', sortIndex: 100 });
+
+      // Should not throw with any valid policy
+      expect(() => db.reSort('prefer')).not.toThrow();
+      expect(() => db.reSort('avoid')).not.toThrow();
+      expect(() => db.reSort('ignore')).not.toThrow();
+    });
+
+    it('should accept a custom gap parameter', () => {
+      db.create({ title: 'Task A', priority: 'high', sortIndex: 500 });
+      db.create({ title: 'Task B', priority: 'low', sortIndex: 100 });
+
+      db.reSort('ignore', 50);
+
+      // With gap=50, sortIndex values should be 50, 100
+      const items = db.getAll().filter(i => i.status !== 'completed' && i.status !== 'deleted');
+      const sortValues = items.map(i => i.sortIndex).sort((a, b) => a - b);
+      expect(sortValues).toEqual([50, 100]);
+    });
+
+    it('should cause findNextWorkItem to select high priority item despite stale sortIndex', () => {
+      // Simulate the TableauCardEngine scenario:
+      // A high-priority item has a high sortIndex (buried), a medium-priority item has a low sortIndex (at top)
+      db.create({ title: 'Medium task', priority: 'medium', sortIndex: 100 });
+      const high = db.create({ title: 'High priority task', priority: 'high', sortIndex: 5000 });
+
+      // Without re-sort, medium task would be selected (lower sortIndex)
+      // After re-sort, high priority task should be selected
+      db.reSort();
+      const result = db.findNextWorkItem();
+
+      expect(result.workItem?.id).toBe(high.id);
+    });
+  });
 });
