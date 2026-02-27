@@ -2066,7 +2066,10 @@ export class TuiController {
       if (!item) return;
       // use injected spawn implementation when available so tests can mock it
       try {
-        const res = await copyToClipboard(item.id, { spawn: spawnImpl });
+        const writeOsc52 = (seq: string) => {
+          try { (screen as any).program?.write?.(seq); } catch (_) {}
+        };
+        const res = await copyToClipboard(item.id, { spawn: spawnImpl, writeOsc52 });
         if (res.success) showToast('ID copied');
         else showToast(res.error ? `Copy failed: ${res.error}` : 'Copy failed');
       } catch (err: any) {
