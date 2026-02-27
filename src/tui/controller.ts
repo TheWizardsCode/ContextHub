@@ -2066,7 +2066,10 @@ export class TuiController {
       if (!item) return;
       // use injected spawn implementation when available so tests can mock it
       try {
-        const res = await copyToClipboard(item.id, { spawn: spawnImpl });
+        const writeOsc52 = (seq: string) => {
+          try { (screen as any).program?.write?.(seq); } catch (_) {}
+        };
+        const res = await copyToClipboard(item.id, { spawn: spawnImpl, writeOsc52 });
         if (res.success) showToast('ID copied');
         else showToast(res.error ? `Copy failed: ${res.error}` : 'Copy failed');
       } catch (err: any) {
@@ -2886,7 +2889,7 @@ export class TuiController {
     // Copy selected ID
      screen.key(KEY_COPY_ID, () => {
        if (state.moveMode) return;
-       copySelectedId();
+       copySelectedId().catch(() => {});
      });
 
       // Open parent preview
@@ -3127,7 +3130,7 @@ export class TuiController {
     };
     try { (help as any).__opencode_click = helpClickHandler; help.on('click', helpClickHandler); } catch (_) {}
 
-    const copyIdButtonClickHandler = () => { copySelectedId(); };
+    const copyIdButtonClickHandler = () => { copySelectedId().catch(() => {}); };
     try { (copyIdButton as any).__opencode_click = copyIdButtonClickHandler; copyIdButton.on('click', copyIdButtonClickHandler); } catch (_) {}
 
     const closeOverlayClickHandler = () => { closeCloseDialog(); };
