@@ -801,6 +801,92 @@ export class WorklogDatabase {
   }
 
   /**
+   * Compute the effective priority of a candidate work item.
+   *
+   * Effective priority is the maximum of:
+   *   - The item's own priority
+   *   - The priority of any active (non-completed, non-deleted) item that
+   *     depends on this item (i.e., this item is a prerequisite for)
+   *
+   * This implements transparent, deterministic priority inheritance:
+   * an item that blocks a critical task is elevated to critical effective
+   * priority for tie-breaking in sortIndex selection.
+   *
+   * Results are cached in the optional `cache` map to avoid redundant
+   * dependency lookups across a candidate pool.
+   *
+   * @returns Object with numeric value, human-readable reason, and optional
+   *          inheritedFrom item ID
+   */
+  computeEffectivePriority(
+    item: WorkItem,
+    cache?: Map<string, { value: number; reason: string; inheritedFrom?: string }>
+  ): { value: number; reason: string; inheritedFrom?: string } {
+    // Check cache first
+    if (cache) {
+      const cached = cache.get(item.id);
+      if (cached) return cached;
+    }
+
+    const ownValue = this.getPriorityValue(item.priority);
+    let maxInheritedValue = 0;
+    let inheritedFromId: string | undefined;
+    let inheritedFromPriority: string | undefined;
+
+    // Check inbound dependency edges: items that depend on this item
+    const inboundEdges = this.listDependencyEdgesTo(item.id);
+    for (const edge of inboundEdges) {
+      const dependent = this.get(edge.fromId);
+      if (!dependent) continue;
+      // Only inherit from active items (not completed or deleted)
+      if (dependent.status === 'completed' || dependent.status === 'deleted') continue;
+      const depValue = this.getPriorityValue(dependent.priority);
+      if (depValue > maxInheritedValue) {
+        maxInheritedValue = depValue;
+        inheritedFromId = dependent.id;
+        inheritedFromPriority = dependent.priority;
+      }
+    }
+
+    // Also check if this item is a child that implicitly blocks its parent
+    if (item.parentId) {
+      const parent = this.get(item.parentId);
+      if (parent && parent.status !== 'completed' && parent.status !== 'deleted') {
+        // A non-closed child blocks its parent — inherit parent's priority
+        const parentValue = this.getPriorityValue(parent.priority);
+        if (parentValue > maxInheritedValue) {
+          maxInheritedValue = parentValue;
+          inheritedFromId = parent.id;
+          inheritedFromPriority = parent.priority;
+        }
+      }
+    }
+
+    const effectiveValue = Math.max(ownValue, maxInheritedValue);
+
+    let result: { value: number; reason: string; inheritedFrom?: string };
+    if (effectiveValue > ownValue && inheritedFromId) {
+      result = {
+        value: effectiveValue,
+        reason: `effective priority: ${inheritedFromPriority}, inherited from ${inheritedFromId}`,
+        inheritedFrom: inheritedFromId,
+      };
+    } else {
+      result = {
+        value: ownValue,
+        reason: `own priority: ${item.priority || 'none'}`,
+      };
+    }
+
+    // Cache the result
+    if (cache) {
+      cache.set(item.id, result);
+    }
+
+    return result;
+  }
+
+  /**
    * Select the highest priority blocking candidate with critical reference
    */
   private selectHighestPriorityBlocking(pairs: { blocking: WorkItem; critical: WorkItem }[]): { blocking: WorkItem; critical: WorkItem } | null {
@@ -1050,15 +1136,22 @@ export class WorklogDatabase {
     });
   }
 
-  private selectBySortIndex(items: WorkItem[]): WorkItem | null {
+  private selectBySortIndex(
+    items: WorkItem[],
+    effectivePriorityCache?: Map<string, { value: number; reason: string; inheritedFrom?: string }>
+  ): WorkItem | null {
     if (!items || items.length === 0) return null;
     // When all sortIndex values are the same (including all-zero), fall back to
-    // priority (descending) then createdAt (ascending / oldest first).
+    // effective priority (descending) then createdAt (ascending / oldest first).
+    // Effective priority accounts for priority inheritance from blocked dependents.
     const firstSortIndex = items[0].sortIndex ?? 0;
     const allSame = items.every(item => (item.sortIndex ?? 0) === firstSortIndex);
     if (allSame) {
+      const cache = effectivePriorityCache ?? new Map();
       const sorted = items.slice().sort((a, b) => {
-        const priDiff = this.getPriorityValue(b.priority) - this.getPriorityValue(a.priority);
+        const aEffective = this.computeEffectivePriority(a, cache);
+        const bEffective = this.computeEffectivePriority(b, cache);
+        const priDiff = bEffective.value - aEffective.value;
         if (priDiff !== 0) return priDiff;
         const createdDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
         if (createdDiff !== 0) return createdDiff;
@@ -1176,7 +1269,8 @@ export class WorklogDatabase {
    *   4. In-progress parent descent: find in-progress items and descend into their
    *      actionable children.
    *   5. Open item selection: SortIndex-based ranking among remaining candidates;
-   *      when all sortIndex values are equal, priority (descending) then age
+   *      when all sortIndex values are equal, effective priority (descending,
+   *      accounting for priority inheritance from blocked dependents) then age
    *      (ascending) break ties.
    */
   private findNextWorkItemFromItems(
@@ -1189,6 +1283,10 @@ export class WorklogDatabase {
     includeBlocked: boolean = false
   ): NextWorkItemResult {
     this.debug(`${debugPrefix} assignee=${assignee || ''} search=${searchTerm || ''} excluded=${excluded?.size || 0}`);
+
+    // Shared effective-priority cache: avoids redundant dependency lookups
+    // across all selectBySortIndex calls within this invocation.
+    const effectivePriorityCache = new Map<string, { value: number; reason: string; inheritedFrom?: string }>();
 
     // ── Stage 1: Filter pipeline ──
     const { candidates: filteredItems, criticalPool } = this.filterCandidates(items, {
@@ -1312,15 +1410,16 @@ export class WorklogDatabase {
 
       if (rootCandidates.length === 0) {
         // Fallback: all items have parents in the pool (shouldn't happen normally)
-        const selected = this.selectBySortIndex(filteredItems);
+        const selected = this.selectBySortIndex(filteredItems, effectivePriorityCache);
         this.debug(`${debugPrefix} selected open (fallback)=${selected?.id || ''}`);
+        const effectiveInfo = selected ? this.computeEffectivePriority(selected, effectivePriorityCache) : null;
         return {
           workItem: selected,
-          reason: `Next open item by sort_index${selected ? ` (priority ${selected.priority})` : ''}`
+          reason: `Next open item by sort_index${selected ? ` (${effectiveInfo?.inheritedFrom ? effectiveInfo.reason : `priority ${selected.priority}`})` : ''}`
         };
       }
 
-      const selectedRoot = this.selectBySortIndex(rootCandidates);
+      const selectedRoot = this.selectBySortIndex(rootCandidates, effectivePriorityCache);
       this.debug(`${debugPrefix} selected root=${selectedRoot?.id || ''}`);
 
       if (!selectedRoot) {
@@ -1340,7 +1439,7 @@ export class WorklogDatabase {
 
         if (children.length === 0) break;
 
-        const bestChild = this.selectBySortIndex(children);
+        const bestChild = this.selectBySortIndex(children, effectivePriorityCache);
         if (!bestChild) break;
 
         current = bestChild;
@@ -1349,21 +1448,23 @@ export class WorklogDatabase {
 
       if (current.id !== selectedRoot.id) {
         this.debug(`${debugPrefix} selected descendant=${current.id} of root=${selectedRoot.id}`);
+        const effectiveInfo = this.computeEffectivePriority(current, effectivePriorityCache);
         return {
           workItem: current,
-          reason: `Next child by sort_index of open item ${selectedRoot.id}${current ? ` (priority ${current.priority})` : ''}`
+          reason: `Next child by sort_index of open item ${selectedRoot.id} (${effectiveInfo.inheritedFrom ? effectiveInfo.reason : `priority ${current.priority}`})`
         };
       }
 
+      const rootEffectiveInfo = this.computeEffectivePriority(selectedRoot, effectivePriorityCache);
       return {
         workItem: selectedRoot,
-        reason: `Next open item by sort_index${selectedRoot ? ` (priority ${selectedRoot.priority})` : ''}`
+        reason: `Next open item by sort_index (${rootEffectiveInfo.inheritedFrom ? rootEffectiveInfo.reason : `priority ${selectedRoot.priority}`})`
       };
     }
 
     // ── Stage 6: In-progress parent descent (with children) ──
     // Find the best in-progress item and descend into its actionable children
-    const selectedInProgress = this.selectBySortIndex(inProgressItems);
+    const selectedInProgress = this.selectBySortIndex(inProgressItems, effectivePriorityCache);
     this.debug(`${debugPrefix} selected in-progress=${selectedInProgress?.id || ''}`);
     if (!selectedInProgress) {
       return { workItem: null, reason: 'No work items available' };
@@ -1382,21 +1483,23 @@ export class WorklogDatabase {
       }
       // No suitable children — fall back to the best candidate that isn't
       // the in-progress item itself
-      const fallback = this.selectBySortIndex(filteredItems);
+      const fallback = this.selectBySortIndex(filteredItems, effectivePriorityCache);
       if (fallback) {
+        const fallbackEffective = this.computeEffectivePriority(fallback, effectivePriorityCache);
         return {
           workItem: fallback,
-          reason: `Next open item by sort_index (in-progress item ${selectedInProgress.id} has no open children)`
+          reason: `Next open item by sort_index (in-progress item ${selectedInProgress.id} has no open children, ${fallbackEffective.inheritedFrom ? fallbackEffective.reason : `priority ${fallback.priority}`})`
         };
       }
       return { workItem: null, reason: 'No actionable work items available (only in-progress items remain)' };
     }
 
-    const selected = this.selectBySortIndex(actionableChildren);
+    const selected = this.selectBySortIndex(actionableChildren, effectivePriorityCache);
     this.debug(`${debugPrefix} selected child=${selected?.id || ''}`);
+    const selectedEffective = selected ? this.computeEffectivePriority(selected, effectivePriorityCache) : null;
     return {
       workItem: selected,
-      reason: `Next child by sort_index of deepest in-progress item ${selectedInProgress.id}`
+      reason: `Next child by sort_index of deepest in-progress item ${selectedInProgress.id}${selectedEffective ? ` (${selectedEffective.inheritedFrom ? selectedEffective.reason : `priority ${selected!.priority}`})` : ''}`
     };
   }
 
