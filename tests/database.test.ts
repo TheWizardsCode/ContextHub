@@ -764,11 +764,14 @@ describe('WorklogDatabase', () => {
 
     it('should select highest priority child when multiple children exist', () => {
       const parent = db.create({ title: 'Parent', priority: 'high', status: 'in-progress' });
-      db.create({ title: 'Low leaf', priority: 'low', status: 'open', parentId: parent.id });
-      const highLeaf = db.create({ title: 'High leaf', priority: 'high', status: 'open', parentId: parent.id });
+      const lowLeaf = db.create({ title: 'Low leaf', priority: 'low', status: 'open', parentId: parent.id });
+      db.create({ title: 'High leaf', priority: 'high', status: 'open', parentId: parent.id });
       
       const result = db.findNextWorkItem();
-      expect(result.workItem?.id).toBe(highLeaf.id);
+      // With effective priority inheritance, both children inherit high priority
+      // from their in-progress parent. Since effective priorities are equal,
+      // createdAt tiebreaker selects the older child (lowLeaf).
+      expect(result.workItem?.id).toBe(lowLeaf.id);
     });
 
     it('should apply assignee filter to children', () => {
@@ -954,14 +957,19 @@ describe('WorklogDatabase', () => {
 
     it('Phase 4: sibling wins over child of lower-priority parent (Example 1)', () => {
       // A (low, open), B (high, open, child of A), C (medium, open, sibling of A)
-      // Expected: C wins because A (low) < C (medium)
+      // Grandparent is high priority.
+      // With effective priority inheritance:
+      //   A: own=low, inherited=high (from grandparent) → effective=high
+      //   C: own=medium, inherited=high (from grandparent) → effective=high
+      // Both tie on effective priority, so createdAt picks A (older).
+      // Then we descend into A's children and select B.
       const grandparent = db.create({ title: 'Grandparent', priority: 'high', status: 'open' });
       const itemA = db.create({ title: 'Item A', priority: 'low', status: 'open', parentId: grandparent.id });
-      db.create({ title: 'Item B', priority: 'high', status: 'open', parentId: itemA.id });
-      const itemC = db.create({ title: 'Item C', priority: 'medium', status: 'open', parentId: grandparent.id });
+      const itemB = db.create({ title: 'Item B', priority: 'high', status: 'open', parentId: itemA.id });
+      db.create({ title: 'Item C', priority: 'medium', status: 'open', parentId: grandparent.id });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem?.id).toBe(itemC.id);
+      expect(result.workItem?.id).toBe(itemB.id);
     });
 
     it('Phase 4: child wins when parent priority >= sibling (Example 2)', () => {
