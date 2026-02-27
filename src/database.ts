@@ -487,6 +487,13 @@ export class WorklogDatabase {
   }
 
   /**
+   * Generate a unique ID for a comment (public wrapper)
+   */
+  generatePublicCommentId(): string {
+    return this.generateCommentId();
+  }
+
+  /**
    * Generate a unique ID for a comment
    */
   private generateCommentId(): string {
@@ -794,49 +801,6 @@ export class WorklogDatabase {
   }
 
   /**
-   * Select the deepest in-progress item, using priority+age as tie-breaker
-   */
-   private selectDeepestInProgress(items: WorkItem[], recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore'): WorkItem | null {
-    if (items.length === 0) {
-      return null;
-    }
-
-    const depths = items.map(item => ({ item, depth: this.getDepth(item.id) }));
-    const maxDepth = Math.max(...depths.map(entry => entry.depth));
-    const deepest = depths
-      .filter(entry => entry.depth === maxDepth)
-      .map(entry => entry.item);
-
-    return this.selectBySortIndex(deepest, recencyPolicy);
-  }
-
-  /**
-   * Find a higher priority sibling of an in-progress item
-   */
-  private findHigherPrioritySibling(items: WorkItem[], selectedInProgress: WorkItem, recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore'): WorkItem | null {
-    if (!selectedInProgress.parentId) {
-      return null;
-    }
-
-    const inProgressPriority = this.getPriorityValue(selectedInProgress.priority);
-    const siblingCandidates = items.filter(item =>
-      item.parentId === selectedInProgress.parentId &&
-      item.id !== selectedInProgress.id &&
-      item.status !== 'completed' &&
-      item.status !== 'deleted' &&
-      item.status !== 'in-progress' &&
-      item.status !== 'blocked' &&
-      this.getPriorityValue(item.priority) > inProgressPriority
-    );
-
-    if (siblingCandidates.length === 0) {
-      return null;
-    }
-
-    return this.selectByScore(siblingCandidates, recencyPolicy);
-  }
-
-  /**
    * Select the highest priority blocking candidate with critical reference
    */
   private selectHighestPriorityBlocking(pairs: { blocking: WorkItem; critical: WorkItem }[]): { blocking: WorkItem; critical: WorkItem } | null {
@@ -868,7 +832,6 @@ export class WorklogDatabase {
       updated: 100, // recency boost/penalty
       blocked: -10000,
       effort: 20,
-      assigneeBoost: 200,
     };
 
     let score = 0;
@@ -929,27 +892,6 @@ export class WorklogDatabase {
     return score;
   }
 
-  /**
-   * Select item by computed score. Tie-breakers: createdAt (older first), then id.
-   */
-  private selectByScore(items: WorkItem[], recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore'): WorkItem | null {
-    if (!items || items.length === 0) return null;
-    const now = Date.now();
-    const scored = items.map(it => ({
-      it,
-      score: this.computeScore(it, now, recencyPolicy),
-      createdAt: new Date(it.createdAt).getTime(),
-    }));
-
-    scored.sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
-      return a.it.id.localeCompare(b.it.id);
-    });
-
-    return scored[0].it;
-  }
-
   private orderBySortIndex(items: WorkItem[]): WorkItem[] {
     const orderedAll = this.store.getAllWorkItemsOrderedByHierarchySortIndexSkipCompleted();
     const positions = new Map(orderedAll.map((item, index) => [item.id, index]));
@@ -968,61 +910,105 @@ export class WorklogDatabase {
     });
   }
 
-  private selectBySortIndex(items: WorkItem[], recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore'): WorkItem | null {
+  private selectBySortIndex(items: WorkItem[]): WorkItem | null {
     if (!items || items.length === 0) return null;
+    // When all sortIndex values are the same (including all-zero), fall back to
+    // priority (descending) then createdAt (ascending / oldest first).
     const firstSortIndex = items[0].sortIndex ?? 0;
     const allSame = items.every(item => (item.sortIndex ?? 0) === firstSortIndex);
     if (allSame) {
-      return this.selectByScore(items, recencyPolicy);
+      const sorted = items.slice().sort((a, b) => {
+        const priDiff = this.getPriorityValue(b.priority) - this.getPriorityValue(a.priority);
+        if (priDiff !== 0) return priDiff;
+        const createdDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        if (createdDiff !== 0) return createdDiff;
+        return a.id.localeCompare(b.id);
+      });
+      return sorted[0] ?? null;
     }
     return this.orderBySortIndex(items)[0] ?? null;
   }
 
   /**
-   * Shared next-item selection logic to keep single-item and batch results aligned.
+   * Consolidated filter pipeline for wl next candidate selection.
    *
-   * Selection proceeds through several phases:
-   *   1. Filter out deleted, in_review (unless opted in), and excluded items.
-   *   2. Partition into dependency-blocked and unblocked candidates.
-   *   3. Critical-path escalation: if a critical item is blocked, surface its direct
-   *      blocker immediately (bypasses scoring).
-   *   4. Hierarchical descent: if an in-progress parent exists, recurse into its children.
-   *   5. Score-based ranking among remaining candidates via {@link computeScore}:
-   *        priority (1000/level) → blocks-high-priority boost (500) → blocked penalty
-   *        → age/effort/recency tie-breakers.
-   *   6. If no unblocked candidates remain and includeBlocked is set, fall back to
-   *      blocked items ranked by the same scoring logic.
+   * Removes non-actionable items in a single pass and returns two pools:
+   *   - candidates: fully filtered items ready for selection
+   *   - criticalPool: items filtered before dep-blocking, with assignee/search
+   *     applied, so that critical-path escalation can still find blocked
+   *     critical items and surface their blockers
+   *
+   * Filter stages (in order):
+   *   1. Remove deleted items
+   *   2. Remove completed items
+   *   3. Remove in-progress items (wl next skips items already being worked on)
+   *   4. Remove in_review+blocked items (unless includeInReview)
+   *   5. Remove excluded items (batch mode)
+   *   6. Apply assignee and search filters
+   *   --- criticalPool snapshot taken here ---
+   *   7. Remove dependency-blocked items (unless includeBlocked)
    */
-  private findNextWorkItemFromItems(
+  private filterCandidates(
     items: WorkItem[],
-    assignee?: string,
-    searchTerm?: string,
-    recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore',
-    excluded?: Set<string>,
-    debugPrefix: string = '[next]',
-    includeInReview: boolean = false,
-    includeBlocked: boolean = false
-  ): NextWorkItemResult {
-    this.debug(`${debugPrefix} recencyPolicy=${recencyPolicy} assignee=${assignee || ''} search=${searchTerm || ''} excluded=${excluded?.size || 0}`);
-    let filteredItems = items;
-    this.debug(`${debugPrefix} total items=${filteredItems.length}`);
+    options: {
+      assignee?: string;
+      searchTerm?: string;
+      excluded?: Set<string>;
+      includeInReview?: boolean;
+      includeBlocked?: boolean;
+      debugPrefix?: string;
+    } = {}
+  ): { candidates: WorkItem[]; criticalPool: WorkItem[] } {
+    const {
+      assignee,
+      searchTerm,
+      excluded,
+      includeInReview = false,
+      includeBlocked = false,
+      debugPrefix = '[filter]',
+    } = options;
 
-    // Filter out deleted items first
-    filteredItems = filteredItems.filter(item => item.status !== 'deleted');
+    let pool = items;
+    this.debug(`${debugPrefix} filter: total=${pool.length}`);
+
+    // 1. Remove deleted items
+    pool = pool.filter(item => item.status !== 'deleted');
+    this.debug(`${debugPrefix} filter: after deleted=${pool.length}`);
+
+    // 2. Remove completed items
+    pool = pool.filter(item => item.status !== 'completed');
+    this.debug(`${debugPrefix} filter: after completed=${pool.length}`);
+
+    // 3. Remove in-progress items (wl next recommends what to work on next,
+    //    not what's already being worked on)
+    pool = pool.filter(item => item.status !== 'in-progress');
+    this.debug(`${debugPrefix} filter: after in-progress=${pool.length}`);
+
+    // 4. Remove in_review+blocked items unless opted in
     if (!includeInReview) {
-      filteredItems = filteredItems.filter(
+      pool = pool.filter(
         item => !(item.stage === 'in_review' && item.status === 'blocked')
       );
+      this.debug(`${debugPrefix} filter: after in_review+blocked=${pool.length}`);
     }
+
+    // 5. Remove excluded items (batch mode)
     if (excluded && excluded.size > 0) {
-      filteredItems = filteredItems.filter(item => !excluded.has(item.id));
+      pool = pool.filter(item => !excluded.has(item.id));
+      this.debug(`${debugPrefix} filter: after excluded=${pool.length}`);
     }
-    // Save pre-dep-blocker pool so the critical-path can still surface blockers
-    const preDepBlockerItems = filteredItems;
+
+    // 6. Apply assignee and search filters
+    pool = this.applyFilters(pool, assignee, searchTerm);
+    this.debug(`${debugPrefix} filter: after assignee/search=${pool.length}`);
+
+    // Snapshot for critical-path escalation (before dep-blocker removal)
+    const criticalPool = pool;
+
+    // 7. Remove dependency-blocked items unless opted in
+    let candidates = pool;
     if (!includeBlocked) {
-      // Use store-direct access to avoid per-item refreshFromJsonlIfNewer overhead
-      // (data is already fresh from the getAllWorkItems call at the top of the stack)
-      filteredItems = filteredItems.filter(item => {
+      candidates = pool.filter(item => {
         const edges = this.store.getDependencyEdgesFrom(item.id);
         for (const edge of edges) {
           const target = this.store.getWorkItem(edge.toId);
@@ -1032,17 +1018,51 @@ export class WorklogDatabase {
         }
         return true;
       });
+      this.debug(`${debugPrefix} filter: after dep-blocked=${candidates.length}`);
     }
-    this.debug(`${debugPrefix} after deleted/excluded/dep-blocker=${filteredItems.length}`);
 
-    // Apply filters
-    filteredItems = this.applyFilters(filteredItems, assignee, searchTerm);
-    this.debug(`${debugPrefix} after assignee/search filters=${filteredItems.length}`);
+    return { candidates, criticalPool };
+  }
 
-    // Critical items: use pre-dep-blocker pool so that blocked criticals still surface their blockers
-    const criticalPool = this.applyFilters(preDepBlockerItems, assignee, searchTerm);
+  /**
+   * Shared next-item selection logic to keep single-item and batch results aligned.
+   *
+   * Selection proceeds through several phases:
+   *   1. Filter candidates via filterCandidates() pipeline.
+   *   2. Critical-path escalation: if a critical item is blocked, surface its direct
+   *      blocker immediately (bypasses scoring).
+   *   3. Non-critical blocker surfacing: if a non-critical blocked item has priority
+   *      >= the best open competitor, surface its blocker so the dependency is resolved.
+   *   4. In-progress parent descent: find in-progress items and descend into their
+   *      actionable children.
+   *   5. Open item selection: SortIndex-based ranking among remaining candidates;
+   *      when all sortIndex values are equal, priority (descending) then age
+   *      (ascending) break ties.
+   */
+  private findNextWorkItemFromItems(
+    items: WorkItem[],
+    assignee?: string,
+    searchTerm?: string,
+    excluded?: Set<string>,
+    debugPrefix: string = '[next]',
+    includeInReview: boolean = false,
+    includeBlocked: boolean = false
+  ): NextWorkItemResult {
+    this.debug(`${debugPrefix} assignee=${assignee || ''} search=${searchTerm || ''} excluded=${excluded?.size || 0}`);
+
+    // ── Stage 1: Filter pipeline ──
+    const { candidates: filteredItems, criticalPool } = this.filterCandidates(items, {
+      assignee,
+      searchTerm,
+      excluded,
+      includeInReview,
+      includeBlocked,
+      debugPrefix,
+    });
+
+    // ── Stage 2: Critical-path escalation ──
     const criticalItems = criticalPool.filter(
-      item => item.priority === 'critical' && item.status !== 'completed' && item.status !== 'deleted'
+      item => item.priority === 'critical'
     );
     this.debug(`${debugPrefix} critical items=${criticalItems.length}`);
     const unblockedCriticals = criticalItems.filter(
@@ -1052,7 +1072,7 @@ export class WorklogDatabase {
     this.debug(`${debugPrefix} unblocked criticals=${unblockedCriticals.length}`);
 
     if (unblockedCriticals.length > 0) {
-      const selected = this.selectBySortIndex(unblockedCriticals, recencyPolicy);
+      const selected = this.selectBySortIndex(unblockedCriticals);
       this.debug(`${debugPrefix} selected critical=${selected?.id || ''}`);
       return {
         workItem: selected,
@@ -1095,7 +1115,7 @@ export class WorklogDatabase {
         };
       }
 
-      const selectedBlockedCritical = this.selectBySortIndex(blockedCriticals, recencyPolicy);
+      const selectedBlockedCritical = this.selectBySortIndex(blockedCriticals);
       this.debug(`${debugPrefix} selected blocked critical=${selectedBlockedCritical?.id || ''}`);
       return {
         workItem: selectedBlockedCritical,
@@ -1103,37 +1123,104 @@ export class WorklogDatabase {
       };
     }
 
-    // Find in-progress and blocked items
-    // For blocked items: use pre-dep-blocker pool so blocked items with dependency
-    // edges are still visible for blocker-surfacing logic.
-    // For in-progress items: use filtered (post dep-blocker) pool so dep-blocked
-    // in-progress items are not selected as the final result.
-    const inProgressFromFiltered = this.applyFilters(filteredItems, assignee, searchTerm).filter(item => {
-      return item.status === 'in-progress';
-    });
-    const blockedFromPreFilter = this.applyFilters(preDepBlockerItems, assignee, searchTerm).filter(item => {
-      return item.status === 'blocked';
-    });
-    const inProgressItems = [...inProgressFromFiltered, ...blockedFromPreFilter];
-    this.debug(`${debugPrefix} in-progress/blocked items=${inProgressItems.length}`);
+    // ── Stage 3: Non-critical blocker surfacing ──
+    // For non-critical blocked items whose priority is >= the best open
+    // competitor, surface their blocker so that the dependency is resolved
+    // first.  This mirrors the old selectDeepestInProgress blocked-item
+    // handling that was removed during the filter-pipeline consolidation.
+    const nonCriticalBlocked = criticalPool.filter(
+      item => item.status === 'blocked' && item.priority !== 'critical'
+    );
+    this.debug(`${debugPrefix} non-critical blocked=${nonCriticalBlocked.length}`);
+
+    if (nonCriticalBlocked.length > 0 && filteredItems.length > 0) {
+      // Find the highest priority value among open candidates
+      const bestCompetitorPriority = Math.max(
+        ...filteredItems.map(item => this.getPriorityValue(item.priority))
+      );
+
+      // Sort blocked items by priority descending so we handle the most
+      // important blocked item first
+      const sortedBlocked = nonCriticalBlocked.slice().sort(
+        (a, b) => this.getPriorityValue(b.priority) - this.getPriorityValue(a.priority)
+      );
+
+      for (const blockedItem of sortedBlocked) {
+        const blockedPriority = this.getPriorityValue(blockedItem.priority);
+        if (blockedPriority < bestCompetitorPriority) {
+          // Blocked item is lower priority than best open candidate — skip
+          continue;
+        }
+
+        // Blocked item priority >= best competitor: surface its blocker
+        const blockingPairs: { blocking: WorkItem; blocked: WorkItem }[] = [];
+
+        // Check dependency blockers
+        const dependencyBlockers = this.getActiveDependencyBlockers(blockedItem.id);
+        for (const blocker of dependencyBlockers) {
+          if (excluded?.has(blocker.id)) continue;
+          blockingPairs.push({ blocking: blocker, blocked: blockedItem });
+        }
+
+        // Check child blockers
+        const blockingChildren = this.getNonClosedChildren(blockedItem.id);
+        for (const child of blockingChildren) {
+          if (excluded?.has(child.id)) continue;
+          blockingPairs.push({ blocking: child, blocked: blockedItem });
+        }
+
+        // Apply assignee/search filters to blockers
+        const filteredBlockers = blockingPairs.filter(pair =>
+          this.applyFilters([pair.blocking], assignee, searchTerm).length > 0
+        );
+
+        this.debug(`${debugPrefix} blocker-surfacing: blockedItem=${blockedItem.id} pri=${blockedItem.priority} blockers=${filteredBlockers.length}`);
+
+        if (filteredBlockers.length > 0) {
+          // Select the best blocker by sort index
+          const orderedBlockers = this.orderBySortIndex(filteredBlockers.map(p => p.blocking));
+          const selectedBlocker = orderedBlockers[0];
+          if (selectedBlocker) {
+            const pair = filteredBlockers.find(p => p.blocking.id === selectedBlocker.id)!;
+            return {
+              workItem: selectedBlocker,
+              reason: `Blocking issue for ${pair.blocked.priority}-priority item ${pair.blocked.id} (${pair.blocked.title})`
+            };
+          }
+        }
+      }
+    }
+
+    // ── Stage 4: In-progress parent descent ──
+    // In-progress items are excluded from candidates (wl next doesn't recommend
+    // items already being worked on), but we still check for in-progress parents
+    // so we can descend into their actionable children.
+    const inProgressItems = this.applyFilters(
+      items.filter(item =>
+        item.status === 'in-progress' &&
+        (!excluded || !excluded.has(item.id))
+      ),
+      assignee,
+      searchTerm
+    );
+    this.debug(`${debugPrefix} in-progress parents=${inProgressItems.length}`);
 
     if (inProgressItems.length === 0) {
-      // No in-progress items, find highest priority and oldest non-in-progress item
-      // Respect hierarchy: select among root-level candidates, then descend into children
-      const openItems = filteredItems.filter(item => item.status !== 'completed');
-      this.debug(`${debugPrefix} open items=${openItems.length}`);
-      if (openItems.length === 0) {
+      // ── Stage 5: Open item selection ──
+      // No in-progress parents; select among filtered candidates
+      if (filteredItems.length === 0) {
         return { workItem: null, reason: 'No work items available' };
       }
+      this.debug(`${debugPrefix} open candidates=${filteredItems.length}`);
 
-      // Identify root-level candidates: items whose parent is not in the open set
-      const openIds = new Set(openItems.map(item => item.id));
-      const rootCandidates = openItems.filter(item => !item.parentId || !openIds.has(item.parentId));
+      // Identify root-level candidates: items whose parent is not in the candidate set
+      const candidateIds = new Set(filteredItems.map(item => item.id));
+      const rootCandidates = filteredItems.filter(item => !item.parentId || !candidateIds.has(item.parentId));
       this.debug(`${debugPrefix} root candidates=${rootCandidates.length}`);
 
       if (rootCandidates.length === 0) {
         // Fallback: all items have parents in the pool (shouldn't happen normally)
-        const selected = this.selectBySortIndex(openItems, recencyPolicy);
+        const selected = this.selectBySortIndex(filteredItems);
         this.debug(`${debugPrefix} selected open (fallback)=${selected?.id || ''}`);
         return {
           workItem: selected,
@@ -1141,7 +1228,7 @@ export class WorklogDatabase {
         };
       }
 
-      const selectedRoot = this.selectBySortIndex(rootCandidates, recencyPolicy);
+      const selectedRoot = this.selectBySortIndex(rootCandidates);
       this.debug(`${debugPrefix} selected root=${selectedRoot?.id || ''}`);
 
       if (!selectedRoot) {
@@ -1152,18 +1239,16 @@ export class WorklogDatabase {
       // has open children, pick the best child and continue descending
       let current = selectedRoot;
       let depth = 0;
-      const maxDepth = 50; // Guard against circular references
+      const maxDepth = 15; // Guard against circular references
       while (depth < maxDepth) {
-        const children = openItems.filter(item =>
-          item.parentId === current.id &&
-          item.status !== 'completed' &&
-          item.status !== 'deleted'
+        const children = filteredItems.filter(item =>
+          item.parentId === current.id
         ).filter(item => !excluded?.has(item.id));
         this.debug(`${debugPrefix} descend depth=${depth} current=${current.id} children=${children.length}`);
 
         if (children.length === 0) break;
 
-        const bestChild = this.selectBySortIndex(children, recencyPolicy);
+        const bestChild = this.selectBySortIndex(children);
         if (!bestChild) break;
 
         current = bestChild;
@@ -1184,96 +1269,28 @@ export class WorklogDatabase {
       };
     }
 
-    // There are in-progress or blocked items
-    // Find the highest priority and oldest active item
-    // Note: Blocked items trigger blocking issue detection, in-progress items trigger descendant traversal
-    const selectedInProgress = this.selectDeepestInProgress(inProgressItems, recencyPolicy);
+    // ── Stage 6: In-progress parent descent (with children) ──
+    // Find the best in-progress item and descend into its actionable children
+    const selectedInProgress = this.selectBySortIndex(inProgressItems);
     this.debug(`${debugPrefix} selected in-progress=${selectedInProgress?.id || ''}`);
     if (!selectedInProgress) {
       return { workItem: null, reason: 'No work items available' };
     }
 
-    const higherPrioritySibling = this.findHigherPrioritySibling(filteredItems, selectedInProgress, recencyPolicy);
-    this.debug(`${debugPrefix} higher priority sibling=${higherPrioritySibling?.id || ''}`);
-    if (higherPrioritySibling) {
-      return {
-        workItem: higherPrioritySibling,
-        reason: `Higher priority sibling of in-progress item ${selectedInProgress.id} (${selectedInProgress.title}); selected item priority is ${higherPrioritySibling.priority}`
-      };
-    }
-
-    // Check if the item is blocked - if so, prioritize formal blockers
-    // BUT only if the blocked item's priority is >= the best competing open item
-    if (selectedInProgress.status === 'blocked') {
-      const blockedPriority = this.getPriorityValue(selectedInProgress.priority);
-
-      // Find the best competing non-blocked, non-in-progress open item
-      const competingOpenItems = filteredItems.filter(item => {
-        return item.status !== 'in-progress' &&
-               item.status !== 'blocked' &&
-               item.status !== 'completed' &&
-               item.status !== 'deleted' &&
-               item.id !== selectedInProgress.id;
-      }).filter(item => !excluded?.has(item.id));
-
-      const bestCompetitor = this.selectByScore(competingOpenItems, recencyPolicy);
-      const bestCompetitorPriority = bestCompetitor ? this.getPriorityValue(bestCompetitor.priority) : 0;
-
-      this.debug(`${debugPrefix} blocked item priority=${selectedInProgress.priority}(${blockedPriority}) bestCompetitor=${bestCompetitor?.id || 'none'} priority=${bestCompetitor?.priority || 'none'}(${bestCompetitorPriority})`);
-
-      // If a competing open item has strictly higher priority than the blocked item,
-      // prefer the competitor over the blocker
-      if (bestCompetitor && bestCompetitorPriority > blockedPriority) {
-        this.debug(`${debugPrefix} preferring higher-priority open item over blocker`);
-        return {
-          workItem: bestCompetitor,
-          reason: `Higher priority open item preferred over blocker of lower-priority blocked item ${selectedInProgress.id} (${selectedInProgress.title})`
-        };
-      }
-
-      const blockingChildren = this.getNonClosedChildren(selectedInProgress.id);
-      const dependencyBlockers = this.getActiveDependencyBlockers(selectedInProgress.id);
-      const blockingCandidates = [...blockingChildren, ...dependencyBlockers];
-      const filteredBlockingCandidates = this.applyFilters(blockingCandidates, assignee, searchTerm)
-        .filter(item => !excluded?.has(item.id));
-      if (filteredBlockingCandidates.length > 0) {
-        const selected = this.selectBySortIndex(filteredBlockingCandidates, recencyPolicy);
-        this.debug(`${debugPrefix} selected blocking issue=${selected?.id || ''}`);
-        return {
-          workItem: selected,
-          reason: `Blocking issue for ${selectedInProgress.id} (${selectedInProgress.title})`
-        };
-      }
-      // If no blocking issues found or they don't exist, return the blocked item itself
-      return {
-        workItem: selectedInProgress,
-        reason: `Blocked item with no identifiable blocking issues`
-      };
-    }
-
-    // Select best direct child of the in-progress item
-    const directChildren = this.getChildren(selectedInProgress.id);
-    const filteredChildren = this.applyFilters(directChildren, assignee, searchTerm).filter(
-      item => item.status !== 'in-progress' && item.status !== 'completed' && item.status !== 'deleted'
+    // Select best direct child from the already-filtered candidate pool
+    const actionableChildren = filteredItems.filter(
+      item => item.parentId === selectedInProgress.id
     ).filter(item => !excluded?.has(item.id));
 
-    this.debug(`${debugPrefix} direct children=${directChildren.length} filtered children=${filteredChildren.length}`);
+    this.debug(`${debugPrefix} actionable children of ${selectedInProgress.id}=${actionableChildren.length}`);
 
-    if (filteredChildren.length === 0) {
+    if (actionableChildren.length === 0) {
       if (excluded?.has(selectedInProgress.id)) {
         return { workItem: null, reason: 'No available items after exclusions' };
       }
-      // No suitable direct children — fall through to find the best non-in-progress
-      // open item instead of returning the in-progress item itself (it's already
-      // being worked on, so wl next should recommend something actionable).
-      const fallbackItems = filteredItems.filter(item => {
-        return item.status !== 'in-progress' &&
-               item.status !== 'blocked' &&
-               item.status !== 'completed' &&
-               item.status !== 'deleted' &&
-               item.id !== selectedInProgress.id;
-      }).filter(item => !excluded?.has(item.id));
-      const fallback = this.selectBySortIndex(fallbackItems, recencyPolicy);
+      // No suitable children — fall back to the best candidate that isn't
+      // the in-progress item itself
+      const fallback = this.selectBySortIndex(filteredItems);
       if (fallback) {
         return {
           workItem: fallback,
@@ -1283,7 +1300,7 @@ export class WorklogDatabase {
       return { workItem: null, reason: 'No actionable work items available (only in-progress items remain)' };
     }
 
-    const selected = this.selectBySortIndex(filteredChildren, recencyPolicy);
+    const selected = this.selectBySortIndex(actionableChildren);
     this.debug(`${debugPrefix} selected child=${selected?.id || ''}`);
     return {
       workItem: selected,
@@ -1300,12 +1317,11 @@ export class WorklogDatabase {
   findNextWorkItem(
     assignee?: string,
     searchTerm?: string,
-    recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore',
     includeInReview: boolean = false,
     includeBlocked: boolean = false
   ): NextWorkItemResult {
     const items = this.store.getAllWorkItems();
-    return this.findNextWorkItemFromItems(items, assignee, searchTerm, recencyPolicy, undefined, '[next]', includeInReview, includeBlocked);
+    return this.findNextWorkItemFromItems(items, assignee, searchTerm, undefined, '[next]', includeInReview, includeBlocked);
   }
 
   /**
@@ -1316,7 +1332,6 @@ export class WorklogDatabase {
     count: number,
     assignee?: string,
     searchTerm?: string,
-    recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore',
     includeInReview: boolean = false,
     includeBlocked: boolean = false
   ): NextWorkItemResult[] {
@@ -1328,7 +1343,6 @@ export class WorklogDatabase {
         this.store.getAllWorkItems(),
         assignee,
         searchTerm,
-        recencyPolicy,
         excluded,
         `[next batch ${i + 1}/${count}]`,
         includeInReview,
@@ -1376,35 +1390,6 @@ export class WorklogDatabase {
     }
 
     return filtered;
-  }
-
-  /**
-   * Helper method to select the highest priority and oldest item from a list
-   */
-  private selectHighestPriorityOldest(items: WorkItem[]): WorkItem | null {
-    if (items.length === 0) {
-      return null;
-    }
-
-    // Define priority order
-    const priorityOrder: { [key: string]: number } = {
-      'critical': 4,
-      'high': 3,
-      'medium': 2,
-      'low': 1,
-    };
-
-    // Sort by priority (descending) then by createdAt (ascending - oldest first)
-    const sorted = items.sort((a, b) => {
-      const priorityDiff = priorityOrder[b.priority] - priorityOrder[a.priority];
-      if (priorityDiff !== 0) {
-        return priorityDiff;
-      }
-      // If priorities are equal, sort by creation time (oldest first)
-      return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-    });
-
-    return sorted[0];
   }
 
   /**

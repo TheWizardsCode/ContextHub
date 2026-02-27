@@ -317,15 +317,33 @@ export default function register(ctx: PluginContext): void {
         }
         const items = db.getAll();
         const createNew = resolveGithubImportCreateNew({ createNew: options.createNew });
-        const { updatedItems, createdItems, issues, updatedIds, mergedItems, conflictDetails, markersFound, fieldChanges } = await importIssuesToWorkItems(items, githubConfig, {
+        const { updatedItems, createdItems, issues, updatedIds, mergedItems, conflictDetails, markersFound, fieldChanges, importedComments } = await importIssuesToWorkItems(items, githubConfig, {
           since: options.since,
           createNew,
           generateId: () => db.generateWorkItemId(),
+          generateCommentId: () => db.generatePublicCommentId(),
           onProgress: renderProgress,
         });
 
         if (mergedItems.length > 0) {
           db.import(mergedItems);
+        }
+
+        // Persist imported GitHub comments
+        if (importedComments.length > 0) {
+          const existingComments = db.getAllComments();
+          // Merge: keep existing, add new ones that don't clash by githubCommentId
+          const existingGhIds = new Set(
+            existingComments
+              .filter(c => c.githubCommentId !== undefined)
+              .map(c => c.githubCommentId!)
+          );
+          const newComments = importedComments.filter(
+            c => c.githubCommentId === undefined || !existingGhIds.has(c.githubCommentId)
+          );
+          if (newComments.length > 0) {
+            db.importComments([...existingComments, ...newComments]);
+          }
         }
 
         if (createNew && createdItems.length > 0) {

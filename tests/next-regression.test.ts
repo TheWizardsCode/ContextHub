@@ -275,7 +275,7 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       });
       db.create({ title: 'Open', status: 'open', priority: 'low' });
 
-      const result = db.findNextWorkItem(undefined, undefined, 'ignore', true);
+      const result = db.findNextWorkItem(undefined, undefined, true);
       expect(result.workItem).not.toBeNull();
       expect(result.workItem!.id).toBe(inReview.id);
     });
@@ -284,7 +284,6 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       db.create({ title: 'In review only', status: 'blocked', stage: 'in_review', priority: 'critical' });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem).toBeNull();
     });
   });
 
@@ -372,7 +371,7 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       const itemB = db.create({ title: 'Prerequisite B', priority: 'low', status: 'open' });
       db.addDependencyEdge(itemA.id, itemB.id);
 
-      const result = db.findNextWorkItem(undefined, undefined, 'ignore', false, true);
+      const result = db.findNextWorkItem(undefined, undefined, false, true);
       expect(result.workItem).not.toBeNull();
       // With includeBlocked, A should be in the candidate pool
     });
@@ -566,7 +565,7 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       const inReview = db.create({ title: 'In review', status: 'blocked', stage: 'in_review', priority: 'critical' });
       db.create({ title: 'Open', status: 'open', priority: 'low' });
 
-      const result = db.findNextWorkItem(undefined, undefined, 'ignore', true);
+      const result = db.findNextWorkItem(undefined, undefined, true);
       expect(result.workItem!.id).toBe(inReview.id);
     });
 

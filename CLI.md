@@ -215,12 +215,12 @@ Suggest the next work item(s) to work on using priority/status heuristics. By de
 
 When multiple candidate items exist, `wl next` ranks them using the following criteria (highest weight first):
 
-1. **Priority** — higher-priority items always rank above lower-priority items (weight 1000 per level: low=1000, medium=2000, high=3000, critical=4000).
-2. **Blocks high-priority work** — among equal-priority candidates, an item that is a prerequisite for a `high` or `critical` downstream item receives a scoring boost (weight 500, scaled proportionally for `critical`). This ensures that unblocking high-value work is preferred over unrelated tasks at the same priority.
-3. **Blocked penalty** — items with active dependency blockers receive a heavy penalty and are excluded by default (see `--include-blocked`).
-4. **Tie-breakers** — age (older items first), effort, and recency policy break remaining ties.
+1. **Priority** — higher-priority items always rank above lower-priority items.
+2. **Blocks high-priority work** — among equal-priority candidates, an item that is a prerequisite for a `high` or `critical` downstream item is preferred. This ensures that unblocking high-value work takes precedence over unrelated tasks at the same priority.
+3. **Blocked penalty** — items with active dependency blockers are excluded by default (see `--include-blocked`).
+4. **Tie-breakers** — sort_index hierarchy position, then age (older items first) break remaining ties.
 
-Items with `status: 'blocked'` that have `critical` priority trigger a special escalation path: their direct blockers are surfaced immediately, bypassing the general scoring logic.
+Items with `status: 'blocked'` that have `critical` priority trigger a special escalation path: their direct blockers are surfaced immediately, bypassing the general ranking logic.
 
 #### Backward compatibility
 
@@ -231,7 +231,6 @@ Options:
 `-a, --assignee <assignee>` (optional)
 `-s, --search <term>` (optional)
 `-n, --number <n>` — Number of items to return (optional; default: `1`).
-`--recency-policy <policy>` — Recency policy: `prefer|avoid|ignore` (optional; default: `ignore`).
 `--include-in-review` — Include items with status `blocked` and stage `in_review` (optional).
 `--include-blocked` — Include dependency-blocked items (excluded by default).
 `--prefix <prefix>` (optional)
@@ -243,7 +242,6 @@ wl next
 wl next -n 3
 wl next -a alice --search "bug"
 wl next --include-blocked
-wl next --recency-policy prefer
 ```
 
 ### `in-progress` [options]
