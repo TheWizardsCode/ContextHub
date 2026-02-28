@@ -151,6 +151,9 @@ Worklog Specific Ignores
 .opencode/tmp/
 .tmp
 
+# Stress test logs (scripts/stress-file-lock.sh output)
+stress-logs/
+
 ### End of Worklog Specific Ignores
 
 # Ignore migration test DB backups and temporary backup folders created during tests

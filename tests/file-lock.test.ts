@@ -1077,8 +1077,14 @@ const iterations = parseInt(process.argv[5], 10);
 // Optional diagnostics file path passed as 6th arg
 const diagPath = process.argv[6] || null;
 
+// Per-worker diagnostics: track every iteration independently
+let callbackExecutions = 0;
+const iterLog = []; // { iteration, readValue, wroteValue, tsMs }
+
 for (let i = 0; i < iterations; i++) {
   fileLock.withFileLock(lockPath, () => {
+    callbackExecutions++;
+
     // Read current counter
     let counter = 0;
     try {
@@ -1088,19 +1094,46 @@ for (let i = 0; i < iterations; i++) {
       counter = 0;
     }
 
-    // Increment and write back
+    const readValue = counter;
+
+    // Increment and write back using an atomic write + fsync to ensure visibility
     counter++;
-    fs.writeFileSync(counterFile, String(counter));
+    // Build temp filename via concatenation to avoid nested template literals
+    const tmp = counterFile + '.' + process.pid + '.' + Date.now() + '.tmp';
+    const fd = fs.openSync(tmp, 'w');
+    try {
+      fs.writeSync(fd, String(counter));
+      fs.fsyncSync(fd);
+    } finally {
+      try { fs.closeSync(fd); } catch (e) { /* ignore */ }
+    }
+    // Rename into place
+    fs.renameSync(tmp, counterFile);
+    // Attempt to fsync the directory so the rename is durable/visible across processes
+    try {
+      const dirFd = fs.openSync(path.dirname(counterFile), 'r');
+      try { fs.fsyncSync(dirFd); } catch (e) { /* ignore */ }
+      fs.closeSync(dirFd);
+    } catch (e) {
+      // ignore if not permitted in CI environment
+    }
+
+    iterLog.push({ iteration: i, readValue: readValue, wroteValue: counter, tsMs: Date.now() });
   }, { retryDelay: 50, timeout: 30000 });
 }
-// Emit diagnostics if requested: how many times the callback executed.
-// We approximate callback executions by counting reads of the counter file
-// by reading the final counter value (best-effort) and reporting it.
+
+// Write diagnostics: own iteration count, per-iteration log, and final shared counter
 try {
   if (diagPath) {
-    // Write a small diagnostics object so the test harness can inspect it.
     const finalCounter = parseInt(fs.readFileSync(counterFile, 'utf-8'), 10) || 0;
-    fs.writeFileSync(diagPath, JSON.stringify({ pid: process.pid, finalCounter }), 'utf-8');
+    const diag = {
+      pid: process.pid,
+      requestedIterations: iterations,
+      callbackExecutions: callbackExecutions,
+      finalCounter: finalCounter,
+      iterLog: iterLog
+    };
+    fs.writeFileSync(diagPath, JSON.stringify(diag), 'utf-8');
   }
 } catch (e) {
   // Ignore diagnostics failures - they should not affect test outcome
@@ -1271,7 +1304,23 @@ process.exit(0);
           const diagFile = path.join(tempDir, `worker-${i}.diag.json`);
           if (fs.existsSync(diagFile)) {
             const content = fs.readFileSync(diagFile, 'utf-8');
-            diagReports.push(JSON.parse(content));
+            const parsed = JSON.parse(content);
+            // Emit a compact summary per worker (omit iterLog for the summary line)
+            const { iterLog, ...summary } = parsed;
+            diagReports.push(summary);
+            // Detect anomalies: duplicate readValues across iterations within a single worker
+            if (Array.isArray(iterLog)) {
+              const readValues = iterLog.map((e: any) => e.readValue);
+              const wroteValues = iterLog.map((e: any) => e.wroteValue);
+              // Each successive read should equal the previous write IF this worker held the lock exclusively.
+              // But across workers, gaps are expected. Flag any case where readValue < previous wroteValue
+              // (would indicate another worker overwrote with a lower value = lost increment).
+              for (let j = 1; j < iterLog.length; j++) {
+                if (iterLog[j].readValue < iterLog[j - 1].wroteValue) {
+                  console.error(`[wl:file-lock:diag:anomaly] worker-${i} (pid ${parsed.pid}): iteration ${j} read ${iterLog[j].readValue} < previous wrote ${iterLog[j - 1].wroteValue} (lost increment?)`);
+                }
+              }
+            }
           } else {
             diagReports.push({ pid: null, finalCounter: null, missing: true });
           }
@@ -1280,7 +1329,7 @@ process.exit(0);
         }
       }
 
-      // Emit the diagnostics to stderr so CI captures them in job logs
+      // Emit the compact diagnostics summary to stderr so CI captures it in job logs
       console.error('[wl:file-lock:diagnostics]', JSON.stringify(diagReports));
 
       // The final counter value must equal numWorkers * iterationsPerWorker
