@@ -241,6 +241,10 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
       // O_CREAT | O_EXCL | O_WRONLY — atomic create-if-not-exists
       const fd = fs.openSync(lockPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
       fs.writeSync(fd, lockContent);
+      // fsync to ensure the lock content is visible to other processes
+      // before we release the fd — prevents a concurrent reader from
+      // seeing an empty or partial file.
+      fs.fsyncSync(fd);
       fs.closeSync(fd);
       debugLog(`Lock acquired at ${lockPath} (PID ${process.pid}, attempt ${attempt + 1})`);
       return; // lock acquired
@@ -285,14 +289,32 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
           }
         } else if (fs.existsSync(lockPath)) {
           // Lock file exists but could not be parsed (corrupted, empty,
-          // or missing required fields).  Treat as stale and remove it
-          // so acquisition can be retried.
-          debugLog(`Stale lock detected: corrupted lock file, removing ${lockPath}`);
+          // or missing required fields).
+          //
+          // RACE-SAFETY: A concurrent process may have just created the
+          // file with O_EXCL but not yet finished writing + fsyncing the
+          // lock content.  To avoid deleting a half-written lock file
+          // (which would let both processes think they hold the lock),
+          // only treat the file as corrupted if it is older than a
+          // grace period (2× the retry delay, minimum 500ms).
           try {
-            fs.unlinkSync(lockPath);
-            continue;
+            const stat = fs.statSync(lockPath);
+            const fileAge = Date.now() - stat.mtimeMs;
+            const graceMs = Math.max(currentDelay * 2, 500);
+            if (fileAge > graceMs) {
+              debugLog(`Stale lock detected: corrupted lock file (age ${Math.round(fileAge)}ms > grace ${graceMs}ms), removing ${lockPath}`);
+              try {
+                fs.unlinkSync(lockPath);
+                continue;
+              } catch {
+                // Another process may have removed it; retry
+                continue;
+              }
+            } else {
+              debugLog(`Lock file unparseable but young (age ${Math.round(fileAge)}ms < grace ${graceMs}ms), assuming in-flight write`);
+            }
           } catch {
-            // Another process may have removed it; retry
+            // stat failed (file removed between existsSync and statSync) — retry
             continue;
           }
         }
