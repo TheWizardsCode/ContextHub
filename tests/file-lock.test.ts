@@ -1074,6 +1074,8 @@ const fileLock = await import(path.resolve(process.argv[2]));
 const lockPath = process.argv[3];
 const counterFile = process.argv[4];
 const iterations = parseInt(process.argv[5], 10);
+// Optional diagnostics file path passed as 6th arg
+const diagPath = process.argv[6] || null;
 
 for (let i = 0; i < iterations; i++) {
   fileLock.withFileLock(lockPath, () => {
@@ -1090,6 +1092,18 @@ for (let i = 0; i < iterations; i++) {
     counter++;
     fs.writeFileSync(counterFile, String(counter));
   }, { retryDelay: 50, timeout: 30000 });
+}
+// Emit diagnostics if requested: how many times the callback executed.
+// We approximate callback executions by counting reads of the counter file
+// by reading the final counter value (best-effort) and reporting it.
+try {
+  if (diagPath) {
+    // Write a small diagnostics object so the test harness can inspect it.
+    const finalCounter = parseInt(fs.readFileSync(counterFile, 'utf-8'), 10) || 0;
+    fs.writeFileSync(diagPath, JSON.stringify({ pid: process.pid, finalCounter }), 'utf-8');
+  }
+} catch (e) {
+  // Ignore diagnostics failures - they should not affect test outcome
 }
 
 // Signal success
@@ -1211,9 +1225,11 @@ process.exit(0);
       const workerPromises: Promise<{ index: number; exitCode: number | null; stderr: string }>[] = [];
 
       for (let i = 0; i < numWorkers; i++) {
+        // Create per-worker diagnostics file path so CI can report per-worker callback counts
+        const diagFile = path.join(tempDir, `worker-${i}.diag.json`);
         const args = useTs
-          ? ['--import', 'tsx', workerScript, modulePath, sharedLockPath, counterFile, String(iterationsPerWorker)]
-          : [workerScript, modulePath, sharedLockPath, counterFile, String(iterationsPerWorker)];
+          ? ['--import', 'tsx', workerScript, modulePath, sharedLockPath, counterFile, String(iterationsPerWorker), diagFile]
+          : [workerScript, modulePath, sharedLockPath, counterFile, String(iterationsPerWorker), diagFile];
 
         const promise = new Promise<{ index: number; exitCode: number | null; stderr: string }>((resolve) => {
           const child = childProcess.spawn(process.execPath, args, {
@@ -1247,6 +1263,25 @@ process.exit(0);
         }
         expect(result.exitCode).toBe(0);
       }
+
+      // Gather and log per-worker diagnostics for CI visibility
+      const diagReports: any[] = [];
+      for (let i = 0; i < numWorkers; i++) {
+        try {
+          const diagFile = path.join(tempDir, `worker-${i}.diag.json`);
+          if (fs.existsSync(diagFile)) {
+            const content = fs.readFileSync(diagFile, 'utf-8');
+            diagReports.push(JSON.parse(content));
+          } else {
+            diagReports.push({ pid: null, finalCounter: null, missing: true });
+          }
+        } catch (e) {
+          diagReports.push({ pid: null, finalCounter: null, error: String(e) });
+        }
+      }
+
+      // Emit the diagnostics to stderr so CI captures them in job logs
+      console.error('[wl:file-lock:diagnostics]', JSON.stringify(diagReports));
 
       // The final counter value must equal numWorkers * iterationsPerWorker
       const finalCounter = parseInt(fs.readFileSync(counterFile, 'utf-8'), 10);
