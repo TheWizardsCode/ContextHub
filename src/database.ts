@@ -1790,6 +1790,9 @@ export class WorklogDatabase {
       this.store.saveWorkItem(updated);
       this.exportToJsonl();
       this.triggerAutoSync();
+      if (process.env.WL_DEBUG) {
+        process.stderr.write(`[wl:dep] re-blocked ${itemId} (active blockers remain)\n`);
+      }
       return true;
     }
 
@@ -1805,6 +1808,9 @@ export class WorklogDatabase {
     this.store.saveWorkItem(updated);
     this.exportToJsonl();
     this.triggerAutoSync();
+    if (process.env.WL_DEBUG) {
+      process.stderr.write(`[wl:dep] unblocked ${itemId} (no active blockers remain)\n`);
+    }
     return true;
   }
 
@@ -1815,6 +1821,9 @@ export class WorklogDatabase {
       if (this.reconcileDependentStatus(dependent.id)) {
         updated += 1;
       }
+    }
+    if (process.env.WL_DEBUG && updated > 0) {
+      process.stderr.write(`[wl:dep] reconciled ${updated} dependent(s) for target ${targetId}\n`);
     }
     return updated;
   }

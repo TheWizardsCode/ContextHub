@@ -481,6 +481,182 @@ describe('WorklogDatabase', () => {
       db.update(blocker.id, { stage: 'done' });
       expect(db.get(blocked.id)?.status).toBe('open');
     });
+
+    it('should unblock dependent when blocker is closed via status completed', () => {
+      const blocker = db.create({ title: 'Blocker', status: 'open' });
+      const blocked = db.create({ title: 'Blocked', status: 'blocked' });
+      db.addDependencyEdge(blocked.id, blocker.id);
+
+      db.update(blocker.id, { status: 'completed' });
+      expect(db.get(blocked.id)?.status).toBe('open');
+    });
+
+    it('should keep dependent blocked when one of multiple blockers is closed', () => {
+      const blockerA = db.create({ title: 'Blocker A', status: 'open' });
+      const blockerB = db.create({ title: 'Blocker B', status: 'open' });
+      const blocked = db.create({ title: 'Blocked', status: 'blocked' });
+      db.addDependencyEdge(blocked.id, blockerA.id);
+      db.addDependencyEdge(blocked.id, blockerB.id);
+
+      db.update(blockerA.id, { status: 'completed' });
+      expect(db.get(blocked.id)?.status).toBe('blocked');
+    });
+
+    it('should unblock dependent when all blockers are closed', () => {
+      const blockerA = db.create({ title: 'Blocker A', status: 'open' });
+      const blockerB = db.create({ title: 'Blocker B', status: 'open' });
+      const blocked = db.create({ title: 'Blocked', status: 'blocked' });
+      db.addDependencyEdge(blocked.id, blockerA.id);
+      db.addDependencyEdge(blocked.id, blockerB.id);
+
+      db.update(blockerA.id, { status: 'completed' });
+      expect(db.get(blocked.id)?.status).toBe('blocked');
+
+      db.update(blockerB.id, { status: 'completed' });
+      expect(db.get(blocked.id)?.status).toBe('open');
+    });
+
+    it('should not change completed dependent when blocker is closed', () => {
+      const blocker = db.create({ title: 'Blocker', status: 'open' });
+      const completed = db.create({ title: 'Completed Dependent', status: 'completed' });
+      db.addDependencyEdge(completed.id, blocker.id);
+
+      db.update(blocker.id, { status: 'completed' });
+      expect(db.get(completed.id)?.status).toBe('completed');
+    });
+
+    it('should not change deleted dependent when blocker is closed', () => {
+      const blocker = db.create({ title: 'Blocker', status: 'open' });
+      const deleted = db.create({ title: 'Deleted Dependent', status: 'open' });
+      db.addDependencyEdge(deleted.id, blocker.id);
+      db.delete(deleted.id);
+      expect(db.get(deleted.id)?.status).toBe('deleted');
+
+      db.update(blocker.id, { status: 'completed' });
+      expect(db.get(deleted.id)?.status).toBe('deleted');
+    });
+
+    it('should be idempotent: closing an already-completed blocker is a no-op', () => {
+      const blocker = db.create({ title: 'Blocker', status: 'open' });
+      const blocked = db.create({ title: 'Blocked', status: 'blocked' });
+      db.addDependencyEdge(blocked.id, blocker.id);
+
+      db.update(blocker.id, { status: 'completed' });
+      expect(db.get(blocked.id)?.status).toBe('open');
+
+      // Closing again should not change anything
+      db.update(blocker.id, { status: 'completed' });
+      expect(db.get(blocked.id)?.status).toBe('open');
+    });
+
+    it('should handle chain dependencies: A blocks B blocks C', () => {
+      const a = db.create({ title: 'A (blocker of B)', status: 'open' });
+      const b = db.create({ title: 'B (blocked by A, blocker of C)', status: 'blocked' });
+      const c = db.create({ title: 'C (blocked by B)', status: 'blocked' });
+      db.addDependencyEdge(b.id, a.id); // B depends on A
+      db.addDependencyEdge(c.id, b.id); // C depends on B
+
+      // Close A: B should unblock, but C should stay blocked (B is now open, not completed)
+      db.update(a.id, { status: 'completed' });
+      expect(db.get(b.id)?.status).toBe('open');
+      expect(db.get(c.id)?.status).toBe('blocked');
+
+      // Close B: C should unblock
+      db.update(b.id, { status: 'completed' });
+      expect(db.get(c.id)?.status).toBe('open');
+    });
+
+    it('should unblock dependent when blocker is deleted', () => {
+      const blocker = db.create({ title: 'Blocker', status: 'open' });
+      const blocked = db.create({ title: 'Blocked', status: 'blocked' });
+      db.addDependencyEdge(blocked.id, blocker.id);
+
+      db.delete(blocker.id);
+      expect(db.get(blocked.id)?.status).toBe('open');
+    });
+
+    it('should re-block dependent when closed blocker is reopened', () => {
+      const blocker = db.create({ title: 'Blocker', status: 'open' });
+      const blocked = db.create({ title: 'Blocked', status: 'blocked' });
+      db.addDependencyEdge(blocked.id, blocker.id);
+
+      db.update(blocker.id, { status: 'completed' });
+      expect(db.get(blocked.id)?.status).toBe('open');
+
+      db.update(blocker.id, { status: 'in-progress', stage: 'in_progress' });
+      expect(db.get(blocked.id)?.status).toBe('blocked');
+    });
+
+    it('should unblock multiple dependents when their shared blocker is closed', () => {
+      const blocker = db.create({ title: 'Shared Blocker', status: 'open' });
+      const dependentA = db.create({ title: 'Dependent A', status: 'blocked' });
+      const dependentB = db.create({ title: 'Dependent B', status: 'blocked' });
+      db.addDependencyEdge(dependentA.id, blocker.id);
+      db.addDependencyEdge(dependentB.id, blocker.id);
+
+      db.update(blocker.id, { status: 'completed' });
+      expect(db.get(dependentA.id)?.status).toBe('open');
+      expect(db.get(dependentB.id)?.status).toBe('open');
+    });
+
+    it('should emit debug log to stderr when WL_DEBUG is set and dependent is unblocked', () => {
+      const blocker = db.create({ title: 'Debug Log Blocker', status: 'open' });
+      const dependent = db.create({ title: 'Debug Log Dependent', status: 'blocked' });
+      db.addDependencyEdge(dependent.id, blocker.id);
+
+      const stderrChunks: Buffer[] = [];
+      const originalWrite = process.stderr.write;
+      process.stderr.write = ((chunk: any) => {
+        stderrChunks.push(Buffer.from(chunk));
+        return true;
+      }) as any;
+
+      const originalDebug = process.env.WL_DEBUG;
+      process.env.WL_DEBUG = '1';
+
+      try {
+        db.update(blocker.id, { status: 'completed' });
+        const stderrOutput = Buffer.concat(stderrChunks).toString();
+        expect(stderrOutput).toContain(`[wl:dep] unblocked ${dependent.id}`);
+        expect(stderrOutput).toContain(`[wl:dep] reconciled 1 dependent(s) for target ${blocker.id}`);
+      } finally {
+        process.stderr.write = originalWrite;
+        if (originalDebug === undefined) {
+          delete process.env.WL_DEBUG;
+        } else {
+          process.env.WL_DEBUG = originalDebug;
+        }
+      }
+    });
+
+    it('should not emit debug log when WL_DEBUG is not set during reconciliation', () => {
+      const blocker = db.create({ title: 'No Debug Blocker', status: 'open' });
+      const dependent = db.create({ title: 'No Debug Dependent', status: 'blocked' });
+      db.addDependencyEdge(dependent.id, blocker.id);
+
+      const stderrChunks: Buffer[] = [];
+      const originalWrite = process.stderr.write;
+      process.stderr.write = ((chunk: any) => {
+        stderrChunks.push(Buffer.from(chunk));
+        return true;
+      }) as any;
+
+      const originalDebug = process.env.WL_DEBUG;
+      delete process.env.WL_DEBUG;
+
+      try {
+        db.update(blocker.id, { status: 'completed' });
+        const stderrOutput = Buffer.concat(stderrChunks).toString();
+        expect(stderrOutput).not.toContain('[wl:dep]');
+      } finally {
+        process.stderr.write = originalWrite;
+        if (originalDebug === undefined) {
+          delete process.env.WL_DEBUG;
+        } else {
+          process.env.WL_DEBUG = originalDebug;
+        }
+      }
+    });
   });
 
   describe('import and export', () => {
