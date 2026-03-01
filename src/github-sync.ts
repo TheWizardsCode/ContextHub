@@ -77,7 +77,7 @@ export interface GithubSyncTiming {
 }
 
 export interface GithubProgress {
-  phase: 'push' | 'import' | 'close-check' | 'hierarchy';
+  phase: 'push' | 'import' | 'close-check' | 'hierarchy' | 'comments' | 'saving';
   current: number;
   total: number;
 }
@@ -1156,7 +1156,12 @@ export async function importIssuesToWorkItems(
   }
 
   // Fetch comments for every issue that was processed during this import
-  for (const issueNumber of seenIssueNumbers) {
+  const seenIssueArray = [...seenIssueNumbers];
+  const seenIssueTotal = seenIssueArray.length;
+  let seenIssueIndex = 0;
+  for (const issueNumber of seenIssueArray) {
+    seenIssueIndex++;
+    onProgress?.({ phase: 'comments', current: seenIssueIndex, total: seenIssueTotal });
     const workItemId = itemIdByIssueNumber.get(issueNumber);
     if (!workItemId) continue;
 
