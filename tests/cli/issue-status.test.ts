@@ -347,6 +347,25 @@ describe('CLI Issue Status Tests', () => {
       expect(result.results).toHaveLength(1);
       expect(result.results[0].workItem).toBeTruthy();
     });
+
+    it('should preserve stale sortIndex order with --no-re-sort flag', async () => {
+      // Create low-priority item first (gets sortIndex 100 via createWithNextSortIndex)
+      await execAsync(`tsx ${cliPath} create -t "Low priority first" -s open -p low`);
+      // Create high-priority item second (gets sortIndex 200 via createWithNextSortIndex)
+      await execAsync(`tsx ${cliPath} create -t "High priority second" -s open -p high`);
+
+      // With --no-re-sort FIRST: the original creation order (sortIndex) is preserved,
+      // so the low-priority item with sortIndex=100 should be selected over
+      // the high-priority item with sortIndex=200
+      const { stdout: withoutReSort } = await execAsync(`tsx ${cliPath} --json next --no-re-sort`);
+      const resultWithoutReSort = JSON.parse(withoutReSort);
+      expect(resultWithoutReSort.workItem.title).toBe('Low priority first');
+
+      // With default behavior (auto re-sort), high-priority item wins
+      const { stdout: withReSort } = await execAsync(`tsx ${cliPath} --json next`);
+      const resultWithReSort = JSON.parse(withReSort);
+      expect(resultWithReSort.workItem.title).toBe('High priority second');
+    });
   });
 
   describe('in-progress command', () => {
