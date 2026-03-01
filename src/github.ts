@@ -916,6 +916,15 @@ export function issueToWorkItemFields(
     tags.push(label);
   }
 
+  // GitHub issue state is authoritative for the open/completed distinction.
+  // A stale wl:status label must not override the issue state — e.g. when an
+  // issue is reopened but the wl:status:completed label was not removed.
+  if (issue.state === 'closed' && status !== 'completed') {
+    status = 'completed';
+  } else if (issue.state !== 'closed' && status === 'completed') {
+    status = 'open';
+  }
+
   return { status, priority, tags: Array.from(new Set(tags)), risk, effort, stage, issueType };
 }
 

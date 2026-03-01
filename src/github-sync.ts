@@ -970,16 +970,27 @@ export async function importIssuesToWorkItems(
     const childIssueNumbers = hierarchy?.childIssueNumbers ?? extractChildIssueNumbers(issue.body);
       const parentId = extractParentId(issue.body);
       const childIds = extractChildIds(issue.body);
-      if (issue.state !== 'closed') {
+      const isClosed = issue.state === 'closed';
+
+      // Skip open issues where the local item is also not completed (no state change)
+      if (!isClosed && item.status !== 'completed') {
         checked += 1;
         continue;
       }
 
       const existingUpdatedAt = item.githubIssueUpdatedAt ? new Date(item.githubIssueUpdatedAt).getTime() : null;
       const issueUpdatedAt = new Date(issue.updatedAt).getTime();
-      if (existingUpdatedAt !== null && existingUpdatedAt >= issueUpdatedAt && item.status === 'completed') {
-        checked += 1;
-        continue;
+      // Skip when the issue hasn't changed and the local status already matches
+      // the expected state (completed for closed issues, non-completed for open)
+      if (existingUpdatedAt !== null && existingUpdatedAt >= issueUpdatedAt) {
+        if (isClosed && item.status === 'completed') {
+          checked += 1;
+          continue;
+        }
+        if (!isClosed && item.status !== 'completed') {
+          checked += 1;
+          continue;
+        }
       }
 
       const labelFields = issueToWorkItemFields(issue, config.labelPrefix);
@@ -990,7 +1001,7 @@ export async function importIssuesToWorkItems(
           ...item,
           title: issue.title || item.title,
           description: issue.body ? stripWorklogMarkers(issue.body) : item.description,
-          status: 'completed',
+          status: isClosed ? 'completed' : (labelFields.status || item.status),
           priority: labelFields.priority || item.priority,
           tags,
           risk: (labelFields.risk || item.risk) as WorkItemRiskLevel | '',

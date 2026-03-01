@@ -17,12 +17,13 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { WorkItem, WorkItemStatus, WorkItemPriority } from '../src/types.js';
-import type { LabelEvent, GithubConfig } from '../src/github.js';
+import type { LabelEvent, GithubConfig, GithubIssueRecord } from '../src/github.js';
 
 // Hoist mock function references so vi.mock factory can access them
-const { mockFetchLabelEventsAsync, mockListGithubIssues } = vi.hoisted(() => ({
+const { mockFetchLabelEventsAsync, mockListGithubIssues, mockGetGithubIssue } = vi.hoisted(() => ({
   mockFetchLabelEventsAsync: vi.fn(),
   mockListGithubIssues: vi.fn(),
+  mockGetGithubIssue: vi.fn() as ReturnType<typeof vi.fn<(...args: any[]) => any>>,
 }));
 
 vi.mock('../src/github.js', async (importOriginal) => {
@@ -31,7 +32,7 @@ vi.mock('../src/github.js', async (importOriginal) => {
     ...actual,
     // Override only the functions that make real API calls
     listGithubIssues: mockListGithubIssues,
-    getGithubIssue: vi.fn(() => { throw new Error('not found'); }),
+    getGithubIssue: mockGetGithubIssue,
     getIssueHierarchy: vi.fn(() => ({ parentIssueNumber: null, childIssueNumbers: [] })),
     getIssueHierarchyAsync: vi.fn(async () => ({ parentIssueNumber: null, childIssueNumbers: [] })),
     createGithubIssue: vi.fn(),
@@ -66,6 +67,7 @@ vi.mock('../src/github-metrics.js', () => ({
 }));
 
 import { importIssuesToWorkItems, FieldChange } from '../src/github-sync.js';
+import { issueToWorkItemFields } from '../src/github.js';
 
 const T_BASE = '2026-01-01T00:00:00.000Z';
 const T_LOCAL_UPDATE = '2026-01-10T00:00:00.000Z';
@@ -101,9 +103,9 @@ function makeGithubIssue(overrides: {
   labels?: string[];
   body?: string;
   title?: string;
-  state?: string;
+  state?: 'open' | 'closed';
   updatedAt?: string;
-}) {
+}): GithubIssueRecord {
   return {
     number: overrides.number,
     id: overrides.number * 1000,
@@ -112,9 +114,7 @@ function makeGithubIssue(overrides: {
     state: overrides.state || 'open',
     labels: overrides.labels || [],
     updatedAt: overrides.updatedAt || T_ISSUE_UPDATE,
-    subIssuesSummary: { total: 0 },
-    assignees: [],
-    milestone: null,
+    subIssuesSummary: { total: 0, completed: 0 },
   };
 }
 
@@ -128,6 +128,8 @@ describe('importIssuesToWorkItems label resolution integration', () => {
     vi.clearAllMocks();
     // Default: fetchLabelEventsAsync returns empty (will be overridden per test)
     mockFetchLabelEventsAsync.mockResolvedValue([]);
+    // Default: getGithubIssue throws (Phase 2 tests will override)
+    mockGetGithubIssue.mockImplementation(() => { throw new Error('not found'); });
   });
 
   it('updates local stage to remote when GitHub label event is newer', async () => {
@@ -633,5 +635,231 @@ describe('importIssuesToWorkItems label resolution integration', () => {
     expect(merged).toBeDefined();
     expect(merged!.status).toBe('open');
     expect(merged!.stage).toBe('idea');
+  });
+
+  describe('issueToWorkItemFields: GitHub issue state is authoritative over stale labels', () => {
+    it('returns status=open when issue is open but has stale wl:status:completed label', () => {
+      // Scenario: someone reopened the GitHub issue but forgot to remove the completed label
+      const issue = makeGithubIssue({
+        number: 1,
+        labels: ['wl:status:completed', 'wl:stage:done'],
+        state: 'open',
+      });
+
+      const fields = issueToWorkItemFields(issue, 'wl:');
+      // GitHub issue state (open) must override the stale label
+      expect(fields.status).toBe('open');
+      // stage is unrelated to issue state — label value should be preserved
+      expect(fields.stage).toBe('done');
+    });
+
+    it('returns status=completed when issue is closed but has stale wl:status:open label', () => {
+      // Scenario: issue was closed on GitHub but the open label was never removed
+      const issue = makeGithubIssue({
+        number: 1,
+        labels: ['wl:status:open', 'wl:stage:review'],
+        state: 'closed',
+      });
+
+      const fields = issueToWorkItemFields(issue, 'wl:');
+      // GitHub issue state (closed) must override the stale label
+      expect(fields.status).toBe('completed');
+      // stage is unrelated to issue state — label value should be preserved
+      expect(fields.stage).toBe('review');
+    });
+
+    it('returns status=open when issue is open with no status label at all', () => {
+      const issue = makeGithubIssue({
+        number: 1,
+        labels: ['wl:stage:idea'],
+        state: 'open',
+      });
+
+      const fields = issueToWorkItemFields(issue, 'wl:');
+      expect(fields.status).toBe('open');
+    });
+
+    it('returns status=completed when issue is closed with no status label at all', () => {
+      const issue = makeGithubIssue({
+        number: 1,
+        labels: ['wl:stage:idea'],
+        state: 'closed',
+      });
+
+      const fields = issueToWorkItemFields(issue, 'wl:');
+      expect(fields.status).toBe('completed');
+    });
+  });
+
+  describe('Phase 2 close-check: reopened issues propagate status changes', () => {
+    it('updates completed local item to open when GitHub issue is reopened', async () => {
+      // Scenario: local item is completed, GitHub issue was reopened.
+      // Phase 1 does NOT return this issue (it was not recently changed via listGithubIssues).
+      // Phase 2 fetches it via getGithubIssue and should detect the state mismatch.
+      const T_COMPLETED = '2026-01-10T00:00:00.000Z';
+      const T_REOPEN = '2026-01-12T00:00:00.000Z';
+
+      const localItem = makeLocalItem({
+        id: 'WL-001',
+        status: 'completed' as WorkItemStatus,
+        stage: 'in_review',
+        updatedAt: T_COMPLETED,
+        githubIssueNumber: 42,
+        githubIssueUpdatedAt: T_COMPLETED,
+      } as any);
+
+      // Phase 1: no issues returned (this issue was not in the "since" window)
+      mockListGithubIssues.mockReturnValue([]);
+
+      // Phase 2: getGithubIssue returns the reopened issue
+      mockGetGithubIssue.mockReturnValue(
+        makeGithubIssue({
+          number: 42,
+          labels: ['wl:status:open', 'wl:stage:idea'],
+          state: 'open',
+          updatedAt: T_REOPEN,
+        })
+      );
+
+      // Label events show the status/stage labels were added at reopen time
+      mockFetchLabelEventsAsync.mockResolvedValue([
+        { label: 'wl:status:open', action: 'labeled', createdAt: T_REOPEN },
+        { label: 'wl:stage:idea', action: 'labeled', createdAt: T_REOPEN },
+      ] as LabelEvent[]);
+
+      const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+        generateId: () => 'WL-GEN',
+      });
+
+      const merged = result.mergedItems.find(item => item.id === 'WL-001');
+      expect(merged).toBeDefined();
+      expect(merged!.status).toBe('open');
+      expect(merged!.stage).toBe('idea');
+    });
+
+    it('updates completed local item to open even when stale wl:status:completed label exists', async () => {
+      // Scenario: local item completed, GitHub issue reopened, but
+      // wl:status:completed label was NOT removed. The issue state (open)
+      // must be authoritative — our Fix A in issueToWorkItemFields handles this.
+      const T_COMPLETED = '2026-01-10T00:00:00.000Z';
+      const T_REOPEN = '2026-01-12T00:00:00.000Z';
+
+      const localItem = makeLocalItem({
+        id: 'WL-001',
+        status: 'completed' as WorkItemStatus,
+        stage: 'in_review',
+        updatedAt: T_COMPLETED,
+        githubIssueNumber: 42,
+        githubIssueUpdatedAt: T_COMPLETED,
+      } as any);
+
+      // Phase 1: empty
+      mockListGithubIssues.mockReturnValue([]);
+
+      // Phase 2: issue is open but has STALE wl:status:completed label
+      mockGetGithubIssue.mockReturnValue(
+        makeGithubIssue({
+          number: 42,
+          labels: ['wl:status:completed', 'wl:stage:in_review'],
+          state: 'open',
+          updatedAt: T_REOPEN,
+        })
+      );
+
+      // No label events (the labels weren't changed — only the issue was reopened)
+      mockFetchLabelEventsAsync.mockResolvedValue([]);
+
+      const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+        generateId: () => 'WL-GEN',
+      });
+
+      const merged = result.mergedItems.find(item => item.id === 'WL-001');
+      expect(merged).toBeDefined();
+      // issueToWorkItemFields overrides stale completed label → status=open
+      expect(merged!.status).toBe('open');
+    });
+
+    it('does not regress: closed GitHub issue still sets local item to completed', async () => {
+      // Ensure the Phase 2 changes did not break the normal close path
+      const T_OPEN = '2026-01-10T00:00:00.000Z';
+      const T_CLOSE = '2026-01-12T00:00:00.000Z';
+
+      const localItem = makeLocalItem({
+        id: 'WL-001',
+        status: 'open' as WorkItemStatus,
+        stage: 'idea',
+        updatedAt: T_OPEN,
+        githubIssueNumber: 42,
+        githubIssueUpdatedAt: T_OPEN,
+      } as any);
+
+      // Phase 1: empty
+      mockListGithubIssues.mockReturnValue([]);
+
+      // Phase 2: issue was closed
+      mockGetGithubIssue.mockReturnValue(
+        makeGithubIssue({
+          number: 42,
+          labels: ['wl:status:completed', 'wl:stage:done'],
+          state: 'closed',
+          updatedAt: T_CLOSE,
+        })
+      );
+
+      mockFetchLabelEventsAsync.mockResolvedValue([
+        { label: 'wl:status:completed', action: 'labeled', createdAt: T_CLOSE },
+        { label: 'wl:stage:done', action: 'labeled', createdAt: T_CLOSE },
+      ] as LabelEvent[]);
+
+      const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+        generateId: () => 'WL-GEN',
+      });
+
+      const merged = result.mergedItems.find(item => item.id === 'WL-001');
+      expect(merged).toBeDefined();
+      expect(merged!.status).toBe('completed');
+      expect(merged!.stage).toBe('done');
+    });
+
+    it('skips Phase 2 processing for open issues where local item is also open', async () => {
+      // When both the GitHub issue and local item are open/non-completed,
+      // Phase 2 should skip processing (no state change to propagate)
+      const T_RECENT = '2026-01-10T00:00:00.000Z';
+
+      const localItem = makeLocalItem({
+        id: 'WL-001',
+        status: 'open' as WorkItemStatus,
+        stage: 'idea',
+        updatedAt: T_RECENT,
+        githubIssueNumber: 42,
+        githubIssueUpdatedAt: T_RECENT,
+      } as any);
+
+      // Phase 1: empty
+      mockListGithubIssues.mockReturnValue([]);
+
+      // Phase 2 fetches the issue, but it's open and local is also open
+      mockGetGithubIssue.mockReturnValue(
+        makeGithubIssue({
+          number: 42,
+          labels: ['wl:stage:idea'],
+          state: 'open',
+          updatedAt: T_RECENT,
+        })
+      );
+
+      const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+        generateId: () => 'WL-GEN',
+      });
+
+      const merged = result.mergedItems.find(item => item.id === 'WL-001');
+      expect(merged).toBeDefined();
+      // Item should remain unchanged — Phase 2 skipped it
+      expect(merged!.status).toBe('open');
+      expect(merged!.stage).toBe('idea');
+
+      // No label events should have been fetched (item was skipped before resolution)
+      expect(mockFetchLabelEventsAsync).not.toHaveBeenCalled();
+    });
   });
 });
