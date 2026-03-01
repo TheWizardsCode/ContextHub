@@ -762,9 +762,12 @@ describe('WorklogDatabase', () => {
       expect(result.reason).toContain('Next open item by sort_index');
     });
 
-    it('should select highest priority child when multiple children exist', () => {
+    it('should select highest priority child when multiple children exist', async () => {
       const parent = db.create({ title: 'Parent', priority: 'high', status: 'in-progress' });
       const lowLeaf = db.create({ title: 'Low leaf', priority: 'low', status: 'open', parentId: parent.id });
+      // Small delay to ensure different timestamps for createdAt tiebreaking
+      const delay = () => new Promise(resolve => setTimeout(resolve, 10));
+      await delay();
       db.create({ title: 'High leaf', priority: 'high', status: 'open', parentId: parent.id });
       
       const result = db.findNextWorkItem();
@@ -955,7 +958,7 @@ describe('WorklogDatabase', () => {
       expect(result.reason).toContain('Blocking issue');
     });
 
-    it('Phase 4: sibling wins over child of lower-priority parent (Example 1)', () => {
+    it('Phase 4: sibling wins over child of lower-priority parent (Example 1)', async () => {
       // A (low, open), B (high, open, child of A), C (medium, open, sibling of A)
       // Grandparent is high priority.
       // With effective priority inheritance:
@@ -963,33 +966,42 @@ describe('WorklogDatabase', () => {
       //   C: own=medium, inherited=high (from grandparent) → effective=high
       // Both tie on effective priority, so createdAt picks A (older).
       // Then we descend into A's children and select B.
+      const delay = () => new Promise(resolve => setTimeout(resolve, 10));
       const grandparent = db.create({ title: 'Grandparent', priority: 'high', status: 'open' });
       const itemA = db.create({ title: 'Item A', priority: 'low', status: 'open', parentId: grandparent.id });
       const itemB = db.create({ title: 'Item B', priority: 'high', status: 'open', parentId: itemA.id });
+      // Small delay to ensure itemC has a later createdAt than itemA
+      await delay();
       db.create({ title: 'Item C', priority: 'medium', status: 'open', parentId: grandparent.id });
 
       const result = db.findNextWorkItem();
       expect(result.workItem?.id).toBe(itemB.id);
     });
 
-    it('Phase 4: child wins when parent priority >= sibling (Example 2)', () => {
+    it('Phase 4: child wins when parent priority >= sibling (Example 2)', async () => {
       // A (medium, open), B (high, open, child of A), C (medium, open, sibling of A)
       // Expected: B wins because A (medium) >= C (medium)
+      const delay = () => new Promise(resolve => setTimeout(resolve, 10));
       const grandparent = db.create({ title: 'Grandparent', priority: 'high', status: 'open' });
       const itemA = db.create({ title: 'Item A', priority: 'medium', status: 'open', parentId: grandparent.id });
       const itemB = db.create({ title: 'Item B', priority: 'high', status: 'open', parentId: itemA.id });
+      // Small delay to ensure itemC has a later createdAt than itemA
+      await delay();
       db.create({ title: 'Item C', priority: 'medium', status: 'open', parentId: grandparent.id });
 
       const result = db.findNextWorkItem();
       expect(result.workItem?.id).toBe(itemB.id);
     });
 
-    it('Phase 4: low-priority child wins when parent priority >= sibling (Example 3)', () => {
+    it('Phase 4: low-priority child wins when parent priority >= sibling (Example 3)', async () => {
       // A (medium, open), B (low, open, child of A), C (medium, open, sibling of A)
       // Expected: B wins because A (medium) >= C (medium), and B is A's child
+      const delay = () => new Promise(resolve => setTimeout(resolve, 10));
       const grandparent = db.create({ title: 'Grandparent', priority: 'high', status: 'open' });
       const itemA = db.create({ title: 'Item A', priority: 'medium', status: 'open', parentId: grandparent.id });
       const itemB = db.create({ title: 'Item B', priority: 'low', status: 'open', parentId: itemA.id });
+      // Small delay to ensure itemC has a later createdAt than itemA
+      await delay();
       db.create({ title: 'Item C', priority: 'medium', status: 'open', parentId: grandparent.id });
 
       const result = db.findNextWorkItem();
@@ -1006,9 +1018,12 @@ describe('WorklogDatabase', () => {
       expect(result.workItem?.id).toBe(highItem.id);
     });
 
-    it('Phase 4: top-level item with children descends to best child', () => {
+    it('Phase 4: top-level item with children descends to best child', async () => {
       const parent = db.create({ title: 'Parent', priority: 'high', status: 'open' });
       const bestChild = db.create({ title: 'Best child', priority: 'high', status: 'open', parentId: parent.id });
+      // Small delay to ensure bestChild has an earlier createdAt than otherChild
+      const delay = () => new Promise(resolve => setTimeout(resolve, 10));
+      await delay();
       db.create({ title: 'Other child', priority: 'low', status: 'open', parentId: parent.id });
 
       const result = db.findNextWorkItem();
