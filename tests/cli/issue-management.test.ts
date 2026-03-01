@@ -483,6 +483,96 @@ describe('CLI Issue Management Tests', () => {
       expect(JSON.parse(blockedShowStdout).workItem.status).toBe('blocked');
     });
 
+    it('should keep dependent blocked when only one of multiple blockers is closed', async () => {
+      const { stdout: blockedStdout } = await execAsync(`tsx ${cliPath} --json create -t "Blocked"`);
+      const { stdout: blockerAStdout } = await execAsync(`tsx ${cliPath} --json create -t "BlockerA"`);
+      const { stdout: blockerBStdout } = await execAsync(`tsx ${cliPath} --json create -t "BlockerB"`);
+      const blockedId = JSON.parse(blockedStdout).workItem.id;
+      const blockerAId = JSON.parse(blockerAStdout).workItem.id;
+      const blockerBId = JSON.parse(blockerBStdout).workItem.id;
+
+      await execAsync(`tsx ${cliPath} --json dep add ${blockedId} ${blockerAId}`);
+      await execAsync(`tsx ${cliPath} --json dep add ${blockedId} ${blockerBId}`);
+      const { stdout: blockedShowStdout } = await execAsync(`tsx ${cliPath} --json show ${blockedId}`);
+      expect(JSON.parse(blockedShowStdout).workItem.status).toBe('blocked');
+
+      await execAsync(`tsx ${cliPath} --json close ${blockerAId}`);
+      const { stdout: stillBlockedStdout } = await execAsync(`tsx ${cliPath} --json show ${blockedId}`);
+      expect(JSON.parse(stillBlockedStdout).workItem.status).toBe('blocked');
+    });
+
+    it('should unblock dependent when all blockers are closed', async () => {
+      const { stdout: blockedStdout } = await execAsync(`tsx ${cliPath} --json create -t "Blocked"`);
+      const { stdout: blockerAStdout } = await execAsync(`tsx ${cliPath} --json create -t "BlockerA"`);
+      const { stdout: blockerBStdout } = await execAsync(`tsx ${cliPath} --json create -t "BlockerB"`);
+      const blockedId = JSON.parse(blockedStdout).workItem.id;
+      const blockerAId = JSON.parse(blockerAStdout).workItem.id;
+      const blockerBId = JSON.parse(blockerBStdout).workItem.id;
+
+      await execAsync(`tsx ${cliPath} --json dep add ${blockedId} ${blockerAId}`);
+      await execAsync(`tsx ${cliPath} --json dep add ${blockedId} ${blockerBId}`);
+
+      await execAsync(`tsx ${cliPath} --json close ${blockerAId}`);
+      await execAsync(`tsx ${cliPath} --json close ${blockerBId}`);
+      const { stdout: unblockedStdout } = await execAsync(`tsx ${cliPath} --json show ${blockedId}`);
+      expect(JSON.parse(unblockedStdout).workItem.status).toBe('open');
+    });
+
+    it('should handle chain dependencies: close A unblocks B but C stays blocked', async () => {
+      const { stdout: aStdout } = await execAsync(`tsx ${cliPath} --json create -t "A"`);
+      const { stdout: bStdout } = await execAsync(`tsx ${cliPath} --json create -t "B"`);
+      const { stdout: cStdout } = await execAsync(`tsx ${cliPath} --json create -t "C"`);
+      const aId = JSON.parse(aStdout).workItem.id;
+      const bId = JSON.parse(bStdout).workItem.id;
+      const cId = JSON.parse(cStdout).workItem.id;
+
+      // B depends on A, C depends on B
+      await execAsync(`tsx ${cliPath} --json dep add ${bId} ${aId}`);
+      await execAsync(`tsx ${cliPath} --json dep add ${cId} ${bId}`);
+
+      // Close A: B should unblock, C should stay blocked (B is open, not completed)
+      await execAsync(`tsx ${cliPath} --json close ${aId}`);
+      const { stdout: bShowStdout } = await execAsync(`tsx ${cliPath} --json show ${bId}`);
+      expect(JSON.parse(bShowStdout).workItem.status).toBe('open');
+      const { stdout: cShowStdout } = await execAsync(`tsx ${cliPath} --json show ${cId}`);
+      expect(JSON.parse(cShowStdout).workItem.status).toBe('blocked');
+
+      // Close B: C should unblock
+      await execAsync(`tsx ${cliPath} --json close ${bId}`);
+      const { stdout: cUnblockedStdout } = await execAsync(`tsx ${cliPath} --json show ${cId}`);
+      expect(JSON.parse(cUnblockedStdout).workItem.status).toBe('open');
+    });
+
+    it('should unblock multiple dependents when shared blocker is closed', async () => {
+      const { stdout: blockerStdout } = await execAsync(`tsx ${cliPath} --json create -t "SharedBlocker"`);
+      const { stdout: depAStdout } = await execAsync(`tsx ${cliPath} --json create -t "DepA"`);
+      const { stdout: depBStdout } = await execAsync(`tsx ${cliPath} --json create -t "DepB"`);
+      const blockerId = JSON.parse(blockerStdout).workItem.id;
+      const depAId = JSON.parse(depAStdout).workItem.id;
+      const depBId = JSON.parse(depBStdout).workItem.id;
+
+      await execAsync(`tsx ${cliPath} --json dep add ${depAId} ${blockerId}`);
+      await execAsync(`tsx ${cliPath} --json dep add ${depBId} ${blockerId}`);
+
+      await execAsync(`tsx ${cliPath} --json close ${blockerId}`);
+      const { stdout: depAShowStdout } = await execAsync(`tsx ${cliPath} --json show ${depAId}`);
+      const { stdout: depBShowStdout } = await execAsync(`tsx ${cliPath} --json show ${depBId}`);
+      expect(JSON.parse(depAShowStdout).workItem.status).toBe('open');
+      expect(JSON.parse(depBShowStdout).workItem.status).toBe('open');
+    });
+
+    it('should close with reason and still unblock dependents', async () => {
+      const { stdout: blockedStdout } = await execAsync(`tsx ${cliPath} --json create -t "Blocked"`);
+      const { stdout: blockerStdout } = await execAsync(`tsx ${cliPath} --json create -t "Blocker"`);
+      const blockedId = JSON.parse(blockedStdout).workItem.id;
+      const blockerId = JSON.parse(blockerStdout).workItem.id;
+
+      await execAsync(`tsx ${cliPath} --json dep add ${blockedId} ${blockerId}`);
+      await execAsync(`tsx ${cliPath} --json close ${blockerId} -r "Done with implementation"`);
+      const { stdout: unblockedStdout } = await execAsync(`tsx ${cliPath} --json show ${blockedId}`);
+      expect(JSON.parse(unblockedStdout).workItem.status).toBe('open');
+    });
+
     it('should fail when adding an existing dependency', async () => {
       const { stdout: fromStdout } = await execAsync(`tsx ${cliPath} --json create -t "From"`);
       const { stdout: toStdout } = await execAsync(`tsx ${cliPath} --json create -t "To"`);
