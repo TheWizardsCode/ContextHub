@@ -65,7 +65,11 @@ export default function register(ctx: PluginContext): void {
             ? 'Import'
             : progress.phase === 'hierarchy'
               ? 'Hierarchy'
-              : 'Close check';
+              : progress.phase === 'comments'
+                ? 'Comments'
+                : progress.phase === 'saving'
+                  ? 'Saving'
+                  : 'Close check';
         const message = `${label}: ${progress.current}/${progress.total}`;
         if (message === lastProgress) {
           return;
@@ -293,7 +297,11 @@ export default function register(ctx: PluginContext): void {
             ? 'Import'
             : progress.phase === 'hierarchy'
               ? 'Hierarchy'
-              : 'Close check';
+              : progress.phase === 'comments'
+                ? 'Comments'
+                : progress.phase === 'saving'
+                  ? 'Saving'
+                  : 'Close check';
         const message = `${label}: ${progress.current}/${progress.total}`;
         if (message === lastProgress) {
           return;
@@ -326,11 +334,13 @@ export default function register(ctx: PluginContext): void {
         });
 
         if (mergedItems.length > 0) {
+          renderProgress({ phase: 'saving', current: 1, total: 2 });
           db.import(mergedItems);
         }
 
         // Persist imported GitHub comments
         if (importedComments.length > 0) {
+          renderProgress({ phase: 'saving', current: 2, total: 2 });
           const existingComments = db.getAllComments();
           // Merge: keep existing, add new ones that don't clash by githubCommentId
           const existingGhIds = new Set(
