@@ -1843,5 +1843,54 @@ describe('WorklogDatabase', () => {
 
       expect(result.workItem?.id).toBe(high.id);
     });
+
+    it('should preserve stale sortIndex order when reSort is NOT called (--no-re-sort behavior)', () => {
+      // Create items where sortIndex contradicts priority:
+      // Medium priority has low sortIndex (top position), high priority has high sortIndex (buried)
+      const medium = db.create({ title: 'Medium task', priority: 'medium', sortIndex: 100 });
+      db.create({ title: 'High priority task', priority: 'high', sortIndex: 5000 });
+
+      // Without calling reSort(), findNextWorkItem should use the stale sortIndex order.
+      // The medium-priority item has sortIndex=100 which is lower than 5000,
+      // so it should be selected first (sortIndex ascending = higher priority position).
+      const result = db.findNextWorkItem();
+
+      expect(result.workItem?.id).toBe(medium.id);
+    });
+
+    it('should change ordering based on recency policy (prefer vs avoid)', () => {
+      // Create two items with the same priority so recency is the tie-breaker
+      const itemA = db.create({ title: 'Task A - recently updated', priority: 'medium', sortIndex: 200 });
+      const itemB = db.create({ title: 'Task B - old update', priority: 'medium', sortIndex: 100 });
+
+      const store = (db as any).store;
+      const now = new Date();
+      const fiveDaysAgo = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
+
+      // Manipulate updatedAt directly via the store:
+      // Task A: updated just now (very recent — within both 48h prefer and 72h avoid windows)
+      // Task B: updated 5 days ago (stale — beyond both windows, so no recency effect)
+      store.saveWorkItem({ ...db.get(itemA.id)!, updatedAt: now.toISOString() });
+      store.saveWorkItem({ ...db.get(itemB.id)!, updatedAt: fiveDaysAgo.toISOString() });
+
+      // With 'prefer' policy: recently-updated Task A gets a recency BOOST,
+      // so it should have a better (lower) sortIndex after re-sort
+      db.reSort('prefer');
+      const afterPreferA = db.get(itemA.id)!;
+      const afterPreferB = db.get(itemB.id)!;
+      expect(afterPreferA.sortIndex).toBeLessThan(afterPreferB.sortIndex);
+
+      // Re-apply updatedAt manipulation because reSort() overwrites updatedAt
+      // for any item whose sortIndex changed
+      store.saveWorkItem({ ...db.get(itemA.id)!, updatedAt: now.toISOString() });
+      store.saveWorkItem({ ...db.get(itemB.id)!, updatedAt: fiveDaysAgo.toISOString() });
+
+      // With 'avoid' policy: recently-updated Task A gets a recency PENALTY,
+      // so it should have a worse (higher) sortIndex after re-sort
+      db.reSort('avoid');
+      const afterAvoidA = db.get(itemA.id)!;
+      const afterAvoidB = db.get(itemB.id)!;
+      expect(afterAvoidA.sortIndex).toBeGreaterThan(afterAvoidB.sortIndex);
+    });
   });
 });
