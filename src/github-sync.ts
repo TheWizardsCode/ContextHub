@@ -787,6 +787,13 @@ export async function importIssuesToWorkItems(
     issueUpdatedAt: string;
   }> = [];
 
+  // Track the authoritative GitHub issue state (open/closed) per work item ID.
+  // GitHub issue state is NOT a label-derived field — it is authoritative and
+  // must survive the timestamp-based mergeWorkItems resolution. This map is
+  // populated during Phase 1 and Phase 2, then used after merge to enforce
+  // the correct status regardless of which side "won" the timestamp comparison.
+  const issueClosedById = new Map<string, boolean>();
+
   const shouldReplaceRemote = (existingUpdatedAt: string | null | undefined, nextUpdatedAt: string): boolean => {
     if (!existingUpdatedAt) {
       return true;
@@ -907,6 +914,7 @@ export async function importIssuesToWorkItems(
     }
     if (shouldReplace) {
       remoteItemsById.set(remoteItem.id, remoteItem);
+      issueClosedById.set(remoteItem.id, isClosed);
       issueMetaById.set(remoteItem.id, {
         number: issue.number,
         id: issue.id,
@@ -1010,6 +1018,7 @@ export async function importIssuesToWorkItems(
           issueType: labelFields.issueType || item.issueType,
           updatedAt: issue.updatedAt,
         });
+      issueClosedById.set(item.id, isClosed);
       if (parentId) {
         parentHints.set(item.id, parentId);
       }
@@ -1102,6 +1111,29 @@ export async function importIssuesToWorkItems(
       const item = mergedById.get(change.workItemId);
       if (item) {
         (item as any)[change.field] = change.newValue;
+      }
+    }
+  }
+
+  // Enforce authoritative GitHub issue state (open/closed) on the merged items.
+  // Unlike label-derived fields (priority, stage, etc.) which are subject to
+  // event-timestamp resolution, the issue state (open vs closed) is an
+  // authoritative signal from GitHub that must always propagate regardless of
+  // which side "won" the timestamp-based merge. Without this, a reopened issue
+  // whose local updatedAt is newer than the issue updatedAt would remain
+  // 'completed' after merge because mergeWorkItems prefers the newer local value.
+  if (issueClosedById.size > 0) {
+    const mergedById = new Map(mergedItems.map(item => [item.id, item]));
+    for (const [itemId, isClosed] of issueClosedById.entries()) {
+      const item = mergedById.get(itemId);
+      if (!item) {
+        continue;
+      }
+      const expectedStatus = isClosed ? 'completed' : 'open';
+      if (isClosed && item.status !== 'completed') {
+        item.status = 'completed';
+      } else if (!isClosed && item.status === 'completed') {
+        item.status = expectedStatus;
       }
     }
   }
