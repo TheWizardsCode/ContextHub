@@ -1080,6 +1080,21 @@ export async function importIssuesToWorkItems(
     };
   });
 
+  // Re-apply label event resolutions that may have been overridden by mergeWorkItems.
+  // Label event timestamps provide per-field precision that the item-level updatedAt
+  // comparison in mergeWorkItems cannot capture. When a label event is newer than the
+  // local updatedAt for a specific field, that resolution must take precedence even if
+  // the overall item-level merge preferred local values.
+  if (allFieldChanges.length > 0) {
+    const mergedById = new Map(mergedItems.map(item => [item.id, item]));
+    for (const change of allFieldChanges) {
+      const item = mergedById.get(change.workItemId);
+      if (item) {
+        (item as any)[change.field] = change.newValue;
+      }
+    }
+  }
+
   if (childHints.size > 0) {
     const itemsById = new Map(mergedItems.map(item => [item.id, item]));
     for (const [parentId, childIds] of childHints.entries()) {

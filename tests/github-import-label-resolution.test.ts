@@ -499,4 +499,139 @@ describe('importIssuesToWorkItems label resolution integration', () => {
     // No field changes (resolution only applies to existing items)
     expect(result.fieldChanges).toEqual([]);
   });
+
+  it('propagates status change when issue is reopened even if local updatedAt is newer than issue updatedAt', async () => {
+    // Scenario: item was completed locally, then someone reopened the GitHub issue
+    // Local updatedAt (Jan 10) > issue updatedAt (Jan 12 is used here but local was edited later)
+    const T_LOCAL_VERY_RECENT = '2026-01-20T00:00:00.000Z';
+    const T_REOPEN_EVENT = '2026-01-25T00:00:00.000Z';
+
+    const localItem = makeLocalItem({
+      id: 'WL-001',
+      status: 'completed' as WorkItemStatus,
+      stage: 'in_review',
+      updatedAt: T_LOCAL_VERY_RECENT,
+    });
+
+    // GitHub issue is open (was reopened), with status label
+    const issue = makeGithubIssue({
+      number: 1,
+      labels: ['wl:status:open', 'wl:stage:idea'],
+      state: 'open',
+      updatedAt: T_ISSUE_UPDATE, // Jan 12 — older than local
+    });
+
+    mockListGithubIssues.mockReturnValue([issue]);
+
+    // The label events show the status/stage labels were added AFTER local updatedAt
+    mockFetchLabelEventsAsync.mockResolvedValue([
+      { label: 'wl:status:open', action: 'labeled', createdAt: T_REOPEN_EVENT },
+      { label: 'wl:stage:idea', action: 'labeled', createdAt: T_REOPEN_EVENT },
+    ] as LabelEvent[]);
+
+    const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+      generateId: () => 'WL-GEN',
+    });
+
+    const merged = result.mergedItems.find(item => item.id === 'WL-001');
+    expect(merged).toBeDefined();
+    // Even though local updatedAt > issue updatedAt, the label event is newer
+    // than local updatedAt, so label resolution should win
+    expect(merged!.status).toBe('open');
+    expect(merged!.stage).toBe('idea');
+
+    // fieldChanges should include both status and stage changes
+    const statusChange = result.fieldChanges.find(fc => fc.field === 'status' && fc.workItemId === 'WL-001');
+    expect(statusChange).toBeDefined();
+    expect(statusChange!.oldValue).toBe('completed');
+    expect(statusChange!.newValue).toBe('open');
+
+    const stageChange = result.fieldChanges.find(fc => fc.field === 'stage' && fc.workItemId === 'WL-001');
+    expect(stageChange).toBeDefined();
+    expect(stageChange!.oldValue).toBe('in_review');
+    expect(stageChange!.newValue).toBe('idea');
+  });
+
+  it('propagates stage change when label event is newer even if same item-level timestamps', async () => {
+    // Scenario: after a sync cycle both local and remote have the same updatedAt.
+    // Then someone changes a label on GitHub. The label event is newer,
+    // but the issue updatedAt might match local updatedAt.
+    const T_SYNCED = '2026-01-10T00:00:00.000Z';
+    const T_LABEL_CHANGE = '2026-01-15T00:00:00.000Z';
+
+    const localItem = makeLocalItem({
+      id: 'WL-001',
+      stage: 'done',
+      status: 'completed' as WorkItemStatus,
+      updatedAt: T_SYNCED,
+    });
+
+    // GitHub issue updatedAt matches local (same sync cycle),
+    // but now has a different stage label
+    const issue = makeGithubIssue({
+      number: 1,
+      labels: ['wl:stage:review', 'wl:status:open'],
+      state: 'open',
+      updatedAt: T_SYNCED, // Same as local
+    });
+
+    mockListGithubIssues.mockReturnValue([issue]);
+
+    // Label event is newer than the synced timestamp
+    mockFetchLabelEventsAsync.mockResolvedValue([
+      { label: 'wl:stage:review', action: 'labeled', createdAt: T_LABEL_CHANGE },
+      { label: 'wl:status:open', action: 'labeled', createdAt: T_LABEL_CHANGE },
+    ] as LabelEvent[]);
+
+    const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+      generateId: () => 'WL-GEN',
+    });
+
+    const merged = result.mergedItems.find(item => item.id === 'WL-001');
+    expect(merged).toBeDefined();
+    // Label resolution determined remote wins; this should survive mergeWorkItems
+    expect(merged!.stage).toBe('review');
+    expect(merged!.status).toBe('open');
+
+    const stageChange = result.fieldChanges.find(fc => fc.field === 'stage');
+    expect(stageChange).toBeDefined();
+    expect(stageChange!.newValue).toBe('review');
+  });
+
+  it('propagates status from completed to open when GitHub issue is reopened with newer label event', async () => {
+    // The exact scenario from the bug report: item is completed/in_review,
+    // GitHub issue is reopened with stage changed, wl gh import should update both
+    const T_COMPLETED = '2026-01-10T00:00:00.000Z';
+    const T_REOPEN = '2026-01-12T00:00:00.000Z';
+
+    const localItem = makeLocalItem({
+      id: 'WL-001',
+      status: 'completed' as WorkItemStatus,
+      stage: 'in_review',
+      updatedAt: T_COMPLETED,
+    });
+
+    const issue = makeGithubIssue({
+      number: 1,
+      labels: ['wl:status:open', 'wl:stage:idea'],
+      state: 'open',
+      updatedAt: T_REOPEN,
+    });
+
+    mockListGithubIssues.mockReturnValue([issue]);
+
+    mockFetchLabelEventsAsync.mockResolvedValue([
+      { label: 'wl:status:open', action: 'labeled', createdAt: T_REOPEN },
+      { label: 'wl:stage:idea', action: 'labeled', createdAt: T_REOPEN },
+    ] as LabelEvent[]);
+
+    const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+      generateId: () => 'WL-GEN',
+    });
+
+    const merged = result.mergedItems.find(item => item.id === 'WL-001');
+    expect(merged).toBeDefined();
+    expect(merged!.status).toBe('open');
+    expect(merged!.stage).toBe('idea');
+  });
 });
