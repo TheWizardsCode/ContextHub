@@ -598,6 +598,65 @@ describe('WorklogDatabase', () => {
       expect(db.get(dependentA.id)?.status).toBe('open');
       expect(db.get(dependentB.id)?.status).toBe('open');
     });
+
+    it('should emit debug log to stderr when WL_DEBUG is set and dependent is unblocked', () => {
+      const blocker = db.create({ title: 'Debug Log Blocker', status: 'open' });
+      const dependent = db.create({ title: 'Debug Log Dependent', status: 'blocked' });
+      db.addDependencyEdge(dependent.id, blocker.id);
+
+      const stderrChunks: Buffer[] = [];
+      const originalWrite = process.stderr.write;
+      process.stderr.write = ((chunk: any) => {
+        stderrChunks.push(Buffer.from(chunk));
+        return true;
+      }) as any;
+
+      const originalDebug = process.env.WL_DEBUG;
+      process.env.WL_DEBUG = '1';
+
+      try {
+        db.update(blocker.id, { status: 'completed' });
+        const stderrOutput = Buffer.concat(stderrChunks).toString();
+        expect(stderrOutput).toContain(`[wl:dep] unblocked ${dependent.id}`);
+        expect(stderrOutput).toContain(`[wl:dep] reconciled 1 dependent(s) for target ${blocker.id}`);
+      } finally {
+        process.stderr.write = originalWrite;
+        if (originalDebug === undefined) {
+          delete process.env.WL_DEBUG;
+        } else {
+          process.env.WL_DEBUG = originalDebug;
+        }
+      }
+    });
+
+    it('should not emit debug log when WL_DEBUG is not set during reconciliation', () => {
+      const blocker = db.create({ title: 'No Debug Blocker', status: 'open' });
+      const dependent = db.create({ title: 'No Debug Dependent', status: 'blocked' });
+      db.addDependencyEdge(dependent.id, blocker.id);
+
+      const stderrChunks: Buffer[] = [];
+      const originalWrite = process.stderr.write;
+      process.stderr.write = ((chunk: any) => {
+        stderrChunks.push(Buffer.from(chunk));
+        return true;
+      }) as any;
+
+      const originalDebug = process.env.WL_DEBUG;
+      delete process.env.WL_DEBUG;
+
+      try {
+        db.update(blocker.id, { status: 'completed' });
+        const stderrOutput = Buffer.concat(stderrChunks).toString();
+        expect(stderrOutput).not.toContain('[wl:dep]');
+      } finally {
+        process.stderr.write = originalWrite;
+        if (originalDebug === undefined) {
+          delete process.env.WL_DEBUG;
+        } else {
+          process.env.WL_DEBUG = originalDebug;
+        }
+      }
+    });
   });
 
   describe('import and export', () => {

@@ -139,6 +139,12 @@ wl comment delete CMT-0001
 
 Close one or more work items and optionally record a close reason as a comment.
 
+**Automatic unblocking:** When a work item is closed, any dependents that were blocked
+solely by this item are automatically unblocked (their status changes from `blocked` to
+`open`). If a dependent has multiple blockers and other blockers remain active, it stays
+blocked. This behaviour is identical in both the CLI and TUI — both paths use the shared
+`reconcileDependentsForTarget()` service in the database layer.
+
 Options:
 
 `-r, --reason <reason>` — Reason text stored as a comment (optional).
@@ -170,10 +176,16 @@ Behavior:
 
 - `dep add` errors if either work item does not exist.
 - `dep add` errors if the dependency already exists.
+- `dep add` automatically sets `itemId` status to `blocked` when the dependency is active (i.e. `dependsOnId` is not completed or deleted).
 - `dep rm` warns and exits 0 when ids are missing.
 - `dep list` warns and exits 0 when ids are missing.
 - `dep list --outgoing` shows only outbound dependencies.
 - `dep list --incoming` shows only inbound dependencies.
+
+**Automatic unblocking:** Dependents are automatically unblocked when all their blockers
+become inactive (completed or deleted). This reconciliation happens via `db.update()` and
+`db.delete()` — any status or stage change triggers the reconciliation logic. See
+[Dependency Reconciliation](docs/dependency-reconciliation.md) for developer details.
 
 Examples:
 
