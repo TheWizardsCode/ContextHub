@@ -1686,6 +1686,45 @@ export class WorklogDatabase {
   }
 
   /**
+   * Upsert work items non-destructively (INSERT OR REPLACE without clearing).
+   *
+   * Unlike `import()`, this method does NOT call `clearWorkItems()` or
+   * `clearDependencyEdges()`. It saves each provided item via the store's
+   * `saveWorkItem()` (which uses INSERT … ON CONFLICT DO UPDATE) so that
+   * existing items not in the provided array are preserved.
+   *
+   * When `dependencyEdges` is provided, only edges whose `fromId` or `toId`
+   * belongs to the provided items are upserted; all other edges are untouched.
+   *
+   * If `items` is empty the method is a no-op (no export/sync triggered).
+   */
+  upsertItems(items: WorkItem[], dependencyEdges?: DependencyEdge[]): void {
+    if (items.length === 0) {
+      return;
+    }
+
+    for (const item of items) {
+      this.store.saveWorkItem(item);
+    }
+
+    if (dependencyEdges) {
+      const affectedIds = new Set(items.map(i => i.id));
+      for (const edge of dependencyEdges) {
+        if (
+          (affectedIds.has(edge.fromId) || affectedIds.has(edge.toId)) &&
+          this.store.getWorkItem(edge.fromId) &&
+          this.store.getWorkItem(edge.toId)
+        ) {
+          this.store.saveDependencyEdge(edge);
+        }
+      }
+    }
+
+    this.exportToJsonl();
+    this.triggerAutoSync();
+  }
+
+  /**
    * Add a dependency edge (fromId depends on toId)
    */
   addDependencyEdge(fromId: string, toId: string): DependencyEdge | null {
