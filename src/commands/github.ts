@@ -544,11 +544,11 @@ export default function register(ctx: PluginContext): void {
 
         // Assign the issue to copilot
         const { assignGithubIssueAsync } = await import('../github.js');
-        const assignResult = await assignGithubIssueAsync(githubConfig, issueNumber, 'copilot');
+        const assignResult = await assignGithubIssueAsync(githubConfig, issueNumber, '@copilot');
 
         if (!assignResult.ok) {
           // Assignment failed: do NOT update local state, add comment, re-push
-          const failureMessage = `Failed to assign copilot to GitHub issue #${issueNumber}: ${assignResult.error}`;
+          const failureMessage = `Failed to assign @copilot to GitHub issue #${issueNumber}: ${assignResult.error}`;
           db.createComment({
             workItemId: normalizedId,
             author: 'wl-delegate',
@@ -593,7 +593,7 @@ export default function register(ctx: PluginContext): void {
           });
         } else {
           console.log(`Pushing to GitHub... done.`);
-          console.log(`Assigning to copilot... done.`);
+          console.log(`Assigning to @copilot... done.`);
           console.log(`Done. Issue: ${issueUrl}`);
         }
       } catch (error) {

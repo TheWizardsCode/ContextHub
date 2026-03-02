@@ -315,7 +315,7 @@ describe('delegate subcommand guard rails', () => {
 
     await t.runDelegate('WL-HUMAN-1');
     expect(t.consoleMessages.some(m => m.includes('Pushing to GitHub'))).toBe(true);
-    expect(t.consoleMessages.some(m => m.includes('Assigning to copilot'))).toBe(true);
+    expect(t.consoleMessages.some(m => m.includes('Assigning to @copilot'))).toBe(true);
     expect(t.consoleMessages.some(m => m.includes('Done. Issue:'))).toBe(true);
   });
 
@@ -324,7 +324,7 @@ describe('delegate subcommand guard rails', () => {
 
     // Make assign fail
     const { assignGithubIssueAsync } = await import('../../src/github.js');
-    vi.mocked(assignGithubIssueAsync).mockResolvedValueOnce({ ok: false, error: 'copilot user not found' });
+    vi.mocked(assignGithubIssueAsync).mockResolvedValueOnce({ ok: false, error: '@copilot user not found' });
 
     await expect(t.runDelegate('WL-FAIL-1')).rejects.toThrow('process.exit(1)');
     const item = t.db.get('WL-FAIL-1');
@@ -341,7 +341,7 @@ describe('delegate subcommand guard rails', () => {
 
     await expect(t.runDelegate('WL-FAIL-2')).rejects.toThrow('process.exit(1)');
     expect(t.createdComments).toHaveLength(1);
-    expect(t.createdComments[0].comment).toContain('Failed to assign copilot');
+    expect(t.createdComments[0].comment).toContain('Failed to assign @copilot');
     expect(t.createdComments[0].comment).toContain('rate limited');
     expect(t.createdComments[0].author).toBe('wl-delegate');
   });
