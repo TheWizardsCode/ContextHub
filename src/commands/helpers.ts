@@ -285,6 +285,33 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     return lines.join('\n');
   }
 
+  // detail-pane: title + description + comments only (metadata is in the metadata pane)
+  if (fmt === 'detail-pane') {
+    lines.push(renderTitle(item, '# '));
+
+    if (item.description) {
+      lines.push('');
+      lines.push('## Description');
+      lines.push('');
+      lines.push(item.description);
+    }
+
+    if (db) {
+      const comments = db.getCommentsForWorkItem(item.id);
+      if (comments.length > 0) {
+        lines.push('');
+        lines.push('## Comments');
+        lines.push('');
+        for (const c of comments) {
+          lines.push(`  ${c.author} at ${c.createdAt}`);
+          lines.push(`    ${c.comment}`);
+        }
+      }
+    }
+
+    return lines.join('\n');
+  }
+
   // full output
   lines.push(renderTitle(item, '# '));
   lines.push('');

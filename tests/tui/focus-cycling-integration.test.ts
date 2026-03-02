@@ -102,6 +102,7 @@ function buildLayout(screen: any) {
   const footer = makeBox();
   const detail = makeBox();
   const copyIdButton = makeBox();
+  const metadataBox = makeBox();
   const overlays = {
     detailOverlay: makeBox(),
     closeOverlay: makeBox(),
@@ -146,12 +147,14 @@ function buildLayout(screen: any) {
     screen,
     list,
     detail,
+    metadataBox,
     opencodeDialog: opencodeUi.dialog,
     opencodeText: opencodeUi.textarea,
     layout: {
       screen,
       listComponent: { getList: () => list, getFooter: () => footer },
       detailComponent: { getDetail: () => detail, getCopyIdButton: () => copyIdButton },
+      metadataPaneComponent: { getBox: () => metadataBox, updateFromItem: vi.fn() },
       toastComponent: { show: vi.fn() } as any,
       overlaysComponent: overlays,
       dialogsComponent: dialogs,
@@ -315,7 +318,7 @@ describe('TUI focus cycling integration', () => {
   it('Ctrl-W w cycles focus forward', async () => {
     const root = makeItem('WL-FOCUS-1');
     const screen = makeScreen();
-    const { layout, list, detail } = buildLayout(screen);
+    const { layout, list, detail, metadataBox } = buildLayout(screen);
     const ctx = buildCtx([root]);
 
     const controller = new TuiController(ctx, {
@@ -334,11 +337,11 @@ describe('TUI focus cycling integration', () => {
     // Initial focus should be on list
     expect(list.style.border.fg).toBe('green');
 
-    // Simulate Ctrl-W w to cycle focus
+    // Simulate Ctrl-W w to cycle focus: list → metadata
     simulateCtrlWChord(screen, 'w');
 
-    // Detail should now be focused (green border)
-    expect(detail.style.border.fg).toBe('green');
+    // Metadata should now be focused (green border)
+    expect(metadataBox.style.border.fg).toBe('green');
     // List should be unfocused (white border)
     expect(list.style.border.fg).toBe('white');
   });
@@ -346,7 +349,7 @@ describe('TUI focus cycling integration', () => {
   it('Ctrl-W h moves focus left', async () => {
     const root = makeItem('WL-FOCUS-1');
     const screen = makeScreen();
-    const { layout, list, detail } = buildLayout(screen);
+    const { layout, list, detail, metadataBox } = buildLayout(screen);
     const ctx = buildCtx([root]);
 
     const controller = new TuiController(ctx, {
@@ -362,20 +365,21 @@ describe('TUI focus cycling integration', () => {
 
     await controller.start({});
 
-    // First cycle to detail (Ctrl-W w)
+    // Cycle forward twice to reach detail (list → metadata → detail)
+    simulateCtrlWChord(screen, 'w');
     simulateCtrlWChord(screen, 'w');
     expect(detail.style.border.fg).toBe('green');
 
-    // Now Ctrl-W h should move back to list
+    // Now Ctrl-W h should move back to metadata
     simulateCtrlWChord(screen, 'h');
-    expect(list.style.border.fg).toBe('green');
+    expect(metadataBox.style.border.fg).toBe('green');
     expect(detail.style.border.fg).toBe('white');
   });
 
   it('Ctrl-W l moves focus right', async () => {
     const root = makeItem('WL-FOCUS-1');
     const screen = makeScreen();
-    const { layout, list, detail } = buildLayout(screen);
+    const { layout, list, detail, metadataBox } = buildLayout(screen);
     const ctx = buildCtx([root]);
 
     const controller = new TuiController(ctx, {
@@ -391,16 +395,16 @@ describe('TUI focus cycling integration', () => {
 
     await controller.start({});
 
-    // List is focused initially; Ctrl-W l should move to detail
+    // List is focused initially; Ctrl-W l should move to metadata
     simulateCtrlWChord(screen, 'l');
-    expect(detail.style.border.fg).toBe('green');
+    expect(metadataBox.style.border.fg).toBe('green');
     expect(list.style.border.fg).toBe('white');
   });
 
   it('Ctrl-W p returns to previous pane', async () => {
     const root = makeItem('WL-FOCUS-1');
     const screen = makeScreen();
-    const { layout, list, detail } = buildLayout(screen);
+    const { layout, list, detail, metadataBox } = buildLayout(screen);
     const ctx = buildCtx([root]);
 
     const controller = new TuiController(ctx, {
@@ -416,14 +420,14 @@ describe('TUI focus cycling integration', () => {
 
     await controller.start({});
 
-    // Move to detail
+    // Move to metadata
     simulateCtrlWChord(screen, 'w');
-    expect(detail.style.border.fg).toBe('green');
+    expect(metadataBox.style.border.fg).toBe('green');
 
     // Ctrl-W p should go back to list (previous pane)
     simulateCtrlWChord(screen, 'p');
     expect(list.style.border.fg).toBe('green');
-    expect(detail.style.border.fg).toBe('white');
+    expect(metadataBox.style.border.fg).toBe('white');
   });
 
   it('chord events do not leak when help menu is visible', async () => {
@@ -490,7 +494,7 @@ describe('TUI focus cycling integration', () => {
   it('focus wraps around when cycling past the last pane', async () => {
     const root = makeItem('WL-FOCUS-1');
     const screen = makeScreen();
-    const { layout, list, detail } = buildLayout(screen);
+    const { layout, list, detail, metadataBox } = buildLayout(screen);
     const ctx = buildCtx([root]);
 
     const controller = new TuiController(ctx, {
@@ -506,8 +510,11 @@ describe('TUI focus cycling integration', () => {
 
     await controller.start({});
 
-    // With opencode dialog hidden, there are 2 panes: list and detail
-    // Cycle forward twice to wrap back to list
+    // With opencode dialog hidden, there are 3 panes: list, metadata, detail
+    // Cycle forward three times to wrap back to list
+    simulateCtrlWChord(screen, 'w');
+    expect(metadataBox.style.border.fg).toBe('green');
+
     simulateCtrlWChord(screen, 'w');
     expect(detail.style.border.fg).toBe('green');
 

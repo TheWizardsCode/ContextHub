@@ -3,6 +3,7 @@ import blessed from 'blessed';
 import { createLayout, type TuiLayout, type NextDialogWidgets } from '../../src/tui/layout.js';
 import { ListComponent } from '../../src/tui/components/list.js';
 import { DetailComponent } from '../../src/tui/components/detail.js';
+import { MetadataPaneComponent } from '../../src/tui/components/metadata-pane.js';
 import { ToastComponent } from '../../src/tui/components/toast.js';
 import { OverlaysComponent } from '../../src/tui/components/overlays.js';
 import { DialogsComponent } from '../../src/tui/components/dialogs.js';
@@ -57,6 +58,7 @@ describe('createLayout', () => {
       expect(layout.screen).toBeDefined();
       expect(layout.listComponent).toBeInstanceOf(ListComponent);
       expect(layout.detailComponent).toBeInstanceOf(DetailComponent);
+      expect(layout.metadataPaneComponent).toBeInstanceOf(MetadataPaneComponent);
       expect(layout.toastComponent).toBeInstanceOf(ToastComponent);
       expect(layout.overlaysComponent).toBeInstanceOf(OverlaysComponent);
       expect(layout.dialogsComponent).toBeInstanceOf(DialogsComponent);
@@ -113,6 +115,7 @@ describe('createLayout', () => {
 
       expect(layout.listComponent).toBeInstanceOf(ListComponent);
       expect(layout.detailComponent).toBeInstanceOf(DetailComponent);
+      expect(layout.metadataPaneComponent).toBeInstanceOf(MetadataPaneComponent);
       expect(layout.toastComponent).toBeInstanceOf(ToastComponent);
       expect(layout.overlaysComponent).toBeInstanceOf(OverlaysComponent);
       expect(layout.dialogsComponent).toBeInstanceOf(DialogsComponent);
@@ -140,6 +143,7 @@ describe('createLayout', () => {
         'screen',
         'listComponent',
         'detailComponent',
+        'metadataPaneComponent',
         'toastComponent',
         'overlaysComponent',
         'dialogsComponent',

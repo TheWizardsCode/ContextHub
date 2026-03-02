@@ -179,6 +179,7 @@ export class TuiController {
       screen,
       listComponent,
       detailComponent,
+      metadataPaneComponent,
       toastComponent,
       overlaysComponent,
       dialogsComponent,
@@ -190,6 +191,7 @@ export class TuiController {
     const help = listComponent.getFooter();
     const detail = detailComponent.getDetail();
     const copyIdButton = detailComponent.getCopyIdButton();
+    const metadataPane = metadataPaneComponent?.getBox?.() ?? null;
 
     const detailOverlay = overlaysComponent.detailOverlay;
     const detailModal = dialogsComponent.detailModal;
@@ -629,6 +631,10 @@ export class TuiController {
       setBorderFocusStyle(list, focused);
     };
 
+    const setMetadataBorderFocusStyle = (focused: boolean) => {
+      if (metadataPane) setBorderFocusStyle(metadataPane as unknown as Pane, focused);
+    };
+
     const setOpencodeBorderFocusStyle = (focused: boolean) => {
       setBorderFocusStyle(opencodeDialog, focused);
     };
@@ -637,6 +643,7 @@ export class TuiController {
       if (!node) return null;
       if (node === list) return list as unknown as Pane;
       if (node === detail) return detail as unknown as Pane;
+      if (metadataPane && node === metadataPane) return metadataPane as unknown as Pane;
       if (node === opencodeDialog || node === opencodeText) return opencodeDialog as unknown as Pane;
       if (node === opencodePane) return opencodeDialog as unknown as Pane;
       return null;
@@ -646,6 +653,7 @@ export class TuiController {
 
     const getFocusPanes = (): Pane[] => {
       const panes: Pane[] = [list as unknown as Pane, detail as unknown as Pane];
+      if (metadataPane) panes.splice(1, 0, metadataPane as unknown as Pane);
       if (!opencodeDialog.hidden) panes.push(opencodeDialog as unknown as Pane);
       return panes;
     };
@@ -693,12 +701,14 @@ export class TuiController {
     const applyFocusStyles = () => {
       const active = getFocusPanes()[paneFocusIndex];
       setListBorderFocusStyle(active === list);
+      setMetadataBorderFocusStyle(active === metadataPane);
       setDetailBorderFocusStyle(active === detail);
       setOpencodeBorderFocusStyle(active === opencodeDialog);
     };
 
     const applyFocusStylesForPane = (pane: any) => {
       setListBorderFocusStyle(pane === list);
+      setMetadataBorderFocusStyle(pane === metadataPane);
       setDetailBorderFocusStyle(pane === detail);
       setOpencodeBorderFocusStyle(pane === opencodeDialog);
     };
@@ -1671,14 +1681,20 @@ export class TuiController {
       const v = visible || buildVisible();
       if (v.length === 0) {
         detail.setContent('');
+        if (metadataPaneComponent) metadataPaneComponent.updateFromItem(null, 0);
         return;
       }
       const node = v[idx] || v[0];
-      const text = humanFormatWorkItem(node.item, db, 'full');
+      const text = humanFormatWorkItem(node.item, db, 'detail-pane');
       const escaped = escapeBlessedTags(text);
       const brightened = brightenDetailIdLine(escaped);
       detail.setContent(decorateIdsForClick(brightened));
       detail.setScroll(0);
+      // Update metadata pane with current item's metadata
+      if (metadataPaneComponent) {
+        const commentCount = db ? db.getCommentsForWorkItem(node.item.id).length : 0;
+        metadataPaneComponent.updateFromItem(node.item, commentCount);
+      }
     }
 
     // ID parsing utilities moved to src/tui/id-utils.ts
@@ -2778,6 +2794,26 @@ export class TuiController {
           });
         } catch (_) {}
 
+        // Tab / Shift-Tab: cycle focus between tree, metadata, and details panes
+        // Only active when no dialog or overlay is open.
+        try {
+          screen.key(KEY_TAB, () => {
+            if (helpMenu.isVisible()) return;
+            if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden) return;
+            if (opencodeDialog && !opencodeDialog.hidden) return;
+            cycleFocus(1);
+            screen.render();
+          });
+        } catch (_) {}
+        try {
+          screen.key(KEY_SHIFT_TAB, () => {
+            if (helpMenu.isVisible()) return;
+            if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden) return;
+            if (opencodeDialog && !opencodeDialog.hidden) return;
+            cycleFocus(-1);
+            screen.render();
+          });
+        } catch (_) {}
 
     // Open opencode prompt dialog (shortcut O)
      screen.key(KEY_OPEN_OPENCODE, async () => {

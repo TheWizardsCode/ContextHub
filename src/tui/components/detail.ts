@@ -18,10 +18,11 @@ export class DetailComponent {
 
     this.detail = this.blessedImpl.box({
       parent: this.screen,
-      label: ' Details ',
-      left: '50%',
-      width: '50%',
-      height: '100%-1',
+      label: ' Description & Comments ',
+      left: 0,
+      top: '50%',
+      width: '100%',
+      height: '50%-1',
       tags: true,
       scrollable: true,
       alwaysScroll: true,
