@@ -47,6 +47,19 @@ export class MetadataPaneComponent {
     return this.box;
   }
 
+  private static formatDate(value: Date | string | undefined): string {
+    if (!value) return '';
+    const d = typeof value === 'string' ? new Date(value) : value;
+    if (isNaN(d.getTime())) return String(value);
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const mon = months[d.getUTCMonth()];
+    const day = d.getUTCDate();
+    const year = d.getUTCFullYear();
+    const hh = String(d.getUTCHours()).padStart(2, '0');
+    const mm = String(d.getUTCMinutes()).padStart(2, '0');
+    return `${mon} ${day}, ${year} ${hh}:${mm}`;
+  }
+
   updateFromItem(item: {
     status?: string;
     stage?: string;
@@ -65,18 +78,10 @@ export class MetadataPaneComponent {
     lines.push(`Stage:    ${item.stage ?? ''}`);
     lines.push(`Priority: ${item.priority ?? ''}`);
     lines.push(`Comments: ${commentCount}`);
-    if (item.tags && item.tags.length > 0) {
-      lines.push(`Tags:     ${item.tags.join(', ')}`);
-    }
-    if (item.assignee) {
-      lines.push(`Assignee: ${item.assignee}`);
-    }
-    if (item.createdAt) {
-      lines.push(`Created:  ${String(item.createdAt)}`);
-    }
-    if (item.updatedAt) {
-      lines.push(`Updated:  ${String(item.updatedAt)}`);
-    }
+    lines.push(`Tags:     ${item.tags && item.tags.length > 0 ? item.tags.join(', ') : ''}`);
+    lines.push(`Assignee: ${item.assignee ?? ''}`);
+    lines.push(`Created:  ${MetadataPaneComponent.formatDate(item.createdAt)}`);
+    lines.push(`Updated:  ${MetadataPaneComponent.formatDate(item.updatedAt)}`);
     this.box.setContent(lines.join('\n'));
   }
 
@@ -97,9 +102,8 @@ export class MetadataPaneComponent {
   }
 
   destroy(): void {
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore
-    if (typeof this.box.removeAllListeners === 'function') this.box.removeAllListeners();
+    const box = this.box as unknown as { removeAllListeners?: () => void; destroy: () => void };
+    if (typeof box.removeAllListeners === 'function') box.removeAllListeners();
     this.box.destroy();
   }
 }

@@ -191,7 +191,7 @@ export class TuiController {
     const help = listComponent.getFooter();
     const detail = detailComponent.getDetail();
     const copyIdButton = detailComponent.getCopyIdButton();
-    const metadataPane = (metadataPaneComponent as any)?.getBox?.() ?? (metadataPaneComponent as any)?.box ?? null;
+    const metadataPane = metadataPaneComponent?.getBox?.() ?? null;
 
     const detailOverlay = overlaysComponent.detailOverlay;
     const detailModal = dialogsComponent.detailModal;
@@ -632,7 +632,7 @@ export class TuiController {
     };
 
     const setMetadataBorderFocusStyle = (focused: boolean) => {
-      setBorderFocusStyle(metadataPane as unknown as Pane, focused);
+      if (metadataPane) setBorderFocusStyle(metadataPane as unknown as Pane, focused);
     };
 
     const setOpencodeBorderFocusStyle = (focused: boolean) => {
@@ -701,14 +701,14 @@ export class TuiController {
     const applyFocusStyles = () => {
       const active = getFocusPanes()[paneFocusIndex];
       setListBorderFocusStyle(active === list);
-      setMetadataBorderFocusStyle(metadataPane ? active === metadataPane : false);
+      setMetadataBorderFocusStyle(active === metadataPane);
       setDetailBorderFocusStyle(active === detail);
       setOpencodeBorderFocusStyle(active === opencodeDialog);
     };
 
     const applyFocusStylesForPane = (pane: any) => {
       setListBorderFocusStyle(pane === list);
-      setMetadataBorderFocusStyle(metadataPane ? pane === metadataPane : false);
+      setMetadataBorderFocusStyle(pane === metadataPane);
       setDetailBorderFocusStyle(pane === detail);
       setOpencodeBorderFocusStyle(pane === opencodeDialog);
     };
@@ -2814,7 +2814,6 @@ export class TuiController {
             screen.render();
           });
         } catch (_) {}
-
 
     // Open opencode prompt dialog (shortcut O)
      screen.key(KEY_OPEN_OPENCODE, async () => {

@@ -455,6 +455,14 @@ describe('TUI 50/50 split layout', () => {
     expect(capturedContent).toContain('backend');
     expect(capturedContent).toContain('Assignee:');
     expect(capturedContent).toContain('alice');
+    // Dates should be formatted as human-friendly strings
+    expect(capturedContent).toContain('Created:');
+    expect(capturedContent).toContain('Jan 1, 2024');
+    expect(capturedContent).toContain('Updated:');
+    expect(capturedContent).toContain('Jun 1, 2024');
+    // All rows should always be present (consistent layout)
+    const lines = capturedContent.split('\n');
+    expect(lines.length).toBe(8);
   });
 
   it('MetadataPaneComponent.updateFromItem clears content for null item', () => {
@@ -479,5 +487,42 @@ describe('TUI 50/50 split layout', () => {
     comp.updateFromItem(null, 0);
 
     expect(capturedContent).toBe('');
+  });
+
+  it('MetadataPaneComponent.updateFromItem renders all rows even when fields are empty', () => {
+    let capturedContent = '';
+    const mockBox = {
+      setContent: vi.fn((c: string) => { capturedContent = c; }),
+      on: vi.fn(),
+      key: vi.fn(),
+      focus: vi.fn(),
+      show: vi.fn(),
+      hide: vi.fn(),
+      destroy: vi.fn(),
+      removeAllListeners: vi.fn(),
+      style: {},
+    };
+    const mockBlessed = {
+      box: vi.fn(() => mockBox),
+    };
+    const mockScreen = { on: vi.fn() };
+
+    const comp = new MetadataPaneComponent({ parent: mockScreen as any, blessed: mockBlessed as any }).create();
+    comp.updateFromItem({
+      status: 'open',
+      stage: '',
+      priority: 'medium',
+      tags: [],
+      assignee: '',
+    }, 0);
+
+    // All 8 rows should always be present for consistent layout
+    const lines = capturedContent.split('\n');
+    expect(lines.length).toBe(8);
+    expect(capturedContent).toContain('Status:');
+    expect(capturedContent).toContain('Tags:');
+    expect(capturedContent).toContain('Assignee:');
+    expect(capturedContent).toContain('Created:');
+    expect(capturedContent).toContain('Updated:');
   });
 });
