@@ -197,9 +197,27 @@ export class WorklogDatabase {
 
   private sortItemsByScore(items: WorkItem[], recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore'): WorkItem[] {
     const now = Date.now();
+
+    // Pre-compute ancestors of in-progress items for O(1) per-item lookup.
+    // For each in-progress item, walk up the parent chain and record ancestor IDs.
+    const MAX_ANCESTOR_DEPTH = 50;
+    const ancestorsOfInProgress = new Set<string>();
+    for (const item of items) {
+      if (item.status === 'in-progress') {
+        let currentParentId = item.parentId ?? null;
+        let depth = 0;
+        while (currentParentId && depth < MAX_ANCESTOR_DEPTH) {
+          ancestorsOfInProgress.add(currentParentId);
+          const parent = this.store.getWorkItem(currentParentId);
+          currentParentId = parent?.parentId ?? null;
+          depth++;
+        }
+      }
+    }
+
     return items.slice().sort((a, b) => {
-      const scoreA = this.computeScore(a, now, recencyPolicy);
-      const scoreB = this.computeScore(b, now, recencyPolicy);
+      const scoreA = this.computeScore(a, now, recencyPolicy, ancestorsOfInProgress);
+      const scoreB = this.computeScore(b, now, recencyPolicy, ancestorsOfInProgress);
       if (scoreB !== scoreA) return scoreB - scoreA;
       const createdA = new Date(a.createdAt).getTime();
       const createdB = new Date(b.createdAt).getTime();
@@ -1062,14 +1080,20 @@ export class WorklogDatabase {
    * Compute a score for an item. Defaults: recencyPolicy='ignore'.
    * Higher score == more desirable.
    */
-   private computeScore(item: WorkItem, now: number, recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore'): number {
+   private computeScore(
+    item: WorkItem,
+    now: number,
+    recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore',
+    ancestorsOfInProgress?: Set<string>
+  ): number {
     // Weights are intentionally fixed and not configurable per request
     //
     // Ranking precedence (highest to lowest):
     //   1. priority          — primary ranking (weight 1000 per level)
     //   2. blocksHighPriority — boost for items that unblock high/critical work
-    //   3. blocked penalty   — heavy penalty for blocked items
-    //   4. age / effort / recency — fine-grained tie-breakers
+    //   3. in-progress multipliers — boost active items and their ancestors
+    //   4. blocked penalty   — heavy penalty for blocked items
+    //   5. age / effort / recency — fine-grained tie-breakers
     const WEIGHTS = {
       priority: 1000,
       blocksHighPriority: 500,  // boost when this item unblocks high/critical items
@@ -1133,6 +1157,19 @@ export class WorklogDatabase {
 
     // Blocked status - heavy penalty
     if (item.status === 'blocked') score += WEIGHTS.blocked;
+
+    // In-progress score multiplier boosts (applied after all additive components).
+    // Non-stacking: direct in-progress boost takes precedence over ancestor boost.
+    // Blocked items receive no boost (the -10000 penalty remains dominant).
+    const IN_PROGRESS_BOOST = 1.5;
+    const PARENT_IN_PROGRESS_BOOST = 1.25;
+    if (item.status !== 'blocked') {
+      if (item.status === 'in-progress') {
+        score *= IN_PROGRESS_BOOST;
+      } else if (ancestorsOfInProgress?.has(item.id)) {
+        score *= PARENT_IN_PROGRESS_BOOST;
+      }
+    }
 
     return score;
   }
