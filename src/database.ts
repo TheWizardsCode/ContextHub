@@ -1666,7 +1666,21 @@ export class WorklogDatabase {
   }
 
   /**
-   * Import work items (replaces existing data)
+   * Import work items by **replacing** all existing data.
+   *
+   * **WARNING — DESTRUCTIVE**: This method calls `clearWorkItems()` (DELETE
+   * FROM workitems) before re-inserting the provided items. If `dependencyEdges`
+   * is supplied it also calls `clearDependencyEdges()` first. Any items or
+   * edges NOT included in the arguments will be permanently deleted.
+   *
+   * Only call this method with a **complete** item set (e.g. the result of
+   * merging local + remote data). For partial / incremental updates — such as
+   * syncing a subset of items back from GitHub — use {@link upsertItems}
+   * instead, which preserves items not in the provided array.
+   *
+   * @param items - The full set of work items to store.
+   * @param dependencyEdges - Optional full set of dependency edges. When
+   *   provided, existing edges are cleared and replaced with these.
    */
   import(items: WorkItem[], dependencyEdges?: DependencyEdge[]): void {
     this.store.clearWorkItems();

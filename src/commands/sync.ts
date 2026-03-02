@@ -178,6 +178,9 @@ async function performSync(
   if (autoSyncEnabled) {
     db.setAutoSync(false);
   }
+  // SAFETY: db.import() is destructive (clears all items before inserting).
+  // This is safe here because itemMergeResult.merged is the complete merged
+  // set of local + remote items — no data is lost.
   db.import(itemMergeResult.merged, edgeMergeResult.merged);
   db.importComments(commentMergeResult.merged);
   if (autoSyncEnabled) {
