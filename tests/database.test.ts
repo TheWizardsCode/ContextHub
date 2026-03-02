@@ -1923,21 +1923,32 @@ describe('WorklogDatabase', () => {
       expect(updatedParent.sortIndex).toBeLessThan(updatedUnrelated.sortIndex);
     });
 
-    it('should apply only the in-progress boost (not ancestor boost) when item is itself in-progress', () => {
-      // Parent has an in-progress child AND is itself in-progress:
-      // it should get the 1.5x boost, not both 1.5x and 1.25x
+    it('should apply only the in-progress boost (not ancestor boost) when item is itself in-progress', async () => {
+      // Strategy: create a high-priority open item and then (after a small delay
+      // to guarantee a later createdAt) a medium-priority in-progress parent
+      // with an in-progress child.
+      //
+      // Score maths (freshly created, no deps/effort, negligible age):
+      //   high open base   = 3 * 1000 = 3000
+      //   medium IP parent = 2 * 1000 = 2000
+      //     correct  (1.5x only):     2000 * 1.5   = 3000  → tie, high wins on createdAt (older)
+      //     incorrect (1.5x * 1.25x): 2000 * 1.875 = 3750  → parent wins, test fails
+      //
+      // The delay ensures createdAt differs so the tie-breaker is deterministic.
+      const highOpen = db.create({ title: 'High open item', priority: 'high' });
+      await new Promise(resolve => setTimeout(resolve, 10));
       const parent = db.create({ title: 'In-progress parent', priority: 'medium', status: 'in-progress' });
       const child = db.create({ title: 'In-progress child', priority: 'medium', status: 'in-progress', parentId: parent.id });
-      const open = db.create({ title: 'Open item', priority: 'medium' });
 
       void child;
 
       db.reSort();
 
+      const updatedHighOpen = db.get(highOpen.id)!;
       const updatedParent = db.get(parent.id)!;
-      const updatedOpen = db.get(open.id)!;
-      // Parent is in-progress so it gets the 1.5x boost (not stacked 1.5x * 1.25x)
-      expect(updatedParent.sortIndex).toBeLessThan(updatedOpen.sortIndex);
+      // With correct non-stacking 1.5x: scores tie at ~3000, high item wins on createdAt (older).
+      // With incorrect stacking 1.875x: parent would score ~3750 and sort first — test fails.
+      expect(updatedHighOpen.sortIndex).toBeLessThan(updatedParent.sortIndex);
     });
 
     it('should not boost a blocked item even if it is an ancestor of an in-progress item', () => {
@@ -1976,12 +1987,35 @@ describe('WorklogDatabase', () => {
       expect(updatedGrandparent.sortIndex).toBeLessThan(updatedUnrelated.sortIndex);
     });
 
+    it('should boost all ancestors when in-progress items exist at multiple depths', () => {
+      // Two in-progress items in the same lineage: child and grandchild.
+      // Both the parent and grandparent should receive the 1.25x ancestor boost,
+      // and the de-duplication in the ancestor set should not cause any issues.
+      const grandparent = db.create({ title: 'Grandparent', priority: 'medium' });
+      const parent = db.create({ title: 'In-progress parent', priority: 'medium', status: 'in-progress', parentId: grandparent.id });
+      db.create({ title: 'In-progress grandchild', priority: 'medium', status: 'in-progress', parentId: parent.id });
+      const unrelatedOpen = db.create({ title: 'Unrelated open item', priority: 'medium' });
+
+      db.reSort();
+
+      const updatedGrandparent = db.get(grandparent.id)!;
+      const updatedParent = db.get(parent.id)!;
+      const updatedUnrelated = db.get(unrelatedOpen.id)!;
+      // Grandparent gets 1.25x ancestor boost → sorts above unrelated open
+      expect(updatedGrandparent.sortIndex).toBeLessThan(updatedUnrelated.sortIndex);
+      // Parent is itself in-progress → gets the 1.5x boost (not stacked with ancestor 1.25x)
+      expect(updatedParent.sortIndex).toBeLessThan(updatedGrandparent.sortIndex);
+    });
+
     it('should not boost ancestor when in-progress child is completed', () => {
+      // Create unrelated FIRST so that age tie-break favours it (older = sorts first).
+      // If the ancestor boost were incorrectly still applied after the child is completed,
+      // the parent would sort above unrelated despite being younger.
+      const unrelated = db.create({ title: 'Unrelated open item', priority: 'medium' });
       const parent = db.create({ title: 'Parent', priority: 'medium' });
       const child = db.create({ title: 'Child', priority: 'medium', status: 'in-progress', parentId: parent.id });
-      const unrelated = db.create({ title: 'Unrelated open item', priority: 'medium' });
 
-      // Close the in-progress child
+      // Close the in-progress child — parent should lose its ancestor boost
       db.update(child.id, { status: 'completed' });
 
       db.reSort();
@@ -1990,8 +2024,8 @@ describe('WorklogDatabase', () => {
       const updatedUnrelated = db.get(unrelated.id)!;
       // Parent no longer has any in-progress descendants; no ancestor boost.
       // With equal priority and no boost, createdAt is the tie-breaker:
-      // parent was created first so it naturally gets a lower sortIndex.
-      expect(updatedParent.sortIndex).toBeLessThan(updatedUnrelated.sortIndex);
+      // unrelated was created first so it sorts first (lower sortIndex).
+      expect(updatedUnrelated.sortIndex).toBeLessThan(updatedParent.sortIndex);
     });
   });
 });
