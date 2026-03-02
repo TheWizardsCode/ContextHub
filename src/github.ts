@@ -827,6 +827,68 @@ export async function getGithubIssueCommentAsync(config: GithubConfig, commentId
   return normalizeGithubIssueComment(data);
 }
 
+// ---------------------------------------------------------------------------
+// Issue assignment helpers
+// ---------------------------------------------------------------------------
+
+export interface AssignGithubIssueResult {
+  ok: boolean;
+  error?: string;
+}
+
+/**
+ * Assign a GitHub user to an issue via `gh issue edit --add-assignee`.
+ *
+ * Uses `runGhDetailedAsync` with rate-limit retry/backoff. On failure returns
+ * `{ ok: false, error: <stderr> }` without throwing.
+ */
+export async function assignGithubIssueAsync(
+  config: GithubConfig,
+  issueNumber: number,
+  assignee: string,
+  retries = 3
+): Promise<AssignGithubIssueResult> {
+  let attempt = 0;
+  let backoff = 500;
+  while (attempt <= retries) {
+    const res = await runGhDetailedAsync(
+      `gh issue edit ${issueNumber} --repo ${config.repo} --add-assignee ${JSON.stringify(assignee)}`
+    );
+    if (res.ok) {
+      return { ok: true };
+    }
+    const stderr = res.stderr || '';
+    // Retry on rate-limit / 403 errors
+    if (/rate limit|403|API rate limit exceeded/i.test(stderr) && attempt < retries) {
+      await new Promise(r => setTimeout(r, backoff));
+      attempt += 1;
+      backoff *= 2;
+      continue;
+    }
+    return { ok: false, error: stderr || `gh issue edit failed with unknown error` };
+  }
+  return { ok: false, error: 'Max retries exceeded' };
+}
+
+/**
+ * Synchronous variant of `assignGithubIssueAsync`. Calls `runGhDetailed`
+ * directly (no retry/backoff). Returns `{ ok: false, error }` on failure
+ * without throwing.
+ */
+export function assignGithubIssue(
+  config: GithubConfig,
+  issueNumber: number,
+  assignee: string
+): AssignGithubIssueResult {
+  const res = runGhDetailed(
+    `gh issue edit ${issueNumber} --repo ${config.repo} --add-assignee ${JSON.stringify(assignee)}`
+  );
+  if (res.ok) {
+    return { ok: true };
+  }
+  return { ok: false, error: res.stderr || `gh issue edit failed with unknown error` };
+}
+
 /**
  * Legacy priority label mapping. Labels like `wl:P0`, `wl:P1`, etc. are mapped
  * to the current priority values for backward compatibility during import.
