@@ -127,6 +127,11 @@ function createDelegateTestContext() {
         items.set(item.id, item);
       }
     },
+    upsertItems: (updatedItems: any[]) => {
+      for (const item of updatedItems) {
+        items.set(item.id, item);
+      }
+    },
     update: (id: string, updates: any) => {
       const cur = items.get(id);
       if (!cur) return null;

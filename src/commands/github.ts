@@ -147,7 +147,7 @@ export default function register(ctx: PluginContext): void {
           })
         );
         if (updatedItems.length > 0) {
-          db.import(updatedItems);
+          db.upsertItems(updatedItems);
         }
 
         // Update the last-push timestamp unless --no-update-timestamp was provided.
@@ -335,7 +335,7 @@ export default function register(ctx: PluginContext): void {
 
         if (mergedItems.length > 0) {
           renderProgress({ phase: 'saving', current: 1, total: 2 });
-          db.import(mergedItems);
+          db.upsertItems(mergedItems);
         }
 
         // Persist imported GitHub comments
@@ -359,7 +359,7 @@ export default function register(ctx: PluginContext): void {
         if (createNew && createdItems.length > 0) {
           const { updatedItems: markedItems } = await upsertIssuesFromWorkItems(mergedItems, db.getAllComments(), githubConfig, renderProgress);
           if (markedItems.length > 0) {
-            db.import(markedItems);
+            db.upsertItems(markedItems);
           }
         }
 
@@ -517,7 +517,6 @@ export default function register(ctx: PluginContext): void {
         const githubConfig = resolveGithubConfig({ repo: (options as any).repo, labelPrefix: (options as any).labelPrefix });
 
         // Push the work item to GitHub (smart sync)
-        const items = db.getAll();
         const comments = db.getAllComments();
         const { updatedItems } = await upsertIssuesFromWorkItems(
           [item],
@@ -526,7 +525,7 @@ export default function register(ctx: PluginContext): void {
           () => {} // no progress rendering for single-item push
         );
         if (updatedItems.length > 0) {
-          db.import(updatedItems);
+          db.upsertItems(updatedItems);
         }
 
         // Resolve the GitHub issue number (may have been set by the push)
