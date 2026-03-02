@@ -347,6 +347,49 @@ describe('delegate subcommand guard rails', () => {
     expect(t.createdComments[0].author).toBe('wl-delegate');
   });
 
+  it('includes "Local state was not updated." in human failure output', async () => {
+    t.makeItem({ id: 'WL-FAIL-MSG', githubIssueNumber: 95, status: 'open', assignee: '' });
+
+    const { assignGithubIssueAsync } = await import('../../src/github.js');
+    vi.mocked(assignGithubIssueAsync).mockResolvedValueOnce({ ok: false, error: 'not found' });
+
+    await expect(t.runDelegate('WL-FAIL-MSG')).rejects.toThrow('process.exit(1)');
+    // Find the assignment failure error (there may be additional errors from re-push)
+    const assignError = t.errorOutput.find(e => e.msg.includes('Failed to assign @copilot'));
+    expect(assignError).toBeDefined();
+    expect(assignError!.msg).toContain('Local state was not updated.');
+    expect(assignError!.msg).toContain('Failed to assign @copilot');
+  });
+
+  it('delegates item without githubIssueNumber (first push creates issue)', async () => {
+    // Item with no githubIssueNumber — the push should create the issue
+    const id = t.makeItem({ id: 'WL-FIRST-PUSH', status: 'open', assignee: '' });
+    // The mock upsertIssuesFromWorkItems returns the items as-is, so we need
+    // to simulate that the push sets githubIssueNumber on the item
+    const { upsertIssuesFromWorkItems } = await import('../../src/github-sync.js');
+    vi.mocked(upsertIssuesFromWorkItems).mockImplementationOnce(async (items: any[]) => {
+      // Simulate push assigning a GitHub issue number
+      const updated = items.map((it: any) => ({ ...it, githubIssueNumber: 999 }));
+      // Also update the item in the test DB so the refreshed lookup finds it
+      for (const u of updated) {
+        t.db.update(u.id, { githubIssueNumber: u.githubIssueNumber });
+      }
+      return {
+        updatedItems: updated,
+        result: { created: 1, updated: 0, closed: 0, skipped: 0, errors: [], syncedItems: [], errorItems: [], commentsCreated: 0, commentsUpdated: 0 },
+        timing: { totalMs: 0, upsertMs: 0, commentListMs: 0, commentUpsertMs: 0, hierarchyCheckMs: 0, hierarchyLinkMs: 0, hierarchyVerifyMs: 0 },
+      };
+    });
+
+    await t.runDelegate('WL-FIRST-PUSH');
+    const updated = t.db.get('WL-FIRST-PUSH');
+    expect(updated.status).toBe('in-progress');
+    expect(updated.assignee).toBe('@github-copilot');
+    expect(updated.githubIssueNumber).toBe(999);
+    // Human output should indicate success
+    expect(t.consoleMessages.some(m => m.includes('Done. Issue:'))).toBe(true);
+  });
+
   it('outputs structured error JSON on assignment failure', async () => {
     t.makeItem({ id: 'WL-FAIL-3', githubIssueNumber: 100 });
     t.ctx.utils.isJsonMode = () => true;

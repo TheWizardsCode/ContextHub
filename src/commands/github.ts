@@ -548,7 +548,7 @@ export default function register(ctx: PluginContext): void {
 
         if (!assignResult.ok) {
           // Assignment failed: do NOT update local state, add comment, re-push
-          const failureMessage = `Failed to assign @copilot to GitHub issue #${issueNumber}: ${assignResult.error}`;
+          const failureMessage = `Failed to assign @copilot to GitHub issue #${issueNumber}: ${assignResult.error}. Local state was not updated.`;
           db.createComment({
             workItemId: normalizedId,
             author: 'wl-delegate',
