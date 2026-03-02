@@ -1893,4 +1893,105 @@ describe('WorklogDatabase', () => {
       expect(afterAvoidA.sortIndex).toBeGreaterThan(afterAvoidB.sortIndex);
     });
   });
+
+  describe('in-progress boost in computeScore / reSort', () => {
+    it('should boost an in-progress item above a same-priority open item', () => {
+      const open = db.create({ title: 'Open item', priority: 'medium' });
+      const inProgress = db.create({ title: 'In-progress item', priority: 'medium', status: 'in-progress' });
+
+      db.reSort();
+
+      const updatedOpen = db.get(open.id)!;
+      const updatedInProgress = db.get(inProgress.id)!;
+      // In-progress item should sort first (lower sortIndex = higher rank)
+      expect(updatedInProgress.sortIndex).toBeLessThan(updatedOpen.sortIndex);
+    });
+
+    it('should boost an ancestor of an in-progress item above a same-priority open item', () => {
+      const parent = db.create({ title: 'Parent epic', priority: 'medium' });
+      const child = db.create({ title: 'In-progress child', priority: 'medium', status: 'in-progress', parentId: parent.id });
+      const unrelated = db.create({ title: 'Unrelated open item', priority: 'medium' });
+
+      // Suppress unused-variable lint warning
+      void child;
+
+      db.reSort();
+
+      const updatedParent = db.get(parent.id)!;
+      const updatedUnrelated = db.get(unrelated.id)!;
+      // Parent with in-progress child should sort above the unrelated open item
+      expect(updatedParent.sortIndex).toBeLessThan(updatedUnrelated.sortIndex);
+    });
+
+    it('should apply only the in-progress boost (not ancestor boost) when item is itself in-progress', () => {
+      // Parent has an in-progress child AND is itself in-progress:
+      // it should get the 1.5x boost, not both 1.5x and 1.25x
+      const parent = db.create({ title: 'In-progress parent', priority: 'medium', status: 'in-progress' });
+      const child = db.create({ title: 'In-progress child', priority: 'medium', status: 'in-progress', parentId: parent.id });
+      const open = db.create({ title: 'Open item', priority: 'medium' });
+
+      void child;
+
+      db.reSort();
+
+      const updatedParent = db.get(parent.id)!;
+      const updatedOpen = db.get(open.id)!;
+      // Parent is in-progress so it gets the 1.5x boost (not stacked 1.5x * 1.25x)
+      expect(updatedParent.sortIndex).toBeLessThan(updatedOpen.sortIndex);
+    });
+
+    it('should not boost a blocked item even if it is an ancestor of an in-progress item', () => {
+      const blockedParent = db.create({ title: 'Blocked parent', priority: 'medium', status: 'blocked' });
+      db.create({ title: 'In-progress child', priority: 'medium', status: 'in-progress', parentId: blockedParent.id });
+      const open = db.create({ title: 'Open item', priority: 'medium' });
+
+      db.reSort();
+
+      const updatedBlockedParent = db.get(blockedParent.id)!;
+      const updatedOpen = db.get(open.id)!;
+      // Blocked parent should still sort below the open item due to -10000 penalty
+      expect(updatedBlockedParent.sortIndex).toBeGreaterThan(updatedOpen.sortIndex);
+    });
+
+    it('should not modify the stored priority field when applying in-progress boost', () => {
+      const item = db.create({ title: 'In-progress item', priority: 'medium', status: 'in-progress' });
+
+      db.reSort();
+
+      const updated = db.get(item.id)!;
+      expect(updated.priority).toBe('medium');
+    });
+
+    it('should still boost ancestor when multiple in-progress children exist at different depths', () => {
+      const grandparent = db.create({ title: 'Grandparent', priority: 'medium' });
+      const parent = db.create({ title: 'Parent', priority: 'medium', parentId: grandparent.id });
+      db.create({ title: 'In-progress grandchild', priority: 'medium', status: 'in-progress', parentId: parent.id });
+      const unrelated = db.create({ title: 'Unrelated open item', priority: 'medium' });
+
+      db.reSort();
+
+      const updatedGrandparent = db.get(grandparent.id)!;
+      const updatedUnrelated = db.get(unrelated.id)!;
+      // Grandparent should be boosted because it is an ancestor of an in-progress item
+      expect(updatedGrandparent.sortIndex).toBeLessThan(updatedUnrelated.sortIndex);
+    });
+
+    it('should not boost ancestor when in-progress child is completed', () => {
+      const parent = db.create({ title: 'Parent', priority: 'medium' });
+      const child = db.create({ title: 'Child', priority: 'medium', status: 'in-progress', parentId: parent.id });
+      const unrelated = db.create({ title: 'Unrelated open item', priority: 'medium' });
+
+      // Close the in-progress child
+      db.update(child.id, { status: 'completed' });
+
+      db.reSort();
+
+      const updatedParent = db.get(parent.id)!;
+      const updatedUnrelated = db.get(unrelated.id)!;
+      // Parent no longer has any in-progress descendants; no ancestor boost.
+      // With equal priority and no boost, createdAt is the tie-breaker:
+      // parent was created first so it naturally gets a lower sortIndex.
+      expect(updatedParent.sortIndex).toBeLessThan(updatedUnrelated.sortIndex);
+    });
+  });
 });
