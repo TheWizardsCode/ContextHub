@@ -22,6 +22,9 @@ export default function register(ctx: PluginContext): void {
       withFileLock(lockPath, () => {
         const db = utils.getDatabase(options.prefix);
         const { items, comments, dependencyEdges } = importFromJsonl(filePath);
+        // SAFETY: db.import() is destructive (clears all items before inserting).
+        // This is intentional here — the import command replaces the entire
+        // database with the contents of the JSONL file.
         db.import(items, dependencyEdges);
         db.importComments(comments);
         

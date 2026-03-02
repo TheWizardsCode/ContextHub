@@ -409,6 +409,9 @@ export function createAPI(db: WorklogDatabase) {
       db.setPrefix(defaultPrefix);
       const filepath = req.body.filepath || getDefaultDataPath();
       const { items, comments, dependencyEdges } = importFromJsonl(filepath);
+      // SAFETY: db.import() is destructive (clears all items before inserting).
+      // This is intentional here — the API import endpoint replaces the entire
+      // database with the contents of the JSONL file.
       db.import(items, dependencyEdges);
       db.importComments(comments);
       res.json({ message: 'Import successful', count: items.length, commentCount: comments.length });
