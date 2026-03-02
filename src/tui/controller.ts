@@ -1685,7 +1685,7 @@ export class TuiController {
         return;
       }
       const node = v[idx] || v[0];
-      const text = humanFormatWorkItem(node.item, db, 'full');
+      const text = humanFormatWorkItem(node.item, db, 'detail-pane');
       const escaped = escapeBlessedTags(text);
       const brightened = brightenDetailIdLine(escaped);
       detail.setContent(decorateIdsForClick(brightened));
