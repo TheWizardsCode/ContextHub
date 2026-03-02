@@ -18,6 +18,7 @@ import {
   DialogsComponent,
   HelpMenuComponent,
   ListComponent,
+  MetadataPaneComponent,
   ModalDialogsComponent,
   OpencodePaneComponent,
   OverlaysComponent,
@@ -42,6 +43,7 @@ export interface TuiLayout {
   // Component instances
   listComponent: ListComponent;
   detailComponent: DetailComponent;
+  metadataPaneComponent: MetadataPaneComponent;
   toastComponent: ToastComponent;
   overlaysComponent: OverlaysComponent;
   dialogsComponent: DialogsComponent;
@@ -102,8 +104,14 @@ export function createLayout(options: CreateLayoutOptions = {}): TuiLayout {
     blessed: blessedImpl,
   }).create();
 
-  // ── Detail (right pane) ─────────────────────────────────────────────
+  // ── Detail (bottom pane) ────────────────────────────────────────────
   const detailComponent = new DetailComponent({
+    parent: screen,
+    blessed: blessedImpl,
+  }).create();
+
+  // ── Metadata (top-right pane) ────────────────────────────────────────
+  const metadataPaneComponent = new MetadataPaneComponent({
     parent: screen,
     blessed: blessedImpl,
   }).create();
@@ -220,6 +228,7 @@ export function createLayout(options: CreateLayoutOptions = {}): TuiLayout {
     screen,
     listComponent,
     detailComponent,
+    metadataPaneComponent,
     toastComponent,
     overlaysComponent,
     dialogsComponent,

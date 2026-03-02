@@ -248,7 +248,7 @@ describe('TUI integration: style preservation', () => {
 
     const boxMock = (blessedMock as any).box?.mock;
     const boxCalls = boxMock?.calls || [];
-    const detailIndex = boxCalls.findIndex((call: any[]) => call?.[0]?.label === ' Details ');
+    const detailIndex = boxCalls.findIndex((call: any[]) => call?.[0]?.label === ' Description & Comments ');
     const detail = detailIndex >= 0 ? boxMock.results[detailIndex]?.value : null;
 
     const selectHandler = handlers['select'] || handlers['select item'];
@@ -295,7 +295,7 @@ describe('TUI integration: style preservation', () => {
 
     const boxMock = (blessedMock as any).box?.mock;
     const boxCalls = boxMock?.calls || [];
-    const detailIndex = boxCalls.findIndex((call: any[]) => call?.[0]?.label === ' Details ');
+    const detailIndex = boxCalls.findIndex((call: any[]) => call?.[0]?.label === ' Description & Comments ');
     const detail = detailIndex >= 0 ? boxMock.results[detailIndex]?.value : null;
 
     const selectHandler = handlers['select'] || handlers['select item'];
@@ -349,7 +349,7 @@ describe('TUI integration: style preservation', () => {
 
     const boxMock = (blessedMock as any).box?.mock;
     const boxCalls = boxMock?.calls || [];
-    const detailIndex = boxCalls.findIndex((call: any[]) => call?.[0]?.label === ' Details ');
+    const detailIndex = boxCalls.findIndex((call: any[]) => call?.[0]?.label === ' Description & Comments ');
     const detail = detailIndex >= 0 ? boxMock.results[detailIndex]?.value : null;
 
     const screenKeyCtrlW = handlers['screen-key:C-w'];
@@ -357,10 +357,16 @@ describe('TUI integration: style preservation', () => {
     expect(typeof screenKeyCtrlW).toBe('function');
     expect(typeof screenKeyW).toBe('function');
 
+    // Cycle 1: list → metadata
+    screenKeyCtrlW(null, { name: 'C-w' });
+    screenKeyW(null, { name: 'w' });
+
+    // Cycle 2: metadata → detail
     screenKeyCtrlW(null, { name: 'C-w' });
     screenKeyW(null, { name: 'w' });
     expect(detail?.focus).toHaveBeenCalled();
 
+    // Cycle 3: detail → list (wrap)
     screenKeyCtrlW(null, { name: 'C-w' });
     screenKeyW(null, { name: 'w' });
     const listMock = (blessedMock as any).list?.mock;
@@ -487,7 +493,7 @@ describe('TUI integration: style preservation', () => {
     const listWidget = (blessedMock as any).list?.mock?.results?.[0]?.value;
     const boxMock = (blessedMock as any).box?.mock;
     const boxCalls = boxMock?.calls || [];
-    const detailIndex = boxCalls.findIndex((call: any[]) => call?.[0]?.label === ' Details ');
+    const detailIndex = boxCalls.findIndex((call: any[]) => call?.[0]?.label === ' Description & Comments ');
     const detail = detailIndex >= 0 ? boxMock.results[detailIndex]?.value : null;
 
     expect(listWidget?.style?.border?.fg).toBe('green');
@@ -495,6 +501,9 @@ describe('TUI integration: style preservation', () => {
 
     const screenKeyCtrlW = handlers['screen-key:C-w'];
     const screenKeyW = handlers['screen-key:w'];
+    // Cycle twice to reach detail (list → metadata → detail)
+    screenKeyCtrlW(null, { name: 'C-w' });
+    screenKeyW(null, { name: 'w' });
     screenKeyCtrlW(null, { name: 'C-w' });
     screenKeyW(null, { name: 'w' });
     const listMock = (blessedMock as any).list?.mock;
@@ -639,7 +648,7 @@ describe('TUI integration: style preservation', () => {
     await (savedAction as any)({});
 
     const boxes: any[] = (blessedMock as any)._boxes || [];
-    const detailBox = boxes.find((b) => b.label === ' Details ');
+    const detailBox = boxes.find((b) => b.label === ' Description & Comments ');
     const detailModal = boxes.find((b) => b.label === ' Item Details ');
     expect(detailBox).toBeTruthy();
     expect(detailModal).toBeTruthy();

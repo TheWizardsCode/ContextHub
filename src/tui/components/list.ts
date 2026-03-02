@@ -20,8 +20,8 @@ export class ListComponent {
     this.list = this.blessedImpl.list({
       parent: this.screen,
       label: ' Work Items ',
-      width: '50%',
-      height: '100%-1',
+      width: '65%',
+      height: '50%',
       tags: true,
       keys: true,
       vi: false,
