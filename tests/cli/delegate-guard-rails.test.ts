@@ -122,7 +122,12 @@ function createDelegateTestContext() {
     getAllComments: () => comments,
     getChildren: (parentId: string) => Array.from(items.values()).filter(i => i.parentId === parentId),
     getDescendants: (parentId: string) => Array.from(items.values()).filter(i => i.parentId === parentId),
+    // Mirrors real db.import() destructive semantics: DELETE all items then
+    // re-insert only the provided set. This ensures mock-based tests would
+    // catch data-loss bugs if code mistakenly calls import() with a partial
+    // item set instead of upsertItems().
     import: (updatedItems: any[]) => {
+      items.clear();
       for (const item of updatedItems) {
         items.set(item.id, item);
       }
@@ -410,5 +415,31 @@ describe('delegate subcommand guard rails', () => {
     expect(assignError!.data.pushed).toBe(true);
     expect(assignError!.data.assigned).toBe(false);
     expect(assignError!.data.error).toBe('forbidden');
+  });
+
+  it('preserves non-delegated items after successful delegation', async () => {
+    // Create multiple items — only one will be delegated
+    t.makeItem({ id: 'WL-KEEP-1', title: 'Unrelated epic', githubIssueNumber: 200 });
+    t.makeItem({ id: 'WL-KEEP-2', title: 'Unrelated bug', githubIssueNumber: 201 });
+    t.makeItem({ id: 'WL-TARGET', title: 'Delegate target', githubIssueNumber: 202 });
+
+    await t.runDelegate('WL-TARGET');
+
+    // The delegated item should be updated
+    const target = t.db.get('WL-TARGET');
+    expect(target).toBeDefined();
+    expect(target.status).toBe('in-progress');
+    expect(target.assignee).toBe('@github-copilot');
+
+    // Non-delegated items MUST still exist.
+    // With the realistic destructive db.import mock, this test would fail
+    // if the code called db.import() instead of db.upsertItems().
+    const keep1 = t.db.get('WL-KEEP-1');
+    expect(keep1, 'WL-KEEP-1 should survive delegation of another item').toBeDefined();
+    expect(keep1.title).toBe('Unrelated epic');
+
+    const keep2 = t.db.get('WL-KEEP-2');
+    expect(keep2, 'WL-KEEP-2 should survive delegation of another item').toBeDefined();
+    expect(keep2.title).toBe('Unrelated bug');
   });
 });
