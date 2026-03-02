@@ -76,7 +76,7 @@ describe('assignGithubIssueAsync', () => {
   it('returns { ok: true } on successful assignment', async () => {
     mockSpawn.mockImplementation(createMockSpawnImpl('', 0));
 
-    const result = await assignGithubIssueAsync(defaultConfig, 42, 'copilot');
+    const result = await assignGithubIssueAsync(defaultConfig, 42, '@copilot');
 
     expect(result).toEqual({ ok: true });
     expect(mockSpawn).toHaveBeenCalledTimes(1);
@@ -84,19 +84,19 @@ describe('assignGithubIssueAsync', () => {
     const command = mockSpawn.mock.calls[0][1][1]; // spawn('/bin/sh', ['-c', command])
     expect(command).toContain('gh issue edit 42');
     expect(command).toContain('--add-assignee');
-    expect(command).toContain('copilot');
+    expect(command).toContain('@copilot');
     expect(command).toContain('--repo owner/repo');
   });
 
   it('returns { ok: false, error } on gh failure without throwing', async () => {
     mockSpawn.mockImplementation(
-      createMockSpawnImpl('', 1, 'user copilot is not assignable to this issue')
+      createMockSpawnImpl('', 1, 'user @copilot is not assignable to this issue')
     );
 
-    const result = await assignGithubIssueAsync(defaultConfig, 42, 'copilot');
+    const result = await assignGithubIssueAsync(defaultConfig, 42, '@copilot');
 
     expect(result.ok).toBe(false);
-    expect(result.error).toContain('copilot is not assignable');
+    expect(result.error).toContain('@copilot is not assignable');
   });
 
   it('retries on rate-limit errors', async () => {
@@ -109,7 +109,7 @@ describe('assignGithubIssueAsync', () => {
       return createMockSpawnImpl('', 0)(_cmd, _args, _opts);
     });
 
-    const result = await assignGithubIssueAsync(defaultConfig, 42, 'copilot', 3);
+    const result = await assignGithubIssueAsync(defaultConfig, 42, '@copilot', 3);
 
     expect(result.ok).toBe(true);
     expect(mockSpawn).toHaveBeenCalledTimes(3);
@@ -125,7 +125,7 @@ describe('assignGithubIssueAsync', () => {
       return createMockSpawnImpl('', 0)(_cmd, _args, _opts);
     });
 
-    const result = await assignGithubIssueAsync(defaultConfig, 42, 'copilot', 3);
+    const result = await assignGithubIssueAsync(defaultConfig, 42, '@copilot', 3);
 
     expect(result.ok).toBe(true);
     expect(mockSpawn).toHaveBeenCalledTimes(2);
@@ -136,7 +136,7 @@ describe('assignGithubIssueAsync', () => {
       createMockSpawnImpl('', 1, 'API rate limit exceeded')
     );
 
-    const result = await assignGithubIssueAsync(defaultConfig, 42, 'copilot', 2);
+    const result = await assignGithubIssueAsync(defaultConfig, 42, '@copilot', 2);
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain('rate limit');
@@ -149,7 +149,7 @@ describe('assignGithubIssueAsync', () => {
       createMockSpawnImpl('', 1, 'repository not found')
     );
 
-    const result = await assignGithubIssueAsync(defaultConfig, 42, 'copilot', 3);
+    const result = await assignGithubIssueAsync(defaultConfig, 42, '@copilot', 3);
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain('repository not found');
@@ -162,7 +162,7 @@ describe('assignGithubIssueAsync', () => {
       createMockSpawnImpl('', 1, '')
     );
 
-    const result = await assignGithubIssueAsync(defaultConfig, 42, 'copilot');
+    const result = await assignGithubIssueAsync(defaultConfig, 42, '@copilot');
 
     expect(result.ok).toBe(false);
     expect(result.error).toBeTruthy();
@@ -178,7 +178,7 @@ describe('assignGithubIssue (sync)', () => {
     // execSync returns stdout as string on success
     mockExecSync.mockReturnValue('');
 
-    const result = assignGithubIssue(defaultConfig, 42, 'copilot');
+    const result = assignGithubIssue(defaultConfig, 42, '@copilot');
 
     expect(result).toEqual({ ok: true });
     expect(mockExecSync).toHaveBeenCalledTimes(1);
@@ -187,14 +187,14 @@ describe('assignGithubIssue (sync)', () => {
   it('returns { ok: false, error } on gh failure without throwing', () => {
     // execSync throws on non-zero exit code; runGhDetailed catches it
     const err: any = new Error('Command failed');
-    err.stderr = 'user copilot is not assignable to this issue';
+    err.stderr = 'user @copilot is not assignable to this issue';
     err.stdout = '';
     mockExecSync.mockImplementation(() => { throw err; });
 
-    const result = assignGithubIssue(defaultConfig, 42, 'copilot');
+    const result = assignGithubIssue(defaultConfig, 42, '@copilot');
 
     expect(result.ok).toBe(false);
-    expect(result.error).toContain('copilot is not assignable');
+    expect(result.error).toContain('@copilot is not assignable');
   });
 
   it('returns fallback error when stderr is empty on failure', () => {
@@ -203,7 +203,7 @@ describe('assignGithubIssue (sync)', () => {
     err.stdout = '';
     mockExecSync.mockImplementation(() => { throw err; });
 
-    const result = assignGithubIssue(defaultConfig, 42, 'copilot');
+    const result = assignGithubIssue(defaultConfig, 42, '@copilot');
 
     expect(result.ok).toBe(false);
     expect(result.error).toBeTruthy();
