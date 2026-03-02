@@ -578,7 +578,17 @@ export default function register(ctx: PluginContext): void {
         db.update(normalizedId, {
           status: 'in-progress' as any,
           assignee: '@github-copilot',
+          stage: 'in_progress',
         });
+
+        // Re-push to sync updated status/stage labels to GitHub
+        const postAssignComments = db.getAllComments();
+        await upsertIssuesFromWorkItems(
+          [db.get(normalizedId)!],
+          postAssignComments.filter(c => c.workItemId === normalizedId),
+          githubConfig,
+          () => {}
+        );
 
         const issueUrl = `https://github.com/${githubConfig.repo}/issues/${issueNumber}`;
 
