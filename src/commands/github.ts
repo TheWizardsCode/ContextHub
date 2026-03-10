@@ -4,7 +4,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import { getRepoFromGitRemote, normalizeGithubLabelPrefix } from '../github.js';
-import { upsertIssuesFromWorkItems, importIssuesToWorkItems, GithubProgress, SyncedItem, SyncErrorItem, FieldChange } from '../github-sync.js';
+import { upsertIssuesFromWorkItems, importIssuesToWorkItems, GithubProgress, GithubSyncResult, SyncedItem, SyncErrorItem, FieldChange } from '../github-sync.js';
 import { loadConfig } from '../config.js';
 import { displayConflictDetails } from './helpers.js';
 import { createLogFileWriter, getWorklogLogPath, logConflictDetails } from '../logging.js';
@@ -44,6 +44,7 @@ export default function register(ctx: PluginContext): void {
     .option('--all', 'Force a full push of all items, ignoring the last-push timestamp')
     .option('--force', 'Deprecated alias for --all (bypass pre-filter and process all items)', false)
     .option('--no-update-timestamp', 'Do not write last-push timestamp after push')
+    .option('--id <work-item-id>', 'Push a single work item by ID')
     .option('--prefix <prefix>', 'Override the default prefix')
     .action(async (options) => {
       utils.requireInitialized();
@@ -128,6 +129,17 @@ export default function register(ctx: PluginContext): void {
           }
         }
 
+        // --id: restrict to a single work item when provided
+        if (options.id) {
+          const singleItem = itemsToProcess.find(i => i.id === options.id);
+          if (!singleItem) {
+            throw new Error(`Work item '${options.id}' not found (or not a candidate for push).`);
+          }
+          itemsToProcess = [singleItem];
+          commentsToProcess = commentsToProcess.filter(c => c.workItemId === options.id);
+          logLine(`github push: --id mode; pushing single item ${options.id}`);
+        }
+
         // Capture push-start timestamp BEFORE processing begins so that items
         // modified during the push window are re-processed on the next run.
         const pushStartTimestamp = new Date().toISOString();
@@ -135,20 +147,86 @@ export default function register(ctx: PluginContext): void {
         const verboseLog = isVerbose && !isJsonMode
           ? (message: string) => console.log(message)
           : undefined;
-        const { updatedItems, result, timing } = await upsertIssuesFromWorkItems(
-          itemsToProcess,
-          commentsToProcess,
-          githubConfig,
-          renderProgress,
-          verboseLog,
-          // persistComment - write back github mapping to DB
-          (comment) => db.updateComment(comment.id, {
-            githubCommentId: comment.githubCommentId ?? null,
-            githubCommentUpdatedAt: comment.githubCommentUpdatedAt ?? null,
-          })
-        );
-        if (updatedItems.length > 0) {
-          db.upsertItems(updatedItems);
+
+        // Process items in fixed batches of 10 so progress is persisted after
+        // each batch and a single failure does not require reprocessing everything.
+        const BATCH_SIZE = 10;
+        const totalBatches = Math.max(Math.ceil(itemsToProcess.length / BATCH_SIZE), 1);
+        const result: GithubSyncResult = {
+          updated: 0, created: 0, closed: 0, skipped: 0,
+          errors: [], syncedItems: [], errorItems: [],
+          commentsCreated: 0, commentsUpdated: 0,
+        };
+        const timing = {
+          totalMs: 0, upsertMs: 0, commentListMs: 0, commentUpsertMs: 0,
+          hierarchyCheckMs: 0, hierarchyLinkMs: 0, hierarchyVerifyMs: 0,
+        };
+
+        // Build a map of comments by item ID so we can pass only relevant
+        // comments to each batch without scanning the full list every time.
+        const commentsByItemId = new Map<string, typeof commentsToProcess>();
+        for (const comment of commentsToProcess) {
+          const list = commentsByItemId.get(comment.workItemId) ?? [];
+          list.push(comment);
+          commentsByItemId.set(comment.workItemId, list);
+        }
+
+        for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+          const batchStart = batchIndex * BATCH_SIZE;
+          const batchItems = itemsToProcess.slice(batchStart, batchStart + BATCH_SIZE);
+          // Guard: skip if slice is empty (can only happen when itemsToProcess is empty
+          // and totalBatches was clamped to 1 via Math.max above).
+          if (batchItems.length === 0) {
+            break;
+          }
+
+          const batchComments = batchItems.flatMap(item => commentsByItemId.get(item.id) ?? []);
+
+          logLine(`github push: batch ${batchIndex + 1}/${totalBatches} items=${batchItems.length}`);
+
+          let batchResult;
+          try {
+            batchResult = await upsertIssuesFromWorkItems(
+              batchItems,
+              batchComments,
+              githubConfig,
+              renderProgress,
+              verboseLog,
+              // persistComment - write back github mapping to DB
+              (comment) => db.updateComment(comment.id, {
+                githubCommentId: comment.githubCommentId ?? null,
+                githubCommentUpdatedAt: comment.githubCommentUpdatedAt ?? null,
+              })
+            );
+          } catch (batchError) {
+            const batchMsg = `Batch ${batchIndex + 1}/${totalBatches} failed: ${(batchError as Error).message}`;
+            logLine(`github push: ${batchMsg}`);
+            throw new Error(batchMsg);
+          }
+
+          // Persist updated item mappings immediately after each successful batch.
+          if (batchResult.updatedItems.length > 0) {
+            db.upsertItems(batchResult.updatedItems);
+          }
+
+          // Accumulate results across batches.
+          result.updated += batchResult.result.updated;
+          result.created += batchResult.result.created;
+          result.closed += batchResult.result.closed;
+          result.skipped += batchResult.result.skipped;
+          result.errors.push(...batchResult.result.errors);
+          result.syncedItems.push(...batchResult.result.syncedItems);
+          result.errorItems.push(...batchResult.result.errorItems);
+          result.commentsCreated = (result.commentsCreated ?? 0) + (batchResult.result.commentsCreated ?? 0);
+          result.commentsUpdated = (result.commentsUpdated ?? 0) + (batchResult.result.commentsUpdated ?? 0);
+
+          timing.totalMs += batchResult.timing.totalMs;
+          timing.upsertMs += batchResult.timing.upsertMs;
+          timing.commentListMs += batchResult.timing.commentListMs;
+          timing.commentUpsertMs += batchResult.timing.commentUpsertMs;
+          timing.hierarchyCheckMs += batchResult.timing.hierarchyCheckMs;
+          timing.hierarchyLinkMs += batchResult.timing.hierarchyLinkMs;
+          timing.hierarchyVerifyMs += batchResult.timing.hierarchyVerifyMs;
         }
 
         // Update the last-push timestamp unless --no-update-timestamp was provided.
