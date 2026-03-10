@@ -183,7 +183,8 @@ Behavior:
 - `dep list --incoming` shows only inbound dependencies.
 
 **Automatic unblocking:** Dependents are automatically unblocked when all their blockers
-become inactive (completed or deleted). This reconciliation happens via `db.update()` and
+become inactive (completed, deleted, or moved to a non-blocking stage such as `in_review`
+or `done`). This reconciliation happens via `db.update()` and
 `db.delete()` — any status or stage change triggers the reconciliation logic. See
 [Dependency Reconciliation](docs/dependency-reconciliation.md) for developer details.
 
