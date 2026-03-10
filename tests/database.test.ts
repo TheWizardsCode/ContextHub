@@ -657,6 +657,92 @@ describe('WorklogDatabase', () => {
         }
       }
     });
+
+    describe('in_review stage unblocking (dependency edges only)', () => {
+      it('should unblock dependent when sole blocker moves to in_review stage', () => {
+        const blocker = db.create({ title: 'Blocker', status: 'open', stage: 'in_progress' });
+        const blocked = db.create({ title: 'Blocked', status: 'blocked' });
+        db.addDependencyEdge(blocked.id, blocker.id);
+
+        db.update(blocker.id, { stage: 'in_review' });
+        expect(db.get(blocked.id)?.status).toBe('open');
+      });
+
+      it('should keep dependent blocked when one of multiple blockers moves to in_review', () => {
+        const blockerA = db.create({ title: 'Blocker A', status: 'open', stage: 'in_progress' });
+        const blockerB = db.create({ title: 'Blocker B', status: 'open', stage: 'in_progress' });
+        const blocked = db.create({ title: 'Blocked', status: 'blocked' });
+        db.addDependencyEdge(blocked.id, blockerA.id);
+        db.addDependencyEdge(blocked.id, blockerB.id);
+
+        db.update(blockerA.id, { stage: 'in_review' });
+        expect(db.get(blocked.id)?.status).toBe('blocked');
+      });
+
+      it('should unblock dependent when all blockers move to in_review', () => {
+        const blockerA = db.create({ title: 'Blocker A', status: 'open', stage: 'in_progress' });
+        const blockerB = db.create({ title: 'Blocker B', status: 'open', stage: 'in_progress' });
+        const blocked = db.create({ title: 'Blocked', status: 'blocked' });
+        db.addDependencyEdge(blocked.id, blockerA.id);
+        db.addDependencyEdge(blocked.id, blockerB.id);
+
+        db.update(blockerA.id, { stage: 'in_review' });
+        expect(db.get(blocked.id)?.status).toBe('blocked');
+
+        db.update(blockerB.id, { stage: 'in_review' });
+        expect(db.get(blocked.id)?.status).toBe('open');
+      });
+
+      it('should unblock dependent when mix of in_review and completed blockers are all non-blocking', () => {
+        const blockerA = db.create({ title: 'Blocker A', status: 'open', stage: 'in_progress' });
+        const blockerB = db.create({ title: 'Blocker B', status: 'open', stage: 'in_progress' });
+        const blocked = db.create({ title: 'Blocked', status: 'blocked' });
+        db.addDependencyEdge(blocked.id, blockerA.id);
+        db.addDependencyEdge(blocked.id, blockerB.id);
+
+        db.update(blockerA.id, { status: 'completed' });
+        expect(db.get(blocked.id)?.status).toBe('blocked');
+
+        db.update(blockerB.id, { stage: 'in_review' });
+        expect(db.get(blocked.id)?.status).toBe('open');
+      });
+
+      it('should be idempotent: moving blocker to in_review multiple times does not break state', () => {
+        const blocker = db.create({ title: 'Blocker', status: 'open', stage: 'in_progress' });
+        const blocked = db.create({ title: 'Blocked', status: 'blocked' });
+        db.addDependencyEdge(blocked.id, blocker.id);
+
+        db.update(blocker.id, { stage: 'in_review' });
+        expect(db.get(blocked.id)?.status).toBe('open');
+
+        db.update(blocker.id, { stage: 'in_review' });
+        expect(db.get(blocked.id)?.status).toBe('open');
+      });
+
+      it('should re-block dependent when blocker moves back from in_review to in_progress', () => {
+        const blocker = db.create({ title: 'Blocker', status: 'open', stage: 'in_progress' });
+        const blocked = db.create({ title: 'Blocked', status: 'blocked' });
+        db.addDependencyEdge(blocked.id, blocker.id);
+
+        db.update(blocker.id, { stage: 'in_review' });
+        expect(db.get(blocked.id)?.status).toBe('open');
+
+        db.update(blocker.id, { stage: 'in_progress' });
+        expect(db.get(blocked.id)?.status).toBe('blocked');
+      });
+
+      it('should unblock multiple dependents when their shared blocker moves to in_review', () => {
+        const blocker = db.create({ title: 'Shared Blocker', status: 'open', stage: 'in_progress' });
+        const dependentA = db.create({ title: 'Dependent A', status: 'blocked' });
+        const dependentB = db.create({ title: 'Dependent B', status: 'blocked' });
+        db.addDependencyEdge(dependentA.id, blocker.id);
+        db.addDependencyEdge(dependentB.id, blocker.id);
+
+        db.update(blocker.id, { stage: 'in_review' });
+        expect(db.get(dependentA.id)?.status).toBe('open');
+        expect(db.get(dependentB.id)?.status).toBe('open');
+      });
+    });
   });
 
   describe('import and export', () => {
