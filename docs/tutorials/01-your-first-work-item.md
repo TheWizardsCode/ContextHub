@@ -18,8 +18,8 @@ By the end of this tutorial you will be able to:
 Clone and build Worklog, then make the `wl` command available globally:
 
 ```bash
-git clone https://github.com/TheWizardsCode/ContextHub.git
-cd ContextHub
+git clone https://github.com/rgardler-msft/Worklog.git
+cd Worklog
 npm install
 npm run build
 npm link

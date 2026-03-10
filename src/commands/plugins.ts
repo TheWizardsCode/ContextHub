@@ -121,9 +121,9 @@ export default function register(ctx: PluginContext): void {
 function printPluginList(pluginDir: string, dirExists: boolean, verbose: boolean | undefined): void {
   if (!dirExists) {
     console.log('\nNo plugins configured.');
-      console.log(
-        `\nTo add plugins, create ${pluginDir} and add .js or .mjs files. See https://github.com/TheWizardsCode/ContextHub/blob/main/PLUGIN_GUIDE.md for details.`
-      );
+    console.log(
+      `\nTo add plugins, create ${pluginDir} and add .js or .mjs files. See https://github.com/rgardler-msft/Worklog/blob/main/PLUGIN_GUIDE.md for details.`
+    );
     return;
   }
 
