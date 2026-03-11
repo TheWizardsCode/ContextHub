@@ -45,9 +45,10 @@ export class TokenBucketThrottler {
     // start full
     this.tokens = this.burst;
     this.lastRefill = this.clock.now();
-    // Enable debug when explicit env var set or when the process is started
-    // with a `--verbose` flag (useful when running test runner with `--verbose`).
-    this.debug = Boolean(process.env.WL_GITHUB_THROTTLER_DEBUG) || (Array.isArray(process.argv) && process.argv.includes('--verbose'));
+    // Enable throttler debug logging only when explicitly requested.
+    // Tying this to global `--verbose` causes console.debug output to interfere
+    // with full-screen TUI rendering during GitHub push operations.
+    this.debug = Boolean(process.env.WL_GITHUB_THROTTLER_DEBUG);
   }
 
   schedule<T>(fn: () => Promise<T> | T): Promise<T> {
