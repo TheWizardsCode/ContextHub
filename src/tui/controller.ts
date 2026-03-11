@@ -2996,6 +2996,9 @@ export class TuiController {
 
     // Delegate to GitHub Copilot (shortcut g)
     screen.key(KEY_DELEGATE, async (_ch: any, key: any) => {
+      // Only handle plain 'g' key events. If key.name is present and not 'g'
+      // then ignore (this avoids uppercase/shift ambiguity).
+      if (key && key.name && key.name !== 'g') return;
       // Ignore when shift is held — that is handled by KEY_GITHUB_PUSH ('G')
       if (key?.shift) return;
       // Guard: suppress when overlays are visible or in move mode
