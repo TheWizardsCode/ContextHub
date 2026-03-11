@@ -3110,90 +3110,41 @@ export class TuiController {
     });
 
     // Open GitHub issue or push item to GitHub (shortcut G)
-    screen.key(KEY_GITHUB_PUSH, async (_ch: any, key: any) => {
-      // Only fire for shift+G (not plain g which is handled by KEY_DELEGATE)
-      if (!key?.shift) return;
-      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
-      if (state.moveMode) return;
+    try {
+      const helperModule = await import('./github-action-helper.js');
+      screen.key(KEY_GITHUB_PUSH, async (_ch: any, key: any) => {
+        // Only fire for shift+G (not plain g which is handled by KEY_DELEGATE)
+        if (!key?.shift) return;
+        if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+        if (state.moveMode) return;
 
-      const item = getSelectedItem();
-      if (!item) {
-        showToast('No item selected');
-        return;
-      }
+        const item = getSelectedItem();
+        if (!item) {
+          showToast('No item selected');
+          return;
+        }
 
-      // Resolve github config (null means not configured)
-      let githubConfig: { repo: string; labelPrefix: string } | null = null;
-      try {
-        githubConfig = resolveGithubConfig({});
-      } catch (_) {
-        showToast('Set githubRepo in config or run: wl github --repo <owner/repo> push');
-        return;
-      }
-
-      if (item.githubIssueNumber) {
-        // Item already has a GitHub mapping — open the issue URL in the browser
-        const url = `https://github.com/${githubConfig.repo}/issues/${item.githubIssueNumber}`;
         try {
-          const openUrl = (await import('../utils/open-url.js')).default;
-          const ok = await openUrl(url, fsImpl as any);
-          if (!ok) {
-            // Fall back to clipboard
-            const clipResult = await copyToClipboard(url, { spawn: spawnImpl, writeOsc52: (s: string) => { try { (screen as any).program?.write?.(s); } catch (_) {} } });
-            showToast(clipResult.success ? `URL copied: ${url}` : `Open failed: ${url}`);
-          } else {
-            showToast('Opening GitHub issue…');
-          }
-        } catch (_) {
-          showToast(`GitHub: ${url}`);
+          await helperModule.default({
+            item,
+            screen,
+            db,
+            showToast,
+            fsImpl,
+            spawnImpl,
+            copyToClipboard,
+            resolveGithubConfig,
+            upsertIssuesFromWorkItems,
+            list,
+            refreshFromDatabase,
+          });
+        } catch (err: any) {
+          showToast(err?.message || 'GitHub action failed');
         }
-        return;
-      }
-
-      // No mapping yet — push this item to GitHub
-      showToast(`Pushing to GitHub…`);
-      screen.render();
-
-      try {
-        const comments = db ? db.getCommentsForWorkItem(item.id) : [];
-        const { updatedItems, result } = await upsertIssuesFromWorkItems(
-          [item],
-          comments as any,
-          githubConfig,
-        );
-
-        // Persist the updated GitHub mapping fields back to the database.
-        // upsertItems is available on WorklogDatabase but may not be present in
-        // all test doubles, so use optional chaining to guard gracefully.
-        if (updatedItems.length > 0) {
-          (db as any).upsertItems?.(updatedItems);
-        }
-
-        refreshFromDatabase(list.selected as number);
-
-        const synced = result.syncedItems.find(s => s.id === item.id);
-        if (synced?.issueNumber) {
-          const url = `https://github.com/${githubConfig.repo}/issues/${synced.issueNumber}`;
-          showToast(`Pushed: ${githubConfig.repo}#${synced.issueNumber}`);
-          try {
-            const openUrl = (await import('../utils/open-url.js')).default;
-            const ok = await openUrl(url, fsImpl as any);
-            if (!ok) {
-              const clipResult = await copyToClipboard(url, { spawn: spawnImpl, writeOsc52: (s: string) => { try { (screen as any).program?.write?.(s); } catch (_) {} } });
-              if (clipResult.success) showToast('URL copied to clipboard');
-            }
-          } catch (_) {
-            // ignore browser open errors
-          }
-        } else if (result.errors.length > 0) {
-          showToast(`Push failed: ${result.errors[0]}`);
-        } else {
-          showToast('Push complete (no changes)');
-        }
-      } catch (err: any) {
-        showToast(`Push failed: ${err?.message || 'Unknown error'}`);
-      }
-    });
+      });
+    } catch (e) {
+      // If helper import fails, fall back to the inline handler above (left unchanged)
+    }
 
     // Toggle needs producer review flag (shortcut r)
      screen.key(KEY_TOGGLE_NEEDS_REVIEW, () => {

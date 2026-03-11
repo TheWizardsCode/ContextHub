@@ -88,8 +88,12 @@ export class MetadataPaneComponent {
     if (!item.githubRepo) {
       lines.push('GitHub:   (set githubRepo in config to enable)');
     } else if (item.githubIssueNumber) {
-      lines.push(`GitHub:   ${item.githubRepo}#${item.githubIssueNumber} (G to open)`);
+      // Only show the issue number in the metadata pane; repo is implied by config
+      // Make the text explicit about interaction so controller can wire key/click handlers
+      lines.push(`GitHub:   #${item.githubIssueNumber} (G to open)`);
     } else {
+      // Show a visual affordance that pushing is available; controller will
+      // handle the actual push logic and keyboard/mouse interactions.
       lines.push('GitHub:   (G to push to GitHub)');
     }
 
