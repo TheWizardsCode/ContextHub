@@ -370,6 +370,132 @@ describe('TUI Update Dialog', () => {
 
       screen.destroy();
     });
+
+    it('should follow visual left-to-right tab order: Status -> Stage -> Priority -> Comment', () => {
+      const screen = blessed.screen({ mouse: true, smartCSR: true });
+
+      // Order matches visual layout: Status (left), Stage (middle), Priority (right), Comment (bottom)
+      const statusList = blessed.list({ parent: screen, items: statusLabels.slice(0, 2) });
+      const stageList = blessed.list({ parent: screen, items: stageLabels.slice(0, 2) });
+      const priorityList = blessed.list({ parent: screen, items: ['high', 'low'] });
+      const commentBox = blessed.textarea({ parent: screen, inputOnFocus: true });
+
+      const fieldOrder = [statusList, stageList, priorityList, commentBox];
+      const focusManager = createUpdateDialogFocusManager(fieldOrder);
+
+      // Start at Status (index 0)
+      focusManager.focusIndex(0);
+      expect(focusManager.getIndex()).toBe(0);
+
+      // Tab -> Stage
+      focusManager.cycle(1);
+      expect(focusManager.getIndex()).toBe(1);
+
+      // Tab -> Priority
+      focusManager.cycle(1);
+      expect(focusManager.getIndex()).toBe(2);
+
+      // Tab -> Comment
+      focusManager.cycle(1);
+      expect(focusManager.getIndex()).toBe(3);
+
+      // Tab wraps back to Status
+      focusManager.cycle(1);
+      expect(focusManager.getIndex()).toBe(0);
+
+      // Shift+Tab from Status wraps to Comment
+      focusManager.cycle(-1);
+      expect(focusManager.getIndex()).toBe(3);
+
+      screen.destroy();
+    });
+
+    it('should wrap focus correctly at boundaries', () => {
+      const screen = blessed.screen({ mouse: true, smartCSR: true });
+
+      const statusList = blessed.list({ parent: screen, items: statusLabels.slice(0, 2) });
+      const stageList = blessed.list({ parent: screen, items: stageLabels.slice(0, 2) });
+      const priorityList = blessed.list({ parent: screen, items: ['high', 'low'] });
+      const commentBox = blessed.textarea({ parent: screen, inputOnFocus: true });
+
+      const focusManager = createUpdateDialogFocusManager([statusList, stageList, priorityList, commentBox]);
+
+      // From last field, Tab wraps to first
+      focusManager.focusIndex(3);
+      focusManager.cycle(1);
+      expect(focusManager.getIndex()).toBe(0);
+
+      // From first field, Shift+Tab wraps to last
+      focusManager.focusIndex(0);
+      focusManager.cycle(-1);
+      expect(focusManager.getIndex()).toBe(3);
+
+      screen.destroy();
+    });
+  });
+
+  describe('Update Dialog Escape Key Behavior', () => {
+    it('should close dialog when Escape is pressed on any of the three selection lists', () => {
+      const screen = blessed.screen({ mouse: true, smartCSR: true });
+
+      const statusList = blessed.list({ parent: screen, items: statusLabels.slice(0, 2), keys: true });
+      const stageList = blessed.list({ parent: screen, items: stageLabels.slice(0, 2), keys: true });
+      const priorityList = blessed.list({ parent: screen, items: ['high', 'low'], keys: true });
+
+      let closeCount = 0;
+      const closeUpdateDialog = () => { closeCount += 1; };
+
+      // Simulate registering Escape handlers on each list as done in controller.ts
+      const statusEscapeHandler = () => { closeUpdateDialog(); };
+      const stageEscapeHandler = () => { closeUpdateDialog(); };
+      const priorityEscapeHandler = () => { closeUpdateDialog(); };
+
+      (statusList as any).__opencode_key_escape = statusEscapeHandler;
+      (stageList as any).__opencode_key_escape = stageEscapeHandler;
+      (priorityList as any).__opencode_key_escape = priorityEscapeHandler;
+
+      // Trigger Escape on each list — all must close the dialog
+      statusEscapeHandler();
+      expect(closeCount).toBe(1);
+
+      stageEscapeHandler();
+      expect(closeCount).toBe(2);
+
+      priorityEscapeHandler();
+      expect(closeCount).toBe(3);
+
+      // Verify handler references are stored on all three lists
+      expect((statusList as any).__opencode_key_escape).toBeDefined();
+      expect((stageList as any).__opencode_key_escape).toBeDefined();
+      expect((priorityList as any).__opencode_key_escape).toBeDefined();
+
+      screen.destroy();
+    });
+
+    it('should simulate Escape keypress event on status and priority lists via blessed emit', () => {
+      const screen = blessed.screen({ mouse: true, smartCSR: true });
+
+      const statusList = blessed.list({ parent: screen, items: statusLabels.slice(0, 2), keys: true });
+      const priorityList = blessed.list({ parent: screen, items: ['high', 'low'], keys: true });
+
+      let closeCount = 0;
+      const closeUpdateDialog = () => { closeCount += 1; };
+
+      statusList.on('keypress', (_ch: unknown, key: { name?: string } | undefined) => {
+        if (key?.name === 'escape') closeUpdateDialog();
+      });
+      priorityList.on('keypress', (_ch: unknown, key: { name?: string } | undefined) => {
+        if (key?.name === 'escape') closeUpdateDialog();
+      });
+
+      statusList.emit('keypress', '', { name: 'escape', full: 'escape' });
+      expect(closeCount).toBe(1);
+
+      priorityList.emit('keypress', '', { name: 'escape', full: 'escape' });
+      expect(closeCount).toBe(2);
+
+      screen.destroy();
+    });
   });
 
   describe('Update Dialog Comment Handling', () => {

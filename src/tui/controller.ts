@@ -212,12 +212,14 @@ export class TuiController {
     const updateDialogStatusOptions = dialogsComponent.updateDialogStatusOptions;
     const updateDialogPriorityOptions = dialogsComponent.updateDialogPriorityOptions;
     const updateDialogComment = dialogsComponent.updateDialogComment;
+    // Tab order matches the visual left-to-right column layout: Status → Stage → Priority → Comment
     const updateDialogFieldOrder = [
-      updateDialogStageOptions,
       updateDialogStatusOptions,
+      updateDialogStageOptions,
       updateDialogPriorityOptions,
       updateDialogComment,
     ];
+    // Layout order used for Left/Right key navigation (same as Tab order for consistency)
     const updateDialogFieldLayout = [
       updateDialogStatusOptions,
       updateDialogStageOptions,
@@ -1855,7 +1857,7 @@ export class TuiController {
       updateOverlay.setFront();
       updateDialog.setFront();
         updateDialogFocusManager.focusIndex(0);
-        updateDialogStageOptions.focus();
+        updateDialogStatusOptions.focus();
         applyUpdateDialogFocusStyles(updateDialogFieldOrder[0]);
       paneFocusIndex = getFocusPanes().indexOf(list);
       applyFocusStyles();
@@ -3317,8 +3319,16 @@ export class TuiController {
     const updateDialogEscapeHandler = () => { closeUpdateDialog(); };
     try { (updateDialog as any).__opencode_key_escape = updateDialogEscapeHandler; updateDialog.key(KEY_ESCAPE, updateDialogEscapeHandler); } catch (_) {}
 
+    // Escape closes the dialog from any of the three inline selection lists.
+    // updateDialogOptions aliases updateDialogStageOptions, so both are covered.
     const updateDialogOptionsEscapeHandler = () => { closeUpdateDialog(); };
     try { (updateDialogOptions as any).__opencode_key_escape = updateDialogOptionsEscapeHandler; updateDialogOptions.key(KEY_ESCAPE, updateDialogOptionsEscapeHandler); } catch (_) {}
+
+    const updateDialogStatusEscapeHandler = () => { closeUpdateDialog(); };
+    try { (updateDialogStatusOptions as any).__opencode_key_escape = updateDialogStatusEscapeHandler; updateDialogStatusOptions.key(KEY_ESCAPE, updateDialogStatusEscapeHandler); } catch (_) {}
+
+    const updateDialogPriorityEscapeHandler = () => { closeUpdateDialog(); };
+    try { (updateDialogPriorityOptions as any).__opencode_key_escape = updateDialogPriorityEscapeHandler; updateDialogPriorityOptions.key(KEY_ESCAPE, updateDialogPriorityEscapeHandler); } catch (_) {}
 
     const updateDialogCommentEscapeHandler = () => { closeUpdateDialog(); };
     try { (updateDialogComment as any).__opencode_key_escape = updateDialogCommentEscapeHandler; updateDialogComment.key(KEY_ESCAPE, updateDialogCommentEscapeHandler); } catch (_) {}

@@ -686,5 +686,56 @@ describe('CLI Issue Management Tests', () => {
         expect(result.error).toBe('Cannot use --incoming and --outgoing together.');
       }
     });
+
+    it('should unblock dependent when sole blocker moves to in_review stage via update', async () => {
+      const { stdout: blockedStdout } = await execAsync(`tsx ${cliPath} --json create -t "Blocked"`);
+      const { stdout: blockerStdout } = await execAsync(`tsx ${cliPath} --json create -t "Blocker"`);
+      const blockedId = JSON.parse(blockedStdout).workItem.id;
+      const blockerId = JSON.parse(blockerStdout).workItem.id;
+
+      await execAsync(`tsx ${cliPath} --json dep add ${blockedId} ${blockerId}`);
+      const { stdout: blockedShowStdout } = await execAsync(`tsx ${cliPath} --json show ${blockedId}`);
+      expect(JSON.parse(blockedShowStdout).workItem.status).toBe('blocked');
+
+      await execAsync(`tsx ${cliPath} --json update ${blockerId} --status completed --stage in_review`);
+      const { stdout: unblockedShowStdout } = await execAsync(`tsx ${cliPath} --json show ${blockedId}`);
+      expect(JSON.parse(unblockedShowStdout).workItem.status).toBe('open');
+    });
+
+    it('should keep dependent blocked when only one of multiple blockers moves to in_review', async () => {
+      const { stdout: blockedStdout } = await execAsync(`tsx ${cliPath} --json create -t "Blocked"`);
+      const { stdout: blockerAStdout } = await execAsync(`tsx ${cliPath} --json create -t "BlockerA"`);
+      const { stdout: blockerBStdout } = await execAsync(`tsx ${cliPath} --json create -t "BlockerB"`);
+      const blockedId = JSON.parse(blockedStdout).workItem.id;
+      const blockerAId = JSON.parse(blockerAStdout).workItem.id;
+      const blockerBId = JSON.parse(blockerBStdout).workItem.id;
+
+      await execAsync(`tsx ${cliPath} --json dep add ${blockedId} ${blockerAId}`);
+      await execAsync(`tsx ${cliPath} --json dep add ${blockedId} ${blockerBId}`);
+
+      await execAsync(`tsx ${cliPath} --json update ${blockerAId} --status completed --stage in_review`);
+      const { stdout: stillBlockedStdout } = await execAsync(`tsx ${cliPath} --json show ${blockedId}`);
+      expect(JSON.parse(stillBlockedStdout).workItem.status).toBe('blocked');
+    });
+
+    it('should unblock dependent when all blockers move to in_review', async () => {
+      const { stdout: blockedStdout } = await execAsync(`tsx ${cliPath} --json create -t "Blocked"`);
+      const { stdout: blockerAStdout } = await execAsync(`tsx ${cliPath} --json create -t "BlockerA"`);
+      const { stdout: blockerBStdout } = await execAsync(`tsx ${cliPath} --json create -t "BlockerB"`);
+      const blockedId = JSON.parse(blockedStdout).workItem.id;
+      const blockerAId = JSON.parse(blockerAStdout).workItem.id;
+      const blockerBId = JSON.parse(blockerBStdout).workItem.id;
+
+      await execAsync(`tsx ${cliPath} --json dep add ${blockedId} ${blockerAId}`);
+      await execAsync(`tsx ${cliPath} --json dep add ${blockedId} ${blockerBId}`);
+
+      await execAsync(`tsx ${cliPath} --json update ${blockerAId} --status completed --stage in_review`);
+      const { stdout: stillBlockedStdout } = await execAsync(`tsx ${cliPath} --json show ${blockedId}`);
+      expect(JSON.parse(stillBlockedStdout).workItem.status).toBe('blocked');
+
+      await execAsync(`tsx ${cliPath} --json update ${blockerBId} --status completed --stage in_review`);
+      const { stdout: unblockedStdout } = await execAsync(`tsx ${cliPath} --json show ${blockedId}`);
+      expect(JSON.parse(unblockedStdout).workItem.status).toBe('open');
+    });
   });
 });
