@@ -79,7 +79,11 @@ function runGh(command: string, input?: string): string {
     } catch (err: any) {
       const stderr = (err?.stderr ? String(err.stderr) : '') || err?.message || '';
       const stdout = (err?.stdout ? String(err.stdout) : '') || '';
-      if (attempt < maxRetries && (isSecondaryRateLimitText(stderr) || isSecondaryRateLimitText(stdout) || /403|rate limit/i.test(stderr + stdout))) {
+      // If this is clearly the secondary-rate-limit / abuse response, abort
+      if (isSecondaryRateLimitText(stderr) || isSecondaryRateLimitText(stdout)) {
+        throw new SecondaryRateLimitError('secondary rate limit detected (sync)', { stdout, stderr });
+      }
+      if (attempt < maxRetries && /403|rate limit/i.test(stderr + stdout)) {
         const waitMs = computeFullJitterDelay(attempt);
         try { console.error(`gh rate-limited (sync), retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`); } catch (_) {}
         // Blocking sleep for sync path
@@ -183,8 +187,14 @@ async function runGhAsync(command: string, input?: string): Promise<string> {
     if (!res.error && res.code === 0) return res.stdout.trim();
     const stderr = res.stderr || '';
     const stdout = res.stdout || '';
-    // If this looks like a secondary limit/abuse/403 and we have retries left, backoff with jitter
-    if (attempt < maxRetries && (isSecondaryRateLimitText(stderr) || isSecondaryRateLimitText(stdout) || /403|rate limit/i.test(stderr + stdout))) {
+    // If this looks like a secondary limit/abuse/403, throw immediately for a
+    // distinct error so higher-level controllers can abort the overall sync.
+    if (isSecondaryRateLimitText(stderr) || isSecondaryRateLimitText(stdout)) {
+      throw new SecondaryRateLimitError('secondary rate limit detected (async spawn)', { stdout, stderr });
+    }
+    // Otherwise, if we matched a 403/rate-limit hint and have retries left,
+    // apply backoff with jitter and retry.
+    if (attempt < maxRetries && /403|rate limit/i.test(stderr + stdout)) {
       const waitMs = computeFullJitterDelay(attempt);
       try { console.error(`gh rate-limited (async spawn), retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`); } catch (_) {}
       await new Promise(r => setTimeout(r, waitMs));
@@ -199,6 +209,11 @@ async function runGhAsync(command: string, input?: string): Promise<string> {
 async function runGhDetailedAsync(command: string, input?: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   const res = await spawnCommand(command, input);
   if (res.code !== 0) {
+    // If this looks like secondary-rate-limit/abuse detection, propagate
+    // a dedicated error so callers can choose to abort the run immediately.
+    if (isSecondaryRateLimitText(res.stderr) || isSecondaryRateLimitText(res.stdout)) {
+      throw new SecondaryRateLimitError('secondary rate limit detected (detailed async)', { stdout: res.stdout, stderr: res.stderr });
+    }
     return { ok: false, stdout: res.stdout, stderr: res.stderr || `gh command failed with exit code ${res.code}` };
   }
   return { ok: true, stdout: res.stdout, stderr: res.stderr };
@@ -227,8 +242,13 @@ async function runGhJsonDetailedAsync(command: string, input?: string, retries =
     if (!res.ok) {
       const stderr = res.stderr || '';
       const stdout = res.stdout || '';
-      // If this looks like a secondary-rate-limit / abuse / 403, retry with backoff
-      if (attempt < maxRetries && (isSecondaryLimit(stderr) || isSecondaryLimit(stdout))) {
+      // If this looks like a secondary-rate-limit / abuse / 403, propagate
+      // a specialized error so callers can abort the overall sync/run.
+      if (isSecondaryLimit(stderr) || isSecondaryLimit(stdout)) {
+        throw new SecondaryRateLimitError('secondary rate limit detected (json detailed async)', { stdout, stderr });
+      }
+      // Otherwise, if we have retries left, backoff and retry.
+      if (attempt < maxRetries) {
         const waitMs = computeDelay(attempt);
         try { console.error(`gh rate-limited/restricted, retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`); } catch (_) {}
         await new Promise(r => setTimeout(r, waitMs));
@@ -274,6 +294,17 @@ function runGhJson(command: string, input?: string): any {
 export function isSecondaryRateLimitText(text?: string): boolean {
   if (!text) return false;
   return /secondary rate limit|abuse detection|triggered an abuse|you have exceeded a secondary rate limit/i.test((text || '').toLowerCase());
+}
+
+export class SecondaryRateLimitError extends Error {
+  public stdout?: string;
+  public stderr?: string;
+  constructor(message?: string, details?: { stdout?: string; stderr?: string }) {
+    super(message || 'secondary rate limit');
+    this.name = 'SecondaryRateLimitError';
+    this.stdout = details?.stdout;
+    this.stderr = details?.stderr;
+  }
 }
 
 function getBackoffConfig() {
@@ -330,7 +361,13 @@ function runGhJsonDetailed(command: string, input?: string, retries = 3): { ok: 
     if (!result.ok) {
       const stderr = result.stderr || '';
       const stdout = result.stdout || '';
-      if (attempt < maxRetries && (isSecondaryLimit(stderr) || isSecondaryLimit(stdout))) {
+      // If this looks like secondary-rate-limit / abuse, throw a specialized
+      // error so higher-level code can abort the overall sync immediately.
+      if (isSecondaryLimit(stderr) || isSecondaryLimit(stdout)) {
+        throw new SecondaryRateLimitError('secondary rate limit detected (json detailed sync)', { stdout, stderr });
+      }
+      // Otherwise, if retries remain, sleep and retry.
+      if (attempt < maxRetries) {
         const waitMs = computeDelay(attempt);
         try { // synchronous sleep using Atomics.wait
           const sab = new SharedArrayBuffer(4);

@@ -3,7 +3,7 @@
  */
 
 import type { PluginContext } from '../plugin-types.js';
-import { getRepoFromGitRemote, normalizeGithubLabelPrefix } from '../github.js';
+import { getRepoFromGitRemote, normalizeGithubLabelPrefix, SecondaryRateLimitError } from '../github.js';
 import { upsertIssuesFromWorkItems, importIssuesToWorkItems, GithubProgress, GithubSyncResult, SyncedItem, SyncErrorItem, FieldChange } from '../github-sync.js';
 import { loadConfig } from '../config.js';
 import { displayConflictDetails } from './helpers.js';
@@ -219,6 +219,7 @@ export default function register(ctx: PluginContext): void {
           }
         }
 
+        let lastPersistedBatch = 0;
         for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
           const batchStart = batchIndex * BATCH_SIZE;
           const batchItems = itemsToProcess.slice(batchStart, batchStart + BATCH_SIZE);
@@ -249,6 +250,42 @@ export default function register(ctx: PluginContext): void {
               })
             );
           } catch (batchError) {
+            // If this was a GitHub secondary-rate-limit/abuse detection error,
+            // abort the full sync immediately and surface a clear report.
+            if (batchError instanceof SecondaryRateLimitError) {
+              const details = batchError as SecondaryRateLimitError;
+              const batchNumber = batchIndex + 1;
+              const failingItems = batchItems.map(i => ({ id: i.id, title: i.title }));
+              const reportMsg = `Secondary rate limit detected during GitHub push (batch ${batchNumber}/${totalBatches}). Aborting sync.`;
+              logLine(`github push: ${reportMsg}`);
+              logLine(`github push: last persisted batch: ${lastPersistedBatch}`);
+              logLine(`github push: failing batch items: ${JSON.stringify(failingItems)}`);
+              if (details.stderr) logLine(`github push: stderr: ${details.stderr}`);
+              if (details.stdout) logLine(`github push: stdout: ${details.stdout}`);
+
+              const userMsg = `GitHub secondary rate limit encountered (HTTP 403 / abuse detection). ` +
+                `Stopped after batch ${batchNumber}/${totalBatches}. Last persisted batch: ${lastPersistedBatch}. ` +
+                `Please retry later. See logs for details.`;
+
+              if (!isJsonMode) {
+                console.error(userMsg);
+                if (details.stderr) console.error(`GitHub stderr:\n${details.stderr}`);
+              }
+
+              output.error(userMsg, {
+                success: false,
+                error: details.message || 'secondary rate limit',
+                secondaryRateLimit: true,
+                repo: githubConfig.repo,
+                batch: { index: batchNumber, total: totalBatches, items: failingItems },
+                lastPersistedBatch,
+                pushStartTimestamp,
+                stderr: details.stderr,
+                stdout: details.stdout,
+              });
+              process.exit(1);
+            }
+
             const batchMsg = `Batch ${batchIndex + 1}/${totalBatches} failed: ${(batchError as Error).message}`;
             logLine(`github push: ${batchMsg}`);
             throw new Error(batchMsg);
@@ -263,6 +300,8 @@ export default function register(ctx: PluginContext): void {
               const delayMs = Number(process.env.WL_SYNC_WRITE_DELAY_MS || '150');
               if (delayMs > 0) await new Promise(r => setTimeout(r, delayMs));
             } catch (_) {}
+            // Mark this batch as successfully persisted
+            lastPersistedBatch = batchIndex + 1;
           }
 
           // Accumulate results across batches.
