@@ -1,4 +1,5 @@
 import { execSync, spawnSync, spawn } from 'child_process';
+import throttler from './github-throttler.js';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -1204,14 +1205,14 @@ export async function ensureGithubLabelsAsync(config: GithubConfig, labels: stri
       if (existing.has(label)) continue;
       const color = labelColor(label);
       const createCommand = `gh api -X POST repos/${owner}/${name}/labels -f name=${JSON.stringify(label)} -f color=${JSON.stringify(color)}`;
-      try {
-        await runGhAsync(createCommand);
-        existing.add(label);
-        continue;
-      } catch {
-        const fallbackCommand = `gh issue label create ${JSON.stringify(label)} --repo ${config.repo} --color ${color}`;
-        try { await runGhAsync(fallbackCommand); existing.add(label); } catch (_) { /* ignore */ }
-      }
+        try {
+          await runGhAsync(createCommand);
+          existing.add(label);
+          continue;
+        } catch {
+          const fallbackCommand = `gh issue label create ${JSON.stringify(label)} --repo ${config.repo} --color ${color}`;
+          try { await runGhAsync(fallbackCommand); existing.add(label); } catch (_) { /* ignore */ }
+        }
     }
   } catch {
     // ignore label creation failures
@@ -1255,23 +1256,25 @@ async function ensureGithubLabelsOnceAsync(config: GithubConfig, labels: string[
 }
 
 export async function createGithubIssueAsync(config: GithubConfig, payload: { title: string; body: string; labels: string[] }): Promise<GithubIssueRecord> {
-  const command = `gh issue create --repo ${config.repo} --title ${JSON.stringify(payload.title)} --body-file -`;
-  const output = await runGhAsync(command, payload.body);
-  let issueNumber: number | null = null;
-  const match = output.match(/\/(\d+)$/);
-  if (match) issueNumber = parseInt(match[1], 10);
-  if (issueNumber !== null && payload.labels.length > 0) {
-    // Ensure labels once per process to reduce API calls
-    await ensureGithubLabelsOnceAsync(config, payload.labels);
-    try { await runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --add-label ${JSON.stringify(payload.labels.join(','))}`); } catch (_) {}
-  }
-  if (issueNumber === null) {
-    const view = await runGhJsonAsync(`gh issue list --repo ${config.repo} --limit 1 --json number,id,title,body,state,labels,updatedAt`);
-    if (Array.isArray(view) && view.length > 0) return normalizeGithubIssue(view[0]);
-    throw new Error('Failed to create GitHub issue');
-  }
-  const parsed = await runGhJsonAsync(`gh issue view ${issueNumber} --repo ${config.repo} --json number,id,title,body,state,labels,updatedAt`);
-  return normalizeGithubIssue(parsed);
+  return await throttler.schedule(async () => {
+    const command = `gh issue create --repo ${config.repo} --title ${JSON.stringify(payload.title)} --body-file -`;
+    const output = await runGhAsync(command, payload.body);
+    let issueNumber: number | null = null;
+    const match = output.match(/\/(\d+)$/);
+    if (match) issueNumber = parseInt(match[1], 10);
+    if (issueNumber !== null && payload.labels.length > 0) {
+      // Ensure labels once per process to reduce API calls
+      await ensureGithubLabelsOnceAsync(config, payload.labels);
+      try { await runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --add-label ${JSON.stringify(payload.labels.join(','))}`); } catch (_) {}
+    }
+    if (issueNumber === null) {
+      const view = await runGhJsonAsync(`gh issue list --repo ${config.repo} --limit 1 --json number,id,title,body,state,labels,updatedAt`);
+      if (Array.isArray(view) && view.length > 0) return normalizeGithubIssue(view[0]);
+      throw new Error('Failed to create GitHub issue');
+    }
+    const parsed = await runGhJsonAsync(`gh issue view ${issueNumber} --repo ${config.repo} --json number,id,title,body,state,labels,updatedAt`);
+    return normalizeGithubIssue(parsed);
+  });
 }
 
 export async function updateGithubIssueAsync(
@@ -1279,57 +1282,61 @@ export async function updateGithubIssueAsync(
   issueNumber: number,
   payload: { title: string; body: string; labels: string[]; state: 'open' | 'closed' }
 ): Promise<GithubIssueRecord> {
-  // Fetch current issue once and compute minimal set of operations
-  let current: GithubIssueRecord;
-  try {
-    current = await getGithubIssueAsync(config, issueNumber);
-  } catch {
-    current = getGithubIssue(config, issueNumber);
-  }
-
-  const ops: Array<Promise<void>> = [];
-  const titleChanged = (current.title || '') !== (payload.title || '');
-  const bodyChanged = (current.body || '') !== (payload.body || '');
-  // Only edit title/body if something changed
-  if (titleChanged || bodyChanged) {
-    const command = `gh issue edit ${issueNumber} --repo ${config.repo} --title ${JSON.stringify(payload.title)} --body-file -`;
-    ops.push(runGhAsync(command, payload.body).then(() => {}).catch(() => {}));
-  }
-
-  // State change: only close/reopen when different
-  if (payload.state === 'closed' && current.state !== 'closed') {
-    ops.push(runGhAsync(`gh issue close ${issueNumber} --repo ${config.repo}`).then(() => {}).catch(() => {}));
-  } else if (payload.state === 'open' && current.state === 'closed') {
-    ops.push(runGhAsync(`gh issue reopen ${issueNumber} --repo ${config.repo}`).then(() => {}).catch(() => {}));
-  }
-
-  // Labels: compute status labels to remove and labels to add
-  if (payload.labels.length > 0) {
-    const desiredSet = new Set(payload.labels);
-    // Remove any single-valued category labels (stage, priority, status, type,
-    // risk, effort) that are on the issue but not in the desired set. This
-    // prevents label accumulation when e.g. stage changes from idea -> done.
-    const staleLabelsToRemove = current.labels.filter(label => isSingleValueCategoryLabel(label, config.labelPrefix) && !desiredSet.has(label));
-    if (staleLabelsToRemove.length > 0) {
-      ops.push(runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --remove-label ${JSON.stringify(staleLabelsToRemove.join(','))}`).then(() => {}).catch(() => {}));
+  // Run the entire update flow as a single scheduled task to avoid
+  // serializing internal parallel operations via per-call scheduling.
+  return await throttler.schedule(async () => {
+    // Fetch current issue once and compute minimal set of operations
+    let current: GithubIssueRecord;
+    try {
+      current = await getGithubIssueAsync(config, issueNumber);
+    } catch {
+      current = getGithubIssue(config, issueNumber);
     }
 
-    // Compute labels that are not already present
-    const labelsToAdd = payload.labels.filter(l => !current.labels.includes(l));
-    if (labelsToAdd.length > 0) {
-      await ensureGithubLabelsOnceAsync(config, labelsToAdd);
-      ops.push(runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --add-label ${JSON.stringify(labelsToAdd.join(','))}`).then(() => {}).catch(() => {}));
+    const ops: Array<Promise<void>> = [];
+    const titleChanged = (current.title || '') !== (payload.title || '');
+    const bodyChanged = (current.body || '') !== (payload.body || '');
+    // Only edit title/body if something changed
+    if (titleChanged || bodyChanged) {
+      const command = `gh issue edit ${issueNumber} --repo ${config.repo} --title ${JSON.stringify(payload.title)} --body-file -`;
+      ops.push(runGhAsync(command, payload.body).then(() => {}).catch(() => {}));
     }
-  }
 
-  // Execute operations — remove stale labels first, then add new ones,
-  // to avoid transient states where both old and new labels coexist.
-  if (ops.length > 0) await Promise.all(ops);
+    // State change: only close/reopen when different
+    if (payload.state === 'closed' && current.state !== 'closed') {
+      ops.push(runGhAsync(`gh issue close ${issueNumber} --repo ${config.repo}`).then(() => {}).catch(() => {}));
+    } else if (payload.state === 'open' && current.state === 'closed') {
+      ops.push(runGhAsync(`gh issue reopen ${issueNumber} --repo ${config.repo}`).then(() => {}).catch(() => {}));
+    }
 
-  // If no ops ran, return current object, else fetch fresh state
-  if (ops.length === 0) return current;
-  const parsed = await runGhJsonAsync(`gh issue view ${issueNumber} --repo ${config.repo} --json number,id,title,body,state,labels,updatedAt`);
-  return normalizeGithubIssue(parsed);
+    // Labels: compute status labels to remove and labels to add
+    if (payload.labels.length > 0) {
+      const desiredSet = new Set(payload.labels);
+      // Remove any single-valued category labels (stage, priority, status, type,
+      // risk, effort) that are on the issue but not in the desired set. This
+      // prevents label accumulation when e.g. stage changes from idea -> done.
+      const staleLabelsToRemove = current.labels.filter(label => isSingleValueCategoryLabel(label, config.labelPrefix) && !desiredSet.has(label));
+      if (staleLabelsToRemove.length > 0) {
+        ops.push(runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --remove-label ${JSON.stringify(staleLabelsToRemove.join(','))}`).then(() => {}).catch(() => {}));
+      }
+
+      // Compute labels that are not already present
+      const labelsToAdd = payload.labels.filter(l => !current.labels.includes(l));
+      if (labelsToAdd.length > 0) {
+        await ensureGithubLabelsOnceAsync(config, labelsToAdd);
+        ops.push(runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --add-label ${JSON.stringify(labelsToAdd.join(','))}`).then(() => {}).catch(() => {}));
+      }
+    }
+
+    // Execute operations — remove stale labels first, then add new ones,
+    // to avoid transient states where both old and new labels coexist.
+    if (ops.length > 0) await Promise.all(ops);
+
+    // If no ops ran, return current object, else fetch fresh state
+    if (ops.length === 0) return current;
+    const parsed = await runGhJsonAsync(`gh issue view ${issueNumber} --repo ${config.repo} --json number,id,title,body,state,labels,updatedAt`);
+    return normalizeGithubIssue(parsed);
+  });
 }
 
 export async function getGithubIssueAsync(config: GithubConfig, issueNumber: number): Promise<GithubIssueRecord> {
