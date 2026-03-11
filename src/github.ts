@@ -787,29 +787,29 @@ export async function listGithubIssueCommentsAsync(config: GithubConfig, issueNu
 
 export function createGithubIssueComment(config: GithubConfig, issueNumber: number, body: string): GithubIssueComment {
   const { owner, name } = parseRepoSlug(config.repo);
-  const command = `gh api -X POST repos/${owner}/${name}/issues/${issueNumber}/comments -f body=${JSON.stringify(body)}`;
-  const data = runGhJson(command);
+  const command = `gh api -X POST repos/${owner}/${name}/issues/${issueNumber}/comments -F body=@-`;
+  const data = runGhJson(command, body);
   return normalizeGithubIssueComment(data);
 }
 
 export async function createGithubIssueCommentAsync(config: GithubConfig, issueNumber: number, body: string): Promise<GithubIssueComment> {
   const { owner, name } = parseRepoSlug(config.repo);
-  const command = `gh api -X POST repos/${owner}/${name}/issues/${issueNumber}/comments -f body=${JSON.stringify(body)}`;
-  const data = await runGhJsonAsync(command);
+  const command = `gh api -X POST repos/${owner}/${name}/issues/${issueNumber}/comments -F body=@-`;
+  const data = await runGhJsonAsync(command, body);
   return normalizeGithubIssueComment(data);
 }
 
 export function updateGithubIssueComment(config: GithubConfig, commentId: number, body: string): GithubIssueComment {
   const { owner, name } = parseRepoSlug(config.repo);
-  const command = `gh api -X PATCH repos/${owner}/${name}/issues/comments/${commentId} -f body=${JSON.stringify(body)}`;
-  const data = runGhJson(command);
+  const command = `gh api -X PATCH repos/${owner}/${name}/issues/comments/${commentId} -F body=@-`;
+  const data = runGhJson(command, body);
   return normalizeGithubIssueComment(data);
 }
 
 export async function updateGithubIssueCommentAsync(config: GithubConfig, commentId: number, body: string): Promise<GithubIssueComment> {
   const { owner, name } = parseRepoSlug(config.repo);
-  const command = `gh api -X PATCH repos/${owner}/${name}/issues/comments/${commentId} -f body=${JSON.stringify(body)}`;
-  const data = await runGhJsonAsync(command);
+  const command = `gh api -X PATCH repos/${owner}/${name}/issues/comments/${commentId} -F body=@-`;
+  const data = await runGhJsonAsync(command, body);
   return normalizeGithubIssueComment(data);
 }
 
