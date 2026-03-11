@@ -53,9 +53,29 @@ export default function register(ctx: PluginContext): void {
       const isVerbose = program.opts().verbose;
       let lastProgress = '';
       let lastProgressLength = 0;
+      const BATCH_SIZE = 10;
+      let pushTotalItems = 0;
+      let pushTotalBatches = 1;
+      let currentBatchIndex = 0;
+      let currentBatchLength = 0;
       const logLine = createLogFileWriter(getWorklogLogPath('github_sync.log'));
       logLine(`--- github push start ${new Date().toISOString()} ---`);
       logLine(`Options json=${isJsonMode} verbose=${isVerbose}`);
+
+      const writeProgressMessage = (message: string, complete = false) => {
+        if (message === lastProgress) {
+          return;
+        }
+        lastProgress = message;
+        const padded = `${message} `.padEnd(lastProgressLength, ' ');
+        lastProgressLength = padded.length;
+        process.stdout.write(`\r${padded}`);
+        if (complete) {
+          process.stdout.write('\n');
+          lastProgress = '';
+          lastProgressLength = 0;
+        }
+      };
 
       const renderProgress = (progress: GithubProgress) => {
         if (isJsonMode || process.stdout.isTTY !== true) {
@@ -72,19 +92,23 @@ export default function register(ctx: PluginContext): void {
                 : progress.phase === 'saving'
                   ? 'Saving'
                   : 'Close check';
-        const message = `${label}: ${progress.current}/${progress.total}`;
-        if (message === lastProgress) {
-          return;
-        }
-        lastProgress = message;
-        const padded = `${message} `.padEnd(lastProgressLength, ' ');
-        lastProgressLength = padded.length;
-        process.stdout.write(`\r${padded}`);
-        if (progress.current === progress.total) {
-          process.stdout.write('\n');
-          lastProgress = '';
-          lastProgressLength = 0;
-        }
+        const formatPushProgress = () => {
+          const totalItems = Math.max(pushTotalItems, 0);
+          if (totalItems === 0) {
+            return 'Push: Batch 0/0 Item 0/0';
+          }
+          const totalBatches = Math.max(pushTotalBatches, 1);
+          const batchIdx = Math.min(currentBatchIndex, totalBatches - 1);
+          const batchItemCount = currentBatchLength > 0
+            ? currentBatchLength
+            : Math.min(Math.max(totalItems - batchIdx * BATCH_SIZE, 0), BATCH_SIZE);
+          const itemNumberInBatch = Math.min(Math.max(progress.current, 1), batchItemCount || BATCH_SIZE);
+          return `Push: Batch ${batchIdx + 1}/${totalBatches} Item ${itemNumberInBatch}/${batchItemCount || BATCH_SIZE}`;
+        };
+        const message = label === 'Push'
+          ? formatPushProgress()
+          : `${label}: ${progress.current}/${progress.total}`;
+        writeProgressMessage(message, progress.current === progress.total);
       };
 
       try {
@@ -102,6 +126,11 @@ export default function register(ctx: PluginContext): void {
         // Pass DB to timestamp helpers when available so they may use metadata
         const dbForMetadata = typeof db.getAll === 'function' && typeof (db as any).store === 'object' ? (db as any).store : undefined;
 
+        // Eagerly capture writeLastPushTimestamp when the pre-filter module is
+        // available.  It may be resolved during the pre-filter import below or
+        // via a standalone import before the batch loop.
+        let _writeLastPushTimestamp: ((ts: string, db?: { setMetadata?: (k: string, v: string) => void }) => void) | null = null;
+
         const forceAll = Boolean(options.all) || Boolean(options.force);
         if (forceAll) {
           // Bypass pre-filter when --all (or deprecated --force) specified
@@ -110,9 +139,10 @@ export default function register(ctx: PluginContext): void {
         } else {
           // Pre-filter items to only those changed since last push or never pushed
           try {
-            const { readLastPushTimestamp, filterItemsForPush } = await import('../github-pre-filter.js');
-            lastPush = readLastPushTimestamp(dbForMetadata);
-            const { filteredItems, filteredComments, totalCandidates, skippedCount } = filterItemsForPush(items, comments, lastPush);
+            const preFilterMod = await import('../github-pre-filter.js');
+            _writeLastPushTimestamp = preFilterMod.writeLastPushTimestamp;
+            lastPush = preFilterMod.readLastPushTimestamp(dbForMetadata);
+            const { filteredItems, filteredComments, totalCandidates, skippedCount } = preFilterMod.filterItemsForPush(items, comments, lastPush);
             itemsToProcess = filteredItems;
             commentsToProcess = filteredComments;
             if (!isJsonMode) {
@@ -148,9 +178,10 @@ export default function register(ctx: PluginContext): void {
           ? (message: string) => console.log(message)
           : undefined;
 
+        pushTotalItems = itemsToProcess.length;
+
         // Process items in fixed batches of 10 so progress is persisted after
         // each batch and a single failure does not require reprocessing everything.
-        const BATCH_SIZE = 10;
         const totalBatches = Math.max(Math.ceil(itemsToProcess.length / BATCH_SIZE), 1);
         const result: GithubSyncResult = {
           updated: 0, created: 0, closed: 0, skipped: 0,
@@ -171,6 +202,23 @@ export default function register(ctx: PluginContext): void {
           commentsByItemId.set(comment.workItemId, list);
         }
 
+        pushTotalBatches = totalBatches;
+
+        // Resolve timestamp writer once before the loop so we can update
+        // the last-push timestamp after each successful batch.  The flag
+        // `--no-update-timestamp` (Commander exposes as `updateTimestamp`
+        // defaulting to true) suppresses all writes.
+        const skipUpdateTimestamp = Boolean(options.noUpdateTimestamp) || options.updateTimestamp === false;
+        let writeTimestamp = skipUpdateTimestamp ? null : _writeLastPushTimestamp;
+        if (!skipUpdateTimestamp && !writeTimestamp) {
+          try {
+            const mod = await import('../github-pre-filter.js');
+            writeTimestamp = mod.writeLastPushTimestamp;
+          } catch (_err) {
+            logLine('github push: failed to load writeLastPushTimestamp; timestamps will not be updated');
+          }
+        }
+
         for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
           const batchStart = batchIndex * BATCH_SIZE;
           const batchItems = itemsToProcess.slice(batchStart, batchStart + BATCH_SIZE);
@@ -181,6 +229,8 @@ export default function register(ctx: PluginContext): void {
           }
 
           const batchComments = batchItems.flatMap(item => commentsByItemId.get(item.id) ?? []);
+          currentBatchIndex = batchIndex;
+          currentBatchLength = batchItems.length;
 
           logLine(`github push: batch ${batchIndex + 1}/${totalBatches} items=${batchItems.length}`);
 
@@ -220,6 +270,27 @@ export default function register(ctx: PluginContext): void {
           result.commentsCreated = (result.commentsCreated ?? 0) + (batchResult.result.commentsCreated ?? 0);
           result.commentsUpdated = (result.commentsUpdated ?? 0) + (batchResult.result.commentsUpdated ?? 0);
 
+          if (batchResult.result.errors.length > 0) {
+            const batchErrorMessage = `github push: batch ${batchIndex + 1}/${totalBatches} errors (${batchResult.result.errors.length}): ${batchResult.result.errors.join(' | ')}`;
+            logLine(batchErrorMessage);
+            if (!isJsonMode) {
+              console.error(batchErrorMessage);
+            }
+          }
+
+          // Advance the last-push timestamp after each successful batch so
+          // interrupted or re-run pushes skip already-synced batches.  Items
+          // modified during the push window will still be picked up because
+          // pushStartTimestamp was captured before processing began.
+          if (writeTimestamp) {
+            try {
+              writeTimestamp(pushStartTimestamp, dbForMetadata);
+              logLine(`github push: batch ${batchIndex + 1}/${totalBatches} timestamp updated to ${pushStartTimestamp}`);
+            } catch (_tsErr) {
+              logLine(`github push: batch ${batchIndex + 1}/${totalBatches} failed to update timestamp`);
+            }
+          }
+
           timing.totalMs += batchResult.timing.totalMs;
           timing.upsertMs += batchResult.timing.upsertMs;
           timing.commentListMs += batchResult.timing.commentListMs;
@@ -229,29 +300,26 @@ export default function register(ctx: PluginContext): void {
           timing.hierarchyVerifyMs += batchResult.timing.hierarchyVerifyMs;
         }
 
-        // Update the last-push timestamp unless --no-update-timestamp was provided.
-        // Uses pushStartTimestamp captured before processing so items modified
-        // during the push are re-processed on the next run.
-        try {
-          const { writeLastPushTimestamp } = await import('../github-pre-filter.js');
-          // Commander creates a negated option as `updateTimestamp` (true by default)
-          // while some callers may inspect `noUpdateTimestamp`. Support both forms here.
-          const skipUpdateTimestamp = Boolean(options.noUpdateTimestamp) || options.updateTimestamp === false;
-          if (skipUpdateTimestamp) {
-            logLine('github push: skipping last-push timestamp update due to --no-update-timestamp');
-            if (!isJsonMode) console.log('Note: last-push timestamp was not updated (--no-update-timestamp)');
-          } else {
-            writeLastPushTimestamp(pushStartTimestamp, dbForMetadata);
-            if (forceAll) {
-              // In --all mode still update timestamp but record that it was a full push
-              logLine(`github push: full push (--all) completed - lastPush updated to ${pushStartTimestamp}`);
-            } else {
-              logLine(`github push: lastPush updated from ${lastPush ?? 'none'} to ${pushStartTimestamp}`);
+        // Final timestamp write and logging.  Per-batch writes above cover the
+        // common case; this block handles zero-item pushes (where the batch loop
+        // breaks immediately) and acts as a safety-net final write.
+        if (skipUpdateTimestamp) {
+          logLine('github push: skipping last-push timestamp update due to --no-update-timestamp');
+          if (!isJsonMode) console.log('Note: last-push timestamp was not updated (--no-update-timestamp)');
+        } else {
+          // Write once more to cover the zero-batch / safety-net case.
+          if (writeTimestamp) {
+            try {
+              writeTimestamp(pushStartTimestamp, dbForMetadata);
+            } catch (_tsErr) {
+              logLine('github push: failed to write final last-push timestamp');
             }
           }
-        } catch (_err) {
-          // non-fatal
-          logLine('github push: failed to write last-push timestamp');
+          if (forceAll) {
+            logLine(`github push: full push (--all) completed - lastPush updated to ${pushStartTimestamp}`);
+          } else {
+            logLine(`github push: lastPush updated from ${lastPush ?? 'none'} to ${pushStartTimestamp}`);
+          }
         }
 
         logLine(`Repo ${githubConfig.repo}`);
