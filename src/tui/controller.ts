@@ -2996,8 +2996,12 @@ export class TuiController {
 
     // Delegate to GitHub Copilot (shortcut g)
     screen.key(KEY_DELEGATE, async (_ch: any, key: any) => {
+      // If the raw character is uppercase 'G', treat it as the GitHub push
+      // shortcut and do not handle it here. Blessed may report shift via
+      // the raw char (`ch`) rather than `key.shift`/`key.name`.
+      if (_ch === 'G') return;
       // Only handle plain 'g' key events. If key.name is present and not 'g'
-      // then ignore (this avoids uppercase/shift ambiguity).
+      // then ignore (this avoids other key ambiguities).
       if (key && key.name && key.name !== 'g') return;
       // Ignore when shift is held — that is handled by KEY_GITHUB_PUSH ('G')
       if (key?.shift) return;
