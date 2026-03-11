@@ -1,4 +1,5 @@
 import { execSync, spawnSync, spawn } from 'child_process';
+import throttler from './github-throttler.js';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -668,9 +669,9 @@ export function getIssueHierarchy(config: GithubConfig, issueNumber: number): Is
 export async function getIssueNodeIdAsync(config: GithubConfig, issueNumber: number): Promise<string> {
   const { owner, name } = parseRepoSlug(config.repo);
   const query = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { id } } }`;
-  const output = await runGhJsonDetailedAsync(
+  const output = await throttler.schedule(() => runGhJsonDetailedAsync(
     `gh api graphql -f query=${quoteShellValue(query)} -f owner=${quoteShellValue(owner)} -f name=${quoteShellValue(name)} -F number=${issueNumber}`
-  );
+  ));
   if (!output.ok) {
     throw new Error(output.error || 'Unable to query GitHub issue node ID');
   }
@@ -684,9 +685,9 @@ export async function getIssueNodeIdAsync(config: GithubConfig, issueNumber: num
 export async function getIssueHierarchyAsync(config: GithubConfig, issueNumber: number): Promise<IssueHierarchy> {
   const { owner, name } = parseRepoSlug(config.repo);
   const query = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { parent { number } subIssues(first: 100) { nodes { number } } } } }`;
-  const output = await runGhJsonDetailedAsync(
+  const output = await throttler.schedule(() => runGhJsonDetailedAsync(
     `gh api graphql -f query=${quoteShellValue(query)} -f owner=${quoteShellValue(owner)} -f name=${quoteShellValue(name)} -F number=${issueNumber}`
-  );
+  ));
   if (!output.ok) {
     throw new Error(output.error || 'Unable to query issue hierarchy');
   }
@@ -762,9 +763,9 @@ export async function addSubIssueLinkAsync(
   const parentNodeId = await resolveNodeId(parentIssueNumber);
   const childNodeId = await resolveNodeId(childIssueNumber);
   const mutation = `mutation($parent: ID!, $child: ID!) { addSubIssue(input: { issueId: $parent, subIssueId: $child }) { issue { id } subIssue { id } } }`;
-  const result = await runGhJsonDetailedAsync(
+  const result = await throttler.schedule(() => runGhJsonDetailedAsync(
     `gh api graphql -f query=${quoteShellValue(mutation)} -f parent=${quoteShellValue(parentNodeId)} -f child=${quoteShellValue(childNodeId)}`
-  );
+  ));
   if (!result.ok) {
     throw new Error(result.error || `Failed to link #${childIssueNumber} as sub-issue of #${parentIssueNumber}`);
   }
@@ -934,7 +935,7 @@ export async function listGithubIssueCommentsAsync(config: GithubConfig, issueNu
   const { owner, name } = parseRepoSlug(config.repo);
   const command = `gh api repos/${owner}/${name}/issues/${issueNumber}/comments --paginate`;
   try {
-    const data = await runGhJsonAsync(command);
+    const data = await throttler.schedule(() => runGhJsonAsync(command));
     if (!data) return [];
     const raw = Array.isArray(data) ? data : [];
     return raw.map(comment => normalizeGithubIssueComment(comment));
@@ -953,7 +954,7 @@ export function createGithubIssueComment(config: GithubConfig, issueNumber: numb
 export async function createGithubIssueCommentAsync(config: GithubConfig, issueNumber: number, body: string): Promise<GithubIssueComment> {
   const { owner, name } = parseRepoSlug(config.repo);
   const command = `gh api -X POST repos/${owner}/${name}/issues/${issueNumber}/comments -F body=@-`;
-  const data = await runGhJsonAsync(command, body);
+  const data = await throttler.schedule(() => runGhJsonAsync(command, body));
   return normalizeGithubIssueComment(data);
 }
 
@@ -967,7 +968,7 @@ export function updateGithubIssueComment(config: GithubConfig, commentId: number
 export async function updateGithubIssueCommentAsync(config: GithubConfig, commentId: number, body: string): Promise<GithubIssueComment> {
   const { owner, name } = parseRepoSlug(config.repo);
   const command = `gh api -X PATCH repos/${owner}/${name}/issues/comments/${commentId} -F body=@-`;
-  const data = await runGhJsonAsync(command, body);
+  const data = await throttler.schedule(() => runGhJsonAsync(command, body));
   return normalizeGithubIssueComment(data);
 }
 
@@ -981,7 +982,7 @@ export function getGithubIssueComment(config: GithubConfig, commentId: number): 
 export async function getGithubIssueCommentAsync(config: GithubConfig, commentId: number): Promise<GithubIssueComment> {
   const { owner, name } = parseRepoSlug(config.repo);
   const command = `gh api repos/${owner}/${name}/issues/comments/${commentId} --json id,body,updatedAt,user`;
-  const data = await runGhJsonAsync(command);
+  const data = await throttler.schedule(() => runGhJsonAsync(command));
   return normalizeGithubIssueComment(data);
 }
 
@@ -1183,7 +1184,7 @@ export async function ensureGithubLabelsAsync(config: GithubConfig, labels: stri
     let existing = existingLabelsCache.get(config.repo);
     if (existing === undefined && !existingLabelsCache.has(config.repo)) {
       try {
-        const existingRaw = await runGhJsonAsync(`gh api repos/${owner}/${name}/labels --paginate`);
+        const existingRaw = await throttler.schedule(() => runGhJsonAsync(`gh api repos/${owner}/${name}/labels --paginate`));
         const parsedSet = new Set<string>();
         if (existingRaw) {
           for (const entry of existingRaw) {
@@ -1205,12 +1206,12 @@ export async function ensureGithubLabelsAsync(config: GithubConfig, labels: stri
       const color = labelColor(label);
       const createCommand = `gh api -X POST repos/${owner}/${name}/labels -f name=${JSON.stringify(label)} -f color=${JSON.stringify(color)}`;
       try {
-        await runGhAsync(createCommand);
+        await throttler.schedule(() => runGhAsync(createCommand));
         existing.add(label);
         continue;
       } catch {
         const fallbackCommand = `gh issue label create ${JSON.stringify(label)} --repo ${config.repo} --color ${color}`;
-        try { await runGhAsync(fallbackCommand); existing.add(label); } catch (_) { /* ignore */ }
+        try { await throttler.schedule(() => runGhAsync(fallbackCommand)); existing.add(label); } catch (_) { /* ignore */ }
       }
     }
   } catch {
@@ -1256,21 +1257,21 @@ async function ensureGithubLabelsOnceAsync(config: GithubConfig, labels: string[
 
 export async function createGithubIssueAsync(config: GithubConfig, payload: { title: string; body: string; labels: string[] }): Promise<GithubIssueRecord> {
   const command = `gh issue create --repo ${config.repo} --title ${JSON.stringify(payload.title)} --body-file -`;
-  const output = await runGhAsync(command, payload.body);
+  const output = await throttler.schedule(() => runGhAsync(command, payload.body));
   let issueNumber: number | null = null;
   const match = output.match(/\/(\d+)$/);
   if (match) issueNumber = parseInt(match[1], 10);
   if (issueNumber !== null && payload.labels.length > 0) {
     // Ensure labels once per process to reduce API calls
     await ensureGithubLabelsOnceAsync(config, payload.labels);
-    try { await runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --add-label ${JSON.stringify(payload.labels.join(','))}`); } catch (_) {}
+    try { await throttler.schedule(() => runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --add-label ${JSON.stringify(payload.labels.join(','))}`)); } catch (_) {}
   }
   if (issueNumber === null) {
-    const view = await runGhJsonAsync(`gh issue list --repo ${config.repo} --limit 1 --json number,id,title,body,state,labels,updatedAt`);
+    const view = await throttler.schedule(() => runGhJsonAsync(`gh issue list --repo ${config.repo} --limit 1 --json number,id,title,body,state,labels,updatedAt`));
     if (Array.isArray(view) && view.length > 0) return normalizeGithubIssue(view[0]);
     throw new Error('Failed to create GitHub issue');
   }
-  const parsed = await runGhJsonAsync(`gh issue view ${issueNumber} --repo ${config.repo} --json number,id,title,body,state,labels,updatedAt`);
+  const parsed = await throttler.schedule(() => runGhJsonAsync(`gh issue view ${issueNumber} --repo ${config.repo} --json number,id,title,body,state,labels,updatedAt`));
   return normalizeGithubIssue(parsed);
 }
 
@@ -1293,14 +1294,14 @@ export async function updateGithubIssueAsync(
   // Only edit title/body if something changed
   if (titleChanged || bodyChanged) {
     const command = `gh issue edit ${issueNumber} --repo ${config.repo} --title ${JSON.stringify(payload.title)} --body-file -`;
-    ops.push(runGhAsync(command, payload.body).then(() => {}).catch(() => {}));
+    ops.push(throttler.schedule(() => runGhAsync(command, payload.body)).then(() => {}).catch(() => {}));
   }
 
   // State change: only close/reopen when different
-  if (payload.state === 'closed' && current.state !== 'closed') {
-    ops.push(runGhAsync(`gh issue close ${issueNumber} --repo ${config.repo}`).then(() => {}).catch(() => {}));
+    if (payload.state === 'closed' && current.state !== 'closed') {
+    ops.push(throttler.schedule(() => runGhAsync(`gh issue close ${issueNumber} --repo ${config.repo}`)).then(() => {}).catch(() => {}));
   } else if (payload.state === 'open' && current.state === 'closed') {
-    ops.push(runGhAsync(`gh issue reopen ${issueNumber} --repo ${config.repo}`).then(() => {}).catch(() => {}));
+    ops.push(throttler.schedule(() => runGhAsync(`gh issue reopen ${issueNumber} --repo ${config.repo}`)).then(() => {}).catch(() => {}));
   }
 
   // Labels: compute status labels to remove and labels to add
@@ -1311,14 +1312,14 @@ export async function updateGithubIssueAsync(
     // prevents label accumulation when e.g. stage changes from idea -> done.
     const staleLabelsToRemove = current.labels.filter(label => isSingleValueCategoryLabel(label, config.labelPrefix) && !desiredSet.has(label));
     if (staleLabelsToRemove.length > 0) {
-      ops.push(runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --remove-label ${JSON.stringify(staleLabelsToRemove.join(','))}`).then(() => {}).catch(() => {}));
+      ops.push(throttler.schedule(() => runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --remove-label ${JSON.stringify(staleLabelsToRemove.join(','))}`)).then(() => {}).catch(() => {}));
     }
 
     // Compute labels that are not already present
     const labelsToAdd = payload.labels.filter(l => !current.labels.includes(l));
     if (labelsToAdd.length > 0) {
       await ensureGithubLabelsOnceAsync(config, labelsToAdd);
-      ops.push(runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --add-label ${JSON.stringify(labelsToAdd.join(','))}`).then(() => {}).catch(() => {}));
+      ops.push(throttler.schedule(() => runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --add-label ${JSON.stringify(labelsToAdd.join(','))}`)).then(() => {}).catch(() => {}));
     }
   }
 
@@ -1328,12 +1329,12 @@ export async function updateGithubIssueAsync(
 
   // If no ops ran, return current object, else fetch fresh state
   if (ops.length === 0) return current;
-  const parsed = await runGhJsonAsync(`gh issue view ${issueNumber} --repo ${config.repo} --json number,id,title,body,state,labels,updatedAt`);
+  const parsed = await throttler.schedule(() => runGhJsonAsync(`gh issue view ${issueNumber} --repo ${config.repo} --json number,id,title,body,state,labels,updatedAt`));
   return normalizeGithubIssue(parsed);
 }
 
 export async function getGithubIssueAsync(config: GithubConfig, issueNumber: number): Promise<GithubIssueRecord> {
-  const parsed = await runGhJsonAsync(`gh issue view ${issueNumber} --repo ${config.repo} --json number,id,title,body,state,labels,updatedAt`);
+  const parsed = await throttler.schedule(() => runGhJsonAsync(`gh issue view ${issueNumber} --repo ${config.repo} --json number,id,title,body,state,labels,updatedAt`));
   return normalizeGithubIssue(parsed);
 }
 
@@ -1341,7 +1342,7 @@ export async function listGithubIssuesAsync(config: GithubConfig, since?: string
   const sinceParam = since ? `&since=${encodeURIComponent(since)}` : '';
   const apiPath = `repos/${config.repo}/issues?state=all&per_page=100${sinceParam}`;
   const apiCommand = `gh api ${quoteShellValue(apiPath)} --paginate`;
-  const output = await runGhAsync(apiCommand);
+  const output = await throttler.schedule(() => runGhAsync(apiCommand));
   const parsed = JSON.parse(output) as any[];
   const issuesOnly = parsed.filter(entry => {
     if (entry.pull_request) return false;
@@ -1537,7 +1538,7 @@ export async function fetchLabelEventsAsync(
 
   try {
     const command = `gh api repos/${owner}/${name}/issues/${issueNumber}/events --paginate`;
-    const result = await runGhJsonDetailedAsync(command);
+    const result = await throttler.schedule(() => runGhJsonDetailedAsync(command));
 
     if (!result.ok || !Array.isArray(result.data)) {
       // API failure — cache empty array to avoid retrying in same run
