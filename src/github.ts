@@ -66,11 +66,39 @@ function runGh(command: string, input?: string): string {
     }
   }
 
-  return execSync(command, {
-    encoding: 'utf-8',
-    stdio: ['pipe', 'pipe', 'pipe'],
-    input,
-  }).trim();
+  // Synchronous runner with retry/backoff support for secondary limits.
+  const { maxRetries } = getBackoffConfig();
+  let attempt = 0;
+  while (true) {
+    try {
+      return execSync(command, {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        input,
+      }).toString().trim();
+    } catch (err: any) {
+      const stderr = (err?.stderr ? String(err.stderr) : '') || err?.message || '';
+      const stdout = (err?.stdout ? String(err.stdout) : '') || '';
+      if (attempt < maxRetries && (isSecondaryRateLimitText(stderr) || isSecondaryRateLimitText(stdout) || /403|rate limit/i.test(stderr + stdout))) {
+        const waitMs = computeFullJitterDelay(attempt);
+        try { console.error(`gh rate-limited (sync), retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`); } catch (_) {}
+        // Blocking sleep for sync path
+        try {
+          const sab = new SharedArrayBuffer(4);
+          const ia = new Int32Array(sab);
+          Atomics.wait(ia, 0, 0, waitMs);
+        } catch (_) {
+          const start = Date.now();
+          while (Date.now() - start < waitMs) { /* busy wait */ }
+        }
+        attempt += 1;
+        continue;
+      }
+      const e = err as Error;
+      if (stderr) e.message = `${e.message}\n${stderr}`;
+      throw e;
+    }
+  }
 }
 
 function runGhDetailed(command: string, input?: string): { ok: boolean; stdout: string; stderr: string } {
@@ -148,10 +176,24 @@ function spawnCommand(command: string, input?: string, timeout = 120000): Promis
 
 async function runGhAsync(command: string, input?: string): Promise<string> {
   // For paginate commands prefer streaming via spawnCommand
-  const res = await spawnCommand(command, input);
-  if (res.error) throw res.error;
-  if (res.code !== 0) throw new Error(res.stderr || `gh command failed with exit code ${res.code}`);
-  return res.stdout.trim();
+  const { maxRetries } = getBackoffConfig();
+  let attempt = 0;
+  while (true) {
+    const res = await spawnCommand(command, input);
+    if (!res.error && res.code === 0) return res.stdout.trim();
+    const stderr = res.stderr || '';
+    const stdout = res.stdout || '';
+    // If this looks like a secondary limit/abuse/403 and we have retries left, backoff with jitter
+    if (attempt < maxRetries && (isSecondaryRateLimitText(stderr) || isSecondaryRateLimitText(stdout) || /403|rate limit/i.test(stderr + stdout))) {
+      const waitMs = computeFullJitterDelay(attempt);
+      try { console.error(`gh rate-limited (async spawn), retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`); } catch (_) {}
+      await new Promise(r => setTimeout(r, waitMs));
+      attempt += 1;
+      continue;
+    }
+    if (res.error) throw res.error;
+    throw new Error(res.stderr || `gh command failed with exit code ${res.code}`);
+  }
 }
 
 async function runGhDetailedAsync(command: string, input?: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
@@ -210,8 +252,10 @@ async function runGhJsonDetailedAsync(command: string, input?: string, retries =
 }
 
 async function runGhJsonAsync(command: string, input?: string): Promise<any> {
-  const output = await runGhAsync(command, input);
-  return JSON.parse(output);
+  // Use the detailed async JSON helper which includes retry/backoff behaviour.
+  const detailed = await runGhJsonDetailedAsync(command, input);
+  if (!detailed.ok) throw new Error(detailed.error || 'gh command failed');
+  return detailed.data;
 }
 
 function runGhSafe(command: string, input?: string): string | null {
@@ -230,6 +274,19 @@ function runGhJson(command: string, input?: string): any {
 export function isSecondaryRateLimitText(text?: string): boolean {
   if (!text) return false;
   return /secondary rate limit|abuse detection|triggered an abuse|you have exceeded a secondary rate limit/i.test((text || '').toLowerCase());
+}
+
+function getBackoffConfig() {
+  const baseDelay = Number(process.env.WL_GH_BACKOFF_BASE_MS || '1000');
+  const capDelay = Number(process.env.WL_GH_BACKOFF_MAX_MS || '8000');
+  const maxRetries = Number(process.env.WL_GH_BACKOFF_MAX_RETRIES || '3');
+  return { baseDelay, capDelay, maxRetries };
+}
+
+function computeFullJitterDelay(attempt: number) {
+  const { baseDelay, capDelay } = getBackoffConfig();
+  const raw = Math.min(capDelay, baseDelay * (2 ** attempt));
+  return Math.floor(Math.random() * raw);
 }
 
 // Sync wrapper with retry/backoff for callers that need synchronous semantics.
@@ -251,22 +308,57 @@ function runGhSafeJson(command: string, input?: string): any | null {
   }
 }
 
-function runGhJsonDetailed(command: string, input?: string): { ok: boolean; data?: any; error?: string } {
-  const result = runGhDetailed(command, input);
-  if (!result.ok) {
-    const error = result.stderr || result.stdout || 'GraphQL request failed';
-    return { ok: false, error };
-  }
-  try {
-    const data = JSON.parse(result.stdout);
-    if (Array.isArray(data?.errors) && data.errors.length > 0) {
-      const message = data.errors.map((entry: any) => entry?.message || String(entry)).join('; ');
-      return { ok: false, error: message || 'GraphQL request returned errors' };
+function runGhJsonDetailed(command: string, input?: string, retries = 3): { ok: boolean; data?: any; error?: string } {
+  // Synchronous detailed JSON runner with retry/backoff support.
+  const maxRetries = Math.max(0, retries);
+  const baseDelay = Number(process.env.WL_GH_BACKOFF_BASE_MS || '1000');
+  const capDelay = Number(process.env.WL_GH_BACKOFF_MAX_MS || '8000');
+
+  const isSecondaryLimit = (text: string | undefined) => {
+    if (!text) return false;
+    return /secondary rate limit|abuse detection|triggered an abuse|rate limit|403|API rate limit exceeded/i.test(text);
+  };
+
+  const computeDelay = (attemptNum: number) => {
+    const raw = Math.min(capDelay, baseDelay * (2 ** attemptNum));
+    return Math.floor(Math.random() * raw);
+  };
+
+  let attempt = 0;
+  while (attempt <= maxRetries) {
+    const result = runGhDetailed(command, input);
+    if (!result.ok) {
+      const stderr = result.stderr || '';
+      const stdout = result.stdout || '';
+      if (attempt < maxRetries && (isSecondaryLimit(stderr) || isSecondaryLimit(stdout))) {
+        const waitMs = computeDelay(attempt);
+        try { // synchronous sleep using Atomics.wait
+          const sab = new SharedArrayBuffer(4);
+          const ia = new Int32Array(sab);
+          Atomics.wait(ia, 0, 0, waitMs);
+        } catch (_) {
+          // fallback to blocking via new Date loop if Atomics.wait not available
+          const start = Date.now();
+          while (Date.now() - start < waitMs) { /* busy wait */ }
+        }
+        attempt += 1;
+        continue;
+      }
+      const error = result.stderr || result.stdout || 'GraphQL request failed';
+      return { ok: false, error };
     }
-    return { ok: true, data };
-  } catch {
-    return { ok: false, error: 'Invalid JSON response from GraphQL' };
+    try {
+      const data = JSON.parse(result.stdout);
+      if (Array.isArray(data?.errors) && data.errors.length > 0) {
+        const message = data.errors.map((entry: any) => entry?.message || String(entry)).join('; ');
+        return { ok: false, error: message || 'GraphQL request returned errors' };
+      }
+      return { ok: true, data };
+    } catch {
+      return { ok: false, error: 'Invalid JSON response from GraphQL' };
+    }
   }
+  return { ok: false, error: 'Max retries exceeded' };
 }
 
 function quoteShellValue(value: string): string {
