@@ -74,7 +74,7 @@ describe('MetadataPaneComponent GitHub row', () => {
     expect(getContent()).toContain('githubRepo');
   });
 
-  it('shows link with repo and issue number when item has a GitHub mapping', () => {
+  it('shows issue number when item has a GitHub mapping', () => {
     const { comp, getContent } = createMockMetadataPane();
     comp.updateFromItem({
       status: 'open',
@@ -85,7 +85,8 @@ describe('MetadataPaneComponent GitHub row', () => {
 
     const content = getContent();
     expect(content).toContain('GitHub:');
-    expect(content).toContain('owner/repo#42');
+    // Metadata pane intentionally shows issue number only; repo is implied by config.
+    expect(content).toContain('#42');
     expect(content).toContain('G to open');
   });
 
@@ -232,4 +233,3 @@ describe('TUI G key (shift+G) GitHub action', () => {
     expect(msg).not.toMatch(/Set githubRepo in config/);
   });
 });
-
