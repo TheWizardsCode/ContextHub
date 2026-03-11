@@ -211,6 +211,28 @@ export default function register(ctx: PluginContext): void {
           // fall back to hard-coded default
         }
 
+        // Auto-fix rules for common incompatible status/stage combos
+        for (const f of findings) {
+          try {
+            const ctx = (f && (f as any).context) || {};
+            // completed + (in_progress|intake_complete|idea) -> completed + in_review
+            if (f.type === 'incompatible-status-stage' && ctx.status === 'completed' && (ctx.stage === 'in_progress' || ctx.stage === 'intake_complete' || ctx.stage === 'idea')) {
+              const current = (f.proposedFix && typeof f.proposedFix === 'object') ? (f.proposedFix as Record<string, unknown>) : {};
+              (f as any).proposedFix = Object.assign({}, current, { stage: 'in_review' });
+              (f as any).safe = true;
+            }
+
+            // deleted + in_progress -> deleted + done
+            if (f.type === 'incompatible-status-stage' && ctx.status === 'deleted' && ctx.stage === 'in_progress') {
+              const current = (f.proposedFix && typeof f.proposedFix === 'object') ? (f.proposedFix as Record<string, unknown>) : {};
+              (f as any).proposedFix = Object.assign({}, current, { stage: 'done' });
+              (f as any).safe = true;
+            }
+          } catch (e) {
+            // ignore
+          }
+        }
+
         // Normalize certain findings: if an invalid/empty stage can be safely defaulted, mark safe
         for (const f of findings) {
           try {
