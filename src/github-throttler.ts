@@ -34,6 +34,7 @@ export class TokenBucketThrottler {
   private lastRefill: number; // ms
   private active = 0;
   private queue: Array<Task<unknown>> = [];
+  private debug = false;
 
   constructor(opts: ThrottlerOptions) {
     this.rate = opts.rate;
@@ -44,6 +45,7 @@ export class TokenBucketThrottler {
     // start full
     this.tokens = this.burst;
     this.lastRefill = this.clock.now();
+    this.debug = Boolean(process.env.WL_GITHUB_THROTTLER_DEBUG);
   }
 
   schedule<T>(fn: () => Promise<T> | T): Promise<T> {
@@ -75,12 +77,16 @@ export class TokenBucketThrottler {
     this.refillTokens();
 
     // If no queued tasks, nothing to do
-    if (this.queue.length === 0) return;
+    if (this.queue.length === 0) {
+      if (this.debug) console.debug(`[throttler] idle tokens=${this.tokens.toFixed(2)} active=${this.active} queue=0`);
+      return;
+    }
 
     // If we have no tokens, compute next token arrival and schedule
     if (this.tokens < 1) {
       const missing = 1 - this.tokens;
       const msUntil = (missing / this.rate) * 1000;
+      if (this.debug) console.debug(`[throttler] no tokens (tokens=${this.tokens.toFixed(2)}), scheduling next check in ${Math.ceil(msUntil)}ms queue=${this.queue.length} active=${this.active}`);
       this.scheduleProcess(msUntil);
       return;
     }
@@ -98,6 +104,7 @@ export class TokenBucketThrottler {
     if (this.tokens < 0) this.tokens = 0;
 
     this.active += 1;
+    if (this.debug) console.debug(`[throttler] dispatch task (active=${this.active} tokens=${this.tokens.toFixed(2)} queue=${this.queue.length})`);
 
     // Execute task
     Promise.resolve()
@@ -105,12 +112,14 @@ export class TokenBucketThrottler {
       .then((res) => {
         this.active -= 1;
         (task.resolve as (v: unknown) => void)(res);
+        if (this.debug) console.debug(`[throttler] task complete (active=${this.active} tokens=${this.tokens.toFixed(2)} queue=${this.queue.length})`);
         // process more tasks (immediately) - may schedule next refill internally
         this.processQueue();
       })
       .catch((err) => {
         this.active -= 1;
         task.reject(err);
+        if (this.debug) console.debug(`[throttler] task error (active=${this.active} tokens=${this.tokens.toFixed(2)} queue=${this.queue.length}) ${String(err?.message ?? err)}`);
         this.processQueue();
       });
 
