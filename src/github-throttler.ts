@@ -45,7 +45,9 @@ export class TokenBucketThrottler {
     // start full
     this.tokens = this.burst;
     this.lastRefill = this.clock.now();
-    this.debug = Boolean(process.env.WL_GITHUB_THROTTLER_DEBUG);
+    // Enable debug when explicit env var set or when the process is started
+    // with a `--verbose` flag (useful when running test runner with `--verbose`).
+    this.debug = Boolean(process.env.WL_GITHUB_THROTTLER_DEBUG) || (Array.isArray(process.argv) && process.argv.includes('--verbose'));
   }
 
   schedule<T>(fn: () => Promise<T> | T): Promise<T> {
@@ -78,7 +80,7 @@ export class TokenBucketThrottler {
 
     // If no queued tasks, nothing to do
     if (this.queue.length === 0) {
-      if (this.debug) console.debug(`[throttler] idle tokens=${this.tokens.toFixed(2)} active=${this.active} queue=0`);
+      if (this.debug) console.debug(`${new Date().toISOString()} [throttler] idle tokens=${this.tokens.toFixed(2)} active=${this.active} queue=0`);
       return;
     }
 
@@ -86,7 +88,7 @@ export class TokenBucketThrottler {
     if (this.tokens < 1) {
       const missing = 1 - this.tokens;
       const msUntil = (missing / this.rate) * 1000;
-      if (this.debug) console.debug(`[throttler] no tokens (tokens=${this.tokens.toFixed(2)}), scheduling next check in ${Math.ceil(msUntil)}ms queue=${this.queue.length} active=${this.active}`);
+      if (this.debug) console.debug(`${new Date().toISOString()} [throttler] no tokens (tokens=${this.tokens.toFixed(2)}), scheduling next check in ${Math.ceil(msUntil)}ms queue=${this.queue.length} active=${this.active}`);
       this.scheduleProcess(msUntil);
       return;
     }
@@ -104,7 +106,7 @@ export class TokenBucketThrottler {
     if (this.tokens < 0) this.tokens = 0;
 
     this.active += 1;
-    if (this.debug) console.debug(`[throttler] dispatch task (active=${this.active} tokens=${this.tokens.toFixed(2)} queue=${this.queue.length})`);
+    if (this.debug) console.debug(`${new Date().toISOString()} [throttler] dispatch task (active=${this.active} tokens=${this.tokens.toFixed(2)} queue=${this.queue.length})`);
 
     // Execute task
     Promise.resolve()
@@ -112,14 +114,14 @@ export class TokenBucketThrottler {
       .then((res) => {
         this.active -= 1;
         (task.resolve as (v: unknown) => void)(res);
-        if (this.debug) console.debug(`[throttler] task complete (active=${this.active} tokens=${this.tokens.toFixed(2)} queue=${this.queue.length})`);
+        if (this.debug) console.debug(`${new Date().toISOString()} [throttler] task complete (active=${this.active} tokens=${this.tokens.toFixed(2)} queue=${this.queue.length})`);
         // process more tasks (immediately) - may schedule next refill internally
         this.processQueue();
       })
       .catch((err) => {
         this.active -= 1;
         task.reject(err);
-        if (this.debug) console.debug(`[throttler] task error (active=${this.active} tokens=${this.tokens.toFixed(2)} queue=${this.queue.length}) ${String(err?.message ?? err)}`);
+        if (this.debug) console.debug(`${new Date().toISOString()} [throttler] task error (active=${this.active} tokens=${this.tokens.toFixed(2)} queue=${this.queue.length}) ${String(err?.message ?? err)}`);
         this.processQueue();
       });
 
