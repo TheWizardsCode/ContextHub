@@ -42,7 +42,7 @@ function runGh(command: string, input?: string): string {
     const outFd = fs.openSync(outPath, 'w');
     const errFd = fs.openSync(errPath, 'w');
     try {
-      const res = spawnSync('/bin/sh', ['-c', command], {
+      const res = spawnSync('/bin/bash', ['-c', command], {
         encoding: 'utf-8',
         stdio: ['pipe', outFd, errFd],
         input,
@@ -75,6 +75,7 @@ function runGh(command: string, input?: string): string {
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe'],
         input,
+        shell: '/bin/bash',
       }).toString().trim();
     } catch (err: any) {
       const stderr = (err?.stderr ? String(err.stderr) : '') || err?.message || '';
@@ -113,7 +114,7 @@ function runGhDetailed(command: string, input?: string): { ok: boolean; stdout: 
     const outFd = fs.openSync(outPath, 'w');
     const errFd = fs.openSync(errPath, 'w');
     try {
-      const res = spawnSync('/bin/sh', ['-c', command], {
+      const res = spawnSync('/bin/bash', ['-c', command], {
         encoding: 'utf-8',
         stdio: ['pipe', outFd, errFd],
         input,
@@ -153,7 +154,7 @@ function runGhDetailed(command: string, input?: string): { ok: boolean; stdout: 
 // Async variants -----------------------------------------------------------
 function spawnCommand(command: string, input?: string, timeout = 120000): Promise<{ stdout: string; stderr: string; code: number | null; error?: Error }> {
   return new Promise((resolve) => {
-    const child = spawn('/bin/sh', ['-c', command], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn('/bin/bash', ['-c', command], { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
