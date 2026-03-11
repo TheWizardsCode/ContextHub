@@ -3111,7 +3111,7 @@ export class TuiController {
 
     // Open GitHub issue or push item to GitHub (shortcut G)
     try {
-      const helperModule = await import('./github-action-helper.js');
+      const helperModule = await import('./github-action-helper');
       screen.key(KEY_GITHUB_PUSH, async (_ch: any, key: any) => {
         // Only fire for shift+G (not plain g which is handled by KEY_DELEGATE)
         if (!key?.shift) return;
@@ -3125,7 +3125,7 @@ export class TuiController {
         }
 
         try {
-          await helperModule.default({
+          await (helperModule as any).default({
             item,
             screen,
             db,
