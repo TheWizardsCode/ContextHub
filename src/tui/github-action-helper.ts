@@ -79,6 +79,23 @@ export default async function githubActionHelper(opts: {
           if (clipResult.success) showToast('URL copied to clipboard');
         }
       } catch (_) {}
+    } else if (item.githubIssueNumber) {
+      // Mapping might have existed already or sync returned no explicit item;
+      // still try to open the known mapped URL.
+      const url = `https://github.com/${githubConfig!.repo}/issues/${item.githubIssueNumber}`;
+      try {
+        const openUrlMod = await import('../utils/open-url.js');
+        const openUrl = (openUrlMod as any).default;
+        const ok = await openUrl(url, fsImpl);
+        if (!ok) {
+          const clipResult = await copyFn(url, { spawn: spawnImpl, writeOsc52: (s: string) => { try { if (screen && screen.program && typeof screen.program.write === 'function') screen.program.write(s); } catch (_) {} } });
+          if (clipResult.success) showToast('URL copied to clipboard');
+        } else {
+          showToast('Opening GitHub issue…');
+        }
+      } catch (_) {
+        showToast(`GitHub: ${url}`);
+      }
     } else if (result && result.errors && result.errors.length > 0) {
       showToast(`Push failed: ${result.errors[0]}`);
     } else {
