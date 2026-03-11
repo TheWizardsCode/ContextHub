@@ -2773,6 +2773,14 @@ export class TuiController {
         } catch (err) {
           debugLog(`ChordHandler.feed threw: ${(err as any)?.message ?? String(err)}`);
         }
+
+        // Some terminals/blessed combinations report Shift+g as raw ch='G'
+        // without setting key.shift in downstream `screen.key` handlers.
+        // Handle it directly here so the GitHub shortcut is reliable.
+        if (_ch === 'G') {
+          void handleGithubPushShortcut(_ch, key);
+          return false;
+        }
         
         // No legacy pending-state fallback: chordHandler.feed handles all
         // Ctrl-W prefixes and their follow-ups. If chordHandler didn't
@@ -3117,56 +3125,34 @@ export class TuiController {
     });
 
     // Open GitHub issue or push item to GitHub (shortcut G)
-    try {
-      const helperModule = await import('./github-action-helper');
-      screen.key(KEY_GITHUB_PUSH, async (_ch: any, key: any) => {
-        // Only fire for uppercase G intent. Blessed can represent this as
-        // raw ch='G', key.shift=true, or key.full='G'.
-        const isUppercaseG = _ch === 'G' || key?.shift || key?.full === 'G';
-        if (!isUppercaseG) return;
-        if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
-        if (state.moveMode) return;
+    async function handleGithubPushShortcut(_ch: any, key: any): Promise<void> {
+      const isUppercaseG = _ch === 'G' || key?.shift || key?.full === 'G';
+      if (!isUppercaseG) return;
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+      if (state.moveMode) return;
 
-        const item = getSelectedItem();
-        if (!item) {
-          showToast('No item selected');
-          return;
-        }
+      const item = getSelectedItem();
+      if (!item) {
+        showToast('No item selected');
+        return;
+      }
 
-        try {
-          await (helperModule as any).default({
-            item,
-            screen,
-            db,
-            showToast,
-            fsImpl,
-            spawnImpl,
-            copyToClipboard,
-            resolveGithubConfig,
-            upsertIssuesFromWorkItems,
-            list,
-            refreshFromDatabase,
-          });
-        } catch (err: any) {
-          showToast(err?.message || 'GitHub action failed');
-        }
-      });
-    } catch (e) {
-      // If helper import fails, register the inline handler so G still works.
-      screen.key(KEY_GITHUB_PUSH, async (_ch: any, key: any) => {
-        // Only fire for uppercase G intent. Blessed can represent this as
-        // raw ch='G', key.shift=true, or key.full='G'.
-        const isUppercaseG = _ch === 'G' || key?.shift || key?.full === 'G';
-        if (!isUppercaseG) return;
-        if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
-        if (state.moveMode) return;
-
-        const item = getSelectedItem();
-        if (!item) {
-          showToast('No item selected');
-          return;
-        }
-
+      try {
+        const helperModule = await import('./github-action-helper');
+        await (helperModule as any).default({
+          item,
+          screen,
+          db,
+          showToast,
+          fsImpl,
+          spawnImpl,
+          copyToClipboard,
+          resolveGithubConfig,
+          upsertIssuesFromWorkItems,
+          list,
+          refreshFromDatabase,
+        });
+      } catch (_e) {
         // Resolve github config (null means not configured)
         let githubConfig: { repo: string; labelPrefix: string } | null = null;
         try {
@@ -3177,13 +3163,11 @@ export class TuiController {
         }
 
         if (item.githubIssueNumber) {
-          // Item already has a GitHub mapping — open the issue URL in the browser
           const url = `https://github.com/${githubConfig.repo}/issues/${item.githubIssueNumber}`;
           try {
             const openUrl = (await import('../utils/open-url.js')).default;
             const ok = await openUrl(url, fsImpl as any);
             if (!ok) {
-              // Fall back to clipboard
               const clipResult = await copyToClipboard(url, { spawn: spawnImpl, writeOsc52: (s: string) => { try { (screen as any).program?.write?.(s); } catch (_) {} } });
               showToast(clipResult.success ? `URL copied: ${url}` : `Open failed: ${url}`);
             } else {
@@ -3195,39 +3179,19 @@ export class TuiController {
           return;
         }
 
-        // No mapping yet — push this item to GitHub
-        showToast(`Pushing to GitHub…`);
+        showToast('Pushing to GitHub…');
         screen.render();
-
         try {
           const comments = db ? db.getCommentsForWorkItem(item.id) : [];
-          const { updatedItems, result } = await upsertIssuesFromWorkItems(
-            [item],
-            comments as any,
-            githubConfig,
-          );
-
-          // Persist the updated GitHub mapping fields back to the database.
+          const { updatedItems, result } = await upsertIssuesFromWorkItems([item], comments as any, githubConfig);
           if (updatedItems.length > 0) {
             (db as any).upsertItems?.(updatedItems);
           }
-
           refreshFromDatabase(list.selected as number);
-
-          const synced = result.syncedItems.find(s => s.id === item.id);
+          const synced = result.syncedItems.find((s: any) => s.id === item.id);
           if (synced?.issueNumber) {
             const url = `https://github.com/${githubConfig.repo}/issues/${synced.issueNumber}`;
             showToast(`Pushed: ${githubConfig.repo}#${synced.issueNumber}`);
-            try {
-              const openUrl = (await import('../utils/open-url.js')).default;
-              const ok = await openUrl(url, fsImpl as any);
-              if (!ok) {
-                const clipResult = await copyToClipboard(url, { spawn: spawnImpl, writeOsc52: (s: string) => { try { (screen as any).program?.write?.(s); } catch (_) {} } });
-                if (clipResult.success) showToast('URL copied to clipboard');
-              }
-            } catch (_) {
-              // ignore browser open errors
-            }
           } else if (result.errors.length > 0) {
             showToast(`Push failed: ${result.errors[0]}`);
           } else {
@@ -3236,8 +3200,12 @@ export class TuiController {
         } catch (err: any) {
           showToast(`Push failed: ${err?.message || 'Unknown error'}`);
         }
-      });
+      }
     }
+
+    screen.key(KEY_GITHUB_PUSH, async (_ch: any, key: any) => {
+      await handleGithubPushShortcut(_ch, key);
+    });
 
     // Toggle needs producer review flag (shortcut r)
      screen.key(KEY_TOGGLE_NEEDS_REVIEW, () => {
