@@ -227,6 +227,11 @@ function runGhJson(command: string, input?: string): any {
   return JSON.parse(output);
 }
 
+export function isSecondaryRateLimitText(text?: string): boolean {
+  if (!text) return false;
+  return /secondary rate limit|abuse detection|triggered an abuse|you have exceeded a secondary rate limit/i.test((text || '').toLowerCase());
+}
+
 // Sync wrapper with retry/backoff for callers that need synchronous semantics.
 function runGhJsonWithRetries(command: string, input?: string, retries = 3): any {
   const res = runGhJsonDetailed(command, input);
