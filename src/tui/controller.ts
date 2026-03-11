@@ -3120,8 +3120,10 @@ export class TuiController {
     try {
       const helperModule = await import('./github-action-helper');
       screen.key(KEY_GITHUB_PUSH, async (_ch: any, key: any) => {
-        // Only fire for shift+G (not plain g which is handled by KEY_DELEGATE)
-        if (!key?.shift) return;
+        // Only fire for uppercase G intent. Blessed can represent this as
+        // raw ch='G', key.shift=true, or key.full='G'.
+        const isUppercaseG = _ch === 'G' || key?.shift || key?.full === 'G';
+        if (!isUppercaseG) return;
         if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
         if (state.moveMode) return;
 
@@ -3152,8 +3154,10 @@ export class TuiController {
     } catch (e) {
       // If helper import fails, register the inline handler so G still works.
       screen.key(KEY_GITHUB_PUSH, async (_ch: any, key: any) => {
-        // Only fire for shift+G (not plain g which is handled by KEY_DELEGATE)
-        if (!key?.shift) return;
+        // Only fire for uppercase G intent. Blessed can represent this as
+        // raw ch='G', key.shift=true, or key.full='G'.
+        const isUppercaseG = _ch === 'G' || key?.shift || key?.full === 'G';
+        if (!isUppercaseG) return;
         if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
         if (state.moveMode) return;
 
