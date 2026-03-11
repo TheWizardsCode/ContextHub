@@ -164,17 +164,33 @@ async function runGhDetailedAsync(command: string, input?: string): Promise<{ ok
 
 // JSON helpers with simple retry/backoff for rate limits
 async function runGhJsonDetailedAsync(command: string, input?: string, retries = 3): Promise<{ ok: boolean; data?: any; error?: string }> {
+  // Exponential backoff with full jitter on rate-limit/403/abuse responses.
+  const maxRetries = Math.max(0, retries);
   let attempt = 0;
-  let backoff = 500;
-  while (attempt <= retries) {
+  const baseDelay = Number(process.env.WL_GH_BACKOFF_BASE_MS || '1000');
+  const capDelay = Number(process.env.WL_GH_BACKOFF_MAX_MS || '8000');
+
+  const isSecondaryLimit = (text: string | undefined) => {
+    if (!text) return false;
+    return /secondary rate limit|abuse detection|triggered an abuse|rate limit|403|API rate limit exceeded/i.test(text);
+  };
+
+  const computeDelay = (attemptNum: number) => {
+    const raw = Math.min(capDelay, baseDelay * (2 ** attemptNum));
+    return Math.floor(Math.random() * raw); // full jitter
+  };
+
+  while (attempt <= maxRetries) {
     const res = await runGhDetailedAsync(command, input);
     if (!res.ok) {
       const stderr = res.stderr || '';
-      // simple detection of rate limit or 403s
-      if (/rate limit|403|API rate limit exceeded/i.test(stderr) && attempt < retries) {
-        await new Promise(r => setTimeout(r, backoff));
+      const stdout = res.stdout || '';
+      // If this looks like a secondary-rate-limit / abuse / 403, retry with backoff
+      if (attempt < maxRetries && (isSecondaryLimit(stderr) || isSecondaryLimit(stdout))) {
+        const waitMs = computeDelay(attempt);
+        try { console.error(`gh rate-limited/restricted, retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`); } catch (_) {}
+        await new Promise(r => setTimeout(r, waitMs));
         attempt += 1;
-        backoff *= 2;
         continue;
       }
       return { ok: false, error: stderr || res.stdout || 'GraphQL request failed' };
@@ -186,7 +202,7 @@ async function runGhJsonDetailedAsync(command: string, input?: string, retries =
         return { ok: false, error: message || 'GraphQL request returned errors' };
       }
       return { ok: true, data };
-    } catch (err: any) {
+    } catch {
       return { ok: false, error: 'Invalid JSON response from GraphQL' };
     }
   }
@@ -209,6 +225,13 @@ function runGhSafe(command: string, input?: string): string | null {
 function runGhJson(command: string, input?: string): any {
   const output = runGh(command, input);
   return JSON.parse(output);
+}
+
+// Sync wrapper with retry/backoff for callers that need synchronous semantics.
+function runGhJsonWithRetries(command: string, input?: string, retries = 3): any {
+  const res = runGhJsonDetailed(command, input);
+  if (!res.ok) throw new Error(res.error || 'gh command failed');
+  return res.data;
 }
 
 function runGhSafeJson(command: string, input?: string): any | null {

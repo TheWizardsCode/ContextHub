@@ -254,9 +254,15 @@ export default function register(ctx: PluginContext): void {
             throw new Error(batchMsg);
           }
 
-          // Persist updated item mappings immediately after each successful batch.
+        // Persist updated item mappings immediately after each successful batch.
           if (batchResult.updatedItems.length > 0) {
             db.upsertItems(batchResult.updatedItems);
+            // Throttle state sync writes to reduce GitHub secondary rate limiting.
+            // Small delay between writes (default 150ms) helps avoid bursts.
+            try {
+              const delayMs = Number(process.env.WL_SYNC_WRITE_DELAY_MS || '150');
+              if (delayMs > 0) await new Promise(r => setTimeout(r, delayMs));
+            } catch (_) {}
           }
 
           // Accumulate results across batches.
