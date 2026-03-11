@@ -216,7 +216,7 @@ export default function register(ctx: PluginContext): void {
         for (const f of findings) {
           try {
             const ctx = (f && (f as any).context) || {};
-            if (f.type === 'incompatible-status-stage' && ctx.status === 'completed' && ctx.stage === 'in_progress') {
+            if (f.type === 'incompatible-status-stage' && ctx.status === 'completed' && (ctx.stage === 'in_progress' || ctx.stage === 'intake_complete')) {
               const current = (f.proposedFix && typeof f.proposedFix === 'object') ? (f.proposedFix as Record<string, unknown>) : {};
               (f as any).proposedFix = Object.assign({}, current, { stage: 'in_review' });
               (f as any).safe = true;
