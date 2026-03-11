@@ -460,9 +460,11 @@ describe('TUI 50/50 split layout', () => {
     expect(capturedContent).toContain('Jan 1, 2024');
     expect(capturedContent).toContain('Updated:');
     expect(capturedContent).toContain('Jun 1, 2024');
+    // GitHub row is always present (9th row)
+    expect(capturedContent).toContain('GitHub:');
     // All rows should always be present (consistent layout)
     const lines = capturedContent.split('\n');
-    expect(lines.length).toBe(8);
+    expect(lines.length).toBe(9);
   });
 
   it('MetadataPaneComponent.updateFromItem clears content for null item', () => {
@@ -516,9 +518,9 @@ describe('TUI 50/50 split layout', () => {
       assignee: '',
     }, 0);
 
-    // All 8 rows should always be present for consistent layout
+    // All 9 rows should always be present for consistent layout
     const lines = capturedContent.split('\n');
-    expect(lines.length).toBe(8);
+    expect(lines.length).toBe(9);
     expect(capturedContent).toContain('Status:');
     expect(capturedContent).toContain('Tags:');
     expect(capturedContent).toContain('Assignee:');

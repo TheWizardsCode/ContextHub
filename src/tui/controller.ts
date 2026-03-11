@@ -36,11 +36,12 @@ import ChordHandler from './chords.js';
 import { stripAnsi, stripTags, decorateIdsForClick, extractIdFromLine, extractIdAtColumn, stripTagsAndAnsiWithMap, wrapPlainLineWithMap } from './id-utils.js';
 import { AVAILABLE_COMMANDS, MIN_INPUT_HEIGHT, MAX_INPUT_LINES, FOOTER_HEIGHT, OPENCODE_SERVER_PORT,
   KEY_NAV_RIGHT, KEY_NAV_LEFT, KEY_TOGGLE_EXPAND, KEY_QUIT, KEY_ESCAPE, KEY_TOGGLE_HELP, KEY_CHORD_PREFIX, KEY_CHORD_FOLLOWUPS, KEY_OPEN_OPENCODE, KEY_OPEN_SEARCH,
-  KEY_TAB, KEY_SHIFT_TAB, KEY_LEFT_SINGLE, KEY_RIGHT_SINGLE, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_FILTER_BLOCKED, KEY_FILTER_NEEDS_REVIEW, KEY_FILTER_INTAKE_COMPLETED, KEY_FILTER_PLAN_COMPLETED, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW, KEY_MOVE, KEY_DELEGATE } from './constants.js';
+  KEY_TAB, KEY_SHIFT_TAB, KEY_LEFT_SINGLE, KEY_RIGHT_SINGLE, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_FILTER_BLOCKED, KEY_FILTER_NEEDS_REVIEW, KEY_FILTER_INTAKE_COMPLETED, KEY_FILTER_PLAN_COMPLETED, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW, KEY_MOVE, KEY_DELEGATE, KEY_GITHUB_PUSH } from './constants.js';
 import { theme } from '../theme.js';
 import { initAutocomplete, type AutocompleteInstance } from './opencode-autocomplete.js';
 import { delegateWorkItem, type DelegateResult, type DelegateDb } from '../delegate-helper.js';
 import { resolveGithubConfig } from '../commands/github.js';
+import { upsertIssuesFromWorkItems } from '../github-sync.js';
 
 type Item = WorkItem;
 
@@ -1266,6 +1267,15 @@ export class TuiController {
       } catch (_) {}
     };
 
+    // Resolve github repo without throwing — returns null when not configured.
+    const tryGetGithubRepo = (): string | null => {
+      try {
+        return resolveGithubConfig({}).repo;
+      } catch (_) {
+        return null;
+      }
+    };
+
     const opencodeClient = new OpencodeClientImpl({
       port: OPENCODE_SERVER_PORT,
       cwd: worklogRoot,
@@ -1697,7 +1707,7 @@ export class TuiController {
       // Update metadata pane with current item's metadata
       if (metadataPaneComponent) {
         const commentCount = db ? db.getCommentsForWorkItem(node.item.id).length : 0;
-        metadataPaneComponent.updateFromItem(node.item, commentCount);
+        metadataPaneComponent.updateFromItem({ ...node.item, githubRepo: tryGetGithubRepo() ?? undefined }, commentCount);
       }
     }
 
@@ -2985,7 +2995,9 @@ export class TuiController {
     });
 
     // Delegate to GitHub Copilot (shortcut g)
-    screen.key(KEY_DELEGATE, async () => {
+    screen.key(KEY_DELEGATE, async (_ch: any, key: any) => {
+      // Ignore when shift is held — that is handled by KEY_GITHUB_PUSH ('G')
+      if (key?.shift) return;
       // Guard: suppress when overlays are visible or in move mode
       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
       if (!opencodeDialog.hidden) return;
@@ -3094,6 +3106,92 @@ export class TuiController {
           cancelIndex: 0,
           height: 10,
         });
+      }
+    });
+
+    // Open GitHub issue or push item to GitHub (shortcut G)
+    screen.key(KEY_GITHUB_PUSH, async (_ch: any, key: any) => {
+      // Only fire for shift+G (not plain g which is handled by KEY_DELEGATE)
+      if (!key?.shift) return;
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+      if (state.moveMode) return;
+
+      const item = getSelectedItem();
+      if (!item) {
+        showToast('No item selected');
+        return;
+      }
+
+      // Resolve github config (null means not configured)
+      let githubConfig: { repo: string; labelPrefix: string } | null = null;
+      try {
+        githubConfig = resolveGithubConfig({});
+      } catch (_) {
+        showToast('Set githubRepo in config or run: wl github --repo <owner/repo> push');
+        return;
+      }
+
+      if (item.githubIssueNumber) {
+        // Item already has a GitHub mapping — open the issue URL in the browser
+        const url = `https://github.com/${githubConfig.repo}/issues/${item.githubIssueNumber}`;
+        try {
+          const openUrl = (await import('../utils/open-url.js')).default;
+          const ok = await openUrl(url, fsImpl as any);
+          if (!ok) {
+            // Fall back to clipboard
+            const clipResult = await copyToClipboard(url, { spawn: spawnImpl, writeOsc52: (s: string) => { try { (screen as any).program?.write?.(s); } catch (_) {} } });
+            showToast(clipResult.success ? `URL copied: ${url}` : `Open failed: ${url}`);
+          } else {
+            showToast('Opening GitHub issue…');
+          }
+        } catch (_) {
+          showToast(`GitHub: ${url}`);
+        }
+        return;
+      }
+
+      // No mapping yet — push this item to GitHub
+      showToast(`Pushing to GitHub…`);
+      screen.render();
+
+      try {
+        const comments = db ? db.getCommentsForWorkItem(item.id) : [];
+        const { updatedItems, result } = await upsertIssuesFromWorkItems(
+          [item],
+          comments as any,
+          githubConfig,
+        );
+
+        // Persist the updated GitHub mapping fields back to the database.
+        // upsertItems is available on WorklogDatabase but may not be present in
+        // all test doubles, so use optional chaining to guard gracefully.
+        if (updatedItems.length > 0) {
+          (db as any).upsertItems?.(updatedItems);
+        }
+
+        refreshFromDatabase(list.selected as number);
+
+        const synced = result.syncedItems.find(s => s.id === item.id);
+        if (synced?.issueNumber) {
+          const url = `https://github.com/${githubConfig.repo}/issues/${synced.issueNumber}`;
+          showToast(`Pushed: ${githubConfig.repo}#${synced.issueNumber}`);
+          try {
+            const openUrl = (await import('../utils/open-url.js')).default;
+            const ok = await openUrl(url, fsImpl as any);
+            if (!ok) {
+              const clipResult = await copyToClipboard(url, { spawn: spawnImpl, writeOsc52: (s: string) => { try { (screen as any).program?.write?.(s); } catch (_) {} } });
+              if (clipResult.success) showToast('URL copied to clipboard');
+            }
+          } catch (_) {
+            // ignore browser open errors
+          }
+        } else if (result.errors.length > 0) {
+          showToast(`Push failed: ${result.errors[0]}`);
+        } else {
+          showToast('Push complete (no changes)');
+        }
+      } catch (err: any) {
+        showToast(`Push failed: ${err?.message || 'Unknown error'}`);
       }
     });
 
