@@ -203,11 +203,64 @@ export default function register(ctx: PluginContext): void {
 
       // If --fix was provided, attempt to apply safe fixes and prompt per non-safe finding
       if (options.fix) {
-        // Lazy import to avoid adding readline overhead in normal runs
-        const { applyDoctorFixes } = await import('../doctor/fix.js');
-        // Import the Node readline module dynamically (avoid `require` which is not available in ESM runtime)
+        // Compute a sensible default stage from rules (prefer a stage that allows 'open')
+        let defaultStage = 'idea';
+        try {
+          defaultStage = (rules.stageValues.find(s => (rules.stageStatusCompatibility[s] || []).includes('open'))) || rules.stageValues[0] || defaultStage;
+        } catch (e) {
+          // fall back to hard-coded default
+        }
+
+        // Normalize certain findings: if an invalid/empty stage can be safely defaulted, mark safe
+        for (const f of findings) {
+          try {
+            if (f.type === 'invalid-stage' && f.context && (f.context as any).stage === '') {
+              const current = (f.proposedFix && typeof f.proposedFix === 'object') ? (f.proposedFix as Record<string, unknown>) : {};
+              f.proposedFix = Object.assign({}, current, { stage: defaultStage });
+              f.safe = true;
+            }
+          } catch (e) {
+            // ignore
+          }
+        }
+
+        // First, apply all safe fixes
+        const remainingFindings: any[] = [];
+        for (const f of findings) {
+          if (f.safe && f.proposedFix && typeof f.proposedFix === 'object') {
+            try {
+              const itemId = f.itemId;
+              const item = db.get(itemId);
+              if (!item) {
+                remainingFindings.push(f);
+                continue;
+              }
+              const update: any = {};
+              if ((f.proposedFix as any).status) update.status = (f.proposedFix as any).status;
+              if ((f.proposedFix as any).stage) update.stage = (f.proposedFix as any).stage;
+              if (Object.keys(update).length > 0) {
+                try {
+                  db.update(itemId, update);
+                } catch (err) {
+                  // if update fails, keep finding in remaining list so it appears in report
+                  remainingFindings.push(f);
+                  continue;
+                }
+                // applied successfully; don't add to remainingFindings
+                continue;
+              }
+            } catch (err) {
+              remainingFindings.push(f);
+              continue;
+            }
+          }
+          remainingFindings.push(f);
+        }
+
+        // For non-safe actionable findings, prompt interactively unless in JSON/non-interactive mode
+        const finalFindings: any[] = [];
         const readlineMod = await import('node:readline');
-        const promptFn = (promptText: string) => {
+        const promptInteractive = (promptText: string) => {
           const rl = readlineMod.createInterface({ input: process.stdin, output: process.stdout });
           return new Promise<boolean>(resolve => {
             rl.question(promptText + ' (y/N): ', (answer: string) => {
@@ -217,7 +270,55 @@ export default function register(ctx: PluginContext): void {
             });
           });
         };
-        findings = await applyDoctorFixes(db, findings, promptFn);
+
+        for (const f of remainingFindings) {
+          if (f.safe) {
+            // safe but nothing actionable left - keep for report
+            finalFindings.push(f);
+            continue;
+          }
+
+          const hasActionableFix = f.proposedFix && typeof f.proposedFix === 'object' && (
+            Object.prototype.hasOwnProperty.call(f.proposedFix, 'status') ||
+            Object.prototype.hasOwnProperty.call(f.proposedFix, 'stage')
+          );
+
+          if (!hasActionableFix) {
+            // mark as manual required
+            try { f.context = { ...(f.context || {}), requiresManualFix: true }; } catch (e) {}
+            finalFindings.push(f);
+            continue;
+          }
+
+          let shouldApply = false;
+          if (utils.isJsonMode()) {
+            // In JSON / non-interactive mode do not prompt; only safe fixes were applied above
+            shouldApply = false;
+          } else {
+            shouldApply = await promptInteractive(`${f.itemId}: ${f.message}`);
+          }
+
+          if (shouldApply && f.proposedFix && typeof f.proposedFix === 'object') {
+            try {
+              const item = db.get(f.itemId);
+              if (item) {
+                const update: any = {};
+                if ((f.proposedFix as any).status) update.status = (f.proposedFix as any).status;
+                if ((f.proposedFix as any).stage) update.stage = (f.proposedFix as any).stage;
+                if (Object.keys(update).length > 0) {
+                  try { db.update(f.itemId, update); continue; } catch (err) { /* fall through to keep in report */ }
+                }
+              }
+            } catch (err) {
+              // fall through to keep in report
+            }
+          }
+
+          finalFindings.push(f);
+        }
+
+        // Replace findings with the post-fix set for reporting
+        findings = finalFindings;
       }
 
       // Human-readable output handled below
