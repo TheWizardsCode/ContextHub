@@ -156,7 +156,9 @@ export const KEY_TOGGLE_DO_NOT_DELEGATE = ['d', 'D'];
 export const KEY_TOGGLE_NEEDS_REVIEW = ['r', 'R'];
 export const KEY_MOVE = ['m', 'M'];
 export const KEY_DELEGATE = ['g'];
-export const KEY_GITHUB_PUSH = ['G'];
+// Include both cases because blessed may normalize key.name to lowercase while
+// still exposing uppercase intent via the raw `ch` argument.
+export const KEY_GITHUB_PUSH = ['g', 'G'];
 
 // Composite keys often used in help menu / close handlers
 export const KEY_MENU_CLOSE = ['escape', 'q'];

@@ -2773,6 +2773,14 @@ export class TuiController {
         } catch (err) {
           debugLog(`ChordHandler.feed threw: ${(err as any)?.message ?? String(err)}`);
         }
+
+        // Some terminals/blessed combinations report Shift+g as raw ch='G'
+        // without setting key.shift in downstream `screen.key` handlers.
+        // Handle it directly here so the GitHub shortcut is reliable.
+        if (_ch === 'G') {
+          void handleGithubPushShortcut(_ch, key);
+          return false;
+        }
         
         // No legacy pending-state fallback: chordHandler.feed handles all
         // Ctrl-W prefixes and their follow-ups. If chordHandler didn't
@@ -2996,6 +3004,13 @@ export class TuiController {
 
     // Delegate to GitHub Copilot (shortcut g)
     screen.key(KEY_DELEGATE, async (_ch: any, key: any) => {
+      // If the raw character is uppercase 'G', treat it as the GitHub push
+      // shortcut and do not handle it here. Blessed may report shift via
+      // the raw char (`ch`) rather than `key.shift`/`key.name`.
+      if (_ch === 'G') return;
+      // Only handle plain 'g' key events. If key.name is present and not 'g'
+      // then ignore (this avoids other key ambiguities).
+      if (key && key.name && key.name !== 'g') return;
       // Ignore when shift is held — that is handled by KEY_GITHUB_PUSH ('G')
       if (key?.shift) return;
       // Guard: suppress when overlays are visible or in move mode
@@ -3110,9 +3125,9 @@ export class TuiController {
     });
 
     // Open GitHub issue or push item to GitHub (shortcut G)
-    screen.key(KEY_GITHUB_PUSH, async (_ch: any, key: any) => {
-      // Only fire for shift+G (not plain g which is handled by KEY_DELEGATE)
-      if (!key?.shift) return;
+    async function handleGithubPushShortcut(_ch: any, key: any): Promise<void> {
+      const isUppercaseG = _ch === 'G' || key?.shift || key?.full === 'G';
+      if (!isUppercaseG) return;
       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
       if (state.moveMode) return;
 
@@ -3122,77 +3137,74 @@ export class TuiController {
         return;
       }
 
-      // Resolve github config (null means not configured)
-      let githubConfig: { repo: string; labelPrefix: string } | null = null;
       try {
-        githubConfig = resolveGithubConfig({});
-      } catch (_) {
-        showToast('Set githubRepo in config or run: wl github --repo <owner/repo> push');
-        return;
-      }
-
-      if (item.githubIssueNumber) {
-        // Item already has a GitHub mapping — open the issue URL in the browser
-        const url = `https://github.com/${githubConfig.repo}/issues/${item.githubIssueNumber}`;
+        const helperModule = await import('./github-action-helper');
+        await (helperModule as any).default({
+          item,
+          screen,
+          db,
+          showToast,
+          fsImpl,
+          spawnImpl,
+          copyToClipboard,
+          resolveGithubConfig,
+          upsertIssuesFromWorkItems,
+          list,
+          refreshFromDatabase,
+        });
+      } catch (_e) {
+        // Resolve github config (null means not configured)
+        let githubConfig: { repo: string; labelPrefix: string } | null = null;
         try {
-          const openUrl = (await import('../utils/open-url.js')).default;
-          const ok = await openUrl(url, fsImpl as any);
-          if (!ok) {
-            // Fall back to clipboard
-            const clipResult = await copyToClipboard(url, { spawn: spawnImpl, writeOsc52: (s: string) => { try { (screen as any).program?.write?.(s); } catch (_) {} } });
-            showToast(clipResult.success ? `URL copied: ${url}` : `Open failed: ${url}`);
-          } else {
-            showToast('Opening GitHub issue…');
-          }
+          githubConfig = resolveGithubConfig({});
         } catch (_) {
-          showToast(`GitHub: ${url}`);
-        }
-        return;
-      }
-
-      // No mapping yet — push this item to GitHub
-      showToast(`Pushing to GitHub…`);
-      screen.render();
-
-      try {
-        const comments = db ? db.getCommentsForWorkItem(item.id) : [];
-        const { updatedItems, result } = await upsertIssuesFromWorkItems(
-          [item],
-          comments as any,
-          githubConfig,
-        );
-
-        // Persist the updated GitHub mapping fields back to the database.
-        // upsertItems is available on WorklogDatabase but may not be present in
-        // all test doubles, so use optional chaining to guard gracefully.
-        if (updatedItems.length > 0) {
-          (db as any).upsertItems?.(updatedItems);
+          showToast('Set githubRepo in config or run: wl github --repo <owner/repo> push');
+          return;
         }
 
-        refreshFromDatabase(list.selected as number);
-
-        const synced = result.syncedItems.find(s => s.id === item.id);
-        if (synced?.issueNumber) {
-          const url = `https://github.com/${githubConfig.repo}/issues/${synced.issueNumber}`;
-          showToast(`Pushed: ${githubConfig.repo}#${synced.issueNumber}`);
+        if (item.githubIssueNumber) {
+          const url = `https://github.com/${githubConfig.repo}/issues/${item.githubIssueNumber}`;
           try {
             const openUrl = (await import('../utils/open-url.js')).default;
             const ok = await openUrl(url, fsImpl as any);
             if (!ok) {
               const clipResult = await copyToClipboard(url, { spawn: spawnImpl, writeOsc52: (s: string) => { try { (screen as any).program?.write?.(s); } catch (_) {} } });
-              if (clipResult.success) showToast('URL copied to clipboard');
+              showToast(clipResult.success ? `URL copied: ${url}` : `Open failed: ${url}`);
+            } else {
+              showToast('Opening GitHub issue…');
             }
           } catch (_) {
-            // ignore browser open errors
+            showToast(`GitHub: ${url}`);
           }
-        } else if (result.errors.length > 0) {
-          showToast(`Push failed: ${result.errors[0]}`);
-        } else {
-          showToast('Push complete (no changes)');
+          return;
         }
-      } catch (err: any) {
-        showToast(`Push failed: ${err?.message || 'Unknown error'}`);
+
+        showToast('Pushing to GitHub…');
+        screen.render();
+        try {
+          const comments = db ? db.getCommentsForWorkItem(item.id) : [];
+          const { updatedItems, result } = await upsertIssuesFromWorkItems([item], comments as any, githubConfig);
+          if (updatedItems.length > 0) {
+            (db as any).upsertItems?.(updatedItems);
+          }
+          refreshFromDatabase(list.selected as number);
+          const synced = result.syncedItems.find((s: any) => s.id === item.id);
+          if (synced?.issueNumber) {
+            const url = `https://github.com/${githubConfig.repo}/issues/${synced.issueNumber}`;
+            showToast(`Pushed: ${githubConfig.repo}#${synced.issueNumber}`);
+          } else if (result.errors.length > 0) {
+            showToast(`Push failed: ${result.errors[0]}`);
+          } else {
+            showToast('Push complete (no changes)');
+          }
+        } catch (err: any) {
+          showToast(`Push failed: ${err?.message || 'Unknown error'}`);
+        }
       }
+    }
+
+    screen.key(KEY_GITHUB_PUSH, async (_ch: any, key: any) => {
+      await handleGithubPushShortcut(_ch, key);
     });
 
     // Toggle needs producer review flag (shortcut r)
