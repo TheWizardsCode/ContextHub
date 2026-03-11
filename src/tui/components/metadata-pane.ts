@@ -68,6 +68,8 @@ export class MetadataPaneComponent {
     assignee?: string;
     createdAt?: Date | string;
     updatedAt?: Date | string;
+    githubIssueNumber?: number;
+    githubRepo?: string;
   } | null, commentCount: number): void {
     if (!item) {
       this.box.setContent('');
@@ -82,6 +84,15 @@ export class MetadataPaneComponent {
     lines.push(`Assignee: ${item.assignee ?? ''}`);
     lines.push(`Created:  ${MetadataPaneComponent.formatDate(item.createdAt)}`);
     lines.push(`Updated:  ${MetadataPaneComponent.formatDate(item.updatedAt)}`);
+
+    if (!item.githubRepo) {
+      lines.push('GitHub:   (set githubRepo in config to enable)');
+    } else if (item.githubIssueNumber) {
+      lines.push(`GitHub:   ${item.githubRepo}#${item.githubIssueNumber} (G to open)`);
+    } else {
+      lines.push('GitHub:   (G to push to GitHub)');
+    }
+
     this.box.setContent(lines.join('\n'));
   }
 
