@@ -42,11 +42,14 @@ describe('Status/Stage Validation Helper', () => {
       rulesConfig.stageValues.forEach((stage) => {
         const compatible = isStatusStageCompatible(status, stage, rules);
         // Mirror the special-case logic in isStatusStageCompatible which
-        // treats the combination of 'in-progress' status with 'in_review'
-        // stage as compatible by default (handles both underscore/hyphen forms).
+        // permits common transitional combinations used by the TUI/agents.
+        // Historically this included ('in-progress' status, 'in_review' stage),
+        // and has been extended to also allow 'in-progress' together with
+        // earlier stages such as 'idea' or internal 'in_progress' stage value
+        // (underscore/hyphen variants are handled).
         const specialCase = (
           (status === 'in-progress' || status === 'in_progress') &&
-          (stage === 'in_review' || stage === 'in-review')
+          (stage === 'in_review' || stage === 'in-review' || stage === 'idea' || stage === 'in_progress' || stage === 'in-progress')
         );
         const expected = allowedStages.has(stage) || specialCase;
         if (compatible !== expected) {
