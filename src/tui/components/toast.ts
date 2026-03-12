@@ -58,10 +58,25 @@ export class ToastComponent {
    */
   show(message: string): void {
     if (!message) return;
-    
+    this._showWithOptions(message, this.duration, undefined);
+  }
+
+  /**
+   * Show an error toast message with a red background and 3× the normal duration.
+   */
+  showError(message: string): void {
+    if (!message) return;
+    this._showWithOptions(message, this.duration * 3, 'red');
+  }
+
+  private _showWithOptions(message: string, duration: number, bg: string | undefined): void {
     const padded = ` ${message} `;
     this.box.setContent(padded);
     this.box.width = padded.length;
+
+    const originalBg = this.box.style.bg as string | undefined;
+    if (bg !== undefined) this.box.style.bg = bg;
+
     this.box.show();
     this.screen.render();
     
@@ -72,8 +87,10 @@ export class ToastComponent {
     
     // Set new timer to hide the toast
     this.timer = setTimeout(() => {
+      // Restore original background color before hiding
+      if (bg !== undefined) this.box.style.bg = originalBg;
       this.hide();
-    }, this.duration);
+    }, duration);
   }
 
   /**

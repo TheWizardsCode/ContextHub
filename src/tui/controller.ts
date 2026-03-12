@@ -1267,6 +1267,26 @@ export class TuiController {
       } catch (_) {}
     };
 
+    // showErrorToast shows a red, longer-lived toast for error conditions.
+    const showErrorToast = (message: string) => {
+      try {
+        if (toastComponent && typeof (toastComponent as any).showError === 'function') {
+          (toastComponent as any).showError(message);
+        } else {
+          toastComponent?.show?.(message);
+        }
+      } catch (_) {}
+      try {
+        // also notify any toast helper attached to the controller ctx (tests use this)
+        const ctxToast = (this as any).ctx?.toast;
+        if (ctxToast && typeof ctxToast.showError === 'function') {
+          ctxToast.showError(message);
+        } else {
+          ctxToast?.show?.(message);
+        }
+      } catch (_) {}
+    };
+
     // Resolve github repo without throwing — returns null when not configured.
     const tryGetGithubRepo = (): string | null => {
       try {
@@ -2101,9 +2121,9 @@ export class TuiController {
         };
         const res = await copyToClipboard(item.id, { spawn: spawnImpl, writeOsc52 });
         if (res.success) showToast('ID copied');
-        else showToast(res.error ? `Copy failed: ${res.error}` : 'Copy failed');
+        else showErrorToast(res.error ? `Copy failed: ${res.error}` : 'Copy failed');
       } catch (err: any) {
-        showToast(err?.message || 'Copy failed');
+        showErrorToast(err?.message || 'Copy failed');
       }
     }
 

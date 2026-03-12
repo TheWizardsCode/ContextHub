@@ -81,8 +81,9 @@ describe('TUI C key copy ID to clipboard', () => {
     expect(written.length).toBeGreaterThan(0);
     expect(written).toContain(id);
 
-    // Verify the success toast was shown
+    // Verify the success toast was shown (not an error toast)
     expect(ctx.toast.lastMessage()).toBe('ID copied');
+    expect(ctx.toast.lastIsError()).toBe(false);
   });
 
   it('shows error toast when all clipboard methods fail', async () => {
@@ -149,6 +150,10 @@ describe('TUI C key copy ID to clipboard', () => {
     // Accept either outcome: if env leaks TMUX or OSC52 is considered success,
     // the toast might be "ID copied". If everything truly fails, "Copy failed".
     expect(msg).toMatch(/ID copied|Copy failed/);
+    // If it's a failure message, it must be shown as an error toast.
+    if (msg.startsWith('Copy failed')) {
+      expect(ctx.toast.lastIsError()).toBe(true);
+    }
   });
 
   it('does nothing when no item is selected', async () => {

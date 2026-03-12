@@ -129,8 +129,11 @@ export function createTuiTestContext() {
 
   const toast = {
     _last: '',
-    show: (m: string) => { toast._last = m; },
+    _lastIsError: false,
+    show: (m: string) => { toast._last = m; toast._lastIsError = false; },
+    showError: (m: string) => { toast._last = m; toast._lastIsError = true; },
     lastMessage: () => toast._last,
+    lastIsError: () => toast._lastIsError,
   } as any;
 
   // Minimal box/screen factories used by the layout mocks
@@ -216,7 +219,7 @@ export function createTuiTestContext() {
     // Use consistent instances so focus/selected are shared
     listComponent: { getList: (() => { const b = makeBox(); return () => b; })(), getFooter: (() => { const b = makeBox(); return () => b; })() },
     detailComponent: { getDetail: (() => { const b = makeBox(); return () => b; })(), getCopyIdButton: (() => { const b = makeBox(); return () => b; })() },
-    toastComponent: { show: (m: string) => toast.show(m) },
+    toastComponent: { show: (m: string) => toast.show(m), showError: (m: string) => toast.showError(m) },
     overlaysComponent: { detailOverlay: makeBox(), closeOverlay: makeBox(), updateOverlay: makeBox() },
     dialogsComponent: {
       detailModal: makeBox(), detailClose: makeBox(), closeDialog: makeBox(), closeDialogText: makeBox(), closeDialogOptions: makeBox(),
