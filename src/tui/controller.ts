@@ -3143,7 +3143,7 @@ export class TuiController {
           return;
         }
 
-        const helperModule = await import('./github-action-helper');
+        const helperModule = await import('./github-action-helper.js');
         await (helperModule as any).default({
           item,
           screen,
