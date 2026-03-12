@@ -50,6 +50,7 @@ TUI update dialog rejects invalid status/stage combinations.
 - Tests: tests/tui/tui-update-dialog.test.ts
   - Rejects invalid status/stage combinations.
   - Accepts compatible updates and applies changes.
+  - Note: The validation logic permits common transitional combinations by default, e.g. `status=in-progress` (or `in_progress`) while `stage` is `idea`, `in_progress`, or `in_review`. This mirrors TUI/agent workflows that may set an item as in-progress before advancing its stage.
 
 ### Close Dialog Status/Stage Mapping
 Close dialog sets status/stage pairs as follows:
@@ -95,5 +96,8 @@ The next-item selection logic treats in_review specially and filters statuses.
 - Valid: status=open, stage=idea
 - Valid: status=in-progress, stage=in_progress
 - Valid: status=completed, stage=in_review
-- Invalid (TUI rejected): status=completed, stage=idea
-- Invalid (TUI rejected): status=deleted, stage=in_review
+ - Invalid (TUI rejected): status=completed, stage=idea
+ - Invalid (TUI rejected): status=deleted, stage=in_review
+ - Transitional valid: status=in-progress (or in_progress), stage=idea
+ - Transitional valid: status=in-progress (or in_progress), stage=in_progress
+ - Transitional valid: status=in-progress (or in_progress), stage=in_review

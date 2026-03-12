@@ -39,14 +39,17 @@ export const isStatusStageCompatible = (
 ): boolean => {
   if (!status || stage === undefined) return true;
 
-  // Allow the common transitional combination `in-progress` (status)
-  // with `in_review` (stage) even when not explicitly listed in the
-  // compatibility tables. This combination is used by the TUI/agent
-  // workflows and should be considered valid by default.
+  // Allow common transitional combinations used by the TUI/agents even when
+  // they are not enumerated in the compatibility tables. Historically the
+  // UI and automation have used `in-progress`/`in_progress` status together
+  // with `in_review` (stage). In practice it's also permissible for an
+  // `in-progress` status to exist while the work-item remains in an earlier
+  // stage such as `idea` or `in_progress` (stage values may use underscores
+  // or hyphens depending on source). Treat these as allowed by default.
   const statusNorm = status;
   const stageNorm = stage;
   if ((statusNorm === 'in-progress' || statusNorm === 'in_progress') &&
-      (stageNorm === 'in_review' || stageNorm === 'in-review')) {
+      (stageNorm === 'in_review' || stageNorm === 'in-review' || stageNorm === 'idea' || stageNorm === 'in_progress' || stageNorm === 'in-progress')) {
     return true;
   }
   const allowedStages = getAllowedStagesForStatus(status, rules);

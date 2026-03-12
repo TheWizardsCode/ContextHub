@@ -3153,53 +3153,7 @@ export class TuiController {
           refreshFromDatabase,
         });
       } catch (_e) {
-        // Resolve github config (null means not configured)
-        let githubConfig: { repo: string; labelPrefix: string } | null = null;
-        try {
-          githubConfig = resolveGithubConfig({});
-        } catch (_) {
-          showToast('Set githubRepo in config or run: wl github --repo <owner/repo> push');
-          return;
-        }
-
-        if (item.githubIssueNumber) {
-          const url = `https://github.com/${githubConfig.repo}/issues/${item.githubIssueNumber}`;
-          try {
-            const openUrl = (await import('../utils/open-url.js')).default;
-            const ok = await openUrl(url, fsImpl as any);
-            if (!ok) {
-              const clipResult = await copyToClipboard(url, { spawn: spawnImpl, writeOsc52: (s: string) => { try { (screen as any).program?.write?.(s); } catch (_) {} } });
-              showToast(clipResult.success ? `URL copied: ${url}` : `Open failed: ${url}`);
-            } else {
-              showToast('Opening GitHub issue…');
-            }
-          } catch (_) {
-            showToast(`GitHub: ${url}`);
-          }
-          return;
-        }
-
-        showToast('Pushing to GitHub…');
-        screen.render();
-        try {
-          const comments = db ? db.getCommentsForWorkItem(item.id) : [];
-          const { updatedItems, result } = await upsertIssuesFromWorkItems([item], comments as any, githubConfig);
-          if (updatedItems.length > 0) {
-            (db as any).upsertItems?.(updatedItems);
-          }
-          refreshFromDatabase(list.selected as number);
-          const synced = result.syncedItems.find((s: any) => s.id === item.id);
-          if (synced?.issueNumber) {
-            const url = `https://github.com/${githubConfig.repo}/issues/${synced.issueNumber}`;
-            showToast(`Pushed: ${githubConfig.repo}#${synced.issueNumber}`);
-          } else if (result.errors.length > 0) {
-            showToast(`Push failed: ${result.errors[0]}`);
-          } else {
-            showToast('Push complete (no changes)');
-          }
-        } catch (err: any) {
-          showToast(`Push failed: ${err?.message || 'Unknown error'}`);
-        }
+        showToast('GitHub action failed — check config and try again');
       }
     }
 

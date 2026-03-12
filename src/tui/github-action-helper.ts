@@ -1,4 +1,17 @@
+/**
+ * TUI-specific wrapper around the shared GitHub push/open helper.
+ *
+ * This module wires TUI concerns (screen.program.write for OSC 52,
+ * screen.render for progress indication, showToast for user feedback)
+ * to the UI-agnostic helper at src/lib/github-helper.ts.
+ *
+ * Refactored from the previous inline implementation to eliminate
+ * duplication with the controller.ts fallback code.
+ * See work item WL-0MMMGB7VY1XNY073.
+ */
+
 import { copyToClipboard } from '../clipboard.js';
+import { githubPushOrOpen } from '../lib/github-helper.js';
 
 export default async function githubActionHelper(opts: {
   item: any;
@@ -27,81 +40,29 @@ export default async function githubActionHelper(opts: {
     refreshFromDatabase,
   } = opts;
 
-  let githubConfig: { repo: string; labelPrefix?: string } | null = null;
-  try {
-    githubConfig = resolveGithubConfig({});
-  } catch (e) {
-    showToast('Set githubRepo in config or run: wl github --repo <owner/repo> push');
-    return;
+  // Show a progress toast before starting a push (not needed for open).
+  if (!item.githubIssueNumber) {
+    showToast('Pushing to GitHub\u2026');
+    try { screen?.render?.(); } catch (_) {}
   }
 
-  if (item.githubIssueNumber) {
-    const url = `https://github.com/${githubConfig!.repo}/issues/${item.githubIssueNumber}`;
-    try {
-      const openUrlMod = await import('../utils/open-url.js');
-      const openUrl = (openUrlMod as any).default;
-      const ok = await openUrl(url, fsImpl);
-      if (!ok) {
-        const clipResult = await copyFn(url, { spawn: spawnImpl, writeOsc52: (s: string) => { try { (screen as any).program?.write?.(s); } catch (_) {} } });
-        showToast(clipResult.success ? `URL copied: ${url}` : `Open failed: ${url}`);
-      } else {
-        showToast('Opening GitHub issue…');
-      }
-    } catch (e) {
-      showToast(`GitHub: ${url}`);
-    }
-    return;
-  }
-
-  showToast('Pushing to GitHub…');
-  try { screen?.render?.(); } catch (_) {}
-
-  try {
-    const comments = db ? db.getCommentsForWorkItem(item.id) : [];
-    const { updatedItems, result } = await upsertIssuesFromWorkItems([item], comments, githubConfig);
-
-    if (updatedItems && updatedItems.length > 0) {
-      if (db && typeof db.upsertItems === 'function') db.upsertItems(updatedItems);
-    }
-
-    try { refreshFromDatabase && refreshFromDatabase(list?.selected ?? 0); } catch (_) {}
-
-    const synced = result && result.syncedItems ? result.syncedItems.find((s: any) => s.id === item.id) : null;
-    if (synced && synced.issueNumber) {
-      const url = `https://github.com/${githubConfig!.repo}/issues/${synced.issueNumber}`;
-      showToast(`Pushed: ${githubConfig!.repo}#${synced.issueNumber}`);
+  const result = await githubPushOrOpen(item, {
+    resolveGithubConfig,
+    upsertIssuesFromWorkItems,
+    copyToClipboard: copyFn,
+    fsImpl,
+    spawnImpl,
+    writeOsc52: (s: string) => {
       try {
-        const openUrlMod = await import('../utils/open-url.js');
-        const openUrl = (openUrlMod as any).default;
-        const ok = await openUrl(url, fsImpl);
-        if (!ok) {
-          const clipResult = await copyFn(url, { spawn: spawnImpl, writeOsc52: (s: string) => { try { if (screen && screen.program && typeof screen.program.write === 'function') screen.program.write(s); } catch (_) {} } });
-          if (clipResult.success) showToast('URL copied to clipboard');
+        if (screen && screen.program && typeof screen.program.write === 'function') {
+          screen.program.write(s);
         }
       } catch (_) {}
-    } else if (item.githubIssueNumber) {
-      // Mapping might have existed already or sync returned no explicit item;
-      // still try to open the known mapped URL.
-      const url = `https://github.com/${githubConfig!.repo}/issues/${item.githubIssueNumber}`;
-      try {
-        const openUrlMod = await import('../utils/open-url.js');
-        const openUrl = (openUrlMod as any).default;
-        const ok = await openUrl(url, fsImpl);
-        if (!ok) {
-          const clipResult = await copyFn(url, { spawn: spawnImpl, writeOsc52: (s: string) => { try { if (screen && screen.program && typeof screen.program.write === 'function') screen.program.write(s); } catch (_) {} } });
-          if (clipResult.success) showToast('URL copied to clipboard');
-        } else {
-          showToast('Opening GitHub issue…');
-        }
-      } catch (_) {
-        showToast(`GitHub: ${url}`);
-      }
-    } else if (result && result.errors && result.errors.length > 0) {
-      showToast(`Push failed: ${result.errors[0]}`);
-    } else {
-      showToast('Push complete (no changes)');
-    }
-  } catch (err: any) {
-    showToast(`Push failed: ${err?.message || 'Unknown error'}`);
-  }
+    },
+    db,
+    refreshFromDatabase,
+    selectedIndex: list?.selected ?? 0,
+  });
+
+  showToast(result.toastMessage);
 }
