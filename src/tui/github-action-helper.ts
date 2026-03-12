@@ -46,23 +46,29 @@ export default async function githubActionHelper(opts: {
     try { screen?.render?.(); } catch (_) {}
   }
 
-  const result = await githubPushOrOpen(item, {
-    resolveGithubConfig,
-    upsertIssuesFromWorkItems,
-    copyToClipboard: copyFn,
-    fsImpl,
-    spawnImpl,
-    writeOsc52: (s: string) => {
-      try {
-        if (screen && screen.program && typeof screen.program.write === 'function') {
-          screen.program.write(s);
-        }
-      } catch (_) {}
-    },
-    db,
-    refreshFromDatabase,
-    selectedIndex: list?.selected ?? 0,
-  });
+  let result;
+  try {
+    result = await githubPushOrOpen(item, {
+      resolveGithubConfig,
+      upsertIssuesFromWorkItems,
+      copyToClipboard: copyFn,
+      fsImpl,
+      spawnImpl,
+      writeOsc52: (s: string) => {
+        try {
+          if (screen && screen.program && typeof screen.program.write === 'function') {
+            screen.program.write(s);
+          }
+        } catch (_) {}
+      },
+      db,
+      refreshFromDatabase,
+      selectedIndex: list?.selected ?? 0,
+    });
+  } catch (err: any) {
+    showToast(`GitHub action failed: ${err?.message || 'Unknown error'}`);
+    return;
+  }
 
   showToast(result.toastMessage);
 }

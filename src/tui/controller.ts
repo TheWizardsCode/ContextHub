@@ -3125,19 +3125,24 @@ export class TuiController {
     });
 
     // Open GitHub issue or push item to GitHub (shortcut G)
+    let githubPushInFlight = false;
     async function handleGithubPushShortcut(_ch: any, key: any): Promise<void> {
       const isUppercaseG = _ch === 'G' || key?.shift || key?.full === 'G';
       if (!isUppercaseG) return;
-      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
-      if (state.moveMode) return;
-
-      const item = getSelectedItem();
-      if (!item) {
-        showToast('No item selected');
-        return;
-      }
-
+      // Prevent concurrent invocations — the raw keypress handler and
+      // screen.key handler both fire for 'G', so guard against re-entrancy.
+      if (githubPushInFlight) return;
+      githubPushInFlight = true;
       try {
+        if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+        if (state.moveMode) return;
+
+        const item = getSelectedItem();
+        if (!item) {
+          showToast('No item selected');
+          return;
+        }
+
         const helperModule = await import('./github-action-helper');
         await (helperModule as any).default({
           item,
@@ -3152,8 +3157,11 @@ export class TuiController {
           list,
           refreshFromDatabase,
         });
-      } catch (_e) {
-        showToast('GitHub action failed — check config and try again');
+      } catch (_e: any) {
+        debugLog(`GitHub action error: ${_e?.message ?? String(_e)}${_e?.stack ? '\n' + _e.stack : ''}`);
+        showToast(`GitHub action failed: ${_e?.message || 'check config and try again'}`);
+      } finally {
+        githubPushInFlight = false;
       }
     }
 
