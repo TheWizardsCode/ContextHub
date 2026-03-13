@@ -64,6 +64,8 @@ export class MetadataPaneComponent {
     status?: string;
     stage?: string;
     priority?: string;
+    risk?: string;
+    effort?: string;
     tags?: string[];
     assignee?: string;
     createdAt?: Date | string;
@@ -75,10 +77,13 @@ export class MetadataPaneComponent {
       this.box.setContent('');
       return;
     }
+    const placeholder = '—';
     const lines: string[] = [];
     lines.push(`Status:   ${item.status ?? ''}`);
     lines.push(`Stage:    ${item.stage ?? ''}`);
     lines.push(`Priority: ${item.priority ?? ''}`);
+    lines.push(`Risk:     ${item.risk && item.risk.trim() ? item.risk : placeholder}`);
+    lines.push(`Effort:   ${item.effort && item.effort.trim() ? item.effort : placeholder}`);
     lines.push(`Comments: ${commentCount}`);
     lines.push(`Tags:     ${item.tags && item.tags.length > 0 ? item.tags.join(', ') : ''}`);
     lines.push(`Assignee: ${item.assignee ?? ''}`);
