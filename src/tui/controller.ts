@@ -540,10 +540,11 @@ export class TuiController {
       try { chordHandler.reset(); } catch (_) {}
     };
     const endOpencodeTextReading = () => {
+      // Best-effort cleanup: widget lifecycle differs across blessed versions
+      // and test doubles, so failures here should not block user input flow.
       try {
         const widget = opencodeText as any;
         if (typeof widget?.cancel === 'function') widget.cancel();
-        if (widget?._reading) widget._reading = false;
       } catch (_) {}
       try { (screen as any).grabKeys = false; } catch (_) {}
       try { (screen as any).program?.hideCursor?.(); } catch (_) {}

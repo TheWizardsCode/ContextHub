@@ -32,20 +32,15 @@ const blessedMock = {
     const handlersByEvent: Record<string, Function> = {};
     const widget: any = {
       style,
-      _reading: false,
-      __listener: true,
       getValue: () => '',
       setValue: vi.fn(),
       clearValue: vi.fn(),
       focus: vi.fn(() => {
         widget._screen!.focused = widget;
-        widget._reading = true;
         widget._screen!.grabKeys = true;
         handlersByEvent['focus']?.();
       }),
-      cancel: vi.fn(() => {
-        widget._reading = false;
-      }),
+      cancel: vi.fn(),
       show: vi.fn(() => { widget.hidden = false; }),
       hide: vi.fn(() => { widget.hidden = true; }),
       setScrollPerc: vi.fn(),
