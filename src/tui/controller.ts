@@ -539,12 +539,22 @@ export class TuiController {
       // Clear any pending state held by the chord handler (leader+wait)
       try { chordHandler.reset(); } catch (_) {}
     };
+    const endOpencodeTextReading = () => {
+      try {
+        const widget = opencodeText as any;
+        if (typeof widget?.cancel === 'function') widget.cancel();
+        if (widget?._reading) widget._reading = false;
+      } catch (_) {}
+      try { (screen as any).grabKeys = false; } catch (_) {}
+      try { (screen as any).program?.hideCursor?.(); } catch (_) {}
+    };
 
     // Register Ctrl-W chord handlers
     if (chordDebug) console.error('[tui] registering ctrl-w chord handlers');
     chordHandler.register(['C-w', 'w'], () => {
       if (helpMenu.isVisible()) return;
       if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden) return;
+      endOpencodeTextReading();
       clearCtrlWPending();
       cycleFocus(1);
       screen.render();
@@ -553,6 +563,7 @@ export class TuiController {
     chordHandler.register(['C-w', 'p'], () => {
       if (helpMenu.isVisible()) return;
       if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden) return;
+      endOpencodeTextReading();
       clearCtrlWPending();
       focusPaneByIndex(lastPaneFocusIndex);
       screen.render();
@@ -565,6 +576,7 @@ export class TuiController {
     chordHandler.register(['C-w', 'h'], () => {
       if (helpMenu.isVisible()) return;
       if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden) return;
+      endOpencodeTextReading();
       clearCtrlWPending();
       const current = getActivePaneIndex();
       focusPaneByIndex(current - 1);
@@ -574,6 +586,7 @@ export class TuiController {
     chordHandler.register(['C-w', 'l'], () => {
       if (helpMenu.isVisible()) return;
       if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden) return;
+      endOpencodeTextReading();
       clearCtrlWPending();
       const current = getActivePaneIndex();
       focusPaneByIndex(current + 1);
@@ -601,6 +614,7 @@ export class TuiController {
       if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden) return;
       if (opencodeDialog.hidden) return;
       if (!opencodePane || (opencodePane as any).hidden) return;
+      endOpencodeTextReading();
       clearCtrlWPending();
       (opencodePane as Pane).focus?.();
       syncFocusFromScreen();
@@ -1214,6 +1228,7 @@ export class TuiController {
     function closeOpencodeDialog() {
       // In compact mode, don't hide the dialog - it stays as the input bar
       // Just clear the input and keep it open
+      endOpencodeTextReading();
       try { if (typeof opencodeText.clearValue === 'function') opencodeText.clearValue(); } catch (_) {}
       try { if (typeof opencodeText.setValue === 'function') opencodeText.setValue(''); } catch (_) {}
       setOpencodeCursorIndex('', 0);
@@ -1223,6 +1238,7 @@ export class TuiController {
     }
 
     function closeOpencodePane() {
+      endOpencodeTextReading();
       if (opencodePane) {
         opencodePane.hide();
       }
@@ -1485,6 +1501,7 @@ export class TuiController {
 
     // Add Escape key handler to close the opencode dialog
     const opencodeTextEscapeHandler = function(this: any) {
+      endOpencodeTextReading();
       opencodeDialog.hide();
       if (opencodePane) {
         opencodePane.hide();
@@ -1571,6 +1588,7 @@ export class TuiController {
     // to the main list. Use a named handler so it can be removed during
     // cleanup in tests that repeatedly create/destroy dialogs.
     const opencodeDialogEscapeHandler = () => {
+      endOpencodeTextReading();
       opencodeDialog.hide();
       if (opencodePane) {
         opencodePane.hide();

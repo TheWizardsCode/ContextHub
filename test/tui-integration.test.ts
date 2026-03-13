@@ -32,12 +32,19 @@ const blessedMock = {
     const handlersByEvent: Record<string, Function> = {};
     const widget: any = {
       style,
+      _reading: false,
+      __listener: true,
       getValue: () => '',
       setValue: vi.fn(),
       clearValue: vi.fn(),
       focus: vi.fn(() => {
         widget._screen!.focused = widget;
+        widget._reading = true;
+        widget._screen!.grabKeys = true;
         handlersByEvent['focus']?.();
+      }),
+      cancel: vi.fn(() => {
+        widget._reading = false;
       }),
       show: vi.fn(() => { widget.hidden = false; }),
       hide: vi.fn(() => { widget.hidden = true; }),
@@ -450,6 +457,74 @@ describe('TUI integration: style preservation', () => {
     screenKeyCtrlW(null, { name: 'C-w' });
     screenKeyJ(null, { name: 'j' });
     expect(textarea?.focus).toHaveBeenCalled();
+  });
+
+  it('releases screen grabKeys when leaving opencode textarea via Ctrl+W then k', async () => {
+    vi.resetModules();
+    let savedAction: Function | null = null;
+    const program: any = {
+      opts: () => ({ verbose: false }),
+      command() { return this; },
+      description() { return this; },
+      option() { return this; },
+      action(fn: Function) { savedAction = fn; return this; },
+    };
+
+    const utils = {
+      requireInitialized: () => {},
+      getDatabase: () => ({
+        list: () => [{ id: 'WL-TEST-1', title: 'Item', status: 'open' }],
+        getPrefix: () => 'default',
+        getCommentsForWorkItem: (_id: string) => [],
+        get: () => ({ id: 'WL-TEST-1', title: 'Item', status: 'open' }),
+      }),
+    };
+
+    const opencodeClient = {
+      getStatus: () => ({ status: 'running', port: 9999 }),
+      startServer: vi.fn().mockResolvedValue(undefined),
+      stopServer: vi.fn(),
+      sendPrompt: vi.fn().mockResolvedValue(undefined),
+    };
+
+    vi.doMock('../src/tui/opencode-client.js', () => ({
+      OpencodeClient: function() { return opencodeClient; },
+    }));
+
+    const mod = await import('../src/commands/tui');
+    const register = mod.default || mod;
+    register({ program, utils, blessed: blessedMock } as any);
+
+    await (savedAction as any)({});
+
+    const textarea = (blessedMock as any)._lastTextarea;
+    const screen = (blessedMock as any)._lastScreen;
+    const boxMock = (blessedMock as any).box?.mock;
+
+    const ensureHandler = handlers['screen-key:o'] || handlers['screen-key:O'];
+    if (ensureHandler) await ensureHandler(null, { name: 'o' });
+    const sendHandler = handlers['key'];
+    if (sendHandler) sendHandler.call(textarea, null, { name: 'enter' });
+
+    const updatedBoxCalls = boxMock?.calls || [];
+    const responsePaneIndex = updatedBoxCalls.findIndex((call: any[]) => call?.[0]?.label === ' opencode [esc] ');
+    const responsePane = responsePaneIndex >= 0 ? boxMock.results[responsePaneIndex]?.value : null;
+    expect(responsePane).toBeTruthy();
+    responsePane?.show?.();
+
+    textarea?.focus?.();
+    expect(screen.grabKeys).toBe(true);
+
+    const screenKeyCtrlW = handlers['screen-key:C-w'];
+    const screenKeyK = handlers['screen-key:k'];
+    expect(typeof screenKeyCtrlW).toBe('function');
+    expect(typeof screenKeyK).toBe('function');
+
+    screenKeyCtrlW(null, { name: 'C-w' });
+    screenKeyK(null, { name: 'k' });
+
+    expect(responsePane?.focus).toHaveBeenCalled();
+    expect(screen.grabKeys).toBe(false);
   });
 
   it('updates border styles when focus changes', async () => {
