@@ -2049,11 +2049,28 @@ export class TuiController {
       const dataPath = getDefaultDataPath();
       const dataDir = pathImpl.dirname(dataPath);
       const dataFile = pathImpl.basename(dataPath);
+      const readDataMtimeMs = () => {
+        try {
+          return fsImpl.statSync(dataPath).mtimeMs;
+        } catch (err) {
+          debugLog(`Failed to read data file mtime for watch event filtering: ${String(err)}`);
+          return null;
+        }
+      };
+      let lastKnownDataMtimeMs = readDataMtimeMs();
       try {
         dataWatcher = fsImpl.watch(dataDir, (eventType, filename) => {
           if (isShuttingDown) return;
           if (eventType !== 'change' && eventType !== 'rename') return;
           if (filename && filename !== dataFile) return;
+          if (!filename) {
+            const nextMtime = readDataMtimeMs();
+            if (nextMtime === null) return;
+            if (lastKnownDataMtimeMs !== null && nextMtime === lastKnownDataMtimeMs) return;
+            lastKnownDataMtimeMs = nextMtime;
+          } else {
+            lastKnownDataMtimeMs = readDataMtimeMs() ?? lastKnownDataMtimeMs;
+          }
           const selectedIndex = typeof list.selected === 'number' ? (list.selected as number) : 0;
           scheduleRefreshFromDatabase(selectedIndex);
         });
