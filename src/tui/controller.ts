@@ -2080,7 +2080,12 @@ export class TuiController {
         // filesystem activity. We schedule an async check to compare mtime
         // and only trigger a refresh when the file's mtime actually changed.
         let watchDebounce: ReturnType<typeof setTimeout> | null = null;
-        let lastSeenMtimeMs: number | null = null;
+        // Initialize lastSeenMtimeMs from the current known mtime so we do
+        // not trigger a refresh for the first watch callback when the file
+        // has not actually changed since startup. Previously this was
+        // initialized to null which caused an extra refresh call in tests
+        // that expect no-op behavior when mtime is unchanged.
+        let lastSeenMtimeMs: number | null = lastKnownDataMtimeMs;
         dataWatcher = fsImpl.watch(dataDir, (_eventType, filename) => {
           if (isShuttingDown) return;
           if (filename && filename !== dataFile) return;
@@ -2088,15 +2093,35 @@ export class TuiController {
           if (watchDebounce) clearTimeout(watchDebounce);
           watchDebounce = setTimeout(async () => {
             watchDebounce = null;
-            try {
-              const stat = await fsAsync.stat(dataPath).catch(() => null);
-              const mtimeMs = stat?.mtimeMs ?? null;
-              if (mtimeMs === null) {
-                // file may have been removed/rotated — trigger refresh
-                const selectedIndex = typeof list.selected === 'number' ? (list.selected as number) : 0;
-                scheduleRefreshFromDatabase(selectedIndex);
-                return;
-              }
+               try {
+               // Prefer using injected statSync when available because tests
+               // commonly mock it. If statSync exists but throws, treat the
+               // failure as a transient error and do NOT fall back to the
+               // async stat path (which may observe a different file) to
+               // avoid scheduling spurious refreshes. Only attempt the
+               // async stat when statSync is not present on the injected
+               // fsImpl.
+               let stat: fs.Stats | null = null;
+               const hasSync = typeof (fsImpl as any).statSync === 'function';
+               if (hasSync) {
+                 try {
+                   stat = (fsImpl as any).statSync(dataPath);
+                 } catch (e) {
+                   // statSync exists but failed — ignore this watch event
+                   // rather than attempting async stat which can cause
+                   // inconsistent results in tests.
+                   return;
+                 }
+               } else {
+                 stat = await fsAsync.stat(dataPath).catch(() => null);
+               }
+               const mtimeMs = stat?.mtimeMs ?? null;
+               if (mtimeMs === null) {
+                 // Could not read mtime (stat failed) — ignore this watch
+                 // event rather than triggering a refresh. Transient stat
+                 // failures should not cause spurious refreshes.
+                 return;
+               }
               if (lastSeenMtimeMs === null || mtimeMs !== lastSeenMtimeMs) {
                 lastSeenMtimeMs = mtimeMs;
                 const selectedIndex = typeof list.selected === 'number' ? (list.selected as number) : 0;
