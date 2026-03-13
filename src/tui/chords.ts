@@ -112,19 +112,17 @@ export class ChordHandler {
       // state. This avoids cycles where a duplicate leader clears the
       // pending state and prevents the intended follow-up key from
       // matching.
-      const lp = this.pending[this.pending.length - 1];
       const lastIsSameAsNew = nextPending.length > 1 && nextPending[nextPending.length - 1] === nextPending[nextPending.length - 2];
       if (lastIsSameAsNew) {
-        // Keep the pending timeout alive when deduplicating repeated physical
-        // key events (e.g. raw keypress + screen.key wrapper for Ctrl-W).
-        // Without re-scheduling here the pending prefix can remain set
-        // indefinitely and suppress normal key handling.
-        this.scheduleClear();
         if (dbg) try { console.error(`[chords] duplicate key '${k}' ignored (pending=${JSON.stringify(this.pending)})`); } catch (_) {}
         // Consume the duplicate event but keep pending as-is.
-        // Restore preserved pendingHandler (if any) so subsequent
-        // scheduleClear() uses the original deferred handler.
+        // Restore preserved pendingHandler (if any) and re-schedule
+        // the leader timeout so the deferred handler still runs after
+        // the original timeout period even if the timer was cleared
+        // by the duplicate physical event.
         if (prevPendingHandler) this.pendingHandler = prevPendingHandler;
+        // ensure a timeout is active to eventually invoke pendingHandler
+        this.scheduleClear();
         return true;
       }
 
