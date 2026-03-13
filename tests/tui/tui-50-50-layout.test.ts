@@ -450,6 +450,8 @@ describe('TUI 50/50 split layout', () => {
     expect(capturedContent).toContain('in-progress');
     expect(capturedContent).toContain('Priority:');
     expect(capturedContent).toContain('high');
+    expect(capturedContent).toContain('Risk:');
+    expect(capturedContent).toContain('Effort:');
     expect(capturedContent).toContain('Comments: 3');
     expect(capturedContent).toContain('Tags:');
     expect(capturedContent).toContain('backend');
@@ -460,11 +462,11 @@ describe('TUI 50/50 split layout', () => {
     expect(capturedContent).toContain('Jan 1, 2024');
     expect(capturedContent).toContain('Updated:');
     expect(capturedContent).toContain('Jun 1, 2024');
-    // GitHub row is always present (9th row)
+    // GitHub row is always present (11th row)
     expect(capturedContent).toContain('GitHub:');
     // All rows should always be present (consistent layout)
     const lines = capturedContent.split('\n');
-    expect(lines.length).toBe(9);
+    expect(lines.length).toBe(11);
   });
 
   it('MetadataPaneComponent.updateFromItem clears content for null item', () => {
@@ -518,9 +520,9 @@ describe('TUI 50/50 split layout', () => {
       assignee: '',
     }, 0);
 
-    // All 9 rows should always be present for consistent layout
+    // All 11 rows should always be present for consistent layout
     const lines = capturedContent.split('\n');
-    expect(lines.length).toBe(9);
+    expect(lines.length).toBe(11);
     expect(capturedContent).toContain('Status:');
     expect(capturedContent).toContain('Tags:');
     expect(capturedContent).toContain('Assignee:');

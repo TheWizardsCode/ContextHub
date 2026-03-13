@@ -212,6 +212,8 @@ Options:
 `-c, --children` — Also display descendants in a tree layout (optional).
 `--prefix <prefix>` (optional)
 
+The output always includes `Risk` and `Effort` fields. When a field has no value a placeholder `—` is shown so the field is consistently visible for triage and prioritization.
+
 Examples:
 
 ```sh
