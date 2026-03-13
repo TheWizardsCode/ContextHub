@@ -2066,7 +2066,7 @@ export class TuiController {
           if (!filename) {
             const nextMtime = readDataMtimeMs();
             if (nextMtime === null) return;
-            if (lastKnownDataMtimeMs !== null && nextMtime === lastKnownDataMtimeMs) return;
+            if (lastKnownDataMtimeMs !== null && nextMtime !== null && nextMtime === lastKnownDataMtimeMs) return;
             lastKnownDataMtimeMs = nextMtime;
           } else {
             lastKnownDataMtimeMs = readDataMtimeMs() ?? lastKnownDataMtimeMs;
