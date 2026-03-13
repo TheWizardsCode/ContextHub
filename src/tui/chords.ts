@@ -81,10 +81,16 @@ export class ChordHandler {
       try { console.error(`[chords] feed key=${JSON.stringify(key)} -> normalized='${k}', pending=${JSON.stringify(this.pending)}, timer=${this.timer ? 'set' : 'null'}`); } catch (_) {}
     }
     // if there is an in-flight pending short-handler timer, cancel it
+    // Preserve any previously-set pendingHandler: a duplicate physical
+    // key event should not drop a deferred handler. We will clear the
+    // timer but keep the handler so the later scheduleClear() call will
+    // invoke it unless the logic replaces it explicitly.
+    let prevPendingHandler: Handler | null = null;
     if (this.timer) {
       clearTimeout(this.timer as any);
       this.timer = null;
-      this.pendingHandler = null;
+      prevPendingHandler = this.pendingHandler;
+      // do not set this.pendingHandler = null here; preserve it
     }
 
     const nextPending = [...this.pending, k];
@@ -116,6 +122,9 @@ export class ChordHandler {
         this.scheduleClear();
         if (dbg) try { console.error(`[chords] duplicate key '${k}' ignored (pending=${JSON.stringify(this.pending)})`); } catch (_) {}
         // Consume the duplicate event but keep pending as-is.
+        // Restore preserved pendingHandler (if any) so subsequent
+        // scheduleClear() uses the original deferred handler.
+        if (prevPendingHandler) this.pendingHandler = prevPendingHandler;
         return true;
       }
 

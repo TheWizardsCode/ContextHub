@@ -14,6 +14,85 @@ import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import fsPromises from 'fs/promises';
 import path from 'path';
+import os from 'os';
+
+/**
+ * Resolve the global OpenCode base directory.
+ * Returns ${XDG_CONFIG_HOME}/opencode or $HOME/.config/opencode.
+ * Throws if neither XDG_CONFIG_HOME nor HOME is available.
+ */
+function globalOpenCodeDir() {
+  const xdg = process.env.XDG_CONFIG_HOME;
+  if (xdg) {
+    return path.join(xdg, 'opencode');
+  }
+  const home = process.env.HOME || os.homedir();
+  if (!home) {
+    throw new Error(
+      'Cannot determine global directory: neither XDG_CONFIG_HOME nor HOME is set'
+    );
+  }
+  return path.join(home, '.config', 'opencode');
+}
+
+/**
+ * Resolve the global AMPA data directory.
+ * Pool state files (pool-state.json, pool-cleanup.json, pool-replenish.log)
+ * are stored here so they are shared across all projects.
+ *
+ * Respects XDG_CONFIG_HOME; falls back to $HOME/.config.
+ * Throws if neither XDG_CONFIG_HOME nor HOME is set.
+ */
+function globalAmpaDir() {
+  return path.join(globalOpenCodeDir(), '.worklog', 'ampa');
+}
+
+/**
+ * Resolve the global plugins directory.
+ * Returns ${XDG_CONFIG_HOME}/opencode/.worklog/plugins or
+ * $HOME/.config/opencode/.worklog/plugins.
+ */
+function globalPluginsDir() {
+  return path.join(globalOpenCodeDir(), '.worklog', 'plugins');
+}
+
+/**
+ * Resolve the per-project AMPA config directory.
+ * Per-project configuration (.env, scheduler_store.json) and daemon runtime
+ * files (PID, log) are stored here.
+ *
+ * Path: <projectRoot>/.worklog/ampa/
+ */
+function projectAmpaDir(projectRoot) {
+  return path.join(projectRoot, '.worklog', 'ampa');
+}
+
+/**
+ * Locate the bundled AMPA Python package (ampa_py).
+ *
+ * Resolution order:
+ *   1. <projectRoot>/.worklog/plugins/ampa_py/  (local override)
+ *   2. <globalPluginsDir>/ampa_py/              (global install)
+ *
+ * Returns { pyPath, pythonBin } or null if the package is not found in
+ * either location.
+ */
+function resolveAmpaPackage(projectRoot) {
+  const locations = [
+    path.join(projectRoot, '.worklog', 'plugins', 'ampa_py'),
+    path.join(globalPluginsDir(), 'ampa_py'),
+  ];
+  for (const pyPath of locations) {
+    try {
+      if (fs.existsSync(path.join(pyPath, 'ampa', '__init__.py'))) {
+        const venvPython = path.join(pyPath, 'venv', 'bin', 'python');
+        const pythonBin = fs.existsSync(venvPython) ? venvPython : 'python3';
+        return { pyPath, pythonBin };
+      }
+    } catch (e) {}
+  }
+  return null;
+}
 
 function findProjectRoot(start) {
   let cur = path.resolve(start);
@@ -78,10 +157,10 @@ function readDotEnv(projectRoot, extraPaths = []) {
 async function resolveCommand(cliCmd, projectRoot) {
   if (cliCmd) return Array.isArray(cliCmd) ? cliCmd : shellSplit(cliCmd);
   if (process.env.WL_AMPA_CMD) return shellSplit(process.env.WL_AMPA_CMD);
-  const wl = path.join(projectRoot, 'worklog.json');
-  if (fs.existsSync(wl)) {
+  const wlJson = path.join(projectRoot, 'worklog.json');
+  if (fs.existsSync(wlJson)) {
     try {
-      const data = JSON.parse(await fsPromises.readFile(wl, 'utf8'));
+      const data = JSON.parse(await fsPromises.readFile(wlJson, 'utf8'));
       if (data && typeof data === 'object' && 'ampa' in data) {
         const val = data.ampa;
         if (typeof val === 'string') return shellSplit(val);
@@ -89,10 +168,10 @@ async function resolveCommand(cliCmd, projectRoot) {
       }
     } catch (e) {}
   }
-  const pkg = path.join(projectRoot, 'package.json');
-  if (fs.existsSync(pkg)) {
+  const pkgJson = path.join(projectRoot, 'package.json');
+  if (fs.existsSync(pkgJson)) {
     try {
-      const pj = JSON.parse(await fsPromises.readFile(pkg, 'utf8'));
+      const pj = JSON.parse(await fsPromises.readFile(pkgJson, 'utf8'));
       const scripts = pj.scripts || {};
       if (scripts.ampa) return shellSplit(scripts.ampa);
     } catch (e) {}
@@ -103,73 +182,77 @@ async function resolveCommand(cliCmd, projectRoot) {
       if (fs.existsSync(c) && fs.accessSync(c, fs.constants.X_OK) === undefined) return [c];
     } catch (e) {}
   }
-  // Fallback: if a bundled Python package 'ampa' was installed into
-  // .worklog/plugins/ampa_py/ampa, prefer running it with Python -m ampa.daemon
-  try {
-    const pyBundle = path.join(projectRoot, '.worklog', 'plugins', 'ampa_py', 'ampa');
-    if (fs.existsSync(path.join(pyBundle, '__init__.py'))) {
-      const pyPath = path.join(projectRoot, '.worklog', 'plugins', 'ampa_py');
-      const venvPython = path.join(pyPath, 'venv', 'bin', 'python');
-      const pythonBin = fs.existsSync(venvPython) ? venvPython : 'python3';
-      const launcher = `import sys; sys.path.insert(0, ${JSON.stringify(pyPath)}); import ampa.daemon as d; d.main()`;
-      // Run the daemon in long-running mode by default (start scheduler).
-      // Users can override via --cmd or AMPA_RUN_SCHEDULER env var if desired.
-      // use -u to force unbuffered stdout/stderr so logs show up promptly
-      return {
-        cmd: [pythonBin, '-u', '-c', launcher, '--start-scheduler'],
-        env: { PYTHONPATH: pyPath, AMPA_RUN_SCHEDULER: '1' },
-      };
-    }
-  } catch (e) {}
+  // Fallback: look for the bundled Python package 'ampa' in the local or global
+  // plugins directory.  resolveAmpaPackage() checks project-local first, then
+  // the global install path — there is no fallback to a development source tree.
+  const pkg = resolveAmpaPackage(projectRoot);
+  if (pkg) {
+    const { pyPath, pythonBin } = pkg;
+    const launcher = `import sys; sys.path.insert(0, ${JSON.stringify(pyPath)}); import ampa.daemon as d; d.main()`;
+    // Run the daemon in long-running mode by default (start scheduler).
+    // Users can override via --cmd or AMPA_RUN_SCHEDULER env var if desired.
+    // use -u to force unbuffered stdout/stderr so logs show up promptly
+    return {
+      cmd: [pythonBin, '-u', '-c', launcher, '--start-scheduler'],
+      env: { PYTHONPATH: pyPath, AMPA_RUN_SCHEDULER: '1' },
+    };
+  }
   return null;
 }
 
-async function resolveRunOnceCommand(projectRoot, commandId) {
-  if (!commandId) return null;
-  // Prefer bundled python package if available.
-  try {
-    const pyBundle = path.join(projectRoot, '.worklog', 'plugins', 'ampa_py', 'ampa');
-    if (fs.existsSync(path.join(pyBundle, '__init__.py'))) {
-      const pyPath = path.join(projectRoot, '.worklog', 'plugins', 'ampa_py');
-      const venvPython = path.join(pyPath, 'venv', 'bin', 'python');
-      const pythonBin = fs.existsSync(venvPython) ? venvPython : 'python3';
-      return {
-        cmd: [pythonBin, '-u', '-m', 'ampa.scheduler', 'run-once', commandId],
-        env: { PYTHONPATH: pyPath },
-        envPaths: [path.join(pyPath, 'ampa', '.env')],
-      };
-    }
-  } catch (e) {}
-  // Fallback to repo/local package
-  return {
-    cmd: ['python3', '-m', 'ampa.scheduler', 'run-once', commandId],
-    env: {},
-    envPaths: [path.join(projectRoot, 'ampa', '.env')],
-  };
+async function resolveRunOnceCommand(projectRoot, commandId, extraArgs = []) {
+  // Build base args: use 'run' subcommand (enhanced version).
+  const subcommand = 'run';
+  const baseArgs = ['-u', '-m', 'ampa.scheduler_cli', subcommand];
+  if (commandId) baseArgs.push(commandId);
+  if (extraArgs.length) baseArgs.push(...extraArgs);
+
+  // Per-project config: .env is always loaded from <projectRoot>/.worklog/ampa/.env
+  const envPath = path.join(projectAmpaDir(projectRoot), '.env');
+
+  // Locate the bundled Python package (local override or global install).
+  const pkg = resolveAmpaPackage(projectRoot);
+  if (pkg) {
+    const { pyPath, pythonBin } = pkg;
+    return {
+      cmd: [pythonBin, ...baseArgs],
+      env: { PYTHONPATH: pyPath },
+      envPaths: [envPath],
+    };
+  }
+  // No bundled package found — report error instead of falling back to dev tree.
+  throw new Error(
+    'AMPA Python package not found. Install the plugin with:\n' +
+    '  skill/install-ampa/scripts/install-worklog-plugin.sh --yes\n' +
+    'Expected at: <projectRoot>/.worklog/plugins/ampa_py/ or ' +
+    globalPluginsDir() + '/ampa_py/'
+  );
 }
 
 async function resolveListCommand(projectRoot, useJson) {
-  const args = ['-m', 'ampa.scheduler', 'list'];
+  const args = ['-m', 'ampa.scheduler_cli', 'list'];
   if (useJson) args.push('--json');
-  // Prefer bundled python package if available.
-  try {
-    const pyBundle = path.join(projectRoot, '.worklog', 'plugins', 'ampa_py', 'ampa');
-    if (fs.existsSync(path.join(pyBundle, '__init__.py'))) {
-      const pyPath = path.join(projectRoot, '.worklog', 'plugins', 'ampa_py');
-      const venvPython = path.join(pyPath, 'venv', 'bin', 'python');
-      const pythonBin = fs.existsSync(venvPython) ? venvPython : 'python3';
-      return {
-        cmd: [pythonBin, '-u', ...args],
-        env: { PYTHONPATH: pyPath },
-        envPaths: [path.join(pyPath, 'ampa', '.env')],
-      };
-    }
-  } catch (e) {}
-  return {
-    cmd: ['python3', '-u', ...args],
-    env: {},
-    envPaths: [path.join(projectRoot, 'ampa', '.env')],
-  };
+
+  // Per-project config: .env is always loaded from <projectRoot>/.worklog/ampa/.env
+  const envPath = path.join(projectAmpaDir(projectRoot), '.env');
+
+  // Locate the bundled Python package (local override or global install).
+  const pkg = resolveAmpaPackage(projectRoot);
+  if (pkg) {
+    const { pyPath, pythonBin } = pkg;
+    return {
+      cmd: [pythonBin, '-u', ...args],
+      env: { PYTHONPATH: pyPath },
+      envPaths: [envPath],
+    };
+  }
+  // No bundled package found — report error instead of falling back to dev tree.
+  throw new Error(
+    'AMPA Python package not found. Install the plugin with:\n' +
+    '  skill/install-ampa/scripts/install-worklog-plugin.sh --yes\n' +
+    'Expected at: <projectRoot>/.worklog/plugins/ampa_py/ or ' +
+    globalPluginsDir() + '/ampa_py/'
+  );
 }
 
 const DAEMON_NOT_RUNNING_MESSAGE = 'Daemon is not running. Start it with: wl ampa start';
@@ -210,25 +293,70 @@ function resolveDaemonStore(projectRoot, name = 'default') {
     cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
   } catch (e) {}
   const env = readDaemonEnv(pid) || {};
+
+  // Resolution order (matches the Python daemon's SchedulerConfig.from_env):
+  //   1. AMPA_SCHEDULER_STORE env var (explicit override)
+  //   2. <projectRoot>/.worklog/ampa/scheduler_store.json (per-project)
+  //   3. <packageDir>/ampa/scheduler_store.json (backward compat)
   let storePath = env.AMPA_SCHEDULER_STORE || '';
   if (!storePath) {
-    const candidates = [];
-    if (env.PYTHONPATH) {
-      for (const entry of env.PYTHONPATH.split(path.delimiter)) {
-        if (entry) candidates.push(entry);
+    // Per-project path (preferred)
+    const projectStore = path.join(projectAmpaDir(projectRoot), 'scheduler_store.json');
+    if (fs.existsSync(projectStore)) {
+      storePath = projectStore;
+    } else {
+      // Backward compat: look inside the Python package directory. Prefer the
+      // per-project package first, then any PYTHONPATH entries, then the
+      // global plugins dir. If a package provides a scheduler_store.json use
+      // that; otherwise continue searching. If no package store is found,
+      // default to the per-project path.
+      const candidates = [];
+      // per-project package candidate first
+      candidates.push(path.join(projectRoot, '.worklog', 'plugins', 'ampa_py'));
+      // Do not consult the daemon's PYTHONPATH here — the test harness and
+      // developer environments may set PYTHONPATH to include local copies of
+      // the package, which would break test isolation. Only consider the
+      // per-project package and the daemon's XDG_CONFIG_HOME-based global
+      // plugins path.
+      // Determine the global plugins dir based on the daemon's environment
+      // (env) when possible. Tests spawn the daemon with XDG_CONFIG_HOME set
+      // in its environment; prefer that so resolution matches what the daemon
+      // will see. Fall back to the current process's globalPluginsDir()
+      // only if the daemon didn't set XDG_CONFIG_HOME.
+      try {
+        // Only consult the daemon's XDG_CONFIG_HOME (from the daemon process
+        // environment). Do NOT consult this process's XDG_CONFIG_HOME — that
+        // risks picking up the developer's installed plugin and breaking test
+        // isolation.
+        if (env.XDG_CONFIG_HOME) {
+          const gbase = path.join(env.XDG_CONFIG_HOME, 'opencode', '.worklog', 'plugins');
+          candidates.push(path.join(gbase, 'ampa_py'));
+        }
+      } catch (e) {}
+
+      const perProjectPkg = path.join(projectRoot, '.worklog', 'plugins', 'ampa_py');
+      for (const candidate of candidates) {
+        const ampaPath = path.join(candidate, 'ampa');
+        if (!fs.existsSync(path.join(ampaPath, 'scheduler.py'))) continue;
+        const pkgStore = path.join(ampaPath, 'scheduler_store.json');
+        if (fs.existsSync(pkgStore)) {
+          storePath = pkgStore;
+          break;
+        }
+        // If the per-project package exists but has no store file, prefer the
+        // per-project scheduler_store.json path rather than falling back to
+        // a global package store. This keeps per-project isolation intact.
+        if (candidate === perProjectPkg) {
+          storePath = projectStore;
+          break;
+        }
+        // otherwise continue searching other candidates
+      }
+      // Default to per-project path even if file doesn't exist yet
+      if (!storePath) {
+        storePath = projectStore;
       }
     }
-    candidates.push(path.join(projectRoot, '.worklog', 'plugins', 'ampa_py'));
-    for (const candidate of candidates) {
-      const ampaPath = path.join(candidate, 'ampa');
-      if (fs.existsSync(path.join(ampaPath, 'scheduler.py'))) {
-        storePath = path.join(ampaPath, 'scheduler_store.json');
-        break;
-      }
-    }
-  }
-  if (!storePath) {
-    storePath = path.join(cwd, 'ampa', 'scheduler_store.json');
   } else if (!path.isAbsolute(storePath)) {
     storePath = path.resolve(cwd, storePath);
   }
@@ -327,7 +455,7 @@ function readLogTail(lpath, maxBytes = 64 * 1024) {
 function extractErrorLines(text) {
   if (!text) return [];
   const lines = text.split(/\r?\n/);
-  const re = /(ERROR|Traceback|Exception|AMPA_DISCORD_WEBHOOK)/i;
+  const re = /(ERROR|Traceback|Exception|AMPA_DISCORD_BOT_TOKEN|AMPA_DISCORD_CHANNEL_ID)/i;
   const out = [];
   for (const l of lines) {
     if (re.test(l)) out.push(l);
@@ -909,9 +1037,13 @@ function poolContainerName(index) {
  * Path to the pool state JSON file.
  * Stores a mapping of pool container name -> { workItemId, branch, claimedAt }
  * for containers that have been claimed by start-work.
+ *
+ * Pool state is stored in the global AMPA directory so it is shared across
+ * all projects. The projectRoot parameter is accepted for API compatibility
+ * but is no longer used for path resolution.
  */
-function poolStatePath(projectRoot) {
-  return path.join(projectRoot, '.worklog', 'ampa', 'pool-state.json');
+function poolStatePath(_projectRoot) {
+  return path.join(globalAmpaDir(), 'pool-state.json');
 }
 
 /**
@@ -1007,9 +1139,13 @@ function releasePoolContainer(projectRoot, containerNameOrAll) {
 /**
  * Path to the pool cleanup JSON file.
  * Stores an array of container names that should be destroyed from the host.
+ *
+ * Pool cleanup state is stored in the global AMPA directory so it is shared
+ * across all projects. The projectRoot parameter is accepted for API
+ * compatibility but is no longer used for path resolution.
  */
-function poolCleanupPath(projectRoot) {
-  return path.join(projectRoot, '.worklog', 'ampa', 'pool-cleanup.json');
+function poolCleanupPath(_projectRoot) {
+  return path.join(globalAmpaDir(), 'pool-cleanup.json');
 }
 
 /**
@@ -1214,7 +1350,9 @@ function replenishPoolBackground(projectRoot) {
     `.catch(e => { process.stderr.write(String(e) + '\\n'); process.exit(1); });`,
   ].join('');
 
-  const logFile = path.join(projectRoot, '.worklog', 'ampa', 'pool-replenish.log');
+  const logDir = globalAmpaDir();
+  fs.mkdirSync(logDir, { recursive: true });
+  const logFile = path.join(logDir, 'pool-replenish.log');
   const out = fs.openSync(logFile, 'a');
   try {
     fs.appendFileSync(logFile, `\n--- replenish started at ${new Date().toISOString()} ---\n`);
@@ -1593,6 +1731,10 @@ async function finishWork(force = false, workItemIdArg) {
   const insideContainer = !!process.env.AMPA_CONTAINER_NAME;
 
   let cName, workItemId, branch, projectRoot;
+  // commitHash: set when we push from inside the container
+  let commitHash = null;
+  // commitHashHost: set when we push via host-enter path
+  let commitHashHost = null;
 
   if (insideContainer) {
     // Inside-container path: read env vars set by start-work
@@ -1695,35 +1837,57 @@ async function finishWork(force = false, workItemIdArg) {
       runSync('wl', ['sync']);
 
       const hashResult = runSync('git', ['rev-parse', '--short', 'HEAD']);
-      const commitHash = hashResult.stdout || 'unknown';
+      commitHash = hashResult.stdout || 'unknown';
+    }
 
-      // 4. Update work item
+    // 4. Update work item (always update, even when --force is used). When
+    // forced, there is no commit hash — note that in the comment.
+    try {
       console.log(`Updating work item ${workItemId}...`);
       spawnSync('wl', ['update', workItemId, '--stage', 'in_review', '--status', 'completed', '--json'], {
         stdio: 'pipe',
         encoding: 'utf8',
       });
-      spawnSync('wl', ['comment', 'add', workItemId, '--comment', `Work completed in dev container ${cName}. Branch: ${pushBranch}. Latest commit: ${commitHash}`, '--author', 'ampa', '--json'], {
+      const commentMsg = commitHash
+        ? `Work completed in dev container ${cName}. Branch: ${branch || 'HEAD'}. Latest commit: ${commitHash}`
+        : `Work completed in dev container ${cName}. Branch: ${branch || 'HEAD'}. No commit pushed (finished with --force or no new commits).`;
+      spawnSync('wl', ['comment', 'add', workItemId, '--comment', commentMsg, '--author', 'ampa', '--json'], {
         stdio: 'pipe',
         encoding: 'utf8',
       });
+    } catch (e) {
+      // Non-fatal — continue to cleanup even if wl update/comment fail
     }
 
-    // 5. Release pool claim and mark for cleanup
+    // 5. Release pool claim and attempt to destroy the container. If the
+    // container cannot remove itself, mark it for host-side cleanup.
     if (projectRoot) {
       try {
         releasePoolContainer(projectRoot, cName);
       } catch (e) {
         // Non-fatal — pool state file may not be accessible from inside container
       }
+      // Try to remove the container directly (may fail inside some container
+      // environments). If direct removal fails, fall back to marking it for
+      // host-side cleanup.
       try {
-        markForCleanup(projectRoot, cName);
-        console.log(`Container "${cName}" marked for cleanup — it will be destroyed automatically on the next host-side pool operation.`);
+        const rmRes = runSync('distrobox', ['rm', '--force', cName]);
+        if (rmRes.status === 0) {
+          console.log(`Container "${cName}" destroyed.`);
+        } else {
+          // Couldn't remove from inside — mark for cleanup
+          markForCleanup(projectRoot, cName);
+          console.log(`Container "${cName}" marked for cleanup — it will be destroyed automatically on the next host-side pool operation.`);
+        }
       } catch (e) {
-        // Fallback to manual instructions if marker write fails
-        console.log(`Container "${cName}" marked for cleanup.`);
-        console.log('Run the following from the host to destroy the container:');
-        console.log(`  distrobox rm --force ${cName}`);
+        try {
+          markForCleanup(projectRoot, cName);
+          console.log(`Container "${cName}" marked for cleanup — it will be destroyed automatically on the next host-side pool operation.`);
+        } catch (ee) {
+          console.log(`Container "${cName}" marked for cleanup.`);
+          console.log('Run the following from the host to destroy the container:');
+          console.log(`  distrobox rm --force ${cName}`);
+        }
       }
     } else {
       console.log(`Container "${cName}" marked for cleanup.`);
@@ -1778,21 +1942,30 @@ async function finishWork(force = false, workItemIdArg) {
 
     // Extract commit hash from output
     const hashMatch = (commitResult.stdout || '').match(/AMPA_COMMIT_HASH=(\S+)/);
-    const commitHash = hashMatch ? hashMatch[1] : 'unknown';
+    commitHashHost = hashMatch ? hashMatch[1] : 'unknown';
 
-    // Update work item from the host
-    console.log(`Updating work item ${workItemId}...`);
-    spawnSync('wl', ['update', workItemId, '--stage', 'in_review', '--status', 'completed', '--json'], {
-      stdio: 'pipe',
-      encoding: 'utf8',
-    });
-    spawnSync('wl', ['comment', 'add', workItemId, '--comment', `Work completed in dev container ${cName}. Branch: ${branch || 'HEAD'}. Latest commit: ${commitHash}`, '--author', 'ampa', '--json'], {
-      stdio: 'pipe',
-      encoding: 'utf8',
-    });
-  } else {
-    console.log('Warning: Skipping commit/push (--force). Uncommitted changes will be lost.');
-  }
+    }
+
+    // Update work item from the host (always update, even when --force).
+    try {
+      console.log(`Updating work item ${workItemId}...`);
+      spawnSync('wl', ['update', workItemId, '--stage', 'in_review', '--status', 'completed', '--json'], {
+        stdio: 'pipe',
+        encoding: 'utf8',
+      });
+      const commentMsgHost = commitHashHost || (commitHash || null)
+        ? `Work completed in dev container ${cName}. Branch: ${branch || 'HEAD'}. Latest commit: ${commitHashHost || commitHash}`
+        : `Work completed in dev container ${cName}. Branch: ${branch || 'HEAD'}. No commit pushed (finished with --force or no new commits).`;
+      spawnSync('wl', ['comment', 'add', workItemId, '--comment', commentMsgHost, '--author', 'ampa', '--json'], {
+        stdio: 'pipe',
+        encoding: 'utf8',
+      });
+    } catch (e) {
+      // Non-fatal
+    }
+    if (force) {
+      console.log('Warning: Skipping commit/push (--force). Uncommitted changes will be lost.');
+    }
 
   // Release pool claim
   try {
@@ -1943,14 +2116,34 @@ export default function register(ctx) {
 
   ampa
     .command('run')
-    .description('Run a scheduler command immediately by id')
-    .arguments('<command-id>')
-    .action(async (commandId) => {
+    .description('Run a scheduler command immediately by id, or list available commands')
+    .arguments('[command-id]')
+    .option('--json', 'Output in JSON format')
+    .option('-F, --format <format>', 'Human display format (concise|normal|full|raw)')
+    .option('-w, --watch [seconds]', 'Rerun the command every N seconds (default: 5)')
+    .option('--verbose', 'Show verbose output including debug messages')
+    .action(async (commandId, opts, cmd) => {
+      // Use optsWithGlobals() because wl defines a global --json flag that
+      // captures the option before it reaches the local opts object.
+      const allOpts = cmd.optsWithGlobals();
       let cwd = process.cwd();
       try { cwd = findProjectRoot(cwd); } catch (e) { console.error(e.message); process.exitCode = 2; return; }
-      const cmdSpec = await resolveRunOnceCommand(cwd, commandId);
+      // Build extra CLI args to pass through to the Python scheduler
+      const extraArgs = [];
+      if (allOpts.json) extraArgs.push('--json');
+      if (allOpts.format) extraArgs.push('--format', allOpts.format);
+      if (allOpts.watch !== undefined) {
+        if (allOpts.watch === true) {
+          extraArgs.push('--watch');
+        } else {
+          extraArgs.push('--watch', String(allOpts.watch));
+        }
+      }
+      if (allOpts.verbose) extraArgs.push('--verbose');
+
+      const cmdSpec = await resolveRunOnceCommand(cwd, commandId || null, extraArgs);
       if (!cmdSpec) {
-        console.error('No run-once command resolved.');
+        console.error('No run command resolved.');
         process.exitCode = 2;
         return;
       }
@@ -1964,17 +2157,18 @@ export default function register(ctx) {
     .option('--json', 'Output JSON')
     .option('--name <name>', 'Daemon name', 'default')
     .option('--verbose', 'Print resolved store path', false)
-    .action(async (opts) => {
-      const verbose = !!opts.verbose || process.argv.includes('--verbose');
+    .action(async (opts, cmd) => {
+      const allOpts = cmd.optsWithGlobals();
+      const verbose = !!allOpts.verbose || process.argv.includes('--verbose');
       let cwd = process.cwd();
       try { cwd = findProjectRoot(cwd); } catch (e) { console.error(e.message); process.exitCode = 2; return; }
-      const daemon = resolveDaemonStore(cwd, opts.name);
+      const daemon = resolveDaemonStore(cwd, allOpts.name);
       if (!daemon.running) {
         console.log(DAEMON_NOT_RUNNING_MESSAGE);
         process.exitCode = 3;
         return;
       }
-      const cmdSpec = await resolveListCommand(cwd, !!opts.json);
+      const cmdSpec = await resolveListCommand(cwd, !!allOpts.json);
       if (!cmdSpec) {
         console.error('No list command resolved.');
         process.exitCode = 2;
@@ -1996,17 +2190,18 @@ export default function register(ctx) {
     .option('--json', 'Output JSON')
     .option('--name <name>', 'Daemon name', 'default')
     .option('--verbose', 'Print resolved store path', false)
-    .action(async (opts) => {
-      const verbose = !!opts.verbose || process.argv.includes('--verbose');
+    .action(async (opts, cmd) => {
+      const allOpts = cmd.optsWithGlobals();
+      const verbose = !!allOpts.verbose || process.argv.includes('--verbose');
       let cwd = process.cwd();
       try { cwd = findProjectRoot(cwd); } catch (e) { console.error(e.message); process.exitCode = 2; return; }
-      const daemon = resolveDaemonStore(cwd, opts.name);
+      const daemon = resolveDaemonStore(cwd, allOpts.name);
       if (!daemon.running) {
         console.log(DAEMON_NOT_RUNNING_MESSAGE);
         process.exitCode = 3;
         return;
       }
-      const cmdSpec = await resolveListCommand(cwd, !!opts.json);
+      const cmdSpec = await resolveListCommand(cwd, !!allOpts.json);
       if (!cmdSpec) {
         console.error('No list command resolved.');
         process.exitCode = 2;
@@ -2072,10 +2267,11 @@ export default function register(ctx) {
     .command('list-containers')
     .description('List dev containers created by start-work')
     .option('--json', 'Output JSON')
-    .action(async (opts) => {
+    .action(async (opts, cmd) => {
+      const allOpts = cmd.optsWithGlobals();
       let cwd = process.cwd();
       try { cwd = findProjectRoot(cwd); } catch (e) { console.error(e.message); process.exitCode = 2; return; }
-      const code = listContainers(cwd, !!opts.json);
+      const code = listContainers(cwd, !!allOpts.json);
       process.exitCode = code;
     });
 
@@ -2083,10 +2279,11 @@ export default function register(ctx) {
     .command('lc')
     .description('Alias for list-containers')
     .option('--json', 'Output JSON')
-    .action(async (opts) => {
+    .action(async (opts, cmd) => {
+      const allOpts = cmd.optsWithGlobals();
       let cwd = process.cwd();
       try { cwd = findProjectRoot(cwd); } catch (e) { console.error(e.message); process.exitCode = 2; return; }
-      const code = listContainers(cwd, !!opts.json);
+      const code = listContainers(cwd, !!allOpts.json);
       process.exitCode = code;
     });
 
@@ -2225,6 +2422,8 @@ export {
   getCleanupList,
   getGitOrigin,
   getPoolState,
+  globalAmpaDir,
+  globalPluginsDir,
   imageCreatedDate,
   imageExists,
   isImageStale,
@@ -2234,9 +2433,11 @@ export {
   poolCleanupPath,
   poolContainerName,
   poolStatePath,
+  projectAmpaDir,
   releasePoolContainer,
   replenishPool,
   replenishPoolBackground,
+  resolveAmpaPackage,
   resolveDaemonStore,
   saveCleanupList,
   savePoolState,
