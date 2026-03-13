@@ -37,8 +37,10 @@ const blessedMock = {
       clearValue: vi.fn(),
       focus: vi.fn(() => {
         widget._screen!.focused = widget;
+        widget._screen!.grabKeys = true;
         handlersByEvent['focus']?.();
       }),
+      cancel: vi.fn(),
       show: vi.fn(() => { widget.hidden = false; }),
       hide: vi.fn(() => { widget.hidden = true; }),
       setScrollPerc: vi.fn(),
@@ -450,6 +452,155 @@ describe('TUI integration: style preservation', () => {
     screenKeyCtrlW(null, { name: 'C-w' });
     screenKeyJ(null, { name: 'j' });
     expect(textarea?.focus).toHaveBeenCalled();
+  });
+
+  it('releases screen grabKeys when leaving opencode textarea via Ctrl+W then k', async () => {
+    vi.resetModules();
+    let savedAction: Function | null = null;
+    const program: any = {
+      opts: () => ({ verbose: false }),
+      command() { return this; },
+      description() { return this; },
+      option() { return this; },
+      action(fn: Function) { savedAction = fn; return this; },
+    };
+
+    const utils = {
+      requireInitialized: () => {},
+      getDatabase: () => ({
+        list: () => [{ id: 'WL-TEST-1', title: 'Item', status: 'open' }],
+        getPrefix: () => 'default',
+        getCommentsForWorkItem: (_id: string) => [],
+        get: () => ({ id: 'WL-TEST-1', title: 'Item', status: 'open' }),
+      }),
+    };
+
+    const opencodeClient = {
+      getStatus: () => ({ status: 'running', port: 9999 }),
+      startServer: vi.fn().mockResolvedValue(undefined),
+      stopServer: vi.fn(),
+      sendPrompt: vi.fn().mockResolvedValue(undefined),
+    };
+
+    vi.doMock('../src/tui/opencode-client.js', () => ({
+      OpencodeClient: function() { return opencodeClient; },
+    }));
+
+    const mod = await import('../src/commands/tui');
+    const register = mod.default || mod;
+    register({ program, utils, blessed: blessedMock } as any);
+
+    await (savedAction as any)({});
+
+    const textarea = (blessedMock as any)._lastTextarea;
+    const screen = (blessedMock as any)._lastScreen;
+    const boxMock = (blessedMock as any).box?.mock;
+
+    const ensureHandler = handlers['screen-key:o'] || handlers['screen-key:O'];
+    if (ensureHandler) await ensureHandler(null, { name: 'o' });
+    const sendHandler = handlers['key'];
+    if (sendHandler) sendHandler.call(textarea, null, { name: 'enter' });
+
+    const updatedBoxCalls = boxMock?.calls || [];
+    const responsePaneIndex = updatedBoxCalls.findIndex((call: any[]) => call?.[0]?.label === ' opencode [esc] ');
+    const responsePane = responsePaneIndex >= 0 ? boxMock.results[responsePaneIndex]?.value : null;
+    expect(responsePane).toBeTruthy();
+    responsePane?.show?.();
+
+    textarea?.focus?.();
+    expect(screen.grabKeys).toBe(true);
+
+    const screenKeyCtrlW = handlers['screen-key:C-w'];
+    const screenKeyK = handlers['screen-key:k'];
+    expect(typeof screenKeyCtrlW).toBe('function');
+    expect(typeof screenKeyK).toBe('function');
+
+    screenKeyCtrlW(null, { name: 'C-w' });
+    screenKeyK(null, { name: 'k' });
+
+    expect(responsePane?.focus).toHaveBeenCalled();
+    expect(screen.grabKeys).toBe(false);
+  });
+
+  it('skips watch events with unchanged data mtime', async () => {
+    vi.resetModules();
+    vi.useFakeTimers();
+    let savedAction: Function | null = null;
+    const watchCallbacks: Array<(eventType: string, filename?: string) => void> = [];
+    let dataMtimeMs = 1000;
+    let mtimeReadError = false;
+    const program: any = {
+      opts: () => ({ verbose: false }),
+      command() { return this; },
+      description() { return this; },
+      option() { return this; },
+      action(fn: Function) { savedAction = fn; return this; },
+    };
+
+    const listMock = vi.fn(() => [{ id: 'WL-TEST-1', title: 'Item', status: 'open' }]);
+    const utils = {
+      requireInitialized: () => {},
+      getDatabase: () => ({
+        list: listMock,
+        getPrefix: () => 'default',
+        getCommentsForWorkItem: (_id: string) => [],
+        get: () => ({ id: 'WL-TEST-1', title: 'Item', status: 'open' }),
+      }),
+    };
+
+    vi.doMock('fs', async () => {
+      const actual = await vi.importActual<typeof import('fs')>('fs');
+      return {
+        ...actual,
+        watch: vi.fn((_dir: string, cb: (eventType: string, filename?: string) => void) => {
+          watchCallbacks.push(cb);
+          return { close: vi.fn() } as any;
+        }),
+        statSync: vi.fn((targetPath: any, options?: any) => {
+          if (String(targetPath).endsWith('.jsonl')) {
+            if (mtimeReadError) throw new Error('stat failed');
+            return { mtimeMs: dataMtimeMs } as any;
+          }
+          return (actual.statSync as any)(targetPath, options);
+        }),
+      };
+    });
+
+    const opencodeClient = {
+      getStatus: () => ({ status: 'running', port: 9999 }),
+      startServer: vi.fn().mockResolvedValue(undefined),
+      stopServer: vi.fn(),
+      sendPrompt: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.doMock('../src/tui/opencode-client.js', () => ({
+      OpencodeClient: function() { return opencodeClient; },
+    }));
+
+    const mod = await import('../src/commands/tui');
+    const register = mod.default || mod;
+    register({ program, utils, blessed: blessedMock } as any);
+    await (savedAction as any)({});
+
+    expect(watchCallbacks.length).toBeGreaterThan(0);
+    const onWatch = watchCallbacks[0];
+    const baselineCalls = listMock.mock.calls.length;
+
+    onWatch('change', undefined);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(listMock.mock.calls.length).toBe(baselineCalls);
+
+    dataMtimeMs = 2000;
+    onWatch('change', undefined);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(listMock.mock.calls.length).toBeGreaterThan(baselineCalls);
+
+    const afterChangedMtimeCalls = listMock.mock.calls.length;
+    mtimeReadError = true;
+    onWatch('change', undefined);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(listMock.mock.calls.length).toBe(afterChangedMtimeCalls);
+
+    vi.useRealTimers();
   });
 
   it('updates border styles when focus changes', async () => {
