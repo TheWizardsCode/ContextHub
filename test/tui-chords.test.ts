@@ -46,4 +46,15 @@ describe('ChordHandler', () => {
     expect(p2).toBe(true);
     expect(abCalled).toBe(true);
   });
+
+  it('clears pending leader timeout when duplicate key events are deduplicated', async () => {
+    const c = new ChordHandler({ timeoutMs: 20 });
+    c.register(['C-w', 'w'], () => {});
+
+    c.feed({ name: 'w', ctrl: true });
+    c.feed({ name: 'w', ctrl: true });
+
+    await new Promise(r => setTimeout(r, 30));
+    expect(c.isPending()).toBe(false);
+  });
 });
