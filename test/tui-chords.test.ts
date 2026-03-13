@@ -47,14 +47,24 @@ describe('ChordHandler', () => {
     expect(abCalled).toBe(true);
   });
 
-  it('clears pending leader timeout when duplicate key events are deduplicated', async () => {
-    const c = new ChordHandler({ timeoutMs: 20 });
+  it('preserves deferred handler when duplicate physical key events arrive', async () => {
+    const c = new ChordHandler({ timeoutMs: 30 });
+    let leaderHandlerCalled = false;
+    // Register a leader handler with a follow-up so the leader is deferred
+    c.register(['C-w'], () => { leaderHandlerCalled = true; });
     c.register(['C-w', 'w'], () => {});
 
-    c.feed({ name: 'w', ctrl: true });
-    c.feed({ name: 'w', ctrl: true });
+    // feed Ctrl-W to set pending and deferred handler
+    const p1 = c.feed({ name: 'w', ctrl: true });
+    expect(p1).toBe(true);
+    expect(leaderHandlerCalled).toBe(false);
 
-    await new Promise(r => setTimeout(r, 30));
-    expect(c.isPending()).toBe(false);
+    // simulate a duplicate physical delivery of the same leader key (e.g. raw+wrapper)
+    const pDup = c.feed({ name: 'w', ctrl: true });
+    expect(pDup).toBe(true);
+
+    // wait for timeout to elapse and allow deferred handler to run
+    await new Promise(res => setTimeout(res, 50));
+    expect(leaderHandlerCalled).toBe(true);
   });
 });

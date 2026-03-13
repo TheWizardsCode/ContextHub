@@ -105,4 +105,54 @@ describe('tree rendering helpers', () => {
     expect(childBIndex).toBeGreaterThanOrEqual(0);
     expect(childBIndex).toBeLessThan(childAIndex);
   });
+
+  it('shows Risk and Effort placeholders when fields are empty', () => {
+    const item = baseWorkItem({ id: 'TEST-RISK-1', title: 'Risk Test', risk: '', effort: '' });
+
+    const { lines, spy } = captureConsole();
+    displayItemTree([item]);
+    spy.mockRestore();
+
+    const normalized = lines.map(stripAnsi);
+    expect(normalized.some(line => line.includes('Risk: —'))).toBe(true);
+    expect(normalized.some(line => line.includes('Effort: —'))).toBe(true);
+  });
+
+  it('shows Risk and Effort values when set', () => {
+    const item = baseWorkItem({ id: 'TEST-RISK-2', title: 'Risk Set', risk: 'High', effort: 'M' });
+
+    const { lines, spy } = captureConsole();
+    displayItemTree([item]);
+    spy.mockRestore();
+
+    const normalized = lines.map(stripAnsi);
+    expect(normalized.some(line => line.includes('Risk: High'))).toBe(true);
+    expect(normalized.some(line => line.includes('Effort: M'))).toBe(true);
+  });
+
+  it('shows Risk and Effort in concise format output', () => {
+    const item = baseWorkItem({ id: 'TEST-RISK-3', title: 'Concise Test', risk: 'Low', effort: 'XS' });
+    const items = [item];
+
+    const { lines, spy } = captureConsole();
+    displayItemTreeWithFormat(items, null, 'concise');
+    spy.mockRestore();
+
+    const normalized = lines.map(stripAnsi).join('\n');
+    expect(normalized).toContain('Risk: Low');
+    expect(normalized).toContain('Effort: XS');
+  });
+
+  it('shows Risk and Effort placeholders in normal format when fields are empty', () => {
+    const item = baseWorkItem({ id: 'TEST-RISK-4', title: 'Normal Test', risk: '', effort: '' });
+    const items = [item];
+
+    const { lines, spy } = captureConsole();
+    displayItemTreeWithFormat(items, null, 'normal');
+    spy.mockRestore();
+
+    const normalized = lines.map(stripAnsi).join('\n');
+    expect(normalized).toContain('Risk: —');
+    expect(normalized).toContain('Effort: —');
+  });
 });

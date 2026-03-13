@@ -7,6 +7,7 @@ This document describes the interactive terminal UI shipped as the `wl tui` (or 
 - The TUI presents a tree view of work items on the left and a details pane on the right.
 - It can show all items, or be limited to in-progress items via `--in-progress`.
 - The details pane uses the same human formatter as the CLI so what you see in the TUI matches `wl show --format full`.
+- The metadata pane (top-right) shows Status, Stage, Priority, Risk, Effort, Comments, Tags, Assignee, Created, Updated, and GitHub link for the selected item. `Risk` and `Effort` always appear; when a field has no value a placeholder `—` is shown.
 - Integrated OpenCode AI assistant for intelligent work item management and coding assistance.
 
 ## Controls

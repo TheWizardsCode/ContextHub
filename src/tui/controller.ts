@@ -243,8 +243,24 @@ export class TuiController {
           widget._reading = false;
         }
       } catch (_) {}
-      try { (screen as any).grabKeys = false; } catch (_) {}
-      try { (screen as any).program?.hideCursor?.(); } catch (_) {}
+      try {
+        // Prefer blessed API when available; fall back to property assignment
+        if (typeof (screen as any).grabKeys === 'function') {
+          try { (screen as any).grabKeys(false); } catch (_) { (screen as any).grabKeys = false; }
+        } else {
+          (screen as any).grabKeys = false;
+        }
+      } catch (err) {
+        // best-effort cleanup; log when verbose to help diagnose issues
+        try { debugLog(`endUpdateDialogCommentReading: failed to clear grabKeys: ${String(err)}`); } catch (_) {}
+      }
+      try {
+        if (typeof (screen as any).program?.hideCursor === 'function') {
+          (screen as any).program.hideCursor();
+        }
+      } catch (err) {
+        try { debugLog(`endUpdateDialogCommentReading: failed to hide cursor: ${String(err)}`); } catch (_) {}
+      }
     };
 
     const startUpdateDialogCommentReading = () => {
@@ -2059,20 +2075,40 @@ export class TuiController {
       };
       let lastKnownDataMtimeMs = readDataMtimeMs();
       try {
-        dataWatcher = fsImpl.watch(dataDir, (eventType, filename) => {
+        // Use a lightweight debounce and avoid synchronous fs.statSync in
+        // the watch handler which can block the event loop under heavy
+        // filesystem activity. We schedule an async check to compare mtime
+        // and only trigger a refresh when the file's mtime actually changed.
+        let watchDebounce: ReturnType<typeof setTimeout> | null = null;
+        let lastSeenMtimeMs: number | null = null;
+        dataWatcher = fsImpl.watch(dataDir, (_eventType, filename) => {
           if (isShuttingDown) return;
-          if (eventType !== 'change' && eventType !== 'rename') return;
           if (filename && filename !== dataFile) return;
-          if (!filename) {
-            const nextMtime = readDataMtimeMs();
-            if (nextMtime === null) return;
-            if (lastKnownDataMtimeMs !== null && nextMtime !== null && nextMtime === lastKnownDataMtimeMs) return;
-            lastKnownDataMtimeMs = nextMtime;
-          } else {
-            lastKnownDataMtimeMs = readDataMtimeMs() ?? lastKnownDataMtimeMs;
-          }
-          const selectedIndex = typeof list.selected === 'number' ? (list.selected as number) : 0;
-          scheduleRefreshFromDatabase(selectedIndex);
+          // debounce rapid successive watch callbacks
+          if (watchDebounce) clearTimeout(watchDebounce);
+          watchDebounce = setTimeout(async () => {
+            watchDebounce = null;
+            try {
+              const stat = await fsAsync.stat(dataPath).catch(() => null);
+              const mtimeMs = stat?.mtimeMs ?? null;
+              if (mtimeMs === null) {
+                // file may have been removed/rotated — trigger refresh
+                const selectedIndex = typeof list.selected === 'number' ? (list.selected as number) : 0;
+                scheduleRefreshFromDatabase(selectedIndex);
+                return;
+              }
+              if (lastSeenMtimeMs === null || mtimeMs !== lastSeenMtimeMs) {
+                lastSeenMtimeMs = mtimeMs;
+                const selectedIndex = typeof list.selected === 'number' ? (list.selected as number) : 0;
+                scheduleRefreshFromDatabase(selectedIndex);
+              }
+            } catch (err) {
+              // best-effort; log when verbose
+              try { debugLog(`startDatabaseWatch: watch handler error: ${String(err)}`); } catch (_) {}
+              const selectedIndex = typeof list.selected === 'number' ? (list.selected as number) : 0;
+              scheduleRefreshFromDatabase(selectedIndex);
+            }
+          }, 75);
         });
       } catch (_) {
         dataWatcher = null;

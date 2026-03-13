@@ -124,8 +124,8 @@ export function displayItemTree(items: WorkItem[]): void {
         ? `Status: ${item.status} · Stage: ${effectiveStage} | Priority: ${item.priority}`
         : `Status: ${item.status} | Priority: ${item.priority}`;
       console.log(`${detailIndent}${statusSummary}`);
-      if (item.risk) console.log(`${detailIndent}Risk: ${item.risk}`);
-      if (item.effort) console.log(`${detailIndent}Effort: ${item.effort}`);
+      console.log(`${detailIndent}Risk: ${item.risk || '—'}`);
+      console.log(`${detailIndent}Effort: ${item.effort || '—'}`);
       if (item.assignee) console.log(`${detailIndent}Assignee: ${item.assignee}`);
       if (item.tags.length > 0) console.log(`${detailIndent}Tags: ${item.tags.join(', ')}`);
     }
@@ -257,8 +257,8 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
       lines.push(`Status: ${statusLabel} | Priority: ${item.priority}`);
     }
     lines.push(sortIndexLabel);
-    if (item.risk) lines.push(`Risk: ${item.risk}`);
-    if (item.effort) lines.push(`Effort: ${item.effort}`);
+    lines.push(`Risk: ${item.risk || '—'}`);
+    lines.push(`Effort: ${item.effort || '—'}`);
     if (item.assignee) lines.push(`Assignee: ${item.assignee}`);
     if (item.tags && item.tags.length > 0) lines.push(`Tags: ${item.tags.join(', ')}`);
     return lines.join('\n');
@@ -277,8 +277,8 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
       lines.push(`Status: ${statusLabel} | Priority: ${item.priority}`);
     }
     lines.push(sortIndexLabel);
-    if (item.risk) lines.push(`Risk: ${item.risk}`);
-    if (item.effort) lines.push(`Effort: ${item.effort}`);
+    lines.push(`Risk: ${item.risk || '—'}`);
+    lines.push(`Effort: ${item.effort || '—'}`);
     if (item.assignee) lines.push(`Assignee: ${item.assignee}`);
     if (item.parentId) lines.push(`Parent: ${item.parentId}`);
     if (item.description) lines.push(`Description: ${item.description}`);
@@ -323,7 +323,9 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     ['SortIndex', String(item.sortIndex)]
   ];
   if (item.risk) frontmatter.push(['Risk', item.risk]);
+  else frontmatter.push(['Risk', '—']);
   if (item.effort) frontmatter.push(['Effort', item.effort]);
+  else frontmatter.push(['Effort', '—']);
   if (item.assignee) frontmatter.push(['Assignee', item.assignee]);
   if (item.parentId) frontmatter.push(['Parent', item.parentId]);
   if (item.tags && item.tags.length > 0) frontmatter.push(['Tags', item.tags.join(', ')]);

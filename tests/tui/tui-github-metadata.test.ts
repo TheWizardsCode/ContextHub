@@ -103,20 +103,20 @@ describe('MetadataPaneComponent GitHub row', () => {
     expect(content).toContain('G to push');
   });
 
-  it('always renders exactly 9 rows regardless of GitHub state', () => {
+  it('always renders exactly 11 rows regardless of GitHub state', () => {
     const { comp, getContent } = createMockMetadataPane();
 
     // With no github fields
     comp.updateFromItem({ status: 'open' }, 0);
-    expect(getContent().split('\n').length).toBe(9);
+    expect(getContent().split('\n').length).toBe(11);
 
     // With github mapping
     comp.updateFromItem({ status: 'open', githubRepo: 'o/r', githubIssueNumber: 1 }, 0);
-    expect(getContent().split('\n').length).toBe(9);
+    expect(getContent().split('\n').length).toBe(11);
 
     // With github configured but no mapping
     comp.updateFromItem({ status: 'open', githubRepo: 'o/r' }, 0);
-    expect(getContent().split('\n').length).toBe(9);
+    expect(getContent().split('\n').length).toBe(11);
   });
 
   it('clears content for null item', () => {
@@ -127,8 +127,35 @@ describe('MetadataPaneComponent GitHub row', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Integration tests: controller passes github fields to updateFromItem
+// Unit tests: MetadataPaneComponent Risk and Effort row rendering
 // ---------------------------------------------------------------------------
+describe('MetadataPaneComponent Risk and Effort rows', () => {
+  it('shows placeholder when risk and effort are not set', () => {
+    const { comp, getContent } = createMockMetadataPane();
+    comp.updateFromItem({ status: 'open' }, 0);
+    expect(getContent()).toContain('Risk:');
+    expect(getContent()).toContain('Effort:');
+    expect(getContent()).toMatch(/Risk:\s+—/);
+    expect(getContent()).toMatch(/Effort:\s+—/);
+  });
+
+  it('shows risk and effort values when set', () => {
+    const { comp, getContent } = createMockMetadataPane();
+    comp.updateFromItem({ status: 'open', risk: 'High', effort: 'M' }, 0);
+    const content = getContent();
+    expect(content).toMatch(/Risk:\s+High/);
+    expect(content).toMatch(/Effort:\s+M/);
+  });
+
+  it('shows placeholder when risk and effort are empty strings', () => {
+    const { comp, getContent } = createMockMetadataPane();
+    comp.updateFromItem({ status: 'open', risk: '', effort: '' }, 0);
+    const content = getContent();
+    expect(content).toMatch(/Risk:\s+—/);
+    expect(content).toMatch(/Effort:\s+—/);
+  });
+});
+
 describe('TUI metadata pane receives GitHub fields', () => {
   it('calls updateFromItem after start', async () => {
     const ctx = createTuiTestContext();
