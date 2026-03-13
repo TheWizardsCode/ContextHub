@@ -62,6 +62,10 @@ export class ChordHandler {
   }
 
   private scheduleClear(): void {
+    // Clear any previously scheduled timeout before creating a new one so
+    // we don't accumulate overlapping timers when scheduleClear is called
+    // repeatedly (for example when duplicate physical events re-schedule
+    // the leader timeout).
     if (this.timer) clearTimeout(this.timer as any);
     this.timer = setTimeout(() => {
       if (this.pendingHandler) {
