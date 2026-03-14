@@ -9,6 +9,7 @@ import { humanFormatWorkItem, resolveFormat } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { promises as fs } from 'fs';
 import { normalizeActionArgs } from './cli-utils.js';
+import { buildAuditEntry } from '../audit.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -32,9 +33,10 @@ export default function register(ctx: PluginContext): void {
     .option('--deleted-by <deletedBy>', 'Deleted by (interoperability field)')
     .option('--delete-reason <deleteReason>', 'Delete reason (interoperability field)')
     .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag for the new item (true|false|yes|no)')
+    .option('--audit <text>', 'Add a structured audit note (freeform text; time and author are set automatically)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .action(async (...rawArgs: any[]) => {
-      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','prefix']);
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','prefix']);
       let options: CreateOptions = normalized.options as any || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
@@ -97,6 +99,7 @@ export default function register(ctx: PluginContext): void {
         needsProducerReview: (options.needsProducerReview !== undefined) ?
           (['true','yes','1'].includes(String(options.needsProducerReview).toLowerCase())) :
           false,
+        audit: options.audit ? buildAuditEntry(options.audit, description) : undefined,
       });
 
       const refreshed = db.get(item.id) || item;

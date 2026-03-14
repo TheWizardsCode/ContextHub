@@ -151,6 +151,7 @@ export class SqlitePersistentStore {
         githubIssueId INTEGER,
         githubIssueUpdatedAt TEXT
         ,needsProducerReview INTEGER NOT NULL DEFAULT 0
+        ,audit TEXT
        )
     `);
 
@@ -304,8 +305,8 @@ export class SqlitePersistentStore {
     // Use INSERT ... ON CONFLICT DO UPDATE to avoid triggering DELETE (which would cascade and remove comments)
     const stmt = this.db.prepare(`
       INSERT INTO workitems
-      (id, title, description, status, priority, sortIndex, parentId, createdAt, updatedAt, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort, githubIssueNumber, githubIssueId, githubIssueUpdatedAt, needsProducerReview)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, title, description, status, priority, sortIndex, parentId, createdAt, updatedAt, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort, githubIssueNumber, githubIssueId, githubIssueUpdatedAt, needsProducerReview, audit)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -327,7 +328,8 @@ export class SqlitePersistentStore {
         githubIssueNumber = excluded.githubIssueNumber,
         githubIssueId = excluded.githubIssueId,
         githubIssueUpdatedAt = excluded.githubIssueUpdatedAt,
-        needsProducerReview = excluded.needsProducerReview
+        needsProducerReview = excluded.needsProducerReview,
+        audit = excluded.audit
     `);
 
     // Normalize status to canonical hyphenated form on write (e.g. in_progress -> in-progress).
@@ -362,6 +364,7 @@ export class SqlitePersistentStore {
       item.githubIssueId ?? null,
       item.githubIssueUpdatedAt ?? null,
       item.needsProducerReview ? 1 : 0,
+      item.audit ? JSON.stringify(item.audit) : null,
     ];
 
     const normalized = normalizeSqliteBindings(values);
@@ -1257,7 +1260,8 @@ export class SqlitePersistentStore {
         githubIssueNumber: row.githubIssueNumber ?? undefined,
         githubIssueId: row.githubIssueId ?? undefined,
         githubIssueUpdatedAt: row.githubIssueUpdatedAt || undefined,
-        needsProducerReview: Boolean(row.needsProducerReview)
+        needsProducerReview: Boolean(row.needsProducerReview),
+        audit: row.audit ? JSON.parse(row.audit) : undefined,
       };
     } catch (error) {
       console.error(`Error parsing work item ${row.id}:`, error);
@@ -1286,6 +1290,7 @@ export class SqlitePersistentStore {
         githubIssueId: row.githubIssueId ?? undefined,
         githubIssueUpdatedAt: row.githubIssueUpdatedAt || undefined,
         needsProducerReview: Boolean(row.needsProducerReview),
+        audit: (() => { try { return row.audit ? JSON.parse(row.audit) : undefined; } catch { return undefined; } })(),
       };
     }
   }
