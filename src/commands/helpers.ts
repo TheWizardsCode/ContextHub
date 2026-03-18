@@ -363,6 +363,16 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
       }
     }
 
+  if (item.audit) {
+    lines.push('');
+    lines.push('## Audit');
+    lines.push('');
+    lines.push(`  Status : ${item.audit.status}`);
+    lines.push(`  Author : ${item.audit.author}`);
+    lines.push(`  Time   : ${item.audit.time}`);
+    lines.push(`  Note   : ${item.audit.text}`);
+  }
+
   return lines.join('\n');
 }
 

@@ -9,6 +9,7 @@ import { promises as fs } from 'fs';
 import { humanFormatWorkItem, resolveFormat } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { normalizeActionArgs } from './cli-utils.js';
+import { buildAuditEntry } from '../audit.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -32,11 +33,12 @@ export default function register(ctx: PluginContext): void {
     .option('--deleted-by <deletedBy>', 'New deleted by (interoperability field)')
     .option('--delete-reason <deleteReason>', 'New delete reason (interoperability field)')
     .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag (true|false|yes|no)')
+    .option('--audit <text>', 'Add a structured audit note (freeform text; time and author are set automatically)')
     .option('--do-not-delegate <true|false>', 'Set or clear the do-not-delegate tag (true|false|yes|no)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .action(async (...rawArgs: any[]) => {
       const knownOptionKeys = [
-        'title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','doNotDelegate','prefix'
+        'title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','doNotDelegate','audit','prefix'
       ];
 
       const normalized = normalizeActionArgs(rawArgs, knownOptionKeys);
@@ -127,6 +129,9 @@ export default function register(ctx: PluginContext): void {
         }
       }
 
+      // --audit: freeform text provided by the operator; system populates time/author/status
+      const auditTextCandidate = hasProvided('audit') ? String(options.audit ?? '') : undefined;
+
       const results: Array<any> = [];
       for (const rawId of idsRaw) {
         const normalizedId = utils.normalizeCliId(rawId, options.prefix) || rawId;
@@ -144,6 +149,13 @@ export default function register(ctx: PluginContext): void {
         if (deletedByCandidate !== undefined) updates.deletedBy = deletedByCandidate;
         if (deleteReasonCandidate !== undefined) updates.deleteReason = deleteReasonCandidate;
         if (needsProducerReviewCandidate !== undefined) updates.needsProducerReview = needsProducerReviewCandidate;
+
+        // Build audit entry if --audit was provided (requires current item description for status derivation)
+        if (auditTextCandidate !== undefined) {
+          const current = db.get(normalizedId);
+          const description = descriptionCandidate ?? current?.description ?? '';
+          updates.audit = buildAuditEntry(auditTextCandidate, description);
+        }
 
         // Validate status/stage per-id if needed.
         if ((statusCandidate !== undefined || stageCandidate !== undefined) && canValidateStatusStage(config)) {

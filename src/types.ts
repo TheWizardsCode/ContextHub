@@ -4,6 +4,30 @@
 
 export type WorkItemStatus = 'open' | 'in-progress' | 'completed' | 'blocked' | 'deleted';
 export type WorkItemPriority = 'low' | 'medium' | 'high' | 'critical';
+
+/**
+ * Audit status values for structured audit entries.
+ * Derived conservatively from audit text and work item success criteria.
+ */
+export type AuditStatus = 'Complete' | 'Partial' | 'Not Started' | 'Missing Criteria';
+
+/**
+ * Structured audit entry attached to a work item.
+ * Only the most recent audit is stored per item.
+ */
+export interface AuditEntry {
+  /** ISO 8601 timestamp when the audit was written */
+  time: string;
+  /** Author identity (username) at audit write time */
+  author: string;
+  /** Freeform audit note text provided by the operator/agent */
+  text: string;
+  /**
+   * Conservative status derived from audit text and work item description.
+   * 'Missing Criteria' when the description lacks explicit success criteria.
+   */
+  status: AuditStatus;
+}
 export type WorkItemRiskLevel = 'Low' | 'Medium' | 'High' | 'Severe';
 export type WorkItemEffortLevel = 'XS' | 'S' | 'M' | 'L' | 'XL';
 
@@ -50,6 +74,11 @@ export interface WorkItem {
   githubIssueUpdatedAt?: string;
   // Indicates whether the item needs a Producer to review/sign-off. Default: false
   needsProducerReview?: boolean;
+  /**
+   * Structured audit entry (most recent). Set explicitly via --audit flag.
+   * Not backfilled from comment history.
+   */
+  audit?: AuditEntry;
 }
 
 /**
@@ -75,6 +104,8 @@ export interface CreateWorkItemInput {
   effort?: WorkItemEffortLevel | '';
   /** When present, sets the needsProducerReview flag on the created item */
   needsProducerReview?: boolean;
+  /** When present, attaches a structured audit entry to the created item */
+  audit?: AuditEntry;
 }
 
 /**
@@ -100,11 +131,9 @@ export interface UpdateWorkItemInput {
   effort?: WorkItemEffortLevel | '';
   /** When present, sets the needsProducerReview flag */
   needsProducerReview?: boolean;
+  /** When present, updates the structured audit entry on the work item */
+  audit?: AuditEntry;
 }
-
-/**
- * Query filters for finding work items
- */
 export interface WorkItemQuery {
   status?: WorkItemStatus;
   priority?: WorkItemPriority;
