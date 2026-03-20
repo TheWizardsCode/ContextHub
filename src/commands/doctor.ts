@@ -55,8 +55,30 @@ export default function register(ctx: PluginContext): void {
         // Not a dry-run: list safe migrations, print blank line, and ask to apply
         const safeMigs = pending.filter(p => p.safe);
         if (utils.isJsonMode()) {
-          output.json({ success: true, pending, safeMigrations: safeMigs });
-          return;
+          if (!opts.confirm) {
+            output.json({ success: true, pending, safeMigrations: safeMigs, requiresConfirm: true });
+            return;
+          }
+
+          try {
+            const result = runMigrations({
+              dryRun: false,
+              confirm: true,
+              logger: { info: s => console.error(s), error: s => console.error(s) }
+            });
+            output.json({
+              success: true,
+              pending,
+              safeMigrations: safeMigs,
+              applied: result.applied,
+              backups: result.backups,
+            });
+            return;
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            output.json({ success: false, error: message });
+            return;
+          }
         }
         console.log('Pending safe migrations:');
         safeMigs.forEach(p => console.log(` - ${p.id}: ${p.description}`));
