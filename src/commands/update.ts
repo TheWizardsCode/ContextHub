@@ -33,12 +33,13 @@ export default function register(ctx: PluginContext): void {
     .option('--deleted-by <deletedBy>', 'New deleted by (interoperability field)')
     .option('--delete-reason <deleteReason>', 'New delete reason (interoperability field)')
     .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag (true|false|yes|no)')
-    .option('--audit <text>', 'Add a structured audit note (freeform text; time and author are set automatically)')
+    .option('--audit <text>', 'Legacy alias for --audit-text')
+    .option('--audit-text <text>', 'Set structured audit text (time/author auto-populated)')
     .option('--do-not-delegate <true|false>', 'Set or clear the do-not-delegate tag (true|false|yes|no)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .action(async (...rawArgs: any[]) => {
       const knownOptionKeys = [
-        'title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','doNotDelegate','audit','prefix'
+        'title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','doNotDelegate','prefix'
       ];
 
       const normalized = normalizeActionArgs(rawArgs, knownOptionKeys);
@@ -99,12 +100,21 @@ export default function register(ctx: PluginContext): void {
       const assigneeCandidate = hasProvided('assignee') ? options.assignee : undefined;
       const stageCandidate = hasProvided('stage') ? options.stage : undefined;
       const config = utils.getConfig();
+      const auditWriteEnabled = config?.auditWriteEnabled !== false;
       const riskCandidate = hasProvided('risk') ? options.risk as WorkItemRiskLevel | '' : undefined;
       const effortCandidate = hasProvided('effort') ? options.effort as WorkItemEffortLevel | '' : undefined;
       const issueTypeCandidate = hasProvided('issueType') ? options.issueType : undefined;
       const createdByCandidate = hasProvided('createdBy') ? options.createdBy : undefined;
       const deletedByCandidate = hasProvided('deletedBy') ? options.deletedBy : undefined;
       const deleteReasonCandidate = hasProvided('deleteReason') ? options.deleteReason : undefined;
+      const auditCandidate = hasProvided('auditText') ? options.auditText : (hasProvided('audit') ? options.audit : undefined);
+      if (auditCandidate !== undefined && !auditWriteEnabled) {
+        output.error('Audit writes are disabled by config (`auditWriteEnabled: false`).', {
+          success: false,
+          error: 'audit-write-disabled',
+        });
+        process.exit(1);
+      }
       let needsProducerReviewCandidate: boolean | undefined;
       if (hasProvided('needsProducerReview')) {
         const raw = String(options.needsProducerReview).toLowerCase();
@@ -129,9 +139,6 @@ export default function register(ctx: PluginContext): void {
         }
       }
 
-      // --audit: freeform text provided by the operator; system populates time/author/status
-      const auditTextCandidate = hasProvided('audit') ? String(options.audit ?? '') : undefined;
-
       const results: Array<any> = [];
       for (const rawId of idsRaw) {
         const normalizedId = utils.normalizeCliId(rawId, options.prefix) || rawId;
@@ -149,12 +156,14 @@ export default function register(ctx: PluginContext): void {
         if (deletedByCandidate !== undefined) updates.deletedBy = deletedByCandidate;
         if (deleteReasonCandidate !== undefined) updates.deleteReason = deleteReasonCandidate;
         if (needsProducerReviewCandidate !== undefined) updates.needsProducerReview = needsProducerReviewCandidate;
-
-        // Build audit entry if --audit was provided (requires current item description for status derivation)
-        if (auditTextCandidate !== undefined) {
+        if (auditCandidate !== undefined) {
           const current = db.get(normalizedId);
-          const description = descriptionCandidate ?? current?.description ?? '';
-          updates.audit = buildAuditEntry(auditTextCandidate, description);
+          if (!current) {
+            const message = `Work item not found: ${normalizedId}`;
+            results.push({ id: normalizedId, success: false, error: message });
+            continue;
+          }
+          updates.audit = buildAuditEntry(String(auditCandidate));
         }
 
         // Validate status/stage per-id if needed.

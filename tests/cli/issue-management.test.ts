@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   cliPath,
   execAsync,
@@ -22,6 +24,11 @@ describe('CLI Issue Management Tests', () => {
   });
 
   describe('create command', () => {
+    it('should list --audit-text in create --help', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} create --help`);
+      expect(stdout).toContain('--audit-text <text>');
+    });
+
     it('should create a work item with required fields', async () => {
       const { stdout } = await execAsync(`tsx ${cliPath} --json create -t "Test task"`);
 
@@ -89,6 +96,11 @@ describe('CLI Issue Management Tests', () => {
       workItemId = result.workItem.id;
     });
 
+    it('should list --audit-text in update --help', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} update --help`);
+      expect(stdout).toContain('--audit-text <text>');
+    });
+
     it('should update a work item title', async () => {
       const { stdout } = await execAsync(
         `tsx ${cliPath} --json update ${workItemId} -t "Updated title"`
@@ -97,6 +109,89 @@ describe('CLI Issue Management Tests', () => {
       const result = JSON.parse(stdout);
       expect(result.success).toBe(true);
       expect(result.workItem.title).toBe('Updated title');
+    });
+
+    it('should set audit via update command', async () => {
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json update ${workItemId} --audit-text "Ready to close: Yes"`
+      );
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItem.audit).toBeDefined();
+      expect(result.workItem.audit.text).toBe('Ready to close: Yes');
+      expect(result.workItem.audit.author).toBeTruthy();
+      expect(result.workItem.audit.time).toMatch(/Z$/);
+    });
+
+    it('should derive complete audit status when success criteria exist', async () => {
+      const { stdout: created } = await execAsync(
+        `tsx ${cliPath} --json create -t "With criteria" -d "Success criteria: Done means closed"`
+      );
+      const itemId = JSON.parse(created).workItem.id;
+
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json update ${itemId} --audit-text "Ready to close: Yes"`
+      );
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItem.audit.text).toBe('Ready to close: Yes');
+    });
+
+    it('should set audit via create command', async () => {
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json create -t "Create audited" -d "Acceptance criteria: Must pass" --audit-text "Ready to close: No"`
+      );
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItem.audit).toBeDefined();
+      expect(result.workItem.audit.text).toBe('Ready to close: No');
+      expect(result.workItem.audit.author).toBeTruthy();
+    });
+
+    it('should accept free-form audit text', async () => {
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json update ${workItemId} --audit-text "Looks good to me"`
+      );
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItem.audit.text).toBe('Looks good to me');
+    });
+
+    it('should overwrite existing audit object on subsequent writes', async () => {
+      const first = await execAsync(
+        `tsx ${cliPath} --json update ${workItemId} --audit-text "First audit"`
+      );
+      const firstResult = JSON.parse(first.stdout);
+
+      const second = await execAsync(
+        `tsx ${cliPath} --json update ${workItemId} --audit-text "Second audit"`
+      );
+      const secondResult = JSON.parse(second.stdout);
+
+      expect(firstResult.success).toBe(true);
+      expect(secondResult.success).toBe(true);
+      expect(secondResult.workItem.audit.text).toBe('Second audit');
+      expect(secondResult.workItem.audit.author).toBeTruthy();
+      expect(secondResult.workItem.audit.time).toMatch(/Z$/);
+    });
+
+    it('should reject audit writes when auditWriteEnabled is false', async () => {
+      writeConfig(tempState.tempDir, 'Test Project', 'TEST');
+      fs.appendFileSync(path.join(tempState.tempDir, '.worklog', 'config.yaml'), '\nauditWriteEnabled: false\n', 'utf-8');
+
+      try {
+        await execAsync(
+          `tsx ${cliPath} --json update ${workItemId} --audit-text "Ready to close: Yes"`
+        );
+        expect.fail('Should have thrown an error');
+      } catch (error: any) {
+        const result = JSON.parse(error.stderr || error.stdout || '{}');
+        expect(result.success).toBe(false);
+        expect(result.error).toBe('audit-write-disabled');
+      }
     });
 
     it('should update multiple fields', async () => {

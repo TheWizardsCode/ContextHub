@@ -188,6 +188,16 @@ describe('CLI Issue Status Tests', () => {
       expect(result.workItem.title).toBe('Test task');
     });
 
+    it('should include audit in show json output', async () => {
+      await execAsync(`tsx ${cliPath} --json update ${workItemId} --audit-text "Ready to close: Yes"`);
+      const { stdout } = await execAsync(`tsx ${cliPath} --json show ${workItemId}`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItem.audit).toBeDefined();
+      expect(result.workItem.audit.text).toBe('Ready to close: Yes');
+    });
+
     it('should show children when -c flag is used', async () => {
       await execAsync(`tsx ${cliPath} create -t "Child task" -P ${workItemId}`);
 

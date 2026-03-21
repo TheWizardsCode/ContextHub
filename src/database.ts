@@ -645,6 +645,7 @@ export class WorklogDatabase {
       githubIssueNumber: item.githubIssueNumber,
       githubIssueId: item.githubIssueId,
       githubIssueUpdatedAt: item.githubIssueUpdatedAt,
+      audit: input.audit ?? item.audit,
     };
 
     if (process.env.WL_DEBUG_SQL_BINDINGS) {

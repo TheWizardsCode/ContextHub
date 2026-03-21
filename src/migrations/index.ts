@@ -20,11 +20,12 @@ interface RunOptions {
   logger?: { info: (s: string) => void; error: (s: string) => void };
 }
 
-const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; apply: (db: Database.Database) => void }> = [
+const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; requiredColumn: string; apply: (db: Database.Database) => void }> = [
   {
     id: '20260210-add-needsProducerReview',
     description: 'Add needsProducerReview INTEGER column to workitems (default 0)',
     safe: true,
+    requiredColumn: 'needsProducerReview',
     apply: (db: Database.Database) => {
       const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
       const existingCols = new Set(cols.map(c => String(c.name)));
@@ -35,9 +36,10 @@ const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; apply:
     }
   },
   {
-    id: '20260314-add-audit',
-    description: 'Add audit TEXT column to workitems (stores JSON-encoded AuditEntry, nullable)',
+    id: '20260315-add-audit',
+    description: 'Add audit TEXT column to workitems',
     safe: true,
+    requiredColumn: 'audit',
     apply: (db: Database.Database) => {
       const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
       const existingCols = new Set(cols.map(c => String(c.name)));
@@ -47,16 +49,6 @@ const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; apply:
     }
   }
 ];
-
-/**
- * Map from migration id to the column name whose presence indicates
- * the migration has already been applied.
- * This lets listPendingMigrations and runMigrations operate generically.
- */
-const MIGRATION_COLUMN_SENTINEL: Record<string, string> = {
-  '20260210-add-needsProducerReview': 'needsProducerReview',
-  '20260314-add-audit': 'audit',
-};
 
 function resolveDbPath(dbPath?: string): string {
   if (dbPath) return dbPath;
@@ -75,12 +67,8 @@ export function listPendingMigrations(dbPath?: string): MigrationInfo[] {
   try {
     const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
     const existingCols = new Set(cols.map(c => String(c.name)));
-    const pending = MIGRATIONS
-      .filter(m => {
-        const sentinel = MIGRATION_COLUMN_SENTINEL[m.id];
-        if (sentinel) return !existingCols.has(sentinel);
-        // Unknown migration: conservatively report as pending
-        return true;
+    const pending = MIGRATIONS.filter(m => {
+        return !existingCols.has(m.requiredColumn);
       })
       .map(m => ({ id: m.id, description: m.description, safe: m.safe }));
     return pending;
@@ -152,25 +140,19 @@ export function runMigrations(opts: RunOptions = {}, dbPath?: string, filter?: {
   const applied: MigrationInfo[] = [];
   try {
     const tx = db.transaction(() => {
-      // Fetch current columns once; each migration's apply() is idempotent,
-      // but we also guard here to avoid re-applying already-applied migrations.
-      const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
-      const existingCols = new Set(cols.map(c => String(c.name)));
-
       for (const m of MIGRATIONS) {
         if (filter?.safeOnly && !m.safe) continue;
-        const sentinel = MIGRATION_COLUMN_SENTINEL[m.id];
-        if (sentinel && existingCols.has(sentinel)) continue; // already applied
-        m.apply(db);
-        applied.push({ id: m.id, description: m.description, safe: m.safe });
+        const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
+        const existingCols = new Set(cols.map(c => String(c.name)));
+        if (!existingCols.has(m.requiredColumn)) {
+          m.apply(db);
+          applied.push({ id: m.id, description: m.description, safe: m.safe });
+        }
       }
 
-      // Update metadata schemaVersion (increment by 1 from existing if present)
+      // Update metadata schemaVersion deterministically to current schema.
       try {
-        const versionRow = db.prepare('SELECT value FROM metadata WHERE key = ?').get('schemaVersion') as { value: string } | undefined;
-        const current = versionRow ? parseInt(versionRow.value, 10) : 6;
-        const next = Math.max(current, 6) + (applied.length > 0 ? 1 : 0);
-        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('schemaVersion', String(next));
+        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('schemaVersion', '7');
       } catch (err) {
         // Best-effort: don't fail migration if metadata update fails, but log
         logger.error?.(`Failed to update metadata.schemaVersion: ${(err as Error).message}`);

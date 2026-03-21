@@ -67,6 +67,18 @@ describe('CLI Initialization Check Tests', () => {
     }
   });
 
+  it('should fail update --audit-text when not initialized', async () => {
+    try {
+      await execAsync(`tsx ${cliPath} --json update TEST-1 --audit-text "Test audit"`);
+      throw new Error('Expected update command to fail, but it succeeded');
+    } catch (error: any) {
+      const result = JSON.parse(error.stdout || '{}');
+      expect(result.success).toBe(false);
+      expect(result.initialized).toBe(false);
+      expect(result.error).toContain('not initialized');
+    }
+  });
+
   it('should fail delete command when not initialized', async () => {
     try {
       await execAsync(`tsx ${cliPath} --json delete TEST-1`);

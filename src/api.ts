@@ -7,6 +7,7 @@ import { WorklogDatabase } from './database.js';
 import { CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, WorkItemStatus, WorkItemPriority, CreateCommentInput, UpdateCommentInput } from './types.js';
 import { exportToJsonl, importFromJsonl, getDefaultDataPath } from './jsonl.js';
 import { loadConfig } from './config.js';
+import { buildAuditEntry } from './audit.js';
 
 function parseNeedsProducerReview(value: unknown): boolean | undefined {
   if (value === undefined || value === null) return undefined;
@@ -16,6 +17,33 @@ function parseNeedsProducerReview(value: unknown): boolean | undefined {
   return undefined;
 }
 
+function normalizeCreateInputWithAudit(input: CreateWorkItemInput): CreateWorkItemInput {
+  const rawAudit = (input as any).audit;
+  if (typeof rawAudit === 'string') {
+    return {
+      ...input,
+      audit: buildAuditEntry(rawAudit),
+    };
+  }
+  return input;
+}
+
+function normalizeUpdateInputWithAudit(input: UpdateWorkItemInput): UpdateWorkItemInput {
+  const rawAudit = (input as any).audit;
+  if (typeof rawAudit === 'string') {
+    return {
+      ...input,
+      audit: buildAuditEntry(rawAudit),
+    };
+  }
+  return input;
+}
+
+function hasAuditField(input: unknown): boolean {
+  if (!input || typeof input !== 'object') return false;
+  return Object.prototype.hasOwnProperty.call(input as object, 'audit') && (input as any).audit !== undefined;
+}
+
 export function createAPI(db: WorklogDatabase) {
   const app = express();
   app.use(express.json());
@@ -23,6 +51,7 @@ export function createAPI(db: WorklogDatabase) {
   // Load configuration to get default prefix
   const config = loadConfig();
   const defaultPrefix = config?.prefix || 'WI';
+  const auditWriteEnabled = config?.auditWriteEnabled !== false;
 
   // Middleware to set the database prefix based on the route
   function setPrefixMiddleware(req: Request, res: Response, next: NextFunction) {
@@ -41,11 +70,16 @@ export function createAPI(db: WorklogDatabase) {
   app.post('/items', (req: Request, res: Response) => {
     try {
       db.setPrefix(defaultPrefix);
-      const input: CreateWorkItemInput = req.body;
+      if (!auditWriteEnabled && hasAuditField(req.body)) {
+        res.status(400).json({ error: 'Audit writes are disabled by config (auditWriteEnabled: false)' });
+        return;
+      }
+      const input: CreateWorkItemInput = normalizeCreateInputWithAudit(req.body);
       const item = db.create(input);
       res.status(201).json(item);
     } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
+      const message = (error as Error).message || 'Invalid request';
+      res.status(400).json({ error: message });
     }
   });
 
@@ -64,7 +98,16 @@ export function createAPI(db: WorklogDatabase) {
   app.put('/items/:id', (req: Request, res: Response) => {
     try {
       db.setPrefix(defaultPrefix);
-      const input: UpdateWorkItemInput = req.body;
+      if (!auditWriteEnabled && hasAuditField(req.body)) {
+        res.status(400).json({ error: 'Audit writes are disabled by config (auditWriteEnabled: false)' });
+        return;
+      }
+      const current = db.get(req.params.id);
+      if (!current) {
+        res.status(404).json({ error: 'Work item not found' });
+        return;
+      }
+      const input: UpdateWorkItemInput = normalizeUpdateInputWithAudit(req.body);
       const item = db.update(req.params.id, input);
       if (!item) {
         res.status(404).json({ error: 'Work item not found' });
@@ -72,7 +115,8 @@ export function createAPI(db: WorklogDatabase) {
       }
       res.json(item);
     } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
+      const message = (error as Error).message || 'Invalid request';
+      res.status(400).json({ error: message });
     }
   });
 
@@ -222,11 +266,16 @@ export function createAPI(db: WorklogDatabase) {
   // Create a work item with prefix
   app.post('/projects/:prefix/items', setPrefixMiddleware, (req: Request, res: Response) => {
     try {
-      const input: CreateWorkItemInput = req.body;
+      if (!auditWriteEnabled && hasAuditField(req.body)) {
+        res.status(400).json({ error: 'Audit writes are disabled by config (auditWriteEnabled: false)' });
+        return;
+      }
+      const input: CreateWorkItemInput = normalizeCreateInputWithAudit(req.body);
       const item = db.create(input);
       res.status(201).json(item);
     } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
+      const message = (error as Error).message || 'Invalid request';
+      res.status(400).json({ error: message });
     }
   });
 
@@ -243,7 +292,16 @@ export function createAPI(db: WorklogDatabase) {
   // Update a work item with prefix
   app.put('/projects/:prefix/items/:id', setPrefixMiddleware, (req: Request, res: Response) => {
     try {
-      const input: UpdateWorkItemInput = req.body;
+      if (!auditWriteEnabled && hasAuditField(req.body)) {
+        res.status(400).json({ error: 'Audit writes are disabled by config (auditWriteEnabled: false)' });
+        return;
+      }
+      const current = db.get(req.params.id);
+      if (!current) {
+        res.status(404).json({ error: 'Work item not found' });
+        return;
+      }
+      const input: UpdateWorkItemInput = normalizeUpdateInputWithAudit(req.body);
       const item = db.update(req.params.id, input);
       if (!item) {
         res.status(404).json({ error: 'Work item not found' });
@@ -251,7 +309,8 @@ export function createAPI(db: WorklogDatabase) {
       }
       res.json(item);
     } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
+      const message = (error as Error).message || 'Invalid request';
+      res.status(400).json({ error: message });
     }
   });
 

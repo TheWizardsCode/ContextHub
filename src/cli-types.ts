@@ -31,8 +31,10 @@ export interface CreateOptions {
   deleteReason?: string;
   /** Accepts true|false|yes|no to set needsProducerReview flag for the new item */
   needsProducerReview?: string;
-  /** Freeform audit text; system populates time/author and derives status */
+  /** Legacy audit flag (kept for compatibility) */
   audit?: string;
+  /** Preferred audit flag for structured writes */
+  auditText?: string;
   prefix?: string;
 }
 
@@ -73,8 +75,10 @@ export interface UpdateOptions {
   createdBy?: string;
   deletedBy?: string;
   deleteReason?: string;
-  /** Freeform audit text; system populates time/author and derives status */
+  /** Legacy audit flag (kept for compatibility) */
   audit?: string;
+  /** Preferred audit flag for structured writes */
+  auditText?: string;
   prefix?: string;
 }
 

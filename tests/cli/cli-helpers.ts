@@ -204,6 +204,11 @@ export function seedWorkItems(
     assignee?: string;
     stage?: string;
     needsProducerReview?: boolean;
+    audit?: {
+      time: string;
+      author: string;
+      text: string;
+    };
   }>,
   comments: Comment[] = []
 ): WorkItem[] {
@@ -228,6 +233,7 @@ export function seedWorkItems(
     risk: '' as const,
     effort: '' as const,
     needsProducerReview: item.needsProducerReview ?? false,
+    audit: item.audit,
   }));
 
   const dataPath = path.join(dir, '.worklog', 'worklog-data.jsonl');
