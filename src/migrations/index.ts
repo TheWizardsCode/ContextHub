@@ -20,11 +20,12 @@ interface RunOptions {
   logger?: { info: (s: string) => void; error: (s: string) => void };
 }
 
-const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; apply: (db: Database.Database) => void }> = [
+const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; requiredColumn: string; apply: (db: Database.Database) => void }> = [
   {
     id: '20260210-add-needsProducerReview',
     description: 'Add needsProducerReview INTEGER column to workitems (default 0)',
     safe: true,
+    requiredColumn: 'needsProducerReview',
     apply: (db: Database.Database) => {
       const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
       const existingCols = new Set(cols.map(c => String(c.name)));
@@ -38,6 +39,7 @@ const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; apply:
     id: '20260315-add-audit',
     description: 'Add audit TEXT column to workitems',
     safe: true,
+    requiredColumn: 'audit',
     apply: (db: Database.Database) => {
       const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
       const existingCols = new Set(cols.map(c => String(c.name)));
@@ -47,12 +49,6 @@ const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; apply:
     }
   }
 ];
-
-function requiredColumnForMigration(id: string): string | null {
-  if (id === '20260210-add-needsProducerReview') return 'needsProducerReview';
-  if (id === '20260315-add-audit') return 'audit';
-  return null;
-}
 
 function resolveDbPath(dbPath?: string): string {
   if (dbPath) return dbPath;
@@ -72,9 +68,7 @@ export function listPendingMigrations(dbPath?: string): MigrationInfo[] {
     const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
     const existingCols = new Set(cols.map(c => String(c.name)));
     const pending = MIGRATIONS.filter(m => {
-        const requiredColumn = requiredColumnForMigration(m.id);
-        if (!requiredColumn) return false;
-        return !existingCols.has(requiredColumn);
+        return !existingCols.has(m.requiredColumn);
       })
       .map(m => ({ id: m.id, description: m.description, safe: m.safe }));
     return pending;
@@ -148,22 +142,17 @@ export function runMigrations(opts: RunOptions = {}, dbPath?: string, filter?: {
     const tx = db.transaction(() => {
       for (const m of MIGRATIONS) {
         if (filter?.safeOnly && !m.safe) continue;
-        const requiredColumn = requiredColumnForMigration(m.id);
-        if (!requiredColumn) continue;
         const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
         const existingCols = new Set(cols.map(c => String(c.name)));
-        if (!existingCols.has(requiredColumn)) {
+        if (!existingCols.has(m.requiredColumn)) {
           m.apply(db);
           applied.push({ id: m.id, description: m.description, safe: m.safe });
         }
       }
 
-      // Update metadata schemaVersion (increment by 1 from existing if present)
+      // Update metadata schemaVersion deterministically to current schema.
       try {
-        const versionRow = db.prepare('SELECT value FROM metadata WHERE key = ?').get('schemaVersion') as { value: string } | undefined;
-        const current = versionRow ? parseInt(versionRow.value, 10) : 7;
-        const next = Math.max(current, 7) + (applied.length > 0 ? 1 : 0);
-        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('schemaVersion', String(next));
+        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('schemaVersion', '7');
       } catch (err) {
         // Best-effort: don't fail migration if metadata update fails, but log
         logger.error?.(`Failed to update metadata.schemaVersion: ${(err as Error).message}`);

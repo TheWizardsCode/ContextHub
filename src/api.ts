@@ -39,6 +39,11 @@ function normalizeUpdateInputWithAudit(input: UpdateWorkItemInput): UpdateWorkIt
   return input;
 }
 
+function hasAuditField(input: unknown): boolean {
+  if (!input || typeof input !== 'object') return false;
+  return Object.prototype.hasOwnProperty.call(input as object, 'audit') && (input as any).audit !== undefined;
+}
+
 export function createAPI(db: WorklogDatabase) {
   const app = express();
   app.use(express.json());
@@ -65,7 +70,7 @@ export function createAPI(db: WorklogDatabase) {
   app.post('/items', (req: Request, res: Response) => {
     try {
       db.setPrefix(defaultPrefix);
-      if (typeof (req.body as any)?.audit === 'string' && !auditWriteEnabled) {
+      if (!auditWriteEnabled && hasAuditField(req.body)) {
         res.status(400).json({ error: 'Audit writes are disabled by config (auditWriteEnabled: false)' });
         return;
       }
@@ -93,7 +98,7 @@ export function createAPI(db: WorklogDatabase) {
   app.put('/items/:id', (req: Request, res: Response) => {
     try {
       db.setPrefix(defaultPrefix);
-      if (typeof (req.body as any)?.audit === 'string' && !auditWriteEnabled) {
+      if (!auditWriteEnabled && hasAuditField(req.body)) {
         res.status(400).json({ error: 'Audit writes are disabled by config (auditWriteEnabled: false)' });
         return;
       }
@@ -261,7 +266,7 @@ export function createAPI(db: WorklogDatabase) {
   // Create a work item with prefix
   app.post('/projects/:prefix/items', setPrefixMiddleware, (req: Request, res: Response) => {
     try {
-      if (typeof (req.body as any)?.audit === 'string' && !auditWriteEnabled) {
+      if (!auditWriteEnabled && hasAuditField(req.body)) {
         res.status(400).json({ error: 'Audit writes are disabled by config (auditWriteEnabled: false)' });
         return;
       }
@@ -287,7 +292,7 @@ export function createAPI(db: WorklogDatabase) {
   // Update a work item with prefix
   app.put('/projects/:prefix/items/:id', setPrefixMiddleware, (req: Request, res: Response) => {
     try {
-      if (typeof (req.body as any)?.audit === 'string' && !auditWriteEnabled) {
+      if (!auditWriteEnabled && hasAuditField(req.body)) {
         res.status(400).json({ error: 'Audit writes are disabled by config (auditWriteEnabled: false)' });
         return;
       }
