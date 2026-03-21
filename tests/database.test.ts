@@ -80,6 +80,22 @@ describe('WorklogDatabase', () => {
       expect(item.createdBy).toBe('john.doe');
     });
 
+    it('should create a work item with a structured audit', () => {
+      const item = db.create({
+        title: 'Audited item',
+        description: 'Success criteria: ship it',
+        audit: {
+          time: new Date().toISOString(),
+          author: 'tester',
+          text: 'Ready to close: Yes',
+        },
+      });
+
+      expect(item.audit).toBeDefined();
+      expect(item.audit?.author).toBe('tester');
+      expect(item.audit?.text).toBe('Ready to close: Yes');
+    });
+
     it('should create a work item with a parent', () => {
       const parent = db.create({ title: 'Parent task' });
       const child = db.create({
@@ -248,6 +264,21 @@ describe('WorklogDatabase', () => {
       expect(updated?.status).toBe('in-progress');
       expect(updated?.priority).toBe('high');
       expect(updated?.description).toBe('New description');
+    });
+
+    it('should update structured audit fields', () => {
+      const item = db.create({ title: 'Task' });
+      const updated = db.update(item.id, {
+        audit: {
+          time: new Date().toISOString(),
+          author: 'updater',
+          text: 'Ready to close: No',
+        },
+      });
+
+      expect(updated?.audit).toBeDefined();
+      expect(updated?.audit?.author).toBe('updater');
+      expect(db.get(item.id)?.audit?.text).toBe('Ready to close: No');
     });
 
     it('should return null for non-existent ID', () => {

@@ -45,6 +45,11 @@ export interface WorkItem {
   issueType?: 'bug' | 'feature' | 'task' | 'epic' | 'chore';
   effort?: string;
   risk?: string;
+  audit?: {
+    time: string;
+    author: string;
+    text: string;
+  };
 }
 
 export interface VisibleNode {

@@ -77,3 +77,11 @@ Reference
 - Migrations runner: `src/migrations/index.ts`
 - Migration descriptors: `src/migrations/*`
 - Migration application: `runMigrations` creates backups and prunes to the last 5 backups.
+
+Audit field migration note
+--------------------------
+- Migration `20260315-add-audit` adds the `audit` column to `workitems`.
+- The migration does not backfill historical comment-based audit content.
+- Structured audit data is only written when explicitly provided via write paths (for example `wl update --audit-text "..."`).
+- Audit write semantics are overwrite-only for the single `audit` object (no history array in this slice).
+- Redaction/safety rules for audit text are tracked separately in `Redaction and Safety Rules for Audit Text (WL-0MMNCOIYS15A1YSI)`.

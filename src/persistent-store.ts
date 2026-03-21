@@ -29,7 +29,7 @@ interface DbMetadata {
   schemaVersion: number;
 }
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 /**
  * Normalize a single value for use as a better-sqlite3 binding parameter.
@@ -1290,7 +1290,7 @@ export class SqlitePersistentStore {
         githubIssueId: row.githubIssueId ?? undefined,
         githubIssueUpdatedAt: row.githubIssueUpdatedAt || undefined,
         needsProducerReview: Boolean(row.needsProducerReview),
-        audit: (() => { try { return row.audit ? JSON.parse(row.audit) : undefined; } catch { return undefined; } })(),
+        audit: undefined,
       };
     }
   }

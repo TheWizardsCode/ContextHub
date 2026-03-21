@@ -33,10 +33,11 @@ export default function register(ctx: PluginContext): void {
     .option('--deleted-by <deletedBy>', 'Deleted by (interoperability field)')
     .option('--delete-reason <deleteReason>', 'Delete reason (interoperability field)')
     .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag for the new item (true|false|yes|no)')
-    .option('--audit <text>', 'Add a structured audit note (freeform text; time and author are set automatically)')
+    .option('--audit <text>', 'Legacy alias for --audit-text')
+    .option('--audit-text <text>', 'Set structured audit text (time/author auto-populated)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .action(async (...rawArgs: any[]) => {
-      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','prefix']);
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','prefix']);
       let options: CreateOptions = normalized.options as any || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
@@ -53,6 +54,7 @@ export default function register(ctx: PluginContext): void {
       }
 
       const config = utils.getConfig();
+      const auditWriteEnabled = config?.auditWriteEnabled !== false;
       const requestedStage = options.stage !== undefined ? options.stage : 'idea';
       let normalizedStatus = (options.status || 'open') as WorkItemStatus;
       let normalizedStage = requestedStage;
@@ -81,6 +83,21 @@ export default function register(ctx: PluginContext): void {
         }
       }
 
+      const auditTextInput = options.auditText ?? options.audit;
+
+      if (auditTextInput !== undefined && !auditWriteEnabled) {
+        output.error('Audit writes are disabled by config (`auditWriteEnabled: false`).', {
+          success: false,
+          error: 'audit-write-disabled',
+        });
+        process.exit(1);
+      }
+
+      let auditEntry;
+      if (auditTextInput !== undefined) {
+        auditEntry = buildAuditEntry(String(auditTextInput));
+      }
+
       const item = db.createWithNextSortIndex({
         title: options.title,
         description: description,
@@ -99,7 +116,7 @@ export default function register(ctx: PluginContext): void {
         needsProducerReview: (options.needsProducerReview !== undefined) ?
           (['true','yes','1'].includes(String(options.needsProducerReview).toLowerCase())) :
           false,
-        audit: options.audit ? buildAuditEntry(options.audit, description) : undefined,
+        audit: auditEntry,
       });
 
       const refreshed = db.get(item.id) || item;

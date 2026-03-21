@@ -165,6 +165,11 @@ describe('SQLite binding round-trip', () => {
       stage: 'idea',
       issueType: 'task',
       needsProducerReview: true,
+      audit: {
+        time: new Date().toISOString(),
+        author: 'roundtrip',
+        text: 'Ready to close: Yes',
+      },
     });
 
     const loaded = db.get(created.id);
@@ -177,6 +182,8 @@ describe('SQLite binding round-trip', () => {
     expect(loaded!.stage).toBe('idea');
     expect(loaded!.issueType).toBe('task');
     expect(loaded!.needsProducerReview).toBe(true);
+    expect(loaded!.audit).toBeDefined();
+    expect(loaded!.audit?.author).toBe('roundtrip');
     // Date fields should be valid ISO strings
     expect(() => new Date(loaded!.createdAt).toISOString()).not.toThrow();
     expect(() => new Date(loaded!.updatedAt).toISOString()).not.toThrow();

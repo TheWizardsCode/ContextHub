@@ -260,6 +260,10 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push(`Risk: ${item.risk || '—'}`);
     lines.push(`Effort: ${item.effort || '—'}`);
     if (item.assignee) lines.push(`Assignee: ${item.assignee}`);
+    if (item.audit) {
+      const firstLine = String(item.audit.text || '').split(/\r?\n/, 1)[0];
+      lines.push(`Audit: ${firstLine}`);
+    }
     if (item.tags && item.tags.length > 0) lines.push(`Tags: ${item.tags.join(', ')}`);
     return lines.join('\n');
   }
@@ -280,6 +284,10 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push(`Risk: ${item.risk || '—'}`);
     lines.push(`Effort: ${item.effort || '—'}`);
     if (item.assignee) lines.push(`Assignee: ${item.assignee}`);
+    if (item.audit) {
+      const firstLine = String(item.audit.text || '').split(/\r?\n/, 1)[0];
+      lines.push(`Audit: ${firstLine}`);
+    }
     if (item.parentId) lines.push(`Parent: ${item.parentId}`);
     if (item.description) lines.push(`Description: ${item.description}`);
     return lines.join('\n');
@@ -367,10 +375,10 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push('');
     lines.push('## Audit');
     lines.push('');
-    lines.push(`  Status : ${item.audit.status}`);
-    lines.push(`  Author : ${item.audit.author}`);
-    lines.push(`  Time   : ${item.audit.time}`);
-    lines.push(`  Note   : ${item.audit.text}`);
+    lines.push(`Time: ${item.audit.time}`);
+    lines.push(`Author: ${item.audit.author}`);
+    lines.push('');
+    lines.push(item.audit.text);
   }
 
   return lines.join('\n');
