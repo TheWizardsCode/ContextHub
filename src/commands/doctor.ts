@@ -76,6 +76,7 @@ export default function register(ctx: PluginContext): void {
             return;
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
+            process.exitCode = 1;
             output.json({ success: false, error: message });
             return;
           }
