@@ -1165,13 +1165,18 @@ export class WorklogDatabase {
     // Blocked items receive no boost (the -10000 penalty remains dominant).
     const IN_PROGRESS_BOOST = 1.5;
     const PARENT_IN_PROGRESS_BOOST = 1.25;
+    // Apply in-progress / ancestor multipliers non-stacking.
+    // Use an explicit multiplier variable to avoid any accidental
+    // double-application of boosts if this code is refactored in future.
+    let multiplier = 1;
     if (item.status !== 'blocked') {
       if (item.status === 'in-progress') {
-        score *= IN_PROGRESS_BOOST;
+        multiplier = IN_PROGRESS_BOOST;
       } else if (ancestorsOfInProgress?.has(item.id)) {
-        score *= PARENT_IN_PROGRESS_BOOST;
+        multiplier = PARENT_IN_PROGRESS_BOOST;
       }
     }
+    score *= multiplier;
 
     return score;
   }

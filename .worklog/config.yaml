@@ -2,3 +2,4 @@ projectName: Worklog
 prefix: WL
 autoExport: true
 autoSync: false
+githubRepo: TheWizardsCode/ContextHub
