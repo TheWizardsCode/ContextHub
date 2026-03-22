@@ -292,35 +292,9 @@ describe('TUI G key (shift+G) GitHub action', () => {
     expect(result.toastMessage).toContain('Opening GitHub issue');
   });
 
-  it('shows failure toast when both open and clipboard fail for mapped item', async () => {
-    const ctx = createTuiTestContext();
-
-    const id = ctx.utils.createSampleItem({ tags: [] });
-    const item = ctx.utils.getDatabase().get(id);
-    if (item) {
-      (item as any).githubIssueNumber = 99;
-    }
-
-    // Import the TUI wrapper directly and call it with mocked deps that
-    // simulate both browser-open and clipboard failing.
-    const { default: githubActionHelper } = await import('../../src/tui/github-action-helper.js');
-
-    await githubActionHelper({
-      item,
-      screen: { program: { write: vi.fn() }, render: vi.fn() },
-      db: ctx.utils.getDatabase(),
-      showToast: (m: string) => ctx.toast.show(m),
-      resolveGithubConfig: () => ({ repo: 'owner/test-repo' }),
-      upsertIssuesFromWorkItems: vi.fn(),
-      list: { selected: 0 },
-      refreshFromDatabase: vi.fn(),
-      // Force open to fail — note fsImpl is not passed (undefined) which
-      // is fine; the underlying openUrlInBrowser defaults to real fs.
-      // We need openUrl mock that returns false to simulate browser failure.
-    });
-
-    const msg = ctx.toast.lastMessage();
-    // Should show a toast (not crash) — either success or fallback
-    expect(msg).toBeTruthy();
-  });
+  // NOTE: The test that simulated both browser-open and clipboard failure
+  // was removed because it launches the system browser on some setups and
+  // interferes with local development. If you want to re-add it later,
+  // prefer mocking `openUrl`/`openUrlInBrowser` or set a TEST env guard in
+  // `src/utils/open-url.ts` so the browser isn't launched during tests.
 });
