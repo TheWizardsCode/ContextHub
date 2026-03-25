@@ -248,8 +248,8 @@ Worklog uses **SQLite as the runtime source of truth** with an **ephemeral JSONL
 
 4. **Legacy JSONL Files**
    - If you encounter a persistent JSONL file, it may be from an older version
-   - Use `wl migrate jsonl` to import it into SQLite
-   - Use `wl migrate jsonl --delete` to import and remove the file
+   - Use `wl doctor migrate` to import it into SQLite
+   - Use `wl doctor migrate --delete` to import and remove the file
 
 ### For More Information
 
