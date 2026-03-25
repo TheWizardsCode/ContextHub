@@ -7,8 +7,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { WorkItem, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge } from './types.js';
 import { SqlitePersistentStore, FtsSearchResult } from './persistent-store.js';
-import { importFromJsonl, exportToJsonl, getDefaultDataPath } from './jsonl.js';
-import { mergeWorkItems, mergeComments } from './sync.js';
+import { importFromJsonl, importFromJsonlContent, exportToJsonl, getDefaultDataPath } from './jsonl.js';
+import { mergeWorkItems, mergeComments, getRemoteDataFileContent, GitTarget } from './sync.js';
 import { withFileLock, getLockPathForJsonl } from './file-lock.js';
 import * as searchMetrics from './search-metrics.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
@@ -52,8 +52,13 @@ export class WorklogDatabase {
     
     this.store = new SqlitePersistentStore(actualDbPath, !silent);
     
-    // Refresh from JSONL if needed
-    this.refreshFromJsonlIfNewer();
+    // Refresh from JSONL only if SQLite is empty (ephemeral JSONL pattern)
+    // In the ephemeral pattern, SQLite is the sole runtime source of truth.
+    // JSONL only exists transiently during sync operations.
+    const itemCount = this.store.countWorkItems();
+    if (itemCount === 0) {
+      this.refreshFromJsonlIfNewer();
+    }
   }
 
   setAutoSync(enabled: boolean, provider?: () => Promise<void>): void {
@@ -68,6 +73,141 @@ export class WorklogDatabase {
       return;
     }
     void this.syncProvider();
+  }
+
+  /**
+   * Refresh database from Git remote.
+   * This implements the ephemeral JSONL pattern where:
+   * 1. Pull JSONL from Git remote
+   * 2. Merge with local SQLite data
+   * 3. Delete local JSONL file
+   * 
+   * @param target Git target (remote and branch)
+   * @returns Object with success flag, counts of items added/updated, and any error message
+   */
+  async refreshFromGit(target: GitTarget): Promise<{ 
+    success: boolean; 
+    itemsAdded: number;
+    itemsUpdated: number;
+    commentsAdded: number;
+    error?: string;
+  }> {
+    try {
+      // Fetch remote content
+      const remoteContent = await getRemoteDataFileContent(this.jsonlPath, target);
+      
+      if (!remoteContent) {
+        // No remote data yet (first sync) - this is OK
+        return { success: true, itemsAdded: 0, itemsUpdated: 0, commentsAdded: 0 };
+      }
+
+      // Parse remote data
+      const { items: remoteItems, comments: remoteComments, dependencyEdges } = importFromJsonlContent(remoteContent);
+      
+      // Get local state
+      const localItems = this.store.getAllWorkItems();
+      const localComments = this.store.getAllComments();
+      const localEdges = this.store.getAllDependencyEdges();
+
+      // Merge data
+      const itemMergeResult = mergeWorkItems(localItems, remoteItems);
+      const commentMergeResult = mergeComments(localComments, remoteComments);
+      
+      // Calculate changes
+      const itemsAdded = Math.max(0, itemMergeResult.merged.length - localItems.length);
+      const itemsUpdated = itemMergeResult.conflicts.length;
+      const commentsAdded = Math.max(0, commentMergeResult.merged.length - localComments.length);
+
+      // Import merged data to SQLite
+      this.store.importData(itemMergeResult.merged, commentMergeResult.merged);
+      
+      // Import dependency edges
+      for (const edge of dependencyEdges) {
+        if (this.store.getWorkItem(edge.fromId) && this.store.getWorkItem(edge.toId)) {
+          this.store.saveDependencyEdge(edge);
+        }
+      }
+
+      // Update metadata to prevent re-import of the same data
+      const now = Date.now();
+      this.store.setMetadata('lastJsonlImportMtime', now.toString());
+      this.store.setMetadata('lastJsonlImportAt', new Date().toISOString());
+
+      // Delete local JSONL file (ephemeral pattern)
+      if (fs.existsSync(this.jsonlPath)) {
+        fs.unlinkSync(this.jsonlPath);
+      }
+
+      return { 
+        success: true, 
+        itemsAdded, 
+        itemsUpdated, 
+        commentsAdded 
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      // Check for offline/network errors
+      if (errorMessage.includes('Could not resolve host') || 
+          errorMessage.includes('Network is unreachable') ||
+          errorMessage.includes('Connection refused') ||
+          errorMessage.includes('timeout')) {
+        return { 
+          success: false, 
+          itemsAdded: 0, 
+          itemsUpdated: 0, 
+          commentsAdded: 0,
+          error: 'Offline: Unable to reach Git remote. Please check your network connection.'
+        };
+      }
+      
+      // Check for merge conflicts
+      if (errorMessage.includes('CONFLICT') || errorMessage.includes('merge conflict')) {
+        return { 
+          success: false, 
+          itemsAdded: 0, 
+          itemsUpdated: 0, 
+          commentsAdded: 0,
+          error: 'Merge conflict detected. Please resolve conflicts manually before syncing.'
+        };
+      }
+      
+      return { 
+        success: false, 
+        itemsAdded: 0, 
+        itemsUpdated: 0, 
+        commentsAdded: 0,
+        error: errorMessage
+      };
+    }
+  }
+
+  /**
+   * Export current database state to JSONL for sync operations.
+   * This is used by the sync command before pushing to Git.
+   * The JSONL file should be deleted after successful push (ephemeral pattern).
+   * 
+   * @returns The path to the exported JSONL file
+   */
+  exportForSync(): string {
+    const items = this.store.getAllWorkItems();
+    const comments = this.store.getAllComments();
+    const dependencyEdges = this.store.getAllDependencyEdges();
+    
+    // Export to JSONL
+    exportToJsonl(items, comments, this.jsonlPath, dependencyEdges);
+    
+    return this.jsonlPath;
+  }
+
+  /**
+   * Delete the local JSONL file.
+   * This should be called after successful Git push (ephemeral pattern).
+   */
+  deleteLocalJsonl(): void {
+    if (fs.existsSync(this.jsonlPath)) {
+      fs.unlinkSync(this.jsonlPath);
+    }
   }
 
   /**

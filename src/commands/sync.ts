@@ -8,7 +8,7 @@ import type { WorkItem, Comment, DependencyEdge } from '../types.js';
 import type { GitTarget, SyncResult } from '../sync.js';
 import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges } from '../sync.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
-import { importFromJsonlContent, exportToJsonl } from '../jsonl.js';
+import { importFromJsonlContent } from '../jsonl.js';
 import { loadConfig } from '../config.js';
 import { displayConflictDetails } from './helpers.js';
 import { createLogFileWriter, getWorklogLogPath, logConflictDetails } from '../logging.js';
@@ -191,19 +191,39 @@ async function performSync(
     console.log('\nMerged data saved locally');
   }
 
-  exportToJsonl(itemMergeResult.merged, commentMergeResult.merged, options.file, edgeMergeResult.merged);
+  // Ephemeral JSONL pattern: Export SQLite → JSONL → Push → Delete local JSONL
+  // JSONL only exists transiently during sync operations
+  const jsonlPath = db.exportForSync();
   
   if (options.push) {
     if (!isJsonMode && !isSilent) {
       console.log('\nPushing changes to git...');
     }
-    await gitPushDataFileToBranch(options.file, 'Sync work items and comments', gitTarget);
-    if (!isJsonMode && !isSilent) {
-      console.log('Changes pushed successfully');
+    
+    try {
+      await gitPushDataFileToBranch(jsonlPath, 'Sync work items and comments', gitTarget);
+      if (!isJsonMode && !isSilent) {
+        console.log('Changes pushed successfully');
+      }
+      
+      // Delete local JSONL file after successful push (ephemeral pattern)
+      // Only delete if push succeeded - keep for retry on failure
+      db.deleteLocalJsonl();
+      
+      if (!isJsonMode && !isSilent) {
+        console.log('Local JSONL file cleaned up (ephemeral pattern)');
+      }
+    } catch (pushError) {
+      // Push failed - keep JSONL for retry, but report the error
+      if (!isJsonMode && !isSilent) {
+        console.log('\nPush failed - local JSONL file retained for retry');
+      }
+      throw pushError;
     }
   } else {
     if (!isJsonMode && !isSilent) {
       console.log('\nSkipping git push (--no-push flag)');
+      console.log('Local JSONL file retained (ephemeral pattern - file will be deleted on next successful push)');
     }
   }
   
