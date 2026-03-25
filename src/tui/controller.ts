@@ -15,7 +15,6 @@ import { humanFormatWorkItem, formatTitleOnlyTUI } from '../commands/helpers.js'
 import { createTuiState, rebuildTreeState, buildVisibleNodes, expandAncestorsForInProgress, isClosedStatus, enterMoveMode, exitMoveMode } from './state.js';
 import { createPersistence } from './persistence.js';
 import { resolveWorklogDir } from '../worklog-paths.js';
-import { getDefaultDataPath } from '../jsonl.js';
 import { createLayout } from './layout.js';
 import { createUpdateDialogFocusManager } from './update-dialog-navigation.js';
 import { buildUpdateDialogUpdates } from './update-dialog-submit.js';
@@ -2062,77 +2061,26 @@ export class TuiController {
 
     const startDatabaseWatch = () => {
       if (typeof fsImpl.watch !== 'function') return;
-      const dataPath = getDefaultDataPath();
+      // Compute database path using injected resolveWorklogDir to ensure testability
+      const worklogDir = resolveWorklogDirImpl();
+      const dataPath = pathImpl.join(worklogDir, 'worklog.db');
       const dataDir = pathImpl.dirname(dataPath);
       const dataFile = pathImpl.basename(dataPath);
-      const readDataMtimeMs = () => {
-        try {
-          return fsImpl.statSync(dataPath).mtimeMs;
-        } catch (err) {
-          debugLog(`Failed to read data file mtime for watch event filtering: ${String(err)}`);
-          return null;
-        }
-      };
-      let lastKnownDataMtimeMs = readDataMtimeMs();
       try {
-        // Use a lightweight debounce and avoid synchronous fs.statSync in
-        // the watch handler which can block the event loop under heavy
-        // filesystem activity. We schedule an async check to compare mtime
-        // and only trigger a refresh when the file's mtime actually changed.
+        // Watch for changes to either the main DB file or the WAL file.
+        // In SQLite WAL mode, changes are written to the -wal file first,
+        // so we need to watch both files to detect all database changes.
         let watchDebounce: ReturnType<typeof setTimeout> | null = null;
-        // Initialize lastSeenMtimeMs from the current known mtime so we do
-        // not trigger a refresh for the first watch callback when the file
-        // has not actually changed since startup. Previously this was
-        // initialized to null which caused an extra refresh call in tests
-        // that expect no-op behavior when mtime is unchanged.
-        let lastSeenMtimeMs: number | null = lastKnownDataMtimeMs;
         dataWatcher = fsImpl.watch(dataDir, (_eventType, filename) => {
           if (isShuttingDown) return;
-          if (filename && filename !== dataFile) return;
+          // Accept events from either the main DB file or the WAL file
+          if (filename && filename !== dataFile && filename !== `${dataFile}-wal`) return;
           // debounce rapid successive watch callbacks
           if (watchDebounce) clearTimeout(watchDebounce);
-          watchDebounce = setTimeout(async () => {
+          watchDebounce = setTimeout(() => {
             watchDebounce = null;
-               try {
-               // Prefer using injected statSync when available because tests
-               // commonly mock it. If statSync exists but throws, treat the
-               // failure as a transient error and do NOT fall back to the
-               // async stat path (which may observe a different file) to
-               // avoid scheduling spurious refreshes. Only attempt the
-               // async stat when statSync is not present on the injected
-               // fsImpl.
-               let stat: fs.Stats | null = null;
-               const hasSync = typeof (fsImpl as any).statSync === 'function';
-               if (hasSync) {
-                 try {
-                   stat = (fsImpl as any).statSync(dataPath);
-                 } catch (e) {
-                   // statSync exists but failed — ignore this watch event
-                   // rather than attempting async stat which can cause
-                   // inconsistent results in tests.
-                   return;
-                 }
-               } else {
-                 stat = await fsAsync.stat(dataPath).catch(() => null);
-               }
-               const mtimeMs = stat?.mtimeMs ?? null;
-               if (mtimeMs === null) {
-                 // Could not read mtime (stat failed) — ignore this watch
-                 // event rather than triggering a refresh. Transient stat
-                 // failures should not cause spurious refreshes.
-                 return;
-               }
-              if (lastSeenMtimeMs === null || mtimeMs !== lastSeenMtimeMs) {
-                lastSeenMtimeMs = mtimeMs;
-                const selectedIndex = typeof list.selected === 'number' ? (list.selected as number) : 0;
-                scheduleRefreshFromDatabase(selectedIndex);
-              }
-            } catch (err) {
-              // best-effort; log when verbose
-              try { debugLog(`startDatabaseWatch: watch handler error: ${String(err)}`); } catch (_) {}
-              const selectedIndex = typeof list.selected === 'number' ? (list.selected as number) : 0;
-              scheduleRefreshFromDatabase(selectedIndex);
-            }
+            const selectedIndex = typeof list.selected === 'number' ? (list.selected as number) : 0;
+            scheduleRefreshFromDatabase(selectedIndex);
           }, 75);
         });
       } catch (_) {
