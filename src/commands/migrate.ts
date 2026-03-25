@@ -58,17 +58,22 @@ export default function register(ctx: PluginContext): void {
 
   migrate
     .command('jsonl')
-    .description('Migrate from persistent JSONL to SQLite-only architecture (ephemeral JSONL pattern)')
+    .description('DEPRECATED: Use "wl doctor migrate" instead. Migrate from persistent JSONL to SQLite.')
     .option('-f, --file <filepath>', 'JSONL file path to migrate (default: .worklog/worklog-data.jsonl)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--delete', 'Delete JSONL file after successful migration')
     .action((options: MigrateOptions & { delete?: boolean }) => {
+      if (!utils.isJsonMode()) {
+        console.log('Note: The "wl migrate jsonl" command is deprecated.');
+        console.log('Please use "wl doctor migrate" instead.\n');
+      }
+      
       utils.requireInitialized();
       const filePath = options.file || '.worklog/worklog-data.jsonl';
       
       if (!fs.existsSync(filePath)) {
         if (utils.isJsonMode()) {
-          output.json({ success: false, error: `JSONL file not found: ${filePath}` });
+          output.json({ success: true, message: 'No JSONL file found. Your data is already in SQLite format.', migrated: false });
         } else {
           console.log(`No JSONL file found at ${filePath}`);
           console.log('Your data is already in SQLite format. No migration needed.');
@@ -101,7 +106,8 @@ export default function register(ctx: PluginContext): void {
               itemsImported: items.length,
               commentsImported: comments.length,
               itemsMerged: itemMergeResult.conflicts.length,
-              file: filePath
+              file: filePath,
+              migrated: true
             });
           } else {
             console.log(`Merged ${items.length} work items and ${comments.length} comments from ${filePath}`);
@@ -120,7 +126,8 @@ export default function register(ctx: PluginContext): void {
               message: `Imported ${items.length} work items and ${comments.length} comments from JSONL`,
               itemsImported: items.length,
               commentsImported: comments.length,
-              file: filePath
+              file: filePath,
+              migrated: true
             });
           } else {
             console.log(`Imported ${items.length} work items and ${comments.length} comments from ${filePath}`);
@@ -131,7 +138,7 @@ export default function register(ctx: PluginContext): void {
         if (options.delete) {
           fs.unlinkSync(filePath);
           if (!utils.isJsonMode()) {
-            console.log(`Deleted JSONL file: ${filePath}`);
+            console.log(`\nDeleted JSONL file: ${filePath}`);
             console.log('\nMigration complete! Your data is now in SQLite format.');
             console.log('JSONL files will only be created temporarily during sync operations.');
           }
@@ -140,13 +147,13 @@ export default function register(ctx: PluginContext): void {
             console.log('\nMigration complete! Your data is now in SQLite format.');
             console.log('The JSONL file has been preserved.');
             console.log('To delete it and complete the migration, run:');
-            console.log(`  wl migrate jsonl --delete`);
+            console.log(`  wl doctor migrate --delete`);
           }
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         if (utils.isJsonMode()) {
-          output.json({ success: false, error: errorMessage });
+          output.json({ success: false, error: errorMessage, migrated: false });
         } else {
           console.error(`Migration failed: ${errorMessage}`);
           process.exit(1);

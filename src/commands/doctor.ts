@@ -7,6 +7,10 @@ import { loadStatusStageRules } from '../status-stage-rules.js';
 import { validateStatusStageItems } from '../doctor/status-stage-check.js';
 import { validateDependencyEdges } from '../doctor/dependency-check.js';
 import { listPendingMigrations, runMigrations } from '../migrations/index.js';
+import { importFromJsonl } from '../jsonl.js';
+import { mergeWorkItems, mergeComments } from '../sync.js';
+import * as fs from 'fs';
+import * as path from 'path';
 
 interface DoctorOptions {
   prefix?: string;
@@ -205,9 +209,147 @@ export default function register(ctx: PluginContext): void {
       }
     });
 
+  doctor
+    .command('migrate')
+    .description('Migrate from persistent JSONL to SQLite-only architecture (ephemeral JSONL pattern)')
+    .option('-f, --file <filepath>', 'JSONL file path to migrate (default: .worklog/worklog-data.jsonl)')
+    .option('--prefix <prefix>', 'Override the default prefix')
+    .option('--delete', 'Delete JSONL file after successful migration')
+    .action(async (opts: { file?: string; prefix?: string; delete?: boolean }) => {
+      utils.requireInitialized();
+      const filePath = opts.file || path.join('.worklog', 'worklog-data.jsonl');
+      
+      // Check if JSONL file exists
+      if (!fs.existsSync(filePath)) {
+        if (utils.isJsonMode()) {
+          output.json({ success: true, message: 'No JSONL file found. Your data is already in SQLite format.', migrated: false });
+        } else {
+          console.log('Doctor: No JSONL file found at ' + filePath);
+          console.log('Your data is already in SQLite format. No migration needed.');
+        }
+        return;
+      }
+
+      const db = utils.getDatabase(opts.prefix);
+      
+      try {
+        // Get counts before migration
+        const itemsBefore = db.getAll().length;
+        const commentsBefore = db.getAllComments().length;
+        
+        // Import JSONL data
+        const { items, comments, dependencyEdges } = importFromJsonl(filePath);
+        
+        // Check if SQLite already has data
+        if (itemsBefore > 0 || commentsBefore > 0) {
+          // Merge instead of replace to preserve existing data
+          const localItems = db.getAll();
+          const localComments = db.getAllComments();
+          
+          const itemMergeResult = mergeWorkItems(localItems, items);
+          const commentMergeResult = mergeComments(localComments, comments);
+          
+          db.import(itemMergeResult.merged, dependencyEdges);
+          db.importComments(commentMergeResult.merged);
+          
+          if (utils.isJsonMode()) {
+            output.json({
+              success: true,
+              message: `Merged ${items.length} work items and ${comments.length} comments from JSONL`,
+              itemsImported: items.length,
+              commentsImported: comments.length,
+              itemsMerged: itemMergeResult.conflicts.length,
+              file: filePath,
+              itemsBefore,
+              itemsAfter: db.getAll().length,
+              commentsBefore,
+              commentsAfter: db.getAllComments().length,
+              migrated: true
+            });
+          } else {
+            console.log(`Doctor: Merged ${items.length} work items and ${comments.length} comments from ${filePath}`);
+            if (itemMergeResult.conflicts.length > 0) {
+              console.log(`Note: ${itemMergeResult.conflicts.length} items had conflicting updates and were merged.`);
+            }
+            console.log(`Database now contains ${db.getAll().length} work items and ${db.getAllComments().length} comments.`);
+          }
+        } else {
+          // SQLite is empty, just import
+          db.import(items, dependencyEdges);
+          db.importComments(comments);
+          
+          if (utils.isJsonMode()) {
+            output.json({
+              success: true,
+              message: `Imported ${items.length} work items and ${comments.length} comments from JSONL`,
+              itemsImported: items.length,
+              commentsImported: comments.length,
+              file: filePath,
+              itemsBefore: 0,
+              itemsAfter: items.length,
+              commentsBefore: 0,
+              commentsAfter: comments.length,
+              migrated: true
+            });
+          } else {
+            console.log(`Doctor: Imported ${items.length} work items and ${comments.length} comments from ${filePath}`);
+          }
+        }
+        
+        // Optionally delete the JSONL file
+        if (opts.delete) {
+          fs.unlinkSync(filePath);
+          if (!utils.isJsonMode()) {
+            console.log(`\nDeleted JSONL file: ${filePath}`);
+            console.log('\nMigration complete! Your data is now in SQLite format.');
+            console.log('JSONL files will only be created temporarily during sync operations.');
+          }
+        } else {
+          if (!utils.isJsonMode()) {
+            console.log('\nMigration complete! Your data is now in SQLite format.');
+            console.log('The JSONL file has been preserved.');
+            console.log('To delete it and complete the migration, run:');
+            console.log(`  wl doctor migrate --delete`);
+          }
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (utils.isJsonMode()) {
+          output.json({ success: false, error: errorMessage, migrated: false });
+        } else {
+          console.error(`Doctor migrate failed: ${errorMessage}`);
+        }
+        process.exit(1);
+      }
+    });
+
   doctor.action(async (options: DoctorOptions & { fix?: boolean }) => {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
+      
+      // Check for persistent JSONL file (indicates old architecture needs migration)
+      const jsonlPath = path.join('.worklog', 'worklog-data.jsonl');
+      if (fs.existsSync(jsonlPath)) {
+        const stats = fs.statSync(jsonlPath);
+        const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+        
+        if (!utils.isJsonMode()) {
+          console.log('');
+          console.log('⚠️  Found persistent JSONL file: ' + jsonlPath);
+          console.log(`   File size: ${fileSizeMB} MB`);
+          console.log('');
+          console.log('   Worklog now uses SQLite as the runtime source of truth.');
+          console.log('   JSONL files should only exist temporarily during sync operations.');
+          console.log('');
+          console.log('   To migrate your data to SQLite and remove the JSONL file:');
+          console.log('     wl doctor migrate --delete');
+          console.log('');
+          console.log('   To keep the JSONL file (for backup) and migrate to SQLite:');
+          console.log('     wl doctor migrate');
+          console.log('');
+        }
+      }
+      
       const items = db.getAll();
       let rules;
       try {
