@@ -4,6 +4,8 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { MigrateOptions } from '../cli-types.js';
+import { importFromJsonl } from '../jsonl.js';
+import * as fs from 'fs';
 
 const DEFAULT_SORT_GAP = 100;
 
@@ -52,5 +54,103 @@ export default function register(ctx: PluginContext): void {
         return;
       }
       console.log(`Migration complete. Updated ${result.updated} item(s).`);
+    });
+
+  migrate
+    .command('jsonl')
+    .description('Migrate from persistent JSONL to SQLite-only architecture (ephemeral JSONL pattern)')
+    .option('-f, --file <filepath>', 'JSONL file path to migrate (default: .worklog/worklog-data.jsonl)')
+    .option('--prefix <prefix>', 'Override the default prefix')
+    .option('--delete', 'Delete JSONL file after successful migration')
+    .action((options: MigrateOptions & { delete?: boolean }) => {
+      utils.requireInitialized();
+      const filePath = options.file || '.worklog/worklog-data.jsonl';
+      
+      if (!fs.existsSync(filePath)) {
+        if (utils.isJsonMode()) {
+          output.json({ success: false, error: `JSONL file not found: ${filePath}` });
+        } else {
+          console.log(`No JSONL file found at ${filePath}`);
+          console.log('Your data is already in SQLite format. No migration needed.');
+        }
+        return;
+      }
+
+      const db = utils.getDatabase(options.prefix);
+      
+      try {
+        const { items, comments, dependencyEdges } = importFromJsonl(filePath);
+        
+        // Check if SQLite already has data
+        const existingItems = db.getAll();
+        const existingComments = db.getAllComments();
+        
+        if (existingItems.length > 0 || existingComments.length > 0) {
+          // Merge instead of replace to preserve existing data
+          const { mergeWorkItems, mergeComments } = require('../sync.js');
+          const itemMergeResult = mergeWorkItems(existingItems, items);
+          const commentMergeResult = mergeComments(existingComments, comments);
+          
+          db.import(itemMergeResult.merged, dependencyEdges);
+          db.importComments(commentMergeResult.merged);
+          
+          if (utils.isJsonMode()) {
+            output.json({
+              success: true,
+              message: `Merged ${items.length} work items and ${comments.length} comments from JSONL`,
+              itemsImported: items.length,
+              commentsImported: comments.length,
+              itemsMerged: itemMergeResult.conflicts.length,
+              file: filePath
+            });
+          } else {
+            console.log(`Merged ${items.length} work items and ${comments.length} comments from ${filePath}`);
+            if (itemMergeResult.conflicts.length > 0) {
+              console.log(`Note: ${itemMergeResult.conflicts.length} items had conflicting updates and were merged.`);
+            }
+          }
+        } else {
+          // SQLite is empty, just import
+          db.import(items, dependencyEdges);
+          db.importComments(comments);
+          
+          if (utils.isJsonMode()) {
+            output.json({
+              success: true,
+              message: `Imported ${items.length} work items and ${comments.length} comments from JSONL`,
+              itemsImported: items.length,
+              commentsImported: comments.length,
+              file: filePath
+            });
+          } else {
+            console.log(`Imported ${items.length} work items and ${comments.length} comments from ${filePath}`);
+          }
+        }
+        
+        // Optionally delete the JSONL file
+        if (options.delete) {
+          fs.unlinkSync(filePath);
+          if (!utils.isJsonMode()) {
+            console.log(`Deleted JSONL file: ${filePath}`);
+            console.log('\nMigration complete! Your data is now in SQLite format.');
+            console.log('JSONL files will only be created temporarily during sync operations.');
+          }
+        } else {
+          if (!utils.isJsonMode()) {
+            console.log('\nMigration complete! Your data is now in SQLite format.');
+            console.log('The JSONL file has been preserved.');
+            console.log('To delete it and complete the migration, run:');
+            console.log(`  wl migrate jsonl --delete`);
+          }
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (utils.isJsonMode()) {
+          output.json({ success: false, error: errorMessage });
+        } else {
+          console.error(`Migration failed: ${errorMessage}`);
+          process.exit(1);
+        }
+      }
     });
 }

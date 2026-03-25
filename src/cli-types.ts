@@ -98,6 +98,7 @@ export interface MigrateOptions {
   dryRun?: boolean;
   gap?: string;
   prefix?: string;
+  file?: string;
 }
 
 export interface ResortOptions {

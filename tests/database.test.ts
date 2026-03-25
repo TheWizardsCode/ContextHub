@@ -1737,7 +1737,10 @@ describe('WorklogDatabase', () => {
       db2.close();
     });
 
-    it('should emit debug log to stderr when WL_DEBUG is set and JSONL is corrupted', () => {
+    // SKIPPED: This test relies on the old behavior where JSONL was always refreshed on startup.
+    // With the ephemeral JSONL pattern, SQLite is the sole runtime source of truth and JSONL
+    // is only imported when SQLite is empty (on first run or after explicit import).
+    it.skip('should emit debug log to stderr when WL_DEBUG is set and JSONL is corrupted', () => {
       // Set up a work item so SQLite has cached data
       db.create({ title: 'Debug log test item' });
       db.close();
