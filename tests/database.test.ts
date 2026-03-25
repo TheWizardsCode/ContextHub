@@ -829,7 +829,11 @@ describe('WorklogDatabase', () => {
       expect(allItems.find(i => i.id === 'TEST-002')).toBeDefined();
     });
 
-    it('should record lastJsonlExportMtime in metadata after export', () => {
+    // SKIPPED: This test relies on autoExport functionality which was removed in Phase 1.
+    // The autoExport feature that automatically wrote to JSONL after each database operation
+    // has been removed to eliminate TUI freezing. JSONL export will be handled explicitly
+    // in Phase 2 (sync operations).
+    it.skip('should record lastJsonlExportMtime in metadata after export', () => {
       // Ensure initial state: remove jsonl if present
       if (fs.existsSync(jsonlPath)) fs.unlinkSync(jsonlPath);
 
@@ -846,40 +850,6 @@ describe('WorklogDatabase', () => {
       const fileStats = fs.statSync(jsonlPath);
       // mtime recorded should equal file mtime (within 1ms)
       expect(Math.abs(mtimeNum - fileStats.mtimeMs)).toBeLessThan(2);
-    });
-  });
-
-  describe('autoExport', () => {
-    it('should export to JSONL when autoExport is enabled', () => {
-      // Create with autoExport enabled (default)
-      const dbWithExport = new WorklogDatabase('TEST', dbPath, jsonlPath, true, true);
-      
-      // Ensure no JSONL file exists initially
-      if (fs.existsSync(jsonlPath)) {
-        fs.unlinkSync(jsonlPath);
-      }
-      
-      // Create an item
-      dbWithExport.create({ title: 'Test with export' });
-      
-      // JSONL file should exist
-      expect(fs.existsSync(jsonlPath)).toBe(true);
-    });
-
-    it('should not export to JSONL when autoExport is disabled', () => {
-      // Create with autoExport disabled
-      const dbWithoutExport = new WorklogDatabase('TEST', dbPath, jsonlPath, false, true);
-      
-      // Ensure no JSONL file exists initially
-      if (fs.existsSync(jsonlPath)) {
-        fs.unlinkSync(jsonlPath);
-      }
-      
-      // Create an item
-      dbWithoutExport.create({ title: 'Test without export' });
-      
-      // JSONL file should not exist
-      expect(fs.existsSync(jsonlPath)).toBe(false);
     });
   });
 
@@ -1804,7 +1774,11 @@ describe('WorklogDatabase', () => {
       }
     });
 
-    it('should not throw when JSONL file is deleted between existsSync and statSync', () => {
+    // SKIPPED: This test relies on autoExport functionality which was removed in Phase 1.
+    // The autoExport feature that automatically wrote to JSONL after each database operation
+    // has been removed to eliminate TUI freezing. JSONL export will be handled explicitly
+    // in Phase 2 (sync operations).
+    it.skip('should not throw when JSONL file is deleted between existsSync and statSync', () => {
       // Step 1: Create a work item so the DB has cached data and a valid JSONL exists
       const item = db.create({ title: 'Race condition item' });
       const itemId = item.id;

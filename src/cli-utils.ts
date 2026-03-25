@@ -70,9 +70,7 @@ export function getDatabase(prefix?: string, program?: Command): WorklogDatabase
   const effectivePrefix = prefix || config?.prefix || getDefaultPrefix();
   const dataPath = getDefaultDataPath();
   
-  // WorklogDatabase constructor signature: (prefix, dbPath?, jsonlPath?, autoExport?, silent?, autoSync?, syncProvider?)
-  // Get auto-export and auto-sync settings from config
-  const autoExport = config?.autoExport !== false; // Default to true
+  // Get auto-sync settings from config
   const autoSync = config?.autoSync === true; // Default to false
   
   // Determine silent mode: suppress output unless verbose OR not in JSON mode
@@ -80,7 +78,7 @@ export function getDatabase(prefix?: string, program?: Command): WorklogDatabase
   const isVerbose = program?.opts?.()?.verbose || false;
   const silent = isJsonMode || !isVerbose;
   
-  return new WorklogDatabase(effectivePrefix, undefined, dataPath, autoExport, silent, autoSync);
+  return new WorklogDatabase(effectivePrefix, undefined, dataPath, silent, autoSync);
 }
 
 /**

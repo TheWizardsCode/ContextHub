@@ -35,7 +35,6 @@ const DEFAULT_COMMITTED_HOOKS_DIR = '.githooks';
 type NormalizedInitOptions = {
   projectName?: string;
   prefix?: string;
-  autoExport?: boolean;
   autoSync?: boolean;
   agentsTemplateAction?: AgentTemplateAction;
   workflowInline?: boolean;
@@ -73,7 +72,6 @@ function normalizeInitOptions(options: InitOptions): NormalizedInitOptions {
   return {
     projectName,
     prefix,
-    autoExport: normalizeBooleanOption(options.autoExport, '--auto-export'),
     autoSync: normalizeBooleanOption(options.autoSync, '--auto-sync'),
     agentsTemplateAction: normalizeAgentTemplateAction(options.agentsTemplate),
     workflowInline: normalizeBooleanOption(options.workflowInline, '--workflow-inline'),
@@ -822,14 +820,12 @@ function printAgentTemplateSummary(): void {
 async function performInitSync(dataPath: string, prefix?: string, isJsonMode: boolean = false): Promise<void> {
   const config = loadConfig();
   const defaults = getSyncDefaults(config || undefined);
-  // Create DB with autoExport disabled to avoid intermediate exports while
-  // importing items and comments separately. We'll write the merged JSONL
-  // once after both imports are applied.
+  // Create DB to import items and comments separately.
+  // We'll write the merged JSONL once after both imports are applied.
   const db = new (await import('../database.js')).WorklogDatabase(
     prefix || config?.prefix || 'WL',
     undefined,
-    dataPath,
-    /* autoExport */ false
+    dataPath
   );
   
   const localItems = db.getAll();
@@ -960,7 +956,6 @@ export default function register(ctx: PluginContext): void {
             const updatedConfig = await initConfig(config, {
               projectName: normalizedOptions.projectName,
               prefix: normalizedOptions.prefix,
-              autoExport: normalizedOptions.autoExport,
               autoSync: normalizedOptions.autoSync,
             } satisfies InitConfigOptions);
             writeInitSemaphore(version);
@@ -1181,7 +1176,6 @@ export default function register(ctx: PluginContext): void {
         await initConfig(undefined, {
           projectName: normalizedOptions.projectName,
           prefix: normalizedOptions.prefix,
-          autoExport: normalizedOptions.autoExport,
           autoSync: normalizedOptions.autoSync,
         } satisfies InitConfigOptions);
         const config = loadConfig();

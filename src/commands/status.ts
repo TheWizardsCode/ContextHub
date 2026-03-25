@@ -50,7 +50,6 @@ export default function register(ctx: PluginContext): void {
           config: {
             projectName: config?.projectName,
             prefix: config?.prefix,
-            autoExport: config?.autoExport !== false,
             autoSync: config?.autoSync === true,
             syncRemote: config?.syncRemote,
             syncBranch: config?.syncBranch,
@@ -76,7 +75,6 @@ export default function register(ctx: PluginContext): void {
         console.log('Configuration:');
         console.log(`  Project: ${config?.projectName || 'unknown'}`);
         console.log(`  Prefix: ${config?.prefix || 'unknown'}`);
-        console.log(`  Auto-export: ${config?.autoExport !== false ? 'enabled' : 'disabled'}`);
         console.log(`  Auto-sync: ${config?.autoSync ? 'enabled' : 'disabled'}`);
         console.log(`  Sync remote: ${config?.syncRemote || DEFAULT_GIT_REMOTE}`);
         console.log(`  Sync branch: ${config?.syncBranch || DEFAULT_GIT_BRANCH}`);

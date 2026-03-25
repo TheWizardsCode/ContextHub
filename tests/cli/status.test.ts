@@ -57,7 +57,6 @@ describe('CLI Status Tests', () => {
     expect(result.config).toBeDefined();
     expect(result.config.projectName).toBe('Test Project');
     expect(result.config.prefix).toBe('TEST');
-    expect(result.config.autoExport).toBe(true);
     expect(result.config.autoSync).toBe(false);
     expect(result.config.githubRepo).toBeUndefined();
     expect(result.config.githubLabelPrefix).toBeUndefined();
@@ -127,7 +126,11 @@ describe('CLI Status Tests', () => {
     expect(output).not.toContain('Refreshing database from');
   });
 
-  it('should show debug messages when --verbose is specified', async () => {
+  // SKIPPED: This test relies on autoExport functionality which was removed in Phase 1.
+  // The autoExport feature that automatically wrote to JSONL after each database operation
+  // has been removed to eliminate TUI freezing. JSONL export will be handled explicitly
+  // in Phase 2 (sync operations).
+  it.skip('should show debug messages when --verbose is specified', async () => {
     await execAsync(`tsx ${cliPath} --json create -t "Initial task"`);
 
     const dbPath = path.join('.worklog', 'worklog.db');

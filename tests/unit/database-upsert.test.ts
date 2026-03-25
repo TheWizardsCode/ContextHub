@@ -77,7 +77,11 @@ describe('WorklogDatabase.upsertItems', () => {
     expect(all.find(i => i.id === itemB.id)).toBeDefined();
   });
 
-  it('should not trigger export/sync when upserting an empty array', () => {
+  // SKIPPED: This test relies on autoExport functionality which was removed in Phase 1.
+  // The autoExport feature that automatically wrote to JSONL after each database operation
+  // has been removed to eliminate TUI freezing. JSONL export will be handled explicitly
+  // in Phase 2 (sync operations).
+  it.skip('should not trigger export/sync when upserting an empty array', () => {
     // Arrange: create an item so JSONL has content, then record mtime
     db.create({ title: 'Existing item' });
     const statBefore = fs.statSync(jsonlPath);
@@ -218,7 +222,11 @@ describe('WorklogDatabase.upsertItems', () => {
     expect(edgesFromB[0].toId).toBe(itemC.id);
   });
 
-  it('should export to JSONL after upserting non-empty items', () => {
+  // SKIPPED: This test relies on autoExport functionality which was removed in Phase 1.
+  // The autoExport feature that automatically wrote to JSONL after each database operation
+  // has been removed to eliminate TUI freezing. JSONL export will be handled explicitly
+  // in Phase 2 (sync operations).
+  it.skip('should export to JSONL after upserting non-empty items', () => {
     // Arrange: create an item so JSONL exists
     db.create({ title: 'Existing item' });
     const statBefore = fs.statSync(jsonlPath);

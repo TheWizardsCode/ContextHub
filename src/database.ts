@@ -23,7 +23,6 @@ export class WorklogDatabase {
   private store: SqlitePersistentStore;
   private prefix: string;
   private jsonlPath: string;
-  private autoExport: boolean;
   private silent: boolean;
   private autoSync: boolean;
   private syncProvider?: () => Promise<void>;
@@ -33,14 +32,12 @@ export class WorklogDatabase {
     prefix: string = 'WI',
     dbPath?: string,
     jsonlPath?: string,
-    autoExport: boolean = true,
     silent: boolean = false,
     autoSync: boolean = false,
     syncProvider?: () => Promise<void>
   ) {
     this.prefix = prefix;
     this.jsonlPath = jsonlPath || getDefaultDataPath();
-    this.autoExport = autoExport;
     this.silent = silent;
     this.autoSync = autoSync;
     this.syncProvider = syncProvider;
@@ -92,7 +89,8 @@ export class WorklogDatabase {
 
     try {
       const jsonlStats = fs.statSync(this.jsonlPath);
-      const jsonlMtime = jsonlStats.mtimeMs;
+      // Use Math.floor to match the precision of stored mtime (which is stored via Math.floor().toString())
+      const jsonlMtime = Math.floor(jsonlStats.mtimeMs);
 
       const metadata = this.store.getAllMetadata();
       const lastImportMtime = metadata.lastJsonlImportMtime;
@@ -121,7 +119,8 @@ export class WorklogDatabase {
         }
 
         // Update metadata
-        this.store.setMetadata('lastJsonlImportMtime', jsonlMtime.toString());
+        // Use Math.floor to match the precision of parseInt when reading back
+        this.store.setMetadata('lastJsonlImportMtime', Math.floor(jsonlMtime).toString());
         this.store.setMetadata('lastJsonlImportAt', new Date().toISOString());
 
         if (!this.silent) {
@@ -144,10 +143,6 @@ export class WorklogDatabase {
    * Export current database state to JSONL
    */
   private exportToJsonl(): void {
-    if (!this.autoExport) {
-      return;
-    }
-    
     const items = this.store.getAllWorkItems();
     const comments = this.store.getAllComments();
     const dependencyEdges = this.store.getAllDependencyEdges();
@@ -281,7 +276,6 @@ export class WorklogDatabase {
         updated += 1;
       }
     }
-    this.exportToJsonl();
     this.triggerAutoSync();
     return { updated };
   }
@@ -320,7 +314,6 @@ export class WorklogDatabase {
         updated += 1;
       }
     }
-    this.exportToJsonl();
     this.triggerAutoSync();
     return { updated };
   }
@@ -599,7 +592,6 @@ export class WorklogDatabase {
 
     this.store.saveWorkItem(item);
     this.store.upsertFtsEntry(item);
-    this.exportToJsonl();
     this.triggerAutoSync();
     return item;
   }
@@ -669,7 +661,6 @@ export class WorklogDatabase {
 
     this.store.saveWorkItem(updated);
     this.store.upsertFtsEntry(updated);
-    this.exportToJsonl();
     this.triggerAutoSync();
 
     if (previousStatus !== updated.status || previousStage !== updated.stage) {
@@ -703,7 +694,6 @@ export class WorklogDatabase {
 
     this.store.saveWorkItem(updated);
     this.store.deleteFtsEntry(id);
-    this.exportToJsonl();
     this.triggerAutoSync();
     if (this.listDependencyEdgesTo(id).length > 0) {
       this.reconcileDependentsForTarget(id);
@@ -1702,7 +1692,6 @@ export class WorklogDatabase {
         }
       }
     }
-    this.exportToJsonl();
     this.triggerAutoSync();
   }
 
@@ -1741,7 +1730,6 @@ export class WorklogDatabase {
       }
     }
 
-    this.exportToJsonl();
     this.triggerAutoSync();
   }
 
@@ -1761,7 +1749,6 @@ export class WorklogDatabase {
     };
 
     this.store.saveDependencyEdge(edge);
-    this.exportToJsonl();
     this.triggerAutoSync();
     return edge;
   }
@@ -1773,7 +1760,6 @@ export class WorklogDatabase {
     this.refreshFromJsonlIfNewer();
     const removed = this.store.deleteDependencyEdge(fromId, toId);
     if (removed) {
-      this.exportToJsonl();
       this.triggerAutoSync();
     }
     return removed;
@@ -1861,7 +1847,6 @@ export class WorklogDatabase {
       updatedAt: new Date().toISOString(),
     };
     this.store.saveWorkItem(updated);
-    this.exportToJsonl();
     this.triggerAutoSync();
     return true;
   }
@@ -1885,7 +1870,6 @@ export class WorklogDatabase {
         updatedAt: new Date().toISOString(),
       };
       this.store.saveWorkItem(updated);
-      this.exportToJsonl();
       this.triggerAutoSync();
       if (process.env.WL_DEBUG) {
         process.stderr.write(`[wl:dep] re-blocked ${itemId} (active blockers remain)\n`);
@@ -1903,7 +1887,6 @@ export class WorklogDatabase {
       updatedAt: new Date().toISOString(),
     };
     this.store.saveWorkItem(updated);
-    this.exportToJsonl();
     this.triggerAutoSync();
     if (process.env.WL_DEBUG) {
       process.stderr.write(`[wl:dep] unblocked ${itemId} (no active blockers remain)\n`);
@@ -1968,7 +1951,6 @@ export class WorklogDatabase {
      // Re-index the parent work item in FTS to include the new comment text
      const parentItem = this.store.getWorkItem(input.workItemId);
      if (parentItem) this.store.upsertFtsEntry(parentItem);
-     this.exportToJsonl();
      this.triggerAutoSync();
      return comment;
   }
@@ -2015,7 +1997,6 @@ export class WorklogDatabase {
      // Re-index the parent work item in FTS to reflect updated comment text
      const parentItem = this.store.getWorkItem(comment.workItemId);
      if (parentItem) this.store.upsertFtsEntry(parentItem);
-     this.exportToJsonl();
      this.triggerAutoSync();
      return updated;
   }
@@ -2034,7 +2015,6 @@ export class WorklogDatabase {
         // Re-index the parent work item in FTS to reflect removed comment
         const parentItem = this.store.getWorkItem(comment.workItemId);
         if (parentItem) this.store.upsertFtsEntry(parentItem);
-        this.exportToJsonl();
         this.triggerAutoSync();
       }
       return result;
@@ -2067,7 +2047,6 @@ export class WorklogDatabase {
     for (const comment of comments) {
       this.store.saveComment(comment);
     }
-    this.exportToJsonl();
     this.triggerAutoSync();
   }
 

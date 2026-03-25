@@ -145,45 +145,6 @@ describe('Configuration', () => {
       expect(content).toContain('prefix: TEST');
     });
 
-    it('should save config with autoExport setting', () => {
-      const config = {
-        projectName: 'Test Project',
-        prefix: 'TEST',
-        autoExport: false,
-        statuses: [
-          { value: 'open', label: 'Open' },
-          { value: 'in-progress', label: 'In Progress' },
-          { value: 'blocked', label: 'Blocked' },
-          { value: 'completed', label: 'Completed' },
-          { value: 'deleted', label: 'Deleted' }
-        ],
-        stages: [
-          { value: '', label: 'Undefined' },
-          { value: 'idea', label: 'Idea' },
-          { value: 'prd_complete', label: 'PRD Complete' },
-          { value: 'plan_complete', label: 'Plan Complete' },
-          { value: 'in_progress', label: 'In Progress' },
-          { value: 'in_review', label: 'In Review' },
-          { value: 'done', label: 'Done' }
-        ],
-        statusStageCompatibility: {
-          open: ['', 'idea', 'prd_complete', 'plan_complete', 'in_progress'],
-          'in-progress': ['in_progress'],
-          blocked: ['', 'idea', 'prd_complete', 'plan_complete', 'in_progress'],
-          completed: ['in_review', 'done'],
-          deleted: ['']
-        }
-      };
-
-      saveConfig(config);
-
-      expect(fs.existsSync(getConfigPath())).toBe(true);
-      const content = fs.readFileSync(getConfigPath(), 'utf-8');
-      expect(content).toContain('projectName: Test Project');
-      expect(content).toContain('prefix: TEST');
-      expect(content).toContain('autoExport: false');
-    });
-
     it('should create .worklog directory if it does not exist', () => {
       const config = {
         projectName: 'Test Project',
@@ -303,45 +264,6 @@ describe('Configuration', () => {
       expect(loaded?.prefix).toBe('TEST');
     });
 
-    it('should load config with autoExport setting', () => {
-      const testConfig = {
-        projectName: 'Test Project',
-        prefix: 'TEST',
-        autoExport: false,
-        statuses: [
-          { value: 'open', label: 'Open' },
-          { value: 'in-progress', label: 'In Progress' },
-          { value: 'blocked', label: 'Blocked' },
-          { value: 'completed', label: 'Completed' },
-          { value: 'deleted', label: 'Deleted' }
-        ],
-        stages: [
-          { value: '', label: 'Undefined' },
-          { value: 'idea', label: 'Idea' },
-          { value: 'prd_complete', label: 'PRD Complete' },
-          { value: 'plan_complete', label: 'Plan Complete' },
-          { value: 'in_progress', label: 'In Progress' },
-          { value: 'in_review', label: 'In Review' },
-          { value: 'done', label: 'Done' }
-        ],
-        statusStageCompatibility: {
-          open: ['', 'idea', 'prd_complete', 'plan_complete', 'in_progress'],
-          'in-progress': ['in_progress'],
-          blocked: ['', 'idea', 'prd_complete', 'plan_complete', 'in_progress'],
-          completed: ['in_review', 'done'],
-          deleted: ['']
-        }
-      };
-      saveConfig(testConfig);
-
-      const loaded = loadConfig();
-
-      expect(loaded).toBeDefined();
-      expect(loaded?.projectName).toBe('Test Project');
-      expect(loaded?.prefix).toBe('TEST');
-      expect(loaded?.autoExport).toBe(false);
-    });
-
     it('should load defaults when only defaults exist', () => {
       const configDir = getConfigDir();
       fs.mkdirSync(configDir, { recursive: true });
@@ -411,59 +333,6 @@ describe('Configuration', () => {
       expect(loaded?.stages).toBeDefined();
       expect(loaded?.stages!.length).toBeGreaterThan(0);
       expect(loaded?.statusStageCompatibility).toBeDefined();
-    });
-
-    it('should load autoExport from defaults', () => {
-      const configDir = getConfigDir();
-      fs.mkdirSync(configDir, { recursive: true });
-      fs.writeFileSync(
-        getConfigDefaultsPath(), 
-        [
-          'projectName: Default Project',
-          'prefix: DEF',
-          'autoExport: true',
-          'statuses:',
-          '  - value: open',
-          '    label: Open',
-          '  - value: in-progress',
-          '    label: In Progress',
-          '  - value: blocked',
-          '    label: Blocked',
-          '  - value: completed',
-          '    label: Completed',
-          '  - value: deleted',
-          '    label: Deleted',
-          'stages:',
-          '  - value: ""',
-          '    label: Undefined',
-          '  - value: idea',
-          '    label: Idea',
-          '  - value: prd_complete',
-          '    label: PRD Complete',
-          '  - value: plan_complete',
-          '    label: Plan Complete',
-          '  - value: in_progress',
-          '    label: In Progress',
-          '  - value: in_review',
-          '    label: In Review',
-          '  - value: done',
-          '    label: Done',
-          'statusStageCompatibility:',
-          '  open: ["", idea, prd_complete, plan_complete, in_progress]',
-          '  in-progress: [in_progress]',
-          '  blocked: ["", idea, prd_complete, plan_complete, in_progress]',
-          '  completed: [in_review, done]',
-          '  deleted: [""]'
-        ].join('\n'),
-        'utf-8'
-      );
-
-      const loaded = loadConfig();
-
-      expect(loaded).toBeDefined();
-      expect(loaded?.projectName).toBe('Default Project');
-      expect(loaded?.prefix).toBe('DEF');
-      expect(loaded?.autoExport).toBe(true);
     });
 
     it('should merge user config over defaults', () => {
@@ -558,102 +427,6 @@ describe('Configuration', () => {
       expect(loaded).toBeDefined();
       expect(loaded?.projectName).toBe('Default Project'); // From defaults
       expect(loaded?.prefix).toBe('USER'); // Overridden by user config
-    });
-
-    it('should allow user config to override autoExport from defaults', () => {
-      const configDir = getConfigDir();
-      fs.mkdirSync(configDir, { recursive: true });
-      
-      // Create defaults with autoExport: true
-      fs.writeFileSync(
-        getConfigDefaultsPath(), 
-        [
-          'projectName: Default Project',
-          'prefix: DEF',
-          'autoExport: true',
-          'statuses:',
-          '  - value: open',
-          '    label: Open',
-          '  - value: in-progress',
-          '    label: In Progress',
-          '  - value: blocked',
-          '    label: Blocked',
-          '  - value: completed',
-          '    label: Completed',
-          '  - value: deleted',
-          '    label: Deleted',
-          'stages:',
-          '  - value: ""',
-          '    label: Undefined',
-          '  - value: idea',
-          '    label: Idea',
-          '  - value: prd_complete',
-          '    label: PRD Complete',
-          '  - value: plan_complete',
-          '    label: Plan Complete',
-          '  - value: in_progress',
-          '    label: In Progress',
-          '  - value: in_review',
-          '    label: In Review',
-          '  - value: done',
-          '    label: Done',
-          'statusStageCompatibility:',
-          '  open: ["", idea, prd_complete, plan_complete, in_progress]',
-          '  in-progress: [in_progress]',
-          '  blocked: ["", idea, prd_complete, plan_complete, in_progress]',
-          '  completed: [in_review, done]',
-          '  deleted: [""]'
-        ].join('\n'),
-        'utf-8'
-      );
-
-      // Create user config that disables autoExport
-      fs.writeFileSync(
-        getConfigPath(), 
-        [
-          'autoExport: false',
-          'statuses:',
-          '  - value: open',
-          '    label: Open',
-          '  - value: in-progress',
-          '    label: In Progress',
-          '  - value: blocked',
-          '    label: Blocked',
-          '  - value: completed',
-          '    label: Completed',
-          '  - value: deleted',
-          '    label: Deleted',
-          'stages:',
-          '  - value: ""',
-          '    label: Undefined',
-          '  - value: idea',
-          '    label: Idea',
-          '  - value: prd_complete',
-          '    label: PRD Complete',
-          '  - value: plan_complete',
-          '    label: Plan Complete',
-          '  - value: in_progress',
-          '    label: In Progress',
-          '  - value: in_review',
-          '    label: In Review',
-          '  - value: done',
-          '    label: Done',
-          'statusStageCompatibility:',
-          '  open: ["", idea, prd_complete, plan_complete, in_progress]',
-          '  in-progress: [in_progress]',
-          '  blocked: ["", idea, prd_complete, plan_complete, in_progress]',
-          '  completed: [in_review, done]',
-          '  deleted: [""]'
-        ].join('\n'),
-        'utf-8'
-      );
-
-      const loaded = loadConfig();
-
-      expect(loaded).toBeDefined();
-      expect(loaded?.projectName).toBe('Default Project'); // From defaults
-      expect(loaded?.prefix).toBe('DEF'); // From defaults
-      expect(loaded?.autoExport).toBe(false); // Overridden by user config
     });
 
     it('should validate that projectName is a string', () => {

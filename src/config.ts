@@ -185,6 +185,12 @@ export function loadConfig(): WorklogConfig | null {
     console.error(statusStageError);
     return null;
   }
+
+  // Warn about deprecated autoExport option (but don't fail)
+  const rawConfig = config as any;
+  if (rawConfig?.autoExport !== undefined) {
+    console.warn('Warning: autoExport config option is deprecated and will be ignored. Export functionality has been removed.');
+  }
   
   return config;
 }
@@ -369,7 +375,6 @@ function printHeading(title: string): void {
 export type InitConfigOptions = {
   projectName?: string;
   prefix?: string;
-  autoExport?: boolean;
   autoSync?: boolean;
 };
 
@@ -381,22 +386,20 @@ export async function initConfig(existingConfig?: WorklogConfig | null, options?
     printHeading('Current Configuration');
     console.log(`  Project: ${existingConfig.projectName}`);
     console.log(`  Prefix: ${existingConfig.prefix}`);
-    console.log(`  Auto-export: ${existingConfig.autoExport !== false ? 'enabled' : 'disabled'}`);
     console.log(`  Auto-sync: ${existingConfig.autoSync ? 'enabled' : 'disabled'}\n`);
     if (existingConfig.syncRemote || existingConfig.syncBranch) {
       console.log(`  Sync remote: ${existingConfig.syncRemote || '(default)'}`);
-      console.log(`  Sync branch: ${existingConfig.syncBranch || '(default)'}\n`);
+      console.log(`  Sync branch: ${existingConfig.syncBranch || '(default)'}`);
     }
     if (existingConfig.githubRepo || existingConfig.githubLabelPrefix || existingConfig.githubImportCreateNew !== undefined) {
       console.log(`  GitHub repo: ${existingConfig.githubRepo || '(not set)'}`);
       console.log(`  GitHub label prefix: ${existingConfig.githubLabelPrefix || '(default)'}`);
-      console.log(`  GitHub import create: ${existingConfig.githubImportCreateNew !== false ? 'enabled' : 'disabled'}\n`);
+      console.log(`  GitHub import create: ${existingConfig.githubImportCreateNew !== false ? 'enabled' : 'disabled'}`);
     }
 
     const hasExplicitOptions = Boolean(
       options?.projectName !== undefined ||
       options?.prefix !== undefined ||
-      options?.autoExport !== undefined ||
       options?.autoSync !== undefined
     );
 
@@ -455,24 +458,6 @@ export async function initConfig(existingConfig?: WorklogConfig | null, options?
   }
   prefix = prefix.trim();
 
-  // Prompt for auto-export setting
-  const currentAutoExport = existingConfig?.autoExport !== false ? 'Y' : 'n';
-  const autoExportPrompt = existingConfig
-    ? `Auto-export data to JSONL after changes? (Y/n) [${currentAutoExport}]: `
-    : 'Auto-export data to JSONL after changes? (Y/n) [Y]: ';
-  let autoExport: boolean;
-  if (options?.autoExport !== undefined) {
-    autoExport = options.autoExport;
-  } else {
-    const autoExportInput = await prompt(autoExportPrompt);
-    if (autoExportInput.trim() === '') {
-      // Use default or existing value
-      autoExport = existingConfig?.autoExport !== false;
-    } else {
-      autoExport = autoExportInput.toLowerCase() !== 'n' && autoExportInput.toLowerCase() !== 'no';
-    }
-  }
-
   const currentAutoSync = existingConfig?.autoSync === true ? 'Y' : 'n';
   const autoSyncPrompt = existingConfig
     ? `Auto-sync data to git after changes? (y/N) [${currentAutoSync}]: `
@@ -502,7 +487,6 @@ export async function initConfig(existingConfig?: WorklogConfig | null, options?
   const config: WorklogConfig = {
     projectName,
     prefix: prefix.toUpperCase(),
-    autoExport,
     autoSync,
   };
 
@@ -527,7 +511,6 @@ export async function initConfig(existingConfig?: WorklogConfig | null, options?
   console.log(`\nSaved to: ${getConfigPath()}`);
   console.log(`Project:  ${config.projectName}`);
   console.log(`Prefix:   ${config.prefix}`);
-  console.log(`Export:   ${config.autoExport ? 'enabled' : 'disabled'}`);
   console.log(`Sync:     ${config.autoSync ? 'enabled' : 'disabled'}`);
 
   return config;

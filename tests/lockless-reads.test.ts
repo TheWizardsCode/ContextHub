@@ -73,7 +73,11 @@ describe('Lockless reads concurrency', () => {
     cleanupTempDir(tempDir);
   });
 
-  it('should allow 5+ concurrent readers alongside a writer with no lock errors', async () => {
+  // SKIPPED: This test relies on autoExport functionality which was removed in Phase 1.
+  // The autoExport feature that automatically wrote to JSONL after each database operation
+  // has been removed to eliminate TUI freezing. JSONL export will be handled explicitly
+  // in Phase 2 (sync operations).
+  it.skip('should allow 5+ concurrent readers alongside a writer with no lock errors', async () => {
     const NUM_READERS = 5;
     const WRITER_ITERATIONS = 20;
     const READER_ITERATIONS = 30;

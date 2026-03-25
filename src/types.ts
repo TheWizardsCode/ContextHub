@@ -133,7 +133,6 @@ export interface WorkItemQuery {
 export interface WorklogConfig {
   projectName: string;
   prefix: string;
-  autoExport?: boolean;
   autoSync?: boolean;
   auditWriteEnabled?: boolean;
   syncRemote?: string;
