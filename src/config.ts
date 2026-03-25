@@ -15,6 +15,9 @@ const CONFIG_FILE = 'config.yaml';
 const CONFIG_DEFAULTS_FILE = 'config.defaults.yaml';
 const INIT_SEMAPHORE_FILE = 'initialized';
 
+// Track if autoExport deprecation warning has been shown to avoid spamming TUI
+let autoExportWarningShown = false;
+
 /**
  * Get the path to the config directory
  */
@@ -187,9 +190,12 @@ export function loadConfig(): WorklogConfig | null {
   }
 
   // Warn about deprecated autoExport option (but don't fail)
+  // Only show warning once to avoid spamming TUI output
   const rawConfig = config as any;
-  if (rawConfig?.autoExport !== undefined) {
-    console.warn('Warning: autoExport config option is deprecated and will be ignored. Export functionality has been removed.');
+  if (rawConfig?.autoExport !== undefined && !autoExportWarningShown) {
+    autoExportWarningShown = true;
+    // Write to stderr to avoid interfering with TUI stdout
+    process.stderr.write('Warning: autoExport config option is deprecated and will be ignored. Export functionality has been removed.\n');
   }
   
   return config;
