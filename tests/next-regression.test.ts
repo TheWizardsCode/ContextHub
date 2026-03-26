@@ -35,6 +35,9 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
     tempDir = createTempDir();
     dbPath = createTempDbPath(tempDir);
     jsonlPath = createTempJsonlPath(tempDir);
+    if (fs.existsSync(jsonlPath)) {
+      fs.unlinkSync(jsonlPath);
+    }
     db = new WorklogDatabase('TEST', dbPath, jsonlPath, true, true);
   });
 

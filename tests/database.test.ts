@@ -18,6 +18,9 @@ describe('WorklogDatabase', () => {
     tempDir = createTempDir();
     dbPath = createTempDbPath(tempDir);
     jsonlPath = createTempJsonlPath(tempDir);
+    if (fs.existsSync(jsonlPath)) {
+      fs.unlinkSync(jsonlPath);
+    }
     db = new WorklogDatabase('TEST', dbPath, jsonlPath, true, true);
   });
 

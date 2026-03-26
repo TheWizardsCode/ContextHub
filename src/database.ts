@@ -14,9 +14,10 @@ import * as searchMetrics from './search-metrics.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
 
 const UNIQUE_TIME_LENGTH = 9;
-const UNIQUE_RANDOM_BYTES = 4;
-const UNIQUE_RANDOM_LENGTH = 7;
-const UNIQUE_ID_LENGTH = UNIQUE_TIME_LENGTH + UNIQUE_RANDOM_LENGTH;
+const UNIQUE_SEQUENCE_LENGTH = 2;
+const UNIQUE_RANDOM_BYTES = 3;
+const UNIQUE_RANDOM_LENGTH = 5;
+const UNIQUE_ID_LENGTH = UNIQUE_TIME_LENGTH + UNIQUE_SEQUENCE_LENGTH + UNIQUE_RANDOM_LENGTH;
 const MAX_ID_GENERATION_ATTEMPTS = 10;
 
 export class WorklogDatabase {
@@ -27,6 +28,8 @@ export class WorklogDatabase {
   private autoSync: boolean;
   private syncProvider?: () => Promise<void>;
   private lockPath: string;
+  private _lastIdTime: number = 0;
+  private _idSequence: number = 0;
 
   constructor(
     prefix: string = 'WI',
@@ -677,18 +680,28 @@ export class WorklogDatabase {
   }
 
   /**
-   * Generate a globally unique, human-readable identifier
+   * Generate a globally unique, human-readable identifier.
+   * Uses a sequence counter to ensure deterministic ordering when multiple
+   * IDs are generated within the same millisecond.
    */
   private generateUniqueId(): string {
-    const timeRaw = Date.now().toString(36).toUpperCase();
+    const now = Date.now();
+    if (now !== this._lastIdTime) {
+      this._lastIdTime = now;
+      this._idSequence = 0;
+    } else {
+      this._idSequence++;
+    }
+    const timeRaw = now.toString(36).toUpperCase();
     if (timeRaw.length > UNIQUE_TIME_LENGTH) {
       throw new Error('Timestamp overflow while generating unique ID');
     }
     const timePart = timeRaw.padStart(UNIQUE_TIME_LENGTH, '0');
     const randomBytesValue = randomBytes(UNIQUE_RANDOM_BYTES);
-    const randomNumber = randomBytesValue.readUInt32BE(0);
+    const randomNumber = randomBytesValue.readUIntBE(0, UNIQUE_RANDOM_BYTES);
     const randomPart = randomNumber.toString(36).toUpperCase().padStart(UNIQUE_RANDOM_LENGTH, '0');
-    const id = `${timePart}${randomPart}`;
+    const sequencePart = this._idSequence.toString(36).toUpperCase().padStart(2, '0');
+    const id = `${timePart}${sequencePart}${randomPart}`;
     if (id.length !== UNIQUE_ID_LENGTH) {
       throw new Error('Generated unique ID has unexpected length');
     }
