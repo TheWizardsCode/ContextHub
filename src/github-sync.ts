@@ -300,9 +300,11 @@ export async function upsertIssuesFromWorkItems(
         if (onVerboseLog) {
           onVerboseLog(`[upsert] ${item.githubIssueNumber ? 'update' : 'create'} ${item.id}`);
         }
-          if (item.githubIssueNumber) {
-            increment('api.issue.update');
-            issue = await throttler.schedule(() => updateGithubIssueAsync(config, item.githubIssueNumber!, payload));
+            if (item.githubIssueNumber) {
+              increment('api.issue.update');
+              // updateGithubIssueAsync already schedules via the central throttler
+              // internally (see src/github.ts). Avoid double-scheduling here.
+              issue = await updateGithubIssueAsync(config, item.githubIssueNumber!, payload);
           if (item.status === 'deleted') {
             result.closed += 1;
             result.syncedItems.push({
@@ -320,13 +322,14 @@ export async function upsertIssuesFromWorkItems(
               issueNumber: item.githubIssueNumber,
             });
           }
-          } else {
-            increment('api.issue.create');
-            issue = await throttler.schedule(() => createGithubIssueAsync(config, {
-              title: payload.title,
-              body: payload.body,
-              labels: payload.labels,
-            }));
+            } else {
+              increment('api.issue.create');
+              // createGithubIssueAsync schedules via the central throttler itself.
+              issue = await createGithubIssueAsync(config, {
+                title: payload.title,
+                body: payload.body,
+                labels: payload.labels,
+              });
           result.created += 1;
           result.syncedItems.push({
             action: 'created',
