@@ -2042,6 +2042,7 @@ export class TuiController {
     const REFRESH_DEBOUNCE_MS = 300;
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
     let refreshFallbackIndex: number | null = null;
+    // Watcher for database directory changes.
     let dataWatcher: fs.FSWatcher | null = null;
     let isShuttingDown = false;
 
@@ -2067,6 +2068,12 @@ export class TuiController {
       const dataDir = pathImpl.dirname(dataPath);
       const dataFile = pathImpl.basename(dataPath);
       try {
+        // Initialize lastJsonlMtime from the current JSONL export if present so
+        // subsequent watch events can compare against a known baseline. If the
+        // stat fails, leave lastJsonlMtime as null which will cause watch events
+        // to be ignored until a successful stat occurs.
+        // No longer consult a JSONL mtime for watch decisions; always refresh
+        // on observed database directory events (debounced).
         // Watch for changes to either the main DB file or the WAL file.
         // In SQLite WAL mode, changes are written to the -wal file first,
         // so we need to watch both files to detect all database changes.
@@ -2080,6 +2087,20 @@ export class TuiController {
           watchDebounce = setTimeout(() => {
             watchDebounce = null;
             const selectedIndex = typeof list.selected === 'number' ? (list.selected as number) : 0;
+            // If the watcher provided a specific filename (eg. 'worklog.db' or
+            // 'worklog.db-wal') then refresh unconditionally — the event
+            // directly refers to the database file. When filename is undefined
+            // we only refresh when the transient JSONL export mtime changed to
+            // avoid unnecessary reloads caused by unrelated directory changes.
+            if (filename) {
+              scheduleRefreshFromDatabase(selectedIndex);
+              return;
+            }
+            // Always refresh on debounced directory events. The watcher may
+            // provide a filename for the DB or WAL; when it does we refresh
+            // immediately. When filename is undefined (some platforms) we also
+            // refresh — we no longer rely on a JSONL export mtime to gate
+            // updates.
             scheduleRefreshFromDatabase(selectedIndex);
           }, 75);
         });
