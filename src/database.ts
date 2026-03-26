@@ -1237,7 +1237,9 @@ export class WorklogDatabase {
 
     let score = 0;
 
-    // Priority base
+    // Priority base — use raw priority so that priority dominance (high > medium)
+    // is preserved. Effective priority inheritance affects the effective-priority
+    // tiebreaker in selectBySortIndex, not the base score.
     score += this.getPriorityValue(item.priority) * WEIGHTS.priority;
 
     // Blocks-high-priority boost: if this item is a dependency prerequisite for
@@ -1341,13 +1343,21 @@ export class WorklogDatabase {
     const allSame = items.every(item => (item.sortIndex ?? 0) === firstSortIndex);
     if (allSame) {
       const cache = effectivePriorityCache ?? new Map();
+
       const sorted = items.slice().sort((a, b) => {
+        // 1. Effective priority (descending) — primary ranking factor.
+        // Effective priority accounts for inheritance from in-progress parents
+        // and blocked dependents.
         const aEffective = this.computeEffectivePriority(a, cache);
         const bEffective = this.computeEffectivePriority(b, cache);
         const priDiff = bEffective.value - aEffective.value;
         if (priDiff !== 0) return priDiff;
+
+        // 2. CreatedAt (ascending / oldest first)
         const createdDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
         if (createdDiff !== 0) return createdDiff;
+
+        // 3. ID (deterministic tiebreaker)
         return a.id.localeCompare(b.id);
       });
       return sorted[0] ?? null;
