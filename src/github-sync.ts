@@ -352,7 +352,9 @@ export async function upsertIssuesFromWorkItems(
         if (shouldSyncCommentsNow && issueNumber) {
           const commentListStart = Date.now();
           increment('api.comment.list');
-          const existingComments = await throttler.schedule(() => listGithubIssueCommentsAsync(config, issueNumber!));
+          // listGithubIssueCommentsAsync now schedules internally via the throttler
+          // (see src/github.ts). Call it directly to avoid double-scheduling.
+          const existingComments = await listGithubIssueCommentsAsync(config, issueNumber!);
           timing.commentListMs += Date.now() - commentListStart;
           const commentUpsertStart = Date.now();
           const commentSummary = await upsertGithubIssueCommentsAsync(config, issueNumber, itemComments, existingComments);
@@ -410,7 +412,9 @@ export async function upsertIssuesFromWorkItems(
         const bodyMatch = (existing.body || '').trim() === body.trim();
            if (!bodyMatch) {
            increment('api.comment.update');
-            const updatedComment = await throttler.schedule(() => updateGithubIssueCommentAsync(issueConfig, existing.id!, body));
+             // updateGithubIssueCommentAsync now schedules internally via the throttler
+             // (see src/github.ts). Call it directly to avoid double-scheduling.
+             const updatedComment = await updateGithubIssueCommentAsync(issueConfig, existing.id!, body);
           // Persist mapping back to local comment
           comment.githubCommentId = existing.id;
           comment.githubCommentUpdatedAt = updatedComment.updatedAt;
@@ -425,7 +429,9 @@ export async function upsertIssuesFromWorkItems(
 
        // No GH comment mapping found — create a new comment
         increment('api.comment.create');
-           const createdComment = await throttler.schedule(() => createGithubIssueCommentAsync(issueConfig, issueNumber, body));
+            // createGithubIssueCommentAsync now schedules internally via the throttler
+            // (see src/github.ts). Call it directly to avoid double-scheduling.
+            const createdComment = await createGithubIssueCommentAsync(issueConfig, issueNumber, body);
       // Persist mapping back to local comment so future runs can directly reference by ID
       comment.githubCommentId = createdComment.id;
       comment.githubCommentUpdatedAt = createdComment.updatedAt;

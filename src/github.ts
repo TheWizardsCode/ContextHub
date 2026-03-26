@@ -934,14 +934,18 @@ export function listGithubIssueComments(config: GithubConfig, issueNumber: numbe
 export async function listGithubIssueCommentsAsync(config: GithubConfig, issueNumber: number): Promise<GithubIssueComment[]> {
   const { owner, name } = parseRepoSlug(config.repo);
   const command = `gh api repos/${owner}/${name}/issues/${issueNumber}/comments --paginate`;
-  try {
-    const data = await runGhJsonAsync(command);
-    if (!data) return [];
-    const raw = Array.isArray(data) ? data : [];
-    return raw.map(comment => normalizeGithubIssueComment(comment));
-  } catch {
-    return [];
-  }
+  // Schedule network call through central throttler to enforce concurrency
+  // and rate limits. Callers should not need to schedule this themselves.
+  return await throttler.schedule(async () => {
+    try {
+      const data = await runGhJsonAsync(command);
+      if (!data) return [];
+      const raw = Array.isArray(data) ? data : [];
+      return raw.map(comment => normalizeGithubIssueComment(comment));
+    } catch {
+      return [];
+    }
+  });
 }
 
 export function createGithubIssueComment(config: GithubConfig, issueNumber: number, body: string): GithubIssueComment {
@@ -952,10 +956,13 @@ export function createGithubIssueComment(config: GithubConfig, issueNumber: numb
 }
 
 export async function createGithubIssueCommentAsync(config: GithubConfig, issueNumber: number, body: string): Promise<GithubIssueComment> {
-  const { owner, name } = parseRepoSlug(config.repo);
-  const command = `gh api -X POST repos/${owner}/${name}/issues/${issueNumber}/comments -F body=@-`;
-  const data = await runGhJsonAsync(command, body);
-  return normalizeGithubIssueComment(data);
+  // Ensure comment creation is scheduled through the central throttler.
+  return await throttler.schedule(async () => {
+    const { owner, name } = parseRepoSlug(config.repo);
+    const command = `gh api -X POST repos/${owner}/${name}/issues/${issueNumber}/comments -F body=@-`;
+    const data = await runGhJsonAsync(command, body);
+    return normalizeGithubIssueComment(data);
+  });
 }
 
 export function updateGithubIssueComment(config: GithubConfig, commentId: number, body: string): GithubIssueComment {
@@ -966,10 +973,13 @@ export function updateGithubIssueComment(config: GithubConfig, commentId: number
 }
 
 export async function updateGithubIssueCommentAsync(config: GithubConfig, commentId: number, body: string): Promise<GithubIssueComment> {
-  const { owner, name } = parseRepoSlug(config.repo);
-  const command = `gh api -X PATCH repos/${owner}/${name}/issues/comments/${commentId} -F body=@-`;
-  const data = await runGhJsonAsync(command, body);
-  return normalizeGithubIssueComment(data);
+  // Ensure comment updates are scheduled through the central throttler.
+  return await throttler.schedule(async () => {
+    const { owner, name } = parseRepoSlug(config.repo);
+    const command = `gh api -X PATCH repos/${owner}/${name}/issues/comments/${commentId} -F body=@-`;
+    const data = await runGhJsonAsync(command, body);
+    return normalizeGithubIssueComment(data);
+  });
 }
 
 export function getGithubIssueComment(config: GithubConfig, commentId: number): GithubIssueComment {
