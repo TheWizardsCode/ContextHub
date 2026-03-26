@@ -585,20 +585,24 @@ describe('TUI integration: style preservation', () => {
     const onWatch = watchCallbacks[0];
     const baselineCalls = listMock.mock.calls.length;
 
-    onWatch('change', undefined);
-    await vi.advanceTimersByTimeAsync(400);
-    expect(listMock.mock.calls.length).toBe(baselineCalls);
-
-    dataMtimeMs = 2000;
+    // We no longer consult a JSONL mtime for watch decisions; every
+    // debounced directory event should schedule a refresh. Verify that
+    // each debounced callback results in an additional db.list() call.
     onWatch('change', undefined);
     await vi.advanceTimersByTimeAsync(400);
     expect(listMock.mock.calls.length).toBeGreaterThan(baselineCalls);
 
-    const afterChangedMtimeCalls = listMock.mock.calls.length;
+    const afterFirstCalls = listMock.mock.calls.length;
+    dataMtimeMs = 2000;
+    onWatch('change', undefined);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(listMock.mock.calls.length).toBeGreaterThan(afterFirstCalls);
+
+    const afterSecondCalls = listMock.mock.calls.length;
     mtimeReadError = true;
     onWatch('change', undefined);
     await vi.advanceTimersByTimeAsync(400);
-    expect(listMock.mock.calls.length).toBe(afterChangedMtimeCalls);
+    expect(listMock.mock.calls.length).toBeGreaterThan(afterSecondCalls);
 
     vi.useRealTimers();
   });
