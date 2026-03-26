@@ -230,13 +230,6 @@ export class WorklogDatabase {
       return; // No JSONL file, nothing to refresh from
     }
 
-    // Skip refresh for TEST prefix databases to avoid test pollution.
-    // Test databases are created with fresh temp directories and should not
-    // import from any stale JSONL files.
-    if (this.prefix.startsWith('TEST')) {
-      return;
-    }
-
     try {
       const jsonlStats = fs.statSync(this.jsonlPath);
       // Use Math.floor to match the precision of stored mtime (which is stored via Math.floor().toString())
