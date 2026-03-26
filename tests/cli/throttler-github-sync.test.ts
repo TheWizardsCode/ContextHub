@@ -30,12 +30,24 @@ describe('github-sync throttler integration (unit)', () => {
     ];
     const comments = [];
 
-    // Stub out github API helpers (they are exported from src/github.js)
-    vi.spyOn(githubHelpers as any, 'createGithubIssueAsync').mockImplementation(async () => ({ number: 123, id: 99, updatedAt: new Date().toISOString() }));
-    vi.spyOn(githubHelpers as any, 'updateGithubIssueAsync').mockImplementation(async () => ({ number: 123, id: 99, updatedAt: new Date().toISOString() }));
-    vi.spyOn(githubHelpers as any, 'listGithubIssueCommentsAsync').mockImplementation(async () => []);
-    vi.spyOn(githubHelpers as any, 'createGithubIssueCommentAsync').mockImplementation(async () => ({ id: 1, updatedAt: new Date().toISOString() }));
-    vi.spyOn(githubHelpers as any, 'updateGithubIssueCommentAsync').mockImplementation(async () => ({ id: 1, updatedAt: new Date().toISOString() }));
+    // Stub out github API helpers (they are exported from src/github.js).
+    // Each stub should still call the central throttler so we can assert
+    // `throttler.schedule` is used by the flow.
+    vi.spyOn(githubHelpers as any, 'createGithubIssueAsync').mockImplementation(() =>
+      throttler.schedule(async () => ({ number: 123, id: 99, updatedAt: new Date().toISOString() }))
+    );
+    vi.spyOn(githubHelpers as any, 'updateGithubIssueAsync').mockImplementation(() =>
+      throttler.schedule(async () => ({ number: 123, id: 99, updatedAt: new Date().toISOString() }))
+    );
+    vi.spyOn(githubHelpers as any, 'listGithubIssueCommentsAsync').mockImplementation(() =>
+      throttler.schedule(async () => [])
+    );
+    vi.spyOn(githubHelpers as any, 'createGithubIssueCommentAsync').mockImplementation(() =>
+      throttler.schedule(async () => ({ id: 1, updatedAt: new Date().toISOString() }))
+    );
+    vi.spyOn(githubHelpers as any, 'updateGithubIssueCommentAsync').mockImplementation(() =>
+      throttler.schedule(async () => ({ id: 1, updatedAt: new Date().toISOString() }))
+    );
 
     const config = { repo: 'owner/repo', labelPrefix: 'wl:' } as any;
 
