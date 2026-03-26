@@ -1,0 +1,41 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`Human snapshots: show and list outputs with audit > renders concise/list and single-item human outputs with and without audit (snapshots) > human-list-with-audit 1`] = `
+"Found 2 work item(s):
+
+
+├── Audited task TEST-1
+│   Status: Open · Stage: Undefined | Priority: medium
+│   SortIndex: 0
+│   Risk: —
+│   Effort: —
+│   Audit: Ready to close: Yes
+└── No audit TEST-2
+    Status: Open · Stage: Undefined | Priority: medium
+    SortIndex: 0
+    Risk: —
+    Effort: —
+
+"
+`;
+
+exports[`Human snapshots: show and list outputs with audit > renders concise/list and single-item human outputs with and without audit (snapshots) > human-show-with-audit 1`] = `
+"
+└── Audited task TEST-1
+    Status: Open · Stage: Undefined | Priority: medium
+    SortIndex: 0
+    Risk: —
+    Effort: —
+    Audit: Ready to close: Yes
+"
+`;
+
+exports[`Human snapshots: show and list outputs with audit > renders concise/list and single-item human outputs with and without audit (snapshots) > human-show-without-audit 1`] = `
+"
+└── No audit TEST-2
+    Status: Open · Stage: Undefined | Priority: medium
+    SortIndex: 0
+    Risk: —
+    Effort: —
+"
+`;
