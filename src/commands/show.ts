@@ -4,7 +4,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { ShowOptions } from '../cli-types.js';
-import type { WorkItem } from '../types.js';
+import type { WorkItem, Comment, ShowJsonOutput } from '../types.js';
 import { displayItemTree, displayItemTreeWithFormat, humanFormatComment, resolveFormat, humanFormatWorkItem } from './helpers.js';
 
 export default function register(ctx: PluginContext): void {
@@ -27,18 +27,17 @@ export default function register(ctx: PluginContext): void {
       }
       
       if (utils.isJsonMode()) {
-        // Prepare JSON-safe copies that omit the `audit` field when absent
+        // Prepare JSON-safe copies that omit the `audit` field when absent.
+        // Keep the audit object verbatim when present so JSON consumers can
+        // rely on the structured { time, author, text } shape.
         const stripAudit = (src: WorkItem) => {
-          // shallow copy - preserve other fields
           const copy: any = Object.assign({}, src);
-          // If audit is undefined or null, delete the property so JSON output
-          // omits the key entirely per our API contract.
           if (copy.audit === undefined || copy.audit === null) delete copy.audit;
-          return copy;
+          return copy as WorkItem;
         };
 
-        const result: any = { success: true, workItem: stripAudit(item) };
-        result.comments = db.getCommentsForWorkItem(normalizedId);
+        const result: ShowJsonOutput = { success: true, workItem: stripAudit(item) };
+        result.comments = db.getCommentsForWorkItem(normalizedId) as Comment[];
         if (options.children) {
            const children = db.getDescendants(normalizedId).map(stripAudit);
            const ancestors: any[] = [];

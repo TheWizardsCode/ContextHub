@@ -225,3 +225,18 @@ export interface NextWorkItemResult {
   workItem: WorkItem | null;
   reason: string;
 }
+
+/**
+ * JSON output shape for the `show` command when --json mode is enabled.
+ * This keeps the CLI's JSON API stable and explicitly documents the fields
+ * returned by the endpoint.
+ */
+export interface ShowJsonOutput {
+  success: true | false;
+  workItem?: WorkItem;
+  comments?: Comment[];
+  children?: WorkItem[];
+  ancestors?: WorkItem[];
+  // Optional error message used when success is false
+  error?: string;
+}
