@@ -261,8 +261,10 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push(`Effort: ${item.effort || '—'}`);
     if (item.assignee) lines.push(`Assignee: ${item.assignee}`);
     if (item.audit) {
+      // For human outputs, show a truncated/redacted one-line audit excerpt plus author
       const firstLine = String(item.audit.text || '').split(/\r?\n/, 1)[0];
-      lines.push(`Audit: ${firstLine}`);
+      // Friendly format: "<excerpt> — by <author>"
+      lines.push(`Audit: ${firstLine} — by ${item.audit.author}`);
     }
     if (item.tags && item.tags.length > 0) lines.push(`Tags: ${item.tags.join(', ')}`);
     return lines.join('\n');
@@ -286,7 +288,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     if (item.assignee) lines.push(`Assignee: ${item.assignee}`);
     if (item.audit) {
       const firstLine = String(item.audit.text || '').split(/\r?\n/, 1)[0];
-      lines.push(`Audit: ${firstLine}`);
+      lines.push(`Audit: ${firstLine} — by ${item.audit.author}`);
     }
     if (item.parentId) lines.push(`Parent: ${item.parentId}`);
     if (item.description) lines.push(`Description: ${item.description}`);
