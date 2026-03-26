@@ -28,7 +28,8 @@ describe('integration: audit write -> read roundtrip', () => {
     expect(shownRes.workItem).toBeDefined();
     expect(shownRes.workItem.audit).toBeDefined();
     // Audit text should be redacted by buildAuditEntry before persistence
-    expect(shownRes.workItem.audit.text).toMatch(/^a\*\*@/); // local-part redacted to firstChar***@domain
+    // redactAuditText replaces local part with firstChar + '***' and keeps domain
+    expect(shownRes.workItem.audit.text).toContain('a***@example.com');
     expect(shownRes.workItem.audit.author).toBeTruthy();
     expect(shownRes.workItem.audit.time).toMatch(/Z$/);
 
@@ -41,6 +42,6 @@ describe('integration: audit write -> read roundtrip', () => {
     const shownRes2 = JSON.parse(shown2);
     expect(shownRes2.success).toBe(true);
     expect(shownRes2.workItem.audit).toBeDefined();
-    expect(shownRes2.workItem.audit.text).toMatch(/^b\*\*@/);
+    expect(shownRes2.workItem.audit.text).toContain('b***@domain.org');
   });
 });
