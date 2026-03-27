@@ -2052,12 +2052,77 @@ export class TuiController {
         refreshFallbackIndex = fallbackIndex;
       }
       if (refreshTimer) clearTimeout(refreshTimer);
-      refreshTimer = setTimeout(() => {
-        refreshTimer = null;
-        const fallback = refreshFallbackIndex ?? undefined;
-        refreshFallbackIndex = null;
-        refreshFromDatabase(undefined, fallback);
-      }, REFRESH_DEBOUNCE_MS);
+        refreshTimer = setTimeout(() => {
+          refreshTimer = null;
+          const fallback = refreshFallbackIndex ?? undefined;
+          refreshFallbackIndex = null;
+
+          // If a search/filter is active, re-run the same filter command
+          // instead of doing a plain refresh so the filtered view is
+          // preserved across watcher-triggered updates.
+          if (activeFilterTerm) {
+            const args = ['list', activeFilterTerm, '--json'];
+            if (needsReviewFilter !== null) args.push('--needs-producer-review', String(needsReviewFilter));
+            if (options.prefix) args.push('--prefix', options.prefix);
+            try {
+              const child = spawnImpl('wl', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+              let stdout = '';
+              let stderr = '';
+              child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+              child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+              child.on('close', (code: number) => {
+                if (code !== 0) {
+                  try { debugLog(`Filter refresh failed: ${stderr.trim() || `exit ${code}`}`); } catch (_) {}
+                  // Fall back to a normal refresh but do NOT clear the active
+                  // filter state (resetSearch: false) so the UI label remains
+                  // consistent and the user can retry the search.
+                  refreshListWithOptions({
+                    status: options.inProgress ? 'in-progress' : undefined,
+                    includeClosed: options.all,
+                    resetSearch: false,
+                    preferredIndex: fallback,
+                    fallbackIndex: fallback,
+                    allowFallback: true,
+                  });
+                  return;
+                }
+
+                try {
+                  const payload = JSON.parse(stdout.trim());
+                  let results: any[] = [];
+                  if (Array.isArray(payload)) results = payload;
+                  else if (Array.isArray(payload.results)) results = payload.results;
+                  else if (Array.isArray(payload.workItems)) results = payload.workItems;
+                  else if (payload.workItem) results = [payload.workItem];
+
+                  state.items = results.length === 0
+                    ? []
+                    : results.map((r: any) => r.workItem ? r.workItem : r);
+                  state.showClosed = false;
+                  rebuildTree();
+                  expandInProgressAncestors();
+                  renderListAndDetail(typeof fallback === 'number' ? fallback : 0);
+                } catch (err) {
+                  try { debugLog(`Filter refresh parse error: ${String(err)}`); } catch (_) {}
+                }
+              });
+            } catch (err) {
+              try { debugLog(`Filter refresh spawn failed: ${String(err)}`); } catch (_) {}
+              // Worst-case: fall back to normal refresh but keep search state
+              refreshListWithOptions({
+                status: options.inProgress ? 'in-progress' : undefined,
+                includeClosed: options.all,
+                resetSearch: false,
+                preferredIndex: fallback,
+                fallbackIndex: fallback,
+                allowFallback: true,
+              });
+            }
+            return;
+          }
+
+          refreshFromDatabase(undefined, fallback);
+        }, REFRESH_DEBOUNCE_MS);
     };
 
     const startDatabaseWatch = () => {
