@@ -748,10 +748,13 @@ export class TuiController {
       setOpencodeBorderFocusStyle(pane === opencodeDialog);
     };
 
-      let suppressNextP = false;  // Flag to suppress 'p' handler after Ctrl-W p
-      let suppressNextPTimeout: ReturnType<typeof setTimeout> | null = null;
-      let lastCtrlWKeyHandled = false;  // Flag to suppress widget key handling after Ctrl-W command
-      let lastCtrlWKeyHandledTimeout: ReturnType<typeof setTimeout> | null = null;
+    let suppressNextP = false;  // Flag to suppress 'p' handler after Ctrl-W p
+    let suppressNextPTimeout: ReturnType<typeof setTimeout> | null = null;
+    let lastCtrlWKeyHandled = false;  // Flag to suppress widget key handling after Ctrl-W command
+    let lastCtrlWKeyHandledTimeout: ReturnType<typeof setTimeout> | null = null;
+    // Track the last item shown in the detail pane so we can preserve
+    // the user's scroll position when the same item is re-rendered.
+    let lastDetailItemId: string | null = null;
 
 
 
@@ -1756,8 +1759,21 @@ export class TuiController {
       const text = humanFormatWorkItem(node.item, db, 'detail-pane');
       const escaped = escapeBlessedTags(text);
       const brightened = brightenDetailIdLine(escaped);
+      // If we are switching to a different item, reset scroll to top.
+      // If the same item is being re-rendered (e.g. list refresh), preserve
+      // the user's current scroll position to avoid jarring jumps.
       detail.setContent(decorateIdsForClick(brightened));
-      detail.setScroll(0);
+      try {
+        const currentId = node.item.id;
+        const prevId = lastDetailItemId;
+        if (prevId === null || prevId !== currentId) {
+          // different item: reset scroll
+          if (typeof detail.setScroll === 'function') detail.setScroll(0);
+        } // else: same item — preserve scroll
+        lastDetailItemId = currentId;
+      } catch (_) {
+        try { if (typeof detail.setScroll === 'function') detail.setScroll(0); } catch (_) {}
+      }
       // Update metadata pane with current item's metadata
       if (metadataPaneComponent) {
         const commentCount = db ? db.getCommentsForWorkItem(node.item.id).length : 0;
