@@ -685,6 +685,12 @@ export class TuiController {
     };
     let paneFocusIndex = 0;
     let lastPaneFocusIndex = 0;
+    // Track the last work item id rendered in the detail pane so we only
+    // reset scroll when navigating to a different item. Preserving the
+    // scroll position when re-rendering the same item prevents the
+    // description panel from snapping back to the top after the user
+    // scrolls.
+    let lastDetailRenderedItemId: string | null = null;
 
     const getFocusPanes = (): Pane[] => {
       const panes: Pane[] = [list as unknown as Pane, detail as unknown as Pane];
@@ -1757,7 +1763,19 @@ export class TuiController {
       const escaped = escapeBlessedTags(text);
       const brightened = brightenDetailIdLine(escaped);
       detail.setContent(decorateIdsForClick(brightened));
-      detail.setScroll(0);
+      // Only reset scroll when navigating to a different work item. This
+      // preserves the user's manual scroll position when the same item is
+      // re-rendered (caused by unrelated UI updates) and prevents the
+      // description panel from snapping back to the top after scrolling.
+      try {
+        const currentItemId = node.item.id;
+        if (lastDetailRenderedItemId !== currentItemId) {
+          if (typeof (detail as any).setScroll === 'function') (detail as any).setScroll(0);
+        }
+        lastDetailRenderedItemId = currentItemId;
+      } catch (_) {
+        // best-effort: ignore if widget doesn't support scrolling APIs
+      }
       // Update metadata pane with current item's metadata
       if (metadataPaneComponent) {
         const commentCount = db ? db.getCommentsForWorkItem(node.item.id).length : 0;
