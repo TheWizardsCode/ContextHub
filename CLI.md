@@ -565,6 +565,11 @@ wl doctor upgrade --dry-run       # Preview pending schema migrations
 wl doctor upgrade --confirm       # Apply pending schema migrations
 wl doctor prune --days 30         # Prune items deleted more than 30 days ago
 wl doctor prune --dry-run         # Preview which items would be pruned
+
+Notes:
+
+- Default threshold is 30 days. Items with `status: deleted` whose `updatedAt` (or `createdAt` when updatedAt is missing) is older than `--days` are considered for pruning.
+- Items linked to GitHub issues (have `githubIssueNumber`) are skipped when the local `updatedAt` is newer than `githubIssueUpdatedAt` to prevent orphaning GitHub issues. The CLI `--json` output will include `skippedIds` when such items are encountered.
 ```
 
 JSON output is a raw array of findings. Each finding includes:

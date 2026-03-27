@@ -65,6 +65,12 @@ wl doctor prune
 wl doctor prune --days 90
 ```
 
+Notes on GitHub-linked items:
+
+- By default `wl doctor prune` skips any deleted work item that is linked to a GitHub issue (has `githubIssueNumber`) when the local `updatedAt` is newer than the recorded `githubIssueUpdatedAt` on the work item. This prevents accidentally orphaning GitHub issues that have local changes not yet reflected on GitHub.
+
+JSON output from `--json` includes a `skippedIds` array when such items are detected during a dry-run or actual prune.
+
 ## Backups
 
 When `wl doctor upgrade` applies migrations, it automatically:

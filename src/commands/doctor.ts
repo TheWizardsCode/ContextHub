@@ -153,15 +153,36 @@ export default function register(ctx: PluginContext): void {
           return !Number.isNaN(ts) && ts < cutoff;
         });
 
-        const ids = candidates.map(c => c.id);
+        // Skip items that are linked to GitHub and appear to have local changes
+        // newer than the last recorded GitHub state. This prevents orphaning
+        // GitHub issues by deleting items that have local updates not yet
+        // reflected on GitHub.
+        const skippedIds: string[] = [];
+        const prunable = candidates.filter(i => {
+          if (i.githubIssueNumber !== undefined && i.githubIssueNumber !== null) {
+            const localTs = i.updatedAt ? Date.parse(i.updatedAt) : Date.parse(i.createdAt);
+            const ghTs = i.githubIssueUpdatedAt ? Date.parse(i.githubIssueUpdatedAt) : 0;
+            if (!Number.isNaN(localTs) && !Number.isNaN(ghTs) && localTs > ghTs) {
+              skippedIds.push(i.id);
+              return false;
+            }
+          }
+          return true;
+        });
+
+        const ids = prunable.map(c => c.id);
 
         if (opts.dryRun) {
           if (utils.isJsonMode()) {
-            output.json({ dryRun: true, candidates: ids, count: ids.length });
+            output.json({ dryRun: true, candidates: ids, skippedIds, count: ids.length });
             return;
           }
           console.log(`Prune dry-run: ${ids.length} deleted item(s) older than ${days} day(s)`);
           ids.forEach(id => console.log(` - ${id}`));
+          if (skippedIds.length > 0) {
+            console.log('Skipped (linked to GitHub with newer local changes):');
+            skippedIds.forEach(id => console.log(` - ${id}`));
+          }
           return;
         }
 
@@ -193,7 +214,7 @@ export default function register(ctx: PluginContext): void {
         }
 
         if (utils.isJsonMode()) {
-          output.json({ dryRun: false, prunedIds: pruned, count: pruned.length });
+          output.json({ dryRun: false, prunedIds: pruned, skippedIds, count: pruned.length });
           return;
         }
 
