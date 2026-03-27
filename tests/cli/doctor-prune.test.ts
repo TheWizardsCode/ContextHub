@@ -108,7 +108,7 @@ describe('doctor prune command', () => {
     // Re-run list to ensure item A is gone and TEST-KEEP remains
     const { stdout: lsOut } = await execAsync(`tsx ${cliPath} --json list`);
     const listResult = JSON.parse(lsOut);
-    const ids = listResult.map((i: any) => i.id);
+    const ids = (listResult.workItems || []).map((i: any) => i.id);
     expect(ids).not.toContain('TEST-PRUNE-A');
     expect(ids).toContain('TEST-KEEP');
   });
