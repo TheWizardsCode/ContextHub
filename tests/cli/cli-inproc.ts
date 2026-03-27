@@ -1,5 +1,10 @@
 import { Command } from 'commander';
 import { createPluginContext } from '../../src/cli-utils.js';
+// Import the shared throttler so the in-process harness can wait for any
+// scheduled GitHub tasks to drain when a parse timeout occurs. Accessing the
+// instance here is a pragmatic test-harness-only measure to avoid closing
+// the database while background tasks still run.
+import throttler from '../../src/github-throttler.js';
 import * as path from 'path';
 
 // Import built-in commands (same set as src/cli.ts)
@@ -195,6 +200,43 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
           } catch (inner) {
             // ignore
           }
+
+          // If the shared throttler has pending work, wait briefly for it to
+          // drain before closing DBs and returning. This avoids a race where the
+          // harness times out but background async tasks (e.g. GitHub sync)
+          // continue and attempt to use the database after we closed it.
+          try {
+            const graceMs = Number(process.env.WL_INPROC_PARSE_TIMEOUT_GRACE_MS || '10000');
+            const pollInterval = 100;
+            const start = Date.now();
+            const t: any = throttler as any;
+            const isBusy = () => {
+              try {
+                const active = typeof t.active === 'number' ? t.active : 0;
+                const queueLen = Array.isArray(t.queue) ? t.queue.length : (typeof t.queue === 'number' ? t.queue : 0);
+                return active > 0 || queueLen > 0;
+              } catch (_) {
+                return false;
+              }
+            };
+            if (isBusy()) {
+              origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler busy - waiting up to ${graceMs}ms for drain\n`);
+              // wait loop
+              while (Date.now() - start < graceMs) {
+                if (!isBusy()) break;
+                // eslint-disable-next-line no-await-in-loop
+                await new Promise(r => setTimeout(r, pollInterval));
+              }
+              if (isBusy()) {
+                origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler still busy after ${graceMs}ms - proceeding to return\n`);
+              } else {
+                origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler drained after ${Date.now() - start}ms - proceeding to return\n`);
+              }
+            }
+          } catch (_) {
+            // swallow any harness-side errors
+          }
+
           err.push(`PARSE_TIMEOUT:${timeoutMs}`);
           return { stdout: out.join(''), stderr: err.join(''), exitCode: 124 };
         }

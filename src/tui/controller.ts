@@ -3294,6 +3294,14 @@ export class TuiController {
           return;
         }
 
+        // Show a short, immediate progress hint for push path so tests and
+        // lightweight TUI environments observe feedback synchronously even if
+        // the helper import or subsequent async work takes time.
+        if (!item.githubIssueNumber) {
+          try { showToast('Pushing to GitHub\u2026'); } catch (_) {}
+          try { screen?.render?.(); } catch (_) {}
+        }
+
         const helperModule = await import('./github-action-helper.js');
         await (helperModule as any).default({
           item,
