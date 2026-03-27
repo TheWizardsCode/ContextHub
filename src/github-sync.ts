@@ -251,7 +251,10 @@ export async function upsertIssuesFromWorkItems(
   };
 
   // Concurrency: upsert issues and comments with a bounded concurrency pool
-  const upsertConcurrency = Number(process.env.WL_GITHUB_CONCURRENCY || '6');
+  // The central throttler enforces concurrency/rate limits. Do not rely on
+  // a local worker pool here; schedule GitHub API calls through `throttler`.
+  // Keep the env var available to the throttler implementation.
+  // (local upsertConcurrency removed)
 
   const truncateTitle = (title: string, maxLen = 60): string =>
     title.length <= maxLen ? title : title.slice(0, maxLen - 1) + '\u2026';
@@ -292,14 +295,16 @@ export async function upsertIssuesFromWorkItems(
       const shouldUpdateIssue = !item.githubIssueNumber
         || !item.githubIssueUpdatedAt
         || new Date(item.updatedAt).getTime() > new Date(item.githubIssueUpdatedAt).getTime();
-      if (shouldUpdateIssue) {
+    if (shouldUpdateIssue) {
         const upsertStart = Date.now();
         if (onVerboseLog) {
           onVerboseLog(`[upsert] ${item.githubIssueNumber ? 'update' : 'create'} ${item.id}`);
         }
-        if (item.githubIssueNumber) {
-          increment('api.issue.update');
-          issue = await updateGithubIssueAsync(config, item.githubIssueNumber!, payload);
+            if (item.githubIssueNumber) {
+              increment('api.issue.update');
+              // updateGithubIssueAsync already schedules via the central throttler
+              // internally (see src/github.ts). Avoid double-scheduling here.
+              issue = await updateGithubIssueAsync(config, item.githubIssueNumber!, payload);
           if (item.status === 'deleted') {
             result.closed += 1;
             result.syncedItems.push({
@@ -317,13 +322,14 @@ export async function upsertIssuesFromWorkItems(
               issueNumber: item.githubIssueNumber,
             });
           }
-        } else {
-          increment('api.issue.create');
-          issue = await createGithubIssueAsync(config, {
-            title: payload.title,
-            body: payload.body,
-            labels: payload.labels,
-          });
+            } else {
+              increment('api.issue.create');
+              // createGithubIssueAsync schedules via the central throttler itself.
+              issue = await createGithubIssueAsync(config, {
+                title: payload.title,
+                body: payload.body,
+                labels: payload.labels,
+              });
           result.created += 1;
           result.syncedItems.push({
             action: 'created',
@@ -343,14 +349,16 @@ export async function upsertIssuesFromWorkItems(
       }
 
       const shouldSyncCommentsNow = itemComments.length > 0 && (shouldSyncComments || shouldUpdateIssue);
-      if (shouldSyncCommentsNow && issueNumber) {
-        const commentListStart = Date.now();
-        increment('api.comment.list');
-        const existingComments = await listGithubIssueCommentsAsync(config, issueNumber!);
-        timing.commentListMs += Date.now() - commentListStart;
-        const commentUpsertStart = Date.now();
-        const commentSummary = await upsertGithubIssueCommentsAsync(config, issueNumber, itemComments, existingComments);
-        timing.commentUpsertMs += Date.now() - commentUpsertStart;
+        if (shouldSyncCommentsNow && issueNumber) {
+          const commentListStart = Date.now();
+          increment('api.comment.list');
+          // listGithubIssueCommentsAsync now schedules internally via the throttler
+          // (see src/github.ts). Call it directly to avoid double-scheduling.
+          const existingComments = await listGithubIssueCommentsAsync(config, issueNumber!);
+          timing.commentListMs += Date.now() - commentListStart;
+          const commentUpsertStart = Date.now();
+          const commentSummary = await upsertGithubIssueCommentsAsync(config, issueNumber, itemComments, existingComments);
+          timing.commentUpsertMs += Date.now() - commentUpsertStart;
         increment('api.comment.create', commentSummary.created || 0);
         increment('api.comment.update', commentSummary.updated || 0);
         result.commentsCreated = (result.commentsCreated || 0) + commentSummary.created;
@@ -399,12 +407,14 @@ export async function upsertIssuesFromWorkItems(
     for (const comment of sorted) {
       const body = buildGithubCommentBody(comment);
       const existing = byWorklogId.get(comment.id);
-      if (existing) {
+        if (existing) {
         // If the GH comment exists, only update if body changed OR GH's updatedAt is newer than our recorded mapping
         const bodyMatch = (existing.body || '').trim() === body.trim();
-        if (!bodyMatch) {
-          increment('api.comment.update');
-           const updatedComment = await updateGithubIssueCommentAsync(issueConfig, existing.id!, body);
+           if (!bodyMatch) {
+           increment('api.comment.update');
+             // updateGithubIssueCommentAsync now schedules internally via the throttler
+             // (see src/github.ts). Call it directly to avoid double-scheduling.
+             const updatedComment = await updateGithubIssueCommentAsync(issueConfig, existing.id!, body);
           // Persist mapping back to local comment
           comment.githubCommentId = existing.id;
           comment.githubCommentUpdatedAt = updatedComment.updatedAt;
@@ -417,9 +427,11 @@ export async function upsertIssuesFromWorkItems(
         continue;
       }
 
-      // No GH comment mapping found — create a new comment
-       increment('api.comment.create');
-          const createdComment = await createGithubIssueCommentAsync(issueConfig, issueNumber, body);
+       // No GH comment mapping found — create a new comment
+        increment('api.comment.create');
+            // createGithubIssueCommentAsync now schedules internally via the throttler
+            // (see src/github.ts). Call it directly to avoid double-scheduling.
+            const createdComment = await createGithubIssueCommentAsync(issueConfig, issueNumber, body);
       // Persist mapping back to local comment so future runs can directly reference by ID
       comment.githubCommentId = createdComment.id;
       comment.githubCommentUpdatedAt = createdComment.updatedAt;
@@ -433,23 +445,10 @@ export async function upsertIssuesFromWorkItems(
     return { created, updated, latestUpdatedAt };
   }
 
-  // simple concurrent mapper for issue upserts
-  async function mapWithConcurrencyItems(arr: WorkItem[], limit: number, fn: (v: WorkItem, i: number) => Promise<void>) {
-    const results: Promise<void>[] = [];
-    let i = 0;
-    async function worker() {
-      while (true) {
-        const idx = i++;
-        if (idx >= arr.length) return;
-        await fn(arr[idx], idx);
-      }
-    }
-    const workers = Math.min(limit, arr.length);
-    for (let w = 0; w < workers; w += 1) results.push(worker());
-    await Promise.all(results);
-  }
-
-  await mapWithConcurrencyItems(issueItems, upsertConcurrency, upsertMapper);
+  // Launch upsert mappers without a local worker pool; schedule external
+  // GitHub API calls through the central throttler. The throttler enforces
+  // WL_GITHUB_CONCURRENCY and rate limits configured in src/github-throttler.ts.
+  await Promise.all(issueItems.map((it, idx) => upsertMapper(it, idx)));
 
   result.skipped = items.length - issueItems.length + skippedUpdates;
 
@@ -554,23 +553,10 @@ export async function upsertIssuesFromWorkItems(
       }
     }
 
-  // simple concurrent mapper
-  async function mapWithConcurrency(arr: string[], limit: number, fn: (v: string, i: number) => Promise<void>) {
-    const results: Promise<void>[] = [];
-    let i = 0;
-    async function worker() {
-      while (true) {
-        const idx = i++;
-        if (idx >= arr.length) return;
-        await fn(arr[idx], idx);
-      }
-    }
-    const workers = Math.min(limit, arr.length);
-    for (let w = 0; w < workers; w += 1) results.push(worker());
-    await Promise.all(results);
-  }
-
-  await mapWithConcurrency(pairs, concurrency, mapper);
+  // Process hierarchy pairs concurrently and let the throttler limit GitHub
+  // requests. Avoid a local worker pool — schedule linking/fetch calls via
+  // the central throttler inside `mapper`.
+  await Promise.all(pairs.map((p, idx) => mapper(p, idx)));
 
   result.updated += linkedCount;
   timing.totalMs = Date.now() - startTime;
