@@ -3,6 +3,7 @@
  */
 
 import { theme } from '../theme.js';
+import { redactAuditText } from '../audit.js';
 import type { WorkItem, Comment } from '../types.js';
 import type { SyncResult } from '../sync.js';
 import type { WorklogDatabase } from '../database.js';
@@ -261,7 +262,11 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push(`Effort: ${item.effort || '—'}`);
     if (item.assignee) lines.push(`Assignee: ${item.assignee}`);
     if (item.audit) {
-      const firstLine = String(item.audit.text || '').split(/\r?\n/, 1)[0];
+      // For human outputs, show a truncated, redacted one-line audit excerpt.
+      // Do not include the author in concise output to keep it compact.
+      const raw = String(item.audit.text || '');
+      const redacted = redactAuditText(raw);
+      const firstLine = redacted.split(/\r?\n/, 1)[0];
       lines.push(`Audit: ${firstLine}`);
     }
     if (item.tags && item.tags.length > 0) lines.push(`Tags: ${item.tags.join(', ')}`);
@@ -285,7 +290,10 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push(`Effort: ${item.effort || '—'}`);
     if (item.assignee) lines.push(`Assignee: ${item.assignee}`);
     if (item.audit) {
-      const firstLine = String(item.audit.text || '').split(/\r?\n/, 1)[0];
+      const raw = String(item.audit.text || '');
+      const redacted = redactAuditText(raw);
+      const firstLine = redacted.split(/\r?\n/, 1)[0];
+      // Keep concise audit excerpt in normal output as well (author omitted).
       lines.push(`Audit: ${firstLine}`);
     }
     if (item.parentId) lines.push(`Parent: ${item.parentId}`);
