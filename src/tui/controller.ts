@@ -754,10 +754,13 @@ export class TuiController {
       setOpencodeBorderFocusStyle(pane === opencodeDialog);
     };
 
-      let suppressNextP = false;  // Flag to suppress 'p' handler after Ctrl-W p
-      let suppressNextPTimeout: ReturnType<typeof setTimeout> | null = null;
-      let lastCtrlWKeyHandled = false;  // Flag to suppress widget key handling after Ctrl-W command
-      let lastCtrlWKeyHandledTimeout: ReturnType<typeof setTimeout> | null = null;
+    let suppressNextP = false;  // Flag to suppress 'p' handler after Ctrl-W p
+    let suppressNextPTimeout: ReturnType<typeof setTimeout> | null = null;
+    let lastCtrlWKeyHandled = false;  // Flag to suppress widget key handling after Ctrl-W command
+    let lastCtrlWKeyHandledTimeout: ReturnType<typeof setTimeout> | null = null;
+    // Track the last item shown in the detail pane so we can preserve
+    // the user's scroll position when the same item is re-rendered.
+    let lastDetailItemId: string | null = null;
 
 
 
@@ -1762,19 +1765,23 @@ export class TuiController {
       const text = humanFormatWorkItem(node.item, db, 'detail-pane');
       const escaped = escapeBlessedTags(text);
       const brightened = brightenDetailIdLine(escaped);
+      // If we are switching to a different item, reset scroll to top.
+      // If the same item is being re-rendered (e.g. list refresh), preserve
+      // the user's current scroll position to avoid jarring jumps.
       detail.setContent(decorateIdsForClick(brightened));
-      // Only reset scroll when navigating to a different work item. This
-      // preserves the user's manual scroll position when the same item is
-      // re-rendered (caused by unrelated UI updates) and prevents the
-      // description panel from snapping back to the top after scrolling.
+      // Reset scroll only when navigating to a different item. Preserve the
+      // user's scroll position when the same item is re-rendered to avoid
+      // jarring jumps.
       try {
-        const currentItemId = node.item.id;
-        if (lastDetailRenderedItemId !== currentItemId) {
-          if (typeof (detail as any).setScroll === 'function') (detail as any).setScroll(0);
+        const currentId = node.item.id;
+        const prevId = lastDetailItemId;
+        if (prevId === null || prevId !== currentId) {
+          if (typeof detail.setScroll === 'function') detail.setScroll(0);
         }
-        lastDetailRenderedItemId = currentItemId;
+        lastDetailItemId = currentId;
       } catch (_) {
-        // best-effort: ignore if widget doesn't support scrolling APIs
+        // best-effort fallback: try to reset scroll when APIs are available
+        try { if (typeof detail.setScroll === 'function') detail.setScroll(0); } catch (_) {}
       }
       // Update metadata pane with current item's metadata
       if (metadataPaneComponent) {
