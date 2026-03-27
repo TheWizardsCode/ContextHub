@@ -685,6 +685,12 @@ export class TuiController {
     };
     let paneFocusIndex = 0;
     let lastPaneFocusIndex = 0;
+    // Track the last work item id rendered in the detail pane so we only
+    // reset scroll when navigating to a different item. Preserving the
+    // scroll position when re-rendering the same item prevents the
+    // description panel from snapping back to the top after the user
+    // scrolls.
+    let lastDetailRenderedItemId: string | null = null;
 
     const getFocusPanes = (): Pane[] => {
       const panes: Pane[] = [list as unknown as Pane, detail as unknown as Pane];
@@ -748,10 +754,13 @@ export class TuiController {
       setOpencodeBorderFocusStyle(pane === opencodeDialog);
     };
 
-      let suppressNextP = false;  // Flag to suppress 'p' handler after Ctrl-W p
-      let suppressNextPTimeout: ReturnType<typeof setTimeout> | null = null;
-      let lastCtrlWKeyHandled = false;  // Flag to suppress widget key handling after Ctrl-W command
-      let lastCtrlWKeyHandledTimeout: ReturnType<typeof setTimeout> | null = null;
+    let suppressNextP = false;  // Flag to suppress 'p' handler after Ctrl-W p
+    let suppressNextPTimeout: ReturnType<typeof setTimeout> | null = null;
+    let lastCtrlWKeyHandled = false;  // Flag to suppress widget key handling after Ctrl-W command
+    let lastCtrlWKeyHandledTimeout: ReturnType<typeof setTimeout> | null = null;
+    // Track the last item shown in the detail pane so we can preserve
+    // the user's scroll position when the same item is re-rendered.
+    let lastDetailItemId: string | null = null;
 
 
 
@@ -1756,8 +1765,24 @@ export class TuiController {
       const text = humanFormatWorkItem(node.item, db, 'detail-pane');
       const escaped = escapeBlessedTags(text);
       const brightened = brightenDetailIdLine(escaped);
+      // If we are switching to a different item, reset scroll to top.
+      // If the same item is being re-rendered (e.g. list refresh), preserve
+      // the user's current scroll position to avoid jarring jumps.
       detail.setContent(decorateIdsForClick(brightened));
-      detail.setScroll(0);
+      // Reset scroll only when navigating to a different item. Preserve the
+      // user's scroll position when the same item is re-rendered to avoid
+      // jarring jumps.
+      try {
+        const currentId = node.item.id;
+        const prevId = lastDetailItemId;
+        if (prevId === null || prevId !== currentId) {
+          if (typeof detail.setScroll === 'function') detail.setScroll(0);
+        }
+        lastDetailItemId = currentId;
+      } catch (_) {
+        // best-effort fallback: try to reset scroll when APIs are available
+        try { if (typeof detail.setScroll === 'function') detail.setScroll(0); } catch (_) {}
+      }
       // Update metadata pane with current item's metadata
       if (metadataPaneComponent) {
         const commentCount = db ? db.getCommentsForWorkItem(node.item.id).length : 0;
