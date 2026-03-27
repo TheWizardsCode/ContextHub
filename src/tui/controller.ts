@@ -2123,7 +2123,10 @@ export class TuiController {
                   state.items = results.length === 0
                     ? []
                     : results.map((r: any) => r.workItem ? r.workItem : r);
-                  state.showClosed = false;
+                  // Preserve the user's current `showClosed` preference when
+                  // refreshing an active search/filter. Previously this reset
+                  // the flag to false which caused a transient flicker when the
+                  // user toggled the Closed view while a filter was active.
                   rebuildTree();
                   expandInProgressAncestors();
                   renderListAndDetail(typeof fallback === 'number' ? fallback : 0);
