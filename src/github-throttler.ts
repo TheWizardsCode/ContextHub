@@ -51,6 +51,34 @@ export class TokenBucketThrottler {
     this.debug = Boolean(process.env.WL_GITHUB_THROTTLER_DEBUG);
   }
 
+  /**
+   * Wait for the throttler to become idle (no active tasks and empty queue).
+   * Resolves true if the throttler drained within the grace period, false
+   * if the grace period elapsed while it remained busy.
+   *
+   * This helper is intended for test harnesses and debugging to avoid
+   * races where background tasks continue after callers close shared
+   * resources (e.g. database connections).
+   */
+  async waitForIdle(graceMs: number = 10000, pollInterval = 100): Promise<boolean> {
+    const isBusy = () => this.active > 0 || this.queue.length > 0;
+    if (!isBusy()) return true;
+    const start = this.clock.now();
+    // Poll until drained or timeout
+    return new Promise<boolean>((resolve) => {
+      const check = () => {
+        try {
+          if (!isBusy()) return resolve(true);
+          if (this.clock.now() - start >= graceMs) return resolve(false);
+        } catch (_) {
+          return resolve(false);
+        }
+        setTimeout(check, pollInterval);
+      };
+      check();
+    });
+  }
+
   schedule<T>(fn: () => Promise<T> | T): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const task: Task<T> = { fn, resolve, reject } as Task<T>;
