@@ -258,6 +258,40 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
       throw e;
     }
   } finally {
+    // Before closing DBs, wait briefly for the shared throttler to drain.
+    // Background GitHub-sync tasks may still be running and can reference
+    // the database; closing DBs while throttler tasks are active causes
+    // "The database connection is not open" errors. Use the same grace
+    // timeout env var used for parse-timeout diagnostics to bound the wait.
+    try {
+      const graceMs = Number(process.env.WL_INPROC_PARSE_TIMEOUT_GRACE_MS || '10000');
+      const pollInterval = 100;
+      const t: any = throttler as any;
+      const isBusy = () => {
+        try {
+          const active = typeof t.active === 'number' ? t.active : 0;
+          const queueLen = Array.isArray(t.queue) ? t.queue.length : (typeof t.queue === 'number' ? t.queue : 0);
+          return active > 0 || queueLen > 0;
+        } catch (_) { return false; }
+      };
+      if (isBusy()) {
+        origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler busy at cleanup - waiting up to ${graceMs}ms for drain\n`);
+        const started = Date.now();
+        while (Date.now() - started < graceMs) {
+          if (!isBusy()) break;
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise(r => setTimeout(r, pollInterval));
+        }
+        if (isBusy()) {
+          origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler still busy after ${graceMs}ms - proceeding to close DBs\n`);
+        } else {
+          origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler drained after ${Date.now() - started}ms - proceeding to close DBs\n`);
+        }
+      }
+    } catch (_) {
+      // swallow any harness-side errors when probing throttler
+    }
+
     // Close all database connections opened during this run to release
     // Windows file locks before tests attempt temp-dir cleanup.
     for (const db of openDatabases) {
