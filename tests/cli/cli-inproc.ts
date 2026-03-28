@@ -202,35 +202,46 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
           }
 
           // If the shared throttler has pending work, wait briefly for it to
-          // drain before closing DBs and returning. This avoids a race where the
-          // harness times out but background async tasks (e.g. GitHub sync)
-          // continue and attempt to use the database after we closed it.
+          // drain before closing DBs and returning. Prefer the throttler's
+          // public API when available; fall back to probing internal fields.
           try {
             const graceMs = Number(process.env.WL_INPROC_PARSE_TIMEOUT_GRACE_MS || '10000');
-            const pollInterval = 100;
-            const start = Date.now();
-            const t: any = throttler as any;
-            const isBusy = () => {
-              try {
-                const active = typeof t.active === 'number' ? t.active : 0;
-                const queueLen = Array.isArray(t.queue) ? t.queue.length : (typeof t.queue === 'number' ? t.queue : 0);
-                return active > 0 || queueLen > 0;
-              } catch (_) {
-                return false;
-              }
-            };
-            if (isBusy()) {
-              origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler busy - waiting up to ${graceMs}ms for drain\n`);
-              // wait loop
-              while (Date.now() - start < graceMs) {
-                if (!isBusy()) break;
-                // eslint-disable-next-line no-await-in-loop
-                await new Promise(r => setTimeout(r, pollInterval));
-              }
-              if (isBusy()) {
-                origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler still busy after ${graceMs}ms - proceeding to return\n`);
+            const startWait = Date.now();
+            const waitFn = (throttler as any)?.waitForIdle;
+            if (typeof waitFn === 'function') {
+              origStderrWrite?.call(process.stderr, `INPROC_DEBUG: waiting up to ${graceMs}ms for throttler to drain\n`);
+              const drained = await waitFn.call(throttler, graceMs);
+              const elapsed = Date.now() - startWait;
+              if (drained) {
+                origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler drained after ${elapsed}ms - proceeding to return\n`);
               } else {
-                origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler drained after ${Date.now() - start}ms - proceeding to return\n`);
+                origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler still busy after ${graceMs}ms - proceeding to return\n`);
+              }
+            } else {
+              // Fallback: probe internals
+              const pollInterval = 100;
+              const t: any = throttler as any;
+              const isBusy = () => {
+                try {
+                  const active = typeof t.active === 'number' ? t.active : 0;
+                  const queueLen = Array.isArray(t.queue) ? t.queue.length : (typeof t.queue === 'number' ? t.queue : 0);
+                  return active > 0 || queueLen > 0;
+                } catch (_) {
+                  return false;
+                }
+              };
+              if (isBusy()) {
+                origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler busy - waiting up to ${graceMs}ms for drain\n`);
+                while (Date.now() - startWait < graceMs) {
+                  if (!isBusy()) break;
+                  // eslint-disable-next-line no-await-in-loop
+                  await new Promise(r => setTimeout(r, pollInterval));
+                }
+                if (isBusy()) {
+                  origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler still busy after ${graceMs}ms - proceeding to return\n`);
+                } else {
+                  origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler drained after ${Date.now() - startWait}ms - proceeding to return\n`);
+                }
               }
             }
           } catch (_) {
@@ -265,27 +276,41 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
     // timeout env var used for parse-timeout diagnostics to bound the wait.
     try {
       const graceMs = Number(process.env.WL_INPROC_PARSE_TIMEOUT_GRACE_MS || '10000');
-      const pollInterval = 100;
-      const t: any = throttler as any;
-      const isBusy = () => {
-        try {
-          const active = typeof t.active === 'number' ? t.active : 0;
-          const queueLen = Array.isArray(t.queue) ? t.queue.length : (typeof t.queue === 'number' ? t.queue : 0);
-          return active > 0 || queueLen > 0;
-        } catch (_) { return false; }
-      };
-      if (isBusy()) {
-        origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler busy at cleanup - waiting up to ${graceMs}ms for drain\n`);
-        const started = Date.now();
-        while (Date.now() - started < graceMs) {
-          if (!isBusy()) break;
-          // eslint-disable-next-line no-await-in-loop
-          await new Promise(r => setTimeout(r, pollInterval));
-        }
-        if (isBusy()) {
-          origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler still busy after ${graceMs}ms - proceeding to close DBs\n`);
+      const startWait = Date.now();
+      const waitFn = (throttler as any)?.waitForIdle;
+      if (typeof waitFn === 'function') {
+        origStderrWrite?.call(process.stderr, `INPROC_DEBUG: waiting up to ${graceMs}ms for throttler to drain\n`);
+        const drained = await waitFn.call(throttler, graceMs);
+        const elapsed = Date.now() - startWait;
+        if (drained) {
+          origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler drained after ${elapsed}ms - proceeding to close DBs\n`);
         } else {
-          origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler drained after ${Date.now() - started}ms - proceeding to close DBs\n`);
+          origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler still busy after ${graceMs}ms - proceeding to close DBs\n`);
+        }
+      } else {
+        // Fallback: probe internals
+        const pollInterval = 100;
+        const t: any = throttler as any;
+        const isBusy = () => {
+          try {
+            const active = typeof t.active === 'number' ? t.active : 0;
+            const queueLen = Array.isArray(t.queue) ? t.queue.length : (typeof t.queue === 'number' ? t.queue : 0);
+            return active > 0 || queueLen > 0;
+          } catch (_) { return false; }
+        };
+        if (isBusy()) {
+          origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler busy at cleanup - waiting up to ${graceMs}ms for drain\n`);
+          const started = Date.now();
+          while (Date.now() - started < graceMs) {
+            if (!isBusy()) break;
+            // eslint-disable-next-line no-await-in-loop
+            await new Promise(r => setTimeout(r, pollInterval));
+          }
+          if (isBusy()) {
+            origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler still busy after ${graceMs}ms - proceeding to close DBs\n`);
+          } else {
+            origStderrWrite?.call(process.stderr, `INPROC_DEBUG: throttler drained after ${Date.now() - started}ms - proceeding to close DBs\n`);
+          }
         }
       }
     } catch (_) {
