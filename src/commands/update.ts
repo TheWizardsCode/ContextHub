@@ -9,7 +9,7 @@ import { promises as fs } from 'fs';
 import { humanFormatWorkItem, resolveFormat } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { normalizeActionArgs } from './cli-utils.js';
-import { buildAuditEntry, hasAcceptanceCriteria } from '../audit.js';
+import { buildAuditEntry, hasAcceptanceCriteria, redactAuditText, parseReadinessLine } from '../audit.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -156,24 +156,46 @@ export default function register(ctx: PluginContext): void {
         if (deletedByCandidate !== undefined) updates.deletedBy = deletedByCandidate;
         if (deleteReasonCandidate !== undefined) updates.deleteReason = deleteReasonCandidate;
         if (needsProducerReviewCandidate !== undefined) updates.needsProducerReview = needsProducerReviewCandidate;
-      if (auditCandidate !== undefined) {
+        if (auditCandidate !== undefined) {
           const current = db.get(normalizedId);
           if (!current) {
             const message = `Work item not found: ${normalizedId}`;
             results.push({ id: normalizedId, success: false, error: message });
             continue;
           }
-          // Keep existing conservative behaviour: do not reject ambiguous audits.
-          // However, ensure the buildAuditEntry is aware whether the work item
-          // contains acceptance criteria so it may downgrade 'Complete' to
-          // 'Missing Criteria' when appropriate.
-          // If the user provided a new description as part of this update, use
-          // that to determine whether acceptance criteria exist; otherwise
-          // fall back to the current stored description.
+
+          // Determine effective description for acceptance-criteria heuristics
           const effectiveDescription = descriptionCandidate !== undefined ? descriptionCandidate : current.description;
           const hasCriteria = hasAcceptanceCriteria(effectiveDescription);
+
+          // Validate audit first-line after redaction. Reject ambiguous or
+          // unverifiable writes by returning a per-id failure and continuing
+          // batch processing (single-id callers will observe a non-zero exit).
+          const redacted = redactAuditText(String(auditCandidate));
+          const parsed = parseReadinessLine(redacted);
+          if (parsed === 'Missing Criteria') {
+            // Ambiguous readiness token — reject the write.
+            results.push({
+              id: normalizedId,
+              success: false,
+              error: 'audit-ambiguous-readiness',
+              message: 'Audit first-line did not contain a verifiable readiness token',
+            });
+            continue;
+          }
+          if (parsed === 'Complete' && hasCriteria === false) {
+            // Claims Complete but cannot be verified.
+            results.push({
+              id: normalizedId,
+              success: false,
+              error: 'audit-unverifiable-complete',
+              message: 'Audit claims Complete but work item has no acceptance criteria',
+            });
+            continue;
+          }
+
           updates.audit = buildAuditEntry(String(auditCandidate), undefined, { hasAcceptanceCriteria: hasCriteria });
-      }
+        }
 
         // Validate status/stage per-id if needed.
         if ((statusCandidate !== undefined || stageCandidate !== undefined) && canValidateStatusStage(config)) {
