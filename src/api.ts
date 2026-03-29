@@ -7,7 +7,7 @@ import { WorklogDatabase } from './database.js';
 import { CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, WorkItemStatus, WorkItemPriority, CreateCommentInput, UpdateCommentInput } from './types.js';
 import { exportToJsonl, importFromJsonl, getDefaultDataPath } from './jsonl.js';
 import { loadConfig } from './config.js';
-import { buildAuditEntry } from './audit.js';
+import { buildAuditEntry, hasAcceptanceCriteria } from './audit.js';
 
 function parseNeedsProducerReview(value: unknown): boolean | undefined {
   if (value === undefined || value === null) return undefined;
@@ -22,7 +22,7 @@ function normalizeCreateInputWithAudit(input: CreateWorkItemInput): CreateWorkIt
   if (typeof rawAudit === 'string') {
     return {
       ...input,
-      audit: buildAuditEntry(rawAudit),
+      audit: buildAuditEntry(rawAudit, undefined, { hasAcceptanceCriteria: hasAcceptanceCriteria(input.description) }),
     };
   }
   return input;
@@ -33,7 +33,13 @@ function normalizeUpdateInputWithAudit(input: UpdateWorkItemInput): UpdateWorkIt
   if (typeof rawAudit === 'string') {
     return {
       ...input,
-      audit: buildAuditEntry(rawAudit),
+      // We cannot reliably determine acceptance criteria here because the
+      // caller may be updating description simultaneously. For simplicity
+      // assume the provided body includes the same description as current
+      // stored item; the API layer does not have the current item here, so
+      // we conservatively set hasAcceptanceCriteria to true when the
+      // incoming request includes a description that looks like it has criteria.
+      audit: buildAuditEntry(rawAudit, undefined, { hasAcceptanceCriteria: hasAcceptanceCriteria((input as any).description) }),
     };
   }
   return input;
@@ -107,7 +113,21 @@ export function createAPI(db: WorklogDatabase) {
         res.status(404).json({ error: 'Work item not found' });
         return;
       }
-      const input: UpdateWorkItemInput = normalizeUpdateInputWithAudit(req.body);
+      // If the caller provided a string `audit`, build the structured audit entry
+      // using information from the stored item when the request does not include
+      // a description. This ensures the hasAcceptanceCriteria signal is derived
+      // from the correct source (incoming description when present, otherwise
+      // the current stored description).
+      let normalizedBody: any = req.body;
+      const rawAudit = (req.body as any).audit;
+      if (typeof rawAudit === 'string') {
+        const descriptionCandidate = Object.prototype.hasOwnProperty.call(req.body, 'description') ? (req.body as any).description : current.description;
+        normalizedBody = {
+          ...req.body,
+          audit: buildAuditEntry(rawAudit, undefined, { hasAcceptanceCriteria: hasAcceptanceCriteria(descriptionCandidate) }),
+        };
+      }
+      const input: UpdateWorkItemInput = normalizeUpdateInputWithAudit(normalizedBody);
       const item = db.update(req.params.id, input);
       if (!item) {
         res.status(404).json({ error: 'Work item not found' });
@@ -301,7 +321,20 @@ export function createAPI(db: WorklogDatabase) {
         res.status(404).json({ error: 'Work item not found' });
         return;
       }
-      const input: UpdateWorkItemInput = normalizeUpdateInputWithAudit(req.body);
+      // See comment in the non-prefixed update handler — prefer the incoming
+      // description when present, otherwise use the stored item's description
+      // to determine whether acceptance criteria exist for conservative status
+      // resolution.
+      let normalizedBody: any = req.body;
+      const rawAudit = (req.body as any).audit;
+      if (typeof rawAudit === 'string') {
+        const descriptionCandidate = Object.prototype.hasOwnProperty.call(req.body, 'description') ? (req.body as any).description : current.description;
+        normalizedBody = {
+          ...req.body,
+          audit: buildAuditEntry(rawAudit, undefined, { hasAcceptanceCriteria: hasAcceptanceCriteria(descriptionCandidate) }),
+        };
+      }
+      const input: UpdateWorkItemInput = normalizeUpdateInputWithAudit(normalizedBody);
       const item = db.update(req.params.id, input);
       if (!item) {
         res.status(404).json({ error: 'Work item not found' });

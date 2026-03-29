@@ -5,7 +5,7 @@
 import type { PluginContext } from '../plugin-types.js';
 import type { RecentOptions } from '../cli-types.js';
 import type { WorkItem } from '../types.js';
-import { displayItemTree } from './helpers.js';
+import { displayItemTreeWithFormat } from './helpers.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -69,7 +69,9 @@ export default function register(ctx: PluginContext): void {
       }
 
       console.log('');
-      displayItemTree(itemsToDisplay);
+      // Use the human formatter so recent output includes the audit summary
+      // (concise format by default).
+      displayItemTreeWithFormat(itemsToDisplay, db, 'concise');
       console.log('');
     });
 }

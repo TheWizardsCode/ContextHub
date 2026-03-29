@@ -49,6 +49,8 @@ wl tui --all
 
 As you navigate, the details pane on the right updates to show the selected item's full information, including description, comments, timestamps, and metadata.
 
+Note: The right-hand metadata pane shows a compact, easy-to-scan layout. Risk and Effort are shown on a single line (`Risk/Effort: <Risk>/<Effort>`), and a one-line Audit summary (when present) is surfaced as `Audit: <excerpt> — by <author>`. Created/Updated rows are not displayed in the compact pane to reduce noise.
+
 ## Step 3: Manage work items
 
 The TUI supports common work item operations without leaving the interface:

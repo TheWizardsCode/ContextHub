@@ -117,11 +117,14 @@ export class TuiController {
     const db = utils.getDatabase(options.prefix);
     const isVerbose = !!program.opts().verbose;
     const perfEnabled = Boolean((options as any).perf);
+
+
     const debugLog = (message: string) => {
       if (!isVerbose) return;
       console.error(`[tui:opencode] ${message}`);
     };
     const perfMetrics: {event: string; start: number; end: number; duration: number}[] = [];
+    const detailCache = new Map<string, string>();
 
     const query: Partial<Record<string, unknown>> = {};
     if (options.inProgress) query.status = 'in-progress';
@@ -1641,6 +1644,7 @@ export class TuiController {
 
     function renderListAndDetail(selectIndex = 0) {
       const visible = buildVisible();
+      const renderStart = perfEnabled ? performance.now() : null;
       const lines = visible.map(n => {
         const indent = '  '.repeat(n.depth);
         const marker = n.hasChildren ? (state.expanded.has(n.item.id) ? '▾' : '▸') : ' ';
@@ -1709,6 +1713,10 @@ export class TuiController {
         // ignore
       }
       screen.render();
+        if (perfEnabled && renderStart !== null) {
+          const dur = performance.now() - renderStart;
+          debugLog(`renderListAndDetail took ${dur.toFixed(2)} ms`);
+        }
     }
 
     function escapeBlessedTags(value: string): string {
@@ -1757,41 +1765,43 @@ export class TuiController {
       return updated.join('\n');
     }
 
-    function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
-      const v = visible || buildVisible();
-      if (v.length === 0) {
-        detail.setContent('');
-        if (metadataPaneComponent) metadataPaneComponent.updateFromItem(null, 0);
-        return;
-      }
-      const node = v[idx] || v[0];
-      const text = humanFormatWorkItem(node.item, db, 'detail-pane');
-      const escaped = escapeBlessedTags(text);
-      const brightened = brightenDetailIdLine(escaped);
-      // If we are switching to a different item, reset scroll to top.
-      // If the same item is being re-rendered (e.g. list refresh), preserve
-      // the user's current scroll position to avoid jarring jumps.
-      detail.setContent(decorateIdsForClick(brightened));
-      // Reset scroll only when navigating to a different item. Preserve the
-      // user's scroll position when the same item is re-rendered to avoid
-      // jarring jumps.
-      try {
-        const currentId = node.item.id;
-        const prevId = lastDetailItemId;
-        if (prevId === null || prevId !== currentId) {
-          if (typeof detail.setScroll === 'function') detail.setScroll(0);
-        }
-        lastDetailItemId = currentId;
-      } catch (_) {
-        // best-effort fallback: try to reset scroll when APIs are available
-        try { if (typeof detail.setScroll === 'function') detail.setScroll(0); } catch (_) {}
-      }
-      // Update metadata pane with current item's metadata
-      if (metadataPaneComponent) {
-        const commentCount = db ? db.getCommentsForWorkItem(node.item.id).length : 0;
-        metadataPaneComponent.updateFromItem({ ...node.item, githubRepo: tryGetGithubRepo() ?? undefined }, commentCount);
-      }
+function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
+  const v = visible || buildVisible();
+  if (v.length === 0) {
+    detail.setContent('');
+    if (metadataPaneComponent) metadataPaneComponent.updateFromItem(null, 0);
+    return;
+  }
+  const node = v[idx] || v[0];
+  // Use cache for formatted detail content
+  let content = detailCache.get(node.item.id);
+  if (!content) {
+    const text = humanFormatWorkItem(node.item, db, 'detail-pane');
+    const escaped = escapeBlessedTags(text);
+    const brightened = brightenDetailIdLine(escaped);
+    content = decorateIdsForClick(brightened);
+    detailCache.set(node.item.id, content);
+  }
+  detail.setContent(content);
+  // Reset scroll only when navigating to a different item. Preserve the
+  // user's scroll position when the same item is re-rendered to avoid jarring jumps.
+  try {
+    const currentId = node.item.id;
+    const prevId = lastDetailItemId;
+    if (prevId === null || prevId !== currentId) {
+      if (typeof detail.setScroll === 'function') detail.setScroll(0);
     }
+    lastDetailItemId = currentId;
+  } catch (_) {
+    // best-effort fallback: try to reset scroll when APIs are available
+    try { if (typeof detail.setScroll === 'function') detail.setScroll(0); } catch (_) {}
+  }
+  // Update metadata pane with current item's metadata
+  if (metadataPaneComponent) {
+    const commentCount = db ? db.getCommentsForWorkItem(node.item.id).length : 0;
+    metadataPaneComponent.updateFromItem({ ...node.item, githubRepo: tryGetGithubRepo() ?? undefined }, commentCount);
+  }
+}
 
     // ID parsing utilities moved to src/tui/id-utils.ts
 
@@ -3457,7 +3467,8 @@ export class TuiController {
         exitMoveMode(state);
         refreshFromDatabase();
         // After refresh, find and select the moved item
-        const visible = buildVisible();
+const visible = buildVisible();
+    const renderStart = perfEnabled ? performance.now() : null;
         const movedIdx = visible.findIndex(n => n.item.id === sourceId);
         if (movedIdx >= 0) {
           renderListAndDetail(movedIdx);

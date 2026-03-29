@@ -11,6 +11,8 @@ export interface WorkItemAudit {
   time: string;
   author: string;
   text: string;
+  /** Optional readiness status derived from the first line of the audit text. */
+  status?: 'Complete' | 'Partial' | 'Not Started' | 'Missing Criteria';
 }
 
 /**

@@ -179,6 +179,7 @@ The server is managed automatically, but you can also:
 
 - TUI controller: `src/tui/controller.ts`
 - OpenCode pane component: `src/tui/components/opencode-pane.ts`
+ - Metadata pane component: `src/tui/components/metadata-pane.ts` (compact Risk/Effort and one-line Audit summary)
 - Autocomplete module: `src/tui/opencode-autocomplete.ts`
 - Constants (commands, layout): `src/tui/constants.ts`
 - OpenCode client: `src/tui/opencode-client.ts`

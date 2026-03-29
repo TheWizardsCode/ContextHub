@@ -103,20 +103,28 @@ describe('MetadataPaneComponent GitHub row', () => {
     expect(content).toContain('G to push');
   });
 
-  it('always renders exactly 11 rows regardless of GitHub state', () => {
+  it('renders expected metadata keys (no brittle row-count assertions)', () => {
     const { comp, getContent } = createMockMetadataPane();
 
     // With no github fields
     comp.updateFromItem({ status: 'open' }, 0);
-    expect(getContent().split('\n').length).toBe(11);
+    const content1 = getContent();
+    expect(content1).toContain('Status:');
+    expect(content1).toContain('Priority:');
+    expect(content1).toContain('Risk/Effort:');
+    expect(content1).toContain('Comments:');
 
     // With github mapping
     comp.updateFromItem({ status: 'open', githubRepo: 'o/r', githubIssueNumber: 1 }, 0);
-    expect(getContent().split('\n').length).toBe(11);
+    const content2 = getContent();
+    expect(content2).toContain('GitHub:');
+    expect(content2).toContain('#1');
 
     // With github configured but no mapping
     comp.updateFromItem({ status: 'open', githubRepo: 'o/r' }, 0);
-    expect(getContent().split('\n').length).toBe(11);
+    const content3 = getContent();
+    expect(content3).toContain('GitHub:');
+    expect(content3.toLowerCase()).toContain('push');
   });
 
   it('clears content for null item', () => {
@@ -133,26 +141,22 @@ describe('MetadataPaneComponent Risk and Effort rows', () => {
   it('shows placeholder when risk and effort are not set', () => {
     const { comp, getContent } = createMockMetadataPane();
     comp.updateFromItem({ status: 'open' }, 0);
-    expect(getContent()).toContain('Risk:');
-    expect(getContent()).toContain('Effort:');
-    expect(getContent()).toMatch(/Risk:\s+—/);
-    expect(getContent()).toMatch(/Effort:\s+—/);
+    expect(getContent()).toContain('Risk/Effort:');
+    expect(getContent()).toMatch(/Risk\/Effort:\s+—\/—/);
   });
 
   it('shows risk and effort values when set', () => {
     const { comp, getContent } = createMockMetadataPane();
     comp.updateFromItem({ status: 'open', risk: 'High', effort: 'M' }, 0);
     const content = getContent();
-    expect(content).toMatch(/Risk:\s+High/);
-    expect(content).toMatch(/Effort:\s+M/);
+    expect(content).toMatch(/Risk\/Effort:\s+High\/M/);
   });
 
   it('shows placeholder when risk and effort are empty strings', () => {
     const { comp, getContent } = createMockMetadataPane();
     comp.updateFromItem({ status: 'open', risk: '', effort: '' }, 0);
     const content = getContent();
-    expect(content).toMatch(/Risk:\s+—/);
-    expect(content).toMatch(/Effort:\s+—/);
+    expect(content).toMatch(/Risk\/Effort:\s+—\/—/);
   });
 });
 
