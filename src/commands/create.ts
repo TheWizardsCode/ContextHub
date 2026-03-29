@@ -9,7 +9,7 @@ import { humanFormatWorkItem, resolveFormat } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { promises as fs } from 'fs';
 import { normalizeActionArgs } from './cli-utils.js';
-import { buildAuditEntry } from '../audit.js';
+import { buildAuditEntry, hasAcceptanceCriteria } from '../audit.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -34,7 +34,7 @@ export default function register(ctx: PluginContext): void {
     .option('--delete-reason <deleteReason>', 'Delete reason (interoperability field)')
     .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag for the new item (true|false|yes|no)')
     .option('--audit <text>', 'Legacy alias for --audit-text')
-    .option('--audit-text <text>', 'Set structured audit text (time/author auto-populated)')
+    .option('--audit-text <text>', 'Set structured audit text (time/author auto-populated). Emails in text are redacted; readiness is parsed conservatively (see docs/AUDIT_STATUS.md)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .action(async (...rawArgs: any[]) => {
       const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','prefix']);
@@ -95,7 +95,7 @@ export default function register(ctx: PluginContext): void {
 
       let auditEntry;
       if (auditTextInput !== undefined) {
-        auditEntry = buildAuditEntry(String(auditTextInput));
+        auditEntry = buildAuditEntry(String(auditTextInput), undefined, { hasAcceptanceCriteria: hasAcceptanceCriteria(description) });
       }
 
       const item = db.createWithNextSortIndex({
