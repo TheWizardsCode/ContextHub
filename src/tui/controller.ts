@@ -7,6 +7,7 @@ import type { PluginContext } from '../plugin-types.js';
 import type { WorkItem, WorkItemStatus } from '../types.js';
 import type { ChildProcess } from 'child_process';
 import blessed from 'blessed';
+import { performance } from 'perf_hooks';
 import { spawn } from 'child_process';
 import { copyToClipboard } from '../clipboard.js';
 import * as fs from 'fs';
@@ -98,7 +99,7 @@ export class TuiController {
     private readonly deps: TuiControllerDeps = {}
   ) {}
 
-  async start(options: { inProgress?: boolean; prefix?: string; all?: boolean }): Promise<void> {
+  async start(options: { inProgress?: boolean; prefix?: string; all?: boolean; perf?: boolean }): Promise<void> {
     const { program, utils } = this.ctx;
     // Allow tests to inject a mocked blessed implementation via the ctx object.
     // If not provided, fall back to the real blessed import.
@@ -115,10 +116,12 @@ export class TuiController {
     utils.requireInitialized();
     const db = utils.getDatabase(options.prefix);
     const isVerbose = !!program.opts().verbose;
+    const perfEnabled = Boolean((options as any).perf);
     const debugLog = (message: string) => {
       if (!isVerbose) return;
       console.error(`[tui:opencode] ${message}`);
     };
+    const perfMetrics: {event: string; start: number; end: number; duration: number}[] = [];
 
     const query: Partial<Record<string, unknown>> = {};
     if (options.inProgress) query.status = 'in-progress';
@@ -2814,15 +2817,26 @@ export class TuiController {
 
     // Toggle expand/collapse with space
     screen.key(KEY_TOGGLE_EXPAND, () => {
+      const start = performance.now();
       const idx = list.selected as number;
       const visible = buildVisible();
       const node = visible[idx];
-      if (!node || !node.hasChildren) return;
+      if (!node || !node.hasChildren) {
+        const endEarly = performance.now();
+        const durEarly = endEarly - start;
+        perfMetrics.push({event: 'expand_toggle_noop', start, end: endEarly, duration: durEarly});
+        debugLog(`Expand/collapse no-op took ${durEarly.toFixed(2)} ms`);
+        return;
+      }
       if (state.expanded.has(node.item.id)) state.expanded.delete(node.item.id);
       else state.expanded.add(node.item.id);
       renderListAndDetail(idx);
       // persist state
       void persistence.savePersistedState(db.getPrefix?.() || undefined, { expanded: Array.from(state.expanded) });
+      const end = performance.now();
+      const duration = end - start;
+      perfMetrics.push({event: 'expand_toggle', start, end, duration});
+      debugLog(`Expand/collapse took ${duration.toFixed(2)} ms`);
     });
 
     const shutdown = () => {
@@ -2830,6 +2844,16 @@ export class TuiController {
       // Persist state before exiting
       try { void persistence.savePersistedState(db.getPrefix?.() || undefined, { expanded: Array.from(state.expanded) }); } catch (_) {}
       stopDatabaseWatch();
+      // Write performance metrics to file
+      void (async () => {
+        try {
+          const perfPath = pathImpl.join(worklogDir, 'tui-performance.json');
+          await fsAsync.writeFile(perfPath, JSON.stringify(perfMetrics, null, 2));
+          debugLog(`Performance metrics written to ${perfPath}`);
+        } catch (err) {
+          debugLog(`Failed to write performance metrics: ${err}`);
+        }
+      })();
       // Stop the OpenCode server if we started it
       opencodeClient.stopServer();
       // Clear pending timers to avoid keeping the process alive
