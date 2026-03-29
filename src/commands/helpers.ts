@@ -267,7 +267,16 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
       const raw = String(item.audit.text || '');
       const redacted = redactAuditText(raw);
       const firstLine = redacted.split(/\r?\n/, 1)[0];
-      lines.push(`Audit: ${firstLine}`);
+      const statusSuffix = item.audit.status ? ` (${item.audit.status})` : '';
+      lines.push(`Audit: ${firstLine}${statusSuffix}`);
+      // Non-blocking warning: if the audit was downgraded to Missing Criteria
+      // because the item lacks acceptance criteria, surface a subtle warning
+      // in normal/concise human outputs so operators notice without failing
+      // the write. This is intentionally non-fatal and mirrors the
+      // conservative policy implemented in buildAuditEntry.
+      if (item.audit.status === 'Missing Criteria') {
+        lines.push(`Warning: Audit claim could not be verified (Missing Criteria)`);
+      }
     }
     if (item.tags && item.tags.length > 0) lines.push(`Tags: ${item.tags.join(', ')}`);
     return lines.join('\n');
@@ -294,7 +303,8 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
       const redacted = redactAuditText(raw);
       const firstLine = redacted.split(/\r?\n/, 1)[0];
       // Keep concise audit excerpt in normal output as well (author omitted).
-      lines.push(`Audit: ${firstLine}`);
+      const statusSuffix = item.audit.status ? ` (${item.audit.status})` : '';
+      lines.push(`Audit: ${firstLine}${statusSuffix}`);
     }
     if (item.parentId) lines.push(`Parent: ${item.parentId}`);
     if (item.description) lines.push(`Description: ${item.description}`);
@@ -385,6 +395,9 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push('');
     lines.push(`Time: ${item.audit.time}`);
     lines.push(`Author: ${item.audit.author}`);
+    if (item.audit.status) {
+      lines.push(`Readiness: ${item.audit.status}`);
+    }
     lines.push('');
     lines.push(item.audit.text);
   }

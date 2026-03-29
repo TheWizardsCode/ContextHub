@@ -120,6 +120,9 @@ describe('CLI Issue Management Tests', () => {
       expect(result.success).toBe(true);
       expect(result.workItem.audit).toBeDefined();
       expect(result.workItem.audit.text).toBe('Ready to close: Yes');
+      // Conservative behaviour: without explicit acceptance criteria on the
+      // work item we downgrade 'Complete' claims to 'Missing Criteria'.
+      expect(result.workItem.audit.status).toBe('Missing Criteria');
       expect(result.workItem.audit.author).toBeTruthy();
       expect(result.workItem.audit.time).toMatch(/Z$/);
     });
@@ -137,6 +140,10 @@ describe('CLI Issue Management Tests', () => {
       const result = JSON.parse(stdout);
       expect(result.success).toBe(true);
       expect(result.workItem.audit.text).toBe('Ready to close: Yes');
+      // Because this item included success/acceptance criteria in its
+      // description, the parsed readiness claim should be preserved as
+      // 'Complete'.
+      expect(result.workItem.audit.status).toBe('Complete');
     });
 
     it('should set audit via create command', async () => {

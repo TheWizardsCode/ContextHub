@@ -1,5 +1,7 @@
 import blessed from 'blessed';
 import type { BlessedBox, BlessedFactory, BlessedScreen } from '../types.js';
+import { humanFormatWorkItem } from '../../commands/helpers.js';
+import { redactAuditText } from '../../audit.js';
 
 export interface MetadataPaneOptions {
   parent: BlessedScreen;
@@ -82,13 +84,41 @@ export class MetadataPaneComponent {
     lines.push(`Status:   ${item.status ?? ''}`);
     lines.push(`Stage:    ${item.stage ?? ''}`);
     lines.push(`Priority: ${item.priority ?? ''}`);
-    lines.push(`Risk:     ${item.risk && item.risk.trim() ? item.risk : placeholder}`);
-    lines.push(`Effort:   ${item.effort && item.effort.trim() ? item.effort : placeholder}`);
+    // Compact Risk and Effort into a single, predictable line to make the
+    // metadata pane easier to scan. Use the same placeholders as before.
+    const riskVal = item.risk && item.risk.trim() ? item.risk : placeholder;
+    const effortVal = item.effort && item.effort.trim() ? item.effort : placeholder;
+    lines.push(`Risk/Effort: ${riskVal}/${effortVal}`);
     lines.push(`Comments: ${commentCount}`);
     lines.push(`Tags:     ${item.tags && item.tags.length > 0 ? item.tags.join(', ') : ''}`);
     lines.push(`Assignee: ${item.assignee ?? ''}`);
-    lines.push(`Created:  ${MetadataPaneComponent.formatDate(item.createdAt)}`);
-    lines.push(`Updated:  ${MetadataPaneComponent.formatDate(item.updatedAt)}`);
+
+    // Surface a one-line Audit summary if present. Prefer reusing the
+    // human-readable formatter so the TUI shows the same excerpt as
+    // `wl show <id>`. Extract the Audit: line from the human formatter
+    // and append the author for quick triage.
+    try {
+      if ((item as any).audit && typeof (item as any).audit.text === 'string') {
+        const formatted = humanFormatWorkItem(item as any, null, 'concise');
+        const auditLine = formatted.split('\n').find(l => l.trim().startsWith('Audit:')) || '';
+        let excerpt = '';
+        if (auditLine) {
+          excerpt = auditLine.replace(/^Audit:\s*/, '');
+        } else {
+          const raw = String((item as any).audit.text || '');
+          excerpt = (redactAuditText(raw).split(/\r?\n/).find(l => l.trim() !== '') || '').trim();
+        }
+        if (excerpt) {
+          const author = (item as any).audit.author ? String((item as any).audit.author) : '';
+          const safeAuthor = author ? redactAuditText(author) : '';
+          const auditDisplay = safeAuthor ? `Audit: ${excerpt} — by ${safeAuthor}` : `Audit: ${excerpt}`;
+          lines.push(auditDisplay);
+        }
+      }
+    } catch (err) {
+      // Non-fatal: if audit formatting fails, do not break the metadata pane
+      // — fall through and continue rendering other rows.
+    }
 
     if (!item.githubRepo) {
       lines.push('GitHub:   (set githubRepo in config to enable)');

@@ -32,6 +32,9 @@ describe('integration: audit write -> read roundtrip', () => {
     expect(shownRes.workItem.audit.text).toContain('a***@example.com');
     expect(shownRes.workItem.audit.author).toBeTruthy();
     expect(shownRes.workItem.audit.time).toMatch(/Z$/);
+    // For freeform first lines without explicit readiness tokens we conservatively
+    // set status to 'Missing Criteria'.
+    expect(shownRes.workItem.audit.status).toBe('Missing Criteria');
 
     // Now update the item with a new audit text and verify it overwrote
     const { stdout: updated } = await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "Updated by bob@domain.org"`);
@@ -43,5 +46,6 @@ describe('integration: audit write -> read roundtrip', () => {
     expect(shownRes2.success).toBe(true);
     expect(shownRes2.workItem.audit).toBeDefined();
     expect(shownRes2.workItem.audit.text).toContain('b***@domain.org');
+    expect(shownRes2.workItem.audit.status).toBe('Missing Criteria');
   });
 });
