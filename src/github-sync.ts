@@ -11,10 +11,9 @@ import {
   extractParentIssueNumber,
   extractChildIds,
   extractChildIssueNumbers,
-  getIssueHierarchy,
+  getIssueHierarchyAsync,
   addSubIssueLink,
   addSubIssueLinkResult,
-  getIssueHierarchyAsync,
   addSubIssueLinkResultAsync,
   buildWorklogCommentMarker,
   workItemToIssuePayload,
@@ -23,8 +22,7 @@ import {
   createGithubIssueAsync,
   updateGithubIssueAsync,
   getGithubIssueAsync,
-  listGithubIssues,
-  getGithubIssue,
+  listGithubIssuesAsync,
   listGithubIssueComments,
   listGithubIssueCommentsAsync,
   createGithubIssueComment,
@@ -506,9 +504,7 @@ export async function upsertIssuesFromWorkItems(
         if (!hierarchy) {
           const checkStart = Date.now();
           increment('api.hierarchy.fetch');
-          hierarchy = await (typeof (getIssueHierarchyAsync) === 'function'
-            ? getIssueHierarchyAsync(config, parentNumber)
-            : Promise.resolve(getIssueHierarchy(config, parentNumber)));
+          hierarchy = await getIssueHierarchyAsync(config, parentNumber);
           timing.hierarchyCheckMs += Date.now() - checkStart;
           hierarchyCache.set(parentNumber, hierarchy);
           if (onVerboseLog) {
@@ -723,7 +719,7 @@ export async function importIssuesToWorkItems(
   const generateId = options?.generateId;
   const generateCommentId = options?.generateCommentId;
   const onProgress = options?.onProgress;
-  const issues = listGithubIssues(config, since);
+  const issues = await listGithubIssuesAsync(config, since);
   const byId = new Map(items.map(item => [item.id, item]));
   const byIssueNumber = new Map<number, WorkItem>();
   for (const item of items) {
@@ -744,7 +740,7 @@ export async function importIssuesToWorkItems(
     }
     hierarchyChecked += 1;
     try {
-      const hierarchy = getIssueHierarchy(config, issueNumber);
+      const hierarchy = await getIssueHierarchyAsync(config, issueNumber);
       hierarchyByIssueNumber.set(issueNumber, hierarchy);
       for (const childNumber of hierarchy.childIssueNumbers) {
         parentByChildIssueNumber.set(childNumber, issueNumber);
@@ -957,7 +953,7 @@ export async function importIssuesToWorkItems(
       onProgress({ phase: 'close-check', current: checked + 1, total: items.length });
     }
     try {
-    const issue = getGithubIssue(config, item.githubIssueNumber);
+    const issue = await getGithubIssueAsync(config, item.githubIssueNumber);
     const hierarchy = hierarchyByIssueNumber.get(issue.number);
     const parentIssueNumber = parentByChildIssueNumber.get(issue.number)
       ?? hierarchy?.parentIssueNumber

@@ -165,8 +165,8 @@ export class TokenBucketThrottler {
  * Make a throttler instance from environment variables (or provided overrides)
  */
 export function makeThrottlerFromEnv(overrides?: Partial<ThrottlerOptions>): TokenBucketThrottler {
-  const rate = Number(process.env.WL_GITHUB_RATE || '6');
-  const burst = Number(process.env.WL_GITHUB_BURST || '12');
+  const rate = Number(process.env.WL_GITHUB_RATE || '2');
+  const burst = Number(process.env.WL_GITHUB_BURST || '4');
   // Only enforce a concurrency cap if the env var is explicitly set. Leaving
   // it unset preserves existing per-callsite concurrency controls. When not
   // set we use Infinity (unlimited) so the throttler only enforces rate.

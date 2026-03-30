@@ -464,6 +464,10 @@ export function isSingleValueCategoryLabel(label: string, labelPrefix: string): 
   return false;
 }
 
+/**
+ * @deprecated Use `ensureGithubLabelsAsync` instead. This function blocks the event loop.
+ * Migration: Replace `ensureGithubLabels(config, labels)` with `await ensureGithubLabelsAsync(config, labels)`.
+ */
 function ensureGithubLabels(config: GithubConfig, labels: string[]): void {
   const unique = Array.from(new Set(labels.filter(label => label.trim() !== '')));
   if (unique.length === 0) {
@@ -685,12 +689,15 @@ export async function getIssueNodeIdAsync(config: GithubConfig, issueNumber: num
 export async function getIssueHierarchyAsync(config: GithubConfig, issueNumber: number): Promise<IssueHierarchy> {
   const { owner, name } = parseRepoSlug(config.repo);
   const query = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { parent { number } subIssues(first: 100) { nodes { number } } } } }`;
-  const output = await runGhJsonDetailedAsync(
-    `gh api graphql -f query=${quoteShellValue(query)} -f owner=${quoteShellValue(owner)} -f name=${quoteShellValue(name)} -F number=${issueNumber}`
-  );
-  if (!output.ok) {
-    throw new Error(output.error || 'Unable to query issue hierarchy');
-  }
+  const output = await throttler.schedule(async () => {
+    const result = await runGhJsonDetailedAsync(
+      `gh api graphql -f query=${quoteShellValue(query)} -f owner=${quoteShellValue(owner)} -f name=${quoteShellValue(name)} -F number=${issueNumber}`
+    );
+    if (!result.ok) {
+      throw new Error(result.error || 'Unable to query issue hierarchy');
+    }
+    return result;
+  });
   const issue = output.data?.data?.repository?.issue;
   const parentIssueNumber = issue?.parent?.number ?? null;
   const childIssueNumbers = Array.isArray(issue?.subIssues?.nodes)
@@ -919,6 +926,10 @@ function normalizeGithubIssueComment(comment: any): GithubIssueComment {
   };
 }
 
+/**
+ * @deprecated Use `listGithubIssueCommentsAsync` instead. This function blocks the event loop.
+ * Migration: Replace `listGithubIssueComments(config, issueNumber)` with `await listGithubIssueCommentsAsync(config, issueNumber)`.
+ */
 export function listGithubIssueComments(config: GithubConfig, issueNumber: number): GithubIssueComment[] {
   const { owner, name } = parseRepoSlug(config.repo);
   const command = `gh api repos/${owner}/${name}/issues/${issueNumber}/comments --paginate`;
@@ -948,6 +959,10 @@ export async function listGithubIssueCommentsAsync(config: GithubConfig, issueNu
   });
 }
 
+/**
+ * @deprecated Use `createGithubIssueCommentAsync` instead. This function blocks the event loop.
+ * Migration: Replace `createGithubIssueComment(config, issueNumber, body)` with `await createGithubIssueCommentAsync(config, issueNumber, body)`.
+ */
 export function createGithubIssueComment(config: GithubConfig, issueNumber: number, body: string): GithubIssueComment {
   const { owner, name } = parseRepoSlug(config.repo);
   const command = `gh api -X POST repos/${owner}/${name}/issues/${issueNumber}/comments -F body=@-`;
@@ -965,6 +980,10 @@ export async function createGithubIssueCommentAsync(config: GithubConfig, issueN
   });
 }
 
+/**
+ * @deprecated Use `updateGithubIssueCommentAsync` instead. This function blocks the event loop.
+ * Migration: Replace `updateGithubIssueComment(config, commentId, body)` with `await updateGithubIssueCommentAsync(config, commentId, body)`.
+ */
 export function updateGithubIssueComment(config: GithubConfig, commentId: number, body: string): GithubIssueComment {
   const { owner, name } = parseRepoSlug(config.repo);
   const command = `gh api -X PATCH repos/${owner}/${name}/issues/comments/${commentId} -F body=@-`;
@@ -982,6 +1001,10 @@ export async function updateGithubIssueCommentAsync(config: GithubConfig, commen
   });
 }
 
+/**
+ * @deprecated Use `getGithubIssueCommentAsync` instead. This function blocks the event loop.
+ * Migration: Replace `getGithubIssueComment(config, commentId)` with `await getGithubIssueCommentAsync(config, commentId)`.
+ */
 export function getGithubIssueComment(config: GithubConfig, commentId: number): GithubIssueComment {
   const { owner, name } = parseRepoSlug(config.repo);
   const command = `gh api repos/${owner}/${name}/issues/comments/${commentId} --json id,body,updatedAt,user`;
@@ -992,7 +1015,9 @@ export function getGithubIssueComment(config: GithubConfig, commentId: number): 
 export async function getGithubIssueCommentAsync(config: GithubConfig, commentId: number): Promise<GithubIssueComment> {
   const { owner, name } = parseRepoSlug(config.repo);
   const command = `gh api repos/${owner}/${name}/issues/comments/${commentId} --json id,body,updatedAt,user`;
-  const data = await runGhJsonAsync(command);
+  const data = await throttler.schedule(async () => {
+    return await runGhJsonAsync(command);
+  });
   return normalizeGithubIssueComment(data);
 }
 
@@ -1159,6 +1184,10 @@ export function issueToWorkItemFields(
   return { status, priority, tags: Array.from(new Set(tags)), risk, effort, stage, issueType };
 }
 
+/**
+ * @deprecated Use `createGithubIssueAsync` instead. This function blocks the event loop.
+ * Migration: Replace `createGithubIssue(config, payload)` with `await createGithubIssueAsync(config, payload)`.
+ */
 export function createGithubIssue(config: GithubConfig, payload: { title: string; body: string; labels: string[] }): GithubIssueRecord {
   const command = `gh issue create --repo ${config.repo} --title ${JSON.stringify(payload.title)} --body-file -`;
   const output = runGh(command, payload.body);
@@ -1194,7 +1223,9 @@ export async function ensureGithubLabelsAsync(config: GithubConfig, labels: stri
     let existing = existingLabelsCache.get(config.repo);
     if (existing === undefined && !existingLabelsCache.has(config.repo)) {
       try {
-        const existingRaw = await runGhJsonAsync(`gh api repos/${owner}/${name}/labels --paginate`);
+        const existingRaw = await throttler.schedule(async () => {
+          return await runGhJsonAsync(`gh api repos/${owner}/${name}/labels --paginate`);
+        });
         const parsedSet = new Set<string>();
         if (existingRaw) {
           for (const entry of existingRaw) {
@@ -1216,12 +1247,14 @@ export async function ensureGithubLabelsAsync(config: GithubConfig, labels: stri
       const color = labelColor(label);
       const createCommand = `gh api -X POST repos/${owner}/${name}/labels -f name=${JSON.stringify(label)} -f color=${JSON.stringify(color)}`;
         try {
-          await runGhAsync(createCommand);
+          await throttler.schedule(async () => {
+            return await runGhAsync(createCommand);
+          });
           existing.add(label);
           continue;
         } catch {
           const fallbackCommand = `gh issue label create ${JSON.stringify(label)} --repo ${config.repo} --color ${color}`;
-          try { await runGhAsync(fallbackCommand); existing.add(label); } catch (_) { /* ignore */ }
+          try { await throttler.schedule(async () => { return await runGhAsync(fallbackCommand); }); existing.add(label); } catch (_) { /* ignore */ }
         }
     }
   } catch {
@@ -1235,6 +1268,10 @@ const ensuredLabelsCache = new Map<string, Set<string>>();
 // When populated it avoids calling the labels API repeatedly during a single process run.
 const existingLabelsCache: Map<string, Set<string> | undefined> = new Map();
 
+/**
+ * @deprecated Use `ensureGithubLabelsOnceAsync` instead. This function blocks the event loop.
+ * Migration: Replace `ensureGithubLabelsOnce(config, labels)` with `await ensureGithubLabelsOnceAsync(config, labels)`.
+ */
 function ensureGithubLabelsOnce(config: GithubConfig, labels: string[]): void {
   const unique = Array.from(new Set(labels.filter(label => label.trim() !== '')));
   if (unique.length === 0) return;
@@ -1350,7 +1387,9 @@ export async function updateGithubIssueAsync(
 }
 
 export async function getGithubIssueAsync(config: GithubConfig, issueNumber: number): Promise<GithubIssueRecord> {
-  const parsed = await runGhJsonAsync(`gh issue view ${issueNumber} --repo ${config.repo} --json number,id,title,body,state,labels,updatedAt`);
+  const parsed = await throttler.schedule(async () => {
+    return await runGhJsonAsync(`gh issue view ${issueNumber} --repo ${config.repo} --json number,id,title,body,state,labels,updatedAt`);
+  });
   return normalizeGithubIssue(parsed);
 }
 
@@ -1358,7 +1397,9 @@ export async function listGithubIssuesAsync(config: GithubConfig, since?: string
   const sinceParam = since ? `&since=${encodeURIComponent(since)}` : '';
   const apiPath = `repos/${config.repo}/issues?state=all&per_page=100${sinceParam}`;
   const apiCommand = `gh api ${quoteShellValue(apiPath)} --paginate`;
-  const output = await runGhAsync(apiCommand);
+  const output = await throttler.schedule(async () => {
+    return await runGhAsync(apiCommand);
+  });
   const parsed = JSON.parse(output) as any[];
   const issuesOnly = parsed.filter(entry => {
     if (entry.pull_request) return false;
@@ -1378,6 +1419,10 @@ export async function listGithubIssuesAsync(config: GithubConfig, since?: string
   }));
 }
 
+/**
+ * @deprecated Use `updateGithubIssueAsync` instead. This function blocks the event loop.
+ * Migration: Replace `updateGithubIssue(config, issueNumber, payload)` with `await updateGithubIssueAsync(config, issueNumber, payload)`.
+ */
 export function updateGithubIssue(
   config: GithubConfig,
   issueNumber: number,
@@ -1422,6 +1467,10 @@ export function updateGithubIssue(
   return normalizeGithubIssue(parsed);
 }
 
+/**
+ * @deprecated Use `listGithubIssuesAsync` instead. This function blocks the event loop.
+ * Migration: Replace `listGithubIssues(config, since)` with `await listGithubIssuesAsync(config, since)`.
+ */
 export function listGithubIssues(config: GithubConfig, since?: string): GithubIssueRecord[] {
   const sinceParam = since ? `&since=${encodeURIComponent(since)}` : '';
   const apiPath = `repos/${config.repo}/issues?state=all&per_page=100${sinceParam}`;
@@ -1459,6 +1508,10 @@ export function listGithubIssues(config: GithubConfig, since?: string): GithubIs
   );
 }
 
+/**
+ * @deprecated Use `getGithubIssueAsync` instead. This function blocks the event loop.
+ * Migration: Replace `getGithubIssue(config, issueNumber)` with `await getGithubIssueAsync(config, issueNumber)`.
+ */
 export function getGithubIssue(config: GithubConfig, issueNumber: number): GithubIssueRecord {
   const command = `gh issue view ${issueNumber} --repo ${config.repo} --json number,id,title,body,state,labels,updatedAt`;
   const output = runGh(command);
