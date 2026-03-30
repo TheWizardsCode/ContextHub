@@ -2044,6 +2044,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       if (status) query.status = status;
       if (needsReviewFilter !== null) query.needsProducerReview = needsReviewFilter;
       state.items = db.list(query);
+      detailCache.clear();
       const nextVisible = includeClosed
         ? state.items.slice()
         : state.items.filter((item: any) => item.status !== 'completed' && item.status !== 'deleted');
