@@ -3,7 +3,7 @@
  */
 
 import { theme } from '../theme.js';
-import { redactAuditText } from '../audit.js';
+import { redactAuditText, parseReadinessLine } from '../audit.js';
 import type { WorkItem, Comment } from '../types.js';
 import type { SyncResult } from '../sync.js';
 import type { WorklogDatabase } from '../database.js';
@@ -230,6 +230,17 @@ function walkItemTree(items: WorkItem[], options: TreeRenderOptions): void {
   });
 }
 
+// Helper to apply color to audit excerpt based on readiness status
+// Redaction must happen BEFORE applying color
+function colorizeAuditExcerpt(auditText: string): string {
+  const firstLine = auditText.split(/\r?\n/, 1)[0];
+  const status = parseReadinessLine(auditText);
+  if (status === 'Complete') {
+    return theme.text.readyYes(firstLine);
+  }
+  return theme.text.readyNo(firstLine);
+}
+
 // Standard human formatter: supports 'concise' | 'normal' | 'full' | 'raw'
 export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, format: string | undefined): string {
   const fmt = (format || loadConfig()?.humanDisplay || 'concise').toLowerCase();
@@ -266,9 +277,9 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
       // Do not include the author in concise output to keep it compact.
       const raw = String(item.audit.text || '');
       const redacted = redactAuditText(raw);
-      const firstLine = redacted.split(/\r?\n/, 1)[0];
+      const colorized = colorizeAuditExcerpt(redacted);
       const statusSuffix = item.audit.status ? ` (${item.audit.status})` : '';
-      lines.push(`Audit: ${firstLine}${statusSuffix}`);
+      lines.push(`Audit: ${colorized}${statusSuffix}`);
       // Non-blocking warning: if the audit was downgraded to Missing Criteria
       // because the item lacks acceptance criteria, surface a subtle warning
       // in normal/concise human outputs so operators notice without failing
@@ -301,10 +312,10 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     if (item.audit) {
       const raw = String(item.audit.text || '');
       const redacted = redactAuditText(raw);
-      const firstLine = redacted.split(/\r?\n/, 1)[0];
+      const colorized = colorizeAuditExcerpt(redacted);
       // Keep concise audit excerpt in normal output as well (author omitted).
       const statusSuffix = item.audit.status ? ` (${item.audit.status})` : '';
-      lines.push(`Audit: ${firstLine}${statusSuffix}`);
+      lines.push(`Audit: ${colorized}${statusSuffix}`);
     }
     if (item.parentId) lines.push(`Parent: ${item.parentId}`);
     if (item.description) lines.push(`Description: ${item.description}`);
@@ -399,7 +410,11 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
       lines.push(`Readiness: ${item.audit.status}`);
     }
     lines.push('');
-    lines.push(item.audit.text);
+    const redacted = redactAuditText(String(item.audit.text || ''));
+    const colorizedFirstLine = colorizeAuditExcerpt(redacted);
+    const remainingLines = redacted.split(/\r?\n/).slice(1).join('\n');
+    const coloredText = remainingLines ? `${colorizedFirstLine}\n${remainingLines}` : colorizedFirstLine;
+    lines.push(coloredText);
   }
 
   return lines.join('\n');

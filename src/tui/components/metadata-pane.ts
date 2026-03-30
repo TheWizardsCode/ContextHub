@@ -1,7 +1,8 @@
 import blessed from 'blessed';
 import type { BlessedBox, BlessedFactory, BlessedScreen } from '../types.js';
 import { humanFormatWorkItem } from '../../commands/helpers.js';
-import { redactAuditText } from '../../audit.js';
+import { redactAuditText, parseReadinessLine } from '../../audit.js';
+import { theme } from '../../theme.js';
 
 export interface MetadataPaneOptions {
   parent: BlessedScreen;
@@ -111,7 +112,10 @@ export class MetadataPaneComponent {
         if (excerpt) {
           const author = (item as any).audit.author ? String((item as any).audit.author) : '';
           const safeAuthor = author ? redactAuditText(author) : '';
-          const auditDisplay = safeAuthor ? `Audit: ${excerpt} — by ${safeAuthor}` : `Audit: ${excerpt}`;
+          const redactedExcerpt = redactAuditText(excerpt);
+          const auditStatus = parseReadinessLine(excerpt);
+          const colorExcerpt = auditStatus === 'Complete' ? theme.tui.text.readyYes(redactedExcerpt) : theme.tui.text.readyNo(redactedExcerpt);
+          const auditDisplay = safeAuthor ? `Audit: ${colorExcerpt} — by ${safeAuthor}` : `Audit: ${colorExcerpt}`;
           lines.push(auditDisplay);
         }
       }

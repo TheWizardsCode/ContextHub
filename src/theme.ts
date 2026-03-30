@@ -13,6 +13,8 @@ export const theme = {
     error: chalk.red,
     heading: chalk.blue,
     strong: chalk.bold,
+    readyYes: chalk.green,
+    readyNo: chalk.hex('#FFA500'),
   },
   status: {
     open: chalk.greenBright,
@@ -38,6 +40,8 @@ export const theme = {
       error: tuiWrap('red-fg'),
       shellCommand: tuiWrap('214-fg'),
       shellOutput: tuiWrap('white-fg'),
+      readyYes: tuiWrap('green-fg'),
+      readyNo: tuiWrap('214-fg'),
     },
     status: {
       open: tuiWrap('green-fg'),
