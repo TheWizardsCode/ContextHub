@@ -2,6 +2,7 @@ import blessed from 'blessed';
 import type { BlessedBox, BlessedFactory, BlessedScreen } from '../types.js';
 import { humanFormatWorkItem } from '../../commands/helpers.js';
 import { redactAuditText, parseReadinessLine } from '../../audit.js';
+import { stripAnsi } from '../id-utils.js';
 import { theme } from '../../theme.js';
 
 export interface MetadataPaneOptions {
@@ -110,13 +111,12 @@ export class MetadataPaneComponent {
           excerpt = (redactAuditText(raw).split(/\r?\n/).find(l => l.trim() !== '') || '').trim();
         }
         if (excerpt) {
-          const author = (item as any).audit.author ? String((item as any).audit.author) : '';
-          const safeAuthor = author ? redactAuditText(author) : '';
-          const redactedExcerpt = redactAuditText(excerpt);
-          const auditStatus = parseReadinessLine(excerpt);
-          const colorExcerpt = auditStatus === 'Complete' ? theme.tui.text.readyYes(redactedExcerpt) : theme.tui.text.readyNo(redactedExcerpt);
-          const auditDisplay = safeAuthor ? `Audit: ${colorExcerpt} — by ${safeAuthor}` : `Audit: ${colorExcerpt}`;
-          lines.push(auditDisplay);
+          const excerptWithoutAnsi = stripAnsi(excerpt);
+          const redactedExcerpt = redactAuditText(excerptWithoutAnsi);
+          const colorExcerpt = excerptWithoutAnsi.includes('Ready to close: Yes')
+            ? theme.tui.text.readyYes(redactedExcerpt)
+            : theme.tui.text.readyNo(redactedExcerpt);
+          lines.push(colorExcerpt);
         }
       }
     } catch (err) {

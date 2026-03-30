@@ -234,8 +234,7 @@ function walkItemTree(items: WorkItem[], options: TreeRenderOptions): void {
 // Redaction must happen BEFORE applying color
 function colorizeAuditExcerpt(auditText: string): string {
   const firstLine = auditText.split(/\r?\n/, 1)[0];
-  const status = parseReadinessLine(auditText);
-  if (status === 'Complete') {
+  if (firstLine.includes('Ready to close: Yes')) {
     return theme.text.readyYes(firstLine);
   }
   return theme.text.readyNo(firstLine);
@@ -278,8 +277,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
       const raw = String(item.audit.text || '');
       const redacted = redactAuditText(raw);
       const colorized = colorizeAuditExcerpt(redacted);
-      const statusSuffix = item.audit.status ? ` (${item.audit.status})` : '';
-      lines.push(`Audit: ${colorized}${statusSuffix}`);
+      lines.push(`Audit: ${colorized}`);
       // Non-blocking warning: if the audit was downgraded to Missing Criteria
       // because the item lacks acceptance criteria, surface a subtle warning
       // in normal/concise human outputs so operators notice without failing
@@ -314,8 +312,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
       const redacted = redactAuditText(raw);
       const colorized = colorizeAuditExcerpt(redacted);
       // Keep concise audit excerpt in normal output as well (author omitted).
-      const statusSuffix = item.audit.status ? ` (${item.audit.status})` : '';
-      lines.push(`Audit: ${colorized}${statusSuffix}`);
+      lines.push(`Audit: ${colorized}`);
     }
     if (item.parentId) lines.push(`Parent: ${item.parentId}`);
     if (item.description) lines.push(`Description: ${item.description}`);
@@ -406,9 +403,6 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push('');
     lines.push(`Time: ${item.audit.time}`);
     lines.push(`Author: ${item.audit.author}`);
-    if (item.audit.status) {
-      lines.push(`Readiness: ${item.audit.status}`);
-    }
     lines.push('');
     const redacted = redactAuditText(String(item.audit.text || ''));
     const colorizedFirstLine = colorizeAuditExcerpt(redacted);
