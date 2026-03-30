@@ -1765,6 +1765,10 @@ export class TuiController {
       return updated.join('\n');
     }
 
+function invalidateDetailCache(itemId: string): void {
+  detailCache.delete(itemId);
+}
+
 function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
   const v = visible || buildVisible();
   if (v.length === 0) {
@@ -2315,6 +2319,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
             showToast('Delete failed');
             return;
           }
+          invalidateDetailCache(item.id);
           showToast('Deleted');
           refreshFromDatabase(nextIndex);
         } catch (err) {
@@ -2338,6 +2343,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           showToast('Close failed');
           return;
         }
+        invalidateDetailCache(item.id);
         showToast(stage === 'done' ? 'Closed (done)' : 'Closed (in_review)');
         refreshFromDatabase(nextIndex);
       } catch (err) {
@@ -2762,6 +2768,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           try {
             const updated = db.update(sourceId, { parentId: null });
             if (!updated) { showToast('Move failed'); exitMoveMode(state); renderListAndDetail(list.selected as number); return; }
+            invalidateDetailCache(sourceId);
             showToast(`Moved ${sourceItem?.title || sourceId} to root level`);
           } catch (err) { showToast('Move failed'); }
           exitMoveMode(state);
@@ -2775,6 +2782,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         try {
           const updated = db.update(sourceId, { parentId: targetId });
           if (!updated) { showToast('Move failed'); exitMoveMode(state); renderListAndDetail(list.selected as number); return; }
+          invalidateDetailCache(sourceId);
           const sourceItem = state.itemsById.get(sourceId);
           const targetItem = state.itemsById.get(targetId);
           showToast(`Moved ${sourceItem?.title || sourceId} under ${targetItem?.title || targetId}`);
@@ -3207,6 +3215,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           showToast('Update failed');
           return;
         }
+        invalidateDetailCache(item.id);
         showToast(has ? 'Do-not-delegate: OFF' : 'Do-not-delegate: ON');
         // Refresh list and detail keeping selection
         refreshFromDatabase(list.selected as number);
@@ -3406,6 +3415,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           showToast('Update failed');
           return;
         }
+        invalidateDetailCache(item.id);
         showToast(nextValue ? 'Needs review: ON' : 'Needs review: OFF');
         refreshFromDatabase(list.selected as number);
       } catch (err) {
@@ -3459,6 +3469,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
             renderListAndDetail(list.selected as number);
             return;
           }
+          invalidateDetailCache(sourceId);
           const title = sourceItem?.title || sourceId;
           showToast(`Moved ${title} to root level`);
         } catch (err) {
@@ -3485,6 +3496,7 @@ const visible = buildVisible();
           renderListAndDetail(list.selected as number);
           return;
         }
+        invalidateDetailCache(sourceId);
         const sourceItem = state.itemsById.get(sourceId);
         const targetItem = state.itemsById.get(targetId);
         const sourceTitle = sourceItem?.title || sourceId;
@@ -3696,6 +3708,7 @@ const visible = buildVisible();
         if (comment) {
           db.createComment({ workItemId: item.id, comment, author: '@tui' });
         }
+        invalidateDetailCache(item.id);
         showToast('Updated');
         refreshFromDatabase(Math.max(0, (list.selected as number) - 0));
       } catch (err) {
