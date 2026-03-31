@@ -145,9 +145,55 @@ export class TuiController {
     const persistedExpanded = persisted && Array.isArray(persisted.expanded) ? persisted.expanded : undefined;
     const state = createTuiState(items, showClosed, persistedExpanded);
 
+    // Setup blessed screen and layout via factory (extracted to src/tui/layout.ts)
+    const layout = createLayoutImpl({ blessed: blessedImpl });
+    const {
+      screen,
+      listComponent,
+      detailComponent,
+      metadataPaneComponent,
+      toastComponent,
+      emptyStateComponent,
+      overlaysComponent,
+      dialogsComponent,
+      helpMenu,
+      modalDialogs,
+      opencodeUi,
+    } = layout;
+    const list = listComponent.getList();
+    // Register quit key early so Ctrl-C works even when we take the
+    // early-return path for the empty-state UI. Prefer the full
+    // shutdown() helper when it's available; otherwise perform a
+    // minimal best-effort cleanup (persist minimal state and destroy
+    // the screen) so the terminal isn't left in a broken state.
+    try {
+      screen.key(KEY_QUIT, () => {
+        try {
+          // If the full shutdown helper is defined later, use it.
+          // This may throw (TDZ) when shutdown isn't yet initialized,
+          // which we catch and fall back to minimal cleanup below.
+          // When the normal startup path completes the later
+          // shutdown implementation will be available and invoked.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (shutdown as any)();
+          return;
+        } catch (_) {
+          // fallback minimal cleanup
+        }
+
+        try {
+          void persistence.savePersistedState(db.getPrefix?.() || undefined, { expanded: Array.from(state.expanded) });
+        } catch (_) {}
+        try { screen.destroy(); } catch (_) {}
+      });
+    } catch (_) {}
     // By default hide closed items (completed or deleted) unless --all is set
     if (state.currentVisibleItems.length === 0) {
-      console.log('No work items found');
+      list.hide();
+      if (emptyStateComponent) {
+        emptyStateComponent.show();
+      }
+      screen.render();
       return;
     }
     const rebuildTree = () => rebuildTreeState(state);
@@ -181,21 +227,6 @@ export class TuiController {
      // Flatten visible nodes for rendering (uses module-level VisibleNode type)
     const buildVisible = () => buildVisibleNodes(state);
 
-    // Setup blessed screen and layout via factory (extracted to src/tui/layout.ts)
-    const layout = createLayoutImpl({ blessed: blessedImpl });
-    const {
-      screen,
-      listComponent,
-      detailComponent,
-      metadataPaneComponent,
-      toastComponent,
-      overlaysComponent,
-      dialogsComponent,
-      helpMenu,
-      modalDialogs,
-      opencodeUi,
-    } = layout;
-    const list = listComponent.getList();
     const help = listComponent.getFooter();
     const detail = detailComponent.getDetail();
     const copyIdButton = detailComponent.getCopyIdButton();
@@ -2901,6 +2932,10 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       }
       shutdown();
     });
+
+    // Note: SIGINT fallback removed in favor of registering the quit key
+    // earlier (above) so blessed's screen.key handles Ctrl-C even when the
+    // empty-state early-return path is taken.
 
     // NOTE: keep an extra textual reference to `shutdown();` so tests that
     // scan source for use of the shared shutdown helper (and ensure there
