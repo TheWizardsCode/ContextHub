@@ -671,19 +671,23 @@ export function getIssueHierarchy(config: GithubConfig, issueNumber: number): Is
 
 // Async wrappers -----------------------------------------------------------
 export async function getIssueNodeIdAsync(config: GithubConfig, issueNumber: number): Promise<string> {
-  const { owner, name } = parseRepoSlug(config.repo);
-  const query = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { id } } }`;
-  const output = await runGhJsonDetailedAsync(
-    `gh api graphql -f query=${quoteShellValue(query)} -f owner=${quoteShellValue(owner)} -f name=${quoteShellValue(name)} -F number=${issueNumber}`
-  );
-  if (!output.ok) {
-    throw new Error(output.error || 'Unable to query GitHub issue node ID');
-  }
-  const id = output.data?.data?.repository?.issue?.id;
-  if (!id) {
-    throw new Error(`Unable to resolve GitHub issue node ID for #${issueNumber}`);
-  }
-  return id;
+  // Schedule GraphQL node-id resolution through the central throttler so
+  // concurrent runs respect WL_GITHUB_CONCURRENCY and rate limits.
+  return await throttler.schedule(async () => {
+    const { owner, name } = parseRepoSlug(config.repo);
+    const query = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { id } } }`;
+    const output = await runGhJsonDetailedAsync(
+      `gh api graphql -f query=${quoteShellValue(query)} -f owner=${quoteShellValue(owner)} -f name=${quoteShellValue(name)} -F number=${issueNumber}`
+    );
+    if (!output.ok) {
+      throw new Error(output.error || 'Unable to query GitHub issue node ID');
+    }
+    const id = output.data?.data?.repository?.issue?.id;
+    if (!id) {
+      throw new Error(`Unable to resolve GitHub issue node ID for #${issueNumber}`);
+    }
+    return id;
+  });
 }
 
 export async function getIssueHierarchyAsync(config: GithubConfig, issueNumber: number): Promise<IssueHierarchy> {
@@ -770,9 +774,13 @@ export async function addSubIssueLinkAsync(
   const parentNodeId = await resolveNodeId(parentIssueNumber);
   const childNodeId = await resolveNodeId(childIssueNumber);
   const mutation = `mutation($parent: ID!, $child: ID!) { addSubIssue(input: { issueId: $parent, subIssueId: $child }) { issue { id } subIssue { id } } }`;
-  const result = await runGhJsonDetailedAsync(
-    `gh api graphql -f query=${quoteShellValue(mutation)} -f parent=${quoteShellValue(parentNodeId)} -f child=${quoteShellValue(childNodeId)}`
-  );
+  // Ensure the mutation is scheduled through the central throttler to honor
+  // concurrency and rate limits.
+  const result = await throttler.schedule(async () => {
+    return await runGhJsonDetailedAsync(
+      `gh api graphql -f query=${quoteShellValue(mutation)} -f parent=${quoteShellValue(parentNodeId)} -f child=${quoteShellValue(childNodeId)}`
+    );
+  });
   if (!result.ok) {
     throw new Error(result.error || `Failed to link #${childIssueNumber} as sub-issue of #${parentIssueNumber}`);
   }
@@ -1045,9 +1053,12 @@ export async function assignGithubIssueAsync(
   let attempt = 0;
   let backoff = 500;
   while (attempt <= retries) {
-    const res = await runGhDetailedAsync(
-      `gh issue edit ${issueNumber} --repo ${config.repo} --add-assignee ${JSON.stringify(assignee)}`
-    );
+    // Schedule assignment through the throttler to respect concurrency/rate limits.
+    const res = await throttler.schedule(async () => {
+      return await runGhDetailedAsync(
+        `gh issue edit ${issueNumber} --repo ${config.repo} --add-assignee ${JSON.stringify(assignee)}`
+      );
+    });
     if (res.ok) {
       return { ok: true };
     }
@@ -1074,6 +1085,14 @@ export function assignGithubIssue(
   issueNumber: number,
   assignee: string
 ): AssignGithubIssueResult {
+  // Synchronous variant: schedule on the throttler but execute a synchronous
+  // gh command inside the scheduled task. This preserves the sync semantics
+  // for callers while ensuring the throttler counts the operation.
+  // Note: the throttler.schedule returns a Promise which we must block on
+  // synchronously by awaiting via a deasync-like approach is undesirable.
+  // To keep this function truly synchronous, run the operation directly but
+  // still attempt a best-effort check: if throttler has a concurrency cap,
+  // it won't be respected for this sync call. Prefer the async variant.
   const res = runGhDetailed(
     `gh issue edit ${issueNumber} --repo ${config.repo} --add-assignee ${JSON.stringify(assignee)}`
   );

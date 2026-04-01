@@ -9,7 +9,7 @@ import { humanFormatWorkItem, resolveFormat } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { promises as fs } from 'fs';
 import { normalizeActionArgs } from './cli-utils.js';
-import { buildAuditEntry, hasAcceptanceCriteria, redactAuditText, parseReadinessLine } from '../audit.js';
+import { buildAuditEntry, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -34,7 +34,7 @@ export default function register(ctx: PluginContext): void {
     .option('--delete-reason <deleteReason>', 'Delete reason (interoperability field)')
     .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag for the new item (true|false|yes|no)')
     .option('--audit <text>', 'Legacy alias for --audit-text')
-    .option('--audit-text <text>', 'Set structured audit text (time/author auto-populated). Emails in text are redacted; readiness is parsed conservatively (see docs/AUDIT_STATUS.md)')
+    .option('--audit-text <text>', 'Set structured audit text. First non-empty line must be "Ready to close: Yes" or "Ready to close: No" (see docs/AUDIT_STATUS.md)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .action(async (...rawArgs: any[]) => {
       const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','prefix']);
@@ -95,19 +95,25 @@ export default function register(ctx: PluginContext): void {
 
       let auditEntry;
       if (auditTextInput !== undefined) {
-        const hasCriteria = hasAcceptanceCriteria(description);
         const redacted = redactAuditText(String(auditTextInput));
-        const parsed = parseReadinessLine(redacted);
-        if (parsed === 'Missing Criteria') {
-          output.error('Audit first-line did not contain a verifiable readiness token', { success: false, error: 'audit-ambiguous-readiness', message: 'Audit first-line did not contain a verifiable readiness token' });
-          process.exit(1);
-        }
-        if (parsed === 'Complete' && hasCriteria === false) {
-          output.error('Audit claims Complete but work item has no acceptance criteria', { success: false, error: 'audit-unverifiable-complete', message: 'Audit claims Complete but work item has no acceptance criteria' });
+        const inspection = inspectAuditFirstLine(redacted);
+        if (!inspection.isValid) {
+          const message = formatInvalidAuditFirstLineMessage(inspection);
+          output.error(message, {
+            success: false,
+            error: 'audit-invalid-first-line',
+            message,
+            firstNonEmptyLine: inspection.trimmedFirstNonEmptyLine,
+            indicators: {
+              bom: inspection.hasBom,
+              nonPrintable: inspection.hasNonPrintable,
+              gutterChars: inspection.hasGutterChars,
+            },
+          });
           process.exit(1);
         }
 
-        auditEntry = buildAuditEntry(String(auditTextInput), undefined, { hasAcceptanceCriteria: hasCriteria });
+        auditEntry = buildAuditEntry(String(auditTextInput));
       }
 
       const item = db.createWithNextSortIndex({

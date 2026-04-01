@@ -1,28 +1,38 @@
 import { describe, expect, it } from 'vitest';
-import { buildAuditEntry } from '../src/audit.js';
+import { buildAuditEntry, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine } from '../src/audit.js';
 
 describe('buildAuditEntry', () => {
   it('builds an audit entry with generated time and author', () => {
-    const entry = buildAuditEntry('Applied DB migration');
+    const entry = buildAuditEntry('Ready to close: Yes\nApplied DB migration');
 
-    expect(entry.text).toBe('Applied DB migration');
+    expect(entry.text).toBe('Ready to close: Yes\nApplied DB migration');
     expect(entry.author).toBeTruthy();
     expect(entry.time).toMatch(/Z$/);
-    // Conservative default: when first line contains no explicit readiness
-    // tokens we set status to 'Missing Criteria'.
-    expect(entry.status).toBe('Missing Criteria');
+    expect(entry.status).toBe('Complete');
   });
 
   it('uses explicit author when provided', () => {
-    const entry = buildAuditEntry('Manual handoff', 'cli-user');
+    const entry = buildAuditEntry('Ready to close: No\nManual handoff', 'cli-user');
 
     expect(entry.author).toBe('cli-user');
-    expect(entry.text).toBe('Manual handoff');
+    expect(entry.text).toBe('Ready to close: No\nManual handoff');
+    expect(entry.status).toBe('Partial');
+  });
+
+  it('sets Missing Criteria status for invalid first line', () => {
+    const entry = buildAuditEntry('Any text');
     expect(entry.status).toBe('Missing Criteria');
   });
 
-  it('does not add status to audit entries', () => {
-    const entry = buildAuditEntry('Any text');
-    expect(entry.status).toBe('Missing Criteria');
+  it('inspects first line and formats detailed invalid message', () => {
+    const inspection = inspectAuditFirstLine('┃ Ready to close: No');
+    expect(inspection.isValid).toBe(false);
+    expect(inspection.trimmedFirstNonEmptyLine).toBe('┃ Ready to close: No');
+    expect(inspection.hasGutterChars).toBe(true);
+
+    const message = formatInvalidAuditFirstLineMessage(inspection);
+    expect(message).toContain("First non-empty line must be 'Ready to close: Yes' or 'Ready to close: No'");
+    expect(message).toContain("Found: '┃ Ready to close: No'");
+    expect(message).toContain('gutterChars=yes');
   });
 });

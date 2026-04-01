@@ -21,15 +21,15 @@ describe('integration: audit write -> read roundtrip', () => {
     expect(createdRes.success).toBe(true);
     const id = createdRes.workItem.id;
 
-    // Attempt to update with freeform audit text that does not contain a
-    // verifiable readiness token; expect the CLI to reject the write.
+    // Attempt to update with an invalid first line; expect the CLI to reject the write.
     try {
       await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "Confirm by alice@example.com"`);
       expect.fail('Should have rejected ambiguous audit write');
     } catch (error: any) {
       const result = JSON.parse(error.stdout || error.stderr || '{}');
       expect(result.success).toBe(false);
-      expect(result.error).toBe('audit-ambiguous-readiness');
+      expect(result.error).toBe('audit-invalid-first-line');
+      expect(result.message).toContain("Found: 'Confirm by a***@example.com'");
     }
   });
 });

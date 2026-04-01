@@ -9,7 +9,7 @@ import { promises as fs } from 'fs';
 import { humanFormatWorkItem, resolveFormat } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { normalizeActionArgs } from './cli-utils.js';
-import { buildAuditEntry, hasAcceptanceCriteria, redactAuditText, parseReadinessLine } from '../audit.js';
+import { buildAuditEntry, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -34,7 +34,7 @@ export default function register(ctx: PluginContext): void {
     .option('--delete-reason <deleteReason>', 'New delete reason (interoperability field)')
     .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag (true|false|yes|no)')
     .option('--audit <text>', 'Legacy alias for --audit-text')
-    .option('--audit-text <text>', 'Set structured audit text (time/author auto-populated). Emails in text are redacted; readiness is parsed conservatively (see docs/AUDIT_STATUS.md)')
+    .option('--audit-text <text>', 'Set structured audit text. First non-empty line must be "Ready to close: Yes" or "Ready to close: No" (see docs/AUDIT_STATUS.md)')
     .option('--do-not-delegate <true|false>', 'Set or clear the do-not-delegate tag (true|false|yes|no)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .action(async (...rawArgs: any[]) => {
@@ -164,37 +164,28 @@ export default function register(ctx: PluginContext): void {
             continue;
           }
 
-          // Determine effective description for acceptance-criteria heuristics
-          const effectiveDescription = descriptionCandidate !== undefined ? descriptionCandidate : current.description;
-          const hasCriteria = hasAcceptanceCriteria(effectiveDescription);
-
-          // Validate audit first-line after redaction. Reject ambiguous or
-          // unverifiable writes by returning a per-id failure and continuing
+          // Validate audit first-line after redaction. Reject invalid writes and continue
           // batch processing (single-id callers will observe a non-zero exit).
           const redacted = redactAuditText(String(auditCandidate));
-          const parsed = parseReadinessLine(redacted);
-          if (parsed === 'Missing Criteria') {
-            // Ambiguous readiness token — reject the write.
+          const inspection = inspectAuditFirstLine(redacted);
+          if (!inspection.isValid) {
+            const message = formatInvalidAuditFirstLineMessage(inspection);
             results.push({
               id: normalizedId,
               success: false,
-              error: 'audit-ambiguous-readiness',
-              message: 'Audit first-line did not contain a verifiable readiness token',
-            });
-            continue;
-          }
-          if (parsed === 'Complete' && hasCriteria === false) {
-            // Claims Complete but cannot be verified.
-            results.push({
-              id: normalizedId,
-              success: false,
-              error: 'audit-unverifiable-complete',
-              message: 'Audit claims Complete but work item has no acceptance criteria',
+              error: 'audit-invalid-first-line',
+              message,
+              firstNonEmptyLine: inspection.trimmedFirstNonEmptyLine,
+              indicators: {
+                bom: inspection.hasBom,
+                nonPrintable: inspection.hasNonPrintable,
+                gutterChars: inspection.hasGutterChars,
+              },
             });
             continue;
           }
 
-          updates.audit = buildAuditEntry(String(auditCandidate), undefined, { hasAcceptanceCriteria: hasCriteria });
+          updates.audit = buildAuditEntry(String(auditCandidate));
         }
 
         // Validate status/stage per-id if needed.
@@ -291,7 +282,10 @@ export default function register(ctx: PluginContext): void {
         if (results.length === 1) {
           const r = results[0];
           if (r.success) output.json({ success: true, workItem: r.workItem });
-          else output.json({ success: false, error: r.error, id: r.id });
+          else {
+            const { success: _ignored, ...rest } = r;
+            output.json({ success: false, ...rest });
+          }
         } else {
           output.json({ success: !anyFailures, results });
         }

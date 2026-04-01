@@ -111,34 +111,32 @@ describe('CLI Issue Management Tests', () => {
       expect(result.workItem.title).toBe('Updated title');
     });
 
-    it('should reject ambiguous audit writes without acceptance criteria', async () => {
-      try {
-        await execAsync(`tsx ${cliPath} --json update ${workItemId} --audit-text "Ready to close: Yes"`);
-        expect.fail('Should have thrown an error');
-      } catch (error: any) {
-        const result = JSON.parse(error.stderr || error.stdout || '{}');
-        expect(result.success).toBe(false);
-        expect(result.error).toBe('audit-unverifiable-complete');
-      }
-    });
-
-    it('should derive complete audit status when success criteria exist', async () => {
-      const { stdout: created } = await execAsync(
-        `tsx ${cliPath} --json create -t "With criteria" -d "Success criteria: Done means closed"`
-      );
-      const itemId = JSON.parse(created).workItem.id;
-
+    it('accepts valid first line without requiring acceptance criteria', async () => {
       const { stdout } = await execAsync(
-        `tsx ${cliPath} --json update ${itemId} --audit-text "Ready to close: Yes"`
+        `tsx ${cliPath} --json update ${workItemId} --audit-text "Ready to close: Yes"`
       );
 
       const result = JSON.parse(stdout);
       expect(result.success).toBe(true);
       expect(result.workItem.audit.text).toBe('Ready to close: Yes');
-      // Because this item included success/acceptance criteria in its
-      // description, the parsed readiness claim should be preserved as
-      // 'Complete'.
       expect(result.workItem.audit.status).toBe('Complete');
+    });
+
+    it('accepts the reported valid format with leading/trailing whitespace', async () => {
+      const auditText = `
+  Ready to close: No
+
+  ## Summary
+
+  The work item remains open.
+`;
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json update ${workItemId} --audit-text "${auditText}"`
+      );
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItem.audit.status).toBe('Partial');
     });
 
     it('should set audit via create command', async () => {
@@ -152,30 +150,47 @@ describe('CLI Issue Management Tests', () => {
       expect(result.workItem.audit.author).toBeTruthy();
     });
 
-    it('should accept free-form audit text', async () => {
-      const { stdout } = await execAsync(
-        `tsx ${cliPath} --json update ${workItemId} --audit-text "Looks good to me"`
-      );
-
-      const result = JSON.parse(stdout);
-      expect(result.success).toBe(true);
-      expect(result.workItem.audit.text).toBe('Looks good to me');
+    it('returns a clear error for invalid first line', async () => {
+      try {
+        await execAsync(`tsx ${cliPath} --json update ${workItemId} --audit-text "Looks good to me"`);
+        expect.fail('Should have thrown an error');
+      } catch (error: any) {
+        const result = JSON.parse(error.stderr || error.stdout || '{}');
+        expect(result.success).toBe(false);
+        expect(result.error).toBe('audit-invalid-first-line');
+        expect(result.message).toContain("First non-empty line must be 'Ready to close: Yes' or 'Ready to close: No'");
+        expect(result.message).toContain("Found: 'Looks good to me'");
+        expect(result.indicators).toBeDefined();
+      }
     });
 
-    it('should overwrite existing audit object on subsequent writes', async () => {
+    it('flags gutter-character variants as invalid and reports indicators', async () => {
+      try {
+        await execAsync(`tsx ${cliPath} --json update ${workItemId} --audit-text "┃ Ready to close: No"`);
+        expect.fail('Should have thrown an error');
+      } catch (error: any) {
+        const result = JSON.parse(error.stderr || error.stdout || '{}');
+        expect(result.success).toBe(false);
+        expect(result.error).toBe('audit-invalid-first-line');
+        expect(result.firstNonEmptyLine).toBe('┃ Ready to close: No');
+        expect(result.indicators.gutterChars).toBe(true);
+      }
+    });
+
+    it('should overwrite existing audit object on subsequent valid writes', async () => {
       const first = await execAsync(
-        `tsx ${cliPath} --json update ${workItemId} --audit-text "First audit"`
+        `tsx ${cliPath} --json update ${workItemId} --audit-text "Ready to close: No"`
       );
       const firstResult = JSON.parse(first.stdout);
 
       const second = await execAsync(
-        `tsx ${cliPath} --json update ${workItemId} --audit-text "Second audit"`
+        `tsx ${cliPath} --json update ${workItemId} --audit-text "Ready to close: Yes"`
       );
       const secondResult = JSON.parse(second.stdout);
 
       expect(firstResult.success).toBe(true);
       expect(secondResult.success).toBe(true);
-      expect(secondResult.workItem.audit.text).toBe('Second audit');
+      expect(secondResult.workItem.audit.text).toBe('Ready to close: Yes');
       expect(secondResult.workItem.audit.author).toBeTruthy();
       expect(secondResult.workItem.audit.time).toMatch(/Z$/);
     });

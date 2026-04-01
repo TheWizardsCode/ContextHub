@@ -20,26 +20,38 @@ import type { WorkItem, WorkItemStatus, WorkItemPriority } from '../src/types.js
 import type { LabelEvent, GithubConfig, GithubIssueRecord } from '../src/github.js';
 
 // Hoist mock function references so vi.mock factory can access them
-const { mockFetchLabelEventsAsync, mockListGithubIssues, mockGetGithubIssue } = vi.hoisted(() => ({
+const {
+  mockFetchLabelEventsAsync,
+  mockListGithubIssuesAsync,
+  mockGetGithubIssueAsync,
+  mockListGithubIssuesSync,
+  mockGetGithubIssueSync,
+} = vi.hoisted(() => ({
   mockFetchLabelEventsAsync: vi.fn(),
-  mockListGithubIssues: vi.fn(),
-  mockGetGithubIssue: vi.fn() as ReturnType<typeof vi.fn<(...args: any[]) => any>>,
+  mockListGithubIssuesAsync: vi.fn(),
+  mockGetGithubIssueAsync: vi.fn(),
+  mockListGithubIssuesSync: vi.fn(() => { throw new Error('sync listGithubIssues should not be called in import tests'); }),
+  mockGetGithubIssueSync: vi.fn(() => { throw new Error('sync getGithubIssue should not be called in import tests'); }),
 }));
+
+const mockListGithubIssues = mockListGithubIssuesAsync;
+const mockGetGithubIssue = mockGetGithubIssueAsync;
 
 vi.mock('../src/github.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/github.js')>();
   return {
     ...actual,
     // Override only the functions that make real API calls
-    listGithubIssues: mockListGithubIssues,
-    getGithubIssue: mockGetGithubIssue,
+    listGithubIssues: mockListGithubIssuesSync,
+    listGithubIssuesAsync: mockListGithubIssuesAsync,
+    getGithubIssue: mockGetGithubIssueSync,
     getIssueHierarchy: vi.fn(() => ({ parentIssueNumber: null, childIssueNumbers: [] })),
     getIssueHierarchyAsync: vi.fn(async () => ({ parentIssueNumber: null, childIssueNumbers: [] })),
     createGithubIssue: vi.fn(),
     createGithubIssueAsync: vi.fn(),
     updateGithubIssue: vi.fn(),
     updateGithubIssueAsync: vi.fn(),
-    getGithubIssueAsync: vi.fn(),
+    getGithubIssueAsync: mockGetGithubIssueAsync,
     listGithubIssueComments: vi.fn(() => []),
     listGithubIssueCommentsAsync: vi.fn(async () => []),
     createGithubIssueComment: vi.fn(),
@@ -126,10 +138,11 @@ const dummyConfig: GithubConfig = {
 describe('importIssuesToWorkItems label resolution integration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockListGithubIssuesAsync.mockResolvedValue([]);
     // Default: fetchLabelEventsAsync returns empty (will be overridden per test)
     mockFetchLabelEventsAsync.mockResolvedValue([]);
-    // Default: getGithubIssue throws (Phase 2 tests will override)
-    mockGetGithubIssue.mockImplementation(() => { throw new Error('not found'); });
+    // Default: getGithubIssueAsync rejects (Phase 2 tests will override)
+    mockGetGithubIssueAsync.mockRejectedValue(new Error('not found'));
   });
 
   it('updates local stage to remote when GitHub label event is newer', async () => {
@@ -153,6 +166,9 @@ describe('importIssuesToWorkItems label resolution integration', () => {
     const result = await importIssuesToWorkItems([localItem], dummyConfig, {
       generateId: () => 'WL-GEN',
     });
+
+    expect(mockListGithubIssuesAsync).toHaveBeenCalledTimes(1);
+    expect(mockListGithubIssuesSync).not.toHaveBeenCalled();
 
     // The merged item should have stage=done (remote won)
     const merged = result.mergedItems.find(item => item.id === 'WL-001');
@@ -730,6 +746,9 @@ describe('importIssuesToWorkItems label resolution integration', () => {
       const result = await importIssuesToWorkItems([localItem], dummyConfig, {
         generateId: () => 'WL-GEN',
       });
+
+      expect(mockGetGithubIssueAsync).toHaveBeenCalledWith(expect.anything(), 42);
+      expect(mockGetGithubIssueSync).not.toHaveBeenCalled();
 
       const merged = result.mergedItems.find(item => item.id === 'WL-001');
       expect(merged).toBeDefined();

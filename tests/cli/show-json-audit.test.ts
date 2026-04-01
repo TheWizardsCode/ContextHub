@@ -16,7 +16,7 @@ describe('show --json audit handling', () => {
 
   it('includes structured audit object when audit present and omits when absent', async () => {
     // Create an item with audit
-    const { stdout: created } = await execAsync(`tsx ${cliPath} --json create -t "Audited task" --audit-text "Ready to close: Yes"`);
+    const { stdout: created } = await execAsync(`tsx ${cliPath} --json create -t "Audited task" --audit-text "  Ready to close: Yes  "`);
     const createdRes = JSON.parse(created);
     expect(createdRes.success).toBe(true);
     const id = createdRes.workItem.id;
@@ -27,7 +27,8 @@ describe('show --json audit handling', () => {
     expect(shownRes.workItem).toBeDefined();
     expect(shownRes.workItem.audit).toBeDefined();
     expect(typeof shownRes.workItem.audit.text).toBe('string');
-    expect(shownRes.workItem.audit.text).toBe('Ready to close: Yes');
+    expect(shownRes.workItem.audit.text).toBe('  Ready to close: Yes  ');
+    expect(shownRes.workItem.audit.status).toBe('Complete');
     expect(shownRes.workItem.audit.author).toBeTruthy();
     expect(shownRes.workItem.audit.time).toMatch(/Z$/);
 

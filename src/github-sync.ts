@@ -481,8 +481,9 @@ export async function upsertIssuesFromWorkItems(
     onVerboseLog(`[hierarchy] ${pairs.length} parent-child pair(s) to verify`);
   }
 
-  // Concurrency: process hierarchy checks and linking with a bounded concurrency pool
-  const concurrency = Number(process.env.WL_GITHUB_CONCURRENCY || '6');
+  // Concurrency is enforced by the central throttler (WL_GITHUB_CONCURRENCY).
+  // Do not use a separate local concurrency default here to avoid surprising
+  // behaviour when the env var is unset.
 
   const hierarchyCache = new Map<number, { parentIssueNumber: number | null; childIssueNumbers: number[] }>();
 

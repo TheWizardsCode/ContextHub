@@ -19,14 +19,18 @@ import type { GithubConfig, GithubIssueComment } from '../src/github.js';
 // ── Hoist mock references for partial mock (import tests) ────────────────
 
 const {
-  mockListGithubIssues,
+  mockListGithubIssuesAsync,
   mockListGithubIssueCommentsAsync,
   mockFetchLabelEventsAsync,
+  mockListGithubIssuesSync,
 } = vi.hoisted(() => ({
-  mockListGithubIssues: vi.fn(),
+  mockListGithubIssuesAsync: vi.fn(),
   mockListGithubIssueCommentsAsync: vi.fn(),
   mockFetchLabelEventsAsync: vi.fn(),
+  mockListGithubIssuesSync: vi.fn(() => { throw new Error('sync listGithubIssues should not be called in import tests'); }),
 }));
+
+const mockListGithubIssues = mockListGithubIssuesAsync;
 
 // ── Mock ../src/github.js with partial real implementations ──────────────
 
@@ -35,7 +39,8 @@ vi.mock('../src/github.js', async (importOriginal) => {
   return {
     ...actual,
     // Override only the functions that make real API calls
-    listGithubIssues: mockListGithubIssues,
+    listGithubIssues: mockListGithubIssuesSync,
+    listGithubIssuesAsync: mockListGithubIssuesAsync,
     listGithubIssueCommentsAsync: mockListGithubIssueCommentsAsync,
     getGithubIssue: vi.fn(() => { throw new Error('not found'); }),
     getIssueHierarchy: vi.fn(() => ({ parentIssueNumber: null, childIssueNumbers: [] })),
@@ -167,6 +172,7 @@ const dummyConfig: GithubConfig = {
 describe('GitHub comment import (GitHub -> Worklog)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockListGithubIssuesAsync.mockResolvedValue([]);
     mockFetchLabelEventsAsync.mockResolvedValue([]);
   });
 
@@ -199,6 +205,9 @@ describe('GitHub comment import (GitHub -> Worklog)', () => {
     const result = await importIssuesToWorkItems([localItem], dummyConfig, {
       generateId: () => 'WL-GEN',
     });
+
+    expect(mockListGithubIssuesAsync).toHaveBeenCalledTimes(1);
+    expect(mockListGithubIssuesSync).not.toHaveBeenCalled();
 
     // The result should include imported comments
     expect(result).toHaveProperty('importedComments');

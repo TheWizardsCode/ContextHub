@@ -15,16 +15,14 @@ describe('integration: audit skill CLI write path', () => {
   });
 
   it('stores audit via update --audit-text and shows in wl show --json', async () => {
-    // Create a work item with acceptance criteria so "Ready to close" is not downgraded
-    const { stdout: created } = await execAsync(`tsx ${cliPath} --json create -t "Audit skill test" -d "## Acceptance Criteria\n1. Test passes"`);
+    const { stdout: created } = await execAsync(`tsx ${cliPath} --json create -t "Audit skill test"`);
     const createdRes = JSON.parse(created);
     expect(createdRes.success).toBe(true);
     const id = createdRes.workItem.id;
 
     // Simulate what the audit skill would do: call wl update with --audit-text
-    // Use text that matches the readiness parsing regex (word boundary required)
     const { stdout: updated } = await execAsync(
-      `tsx ${cliPath} --json update ${id} --audit-text "Ready to close"`
+      `tsx ${cliPath} --json update ${id} --audit-text "Ready to close: Yes"`
     );
     const updatedRes = JSON.parse(updated);
     expect(updatedRes.success).toBe(true);
@@ -35,22 +33,22 @@ describe('integration: audit skill CLI write path', () => {
     expect(shownRes.success).toBe(true);
     expect(shownRes.workItem).toBeDefined();
     expect(shownRes.workItem.audit).toBeDefined();
-    expect(shownRes.workItem.audit.text).toBe('Ready to close');
+    expect(shownRes.workItem.audit.text).toBe('Ready to close: Yes');
     expect(shownRes.workItem.audit.author).toBeTruthy();
     expect(shownRes.workItem.audit.time).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{3}Z$/);
-    // Status should be parsed from "Ready to close" -> Complete (because work item has acceptance criteria)
+    // Status should be parsed from "Ready to close: Yes" -> Complete
     expect(shownRes.workItem.audit.status).toBe('Complete');
   });
 
-  it('redacts email addresses in audit text', async () => {
+  it('redacts email addresses in audit text while preserving valid first line', async () => {
     // Create a work item
     const { stdout: created } = await execAsync(`tsx ${cliPath} --json create -t "Email redaction test"`);
     const createdRes = JSON.parse(created);
     expect(createdRes.success).toBe(true);
     const id = createdRes.workItem.id;
 
-    // Audit with email addresses (simulating what skill might produce)
-    const auditText = 'Reviewed by alice@example.com and bob@test.org';
+    // Audit with required first line + free-form details including emails
+    const auditText = 'Ready to close: No\nReviewed by alice@example.com and bob@test.org';
     const { stdout: updated } = await execAsync(
       `tsx ${cliPath} --json update ${id} --audit-text "${auditText}"`
     );
@@ -60,7 +58,7 @@ describe('integration: audit skill CLI write path', () => {
     // Verify email redaction
     const { stdout: shown } = await execAsync(`tsx ${cliPath} --json show ${id}`);
     const shownRes = JSON.parse(shown);
-    expect(shownRes.workItem.audit.text).toBe('Reviewed by a***@example.com and b***@test.org');
+    expect(shownRes.workItem.audit.text).toBe('Ready to close: No\nReviewed by a***@example.com and b***@test.org');
   });
 
   it('preserves historical comments while storing new structured audit', async () => {
@@ -76,8 +74,7 @@ describe('integration: audit skill CLI write path', () => {
     expect(commentRes.success).toBe(true);
 
     // Add structured audit via CLI write path (new audit skill behavior)
-    // This update uses an unambiguous 'Ready' token which should succeed.
-    await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "Ready"`);
+    await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "Ready to close: No"`);
 
     // Verify both exist: structured audit AND comment
     const { stdout: shown } = await execAsync(`tsx ${cliPath} --json show ${id}`);
@@ -85,7 +82,7 @@ describe('integration: audit skill CLI write path', () => {
 
     // Structured audit should be present
     expect(shownRes.workItem.audit).toBeDefined();
-    expect(shownRes.workItem.audit.text).toBe('Ready');
+    expect(shownRes.workItem.audit.text).toBe('Ready to close: No');
 
     // Historical comment should also still exist - fetch with comment list
     const { stdout: commentList } = await execAsync(`tsx ${cliPath} --json comment list ${id}`);
@@ -96,51 +93,50 @@ describe('integration: audit skill CLI write path', () => {
     // but the exact structure of comments returned may vary
   });
 
-  it('parses readiness status from audit text correctly', async () => {
-    // Create work items WITH acceptance criteria so status is not downgraded
-    // Test cases with unambiguous status tokens
-    const testCases = [
-      { text: 'Ready to close', expectedStatus: 'Complete' },
-      { text: 'Ready', expectedStatus: 'Complete' },
-      { text: 'Complete', expectedStatus: 'Complete' },
-      { text: 'Done', expectedStatus: 'Complete' },
-      // Note: "Partial work done" parses as Complete because "done" matches first in the regex order
-      // Using more explicit partial tokens
-      { text: 'Partial', expectedStatus: 'Partial' },
-      { text: 'Incomplete', expectedStatus: 'Partial' },
-      { text: 'Needs work', expectedStatus: 'Partial' },
-      { text: 'Not started', expectedStatus: 'Not Started' },
-      { text: 'Todo', expectedStatus: 'Not Started' },
-      { text: 'Open', expectedStatus: 'Not Started' },
-      { text: 'Some random text', expectedStatus: 'Missing Criteria' },
-    ];
+  it('accepts only the exact required first line and rejects invalid variants', async () => {
+    const { stdout: created } = await execAsync(`tsx ${cliPath} --json create -t "Status test"`);
+    const id = JSON.parse(created).workItem.id;
 
-    for (const tc of testCases) {
-      // Create with acceptance criteria to avoid the conservative downgrade
-      const { stdout: created } = await execAsync(`tsx ${cliPath} --json create -t "Status test" -d "## Acceptance Criteria\n1. Test"`);
-      const createdRes = JSON.parse(created);
-      const id = createdRes.workItem.id;
+    const { stdout: noOut } = await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "  Ready to close: No  \nDetails"`);
+    const noRes = JSON.parse(noOut);
+    expect(noRes.success).toBe(true);
+    expect(noRes.workItem.audit.status).toBe('Partial');
 
-      // For ambiguous inputs (Missing Criteria) the CLI is expected to
-      // reject the write. For all others it should succeed.
-      if (tc.expectedStatus === 'Missing Criteria') {
-        try {
-          await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "${tc.text}"`);
-          expect.fail('Should have rejected ambiguous audit write');
-        } catch (error: any) {
-          const result = JSON.parse(error.stdout || error.stderr || '{}');
-          expect(result.success).toBe(false);
-          expect(result.error).toBe('audit-ambiguous-readiness');
-        }
-      } else {
-        const { stdout: updated } = await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "${tc.text}"`);
-        const updatedRes = JSON.parse(updated);
-        expect(updatedRes.success).toBe(true);
+    try {
+      await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "Ready to close"`);
+      expect.fail('Should have rejected invalid first line');
+    } catch (error: any) {
+      const result = JSON.parse(error.stdout || error.stderr || '{}');
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('audit-invalid-first-line');
+      expect(result.message).toContain("Found: 'Ready to close'");
+    }
+  });
 
-        const { stdout: shown } = await execAsync(`tsx ${cliPath} --json show ${id}`);
-        const shownRes = JSON.parse(shown);
-        expect(shownRes.workItem.audit.status).toBe(tc.expectedStatus);
-      }
+  it('handles the reported example and flags gutter-character variant', async () => {
+    const { stdout: created } = await execAsync(`tsx ${cliPath} --json create -t "Reported example test"`);
+    const id = JSON.parse(created).workItem.id;
+
+    const reportedAudit = `
+  Ready to close: No
+
+  ## Summary
+
+  The work item remains open and needs follow-up.
+`;
+    const { stdout: okOut } = await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "${reportedAudit}"`);
+    const ok = JSON.parse(okOut);
+    expect(ok.success).toBe(true);
+    expect(ok.workItem.audit.status).toBe('Partial');
+
+    try {
+      await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "┃ Ready to close: No"`);
+      expect.fail('Should have rejected gutter-character first line');
+    } catch (error: any) {
+      const result = JSON.parse(error.stdout || error.stderr || '{}');
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('audit-invalid-first-line');
+      expect(result.indicators.gutterChars).toBe(true);
     }
   });
 });

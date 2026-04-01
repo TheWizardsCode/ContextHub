@@ -1,6 +1,20 @@
 import os from 'node:os';
 import type { WorkItemAudit } from './types.js';
 
+const READY_TO_CLOSE_YES = 'Ready to close: Yes';
+const READY_TO_CLOSE_NO = 'Ready to close: No';
+const GUTTER_CHAR_RE = /[│┃┆┇╎╏]/u;
+const NON_PRINTABLE_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B\u200C\u200D\u2060]/u;
+
+export type AuditFirstLineInspection = {
+  firstNonEmptyLine: string;
+  trimmedFirstNonEmptyLine: string;
+  hasBom: boolean;
+  hasNonPrintable: boolean;
+  hasGutterChars: boolean;
+  isValid: boolean;
+};
+
 export function resolveAuditAuthor(): string {
   const explicit = process.env.WL_USER || process.env.USER || process.env.USERNAME;
   if (explicit && explicit.trim()) return explicit.trim();
@@ -49,51 +63,51 @@ export function buildAuditEntry(auditText: string, author?: string, opts?: Build
   const redacted = redactAuditText(auditText);
   const parsed = parseReadinessLine(redacted);
 
-  // Conservative override: if the audit text claims readiness (Complete) but the
-  // associated work item lacks explicit acceptance criteria, mark as Missing Criteria
-  // to signal that we cannot deterministically verify the claim.
-  let finalStatus: WorkItemAudit['status'] = parsed;
-  if (parsed === 'Complete' && opts && opts.hasAcceptanceCriteria === false) {
-    finalStatus = 'Missing Criteria';
-  }
-
   return {
     time: new Date().toISOString(),
     author: author && author.trim() ? author.trim() : resolveAuditAuthor(),
     text: redacted,
-    status: finalStatus,
+    status: parsed,
   };
 }
 
+export function inspectAuditFirstLine(auditText: string): AuditFirstLineInspection {
+  const firstNonEmptyLine = (auditText || '').split(/\r?\n/).find(l => l.trim() !== '') || '';
+  const trimmedFirstNonEmptyLine = firstNonEmptyLine.trim();
+  const hasBom = firstNonEmptyLine.includes('\uFEFF');
+  const hasNonPrintable = NON_PRINTABLE_RE.test(firstNonEmptyLine);
+  const hasGutterChars = GUTTER_CHAR_RE.test(firstNonEmptyLine);
+  const isValid = trimmedFirstNonEmptyLine === READY_TO_CLOSE_YES || trimmedFirstNonEmptyLine === READY_TO_CLOSE_NO;
+
+  return {
+    firstNonEmptyLine,
+    trimmedFirstNonEmptyLine,
+    hasBom,
+    hasNonPrintable,
+    hasGutterChars,
+    isValid,
+  };
+}
+
+export function formatInvalidAuditFirstLineMessage(inspection: AuditFirstLineInspection): string {
+  const found = inspection.trimmedFirstNonEmptyLine === '' ? '<empty>' : inspection.trimmedFirstNonEmptyLine;
+  return `First non-empty line must be '${READY_TO_CLOSE_YES}' or '${READY_TO_CLOSE_NO}'. Found: '${found}'. Indicators: bom=${inspection.hasBom ? 'yes' : 'no'}, nonPrintable=${inspection.hasNonPrintable ? 'yes' : 'no'}, gutterChars=${inspection.hasGutterChars ? 'yes' : 'no'}`;
+}
+
 /**
- * Parse the first line of an audit text to derive a conservative readiness status.
+ * Parse the first line of an audit text to derive readiness status.
  *
- * Rules (deterministic, no ML):
+ * Rules:
  * - Inspect only the first non-empty line.
- * - If the line starts with or contains explicit tokens mapping to Complete/Partial/Not Started
- *   return the mapped value. Tokens checked (case-insensitive):
- *     - Complete: `complete`, `done`, `closed`, `ready to close`, `ready`.
- *     - Partial: `partial`, `incomplete`, `needs work`, `some work`.
- *     - Not Started: `not started`, `open`, `todo`.
- * - If none match, return 'Missing Criteria' to signal conservatively that readiness
- *   couldn't be determined.
+ * - Trim whitespace around that line.
+ * - Accept only exact matches:
+ *   - `Ready to close: Yes` -> `Complete`
+ *   - `Ready to close: No` -> `Partial`
+ * - Otherwise return `Missing Criteria`.
  */
 export function parseReadinessLine(auditText: string): WorkItemAudit['status'] {
-  if (!auditText) return 'Missing Criteria';
-  const firstLine = auditText.split(/\r?\n/).find(l => l.trim() !== '') || '';
-  const s = firstLine.trim().toLowerCase();
-
-  // Map of token -> status. Order matters: check more specific phrases first.
-  const checks: Array<{ re: RegExp; status: WorkItemAudit['status'] }> = [
-    { re: /(^|\b)(ready to close|ready to be closed|ready to close)($|\b)/i, status: 'Complete' },
-    { re: /(^|\b)(ready|complete|closed|done)($|\b)/i, status: 'Complete' },
-    { re: /(^|\b)(partial|incomplete|needs work|some work)($|\b)/i, status: 'Partial' },
-    { re: /(^|\b)(not started|todo|open)($|\b)/i, status: 'Not Started' },
-  ];
-
-  for (const c of checks) {
-    if (c.re.test(firstLine)) return c.status;
-  }
-
+  const inspection = inspectAuditFirstLine(auditText);
+  if (inspection.trimmedFirstNonEmptyLine === READY_TO_CLOSE_YES) return 'Complete';
+  if (inspection.trimmedFirstNonEmptyLine === READY_TO_CLOSE_NO) return 'Partial';
   return 'Missing Criteria';
 }

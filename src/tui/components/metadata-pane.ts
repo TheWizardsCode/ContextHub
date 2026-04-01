@@ -64,6 +64,19 @@ export class MetadataPaneComponent {
     return `${mon} ${day}, ${year} ${hh}:${mm}`;
   }
 
+  // Short date/time for the metadata pane: DD/MM HH:MM (local time).
+  // Used to append an audit timestamp beside the one-line audit summary.
+  private static formatShortDateTime(value: Date | string | undefined): string {
+    if (!value) return '';
+    const d = typeof value === 'string' ? new Date(value) : value;
+    if (isNaN(d.getTime())) return String(value);
+    const day = String(d.getDate()).padStart(2, '0');
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    return `${day}/${month} ${hh}:${mm}`;
+  }
+
   updateFromItem(item: {
     status?: string;
     stage?: string;
@@ -116,7 +129,12 @@ export class MetadataPaneComponent {
           const colorExcerpt = excerptWithoutAnsi.includes('Ready to close: Yes')
             ? theme.tui.text.readyYes(redactedExcerpt)
             : theme.tui.text.readyNo(redactedExcerpt);
-          lines.push(colorExcerpt);
+          // Append short audit timestamp (DD/MM HH:MM) if available. Prefer
+          // the structured audit.time field; fall back to item.updatedAt.
+          const auditTime = (item as any)?.audit?.time ?? (item.updatedAt ?? undefined);
+          const shortTs = MetadataPaneComponent.formatShortDateTime(auditTime);
+          const tsPart = shortTs ? ` ${theme.tui.text.muted(`(${shortTs})`)}` : '';
+          lines.push(`${colorExcerpt}${tsPart}`);
         }
       }
     } catch (err) {

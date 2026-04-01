@@ -196,6 +196,7 @@ describe('CLI Issue Status Tests', () => {
       expect(result.success).toBe(true);
       expect(result.workItem.audit).toBeDefined();
       expect(result.workItem.audit.text).toBe('Ready to close: Yes');
+      expect(result.workItem.audit.status).toBe('Complete');
     });
 
     it('should show children when -c flag is used', async () => {
