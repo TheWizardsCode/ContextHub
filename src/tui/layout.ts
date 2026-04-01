@@ -16,6 +16,7 @@ import type {
 import {
   DetailComponent,
   DialogsComponent,
+  EmptyStateComponent,
   HelpMenuComponent,
   ListComponent,
   MetadataPaneComponent,
@@ -45,6 +46,7 @@ export interface TuiLayout {
   detailComponent: DetailComponent;
   metadataPaneComponent: MetadataPaneComponent;
   toastComponent: ToastComponent;
+  emptyStateComponent: EmptyStateComponent;
   overlaysComponent: OverlaysComponent;
   dialogsComponent: DialogsComponent;
   helpMenu: HelpMenuComponent;
@@ -123,6 +125,12 @@ export function createLayout(options: CreateLayoutOptions = {}): TuiLayout {
     position: { bottom: 1, right: 1 },
     style: { fg: theme.tui.colors.lightText, bg: 'green' },
     duration: 1200,
+  }).create();
+
+  // ── Empty state ─────────────────────────────────────────────────────
+  const emptyStateComponent = new EmptyStateComponent({
+    parent: screen,
+    blessed: blessedImpl,
   }).create();
 
   // ── Overlays + Dialogs ──────────────────────────────────────────────
@@ -230,6 +238,7 @@ export function createLayout(options: CreateLayoutOptions = {}): TuiLayout {
     detailComponent,
     metadataPaneComponent,
     toastComponent,
+    emptyStateComponent,
     overlaysComponent,
     dialogsComponent,
     helpMenu,

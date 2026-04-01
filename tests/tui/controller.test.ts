@@ -195,4 +195,235 @@ describe('TuiController', () => {
     expect(opencodeCtorCalls.length).toBe(1);
     expect(opencodeCtorCalls[0].port).toBe(0);
   });
+
+  it('shows empty state when there are no items', async () => {
+    const screen = makeScreen();
+    const list = makeList();
+    const footer = makeBox();
+    const detail = makeBox();
+    const copyIdButton = makeBox();
+    const toastBox = { show: vi.fn() } as any;
+    const emptyStateBox = { show: vi.fn(), hide: vi.fn() } as any;
+
+    const overlays = {
+      detailOverlay: makeBox(),
+      closeOverlay: makeBox(),
+      updateOverlay: makeBox(),
+    };
+    const dialogs = {
+      detailModal: makeBox(),
+      detailClose: makeBox(),
+      closeDialog: makeBox(),
+      closeDialogText: makeBox(),
+      closeDialogOptions: makeList(),
+      updateDialog: makeBox(),
+      updateDialogText: makeBox(),
+      updateDialogOptions: makeList(),
+      updateDialogStageOptions: makeList(),
+      updateDialogStatusOptions: makeList(),
+      updateDialogPriorityOptions: makeList(),
+      updateDialogComment: makeBox(),
+    };
+    const helpMenu = {
+      isVisible: vi.fn(() => false),
+      show: vi.fn(),
+      hide: vi.fn(),
+    };
+    const modalDialogs = {
+      selectList: vi.fn(async () => 0),
+      editTextarea: vi.fn(async () => null),
+    };
+    const opencodeUi = {
+      show: vi.fn(),
+      hide: vi.fn(),
+    };
+    const metadataPane = makeBox();
+
+    const createLayout = vi.fn(() => ({
+      screen,
+      listComponent: {
+        getList: () => list,
+        getFooter: () => footer,
+        setItems: vi.fn(),
+      },
+      detailComponent: {
+        getDetail: () => detail,
+        getCopyIdButton: () => copyIdButton,
+      },
+      toastComponent: toastBox,
+      emptyStateComponent: emptyStateBox,
+      overlaysComponent: overlays,
+      dialogsComponent: dialogs,
+      helpMenu,
+      modalDialogs,
+      opencodeUi,
+      metadataPaneComponent: {
+        getBox: () => metadataPane,
+      },
+    }));
+
+    const ctx = {
+      blessed: { screen: () => screen },
+      program: { opts: () => ({ verbose: false }) },
+      utils: {
+        requireInitialized: vi.fn(),
+        getDatabase: vi.fn(() => ({
+          list: () => [],
+          getPrefix: () => undefined,
+          getCommentsForWorkItem: () => [],
+          update: () => ({}),
+          createComment: () => ({}),
+          get: () => null,
+        })),
+      },
+    } as any;
+
+    const controller = new TuiController(ctx, {
+      createLayout: createLayout as any,
+      OpencodeClient: class FakeOpencodeClient {
+        constructor() {}
+        startServer = vi.fn();
+      } as any,
+      resolveWorklogDir: () => '/tmp',
+      createPersistence: () => ({
+        loadPersistedState: async () => null,
+        savePersistedState: async () => undefined,
+        statePath: '/tmp/tui-state.json',
+      }),
+    });
+
+    await controller.start({});
+
+    expect(createLayout).toHaveBeenCalled();
+    expect(emptyStateBox.show).toHaveBeenCalled();
+    expect(screen.render).toHaveBeenCalled();
+  });
+
+  it('Ctrl-C triggers shutdown when empty-state is shown', async () => {
+    // Build a screen mock that records key registrations so we can invoke handlers
+    const screen: any = {
+      height: 40,
+      width: 120,
+      focused: null,
+      render: vi.fn(),
+      destroy: vi.fn(),
+      // we'll capture key registrations here
+      _keys: [] as any[],
+      key(keys: any, handler: any) {
+        this._keys.push([keys, handler]);
+      },
+      on: vi.fn(),
+    };
+
+    const list = makeList();
+    const footer = makeBox();
+    const detail = makeBox();
+    const copyIdButton = makeBox();
+    const toastBox = { show: vi.fn() } as any;
+    const emptyStateBox = { show: vi.fn(), hide: vi.fn() } as any;
+
+    const overlays = {
+      detailOverlay: makeBox(),
+      closeOverlay: makeBox(),
+      updateOverlay: makeBox(),
+    };
+    const dialogs = {
+      detailModal: makeBox(),
+      detailClose: makeBox(),
+      closeDialog: makeBox(),
+      closeDialogText: makeBox(),
+      closeDialogOptions: makeList(),
+      updateDialog: makeBox(),
+      updateDialogText: makeBox(),
+      updateDialogOptions: makeList(),
+      updateDialogStageOptions: makeList(),
+      updateDialogStatusOptions: makeList(),
+      updateDialogPriorityOptions: makeList(),
+      updateDialogComment: makeBox(),
+    };
+    const helpMenu = {
+      isVisible: vi.fn(() => false),
+      show: vi.fn(),
+      hide: vi.fn(),
+    };
+    const modalDialogs = {
+      selectList: vi.fn(async () => 0),
+      editTextarea: vi.fn(async () => null),
+    };
+    const opencodeUi = {
+      show: vi.fn(),
+      hide: vi.fn(),
+    };
+    const metadataPane = makeBox();
+
+    const createLayout = vi.fn(() => ({
+      screen,
+      listComponent: {
+        getList: () => list,
+        getFooter: () => footer,
+        setItems: vi.fn(),
+      },
+      detailComponent: {
+        getDetail: () => detail,
+        getCopyIdButton: () => copyIdButton,
+      },
+      toastComponent: toastBox,
+      emptyStateComponent: emptyStateBox,
+      overlaysComponent: overlays,
+      dialogsComponent: dialogs,
+      helpMenu,
+      modalDialogs,
+      opencodeUi,
+      metadataPaneComponent: {
+        getBox: () => metadataPane,
+      },
+    }));
+
+    const saveSpy = vi.fn(async () => undefined);
+
+    const ctx = {
+      blessed: { screen: () => screen },
+      program: { opts: () => ({ verbose: false }) },
+      utils: {
+        requireInitialized: vi.fn(),
+        getDatabase: vi.fn(() => ({
+          list: () => [],
+          getPrefix: () => undefined,
+          getCommentsForWorkItem: () => [],
+          update: () => ({}),
+          createComment: () => ({}),
+          get: () => null,
+        })),
+      },
+    } as any;
+
+    const controller = new TuiController(ctx, {
+      createLayout: createLayout as any,
+      OpencodeClient: class FakeOpencodeClient { constructor() {} startServer = vi.fn(); } as any,
+      resolveWorklogDir: () => '/tmp',
+      createPersistence: () => ({
+        loadPersistedState: async () => null,
+        savePersistedState: saveSpy,
+        statePath: '/tmp/tui-state.json',
+      }),
+    });
+
+    await controller.start({});
+
+    // Find the registered quit handler (one of the key registrations should include 'C-c')
+    const quitEntry = screen._keys.find((entry: any[]) => {
+      const keys = entry[0];
+      if (Array.isArray(keys)) return keys.includes('C-c') || keys.includes('C-c'.replace('-', ''));
+      return String(keys).includes('C-c');
+    });
+    expect(quitEntry).toBeTruthy();
+    const quitHandler = quitEntry[1];
+
+    // Invoke the handler as if user pressed Ctrl-C while empty-state is shown
+    await quitHandler();
+
+    // The early fallback should persist minimal state and destroy the screen
+    expect(saveSpy).toHaveBeenCalled();
+    expect(screen.destroy).toHaveBeenCalled();
+  });
 });
