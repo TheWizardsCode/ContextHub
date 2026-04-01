@@ -121,26 +121,14 @@ describe('integration: audit skill CLI write path', () => {
       const createdRes = JSON.parse(created);
       const id = createdRes.workItem.id;
 
-      // For ambiguous inputs (Missing Criteria) the CLI is expected to
-      // reject the write. For all others it should succeed.
-      if (tc.expectedStatus === 'Missing Criteria') {
-        try {
-          await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "${tc.text}"`);
-          expect.fail('Should have rejected ambiguous audit write');
-        } catch (error: any) {
-          const result = JSON.parse(error.stdout || error.stderr || '{}');
-          expect(result.success).toBe(false);
-          expect(result.error).toBe('audit-ambiguous-readiness');
-        }
-      } else {
-        const { stdout: updated } = await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "${tc.text}"`);
-        const updatedRes = JSON.parse(updated);
-        expect(updatedRes.success).toBe(true);
+      // All audit writes should succeed; the status is parsed from the text
+      const { stdout: updated } = await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "${tc.text}"`);
+      const updatedRes = JSON.parse(updated);
+      expect(updatedRes.success).toBe(true);
 
-        const { stdout: shown } = await execAsync(`tsx ${cliPath} --json show ${id}`);
-        const shownRes = JSON.parse(shown);
-        expect(shownRes.workItem.audit.status).toBe(tc.expectedStatus);
-      }
+      const { stdout: shown } = await execAsync(`tsx ${cliPath} --json show ${id}`);
+      const shownRes = JSON.parse(shown);
+      expect(shownRes.workItem.audit.status).toBe(tc.expectedStatus);
     }
   });
 });

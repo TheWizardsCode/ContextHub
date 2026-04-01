@@ -9,7 +9,7 @@ import { humanFormatWorkItem, resolveFormat } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { promises as fs } from 'fs';
 import { normalizeActionArgs } from './cli-utils.js';
-import { buildAuditEntry, hasAcceptanceCriteria, redactAuditText, parseReadinessLine } from '../audit.js';
+import { buildAuditEntry, hasAcceptanceCriteria } from '../audit.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -96,17 +96,6 @@ export default function register(ctx: PluginContext): void {
       let auditEntry;
       if (auditTextInput !== undefined) {
         const hasCriteria = hasAcceptanceCriteria(description);
-        const redacted = redactAuditText(String(auditTextInput));
-        const parsed = parseReadinessLine(redacted);
-        if (parsed === 'Missing Criteria') {
-          output.error('Audit first-line did not contain a verifiable readiness token', { success: false, error: 'audit-ambiguous-readiness', message: 'Audit first-line did not contain a verifiable readiness token' });
-          process.exit(1);
-        }
-        if (parsed === 'Complete' && hasCriteria === false) {
-          output.error('Audit claims Complete but work item has no acceptance criteria', { success: false, error: 'audit-unverifiable-complete', message: 'Audit claims Complete but work item has no acceptance criteria' });
-          process.exit(1);
-        }
-
         auditEntry = buildAuditEntry(String(auditTextInput), undefined, { hasAcceptanceCriteria: hasCriteria });
       }
 

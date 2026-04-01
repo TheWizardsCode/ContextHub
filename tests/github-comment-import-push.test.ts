@@ -36,8 +36,10 @@ vi.mock('../src/github.js', async (importOriginal) => {
     ...actual,
     // Override only the functions that make real API calls
     listGithubIssues: mockListGithubIssues,
+    listGithubIssuesAsync: async (...args: any[]) => mockListGithubIssues(...args),
     listGithubIssueCommentsAsync: mockListGithubIssueCommentsAsync,
     getGithubIssue: vi.fn(() => { throw new Error('not found'); }),
+    getGithubIssueAsync: vi.fn(async () => { throw new Error('not found'); }),
     getIssueHierarchy: vi.fn(() => ({ parentIssueNumber: null, childIssueNumbers: [] })),
     getIssueHierarchyAsync: vi.fn(async () => ({ parentIssueNumber: null, childIssueNumbers: [] })),
     createGithubIssue: vi.fn(),
@@ -52,7 +54,6 @@ vi.mock('../src/github.js', async (importOriginal) => {
       id: `ID_${_num}`,
       updatedAt: new Date().toISOString(),
     })),
-    getGithubIssueAsync: vi.fn(),
     listGithubIssueComments: vi.fn(() => []),
     createGithubIssueComment: vi.fn(),
     createGithubIssueCommentAsync: vi.fn(async (_config: any, _issueNumber: number, _body: string) => ({

@@ -111,15 +111,12 @@ describe('CLI Issue Management Tests', () => {
       expect(result.workItem.title).toBe('Updated title');
     });
 
-    it('should reject ambiguous audit writes without acceptance criteria', async () => {
-      try {
-        await execAsync(`tsx ${cliPath} --json update ${workItemId} --audit-text "Ready to close: Yes"`);
-        expect.fail('Should have thrown an error');
-      } catch (error: any) {
-        const result = JSON.parse(error.stderr || error.stdout || '{}');
-        expect(result.success).toBe(false);
-        expect(result.error).toBe('audit-unverifiable-complete');
-      }
+    it('should accept audit writes regardless of acceptance criteria', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json update ${workItemId} --audit-text "Ready to close: Yes"`);
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItem.audit).toBeDefined();
+      expect(result.workItem.audit.text).toBe('Ready to close: Yes');
     });
 
     it('should derive complete audit status when success criteria exist', async () => {

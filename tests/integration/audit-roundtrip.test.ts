@@ -15,21 +15,23 @@ describe('integration: audit write -> read roundtrip', () => {
   });
 
   it('persists audit via create/update and is returned by show --json', async () => {
-    // Create without audit text and then attempt to write an ambiguous audit
+    // Create without audit text and then write a freeform audit
     const { stdout: created } = await execAsync(`tsx ${cliPath} --json create -t "Roundtrip audit"`);
     const createdRes = JSON.parse(created);
     expect(createdRes.success).toBe(true);
     const id = createdRes.workItem.id;
 
-    // Attempt to update with freeform audit text that does not contain a
-    // verifiable readiness token; expect the CLI to reject the write.
-    try {
-      await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "Confirm by alice@example.com"`);
-      expect.fail('Should have rejected ambiguous audit write');
-    } catch (error: any) {
-      const result = JSON.parse(error.stdout || error.stderr || '{}');
-      expect(result.success).toBe(false);
-      expect(result.error).toBe('audit-ambiguous-readiness');
-    }
+    // Write freeform audit text (email addresses will be redacted)
+    const { stdout: updated } = await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "Confirm by alice@example.com"`);
+    const updatedRes = JSON.parse(updated);
+    expect(updatedRes.success).toBe(true);
+
+    // Verify the audit is persisted and returned by show --json
+    const { stdout: shown } = await execAsync(`tsx ${cliPath} --json show ${id}`);
+    const shownRes = JSON.parse(shown);
+    expect(shownRes.success).toBe(true);
+    expect(shownRes.workItem.audit).toBeDefined();
+    // Email should be redacted in the stored text
+    expect(shownRes.workItem.audit.text).toBe('Confirm by a***@example.com');
   });
 });
