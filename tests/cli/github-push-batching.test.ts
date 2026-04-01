@@ -3,6 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { enterTempDir, leaveTempDir, writeConfig, writeInitSemaphore, seedWorkItems, execAsync, cliPath } from './cli-helpers.js';
 
+const FAR_FUTURE_TIMESTAMP = '2999-01-01T00:00:00.000Z';
+
 describe('github push --id flag', () => {
   it('--id with a valid item pushes only that item (command completes without error)', async () => {
     const state = enterTempDir();
@@ -10,11 +12,26 @@ describe('github push --id flag', () => {
       writeConfig(state.tempDir);
       writeInitSemaphore(state.tempDir);
       seedWorkItems(state.tempDir, [
-        { id: 'WL-ALPHA', title: 'Alpha item', status: 'open' as any, priority: 'medium' as any },
-        { id: 'WL-BETA', title: 'Beta item', status: 'open' as any, priority: 'medium' as any },
+        {
+          id: 'WL-ALPHA',
+          title: 'Alpha item',
+          status: 'open' as any,
+          priority: 'medium' as any,
+          githubIssueNumber: 1001,
+          githubIssueId: 5001,
+          githubIssueUpdatedAt: FAR_FUTURE_TIMESTAMP,
+        },
+        {
+          id: 'WL-BETA',
+          title: 'Beta item',
+          status: 'open' as any,
+          priority: 'medium' as any,
+          githubIssueNumber: 1002,
+          githubIssueId: 5002,
+          githubIssueUpdatedAt: FAR_FUTURE_TIMESTAMP,
+        },
       ]);
 
-      // Should succeed (items have no GitHub mapping yet so push will skip gracefully)
       const { stdout } = await execAsync(
         `tsx ${cliPath} github push --repo owner/name --id WL-ALPHA`,
         { cwd: state.tempDir }
@@ -58,7 +75,15 @@ describe('github push --id flag', () => {
       writeConfig(state.tempDir);
       writeInitSemaphore(state.tempDir);
       seedWorkItems(state.tempDir, [
-        { id: 'WL-ALPHA', title: 'Alpha item', status: 'open' as any, priority: 'medium' as any },
+        {
+          id: 'WL-ALPHA',
+          title: 'Alpha item',
+          status: 'open' as any,
+          priority: 'medium' as any,
+          githubIssueNumber: 1001,
+          githubIssueId: 5001,
+          githubIssueUpdatedAt: FAR_FUTURE_TIMESTAMP,
+        },
       ]);
 
       const timestampPath = path.join(state.tempDir, '.worklog', 'github-last-push');
@@ -81,7 +106,15 @@ describe('github push --id flag', () => {
       writeConfig(state.tempDir);
       writeInitSemaphore(state.tempDir);
       seedWorkItems(state.tempDir, [
-        { id: 'WL-ALPHA', title: 'Alpha item', status: 'open' as any, priority: 'medium' as any },
+        {
+          id: 'WL-ALPHA',
+          title: 'Alpha item',
+          status: 'open' as any,
+          priority: 'medium' as any,
+          githubIssueNumber: 1001,
+          githubIssueId: 5001,
+          githubIssueUpdatedAt: FAR_FUTURE_TIMESTAMP,
+        },
       ]);
 
       const timestampPath = path.join(state.tempDir, '.worklog', 'github-last-push');
@@ -112,6 +145,9 @@ describe('github push batching', () => {
         title: `Batch item ${i + 1}`,
         status: 'open' as any,
         priority: 'medium' as any,
+        githubIssueNumber: 2000 + i,
+        githubIssueId: 6000 + i,
+        githubIssueUpdatedAt: FAR_FUTURE_TIMESTAMP,
       }));
       seedWorkItems(state.tempDir, items);
 
@@ -142,6 +178,9 @@ describe('github push batching', () => {
         title: `Exact item ${i + 1}`,
         status: 'open' as any,
         priority: 'medium' as any,
+        githubIssueNumber: 3000 + i,
+        githubIssueId: 7000 + i,
+        githubIssueUpdatedAt: FAR_FUTURE_TIMESTAMP,
       }));
       seedWorkItems(state.tempDir, items);
 
