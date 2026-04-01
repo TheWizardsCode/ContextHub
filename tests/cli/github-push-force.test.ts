@@ -3,6 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { enterTempDir, leaveTempDir, writeConfig, writeInitSemaphore, seedWorkItems, execAsync, cliPath } from './cli-helpers.js';
 
+const FAR_FUTURE_TIMESTAMP = '2999-01-01T00:00:00.000Z';
+
 describe('github push --all flag', () => {
   it('--all processes all items and writes timestamp file', async () => {
     const state = enterTempDir();
@@ -50,8 +52,24 @@ describe('github push --all flag', () => {
       writeConfig(state.tempDir);
       writeInitSemaphore(state.tempDir);
       seedWorkItems(state.tempDir, [
-        { id: 'WL-TEST1', title: 'Item 1', status: 'open' as any, priority: 'medium' as any },
-        { id: 'WL-TEST2', title: 'Item 2', status: 'open' as any, priority: 'medium' as any },
+        {
+          id: 'WL-TEST1',
+          title: 'Item 1',
+          status: 'open' as any,
+          priority: 'medium' as any,
+          githubIssueNumber: 5001,
+          githubIssueId: 9001,
+          githubIssueUpdatedAt: FAR_FUTURE_TIMESTAMP,
+        },
+        {
+          id: 'WL-TEST2',
+          title: 'Item 2',
+          status: 'open' as any,
+          priority: 'medium' as any,
+          githubIssueNumber: 5002,
+          githubIssueId: 9002,
+          githubIssueUpdatedAt: FAR_FUTURE_TIMESTAMP,
+        },
       ]);
 
       const { stdout } = await execAsync(`tsx ${cliPath} github push --repo owner/name --all`, { cwd: state.tempDir });

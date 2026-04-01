@@ -3,6 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { enterTempDir, leaveTempDir, writeConfig, writeInitSemaphore, seedWorkItems, execAsync, cliPath } from './cli-helpers.js';
 
+const FAR_FUTURE_TIMESTAMP = '2999-01-01T00:00:00.000Z';
+
 describe('github push timestamp uses push-start time (AC2)', () => {
   it('timestamp is captured before processing begins (push-start time <= post-push time)', async () => {
     const state = enterTempDir();
@@ -87,15 +89,23 @@ describe('github push timestamp uses push-start time (AC2)', () => {
     }
   });
 
-  it('timestamp is written even when items exist but none have GitHub mapping', async () => {
+  it('timestamp is written even when items exist and are unchanged', async () => {
     const state = enterTempDir();
     try {
       writeConfig(state.tempDir);
       writeInitSemaphore(state.tempDir);
-      // Seed items with no githubIssueNumber - they'll attempt push (and succeed
-      // via mock) but have no prior GitHub mapping.
+      // Seed one item that is already GitHub-synced and newer than local updates
+      // so push can complete deterministically without external API calls.
       seedWorkItems(state.tempDir, [
-        { title: 'Item without GitHub mapping', status: 'open', priority: 'medium' },
+        {
+          id: 'WL-SYNCED-1',
+          title: 'Previously synced item',
+          status: 'open',
+          priority: 'medium',
+          githubIssueNumber: 4001,
+          githubIssueId: 8001,
+          githubIssueUpdatedAt: FAR_FUTURE_TIMESTAMP,
+        },
       ]);
 
       const timestampPath = path.join(state.tempDir, '.worklog', 'github-last-push');

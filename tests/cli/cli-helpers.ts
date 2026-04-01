@@ -204,6 +204,9 @@ export function seedWorkItems(
     assignee?: string;
     stage?: string;
     needsProducerReview?: boolean;
+    githubIssueNumber?: number;
+    githubIssueId?: number;
+    githubIssueUpdatedAt?: string;
     audit?: {
       time: string;
       author: string;
@@ -230,11 +233,14 @@ export function seedWorkItems(
     createdBy: '',
     deletedBy: '',
     deleteReason: '',
-    risk: '' as const,
-    effort: '' as const,
-    needsProducerReview: item.needsProducerReview ?? false,
-    audit: item.audit,
-  }));
+      risk: '' as const,
+      effort: '' as const,
+      githubIssueNumber: item.githubIssueNumber,
+      githubIssueId: item.githubIssueId,
+      githubIssueUpdatedAt: item.githubIssueUpdatedAt,
+      needsProducerReview: item.needsProducerReview ?? false,
+      audit: item.audit,
+    }));
 
   const dataPath = path.join(dir, '.worklog', 'worklog-data.jsonl');
   exportToJsonl(seeded, comments, dataPath, []);
