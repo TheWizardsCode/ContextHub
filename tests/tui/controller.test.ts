@@ -426,4 +426,329 @@ describe('TuiController', () => {
     expect(saveSpy).toHaveBeenCalled();
     expect(screen.destroy).toHaveBeenCalled();
   });
+
+  it('falls back to safe terminal mode when layout startup hits a capability parse error', async () => {
+    const screen = makeScreen();
+    const list = makeList();
+    const footer = makeBox();
+    const detail = makeBox();
+    const copyIdButton = makeBox();
+    const toastBox = { show: vi.fn() } as any;
+
+    const overlays = {
+      detailOverlay: makeBox(),
+      closeOverlay: makeBox(),
+      updateOverlay: makeBox(),
+    };
+    const dialogs = {
+      detailModal: makeBox(),
+      detailClose: makeBox(),
+      closeDialog: makeBox(),
+      closeDialogText: makeBox(),
+      closeDialogOptions: makeList(),
+      updateDialog: makeBox(),
+      updateDialogText: makeBox(),
+      updateDialogOptions: makeList(),
+      updateDialogStageOptions: makeList(),
+      updateDialogStatusOptions: makeList(),
+      updateDialogPriorityOptions: makeList(),
+      updateDialogComment: makeBox(),
+    };
+    const helpMenu = {
+      isVisible: vi.fn(() => false),
+      show: vi.fn(),
+      hide: vi.fn(),
+    };
+    const modalDialogs = {
+      selectList: vi.fn(async () => 0),
+      editTextarea: vi.fn(async () => null),
+      confirmTextbox: vi.fn(async () => false),
+      forceCleanup: vi.fn(),
+    };
+    const opencodeUi = {
+      serverStatusBox: makeBox(),
+      dialog: makeBox(),
+      textarea: makeBox(),
+      suggestionHint: makeBox(),
+      sendButton: makeBox(),
+      cancelButton: makeBox(),
+      ensureResponsePane: vi.fn(() => makeBox()),
+    };
+    const layout = {
+      screen,
+      listComponent: { getList: () => list, getFooter: () => footer },
+      detailComponent: { getDetail: () => detail, getCopyIdButton: () => copyIdButton },
+      toastComponent: toastBox,
+      overlaysComponent: overlays,
+      dialogsComponent: dialogs,
+      helpMenu,
+      modalDialogs,
+      opencodeUi,
+      nextDialog: {
+        overlay: makeBox(),
+        dialog: makeBox(),
+        close: makeBox(),
+        text: makeBox(),
+        options: makeList(),
+      },
+    };
+
+    const createLayout = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw new Error('tmux-256color.plab_norm terminal capability parse error');
+      })
+      .mockImplementation(() => layout) as unknown as (options?: any) => any;
+
+    const opencodeCtorCalls: any[] = [];
+    class FakeOpencodeClient {
+      constructor(options: any) {
+        opencodeCtorCalls.push(options);
+      }
+      getStatus() { return { status: 'stopped', port: 9999 }; }
+      startServer() { return Promise.resolve(true); }
+      stopServer() { return undefined; }
+      sendPrompt() { return Promise.resolve(); }
+    }
+
+    const stderrSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const program = { opts: () => ({ verbose: false }) } as any;
+    const ctx = {
+      program,
+      utils: {
+        requireInitialized: vi.fn(),
+        getDatabase: vi.fn(() => ({
+          list: () => [
+            {
+              id: 'WL-TEST-2',
+              title: 'Test fallback',
+              description: '',
+              status: 'open',
+              priority: 'medium',
+              sortIndex: 0,
+              parentId: null,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              tags: [],
+              assignee: '',
+              stage: '',
+              issueType: 'task',
+              createdBy: '',
+              deletedBy: '',
+              deleteReason: '',
+              risk: '',
+              effort: '',
+            },
+          ],
+          getPrefix: () => undefined,
+          getCommentsForWorkItem: () => [],
+          update: () => ({}),
+          createComment: () => ({}),
+          get: () => null,
+        })),
+      },
+    } as any;
+
+    const previousTerm = process.env.TERM;
+    process.env.TERM = 'xterm-256color';
+
+    try {
+      const controller = new TuiController(ctx, {
+        createLayout: createLayout as any,
+        OpencodeClient: FakeOpencodeClient as any,
+        resolveWorklogDir: () => '/tmp',
+        createPersistence: () => ({
+          loadPersistedState: async () => null,
+          savePersistedState: async () => undefined,
+          statePath: '/tmp/tui-state.json',
+        }),
+      });
+
+      await controller.start({});
+
+      expect(createLayout).toHaveBeenCalledTimes(2);
+      expect((createLayout as any).mock.calls[0][0]).toEqual(
+        expect.objectContaining({ blessed: expect.anything() })
+      );
+      expect((createLayout as any).mock.calls[1][0]).toEqual(
+        expect.objectContaining({
+          screenOptions: { terminal: 'xterm-256color' },
+          disableColorCapabilityOverride: true,
+        })
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(
+        '[wl tui] Terminal capability parse error detected; starting with safe fallback mode.'
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('TERM=xterm-256color; error: tmux-256color.plab_norm terminal capability parse error')
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(
+        '[wl tui] If needed, run: TERM=xterm-256color wl tui'
+      );
+      expect(opencodeCtorCalls.length).toBe(1);
+    } finally {
+      stderrSpy.mockRestore();
+      if (previousTerm === undefined) {
+        delete process.env.TERM;
+      } else {
+        process.env.TERM = previousTerm;
+      }
+    }
+  });
+
+  it('uses safe startup layout immediately when TERM is tmux-256color', async () => {
+    const screen = makeScreen();
+    const list = makeList();
+    const footer = makeBox();
+    const detail = makeBox();
+    const copyIdButton = makeBox();
+    const toastBox = { show: vi.fn() } as any;
+
+    const overlays = {
+      detailOverlay: makeBox(),
+      closeOverlay: makeBox(),
+      updateOverlay: makeBox(),
+    };
+    const dialogs = {
+      detailModal: makeBox(),
+      detailClose: makeBox(),
+      closeDialog: makeBox(),
+      closeDialogText: makeBox(),
+      closeDialogOptions: makeList(),
+      updateDialog: makeBox(),
+      updateDialogText: makeBox(),
+      updateDialogOptions: makeList(),
+      updateDialogStageOptions: makeList(),
+      updateDialogStatusOptions: makeList(),
+      updateDialogPriorityOptions: makeList(),
+      updateDialogComment: makeBox(),
+    };
+    const helpMenu = {
+      isVisible: vi.fn(() => false),
+      show: vi.fn(),
+      hide: vi.fn(),
+    };
+    const modalDialogs = {
+      selectList: vi.fn(async () => 0),
+      editTextarea: vi.fn(async () => null),
+      confirmTextbox: vi.fn(async () => false),
+      forceCleanup: vi.fn(),
+    };
+    const opencodeUi = {
+      serverStatusBox: makeBox(),
+      dialog: makeBox(),
+      textarea: makeBox(),
+      suggestionHint: makeBox(),
+      sendButton: makeBox(),
+      cancelButton: makeBox(),
+      ensureResponsePane: vi.fn(() => makeBox()),
+    };
+    const layout = {
+      screen,
+      listComponent: { getList: () => list, getFooter: () => footer },
+      detailComponent: { getDetail: () => detail, getCopyIdButton: () => copyIdButton },
+      toastComponent: toastBox,
+      overlaysComponent: overlays,
+      dialogsComponent: dialogs,
+      helpMenu,
+      modalDialogs,
+      opencodeUi,
+      nextDialog: {
+        overlay: makeBox(),
+        dialog: makeBox(),
+        close: makeBox(),
+        text: makeBox(),
+        options: makeList(),
+      },
+    };
+
+    const createLayout = vi.fn(() => layout) as unknown as (options?: any) => any;
+
+    class FakeOpencodeClient {
+      constructor(_options: any) {}
+      getStatus() { return { status: 'stopped', port: 9999 }; }
+      startServer() { return Promise.resolve(true); }
+      stopServer() { return undefined; }
+      sendPrompt() { return Promise.resolve(); }
+    }
+
+    const stderrSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const program = { opts: () => ({ verbose: false }) } as any;
+    const ctx = {
+      program,
+      utils: {
+        requireInitialized: vi.fn(),
+        getDatabase: vi.fn(() => ({
+          list: () => [
+            {
+              id: 'WL-TEST-3',
+              title: 'Test tmux fallback',
+              description: '',
+              status: 'open',
+              priority: 'medium',
+              sortIndex: 0,
+              parentId: null,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              tags: [],
+              assignee: '',
+              stage: '',
+              issueType: 'task',
+              createdBy: '',
+              deletedBy: '',
+              deleteReason: '',
+              risk: '',
+              effort: '',
+            },
+          ],
+          getPrefix: () => undefined,
+          getCommentsForWorkItem: () => [],
+          update: () => ({}),
+          createComment: () => ({}),
+          get: () => null,
+        })),
+      },
+    } as any;
+
+    const previousTerm = process.env.TERM;
+    process.env.TERM = 'tmux-256color';
+
+    try {
+      const controller = new TuiController(ctx, {
+        createLayout: createLayout as any,
+        OpencodeClient: FakeOpencodeClient as any,
+        resolveWorklogDir: () => '/tmp',
+        createPersistence: () => ({
+          loadPersistedState: async () => null,
+          savePersistedState: async () => undefined,
+          statePath: '/tmp/tui-state.json',
+        }),
+      });
+
+      await controller.start({});
+
+      expect(createLayout).toHaveBeenCalledTimes(1);
+      expect((createLayout as any).mock.calls[0][0]).toEqual(
+        expect.objectContaining({
+          screenOptions: { terminal: 'xterm-256color' },
+          disableColorCapabilityOverride: true,
+        })
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(
+        '[wl tui] TERM=tmux-256color can trigger tmux terminfo parse issues; using fallback terminal xterm-256color.'
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(
+        '[wl tui] If needed, run: TERM=xterm-256color wl tui'
+      );
+    } finally {
+      stderrSpy.mockRestore();
+      if (previousTerm === undefined) {
+        delete process.env.TERM;
+      } else {
+        process.env.TERM = previousTerm;
+      }
+    }
+  });
 });
