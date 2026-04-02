@@ -2752,6 +2752,14 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     };
     try { (list as any).__opencode_select = listSelectHandler; list.on('select', listSelectHandler); } catch (_) {}
 
+    // 'select item' fires via List.prototype.select() for ALL selection changes,
+    // including mouse clicks on a different item (where 'select' is NOT emitted).
+    // This is the primary handler that fixes mouse click-to-select.
+    const listSelectItemHandler = (_item: any, idx: number) => {
+      updateListSelection(idx, 'select-item');
+    };
+    try { (list as any).__opencode_select_item = listSelectItemHandler; list.on('select item', listSelectItemHandler); } catch (_) {}
+
     // Update details immediately when navigating with keys or mouse
     const listKeypressHandler = (_ch: any, key: any) => {
       try {
