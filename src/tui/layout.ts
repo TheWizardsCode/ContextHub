@@ -68,6 +68,13 @@ export interface CreateLayoutOptions {
 
   /** Options forwarded to `blessed.screen()`. */
   screenOptions?: Record<string, unknown>;
+
+  /**
+   * Disable the tput-based color capability override.
+   *
+   * Useful for startup fallback paths where terminfo parsing is unreliable.
+   */
+  disableColorCapabilityOverride?: boolean;
 }
 
 // ── Factory ──────────────────────────────────────────────────────────
@@ -95,9 +102,11 @@ export function createLayout(options: CreateLayoutOptions = {}): TuiLayout {
   // handle 256-color SGR sequences, so this override is safe.
   // Cast to any: blessed's program.tput exists at runtime but is missing
   // from @types/blessed's BlessedProgram declaration.
-  const prog = screen.program as any;
-  if (prog?.tput && prog.tput.colors < 256) {
-    prog.tput.colors = 256;
+  if (!options.disableColorCapabilityOverride) {
+    const prog = screen.program as any;
+    if (prog?.tput && prog.tput.colors < 256) {
+      prog.tput.colors = 256;
+    }
   }
 
   // ── List (left pane + footer) ───────────────────────────────────────

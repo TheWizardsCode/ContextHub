@@ -132,6 +132,26 @@ describe('createLayout', () => {
         expect.objectContaining({ fullUnicode: true }),
       );
     });
+
+    it('enables 256 colors by default when terminfo reports fewer', () => {
+      const mock = createMockBlessed();
+      const screen = createMockWidget({ program: { tput: { colors: 8 } } });
+      mock.screen = vi.fn(() => screen);
+
+      createLayout({ blessed: mock });
+
+      expect((screen as any).program.tput.colors).toBe(256);
+    });
+
+    it('skips color override when disableColorCapabilityOverride is set', () => {
+      const mock = createMockBlessed();
+      const screen = createMockWidget({ program: { tput: { colors: 8 } } });
+      mock.screen = vi.fn(() => screen);
+
+      createLayout({ blessed: mock, disableColorCapabilityOverride: true });
+
+      expect((screen as any).program.tput.colors).toBe(8);
+    });
   });
 
   describe('layout structure', () => {

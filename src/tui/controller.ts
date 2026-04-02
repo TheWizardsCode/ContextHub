@@ -93,6 +93,34 @@ export interface TuiControllerDeps {
   OpencodeClient?: typeof OpencodeClient;
 }
 
+const TUI_FALLBACK_TERMINAL = 'xterm-256color';
+
+const getErrorMessage = (error: unknown): string => {
+  if (error instanceof Error && typeof error.message === 'string') {
+    return error.message;
+  }
+  return String(error);
+};
+
+const toSingleLine = (value: string): string => value.replace(/\s+/g, ' ').trim();
+
+const shouldUseSafeTerminalFallback = (): boolean => {
+  const term = (process.env.TERM || '').toLowerCase();
+  return term === 'tmux-256color';
+};
+
+const isTerminalCapabilityParseError = (error: unknown): boolean => {
+  const message = getErrorMessage(error).toLowerCase();
+  return (
+    message.includes('plab_norm')
+    || message.includes('terminfo')
+    || message.includes('tmux-256color')
+    || (message.includes('terminal') && message.includes('capab'))
+    || (message.includes('capab') && message.includes('parse'))
+    || (message.includes('tput') && message.includes('parse'))
+  );
+};
+
 export class TuiController {
   constructor(
     private readonly ctx: PluginContext,
@@ -146,7 +174,38 @@ export class TuiController {
     const state = createTuiState(items, showClosed, persistedExpanded);
 
     // Setup blessed screen and layout via factory (extracted to src/tui/layout.ts)
-    const layout = createLayoutImpl({ blessed: blessedImpl });
+    let layout: ReturnType<typeof createLayout>;
+    const fallbackLayoutOptions = {
+      blessed: blessedImpl,
+      screenOptions: { terminal: TUI_FALLBACK_TERMINAL },
+      disableColorCapabilityOverride: true,
+    };
+    const currentTerm = process.env.TERM || 'unknown';
+    const useSafeTerminalFallback = shouldUseSafeTerminalFallback();
+    const initialLayoutOptions = useSafeTerminalFallback
+      ? fallbackLayoutOptions
+      : { blessed: blessedImpl };
+
+    if (useSafeTerminalFallback) {
+      console.error(`[wl tui] TERM=${currentTerm} can trigger tmux terminfo parse issues; using fallback terminal ${TUI_FALLBACK_TERMINAL}.`);
+      console.error(`[wl tui] If needed, run: TERM=${TUI_FALLBACK_TERMINAL} wl tui`);
+    }
+
+    try {
+      layout = createLayoutImpl(initialLayoutOptions);
+    } catch (error) {
+      if (!isTerminalCapabilityParseError(error)) {
+        throw error;
+      }
+      if (useSafeTerminalFallback) {
+        throw error;
+      }
+      const errorMessage = toSingleLine(getErrorMessage(error));
+      console.error('[wl tui] Terminal capability parse error detected; starting with safe fallback mode.');
+      console.error(`[wl tui] TERM=${currentTerm}; error: ${errorMessage}`);
+      console.error(`[wl tui] If needed, run: TERM=${TUI_FALLBACK_TERMINAL} wl tui`);
+      layout = createLayoutImpl(fallbackLayoutOptions);
+    }
     const {
       screen,
       listComponent,
