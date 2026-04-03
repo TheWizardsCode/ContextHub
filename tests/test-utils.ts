@@ -320,3 +320,24 @@ export function createTuiTestContext() {
 
 // Back-compat alias for CLI command tests.
 export const createTestContext = createTuiTestContext;
+
+// Helper to gate long-running tests. Set WL_RUN_LONG_TESTS=true to enable.
+export const RUN_LONG = process.env.WL_RUN_LONG_TESTS === 'true';
+
+/**
+ * Describe wrapper for long-running tests. Skips the suite unless
+ * WL_RUN_LONG_TESTS=true in the environment.
+ */
+export function describeLong(name: string, fn: () => void) {
+  if (RUN_LONG) return (global as any).describe(name, fn);
+  return (global as any).describe.skip(name, fn);
+}
+
+/**
+ * Test wrapper for individual long-running tests. Skips the test unless
+ * WL_RUN_LONG_TESTS=true in the environment.
+ */
+export function itLong(name: string, fn: (done?: any) => any) {
+  if (RUN_LONG) return (global as any).it(name, fn as any);
+  return (global as any).it.skip(name, fn as any);
+}
