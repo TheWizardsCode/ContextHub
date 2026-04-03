@@ -67,6 +67,26 @@ export function normalizeSqliteBindings(values: unknown[]): Array<number | strin
   return values.map(normalizeSqliteValue);
 }
 
+/**
+ * Unescape backslash escape sequences in a plain-text string before persisting.
+ * Converts common two-character escape artifacts (e.g. backslash-n from CLI
+ * argument passing) into their actual character equivalents so stored text is
+ * human-readable and free of accidental escape artifacts.
+ *
+ * Only the following sequences are converted (single-pass, left-to-right):
+ *   \n  -> newline
+ *   \t  -> tab
+ *   \r  -> carriage return
+ *   \\  -> single backslash
+ *
+ * All other characters (including quotes and backticks) are left unchanged.
+ * This function must NOT be applied to JSON strings or structured fields.
+ */
+export function unescapeText(s: string): string {
+  const map: Record<string, string> = { '\\': '\\', n: '\n', t: '\t', r: '\r' };
+  return s.replace(/\\(\\|n|t|r)/g, (_, c: string) => map[c]);
+}
+
 export class SqlitePersistentStore {
   private db: Database.Database;
   private dbPath: string;
@@ -337,14 +357,27 @@ export class SqlitePersistentStore {
     // runtime normalization elsewhere.
     const normalizedStatus = normalizeStatusValue(item.status) ?? item.status;
 
+    // Unescape plain-text fields so backslash escape artifacts (e.g. \n from
+    // CLI argument passing) are stored as the intended characters.
+    // Structured/JSON fields (tags, refs, audit JSON) must NOT be unescaped here.
+    const titleVal = unescapeText(item.title ?? '');
+    const descriptionVal = unescapeText(item.description ?? '');
+    const deleteReasonVal = unescapeText(item.deleteReason ?? '');
+    // Unescape only the plain-text field within the structured audit object.
+    let auditVal: string | null = null;
+    if (item.audit) {
+      const auditCopy = { ...item.audit, text: unescapeText(item.audit.text ?? '') };
+      auditVal = JSON.stringify(auditCopy);
+    }
+
     // Ensure we never pass `undefined` into better-sqlite3 bindings (it only
     // accepts numbers, strings, bigints, buffers and null). Normalize tags to
     // a JSON string and convert any undefined to null before running.
     const tagsVal = Array.isArray(item.tags) ? JSON.stringify(item.tags) : JSON.stringify([]);
     const values: any[] = [
       item.id,
-      item.title,
-      item.description,
+      titleVal,
+      descriptionVal,
       normalizedStatus,
       item.priority,
       item.sortIndex,
@@ -357,14 +390,14 @@ export class SqlitePersistentStore {
       item.issueType ?? '',
       item.createdBy ?? '',
       item.deletedBy ?? '',
-      item.deleteReason ?? '',
+      deleteReasonVal,
       item.risk ?? '',
       item.effort ?? '',
       item.githubIssueNumber ?? null,
       item.githubIssueId ?? null,
       item.githubIssueUpdatedAt ?? null,
       item.needsProducerReview ? 1 : 0,
-      item.audit ? JSON.stringify(item.audit) : null,
+      auditVal,
     ];
 
     const normalized = normalizeSqliteBindings(values);
@@ -601,11 +634,14 @@ export class SqlitePersistentStore {
     // Pre-construction: stringify references, coerce optional fields.
     // Preserve existing || behavior for githubCommentUpdatedAt so that
     // falsy values (including empty string) become null.
+    // Unescape the comment body so backslash escape artifacts are stored as
+    // the intended characters. The refs JSON and other structured fields are
+    // intentionally left unchanged.
     const values: unknown[] = [
       comment.id,
       comment.workItemId,
       comment.author,
-      comment.comment,
+      unescapeText(comment.comment),
       comment.createdAt,
       JSON.stringify(comment.references),
       comment.githubCommentId ?? null,
