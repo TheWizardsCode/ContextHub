@@ -1,10 +1,10 @@
 /**
- * Tests for normalizeSqliteValue and normalizeSqliteBindings
+ * Tests for normalizeSqliteValue, normalizeSqliteBindings, and unescapeText
  * (WL-0MLRSV1XF14KM6WT)
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { normalizeSqliteValue, normalizeSqliteBindings } from '../src/persistent-store.js';
+import { normalizeSqliteValue, normalizeSqliteBindings, unescapeText } from '../src/persistent-store.js';
 import { WorklogDatabase } from '../src/database.js';
 import { createTempDir, cleanupTempDir, createTempJsonlPath, createTempDbPath } from './test-utils.js';
 
@@ -285,5 +285,157 @@ describe('SQLite binding round-trip', () => {
     const outbound = db.listDependencyEdgesFrom(a.id);
     expect(outbound).toHaveLength(1);
     expect(outbound[0].toId).toBe(b.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unit tests for unescapeText
+// ---------------------------------------------------------------------------
+
+describe('unescapeText', () => {
+  it('returns an empty string unchanged', () => {
+    expect(unescapeText('')).toBe('');
+  });
+
+  it('passes through plain text with no escape sequences', () => {
+    expect(unescapeText('Hello World')).toBe('Hello World');
+  });
+
+  it('converts \\n to a real newline', () => {
+    expect(unescapeText('Line\\nBreak')).toBe('Line\nBreak');
+  });
+
+  it('converts \\t to a real tab', () => {
+    expect(unescapeText('Col\\tValue')).toBe('Col\tValue');
+  });
+
+  it('converts \\r to a real carriage return', () => {
+    expect(unescapeText('Foo\\rBar')).toBe('Foo\rBar');
+  });
+
+  it('converts \\\\ to a single backslash', () => {
+    expect(unescapeText('path\\\\file')).toBe('path\\file');
+  });
+
+  it('handles multiple escape sequences in a single string', () => {
+    expect(unescapeText('a\\nb\\tc\\\\d')).toBe('a\nb\tc\\d');
+  });
+
+  it('does not double-decode when a backslash precedes a backslash-n', () => {
+    // Input: 4 chars: \  \  n  ->  backslash + n (not a newline)
+    expect(unescapeText('\\\\n')).toBe('\\n');
+  });
+
+  it('preserves double quotes unchanged', () => {
+    expect(unescapeText('say "hello"')).toBe('say "hello"');
+  });
+
+  it('preserves backticks unchanged', () => {
+    expect(unescapeText('use `code`')).toBe('use `code`');
+  });
+
+  it('preserves unrecognised backslash sequences unchanged', () => {
+    // \x is not a recognised sequence; the backslash is kept as-is
+    expect(unescapeText('foo\\xbar')).toBe('foo\\xbar');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration round-trip tests: unescaping applied on DB write
+// ---------------------------------------------------------------------------
+
+describe('unescapeText round-trip via DB', () => {
+  let tempDir: string;
+  let dbPath: string;
+  let jsonlPath: string;
+  let db: WorklogDatabase;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+    dbPath = createTempDbPath(tempDir);
+    jsonlPath = createTempJsonlPath(tempDir);
+    db = new WorklogDatabase('UT', dbPath, jsonlPath, true, true);
+  });
+
+  afterEach(() => {
+    db.close();
+    cleanupTempDir(tempDir);
+  });
+
+  it('stores description with real newline when input contains \\n escape artifact', () => {
+    const created = db.create({
+      title: 'Escape test',
+      description: 'Line\\nBreak',
+    });
+
+    const loaded = db.get(created.id);
+    expect(loaded).toBeDefined();
+    // Stored text must contain a real newline, not the two-char sequence \n
+    expect(loaded!.description).toBe('Line\nBreak');
+    expect(loaded!.description).not.toContain('\\n');
+  });
+
+  it('stores title with real newline when input contains \\n escape artifact', () => {
+    const created = db.create({
+      title: 'Title\\nWith Escape',
+    });
+
+    const loaded = db.get(created.id);
+    expect(loaded).toBeDefined();
+    expect(loaded!.title).toBe('Title\nWith Escape');
+    expect(loaded!.title).not.toContain('\\n');
+  });
+
+  it('stores comment body with real newline when input contains \\n escape artifact', () => {
+    const item = db.create({ title: 'Escape comment test' });
+
+    db.createComment({
+      workItemId: item.id,
+      author: 'tester',
+      comment: 'First\\nSecond',
+      references: [],
+    });
+
+    const comments = db.getCommentsForWorkItem(item.id);
+    expect(comments).toHaveLength(1);
+    expect(comments[0].comment).toBe('First\nSecond');
+    expect(comments[0].comment).not.toContain('\\n');
+  });
+
+  it('unescapes audit text field but leaves audit JSON structure intact', () => {
+    const created = db.create({
+      title: 'Audit escape test',
+      audit: {
+        time: '2026-01-01T00:00:00.000Z',
+        author: 'tester',
+        text: 'Ready to close: Yes\\nExtra detail',
+        status: 'Complete',
+      },
+    });
+
+    const loaded = db.get(created.id);
+    expect(loaded).toBeDefined();
+    expect(loaded!.audit).toBeDefined();
+    // audit.text should have a real newline
+    expect(loaded!.audit!.text).toBe('Ready to close: Yes\nExtra detail');
+    expect(loaded!.audit!.text).not.toContain('\\n');
+    // Structured audit fields must remain intact
+    expect(loaded!.audit!.author).toBe('tester');
+    expect(loaded!.audit!.status).toBe('Complete');
+  });
+
+  it('does not alter tags (JSON field) when description contains escape artifacts', () => {
+    const created = db.create({
+      title: 'Tags intact',
+      description: 'Desc\\nValue',
+      tags: ['tag\\none', 'normal'],
+    });
+
+    const loaded = db.get(created.id);
+    expect(loaded).toBeDefined();
+    // Description should be unescaped
+    expect(loaded!.description).toBe('Desc\nValue');
+    // Tags are JSON-structured; the raw tag values are preserved as-is
+    expect(loaded!.tags).toEqual(['tag\\none', 'normal']);
   });
 });
