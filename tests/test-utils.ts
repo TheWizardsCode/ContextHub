@@ -5,6 +5,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { describe as vitestDescribe, it as vitestIt } from 'vitest';
 
 /**
  * Create a temporary directory for test files
@@ -329,8 +330,22 @@ export const RUN_LONG = process.env.WL_RUN_LONG_TESTS === 'true';
  * WL_RUN_LONG_TESTS=true in the environment.
  */
 export function describeLong(name: string, fn: () => void) {
-  if (RUN_LONG) return (global as any).describe(name, fn);
-  return (global as any).describe.skip(name, fn);
+  // Prefer the vitest-provided describe if available
+  if (typeof vitestDescribe === 'function') {
+    if (RUN_LONG) return vitestDescribe(name, fn);
+    if (typeof vitestDescribe.skip === 'function') return vitestDescribe.skip(name, fn);
+    return vitestDescribe(name, () => {});
+  }
+  // Fallback to global describe if present (non-vitest environments)
+  const g: any = globalThis as any;
+  const desc = g.describe;
+  if (typeof desc === 'function') {
+    if (RUN_LONG) return desc(name, fn);
+    if (typeof desc.skip === 'function') return desc.skip(name, fn);
+    return desc(name, () => {});
+  }
+  // No test runner available; no-op.
+  return;
 }
 
 /**
@@ -338,6 +353,17 @@ export function describeLong(name: string, fn: () => void) {
  * WL_RUN_LONG_TESTS=true in the environment.
  */
 export function itLong(name: string, fn: (done?: any) => any) {
-  if (RUN_LONG) return (global as any).it(name, fn as any);
-  return (global as any).it.skip(name, fn as any);
+  if (typeof vitestIt === 'function') {
+    if (RUN_LONG) return vitestIt(name, fn as any);
+    if (typeof vitestIt.skip === 'function') return vitestIt.skip(name, fn as any);
+    return vitestIt(name, () => {});
+  }
+  const g: any = globalThis as any;
+  const itFn = g.it;
+  if (typeof itFn === 'function') {
+    if (RUN_LONG) return itFn(name, fn as any);
+    if (typeof itFn.skip === 'function') return itFn.skip(name, fn as any);
+    return itFn(name, () => {});
+  }
+  return;
 }

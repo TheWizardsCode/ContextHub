@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import throttler from '../src/github-throttler.js';
-import { describeLong, itLong } from './test-utils.js';
+import { describeLong, itLong } from './test-utils.ts';
 
 // Long-running load simulation for github-sync. This should be gated and
 // will be skipped in CI unless WL_RUN_LONG_TESTS=true is set.
