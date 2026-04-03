@@ -8,8 +8,7 @@ describe('github-sync throttler integration (unit)', () => {
     vi.restoreAllMocks();
   });
 
-  it('uses throttler.schedule for GitHub issue create/update and comment operations', async () => {
-    // Spy on throttler.schedule
+  it('schedules exactly once for a single issue create call', async () => {
     const scheduleSpy = vi.spyOn(throttler, 'schedule');
 
     // Prepare minimal items and comments to exercise upsert path
@@ -33,19 +32,19 @@ describe('github-sync throttler integration (unit)', () => {
     // Stub out github API helpers (they are exported from src/github.js).
     // Each stub should still call the central throttler so we can assert
     // `throttler.schedule` is used by the flow.
-    vi.spyOn(githubHelpers as any, 'createGithubIssueAsync').mockImplementation(() =>
+    const createIssueSpy = vi.spyOn(githubHelpers as any, 'createGithubIssueAsync').mockImplementation(() =>
       throttler.schedule(async () => ({ number: 123, id: 99, updatedAt: new Date().toISOString() }))
     );
-    vi.spyOn(githubHelpers as any, 'updateGithubIssueAsync').mockImplementation(() =>
+    const updateIssueSpy = vi.spyOn(githubHelpers as any, 'updateGithubIssueAsync').mockImplementation(() =>
       throttler.schedule(async () => ({ number: 123, id: 99, updatedAt: new Date().toISOString() }))
     );
-    vi.spyOn(githubHelpers as any, 'listGithubIssueCommentsAsync').mockImplementation(() =>
+    const listCommentsSpy = vi.spyOn(githubHelpers as any, 'listGithubIssueCommentsAsync').mockImplementation(() =>
       throttler.schedule(async () => [])
     );
-    vi.spyOn(githubHelpers as any, 'createGithubIssueCommentAsync').mockImplementation(() =>
+    const createCommentSpy = vi.spyOn(githubHelpers as any, 'createGithubIssueCommentAsync').mockImplementation(() =>
       throttler.schedule(async () => ({ id: 1, updatedAt: new Date().toISOString() }))
     );
-    vi.spyOn(githubHelpers as any, 'updateGithubIssueCommentAsync').mockImplementation(() =>
+    const updateCommentSpy = vi.spyOn(githubHelpers as any, 'updateGithubIssueCommentAsync').mockImplementation(() =>
       throttler.schedule(async () => ({ id: 1, updatedAt: new Date().toISOString() }))
     );
 
@@ -53,7 +52,12 @@ describe('github-sync throttler integration (unit)', () => {
 
     await githubSync.upsertIssuesFromWorkItems(items as any, comments as any, config);
 
-    // Assert that throttle.schedule was used at least once (multiple callsites exist)
-    expect(scheduleSpy).toHaveBeenCalled();
+    // Exactly one external call (issue create) should be scheduled once.
+    expect(createIssueSpy).toHaveBeenCalledTimes(1);
+    expect(updateIssueSpy).not.toHaveBeenCalled();
+    expect(listCommentsSpy).not.toHaveBeenCalled();
+    expect(createCommentSpy).not.toHaveBeenCalled();
+    expect(updateCommentSpy).not.toHaveBeenCalled();
+    expect(scheduleSpy).toHaveBeenCalledTimes(1);
   });
 });
