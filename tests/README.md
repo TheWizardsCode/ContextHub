@@ -168,3 +168,53 @@ None at this time. All 894 tests pass with 0 skipped.
 - Add API endpoint integration tests
 - Increase code coverage measurement
 - Add mutation testing
+
+## Long-running / Gated Tests
+
+Some tests in this repository are intentionally long-running (load or simulation tests) and are gated so they do not run in CI by default. The gating mechanism is implemented in `tests/test-utils.ts`:
+
+- Wrapper helpers: `describeLong(name, fn)` and `itLong(name, fn)` – these skip the suite/test unless the environment variable `WL_RUN_LONG_TESTS` is set to `true`.
+- Naming convention: long tests often use the `.long.test.ts` filename suffix (for discoverability), but the gate is enforced by the helper functions above.
+
+How to run long or gated tests locally:
+
+- Run all tests but skip long tests (default CI behaviour):
+  - `npm test`
+
+- Run the full test-suite including long tests:
+  - `WL_RUN_LONG_TESTS=true npm test`
+
+- Run only the long tests (by filename pattern):
+  - `WL_RUN_LONG_TESTS=true npx vitest run "tests/**/*.long.test.ts"`
+
+- Run a single long test file:
+  - `WL_RUN_LONG_TESTS=true npx vitest run tests/github-sync-load.long.test.ts`
+
+Running subsets of tests
+
+- Run unit tests only (tests under `tests/`):
+  - `npx vitest run tests`
+
+- Run integration tests only (tests under `test/`):
+  - `npx vitest run test`
+
+- Run TUI/headless tests (CI helper):
+  - `npm run test:tui`
+
+Guidance for authors
+
+- Mark legitimately long simulations with the `describeLong` / `itLong` helpers from `tests/test-utils.ts`. This ensures CI remains fast and reliable while still allowing engineers to run exhaustive load simulations locally when needed.
+- Keep long tests deterministic: use injectable clocks, network stubs, and spies rather than real external services.
+- Prefer splitting long integration/load tests into separate files (or `.long.test.ts` suffix) so they are easy to find and run.
+
+Example
+
+```ts
+import { describeLong, itLong } from './test-utils.ts';
+
+describeLong('github-sync long load simulations (gated)', () => {
+  itLong('schedules many calls through throttler under simulated load', async () => {
+    // ...long-running simulation here
+  });
+});
+```
