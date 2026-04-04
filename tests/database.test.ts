@@ -2125,4 +2125,20 @@ describe('WorklogDatabase', () => {
       expect(updatedUnrelated.sortIndex).toBeLessThan(updatedParent.sortIndex);
     });
   });
+
+  describe('exportForSync', () => {
+    it('exports asynchronously and returns the JSONL path', async () => {
+      db.create({ title: 'Async export item' });
+
+      const exportedPath = await db.exportForSync();
+
+      expect(exportedPath).toBe(jsonlPath);
+      expect(fs.existsSync(jsonlPath)).toBe(true);
+
+      const content = fs.readFileSync(jsonlPath, 'utf-8').trim();
+      expect(content.length).toBeGreaterThan(0);
+      const lines = content.split('\n');
+      expect(lines.length).toBeGreaterThan(0);
+    });
+  });
 });

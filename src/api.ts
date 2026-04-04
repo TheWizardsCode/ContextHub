@@ -5,7 +5,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { WorklogDatabase } from './database.js';
 import { CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, WorkItemStatus, WorkItemPriority, CreateCommentInput, UpdateCommentInput } from './types.js';
-import { exportToJsonl, importFromJsonl, getDefaultDataPath } from './jsonl.js';
+import { exportToJsonlAsync, importFromJsonl, getDefaultDataPath } from './jsonl.js';
 import { loadConfig } from './config.js';
 import { buildAuditEntry, hasAcceptanceCriteria } from './audit.js';
 
@@ -481,14 +481,14 @@ export function createAPI(db: WorklogDatabase) {
   });
 
   // Export to JSONL
-  app.post('/export', (req: Request, res: Response) => {
+  app.post('/export', async (req: Request, res: Response) => {
     try {
       db.setPrefix(defaultPrefix);
       const filepath = req.body.filepath || getDefaultDataPath();
       const items = db.getAll();
       const comments = db.getAllComments();
       const dependencyEdges = db.getAllDependencyEdges();
-      exportToJsonl(items, comments, filepath, dependencyEdges);
+      await exportToJsonlAsync(items, comments, filepath, dependencyEdges);
       res.json({ message: 'Export successful', filepath, count: items.length, commentCount: comments.length });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });

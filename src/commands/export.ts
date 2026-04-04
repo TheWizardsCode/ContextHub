@@ -4,7 +4,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { ExportOptions } from '../cli-types.js';
-import { exportToJsonl } from '../jsonl.js';
+import { exportToJsonlAsync } from '../jsonl.js';
 import { withFileLock, getLockPathForJsonl } from '../file-lock.js';
 
 export default function register(ctx: PluginContext): void {
@@ -15,16 +15,16 @@ export default function register(ctx: PluginContext): void {
     .description('Export work items and comments to JSONL file')
     .option('-f, --file <filepath>', 'Output file path', dataPath)
     .option('--prefix <prefix>', 'Override the default prefix')
-    .action((options: ExportOptions) => {
+    .action(async (options: ExportOptions) => {
       utils.requireInitialized();
       const filePath = options.file || dataPath;
       const lockPath = getLockPathForJsonl(filePath);
-      withFileLock(lockPath, () => {
+      await withFileLock(lockPath, async () => {
         const db = utils.getDatabase(options.prefix);
         const items = db.getAll();
         const comments = db.getAllComments();
         const dependencyEdges = db.getAllDependencyEdges();
-        exportToJsonl(items, comments, filePath, dependencyEdges);
+        await exportToJsonlAsync(items, comments, filePath, dependencyEdges);
         
         if (utils.isJsonMode()) {
           output.json({ 

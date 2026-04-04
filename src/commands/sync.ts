@@ -193,7 +193,7 @@ async function performSync(
 
   // Ephemeral JSONL pattern: Export SQLite → JSONL → Push → Delete local JSONL
   // JSONL only exists transiently during sync operations
-  const jsonlPath = db.exportForSync();
+  const jsonlPath = await db.exportForSync();
   
   if (options.push) {
     if (!isJsonMode && !isSilent) {

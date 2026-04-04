@@ -7,7 +7,7 @@ import { createAPI } from './api.js';
 import { loadConfig } from './config.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from './sync-defaults.js';
 import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, GitTarget } from './sync.js';
-import { importFromJsonlContent, exportToJsonl, getDefaultDataPath } from './jsonl.js';
+import { importFromJsonlContent, exportToJsonlAsync, getDefaultDataPath } from './jsonl.js';
 
 const PORT = process.env.PORT || 3000;
 
@@ -24,6 +24,8 @@ const syncState = {
   inFlight: false,
   pending: false,
 };
+
+let isShuttingDown = false;
 
 const AUTO_SYNC_DEBOUNCE_MS = 500;
 
@@ -65,7 +67,7 @@ async function performServerSync(): Promise<void> {
         return Promise.resolve();
       });
     }
-    exportToJsonl(itemMergeResult.merged, commentMergeResult.merged, dataPath, edgeMergeResult.merged);
+    await exportToJsonlAsync(itemMergeResult.merged, commentMergeResult.merged, dataPath, edgeMergeResult.merged);
 
     await gitPushDataFileToBranch(dataPath, 'Sync work items and comments', gitTarget);
   } catch (error) {
@@ -74,14 +76,42 @@ async function performServerSync(): Promise<void> {
   } finally {
     syncState.inFlight = false;
     if (syncState.pending) {
+      if (isShuttingDown) {
+        return;
+      }
       syncState.pending = false;
       scheduleServerSync();
     }
   }
 }
 
-function scheduleServerSync(): void {
+function wait(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function flushServerSync(): Promise<void> {
   if (!autoSync) {
+    return;
+  }
+
+  if (syncState.timer) {
+    clearTimeout(syncState.timer);
+    syncState.timer = null;
+    syncState.pending = true;
+  }
+
+  while (syncState.pending || syncState.inFlight) {
+    if (syncState.pending && !syncState.inFlight) {
+      syncState.pending = false;
+      await performServerSync();
+      continue;
+    }
+    await wait(25);
+  }
+}
+
+function scheduleServerSync(): void {
+  if (!autoSync || isShuttingDown) {
     return;
   }
   if (syncState.timer) {
@@ -112,7 +142,40 @@ console.log(`Database ready with ${db.getAll().length} work items and ${db.getAl
 
 // Create and start the API server
 const app = createAPI(db);
-
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Worklog API server running on http://localhost:${PORT}`);
+});
+
+async function shutdownServer(signal: NodeJS.Signals): Promise<void> {
+  if (isShuttingDown) {
+    return;
+  }
+  isShuttingDown = true;
+
+  console.log(`Received ${signal}; flushing pending exports before shutdown...`);
+
+  await new Promise<void>((resolve) => {
+    server.close(() => resolve());
+  });
+
+  if (autoSync) {
+    syncState.pending = true;
+  }
+
+  try {
+    await flushServerSync();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Failed to flush pending exports: ${message}`);
+  }
+
+  process.exit(0);
+}
+
+process.on('SIGINT', () => {
+  void shutdownServer('SIGINT');
+});
+
+process.on('SIGTERM', () => {
+  void shutdownServer('SIGTERM');
 });
