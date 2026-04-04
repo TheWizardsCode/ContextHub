@@ -57,16 +57,11 @@ function mergeDependencyEdges(edges: DependencyEdge[]): DependencyEdge[] {
   return Array.from(merged.values());
 }
 
-
-/**
- * Export work items and comments to a JSONL file
- */
-export function exportToJsonl(
+function buildJsonlContent(
   items: WorkItem[],
   comments: Comment[],
-  filepath: string,
   dependencyEdges: DependencyEdge[] = []
-): number {
+): string {
   const lines: string[] = [];
 
   const sortedItems = [...items].sort((a, b) => a.id.localeCompare(b.id));
@@ -78,7 +73,7 @@ export function exportToJsonl(
     if (ca !== 0) return ca;
     return a.id.localeCompare(b.id);
   });
-  
+
   // Add work items
   sortedItems.forEach(item => {
     const dependencies = dependenciesFromEdges(normalizedEdges, item.id);
@@ -88,7 +83,7 @@ export function exportToJsonl(
     };
     lines.push(stableStringify({ type: 'workitem', data: itemWithDeps }));
   });
-  
+
   // Add comments
   sortedComments.forEach(comment => {
     // Ensure comment includes the new optional GitHub mapping fields when present
@@ -97,7 +92,22 @@ export function exportToJsonl(
     if (outComment.githubCommentUpdatedAt === undefined) delete outComment.githubCommentUpdatedAt;
     lines.push(stableStringify({ type: 'comment', data: outComment }));
   });
-  
+
+  return lines.join('\n') + '\n';
+}
+
+
+/**
+ * Export work items and comments to a JSONL file
+ */
+export function exportToJsonl(
+  items: WorkItem[],
+  comments: Comment[],
+  filepath: string,
+  dependencyEdges: DependencyEdge[] = []
+): number {
+  const content = buildJsonlContent(items, comments, dependencyEdges);
+
   // Ensure directory exists
   const dir = path.dirname(filepath);
   if (!fs.existsSync(dir)) {
@@ -106,7 +116,6 @@ export function exportToJsonl(
 
   // Atomic write: write to a temporary file in the same directory then rename
   // to avoid other processes reading a partially-written file.
-  const content = lines.join('\n') + '\n';
   const tempName = `${path.basename(filepath)}.tmp-${Math.random().toString(36).slice(2, 10)}`;
   const tempPath = path.join(dir, tempName);
 
@@ -115,6 +124,41 @@ export function exportToJsonl(
   fs.renameSync(tempPath, filepath);
 
   const stats = fs.statSync(filepath);
+  return stats.mtimeMs;
+}
+
+/**
+ * Asynchronously export work items and comments to a JSONL file.
+ *
+ * Uses non-blocking filesystem operations to avoid blocking the Node.js event
+ * loop on large exports.
+ */
+export async function exportToJsonlAsync(
+  items: WorkItem[],
+  comments: Comment[],
+  filepath: string,
+  dependencyEdges: DependencyEdge[] = []
+): Promise<number> {
+  const content = buildJsonlContent(items, comments, dependencyEdges);
+  const dir = path.dirname(filepath);
+  const tempName = `${path.basename(filepath)}.tmp-${Math.random().toString(36).slice(2, 10)}`;
+  const tempPath = path.join(dir, tempName);
+
+  await fs.promises.mkdir(dir, { recursive: true });
+
+  try {
+    await fs.promises.writeFile(tempPath, content, 'utf-8');
+    await fs.promises.rename(tempPath, filepath);
+  } catch (error) {
+    try {
+      await fs.promises.unlink(tempPath);
+    } catch {
+      // no-op: temp file may not exist if write/rename did not create it
+    }
+    throw error;
+  }
+
+  const stats = await fs.promises.stat(filepath);
   return stats.mtimeMs;
 }
 

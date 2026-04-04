@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { WorkItem, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge } from './types.js';
 import { SqlitePersistentStore, FtsSearchResult } from './persistent-store.js';
-import { importFromJsonl, importFromJsonlContent, exportToJsonl, getDefaultDataPath } from './jsonl.js';
+import { importFromJsonl, importFromJsonlContent, exportToJsonlAsync, getDefaultDataPath } from './jsonl.js';
 import { mergeWorkItems, mergeComments, getRemoteDataFileContent, GitTarget } from './sync.js';
 import { withFileLock, getLockPathForJsonl } from './file-lock.js';
 import * as searchMetrics from './search-metrics.js';
@@ -189,13 +189,13 @@ export class WorklogDatabase {
    * 
    * @returns The path to the exported JSONL file
    */
-  exportForSync(): string {
+  async exportForSync(): Promise<string> {
     const items = this.store.getAllWorkItems();
     const comments = this.store.getAllComments();
     const dependencyEdges = this.store.getAllDependencyEdges();
     
     // Export to JSONL
-    exportToJsonl(items, comments, this.jsonlPath, dependencyEdges);
+    await exportToJsonlAsync(items, comments, this.jsonlPath, dependencyEdges);
     
     return this.jsonlPath;
   }
@@ -280,52 +280,6 @@ export class WorklogDatabase {
         process.stderr.write(`[wl:db] JSONL parse failed, using cached data: ${message}\n`);
       }
     }
-  }
-
-  /**
-   * Export current database state to JSONL
-   */
-  private exportToJsonl(): void {
-    const items = this.store.getAllWorkItems();
-    const comments = this.store.getAllComments();
-    const dependencyEdges = this.store.getAllDependencyEdges();
-
-    // Hold the file lock for the entire read-merge-write cycle to prevent
-    // another process from reading a partially-written file or interleaving
-    // its own merge while we are writing.
-    withFileLock(this.lockPath, () => {
-      let itemsToExport = items;
-      let commentsToExport = comments;
-      if (fs.existsSync(this.jsonlPath)) {
-        try {
-          const { items: diskItems, comments: diskComments } = importFromJsonl(this.jsonlPath);
-          const itemMergeResult = mergeWorkItems(items, diskItems);
-          const commentMergeResult = mergeComments(comments, diskComments);
-          itemsToExport = itemMergeResult.merged;
-          commentsToExport = commentMergeResult.merged;
-        } catch (error) {
-          if (!this.silent) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.debug(`WorklogDatabase.exportToJsonl: merge failed, exporting local snapshot. ${message}`);
-          }
-        }
-      }
-      if (!this.silent) {
-        // Debug: use stderr for diagnostic logs
-        this.debug(`WorklogDatabase.exportToJsonl: exporting ${itemsToExport.length} items and ${commentsToExport.length} comments to ${this.jsonlPath}`);
-      }
-      try {
-        const mtime = exportToJsonl(itemsToExport, commentsToExport, this.jsonlPath, dependencyEdges);
-        // Record export mtime so other processes can avoid re-importing our own export
-        this.store.setMetadata('lastJsonlExportMtime', String(Math.floor(mtime)));
-        this.store.setMetadata('lastJsonlExportAt', new Date().toISOString());
-      } catch (error) {
-        if (!this.silent) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.debug(`WorklogDatabase.exportToJsonl: failed to write JSONL: ${message}`);
-        }
-      }
-    });
   }
 
   private debug(message: string): void {

@@ -7,7 +7,7 @@ import type { InitOptions } from '../cli-types.js';
 import type { DependencyEdge } from '../types.js';
 import { initConfig, loadConfig, configExists, isInitialized, readInitSemaphore, writeInitSemaphore, type InitConfigOptions } from '../config.js';
 import { resolveWorklogDir } from '../worklog-paths.js';
-import { exportToJsonl } from '../jsonl.js';
+import { exportToJsonlAsync } from '../jsonl.js';
 import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges } from '../sync.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
 import { importFromJsonlContent } from '../jsonl.js';
@@ -862,7 +862,7 @@ async function performInitSync(dataPath: string, prefix?: string, isJsonMode: bo
     db.setAutoSync(true, () => Promise.resolve());
   }
   
-  exportToJsonl(itemMergeResult.merged, commentMergeResult.merged, dataPath, edgeMergeResult.merged);
+  await exportToJsonlAsync(itemMergeResult.merged, commentMergeResult.merged, dataPath, edgeMergeResult.merged);
   await gitPushDataFileToBranch(dataPath, 'Sync work items and comments', gitTarget);
 }
 

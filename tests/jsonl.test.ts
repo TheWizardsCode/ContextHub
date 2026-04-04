@@ -4,7 +4,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
-import { importFromJsonl, exportToJsonl } from '../src/jsonl.js';
+import { importFromJsonl, exportToJsonl, exportToJsonlAsync } from '../src/jsonl.js';
 import { WorkItem, Comment } from '../src/types.js';
 import { createTempDir, cleanupTempDir } from './test-utils.js';
 import * as path from 'path';
@@ -133,6 +133,60 @@ describe('JSONL Import/Export', () => {
       expect(mtime).toBe(stats.mtimeMs);
 
       // Ensure no temp files remain (pattern: <basename>.tmp-<random>)
+      const dir = path.dirname(testFilePath);
+      const base = path.basename(testFilePath);
+      const files = fs.readdirSync(dir);
+      const hasTemp = files.some(f => f.startsWith(base + '.tmp-'));
+      expect(hasTemp).toBe(false);
+    });
+
+    it('should export asynchronously and return file mtime', async () => {
+      const items: WorkItem[] = [
+        {
+          id: 'WI-ASYNC-001',
+          title: 'Async item',
+          description: 'Exported asynchronously',
+          status: 'open',
+          priority: 'medium',
+          sortIndex: 0,
+          parentId: null,
+          createdAt: '2024-01-01T00:00:00.000Z',
+          updatedAt: '2024-01-01T00:00:00.000Z',
+          tags: [],
+          assignee: '',
+          stage: '',
+          issueType: '',
+          createdBy: '',
+          deletedBy: '',
+          deleteReason: '',
+          risk: '',
+          effort: '',
+        },
+      ];
+
+      const comments: Comment[] = [
+        {
+          id: 'WI-ASYNC-C001',
+          workItemId: 'WI-ASYNC-001',
+          author: 'Async Tester',
+          comment: 'Async comment',
+          createdAt: '2024-01-01T00:05:00.000Z',
+          references: [],
+        },
+      ];
+
+      const mtime = await exportToJsonlAsync(items, comments, testFilePath);
+
+      expect(typeof mtime).toBe('number');
+      expect(fs.existsSync(testFilePath)).toBe(true);
+
+      const stats = fs.statSync(testFilePath);
+      expect(mtime).toBe(stats.mtimeMs);
+
+      const content = fs.readFileSync(testFilePath, 'utf-8');
+      const lines = content.trim().split('\n');
+      expect(lines).toHaveLength(2);
+
       const dir = path.dirname(testFilePath);
       const base = path.basename(testFilePath);
       const files = fs.readdirSync(dir);
