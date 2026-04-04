@@ -78,8 +78,8 @@ describe('runAdd', () => {
   it('appends newline to stdout when content does not end with one', async () => {
     ingestSpy.mockResolvedValueOnce(mockIngestResult('No newline content'));
     const writes: string[] = [];
-    stdoutSpy.mockImplementation((s: unknown) => {
-      writes.push(String(s));
+    stdoutSpy.mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
       return true;
     });
 
@@ -91,8 +91,8 @@ describe('runAdd', () => {
   it('does not append extra newline when content already ends with one', async () => {
     ingestSpy.mockResolvedValueOnce(mockIngestResult('Content with newline\n'));
     const writes: string[] = [];
-    stdoutSpy.mockImplementation((s: unknown) => {
-      writes.push(String(s));
+    stdoutSpy.mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
       return true;
     });
 

@@ -140,10 +140,15 @@ export class PlaywrightExtractor implements Extractor {
 
       const html = await page.content();
       const title = await page.title().catch(() => undefined);
-      // evaluate runs in the browser context where `document` is available;
-      // cast through globalThis to avoid TypeScript's non-DOM lib complaint.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const text = await page.evaluate(() => (globalThis as any).document?.body?.innerText ?? '');
+      // evaluate() runs in the browser context where `document` is available.
+      // Cast through a minimal interface to avoid TypeScript's non-DOM lib
+      // complaint without resorting to an untyped `any`.
+      const text = await page.evaluate(() => {
+        const g = globalThis as unknown as {
+          document?: { body?: { innerText?: string } };
+        };
+        return g.document?.body?.innerText ?? '';
+      });
 
       await context.close();
 
@@ -201,10 +206,15 @@ export interface BrowserModule {
  * time (via the `loadPlaywrightFn` constructor parameter) without needing to
  * actually install playwright.
  *
+ * The `any` cast is intentional: `playwright` is an optional peer dependency
+ * that may not be present at compile time, so its types are unavailable.
+ * The {@link BrowserModule} interface documents the exact subset we rely on.
+ *
  * @internal
  */
 export async function loadPlaywright(): Promise<BrowserModule> {
+  // playwright is an optional peer dependency; the cast is deliberate.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const mod = await import('playwright' as any) as BrowserModule;
+  const mod = (await import('playwright' as any)) as BrowserModule;
   return mod;
 }

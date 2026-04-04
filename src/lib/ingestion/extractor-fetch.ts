@@ -31,22 +31,27 @@ const DEFAULT_USER_AGENT =
  * Returns the resulting plain text.
  */
 export function htmlToText(html: string): string {
-  // Remove script and style blocks entirely.
+  // Remove script and style blocks entirely (allow optional whitespace before closing >).
   let text = html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ');
+    .replace(/<script[\s\S]*?<\/script\s*>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style\s*>/gi, ' ');
   // Replace block-level elements with newlines.
   text = text.replace(/<\/(p|div|li|h[1-6]|br|tr|td|th|blockquote)[^>]*>/gi, '\n');
   // Strip all remaining tags.
   text = text.replace(/<[^>]+>/g, ' ');
-  // Decode common HTML entities.
-  text = text
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ');
+  // Decode common HTML entities in a single pass to avoid double-decoding
+  // (e.g. &amp;lt; must become &lt;, not <).
+  text = text.replace(/&(?:amp|lt|gt|quot|#39|nbsp);/g, (match) => {
+    switch (match) {
+      case '&amp;':  return '&';
+      case '&lt;':   return '<';
+      case '&gt;':   return '>';
+      case '&quot;': return '"';
+      case '&#39;':  return "'";
+      case '&nbsp;': return ' ';
+      default:       return match;
+    }
+  });
   // Collapse whitespace.
   return text.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
 }
