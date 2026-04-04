@@ -203,7 +203,7 @@ describe('TUI mouse click-to-select (regression)', () => {
     const item1 = makeItem('WL-MOUSE-1');
     const item2 = makeItem('WL-MOUSE-2');
     const screen = makeScreen();
-    const { layout, detail, list } = buildLayout(screen);
+    const { layout, detail, list, updateFromItemMock } = buildLayout(screen);
     const { ctx } = buildCtx([item1, item2]);
 
     const controller = new TuiController(ctx, {
@@ -228,6 +228,7 @@ describe('TUI mouse click-to-select (regression)', () => {
 
     // Reset mock to detect the update triggered by clicking item 2
     (detail.setContent as any).mockClear();
+    updateFromItemMock.mockClear();
 
     // Simulate blessed's 'select item' event for item at index 1 (item2)
     // This is what blessed fires when the user clicks a different list item.
@@ -237,6 +238,9 @@ describe('TUI mouse click-to-select (regression)', () => {
     // The detail pane must be updated
     expect(detail.setContent).toHaveBeenCalled();
     const updatedContent: string = (detail.setContent as any).mock.calls[0][0] ?? '';
+    expect(updateFromItemMock).toHaveBeenCalled();
+    const [selectedItem] = updateFromItemMock.mock.calls[0] ?? [];
+    expect(selectedItem).toMatchObject({ id: item2.id });
     // The updated content must mention item2's id
     expect(updatedContent).toContain('WL-MOUSE-2');
     // And must differ from the initial (item1) content

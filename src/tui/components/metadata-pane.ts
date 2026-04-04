@@ -79,6 +79,7 @@ export class MetadataPaneComponent {
   }
 
   updateFromItem(item: {
+    id?: string;
     status?: string;
     stage?: string;
     priority?: string;
@@ -97,6 +98,7 @@ export class MetadataPaneComponent {
     }
     const placeholder = '—';
     const lines: string[] = [];
+    lines.push(`ID: ${item.id ?? ''}`);
     lines.push(`Status:   ${item.status ?? ''}`);
     lines.push(`Stage:    ${item.stage ?? ''}`);
     lines.push(`Priority: ${item.priority ?? ''}`);

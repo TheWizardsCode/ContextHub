@@ -66,6 +66,22 @@ function buildLayoutWithMetadataMock(ctx: ReturnType<typeof createTuiTestContext
 // Unit tests: MetadataPaneComponent GitHub row rendering
 // ---------------------------------------------------------------------------
 describe('MetadataPaneComponent GitHub row', () => {
+  it('shows selected work item ID in metadata', () => {
+    const { comp, getContent } = createMockMetadataPane();
+    comp.updateFromItem({ id: 'WL-123', status: 'open', priority: 'medium' }, 0);
+
+    expect(getContent()).toContain('ID: WL-123');
+  });
+
+  it('updates ID line when selected item changes', () => {
+    const { comp, getContent } = createMockMetadataPane();
+    comp.updateFromItem({ id: 'WL-111', status: 'open', priority: 'medium' }, 0);
+    expect(getContent()).toContain('ID: WL-111');
+
+    comp.updateFromItem({ id: 'WL-222', status: 'open', priority: 'medium' }, 0);
+    expect(getContent()).toContain('ID: WL-222');
+  });
+
   it('shows configure hint when githubRepo is not set', () => {
     const { comp, getContent } = createMockMetadataPane();
     comp.updateFromItem({ status: 'open', priority: 'medium' }, 0);
