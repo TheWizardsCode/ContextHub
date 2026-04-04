@@ -31,16 +31,19 @@ const DEFAULT_USER_AGENT =
  * Returns the resulting plain text.
  */
 export function htmlToText(html: string): string {
-  // Remove script and style blocks entirely (allow optional whitespace before closing >).
+  // Remove script and style blocks entirely (allow attributes/whitespace before closing >).
   let text = html
-    .replace(/<script[\s\S]*?<\/script\s*>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style\s*>/gi, ' ');
+    .replace(/<script[\s\S]*?<\/script[^>]*>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style[^>]*>/gi, ' ');
   // Replace block-level elements with newlines.
   text = text.replace(/<\/(p|div|li|h[1-6]|br|tr|td|th|blockquote)[^>]*>/gi, '\n');
   // Strip all remaining tags.
   text = text.replace(/<[^>]+>/g, ' ');
-  // Decode common HTML entities in a single pass to avoid double-decoding
+  // Decode common named HTML entities in a single pass to avoid double-decoding
   // (e.g. &amp;lt; must become &lt;, not <).
+  // Note: numeric character references (e.g. &#65; or &#x41;) are intentionally
+  // not decoded here since they are uncommon in plain-content pages and the
+  // purpose of this extractor is fast-path text extraction, not full HTML parsing.
   text = text.replace(/&(?:amp|lt|gt|quot|#39|nbsp);/g, (match) => {
     switch (match) {
       case '&amp;':  return '&';

@@ -132,14 +132,25 @@ export function registerAddCommand(program: {
     )
     .option('--output <file>', 'Write ingested content to file instead of stdout')
     .action(async (url: string, opts: Record<string, string | boolean>) => {
+      const parsePositiveInt = (
+        raw: string | boolean | undefined,
+        name: string
+      ): number | undefined => {
+        if (raw === undefined || raw === false || raw === '') return undefined;
+        const n = parseInt(String(raw), 10);
+        if (isNaN(n) || n <= 0) {
+          process.stderr.write(
+            `[ob add] Error: --${name} must be a positive integer (received: ${String(raw)})\n`
+          );
+          process.exit(1);
+        }
+        return n;
+      };
+
       const options: AddCommandOptions = {
         playwrightFallback: Boolean(opts['playwrightFallback']),
-        minContentLength: opts['minContentLength']
-          ? parseInt(String(opts['minContentLength']), 10)
-          : undefined,
-        timeout: opts['timeout']
-          ? parseInt(String(opts['timeout']), 10)
-          : undefined,
+        minContentLength: parsePositiveInt(opts['minContentLength'], 'min-content-length'),
+        timeout: parsePositiveInt(opts['timeout'], 'timeout'),
         browser: opts['browser'] as PlaywrightBrowserChannel | undefined,
         output: opts['output'] ? String(opts['output']) : undefined,
       };
