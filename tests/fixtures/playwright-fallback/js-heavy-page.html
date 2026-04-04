@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>JS-Heavy Page (fixture)</title>
+  <script>
+    // Simulate a JavaScript-rendered page.
+    // The initial HTML has no meaningful content; it is added via JS.
+    document.addEventListener('DOMContentLoaded', function () {
+      document.getElementById('app').innerHTML =
+        '<h1>Article Title</h1>' +
+        '<p>This is the main article content rendered by JavaScript. ' +
+        'It contains more than two hundred characters of useful text so that ' +
+        'downstream content-length checks can pass without issue. ' +
+        'The quick brown fox jumped over the lazy dog.</p>';
+    });
+  </script>
+</head>
+<body>
+  <div id="app"><!-- content inserted by JavaScript --></div>
+</body>
+</html>
