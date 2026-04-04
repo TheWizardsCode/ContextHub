@@ -289,6 +289,16 @@ export class TuiController {
     const help = listComponent.getFooter();
     const detail = detailComponent.getDetail();
     const copyIdButton = detailComponent.getCopyIdButton();
+    const setDetailContent = (content: string) => {
+      const component = detailComponent as unknown as { setContent?: (value: string) => void };
+      if (typeof component.setContent === 'function') {
+        component.setContent(content);
+        return;
+      }
+      if (typeof (detail as any).setContent === 'function') {
+        (detail as any).setContent(content);
+      }
+    };
     const metadataPane = metadataPaneComponent?.getBox?.() ?? null;
 
     const detailOverlay = overlaysComponent.detailOverlay;
@@ -1817,6 +1827,28 @@ export class TuiController {
       return value.replace(/[{}]/g, (ch) => (ch === '{' ? '{open}' : '{close}'));
     }
 
+    function escapeLiteralBracesPreservingTags(value: string): string {
+      const allowedTags = new Set([
+        'gray-fg', 'cyan-fg', 'white-fg', 'green-fg', 'red-fg', 'yellow-fg', 'blue-fg', 'magenta-fg', '214-fg',
+        'bold', 'underline'
+      ]);
+      const preserved: string[] = [];
+      const tokenized = value.replace(/\{([^{}]+)\}/g, (_m, innerRaw) => {
+        const inner = String(innerRaw || '').trim();
+        if (inner === '/') {
+          const idx = preserved.push(`{${inner}}`) - 1;
+          return `\u0000WL_TAG_${idx}\u0000`;
+        }
+        const isClose = inner.startsWith('/');
+        const tagName = isClose ? inner.slice(1) : inner;
+        if (!allowedTags.has(tagName)) return `{${inner}}`;
+        const idx = preserved.push(`{${inner}}`) - 1;
+        return `\u0000WL_TAG_${idx}\u0000`;
+      });
+      const escaped = escapeBlessedTags(tokenized);
+      return escaped.replace(/\u0000WL_TAG_(\d+)\u0000/g, (_m, idx) => preserved[Number(idx)] ?? '');
+    }
+
     // Insert zero-width spaces into long uninterrupted tokens so blessed can
     // wrap extremely long words (e.g. long URLs or single-word reasons).
     // Using a zero-width space (U+200B) is intentional: it does not render
@@ -1842,7 +1874,7 @@ export class TuiController {
     function brightenDetailIdLine(value: string): string {
       const lines = value.split('\n');
       const updated = lines.map((line) => {
-        const plain = stripAnsi(line);
+        const plain = stripTags(stripAnsi(line));
         const match = plain.match(/^ID\s*:\s*(\S+)/);
         if (!match) return line;
         const id = match[1];
@@ -1862,21 +1894,21 @@ function invalidateDetailCache(itemId: string): void {
 function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
   const v = visible || buildVisible();
   if (v.length === 0) {
-    detail.setContent('');
+    setDetailContent('');
     if (metadataPaneComponent) metadataPaneComponent.updateFromItem(null, 0);
     return;
   }
   const node = v[idx] || v[0];
   // Use cache for formatted detail content
   let content = detailCache.get(node.item.id);
-  if (!content) {
-    const text = humanFormatWorkItem(node.item, db, 'detail-pane');
-    const escaped = escapeBlessedTags(text);
+    if (!content) {
+    const text = humanFormatWorkItem(node.item, db, 'detail-pane', true);
+    const escaped = escapeLiteralBracesPreservingTags(text);
     const brightened = brightenDetailIdLine(escaped);
     content = decorateIdsForClick(brightened);
     detailCache.set(node.item.id, content);
   }
-  detail.setContent(content);
+  setDetailContent(content);
   // Reset scroll only when navigating to a different item. Preserve the
   // user's scroll position when the same item is re-rendered to avoid jarring jumps.
   try {
@@ -1969,8 +2001,8 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         return;
       }
       detailOverlay.show();
-      const text = humanFormatWorkItem(item, db, 'full');
-      const escaped = escapeBlessedTags(text);
+      const text = humanFormatWorkItem(item, db, 'full', true);
+      const escaped = escapeLiteralBracesPreservingTags(text);
       const brightened = brightenDetailIdLine(escaped);
       detailModal.setContent(decorateIdsForClick(brightened));
       detailModal.setScroll(0);
@@ -2140,7 +2172,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         : state.items.filter((item: any) => item.status !== 'completed' && item.status !== 'deleted');
       if (nextVisible.length === 0) {
         list.setItems([]);
-        detail.setContent('');
+        setDetailContent('');
         showToast('No work items found');
         screen.render();
         return;

@@ -232,32 +232,34 @@ function walkItemTree(items: WorkItem[], options: TreeRenderOptions): void {
 
 // Helper to apply color to audit excerpt based on readiness status
 // Redaction must happen BEFORE applying color
-function colorizeAuditExcerpt(auditText: string): string {
+function colorizeAuditExcerpt(auditText: string, tui?: boolean): string {
   const firstLine = auditText.split(/\r?\n/, 1)[0];
+  const isTui = Boolean(tui);
   if (firstLine.includes('Ready to close: Yes')) {
-    return theme.text.readyYes(firstLine);
+    return isTui ? theme.tui.text.readyYes(firstLine) : theme.text.readyYes(firstLine);
   }
-  return theme.text.readyNo(firstLine);
+  return isTui ? theme.tui.text.readyNo(firstLine) : theme.text.readyNo(firstLine);
 }
 
 // Standard human formatter: supports 'concise' | 'normal' | 'full' | 'raw'
-export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, format: string | undefined): string {
+export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, format: string | undefined, tui?: boolean): string {
   const fmt = (format || loadConfig()?.humanDisplay || 'concise').toLowerCase();
+  const isTui = Boolean(tui);
   const sortIndexLabel = `SortIndex: ${item.sortIndex}`;
   const rules = loadStatusStageRules();
 
   const lines: string[] = [];
-  const titleLine = `Title: ${formatTitleOnly(item)}`;
-  const idLine = `ID:    ${theme.text.muted(item.id)}`;
+  const titleLine = `Title: ${isTui ? formatTitleOnlyTUI(item) : formatTitleOnly(item)}`;
+  const idLine = `ID:    ${isTui ? theme.tui.text.muted(item.id) : theme.text.muted(item.id)}`;
 
   if (fmt === 'raw') {
     return JSON.stringify(item, null, 2);
   }
 
-  if (fmt === 'concise') {
-    const lines: string[] = [];
-    // First line: title + id (compact)
-    lines.push(`${formatTitleOnly(item)} ${theme.text.muted(item.id)}`);
+    if (fmt === 'concise') {
+      const lines: string[] = [];
+      // First line: title + id (compact)
+      lines.push(`${isTui ? formatTitleOnlyTUI(item) : formatTitleOnly(item)} ${isTui ? theme.tui.text.muted(item.id) : theme.text.muted(item.id)}`);
     // Second line: status, stage (if present) and priority (core metadata shown previously by list)
     if (item.stage !== undefined) {
       const stageLabel = item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage;
@@ -271,13 +273,13 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push(`Risk: ${item.risk || '—'}`);
     lines.push(`Effort: ${item.effort || '—'}`);
     if (item.assignee) lines.push(`Assignee: ${item.assignee}`);
-    if (item.audit) {
+      if (item.audit) {
       // For human outputs, show a truncated, redacted one-line audit excerpt.
       // Do not include the author in concise output to keep it compact.
-      const raw = String(item.audit.text || '');
-      const redacted = redactAuditText(raw);
-      const colorized = colorizeAuditExcerpt(redacted);
-      lines.push(`Audit: ${colorized}`);
+        const raw = String(item.audit.text || '');
+        const redacted = redactAuditText(raw);
+        const colorized = colorizeAuditExcerpt(redacted, isTui);
+        lines.push(`Audit: ${colorized}`);
       // Non-blocking warning: if the audit was downgraded to Missing Criteria
       // because the item lacks acceptance criteria, surface a subtle warning
       // in normal/concise human outputs so operators notice without failing
@@ -307,13 +309,13 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push(`Risk: ${item.risk || '—'}`);
     lines.push(`Effort: ${item.effort || '—'}`);
     if (item.assignee) lines.push(`Assignee: ${item.assignee}`);
-    if (item.audit) {
-      const raw = String(item.audit.text || '');
-      const redacted = redactAuditText(raw);
-      const colorized = colorizeAuditExcerpt(redacted);
-      // Keep concise audit excerpt in normal output as well (author omitted).
-      lines.push(`Audit: ${colorized}`);
-    }
+      if (item.audit) {
+        const raw = String(item.audit.text || '');
+        const redacted = redactAuditText(raw);
+        const colorized = colorizeAuditExcerpt(redacted, isTui);
+        // Keep concise audit excerpt in normal output as well (author omitted).
+        lines.push(`Audit: ${colorized}`);
+      }
     if (item.parentId) lines.push(`Parent: ${item.parentId}`);
     if (item.description) lines.push(`Description: ${item.description}`);
     return lines.join('\n');
@@ -321,7 +323,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
 
   // detail-pane: title + description + comments only (metadata is in the metadata pane)
   if (fmt === 'detail-pane') {
-    lines.push(renderTitle(item, '# '));
+    lines.push(isTui ? renderTitleTUI(item, '# ') : renderTitle(item, '# '));
 
     if (item.description) {
       lines.push('');
@@ -347,11 +349,11 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   }
 
   // full output
-  lines.push(renderTitle(item, '# '));
+  lines.push(isTui ? renderTitleTUI(item, '# ') : renderTitle(item, '# '));
   lines.push('');
   const issueTypeLabel = item.issueType && item.issueType.trim() !== '' ? item.issueType : 'unknown';
   const frontmatter: Array<[string, string]> = [
-    ['ID', theme.text.muted(item.id)],
+    ['ID', isTui ? theme.tui.text.muted(item.id) : theme.text.muted(item.id)],
     ['Status', item.stage !== undefined ? `${getStatusLabel(item.status, rules) || item.status} · Stage: ${item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage} | Priority: ${item.priority}` : `${getStatusLabel(item.status, rules) || item.status} | Priority: ${item.priority}`],
     ['Type', issueTypeLabel],
     ['SortIndex', String(item.sortIndex)]
@@ -405,7 +407,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push(`Author: ${item.audit.author}`);
     lines.push('');
     const redacted = redactAuditText(String(item.audit.text || ''));
-    const colorizedFirstLine = colorizeAuditExcerpt(redacted);
+    const colorizedFirstLine = colorizeAuditExcerpt(redacted, isTui);
     const remainingLines = redacted.split(/\r?\n/).slice(1).join('\n');
     const coloredText = remainingLines ? `${colorizedFirstLine}\n${remainingLines}` : colorizedFirstLine;
     lines.push(coloredText);

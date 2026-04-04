@@ -221,7 +221,7 @@ describe('TUI integration: style preservation', () => {
     expect(created.style).toBe(originalStyleRef);
   });
 
-  it('escapes blessed tags when rendering detail text', async () => {
+  it('escapes literal braces while preserving blessed tags in detail text', async () => {
     vi.resetModules();
     let savedAction: Function | null = null;
     const program: any = {
@@ -259,6 +259,8 @@ describe('TUI integration: style preservation', () => {
 
     const setContentCalls = detail?.setContent?.mock?.calls || [];
     const content = setContentCalls.length > 0 ? setContentCalls[setContentCalls.length - 1][0] : '';
+    expect(content).toContain('{green-fg}');
+    expect(content).toContain('{/green-fg}');
     expect(content).toContain('{open}');
     expect(content).toContain('{close}');
   });

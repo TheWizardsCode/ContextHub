@@ -320,16 +320,19 @@ export class OpencodeClient {
               const history = await this.getSessionMessages(sessionId);
               if (pane.setContent) {
                 let histText = '';
+                // Use renderer for markdown-like content when available
+                let _histRenderer: ((s: string, o?: any) => string) | null = null;
+                try { _histRenderer = require('./markdown-renderer.js').renderMarkdownToTags; } catch (_) { _histRenderer = null; }
                 for (const m of history) {
                   const role = m.info?.role || 'unknown';
                   histText += `{gray-fg}[${role}]{/}\n`;
                   const parts = m.parts || [];
                   for (const p of parts) {
                     if (p.type === 'text' && p.text) {
-                      histText += `${p.text}\n`;
+                      histText += `${_histRenderer ? _histRenderer(p.text) : p.text}\n`;
                     } else if (p.type === 'tool-result' && p.content) {
                       histText += `{green-fg}[Tool Result]{/}\n`;
-                      histText += `${p.content}\n`;
+                      histText += `${_histRenderer ? _histRenderer(p.content) : p.content}\n`;
                     } else if (p.type === 'tool-use' && p.tool) {
                       histText += `{yellow-fg}[Tool: ${p.tool.name}]{/}\n`;
                       if (p.tool.description) histText += `${p.tool.description}\n`;
@@ -345,31 +348,33 @@ export class OpencodeClient {
           } else {
             try {
               const localHist = sessionObj.localHistory;
-              if (localHist && Array.isArray(localHist) && localHist.length > 0) {
-                this.options.log(`rendering local persisted history messages=${localHist.length} for workitem=${String(sessionWorkItemId)}`);
-                if (pane.setContent) {
-                  let histText = '{yellow-fg}[Local persisted history - read-only]{/}\n\n';
-                  for (const m of localHist) {
-                    const role = m.info?.role || 'unknown';
-                    histText += `{gray-fg}[${role}]{/}\n`;
-                    const parts = m.parts || [];
-                    for (const p of parts) {
-                      if (p.type === 'text' && p.text) {
-                        histText += `${p.text}\n`;
-                      } else if (p.type === 'tool-result' && p.content) {
-                        histText += `{green-fg}[Tool Result]{/}\n`;
-                        histText += `${p.content}\n`;
-                      } else if (p.type === 'tool-use' && p.tool) {
-                        histText += `{yellow-fg}[Tool: ${p.tool.name}]{/}\n`;
-                        if (p.tool.description) histText += `${p.tool.description}\n`;
+                if (localHist && Array.isArray(localHist) && localHist.length > 0) {
+                  this.options.log(`rendering local persisted history messages=${localHist.length} for workitem=${String(sessionWorkItemId)}`);
+                  if (pane.setContent) {
+                    let histText = '{yellow-fg}[Local persisted history - read-only]{/}\n\n';
+                    let _histRenderer: ((s: string, o?: any) => string) | null = null;
+                    try { _histRenderer = require('./markdown-renderer.js').renderMarkdownToTags; } catch (_) { _histRenderer = null; }
+                    for (const m of localHist) {
+                      const role = m.info?.role || 'unknown';
+                      histText += `{gray-fg}[${role}]{/}\n`;
+                      const parts = m.parts || [];
+                      for (const p of parts) {
+                        if (p.type === 'text' && p.text) {
+                          histText += `${_histRenderer ? _histRenderer(p.text) : p.text}\n`;
+                        } else if (p.type === 'tool-result' && p.content) {
+                          histText += `{green-fg}[Tool Result]{/}\n`;
+                          histText += `${_histRenderer ? _histRenderer(p.content) : p.content}\n`;
+                        } else if (p.type === 'tool-use' && p.tool) {
+                          histText += `{yellow-fg}[Tool: ${p.tool.name}]{/}\n`;
+                          if (p.tool.description) histText += `${p.tool.description}\n`;
+                        }
                       }
+                      histText += '\n';
                     }
-                    histText += '\n';
+                    histText += '{yellow-fg}[End of local history]{/}\n\n';
+                    pane.setContent(histText + '\n');
                   }
-                  histText += '{yellow-fg}[End of local history]{/}\n\n';
-                  pane.setContent(histText + '\n');
                 }
-              }
             } catch (err) {
               this.options.log(`failed to render local history: ${String(err)}`);
             }
@@ -775,6 +780,19 @@ export class OpencodeClient {
     onSessionEnd: () => void,
   ) {
     let streamText = pane.getContent ? pane.getContent() : '';
+    // Lazy import renderer to keep startup cheap and avoid circular deps in tests
+    let renderer: ((s: string, o?: any) => string) | null = null;
+    const getRenderer = () => {
+      if (renderer) return renderer;
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const r = require('./markdown-renderer.js');
+        renderer = r.renderMarkdownToTags || r.default || null;
+      } catch (_) {
+        renderer = null;
+      }
+      return renderer;
+    };
     // Track a succinct activity label for the response pane header and update
     // it only when the activity changes to avoid excessive label churn.
     let currentActivity: string | null = null;
@@ -795,13 +813,16 @@ export class OpencodeClient {
        } catch (_) {}
      };
     const appendText = (text: string) => {
-      streamText += text;
+      const r = getRenderer();
+      streamText += r ? r(text) : text;
     };
     const appendLine = (line: string) => {
+      const r = getRenderer();
+      const rendered = r ? r(line) : line;
       if (streamText && !streamText.endsWith('\n')) {
         streamText += '\n';
       }
-      streamText += line;
+      streamText += rendered;
     };
     const updatePane = () => {
       if (pane.setContent) {

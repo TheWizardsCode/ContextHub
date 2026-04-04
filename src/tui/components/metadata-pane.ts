@@ -2,8 +2,9 @@ import blessed from 'blessed';
 import type { BlessedBox, BlessedFactory, BlessedScreen } from '../types.js';
 import { humanFormatWorkItem } from '../../commands/helpers.js';
 import { redactAuditText, parseReadinessLine } from '../../audit.js';
-import { stripAnsi } from '../id-utils.js';
+import { stripAnsi, stripTags } from '../id-utils.js';
 import { theme } from '../../theme.js';
+import { renderMarkdownToTags } from '../markdown-renderer.js';
 
 export interface MetadataPaneOptions {
   parent: BlessedScreen;
@@ -114,7 +115,7 @@ export class MetadataPaneComponent {
     // and append the author for quick triage.
     try {
       if ((item as any).audit && typeof (item as any).audit.text === 'string') {
-        const formatted = humanFormatWorkItem(item as any, null, 'concise');
+        const formatted = humanFormatWorkItem(item as any, null, 'concise', true);
         const auditLine = formatted.split('\n').find(l => l.trim().startsWith('Audit:')) || '';
         let excerpt = '';
         if (auditLine) {
@@ -124,9 +125,9 @@ export class MetadataPaneComponent {
           excerpt = (redactAuditText(raw).split(/\r?\n/).find(l => l.trim() !== '') || '').trim();
         }
         if (excerpt) {
-          const excerptWithoutAnsi = stripAnsi(excerpt);
-          const redactedExcerpt = redactAuditText(excerptWithoutAnsi);
-          const colorExcerpt = excerptWithoutAnsi.includes('Ready to close: Yes')
+          const excerptPlain = stripTags(stripAnsi(excerpt));
+          const redactedExcerpt = redactAuditText(excerptPlain);
+          const colorExcerpt = excerptPlain.includes('Ready to close: Yes')
             ? theme.tui.text.readyYes(redactedExcerpt)
             : theme.tui.text.readyNo(redactedExcerpt);
           // Append short audit timestamp (DD/MM HH:MM) if available. Prefer
@@ -154,11 +155,13 @@ export class MetadataPaneComponent {
       lines.push('GitHub:   (G to push to GitHub)');
     }
 
-    this.box.setContent(lines.join('\n'));
+    // Use the public setContent wrapper so markdown rendering is applied
+    // consistently in the metadata pane.
+    this.setContent(lines.join('\n'));
   }
 
   setContent(content: string): void {
-    this.box.setContent(content);
+    this.box.setContent(renderMarkdownToTags(content));
   }
 
   focus(): void {
