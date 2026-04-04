@@ -53,6 +53,7 @@ export const DEFAULT_SHORTCUTS = [
       { keys: 'Right/Enter', description: 'Expand node' },
       { keys: 'Left', description: 'Collapse node / parent' },
       { keys: 'Space', description: 'Toggle expand/collapse' },
+      { keys: 'Shift+Up/Shift+Down', description: 'Reorder selected item' },
     ],
   },
   {
@@ -155,6 +156,8 @@ export const KEY_FILTER_PLAN_COMPLETED = ['p', 'P'];
 export const KEY_TOGGLE_DO_NOT_DELEGATE = ['d', 'D'];
 export const KEY_TOGGLE_NEEDS_REVIEW = ['r', 'R'];
 export const KEY_MOVE = ['m', 'M'];
+export const KEY_REORDER_UP = ['S-up'];
+export const KEY_REORDER_DOWN = ['S-down'];
 export const KEY_DELEGATE = ['g'];
 // Include both cases because blessed may normalize key.name to lowercase while
 // still exposing uppercase intent via the raw `ch` argument.

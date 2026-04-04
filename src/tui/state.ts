@@ -1,6 +1,5 @@
 import type { WorkItem } from '../types.js';
 import type { MoveMode } from './types.js';
-import { sortByPriorityAndDate } from '../commands/helpers.js';
 
 export type Item = WorkItem;
 
@@ -17,6 +16,28 @@ export type TuiState = {
 };
 
 export type VisibleNode = { item: Item; depth: number; hasChildren: boolean };
+
+const toSortableSortIndex = (value: unknown): number => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  return 0;
+};
+
+const toSortableTime = (value: unknown): number => {
+  if (typeof value !== 'string' || value.trim() === '') return 0;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+export const sortBySortIndexDateAndId = (a: Item, b: Item): number => {
+  const aSort = toSortableSortIndex((a as any).sortIndex);
+  const bSort = toSortableSortIndex((b as any).sortIndex);
+  if (aSort !== bSort) return aSort - bSort;
+
+  const createdDiff = toSortableTime((a as any).createdAt) - toSortableTime((b as any).createdAt);
+  if (createdDiff !== 0) return createdDiff;
+
+  return String(a.id || '').localeCompare(String(b.id || ''));
+};
 
 export const isClosedStatus = (status: WorkItem['status'] | string | undefined): boolean =>
   (status === 'completed' || status === 'deleted') ?? false;
@@ -40,7 +61,7 @@ export const rebuildTreeState = (state: TuiState): void => {
   }
 
   state.roots = state.currentVisibleItems.filter(it => !(it as any).parentId || !state.itemsById.has((it as any).parentId)).slice();
-  state.roots.sort(sortByPriorityAndDate);
+  state.roots.sort(sortBySortIndexDateAndId);
 
   // prune expanded nodes that are no longer present
   for (const id of Array.from(state.expanded)) {
@@ -73,7 +94,7 @@ export const buildVisibleNodes = (state: TuiState): VisibleNode[] => {
   const out: VisibleNode[] = [];
 
   function visit(it: Item, depth: number) {
-    const children = (state.childrenMap.get(it.id) || []).slice().sort(sortByPriorityAndDate);
+    const children = (state.childrenMap.get(it.id) || []).slice().sort(sortBySortIndexDateAndId);
     out.push({ item: it, depth, hasChildren: children.length > 0 });
     if (children.length > 0 && state.expanded.has(it.id)) {
       for (const c of children) visit(c, depth + 1);

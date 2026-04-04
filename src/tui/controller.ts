@@ -13,7 +13,7 @@ import { copyToClipboard } from '../clipboard.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { humanFormatWorkItem, formatTitleOnlyTUI } from '../commands/helpers.js';
-import { createTuiState, rebuildTreeState, buildVisibleNodes, expandAncestorsForInProgress, isClosedStatus, enterMoveMode, exitMoveMode } from './state.js';
+import { createTuiState, rebuildTreeState, buildVisibleNodes, expandAncestorsForInProgress, isClosedStatus, enterMoveMode, exitMoveMode, sortBySortIndexDateAndId } from './state.js';
 import { createPersistence } from './persistence.js';
 import { resolveWorklogDir } from '../worklog-paths.js';
 import { createLayout } from './layout.js';
@@ -36,7 +36,7 @@ import ChordHandler from './chords.js';
 import { stripAnsi, stripTags, decorateIdsForClick, extractIdFromLine, extractIdAtColumn, stripTagsAndAnsiWithMap, wrapPlainLineWithMap } from './id-utils.js';
 import { AVAILABLE_COMMANDS, MIN_INPUT_HEIGHT, MAX_INPUT_LINES, FOOTER_HEIGHT, OPENCODE_SERVER_PORT,
   KEY_NAV_RIGHT, KEY_NAV_LEFT, KEY_TOGGLE_EXPAND, KEY_QUIT, KEY_ESCAPE, KEY_TOGGLE_HELP, KEY_CHORD_PREFIX, KEY_CHORD_FOLLOWUPS, KEY_OPEN_OPENCODE, KEY_OPEN_SEARCH,
-  KEY_TAB, KEY_SHIFT_TAB, KEY_LEFT_SINGLE, KEY_RIGHT_SINGLE, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_FILTER_BLOCKED, KEY_FILTER_NEEDS_REVIEW, KEY_FILTER_INTAKE_COMPLETED, KEY_FILTER_PLAN_COMPLETED, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW, KEY_MOVE, KEY_DELEGATE, KEY_GITHUB_PUSH } from './constants.js';
+  KEY_TAB, KEY_SHIFT_TAB, KEY_LEFT_SINGLE, KEY_RIGHT_SINGLE, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_FILTER_BLOCKED, KEY_FILTER_NEEDS_REVIEW, KEY_FILTER_INTAKE_COMPLETED, KEY_FILTER_PLAN_COMPLETED, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW, KEY_MOVE, KEY_REORDER_UP, KEY_REORDER_DOWN, KEY_DELEGATE, KEY_GITHUB_PUSH } from './constants.js';
 import { theme } from '../theme.js';
 import { initAutocomplete, type AutocompleteInstance } from './opencode-autocomplete.js';
 import { delegateWorkItem, type DelegateResult, type DelegateDb } from '../delegate-helper.js';
@@ -2410,6 +2410,74 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       return node?.item || null;
     }
 
+    function reorderSelectedItemByOffset(offset: -1 | 1) {
+      const selected = getSelectedItem();
+      if (!selected) {
+        showToast('No item selected');
+        return;
+      }
+
+      const parentId = selected.parentId ?? null;
+      const siblings = state.currentVisibleItems
+        .filter(candidate => (candidate.parentId ?? null) === parentId)
+        .slice()
+        .sort(sortBySortIndexDateAndId);
+
+      const currentIndex = siblings.findIndex(candidate => candidate.id === selected.id);
+      if (currentIndex < 0) return;
+
+      const targetIndex = currentIndex + offset;
+      if (targetIndex < 0 || targetIndex >= siblings.length) {
+        return;
+      }
+
+      const source = siblings[currentIndex];
+      const target = siblings[targetIndex];
+      const sourceSort = Number.isFinite(source.sortIndex) ? source.sortIndex : 0;
+      const targetSort = Number.isFinite(target.sortIndex) ? target.sortIndex : 0;
+
+      let nextSortIndexes: Array<{ id: string; sortIndex: number }>;
+      if (sourceSort !== targetSort) {
+        nextSortIndexes = [
+          { id: source.id, sortIndex: targetSort },
+          { id: target.id, sortIndex: sourceSort },
+        ];
+      } else {
+        const reordered = siblings.slice();
+        const [moved] = reordered.splice(currentIndex, 1);
+        reordered.splice(targetIndex, 0, moved);
+        nextSortIndexes = reordered.map((entry, index) => ({
+          id: entry.id,
+          sortIndex: (index + 1) * 100,
+        }));
+      }
+
+      const updates = new Map<string, Item>();
+      for (const next of nextSortIndexes) {
+        const existing = state.itemsById.get(next.id);
+        const existingSort = Number.isFinite(existing?.sortIndex) ? Number(existing?.sortIndex) : 0;
+        if (existingSort === next.sortIndex) continue;
+
+        const updated = db.update(next.id, { sortIndex: next.sortIndex });
+        if (!updated) {
+          showToast('Reorder failed');
+          return;
+        }
+
+        updates.set(next.id, updated as Item);
+        invalidateDetailCache(next.id);
+      }
+
+      if (updates.size === 0) return;
+
+      state.items = state.items.map((item) => updates.get(item.id) || item);
+      rebuildTree();
+      expandInProgressAncestors();
+      const visible = buildVisible();
+      const movedIndex = visible.findIndex(node => node.item.id === selected.id);
+      renderListAndDetail(movedIndex >= 0 ? movedIndex : (list.selected as number));
+    }
+
     async function copySelectedId() {
       const item = getSelectedItem();
       if (!item) return;
@@ -3137,6 +3205,24 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           void handleGithubPushShortcut(_ch, key);
           return false;
         }
+
+        // Some terminals report Shift+Arrow as key.name='up'/'down' with
+        // key.shift=true instead of 'S-up'/'S-down'. Handle that form here
+        // so reordering remains reliable across environments.
+        if (key?.shift && key?.name === 'up') {
+          if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+          if (!opencodeDialog.hidden) return;
+          if (state.moveMode) return;
+          reorderSelectedItemByOffset(-1);
+          return false;
+        }
+        if (key?.shift && key?.name === 'down') {
+          if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+          if (!opencodeDialog.hidden) return;
+          if (state.moveMode) return;
+          reorderSelectedItemByOffset(1);
+          return false;
+        }
         
         // No legacy pending-state fallback: chordHandler.feed handles all
         // Ctrl-W prefixes and their follow-ups. If chordHandler didn't
@@ -3650,6 +3736,20 @@ const visible = buildVisible();
         renderListAndDetail(movedIdx);
       }
       return;
+    });
+
+    screen.key(KEY_REORDER_UP, () => {
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+      if (!opencodeDialog.hidden) return;
+      if (state.moveMode) return;
+      reorderSelectedItemByOffset(-1);
+    });
+
+    screen.key(KEY_REORDER_DOWN, () => {
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+      if (!opencodeDialog.hidden) return;
+      if (state.moveMode) return;
+      reorderSelectedItemByOffset(1);
     });
 
     // Also handle Enter to confirm move mode target

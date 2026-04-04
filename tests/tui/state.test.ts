@@ -1,11 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { createTuiState, rebuildTreeState, buildVisibleNodes, filterVisibleItems } from '../../src/tui/state.js';
+import { createTuiState, rebuildTreeState, buildVisibleNodes, filterVisibleItems, sortBySortIndexDateAndId } from '../../src/tui/state.js';
 
 type WI = {
   id: string;
   title: string;
   status: string;
   priority?: string;
+  sortIndex?: number;
   parentId?: string | null;
   createdAt?: string | Date;
 };
@@ -63,13 +64,24 @@ describe('TUI state helpers', () => {
     expect(filteredTrue.some(i => i.id === 'done')).toBe(true);
   });
 
-  it('sorts roots by priority then createdAt deterministically', () => {
+  it('sorts roots by sortIndex then createdAt deterministically', () => {
     const items: WI[] = [
-      { id: 'a', title: 'A', status: 'open', priority: 'medium', createdAt: '2020-01-02T00:00:00Z' },
-      { id: 'b', title: 'B', status: 'open', priority: 'medium', createdAt: '2020-01-01T00:00:00Z' },
+      { id: 'a', title: 'A', status: 'open', priority: 'medium', createdAt: '2020-01-02T00:00:00Z', sortIndex: 300 },
+      { id: 'b', title: 'B', status: 'open', priority: 'medium', createdAt: '2020-01-01T00:00:00Z', sortIndex: 100 },
     ];
     const state = createTuiState(items as any, false, undefined as any);
-    // roots should be sorted: older createdAt first (b then a)
+    // roots should be sorted by sortIndex first (b then a)
     expect(state.roots.map(r => r.id)).toEqual(['b', 'a']);
+  });
+
+  it('falls back to createdAt then id when sortIndex ties', () => {
+    const items: WI[] = [
+      { id: 'c', title: 'C', status: 'open', createdAt: '2020-01-02T00:00:00Z' },
+      { id: 'a', title: 'A', status: 'open', createdAt: '2020-01-02T00:00:00Z' },
+      { id: 'b', title: 'B', status: 'open', createdAt: '2020-01-01T00:00:00Z' },
+    ];
+
+    const sorted = items.slice().sort(sortBySortIndexDateAndId as any);
+    expect(sorted.map(item => item.id)).toEqual(['b', 'a', 'c']);
   });
 });
