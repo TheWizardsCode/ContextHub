@@ -724,7 +724,6 @@ export class WorklogDatabase {
    * Update a work item
    */
   update(id: string, input: UpdateWorkItemInput): WorkItem | null {
-    this.refreshFromJsonlIfNewer();
     const item = this.store.getWorkItem(id);
     if (!item) {
       return null;
@@ -782,7 +781,6 @@ export class WorklogDatabase {
    * Delete a work item
    */
   delete(id: string): boolean {
-    this.refreshFromJsonlIfNewer();
     const item = this.store.getWorkItem(id);
     if (!item) {
       return false;
@@ -1844,7 +1842,6 @@ export class WorklogDatabase {
    * Add a dependency edge (fromId depends on toId)
    */
   addDependencyEdge(fromId: string, toId: string): DependencyEdge | null {
-    this.refreshFromJsonlIfNewer();
     if (!this.store.getWorkItem(fromId) || !this.store.getWorkItem(toId)) {
       return null;
     }
@@ -1864,7 +1861,6 @@ export class WorklogDatabase {
    * Remove a dependency edge (fromId depends on toId)
    */
   removeDependencyEdge(fromId: string, toId: string): boolean {
-    this.refreshFromJsonlIfNewer();
     const removed = this.store.deleteDependencyEdge(fromId, toId);
     if (removed) {
       this.triggerAutoSync();
@@ -1876,7 +1872,6 @@ export class WorklogDatabase {
    * List outbound dependency edges (fromId depends on toId)
    */
   listDependencyEdgesFrom(fromId: string): DependencyEdge[] {
-    this.refreshFromJsonlIfNewer();
     return this.store.getDependencyEdgesFrom(fromId);
   }
 
@@ -1884,7 +1879,6 @@ export class WorklogDatabase {
    * List inbound dependency edges (items that depend on toId)
    */
   listDependencyEdgesTo(toId: string): DependencyEdge[] {
-    this.refreshFromJsonlIfNewer();
     return this.store.getDependencyEdgesTo(toId);
   }
 
@@ -2131,7 +2125,6 @@ export class WorklogDatabase {
    * Get all comments for a work item
    */
   getCommentsForWorkItem(workItemId: string): Comment[] {
-    this.refreshFromJsonlIfNewer();
     return this.store.getCommentsForWorkItem(workItemId);
   }
 
