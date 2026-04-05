@@ -96,6 +96,36 @@ wl reviewed WL-ABC123 false     # set to false
 wl --json reviewed WL-ABC123    # JSON output with updated work item
 ```
 
+### `audit` [options] <id>
+
+Run an OpenCode audit flow for a specific work item and print the resulting audit text.
+
+Behavior:
+
+- Requires an explicit work item id.
+- Invokes OpenCode with the prompt `audit <id>`.
+- On success, prints:
+
+```text
+Audit complete:
+
+<audit-text>
+```
+
+- Returns non-zero on failures (for example: timeout, parse failure, missing work item, or OpenCode process errors).
+
+Options:
+
+- `--prefix <prefix>` — Override default ID prefix (optional).
+
+Examples:
+
+```sh
+wl audit WL-ABC123
+wl --json audit WL-ABC123
+wl audit WL-ABC123 --prefix WL
+```
+
 ### `delete` [options] <id>
 
 Delete a work item (marks as deleted): this sets the work item status to `deleted` in the local database. If you prefer to set the status explicitly, use `wl update <id> -s deleted` instead.

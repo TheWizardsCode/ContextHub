@@ -70,7 +70,7 @@ export const DEFAULT_SHORTCUTS = [
     items: [
       { keys: '/', description: 'Search/Filter' },
       { keys: 'I', description: 'Show in-progress only' },
-      { keys: 'A', description: 'Show open items' },
+      { keys: 'a', description: 'Show open items' },
       { keys: 'B', description: 'Show blocked only' },
       { keys: 'V', description: 'Needs review filter (cycle)' },
       { keys: 'T', description: 'Show intake_completed items' },
@@ -93,6 +93,7 @@ export const DEFAULT_SHORTCUTS = [
     category: 'Actions',
     items: [
       { keys: 'O', description: 'Open OpenCode prompt' },
+      { keys: 'A', description: 'Run audit via OpenCode' },
       { keys: 'N', description: 'Find next work item' },
       { keys: 'N (dialog)', description: 'Next recommendation' },
       { keys: 'X', description: 'Close selected item' },
@@ -148,7 +149,8 @@ export const KEY_UPDATE_ITEM = ['u', 'U'];
 export const KEY_REFRESH: string[] = [];
 export const KEY_FIND_NEXT = ['n', 'N'];
 export const KEY_FILTER_IN_PROGRESS = ['i', 'I'];
-export const KEY_FILTER_OPEN = ['a', 'A'];
+export const KEY_FILTER_OPEN = ['a'];
+export const KEY_RUN_AUDIT = ['A'];
 export const KEY_FILTER_BLOCKED = ['b', 'B'];
 export const KEY_FILTER_NEEDS_REVIEW = ['v', 'V'];
 export const KEY_FILTER_INTAKE_COMPLETED = ['t', 'T'];

@@ -63,6 +63,148 @@ const makeScreen = () => {
 };
 
 describe('TuiController', () => {
+  it('runs OpenCode audit prompt for selected item on A key', async () => {
+    const screen = makeScreen() as any;
+    screen._keys = [] as Array<{ keys: string[] | string; handler: (...args: any[]) => any }>;
+    screen.key = vi.fn((keys: string[] | string, handler: (...args: any[]) => any) => {
+      screen._keys.push({ keys, handler });
+    });
+
+    const list = makeList();
+    const footer = makeBox();
+    const detail = makeBox();
+    const copyIdButton = makeBox();
+    const toastBox = { show: vi.fn() } as any;
+
+    const overlays = {
+      detailOverlay: makeBox(),
+      closeOverlay: makeBox(),
+      updateOverlay: makeBox(),
+    };
+    const dialogs = {
+      detailModal: makeBox(),
+      detailClose: makeBox(),
+      closeDialog: makeBox(),
+      closeDialogText: makeBox(),
+      closeDialogOptions: makeList(),
+      updateDialog: makeBox(),
+      updateDialogText: makeBox(),
+      updateDialogOptions: makeList(),
+      updateDialogStageOptions: makeList(),
+      updateDialogStatusOptions: makeList(),
+      updateDialogPriorityOptions: makeList(),
+      updateDialogComment: makeBox(),
+    };
+    const helpMenu = {
+      isVisible: vi.fn(() => false),
+      show: vi.fn(),
+      hide: vi.fn(),
+    };
+    const modalDialogs = {
+      selectList: vi.fn(async () => 0),
+      editTextarea: vi.fn(async () => null),
+      confirmTextbox: vi.fn(async () => false),
+      forceCleanup: vi.fn(),
+    };
+    const opencodeUi = {
+      serverStatusBox: makeBox(),
+      dialog: makeBox(),
+      textarea: makeBox(),
+      suggestionHint: makeBox(),
+      sendButton: makeBox(),
+      cancelButton: makeBox(),
+      ensureResponsePane: vi.fn(() => makeBox()),
+    };
+    const layout = {
+      screen,
+      listComponent: { getList: () => list, getFooter: () => footer },
+      detailComponent: { getDetail: () => detail, getCopyIdButton: () => copyIdButton },
+      toastComponent: toastBox,
+      overlaysComponent: overlays,
+      dialogsComponent: dialogs,
+      helpMenu,
+      modalDialogs,
+      opencodeUi,
+      nextDialog: {
+        overlay: makeBox(),
+        dialog: makeBox(),
+        close: makeBox(),
+        text: makeBox(),
+        options: makeList(),
+      },
+    };
+
+    let capturedPrompt: string | null = null;
+    class FakeOpencodeClient {
+      getStatus() { return { status: 'running', port: 9999 }; }
+      startServer() { return Promise.resolve(true); }
+      stopServer() { return undefined; }
+      sendPrompt(options: any) {
+        capturedPrompt = options.prompt;
+        options.onComplete?.();
+        return Promise.resolve();
+      }
+    }
+
+    const ctx = {
+      program: { opts: () => ({ verbose: false }) },
+      utils: {
+        requireInitialized: vi.fn(),
+        getDatabase: vi.fn(() => ({
+          list: () => [
+            {
+              id: 'WL-AUDIT-1',
+              title: 'Audit me',
+              description: '',
+              status: 'open',
+              priority: 'medium',
+              sortIndex: 0,
+              parentId: null,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              tags: [],
+              assignee: '',
+              stage: '',
+              issueType: 'task',
+              createdBy: '',
+              deletedBy: '',
+              deleteReason: '',
+              risk: '',
+              effort: '',
+            },
+          ],
+          getPrefix: () => undefined,
+          getCommentsForWorkItem: () => [],
+          update: () => ({}),
+          createComment: () => ({}),
+          get: () => null,
+        })),
+      },
+    } as any;
+
+    const controller = new TuiController(ctx, {
+      createLayout: () => layout as any,
+      OpencodeClient: FakeOpencodeClient as any,
+      resolveWorklogDir: () => '/tmp',
+      createPersistence: () => ({
+        loadPersistedState: async () => null,
+        savePersistedState: async () => undefined,
+        statePath: '/tmp/tui-state.json',
+      }),
+    });
+
+    await controller.start({});
+
+    const auditKey = screen._keys.find((entry: any) => {
+      const keys = Array.isArray(entry.keys) ? entry.keys : [entry.keys];
+      return keys.includes('A');
+    });
+    expect(auditKey).toBeTruthy();
+
+    await auditKey!.handler();
+    expect(capturedPrompt).toBe('audit WL-AUDIT-1');
+  });
+
   it('starts with injected deps and layout', async () => {
     const screen = makeScreen();
     const list = makeList();

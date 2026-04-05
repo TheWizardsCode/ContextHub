@@ -54,6 +54,8 @@ export interface ListOptions {
 
 export interface ShowOptions { children?: boolean; prefix?: string }
 
+export interface AuditOptions { prefix?: string }
+
 export interface UpdateOptions {
   title?: string;
   description?: string;
