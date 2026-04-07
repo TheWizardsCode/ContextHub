@@ -46,6 +46,7 @@ export const filterVisibleItems = (items: Item[], showClosed: boolean): Item[] =
   showClosed ? items.slice() : items.filter((item: Item) => !isClosedStatus(item.status));
 
 export const rebuildTreeState = (state: TuiState): void => {
+  const t0 = Date.now();
   state.currentVisibleItems = filterVisibleItems(state.items, state.showClosed);
   state.itemsById = new Map<string, Item>();
   for (const it of state.currentVisibleItems) state.itemsById.set(it.id, it);
@@ -67,6 +68,12 @@ export const rebuildTreeState = (state: TuiState): void => {
   for (const id of Array.from(state.expanded)) {
     if (!state.itemsById.has(id)) state.expanded.delete(id);
   }
+  // Lightweight timing to help diagnose expensive tree rebuilds in the TUI
+  try {
+    const dur = Date.now() - t0;
+    // Expose on the state for tests/inspection when perf debugging is enabled
+    (state as any).__lastRebuildMs = dur;
+  } catch (_) {}
 };
 
 export const createTuiState = (items: Item[], showClosed: boolean, persistedExpanded?: string[] | null): TuiState => {
@@ -91,6 +98,7 @@ export const createTuiState = (items: Item[], showClosed: boolean, persistedExpa
 };
 
 export const buildVisibleNodes = (state: TuiState): VisibleNode[] => {
+  const t0 = Date.now();
   const out: VisibleNode[] = [];
 
   function visit(it: Item, depth: number) {
@@ -102,6 +110,7 @@ export const buildVisibleNodes = (state: TuiState): VisibleNode[] => {
   }
 
   for (const r of state.roots) visit(r, 0);
+  try { (state as any).__lastBuildVisibleMs = Date.now() - t0; } catch (_) {}
   return out;
 };
 

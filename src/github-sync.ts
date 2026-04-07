@@ -87,6 +87,12 @@ export async function upsertIssuesFromWorkItems(
   persistComment?: (comment: Comment) => void
 ): Promise<{ updatedItems: WorkItem[]; result: GithubSyncResult; timing: GithubSyncTiming }> {
   const startTime = Date.now();
+  // Instrumentation hooks for callers that enable verbose logging — record
+  // coarse-grained timings at start so the TUI can surface progress and
+  // detect long-running sync operations that block the main thread.
+  try {
+    (upsertIssuesFromWorkItems as any).__lastStartTime = startTime;
+  } catch (_) {}
   const beforeMetrics = snapshot();
   const labelPrefix = normalizeGithubLabelPrefix(config.labelPrefix);
   const issueItems = items.filter(item => item.status !== 'deleted' || item.githubIssueNumber != null);
@@ -333,6 +339,13 @@ export async function upsertIssuesFromWorkItems(
           });
         }
         timing.upsertMs += Date.now() - upsertStart;
+        // Yield to the event loop occasionally when processing many items so
+        // a busy sync doesn't completely starve the TUI. This is a best-effort
+        // yield that keeps the implementation compatible with tests that run
+        // the sync inline.
+        if (idx % 10 === 0) {
+          await new Promise((res) => setImmediate(res));
+        }
         if (onVerboseLog) {
           onVerboseLog(`[upsert] ${item.id} completed in ${Date.now() - upsertStart}ms`);
         }
@@ -343,7 +356,7 @@ export async function upsertIssuesFromWorkItems(
       }
 
       const shouldSyncCommentsNow = itemComments.length > 0 && (shouldSyncComments || shouldUpdateIssue);
-        if (shouldSyncCommentsNow && issueNumber) {
+      if (shouldSyncCommentsNow && issueNumber) {
           const commentListStart = Date.now();
           increment('api.comment.list');
           // listGithubIssueCommentsAsync now schedules internally via the throttler
@@ -353,6 +366,8 @@ export async function upsertIssuesFromWorkItems(
           const commentUpsertStart = Date.now();
           const commentSummary = await upsertGithubIssueCommentsAsync(config, issueNumber, itemComments, existingComments);
           timing.commentUpsertMs += Date.now() - commentUpsertStart;
+          // small yield after comment work
+          if (idx % 5 === 0) await new Promise((res) => setImmediate(res));
         increment('api.comment.create', commentSummary.created || 0);
         increment('api.comment.update', commentSummary.updated || 0);
         result.commentsCreated = (result.commentsCreated || 0) + commentSummary.created;
@@ -442,7 +457,14 @@ export async function upsertIssuesFromWorkItems(
   // Launch upsert mappers without a local worker pool; schedule external
   // GitHub API calls through the central throttler. The throttler enforces
   // WL_GITHUB_CONCURRENCY and rate limits configured in src/github-throttler.ts.
+  // Run mapper tasks concurrently but await in a way that preserves the
+  // ability to yield back to the event loop during batches. Using
+  // Promise.all on an array of async functions is fine because the mapper
+  // already yields periodically; keep behavior unchanged but surface a
+  // lastStartTime/lastEndTime pair for diagnostic consumption.
   await Promise.all(issueItems.map((it, idx) => upsertMapper(it, idx)));
+
+  try { (upsertIssuesFromWorkItems as any).__lastEndTime = Date.now(); } catch (_) {}
 
   result.skipped = items.length - issueItems.length + skippedUpdates;
 
