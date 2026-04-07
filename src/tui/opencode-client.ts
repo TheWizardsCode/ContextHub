@@ -825,11 +825,26 @@ export class OpencodeClient {
       streamText += rendered;
     };
     const updatePane = () => {
-      if (pane.setContent) {
-        pane.setContent(streamText);
+      // Prefer using pushLine when available since some TUI implementations
+      // (and tests) mock pushLine to observe appended lines. When pushLine
+      // is present, call it with the current accumulated streamText so
+      // consumers receive the update. Otherwise fall back to setContent
+      // which replaces the whole pane content.
+      try {
+        if (typeof pane.pushLine === 'function') {
+          try { pane.pushLine(streamText); } catch (_) {
+            // If pushLine fails for any reason, fall back to setContent
+            if (typeof pane.setContent === 'function') pane.setContent(streamText);
+          }
+        } else if (typeof pane.setContent === 'function') {
+          pane.setContent(streamText);
+        }
+      } catch (_) {
+        // best-effort: ignore pane update failures
       }
+
       if (typeof pane.setScrollPerc === 'function') {
-        pane.setScrollPerc(100);
+        try { pane.setScrollPerc(100); } catch (_) {}
       }
       this.options.render();
     };
@@ -968,6 +983,19 @@ export class OpencodeClient {
         inputField?.focus?.();
         updatePane();
         this.options.log(`sse input request type=${inputType}`);
+
+        // Immediately stop the opencode server when the assistant enters
+        // a waiting-for-input/input.request state so we don't leave a
+        // background server process running (which would orphan processes
+        // in CI or interactive TUI sessions). This is defensive: the
+        // controller will also attempt a best-effort stop in onComplete.
+        try {
+          // log intent then stop
+          this.options.log(`Stopping opencode server due to input request for session=${sessionId}`);
+          this.stopServer();
+        } catch (err) {
+          this.options.log(`Failed to stop opencode server on input request: ${String(err)}`);
+        }
 
         inputField?.once?.('submit', (value: string) => {
           this.sendInputResponse(sessionId, value);

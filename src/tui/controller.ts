@@ -1314,7 +1314,7 @@ export class TuiController {
       screen.render();
     }
 
-    async function openOpencodeDialog() {
+    async function openOpencodeDialog(initialInput?: string) {
       // Always use compact mode at bottom
       updateOpencodePromptLabel('idle');
       opencodeDialog.top = undefined;  // Clear the center positioning
@@ -1333,27 +1333,40 @@ export class TuiController {
       opencodeDialog.show();
       opencodeDialog.setFront();
       
-      // Clear previous contents and focus textbox so typed characters appear
-      try { if (typeof opencodeText.clearValue === 'function') opencodeText.clearValue(); } catch (_) {}
-      try { if (typeof opencodeText.setValue === 'function') opencodeText.setValue(''); } catch (_) {}
-      setOpencodeCursorIndex('', 0);
-      
-      // Reset autocomplete state
-      if (autocompleteInstance) { autocompleteInstance.reset(); }
-      suggestionHint.setContent('');
-      opencodeText.focus();
-      paneFocusIndex = getFocusPanes().indexOf(opencodeDialog);
-      applyFocusStyles();
-      // Don't move cursor since there's no prompt anymore
-      updateOpencodeInputLayout();
-      
-      // Start the server if not already running
-      await opencodeClient.startServer();
-      
-      // Open the response pane automatically
-      ensureOpencodePane();
-      
-      screen.render();
+       // Clear previous contents and focus textbox so typed characters appear
+       try { if (typeof opencodeText.clearValue === 'function') opencodeText.clearValue(); } catch (_) {}
+       try { if (typeof opencodeText.setValue === 'function') opencodeText.setValue(''); } catch (_) {}
+       setOpencodeCursorIndex('', 0);
+
+       // Reset autocomplete state
+       if (autocompleteInstance) { autocompleteInstance.reset(); }
+       suggestionHint.setContent('');
+       opencodeText.focus();
+       paneFocusIndex = getFocusPanes().indexOf(opencodeDialog);
+       applyFocusStyles();
+       // Don't move cursor since there's no prompt anymore
+       updateOpencodeInputLayout();
+
+       // If caller provided an initial input (eg. "audit <id>"), populate
+       // it so the user sees it immediately in the input box while the
+       // OpenCode server starts in the background.
+       if (initialInput && typeof opencodeText.setValue === 'function') {
+         try { opencodeText.setValue(initialInput); } catch (_) {}
+         try { setOpencodeCursorIndex(initialInput, initialInput.length); } catch (_) {}
+         try { updateOpencodeInputLayout(); } catch (_) {}
+       }
+
+       // Render the input/dialog immediately so the prompt text is visible
+       // while we wait for the server to start.
+       screen.render();
+
+       // Start the server if not already running
+       await opencodeClient.startServer();
+
+       // Open the response pane automatically
+       ensureOpencodePane();
+
+       screen.render();
     }
 
     function closeOpencodeDialog() {
@@ -1578,11 +1591,25 @@ export class TuiController {
         return;
       }
 
-      // Check server is running
+      // Check server is running. If not, attempt to start it and ensure we
+      // stop it after the prompt completes to avoid leaving orphaned
+      // opencode server processes. We only stop the server if we started it.
       const serverStatus = opencodeClient.getStatus();
+      let startedServer = false;
       if (serverStatus.status !== 'running' || serverStatus.port === 0) {
-        showToast('OpenCode server not running');
-        return;
+        try {
+          const started = await opencodeClient.startServer();
+          startedServer = !!started;
+        } catch (err) {
+          // startServer failed; notify user and abort
+          showToast('Failed to start OpenCode server');
+          return;
+        }
+        const refreshed = opencodeClient.getStatus();
+        if (refreshed.status !== 'running' || refreshed.port === 0) {
+          showToast('OpenCode server not running');
+          return;
+        }
       }
 
       ensureOpencodePane();
@@ -1596,7 +1623,8 @@ export class TuiController {
       updateOpencodePromptLabel('waiting');
       screen.render();
 
-      // Use HTTP API to communicate with server
+      // Use HTTP API to communicate with server. Ensure we stop a server
+      // we started after the prompt finishes to avoid orphaned processes.
       try {
         await opencodeClient.sendPrompt({
           prompt,
@@ -1605,11 +1633,13 @@ export class TuiController {
           inputField: opencodeText,
           getSelectedItemId: () => getSelectedItem()?.id ?? null,
           onComplete: () => {
-          // Clear flag when response completes and restore label
-          isWaitingForResponse = false;
-          stopPromptSpinner();
-          updateOpencodePromptLabel('idle');
-          openOpencodeDialog();
+            // Clear flag when response completes and restore label
+            isWaitingForResponse = false;
+            stopPromptSpinner();
+            updateOpencodePromptLabel('idle');
+            openOpencodeDialog();
+            // Best-effort stop of server we started for this prompt.
+            try { if (startedServer && typeof opencodeClient.stopServer === 'function') opencodeClient.stopServer(); } catch (_) {}
           },
         });
       } catch (err) {
@@ -1619,6 +1649,15 @@ export class TuiController {
         updateOpencodePromptLabel('idle');
         opencodePane.pushLine(`{red-fg}Server communication error: ${err}{/red-fg}`);
         screen.render();
+      } finally {
+        try {
+          if (startedServer && typeof opencodeClient.stopServer === 'function') {
+            // Best-effort stop of the server we started for this prompt.
+            opencodeClient.stopServer();
+          }
+        } catch (_) {
+          // ignore stop errors; we made a best-effort to clean up
+        }
       }
     }
 
@@ -3222,6 +3261,44 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
 
     startDatabaseWatch();
 
+    // Handle uppercase 'A' raw key events which some terminals report as
+    // ch='A' with key.name='a'. To ensure the audit shortcut (Shift+A)
+    // always triggers, centralize the logic here and call it from both
+    // the raw keypress handler and the registered screen.key binding.
+    async function handleRunAuditShortcut(_ch?: unknown, _key?: unknown) {
+      // Guard conditions mirror the KEY_RUN_AUDIT handler to keep
+      // behaviour consistent regardless of which path invoked it.
+      if (state.moveMode) return;
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+      if (isPromptBusy()) {
+        showToast('Please wait for current response to complete');
+        return;
+      }
+
+      const item = getSelectedItem();
+      if (!item?.id) {
+        showToast('No item selected');
+        return;
+      }
+
+      await openOpencodeDialog(`audit ${item.id}`);
+      try { showToast(`Running audit: ${item.id}`); } catch (_) {}
+      try {
+        if (opencodePane && typeof (opencodePane as any).pushLine === 'function') {
+          (opencodePane as any).pushLine(`{yellow-fg}Running audit for ${item.id}...{/}`);
+        } else if (opencodePane && typeof (opencodePane as any).setContent === 'function') {
+          const prev = typeof opencodePane.getContent === 'function' ? (opencodePane.getContent() || '') : '';
+          try { opencodePane.setContent(`${prev}\n{yellow-fg}Running audit for ${item.id}...{/}`); } catch (_) {}
+        }
+      } catch (_) {}
+      try { screen.render(); } catch (_) {}
+
+      try { if (typeof opencodeText.setValue === 'function') opencodeText.setValue(`audit ${item.id}`); } catch (_) {}
+      try { updateOpencodeInputLayout(); } catch (_) {}
+      closeOpencodeDialog();
+      await runOpencode(`audit ${item.id}`);
+    }
+
     function openHelp() {
       helpMenu.show();
       paneFocusIndex = getFocusPanes().indexOf(list);
@@ -3241,10 +3318,10 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
        else closeHelp();
      });
 
-      // Raw keypress handler feeds into chord handler. If the chord system
-      // consumes the event, stop further processing.
-      screen.on('keypress', (_ch: any, key: any) => {
-        debugLog(`Raw keypress: ch="${_ch}", key.name="${key?.name}", key.ctrl=${key?.ctrl}, key.meta=${key?.meta}`);
+    // Raw keypress handler feeds into chord handler. If the chord system
+    // consumes the event, stop further processing.
+    screen.on('keypress', (_ch: any, key: any) => {
+      debugLog(`Raw keypress: ch="${_ch}", key.name="${key?.name}", key.ctrl=${key?.ctrl}, key.meta=${key?.meta}`);
         try {
           if (chordHandler.feed(key as KeyInfo)) {
             debugLog(`ChordHandler consumed key event`);
@@ -3259,6 +3336,13 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         // Handle it directly here so the GitHub shortcut is reliable.
         if (_ch === 'G') {
           void handleGithubPushShortcut(_ch, key);
+          return false;
+        }
+
+        // Some terminals report uppercase 'A' as raw ch='A' while key.name is 'a'.
+        // Intercept and route to the audit handler so Shift+A triggers reliably.
+        if (_ch === 'A') {
+          void handleRunAuditShortcut(_ch, key);
           return false;
         }
 
@@ -3339,8 +3423,8 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
      screen.key(KEY_OPEN_OPENCODE, async () => {
        if (state.moveMode) return;
        if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden) {
-        await openOpencodeDialog();
-      }
+         await openOpencodeDialog();
+       }
     });
 
     const restoreListFocus = () => {
@@ -3870,11 +3954,23 @@ const visible = buildVisible();
          return;
        }
 
-       await openOpencodeDialog();
-       try { if (typeof opencodeText.setValue === 'function') opencodeText.setValue(`audit ${item.id}`); } catch (_) {}
-       try { updateOpencodeInputLayout(); } catch (_) {}
-       closeOpencodeDialog();
-       await runOpencode(`audit ${item.id}`);
+        await openOpencodeDialog();
+        // Immediate user feedback: toast and a short banner in the response pane
+        try { showToast(`Running audit: ${item.id}`); } catch (_) {}
+        try {
+          if (opencodePane && typeof (opencodePane as any).pushLine === 'function') {
+            (opencodePane as any).pushLine(`{yellow-fg}Running audit for ${item.id}...{/}`);
+          } else if (opencodePane && typeof (opencodePane as any).setContent === 'function') {
+            const prev = typeof opencodePane.getContent === 'function' ? (opencodePane.getContent() || '') : '';
+            try { opencodePane.setContent(`${prev}\n{yellow-fg}Running audit for ${item.id}...{/}`); } catch (_) {}
+          }
+        } catch (_) {}
+        try { screen.render(); } catch (_) {}
+
+        try { if (typeof opencodeText.setValue === 'function') opencodeText.setValue(`audit ${item.id}`); } catch (_) {}
+        try { updateOpencodeInputLayout(); } catch (_) {}
+        closeOpencodeDialog();
+        await runOpencode(`audit ${item.id}`);
      });
 
       screen.key(KEY_FILTER_BLOCKED, () => {

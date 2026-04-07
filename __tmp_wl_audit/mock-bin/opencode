@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+console.log(JSON.stringify({ type: "text", part: { type: "text", messageID: "m1", text: "Audit text from quick mock" } }));
+console.log(JSON.stringify({ type: "input.request", input: { type: "text" } }));
+setTimeout(()=>{}, 100000);

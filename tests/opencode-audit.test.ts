@@ -53,6 +53,10 @@ describe('opencode audit runner', () => {
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     expect(result.auditText).toBe('Audit line 1\nAudit line 2');
     expect(result.terminatedOnWait).toBe(true);
+    // Ensure the runner properly cleared timers and did not leave force-kill
+    // timer running (best-effort smoke check). We cannot directly inspect
+    // internal timers from here, but ensuring the child closed and kill was
+    // called is the critical behavior validated above.
   });
 
   it('fails on invalid JSON output lines', async () => {
