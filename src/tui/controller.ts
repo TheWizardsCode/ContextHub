@@ -147,8 +147,10 @@ export class TuiController {
     const perfEnabled = Boolean((options as any).perf);
 
 
+    // Debug logging helper. Emit when either verbose mode is enabled or
+    // performance instrumentation is explicitly requested via --perf.
     const debugLog = (message: string) => {
-      if (!isVerbose) return;
+      if (!isVerbose && !perfEnabled) return;
       console.error(`[tui:opencode] ${message}`);
     };
     const perfMetrics: {event: string; start: number; end: number; duration: number}[] = [];
@@ -3137,7 +3139,9 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         const endEarly = performance.now();
         const durEarly = endEarly - start;
         perfMetrics.push({event: 'expand_toggle_noop', start, end: endEarly, duration: durEarly});
-        debugLog(`Expand/collapse no-op took ${durEarly.toFixed(2)} ms`);
+        // Include the raw start/end timestamps so the debug output contains
+        // the recorded values (helps correlate with perfMetrics exports)
+        debugLog(`Expand/collapse no-op took ${durEarly.toFixed(2)} ms (start=${start.toFixed(3)}ms end=${endEarly.toFixed(3)}ms)`);
         return;
       }
       if (state.expanded.has(node.item.id)) state.expanded.delete(node.item.id);
@@ -3148,7 +3152,10 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       const end = performance.now();
       const duration = end - start;
       perfMetrics.push({event: 'expand_toggle', start, end, duration});
-      debugLog(`Expand/collapse took ${duration.toFixed(2)} ms`);
+      // Emit both duration and the raw performance timestamps to the debug
+      // output so the audit requirement (recorded timestamps present in the
+      // TUI debug output) is satisfied.
+      debugLog(`Expand/collapse took ${duration.toFixed(2)} ms (start=${start.toFixed(3)}ms end=${end.toFixed(3)}ms)`);
     });
 
     const shutdown = () => {
