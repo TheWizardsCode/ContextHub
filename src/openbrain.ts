@@ -1,0 +1,179 @@
+/**
+ * OpenBrain integration — asynchronous submission of completed work-item summaries.
+ *
+ * When a work item transitions to a completed/done state this module fires a
+ * background process (`ob add`) that saves a concise markdown summary to the
+ * OpenBrain knowledge-base.  The call is intentionally non-blocking: errors are
+ * logged to stderr but never surfaced to the user flow that marked the item
+ * complete.
+ *
+ * Fallback behaviour:
+ *   - If `ob` is not on PATH the error is logged and silently swallowed.
+ *   - If the submission fails for any reason a log entry is written to the
+ *     OpenBrain queue file (.worklog/openbrain-queue.jsonl) so the entry can
+ *     be retried later.
+ */
+
+import { spawn, type SpawnOptions } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
+import { resolveWorklogDir } from './worklog-paths.js';
+import type { WorkItem } from './types.js';
+
+export const OPENBRAIN_QUEUE_FILE = 'openbrain-queue.jsonl';
+
+export interface OpenBrainQueueEntry {
+  workItemId: string;
+  title: string;
+  summary: string;
+  enqueuedAt: string;
+  reason?: string;
+}
+
+/**
+ * Build a concise markdown summary for a completed work item.
+ */
+export function buildOpenBrainSummary(item: WorkItem): string {
+  const lines: string[] = [];
+  lines.push(`# ${item.title}`);
+  lines.push('');
+  lines.push(`**Work item:** ${item.id}`);
+  if (item.issueType) lines.push(`**Type:** ${item.issueType}`);
+  if (item.assignee) lines.push(`**Assignee:** ${item.assignee}`);
+  lines.push(`**Completed at:** ${item.updatedAt}`);
+  lines.push('');
+
+  if (item.description && item.description.trim() !== '') {
+    lines.push('## Objective');
+    lines.push('');
+    lines.push(item.description.trim());
+    lines.push('');
+  }
+
+  if (item.audit?.text && item.audit.text.trim() !== '') {
+    lines.push('## What was done');
+    lines.push('');
+    lines.push(item.audit.text.trim());
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Append a failed submission to the local retry queue.
+ */
+export function appendToQueue(entry: OpenBrainQueueEntry, queueDir?: string): void {
+  try {
+    const dir = queueDir ?? resolveWorklogDir();
+    const queuePath = path.join(dir, OPENBRAIN_QUEUE_FILE);
+    const line = JSON.stringify(entry) + '\n';
+    fs.appendFileSync(queuePath, line, 'utf-8');
+  } catch {
+    // Best-effort — if we cannot write the queue, silently ignore.
+  }
+}
+
+export interface SubmitToOpenBrainOptions {
+  /** Override the `ob` binary path (useful in tests). */
+  obBin?: string;
+  /** Override spawn implementation (useful in tests). */
+  spawnImpl?: (cmd: string, args: string[], opts: SpawnOptions) => ReturnType<typeof spawn>;
+  /** Override the queue directory (useful in tests). */
+  queueDir?: string;
+  /** When true, await completion before returning (useful in tests). */
+  waitForCompletion?: boolean;
+}
+
+/**
+ * Submit a completed work item summary to OpenBrain asynchronously.
+ *
+ * Returns a Promise that resolves once the background process has been spawned
+ * (not waited on) unless `waitForCompletion` is set to true.  Errors are
+ * logged to stderr and, if the submission fails, the entry is written to the
+ * local retry queue.
+ */
+export async function submitToOpenBrain(
+  item: WorkItem,
+  options: SubmitToOpenBrainOptions = {}
+): Promise<void> {
+  const obBin = options.obBin ?? resolveObBinary();
+  const spawnImpl = options.spawnImpl ?? spawn;
+  const summary = buildOpenBrainSummary(item);
+
+  const run = (): Promise<void> =>
+    new Promise<void>((resolve) => {
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = spawnImpl(obBin, ['add', '--stdin', '--title', item.title], {
+          stdio: ['pipe', 'ignore', 'pipe'],
+          detached: !options.waitForCompletion,
+        });
+      } catch (spawnErr) {
+        const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
+        console.error(`[openbrain] Failed to spawn ob: ${msg}`);
+        appendToQueue(
+          { workItemId: item.id, title: item.title, summary, enqueuedAt: new Date().toISOString(), reason: msg },
+          options.queueDir
+        );
+        resolve();
+        return;
+      }
+
+      // Write the markdown summary to the child's stdin.
+      try {
+        child.stdin?.write(summary, 'utf-8');
+        child.stdin?.end();
+      } catch {
+        // Ignore write errors — we'll capture them on close.
+      }
+
+      const stderrLines: string[] = [];
+      child.stderr?.on('data', (chunk: Buffer | string) => {
+        stderrLines.push(chunk.toString());
+      });
+
+      child.once('error', (err) => {
+        const msg = err.message;
+        console.error(`[openbrain] ob add error: ${msg}`);
+        appendToQueue(
+          { workItemId: item.id, title: item.title, summary, enqueuedAt: new Date().toISOString(), reason: msg },
+          options.queueDir
+        );
+        resolve();
+      });
+
+      child.once('close', (code) => {
+        if (code !== 0) {
+          const stderr = stderrLines.join('').trim();
+          const reason = stderr || `ob add exited with code ${code}`;
+          console.error(`[openbrain] ob add failed (exit ${code}): ${reason}`);
+          appendToQueue(
+            { workItemId: item.id, title: item.title, summary, enqueuedAt: new Date().toISOString(), reason },
+            options.queueDir
+          );
+        }
+        resolve();
+      });
+
+      // For non-waiting mode, detach from the event loop immediately after
+      // attaching handlers so the parent process can exit without waiting.
+      if (!options.waitForCompletion) {
+        try { child.unref(); } catch { /* ignore */ }
+        resolve();
+      }
+    });
+
+  return run();
+}
+
+/**
+ * Resolve the `ob` binary path, respecting the WL_OB_BIN environment variable.
+ */
+export function resolveObBinary(explicit?: string): string {
+  if (explicit && explicit.trim() !== '') return explicit.trim();
+  if (process.env.WL_OB_BIN && process.env.WL_OB_BIN.trim() !== '') {
+    return process.env.WL_OB_BIN.trim();
+  }
+  return 'ob';
+}
