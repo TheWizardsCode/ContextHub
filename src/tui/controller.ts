@@ -3006,7 +3006,8 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         const nav = key && key.name && ['up', 'down', 'k', 'j', 'pageup', 'pagedown', 'home', 'end'].includes(key.name);
         if (!nav) return;
         if (vl) {
-          const viewportIdx = getGlobalSelectedIndex();
+          // In virtual mode, list.selected is relative to the viewport slice.
+          const viewportIdx = typeof list.selected === 'number' ? (list.selected as number) : 0;
           const totalVisible = vl.totalItems;
           if (totalVisible === 0) return;
 
