@@ -2216,11 +2216,13 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       if (typeof fallbackIndex === 'number') {
         refreshFallbackIndex = fallbackIndex;
       }
-      if (refreshTimer) clearTimeout(refreshTimer);
-        refreshTimer = setTimeout(() => {
-          refreshTimer = null;
-          const fallback = refreshFallbackIndex ?? undefined;
-          refreshFallbackIndex = null;
+       if (refreshTimer) clearTimeout(refreshTimer);
+        // Instrument the scheduled refresh so we can log when the debounce
+        // timer fires and how long the refresh took.
+         refreshTimer = setTimeout(() => {
+           refreshTimer = null;
+           const fallback = refreshFallbackIndex ?? undefined;
+           refreshFallbackIndex = null;
 
           // If a search/filter is active, re-run the same filter command
           // instead of doing a plain refresh so the filtered view is
@@ -2230,14 +2232,21 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
             if (needsReviewFilter !== null) args.push('--needs-producer-review', String(needsReviewFilter));
             if (options.prefix) args.push('--prefix', options.prefix);
             try {
-              const child = spawnImpl('wl', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+               // Preserve the currently-selected item id and index so
+               // watcher-triggered filter refreshes can restore the user's
+               // selection when possible. Capture them before we replace
+               // state.items below.
+               const beforeRefreshSelectedId = getSelectedItem()?.id;
+               const beforeRefreshSelectedIndex = typeof (list as any).selected === 'number' ? (list as any).selected as number : undefined;
+
+               const child = spawnImpl('wl', args, { stdio: ['ignore', 'pipe', 'pipe'] });
               let stdout = '';
               let stderr = '';
               child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
               child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
-              child.on('close', (code: number) => {
-                if (code !== 0) {
-                  try { debugLog(`Filter refresh failed: ${stderr.trim() || `exit ${code}`}`); } catch (_) {}
+                child.on('close', (code: number) => {
+                  if (code !== 0) {
+                    try { debugLog(`Filter refresh failed: ${stderr.trim() || `exit ${code}`}`); } catch (_) {}
                   // Fall back to a normal refresh but do NOT clear the active
                   // filter state (resetSearch: false) so the UI label remains
                   // consistent and the user can retry the search.
@@ -2260,16 +2269,58 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
                   else if (Array.isArray(payload.workItems)) results = payload.workItems;
                   else if (payload.workItem) results = [payload.workItem];
 
-                  state.items = results.length === 0
+                  const newItems = results.length === 0
                     ? []
                     : results.map((r: any) => r.workItem ? r.workItem : r);
-                  // Preserve the user's current `showClosed` preference when
-                  // refreshing an active search/filter. Previously this reset
-                  // the flag to false which caused a transient flicker when the
-                  // user toggled the Closed view while a filter was active.
+
+                  // Replace items and rebuild before deciding selection so
+                  // visible nodes reflect the refreshed payload.
+                  state.items = newItems;
                   rebuildTree();
                   expandInProgressAncestors();
-                  renderListAndDetail(typeof fallback === 'number' ? fallback : 0);
+
+                  // Defer the final selection decision until any pending
+                  // user-driven selection handlers have a chance to run.
+                  // This avoids a race where a pending key/mouse handler
+                  // executes after the refresh and overwrites the user's
+                  // intention. Using setImmediate here gives I/O and other
+                  // event callbacks (like key/mouse) a chance to update
+                  // the selection state first.
+                  const applySelection = () => {
+                    const visibleAfter = buildVisible();
+                    let nextIndex = 0;
+                    const selectedAtCloseId = getSelectedItem()?.id;
+
+                    // Prefer the selection the user currently has (if any)
+                    if (selectedAtCloseId) {
+                      const foundClose = visibleAfter.findIndex(n => n.item.id === selectedAtCloseId);
+                      if (foundClose >= 0) {
+                        nextIndex = foundClose;
+                      } else if (beforeRefreshSelectedId) {
+                        const foundSpawn = visibleAfter.findIndex(n => n.item.id === beforeRefreshSelectedId);
+                        if (foundSpawn >= 0) nextIndex = foundSpawn;
+                        else if (typeof fallback === 'number') nextIndex = Math.max(0, Math.min(fallback, visibleAfter.length - 1));
+                      } else if (typeof fallback === 'number') {
+                        nextIndex = Math.max(0, Math.min(fallback, visibleAfter.length - 1));
+                      }
+                    } else if (beforeRefreshSelectedId) {
+                      const foundSpawn = visibleAfter.findIndex(n => n.item.id === beforeRefreshSelectedId);
+                      if (foundSpawn >= 0) nextIndex = foundSpawn;
+                      else if (typeof fallback === 'number') nextIndex = Math.max(0, Math.min(fallback, visibleAfter.length - 1));
+                    } else if (typeof fallback === 'number') {
+                      nextIndex = Math.max(0, Math.min(fallback, visibleAfter.length - 1));
+                    }
+
+                    renderListAndDetail(nextIndex);
+                  };
+
+                  try {
+                    if (typeof setImmediate === 'function') setImmediate(applySelection);
+                    else applySelection();
+                  } catch (err) {
+                    // fallback to immediate application
+                    applySelection();
+                  }
                 } catch (err) {
                   try { debugLog(`Filter refresh parse error: ${String(err)}`); } catch (_) {}
                 }
@@ -2289,7 +2340,12 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
             return;
           }
 
-          refreshFromDatabase(undefined, fallback);
+           const refreshStart = Date.now();
+           try {
+             refreshFromDatabase(undefined, fallback);
+           } finally {
+             try { debugLog && debugLog(`scheduleRefreshFromDatabase: refresh completed in ${Date.now() - refreshStart}ms`); } catch (_) {}
+           }
         }, REFRESH_DEBOUNCE_MS);
     };
 
@@ -3317,29 +3373,41 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
 
         const trimmed = (term || '').trim();
         if (!trimmed) {
-          // Clear filter — restore original items
-          activeFilterTerm = '';
-          if (preFilterItems) {
-            state.items = preFilterItems.slice();
-            preFilterItems = null;
-            rebuildTree();
-            expandInProgressAncestors();
-            renderListAndDetail(0);
-          } else {
-            refreshListWithOptions({
-              status: options.inProgress ? 'in-progress' : undefined,
-              includeClosed: options.all,
-              resetSearch: false,
-              preferredIndex: 0,
-              allowFallback: false,
-            });
-          }
-          restoreListFocus();
-          return;
+// Clear filter — restore original items
+            activeFilterTerm = '';
+            // Preserve current selection if possible
+            const beforeClearItem = getSelectedItem();
+            if (preFilterItems) {
+              state.items = preFilterItems.slice();
+              preFilterItems = null;
+              rebuildTree();
+              expandInProgressAncestors();
+              // Compute index to retain selection after resetting filter
+              let newIdx = 0;
+              if (beforeClearItem) {
+                const visibleAfter = buildVisible();
+                const found = visibleAfter.findIndex(n => n.item.id === beforeClearItem.id);
+                if (found >= 0) newIdx = found;
+              }
+              renderListAndDetail(newIdx);
+            } else {
+              // Use refreshListWithOptions which preserves selection based on current item ID
+              refreshListWithOptions({
+                status: options.inProgress ? 'in-progress' : undefined,
+                includeClosed: options.all,
+                resetSearch: false,
+                // allowFallback true lets the function fallback to current selection if ID not found
+                allowFallback: true,
+              });
+            }
+            restoreListFocus();
+            return;
         }
 
         // Apply filter by running `wl list <term> --json`
         activeFilterTerm = trimmed;
+        // Preserve currently selected item before applying filter
+        const beforeFilterItem = getSelectedItem();
         if (!preFilterItems) preFilterItems = state.items.slice();
 
         const args = ['list', trimmed, '--json'];
@@ -3374,7 +3442,14 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
             state.showClosed = false;
             rebuildTree();
             expandInProgressAncestors();
-            renderListAndDetail(0);
+            // Preserve selection if the previously selected item still exists after filtering
+            let newIdx = 0;
+            if (beforeFilterItem) {
+              const visibleAfter = buildVisible();
+              const found = visibleAfter.findIndex(n => n.item.id === beforeFilterItem.id);
+              if (found >= 0) newIdx = found;
+            }
+            renderListAndDetail(newIdx);
           } catch (err) {
             showToast('Filter parse error');
           }
