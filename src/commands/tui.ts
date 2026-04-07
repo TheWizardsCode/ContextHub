@@ -33,8 +33,16 @@ export default function register(ctx: PluginContext): void {
     .option('--all', 'Include completed/deleted items in the list')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--perf', 'Enable performance instrumentation (write perf metrics and show perf debug output)')
-    .action(async (options: { inProgress?: boolean; prefix?: string; all?: boolean }) => {
+    .action(async (options: TuiOptions) => {
       // Forward the perf flag to the controller so instrumentation can be enabled
-      await controller.start(options as any);
+      await controller.start(options);
     });
+}
+
+// Explicit options type for the CLI action so `--perf` is typed
+interface TuiOptions {
+  inProgress?: boolean;
+  prefix?: string;
+  all?: boolean;
+  perf?: boolean;
 }

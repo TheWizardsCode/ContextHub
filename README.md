@@ -63,6 +63,7 @@ wl github import
 ```bash
 wl tui                # Interactive tree view of all items
 wl tui --in-progress  # Show only in-progress items
+wl tui --perf          # Enable performance instrumentation: show timestamps in debug output and persist metrics to worklogDir/tui-performance.json
 ```
 
 Press `O` in the TUI to access the built-in OpenCode AI assistant. See [TUI.md](TUI.md) for controls.
