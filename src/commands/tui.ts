@@ -33,6 +33,7 @@ export default function register(ctx: PluginContext): void {
     .option('--all', 'Include completed/deleted items in the list')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--perf', 'Enable performance instrumentation (write perf metrics and show perf debug output)')
+    .option('--virtualize', 'Use virtual-scroll rendering (only materializes visible rows; improves performance for large lists)')
     .action(async (options: TuiOptions) => {
       // Forward the perf flag to the controller so instrumentation can be enabled
       await controller.start(options);
@@ -45,4 +46,5 @@ interface TuiOptions {
   prefix?: string;
   all?: boolean;
   perf?: boolean;
+  virtualize?: boolean;
 }

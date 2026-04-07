@@ -127,7 +127,7 @@ export class TuiController {
     private readonly deps: TuiControllerDeps = {}
   ) {}
 
-  async start(options: { inProgress?: boolean; prefix?: string; all?: boolean; perf?: boolean }): Promise<void> {
+  async start(options: { inProgress?: boolean; prefix?: string; all?: boolean; perf?: boolean; virtualize?: boolean }): Promise<void> {
     const { program, utils } = this.ctx;
     // Allow tests to inject a mocked blessed implementation via the ctx object.
     // If not provided, fall back to the real blessed import.
@@ -145,6 +145,7 @@ export class TuiController {
     const db = utils.getDatabase(options.prefix);
     const isVerbose = !!program.opts().verbose;
     const perfEnabled = Boolean((options as any).perf);
+    const virtualizeEnabled = Boolean((options as any).virtualize);
 
 
     // Debug logging helper. Emit when either verbose mode is enabled or
@@ -181,12 +182,13 @@ export class TuiController {
       blessed: blessedImpl,
       screenOptions: { terminal: TUI_FALLBACK_TERMINAL },
       disableColorCapabilityOverride: true,
+      virtualize: virtualizeEnabled,
     };
     const currentTerm = process.env.TERM || 'unknown';
     const useSafeTerminalFallback = shouldUseSafeTerminalFallback();
     const initialLayoutOptions = useSafeTerminalFallback
       ? fallbackLayoutOptions
-      : { blessed: blessedImpl };
+      : { blessed: blessedImpl, virtualize: virtualizeEnabled };
 
     if (useSafeTerminalFallback) {
       console.error(`[wl tui] TERM=${currentTerm} can trigger tmux terminfo parse issues; using fallback terminal ${TUI_FALLBACK_TERMINAL}.`);
@@ -222,6 +224,18 @@ export class TuiController {
       opencodeUi,
     } = layout;
     const list = listComponent.getList();
+    /** Virtual-scroll viewport manager — present only when --virtualize is set. */
+    const vl = layout.virtualList;
+
+    /**
+     * Returns the globally-correct selected index into the visible-nodes array.
+     * When virtual scrolling is active the blessed list only holds a viewport
+     * slice, so `list.selected` is relative to that slice; we add the offset.
+     */
+    const getGlobalSelectedIndex = (): number => {
+      const viewportIdx = typeof list.selected === 'number' ? (list.selected as number) : 0;
+      return vl ? vl.offset + viewportIdx : viewportIdx;
+    };
     // Register quit key early so Ctrl-C works even when we take the
     // early-return path for the empty-state UI. Prefer the full
     // shutdown() helper when it's available; otherwise perform a
@@ -1811,11 +1825,25 @@ export class TuiController {
         return line;
       });
       state.listLines = lines;
-      list.setItems(lines);
-      // Keep selection in bounds
-      const idx = Math.max(0, Math.min(selectIndex, lines.length - 1));
-      list.select(idx);
-      updateDetailForIndex(idx, visible);
+      // ── Virtual-scroll rendering ──────────────────────────────────────
+      if (vl) {
+        // Update viewport height from the current list widget dimensions,
+        // subtracting 2 for the border rows.  Fall back to stored height.
+        const listH = typeof list.height === 'number' ? list.height as number : 0;
+        if (listH > 2) vl.setViewportHeight(listH - 2);
+        vl.setTotalItems(lines.length);
+        vl.selectAbsolute(Math.max(0, Math.min(lines.length - 1, selectIndex)));
+        const viewportLines = vl.slice(lines);
+        list.setItems(viewportLines);
+        list.select(vl.selectedIndexInViewport);
+        updateDetailForIndex(vl.selectedIndex, visible);
+      } else {
+        list.setItems(lines);
+        // Keep selection in bounds
+        const idx = Math.max(0, Math.min(selectIndex, lines.length - 1));
+        list.select(idx);
+        updateDetailForIndex(idx, visible);
+      }
       // Update footer/help
       try {
         if (state.moveMode) {
@@ -2279,7 +2307,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
                // selection when possible. Capture them before we replace
                // state.items below.
                const beforeRefreshSelectedId = getSelectedItem()?.id;
-               const beforeRefreshSelectedIndex = typeof (list as any).selected === 'number' ? (list as any).selected as number : undefined;
+               const beforeRefreshSelectedIndex = getGlobalSelectedIndex();
 
                const child = spawnImpl('wl', args, { stdio: ['ignore', 'pipe', 'pipe'] });
               let stdout = '';
@@ -2417,7 +2445,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           if (watchDebounce) clearTimeout(watchDebounce);
           watchDebounce = setTimeout(() => {
             watchDebounce = null;
-            const selectedIndex = typeof list.selected === 'number' ? (list.selected as number) : 0;
+            const selectedIndex = getGlobalSelectedIndex();
             // If the watcher provided a specific filename (eg. 'worklog.db' or
             // 'worklog.db-wal') then refresh unconditionally — the event
             // directly refers to the database file. When filename is undefined
@@ -2502,7 +2530,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     }
 
     function getSelectedItem(): Item | null {
-      const idx = list.selected as number;
+      const idx = getGlobalSelectedIndex();
       const visible = buildVisible();
       const node = visible[idx] || visible[0];
       return node?.item || null;
@@ -2573,7 +2601,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       expandInProgressAncestors();
       const visible = buildVisible();
       const movedIndex = visible.findIndex(node => node.item.id === selected.id);
-      renderListAndDetail(movedIndex >= 0 ? movedIndex : (list.selected as number));
+      renderListAndDetail(movedIndex >= 0 ? movedIndex : (getGlobalSelectedIndex()));
     }
 
     async function copySelectedId() {
@@ -2598,7 +2626,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         showToast('No item selected');
         return;
       }
-      const currentIndex = list.selected as number;
+      const currentIndex = getGlobalSelectedIndex();
       const nextIndex = Math.max(0, currentIndex - 1);
 
       if (stage === 'deleted') {
@@ -2943,7 +2971,11 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     const updateListSelection = (idx: number, source?: string) => {
       const scrollStart = perfEnabled ? performance.now() : null;
       const visible = buildVisible();
-      updateDetailForIndex(idx, visible);
+      // In virtual-scroll mode the caller may pass a viewport-relative index.
+      // Convert to the global (full-list) index before updating the detail pane.
+      const globalIdx = vl ? vl.offset + idx : idx;
+      if (vl) vl.selectAbsolute(globalIdx);
+      updateDetailForIndex(globalIdx, visible);
       screen.render();
       if (perfEnabled && scrollStart !== null) {
         const scrollEnd = performance.now();
@@ -2966,12 +2998,64 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     };
     try { (list as any).__opencode_select_item = listSelectItemHandler; list.on('select item', listSelectItemHandler); } catch (_) {}
 
-    // Update details immediately when navigating with keys or mouse
+    // Update details immediately when navigating with keys or mouse.
+    // When virtual scrolling is active we also detect viewport-edge navigation
+    // and scroll the viewport window to follow the cursor.
     const listKeypressHandler = (_ch: any, key: any) => {
       try {
         const nav = key && key.name && ['up', 'down', 'k', 'j', 'pageup', 'pagedown', 'home', 'end'].includes(key.name);
-        if (nav) {
-          const idx = list.selected as number;
+        if (!nav) return;
+        if (vl) {
+          const viewportIdx = getGlobalSelectedIndex();
+          const totalVisible = vl.totalItems;
+          if (totalVisible === 0) return;
+
+          const maxViewportIdx = Math.min(vl.viewportHeight, totalVisible - vl.offset) - 1;
+          const isUp = key.name === 'up' || key.name === 'k';
+          const isDown = key.name === 'down' || key.name === 'j';
+          const isPageUp = key.name === 'pageup';
+          const isPageDown = key.name === 'pagedown';
+          const isHome = key.name === 'home';
+          const isEnd = key.name === 'end';
+
+          if (isHome) {
+            renderListAndDetail(0);
+            return;
+          }
+          if (isEnd) {
+            renderListAndDetail(totalVisible - 1);
+            return;
+          }
+          if (isPageUp) {
+            renderListAndDetail(Math.max(0, vl.selectedIndex - vl.viewportHeight));
+            return;
+          }
+          if (isPageDown) {
+            renderListAndDetail(Math.min(totalVisible - 1, vl.selectedIndex + vl.viewportHeight));
+            return;
+          }
+
+          // At the top edge of the viewport, pressing up should scroll the window.
+          if (isUp && viewportIdx === 0) {
+            if (vl.offset > 0) {
+              vl.scrollBy(-1);
+              renderListAndDetail(vl.selectedIndex);
+            }
+            return;
+          }
+          // At the bottom edge of the viewport, pressing down should scroll the window.
+          if (isDown && viewportIdx >= maxViewportIdx) {
+            if (vl.offset + vl.viewportHeight < totalVisible) {
+              vl.scrollBy(1);
+              renderListAndDetail(vl.selectedIndex);
+            }
+            return;
+          }
+
+          // Normal movement within viewport: update selection and detail.
+          updateListSelection(viewportIdx, 'keypress');
+        } else {
+          const idx = getGlobalSelectedIndex();
           updateListSelection(idx, 'keypress');
         }
       } catch (err) {
@@ -3067,12 +3151,12 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           if (!sourceItem?.parentId) {
             showToast(`${sourceItem?.title || sourceId} is already at root level`);
             exitMoveMode(state);
-            renderListAndDetail(list.selected as number);
+            renderListAndDetail(getGlobalSelectedIndex());
             return;
           }
           try {
             const updated = db.update(sourceId, { parentId: null });
-            if (!updated) { showToast('Move failed'); exitMoveMode(state); renderListAndDetail(list.selected as number); return; }
+            if (!updated) { showToast('Move failed'); exitMoveMode(state); renderListAndDetail(getGlobalSelectedIndex()); return; }
             invalidateDetailCache(sourceId);
             showToast(`Moved ${sourceItem?.title || sourceId} to root level`);
           } catch (err) { showToast('Move failed'); }
@@ -3086,7 +3170,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         // Reparent under target
         try {
           const updated = db.update(sourceId, { parentId: targetId });
-          if (!updated) { showToast('Move failed'); exitMoveMode(state); renderListAndDetail(list.selected as number); return; }
+          if (!updated) { showToast('Move failed'); exitMoveMode(state); renderListAndDetail(getGlobalSelectedIndex()); return; }
           invalidateDetailCache(sourceId);
           const sourceItem = state.itemsById.get(sourceId);
           const targetItem = state.itemsById.get(targetId);
@@ -3100,7 +3184,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         if (mIdx >= 0) renderListAndDetail(mIdx);
         return;
       }
-      const idx = list.selected as number;
+      const idx = getGlobalSelectedIndex();
       const visible = buildVisible();
       const node = visible[idx];
       if (node && node.hasChildren) {
@@ -3111,7 +3195,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
 
     screen.key(KEY_NAV_LEFT, () => {
       if (!updateDialog.hidden) return;
-      const idx = list.selected as number;
+      const idx = getGlobalSelectedIndex();
       const visible = buildVisible();
       const node = visible[idx];
       if (!node) return;
@@ -3140,7 +3224,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // Toggle expand/collapse with space
     screen.key(KEY_TOGGLE_EXPAND, () => {
       const start = performance.now();
-      const idx = list.selected as number;
+      const idx = getGlobalSelectedIndex();
       const visible = buildVisible();
       const node = visible[idx];
       if (!node || !node.hasChildren) {
@@ -3262,7 +3346,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       if (state.moveMode) {
         exitMoveMode(state);
         showToast('Move cancelled');
-        renderListAndDetail(list.selected as number);
+        renderListAndDetail(getGlobalSelectedIndex());
         return;
       }
       // Do not shut down the entire TUI on a bare Escape press when no
@@ -3616,7 +3700,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         invalidateDetailCache(item.id);
         showToast(has ? 'Do-not-delegate: OFF' : 'Do-not-delegate: ON');
         // Refresh list and detail keeping selection
-        refreshFromDatabase(list.selected as number);
+        refreshFromDatabase(getGlobalSelectedIndex());
       } catch (err) {
         showToast('Update failed');
       }
@@ -3694,7 +3778,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
 
         if (result.success) {
           // Refresh the list to show updated status/assignee
-          refreshFromDatabase(list.selected as number);
+          refreshFromDatabase(getGlobalSelectedIndex());
           const url = result.issueUrl || `Issue #${result.issueNumber || '?'}`;
           showToast(`Delegated: ${url}`);
 
@@ -3815,7 +3899,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         }
         invalidateDetailCache(item.id);
         showToast(nextValue ? 'Needs review: ON' : 'Needs review: OFF');
-        refreshFromDatabase(list.selected as number);
+        refreshFromDatabase(getGlobalSelectedIndex());
       } catch (err) {
         showToast('Update failed');
       }
@@ -3837,7 +3921,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         // Enter move mode: store the source item
         enterMoveMode(state, item.id);
         showToast('Move mode: select target, press m/Enter; Esc to cancel');
-        renderListAndDetail(list.selected as number);
+        renderListAndDetail(getGlobalSelectedIndex());
         return;
       }
 
@@ -3856,7 +3940,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         if (!sourceItem?.parentId) {
           showToast(`${sourceItem?.title || sourceId} is already at root level`);
           exitMoveMode(state);
-          renderListAndDetail(list.selected as number);
+          renderListAndDetail(getGlobalSelectedIndex());
           return;
         }
         try {
@@ -3864,7 +3948,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           if (!updated) {
             showToast('Move failed');
             exitMoveMode(state);
-            renderListAndDetail(list.selected as number);
+            renderListAndDetail(getGlobalSelectedIndex());
             return;
           }
           invalidateDetailCache(sourceId);
@@ -3891,7 +3975,7 @@ const visible = buildVisible();
         if (!updated) {
           showToast('Move failed');
           exitMoveMode(state);
-          renderListAndDetail(list.selected as number);
+          renderListAndDetail(getGlobalSelectedIndex());
           return;
         }
         invalidateDetailCache(sourceId);
@@ -4024,7 +4108,7 @@ const visible = buildVisible();
             state.showClosed = !state.showClosed;
             rebuildTree();
             expandInProgressAncestors();
-            renderListAndDetail(list.selected as number);
+            renderListAndDetail(getGlobalSelectedIndex());
             return;
           }
       } catch (err) {
@@ -4155,7 +4239,7 @@ const visible = buildVisible();
         }
         invalidateDetailCache(item.id);
         showToast('Updated');
-        refreshFromDatabase(Math.max(0, (list.selected as number) - 0));
+        refreshFromDatabase(Math.max(0, (getGlobalSelectedIndex()) - 0));
       } catch (err) {
         const message = err instanceof Error
           ? err.message
@@ -4298,12 +4382,24 @@ const visible = buildVisible();
         if (coords && coords.row >= 0) {
           const scroll = (list as any).childBase ?? 0;
           const lineIndex = coords.row + scroll;
-          if (lineIndex >= 0 && lineIndex < state.listLines.length) {
-            if (typeof list.select === 'function') list.select(lineIndex);
-            updateListSelection(lineIndex, 'screen-mouse');
-            list.focus();
-            paneFocusIndex = getFocusPanes().indexOf(list);
-            applyFocusStylesForPane(list);
+          if (vl) {
+            // In virtual mode, lineIndex is relative to the viewport slice.
+            // Convert to a global index before using it.
+            const globalLineIndex = vl.offset + lineIndex;
+            if (globalLineIndex >= 0 && globalLineIndex < state.listLines.length) {
+              renderListAndDetail(globalLineIndex);
+              list.focus();
+              paneFocusIndex = getFocusPanes().indexOf(list);
+              applyFocusStylesForPane(list);
+            }
+          } else {
+            if (lineIndex >= 0 && lineIndex < state.listLines.length) {
+              if (typeof list.select === 'function') list.select(lineIndex);
+              updateListSelection(lineIndex, 'screen-mouse');
+              list.focus();
+              paneFocusIndex = getFocusPanes().indexOf(list);
+              applyFocusStylesForPane(list);
+            }
           }
         }
       }
