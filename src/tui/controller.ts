@@ -1591,11 +1591,25 @@ export class TuiController {
         return;
       }
 
-      // Check server is running
+      // Check server is running. If not, attempt to start it and ensure we
+      // stop it after the prompt completes to avoid leaving orphaned
+      // opencode server processes. We only stop the server if we started it.
       const serverStatus = opencodeClient.getStatus();
+      let startedServer = false;
       if (serverStatus.status !== 'running' || serverStatus.port === 0) {
-        showToast('OpenCode server not running');
-        return;
+        try {
+          const started = await opencodeClient.startServer();
+          startedServer = !!started;
+        } catch (err) {
+          // startServer failed; notify user and abort
+          showToast('Failed to start OpenCode server');
+          return;
+        }
+        const refreshed = opencodeClient.getStatus();
+        if (refreshed.status !== 'running' || refreshed.port === 0) {
+          showToast('OpenCode server not running');
+          return;
+        }
       }
 
       ensureOpencodePane();
@@ -1609,7 +1623,8 @@ export class TuiController {
       updateOpencodePromptLabel('waiting');
       screen.render();
 
-      // Use HTTP API to communicate with server
+      // Use HTTP API to communicate with server. Ensure we stop a server
+      // we started after the prompt finishes to avoid orphaned processes.
       try {
         await opencodeClient.sendPrompt({
           prompt,
@@ -1618,11 +1633,13 @@ export class TuiController {
           inputField: opencodeText,
           getSelectedItemId: () => getSelectedItem()?.id ?? null,
           onComplete: () => {
-          // Clear flag when response completes and restore label
-          isWaitingForResponse = false;
-          stopPromptSpinner();
-          updateOpencodePromptLabel('idle');
-          openOpencodeDialog();
+            // Clear flag when response completes and restore label
+            isWaitingForResponse = false;
+            stopPromptSpinner();
+            updateOpencodePromptLabel('idle');
+            openOpencodeDialog();
+            // Best-effort stop of server we started for this prompt.
+            try { if (startedServer && typeof opencodeClient.stopServer === 'function') opencodeClient.stopServer(); } catch (_) {}
           },
         });
       } catch (err) {
@@ -1632,6 +1649,15 @@ export class TuiController {
         updateOpencodePromptLabel('idle');
         opencodePane.pushLine(`{red-fg}Server communication error: ${err}{/red-fg}`);
         screen.render();
+      } finally {
+        try {
+          if (startedServer && typeof opencodeClient.stopServer === 'function') {
+            // Best-effort stop of the server we started for this prompt.
+            opencodeClient.stopServer();
+          }
+        } catch (_) {
+          // ignore stop errors; we made a best-effort to clean up
+        }
       }
     }
 
