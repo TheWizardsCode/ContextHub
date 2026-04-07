@@ -307,9 +307,8 @@ export function createTuiTestContext() {
       normalizeCliId: (id: string, _prefix?: string) => id,
       getConfig: () => ({}),
       isJsonMode: () => false,
-      db: {
-        get: (id: string) => items.get(id),
-      }
+      // Expose the small in-memory db implementation (get + update)
+      db: utils.db,
     }),
     toast,
     blessed: blessedImpl,
