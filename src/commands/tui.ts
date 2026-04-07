@@ -32,7 +32,9 @@ export default function register(ctx: PluginContext): void {
     .option('--in-progress', 'Show only in-progress items')
     .option('--all', 'Include completed/deleted items in the list')
     .option('--prefix <prefix>', 'Override the default prefix')
+    .option('--perf', 'Enable performance instrumentation (write perf metrics and show perf debug output)')
     .action(async (options: { inProgress?: boolean; prefix?: string; all?: boolean }) => {
-      await controller.start(options);
+      // Forward the perf flag to the controller so instrumentation can be enabled
+      await controller.start(options as any);
     });
 }
