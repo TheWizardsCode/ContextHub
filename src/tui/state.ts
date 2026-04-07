@@ -13,6 +13,8 @@ export type TuiState = {
   expanded: Set<string>;
   listLines: string[];
   moveMode: MoveMode | null;
+  /** Cached result of buildVisibleNodes. Null when the cache is stale. */
+  cachedVisibleNodes: VisibleNode[] | null;
 };
 
 export type VisibleNode = { item: Item; depth: number; hasChildren: boolean };
@@ -68,6 +70,10 @@ export const rebuildTreeState = (state: TuiState): void => {
   for (const id of Array.from(state.expanded)) {
     if (!state.itemsById.has(id)) state.expanded.delete(id);
   }
+
+  // Invalidate the visible-node cache so the next buildVisibleNodes call
+  // performs a full traversal and repopulates it.
+  state.cachedVisibleNodes = null;
   // Lightweight timing to help diagnose expensive tree rebuilds in the TUI
   try {
     const dur = Date.now() - t0;
@@ -87,6 +93,7 @@ export const createTuiState = (items: Item[], showClosed: boolean, persistedExpa
     expanded: new Set<string>(),
     listLines: [],
     moveMode: null,
+    cachedVisibleNodes: null,
   };
 
   if (persistedExpanded && Array.isArray(persistedExpanded)) {
@@ -111,7 +118,86 @@ export const buildVisibleNodes = (state: TuiState): VisibleNode[] => {
 
   for (const r of state.roots) visit(r, 0);
   try { (state as any).__lastBuildVisibleMs = Date.now() - t0; } catch (_) {}
+  state.cachedVisibleNodes = out;
   return out;
+};
+
+/**
+ * Build the visible VisibleNode sub-list for the children of a given item,
+ * traversing only nodes that are currently expanded. Used by incremental
+ * expand to splice in just the new subtree rather than rebuilding everything.
+ */
+function buildSubtreeNodes(state: TuiState, parentId: string, depth: number): VisibleNode[] {
+  const out: VisibleNode[] = [];
+  const children = (state.childrenMap.get(parentId) || []).slice().sort(sortBySortIndexDateAndId);
+  for (const child of children) {
+    const grandchildren = state.childrenMap.get(child.id) || [];
+    out.push({ item: child, depth, hasChildren: grandchildren.length > 0 });
+    if (grandchildren.length > 0 && state.expanded.has(child.id)) {
+      out.push(...buildSubtreeNodes(state, child.id, depth + 1));
+    }
+  }
+  return out;
+}
+
+/**
+ * Incrementally expand the node at `nodeIdx` in the cached visible-node list.
+ *
+ * Instead of re-traversing the entire tree, this function:
+ *  1. Sets the node as expanded in `state.expanded`.
+ *  2. Builds only the newly visible subtree.
+ *  3. Splices the subtree into `state.cachedVisibleNodes`.
+ *
+ * Falls back to a full `buildVisibleNodes` traversal if the cache is stale.
+ */
+export const incrementalExpand = (state: TuiState, nodeIdx: number): VisibleNode[] => {
+  const cached = state.cachedVisibleNodes;
+  if (!cached) return buildVisibleNodes(state);
+
+  const node = cached[nodeIdx];
+  if (!node || !node.hasChildren) return cached;
+  if (state.expanded.has(node.item.id)) return cached;
+
+  state.expanded.add(node.item.id);
+  const subtree = buildSubtreeNodes(state, node.item.id, node.depth + 1);
+  const newVisible = cached.slice(0, nodeIdx + 1).concat(subtree, cached.slice(nodeIdx + 1));
+  state.cachedVisibleNodes = newVisible;
+  return newVisible;
+};
+
+/**
+ * Incrementally collapse the node at `nodeIdx` in the cached visible-node list.
+ *
+ * Instead of re-traversing the entire tree, this function:
+ *  1. Removes the node from `state.expanded`.
+ *  2. Finds the contiguous block of descendants that follow the node in the
+ *     visible list (all nodes at a greater depth).
+ *  3. Removes that block from `state.cachedVisibleNodes`.
+ *
+ * Falls back to a full `buildVisibleNodes` traversal if the cache is stale.
+ */
+export const incrementalCollapse = (state: TuiState, nodeIdx: number): VisibleNode[] => {
+  const cached = state.cachedVisibleNodes;
+  if (!cached) return buildVisibleNodes(state);
+
+  const node = cached[nodeIdx];
+  if (!node) return cached;
+
+  state.expanded.delete(node.item.id);
+
+  // Find the end of the descendant block: all nodes with depth > node.depth
+  // that immediately follow the collapsed node are now hidden.
+  let endIdx = nodeIdx + 1;
+  while (endIdx < cached.length && cached[endIdx].depth > node.depth) endIdx++;
+
+  if (endIdx === nodeIdx + 1) {
+    // No visible descendants – nothing to remove.
+    return cached;
+  }
+
+  const newVisible = cached.slice(0, nodeIdx + 1).concat(cached.slice(endIdx));
+  state.cachedVisibleNodes = newVisible;
+  return newVisible;
 };
 
 export const expandAncestorsForInProgress = (state: TuiState): void => {

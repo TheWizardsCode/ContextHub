@@ -13,7 +13,7 @@ import { copyToClipboard } from '../clipboard.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { humanFormatWorkItem, formatTitleOnlyTUI } from '../commands/helpers.js';
-import { createTuiState, rebuildTreeState, buildVisibleNodes, expandAncestorsForInProgress, isClosedStatus, enterMoveMode, exitMoveMode, sortBySortIndexDateAndId } from './state.js';
+import { createTuiState, rebuildTreeState, buildVisibleNodes, expandAncestorsForInProgress, isClosedStatus, enterMoveMode, exitMoveMode, sortBySortIndexDateAndId, incrementalExpand, incrementalCollapse } from './state.js';
 import { createPersistence } from './persistence.js';
 import { resolveWorklogDir } from '../worklog-paths.js';
 import { createLayout } from './layout.js';
@@ -285,8 +285,9 @@ export class TuiController {
       for (const r of state.roots) state.expanded.add(r.id);
     }
 
-     // Flatten visible nodes for rendering (uses module-level VisibleNode type)
-    const buildVisible = () => buildVisibleNodes(state);
+     // Flatten visible nodes for rendering. Returns the cached result when
+    // available so scroll and detail-update events avoid a full tree traversal.
+    const buildVisible = () => state.cachedVisibleNodes ?? buildVisibleNodes(state);
 
     const help = listComponent.getFooter();
     const detail = detailComponent.getDetail();
@@ -2938,10 +2939,18 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // Event handlers (named so they can be removed during cleanup)
     // Centralized list selection handler to keep detail updates/rendering
     // consistent across mouse and keyboard interactions.
+    // Uses the cached visible nodes (no tree traversal) for scroll/navigation.
     const updateListSelection = (idx: number, source?: string) => {
+      const scrollStart = perfEnabled ? performance.now() : null;
       const visible = buildVisible();
       updateDetailForIndex(idx, visible);
       screen.render();
+      if (perfEnabled && scrollStart !== null) {
+        const scrollEnd = performance.now();
+        const dur = scrollEnd - scrollStart;
+        perfMetrics.push({ event: 'scroll', start: scrollStart, end: scrollEnd, duration: dur });
+        debugLog(`scroll/select (${source ?? 'unknown'}) took ${dur.toFixed(2)} ms`);
+      }
     };
 
     const listSelectHandler = (_el: any, idx: number) => {
@@ -3095,7 +3104,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       const visible = buildVisible();
       const node = visible[idx];
       if (node && node.hasChildren) {
-        state.expanded.add(node.item.id);
+        incrementalExpand(state, idx);
         renderListAndDetail(idx);
       }
     });
@@ -3107,15 +3116,14 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       const node = visible[idx];
       if (!node) return;
       if (node.hasChildren && state.expanded.has(node.item.id)) {
-        state.expanded.delete(node.item.id);
+        incrementalCollapse(state, idx);
         renderListAndDetail(idx);
         return;
       }
       // collapse parent if possible
       const parentIdx = findParentIndex(idx, visible);
       if (parentIdx >= 0) {
-        const parent = visible[parentIdx];
-        state.expanded.delete(parent.item.id);
+        incrementalCollapse(state, parentIdx);
         renderListAndDetail(parentIdx);
       }
     });
@@ -3144,8 +3152,11 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         debugLog(`Expand/collapse no-op took ${durEarly.toFixed(2)} ms (start=${start.toFixed(3)}ms end=${endEarly.toFixed(3)}ms)`);
         return;
       }
-      if (state.expanded.has(node.item.id)) state.expanded.delete(node.item.id);
-      else state.expanded.add(node.item.id);
+      if (state.expanded.has(node.item.id)) {
+        incrementalCollapse(state, idx);
+      } else {
+        incrementalExpand(state, idx);
+      }
       renderListAndDetail(idx);
       // persist state
       void persistence.savePersistedState(db.getPrefix?.() || undefined, { expanded: Array.from(state.expanded) });
