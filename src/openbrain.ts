@@ -31,6 +31,23 @@ export interface OpenBrainQueueEntry {
 }
 
 /**
+ * Detect whether verbose logging was requested. Honor WL_VERBOSE env var
+ * (true/1/yes) or the presence of a global --verbose flag on process.argv.
+ */
+function isVerbose(): boolean {
+  try {
+    const ev = process.env.WL_VERBOSE;
+    if (ev && String(ev).trim() !== '') {
+      const v = String(ev).toLowerCase();
+      return v === '1' || v === 'true' || v === 'yes';
+    }
+    return Array.isArray(process.argv) && process.argv.includes('--verbose');
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Build a concise markdown summary for a completed work item.
  */
 export function buildOpenBrainSummary(item: WorkItem): string {
@@ -69,8 +86,15 @@ export function appendToQueue(entry: OpenBrainQueueEntry, queueDir?: string): vo
     const queuePath = path.join(dir, OPENBRAIN_QUEUE_FILE);
     const line = JSON.stringify(entry) + '\n';
     fs.appendFileSync(queuePath, line, 'utf-8');
-  } catch {
-    // Best-effort — if we cannot write the queue, silently ignore.
+    if (isVerbose()) {
+      try { console.error(`[openbrain] queued submission to ${queuePath}: ${JSON.stringify(entry)}`); } catch (_) { /* ignore */ }
+    }
+  } catch (err) {
+    // Best-effort — if we cannot write the queue, log in verbose mode but
+    // never throw to avoid interfering with user flows.
+    if (isVerbose()) {
+      try { console.error(`[openbrain] failed to append to queue: ${(err as Error).message}`); } catch (_) { /* ignore */ }
+    }
   }
 }
 
@@ -101,17 +125,30 @@ export async function submitToOpenBrain(
   const spawnImpl = options.spawnImpl ?? spawn;
   const summary = buildOpenBrainSummary(item);
 
+  const verbose = isVerbose();
+  if (verbose) {
+    try { console.error(`[openbrain] submitToOpenBrain: obBin=${obBin} title=${JSON.stringify(item.title)} wait=${Boolean(options.waitForCompletion)}`); } catch (_) { /* ignore */ }
+  }
+
   const run = (): Promise<void> =>
     new Promise<void>((resolve) => {
       let child: ReturnType<typeof spawn>;
       try {
-        child = spawnImpl(obBin, ['add', '--stdin', '--title', item.title], {
-          stdio: ['pipe', 'ignore', 'pipe'],
-          detached: !options.waitForCompletion,
-        });
+        const args = ['add', '--stdin', '--title', item.title];
+        const spawnOpts: SpawnOptions = { stdio: ['pipe', 'ignore', 'pipe'], detached: !options.waitForCompletion };
+        if (verbose) {
+          try { console.error(`[openbrain] spawning: ${obBin} ${args.join(' ')} opts=${JSON.stringify(spawnOpts)}`); } catch (_) { /* ignore */ }
+        }
+        child = spawnImpl(obBin, args, spawnOpts);
+        if (verbose && child && (child as any).pid) {
+          try { console.error(`[openbrain] spawned child pid=${(child as any).pid}`); } catch (_) { /* ignore */ }
+        }
       } catch (spawnErr) {
         const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
         console.error(`[openbrain] Failed to spawn ob: ${msg}`);
+        if (verbose && spawnErr instanceof Error && (spawnErr as any).stack) {
+          try { console.error(`[openbrain] spawn stack: ${(spawnErr as any).stack}`); } catch (_) { /* ignore */ }
+        }
         appendToQueue(
           { workItemId: item.id, title: item.title, summary, enqueuedAt: new Date().toISOString(), reason: msg },
           options.queueDir
@@ -124,18 +161,22 @@ export async function submitToOpenBrain(
       try {
         child.stdin?.write(summary, 'utf-8');
         child.stdin?.end();
+        if (verbose) try { console.error(`[openbrain] wrote ${String(summary.length)} bytes to child stdin`); } catch (_) { /* ignore */ }
       } catch {
         // Ignore write errors — we'll capture them on close.
       }
 
       const stderrLines: string[] = [];
       child.stderr?.on('data', (chunk: Buffer | string) => {
-        stderrLines.push(chunk.toString());
+        const s = chunk.toString();
+        stderrLines.push(s);
+        if (verbose) try { console.error(`[openbrain] child stderr chunk: ${s.trim()}`); } catch (_) { /* ignore */ }
       });
 
       child.once('error', (err) => {
         const msg = err.message;
         console.error(`[openbrain] ob add error: ${msg}`);
+        if (verbose && (err as any).stack) try { console.error(`[openbrain] ob add error stack: ${(err as any).stack}`); } catch (_) { /* ignore */ }
         appendToQueue(
           { workItemId: item.id, title: item.title, summary, enqueuedAt: new Date().toISOString(), reason: msg },
           options.queueDir
@@ -144,15 +185,19 @@ export async function submitToOpenBrain(
       });
 
       child.once('close', (code) => {
+        const stderr = stderrLines.join('').trim();
         if (code !== 0) {
-          const stderr = stderrLines.join('').trim();
           const reason = stderr || `ob add exited with code ${code}`;
           console.error(`[openbrain] ob add failed (exit ${code}): ${reason}`);
+          if (verbose) try { console.error(`[openbrain] full stderr: ${stderr || '<empty>'}`); } catch (_) { /* ignore */ }
           appendToQueue(
             { workItemId: item.id, title: item.title, summary, enqueuedAt: new Date().toISOString(), reason },
             options.queueDir
           );
+        } else {
+          if (verbose) try { console.error(`[openbrain] ob add exited 0 (success) for ${item.id}`); } catch (_) { /* ignore */ }
         }
+        if (verbose) try { console.error(`[openbrain] child close code=${code} for ${item.id}`); } catch (_) { /* ignore */ }
         resolve();
       });
 
