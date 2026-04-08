@@ -127,7 +127,7 @@ export async function submitToOpenBrain(
   const spawnImpl = options.spawnImpl ?? spawn;
   const summary = buildOpenBrainSummary(item);
 
-  const verbose = isVerbose();
+  const verbose = options.verbose !== undefined ? Boolean(options.verbose) : isVerbose();
   if (verbose) {
     try { console.error(`[openbrain] submitToOpenBrain: obBin=${obBin} title=${JSON.stringify(item.title)} wait=${Boolean(options.waitForCompletion)}`); } catch (_) { /* ignore */ }
   }
@@ -135,6 +135,9 @@ export async function submitToOpenBrain(
   const run = (): Promise<void> =>
     new Promise<void>((resolve) => {
       let child: ReturnType<typeof spawn>;
+      let alreadyQueued = false;
+      let finished = false;
+      const safeResolve = () => { if (!finished) { finished = true; resolve(); } };
       try {
         const args = ['add', '--stdin', '--title', item.title];
         const spawnOpts: SpawnOptions = { stdio: ['pipe', 'ignore', 'pipe'], detached: !options.waitForCompletion };
@@ -155,7 +158,7 @@ export async function submitToOpenBrain(
           { workItemId: item.id, title: item.title, summary, enqueuedAt: new Date().toISOString(), reason: msg },
           options.queueDir
         );
-        resolve();
+        safeResolve();
         return;
       }
 
@@ -179,28 +182,34 @@ export async function submitToOpenBrain(
         const msg = err.message;
         console.error(`[openbrain] ob add error: ${msg}`);
         if (verbose && (err as any).stack) try { console.error(`[openbrain] ob add error stack: ${(err as any).stack}`); } catch (_) { /* ignore */ }
+        alreadyQueued = true;
         appendToQueue(
           { workItemId: item.id, title: item.title, summary, enqueuedAt: new Date().toISOString(), reason: msg },
           options.queueDir
         );
-        resolve();
+        safeResolve();
       });
 
       child.once('close', (code) => {
         const stderr = stderrLines.join('').trim();
         if (code !== 0) {
-          const reason = stderr || `ob add exited with code ${code}`;
-          console.error(`[openbrain] ob add failed (exit ${code}): ${reason}`);
-          if (verbose) try { console.error(`[openbrain] full stderr: ${stderr || '<empty>'}`); } catch (_) { /* ignore */ }
-          appendToQueue(
-            { workItemId: item.id, title: item.title, summary, enqueuedAt: new Date().toISOString(), reason },
-            options.queueDir
-          );
+          // Only append if we haven't just appended in the `error` handler.
+          if (!alreadyQueued) {
+            const reason = stderr || `ob add exited with code ${code}`;
+            console.error(`[openbrain] ob add failed (exit ${code}): ${reason}`);
+            if (verbose) try { console.error(`[openbrain] full stderr: ${stderr || '<empty>'}`); } catch (_) { /* ignore */ }
+            appendToQueue(
+              { workItemId: item.id, title: item.title, summary, enqueuedAt: new Date().toISOString(), reason },
+              options.queueDir
+            );
+          } else if (verbose) {
+            try { console.error(`[openbrain] close after error, already queued; code=${code}`); } catch (_) { /* ignore */ }
+          }
         } else {
           if (verbose) try { console.error(`[openbrain] ob add exited 0 (success) for ${item.id}`); } catch (_) { /* ignore */ }
         }
         if (verbose) try { console.error(`[openbrain] child close code=${code} for ${item.id}`); } catch (_) { /* ignore */ }
-        resolve();
+        safeResolve();
       });
 
       // For non-waiting mode, detach from the event loop immediately after
