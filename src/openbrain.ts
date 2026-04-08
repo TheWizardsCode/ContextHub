@@ -107,6 +107,8 @@ export interface SubmitToOpenBrainOptions {
   queueDir?: string;
   /** When true, await completion before returning (useful in tests). */
   waitForCompletion?: boolean;
+  /** When provided, force verbose logging on or off for this invocation. */
+  verbose?: boolean;
 }
 
 /**

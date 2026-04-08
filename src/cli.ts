@@ -194,6 +194,23 @@ program.hook('preAction', () => {
     console.error(`Valid formats: ${Array.from(ALLOWED_FORMATS).join(', ')}`);
     process.exit(1);
   }
+
+  // Propagate the global --verbose flag into WL_VERBOSE so code paths that
+  // detect verbosity via process.env or that run outside Commander can pick
+  // it up (e.g. background submitToOpenBrain). Use string '1' for truthy.
+  try {
+    const opts = program.opts();
+    if (opts && opts.verbose) {
+      process.env.WL_VERBOSE = '1';
+    } else if (process.env.WL_VERBOSE) {
+      // If user did not request verbose for this run, avoid leaking an
+      // existing environment setting by leaving it untouched only when it was
+      // explicitly set; prefer clearing to ensure --verbose controls runtime.
+      delete process.env.WL_VERBOSE;
+    }
+  } catch (_e) {
+    // Ignore errors — verbosity is best-effort
+  }
 });
 
 // Create shared plugin context
