@@ -25,6 +25,7 @@ import {
   OverlaysComponent,
   ToastComponent,
 } from './components/index.js';
+import { VirtualList } from './virtual-list.js';
 
 // ── Public types ─────────────────────────────────────────────────────
 
@@ -55,6 +56,12 @@ export interface TuiLayout {
 
   // "Next recommendation" dialog (raw blessed widgets, not yet wrapped in a component)
   nextDialog: NextDialogWidgets;
+
+  /**
+   * Virtual-scroll manager for the work-item list.
+   * Present only when `CreateLayoutOptions.virtualize` is `true`.
+   */
+  virtualList?: VirtualList;
 }
 
 // ── Options ──────────────────────────────────────────────────────────
@@ -75,6 +82,16 @@ export interface CreateLayoutOptions {
    * Useful for startup fallback paths where terminfo parsing is unreliable.
    */
   disableColorCapabilityOverride?: boolean;
+
+  /**
+   * When `true`, a {@link VirtualList} viewport manager is created and
+   * returned in `layout.virtualList`.  The caller is responsible for using
+   * it to compute which slice of items to pass to `listComponent.setItems()`
+   * and for keeping the selection in sync via `virtualList.selectAbsolute()`.
+   *
+   * Enabled via the `--virtualize` CLI flag.
+   */
+  virtualize?: boolean;
 }
 
 // ── Factory ──────────────────────────────────────────────────────────
@@ -240,6 +257,16 @@ export function createLayout(options: CreateLayoutOptions = {}): TuiLayout {
     blessed: blessedImpl,
   }).create();
 
+  // ── Virtual list (optional) ─────────────────────────────────────────
+  let virtualList: VirtualList | undefined;
+  if (options.virtualize) {
+    // Viewport height heuristic: list occupies ~50% of the screen height
+    // minus borders (2 rows).  Defaults to 20 until a real height is known;
+    // callers should call virtualList.setViewportHeight() after layout.
+    const initialHeight = Math.max(1, (screen.height as number) / 2 - 2) || 20;
+    virtualList = new VirtualList({ totalItems: 0, viewportHeight: initialHeight });
+  }
+
   // ── Return layout ───────────────────────────────────────────────────
   return {
     screen,
@@ -253,6 +280,7 @@ export function createLayout(options: CreateLayoutOptions = {}): TuiLayout {
     helpMenu,
     modalDialogs,
     opencodeUi,
+    ...(virtualList !== undefined ? { virtualList } : {}),
     nextDialog: {
       overlay: nextOverlay,
       dialog: nextDialogBox,
