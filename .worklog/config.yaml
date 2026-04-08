@@ -4,3 +4,4 @@ autoSync: false
 githubRepo: TheWizardsCode/ContextHub
 githubLabelPrefix: 'wl:'
 githubImportCreateNew: true
+openBrainEnabled: true
