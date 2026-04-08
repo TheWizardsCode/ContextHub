@@ -140,7 +140,10 @@ export async function submitToOpenBrain(
       const safeResolve = () => { if (!finished) { finished = true; resolve(); } };
       try {
         const args = ['add', '--stdin', '--title', item.title];
-        const spawnOpts: SpawnOptions = { stdio: ['pipe', 'ignore', 'pipe'], detached: !options.waitForCompletion };
+        // Pipe stdout only in verbose mode so we can capture success messages
+        // that some `ob` implementations print to stdout. Keep stdout ignored
+        // in normal runs to avoid holding unnecessary handles.
+        const spawnOpts: SpawnOptions = { stdio: ['pipe', verbose ? 'pipe' : 'ignore', 'pipe'], detached: !options.waitForCompletion };
         if (verbose) {
           try { console.error(`[openbrain] spawning: ${obBin} ${args.join(' ')} opts=${JSON.stringify(spawnOpts)}`); } catch (_) { /* ignore */ }
         }
@@ -172,10 +175,17 @@ export async function submitToOpenBrain(
       }
 
       const stderrLines: string[] = [];
+      const stdoutLines: string[] = [];
       child.stderr?.on('data', (chunk: Buffer | string) => {
         const s = chunk.toString();
         stderrLines.push(s);
         if (verbose) try { console.error(`[openbrain] child stderr chunk: ${s.trim()}`); } catch (_) { /* ignore */ }
+      });
+      // Capture stdout chunks when verbose so we can see success/ID output
+      child.stdout?.on('data', (chunk: Buffer | string) => {
+        const s = chunk.toString();
+        stdoutLines.push(s);
+        if (verbose) try { console.error(`[openbrain] child stdout chunk: ${s.trim()}`); } catch (_) { /* ignore */ }
       });
 
       child.once('error', (err) => {
@@ -192,6 +202,7 @@ export async function submitToOpenBrain(
 
       child.once('close', (code) => {
         const stderr = stderrLines.join('').trim();
+        const stdout = stdoutLines.join('').trim();
         if (code !== 0) {
           // Only append if we haven't just appended in the `error` handler.
           if (!alreadyQueued) {
@@ -207,6 +218,8 @@ export async function submitToOpenBrain(
           }
         } else {
           if (verbose) try { console.error(`[openbrain] ob add exited 0 (success) for ${item.id}`); } catch (_) { /* ignore */ }
+          // If the child printed an entry id or confirmation on stdout, log it
+          if (verbose && stdout) try { console.error(`[openbrain] ob add stdout: ${stdout}`); } catch (_) { /* ignore */ }
         }
         if (verbose) try { console.error(`[openbrain] child close code=${code} for ${item.id}`); } catch (_) { /* ignore */ }
         safeResolve();
