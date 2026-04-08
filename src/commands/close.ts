@@ -4,6 +4,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { CloseOptions } from '../cli-types.js';
+import { submitToOpenBrain } from '../openbrain.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -56,6 +57,15 @@ export default function register(ctx: PluginContext): void {
             continue;
           }
           results.push({ id, success: true });
+
+          // Fire-and-forget: submit a summary to OpenBrain if enabled.
+          const config = utils.getConfig();
+          if (config?.openBrainEnabled) {
+            submitToOpenBrain(updated).catch(() => {
+              // Errors are already logged inside submitToOpenBrain; swallow here
+              // so the close command is never blocked or aborted.
+            });
+          }
         } catch (err) {
           results.push({ id, success: false, error: (err as Error).message });
         }

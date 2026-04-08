@@ -10,6 +10,7 @@ import { humanFormatWorkItem, resolveFormat } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { normalizeActionArgs } from './cli-utils.js';
 import { buildAuditEntry, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
+import { submitToOpenBrain } from '../openbrain.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -268,6 +269,18 @@ export default function register(ctx: PluginContext): void {
 
         if (updates.status || updates.stage) {
           db.reconcileDependentStatus(normalizedId);
+        }
+
+        // Fire-and-forget: submit a summary to OpenBrain when the item
+        // transitions to completed, if the feature is enabled.
+        if (updates.status === 'completed') {
+          const config = utils.getConfig();
+          if (config?.openBrainEnabled) {
+            submitToOpenBrain(item).catch(() => {
+              // Errors are already logged inside submitToOpenBrain; swallow here
+              // so the update command is never blocked or aborted.
+            });
+          }
         }
 
         results.push({ id: normalizedId, success: true, workItem: item });

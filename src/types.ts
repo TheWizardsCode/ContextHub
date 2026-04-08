@@ -147,6 +147,10 @@ export interface WorklogConfig {
   statuses?: Array<{ value: string; label: string }>;
   stages?: Array<{ value: string; label: string }>;
   statusStageCompatibility?: Record<string, string[]>;
+  // When true, automatically submit a markdown summary to OpenBrain whenever
+  // a work item is marked as completed.  Requires the `ob` CLI to be available
+  // on PATH (or WL_OB_BIN env var).  Defaults to false.
+  openBrainEnabled?: boolean;
 }
 
 /**
