@@ -58,8 +58,8 @@ export interface TuiLayout {
   nextDialog: NextDialogWidgets;
 
   /**
-   * Virtual-scroll manager for the work-item list.
-   * Present only when `CreateLayoutOptions.virtualize` is `true`.
+    * Virtual-scroll manager for the work-item list.
+    * Present when virtualization is enabled (enabled by default).
    */
   virtualList?: VirtualList;
 }
@@ -89,7 +89,8 @@ export interface CreateLayoutOptions {
    * it to compute which slice of items to pass to `listComponent.setItems()`
    * and for keeping the selection in sync via `virtualList.selectAbsolute()`.
    *
-   * Enabled via the `--virtualize` CLI flag.
+    * Enabled by default.  Callers may disable it by passing
+    * `virtualize: false` to {@link createLayout}.
    */
   virtualize?: boolean;
 }
@@ -259,7 +260,9 @@ export function createLayout(options: CreateLayoutOptions = {}): TuiLayout {
 
   // ── Virtual list (optional) ─────────────────────────────────────────
   let virtualList: VirtualList | undefined;
-  if (options.virtualize) {
+  // Virtualization is enabled by default; provide an explicit way to
+  // opt-out by passing `virtualize: false` in the options object.
+  if (options.virtualize !== false) {
     // Viewport height heuristic: list occupies ~50% of the screen height
     // minus borders (2 rows).  Defaults to 20 until a real height is known;
     // callers should call virtualList.setViewportHeight() after layout.

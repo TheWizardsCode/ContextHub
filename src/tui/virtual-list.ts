@@ -6,7 +6,7 @@
  * widget at any given time.  All indexing arithmetic lives here so it can be
  * tested independently of the blessed runtime.
  *
- * Introduced as part of the `--virtualize` flag (WL virtual-scroll feature).
+ * Introduced as the default virtual-scroll feature for the work-item tree.
  */
 
 export interface VirtualListOptions {

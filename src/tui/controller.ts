@@ -145,7 +145,10 @@ export class TuiController {
     const db = utils.getDatabase(options.prefix);
     const isVerbose = !!program.opts().verbose;
     const perfEnabled = Boolean((options as any).perf);
-    const virtualizeEnabled = Boolean((options as any).virtualize);
+    // Virtualization is enabled by default. Allow callers to opt-out by
+    // passing `virtualize: false` (programmatic callers/tests).  The CLI
+    // flag was removed and no longer appears in the user-facing help.
+    const virtualizeEnabled = (options as any).virtualize === false ? false : true;
 
 
     // Debug logging helper. Emit when either verbose mode is enabled or
@@ -224,7 +227,7 @@ export class TuiController {
       opencodeUi,
     } = layout;
     const list = listComponent.getList();
-    /** Virtual-scroll viewport manager — present only when --virtualize is set. */
+    /** Virtual-scroll viewport manager — present when virtualization is enabled. */
     const vl = layout.virtualList;
 
     /**
