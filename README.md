@@ -109,6 +109,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | [AGENTS.md](AGENTS.md) | AI agent onboarding and workflow instructions |
 | [tests/README.md](tests/README.md) | Test suite documentation |
 | [examples/README.md](examples/README.md) | Example plugins |
+ | [OpenBrain Integration](docs/openbrain.md) | Documentation for the optional OpenBrain submission integration |
 
 ### Internal / Development
 
