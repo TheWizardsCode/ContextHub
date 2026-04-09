@@ -667,12 +667,15 @@ wl plugins
 
 Worklog comes bundled with an example stats plugin installed.
 
+- `openbrain` — Manage OpenBrain submission queue (`status`, `resubmit`).
 - `stats` — Show custom work item statistics (example plugin provided in this repo).
  - `ampa` — AMPA plugin: manage AMPA containers and workspace tasks (start, stop, status, run, list, start-work, finish-work).
 
 Examples:
 
 ```sh
+wl openbrain status
+wl openbrain resubmit WL-ABC123
 wl ampa start                 # start AMPA services for this repo
 wl ampa status                # show AMPA service status
 wl ampa list                  # list available AMPA containers/tasks

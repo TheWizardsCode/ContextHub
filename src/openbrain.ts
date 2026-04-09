@@ -166,12 +166,26 @@ export async function submitToOpenBrain(
       }
 
       // Write the markdown summary to the child's stdin.
-      try {
-        child.stdin?.write(summary, 'utf-8');
-        child.stdin?.end();
-        if (verbose) try { console.error(`[openbrain] wrote ${String(summary.length)} bytes to child stdin`); } catch (_) { /* ignore */ }
-      } catch {
-        // Ignore write errors — we'll capture them on close.
+      //
+      // Important: write failures like EPIPE can be emitted asynchronously on
+      // the stream and are not caught by try/catch around write(). Attach a
+      // no-throw error handler so failed writes do not surface as unhandled
+      // exceptions during tests or normal CLI execution.
+      const childStdin = child.stdin;
+      if (childStdin) {
+        childStdin.on('error', (err: NodeJS.ErrnoException) => {
+          if (verbose) {
+            const code = err?.code ? ` code=${String(err.code)}` : '';
+            try { console.error(`[openbrain] stdin write error:${code} ${err.message}`); } catch (_) { /* ignore */ }
+          }
+        });
+        try {
+          childStdin.write(summary, 'utf-8');
+          childStdin.end();
+          if (verbose) try { console.error(`[openbrain] wrote ${String(summary.length)} bytes to child stdin`); } catch (_) { /* ignore */ }
+        } catch {
+          // Ignore synchronous write errors — we'll capture process outcome on close.
+        }
       }
 
       const stderrLines: string[] = [];
