@@ -330,16 +330,28 @@ export class OpencodeClient {
                   const role = m.info?.role || 'unknown';
                   histText += `{gray-fg}[${role}]{/}\n`;
                   const parts = m.parts || [];
-                    for (const p of parts) {
-                      if (p.type === 'text' && p.text) {
-                        histText += `${_histRenderer ? _histRenderer(p.text) : p.text}\n`;
-                      } else if (p.type === 'tool-result' && p.content) {
-                        // Render tool results in muted/gray for TUI
-                        histText += `${theme.tui.text.muted('[Tool Result]')}\n`;
-                        const rendered = _histRenderer ? _histRenderer(p.content) : String(p.content);
+                  // Consider this message a tool-invocation if it explicitly
+                  // finished with tool-calls or if any part represents a tool
+                  // being invoked. In that case render assistant text as muted.
+                  const isToolCall = (m.info && m.info.finish === 'tool-calls') || parts.some((pp: any) => {
+                    const t = pp?.type;
+                    return t === 'tool' || t === 'tool-use' || t === 'tool-result' || t === 'step-start' || t === 'step-finish';
+                  });
+                  for (const p of parts) {
+                    if (p.type === 'text' && p.text) {
+                      const rendered = _histRenderer ? _histRenderer(p.text) : p.text;
+                      if (role === 'assistant' && isToolCall) {
                         histText += `${theme.tui.text.muted(rendered)}\n`;
+                      } else {
+                        histText += `${rendered}\n`;
                       }
+                    } else if (p.type === 'tool-result' && p.content) {
+                      // Render tool results in muted/gray for TUI
+                      histText += `${theme.tui.text.muted('[Tool Result]')}\n`;
+                      const rendered = _histRenderer ? _histRenderer(p.content) : String(p.content);
+                      histText += `${theme.tui.text.muted(rendered)}\n`;
                     }
+                  }
                   histText += '\n';
                 }
                 pane.setContent(histText + '\n');
@@ -360,16 +372,21 @@ export class OpencodeClient {
                       const role = m.info?.role || 'unknown';
                       histText += `{gray-fg}[${role}]{/}\n`;
                       const parts = m.parts || [];
-                        for (const p of parts) {
-                          if (p.type === 'text' && p.text) {
-                            histText += `${_histRenderer ? _histRenderer(p.text) : p.text}\n`;
-                          } else if (p.type === 'tool-result' && p.content) {
-                            // Render tool results in muted/gray for TUI
-                            histText += `${theme.tui.text.muted('[Tool Result]')}\n`;
-                            const rendered = _histRenderer ? _histRenderer(p.content) : String(p.content);
-                            histText += `${theme.tui.text.muted(rendered)}\n`;
-                          }
+                    for (const p of parts) {
+                      if (p.type === 'text' && p.text) {
+                        const rendered = _histRenderer ? _histRenderer(p.text) : p.text;
+                        if (m.info?.role === 'assistant' && ((m.info && m.info.finish === 'tool-calls') || parts.some((pp:any) => ['tool','tool-use','tool-result','step-start','step-finish'].includes(pp?.type)))) {
+                          histText += `${theme.tui.text.muted(rendered)}\n`;
+                        } else {
+                          histText += `${rendered}\n`;
                         }
+                      } else if (p.type === 'tool-result' && p.content) {
+                        // Render tool results in muted/gray for TUI
+                        histText += `${theme.tui.text.muted('[Tool Result]')}\n`;
+                        const rendered = _histRenderer ? _histRenderer(p.content) : String(p.content);
+                        histText += `${theme.tui.text.muted(rendered)}\n`;
+                      }
+                    }
                       histText += '\n';
                     }
                     histText += '{yellow-fg}[End of local history]{/}\n\n';
