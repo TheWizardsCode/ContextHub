@@ -56,7 +56,25 @@ describe('OpencodeClient activity indicators', () => {
     expect((pane.setLabel as any).mock.calls.length).toBeGreaterThan(0);
     const label = (pane.setLabel as any).mock.calls.slice(-1)[0][0] as string;
     expect(label).toContain('Using tool: write');
-    expect(paneContent.value).toContain('Write: src/test.ts');
+    expect(paneContent.value).toBe('');
+  });
+
+  it('keeps step activity in label only', () => {
+    const paneContent: { value: string } = { value: '' };
+    const pane = {
+      getContent: () => paneContent.value,
+      setContent: (s: string) => { paneContent.value = s; },
+      setLabel: vi.fn(),
+      setScrollPerc: vi.fn(),
+    } as any;
+
+    const tools = (client as any).createSessionTools('s-step', pane, null, null, () => {});
+    tools.handlers.onToolUse('step', 'running checks');
+
+    expect((pane.setLabel as any).mock.calls.length).toBeGreaterThan(0);
+    const label = (pane.setLabel as any).mock.calls.slice(-1)[0][0] as string;
+    expect(label).toContain('Step: running checks');
+    expect(paneContent.value).toBe('');
   });
 
   it('sets processing result activity and clears after delay', async () => {

@@ -64,6 +64,7 @@ points:
 - Responses stream in real-time using Server-Sent Events (SSE)
 - See text as it's generated
 - Tool usage is highlighted in yellow
+- Tool/step activity is shown in the pane title (activity label), not as inline response lines
 - Tool results shown in green
 
 ### 6. Interactive Input

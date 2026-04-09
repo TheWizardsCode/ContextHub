@@ -333,9 +333,6 @@ export class OpencodeClient {
                     } else if (p.type === 'tool-result' && p.content) {
                       histText += `{green-fg}[Tool Result]{/}\n`;
                       histText += `${_histRenderer ? _histRenderer(p.content) : p.content}\n`;
-                    } else if (p.type === 'tool-use' && p.tool) {
-                      histText += `{yellow-fg}[Tool: ${p.tool.name}]{/}\n`;
-                      if (p.tool.description) histText += `${p.tool.description}\n`;
                     }
                   }
                   histText += '\n';
@@ -364,9 +361,6 @@ export class OpencodeClient {
                         } else if (p.type === 'tool-result' && p.content) {
                           histText += `{green-fg}[Tool Result]{/}\n`;
                           histText += `${_histRenderer ? _histRenderer(p.content) : p.content}\n`;
-                        } else if (p.type === 'tool-use' && p.tool) {
-                          histText += `{yellow-fg}[Tool: ${p.tool.name}]{/}\n`;
-                          if (p.tool.description) histText += `${p.tool.description}\n`;
                         }
                       }
                       histText += '\n';
@@ -875,17 +869,7 @@ export class OpencodeClient {
         } else {
           setActivity(`Using tool: ${safeName}`);
         }
-        // Inline bracketed file ops when a description (usually filename)
-        // is present and the tool appears to mutate files.
-        const lower = (safeName || '').toLowerCase();
-        if (safeName === 'step') {
-          appendLine(`{yellow-fg}[Step: ${description || 'running'}]{/}`);
-        } else if (description && ['write', 'edit', 'delete', 'create', 'remove'].includes(lower)) {
-          appendLine(`{yellow-fg}[${safeName.charAt(0).toUpperCase() + safeName.slice(1)}: ${description}]{/}`);
-        } else {
-          appendLine(`{yellow-fg}[Tool: ${safeName}]{/}`);
-          if (description) appendLine(`  ${description}`);
-        }
+        // Keep tool/step feedback in the pane title only.
         updatePane();
       },
       onToolResult: (content) => {

@@ -77,3 +77,109 @@ describe('OpencodeClient (TUI) defensive shutdown on input.request', () => {
     }
   });
 });
+
+describe('OpencodeClient history rendering markers', () => {
+  it('does not render tool or step marker lines in session history pane content', async () => {
+    const httpImpl: any = {
+      request: (opts: any, cb: Function) => {
+        const method = (opts.method || 'GET').toUpperCase();
+        const path = opts.path || '';
+
+        const routeKey = `${method} ${path}`;
+        const routes: Record<string, { statusCode: number; body?: string }> = {
+          'GET /session/sess-h1': { statusCode: 200, body: '' },
+          'GET /session/sess-h1/message': {
+            statusCode: 200,
+            body: JSON.stringify([
+              {
+                info: { role: 'assistant' },
+                parts: [
+                  { type: 'text', text: 'hello from history' },
+                  { type: 'tool-use', tool: { name: 'bash', description: 'npm test' } },
+                  { type: 'step-start', title: 'running' },
+                ],
+              },
+            ]),
+          },
+          'POST /session/sess-h1/prompt_async': { statusCode: 204 },
+        };
+
+        const route = routes[routeKey] || { statusCode: 200, body: '' };
+
+        const listeners: Record<string, Function[]> = {};
+        const res = {
+          statusCode: route.statusCode,
+          on: (event: string, fn: Function) => {
+            (listeners[event] = listeners[event] || []).push(fn);
+          },
+          resume: vi.fn(),
+        } as any;
+
+        cb(res);
+
+        queueMicrotask(() => {
+          if (route.body !== undefined) {
+            for (const fn of listeners.data || []) fn(route.body);
+          }
+          for (const fn of listeners.end || []) fn();
+        });
+
+        return {
+          on: vi.fn(),
+          write: vi.fn(),
+          end: vi.fn(),
+          abort: vi.fn(),
+          removeAllListeners: vi.fn(),
+        } as any;
+      },
+    };
+
+    const options: any = {
+      port: 1234,
+      log: () => {},
+      showToast: () => undefined,
+      modalDialogs: { selectList: async () => null, editTextarea: async () => null, confirmTextbox: async () => true },
+      render: () => undefined,
+      persistedState: {
+        load: async () => ({ sessionMap: { 'WL-H1': 'sess-h1' } }),
+        save: async () => undefined,
+        getPrefix: () => undefined,
+      },
+      httpImpl,
+      spawnImpl: () => { throw new Error('not used'); },
+    };
+
+    const client = new OpencodeClient(options);
+    (client as any).connectToSSE = vi.fn((
+      _sessionId: string,
+      _prompt: string,
+      _pane: any,
+      _indicator: any,
+      _inputField: any,
+      resolve: () => void,
+    ) => {
+      resolve();
+    });
+
+    const paneContent: { value: string } = { value: '' };
+    const pane: any = {
+      getContent: () => paneContent.value,
+      setContent: vi.fn((s: string) => { paneContent.value = s; }),
+      setLabel: vi.fn(),
+      setScrollPerc: vi.fn(),
+      pushLine: vi.fn(),
+      focus: vi.fn(),
+    };
+
+    await client.sendPrompt({
+      prompt: 'hello',
+      pane,
+      getSelectedItemId: () => 'WL-H1',
+      onComplete: () => {},
+    });
+
+    expect(paneContent.value).toContain('hello from history');
+    expect(paneContent.value).not.toContain('Tool: bash');
+    expect(paneContent.value).not.toContain('Step: running');
+  });
+});
