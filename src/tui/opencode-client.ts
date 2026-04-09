@@ -1,6 +1,9 @@
 import { spawn, type ChildProcess } from 'child_process';
 import * as http from 'http';
 import { SseParser } from './opencode-sse.js';
+// Import the TUI theme helper. Use a .js specifier so compiled ESM output
+// resolves correctly at runtime (Node ESM requires file extensions).
+import { theme } from '../theme.js';
 
 export type OpencodeServerStatus = 'stopped' | 'starting' | 'running' | 'error';
 
@@ -327,14 +330,16 @@ export class OpencodeClient {
                   const role = m.info?.role || 'unknown';
                   histText += `{gray-fg}[${role}]{/}\n`;
                   const parts = m.parts || [];
-                  for (const p of parts) {
-                    if (p.type === 'text' && p.text) {
-                      histText += `${_histRenderer ? _histRenderer(p.text) : p.text}\n`;
-                    } else if (p.type === 'tool-result' && p.content) {
-                      histText += `{green-fg}[Tool Result]{/}\n`;
-                      histText += `${_histRenderer ? _histRenderer(p.content) : p.content}\n`;
+                    for (const p of parts) {
+                      if (p.type === 'text' && p.text) {
+                        histText += `${_histRenderer ? _histRenderer(p.text) : p.text}\n`;
+                      } else if (p.type === 'tool-result' && p.content) {
+                        // Render tool results in muted/gray for TUI
+                        histText += `${theme.tui.text.muted('[Tool Result]')}\n`;
+                        const rendered = _histRenderer ? _histRenderer(p.content) : String(p.content);
+                        histText += `${theme.tui.text.muted(rendered)}\n`;
+                      }
                     }
-                  }
                   histText += '\n';
                 }
                 pane.setContent(histText + '\n');
@@ -355,14 +360,16 @@ export class OpencodeClient {
                       const role = m.info?.role || 'unknown';
                       histText += `{gray-fg}[${role}]{/}\n`;
                       const parts = m.parts || [];
-                      for (const p of parts) {
-                        if (p.type === 'text' && p.text) {
-                          histText += `${_histRenderer ? _histRenderer(p.text) : p.text}\n`;
-                        } else if (p.type === 'tool-result' && p.content) {
-                          histText += `{green-fg}[Tool Result]{/}\n`;
-                          histText += `${_histRenderer ? _histRenderer(p.content) : p.content}\n`;
+                        for (const p of parts) {
+                          if (p.type === 'text' && p.text) {
+                            histText += `${_histRenderer ? _histRenderer(p.text) : p.text}\n`;
+                          } else if (p.type === 'tool-result' && p.content) {
+                            // Render tool results in muted/gray for TUI
+                            histText += `${theme.tui.text.muted('[Tool Result]')}\n`;
+                            const rendered = _histRenderer ? _histRenderer(p.content) : String(p.content);
+                            histText += `${theme.tui.text.muted(rendered)}\n`;
+                          }
                         }
-                      }
                       histText += '\n';
                     }
                     histText += '{yellow-fg}[End of local history]{/}\n\n';
@@ -813,10 +820,14 @@ export class OpencodeClient {
     const appendLine = (line: string) => {
       const r = getRenderer();
       const rendered = r ? r(line) : line;
+      // Ensure there's a separation from previous content
       if (streamText && !streamText.endsWith('\n')) {
         streamText += '\n';
       }
-      streamText += rendered;
+      // Trim a trailing newline from the rendered chunk so we always
+      // append exactly one line break after each piece of text returned.
+      const cleaned = rendered.endsWith('\n') ? rendered.slice(0, -1) : rendered;
+      streamText += cleaned + '\n';
     };
     const updatePane = () => {
       // Prefer using pushLine when available since some TUI implementations
@@ -875,13 +886,14 @@ export class OpencodeClient {
       onToolResult: (content) => {
         lastToolKey = null;
         setActivity('Processing result...');
-        appendLine('{green-fg}[Tool Result]{/}');
-        const resultLines = content.split('\n');
+        // Use muted/gray styling for the tool result label and content
+        appendLine(theme.tui.text.muted('[Tool Result]'));
+        const resultLines = String(content).split('\n');
         for (const line of resultLines.slice(0, 10)) {
-          appendLine(`  ${line}`);
+          appendLine(theme.tui.text.muted(`  ${line}`));
         }
         if (resultLines.length > 10) {
-          appendLine(`  ... (${resultLines.length - 10} more lines)`);
+          appendLine(theme.tui.text.muted(`  ... (${resultLines.length - 10} more lines)`));
         }
         updatePane();
         // After showing a tool result, return the pane to a neutral state
