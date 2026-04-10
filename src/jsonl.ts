@@ -137,29 +137,123 @@ export async function exportToJsonlAsync(
   items: WorkItem[],
   comments: Comment[],
   filepath: string,
-  dependencyEdges: DependencyEdge[] = []
+  dependencyEdges: DependencyEdge[] = [],
+  options?: any
 ): Promise<number> {
-  const content = buildJsonlContent(items, comments, dependencyEdges);
-  const dir = path.dirname(filepath);
-  const tempName = `${path.basename(filepath)}.tmp-${Math.random().toString(36).slice(2, 10)}`;
-  const tempPath = path.join(dir, tempName);
+  // Prefer worker_threads to move CPU-heavy JSONL building/writing off the
+  // main event loop. If worker_threads are unavailable or worker construction
+  // fails, fall back to the previous in-process async implementation.
+  const onProgress = options?.onProgress;
 
-  await fs.promises.mkdir(dir, { recursive: true });
+  // Inline worker code that performs stable JSONL serialization and reports
+  // progress back to the parent via parentPort.postMessage(). Using an
+  // inline eval'd worker avoids having to manage a separate compiled worker
+  // asset which keeps the change minimal.
+  const tryWorker = async (): Promise<number> => {
+    // Dynamically require to defer errors on unsupported environments
+    let Worker: any;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
+      Worker = require('worker_threads').Worker;
+    } catch (err) {
+      throw new Error('worker_threads unavailable');
+    }
+
+    // Serialize worker code; keep it small and self-contained to avoid
+    // depending on the module system inside the worker.
+    const workerCode = [
+      "const { parentPort, workerData } = require('worker_threads');",
+      "const fs = require('fs');",
+      "const path = require('path');",
+      "function normalizeForStableJson(value) {",
+      "  if (value === null || value === undefined) return value;",
+      "  if (Array.isArray(value)) return value.map(v => normalizeForStableJson(v));",
+      "  if (typeof value !== 'object') return value;",
+      "  const out = {};",
+      "  for (const key of Object.keys(value).sort()) { out[key] = normalizeForStableJson(value[key]); }",
+      "  return out;",
+      "}",
+      "function stableStringify(value) { return JSON.stringify(normalizeForStableJson(value)); }",
+      "function mergeDependencyEdges(edges) { const merged = new Map(); for (const edge of edges || []) { merged.set(edge.fromId + '::' + edge.toId, edge); } return Array.from(merged.values()); }",
+      "function dependenciesFromEdges(edges, itemId) { return (edges || []).filter(function(e){ return e.fromId === itemId; }).map(function(e){ return { from: e.fromId, to: e.toId }; }).sort(function(a,b){ const d = a.from.localeCompare(b.from); return d !== 0 ? d : a.to.localeCompare(b.to); }); }",
+      "try {",
+      "  const { items, comments, dependencyEdges, filepath } = workerData;",
+      "  const dir = path.dirname(filepath); if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });",
+      "  const tempName = path.basename(filepath) + '.tmp-' + Math.random().toString(36).slice(2,10);",
+      "  const tempPath = path.join(dir, tempName);",
+      "  const out = fs.createWriteStream(tempPath, { encoding: 'utf8' });",
+      "  const sortedItems = (items || []).slice().sort(function(a,b){ return a.id.localeCompare(b.id); });",
+      "  const normalizedEdges = mergeDependencyEdges(dependencyEdges || []);",
+      "  const sortedComments = (comments || []).slice().sort(function(a,b){ const wi = a.workItemId.localeCompare(b.workItemId); if (wi !== 0) return wi; const ca = a.createdAt.localeCompare(b.createdAt); if (ca !== 0) return ca; return a.id.localeCompare(b.id); });",
+      "  const total = sortedItems.length + sortedComments.length;",
+      "  let processed = 0;",
+      "  for (let i = 0; i < sortedItems.length; i++) { const item = sortedItems[i]; const deps = dependenciesFromEdges(normalizedEdges, item.id); const itemWithDeps = Object.assign({}, item, { dependencies: deps.length > 0 ? deps : [] }); out.write(stableStringify({ type: 'workitem', data: itemWithDeps }) + '\\n'); processed += 1; if (processed % 100 === 0 || processed === total) { const percent = total > 0 ? Math.floor((processed / total) * 100) : 100; parentPort.postMessage({ type: 'progress', percent: percent, itemsProcessed: processed }); } }",
+      "  for (let i = 0; i < sortedComments.length; i++) { const comment = sortedComments[i]; const outComment = Object.assign({}, comment); if (outComment.githubCommentId === undefined) delete outComment.githubCommentId; if (outComment.githubCommentUpdatedAt === undefined) delete outComment.githubCommentUpdatedAt; out.write(stableStringify({ type: 'comment', data: outComment }) + '\\n'); processed += 1; if (processed % 100 === 0 || processed === total) { const percent = total > 0 ? Math.floor((processed / total) * 100) : 100; parentPort.postMessage({ type: 'progress', percent: percent, itemsProcessed: processed }); } }",
+      "  out.end(function() { try { fs.renameSync(tempPath, filepath); const stats = fs.statSync(filepath); parentPort.postMessage({ type: 'done', mtimeMs: stats.mtimeMs }); } catch (err) { try { fs.unlinkSync(tempPath); } catch (_) {} parentPort.postMessage({ type: 'error', error: String(err) }); } });",
+      "} catch (err) { parentPort.postMessage({ type: 'error', error: String(err) }); }"
+    ].join('\n');
+
+    return new Promise<number>((resolve, reject) => {
+      const worker = new Worker(workerCode, { eval: true, workerData: { items, comments, dependencyEdges, filepath } });
+
+      worker.on('message', (msg: any) => {
+        if (!msg || typeof msg !== 'object') return;
+        if (msg.type === 'progress') {
+          try { onProgress?.({ type: 'progress', percent: msg.percent, itemsProcessed: msg.itemsProcessed }); } catch (_) {}
+        } else if (msg.type === 'done') {
+          try { onProgress?.({ type: 'done', mtimeMs: msg.mtimeMs }); } catch (_) {}
+          resolve(msg.mtimeMs);
+        } else if (msg.type === 'error') {
+          try { onProgress?.({ type: 'error', error: msg.error }); } catch (_) {}
+          reject(new Error(msg.error));
+        }
+      });
+
+      worker.on('error', (err: Error) => {
+        try { onProgress?.({ type: 'error', error: err.message }); } catch (_) {}
+        reject(err);
+      });
+
+      worker.on('exit', (code: number) => {
+        if (code !== 0) {
+          const errMsg = `Worker exited with code ${code}`;
+          try { onProgress?.({ type: 'error', error: errMsg }); } catch (_) {}
+          reject(new Error(errMsg));
+        }
+      });
+    });
+  };
 
   try {
-    await fs.promises.writeFile(tempPath, content, 'utf-8');
-    await fs.promises.rename(tempPath, filepath);
-  } catch (error) {
+    return await tryWorker();
+  } catch (err) {
+    // Worker-based export failed; fall back to previous in-process path.
     try {
-      await fs.promises.unlink(tempPath);
-    } catch {
-      // no-op: temp file may not exist if write/rename did not create it
-    }
-    throw error;
-  }
+      const content = buildJsonlContent(items, comments, dependencyEdges);
+      const dir = path.dirname(filepath);
+      const tempName = `${path.basename(filepath)}.tmp-${Math.random().toString(36).slice(2, 10)}`;
+      const tempPath = path.join(dir, tempName);
 
-  const stats = await fs.promises.stat(filepath);
-  return stats.mtimeMs;
+      await fs.promises.mkdir(dir, { recursive: true });
+
+      try {
+        await fs.promises.writeFile(tempPath, content, 'utf-8');
+        await fs.promises.rename(tempPath, filepath);
+      } catch (error) {
+        try {
+          await fs.promises.unlink(tempPath);
+        } catch {}
+        throw error;
+      }
+
+      const stats = await fs.promises.stat(filepath);
+      // Best-effort progress callback for the fallback path
+      try { onProgress?.({ type: 'done', mtimeMs: stats.mtimeMs }); } catch (_) {}
+      return stats.mtimeMs;
+    } catch (finalErr) {
+      throw finalErr;
+    }
+  }
 }
 
 /**

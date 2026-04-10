@@ -53,6 +53,9 @@ describe('opencode audit runner', () => {
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     expect(result.auditText).toBe('Audit line 1\nAudit line 2');
     expect(result.terminatedOnWait).toBe(true);
+    // Structured parts should be available and include the two text lines
+    expect(Array.isArray(result.selectedMessageParts)).toBe(true);
+    expect(result.selectedMessageParts?.map(p => p.text)).toEqual(['Audit line 1', 'Audit line 2']);
     // Ensure the runner properly cleared timers and did not leave force-kill
     // timer running (best-effort smoke check). We cannot directly inspect
     // internal timers from here, but ensuring the child closed and kill was

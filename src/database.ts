@@ -189,14 +189,14 @@ export class WorklogDatabase {
    * 
    * @returns The path to the exported JSONL file
    */
-  async exportForSync(): Promise<string> {
+  async exportForSync(options?: any): Promise<string> {
     const items = this.store.getAllWorkItems();
     const comments = this.store.getAllComments();
     const dependencyEdges = this.store.getAllDependencyEdges();
-    
+
     // Export to JSONL
-    await exportToJsonlAsync(items, comments, this.jsonlPath, dependencyEdges);
-    
+    await exportToJsonlAsync(items, comments, this.jsonlPath, dependencyEdges, { onProgress: options?.onProgress });
+
     return this.jsonlPath;
   }
 

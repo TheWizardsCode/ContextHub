@@ -1,6 +1,7 @@
 import type { PluginContext } from '../plugin-types.js';
 import type { AuditOptions } from '../cli-types.js';
 import { runOpencodeAudit } from '../opencode-audit.js';
+import { theme } from '../theme.js';
 
 const toErrorMessage = (error: unknown): string => {
   if (error instanceof Error && error.message) return error.message;
@@ -35,16 +36,37 @@ export default function register(ctx: PluginContext): void {
         });
 
         if (utils.isJsonMode()) {
+          // Provide structured parts in JSON mode so consumers can render
+          // tool output separately from assistant text if desired.
           output.json({
             success: true,
             workItemId: normalizedId,
             auditText: result.auditText,
             terminatedOnWait: result.terminatedOnWait,
+            selectedMessageParts: result.selectedMessageParts ?? [],
           });
           return;
         }
 
-        process.stdout.write(`Audit complete:\n\n${result.auditText}\n`);
+        // Human output: prefer structured parts when available so we can
+        // render tool results in muted color while keeping assistant text
+        // in the default color. Fall back to legacy auditText when parts
+        // are not provided.
+        process.stdout.write('Audit complete:\n\n');
+        if (result.selectedMessageParts && result.selectedMessageParts.length > 0) {
+          for (const p of result.selectedMessageParts) {
+            const text = String(p.text || '');
+            // Treat any part that indicates a tool as muted (grey)
+            const partType = String(p.type || '').toLowerCase();
+            if (partType.includes('tool')) {
+              process.stdout.write(theme.text.muted(text) + '\n');
+            } else {
+              process.stdout.write(text + '\n');
+            }
+          }
+        } else {
+          process.stdout.write(`${result.auditText}\n`);
+        }
       } catch (error) {
         const message = toErrorMessage(error);
         if (utils.isJsonMode()) {

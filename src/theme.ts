@@ -33,6 +33,8 @@ export const theme = {
       lightText: 'white',
     },
     text: {
+      // Use a named gray foreground so blessed/markup recognizes the tag
+      // and renders a consistent muted/grey color in the TUI.
       muted: tuiWrap('gray-fg'),
       info: tuiWrap('cyan-fg'),
       success: tuiWrap('green-fg'),
