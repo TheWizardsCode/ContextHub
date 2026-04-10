@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
 import { createTempDir, cleanupTempDir } from './test-utils.js';
+import { getPackageVersion } from './cli/cli-helpers.js';
 import { fileURLToPath } from 'url';
 
 const execAsync = promisify(childProcess.exec);
@@ -87,7 +88,7 @@ describe('Plugin Integration Tests', () => {
     fs.writeFileSync(
       path.join(tempDir, '.worklog', 'initialized'),
       JSON.stringify({
-        version: '1.0.0',
+        version: getPackageVersion(),
         initializedAt: '2024-01-23T12:00:00.000Z'
       }),
       'utf-8'
@@ -369,7 +370,7 @@ describe('Global Plugin Discovery Integration Tests', () => {
     fs.writeFileSync(
       path.join(tempDir, '.worklog', 'initialized'),
       JSON.stringify({
-        version: '1.0.0',
+        version: getPackageVersion(),
         initializedAt: '2024-01-23T12:00:00.000Z'
       }),
       'utf-8'

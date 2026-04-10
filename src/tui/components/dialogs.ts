@@ -296,7 +296,14 @@ export class DialogsComponent {
     };
 
     this.updateDialog.on('show', updateLayout);
-    this.screen.on('resize', updateLayout);
+    // Some test doubles for blessed's screen do not implement `.on`.
+    // Guard the call so tests can provide lightweight mocks without a full
+    // blessed.Screen implementation.
+    try {
+      if (typeof (this.screen as any).on === 'function') {
+        this.screen.on('resize', updateLayout);
+      }
+    } catch (_) {}
   }
 
   create(): this {

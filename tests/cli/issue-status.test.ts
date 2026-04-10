@@ -15,7 +15,7 @@ describe('CLI Issue Status Tests', () => {
   beforeEach(() => {
     tempState = enterTempDir();
     writeConfig(tempState.tempDir, 'Test Project', 'TEST');
-    writeInitSemaphore(tempState.tempDir, '1.0.0');
+    writeInitSemaphore(tempState.tempDir);
   });
 
   afterEach(() => {

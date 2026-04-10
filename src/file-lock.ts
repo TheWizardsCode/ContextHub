@@ -107,6 +107,29 @@ export function readLockInfo(lockPath: string): FileLockInfo | null {
 }
 
 /**
+ * Read the raw lock file and indicate whether it parsed and whether
+ * required fields are present. This lets callers distinguish between
+ * "unparseable/garbage" (apply grace window) and "valid JSON but
+ * missing required fields" (treat as immediately corrupted/stale).
+ */
+export function readRawLock(lockPath: string): { parsed: boolean; info?: FileLockInfo; missingFields?: boolean } {
+  try {
+    const content = fs.readFileSync(lockPath, 'utf-8');
+    const parsed = JSON.parse(content);
+    if (parsed && typeof parsed === 'object') {
+      const info = parsed as FileLockInfo;
+      if (typeof info.pid === 'number' && typeof info.hostname === 'string') {
+        return { parsed: true, info };
+      }
+      return { parsed: true, missingFields: true };
+    }
+    return { parsed: true, missingFields: true };
+  } catch {
+    return { parsed: false };
+  }
+}
+
+/**
  * Synchronous sleep using `Atomics.wait`.  Blocks the calling thread
  * for the requested number of milliseconds **without** busy-waiting,
  * so CPU usage during the sleep is negligible.
@@ -256,7 +279,25 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
 
       // Lock file already exists — check for stale lock
       if (staleLockCleanup) {
-        const existing = readLockInfo(lockPath);
+        // Use readRawLock to distinguish between unparseable content and
+        // parsed JSON that is missing required fields (pid/hostname).
+        const raw = readRawLock(lockPath);
+        const existing = raw.info ?? null;
+
+        if (raw.parsed && raw.missingFields) {
+          // Valid JSON but missing required fields — treat as corrupted/stale
+          // and remove immediately. This matches test expectations and
+          // avoids waiting the grace window for what is likely a bogus file.
+          debugLog(`Corrupted lock file (valid JSON but missing fields), removing ${lockPath}`);
+          try {
+            fs.unlinkSync(lockPath);
+            continue;
+          } catch {
+            // Another process may have removed it; retry
+            continue;
+          }
+        }
+
         if (existing) {
           const sameHost = existing.hostname === os.hostname();
           if (sameHost && !isProcessAlive(existing.pid)) {
@@ -288,15 +329,11 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
             }
           }
         } else if (fs.existsSync(lockPath)) {
-          // Lock file exists but could not be parsed (corrupted, empty,
-          // or missing required fields).
-          //
-          // RACE-SAFETY: A concurrent process may have just created the
-          // file with O_EXCL but not yet finished writing + fsyncing the
-          // lock content.  To avoid deleting a half-written lock file
-          // (which would let both processes think they hold the lock),
-          // only treat the file as corrupted if it is older than a
-          // grace period (2× the retry delay, minimum 500ms).
+          // Lock file exists but could not be parsed (garbage, empty), or
+          // we already handled parsed-but-missing-fields above. For unparseable
+          // content we must be conservative: it may be a concurrent writer
+          // that hasn't finished writing+fsyncing yet. Use a small grace
+          // window before removing to avoid races.
           try {
             const stat = fs.statSync(lockPath);
             const fileAge = Date.now() - stat.mtimeMs;

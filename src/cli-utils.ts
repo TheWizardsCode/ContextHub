@@ -8,7 +8,7 @@ import { loadConfig, loadConfigRelaxed, isInitialized, getDefaultPrefix } from '
 import { getDefaultDataPath } from './jsonl.js';
 import type { PluginContext } from './plugin-types.js';
 
-const WORKLOG_VERSION = '0.0.1';
+import { WORKLOG_VERSION } from './version.js';
 
 /**
  * Output formatting helpers
@@ -134,5 +134,23 @@ export function createPluginContext(program: Command): PluginContext {
  * Get Worklog version
  */
 export function getVersion(): string {
+  try {
+    // Resolve package.json relative to project root (where this module is
+    // located). Use dynamic import so this works under ESM and in tests.
+    // Keep this synchronous-ish by using require-style read via fs.
+    // Use a try/catch to avoid throwing in environments where filesystem
+    // access is restricted.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const path = require('path');
+    const pkgPath = path.resolve(process.cwd(), 'package.json');
+    // We deliberately avoid require() because of ESM; use fs.readFileSync instead.
+    // Import fs lazily to keep startup cost low.
+    const fs = require('fs');
+    const raw = fs.readFileSync(pkgPath, 'utf8');
+    const pkg = JSON.parse(raw);
+    if (pkg && pkg.version) return String(pkg.version);
+  } catch (_) {
+    // ignore and fall back
+  }
   return WORKLOG_VERSION;
 }

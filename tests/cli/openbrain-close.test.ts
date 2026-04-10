@@ -43,7 +43,7 @@ describe('close command + OpenBrain integration', () => {
 
   beforeEach(() => {
     tempState = enterTempDir();
-    writeInitSemaphore(tempState.tempDir, '1.0.0');
+    writeInitSemaphore(tempState.tempDir);
   });
 
   afterEach(() => {

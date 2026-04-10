@@ -180,15 +180,30 @@ export function writeConfig(dir: string, projectName: string = 'Test Project', p
 
 export function writeInitSemaphore(
   dir: string,
-  version: string = '1.0.0',
+  version: string = undefined as unknown as string,
   initializedAt: string = '2024-01-23T12:00:00.000Z'
 ): void {
   fs.mkdirSync(path.join(dir, '.worklog'), { recursive: true });
+  const v = version ?? getPackageVersion();
   fs.writeFileSync(
     path.join(dir, '.worklog', 'initialized'),
-    JSON.stringify({ version, initializedAt }),
+    JSON.stringify({ version: v, initializedAt }),
     'utf-8'
   );
+}
+
+/**
+ * Read the package.json version from the project root so tests use the
+ * same single source of truth as the application.
+ */
+export function getPackageVersion(): string {
+  try {
+    const pkgPath = path.join(projectRoot, 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as { version?: string };
+    return pkg.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
 }
 
 export function seedWorkItems(

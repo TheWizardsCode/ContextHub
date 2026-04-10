@@ -9,7 +9,10 @@ it('in-process harness preserves options and description-file handling', async (
     process.chdir(temp);
     fs.mkdirSync('.worklog', { recursive: true });
     fs.writeFileSync('.worklog/config.yaml', 'projectName: HarnessTest\nprefix: HRT\nstatuses:\n  - value: open\n    label: Open\nstages:\n  - value: ""\n    label: Undefined\n', 'utf8');
-    fs.writeFileSync('.worklog/initialized', JSON.stringify({ version: '1.0.0', initializedAt: new Date().toISOString() }), 'utf8');
+    // Use package.json version for the initialized marker so tests follow the
+    // single source of truth.
+    const { getPackageVersion } = await import('./cli-helpers.js');
+    fs.writeFileSync('.worklog/initialized', JSON.stringify({ version: getPackageVersion(), initializedAt: new Date().toISOString() }), 'utf8');
 
     const createRes = await runInProcess(`node src/cli.ts --json create -t "To update"`, 5000);
     const created = JSON.parse(createRes.stdout);

@@ -769,10 +769,12 @@ export class TuiController {
     // Debug helpers: log raw key events when debugging is enabled
     if (chordDebug) {
       try {
-        const origOn = screen.on.bind(screen);
-        screen.on('keypress', (_ch: any, key: any) => {
-          try { console.error(`[tui] raw keypress: ch='${String(_ch)}' key=${JSON.stringify(key)}`); } catch (_) {}
-        });
+        if (typeof (screen as any).on === 'function') {
+          const origOn = (screen as any).on.bind(screen);
+          (screen as any).on('keypress', (_ch: any, key: any) => {
+            try { console.error(`[tui] raw keypress: ch='${String(_ch)}' key=${JSON.stringify(key)}`); } catch (_) {}
+          });
+        }
       } catch (_) {}
     }
 
@@ -3426,7 +3428,9 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
 
     // Raw keypress handler feeds into chord handler. If the chord system
     // consumes the event, stop further processing.
-    screen.on('keypress', (_ch: any, key: any) => {
+    if (typeof (screen as any).on === 'function') {
+      try {
+        (screen as any).on('keypress', (_ch: any, key: any) => {
       debugLog(`Raw keypress: ch="${_ch}", key.name="${key?.name}", key.ctrl=${key?.ctrl}, key.meta=${key?.meta}`);
         try {
           if (chordHandler.feed(key as KeyInfo)) {
@@ -3473,7 +3477,9 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         // No legacy pending-state fallback: chordHandler.feed handles all
         // Ctrl-W prefixes and their follow-ups. If chordHandler didn't
         // consume the event we fall through to normal key handlers.
-      });
+        });
+      } catch (_) {}
+    }
 
         // Keep lightweight screen.key wrappers so tests and some widget-level
         // handlers that register via screen.key still see a handler. These
@@ -4381,7 +4387,9 @@ const visible = buildVisible();
       closeDetails();
     });
 
-    screen.on('mouse', (data: any) => {
+    if (typeof (screen as any).on === 'function') {
+      try {
+        (screen as any).on('mouse', (data: any) => {
       if (!data || !['mousedown', 'mouseup', 'click'].includes(data.action)) return;
       if (!detailModal.hidden && Date.now() < suppressDetailCloseUntil) return;
       if (!detailModal.hidden && !isInside(detailModal, data.x, data.y)) {
@@ -4425,6 +4433,8 @@ const visible = buildVisible();
           openDetailsFromClick(getRenderedLineAtScreen(detail as any, data));
         }
       }
-    });
+        });
+      } catch (_) {}
+    }
   }
 }

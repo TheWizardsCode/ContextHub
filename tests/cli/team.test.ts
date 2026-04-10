@@ -11,6 +11,7 @@ import {
   writeInitSemaphore
 } from './cli-helpers.js';
 import { cleanupTempDir, createTempDir } from '../test-utils.js';
+import { getPackageVersion } from './cli-helpers.js';
 
 describe('CLI Team Tests', () => {
   let tempState: { tempDir: string; originalCwd: string };
@@ -18,7 +19,7 @@ describe('CLI Team Tests', () => {
   beforeEach(() => {
     tempState = enterTempDir();
     writeConfig(tempState.tempDir, 'Test Project', 'TEST');
-    writeInitSemaphore(tempState.tempDir, '1.0.0');
+    writeInitSemaphore(tempState.tempDir);
   });
 
   afterEach(() => {
@@ -99,7 +100,7 @@ describe('CLI Team Tests', () => {
         fs.writeFileSync(
           '.worklog/initialized',
           JSON.stringify({
-            version: '1.0.0',
+            version: getPackageVersion(),
             initializedAt: '2024-01-23T12:00:00.000Z'
           }),
           'utf-8'

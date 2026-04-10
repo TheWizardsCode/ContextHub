@@ -8,7 +8,11 @@ import {
   leaveTempDir,
   seedWorkItems,
   writeConfig,
-  writeInitSemaphore
+  writeInitSemaphore,
+  // getPackageVersion is provided by cli-helpers to read package.json
+  // and keep tests in sync with the application's canonical version.
+  // eslint-disable-next-line import/no-unresolved
+  getPackageVersion
 } from './cli-helpers.js';
 import { initRepo, initBareRepo } from './git-helpers.js';
 import { cleanupTempDir, createTempDir } from '../test-utils.js';
@@ -103,12 +107,13 @@ describe('CLI Init Tests', () => {
       const result = JSON.parse(stdout);
       expect(result.success).toBe(true);
       expect(result.message).toContain('already exists');
-      expect(result.version).toBe('0.0.1');
+      // version should match package.json
+      expect(result.version).toBe(getPackageVersion());
       expect(result.initializedAt).toBeDefined();
 
       expect(fs.existsSync('.worklog/initialized')).toBe(true);
       const semaphore = JSON.parse(fs.readFileSync('.worklog/initialized', 'utf-8'));
-      expect(semaphore.version).toBe('0.0.1');
+      expect(semaphore.version).toBe(getPackageVersion());
       expect(semaphore.initializedAt).toBeDefined();
     } finally {
       leaveTempDir(tempState);
@@ -143,7 +148,7 @@ describe('CLI Init Tests', () => {
       await execAsync('git push -u origin HEAD', { cwd: sourceRepo });
 
       writeConfig(sourceRepo, 'Sync Test', 'SYNC');
-      writeInitSemaphore(sourceRepo, '0.0.1');
+      writeInitSemaphore(sourceRepo);
 
       seedWorkItems(sourceRepo, [
         { title: 'Seed item' },

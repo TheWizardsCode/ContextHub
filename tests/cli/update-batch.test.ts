@@ -30,7 +30,7 @@ describe('update batch behaviour', () => {
   beforeEach(() => {
     tempState = enterTempDir();
     writeConfig(tempState.tempDir, 'Test Project', 'TEST');
-    writeInitSemaphore(tempState.tempDir, '1.0.0');
+    writeInitSemaphore(tempState.tempDir);
   });
 
   afterEach(() => {

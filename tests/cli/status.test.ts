@@ -7,7 +7,8 @@ import {
   enterTempDir,
   leaveTempDir,
   writeConfig,
-  writeInitSemaphore
+  writeInitSemaphore,
+  getPackageVersion
 } from './cli-helpers.js';
 
 describe('CLI Status Tests', () => {
@@ -16,7 +17,7 @@ describe('CLI Status Tests', () => {
   beforeEach(() => {
     tempState = enterTempDir();
     writeConfig(tempState.tempDir, 'Test Project', 'TEST');
-    writeInitSemaphore(tempState.tempDir, '1.0.0');
+    writeInitSemaphore(tempState.tempDir);
   });
 
   afterEach(() => {
@@ -41,7 +42,7 @@ describe('CLI Status Tests', () => {
     fs.writeFileSync(
       '.worklog/initialized',
       JSON.stringify({
-        version: '1.0.0',
+        version: getPackageVersion(),
         initializedAt: '2024-01-23T12:00:00.000Z'
       }),
       'utf-8'
@@ -52,7 +53,7 @@ describe('CLI Status Tests', () => {
     const result = JSON.parse(stdout);
     expect(result.success).toBe(true);
     expect(result.initialized).toBe(true);
-    expect(result.version).toBe('1.0.0');
+    expect(result.version).toBe(getPackageVersion());
     expect(result.initializedAt).toBe('2024-01-23T12:00:00.000Z');
     expect(result.config).toBeDefined();
     expect(result.config.projectName).toBe('Test Project');
@@ -70,7 +71,7 @@ describe('CLI Status Tests', () => {
     fs.writeFileSync(
       '.worklog/initialized',
       JSON.stringify({
-        version: '1.0.0',
+        version: getPackageVersion(),
         initializedAt: '2024-01-23T12:00:00.000Z'
       }),
       'utf-8'
@@ -97,7 +98,7 @@ describe('CLI Status Tests', () => {
     fs.writeFileSync(
       '.worklog/initialized',
       JSON.stringify({
-        version: '1.0.0',
+        version: getPackageVersion(),
         initializedAt: '2024-01-23T12:00:00.000Z'
       }),
       'utf-8'

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createTempDir, cleanupTempDir, createTempDbPath, createTempJsonlPath } from './test-utils.js';
+import { getPackageVersion } from './cli/cli-helpers.js';
 import { WorklogDatabase } from '../src/database.js';
 import { runInProcess } from './cli/cli-inproc.js';
 import { createAPI } from '../src/api.js';
@@ -25,7 +26,7 @@ describe('comment normalization end-to-end (CLI, API, TUI)', () => {
     dbPath = `${cfgDir}/worklog.db`;
     // Minimal config and initialized marker so CLI recognizes the project
     fs.writeFileSync(`${cfgDir}/config.yaml`, `projectName: E2E\nprefix: E2E\n`, 'utf8');
-    fs.writeFileSync(`${cfgDir}/initialized`, JSON.stringify({ version: '1.0.0', initializedAt: new Date().toISOString() }), 'utf8');
+    fs.writeFileSync(`${cfgDir}/initialized`, JSON.stringify({ version: getPackageVersion(), initializedAt: new Date().toISOString() }), 'utf8');
     db = new WorklogDatabase('E2E', dbPath, jsonlPath, true, true);
   });
 
@@ -52,7 +53,7 @@ describe('comment normalization end-to-end (CLI, API, TUI)', () => {
       const fs = await import('fs');
       fs.mkdirSync(cfgDir, { recursive: true });
       fs.writeFileSync(`${cfgDir}/config.yaml`, `projectName: E2E\nprefix: E2E\n`, 'utf8');
-      fs.writeFileSync(`${cfgDir}/initialized`, JSON.stringify({ version: '1.0.0', initializedAt: new Date().toISOString() }), 'utf8');
+      fs.writeFileSync(`${cfgDir}/initialized`, JSON.stringify({ version: getPackageVersion(), initializedAt: new Date().toISOString() }), 'utf8');
 
       const cmd = `node src/cli.ts comment add ${item.id} --comment "First\\nSecond" --author cli-test`;
       result = await runInProcess(cmd);

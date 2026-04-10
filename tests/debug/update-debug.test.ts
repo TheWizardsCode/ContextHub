@@ -11,7 +11,8 @@ it('debug update with description-file', async () => {
     // write minimal config and initialized semaphore
     fs.mkdirSync('.worklog', { recursive: true });
     fs.writeFileSync('.worklog/config.yaml', 'projectName: Debug\nprefix: DBG\nstatuses:\n  - value: open\n    label: Open\nstages:\n  - value: ""\n    label: Undefined\n', 'utf8');
-    fs.writeFileSync('.worklog/initialized', JSON.stringify({ version: '1.0.0', initializedAt: new Date().toISOString() }), 'utf8');
+    const { getPackageVersion } = await import('../cli/cli-helpers.js');
+    fs.writeFileSync('.worklog/initialized', JSON.stringify({ version: getPackageVersion(), initializedAt: new Date().toISOString() }), 'utf8');
 
     // create an item
     const createRes = await runInProcess(`node src/cli.ts --json create -t "To update"`, 5000);

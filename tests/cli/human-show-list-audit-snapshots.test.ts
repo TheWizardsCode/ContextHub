@@ -7,7 +7,7 @@ describe('Human snapshots: show and list outputs with audit', () => {
   beforeEach(() => {
     state = enterTempDir();
     writeConfig(state.tempDir, 'Test Project', 'TEST');
-    writeInitSemaphore(state.tempDir, '1.0.0');
+    writeInitSemaphore(state.tempDir);
   });
 
   afterEach(() => {

@@ -7,7 +7,7 @@ describe('integration: audit skill CLI write path', () => {
   beforeEach(() => {
     state = enterTempDir();
     writeConfig(state.tempDir, 'Test Project', 'TEST');
-    writeInitSemaphore(state.tempDir, '1.0.0');
+    writeInitSemaphore(state.tempDir);
   });
 
   afterEach(() => {
