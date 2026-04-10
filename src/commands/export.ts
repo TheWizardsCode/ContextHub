@@ -24,7 +24,23 @@ export default function register(ctx: PluginContext): void {
         const items = db.getAll();
         const comments = db.getAllComments();
         const dependencyEdges = db.getAllDependencyEdges();
-        await exportToJsonlAsync(items, comments, filePath, dependencyEdges);
+
+        const progressHandler = (evt: { type: 'progress' | 'done' | 'error'; percent?: number; itemsProcessed?: number; mtimeMs?: number; error?: string }) => {
+          if (utils.isJsonMode()) return;
+          try {
+            if (evt.type === 'progress') {
+              const pct = typeof evt.percent === 'number' ? `${evt.percent}%` : '';
+              const itemsProcessed = typeof evt.itemsProcessed === 'number' ? ` ${evt.itemsProcessed} processed` : '';
+              process.stderr.write(`\rExporting JSONL: ${pct}${itemsProcessed}`);
+            } else if (evt.type === 'done') {
+              process.stderr.write('\rExport complete.                      \n');
+            } else if (evt.type === 'error') {
+              process.stderr.write('\rExport error: ' + (evt.error || 'unknown') + '\n');
+            }
+          } catch {}
+        };
+
+        await exportToJsonlAsync(items, comments, filePath, dependencyEdges, { onProgress: progressHandler });
         
         if (utils.isJsonMode()) {
           output.json({ 

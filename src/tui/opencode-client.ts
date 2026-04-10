@@ -318,14 +318,15 @@ export class OpencodeClient {
             }
           }
 
+          const _printedTexts = new Set<string>();
           if (sessionExisting) {
             try {
               const history = await this.getSessionMessages(sessionId);
               if (pane.setContent) {
                 let histText = '';
                 // Use renderer for markdown-like content when available
-                let _histRenderer: ((s: string, o?: any) => string) | null = null;
-                try { _histRenderer = require('./markdown-renderer.js').renderMarkdownToTags; } catch (_) { _histRenderer = null; }
+                 let _histRenderer: ((s: string, o?: any) => string) | null = null;
+                 try { _histRenderer = require('./markdown-renderer.js').renderMarkdownToTags; } catch (_) { _histRenderer = null; }
                 for (const m of history) {
                   const role = m.info?.role || 'unknown';
                   histText += `{gray-fg}[${role}]{/}\n`;
@@ -339,6 +340,12 @@ export class OpencodeClient {
                   });
                   for (const p of parts) {
                     if (p.type === 'text' && p.text) {
+                      // Avoid printing duplicate text parts that were already
+                      // rendered earlier in the history view.
+                      const key = String(p.text).trim();
+                      if (key && _printedTexts.has(key)) continue;
+                      if (key) _printedTexts.add(key);
+
                       const rendered = _histRenderer ? _histRenderer(p.text) : p.text;
                       if (role === 'assistant' && isToolCall) {
                         histText += `${theme.tui.text.muted(rendered)}\n`;
@@ -374,13 +381,23 @@ export class OpencodeClient {
                       const parts = m.parts || [];
                     for (const p of parts) {
                       if (p.type === 'text' && p.text) {
+                        const key = String(p.text).trim();
+                        if (key && _printedTexts.has(key)) continue;
+                        if (key) _printedTexts.add(key);
+
                         const rendered = _histRenderer ? _histRenderer(p.text) : p.text;
-                        if (m.info?.role === 'assistant' && ((m.info && m.info.finish === 'tool-calls') || parts.some((pp:any) => ['tool','tool-use','tool-result','step-start','step-finish'].includes(pp?.type)))) {
+                        const isAssistantToolCall = m.info?.role === 'assistant' && ((m.info && m.info.finish === 'tool-calls') || parts.some((pp:any) => ['tool','tool-use','tool-result','step-start','step-finish'].includes(pp?.type)));
+                        if (isAssistantToolCall) {
                           histText += `${theme.tui.text.muted(rendered)}\n`;
                         } else {
                           histText += `${rendered}\n`;
                         }
                       } else if (p.type === 'tool-result' && p.content) {
+                        // Avoid duplicate tool-result content based on exact text
+                        const key = String(p.content).trim();
+                        if (key && _printedTexts.has(key)) continue;
+                        if (key) _printedTexts.add(key);
+
                         // Render tool results in muted/gray for TUI
                         histText += `${theme.tui.text.muted('[Tool Result]')}\n`;
                         const rendered = _histRenderer ? _histRenderer(p.content) : String(p.content);
@@ -798,6 +815,24 @@ export class OpencodeClient {
     onSessionEnd: () => void,
   ) {
     let streamText = pane.getContent ? pane.getContent() : '';
+    // Track how much of streamText has already been pushed to a pane that
+    // implements pushLine (which appends). This lets updatePane send only
+    // the new delta to pushLine instead of re-sending the entire buffer
+    // on every update (which caused duplicated content).
+    let lastPushedIndex = streamText.length;
+    // Update mode determines whether updatePane should append a delta via
+    // pushLine ('append') or replace the whole content via setContent
+    // ('replace'). When we update previously-rendered regions (e.g. while
+    // composing a muted "thinking" block) we set 'replace' so the
+    // implementation uses setContent to overwrite the pane.
+    let lastUpdateMode: 'append' | 'replace' = 'append';
+    // Composition state for streaming assistant "thinking" content. While
+    // composing=true we render a muted block and update it in-place. When
+    // the assistant finishes we replace the muted block with the final
+    // un-muted message text.
+    let composing = false;
+    let composingRangeStart: number | null = null;
+    let composingBuffer = '';
     // Lazy import renderer to keep startup cheap and avoid circular deps in tests
     let renderer: ((s: string, o?: any) => string) | null = null;
     const getRenderer = () => {
@@ -847,19 +882,26 @@ export class OpencodeClient {
       streamText += cleaned + '\n';
     };
     const updatePane = () => {
-      // Prefer using pushLine when available since some TUI implementations
-      // (and tests) mock pushLine to observe appended lines. When pushLine
-      // is present, call it with the current accumulated streamText so
-      // consumers receive the update. Otherwise fall back to setContent
-      // which replaces the whole pane content.
+      // Prefer using pushLine when available and we're in append mode.
+      // If we've modified previously-rendered content (replace mode) then
+      // setContent must be used to overwrite the pane.
       try {
-        if (typeof pane.pushLine === 'function') {
-          try { pane.pushLine(streamText); } catch (_) {
-            // If pushLine fails for any reason, fall back to setContent
+        if (typeof pane.pushLine === 'function' && lastUpdateMode === 'append') {
+          try {
+            const delta = streamText.slice(lastPushedIndex);
+            if (delta && delta.length > 0) {
+              pane.pushLine(delta);
+              lastPushedIndex = streamText.length;
+            }
+          } catch (_err) {
             if (typeof pane.setContent === 'function') pane.setContent(streamText);
+            lastPushedIndex = streamText.length;
+            lastUpdateMode = 'append';
           }
         } else if (typeof pane.setContent === 'function') {
           pane.setContent(streamText);
+          lastPushedIndex = streamText.length;
+          lastUpdateMode = 'append';
         }
       } catch (_) {
         // best-effort: ignore pane update failures
@@ -870,22 +912,103 @@ export class OpencodeClient {
       }
       this.options.render();
     };
+    const ensureBlankLineBefore = () => {
+      // Ensure exactly one blank line separates previous content from the
+      // composing block. Do nothing for empty streams.
+      if (!streamText || streamText.length === 0) return;
+      if (streamText.endsWith('\n\n')) return;
+      if (streamText.endsWith('\n')) streamText += '\n';
+      else streamText += '\n\n';
+    };
+
+    const escapeForBlessedTags = (value: string) => {
+      return String(value).replace(/[{}]/g, (ch) => (ch === '{' ? '{open}' : '{close}'));
+    };
+
+    const renderComposingMuted = (value: string) => {
+      // Keep streamed composing text visually muted/grey regardless of
+      // markdown formatting tags. Final (completed) output is rendered
+      // normally in finalizeComposing().
+      const escaped = escapeForBlessedTags(value);
+      const styled = theme.tui.text.muted(escaped);
+      return styled.endsWith('\n') ? styled.slice(0, -1) : styled;
+    };
+
+    const finalizeComposing = (mode: 'final' | 'muted' = 'final') => {
+      if (!composing || composingRangeStart === null) return;
+      try {
+        let cleaned = '';
+        if (mode === 'muted') {
+          // Keep this completed composing block muted. This is used for
+          // assistant text that precedes tool usage.
+          cleaned = renderComposingMuted(composingBuffer);
+        } else {
+          const r = getRenderer();
+          const finalRendered = r ? r(composingBuffer) : composingBuffer;
+          cleaned = finalRendered.endsWith('\n') ? finalRendered.slice(0, -1) : finalRendered;
+        }
+        // Replace the composing block with either muted (tool-call prelude)
+        // or final un-muted text.
+        streamText = streamText.slice(0, composingRangeStart) + cleaned + '\n';
+        composing = false;
+        composingBuffer = '';
+        composingRangeStart = null;
+        // We replaced earlier content — instruct updatePane to use setContent
+        lastUpdateMode = 'replace';
+      } catch (_) {
+        // ignore
+      }
+      updatePane();
+    };
+
     const handlers: OpencodeSseHandlers = {
-      onTextDelta: (text) => {
-        // Receiving streaming text usually indicates the assistant is
-        // composing a response — present that as "Writing response..."
+      onTextDelta: (diff) => {
+        // Streaming partial text — show as muted/thinking while composing.
         setActivity('Writing response...');
         lastToolKey = null;
-        appendText(text);
+
+        try {
+          if (!composing) {
+            ensureBlankLineBefore();
+            composing = true;
+            composingRangeStart = streamText.length;
+            composingBuffer = '';
+          }
+
+          composingBuffer += diff;
+          const cleaned = renderComposingMuted(composingBuffer);
+          if (composingRangeStart !== null) {
+            streamText = streamText.slice(0, composingRangeStart) + cleaned + '\n';
+            lastUpdateMode = 'replace';
+          }
+        } catch (_) {}
+
         updatePane();
       },
       onTextReset: (text) => {
         setActivity('Writing response...');
         lastToolKey = null;
-        appendLine(text);
+
+        try {
+          if (!composing) {
+            ensureBlankLineBefore();
+            composing = true;
+            composingRangeStart = streamText.length;
+          }
+          composingBuffer = text;
+          const cleaned = renderComposingMuted(composingBuffer);
+          if (composingRangeStart !== null) {
+            streamText = streamText.slice(0, composingRangeStart) + cleaned + '\n';
+            lastUpdateMode = 'replace';
+          }
+        } catch (_) {}
+
         updatePane();
       },
       onToolUse: (toolName, description) => {
+        // Ensure any in-progress composing block is finalized before
+        // emitting tool-related content so ordering remains correct.
+        try { finalizeComposing('muted'); } catch (_) {}
         const safeName = toolName || 'tool';
         const key = `${safeName}|${description || ''}`;
         if (key === lastToolKey) return;
@@ -901,6 +1024,9 @@ export class OpencodeClient {
         updatePane();
       },
       onToolResult: (content) => {
+        // Finalize any composing block before inserting tool results so
+        // the tool output doesn't get mixed into the muted composing area.
+        try { finalizeComposing('muted'); } catch (_) {}
         lastToolKey = null;
         setActivity('Processing result...');
         // Use muted/gray styling for the tool result label and content
@@ -922,6 +1048,8 @@ export class OpencodeClient {
         }, 600);
       },
       onPermissionRequest: () => {
+        // Finalize composing before showing permission UI
+        try { finalizeComposing('muted'); } catch (_) {}
         setActivity('Permission required');
         indicator?.setContent?.('{yellow-fg}[!] Permission Required{/}');
         indicator?.show?.();
@@ -931,6 +1059,9 @@ export class OpencodeClient {
         updatePane();
       },
       onQuestionAsked: (question, raw) => {
+        // Finalize composing so the question appears after any prior
+        // assistant text.
+        try { finalizeComposing('muted'); } catch (_) {}
         this.options.log(`sse question asked: ${question.question}`);
         this.options.log(`sse question options: ${JSON.stringify(question.options || [])}`);
 
@@ -976,6 +1107,8 @@ export class OpencodeClient {
         answerReq.end();
       },
       onInputRequest: (input) => {
+        // Finalize composing before prompting for input
+        try { finalizeComposing('muted'); } catch (_) {}
         const inputType = input.type || 'text';
         const promptText = input.prompt || 'Input required';
 
@@ -1025,8 +1158,11 @@ export class OpencodeClient {
         });
       },
       onSessionEnd: () => {
-        // Reset activity and call the provided session end handler so the
-        // controller can restore prompt state and spinner.
+        // Finalize any composing content first so the final assistant
+        // message replaces the muted block, then reset activity and
+        // call the provided session end handler so the controller can
+        // restore prompt state and spinner.
+        try { finalizeComposing('final'); } catch (_) {}
         try { setActivity(null); } catch (_) {}
         try { onSessionEnd(); } catch (_) {}
       },

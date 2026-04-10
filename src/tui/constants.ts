@@ -69,12 +69,13 @@ export const DEFAULT_SHORTCUTS = [
     category: 'Filters',
     items: [
       { keys: '/', description: 'Search/Filter' },
-      { keys: 'I', description: 'Show in-progress only' },
-      { keys: 'a', description: 'Show open items' },
-      { keys: 'B', description: 'Show blocked only' },
-      { keys: 'V', description: 'Needs review filter (cycle)' },
-      { keys: 'T', description: 'Show intake_completed items' },
-      { keys: 'P', description: 'Show plan_complete items' },
+      { keys: 'Alt+I', description: 'Show in-progress only' },
+      { keys: 'Alt+A', description: 'Show open items' },
+      { keys: 'Alt+B', description: 'Show blocked only' },
+      { keys: 'Alt+V', description: 'Needs review filter (cycle)' },
+      { keys: 'Alt+T', description: 'Show intake_completed items' },
+      { keys: 'Alt+P', description: 'Show plan_complete items' },
+      { keys: 'Alt+g', description: 'Show items delegated to Copilot' },
     ],
   },
   {
@@ -155,6 +156,8 @@ export const KEY_FILTER_BLOCKED = ['b', 'B'];
 export const KEY_FILTER_NEEDS_REVIEW = ['v', 'V'];
 export const KEY_FILTER_INTAKE_COMPLETED = ['t', 'T'];
 export const KEY_FILTER_PLAN_COMPLETED = ['p', 'P'];
+// Copilot filter: require Alt+g (meta-g) as a chorded filter key
+export const KEY_FILTER_COPILOT = ['M-g'];
 export const KEY_TOGGLE_DO_NOT_DELEGATE = ['d', 'D'];
 export const KEY_TOGGLE_NEEDS_REVIEW = ['r', 'R'];
 export const KEY_MOVE = ['m', 'M'];

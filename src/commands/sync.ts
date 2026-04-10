@@ -193,7 +193,26 @@ async function performSync(
 
   // Ephemeral JSONL pattern: Export SQLite → JSONL → Push → Delete local JSONL
   // JSONL only exists transiently during sync operations
-  const jsonlPath = await db.exportForSync();
+  // Provide a small progress handler so CLI users see export progress.
+  const progressHandler = (evt: { type: 'progress' | 'done' | 'error'; percent?: number; itemsProcessed?: number; mtimeMs?: number; error?: string }) => {
+    if (isJsonMode) return; // avoid polluting JSON output
+    try {
+      if (evt.type === 'progress') {
+        const pct = typeof evt.percent === 'number' ? `${evt.percent}%` : '';
+        const items = typeof evt.itemsProcessed === 'number' ? ` ${evt.itemsProcessed} processed` : '';
+        // Write to stderr and keep carriage return so it updates in place
+        process.stderr.write(`\rExporting JSONL: ${pct}${items}`);
+      } else if (evt.type === 'done') {
+        process.stderr.write('\rExport complete.                      \n');
+      } else if (evt.type === 'error') {
+        process.stderr.write('\rExport error: ' + (evt.error || 'unknown') + '\n');
+      }
+    } catch {
+      // ignore handler errors
+    }
+  };
+
+  const jsonlPath = await db.exportForSync({ onProgress: progressHandler });
   
   if (options.push) {
     if (!isJsonMode && !isSilent) {

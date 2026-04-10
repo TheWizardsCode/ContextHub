@@ -1,6 +1,7 @@
 import { spawnSync } from 'child_process';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
+import { test, expect } from 'vitest';
 
 test('dist CLI loads without syntax errors and prints version', () => {
   const pkg = JSON.parse(readFileSync(resolve(__dirname, '../../package.json'), 'utf8'));

@@ -9,6 +9,7 @@ type OpencodeJsonEvent = {
   part?: {
     type?: unknown;
     text?: unknown;
+    content?: unknown;
     messageID?: unknown;
   };
   question?: unknown;
@@ -31,6 +32,11 @@ export interface RunOpencodeAuditResult {
   auditText: string;
   terminatedOnWait: boolean;
   exitCode: number;
+  /**
+   * Structured parts for the selected message (if available).
+   * Each part includes the text and an optional part type (eg. 'text', 'tool-result').
+   */
+  selectedMessageParts?: Array<{ text: string; type?: string }>;
 }
 
 const normalizeEventLabel = (value: string): string => value.toLowerCase().replace(/[\s._-]+/g, ' ').trim();
@@ -78,42 +84,48 @@ export function isWaitingForInputEvent(event: unknown): boolean {
   return false;
 }
 
-const extractTextPayload = (event: OpencodeJsonEvent): { messageId: string; text: string } | null => {
+const extractTextPayload = (event: OpencodeJsonEvent): { messageId: string; text: string; partType?: string } | null => {
   const part = event.part;
-  const text = toStringValue(part?.text);
+  // Prefer explicit text, fall back to content (tool results often use `content`).
+  const text = toStringValue(part?.text ?? part?.content);
   if (!text) return null;
 
   const eventType = normalizeEventLabel(toStringValue(event.type) || '');
   const partType = normalizeEventLabel(toStringValue(part?.type) || '');
 
-  if (eventType !== '' && eventType !== 'text' && partType !== 'text') {
+  // Accept textual parts or tool-result parts. Preserve compatibility with
+  // older logic by allowing events with empty or 'text' event types.
+  if (eventType !== '' && eventType !== 'text' && !partType.includes('text') && !partType.includes('tool')) {
     return null;
   }
 
   const messageId = toStringValue(part?.messageID) || '__default__';
-  return { messageId, text };
+  return { messageId, text, partType };
 };
 
-const pushUniqueLine = (target: string[], line: string): void => {
-  if (target.length === 0 || target[target.length - 1] !== line) {
-    target.push(line);
+const pushUniquePart = (target: Array<{ text: string; type?: string }>, text: string, type?: string): void => {
+  if (target.length === 0 || target[target.length - 1].text !== text) {
+    target.push({ text, type });
   }
 };
 
-const selectAuditText = (textsByMessage: Map<string, string[]>, messageOrder: string[]): string => {
+const selectAuditMessageParts = (
+  textsByMessage: Map<string, Array<{ text: string; type?: string }>>,
+  messageOrder: string[],
+): { text: string; parts: Array<{ text: string; type?: string }> } => {
   for (let i = messageOrder.length - 1; i >= 0; i -= 1) {
     const messageId = messageOrder[i];
     const chunks = textsByMessage.get(messageId) || [];
-    const candidate = chunks.join('\n').trim();
-    if (candidate !== '') return candidate;
+    const candidate = chunks.map(c => c.text).join('\n').trim();
+    if (candidate !== '') return { text: candidate, parts: chunks };
   }
 
   for (const chunks of textsByMessage.values()) {
-    const candidate = chunks.join('\n').trim();
-    if (candidate !== '') return candidate;
+    const candidate = chunks.map(c => c.text).join('\n').trim();
+    if (candidate !== '') return { text: candidate, parts: chunks };
   }
 
-  return '';
+  return { text: '', parts: [] };
 };
 
 const formatSpawnError = (error: unknown): string => {
@@ -143,7 +155,7 @@ export async function runOpencodeAudit(options: RunOpencodeAuditOptions): Promis
 
   const parseErrors: string[] = [];
   const stderrLines: string[] = [];
-  const textsByMessage = new Map<string, string[]>();
+  const textsByMessage = new Map<string, Array<{ text: string; type?: string }>>();
   const messageOrder: string[] = [];
 
   let terminatedOnWait = false;
@@ -213,13 +225,13 @@ export async function runOpencodeAudit(options: RunOpencodeAuditOptions): Promis
     const textPayload = extractTextPayload(event);
     if (!textPayload) return;
 
-    const { messageId, text } = textPayload;
+    const { messageId, text, partType } = textPayload;
     if (!textsByMessage.has(messageId)) {
       textsByMessage.set(messageId, []);
       messageOrder.push(messageId);
     }
     const chunks = textsByMessage.get(messageId)!;
-    pushUniqueLine(chunks, text);
+    pushUniquePart(chunks, text, partType || undefined);
   };
 
   const flushStdoutBuffer = () => {
@@ -328,7 +340,8 @@ export async function runOpencodeAudit(options: RunOpencodeAuditOptions): Promis
     throw new Error(`Failed to parse opencode JSON output. First invalid line: ${preview}`);
   }
 
-  const auditText = selectAuditText(textsByMessage, messageOrder);
+  const selected = selectAuditMessageParts(textsByMessage, messageOrder);
+  const auditText = selected.text;
   if (auditText === '') {
     throw new Error('Audit output did not include assistant text.');
   }
@@ -344,5 +357,6 @@ export async function runOpencodeAudit(options: RunOpencodeAuditOptions): Promis
     auditText,
     terminatedOnWait,
     exitCode,
+    selectedMessageParts: selected.parts,
   };
 }
