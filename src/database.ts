@@ -1344,6 +1344,7 @@ export class WorklogDatabase {
     options: {
       assignee?: string;
       searchTerm?: string;
+      stage?: string;
       excluded?: Set<string>;
       includeInReview?: boolean;
       includeBlocked?: boolean;
@@ -1353,6 +1354,7 @@ export class WorklogDatabase {
     const {
       assignee,
       searchTerm,
+      stage,
       excluded,
       includeInReview = false,
       includeBlocked = false,
@@ -1362,20 +1364,29 @@ export class WorklogDatabase {
     let pool = items;
     this.debug(`${debugPrefix} filter: total=${pool.length}`);
 
-    // 1. Remove deleted items
+    // 1. Apply stage filter first if specified (before removing completed/deleted)
+    if (stage) {
+      pool = pool.filter(item => item.stage === stage);
+      this.debug(`${debugPrefix} filter: after stage=${stage}=${pool.length}`);
+    }
+
+    // 2. Remove deleted items
     pool = pool.filter(item => item.status !== 'deleted');
     this.debug(`${debugPrefix} filter: after deleted=${pool.length}`);
 
-    // 2. Remove completed items
-    pool = pool.filter(item => item.status !== 'completed');
-    this.debug(`${debugPrefix} filter: after completed=${pool.length}`);
+    // 3. Remove completed items (unless stage filter was applied - user is
+    //    explicitly filtering by stage and may want completed items in that stage)
+    if (!stage) {
+      pool = pool.filter(item => item.status !== 'completed');
+      this.debug(`${debugPrefix} filter: after completed=${pool.length}`);
+    }
 
-    // 3. Remove in-progress items (wl next recommends what to work on next,
+    // 4. Remove in-progress items (wl next recommends what to work on next,
     //    not what's already being worked on)
     pool = pool.filter(item => item.status !== 'in-progress');
     this.debug(`${debugPrefix} filter: after in-progress=${pool.length}`);
 
-    // 4. Remove in_review+blocked items unless opted in
+    // 5. Remove in_review+blocked items unless opted in
     if (!includeInReview) {
       pool = pool.filter(
         item => !(item.stage === 'in_review' && item.status === 'blocked')
@@ -1383,20 +1394,20 @@ export class WorklogDatabase {
       this.debug(`${debugPrefix} filter: after in_review+blocked=${pool.length}`);
     }
 
-    // 5. Remove excluded items (batch mode)
+    // 6. Remove excluded items (batch mode)
     if (excluded && excluded.size > 0) {
       pool = pool.filter(item => !excluded.has(item.id));
       this.debug(`${debugPrefix} filter: after excluded=${pool.length}`);
     }
 
-    // 6. Apply assignee and search filters
+    // 7. Apply assignee and search filters
     pool = this.applyFilters(pool, assignee, searchTerm);
     this.debug(`${debugPrefix} filter: after assignee/search=${pool.length}`);
 
     // Snapshot for critical-path escalation (before dep-blocker removal)
     const criticalPool = pool;
 
-    // 7. Remove dependency-blocked items unless opted in
+    // 8. Remove dependency-blocked items unless opted in
     let candidates = pool;
     if (!includeBlocked) {
       candidates = pool.filter(item => {
@@ -1438,9 +1449,10 @@ export class WorklogDatabase {
     excluded?: Set<string>,
     debugPrefix: string = '[next]',
     includeInReview: boolean = false,
-    includeBlocked: boolean = false
+    includeBlocked: boolean = false,
+    stage?: string
   ): NextWorkItemResult {
-    this.debug(`${debugPrefix} assignee=${assignee || ''} search=${searchTerm || ''} excluded=${excluded?.size || 0}`);
+    this.debug(`${debugPrefix} assignee=${assignee || ''} search=${searchTerm || ''} stage=${stage || ''} excluded=${excluded?.size || 0}`);
 
     // Shared effective-priority cache: avoids redundant dependency lookups
     // across all selectBySortIndex calls within this invocation.
@@ -1450,6 +1462,7 @@ export class WorklogDatabase {
     const { candidates: filteredItems, criticalPool } = this.filterCandidates(items, {
       assignee,
       searchTerm,
+      stage,
       excluded,
       includeInReview,
       includeBlocked,
@@ -1460,15 +1473,19 @@ export class WorklogDatabase {
     // Delegated to handleCriticalEscalation() which operates on the full
     // item set so that critical items outside the assignee/search filter
     // can still surface their blockers.
-    const criticalResult = this.handleCriticalEscalation(items, {
-      assignee,
-      searchTerm,
-      excluded,
-      includeInReview,
-      debugPrefix: `${debugPrefix} [critical]`,
-    });
-    if (criticalResult) {
-      return criticalResult;
+    // Skip critical escalation when stage filter is specified - user is
+    // explicitly filtering by stage and doesn't want escalation to override it.
+    if (!stage) {
+      const criticalResult = this.handleCriticalEscalation(items, {
+        assignee,
+        searchTerm,
+        excluded,
+        includeInReview,
+        debugPrefix: `${debugPrefix} [critical]`,
+      });
+      if (criticalResult) {
+        return criticalResult;
+      }
     }
 
     // ── Stage 3: Non-critical blocker surfacing ──
@@ -1671,10 +1688,11 @@ export class WorklogDatabase {
     assignee?: string,
     searchTerm?: string,
     includeInReview: boolean = false,
-    includeBlocked: boolean = false
+    includeBlocked: boolean = false,
+    stage?: string
   ): NextWorkItemResult {
     const items = this.store.getAllWorkItems();
-    return this.findNextWorkItemFromItems(items, assignee, searchTerm, undefined, '[next]', includeInReview, includeBlocked);
+    return this.findNextWorkItemFromItems(items, assignee, searchTerm, undefined, '[next]', includeInReview, includeBlocked, stage);
   }
 
   /**
@@ -1686,7 +1704,8 @@ export class WorklogDatabase {
     assignee?: string,
     searchTerm?: string,
     includeInReview: boolean = false,
-    includeBlocked: boolean = false
+    includeBlocked: boolean = false,
+    stage?: string
   ): NextWorkItemResult[] {
     const results: NextWorkItemResult[] = [];
     const excluded = new Set<string>();
@@ -1699,14 +1718,12 @@ export class WorklogDatabase {
         excluded,
         `[next batch ${i + 1}/${count}]`,
         includeInReview,
-        includeBlocked
+        includeBlocked,
+        stage
       );
 
       results.push(result);
       if (result.workItem) excluded.add(result.workItem.id);
-
-      // If no work item was found, stop early
-      if (!result.workItem) break;
     }
 
     return results;

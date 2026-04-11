@@ -221,10 +221,11 @@ export function createTuiTestContext() {
     listComponent: { getList: (() => { const b = makeBox(); return () => b; })(), getFooter: (() => { const b = makeBox(); return () => b; })() },
     detailComponent: { getDetail: (() => { const b = makeBox(); return () => b; })(), getCopyIdButton: (() => { const b = makeBox(); return () => b; })() },
     toastComponent: { show: (m: string) => toast.show(m), showError: (m: string) => toast.showError(m) },
-    overlaysComponent: { detailOverlay: makeBox(), closeOverlay: makeBox(), updateOverlay: makeBox() },
+    overlaysComponent: { detailOverlay: makeBox(), closeOverlay: makeBox(), updateOverlay: makeBox(), createOverlay: makeBox() },
     dialogsComponent: {
       detailModal: makeBox(), detailClose: makeBox(), closeDialog: makeBox(), closeDialogText: makeBox(), closeDialogOptions: makeBox(),
       updateDialog: makeBox(), updateDialogText: makeBox(), updateDialogOptions: makeBox(), updateDialogStageOptions: makeBox(), updateDialogStatusOptions: makeBox(), updateDialogPriorityOptions: makeBox(), updateDialogComment: makeBox(),
+      createDialog: makeBox(), createDialogText: makeBox(), createDialogTitleInput: makeBox(), createDialogDescription: makeBox(), createDialogIssueTypeOptions: makeBox(), createDialogPriorityOptions: makeBox(), createDialogCreateButton: makeBox(), createDialogCancelButton: makeBox(),
     },
     helpMenu: { isVisible: () => false, show: () => {}, hide: () => {} },
     modalDialogs: { selectList: async () => 0, editTextarea: async () => null, confirmTextbox: async () => false, forceCleanup: () => {} },

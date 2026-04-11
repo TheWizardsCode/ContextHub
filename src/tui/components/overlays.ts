@@ -14,6 +14,7 @@ export class OverlaysComponent {
   readonly detailOverlay: BlessedBox;
   readonly closeOverlay: BlessedBox;
   readonly updateOverlay: BlessedBox;
+  readonly createOverlay: BlessedBox;
 
   constructor(options: OverlaysComponentOptions) {
     this.screen = options.parent;
@@ -54,6 +55,18 @@ export class OverlaysComponent {
       clickable: true,
       style: { bg: 'black', fg: theme.tui.colors.lightText },
     });
+
+    this.createOverlay = this.blessedImpl.box({
+      parent: this.screen,
+      top: 0,
+      left: 0,
+      width: '100%',
+      height: '100% - 1',
+      hidden: true,
+      mouse: true,
+      clickable: true,
+      style: { bg: 'black', fg: theme.tui.colors.lightText },
+    });
   }
 
   create(): this {
@@ -68,6 +81,7 @@ export class OverlaysComponent {
     this.detailOverlay.hide();
     this.closeOverlay.hide();
     this.updateOverlay.hide();
+    this.createOverlay.hide();
   }
 
   focus(): void {
@@ -85,9 +99,13 @@ export class OverlaysComponent {
     // eslint-disable-next-line @typescript-eslint/ban-ts-comment
     // @ts-ignore
     if (typeof this.updateOverlay.removeAllListeners === 'function') this.updateOverlay.removeAllListeners();
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore
+    if (typeof this.createOverlay.removeAllListeners === 'function') this.createOverlay.removeAllListeners();
 
     this.detailOverlay.destroy();
     this.closeOverlay.destroy();
     this.updateOverlay.destroy();
+    this.createOverlay.destroy();
   }
 }

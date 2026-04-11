@@ -6,6 +6,7 @@ import type { PluginContext } from '../plugin-types.js';
 import { humanFormatWorkItem, resolveFormat, formatTitleAndId } from './helpers.js';
 import { theme } from '../theme.js';
 import { normalizeActionArgs } from './cli-utils.js';
+import { loadStatusStageRules } from '../status-stage-rules.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -16,7 +17,8 @@ export default function register(ctx: PluginContext): void {
     .command('next')
     .description('Find the next work item to work on based on priority and status (excludes dependency-blocked items by default)')
     .option('-a, --assignee <assignee>', 'Filter by assignee')
-    .option('-s, --search <term>', 'Search term for fuzzy matching against title, description, and comments')
+    .option('--stage <stage>', 'Filter by stage (idea, intake_complete, plan_complete, in_progress, in_review, done)')
+    .option('--search <term>', 'Search term for fuzzy matching against title, description, and comments')
     .option('-n, --number <n>', 'Number of items to return (default: 1)', '1')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--include-in-review', 'Include items with status blocked and stage in_review (default: excluded)')
@@ -25,7 +27,7 @@ export default function register(ctx: PluginContext): void {
     .option('--recency-policy <policy>', 'Recency handling for score ordering during re-sort (prefer|avoid|ignore). Default: ignore', 'ignore')
     .action(async (...rawArgs: any[]) => {
       // Normalize incoming args: commander may pass a Command instance
-      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'search', 'number', 'prefix', 'includeInReview', 'includeBlocked', 'reSort', 'recencyPolicy']);
+      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'stage', 'search', 'number', 'prefix', 'includeInReview', 'includeBlocked', 'reSort', 'recencyPolicy']);
       let options: any = normalized.options || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
@@ -34,6 +36,17 @@ export default function register(ctx: PluginContext): void {
 
       const includeInReview = Boolean(options.includeInReview);
       const includeBlocked = Boolean(options.includeBlocked);
+
+      // Validate stage if provided
+      if (options.stage) {
+        const rules = loadStatusStageRules(utils.getConfig());
+        const normalizedStage = options.stage.toLowerCase().trim().replace(/-/g, '_');
+        if (!rules.stageValues.includes(normalizedStage)) {
+          output.error(`Invalid stage: "${options.stage}". Valid stages are: ${rules.stageValues.filter((s: string) => s !== '').join(', ')}`, { success: false, error: `Invalid stage: "${options.stage}"` });
+          process.exit(1);
+        }
+        options.stage = normalizedStage;
+      }
 
       // Auto re-sort unless --no-re-sort is passed.
       // Commander's --no-re-sort sets options.reSort to false.
@@ -48,8 +61,8 @@ export default function register(ctx: PluginContext): void {
       }
 
       const results = (db as any).findNextWorkItems 
-        ? (db as any).findNextWorkItems(count, options.assignee, options.search, includeInReview, includeBlocked) 
-        : [db.findNextWorkItem(options.assignee, options.search, includeInReview, includeBlocked)];
+        ? (db as any).findNextWorkItems(count, options.assignee, options.search, includeInReview, includeBlocked, options.stage) 
+        : [db.findNextWorkItem(options.assignee, options.search, includeInReview, includeBlocked, options.stage)];
 
       const availableResults = results.filter((result: any) => Boolean(result.workItem));
       const missingCount = Math.max(0, count - availableResults.length);

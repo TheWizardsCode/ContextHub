@@ -93,6 +93,7 @@ export const DEFAULT_SHORTCUTS = [
   {
     category: 'Actions',
     items: [
+      { keys: 'C', description: 'Create new work item' },
       { keys: 'O', description: 'Open OpenCode prompt' },
       { keys: 'A', description: 'Run audit via OpenCode' },
       { keys: 'N', description: 'Find next work item' },
@@ -144,6 +145,7 @@ export const KEY_LINEFEED = ['linefeed', 'C-j'];
 export const KEY_J = ['j'];
 export const KEY_K = ['k'];
 export const KEY_COPY_ID = ['c', 'C'];
+export const KEY_CREATE_ITEM = ['C'];
 export const KEY_PARENT_PREVIEW = ['p', 'P'];
 export const KEY_CLOSE_ITEM = ['x', 'X'];
 export const KEY_UPDATE_ITEM = ['u', 'U'];

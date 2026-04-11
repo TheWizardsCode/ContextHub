@@ -37,7 +37,7 @@ import ChordHandler from './chords.js';
 import { stripAnsi, stripTags, decorateIdsForClick, extractIdFromLine, extractIdAtColumn, stripTagsAndAnsiWithMap, wrapPlainLineWithMap } from './id-utils.js';
 import { AVAILABLE_COMMANDS, MIN_INPUT_HEIGHT, MAX_INPUT_LINES, FOOTER_HEIGHT, OPENCODE_SERVER_PORT,
   KEY_NAV_RIGHT, KEY_NAV_LEFT, KEY_TOGGLE_EXPAND, KEY_QUIT, KEY_ESCAPE, KEY_TOGGLE_HELP, KEY_CHORD_PREFIX, KEY_CHORD_FOLLOWUPS, KEY_OPEN_OPENCODE, KEY_OPEN_SEARCH,
-  KEY_TAB, KEY_SHIFT_TAB, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_RUN_AUDIT, KEY_FILTER_BLOCKED, KEY_FILTER_NEEDS_REVIEW, KEY_FILTER_INTAKE_COMPLETED, KEY_FILTER_PLAN_COMPLETED, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW, KEY_MOVE, KEY_REORDER_UP, KEY_REORDER_DOWN, KEY_DELEGATE, KEY_GITHUB_PUSH, KEY_FILTER_COPILOT } from './constants.js';
+  KEY_TAB, KEY_SHIFT_TAB, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_CREATE_ITEM, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_RUN_AUDIT, KEY_FILTER_BLOCKED, KEY_FILTER_NEEDS_REVIEW, KEY_FILTER_INTAKE_COMPLETED, KEY_FILTER_PLAN_COMPLETED, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW, KEY_MOVE, KEY_REORDER_UP, KEY_REORDER_DOWN, KEY_DELEGATE, KEY_GITHUB_PUSH, KEY_FILTER_COPILOT } from './constants.js';
 import { theme } from '../theme.js';
 import { initAutocomplete, type AutocompleteInstance } from './opencode-autocomplete.js';
 import { delegateWorkItem, type DelegateResult, type DelegateDb } from '../delegate-helper.js';
@@ -339,6 +339,151 @@ export class TuiController {
     const updateDialogStatusOptions = dialogsComponent.updateDialogStatusOptions;
     const updateDialogPriorityOptions = dialogsComponent.updateDialogPriorityOptions;
     const updateDialogComment = dialogsComponent.updateDialogComment;
+
+    // Create dialog widgets
+    const createOverlay = overlaysComponent.createOverlay;
+    const createDialog = dialogsComponent.createDialog;
+    const createDialogText = dialogsComponent.createDialogText;
+    const createDialogTitleInput = dialogsComponent.createDialogTitleInput;
+    const createDialogDescription = dialogsComponent.createDialogDescription;
+    const createDialogIssueTypeOptions = dialogsComponent.createDialogIssueTypeOptions;
+    const createDialogPriorityOptions = dialogsComponent.createDialogPriorityOptions;
+    const createDialogCreateButton = dialogsComponent.createDialogCreateButton;
+    const createDialogCancelButton = dialogsComponent.createDialogCancelButton;
+
+    // Create dialog focus order: Title → Description → Issue Type → Priority → Create Button → Cancel Button
+    const createDialogFieldOrder = [
+      createDialogTitleInput,
+      createDialogDescription,
+      createDialogIssueTypeOptions,
+      createDialogPriorityOptions,
+      createDialogCreateButton,
+      createDialogCancelButton,
+    ];
+
+    // Create dialog modal using the shared abstraction
+    const createDialogModal = new ModalDialogBase({
+      screen,
+      dialog: createDialog,
+      overlay: createOverlay,
+      focusTarget: createDialogTitleInput,
+      restoreFocusTarget: list as any,
+    });
+
+    // Register all create dialog fields as focusable
+    [
+      createDialog,
+      createDialogTitleInput,
+      createDialogDescription,
+      createDialogIssueTypeOptions,
+      createDialogPriorityOptions,
+      createDialogCreateButton,
+      createDialogCancelButton,
+    ].forEach((field) => {
+      createDialogModal.registerFocusable(field as any);
+    });
+
+    const createDialogIssueTypeValues = ['feature', 'bug', 'task', 'epic', 'chore'];
+    const createDialogPriorityValues = ['critical', 'high', 'medium', 'low'];
+
+    // Create dialog focus manager using shared pattern
+    const createDialogFocusManager = createUpdateDialogFocusManager(createDialogFieldOrder);
+
+    // Create dialog focus styles
+    const applyCreateDialogFocusStyles = (focused: Pane | undefined | null) => {
+      createDialogFieldOrder.forEach((field) => {
+        if (!field || !field.style) return;
+        // For list items
+        if (field.style.selected) {
+          field.style.selected.bg = field === focused ? 'cyan' : 'blue';
+          field.style.selected.fg = field === focused ? theme.tui.colors.lightText : 'white';
+        }
+        // For textareas with borders
+        if ((field as any).style?.border) {
+          (field as any).style.border.fg = field === focused ? 'cyan' : 'gray';
+        }
+      });
+      if (!createDialog.hidden) screen.render();
+    };
+
+    // Wire up create dialog field navigation
+    createDialogFieldOrder.forEach((field) => {
+      if (field && typeof field.on === 'function') {
+        const fieldFocusHandler = () => {
+          applyCreateDialogFocusStyles(field);
+        };
+        const fieldBlurHandler = () => {
+          applyCreateDialogFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+        };
+        try {
+          (field as any).__opencode_focus = fieldFocusHandler;
+          (field as any).__opencode_blur = fieldBlurHandler;
+          field.on('focus', fieldFocusHandler);
+          field.on('blur', fieldBlurHandler);
+        } catch (_) {}
+      }
+    });
+
+    // Wire Tab/Shift+Tab navigation for create dialog fields
+    const wireCreateDialogFieldNavigation = (field: Pane | undefined | null) => {
+      if (!field || typeof field.key !== 'function') return;
+      const isFocusedField = () => (screen as any).focused === field;
+      
+      const fieldTabHandler = () => {
+        if (createDialog.hidden) return;
+        if (!isFocusedField()) return;
+        createDialogFocusManager.cycle(1);
+        applyCreateDialogFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+        return false;
+      };
+      
+      const fieldShiftTabHandler = () => {
+        if (createDialog.hidden) return;
+        if (!isFocusedField()) return;
+        createDialogFocusManager.cycle(-1);
+        applyCreateDialogFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+        return false;
+      };
+
+      // For textareas, handle Tab in keypress to allow cursor nav
+      if (field === createDialogTitleInput || field === createDialogDescription) {
+        if (typeof field.on === 'function') {
+          const textareaKeyHandler = (_ch: unknown, key: unknown) => {
+            if (createDialog.hidden) return;
+            if ((screen as any).focused !== field) return;
+            const k = key as KeyInfo | undefined;
+            
+            if (k?.name === 'tab') {
+              createDialogFocusManager.cycle(1);
+              applyCreateDialogFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+              return false;
+            }
+            if (k?.name === 'S-tab') {
+              createDialogFocusManager.cycle(-1);
+              applyCreateDialogFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+              return false;
+            }
+            // Allow normal editing keys to pass through for blessed to handle
+          };
+          try {
+            (field as any).__opencode_textarea_key = textareaKeyHandler;
+            field.on('keypress', textareaKeyHandler);
+          } catch (_) {}
+        }
+      } else {
+        // For non-textarea fields, use standard key handler
+        try {
+          (field as any).__opencode_key_tab = fieldTabHandler;
+          (field as any).__opencode_key_stab = fieldShiftTabHandler;
+          field.key(KEY_TAB, fieldTabHandler);
+          field.key(KEY_SHIFT_TAB, fieldShiftTabHandler);
+        } catch (_) {}
+      }
+    };
+
+    // Wire navigation for all create dialog fields
+    createDialogFieldOrder.forEach(wireCreateDialogFieldNavigation);
+
     // Tab order matches the visual left-to-right column layout: Status → Stage → Priority → Comment
     const updateDialogFieldOrder = [
       updateDialogStatusOptions,
@@ -599,6 +744,165 @@ export class TuiController {
           (screen as any).program.showCursor();
         }
         updateUpdateDialogCommentCursor();
+      } catch (_) {}
+    };
+
+    // === Create dialog textarea editing support (mirror update dialog helpers) ===
+    let createDialogCursorIndex = 0;
+    let createDialogDesiredColumn: number | null = null;
+
+    const clampCreateDialogCursor = (value: string, nextIndex: number) => Math.max(0, Math.min(nextIndex, value.length));
+
+    const setCreateDialogCursorIndex = (value: string, nextIndex: number) => {
+      createDialogCursorIndex = clampCreateDialogCursor(value, nextIndex);
+      try { (createDialogDescription as any).__opencode_cursor = createDialogCursorIndex; } catch (_) {}
+    };
+
+    const getCreateDialogLineColumnFromIndex = (value: string, index: number) => {
+      const clamped = clampCreateDialogCursor(value, index);
+      let line = 0;
+      let column = 0;
+      for (let i = 0; i < clamped; i += 1) {
+        if (value[i] === '\n') { line += 1; column = 0; } else { column += 1; }
+      }
+      return { line, column };
+    };
+
+    const getCreateDialogIndexFromLineColumn = (value: string, line: number, column: number) => {
+      const lines = value.split('\n');
+      const safeLine = Math.max(0, Math.min(line, Math.max(0, lines.length - 1)));
+      let idx = 0;
+      for (let i = 0; i < safeLine; i += 1) idx += lines[i].length + 1;
+      const safeColumn = Math.max(0, Math.min(column, lines[safeLine]?.length ?? 0));
+      return idx + safeColumn;
+    };
+
+    const updateCreateDialogCursor = () => {
+      try { (createDialogDescription as any)._updateCursor?.(); } catch (_) {}
+      screen.render();
+    };
+
+    const moveCreateDialogCursorHorizontal = (delta: number) => {
+      const value = createDialogDescription.getValue ? createDialogDescription.getValue() : '';
+      setCreateDialogCursorIndex(value, createDialogCursorIndex + delta);
+      const { column } = getCreateDialogLineColumnFromIndex(value, createDialogCursorIndex);
+      createDialogDesiredColumn = column;
+      updateCreateDialogCursor();
+    };
+
+    const moveCreateDialogCursorVertical = (delta: number) => {
+      const value = createDialogDescription.getValue ? createDialogDescription.getValue() : '';
+      const pos = getCreateDialogLineColumnFromIndex(value, createDialogCursorIndex);
+      const targetLine = pos.line + delta;
+      const desiredColumn = createDialogDesiredColumn ?? pos.column;
+      const nextIndex = getCreateDialogIndexFromLineColumn(value, targetLine, desiredColumn);
+      setCreateDialogCursorIndex(value, nextIndex);
+      updateCreateDialogCursor();
+    };
+
+    const insertCreateDialogAtCursor = (text: string) => {
+      if (!text) return;
+      const value = createDialogDescription.getValue ? createDialogDescription.getValue() : '';
+      const nextValue = value.slice(0, createDialogCursorIndex) + text + value.slice(createDialogCursorIndex);
+      const nextIndex = createDialogCursorIndex + text.length;
+      createDialogDescription.setValue?.(nextValue);
+      setCreateDialogCursorIndex(nextValue, nextIndex);
+      createDialogDesiredColumn = null;
+      updateCreateDialogCursor();
+    };
+
+    const deleteCreateDialogBackward = () => {
+      const value = createDialogDescription.getValue ? createDialogDescription.getValue() : '';
+      if (createDialogCursorIndex <= 0) return;
+      const nextValue = value.slice(0, createDialogCursorIndex - 1) + value.slice(createDialogCursorIndex);
+      const nextIndex = createDialogCursorIndex - 1;
+      createDialogDescription.setValue?.(nextValue);
+      setCreateDialogCursorIndex(nextValue, nextIndex);
+      createDialogDesiredColumn = null;
+      updateCreateDialogCursor();
+    };
+
+    const deleteCreateDialogForward = () => {
+      const value = createDialogDescription.getValue ? createDialogDescription.getValue() : '';
+      if (createDialogCursorIndex >= value.length) return;
+      const nextValue = value.slice(0, createDialogCursorIndex) + value.slice(createDialogCursorIndex + 1);
+      createDialogDescription.setValue?.(nextValue);
+      setCreateDialogCursorIndex(nextValue, createDialogCursorIndex);
+      createDialogDesiredColumn = null;
+      updateCreateDialogCursor();
+    };
+
+    const createDialogBaseUpdateCursor = (createDialogDescription as any)._updateCursor?.bind(createDialogDescription);
+    const createDialogCustomUpdateCursor = function(this: any, get?: boolean) {
+      if (this.screen?.focused !== this) return;
+      const lpos = get ? this.lpos : this._getCoords?.();
+      if (!lpos || !this.screen?.program) { createDialogBaseUpdateCursor?.(get); return; }
+      if (!this._clines || !Array.isArray(this._clines) || !Array.isArray(this._clines.ftor)) { createDialogBaseUpdateCursor?.(get); return; }
+
+      const value = typeof this.value === 'string' ? this.value : '';
+      const { line, column } = getCreateDialogLineColumnFromIndex(value, createDialogCursorIndex);
+      const wrappedIndexes: number[] = this._clines.ftor[line] ?? [];
+      const fallbackIndex = Math.min(line, Math.max(0, this._clines.length - 1));
+      const wrapped = wrappedIndexes.length ? wrappedIndexes : [fallbackIndex];
+
+      let remaining = column;
+      let wrappedIndex = wrapped[wrapped.length - 1] ?? fallbackIndex;
+      let columnInWrapped = 0;
+
+      for (const index of wrapped) {
+        const text = (this._clines[index] ?? '').replace(/\x1b\[[0-9;]*m/g, '');
+        const width = typeof this.strWidth === 'function' ? this.strWidth(text) : text.length;
+        if (remaining <= width) { wrappedIndex = index; columnInWrapped = remaining; break; }
+        remaining -= width;
+      }
+
+      if (wrappedIndex == null || wrappedIndex < 0) { createDialogBaseUpdateCursor?.(get); return; }
+
+      const visibleLine = Math.max(0, Math.min(wrappedIndex - (this.childBase || 0), Math.max(0, (lpos.yl - lpos.yi) - this.iheight - 1)));
+      const lineText = (this._clines[wrappedIndex] ?? '').replace(/\x1b\[[0-9;]*m/g, '');
+      const colText = lineText.slice(0, columnInWrapped);
+      const cxOffset = typeof this.strWidth === 'function' ? this.strWidth(colText) : colText.length;
+      const cy = lpos.yi + this.itop + visibleLine;
+      const cx = lpos.xi + this.ileft + cxOffset;
+      const program = this.screen.program;
+
+      if (cy === program.y && cx === program.x) return;
+      if (cy === program.y) {
+        if (cx > program.x) program.cuf(cx - program.x);
+        else if (cx < program.x) program.cub(program.x - cx);
+      } else if (cx === program.x) {
+        if (cy > program.y) program.cud(cy - program.y);
+        else if (cy < program.y) program.cuu(program.y - cy);
+      } else {
+        program.cup(cy, cx);
+      }
+    };
+    try { (createDialogDescription as any)._updateCursor = createDialogCustomUpdateCursor; } catch (_) {}
+
+    const endCreateDialogReading = () => {
+      try {
+        const widget = createDialogDescription as any;
+        if (widget?.__listener && typeof widget.removeListener === 'function') { try { widget.removeListener('keypress', widget.__listener); } catch (_) {} }
+        if (widget?.__done && typeof widget.removeListener === 'function') { try { widget.removeListener('blur', widget.__done); } catch (_) {} }
+        delete widget.__listener; delete widget.__done; delete widget._done; delete widget._callback;
+        if (widget?._reading) widget._reading = false;
+      } catch (_) {}
+      try { if (typeof (screen as any).grabKeys === 'function') { try { (screen as any).grabKeys(false); } catch (_) { (screen as any).grabKeys = false; } } else { (screen as any).grabKeys = false; } } catch (_) {}
+      try { if (typeof (screen as any).program?.hideCursor === 'function') (screen as any).program.hideCursor(); } catch (_) {}
+    };
+
+    const startCreateDialogReading = () => {
+      try {
+        const widget = createDialogDescription as any;
+        if (!widget) return;
+        if (widget.__listener && typeof widget.removeListener === 'function') { try { widget.removeListener('keypress', widget.__listener); } catch (_) {} }
+        if (widget.__done && typeof widget.removeListener === 'function') { try { widget.removeListener('blur', widget.__done); } catch (_) {} }
+        delete widget.__listener; delete widget.__done; delete widget._done; delete widget._callback;
+        widget._reading = true;
+        const value = widget.getValue ? widget.getValue() : '';
+        setCreateDialogCursorIndex(value, createDialogCursorIndex);
+        try { if (typeof (screen as any).program?.showCursor === 'function') (screen as any).program.showCursor(); } catch (_) {}
+        updateCreateDialogCursor();
       } catch (_) {}
     };
 
@@ -957,7 +1261,7 @@ export class TuiController {
     if (chordDebug) console.error('[tui] registering ctrl-w chord handlers');
     chordHandler.register(['C-w', 'w'], () => {
       if (helpMenu.isVisible()) return;
-      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden) return;
+      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
       endOpencodeTextReading();
       clearCtrlWPending();
       cycleFocus(1);
@@ -966,7 +1270,7 @@ export class TuiController {
 
     chordHandler.register(['C-w', 'p'], () => {
       if (helpMenu.isVisible()) return;
-      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden) return;
+      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
       endOpencodeTextReading();
       clearCtrlWPending();
       focusPaneByIndex(lastPaneFocusIndex);
@@ -979,7 +1283,7 @@ export class TuiController {
 
     chordHandler.register(['C-w', 'h'], () => {
       if (helpMenu.isVisible()) return;
-      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden) return;
+      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
       endOpencodeTextReading();
       clearCtrlWPending();
       const current = getActivePaneIndex();
@@ -989,7 +1293,7 @@ export class TuiController {
 
     chordHandler.register(['C-w', 'l'], () => {
       if (helpMenu.isVisible()) return;
-      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden) return;
+      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
       endOpencodeTextReading();
       clearCtrlWPending();
       const current = getActivePaneIndex();
@@ -999,7 +1303,7 @@ export class TuiController {
 
     chordHandler.register(['C-w', 'j'], () => {
       if (helpMenu.isVisible()) return;
-      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden) return;
+      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
       if (opencodeDialog.hidden) return;
       if (!opencodePane || (opencodePane as any).hidden) return;
       clearCtrlWPending();
@@ -1015,7 +1319,7 @@ export class TuiController {
 
     chordHandler.register(['C-w', 'k'], () => {
       if (helpMenu.isVisible()) return;
-      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden) return;
+      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
       if (opencodeDialog.hidden) return;
       if (!opencodePane || (opencodePane as any).hidden) return;
       endOpencodeTextReading();
@@ -2447,6 +2751,93 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       screen.render();
     }
 
+    // Create dialog functions using ModalDialogBase abstraction
+    function openCreateDialog() {
+      // Reset form fields
+      if (createDialogTitleInput?.setValue) {
+        createDialogTitleInput.setValue('');
+      }
+      if (createDialogDescription?.setValue) {
+        createDialogDescription.setValue('');
+      }
+      // Select default values (feature, medium)
+      createDialogIssueTypeOptions.select(0);
+      createDialogPriorityOptions.select(2);
+
+      createDialogModal.open({
+        focusTarget: createDialogTitleInput,
+        restoreFocusTarget: list as any,
+      });
+      createDialogFocusManager.focusIndex(0);
+      createDialogTitleInput.focus();
+      applyCreateDialogFocusStyles(createDialogFieldOrder[0]);
+      paneFocusIndex = getFocusPanes().indexOf(list);
+      applyFocusStyles();
+      screen.render();
+    }
+
+    function closeCreateDialog() {
+      createDialogModal.close();
+      if (createDialogTitleInput?.setValue) {
+        createDialogTitleInput.setValue('');
+      }
+      if (createDialogDescription?.setValue) {
+        createDialogDescription.setValue('');
+      }
+      list.focus();
+      paneFocusIndex = getFocusPanes().indexOf(list);
+      applyFocusStyles();
+      screen.render();
+    }
+
+    function submitCreateDialog() {
+      const title = createDialogTitleInput?.getValue ? createDialogTitleInput.getValue().trim() : '';
+
+      if (!title) {
+        showToast('Title is required');
+        return;
+      }
+
+      const description = createDialogDescription?.getValue ? createDialogDescription.getValue().trim() : '';
+
+      const issueTypeIndex = (createDialogIssueTypeOptions as any).selected ?? 0;
+      const priorityIndex = (createDialogPriorityOptions as any).selected ?? 2;
+
+      const issueTypeValues = ['feature', 'bug', 'task', 'epic', 'chore'];
+      const priorityValues: ('critical' | 'high' | 'medium' | 'low')[] = ['critical', 'high', 'medium', 'low'];
+
+      const issueType = issueTypeValues[issueTypeIndex] || 'feature';
+      const priority: 'critical' | 'high' | 'medium' | 'low' = priorityValues[priorityIndex] || 'medium';
+
+      try {
+        const newItem = db.create({
+          title,
+          description,
+          issueType,
+          priority,
+          status: 'open',
+        });
+
+        if (!newItem) {
+          showToast('Create failed');
+          return;
+        }
+
+        showToast(`Created: ${newItem.title} (${newItem.id})`);
+        closeCreateDialog();
+        refreshFromDatabase();
+
+        // Find and select the new item
+        const visible = buildVisible();
+        const newItemIndex = visible.findIndex(n => n.item.id === newItem.id);
+        if (newItemIndex >= 0) {
+          renderListAndDetail(newItemIndex);
+        }
+      } catch (err) {
+        showToast('Create failed');
+      }
+    }
+
     function isInside(box: any, x: number, y: number): boolean {
       const lpos = box?.lpos;
       if (!lpos) return false;
@@ -3408,7 +3799,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     try { (detailClose as any).__opencode_click = detailCloseClickHandler; detailClose.on('click', detailCloseClickHandler); } catch (_) {}
 
     screen.key(KEY_NAV_RIGHT, (_ch: any, key: any) => {
-      if (!updateDialog.hidden) return;
+      if (!updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
       // In move mode, Enter confirms the target (same as pressing 'm')
       if (state.moveMode && key?.name === 'enter') {
         const item = getSelectedItem();
@@ -3466,7 +3857,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     });
 
     screen.key(KEY_NAV_LEFT, () => {
-      if (!updateDialog.hidden) return;
+      if (!updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
       const idx = getGlobalSelectedIndex();
       const visible = buildVisible();
       const node = visible[idx];
@@ -3597,6 +3988,10 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         closeUpdateDialog();
         return;
       }
+      if ((createDialog && !createDialog.hidden)) {
+        closeCreateDialog();
+        return;
+      }
       if (!opencodeDialog.hidden) {
         closeOpencodeDialog();
         return;
@@ -3643,7 +4038,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       // Guard conditions mirror the KEY_RUN_AUDIT handler to keep
       // behaviour consistent regardless of which path invoked it.
       if (state.moveMode) return;
-      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
       if (isPromptBusy()) {
         showToast('Please wait for current response to complete');
         return;
@@ -3722,18 +4117,28 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           return false;
         }
 
+        // Some terminals report uppercase 'C' as raw ch='C' while key.name is 'c'.
+        // Intercept and route to the create handler so Shift+C triggers reliably.
+        if (_ch === 'C') {
+          if (state.moveMode) return false;
+          if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && (!createDialog || createDialog.hidden)) {
+            openCreateDialog();
+          }
+          return false;
+        }
+
         // Some terminals report Shift+Arrow as key.name='up'/'down' with
         // key.shift=true instead of 'S-up'/'S-down'. Handle that form here
         // so reordering remains reliable across environments.
         if (key?.shift && key?.name === 'up') {
-          if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+          if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
           if (!opencodeDialog.hidden) return;
           if (state.moveMode) return;
           reorderSelectedItemByOffset(-1);
           return false;
         }
         if (key?.shift && key?.name === 'down') {
-          if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+          if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
           if (!opencodeDialog.hidden) return;
           if (state.moveMode) return;
           reorderSelectedItemByOffset(1);
@@ -3781,7 +4186,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         try {
           screen.key(KEY_TAB, () => {
             if (helpMenu.isVisible()) return;
-            if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden) return;
+            if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && (createDialog && !createDialog.hidden))) return;
             if (opencodeDialog && !opencodeDialog.hidden) return;
             cycleFocus(1);
             screen.render();
@@ -3790,7 +4195,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         try {
           screen.key(KEY_SHIFT_TAB, () => {
             if (helpMenu.isVisible()) return;
-            if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden) return;
+            if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && (createDialog && !createDialog.hidden))) return;
             if (opencodeDialog && !opencodeDialog.hidden) return;
             cycleFocus(-1);
             screen.render();
@@ -3800,7 +4205,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // Open opencode prompt dialog (shortcut O)
      screen.key(KEY_OPEN_OPENCODE, async () => {
        if (state.moveMode) return;
-       if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden) {
+       if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && (!createDialog || createDialog.hidden)) {
          await openOpencodeDialog();
        }
     });
@@ -3822,7 +4227,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // Open search/filter modal (shortcut /)
      screen.key(KEY_OPEN_SEARCH, async () => {
        if (state.moveMode) return;
-       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
       try {
         const term = await modalDialogs.editTextarea({
           title: 'Filter items',
@@ -3950,15 +4355,23 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // Update selected item (quick edit) - shortcut U
      screen.key(KEY_UPDATE_ITEM, () => {
        if (state.moveMode) return;
-       if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden) {
-        openUpdateDialog();
+        if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && (!createDialog || createDialog.hidden)) {
+         openUpdateDialog();
+       }
+    });
+
+    // Create new work item - shortcut C
+    screen.key(KEY_CREATE_ITEM, () => {
+      if (state.moveMode) return;
+      if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && (!createDialog || createDialog.hidden)) {
+        openCreateDialog();
       }
     });
 
     // Toggle do-not-delegate tag on selected item (shortcut D)
      screen.key(KEY_TOGGLE_DO_NOT_DELEGATE, () => {
        // Only act when no interfering overlays are visible
-       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
        if (state.moveMode) return;
       const item = getSelectedItem();
       if (!item) {
@@ -3994,7 +4407,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       // Ignore when shift is held — that is handled by KEY_GITHUB_PUSH ('G')
       if (key?.shift) return;
       // Guard: suppress when overlays are visible or in move mode
-      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
       if (!opencodeDialog.hidden) return;
       if (state.moveMode) return;
 
@@ -4114,7 +4527,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       if (githubPushInFlight) return;
       githubPushInFlight = true;
       try {
-        if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+        if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
         if (state.moveMode) return;
 
         const item = getSelectedItem();
@@ -4127,7 +4540,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         // lightweight TUI environments observe feedback synchronously even if
         // the helper import or subsequent async work takes time.
         if (!item.githubIssueNumber) {
-          try { showToast('Pushing to GitHub\u2026'); } catch (_) {}
+          try { showToast('Pushing to GitHub…'); } catch (_) {}
           try { screen?.render?.(); } catch (_) {}
         }
 
@@ -4159,7 +4572,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
 
     // Toggle needs producer review flag (shortcut r)
      screen.key(KEY_TOGGLE_NEEDS_REVIEW, () => {
-       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
        if (state.moveMode) return;
       const item = getSelectedItem();
       if (!item) {
@@ -4184,7 +4597,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // Move/reparent mode (shortcut M)
     screen.key(KEY_MOVE, () => {
       // Guard: only active when no overlays are visible
-      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
       if (!opencodeDialog.hidden) return;
 
       const item = getSelectedItem();
@@ -4276,14 +4689,14 @@ const visible = buildVisible();
     });
 
     screen.key(KEY_REORDER_UP, () => {
-      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
       if (!opencodeDialog.hidden) return;
       if (state.moveMode) return;
       reorderSelectedItemByOffset(-1);
     });
 
     screen.key(KEY_REORDER_DOWN, () => {
-      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
       if (!opencodeDialog.hidden) return;
       if (state.moveMode) return;
       reorderSelectedItemByOffset(1);
@@ -4302,7 +4715,7 @@ const visible = buildVisible();
     // Evaluate next item
      screen.key(KEY_FIND_NEXT, () => {
        if (state.moveMode) return;
-       if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && nextDialog.hidden) {
+       if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && nextDialog.hidden && (!createDialog || createDialog.hidden)) {
          openNextDialog();
        }
      });
@@ -4333,7 +4746,7 @@ const visible = buildVisible();
 
      screen.key(KEY_RUN_AUDIT, async () => {
        if (state.moveMode) return;
-       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
        if (isPromptBusy()) {
          showToast('Please wait for current response to complete');
          return;
@@ -4381,7 +4794,7 @@ const visible = buildVisible();
 
      screen.key(KEY_FILTER_NEEDS_REVIEW, () => {
        if (state.moveMode) return;
-       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden) return;
+       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
        cycleNeedsReviewFilter();
      });
 
@@ -4542,6 +4955,64 @@ const visible = buildVisible();
 
     const updateDialogSTabHandler = () => { if (updateDialog.hidden) return; updateDialogFocusManager.cycle(-1); };
     try { (updateDialog as any).__opencode_key_stab = updateDialogSTabHandler; updateDialogModal.registerKeyHandler(updateDialog as any, KEY_SHIFT_TAB, updateDialogSTabHandler); } catch (_) {}
+
+    // Create dialog keyboard handlers using ModalDialogBase
+    const createDialogEscapeHandler = () => { closeCreateDialog(); };
+    try { (createDialog as any).__opencode_key_escape = createDialogEscapeHandler; createDialogModal.registerKeyHandler(createDialog as any, KEY_ESCAPE, createDialogEscapeHandler); } catch (_) {}
+
+    const createDialogTitleEscapeHandler = () => { closeCreateDialog(); };
+    try { (createDialogTitleInput as any).__opencode_key_escape = createDialogTitleEscapeHandler; createDialogModal.registerKeyHandler(createDialogTitleInput as any, KEY_ESCAPE, createDialogTitleEscapeHandler); } catch (_) {}
+
+    const createDialogDescEscapeHandler = () => { closeCreateDialog(); };
+    try { (createDialogDescription as any).__opencode_key_escape = createDialogDescEscapeHandler; createDialogModal.registerKeyHandler(createDialogDescription as any, KEY_ESCAPE, createDialogDescEscapeHandler); } catch (_) {}
+
+    const createDialogIssueTypeEscapeHandler = () => { closeCreateDialog(); };
+    try { (createDialogIssueTypeOptions as any).__opencode_key_escape = createDialogIssueTypeEscapeHandler; createDialogModal.registerKeyHandler(createDialogIssueTypeOptions as any, KEY_ESCAPE, createDialogIssueTypeEscapeHandler); } catch (_) {}
+
+    const createDialogPriorityEscapeHandler = () => { closeCreateDialog(); };
+    try { (createDialogPriorityOptions as any).__opencode_key_escape = createDialogPriorityEscapeHandler; createDialogModal.registerKeyHandler(createDialogPriorityOptions as any, KEY_ESCAPE, createDialogPriorityEscapeHandler); } catch (_) {}
+
+    const createDialogCSHandler = () => { submitCreateDialog(); };
+    try { (createDialog as any).__opencode_key_cs = createDialogCSHandler; createDialogModal.registerKeyHandler(createDialog as any, KEY_CS, createDialogCSHandler); } catch (_) {}
+
+    const createDialogTitleCSHandler = () => { submitCreateDialog(); };
+    try { (createDialogTitleInput as any).__opencode_key_cs = createDialogTitleCSHandler; createDialogModal.registerKeyHandler(createDialogTitleInput as any, KEY_CS, createDialogTitleCSHandler); } catch (_) {}
+
+    const createDialogDescCSHandler = () => { submitCreateDialog(); };
+    try { (createDialogDescription as any).__opencode_key_cs = createDialogDescCSHandler; createDialogModal.registerKeyHandler(createDialogDescription as any, KEY_CS, createDialogDescCSHandler); } catch (_) {}
+
+    const createDialogIssueTypeEnterHandler = () => { submitCreateDialog(); };
+    try { (createDialogIssueTypeOptions as any).__opencode_key_enter = createDialogIssueTypeEnterHandler; createDialogModal.registerKeyHandler(createDialogIssueTypeOptions as any, KEY_ENTER, createDialogIssueTypeEnterHandler); } catch (_) {}
+
+    const createDialogPriorityEnterHandler = () => { submitCreateDialog(); };
+    try { (createDialogPriorityOptions as any).__opencode_key_enter = createDialogPriorityEnterHandler; createDialogModal.registerKeyHandler(createDialogPriorityOptions as any, KEY_ENTER, createDialogPriorityEnterHandler); } catch (_) {}
+
+    // Create dialog Tab/Shift-Tab navigation (using focus manager)
+    const createDialogTabHandler = () => {
+      if (createDialog.hidden) return;
+      createDialogFocusManager.cycle(1);
+      applyCreateDialogFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+      return false;
+    };
+    try { (createDialog as any).__opencode_key_tab = createDialogTabHandler; createDialogModal.registerKeyHandler(createDialog as any, KEY_TAB, createDialogTabHandler); } catch (_) {}
+
+    const createDialogShiftTabHandler = () => {
+      if (createDialog.hidden) return;
+      createDialogFocusManager.cycle(-1);
+      applyCreateDialogFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+      return false;
+    };
+    try { (createDialog as any).__opencode_key_stab = createDialogShiftTabHandler; createDialogModal.registerKeyHandler(createDialog as any, KEY_SHIFT_TAB, createDialogShiftTabHandler); } catch (_) {}
+
+    // Create dialog mouse click handlers
+    const createOverlayClickHandler = () => { closeCreateDialog(); };
+    try { (createOverlay as any).__opencode_click = createOverlayClickHandler; createDialogModal.registerMouseHandler(createOverlay as any, 'click', createOverlayClickHandler); } catch (_) {}
+
+    const createDialogCreateButtonClickHandler = () => { submitCreateDialog(); };
+    try { (createDialogCreateButton as any).__opencode_click = createDialogCreateButtonClickHandler; createDialogModal.registerMouseHandler(createDialogCreateButton as any, 'click', createDialogCreateButtonClickHandler); } catch (_) {}
+
+    const createDialogCancelButtonClickHandler = () => { closeCreateDialog(); };
+    try { (createDialogCancelButton as any).__opencode_click = createDialogCancelButtonClickHandler; createDialogModal.registerMouseHandler(createDialogCancelButton as any, 'click', createDialogCancelButtonClickHandler); } catch (_) {}
 
     const closeDialogEscapeHandler = () => { closeCloseDialog(); };
     try { (closeDialog as any).__opencode_key_escape = closeDialogEscapeHandler; closeDialog.key(KEY_ESCAPE, closeDialogEscapeHandler); } catch (_) {}
