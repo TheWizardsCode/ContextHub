@@ -285,7 +285,7 @@ describe('CLI Issue Status Tests', () => {
       await execAsync(`tsx ${cliPath} create -t "Regular task" -p critical`);
       await execAsync(`tsx ${cliPath} create -t "Bug fix needed" -p low`);
 
-      const { stdout } = await execAsync(`tsx ${cliPath} --json next -s bug`);
+      const { stdout } = await execAsync(`tsx ${cliPath} --json next --search bug`);
 
       const result = JSON.parse(stdout);
       expect(result.success).toBe(true);
@@ -296,7 +296,7 @@ describe('CLI Issue Status Tests', () => {
       await execAsync(`tsx ${cliPath} create -t "Task 1" -d "Some work" -p critical`);
       await execAsync(`tsx ${cliPath} create -t "Task 2" -d "Authentication issue" -p low`);
 
-      const { stdout } = await execAsync(`tsx ${cliPath} --json next -s authentication`);
+      const { stdout } = await execAsync(`tsx ${cliPath} --json next --search authentication`);
 
       const result = JSON.parse(stdout);
       expect(result.success).toBe(true);

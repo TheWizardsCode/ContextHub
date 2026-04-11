@@ -4,13 +4,13 @@ import { TuiController } from '../../src/tui/controller.js';
 // Minimal repro test that demonstrates each keypress inserting three
 // characters after reopening the opencode overlay.
 it('reproduces triple keypress after reopen', async () => {
-  const makeBox = () => ({ hidden: true, show: vi.fn(), hide: vi.fn(), focus: vi.fn(), setValue: vi.fn(), getValue: vi.fn(() => ''), on: vi.fn(), key: vi.fn(), setScrollPerc: vi.fn(), setContent: vi.fn(), setItems: vi.fn(), select: vi.fn(), getItem: vi.fn(() => ({ getContent: vi.fn(() => '') })) });
-  const makeTextarea = () => ({ value: '', setValue: vi.fn((v: string) => { (textarea as any).value = v; }), getValue: vi.fn(() => (textarea as any).value), clearValue: vi.fn(), on: vi.fn(), screen: null });
+  const makeBox = () => ({ hidden: true, show: vi.fn(), hide: vi.fn(), focus: vi.fn(), setValue: vi.fn(), getValue: vi.fn(() => ''), on: vi.fn(), key: vi.fn(), setScrollPerc: vi.fn(), setContent: vi.fn(), setItems: vi.fn(), select: vi.fn(), getItem: vi.fn(() => ({ getContent: vi.fn(() => '') })), style: { border: {}, label: {}, selected: {}, focus: { border: {} } } });
+  const makeTextarea = () => ({ value: '', setValue: vi.fn((v: string) => { (textarea as any).value = v; }), getValue: vi.fn(() => (textarea as any).value), clearValue: vi.fn(), on: vi.fn(), screen: null, _updateCursor: vi.fn(), style: { border: {}, label: {}, selected: {}, focus: { border: {} } } });
   // Use existing test helpers minimal mocks from other tests
   const screen = { height: 40, width: 120, focused: null, program: { y: 0, x: 0, cuf: vi.fn(), cub: vi.fn(), cud: vi.fn(), cuu: vi.fn(), cup: vi.fn() }, render: vi.fn(), destroy: vi.fn(), key: vi.fn(), on: vi.fn() } as any;
 
-  const overlays = { detailOverlay: makeBox(), closeOverlay: makeBox(), updateOverlay: makeBox() } as any;
-  const dialogs = { detailModal: makeBox(), detailClose: makeBox(), closeDialog: makeBox(), closeDialogText: makeBox(), closeDialogOptions: makeBox(), updateDialog: makeBox(), updateDialogText: makeBox(), updateDialogOptions: makeBox(), updateDialogStageOptions: makeBox(), updateDialogStatusOptions: makeBox(), updateDialogPriorityOptions: makeBox(), updateDialogComment: makeBox() } as any;
+  const overlays = { detailOverlay: makeBox(), closeOverlay: makeBox(), updateOverlay: makeBox(), createOverlay: makeBox() } as any;
+  const dialogs = { detailModal: makeBox(), detailClose: makeBox(), closeDialog: makeBox(), closeDialogText: makeBox(), closeDialogOptions: makeBox(), updateDialog: makeBox(), updateDialogText: makeBox(), updateDialogOptions: makeBox(), updateDialogStageOptions: makeBox(), updateDialogStatusOptions: makeBox(), updateDialogPriorityOptions: makeBox(), updateDialogComment: makeBox(), createDialog: makeBox(), createDialogText: makeBox(), createDialogTitleInput: makeTextarea(), createDialogDescription: makeTextarea(), createDialogIssueTypeOptions: makeBox(), createDialogPriorityOptions: makeBox(), createDialogCreateButton: makeBox(), createDialogCancelButton: makeBox() } as any;
 
   const opencodeText = makeTextarea();
   const opencodeUi = { serverStatusBox: makeBox(), dialog: makeBox(), textarea: opencodeText, suggestionHint: makeBox(), sendButton: makeBox(), cancelButton: makeBox(), ensureResponsePane: vi.fn(() => makeBox()) } as any;

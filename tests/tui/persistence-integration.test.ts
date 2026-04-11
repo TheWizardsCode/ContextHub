@@ -13,7 +13,7 @@ const makeBox = () => ({
   hidden: true,
   width: 0,
   height: 0,
-  style: { border: {}, label: {}, selected: {} },
+  style: { border: {}, label: {}, selected: {}, focus: { border: {} } },
   show: vi.fn(function () { (this as any).hidden = false; }),
   hide: vi.fn(function () { (this as any).hidden = true; }),
   focus: vi.fn(),
@@ -35,6 +35,12 @@ const makeBox = () => ({
   getValue: vi.fn(() => ''),
   moveCursor: vi.fn(),
 });
+
+const makeTextarea = () => {
+  const box = makeBox() as any;
+  box._updateCursor = vi.fn();
+  return box;
+};
 
 const makeList = () => {
   const list = makeBox() as any;
@@ -111,6 +117,7 @@ function buildLayout(screen: any) {
     detailOverlay: makeBox(),
     closeOverlay: makeBox(),
     updateOverlay: makeBox(),
+    createOverlay: makeBox(),
   };
   const dialogs = {
     detailModal: makeBox(),
@@ -125,6 +132,14 @@ function buildLayout(screen: any) {
     updateDialogStatusOptions: makeList(),
     updateDialogPriorityOptions: makeList(),
     updateDialogComment: makeBox(),
+    createDialog: makeBox(),
+    createDialogText: makeBox(),
+    createDialogTitleInput: makeTextarea(),
+    createDialogDescription: makeTextarea(),
+    createDialogIssueTypeOptions: makeList(),
+    createDialogPriorityOptions: makeList(),
+    createDialogCreateButton: makeBox(),
+    createDialogCancelButton: makeBox(),
   };
   const helpMenu = {
     isVisible: vi.fn(() => false),

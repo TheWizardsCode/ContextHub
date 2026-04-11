@@ -36,13 +36,17 @@ function buildLayoutWithMetadataMock(ctx: ReturnType<typeof createTuiTestContext
     detailComponent: { getDetail: () => ctx.blessed.box(), getCopyIdButton: () => ctx.blessed.box() },
     metadataPaneComponent: { getBox: () => ctx.blessed.box(), updateFromItem: updateFromItemMock },
     toastComponent: { show: (m: string) => ctx.toast.show(m) },
-    overlaysComponent: { detailOverlay: ctx.blessed.box(), closeOverlay: ctx.blessed.box(), updateOverlay: ctx.blessed.box() },
+    overlaysComponent: { detailOverlay: ctx.blessed.box(), closeOverlay: ctx.blessed.box(), updateOverlay: ctx.blessed.box(), createOverlay: ctx.blessed.box() },
     dialogsComponent: {
       detailModal: ctx.blessed.box(), detailClose: ctx.blessed.box(),
       closeDialog: ctx.blessed.box(), closeDialogText: ctx.blessed.box(), closeDialogOptions: ctx.blessed.box(),
       updateDialog: ctx.blessed.box(), updateDialogText: ctx.blessed.box(), updateDialogOptions: ctx.blessed.box(),
       updateDialogStageOptions: ctx.blessed.box(), updateDialogStatusOptions: ctx.blessed.box(),
       updateDialogPriorityOptions: ctx.blessed.box(), updateDialogComment: ctx.blessed.box(),
+      createDialog: ctx.blessed.box(), createDialogText: ctx.blessed.box(),
+      createDialogTitleInput: ctx.blessed.box(), createDialogDescription: ctx.blessed.box(),
+      createDialogIssueTypeOptions: ctx.blessed.list(), createDialogPriorityOptions: ctx.blessed.list(),
+      createDialogCreateButton: ctx.blessed.box(), createDialogCancelButton: ctx.blessed.box(),
     },
     helpMenu: { isVisible: () => false, show: () => {}, hide: () => {} },
     modalDialogs: {

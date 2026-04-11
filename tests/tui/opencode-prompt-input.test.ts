@@ -5,7 +5,7 @@ const makeBox = () => ({
   hidden: true,
   width: 0,
   height: 0,
-  style: { border: {}, label: {}, selected: {} },
+  style: { border: {}, label: {}, selected: {}, focus: { border: {} } },
   show: vi.fn(function() { (this as any).hidden = false; }),
   hide: vi.fn(function() { (this as any).hidden = true; }),
   focus: vi.fn(),
@@ -82,6 +82,7 @@ describe('OpenCode prompt input modes', () => {
       detailOverlay: makeBox(),
       closeOverlay: makeBox(),
       updateOverlay: makeBox(),
+      createOverlay: makeBox(),
     };
     const dialogs = {
       detailModal: makeBox(),
@@ -96,6 +97,14 @@ describe('OpenCode prompt input modes', () => {
       updateDialogStatusOptions: makeList(),
       updateDialogPriorityOptions: makeList(),
       updateDialogComment: makeTextarea(),
+      createDialog: makeBox(),
+      createDialogText: makeBox(),
+      createDialogTitleInput: makeTextarea(),
+      createDialogDescription: makeTextarea(),
+      createDialogIssueTypeOptions: makeList(),
+      createDialogPriorityOptions: makeList(),
+      createDialogCreateButton: makeBox(),
+      createDialogCancelButton: makeBox(),
     };
     const helpMenu = {
       isVisible: vi.fn(() => false),
@@ -244,6 +253,7 @@ describe('OpenCode prompt input modes', () => {
       detailOverlay: makeBox(),
       closeOverlay: makeBox(),
       updateOverlay: makeBox(),
+      createOverlay: makeBox(),
     };
     const dialogs = {
       detailModal: makeBox(),
@@ -258,6 +268,14 @@ describe('OpenCode prompt input modes', () => {
       updateDialogStatusOptions: makeList(),
       updateDialogPriorityOptions: makeList(),
       updateDialogComment: makeTextarea(),
+      createDialog: makeBox(),
+      createDialogText: makeBox(),
+      createDialogTitleInput: makeTextarea(),
+      createDialogDescription: makeTextarea(),
+      createDialogIssueTypeOptions: makeList(),
+      createDialogPriorityOptions: makeList(),
+      createDialogCreateButton: makeBox(),
+      createDialogCancelButton: makeBox(),
     };
     const helpMenu = {
       isVisible: vi.fn(() => false),
@@ -376,6 +394,7 @@ describe('OpenCode prompt input modes', () => {
       detailOverlay: makeBox(),
       closeOverlay: makeBox(),
       updateOverlay: makeBox(),
+      createOverlay: makeBox(),
     };
     const dialogs = {
       detailModal: makeBox(),
@@ -390,6 +409,14 @@ describe('OpenCode prompt input modes', () => {
       updateDialogStatusOptions: makeList(),
       updateDialogPriorityOptions: makeList(),
       updateDialogComment: makeTextarea(),
+      createDialog: makeBox(),
+      createDialogText: makeBox(),
+      createDialogTitleInput: makeTextarea(),
+      createDialogDescription: makeTextarea(),
+      createDialogIssueTypeOptions: makeList(),
+      createDialogPriorityOptions: makeList(),
+      createDialogCreateButton: makeBox(),
+      createDialogCancelButton: makeBox(),
     };
     const helpMenu = {
       isVisible: vi.fn(() => false),
