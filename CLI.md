@@ -282,7 +282,8 @@ The `--include-blocked` flag behavior is unchanged. The ranking boost only affec
 Options:
 
 `-a, --assignee <assignee>` (optional)
-`-s, --search <term>` (optional)
+`--stage <stage>` — Filter by stage: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` (optional).
+`--search <term>` (optional)
 `-n, --number <n>` — Number of items to return (optional; default: `1`).
 `--include-in-review` — Include items with status `blocked` and stage `in_review` (optional).
 `--include-blocked` — Include dependency-blocked items (excluded by default).
@@ -296,6 +297,8 @@ Examples:
 wl next
 wl next -n 3
 wl next -a alice --search "bug"
+wl next --stage idea
+wl next --stage in_progress
 wl next --include-blocked
 wl next --no-re-sort
 wl next --recency-policy prefer

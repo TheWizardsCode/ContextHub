@@ -1709,6 +1709,93 @@ describe('WorklogDatabase', () => {
         expect(result.workItem!.id).toBe(epic.id);
       });
     });
+
+    // WL-0MNUOLCB20008HVX: --stage filter tests
+    describe('stage filter', () => {
+      it('should filter by stage idea', () => {
+        const ideaItem = db.create({ title: 'Idea task', priority: 'low', status: 'open', stage: 'idea' });
+        db.create({ title: 'In progress task', priority: 'high', status: 'open', stage: 'in_progress' });
+        db.create({ title: 'Done task', priority: 'critical', status: 'completed', stage: 'done' });
+
+        const result = db.findNextWorkItem(undefined, undefined, false, false, 'idea');
+        expect(result.workItem).not.toBeNull();
+        expect(result.workItem!.id).toBe(ideaItem.id);
+        expect(result.workItem!.stage).toBe('idea');
+      });
+
+      it('should filter by stage in_progress', () => {
+        db.create({ title: 'Idea task', priority: 'critical', status: 'open', stage: 'idea' });
+        const inProgressItem = db.create({ title: 'In progress task', priority: 'low', status: 'open', stage: 'in_progress' });
+
+        const result = db.findNextWorkItem(undefined, undefined, false, false, 'in_progress');
+        expect(result.workItem).not.toBeNull();
+        expect(result.workItem!.id).toBe(inProgressItem.id);
+        expect(result.workItem!.stage).toBe('in_progress');
+      });
+
+      it('should filter by stage done', () => {
+        db.create({ title: 'Idea task', priority: 'critical', status: 'open', stage: 'idea' });
+        const doneItem = db.create({ title: 'Done task', priority: 'low', status: 'completed', stage: 'done' });
+
+        const result = db.findNextWorkItem(undefined, undefined, false, false, 'done');
+        expect(result.workItem).not.toBeNull();
+        expect(result.workItem!.id).toBe(doneItem.id);
+        expect(result.workItem!.stage).toBe('done');
+      });
+
+      it('should return null when no items match the stage filter', () => {
+        db.create({ title: 'Idea task', priority: 'high', status: 'open', stage: 'idea' });
+        db.create({ title: 'In progress task', priority: 'high', status: 'open', stage: 'in_progress' });
+
+        const result = db.findNextWorkItem(undefined, undefined, false, false, 'plan_complete');
+        expect(result.workItem).toBeNull();
+      });
+
+      it('should combine stage filter with assignee filter', () => {
+        const janeIdea = db.create({ title: 'Jane idea task', priority: 'low', status: 'open', stage: 'idea', assignee: 'jane' });
+        db.create({ title: 'Jane in progress task', priority: 'high', status: 'open', stage: 'in_progress', assignee: 'jane' });
+        db.create({ title: 'John idea task', priority: 'critical', status: 'open', stage: 'idea', assignee: 'john' });
+
+        const result = db.findNextWorkItem('jane', undefined, false, false, 'idea');
+        expect(result.workItem).not.toBeNull();
+        expect(result.workItem!.id).toBe(janeIdea.id);
+      });
+
+      it('should combine stage filter with search filter', () => {
+        db.create({ title: 'Bug fix idea', priority: 'low', status: 'open', stage: 'idea' });
+        db.create({ title: 'Feature idea', priority: 'high', status: 'open', stage: 'idea' });
+        db.create({ title: 'Bug fix in progress', priority: 'critical', status: 'open', stage: 'in_progress' });
+
+        const result = db.findNextWorkItem(undefined, 'bug', false, false, 'idea');
+        expect(result.workItem).not.toBeNull();
+        expect(result.workItem!.stage).toBe('idea');
+        expect(result.workItem!.title.toLowerCase()).toContain('bug');
+      });
+    });
+
+    describe('findNextWorkItems with stage filter', () => {
+      it('should return multiple items filtered by stage', () => {
+        const idea1 = db.create({ title: 'Idea task 1', priority: 'high', status: 'open', stage: 'idea' });
+        const idea2 = db.create({ title: 'Idea task 2', priority: 'medium', status: 'open', stage: 'idea' });
+        db.create({ title: 'In progress task', priority: 'critical', status: 'open', stage: 'in_progress' });
+
+        const results = db.findNextWorkItems(3, undefined, undefined, false, false, 'idea');
+        expect(results).toHaveLength(3);
+        expect(results[0].workItem!.id).toBe(idea1.id);
+        expect(results[1].workItem!.id).toBe(idea2.id);
+        expect(results[2].workItem).toBeNull();
+      });
+
+      it('should handle batch mode with stage filter when items run out', () => {
+        const idea1 = db.create({ title: 'Idea task 1', priority: 'high', status: 'open', stage: 'idea' });
+
+        const results = db.findNextWorkItems(3, undefined, undefined, false, false, 'idea');
+        expect(results).toHaveLength(3);
+        expect(results[0].workItem!.id).toBe(idea1.id);
+        expect(results[1].workItem).toBeNull();
+        expect(results[2].workItem).toBeNull();
+      });
+    });
   });
 
   describe('refreshFromJsonlIfNewer - graceful fallback', () => {

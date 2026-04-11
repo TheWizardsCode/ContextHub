@@ -29,6 +29,15 @@ export class DialogsComponent {
   readonly updateDialogPriorityOptions: BlessedList;
   readonly updateDialogComment: BlessedTextarea;
 
+  readonly createDialog: BlessedBox;
+  readonly createDialogText: BlessedBox;
+  readonly createDialogTitleInput: BlessedTextarea;
+  readonly createDialogDescription: BlessedTextarea;
+  readonly createDialogIssueTypeOptions: BlessedList;
+  readonly createDialogPriorityOptions: BlessedList;
+  readonly createDialogCreateButton: BlessedBox;
+  readonly createDialogCancelButton: BlessedBox;
+
   constructor(options: DialogsComponentOptions) {
     this.screen = options.parent;
     this.blessedImpl = options.blessed || blessed;
@@ -304,6 +313,195 @@ export class DialogsComponent {
         this.screen.on('resize', updateLayout);
       }
     } catch (_) {}
+
+    // Create Work Item Dialog
+    this.createDialog = this.blessedImpl.box({
+      parent: this.screen,
+      top: 'center',
+      left: 'center',
+      width: '70%',
+      height: 28,
+      label: ' Create Work Item ',
+      border: { type: 'line' },
+      hidden: true,
+      tags: true,
+      mouse: true,
+      clickable: true,
+      style: { border: { fg: 'magenta' } },
+    });
+
+    this.createDialogText = this.blessedImpl.box({
+      parent: this.createDialog,
+      top: 1,
+      left: 2,
+      height: 1,
+      width: '100%-4',
+      content: 'Enter work item details:',
+      tags: false,
+    });
+
+    // Title input field
+    this.blessedImpl.box({
+      parent: this.createDialog,
+      top: 3,
+      left: 2,
+      height: 1,
+      width: '100%-4',
+      content: 'Title (required)',
+      style: { fg: 'cyan', bold: true },
+    });
+
+    this.createDialogTitleInput = this.blessedImpl.textarea({
+      parent: this.createDialog,
+      top: 4,
+      left: 2,
+      right: 2,
+      height: 3,
+      input: true,
+      inputOnFocus: false,
+      keys: true,
+      mouse: true,
+      border: { type: 'line' },
+      style: { fg: theme.tui.colors.lightText, bg: 'black', border: { fg: 'gray' } },
+      scrollbar: { ch: ' ', inverse: true },
+    }) as BlessedTextarea;
+
+    // Description textarea
+    this.blessedImpl.box({
+      parent: this.createDialog,
+      top: 8,
+      left: 2,
+      height: 1,
+      width: '100%-4',
+      content: 'Description',
+      style: { fg: 'cyan', bold: true },
+    });
+
+    this.createDialogDescription = this.blessedImpl.textarea({
+      parent: this.createDialog,
+      top: 9,
+      left: 2,
+      right: 2,
+      height: 6,
+      input: true,
+      inputOnFocus: false,
+      vi: true,
+      wrap: true,
+      keys: true,
+      mouse: true,
+      scrollable: true,
+      alwaysScroll: true,
+      border: { type: 'line' },
+      label: ' Description ',
+      style: { fg: theme.tui.colors.lightText, bg: 'black', border: { fg: 'gray' } },
+      scrollbar: { ch: ' ', inverse: true },
+    }) as BlessedTextarea;
+
+    // Issue Type list
+    this.blessedImpl.box({
+      parent: this.createDialog,
+      top: 16,
+      left: 2,
+      height: 1,
+      width: '30%',
+      content: 'Issue Type',
+      style: { fg: 'cyan', bold: true },
+    });
+
+    this.createDialogIssueTypeOptions = this.blessedImpl.list({
+      parent: this.createDialog,
+      top: 17,
+      left: 2,
+      width: '30%',
+      height: 5,
+      keys: true,
+      mouse: true,
+      style: { selected: { bg: 'blue' } },
+      items: ['feature', 'bug', 'task', 'epic', 'chore'],
+    });
+
+    // Priority list
+    this.blessedImpl.box({
+      parent: this.createDialog,
+      top: 16,
+      left: '35%',
+      height: 1,
+      width: '30%',
+      content: 'Priority',
+      style: { fg: 'cyan', bold: true },
+    });
+
+    this.createDialogPriorityOptions = this.blessedImpl.list({
+      parent: this.createDialog,
+      top: 17,
+      left: '35%',
+      width: '30%',
+      height: 5,
+      keys: true,
+      mouse: true,
+      style: { selected: { bg: 'blue' } },
+      items: ['critical', 'high', 'medium', 'low'],
+    });
+
+    // Create Item button
+    this.createDialogCreateButton = this.blessedImpl.box({
+      parent: this.createDialog,
+      top: 23,
+      left: '20%',
+      width: '25%',
+      height: 3,
+      content: '{center}Create Item (Ctrl+S){/center}',
+      tags: true,
+      border: { type: 'line' },
+      style: {
+        border: { fg: 'green' },
+        bg: 'green',
+        fg: 'white',
+      },
+      mouse: true,
+      clickable: true,
+    });
+
+    // Cancel button
+    this.createDialogCancelButton = this.blessedImpl.box({
+      parent: this.createDialog,
+      top: 23,
+      left: '55%',
+      width: '25%',
+      height: 3,
+      content: '{center}Cancel (Esc){/center}',
+      tags: true,
+      border: { type: 'line' },
+      style: {
+        border: { fg: 'red' },
+        fg: 'white',
+      },
+      mouse: true,
+      clickable: true,
+    });
+
+    // Layout update function for create dialog
+    const updateCreateLayout = () => {
+      const screenHeight = Math.max(0, this.screen.height as number);
+      const screenWidth = Math.max(0, this.screen.width as number);
+      if (!screenHeight || !screenWidth) return;
+
+      // Adjust dialog height for small screens
+      if (screenHeight < 30) {
+        this.createDialog.height = Math.max(20, screenHeight - 4);
+      } else {
+        this.createDialog.height = 28;
+      }
+
+      this.createDialog.width = screenWidth < 100 ? '90%' : '70%';
+    };
+
+    this.createDialog.on('show', updateCreateLayout);
+    try {
+      if (typeof (this.screen as any).on === 'function') {
+        this.screen.on('resize', updateCreateLayout);
+      }
+    } catch (_) {}
   }
 
   create(): this {
@@ -322,6 +520,10 @@ export class DialogsComponent {
     return this.overlays.updateOverlay;
   }
 
+  getCreateOverlay(): any {
+    return this.overlays.createOverlay;
+  }
+
   show(): void {
     // Dialogs are shown individually.
   }
@@ -330,6 +532,7 @@ export class DialogsComponent {
     this.detailModal.hide();
     this.closeDialog.hide();
     this.updateDialog.hide();
+    this.createDialog.hide();
     this.overlays.hide();
   }
 
@@ -356,5 +559,22 @@ export class DialogsComponent {
     try { this.updateDialogOptions.destroy(); } catch (_) {}
     try { this.updateDialogText.destroy(); } catch (_) {}
     try { this.updateDialog.destroy(); } catch (_) {}
+
+    try { this.createDialogTitleInput.removeAllListeners?.(); } catch (_) {}
+    try { this.createDialogDescription.removeAllListeners?.(); } catch (_) {}
+    try { this.createDialogIssueTypeOptions.removeAllListeners?.(); } catch (_) {}
+    try { this.createDialogPriorityOptions.removeAllListeners?.(); } catch (_) {}
+    try { this.createDialogCreateButton.removeAllListeners?.(); } catch (_) {}
+    try { this.createDialogCancelButton.removeAllListeners?.(); } catch (_) {}
+    try { this.createDialogText.removeAllListeners?.(); } catch (_) {}
+    try { this.createDialog.removeAllListeners?.(); } catch (_) {}
+    try { this.createDialogTitleInput.destroy(); } catch (_) {}
+    try { this.createDialogDescription.destroy(); } catch (_) {}
+    try { this.createDialogIssueTypeOptions.destroy(); } catch (_) {}
+    try { this.createDialogPriorityOptions.destroy(); } catch (_) {}
+    try { this.createDialogCreateButton.destroy(); } catch (_) {}
+    try { this.createDialogCancelButton.destroy(); } catch (_) {}
+    try { this.createDialogText.destroy(); } catch (_) {}
+    try { this.createDialog.destroy(); } catch (_) {}
   }
 }
