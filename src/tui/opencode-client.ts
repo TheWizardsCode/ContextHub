@@ -761,7 +761,7 @@ export class OpencodeClient {
 
     req.on('error', (err: unknown) => {
       this.options.log(`input response error: ${String(err)}`);
-      console.error('Failed to send input response:', err);
+      try { this.options.log(`Failed to send input response: ${String(err)}`); } catch (_) {}
     });
 
     req.write(responseData);
