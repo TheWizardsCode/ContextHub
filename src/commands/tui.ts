@@ -4,6 +4,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import { TuiController } from '../tui/controller.js';
+import { InkTuiController } from '../tui/ink/index.js';
 import {
   rebuildTreeState as state_rebuildTreeState,
   createTuiState as state_createTuiState,
@@ -23,7 +24,6 @@ export const expandAncestorsForInProgress = state_expandAncestorsForInProgress;
 export type { TuiState };
 
 export default function register(ctx: PluginContext): void {
-  const controller = new TuiController(ctx);
   const { program } = ctx;
 
   program
@@ -33,9 +33,17 @@ export default function register(ctx: PluginContext): void {
     .option('--all', 'Include completed/deleted items in the list')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--perf', 'Enable performance instrumentation (write perf metrics and show perf debug output)')
+    .option('--ink', 'Use the Ink-based TUI backend (prototype; default backend is Blessed)')
     .action(async (options: TuiOptions) => {
-      // Forward the perf flag to the controller so instrumentation can be enabled
-      await controller.start(options);
+      const useInk = options.ink ?? process.env['WL_TUI_INK'] === '1';
+      if (useInk) {
+        const inkController = new InkTuiController(ctx);
+        await inkController.start(options);
+      } else {
+        const controller = new TuiController(ctx);
+        // Forward the perf flag to the controller so instrumentation can be enabled
+        await controller.start(options);
+      }
     });
 }
 
@@ -45,4 +53,5 @@ interface TuiOptions {
   prefix?: string;
   all?: boolean;
   perf?: boolean;
+  ink?: boolean;
 }
