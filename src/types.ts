@@ -2,7 +2,8 @@
  * Core types for the Worklog system
  */
 
-export type WorkItemStatus = 'open' | 'in-progress' | 'completed' | 'blocked' | 'deleted';
+// Added 'input_needed' to represent items awaiting requester input
+export type WorkItemStatus = 'open' | 'in-progress' | 'completed' | 'blocked' | 'deleted' | 'input_needed';
 export type WorkItemPriority = 'low' | 'medium' | 'high' | 'critical';
 export type WorkItemRiskLevel = 'Low' | 'Medium' | 'High' | 'Severe';
 export type WorkItemEffortLevel = 'XS' | 'S' | 'M' | 'L' | 'XL';

@@ -10,6 +10,8 @@ statuses:
     label: Open
   - value: in-progress
     label: In Progress
+  - value: input_needed
+    label: Input Needed
   - value: blocked
     label: Blocked
   - value: completed
@@ -32,6 +34,7 @@ stages:
 statusStageCompatibility:
   open: [idea, intake_complete, plan_complete, in_progress]
   in-progress: [intake_complete, plan_complete, in_progress]
+  input_needed: [idea, intake_complete, plan_complete, in_progress]
   blocked: [idea, intake_complete, plan_complete]
   completed: [in_review, done]
   deleted: [idea, intake_complete, plan_complete, done]

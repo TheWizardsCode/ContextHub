@@ -157,6 +157,8 @@ export function loadConfig(): WorklogConfig | null {
     config.statuses = [
       { value: 'open', label: 'Open' },
       { value: 'in-progress', label: 'In Progress' },
+      // Status used when additional input is required from the requester
+      { value: 'input_needed', label: 'Input Needed' },
       { value: 'blocked', label: 'Blocked' },
       { value: 'completed', label: 'Completed' },
       { value: 'deleted', label: 'Deleted' },
@@ -176,6 +178,8 @@ export function loadConfig(): WorklogConfig | null {
     config.statusStageCompatibility = {
       'open': ['idea', 'intake_complete', 'plan_complete', 'in_progress'],
       'in-progress': ['in_progress'],
+      // Allow 'input_needed' in early stages where intake questions are asked
+      'input_needed': ['idea', 'intake_complete', 'plan_complete', 'in_progress'],
       'blocked': ['idea', 'intake_complete', 'plan_complete'],
       'completed': ['in_review', 'done'],
       'deleted': ['idea', 'intake_complete', 'plan_complete', 'done'],
