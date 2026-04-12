@@ -156,7 +156,7 @@ export class TuiController {
     // performance instrumentation is explicitly requested via --perf.
     const debugLog = (message: string) => {
       if (!isVerbose && !perfEnabled) return;
-      console.error(`[tui:opencode] ${message}`);
+      try { require('./logger').fileLog(`[tui:opencode] ${message}`); } catch (_) {}
     };
     const perfMetrics: {event: string; start: number; end: number; duration: number}[] = [];
     const detailCache = new Map<string, string>();
@@ -195,8 +195,8 @@ export class TuiController {
       : { blessed: blessedImpl, virtualize: virtualizeEnabled };
 
     if (useSafeTerminalFallback) {
-      console.error(`[wl tui] TERM=${currentTerm} can trigger tmux terminfo parse issues; using fallback terminal ${TUI_FALLBACK_TERMINAL}.`);
-      console.error(`[wl tui] If needed, run: TERM=${TUI_FALLBACK_TERMINAL} wl tui`);
+      try { require('./logger').fileLog(`[wl tui] TERM=${currentTerm} can trigger tmux terminfo parse issues; using fallback terminal ${TUI_FALLBACK_TERMINAL}.`); } catch (_) {}
+      try { require('./logger').fileLog(`[wl tui] If needed, run: TERM=${TUI_FALLBACK_TERMINAL} wl tui`); } catch (_) {}
     }
 
     try {
@@ -209,9 +209,9 @@ export class TuiController {
         throw error;
       }
       const errorMessage = toSingleLine(getErrorMessage(error));
-      console.error('[wl tui] Terminal capability parse error detected; starting with safe fallback mode.');
-      console.error(`[wl tui] TERM=${currentTerm}; error: ${errorMessage}`);
-      console.error(`[wl tui] If needed, run: TERM=${TUI_FALLBACK_TERMINAL} wl tui`);
+      try { require('./logger').fileLog('[wl tui] Terminal capability parse error detected; starting with safe fallback mode.'); } catch (_) {}
+      try { require('./logger').fileLog(`[wl tui] TERM=${currentTerm}; error: ${errorMessage}`); } catch (_) {}
+      try { require('./logger').fileLog(`[wl tui] If needed, run: TERM=${TUI_FALLBACK_TERMINAL} wl tui`); } catch (_) {}
       layout = createLayoutImpl(fallbackLayoutOptions);
     }
     const {
@@ -1132,7 +1132,7 @@ export class TuiController {
     };
 
     // Register Ctrl-W chord handlers
-    if (chordDebug) console.error('[tui] registering ctrl-w chord handlers');
+    if (chordDebug) try { require('./logger').fileLog('[tui] registering ctrl-w chord handlers'); } catch (_) {}
     chordHandler.register(['C-w', 'w'], () => {
       if (helpMenu.isVisible()) return;
       if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
@@ -1212,7 +1212,7 @@ export class TuiController {
         if (typeof (screen as any).on === 'function') {
           const origOn = (screen as any).on.bind(screen);
           (screen as any).on('keypress', (_ch: any, key: any) => {
-            try { console.error(`[tui] raw keypress: ch='${String(_ch)}' key=${JSON.stringify(key)}`); } catch (_) {}
+            try { require('./logger').fileLog(`[tui] raw keypress: ch='${String(_ch)}' key=${JSON.stringify(key)}`); } catch (_) {}
           });
         }
       } catch (_) {}

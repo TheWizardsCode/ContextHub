@@ -14,11 +14,14 @@ describe('tui prototype', () => {
 
     // simulate keypress to open dialog
     stdin.write('o');
+    // allow a small tick for the input handler and render to flush
+    await new Promise((r) => setTimeout(r, 20));
     // dialog prompt text should appear
     expect(lastFrame()).toContain('Enter text');
 
     // press escape to close
     stdin.write('\x1b');
+    await new Promise((r) => setTimeout(r, 20));
     // dialog should be gone
     expect(lastFrame()).not.toContain('Enter text');
 

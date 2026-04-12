@@ -18,8 +18,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:tui": "bash ./tests/tui-ci-run.sh",
-    "tui:prototype": "node -r tsx/register src/tui/prototype/cli.tsx",
-    "tui:prototype:demo": "TUI_DEMO=1 node -r tsx/register src/tui/prototype/cli.tsx",
+    "tui:prototype": "tsx src/tui/prototype/cli.tsx",
+    "tui:prototype:demo": "TUI_DEMO=1 tsx src/tui/prototype/cli.tsx",
     "test:timings": "node ./scripts/test-timings.cjs",
     "benchmark:sort-index": "tsx scripts/benchmark-sort-index.ts"
   },
