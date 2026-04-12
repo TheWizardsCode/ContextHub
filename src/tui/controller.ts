@@ -411,9 +411,57 @@ export class TuiController {
       if (field && typeof field.on === 'function') {
         const fieldFocusHandler = () => {
           applyCreateDialogFocusStyles(field);
+          // Start reading mode for textareas (enables immediate typing)
+          if (field === createDialogTitleInput || field === createDialogDescription) {
+            const widget = field as any;
+            if (widget) {
+              try {
+                // Clean up any previous listeners
+                if (widget.__listener && typeof widget.removeListener === 'function') {
+                  widget.removeListener('keypress', widget.__listener);
+                }
+                if (widget.__done && typeof widget.removeListener === 'function') {
+                  widget.removeListener('blur', widget.__done);
+                }
+                delete widget.__listener;
+                delete widget.__done;
+                delete widget._done;
+                delete widget._callback;
+                // Enable reading mode
+                widget._reading = true;
+                if (typeof (screen as any).program?.showCursor === 'function') {
+                  (screen as any).program.showCursor();
+                }
+              } catch (_) {}
+            }
+          }
         };
         const fieldBlurHandler = () => {
           applyCreateDialogFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+          // End reading mode for textareas
+          if (field === createDialogTitleInput || field === createDialogDescription) {
+            const widget = field as any;
+            if (widget) {
+              try {
+                if (widget.__listener && typeof widget.removeListener === 'function') {
+                  widget.removeListener('keypress', widget.__listener);
+                }
+                if (widget.__done && typeof widget.removeListener === 'function') {
+                  widget.removeListener('blur', widget.__done);
+                }
+                delete widget.__listener;
+                delete widget.__done;
+                delete widget._done;
+                delete widget._callback;
+                if (widget._reading) {
+                  widget._reading = false;
+                }
+                if (typeof (screen as any).program?.hideCursor === 'function') {
+                  (screen as any).program.hideCursor();
+                }
+              } catch (_) {}
+            }
+          }
         };
         try {
           (field as any).__opencode_focus = fieldFocusHandler;
@@ -445,31 +493,14 @@ export class TuiController {
         return false;
       };
 
-      // For textareas, handle Tab in keypress to allow cursor nav
+      // For textareas, use standard key handler for Tab/Enter (no keypress handlers)
       if (field === createDialogTitleInput || field === createDialogDescription) {
-        if (typeof field.on === 'function') {
-          const textareaKeyHandler = (_ch: unknown, key: unknown) => {
-            if (createDialog.hidden) return;
-            if ((screen as any).focused !== field) return;
-            const k = key as KeyInfo | undefined;
-            
-            if (k?.name === 'tab') {
-              createDialogFocusManager.cycle(1);
-              applyCreateDialogFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
-              return false;
-            }
-            if (k?.name === 'S-tab') {
-              createDialogFocusManager.cycle(-1);
-              applyCreateDialogFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
-              return false;
-            }
-            // Allow normal editing keys to pass through for blessed to handle
-          };
-          try {
-            (field as any).__opencode_textarea_key = textareaKeyHandler;
-            field.on('keypress', textareaKeyHandler);
-          } catch (_) {}
-        }
+        try {
+          (field as any).__opencode_key_tab = fieldTabHandler;
+          (field as any).__opencode_key_stab = fieldShiftTabHandler;
+          field.key(KEY_TAB, fieldTabHandler);
+          field.key(KEY_SHIFT_TAB, fieldShiftTabHandler);
+        } catch (_) {}
       } else {
         // For non-textarea fields, use standard key handler
         try {
@@ -747,164 +778,7 @@ export class TuiController {
       } catch (_) {}
     };
 
-    // === Create dialog textarea editing support (mirror update dialog helpers) ===
-    let createDialogCursorIndex = 0;
-    let createDialogDesiredColumn: number | null = null;
 
-    const clampCreateDialogCursor = (value: string, nextIndex: number) => Math.max(0, Math.min(nextIndex, value.length));
-
-    const setCreateDialogCursorIndex = (value: string, nextIndex: number) => {
-      createDialogCursorIndex = clampCreateDialogCursor(value, nextIndex);
-      try { (createDialogDescription as any).__opencode_cursor = createDialogCursorIndex; } catch (_) {}
-    };
-
-    const getCreateDialogLineColumnFromIndex = (value: string, index: number) => {
-      const clamped = clampCreateDialogCursor(value, index);
-      let line = 0;
-      let column = 0;
-      for (let i = 0; i < clamped; i += 1) {
-        if (value[i] === '\n') { line += 1; column = 0; } else { column += 1; }
-      }
-      return { line, column };
-    };
-
-    const getCreateDialogIndexFromLineColumn = (value: string, line: number, column: number) => {
-      const lines = value.split('\n');
-      const safeLine = Math.max(0, Math.min(line, Math.max(0, lines.length - 1)));
-      let idx = 0;
-      for (let i = 0; i < safeLine; i += 1) idx += lines[i].length + 1;
-      const safeColumn = Math.max(0, Math.min(column, lines[safeLine]?.length ?? 0));
-      return idx + safeColumn;
-    };
-
-    const updateCreateDialogCursor = () => {
-      try { (createDialogDescription as any)._updateCursor?.(); } catch (_) {}
-      screen.render();
-    };
-
-    const moveCreateDialogCursorHorizontal = (delta: number) => {
-      const value = createDialogDescription.getValue ? createDialogDescription.getValue() : '';
-      setCreateDialogCursorIndex(value, createDialogCursorIndex + delta);
-      const { column } = getCreateDialogLineColumnFromIndex(value, createDialogCursorIndex);
-      createDialogDesiredColumn = column;
-      updateCreateDialogCursor();
-    };
-
-    const moveCreateDialogCursorVertical = (delta: number) => {
-      const value = createDialogDescription.getValue ? createDialogDescription.getValue() : '';
-      const pos = getCreateDialogLineColumnFromIndex(value, createDialogCursorIndex);
-      const targetLine = pos.line + delta;
-      const desiredColumn = createDialogDesiredColumn ?? pos.column;
-      const nextIndex = getCreateDialogIndexFromLineColumn(value, targetLine, desiredColumn);
-      setCreateDialogCursorIndex(value, nextIndex);
-      updateCreateDialogCursor();
-    };
-
-    const insertCreateDialogAtCursor = (text: string) => {
-      if (!text) return;
-      const value = createDialogDescription.getValue ? createDialogDescription.getValue() : '';
-      const nextValue = value.slice(0, createDialogCursorIndex) + text + value.slice(createDialogCursorIndex);
-      const nextIndex = createDialogCursorIndex + text.length;
-      createDialogDescription.setValue?.(nextValue);
-      setCreateDialogCursorIndex(nextValue, nextIndex);
-      createDialogDesiredColumn = null;
-      updateCreateDialogCursor();
-    };
-
-    const deleteCreateDialogBackward = () => {
-      const value = createDialogDescription.getValue ? createDialogDescription.getValue() : '';
-      if (createDialogCursorIndex <= 0) return;
-      const nextValue = value.slice(0, createDialogCursorIndex - 1) + value.slice(createDialogCursorIndex);
-      const nextIndex = createDialogCursorIndex - 1;
-      createDialogDescription.setValue?.(nextValue);
-      setCreateDialogCursorIndex(nextValue, nextIndex);
-      createDialogDesiredColumn = null;
-      updateCreateDialogCursor();
-    };
-
-    const deleteCreateDialogForward = () => {
-      const value = createDialogDescription.getValue ? createDialogDescription.getValue() : '';
-      if (createDialogCursorIndex >= value.length) return;
-      const nextValue = value.slice(0, createDialogCursorIndex) + value.slice(createDialogCursorIndex + 1);
-      createDialogDescription.setValue?.(nextValue);
-      setCreateDialogCursorIndex(nextValue, createDialogCursorIndex);
-      createDialogDesiredColumn = null;
-      updateCreateDialogCursor();
-    };
-
-    const createDialogBaseUpdateCursor = (createDialogDescription as any)._updateCursor?.bind(createDialogDescription);
-    const createDialogCustomUpdateCursor = function(this: any, get?: boolean) {
-      if (this.screen?.focused !== this) return;
-      const lpos = get ? this.lpos : this._getCoords?.();
-      if (!lpos || !this.screen?.program) { createDialogBaseUpdateCursor?.(get); return; }
-      if (!this._clines || !Array.isArray(this._clines) || !Array.isArray(this._clines.ftor)) { createDialogBaseUpdateCursor?.(get); return; }
-
-      const value = typeof this.value === 'string' ? this.value : '';
-      const { line, column } = getCreateDialogLineColumnFromIndex(value, createDialogCursorIndex);
-      const wrappedIndexes: number[] = this._clines.ftor[line] ?? [];
-      const fallbackIndex = Math.min(line, Math.max(0, this._clines.length - 1));
-      const wrapped = wrappedIndexes.length ? wrappedIndexes : [fallbackIndex];
-
-      let remaining = column;
-      let wrappedIndex = wrapped[wrapped.length - 1] ?? fallbackIndex;
-      let columnInWrapped = 0;
-
-      for (const index of wrapped) {
-        const text = (this._clines[index] ?? '').replace(/\x1b\[[0-9;]*m/g, '');
-        const width = typeof this.strWidth === 'function' ? this.strWidth(text) : text.length;
-        if (remaining <= width) { wrappedIndex = index; columnInWrapped = remaining; break; }
-        remaining -= width;
-      }
-
-      if (wrappedIndex == null || wrappedIndex < 0) { createDialogBaseUpdateCursor?.(get); return; }
-
-      const visibleLine = Math.max(0, Math.min(wrappedIndex - (this.childBase || 0), Math.max(0, (lpos.yl - lpos.yi) - this.iheight - 1)));
-      const lineText = (this._clines[wrappedIndex] ?? '').replace(/\x1b\[[0-9;]*m/g, '');
-      const colText = lineText.slice(0, columnInWrapped);
-      const cxOffset = typeof this.strWidth === 'function' ? this.strWidth(colText) : colText.length;
-      const cy = lpos.yi + this.itop + visibleLine;
-      const cx = lpos.xi + this.ileft + cxOffset;
-      const program = this.screen.program;
-
-      if (cy === program.y && cx === program.x) return;
-      if (cy === program.y) {
-        if (cx > program.x) program.cuf(cx - program.x);
-        else if (cx < program.x) program.cub(program.x - cx);
-      } else if (cx === program.x) {
-        if (cy > program.y) program.cud(cy - program.y);
-        else if (cy < program.y) program.cuu(program.y - cy);
-      } else {
-        program.cup(cy, cx);
-      }
-    };
-    try { (createDialogDescription as any)._updateCursor = createDialogCustomUpdateCursor; } catch (_) {}
-
-    const endCreateDialogReading = () => {
-      try {
-        const widget = createDialogDescription as any;
-        if (widget?.__listener && typeof widget.removeListener === 'function') { try { widget.removeListener('keypress', widget.__listener); } catch (_) {} }
-        if (widget?.__done && typeof widget.removeListener === 'function') { try { widget.removeListener('blur', widget.__done); } catch (_) {} }
-        delete widget.__listener; delete widget.__done; delete widget._done; delete widget._callback;
-        if (widget?._reading) widget._reading = false;
-      } catch (_) {}
-      try { if (typeof (screen as any).grabKeys === 'function') { try { (screen as any).grabKeys(false); } catch (_) { (screen as any).grabKeys = false; } } else { (screen as any).grabKeys = false; } } catch (_) {}
-      try { if (typeof (screen as any).program?.hideCursor === 'function') (screen as any).program.hideCursor(); } catch (_) {}
-    };
-
-    const startCreateDialogReading = () => {
-      try {
-        const widget = createDialogDescription as any;
-        if (!widget) return;
-        if (widget.__listener && typeof widget.removeListener === 'function') { try { widget.removeListener('keypress', widget.__listener); } catch (_) {} }
-        if (widget.__done && typeof widget.removeListener === 'function') { try { widget.removeListener('blur', widget.__done); } catch (_) {} }
-        delete widget.__listener; delete widget.__done; delete widget._done; delete widget._callback;
-        widget._reading = true;
-        const value = widget.getValue ? widget.getValue() : '';
-        setCreateDialogCursorIndex(value, createDialogCursorIndex);
-        try { if (typeof (screen as any).program?.showCursor === 'function') (screen as any).program.showCursor(); } catch (_) {}
-        updateCreateDialogCursor();
-      } catch (_) {}
-    };
 
     const normalizeStatusValue = (value: string | undefined) => {
       if (!value) return value;
@@ -2760,6 +2634,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       if (createDialogDescription?.setValue) {
         createDialogDescription.setValue('');
       }
+
       // Select default values (feature, medium)
       createDialogIssueTypeOptions.select(0);
       createDialogPriorityOptions.select(2);

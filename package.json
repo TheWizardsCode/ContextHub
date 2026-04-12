@@ -18,6 +18,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:tui": "bash ./tests/tui-ci-run.sh",
+    "tui:prototype": "node -r tsx/register src/tui/prototype/cli.tsx",
+    "tui:prototype:demo": "TUI_DEMO=1 node -r tsx/register src/tui/prototype/cli.tsx",
     "test:timings": "node ./scripts/test-timings.cjs",
     "benchmark:sort-index": "tsx scripts/benchmark-sort-index.ts"
   },
@@ -48,6 +50,12 @@
     "execa": "^7.1.1",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3",
-    "vitest": "^4.0.18"
+    "vitest": "^4.0.18",
+    "ink": "^3.0.8",
+    "ink-text-input": "^5.0.1",
+    "ink-testing-library": "^3.0.0",
+    "@testing-library/react": "^14.0.0"
+    ,"react": "^18.2.0",
+    "react-dom": "^18.2.0"
   }
 }
