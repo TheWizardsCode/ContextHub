@@ -43,9 +43,12 @@ export function buildUpdateDialogUpdates(
   const nextStatus = resolveSelection(values.statuses, selections.statusIndex);
   const nextStage = resolveSelection(values.stages, selections.stageIndex);
   const nextPriority = resolveSelection(values.priorities, selections.priorityIndex);
+  // Diagnostics removed: resolved values can be logged via controller debugLog when needed
   const compatibilityStage = nextStage === '' && item.stage === '' ? undefined : nextStage;
 
-  if (!isStatusStageCompatible(nextStatus, compatibilityStage, rules)) {
+  const compatible = isStatusStageCompatible(nextStatus, compatibilityStage, rules);
+  // Diagnostics removed: compatibility can be logged via controller debugLog when needed
+  if (!compatible) {
     return { updates: {}, hasChanges: false };
   }
 
