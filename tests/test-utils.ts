@@ -157,9 +157,11 @@ export function createTuiTestContext() {
     obj.setScroll = (_n: number) => {};
     obj.setScrollPerc = (_n: number) => {};
     obj.pushLine = (_s: string) => {};
-    obj.setItems = (next: string[]) => { _items = next.slice(); };
+    obj.setItems = (next: string[]) => { _items = next.slice(); obj.items = _items.map(v => ({ getContent: () => v })); };
     obj.select = (idx: number) => { obj.selected = idx; };
-    obj.getItem = (idx: number) => { const v = _items[idx]; return v ? { getContent: () => v } : undefined; };
+    obj.getItem = (idx: number) => { const v = (obj.items && obj.items[idx]); return v ? v : undefined; };
+    // Initialize items property to match blessed List API shape
+    obj.items = [];
     obj.on = (_ev: string, _cb?: any) => {};
     obj.key = (_keys: any, _cb?: any) => {};
     obj.setLabel = (_s: string) => {};

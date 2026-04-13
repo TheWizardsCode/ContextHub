@@ -58,6 +58,6 @@ export default function register(ctx: PluginContext): void {
         output.json({ success: true, updated: result.updated, gap, recency });
         return;
       }
-      console.log(`Resort complete. Updated ${result.updated} item(s).`);
+      console.log(`Re-sort complete. Updated ${result.updated} item(s).`);
     });
 }
