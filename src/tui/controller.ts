@@ -19,6 +19,7 @@ import { resolveWorklogDir } from '../worklog-paths.js';
 import { createLayout } from './layout.js';
 import { ModalDialogBase } from './components/modal-base.js';
 import { createUpdateDialogFocusManager } from './update-dialog-navigation.js';
+import createFocusHelpers from './dialog-focus.js';
 import { buildUpdateDialogUpdates } from './update-dialog-submit.js';
 import {
   getAllowedStagesForStatus,
@@ -389,30 +390,13 @@ export class TuiController {
 
     // Create dialog focus manager using shared pattern
     const createDialogFocusManager = createUpdateDialogFocusManager(createDialogFieldOrder);
+    const createDialogFocusHelpers = createFocusHelpers(createDialogFieldOrder, createDialogFocusManager, screen);
 
-    // Create dialog focus styles
-    const applyCreateDialogFocusStyles = (focused: Pane | undefined | null) => {
-      createDialogFieldOrder.forEach((field) => {
-        if (!field || !field.style) return;
-        // For list items
-        if (field.style.selected) {
-          field.style.selected.bg = field === focused ? 'cyan' : 'blue';
-          field.style.selected.fg = field === focused ? theme.tui.colors.lightText : 'white';
-        }
-        // For textareas with borders
-        if ((field as any).style?.border) {
-          (field as any).style.border.fg = field === focused ? 'cyan' : 'gray';
-        }
-      });
-      if (!createDialog.hidden) screen.render();
-    };
-
-    // Wire up create dialog focus styling. Textareas use inputOnFocus in the
-    // component and no longer require custom read-state manipulation.
+    // Wire up create dialog focus styling and handlers using shared helpers
     createDialogFieldOrder.forEach((field) => {
       if (!field || typeof field.on !== 'function') return;
       const fieldFocusHandler = () => {
-        applyCreateDialogFocusStyles(field);
+        createDialogFocusHelpers.applyFocusStyles(field);
       };
       try {
         (field as any).__opencode_focus = fieldFocusHandler;
@@ -420,104 +404,96 @@ export class TuiController {
       } catch (_) {}
     });
 
-    // Wire Tab/Shift+Tab navigation for create dialog fields
-    const wireCreateDialogFieldNavigation = (field: Pane | undefined | null) => {
-      if (!field || typeof field.key !== 'function') return;
-      const isFocusedField = () => (screen as any).focused === field;
-      const isCreateTextarea = field === createDialogTitleInput || field === createDialogDescription;
+    // Wire Tab nav for non-textareas here, textareas need their patched listener preserved
+    // The focus helper expects a cycle delta typed as 1|-1; createUpdateDialogFocusManager
+    // already uses that convention so it's compatible.
+    // Prefer modal's registerKeyHandler so handlers are only active while the
+    // modal is open; pass it as the registerKey arg. Fall back to field.key
+    // when registerKey fails.
+    try {
+      createDialogFocusHelpers.wireFieldNavigation(screen, () => createDialog.hidden, (f) => f === createDialogTitleInput || f === createDialogDescription, (target: any, keys: string[] | string, handler: (...args: any[]) => void) => {
+        try { createDialogModal.registerKeyHandler(target, keys, handler); } catch (_) { try { target.key(keys as any, handler); } catch (_) {} }
+      });
+    } catch (_) {
+      createDialogFocusHelpers.wireFieldNavigation(screen, () => createDialog.hidden, (f) => f === createDialogTitleInput || f === createDialogDescription);
+    }
 
-      const stopCreateDialogTextareaReading = (widget: any) => {
-        if (!widget || !widget._reading) return;
-        let restoreInputOnFocus: boolean | undefined;
+    // Patch create dialog textareas' internal listener so Tab/Shift-Tab cycle
+    // modal focus instead of inserting tab characters. This mirrors the
+    // original behaviour and is necessary because textareas use an internal
+    // `_listener` for editing that would otherwise receive Tab before our
+    // field-level key handlers.
+    const stopCreateDialogTextareaReading = (widget: any) => {
+      if (!widget || !widget._reading) return;
+      let restoreInputOnFocus: boolean | undefined;
+      try {
+        restoreInputOnFocus = widget?.options?.inputOnFocus;
+        if (widget?.options) widget.options.inputOnFocus = false;
+        if (typeof widget._done === 'function') {
+          widget._done('stop');
+        }
+      } catch (_) {
         try {
-          restoreInputOnFocus = widget?.options?.inputOnFocus;
-          if (widget?.options) widget.options.inputOnFocus = false;
-          if (typeof widget._done === 'function') {
-            widget._done('stop');
+          if (widget?.__listener && typeof widget.removeListener === 'function') {
+            widget.removeListener('keypress', widget.__listener);
           }
-        } catch (_) {
-          try {
-            if (widget?.__listener && typeof widget.removeListener === 'function') {
-              widget.removeListener('keypress', widget.__listener);
-            }
-            if (widget?.__done && typeof widget.removeListener === 'function') {
-              widget.removeListener('blur', widget.__done);
-            }
-            delete widget.__listener;
-            delete widget.__done;
-            delete widget._done;
-            delete widget._callback;
-            widget._reading = false;
-            (screen as any).grabKeys = false;
-            if (typeof (screen as any).program?.hideCursor === 'function') {
-              (screen as any).program.hideCursor();
-            }
-          } catch (_) {}
-        } finally {
-          try {
-            if (widget?.options && restoreInputOnFocus !== undefined) {
-              widget.options.inputOnFocus = restoreInputOnFocus;
-            }
-          } catch (_) {}
-        }
-      };
-      
-      const fieldTabHandler = () => {
-        if (createDialog.hidden) return;
-        if (!isFocusedField()) return;
-        createDialogFocusManager.cycle(1);
-        applyCreateDialogFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
-        return false;
-      };
-      
-      const fieldShiftTabHandler = () => {
-        if (createDialog.hidden) return;
-        if (!isFocusedField()) return;
-        createDialogFocusManager.cycle(-1);
-        applyCreateDialogFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
-        return false;
-      };
-
-      if (!isCreateTextarea) {
-        try {
-          (field as any).__opencode_key_tab = fieldTabHandler;
-          (field as any).__opencode_key_stab = fieldShiftTabHandler;
-          field.key(KEY_TAB, fieldTabHandler);
-          field.key(KEY_SHIFT_TAB, fieldShiftTabHandler);
+          if (widget?.__done && typeof widget.removeListener === 'function') {
+            widget.removeListener('blur', widget.__done);
+          }
+          delete widget.__listener;
+          delete widget.__done;
+          delete widget._done;
+          delete widget._callback;
+          widget._reading = false;
+          (screen as any).grabKeys = false;
+          if (typeof (screen as any).program?.hideCursor === 'function') {
+            (screen as any).program.hideCursor();
+          }
         } catch (_) {}
-      }
-
-      // Textareas with inputOnFocus use blessed's internal `_listener` for text
-      // editing. Patch that listener so Tab/Shift-Tab cycle modal focus instead
-      // of inserting tab characters.
-      if (isCreateTextarea) {
-        const widget = field as any;
-        if (typeof widget._listener === 'function' && !widget.__opencode_orig_listener) {
-          const originalListener = widget._listener;
-          widget.__opencode_orig_listener = originalListener;
-          widget._listener = function patchedCreateDialogTextareaListener(ch: unknown, key: KeyInfo | undefined) {
-            if (!createDialog.hidden && (screen as any).focused === widget) {
-              const isTab = key?.name === 'tab' && !key?.shift;
-              const isShiftTab = key?.name === 'S-tab' || (key?.name === 'tab' && Boolean(key?.shift));
-              if (isTab) {
-                stopCreateDialogTextareaReading(widget);
-                fieldTabHandler();
-                return;
-              }
-              if (isShiftTab) {
-                stopCreateDialogTextareaReading(widget);
-                fieldShiftTabHandler();
-                return;
-              }
-            }
-            return originalListener.call(this, ch, key);
-          };
-        }
+      } finally {
+        try {
+          if (widget?.options && restoreInputOnFocus !== undefined) {
+            widget.options.inputOnFocus = restoreInputOnFocus;
+          }
+        } catch (_) {}
       }
     };
 
-    // Wire navigation for all create dialog fields
-    createDialogFieldOrder.forEach(wireCreateDialogFieldNavigation);
+    const patchCreateTextarea = (widget: any, fieldIndex: number) => {
+      if (!widget || typeof widget._listener !== 'function' || widget.__opencode_orig_listener) return;
+      const originalListener = widget._listener;
+      widget.__opencode_orig_listener = originalListener;
+      const fieldTabHandler = () => {
+        if (createDialog.hidden) return;
+        createDialogFocusManager.cycle(1);
+        createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+      };
+      const fieldShiftTabHandler = () => {
+        if (createDialog.hidden) return;
+        createDialogFocusManager.cycle(-1);
+        createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+      };
+      widget._listener = function patchedCreateDialogTextareaListener(ch: unknown, key: KeyInfo | undefined) {
+        if (!createDialog.hidden && (screen as any).focused === widget) {
+          const isTab = key?.name === 'tab' && !key?.shift;
+          const isShiftTab = key?.name === 'S-tab' || (key?.name === 'tab' && Boolean(key?.shift));
+          if (isTab) {
+            stopCreateDialogTextareaReading(widget);
+            fieldTabHandler();
+            return;
+          }
+          if (isShiftTab) {
+            stopCreateDialogTextareaReading(widget);
+            fieldShiftTabHandler();
+            return;
+          }
+        }
+        return originalListener.call(this, ch, key);
+      };
+    };
+
+    patchCreateTextarea(createDialogTitleInput, 0);
+    patchCreateTextarea(createDialogDescription, 1);
 
     // Tab order matches the visual left-to-right column layout: Status → Stage → Priority → Comment
     const updateDialogFieldOrder = [
@@ -721,6 +697,9 @@ export class TuiController {
     };
     try { (updateDialogComment as any)._updateCursor = updateDialogCommentCustomUpdateCursor; } catch (_) {}
 
+    // Use shared focus helpers for update dialog focus styling and Tab navigation.
+    const updateDialogFocusHelpers = createFocusHelpers(updateDialogFieldOrder, updateDialogFocusManager, screen);
+
     const endUpdateDialogCommentReading = () => {
       try {
         const widget = updateDialogComment as any;
@@ -918,29 +897,17 @@ export class TuiController {
       }
     };
 
-    const applyUpdateDialogFocusStyles = (focused: Pane | undefined | null) => {
-      updateDialogFieldOrder.forEach((list) => {
-        if (!list || !list.style) return;
-        if (!list.style.selected) list.style.selected = {};
-        list.style.selected.bg = list === focused ? 'cyan' : 'blue';
-        list.style.selected.fg = list === focused ? theme.tui.colors.lightText : 'white';
-      });
-      if (updateDialogComment && updateDialogComment.style && updateDialogComment.style.border) {
-        updateDialogComment.style.border.fg = focused === updateDialogComment ? 'cyan' : 'gray';
-      }
-      if (!updateDialog.hidden) screen.render();
-    };
-
+    // Wire named focus/blur handlers using shared helpers. Keep update dialog
+    // specific behavior (status/stage compatibility and comment reading).
     updateDialogFieldOrder.forEach((field) => {
       if (field && typeof field.on === 'function') {
-        // Named focus/blur handlers so they can be removed if the field is destroyed
         const fieldFocusHandler = () => {
-          applyUpdateDialogFocusStyles(field);
+          updateDialogFocusHelpers.applyFocusStyles(field);
           if (!updateDialog.hidden) applyStatusStageCompatibility(getSelectedItem());
           if (field === updateDialogComment) startUpdateDialogCommentReading();
         };
         const fieldBlurHandler = () => {
-          applyUpdateDialogFocusStyles(updateDialogFieldOrder[updateDialogFocusManager.getIndex()]);
+          updateDialogFocusHelpers.applyFocusStyles(updateDialogFieldOrder[updateDialogFocusManager.getIndex()]);
           if (!updateDialog.hidden) applyStatusStageCompatibility(getSelectedItem());
           if (field === updateDialogComment) endUpdateDialogCommentReading();
         };
@@ -953,119 +920,69 @@ export class TuiController {
       const idx = values.indexOf(value);
       return idx >= 0 ? idx : fallback;
     };
-    const wireUpdateDialogFieldNavigation = (field: Pane | undefined | null) => {
-      if (!field || typeof field.key !== 'function') return;
-      const isFocusedField = () => (screen as any).focused === field;
-      const fieldTabHandler = () => {
-        if (updateDialog.hidden) return;
-        if (!isFocusedField()) return;
-        updateDialogFocusManager.cycle(1);
-        applyUpdateDialogFocusStyles(updateDialogFieldOrder[updateDialogFocusManager.getIndex()]);
-        return false;
-      };
-      const fieldShiftTabHandler = () => {
-        if (updateDialog.hidden) return;
-        if (!isFocusedField()) return;
-        updateDialogFocusManager.cycle(-1);
-        applyUpdateDialogFocusStyles(updateDialogFieldOrder[updateDialogFocusManager.getIndex()]);
-        return false;
-      };
-      if (field !== updateDialogComment) {
-        try { (field as any).__opencode_key_tab = fieldTabHandler; (field as any).__opencode_key_stab = fieldShiftTabHandler; field.key(KEY_TAB, fieldTabHandler); field.key(KEY_SHIFT_TAB, fieldShiftTabHandler); } catch (_) {}
-      }
-      if (field === updateDialogComment && typeof field.on === 'function') {
-        // Use a named handler so it can be removed if the field is destroyed
-        const commentKeyHandler = (_ch: unknown, key: unknown) => {
-          if (updateDialog.hidden) return;
-          if ((screen as any).focused !== field) return;
-          const k = key as KeyInfo | undefined;
-          if (k?.name === 'tab') {
-            updateDialogFocusManager.cycle(1);
-            applyUpdateDialogFocusStyles(updateDialogFieldOrder[updateDialogFocusManager.getIndex()]);
-            return false;
-          }
-          if (k?.name === 'S-tab') {
-            updateDialogFocusManager.cycle(-1);
-            applyUpdateDialogFocusStyles(updateDialogFieldOrder[updateDialogFocusManager.getIndex()]);
-            return false;
-          }
-          if (k?.name === 'left') {
-            moveUpdateDialogCommentCursorHorizontal(-1);
-            return false;
-          }
-          if (k?.name === 'right') {
-            moveUpdateDialogCommentCursorHorizontal(1);
-            return false;
-          }
-          if (k?.name === 'up') {
-            moveUpdateDialogCommentCursorVertical(-1);
-            return false;
-          }
-          if (k?.name === 'down') {
-            moveUpdateDialogCommentCursorVertical(1);
-            return false;
-          }
-          if (k?.name === 'backspace') {
-            deleteUpdateDialogCommentBackward();
-            return false;
-          }
-          if (k?.name === 'delete') {
-            deleteUpdateDialogCommentForward();
-            return false;
-          }
-          if (k?.name === 'enter' || k?.name === 'linefeed' || k?.name === 'return') {
-            insertUpdateDialogCommentAtCursor('\n');
-            return false;
-          }
-          const insertChar = typeof _ch === 'string' ? _ch : '';
-          if (!insertChar) return;
-          if (/^[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]$/.test(insertChar)) return;
-          insertUpdateDialogCommentAtCursor(insertChar);
-          return false;
-        };
-        try { (field as any).__opencode_comment_key = commentKeyHandler; (field as any).on('keypress', commentKeyHandler); } catch (_) {}
-        }
-      // Keep cursor keys available for in-text navigation when focus is inside
-      // the multiline comment textarea. Use Tab/Shift-Tab for field switching.
-      if (field !== updateDialogComment) {
-        const fieldLeftHandler = () => {
-          if (updateDialog.hidden) return;
-          if (!isFocusedField()) return;
-          const layoutIndex = updateDialogFieldLayout.indexOf(field as any);
-          const nextIndex = layoutIndex <= 0 ? updateDialogFieldLayout.length - 1 : layoutIndex - 1;
-          const target = updateDialogFieldLayout[nextIndex];
-          updateDialogFocusManager.focusIndex(updateDialogFieldOrder.indexOf(target));
-          applyUpdateDialogFocusStyles(target);
-          return false;
-        };
-        const fieldRightHandler = () => {
-          if (updateDialog.hidden) return;
-          if (!isFocusedField()) return;
-          const layoutIndex = updateDialogFieldLayout.indexOf(field as any);
-          const nextIndex = layoutIndex >= updateDialogFieldLayout.length - 1 ? 0 : layoutIndex + 1;
-          const target = updateDialogFieldLayout[nextIndex];
-          updateDialogFocusManager.focusIndex(updateDialogFieldOrder.indexOf(target));
-          applyUpdateDialogFocusStyles(target);
-          return false;
-        };
-        try {
-          const fieldAny = field as any;
-          if (fieldAny.__opencode_key_left_prog) {
-            try { (screen as any).program?.removeKey?.('left', fieldAny.__opencode_key_left_prog); } catch (_) {}
-          }
-          if (fieldAny.__opencode_key_right_prog) {
-            try { (screen as any).program?.removeKey?.('right', fieldAny.__opencode_key_right_prog); } catch (_) {}
-          }
-          fieldAny.__opencode_key_left_prog = fieldLeftHandler;
-          fieldAny.__opencode_key_right_prog = fieldRightHandler;
-          (screen as any).program?.key?.('left', fieldLeftHandler);
-          (screen as any).program?.key?.('right', fieldRightHandler);
-        } catch (_) {}
-      }
-    };
+    // Wire Tab nav and key handlers. We use the shared helper for Tab/Shift-Tab
+    // wiring for non-textareas and then attach the comment-specific key
+    // handling below.
+    try {
+      updateDialogFocusHelpers.wireFieldNavigation(screen, () => updateDialog.hidden, (f) => f === updateDialogComment, (target: any, keys: string[] | string, handler: (...args: any[]) => void) => {
+        try { updateDialogModal.registerKeyHandler(target, keys, handler); } catch (_) { try { target.key(keys as any, handler); } catch (_) {} }
+      });
+    } catch (_) {
+      updateDialogFocusHelpers.wireFieldNavigation(screen, () => updateDialog.hidden, (f) => f === updateDialogComment);
+    }
 
-    [updateDialogStageOptions, updateDialogStatusOptions, updateDialogPriorityOptions, updateDialogComment]
-      .forEach(wireUpdateDialogFieldNavigation);
+    // Attach comment-specific key handling for the multiline textarea.
+    if (typeof updateDialogComment.on === 'function') {
+      const commentKeyHandler = (_ch: unknown, key: unknown) => {
+        if (updateDialog.hidden) return;
+        if ((screen as any).focused !== updateDialogComment) return;
+        const k = key as KeyInfo | undefined;
+        if (k?.name === 'tab') {
+          updateDialogFocusManager.cycle(1);
+          updateDialogFocusHelpers.applyFocusStyles(updateDialogFieldOrder[updateDialogFocusManager.getIndex()]);
+          return false;
+        }
+        if (k?.name === 'S-tab') {
+          updateDialogFocusManager.cycle(-1);
+          updateDialogFocusHelpers.applyFocusStyles(updateDialogFieldOrder[updateDialogFocusManager.getIndex()]);
+          return false;
+        }
+        if (k?.name === 'left') {
+          moveUpdateDialogCommentCursorHorizontal(-1);
+          return false;
+        }
+        if (k?.name === 'right') {
+          moveUpdateDialogCommentCursorHorizontal(1);
+          return false;
+        }
+        if (k?.name === 'up') {
+          moveUpdateDialogCommentCursorVertical(-1);
+          return false;
+        }
+        if (k?.name === 'down') {
+          moveUpdateDialogCommentCursorVertical(1);
+          return false;
+        }
+        if (k?.name === 'backspace') {
+          deleteUpdateDialogCommentBackward();
+          return false;
+        }
+        if (k?.name === 'delete') {
+          deleteUpdateDialogCommentForward();
+          return false;
+        }
+        if (k?.name === 'enter' || k?.name === 'linefeed' || k?.name === 'return') {
+          insertUpdateDialogCommentAtCursor('\n');
+          return false;
+        }
+        const insertChar = typeof _ch === 'string' ? _ch : '';
+        if (!insertChar) return;
+        if (/^[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]$/.test(insertChar)) return;
+        insertUpdateDialogCommentAtCursor(insertChar);
+        return false;
+      };
+      try { (updateDialogComment as any).__opencode_comment_key = commentKeyHandler; (updateDialogComment as any).on('keypress', commentKeyHandler); } catch (_) {}
+    }
 
     // (attachment of per-widget ctrl-w handlers moved to after opencodeText is defined)
 
@@ -2617,7 +2534,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       });
       updateDialogFocusManager.focusIndex(0);
       updateDialogStatusOptions.focus();
-      applyUpdateDialogFocusStyles(updateDialogFieldOrder[0]);
+      updateDialogFocusHelpers.applyFocusStyles(updateDialogFieldOrder[0]);
       paneFocusIndex = getFocusPanes().indexOf(list);
       applyFocusStyles();
       screen.render();
@@ -2664,7 +2581,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         restoreFocusTarget: list as any,
       });
       createDialogFocusManager.focusIndex(0);
-      applyCreateDialogFocusStyles(createDialogFieldOrder[0]);
+        createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[0]);
       paneFocusIndex = getFocusPanes().indexOf(list);
       applyFocusStyles();
       screen.render();
@@ -4890,28 +4807,28 @@ const visible = buildVisible();
     const createDialogTitleInputClickHandler = () => {
       if (createDialog.hidden) return;
       createDialogFocusManager.focusIndex(0);
-      applyCreateDialogFocusStyles(createDialogFieldOrder[0]);
+      createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[0]);
     };
     try { (createDialogTitleInput as any).__opencode_click = createDialogTitleInputClickHandler; createDialogModal.registerMouseHandler(createDialogTitleInput as any, 'click', createDialogTitleInputClickHandler); } catch (_) {}
 
     const createDialogDescriptionClickHandler = () => {
       if (createDialog.hidden) return;
       createDialogFocusManager.focusIndex(1);
-      applyCreateDialogFocusStyles(createDialogFieldOrder[1]);
+      createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[1]);
     };
     try { (createDialogDescription as any).__opencode_click = createDialogDescriptionClickHandler; createDialogModal.registerMouseHandler(createDialogDescription as any, 'click', createDialogDescriptionClickHandler); } catch (_) {}
 
     const createDialogIssueTypeClickHandler = () => {
       if (createDialog.hidden) return;
       createDialogFocusManager.focusIndex(2);
-      applyCreateDialogFocusStyles(createDialogFieldOrder[2]);
+      createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[2]);
     };
     try { (createDialogIssueTypeOptions as any).__opencode_click = createDialogIssueTypeClickHandler; createDialogModal.registerMouseHandler(createDialogIssueTypeOptions as any, 'click', createDialogIssueTypeClickHandler); } catch (_) {}
 
     const createDialogPriorityClickHandler = () => {
       if (createDialog.hidden) return;
       createDialogFocusManager.focusIndex(3);
-      applyCreateDialogFocusStyles(createDialogFieldOrder[3]);
+      createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[3]);
     };
     try { (createDialogPriorityOptions as any).__opencode_click = createDialogPriorityClickHandler; createDialogModal.registerMouseHandler(createDialogPriorityOptions as any, 'click', createDialogPriorityClickHandler); } catch (_) {}
 
