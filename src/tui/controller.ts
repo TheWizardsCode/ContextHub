@@ -517,6 +517,31 @@ export class TuiController {
     patchCreateTextarea(createDialogTitleInput, 0);
     patchCreateTextarea(createDialogDescription, 1);
 
+    // Some textarea implementations or test doubles may not expose per-widget
+    // `key` handlers. Register dialog-level Tab handlers as a fallback so
+    // Tab/Shift-Tab still cycles focus when a textarea is focused. This
+    // keeps behaviour consistent across blessed versions and test mocks.
+    try {
+      const createDialogTabHandler = () => {
+        if (createDialog.hidden) return;
+        const focused = (screen as any).focused;
+        if (focused === createDialogTitleInput || focused === createDialogDescription) {
+          createDialogFocusManager.cycle(1);
+          createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+        }
+      };
+      const createDialogShiftTabHandler = () => {
+        if (createDialog.hidden) return;
+        const focused = (screen as any).focused;
+        if (focused === createDialogTitleInput || focused === createDialogDescription) {
+          createDialogFocusManager.cycle(-1);
+          createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+        }
+      };
+      try { createDialogModal.registerKeyHandler(createDialog as any, KEY_TAB, createDialogTabHandler); } catch (_) { try { (createDialog as any).key(KEY_TAB as any, createDialogTabHandler); } catch (_) {} }
+      try { createDialogModal.registerKeyHandler(createDialog as any, KEY_SHIFT_TAB, createDialogShiftTabHandler); } catch (_) { try { (createDialog as any).key(KEY_SHIFT_TAB as any, createDialogShiftTabHandler); } catch (_) {} }
+    } catch (_) {}
+
     // Tab order matches the visual left-to-right column layout: Status → Stage → Priority → Comment
     const updateDialogFieldOrder = [
       updateDialogStatusOptions,
