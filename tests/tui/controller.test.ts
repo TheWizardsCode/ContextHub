@@ -1,6 +1,18 @@
 import { describe, it, expect, vi } from 'vitest';
 import { TuiController } from '../../src/tui/controller.js';
 
+vi.mock('../../src/tui/logger.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/tui/logger.js')>();
+  return {
+    ...actual,
+    fileLog: (...args: unknown[]) => { console.error(...args); },
+    default: {
+      ...actual.default,
+      fileLog: (...args: unknown[]) => { console.error(...args); },
+    },
+  };
+});
+
 const makeBox = () => ({
   hidden: true,
   width: 0,
