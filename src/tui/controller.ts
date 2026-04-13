@@ -2439,8 +2439,17 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
   }
   // Update metadata pane with current item's metadata
   if (metadataPaneComponent) {
+    type PerfMetric = { start: number; label: string };
+    const metadataPerfMetrics: PerfMetric[] | undefined = perfEnabled ? [] : undefined;
     const commentCount = db ? db.getCommentsForWorkItem(node.item.id).length : 0;
-    metadataPaneComponent.updateFromItem({ ...node.item, githubRepo: tryGetGithubRepo() ?? undefined }, commentCount);
+    metadataPaneComponent.updateFromItem({ ...node.item, githubRepo: tryGetGithubRepo() ?? undefined }, commentCount, metadataPerfMetrics);
+    if (perfEnabled && metadataPerfMetrics && metadataPerfMetrics.length > 0) {
+      const itemStart = metadataPerfMetrics[0]?.start ?? 0;
+      for (const m of metadataPerfMetrics) {
+        const dur = m.start - itemStart;
+        debugLog(`[perf:metadata] ${m.label}: ${dur.toFixed(2)}ms`);
+      }
+    }
   }
 }
 
