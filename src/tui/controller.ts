@@ -525,17 +525,23 @@ export class TuiController {
       const createDialogTabHandler = () => {
         if (createDialog.hidden) return;
         const focused = (screen as any).focused;
+        try { console.error('[tui:_test] createDialogTabHandler focused=', !!focused, 'focused===title?', focused === createDialogTitleInput, 'focused===desc?', focused === createDialogDescription); } catch (_) {}
         if (focused === createDialogTitleInput || focused === createDialogDescription) {
           createDialogFocusManager.cycle(1);
-          createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+          const idx = createDialogFocusManager.getIndex();
+          try { console.error('[tui:_test] createDialogTabHandler cycling to index', idx); } catch (_) {}
+          createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[idx]);
         }
       };
       const createDialogShiftTabHandler = () => {
         if (createDialog.hidden) return;
         const focused = (screen as any).focused;
+        try { console.error('[tui:_test] createDialogShiftTabHandler focused=', !!focused); } catch (_) {}
         if (focused === createDialogTitleInput || focused === createDialogDescription) {
           createDialogFocusManager.cycle(-1);
-          createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+          const idx = createDialogFocusManager.getIndex();
+          try { console.error('[tui:_test] createDialogShiftTabHandler cycling to index', idx); } catch (_) {}
+          createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[idx]);
         }
       };
       try { createDialogModal.registerKeyHandler(createDialog as any, KEY_TAB, createDialogTabHandler); } catch (_) { try { (createDialog as any).key(KEY_TAB as any, createDialogTabHandler); } catch (_) {} }
