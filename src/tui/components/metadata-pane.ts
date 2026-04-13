@@ -1,7 +1,7 @@
 import blessed from 'blessed';
+import { performance } from 'perf_hooks';
 import type { BlessedBox, BlessedFactory, BlessedScreen } from '../types.js';
-import { humanFormatWorkItem } from '../../commands/helpers.js';
-import { redactAuditText, parseReadinessLine } from '../../audit.js';
+import { redactAuditText } from '../../audit.js';
 import { stripAnsi, stripTags } from '../id-utils.js';
 import { theme } from '../../theme.js';
 import { renderMarkdownToTags } from '../markdown-renderer.js';
@@ -10,6 +10,8 @@ export interface MetadataPaneOptions {
   parent: BlessedScreen;
   blessed?: BlessedFactory;
 }
+
+const HAS_MARKDOWN_RE = /[#*`_\[\]]/;
 
 export class MetadataPaneComponent {
   private blessedImpl: BlessedFactory;
@@ -91,7 +93,9 @@ export class MetadataPaneComponent {
     updatedAt?: Date | string;
     githubIssueNumber?: number;
     githubRepo?: string;
-  } | null, commentCount: number): void {
+    audit?: { text?: string; time?: string };
+  } | null, commentCount: number, perfMetrics?: { start: number; label: string }[]): void {
+    const perfStart = perfMetrics ? performance.now() : 0;
     if (!item) {
       this.box.setContent('');
       return;
@@ -111,21 +115,15 @@ export class MetadataPaneComponent {
     lines.push(`Tags:     ${item.tags && item.tags.length > 0 ? item.tags.join(', ') : ''}`);
     lines.push(`Assignee: ${item.assignee ?? ''}`);
 
-    // Surface a one-line Audit summary if present. Prefer reusing the
-    // human-readable formatter so the TUI shows the same excerpt as
-    // `wl show <id>`. Extract the Audit: line from the human formatter
-    // and append the author for quick triage.
+    if (perfMetrics) perfMetrics.push({ start: performance.now(), label: 'audit-extract' });
+
+    // Surface a one-line Audit summary if present. Use a lightweight direct
+    // extraction instead of humanFormatWorkItem to avoid expensive full-item
+    // traversal and formatting in the hot path.
     try {
-      if ((item as any).audit && typeof (item as any).audit.text === 'string') {
-        const formatted = humanFormatWorkItem(item as any, null, 'concise', true);
-        const auditLine = formatted.split('\n').find(l => l.trim().startsWith('Audit:')) || '';
-        let excerpt = '';
-        if (auditLine) {
-          excerpt = auditLine.replace(/^Audit:\s*/, '');
-        } else {
-          const raw = String((item as any).audit.text || '');
-          excerpt = (redactAuditText(raw).split(/\r?\n/).find(l => l.trim() !== '') || '').trim();
-        }
+      if (item.audit && typeof item.audit.text === 'string') {
+        const raw = String(item.audit.text || '');
+        const excerpt = (redactAuditText(raw).split(/\r?\n/).find(l => l.trim() !== '') || '').trim();
         if (excerpt) {
           const excerptPlain = stripTags(stripAnsi(excerpt));
           const redactedExcerpt = redactAuditText(excerptPlain);
@@ -134,7 +132,7 @@ export class MetadataPaneComponent {
             : theme.tui.text.readyNo(redactedExcerpt);
           // Append short audit timestamp (DD/MM HH:MM) if available. Prefer
           // the structured audit.time field; fall back to item.updatedAt.
-          const auditTime = (item as any)?.audit?.time ?? (item.updatedAt ?? undefined);
+          const auditTime = item.audit?.time ?? (item.updatedAt ?? undefined);
           const shortTs = MetadataPaneComponent.formatShortDateTime(auditTime);
           const tsPart = shortTs ? ` ${theme.tui.text.muted(`(${shortTs})`)}` : '';
           lines.push(`${colorExcerpt}${tsPart}`);
@@ -144,6 +142,8 @@ export class MetadataPaneComponent {
       // Non-fatal: if audit formatting fails, do not break the metadata pane
       // — fall through and continue rendering other rows.
     }
+
+    if (perfMetrics) perfMetrics.push({ start: performance.now(), label: 'github-hint' });
 
     if (!item.githubRepo) {
       lines.push('GitHub:   (set githubRepo in config to enable)');
@@ -157,13 +157,23 @@ export class MetadataPaneComponent {
       lines.push('GitHub:   (G to push to GitHub)');
     }
 
+    if (perfMetrics) perfMetrics.push({ start: performance.now(), label: 'setContent' });
+
     // Use the public setContent wrapper so markdown rendering is applied
     // consistently in the metadata pane.
     this.setContent(lines.join('\n'));
+
+    if (perfMetrics) {
+      perfMetrics.push({ start: performance.now(), label: 'done' });
+    }
   }
 
   setContent(content: string): void {
-    this.box.setContent(renderMarkdownToTags(content));
+    // Skip expensive markdown rendering for plain text content that has no
+    // markdown characters. This avoids unnecessary parsing in the hot path
+    // when displaying simple lines like the GitHub configuration hint.
+    const needsMarkdown = HAS_MARKDOWN_RE.test(content);
+    this.box.setContent(needsMarkdown ? renderMarkdownToTags(content) : content);
   }
 
   focus(): void {
