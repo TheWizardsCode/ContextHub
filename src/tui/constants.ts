@@ -81,7 +81,7 @@ export const DEFAULT_SHORTCUTS = [
   {
     category: 'Clipboard',
     items: [
-      { keys: 'C', description: 'Copy selected item ID' },
+      { keys: 'c', description: 'Copy selected item ID' },
     ],
   },
   {
@@ -144,7 +144,7 @@ export const KEY_ENTER = ['enter'];
 export const KEY_LINEFEED = ['linefeed', 'C-j'];
 export const KEY_J = ['j'];
 export const KEY_K = ['k'];
-export const KEY_COPY_ID = ['c', 'C'];
+export const KEY_COPY_ID = ['c'];
 export const KEY_CREATE_ITEM = ['C'];
 export const KEY_PARENT_PREVIEW = ['p', 'P'];
 export const KEY_CLOSE_ITEM = ['x', 'X'];

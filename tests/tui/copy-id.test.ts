@@ -3,7 +3,7 @@ import { TuiController } from '../../src/tui/controller.js';
 import { createTuiTestContext } from '../test-utils.js';
 
 /**
- * Tests for the TUI 'C' key copy-ID-to-clipboard functionality.
+ * Tests for the TUI 'c' key copy-ID-to-clipboard functionality.
  *
  * The copy flow:
  *   screen.key(KEY_COPY_ID) -> copySelectedId() -> copyToClipboard(item.id, { spawn, writeOsc52 })
@@ -16,7 +16,7 @@ import { createTuiTestContext } from '../test-utils.js';
  * We inject a mock spawn so we can verify the correct ID is written to stdin
  * of the clipboard helper process.
  */
-describe('TUI C key copy ID to clipboard', () => {
+describe('TUI c key copy ID to clipboard', () => {
   /**
    * Helper that creates a mock spawn returning a fake child process.
    * Captures whatever is written to stdin so we can assert on it.
@@ -54,7 +54,7 @@ describe('TUI C key copy ID to clipboard', () => {
     return { mockSpawn, written, commands };
   }
 
-  it('copies the selected item ID to clipboard on C keypress', async () => {
+  it('copies the selected item ID to clipboard on c keypress', async () => {
     const ctx = createTuiTestContext();
     const { mockSpawn, written } = createMockSpawn();
 
@@ -84,6 +84,49 @@ describe('TUI C key copy ID to clipboard', () => {
     // Verify the success toast was shown (not an error toast)
     expect(ctx.toast.lastMessage()).toBe('ID copied');
     expect(ctx.toast.lastIsError()).toBe(false);
+  });
+
+  it('does not copy when Shift+C is used for create-item shortcut', async () => {
+    const ctx = createTuiTestContext();
+    const { mockSpawn } = createMockSpawn();
+
+    const controller = new TuiController(ctx as any, {
+      blessed: ctx.blessed,
+      spawn: mockSpawn as any,
+    });
+
+    const id = ctx.utils.createSampleItem({ tags: [] });
+    void id;
+
+    await controller.start({});
+
+    // Simulate Shift+C (raw uppercase C with lowercase key name)
+    ctx.screen.emit('keypress', 'C', { name: 'c', shift: true });
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('does not copy while create dialog is open', async () => {
+    const ctx = createTuiTestContext();
+    const { mockSpawn } = createMockSpawn();
+
+    const controller = new TuiController(ctx as any, {
+      blessed: ctx.blessed,
+      spawn: mockSpawn as any,
+    });
+
+    ctx.utils.createSampleItem({ tags: [] });
+    await controller.start({});
+
+    // Simulate active create modal to verify input isolation
+    const layout = ctx.createLayout();
+    layout.dialogsComponent.createDialog.hidden = false;
+
+    ctx.screen.emit('keypress', 'c', { name: 'c' });
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   it('shows error toast when all clipboard methods fail', async () => {

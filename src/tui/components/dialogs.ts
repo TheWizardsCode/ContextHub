@@ -320,7 +320,7 @@ export class DialogsComponent {
       top: 'center',
       left: 'center',
       width: '70%',
-      height: 28,
+      height: 32,
       label: ' Create Work Item ',
       border: { type: 'line' },
       hidden: true,
@@ -336,7 +336,7 @@ export class DialogsComponent {
       left: 2,
       height: 1,
       width: '100%-4',
-      content: 'Enter work item details:',
+      content: '',
       tags: false,
     });
 
@@ -358,13 +358,9 @@ export class DialogsComponent {
       right: 2,
       height: 3,
       input: true,
-      inputOnFocus: false,
-      vi: true,
-      wrap: true,
+      inputOnFocus: true,
       keys: true,
       mouse: true,
-      scrollable: true,
-      alwaysScroll: true,
       border: { type: 'line' },
       style: { fg: theme.tui.colors.lightText, bg: 'black', border: { fg: 'gray' } },
       scrollbar: { ch: ' ', inverse: true },
@@ -388,7 +384,7 @@ export class DialogsComponent {
       right: 2,
       height: 6,
       input: true,
-      inputOnFocus: false,
+      inputOnFocus: true,
       vi: true,
       wrap: true,
       keys: true,
@@ -494,7 +490,7 @@ export class DialogsComponent {
       if (screenHeight < 30) {
         this.createDialog.height = Math.max(20, screenHeight - 4);
       } else {
-        this.createDialog.height = 28;
+        this.createDialog.height = 32;
       }
 
       this.createDialog.width = screenWidth < 100 ? '90%' : '70%';

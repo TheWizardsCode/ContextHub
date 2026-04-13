@@ -385,6 +385,7 @@ export class TuiController {
 
     const createDialogIssueTypeValues = ['feature', 'bug', 'task', 'epic', 'chore'];
     const createDialogPriorityValues = ['critical', 'high', 'medium', 'low'];
+    const isCreateDialogOpen = () => Boolean(createDialog && !createDialog.hidden);
 
     // Create dialog focus manager using shared pattern
     const createDialogFocusManager = createUpdateDialogFocusManager(createDialogFieldOrder);
@@ -406,76 +407,60 @@ export class TuiController {
       if (!createDialog.hidden) screen.render();
     };
 
-    // Wire up create dialog field navigation
+    // Wire up create dialog focus styling. Textareas use inputOnFocus in the
+    // component and no longer require custom read-state manipulation.
     createDialogFieldOrder.forEach((field) => {
-      if (field && typeof field.on === 'function') {
-        const fieldFocusHandler = () => {
-          applyCreateDialogFocusStyles(field);
-          // Start reading mode for textareas (enables immediate typing)
-          if (field === createDialogTitleInput || field === createDialogDescription) {
-            const widget = field as any;
-            if (widget) {
-              try {
-                // Clean up any previous listeners
-                if (widget.__listener && typeof widget.removeListener === 'function') {
-                  widget.removeListener('keypress', widget.__listener);
-                }
-                if (widget.__done && typeof widget.removeListener === 'function') {
-                  widget.removeListener('blur', widget.__done);
-                }
-                delete widget.__listener;
-                delete widget.__done;
-                delete widget._done;
-                delete widget._callback;
-                // Enable reading mode
-                widget._reading = true;
-                if (typeof (screen as any).program?.showCursor === 'function') {
-                  (screen as any).program.showCursor();
-                }
-              } catch (_) {}
-            }
-          }
-        };
-        const fieldBlurHandler = () => {
-          applyCreateDialogFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
-          // End reading mode for textareas
-          if (field === createDialogTitleInput || field === createDialogDescription) {
-            const widget = field as any;
-            if (widget) {
-              try {
-                if (widget.__listener && typeof widget.removeListener === 'function') {
-                  widget.removeListener('keypress', widget.__listener);
-                }
-                if (widget.__done && typeof widget.removeListener === 'function') {
-                  widget.removeListener('blur', widget.__done);
-                }
-                delete widget.__listener;
-                delete widget.__done;
-                delete widget._done;
-                delete widget._callback;
-                if (widget._reading) {
-                  widget._reading = false;
-                }
-                if (typeof (screen as any).program?.hideCursor === 'function') {
-                  (screen as any).program.hideCursor();
-                }
-              } catch (_) {}
-            }
-          }
-        };
-        try {
-          (field as any).__opencode_focus = fieldFocusHandler;
-          (field as any).__opencode_blur = fieldBlurHandler;
-          field.on('focus', fieldFocusHandler);
-          field.on('blur', fieldBlurHandler);
-        } catch (_) {}
-      }
+      if (!field || typeof field.on !== 'function') return;
+      const fieldFocusHandler = () => {
+        applyCreateDialogFocusStyles(field);
+      };
+      try {
+        (field as any).__opencode_focus = fieldFocusHandler;
+        field.on('focus', fieldFocusHandler);
+      } catch (_) {}
     });
 
     // Wire Tab/Shift+Tab navigation for create dialog fields
     const wireCreateDialogFieldNavigation = (field: Pane | undefined | null) => {
       if (!field || typeof field.key !== 'function') return;
       const isFocusedField = () => (screen as any).focused === field;
+      const isCreateTextarea = field === createDialogTitleInput || field === createDialogDescription;
+
+      const stopCreateDialogTextareaReading = (widget: any) => {
+        if (!widget || !widget._reading) return;
+        let restoreInputOnFocus: boolean | undefined;
+        try {
+          restoreInputOnFocus = widget?.options?.inputOnFocus;
+          if (widget?.options) widget.options.inputOnFocus = false;
+          if (typeof widget._done === 'function') {
+            widget._done('stop');
+          }
+        } catch (_) {
+          try {
+            if (widget?.__listener && typeof widget.removeListener === 'function') {
+              widget.removeListener('keypress', widget.__listener);
+            }
+            if (widget?.__done && typeof widget.removeListener === 'function') {
+              widget.removeListener('blur', widget.__done);
+            }
+            delete widget.__listener;
+            delete widget.__done;
+            delete widget._done;
+            delete widget._callback;
+            widget._reading = false;
+            (screen as any).grabKeys = false;
+            if (typeof (screen as any).program?.hideCursor === 'function') {
+              (screen as any).program.hideCursor();
+            }
+          } catch (_) {}
+        } finally {
+          try {
+            if (widget?.options && restoreInputOnFocus !== undefined) {
+              widget.options.inputOnFocus = restoreInputOnFocus;
+            }
+          } catch (_) {}
+        }
+      };
       
       const fieldTabHandler = () => {
         if (createDialog.hidden) return;
@@ -493,22 +478,41 @@ export class TuiController {
         return false;
       };
 
-      // For textareas, use standard key handler for Tab/Enter (no keypress handlers)
-      if (field === createDialogTitleInput || field === createDialogDescription) {
+      if (!isCreateTextarea) {
         try {
           (field as any).__opencode_key_tab = fieldTabHandler;
           (field as any).__opencode_key_stab = fieldShiftTabHandler;
           field.key(KEY_TAB, fieldTabHandler);
           field.key(KEY_SHIFT_TAB, fieldShiftTabHandler);
         } catch (_) {}
-      } else {
-        // For non-textarea fields, use standard key handler
-        try {
-          (field as any).__opencode_key_tab = fieldTabHandler;
-          (field as any).__opencode_key_stab = fieldShiftTabHandler;
-          field.key(KEY_TAB, fieldTabHandler);
-          field.key(KEY_SHIFT_TAB, fieldShiftTabHandler);
-        } catch (_) {}
+      }
+
+      // Textareas with inputOnFocus use blessed's internal `_listener` for text
+      // editing. Patch that listener so Tab/Shift-Tab cycle modal focus instead
+      // of inserting tab characters.
+      if (isCreateTextarea) {
+        const widget = field as any;
+        if (typeof widget._listener === 'function' && !widget.__opencode_orig_listener) {
+          const originalListener = widget._listener;
+          widget.__opencode_orig_listener = originalListener;
+          widget._listener = function patchedCreateDialogTextareaListener(ch: unknown, key: KeyInfo | undefined) {
+            if (!createDialog.hidden && (screen as any).focused === widget) {
+              const isTab = key?.name === 'tab' && !key?.shift;
+              const isShiftTab = key?.name === 'S-tab' || (key?.name === 'tab' && Boolean(key?.shift));
+              if (isTab) {
+                stopCreateDialogTextareaReading(widget);
+                fieldTabHandler();
+                return;
+              }
+              if (isShiftTab) {
+                stopCreateDialogTextareaReading(widget);
+                fieldShiftTabHandler();
+                return;
+              }
+            }
+            return originalListener.call(this, ch, key);
+          };
+        }
       }
     };
 
@@ -1135,7 +1139,7 @@ export class TuiController {
     if (chordDebug) try { require('./logger').fileLog('[tui] registering ctrl-w chord handlers'); } catch (_) {}
     chordHandler.register(['C-w', 'w'], () => {
       if (helpMenu.isVisible()) return;
-      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
+      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || isCreateDialogOpen()) return;
       endOpencodeTextReading();
       clearCtrlWPending();
       cycleFocus(1);
@@ -1144,7 +1148,7 @@ export class TuiController {
 
     chordHandler.register(['C-w', 'p'], () => {
       if (helpMenu.isVisible()) return;
-      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
+      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || isCreateDialogOpen()) return;
       endOpencodeTextReading();
       clearCtrlWPending();
       focusPaneByIndex(lastPaneFocusIndex);
@@ -1157,7 +1161,7 @@ export class TuiController {
 
     chordHandler.register(['C-w', 'h'], () => {
       if (helpMenu.isVisible()) return;
-      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
+      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || isCreateDialogOpen()) return;
       endOpencodeTextReading();
       clearCtrlWPending();
       const current = getActivePaneIndex();
@@ -1167,7 +1171,7 @@ export class TuiController {
 
     chordHandler.register(['C-w', 'l'], () => {
       if (helpMenu.isVisible()) return;
-      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
+      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || isCreateDialogOpen()) return;
       endOpencodeTextReading();
       clearCtrlWPending();
       const current = getActivePaneIndex();
@@ -1177,7 +1181,7 @@ export class TuiController {
 
     chordHandler.register(['C-w', 'j'], () => {
       if (helpMenu.isVisible()) return;
-      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
+      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || isCreateDialogOpen()) return;
       if (opencodeDialog.hidden) return;
       if (!opencodePane || (opencodePane as any).hidden) return;
       clearCtrlWPending();
@@ -1193,7 +1197,7 @@ export class TuiController {
 
     chordHandler.register(['C-w', 'k'], () => {
       if (helpMenu.isVisible()) return;
-      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
+      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || isCreateDialogOpen()) return;
       if (opencodeDialog.hidden) return;
       if (!opencodePane || (opencodePane as any).hidden) return;
       endOpencodeTextReading();
@@ -2648,12 +2652,18 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       createDialogIssueTypeOptions.select(0);
       createDialogPriorityOptions.select(2);
 
+      if (createDialogCreateButton?.style) {
+        createDialogCreateButton.style.bg = 'green';
+      }
+      if (createDialogCancelButton?.style) {
+        delete (createDialogCancelButton.style as any).bg;
+      }
+
       createDialogModal.open({
-        focusTarget: createDialogTitleInput,
+        focusTarget: createDialog,
         restoreFocusTarget: list as any,
       });
       createDialogFocusManager.focusIndex(0);
-      createDialogTitleInput.focus();
       applyCreateDialogFocusStyles(createDialogFieldOrder[0]);
       paneFocusIndex = getFocusPanes().indexOf(list);
       applyFocusStyles();
@@ -2709,7 +2719,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
 
         showToast(`Created: ${newItem.title} (${newItem.id})`);
         closeCreateDialog();
-        refreshFromDatabase();
+        refreshFromDatabase(undefined, 0);
 
         // Find and select the new item
         const visible = buildVisible();
@@ -3683,7 +3693,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     try { (detailClose as any).__opencode_click = detailCloseClickHandler; detailClose.on('click', detailCloseClickHandler); } catch (_) {}
 
     screen.key(KEY_NAV_RIGHT, (_ch: any, key: any) => {
-      if (!updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
+      if (!updateDialog.hidden || isCreateDialogOpen()) return;
       // In move mode, Enter confirms the target (same as pressing 'm')
       if (state.moveMode && key?.name === 'enter') {
         const item = getSelectedItem();
@@ -3741,7 +3751,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     });
 
     screen.key(KEY_NAV_LEFT, () => {
-      if (!updateDialog.hidden || (createDialog && !createDialog.hidden)) return;
+      if (!updateDialog.hidden || isCreateDialogOpen()) return;
       const idx = getGlobalSelectedIndex();
       const visible = buildVisible();
       const node = visible[idx];
@@ -3872,7 +3882,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         closeUpdateDialog();
         return;
       }
-      if ((createDialog && !createDialog.hidden)) {
+      if (isCreateDialogOpen()) {
         closeCreateDialog();
         return;
       }
@@ -3922,7 +3932,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       // Guard conditions mirror the KEY_RUN_AUDIT handler to keep
       // behaviour consistent regardless of which path invoked it.
       if (state.moveMode) return;
-      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
       if (isPromptBusy()) {
         showToast('Please wait for current response to complete');
         return;
@@ -4005,7 +4015,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         // Intercept and route to the create handler so Shift+C triggers reliably.
         if (_ch === 'C') {
           if (state.moveMode) return false;
-          if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && (!createDialog || createDialog.hidden)) {
+          if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && !isCreateDialogOpen()) {
             openCreateDialog();
           }
           return false;
@@ -4015,14 +4025,14 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         // key.shift=true instead of 'S-up'/'S-down'. Handle that form here
         // so reordering remains reliable across environments.
         if (key?.shift && key?.name === 'up') {
-          if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
+          if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
           if (!opencodeDialog.hidden) return;
           if (state.moveMode) return;
           reorderSelectedItemByOffset(-1);
           return false;
         }
         if (key?.shift && key?.name === 'down') {
-          if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
+          if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
           if (!opencodeDialog.hidden) return;
           if (state.moveMode) return;
           reorderSelectedItemByOffset(1);
@@ -4070,7 +4080,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         try {
           screen.key(KEY_TAB, () => {
             if (helpMenu.isVisible()) return;
-            if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && (createDialog && !createDialog.hidden))) return;
+            if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || isCreateDialogOpen()) return;
             if (opencodeDialog && !opencodeDialog.hidden) return;
             cycleFocus(1);
             screen.render();
@@ -4079,7 +4089,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         try {
           screen.key(KEY_SHIFT_TAB, () => {
             if (helpMenu.isVisible()) return;
-            if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || (createDialog && (createDialog && !createDialog.hidden))) return;
+            if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || isCreateDialogOpen()) return;
             if (opencodeDialog && !opencodeDialog.hidden) return;
             cycleFocus(-1);
             screen.render();
@@ -4089,7 +4099,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // Open opencode prompt dialog (shortcut O)
      screen.key(KEY_OPEN_OPENCODE, async () => {
        if (state.moveMode) return;
-       if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && (!createDialog || createDialog.hidden)) {
+       if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && !isCreateDialogOpen()) {
          await openOpencodeDialog();
        }
     });
@@ -4111,7 +4121,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // Open search/filter modal (shortcut /)
      screen.key(KEY_OPEN_SEARCH, async () => {
        if (state.moveMode) return;
-       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
+       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
       try {
         const term = await modalDialogs.editTextarea({
           title: 'Filter items',
@@ -4213,9 +4223,11 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     });
 
     // Copy selected ID
-     screen.key(KEY_COPY_ID, () => {
-       if (state.moveMode) return;
-       copySelectedId().catch(() => {});
+     screen.key(KEY_COPY_ID, (_ch: any, key: any) => {
+        if (state.moveMode) return;
+        if (_ch === 'C' || key?.shift) return;
+        if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
+        copySelectedId().catch(() => {});
      });
 
       // Open parent preview
@@ -4239,15 +4251,15 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // Update selected item (quick edit) - shortcut U
      screen.key(KEY_UPDATE_ITEM, () => {
        if (state.moveMode) return;
-        if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && (!createDialog || createDialog.hidden)) {
+        if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && !isCreateDialogOpen()) {
          openUpdateDialog();
-       }
+        }
     });
 
     // Create new work item - shortcut C
     screen.key(KEY_CREATE_ITEM, () => {
       if (state.moveMode) return;
-      if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && (!createDialog || createDialog.hidden)) {
+      if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && !isCreateDialogOpen()) {
         openCreateDialog();
       }
     });
@@ -4255,7 +4267,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // Toggle do-not-delegate tag on selected item (shortcut D)
      screen.key(KEY_TOGGLE_DO_NOT_DELEGATE, () => {
        // Only act when no interfering overlays are visible
-       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
+       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
        if (state.moveMode) return;
       const item = getSelectedItem();
       if (!item) {
@@ -4291,7 +4303,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       // Ignore when shift is held — that is handled by KEY_GITHUB_PUSH ('G')
       if (key?.shift) return;
       // Guard: suppress when overlays are visible or in move mode
-      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
       if (!opencodeDialog.hidden) return;
       if (state.moveMode) return;
 
@@ -4411,7 +4423,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       if (githubPushInFlight) return;
       githubPushInFlight = true;
       try {
-        if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
+        if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
         if (state.moveMode) return;
 
         const item = getSelectedItem();
@@ -4456,7 +4468,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
 
     // Toggle needs producer review flag (shortcut r)
      screen.key(KEY_TOGGLE_NEEDS_REVIEW, () => {
-       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
+       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
        if (state.moveMode) return;
       const item = getSelectedItem();
       if (!item) {
@@ -4481,7 +4493,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // Move/reparent mode (shortcut M)
     screen.key(KEY_MOVE, () => {
       // Guard: only active when no overlays are visible
-      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
       if (!opencodeDialog.hidden) return;
 
       const item = getSelectedItem();
@@ -4573,14 +4585,14 @@ const visible = buildVisible();
     });
 
     screen.key(KEY_REORDER_UP, () => {
-      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
       if (!opencodeDialog.hidden) return;
       if (state.moveMode) return;
       reorderSelectedItemByOffset(-1);
     });
 
     screen.key(KEY_REORDER_DOWN, () => {
-      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
       if (!opencodeDialog.hidden) return;
       if (state.moveMode) return;
       reorderSelectedItemByOffset(1);
@@ -4599,7 +4611,7 @@ const visible = buildVisible();
     // Evaluate next item
      screen.key(KEY_FIND_NEXT, () => {
        if (state.moveMode) return;
-       if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && nextDialog.hidden && (!createDialog || createDialog.hidden)) {
+       if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && nextDialog.hidden && !isCreateDialogOpen()) {
          openNextDialog();
        }
      });
@@ -4630,7 +4642,7 @@ const visible = buildVisible();
 
      screen.key(KEY_RUN_AUDIT, async () => {
        if (state.moveMode) return;
-       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
+       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
        if (isPromptBusy()) {
          showToast('Please wait for current response to complete');
          return;
@@ -4678,7 +4690,7 @@ const visible = buildVisible();
 
      screen.key(KEY_FILTER_NEEDS_REVIEW, () => {
        if (state.moveMode) return;
-       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || (createDialog && !createDialog.hidden)) return;
+       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
        cycleNeedsReviewFilter();
      });
 
@@ -4871,32 +4883,49 @@ const visible = buildVisible();
     const createDialogPriorityEnterHandler = () => { submitCreateDialog(); };
     try { (createDialogPriorityOptions as any).__opencode_key_enter = createDialogPriorityEnterHandler; createDialogModal.registerKeyHandler(createDialogPriorityOptions as any, KEY_ENTER, createDialogPriorityEnterHandler); } catch (_) {}
 
-    // Create dialog Tab/Shift-Tab navigation (using focus manager)
-    const createDialogTabHandler = () => {
-      if (createDialog.hidden) return;
-      createDialogFocusManager.cycle(1);
-      applyCreateDialogFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
-      return false;
-    };
-    try { (createDialog as any).__opencode_key_tab = createDialogTabHandler; createDialogModal.registerKeyHandler(createDialog as any, KEY_TAB, createDialogTabHandler); } catch (_) {}
-
-    const createDialogShiftTabHandler = () => {
-      if (createDialog.hidden) return;
-      createDialogFocusManager.cycle(-1);
-      applyCreateDialogFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
-      return false;
-    };
-    try { (createDialog as any).__opencode_key_stab = createDialogShiftTabHandler; createDialogModal.registerKeyHandler(createDialog as any, KEY_SHIFT_TAB, createDialogShiftTabHandler); } catch (_) {}
-
     // Create dialog mouse click handlers
     const createOverlayClickHandler = () => { closeCreateDialog(); };
     try { (createOverlay as any).__opencode_click = createOverlayClickHandler; createDialogModal.registerMouseHandler(createOverlay as any, 'click', createOverlayClickHandler); } catch (_) {}
 
+    const createDialogTitleInputClickHandler = () => {
+      if (createDialog.hidden) return;
+      createDialogFocusManager.focusIndex(0);
+      applyCreateDialogFocusStyles(createDialogFieldOrder[0]);
+    };
+    try { (createDialogTitleInput as any).__opencode_click = createDialogTitleInputClickHandler; createDialogModal.registerMouseHandler(createDialogTitleInput as any, 'click', createDialogTitleInputClickHandler); } catch (_) {}
+
+    const createDialogDescriptionClickHandler = () => {
+      if (createDialog.hidden) return;
+      createDialogFocusManager.focusIndex(1);
+      applyCreateDialogFocusStyles(createDialogFieldOrder[1]);
+    };
+    try { (createDialogDescription as any).__opencode_click = createDialogDescriptionClickHandler; createDialogModal.registerMouseHandler(createDialogDescription as any, 'click', createDialogDescriptionClickHandler); } catch (_) {}
+
+    const createDialogIssueTypeClickHandler = () => {
+      if (createDialog.hidden) return;
+      createDialogFocusManager.focusIndex(2);
+      applyCreateDialogFocusStyles(createDialogFieldOrder[2]);
+    };
+    try { (createDialogIssueTypeOptions as any).__opencode_click = createDialogIssueTypeClickHandler; createDialogModal.registerMouseHandler(createDialogIssueTypeOptions as any, 'click', createDialogIssueTypeClickHandler); } catch (_) {}
+
+    const createDialogPriorityClickHandler = () => {
+      if (createDialog.hidden) return;
+      createDialogFocusManager.focusIndex(3);
+      applyCreateDialogFocusStyles(createDialogFieldOrder[3]);
+    };
+    try { (createDialogPriorityOptions as any).__opencode_click = createDialogPriorityClickHandler; createDialogModal.registerMouseHandler(createDialogPriorityOptions as any, 'click', createDialogPriorityClickHandler); } catch (_) {}
+
     const createDialogCreateButtonClickHandler = () => { submitCreateDialog(); };
     try { (createDialogCreateButton as any).__opencode_click = createDialogCreateButtonClickHandler; createDialogModal.registerMouseHandler(createDialogCreateButton as any, 'click', createDialogCreateButtonClickHandler); } catch (_) {}
 
+    const createDialogCreateButtonEnterHandler = () => { submitCreateDialog(); };
+    try { (createDialogCreateButton as any).__opencode_key_enter = createDialogCreateButtonEnterHandler; createDialogModal.registerKeyHandler(createDialogCreateButton as any, KEY_ENTER, createDialogCreateButtonEnterHandler); } catch (_) {}
+
     const createDialogCancelButtonClickHandler = () => { closeCreateDialog(); };
     try { (createDialogCancelButton as any).__opencode_click = createDialogCancelButtonClickHandler; createDialogModal.registerMouseHandler(createDialogCancelButton as any, 'click', createDialogCancelButtonClickHandler); } catch (_) {}
+
+    const createDialogCancelButtonEnterHandler = () => { closeCreateDialog(); };
+    try { (createDialogCancelButton as any).__opencode_key_enter = createDialogCancelButtonEnterHandler; createDialogModal.registerKeyHandler(createDialogCancelButton as any, KEY_ENTER, createDialogCancelButtonEnterHandler); } catch (_) {}
 
     const closeDialogEscapeHandler = () => { closeCloseDialog(); };
     try { (closeDialog as any).__opencode_key_escape = closeDialogEscapeHandler; closeDialog.key(KEY_ESCAPE, closeDialogEscapeHandler); } catch (_) {}
@@ -5003,7 +5032,7 @@ const visible = buildVisible();
       // Guard: do not process list/detail clicks when any dialog is open.
       // Dialog-internal mouse events are handled by blessed's per-widget
       // dispatch and are unaffected by this guard.
-      if (!updateDialog.hidden || !closeDialog.hidden || !nextDialog.hidden) return;
+      if (!updateDialog.hidden || !closeDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
       // List click-to-select: blessed routes mouse events to list item child
       // elements so list.on('click') never fires. Handle it at screen level.
       if (data.action === 'mousedown' && isInside(list, data.x, data.y)) {
