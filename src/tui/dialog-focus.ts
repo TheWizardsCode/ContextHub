@@ -87,6 +87,7 @@ export const createFocusHelpers = (
     registerKey?: (target: any, keys: string[] | string, handler: (...args: any[]) => void) => void,
   ) => {
     const wireOne = (field: Pane | undefined | null) => {
+      const idx = fieldOrder.indexOf(field);
       if (!field || typeof field.key !== 'function') return;
       const isFocusedField = () => (screen as any).focused === field;
 
@@ -94,7 +95,7 @@ export const createFocusHelpers = (
         if (isHidden()) return;
         if (!isFocusedField()) return;
         // Log before/after cycling to help tests diagnose focus-navigation
-        try { /* eslint-disable-next-line no-console */ console.log('DEBUG fieldTabHandler: invoked for field idx=', idx, 'before cycle index=', focusManager.getIndex()); } catch (_) {}
+      try { /* eslint-disable-next-line no-console */ console.log('DEBUG fieldTabHandler: invoked for field idx=', idx, 'before cycle index=', focusManager.getIndex()); } catch (_) {}
         focusManager.cycle(1);
         try { /* eslint-disable-next-line no-console */ console.log('DEBUG fieldTabHandler: after cycle index=', focusManager.getIndex(), 'newFocusedIdx=', focusManager.getIndex()); } catch (_) {}
         // Ensure screen.focused is updated so other handlers and tests see
@@ -151,13 +152,13 @@ export const createFocusHelpers = (
         // Deterministic invokers used by tests: ensure the field appears
         // focused to the handler and then run the original handler so the
         // shared focusManager + applyFocusStyles path executes reliably.
-        (field as any).__opencode_key_tab = (...args: any[]) => {
+        (field as any).__opencode_key_tab = () => {
           try { if (isHidden()) return; (screen as any).focused = field; } catch (_) {}
-          try { return fieldTabHandler(...args); } catch (_) { return; }
+          try { return fieldTabHandler(); } catch (_) { return; }
         };
-        (field as any).__opencode_key_stab = (...args: any[]) => {
+        (field as any).__opencode_key_stab = () => {
           try { if (isHidden()) return; (screen as any).focused = field; } catch (_) {}
-          try { return fieldShiftTabHandler(...args); } catch (_) { return; }
+          try { return fieldShiftTabHandler(); } catch (_) { return; }
         };
         if (typeof registerKey === 'function') {
           registerKey(field, KEY_TAB as any, fieldTabHandler);

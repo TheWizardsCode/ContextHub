@@ -41,6 +41,7 @@ import { AVAILABLE_COMMANDS, MIN_INPUT_HEIGHT, MAX_INPUT_LINES, FOOTER_HEIGHT, O
   KEY_TAB, KEY_SHIFT_TAB, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_CREATE_ITEM, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_RUN_AUDIT, KEY_FILTER_BLOCKED, KEY_FILTER_NEEDS_REVIEW, KEY_FILTER_INTAKE_COMPLETED, KEY_FILTER_PLAN_COMPLETED, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW, KEY_MOVE, KEY_REORDER_UP, KEY_REORDER_DOWN, KEY_DELEGATE, KEY_GITHUB_PUSH, KEY_FILTER_COPILOT } from './constants.js';
 import { theme } from '../theme.js';
 import { initAutocomplete, type AutocompleteInstance } from './opencode-autocomplete.js';
+import createTextareaHelper from './textarea-helper.js';
 import { delegateWorkItem, type DelegateResult, type DelegateDb } from '../delegate-helper.js';
 import { resolveGithubConfig } from '../commands/github.js';
 import { upsertIssuesFromWorkItems } from '../github-sync.js';
@@ -472,7 +473,7 @@ export class TuiController {
       // advance/create focus state in a stable way even when the modal's
       // wrapped handlers (registered via ModalDialogBase) differ by
       // function identity or when lightweight test doubles are used.
-      (this._test as any)._create_index = (this._test as any)._create_index ?? createDialogFocusManager.getIndex?.() ?? 0;
+      (this._test as any)._create_index = (this._test as any)._create_index ?? 0;
       this._test.applyCreateDialogFocus = () => {
         try {
           const fields = createDialogFieldOrder;
@@ -519,6 +520,9 @@ export class TuiController {
 
     // Create dialog focus manager using shared pattern
     const createDialogFocusManager = createUpdateDialogFocusManager(createDialogFieldOrder);
+    // Now that the focus manager exists, prefer its index when the test
+    // helper hasn't set one earlier.
+    try { (this._test as any)._create_index = (this._test as any)._create_index ?? createDialogFocusManager.getIndex?.() ?? 0; } catch (_) {}
     const createDialogFocusHelpers = createFocusHelpers(createDialogFieldOrder, createDialogFocusManager, screen);
 
     // Wrap the focus manager's cycle method to defensively apply styles to
@@ -722,233 +726,18 @@ export class TuiController {
     const updateDialogStageValues = rules.stageValues.filter(stage => stage !== '');
     const updateDialogPriorityValues = ['critical', 'high', 'medium', 'low'];
 
-    let updateDialogCommentCursorIndex = 0;
-    let updateDialogCommentDesiredColumn: number | null = null;
-
-    const clampUpdateDialogCommentCursor = (value: string, nextIndex: number) => {
-      return Math.max(0, Math.min(nextIndex, value.length));
-    };
-
-    const setUpdateDialogCommentCursorIndex = (value: string, nextIndex: number) => {
-      updateDialogCommentCursorIndex = clampUpdateDialogCommentCursor(value, nextIndex);
-      (updateDialogComment as any).__opencode_cursor = updateDialogCommentCursorIndex;
-    };
-
-    const getUpdateDialogCommentLineColumnFromIndex = (value: string, index: number) => {
-      const clamped = clampUpdateDialogCommentCursor(value, index);
-      let line = 0;
-      let column = 0;
-      for (let i = 0; i < clamped; i += 1) {
-        if (value[i] === '\n') {
-          line += 1;
-          column = 0;
-        } else {
-          column += 1;
-        }
-      }
-      return { line, column };
-    };
-
-    const getUpdateDialogCommentIndexFromLineColumn = (value: string, line: number, column: number) => {
-      const lines = value.split('\n');
-      const safeLine = Math.max(0, Math.min(line, Math.max(0, lines.length - 1)));
-      let idx = 0;
-      for (let i = 0; i < safeLine; i += 1) {
-        idx += lines[i].length + 1;
-      }
-      const safeColumn = Math.max(0, Math.min(column, lines[safeLine]?.length ?? 0));
-      return idx + safeColumn;
-    };
-
-    const updateUpdateDialogCommentCursor = () => {
-      try { (updateDialogComment as any)._updateCursor?.(); } catch (_) {}
-      screen.render();
-    };
-
-    const moveUpdateDialogCommentCursorHorizontal = (delta: number) => {
-      const value = updateDialogComment.getValue ? updateDialogComment.getValue() : '';
-      setUpdateDialogCommentCursorIndex(value, updateDialogCommentCursorIndex + delta);
-      const { column } = getUpdateDialogCommentLineColumnFromIndex(value, updateDialogCommentCursorIndex);
-      updateDialogCommentDesiredColumn = column;
-      updateUpdateDialogCommentCursor();
-    };
-
-    const moveUpdateDialogCommentCursorVertical = (delta: number) => {
-      const value = updateDialogComment.getValue ? updateDialogComment.getValue() : '';
-      const position = getUpdateDialogCommentLineColumnFromIndex(value, updateDialogCommentCursorIndex);
-      const targetLine = position.line + delta;
-      const desiredColumn = updateDialogCommentDesiredColumn ?? position.column;
-      const nextIndex = getUpdateDialogCommentIndexFromLineColumn(value, targetLine, desiredColumn);
-      setUpdateDialogCommentCursorIndex(value, nextIndex);
-      updateUpdateDialogCommentCursor();
-    };
-
-    const insertUpdateDialogCommentAtCursor = (text: string) => {
-      if (!text) return;
-      const value = updateDialogComment.getValue ? updateDialogComment.getValue() : '';
-      const nextValue = value.slice(0, updateDialogCommentCursorIndex) + text + value.slice(updateDialogCommentCursorIndex);
-      const nextIndex = updateDialogCommentCursorIndex + text.length;
-      updateDialogComment.setValue?.(nextValue);
-      setUpdateDialogCommentCursorIndex(nextValue, nextIndex);
-      updateDialogCommentDesiredColumn = null;
-      updateUpdateDialogCommentCursor();
-    };
-
-    const deleteUpdateDialogCommentBackward = () => {
-      const value = updateDialogComment.getValue ? updateDialogComment.getValue() : '';
-      if (updateDialogCommentCursorIndex <= 0) return;
-      const nextValue = value.slice(0, updateDialogCommentCursorIndex - 1) + value.slice(updateDialogCommentCursorIndex);
-      const nextIndex = updateDialogCommentCursorIndex - 1;
-      updateDialogComment.setValue?.(nextValue);
-      setUpdateDialogCommentCursorIndex(nextValue, nextIndex);
-      updateDialogCommentDesiredColumn = null;
-      updateUpdateDialogCommentCursor();
-    };
-
-    const deleteUpdateDialogCommentForward = () => {
-      const value = updateDialogComment.getValue ? updateDialogComment.getValue() : '';
-      if (updateDialogCommentCursorIndex >= value.length) return;
-      const nextValue = value.slice(0, updateDialogCommentCursorIndex) + value.slice(updateDialogCommentCursorIndex + 1);
-      updateDialogComment.setValue?.(nextValue);
-      setUpdateDialogCommentCursorIndex(nextValue, updateDialogCommentCursorIndex);
-      updateDialogCommentDesiredColumn = null;
-      updateUpdateDialogCommentCursor();
-    };
-
-    const updateDialogCommentBaseUpdateCursor = (updateDialogComment as any)._updateCursor?.bind(updateDialogComment);
-    const updateDialogCommentCustomUpdateCursor = function(this: any, get?: boolean) {
-      if (this.screen?.focused !== this) return;
-      const lpos = get ? this.lpos : this._getCoords?.();
-      if (!lpos || !this.screen?.program) {
-        updateDialogCommentBaseUpdateCursor?.(get);
-        return;
-      }
-      if (!this._clines || !Array.isArray(this._clines) || !Array.isArray(this._clines.ftor)) {
-        updateDialogCommentBaseUpdateCursor?.(get);
-        return;
-      }
-
-      const value = typeof this.value === 'string' ? this.value : '';
-      const { line, column } = getUpdateDialogCommentLineColumnFromIndex(value, updateDialogCommentCursorIndex);
-      const wrappedIndexes: number[] = this._clines.ftor[line] ?? [];
-      const fallbackIndex = Math.min(line, Math.max(0, this._clines.length - 1));
-      const wrapped = wrappedIndexes.length ? wrappedIndexes : [fallbackIndex];
-
-      let remaining = column;
-      let wrappedIndex = wrapped[wrapped.length - 1] ?? fallbackIndex;
-      let columnInWrapped = 0;
-
-      for (const index of wrapped) {
-        const text = (this._clines[index] ?? '').replace(/\x1b\[[0-9;]*m/g, '');
-        const width = typeof this.strWidth === 'function' ? this.strWidth(text) : text.length;
-        if (remaining <= width) {
-          wrappedIndex = index;
-          columnInWrapped = remaining;
-          break;
-        }
-        remaining -= width;
-      }
-
-      if (wrappedIndex == null || wrappedIndex < 0) {
-        updateDialogCommentBaseUpdateCursor?.(get);
-        return;
-      }
-
-      const visibleLine = Math.max(
-        0,
-        Math.min(
-          wrappedIndex - (this.childBase || 0),
-          Math.max(0, (lpos.yl - lpos.yi) - this.iheight - 1),
-        ),
-      );
-      const lineText = (this._clines[wrappedIndex] ?? '').replace(/\x1b\[[0-9;]*m/g, '');
-      const colText = lineText.slice(0, columnInWrapped);
-      const cxOffset = typeof this.strWidth === 'function' ? this.strWidth(colText) : colText.length;
-      const cy = lpos.yi + this.itop + visibleLine;
-      const cx = lpos.xi + this.ileft + cxOffset;
-      const program = this.screen.program;
-
-      if (cy === program.y && cx === program.x) return;
-      if (cy === program.y) {
-        if (cx > program.x) {
-          program.cuf(cx - program.x);
-        } else if (cx < program.x) {
-          program.cub(program.x - cx);
-        }
-      } else if (cx === program.x) {
-        if (cy > program.y) {
-          program.cud(cy - program.y);
-        } else if (cy < program.y) {
-          program.cuu(program.y - cy);
-        }
-      } else {
-        program.cup(cy, cx);
-      }
-    };
-    try { (updateDialogComment as any)._updateCursor = updateDialogCommentCustomUpdateCursor; } catch (_) {}
+    const updateHelper = createTextareaHelper(updateDialogComment as any, screen as any);
+    try { updateHelper.attachUpdateCursorOverride(); } catch (_) {}
 
     // Use shared focus helpers for update dialog focus styling and Tab navigation.
     const updateDialogFocusHelpers = createFocusHelpers(updateDialogFieldOrder, updateDialogFocusManager, screen);
 
     const endUpdateDialogCommentReading = () => {
-      try {
-        const widget = updateDialogComment as any;
-        if (widget?.__listener && typeof widget.removeListener === 'function') {
-          try { widget.removeListener('keypress', widget.__listener); } catch (_) {}
-        }
-        if (widget?.__done && typeof widget.removeListener === 'function') {
-          try { widget.removeListener('blur', widget.__done); } catch (_) {}
-        }
-        delete widget.__listener;
-        delete widget.__done;
-        delete widget._done;
-        delete widget._callback;
-        if (widget?._reading) {
-          widget._reading = false;
-        }
-      } catch (_) {}
-      try {
-        // Prefer blessed API when available; fall back to property assignment
-        if (typeof (screen as any).grabKeys === 'function') {
-          try { (screen as any).grabKeys(false); } catch (_) { (screen as any).grabKeys = false; }
-        } else {
-          (screen as any).grabKeys = false;
-        }
-      } catch (err) {
-        // best-effort cleanup; log when verbose to help diagnose issues
-        try { debugLog(`endUpdateDialogCommentReading: failed to clear grabKeys: ${String(err)}`); } catch (_) {}
-      }
-      try {
-        if (typeof (screen as any).program?.hideCursor === 'function') {
-          (screen as any).program.hideCursor();
-        }
-      } catch (err) {
-        try { debugLog(`endUpdateDialogCommentReading: failed to hide cursor: ${String(err)}`); } catch (_) {}
-      }
+      try { updateHelper.endReading(); } catch (_) {}
     };
 
     const startUpdateDialogCommentReading = () => {
-      try {
-        const widget = updateDialogComment as any;
-        if (!widget) return;
-        if (widget.__listener && typeof widget.removeListener === 'function') {
-          try { widget.removeListener('keypress', widget.__listener); } catch (_) {}
-        }
-        if (widget.__done && typeof widget.removeListener === 'function') {
-          try { widget.removeListener('blur', widget.__done); } catch (_) {}
-        }
-        delete widget.__listener;
-        delete widget.__done;
-        delete widget._done;
-        delete widget._callback;
-        widget._reading = true;
-        const value = widget.getValue ? widget.getValue() : '';
-        setUpdateDialogCommentCursorIndex(value, updateDialogCommentCursorIndex);
-        if (typeof (screen as any).program?.showCursor === 'function') {
-          (screen as any).program.showCursor();
-        }
-        updateUpdateDialogCommentCursor();
-      } catch (_) {}
+      try { updateHelper.startReading(); } catch (_) {}
     };
 
 
@@ -1123,7 +912,8 @@ export class TuiController {
 
     // Attach comment-specific key handling for the multiline textarea.
     if (typeof updateDialogComment.on === 'function') {
-      const commentKeyHandler = (_ch: unknown, key: unknown) => {
+      const built = updateHelper.buildKeyHandler();
+      const commentKeyHandler = (ch: unknown, key: unknown) => {
         if (updateDialog.hidden) return;
         if ((screen as any).focused !== updateDialogComment) return;
         const k = key as KeyInfo | undefined;
@@ -1137,39 +927,8 @@ export class TuiController {
           updateDialogFocusHelpers.applyFocusStyles(updateDialogFieldOrder[updateDialogFocusManager.getIndex()]);
           return false;
         }
-        if (k?.name === 'left') {
-          moveUpdateDialogCommentCursorHorizontal(-1);
-          return false;
-        }
-        if (k?.name === 'right') {
-          moveUpdateDialogCommentCursorHorizontal(1);
-          return false;
-        }
-        if (k?.name === 'up') {
-          moveUpdateDialogCommentCursorVertical(-1);
-          return false;
-        }
-        if (k?.name === 'down') {
-          moveUpdateDialogCommentCursorVertical(1);
-          return false;
-        }
-        if (k?.name === 'backspace') {
-          deleteUpdateDialogCommentBackward();
-          return false;
-        }
-        if (k?.name === 'delete') {
-          deleteUpdateDialogCommentForward();
-          return false;
-        }
-        if (k?.name === 'enter' || k?.name === 'linefeed' || k?.name === 'return') {
-          insertUpdateDialogCommentAtCursor('\n');
-          return false;
-        }
-        const insertChar = typeof _ch === 'string' ? _ch : '';
-        if (!insertChar) return;
-        if (/^[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]$/.test(insertChar)) return;
-        insertUpdateDialogCommentAtCursor(insertChar);
-        return false;
+        // Delegate movement/insert/delete to helper
+        return built(ch, key as any);
       };
       try { (updateDialogComment as any).__opencode_comment_key = commentKeyHandler; (updateDialogComment as any).on('keypress', commentKeyHandler); } catch (_) {}
     }
@@ -2700,8 +2459,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       const item = getSelectedItem();
       updateDialogItem = item ?? null;
       const initialComment = updateDialogComment?.getValue ? updateDialogComment.getValue() : '';
-      setUpdateDialogCommentCursorIndex(initialComment, initialComment.length);
-      updateDialogCommentDesiredColumn = null;
+      try { updateHelper.setCursorIndex(initialComment, initialComment.length); } catch (_) {}
       if (item) {
         resetUpdateDialogItems(item);
         updateDialogHeader(item, { status: normalizeStatusValue(item.status), stage: item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules), priority: item.priority });
@@ -2736,8 +2494,8 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       endUpdateDialogCommentReading();
       updateDialogModal.close();
       updateDialogItem = null;
-      updateDialogCommentCursorIndex = 0;
-      updateDialogCommentDesiredColumn = null;
+      try { updateHelper.setCursorIndex('', 0); } catch (_) {}
+      try { (updateHelper as any).desiredColumn = null; } catch (_) {}
       if (updateDialogComment?.setValue) {
         updateDialogComment.setValue('');
       }
