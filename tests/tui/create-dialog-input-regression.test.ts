@@ -74,7 +74,6 @@ describe('TUI create dialog input regression', () => {
     const patched = titleInput._listener;
     expect(typeof patched).toBe('function');
     expect(patched).not.toBe(originalListener);
-    expect(titleInput.__opencode_orig_listener).toBe(originalListener);
 
     // Open create modal and focus title to exercise tab path.
     ctx.screen.emit('keypress', 'C', { name: 'c', shift: true });

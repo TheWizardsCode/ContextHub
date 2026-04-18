@@ -1,7 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { TuiController } from '../src/tui/controller.js';
+import { TuiController } from '../dist/tui/controller.js';
 
 // Minimal helpers copied/adapted from tests/test-utils to allow running
 // the TUI headlessly without pulling the test harness.

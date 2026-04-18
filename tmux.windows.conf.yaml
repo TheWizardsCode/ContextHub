@@ -3,7 +3,7 @@ windows:
   - name: "ContextHub"
     cwd: "~/projects/ContextHub"
     panes:
-      - cmd: "opencode -c"
+      - cmd: "pi --continue"
       - cmd: "wl tui"
         split:
           dir: vertical

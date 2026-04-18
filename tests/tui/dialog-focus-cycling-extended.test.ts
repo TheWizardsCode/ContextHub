@@ -187,7 +187,7 @@ describe('Dialog focus cycling extended', () => {
         // As a fallback, attempt to invoke per-field handler paths if
         // the test helper is not available in this harness.
         const current = fields[i];
-        const tabHandler = (current as any).__opencode_key_tab || (current as any).__opencode_registered_wrapped || getKeyHandler(current.key as ReturnType<typeof vi.fn>, ['tab', 'C-i']);
+        const tabHandler = getKeyHandler(current.key as ReturnType<typeof vi.fn>, ['tab', 'C-i']);
         if (tabHandler) {
           try { (screen as any).focused = current; } catch (_) {}
           try { tabHandler(); } catch (_) {}
@@ -195,15 +195,7 @@ describe('Dialog focus cycling extended', () => {
           try { (controller as any)._test.applyCreateDialogFocus?.(); } catch (_) {}
         }
       }
-      // After cycling, the test harness uses a test-only marker or screen.focused
-      // rather than relying on fragile style mutations. Prefer the marker when
-      // present for determinism.
-      const ok = (next && (next.__opencode_focus_applied === true)) || ((screen as any).focused === next);
-      if (!ok && process.env.WL_DEBUG) {
-        // eslint-disable-next-line no-console
-        console.log('DEBUG focus failed at i=', i, 'next=', next, 'styles=', JSON.stringify(next.style), 'marker=', next && next.__opencode_focus_applied, 'focused=', (screen as any).focused === next);
-      }
-      expect(ok).toBeTruthy();
+      expect((screen as any).focused).toBe(next);
     }
 
     // Now iterate backward with Shift+Tab and ensure wrapping
@@ -219,7 +211,7 @@ describe('Dialog focus cycling extended', () => {
         }
       }
       const prev = fields[i];
-      expect((prev && prev.__opencode_focus_applied === true) || ((screen as any).focused === prev)).toBeTruthy();
+      expect((screen as any).focused).toBe(prev);
     }
   });
 

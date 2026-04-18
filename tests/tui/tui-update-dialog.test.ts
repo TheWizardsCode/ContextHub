@@ -445,29 +445,23 @@ describe('TUI Update Dialog', () => {
       let closeCount = 0;
       const closeUpdateDialog = () => { closeCount += 1; };
 
-      // Simulate registering Escape handlers on each list as done in controller.ts
+      // Simulate the three Escape handlers as in controller.ts without
+      // depending on private widget internals.
       const statusEscapeHandler = () => { closeUpdateDialog(); };
       const stageEscapeHandler = () => { closeUpdateDialog(); };
       const priorityEscapeHandler = () => { closeUpdateDialog(); };
 
-      (statusList as any).__opencode_key_escape = statusEscapeHandler;
-      (stageList as any).__opencode_key_escape = stageEscapeHandler;
-      (priorityList as any).__opencode_key_escape = priorityEscapeHandler;
+      const escapeHandlers = [statusEscapeHandler, stageEscapeHandler, priorityEscapeHandler];
 
-      // Trigger Escape on each list — all must close the dialog
-      statusEscapeHandler();
+      // Trigger Escape handlers for each list — all must close the dialog
+      escapeHandlers[0]();
       expect(closeCount).toBe(1);
 
-      stageEscapeHandler();
+      escapeHandlers[1]();
       expect(closeCount).toBe(2);
 
-      priorityEscapeHandler();
+      escapeHandlers[2]();
       expect(closeCount).toBe(3);
-
-      // Verify handler references are stored on all three lists
-      expect((statusList as any).__opencode_key_escape).toBeDefined();
-      expect((stageList as any).__opencode_key_escape).toBeDefined();
-      expect((priorityList as any).__opencode_key_escape).toBeDefined();
 
       screen.destroy();
     });

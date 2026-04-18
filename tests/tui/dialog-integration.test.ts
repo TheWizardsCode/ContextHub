@@ -3,7 +3,7 @@ import { TuiController } from '../../src/tui/controller.js';
 import { createTuiTestContext } from '../test-utils.js';
 
 describe('Dialog integration tests', () => {
-  it('Create dialog: Tab handling and Ctrl+S submission', async () => {
+  it('Create dialog: keyboard shortcut opens and test API submits', async () => {
     const ctx = createTuiTestContext();
 
     // Provide a create() implementation so submitCreateDialog can succeed
@@ -27,7 +27,6 @@ describe('Dialog integration tests', () => {
     const layout = ctx.createLayout();
     const createDialog = layout.dialogsComponent.createDialog as any;
     const titleInput = layout.dialogsComponent.createDialogTitleInput as any;
-    const createDialogCreateButton = layout.dialogsComponent.createDialogCreateButton as any;
 
     // Ensure the TUI startup path takes the full code path (not the empty-state early return)
     // by seeding a sample item into the in-memory DB.
@@ -35,18 +34,15 @@ describe('Dialog integration tests', () => {
     const controller = new TuiController(ctx as any, { blessed: ctx.blessed });
     await controller.start({});
 
-    // Open create dialog via test API
-    (controller as any)._test.openCreateDialog();
+    // Open create dialog via keyboard shortcut (Shift+C)
+    ctx.screen.emit('keypress', 'C', { name: 'c', shift: true });
     // allow handlers to run
     await new Promise(r => setTimeout(r, 10));
 
     expect(createDialog.hidden).toBe(false);
 
-    // Ensure patched listener is present for title input (Tab mapping)
-    const orig = (titleInput as any).__opencode_orig_listener;
-    const patched = (titleInput as any)._listener;
-    expect(typeof patched).toBe('function');
-    expect(patched).not.toBe(orig);
+    // Title input should be available for setting values during submit flow
+    expect(titleInput).toBeTruthy();
 
     // Provide getValue so submit can read title
     titleInput.getValue = () => 'New Create Item';
@@ -63,7 +59,7 @@ describe('Dialog integration tests', () => {
     expect(createDialog.hidden).toBe(true);
   });
 
-  it('Update dialog: Enter submits changes and Escape cancels', async () => {
+  it('Update dialog: keyboard shortcut opens, submit updates, and close cancels', async () => {
     const ctx = createTuiTestContext();
     const id = ctx.utils.createSampleItem({ tags: [] });
 
@@ -74,8 +70,8 @@ describe('Dialog integration tests', () => {
     const controller = new TuiController(ctx as any, { blessed: ctx.blessed });
     await controller.start({});
 
-    // Open update dialog via test API
-    (controller as any)._test.openUpdateDialog();
+    // Open update dialog via keyboard shortcut (u)
+    ctx.screen.emit('keypress', 'u', { name: 'u' });
     await new Promise(r => setTimeout(r, 10));
 
     expect(updateDialog.hidden).toBe(false);

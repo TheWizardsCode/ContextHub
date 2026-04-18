@@ -63,6 +63,11 @@ export const rebuildTreeState = (state: TuiState): void => {
     }
   }
 
+  // Sort children for each parent to avoid sorting in render path
+  for (const [pid, children] of state.childrenMap.entries()) {
+    children.sort(sortBySortIndexDateAndId);
+  }
+
   state.roots = state.currentVisibleItems.filter(it => !(it as any).parentId || !state.itemsById.has((it as any).parentId)).slice();
   state.roots.sort(sortBySortIndexDateAndId);
 
@@ -109,7 +114,7 @@ export const buildVisibleNodes = (state: TuiState): VisibleNode[] => {
   const out: VisibleNode[] = [];
 
   function visit(it: Item, depth: number) {
-    const children = (state.childrenMap.get(it.id) || []).slice().sort(sortBySortIndexDateAndId);
+    const children = state.childrenMap.get(it.id) || [];
     out.push({ item: it, depth, hasChildren: children.length > 0 });
     if (children.length > 0 && state.expanded.has(it.id)) {
       for (const c of children) visit(c, depth + 1);
@@ -129,7 +134,7 @@ export const buildVisibleNodes = (state: TuiState): VisibleNode[] => {
  */
 function buildSubtreeNodes(state: TuiState, parentId: string, depth: number): VisibleNode[] {
   const out: VisibleNode[] = [];
-  const children = (state.childrenMap.get(parentId) || []).slice().sort(sortBySortIndexDateAndId);
+  const children = state.childrenMap.get(parentId) || [];
   for (const child of children) {
     const grandchildren = state.childrenMap.get(child.id) || [];
     out.push({ item: child, depth, hasChildren: grandchildren.length > 0 });
