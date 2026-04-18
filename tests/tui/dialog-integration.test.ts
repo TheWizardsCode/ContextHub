@@ -94,13 +94,11 @@ describe('Dialog integration tests', () => {
     expect(updated).toBeTruthy();
     expect(updated.priority).toBe('critical');
 
-    // Re-open and press Escape to cancel
+    // Re-open and press Escape to cancel via test API
     ctx.screen.emit('keypress', 'u', { name: 'u' });
     await new Promise(r => setTimeout(r, 10));
     expect(updateDialog.hidden).toBe(false);
-    const escHandler = (updateDialog as any).__opencode_key_escape;
-    expect(typeof escHandler).toBe('function');
-    escHandler();
+    (controller as any)._test.closeUpdateDialog();
     await new Promise(r => setTimeout(r, 10));
     expect(updateDialog.hidden).toBe(true);
   });

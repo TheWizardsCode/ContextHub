@@ -69,6 +69,30 @@ export function wait(ms: number): Promise<void> {
  * `createLayout` factory so tests can instantiate `TuiController` without
  * depending on the real terminal environment.
  */
+
+/**
+ * TuiController test API
+ *
+ * TuiController exposes a minimal test-only API on controller._test with the
+ * following helpers which are intended for tests and internal use only:
+ *
+ * - openCreateDialog()
+ * - closeCreateDialog()
+ * - submitCreateDialog()
+ * - openUpdateDialog()
+ * - closeUpdateDialog()
+ * - submitUpdateDialog()
+ *
+ * These are thin wrappers around the controller's internal dialog helpers
+ * and provide a stable surface so tests do not need to inspect or modify
+ * private widget internals (for example, `__opencode_*` properties).
+ *
+ * Example usage:
+ *   const controller = new TuiController(ctx, { blessed: ctx.blessed });
+ *   await controller.start({});
+ *   (controller as any)._test.openCreateDialog();
+ *   (controller as any)._test.submitCreateDialog();
+ */
 export function createTuiTestContext() {
   let nextId = 1;
   const items = new Map<string, any>();
