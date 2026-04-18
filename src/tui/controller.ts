@@ -653,7 +653,75 @@ export class TuiController {
     };
 
     patchCreateTextarea(createDialogTitleInput, 0);
-    patchCreateTextarea(createDialogDescription, 1);
+    // Replace the patched listener for the multi-line create dialog description
+    // with the shared textarea helper so behavior matches the update dialog.
+    let createDialogDescriptionHelper: ReturnType<typeof createTextareaHelper> | null = null;
+    try {
+      if (createDialogDescription) {
+        createDialogDescriptionHelper = createTextareaHelper(createDialogDescription as any, screen as any);
+        try { createDialogDescriptionHelper.attachUpdateCursorOverride(); } catch (_) {}
+        // Start/end reading on focus/blur to show/hide cursor and prepare helper state
+        try {
+          if (typeof createDialogDescription.on === 'function') {
+            createDialogDescription.on('focus', () => { try { createDialogDescriptionHelper?.startReading(); } catch (_) {} });
+            createDialogDescription.on('blur', () => { try { createDialogDescriptionHelper?.endReading(); } catch (_) {} });
+          }
+        } catch (_) {}
+        // Replace the widget's internal editing listener with one driven by the helper
+        try {
+          const widget: any = createDialogDescription as any;
+          const built = createDialogDescriptionHelper?.buildKeyHandler();
+          // Preserve and remove any existing keypress listeners so the helper
+          // is the sole mutator of the textarea value. Save them for tests
+          // so they can be restored if needed.
+          try {
+            if (typeof widget.listeners === 'function') {
+              widget.__opencode_saved_keypress_listeners = widget.listeners('keypress') || [];
+              for (const l of widget.__opencode_saved_keypress_listeners) {
+                try { widget.removeListener('keypress', l); } catch (_) {}
+              }
+            }
+          } catch (_) {}
+          try {
+            if (typeof createDialog?.listeners === 'function') {
+              createDialog.__opencode_saved_keypress_listeners = createDialog.listeners('keypress') || [];
+              for (const l of createDialog.__opencode_saved_keypress_listeners) {
+                try { createDialog.removeListener('keypress', l); } catch (_) {}
+              }
+            }
+          } catch (_) {}
+
+          // Preserve any existing low-level listener for tests/debugging
+          try { if (typeof widget._listener === 'function') widget.__opencode_orig_listener = widget._listener; } catch (_) {}
+
+          // Install a helper-backed listener that handles Tab/Shift-Tab (focus cycling)
+          // and delegates other keys to the helper. Always return false to stop
+          // further propagation so the helper is the single source of edits.
+          widget._listener = function patchedCreateDialogDescriptionListener(ch: unknown, key: KeyInfo | undefined) {
+            if (!createDialog.hidden && (screen as any).focused === widget) {
+              const isTab = key?.name === 'tab' && !key?.shift;
+              const isShiftTab = key?.name === 'S-tab' || (key?.name === 'tab' && Boolean(key?.shift));
+              if (isTab) {
+                try { createDialogDescriptionHelper?.endReading(); } catch (_) {}
+                createDialogFocusManager.cycle(1);
+                createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+                return false;
+              }
+              if (isShiftTab) {
+                try { createDialogDescriptionHelper?.endReading(); } catch (_) {}
+                createDialogFocusManager.cycle(-1);
+                createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+                return false;
+              }
+            }
+            try { built?.(ch, key as any); } catch (_) {}
+            return false;
+          };
+        } catch (_) {}
+      }
+    } catch (_) {
+      createDialogDescriptionHelper = null;
+    }
 
     // Some textarea implementations or test doubles may not expose per-widget
     // `key` handlers. Register dialog-level Tab handlers as a fallback so
@@ -4982,12 +5050,12 @@ const visible = buildVisible();
     // dialog helpers. Wrappers catch errors so tests don't blow up on
     // internal exceptions.
     this._test = {
-      openCreateDialog: () => { try { console.log('[tui:_test] openCreateDialog called'); openCreateDialog(); } catch (e) { console.log('[tui:_test] openCreateDialog error', e); } },
-      closeCreateDialog: () => { try { console.log('[tui:_test] closeCreateDialog called'); closeCreateDialog(); } catch (e) { console.log('[tui:_test] closeCreateDialog error', e); } },
-      submitCreateDialog: () => { try { console.log('[tui:_test] submitCreateDialog called'); submitCreateDialog(); } catch (e) { console.log('[tui:_test] submitCreateDialog error', e); } },
-      openUpdateDialog: () => { try { console.log('[tui:_test] openUpdateDialog called'); openUpdateDialog(); } catch (e) { console.log('[tui:_test] openUpdateDialog error', e); } },
-      closeUpdateDialog: () => { try { console.log('[tui:_test] closeUpdateDialog called'); closeUpdateDialog(); } catch (e) { console.log('[tui:_test] closeUpdateDialog error', e); } },
-      submitUpdateDialog: () => { try { console.log('[tui:_test] submitUpdateDialog called'); submitUpdateDialog(); } catch (e) { console.log('[tui:_test] submitUpdateDialog error', e); } },
+      openCreateDialog: () => { try { /* test helper */ openCreateDialog(); } catch (_) {} },
+      closeCreateDialog: () => { try { /* test helper */ closeCreateDialog(); } catch (_) {} },
+      submitCreateDialog: () => { try { /* test helper */ submitCreateDialog(); } catch (_) {} },
+      openUpdateDialog: () => { try { /* test helper */ openUpdateDialog(); } catch (_) {} },
+      closeUpdateDialog: () => { try { /* test helper */ closeUpdateDialog(); } catch (_) {} },
+      submitUpdateDialog: () => { try { /* test helper */ submitUpdateDialog(); } catch (_) {} },
     };
   }
 }

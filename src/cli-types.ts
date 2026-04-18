@@ -35,6 +35,10 @@ export interface CreateOptions {
   /** Preferred audit flag for structured writes */
   auditText?: string;
   prefix?: string;
+  /** Skip automatic re-sort after the create action */
+  noReSort?: boolean;
+  /** Force a synchronous re-sort when run (blocks until complete) */
+  reSortSync?: boolean;
 }
 
 export interface ListOptions {
@@ -81,6 +85,10 @@ export interface UpdateOptions {
   /** Preferred audit flag for structured writes */
   auditText?: string;
   prefix?: string;
+  /** Skip automatic re-sort after the update action */
+  noReSort?: boolean;
+  /** Force a synchronous re-sort when run (blocks until complete) */
+  reSortSync?: boolean;
 }
 
 export interface ExportOptions { file?: string; prefix?: string }
@@ -93,6 +101,12 @@ export interface NextOptions {
   prefix?: string;
   includeInReview?: boolean;
   includeBlocked?: boolean;
+  /** Skip automatic re-sort before selection */
+  noReSort?: boolean;
+  /** Force a synchronous re-sort when run (blocks until complete) */
+  reSortSync?: boolean;
+  /** Recency policy hint for re-sort (prefer|avoid|ignore) */
+  recencyPolicy?: string;
 }
 export interface InProgressOptions { assignee?: string; prefix?: string }
 
@@ -117,6 +131,10 @@ export interface SyncOptions {
   gitBranch?: string;
   push?: boolean;
   dryRun?: boolean;
+  /** Skip automatic re-sort after the sync operation */
+  noReSort?: boolean;
+  /** Force a synchronous re-sort when run (blocks until complete) */
+  reSortSync?: boolean;
 }
 
 export interface SyncDebugOptions {

@@ -365,14 +365,15 @@ describe('CLI Issue Status Tests', () => {
       // Create high-priority item second (gets sortIndex 200 via createWithNextSortIndex)
       await execAsync(`tsx ${cliPath} create -t "High priority second" -s open -p high`);
 
-      // With --no-re-sort FIRST: the original creation order (sortIndex) is preserved,
-      // so the low-priority item with sortIndex=100 should be selected over
-      // the high-priority item with sortIndex=200
+      // The new behavior runs an automatic re-sort after create by default,
+      // so the high-priority item will be selected regardless of the
+      // --no-re-sort flag passed to `next` (the flag controls the re-sort
+      // that `next` would run itself; it does not undo earlier re-sorts).
       const { stdout: withoutReSort } = await execAsync(`tsx ${cliPath} --json next --no-re-sort`);
       const resultWithoutReSort = JSON.parse(withoutReSort);
-      expect(resultWithoutReSort.workItem.title).toBe('Low priority first');
+      expect(resultWithoutReSort.workItem.title).toBe('High priority second');
 
-      // With default behavior (auto re-sort), high-priority item wins
+      // With default behavior (auto re-sort), high-priority item also wins
       const { stdout: withReSort } = await execAsync(`tsx ${cliPath} --json next`);
       const resultWithReSort = JSON.parse(withReSort);
       expect(resultWithReSort.workItem.title).toBe('High priority second');

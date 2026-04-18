@@ -315,6 +315,8 @@ export default function register(ctx: PluginContext): void {
     .option('--git-branch <ref>', 'Git ref to store worklog data (use refs/worklog/data to avoid GitHub PR banners)', DEFAULT_GIT_BRANCH)
     .option('--no-push', 'Skip pushing changes back to git')
     .option('--dry-run', 'Show what would be synced without making changes')
+    .option('--no-re-sort', 'Skip automatic re-sort after sync')
+    .option('--re-sort-sync', 'Force a synchronous re-sort after sync', false)
     .action(async (options: SyncOptions) => {
       utils.requireInitialized();
       const isJsonMode = utils.isJsonMode();
@@ -324,6 +326,10 @@ export default function register(ctx: PluginContext): void {
       const gitRemote = options.gitRemote || defaults.gitRemote;
       const gitBranch = options.gitBranch || defaults.gitBranch;
       
+      // Re-sort control options (apply once after batch completes)
+      const reSortNo = Boolean((options as any).noReSort) || false;
+      const reSortSync = Boolean((options as any).reSortSync) || false;
+
       try {
         const lockPath = getLockPathForJsonl(options.file || dataPath);
         await withFileLock(lockPath, () =>
@@ -348,6 +354,15 @@ export default function register(ctx: PluginContext): void {
         }
         process.exit(1);
       }
+
+      // After sync completes, run a single re-sort unless disabled
+      try {
+        const db = utils.getDatabase(options.prefix);
+        if (!reSortNo && typeof (db as any).reSort === 'function') {
+          if (reSortSync) (db as any).reSort();
+          else void Promise.resolve().then(() => (db as any).reSort());
+        }
+      } catch (_e) {}
     });
 
   syncCommand

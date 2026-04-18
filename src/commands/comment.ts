@@ -74,6 +74,10 @@ export default function register(ctx: PluginContext): void {
         console.log('Created comment:');
         console.log(humanFormatComment(comment, format));
       }
+      // No automatic re-sort when comments are added — comments should not
+      // affect the sort order and triggering reSort here caused unnecessary
+      // work. If a caller needs an explicit re-sort they can run
+      // `wl re-sort` or use other commands that perform sorting.
     });
 
   commentCommand

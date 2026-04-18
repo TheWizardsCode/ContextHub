@@ -36,8 +36,10 @@ export default function register(ctx: PluginContext): void {
     .option('--audit <text>', 'Legacy alias for --audit-text')
     .option('--audit-text <text>', 'Set structured audit text. First non-empty line must be "Ready to close: Yes" or "Ready to close: No" (see docs/AUDIT_STATUS.md)')
     .option('--prefix <prefix>', 'Override the default prefix')
+    .option('--no-re-sort', 'Skip automatic re-sort after creating the item')
+    .option('--re-sort-sync', 'Force a synchronous re-sort after creating the item', false)
     .action(async (...rawArgs: any[]) => {
-      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','prefix']);
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','prefix','noReSort','reSortSync']);
       let options: CreateOptions = normalized.options as any || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
@@ -145,5 +147,14 @@ export default function register(ctx: PluginContext): void {
         const format = resolveFormat(program);
         console.log(humanFormatWorkItem(refreshed, db, format));
       }
+      // Trigger re-sort after create unless explicitly disabled
+        try {
+          const reSortNo = Boolean(options.noReSort);
+          const reSortSync = Boolean(options.reSortSync);
+          if (!reSortNo && typeof (db as any).reSort === 'function') {
+            if (reSortSync) (db as any).reSort();
+            else void Promise.resolve().then(() => (db as any).reSort());
+          }
+        } catch (_e) {}
     });
 }

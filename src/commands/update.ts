@@ -39,11 +39,16 @@ export default function register(ctx: PluginContext): void {
     .option('--do-not-delegate <true|false>', 'Set or clear the do-not-delegate tag (true|false|yes|no)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .action(async (...rawArgs: any[]) => {
+      // Accept re-sort flags to control automatic re-sort behavior after writes
+      // --no-re-sort: skip auto re-sort
+      // --re-sort-sync: force synchronous re-sort (blocking)
+      // Normalize re-sort flags from commander/options
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','doNotDelegate','prefix','noReSort','reSortSync']);
+      const reSortNo = Boolean((normalized.options as any)?.noReSort);
+      const reSortSync = Boolean((normalized.options as any)?.reSortSync);
       const knownOptionKeys = [
-        'title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','doNotDelegate','prefix'
+        'title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','doNotDelegate','prefix','noReSort','reSortSync'
       ];
-
-      const normalized = normalizeActionArgs(rawArgs, knownOptionKeys);
       const argsHint = rawArgs.map(a => Array.isArray(a) ? `array(${a.length})` : `${typeof a}:${String(a).slice(0,100)}`);
       if (process.env.WL_DEBUG_UPDATE_ACTION) {
         try { console.error('WL_DEBUG_UPDATE_ACTION rawArgs:', JSON.stringify(argsHint)); } catch (_e) { /* ignore */ }
@@ -320,7 +325,23 @@ export default function register(ctx: PluginContext): void {
         // in-process runner (which replaces process.exit with a throwing
         // trap) will surface a non-zero exit code to execAsync.
         process.exitCode = 1;
+        // Run re-sort unless explicitly disabled (do this before exit so
+        // external scripts can rely on ordering after a blocking update).
+        try {
+          if (!reSortNo && typeof (db as any).reSort === 'function') {
+            if (reSortSync) (db as any).reSort();
+            else void Promise.resolve().then(() => (db as any).reSort());
+          }
+        } catch (_e) {}
         process.exit(1);
       }
+
+      // If reached here and not exiting, trigger re-sort unless disabled
+        try {
+          if (!reSortNo && typeof (db as any).reSort === 'function') {
+            if (reSortSync) (db as any).reSort();
+            else void Promise.resolve().then(() => (db as any).reSort());
+          }
+        } catch (_e) {}
     });
 }

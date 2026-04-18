@@ -24,10 +24,11 @@ export default function register(ctx: PluginContext): void {
     .option('--include-in-review', 'Include items with status blocked and stage in_review (default: excluded)')
     .option('--include-blocked', 'Include dependency-blocked items (excluded by default)')
     .option('--no-re-sort', 'Skip the automatic re-sort before selection (preserve current sortIndex order)')
+    .option('--re-sort-sync', 'Force a synchronous re-sort when auto re-sort is run (blocks until complete)', false)
     .option('--recency-policy <policy>', 'Recency handling for score ordering during re-sort (prefer|avoid|ignore). Default: ignore', 'ignore')
     .action(async (...rawArgs: any[]) => {
       // Normalize incoming args: commander may pass a Command instance
-      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'stage', 'search', 'number', 'prefix', 'includeInReview', 'includeBlocked', 'reSort', 'recencyPolicy']);
+      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'stage', 'search', 'number', 'prefix', 'includeInReview', 'includeBlocked', 'reSort', 'reSortSync', 'recencyPolicy']);
       let options: any = normalized.options || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
@@ -48,16 +49,28 @@ export default function register(ctx: PluginContext): void {
         options.stage = normalizedStage;
       }
 
-      // Auto re-sort unless --no-re-sort is passed.
-      // Commander's --no-re-sort sets options.reSort to false.
-      const shouldReSort = options.reSort !== false;
+      // Auto re-sort unless --no-re-sort is passed. Commander exposes
+      // the flag as `reSort: false` (for --no-re-sort) in some contexts
+      // and some callers/tools may surface `noReSort` instead. Accept
+      // either form for robustness.
+      // Also check raw process.argv for `--no-re-sort` to handle variations in
+      // how commander/normalizeActionArgs may expose the flag in different
+      // invocation contexts (spawned vs in-process). This makes the behavior
+      // robust in tests and CI where option names can vary.
+      const cliNoReSort = process.argv.includes('--no-re-sort') || process.argv.includes('--noReSort');
+      const shouldReSort = !(((options as any).noReSort === true) || (options.reSort === false) || cliNoReSort);
       if (shouldReSort) {
         const recencyPolicy = (options.recencyPolicy || 'ignore').toLowerCase();
         if (!VALID_RECENCY_POLICIES.has(recencyPolicy)) {
           output.error('recency-policy must be one of: prefer, avoid, ignore', { success: false, error: 'recency-policy must be one of: prefer, avoid, ignore' });
           process.exit(1);
         }
-        db.reSort(recencyPolicy as 'prefer' | 'avoid' | 'ignore');
+        try {
+          if (typeof (db as any).reSort === 'function') {
+            if (options.reSortSync) (db as any).reSort(recencyPolicy as 'prefer' | 'avoid' | 'ignore');
+            else void Promise.resolve().then(() => (db as any).reSort(recencyPolicy as 'prefer' | 'avoid' | 'ignore'));
+          }
+        } catch (_e) {}
       }
 
       const results = (db as any).findNextWorkItems 

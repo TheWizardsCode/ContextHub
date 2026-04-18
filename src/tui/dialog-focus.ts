@@ -95,9 +95,9 @@ export const createFocusHelpers = (
         if (isHidden()) return;
         if (!isFocusedField()) return;
         // Log before/after cycling to help tests diagnose focus-navigation
-      try { /* eslint-disable-next-line no-console */ console.log('DEBUG fieldTabHandler: invoked for field idx=', idx, 'before cycle index=', focusManager.getIndex()); } catch (_) {}
+      try { if (process.env.WL_DEBUG) /* eslint-disable-next-line no-console */ console.log('DEBUG fieldTabHandler: invoked for field idx=', idx, 'before cycle index=', focusManager.getIndex()); } catch (_) {}
         focusManager.cycle(1);
-        try { /* eslint-disable-next-line no-console */ console.log('DEBUG fieldTabHandler: after cycle index=', focusManager.getIndex(), 'newFocusedIdx=', focusManager.getIndex()); } catch (_) {}
+        try { if (process.env.WL_DEBUG) /* eslint-disable-next-line no-console */ console.log('DEBUG fieldTabHandler: after cycle index=', focusManager.getIndex(), 'newFocusedIdx=', focusManager.getIndex()); } catch (_) {}
         // Ensure screen.focused is updated so other handlers and tests see
         // the newly-focused widget. Some test doubles don't implement
         // native focus semantics so we set it explicitly when possible.
@@ -120,9 +120,9 @@ export const createFocusHelpers = (
       const fieldShiftTabHandler = () => {
         if (isHidden()) return;
         if (!isFocusedField()) return;
-        try { /* eslint-disable-next-line no-console */ console.log('DEBUG fieldShiftTabHandler: invoked for field idx=', idx, 'before cycle index=', focusManager.getIndex()); } catch (_) {}
+        try { if (process.env.WL_DEBUG) /* eslint-disable-next-line no-console */ console.log('DEBUG fieldShiftTabHandler: invoked for field idx=', idx, 'before cycle index=', focusManager.getIndex()); } catch (_) {}
         focusManager.cycle(-1);
-        try { /* eslint-disable-next-line no-console */ console.log('DEBUG fieldShiftTabHandler: after cycle index=', focusManager.getIndex(), 'newFocusedIdx=', focusManager.getIndex()); } catch (_) {}
+        try { if (process.env.WL_DEBUG) /* eslint-disable-next-line no-console */ console.log('DEBUG fieldShiftTabHandler: after cycle index=', focusManager.getIndex(), 'newFocusedIdx=', focusManager.getIndex()); } catch (_) {}
         try { if (screen) (screen as any).focused = fieldOrder[focusManager.getIndex()]; } catch (_) {}
         try {
           const next = fieldOrder[focusManager.getIndex()];

@@ -46,9 +46,14 @@ export default function register(ctx: PluginContext): void {
     .option('--no-update-timestamp', 'Do not write last-push timestamp after push')
     .option('--id <work-item-id>', 'Push a single work item by ID')
     .option('--prefix <prefix>', 'Override the default prefix')
+    .option('--no-re-sort', 'Skip automatic re-sort after github push')
+    .option('--re-sort-sync', 'Force a synchronous re-sort after github push', false)
     .action(async (options) => {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
+      // Control single re-sort after github push batch completes
+      const reSortNo = Boolean((options as any).noReSort) || false;
+      const reSortSync = Boolean((options as any).reSortSync) || false;
       const isJsonMode = utils.isJsonMode();
       const isVerbose = program.opts().verbose;
       let lastProgress = '';
@@ -389,19 +394,23 @@ export default function register(ctx: PluginContext): void {
             title: si.title,
             url: `https://github.com/${githubConfig.repo}/issues/${si.issueNumber}`,
           }));
-          const errorItemsJson = result.errorItems.map(ei => ({
-            id: ei.id,
-            title: ei.title,
-            error: ei.error,
-          }));
           output.json({
             success: true,
             ...result,
             syncedItems: syncedItemsWithUrls,
-            errorItems: errorItemsJson,
             repo: githubConfig.repo,
           });
         } else {
+          // Trigger a single re-sort after github push unless disabled
+          try {
+            if (!reSortNo) {
+              if (typeof (db as any).reSort === 'function') {
+                if (reSortSync) (db as any).reSort();
+                else void Promise.resolve().then(() => (db as any).reSort());
+              }
+            }
+          } catch (_e) {}
+
           console.log(`GitHub sync complete (${githubConfig.repo})`);
           console.log(`  Created: ${result.created}`);
           console.log(`  Updated: ${result.updated}`);
