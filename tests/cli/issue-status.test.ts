@@ -129,6 +129,24 @@ describe('CLI Issue Status Tests', () => {
       result.workItems.forEach((item: any) => expect(item.needsProducerReview).not.toBe(true));
     });
 
+    it('should accept "yes" as true for needs-producer-review', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list --needs-producer-review yes`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(2);
+      result.workItems.forEach((item: any) => expect(item.needsProducerReview).toBe(true));
+    });
+
+    it('should accept "no" as false for needs-producer-review', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list --needs-producer-review no`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(1);
+      result.workItems.forEach((item: any) => expect(item.needsProducerReview).not.toBe(true));
+    });
+
     it('should include completed items when --stage filter matches them', async () => {
       // Seed items where a completed item has a specific stage
       seedWorkItems(tempState.tempDir, [
