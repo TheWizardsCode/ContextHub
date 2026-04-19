@@ -714,7 +714,12 @@ export class TuiController {
             }
             try {
               const handled = built ? built(ch, key as any) : undefined;
-              if (!handled) {
+              // Only call original listener if helper did not handle the key at all
+              // (handled === undefined). When handled === false the helper did
+              // process the key but returned false to indicate propagation should
+              // stop; in that case we must not call the original listener which
+              // would insert characters again (double input).
+              if (handled === undefined) {
                 try { widget.__opencode_orig_listener?.call(widget, ch, key); } catch (_) {}
               }
             } catch (_) {}
@@ -788,7 +793,12 @@ export class TuiController {
             }
             try {
               const handled = built ? built(ch, key as any) : undefined;
-              if (!handled) {
+              // Only call original listener if helper did not handle the key at all
+              // (handled === undefined). When handled === false the helper did
+              // process the key but returned false to indicate propagation should
+              // stop; in that case we must not call the original listener which
+              // would insert characters again (double input).
+              if (handled === undefined) {
                 try { widget.__opencode_orig_listener?.call(widget, ch, key); } catch (_) {}
               }
             } catch (_) {}
@@ -1070,6 +1080,13 @@ export class TuiController {
         if (k?.name === 'S-tab') {
           updateDialogFocusManager.cycle(-1);
           updateDialogFocusHelpers.applyFocusStyles(updateDialogFieldOrder[updateDialogFocusManager.getIndex()]);
+          return false;
+        }
+        // Block space key from propagating to the main list expand/collapse handler.
+        // KEY_TOGGLE_EXPAND is defined as 'space' in constants.ts. Without this
+        // capture, pressing space in the comment textarea would incorrectly
+        // trigger the main list expand/collapse action.
+        if (k?.name === 'space') {
           return false;
         }
         // Delegate movement/insert/delete to helper
