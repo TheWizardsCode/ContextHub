@@ -147,6 +147,16 @@ describe('CLI Issue Status Tests', () => {
       result.workItems.forEach((item: any) => expect(item.needsProducerReview).not.toBe(true));
     });
 
+    it('should error for invalid needs-producer-review value', async () => {
+      try {
+        await execAsync(`tsx ${cliPath} --json list --needs-producer-review maybe`);
+        expect.fail('Should have thrown an error');
+      } catch (error: any) {
+        const result = JSON.parse(error.stderr || '{}');
+        expect(result.success).toBe(false);
+      }
+    });
+
     it('should include completed items when --stage filter matches them', async () => {
       // Seed items where a completed item has a specific stage
       seedWorkItems(tempState.tempDir, [
