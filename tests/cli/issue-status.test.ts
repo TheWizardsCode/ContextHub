@@ -559,4 +559,87 @@ describe('CLI Issue Status Tests', () => {
       expect(stdout).toContain('search');
     });
   });
+
+  describe('search --needs-producer-review parsing', () => {
+    let reviewItem1Id: string;
+    let reviewItem2Id: string;
+    let nonReviewItemId: string;
+
+    beforeEach(async () => {
+      // Create items via CLI so they're in the SQLite database for search
+      const r1 = JSON.parse((await execAsync(`tsx ${cliPath} --json create -t "Review item 1" -p high`)).stdout);
+      const r2 = JSON.parse((await execAsync(`tsx ${cliPath} --json create -t "Review item 2" -p medium`)).stdout);
+      const r3 = JSON.parse((await execAsync(`tsx ${cliPath} --json create -t "Non-review item" -p low`)).stdout);
+
+      reviewItem1Id = r1.workItem.id;
+      reviewItem2Id = r2.workItem.id;
+      nonReviewItemId = r3.workItem.id;
+
+      // Set needsProducerReview flags
+      await execAsync(`tsx ${cliPath} --json update ${reviewItem1Id} --needs-producer-review true`);
+      await execAsync(`tsx ${cliPath} --json update ${reviewItem2Id} --needs-producer-review true`);
+      await execAsync(`tsx ${cliPath} --json update ${nonReviewItemId} --needs-producer-review false`);
+    });
+
+    it('should filter search results by --needs-producer-review true', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json search "item" --needs-producer-review true`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.results).toHaveLength(2);
+      const ids = result.results.map((r: any) => r.id);
+      expect(ids).toContain(reviewItem1Id);
+      expect(ids).toContain(reviewItem2Id);
+    });
+
+    it('should default --needs-producer-review to true when value omitted', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json search "item" --needs-producer-review`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.results).toHaveLength(2);
+      const ids = result.results.map((r: any) => r.id);
+      expect(ids).toContain(reviewItem1Id);
+      expect(ids).toContain(reviewItem2Id);
+    });
+
+    it('should filter search results by --needs-producer-review false', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json search "item" --needs-producer-review false`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].id).toBe(nonReviewItemId);
+    });
+
+    it('should accept "yes" as true for --needs-producer-review', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json search "item" --needs-producer-review yes`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.results).toHaveLength(2);
+      const ids = result.results.map((r: any) => r.id);
+      expect(ids).toContain(reviewItem1Id);
+      expect(ids).toContain(reviewItem2Id);
+    });
+
+    it('should accept "no" as false for --needs-producer-review', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json search "item" --needs-producer-review no`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].id).toBe(nonReviewItemId);
+    });
+
+    it('should error for invalid --needs-producer-review value', async () => {
+      try {
+        await execAsync(`tsx ${cliPath} --json search "item" --needs-producer-review maybe`);
+        expect.fail('Should have thrown an error');
+      } catch (error: any) {
+        const result = JSON.parse(error.stderr || '{}');
+        expect(result.success).toBe(false);
+      }
+    });
+  });
 });
