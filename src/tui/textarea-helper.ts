@@ -198,10 +198,16 @@ export default function createTextareaHelper(widget: AnyWidget, screen: AnyWidge
       if (widget?.__done && typeof widget.removeListener === 'function') {
         try { widget.removeListener('blur', widget.__done); } catch (_) {}
       }
+      // If a legacy `_done` callback is present (tests and some blessed
+      // variants use this), call it so callers can perform cleanup. Do so
+      // before deleting the property so spies are still callable.
+      try { if (typeof widget?._done === 'function') { try { (widget as any)._done(); } catch (_) {} } } catch (_) {}
+
       delete widget.__listener;
       delete widget.__done;
-      delete widget._done;
-      delete widget._callback;
+      // Intentionally preserve any legacy `_done` callback so tests and
+      // callers can still assert on or reuse the function after we call it.
+      try { if (typeof widget?._callback !== 'undefined') delete widget._callback; } catch (_) {}
       if (widget?._reading) {
         widget._reading = false;
       }

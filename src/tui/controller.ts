@@ -652,7 +652,79 @@ export class TuiController {
       };
     };
 
-    patchCreateTextarea(createDialogTitleInput, 0);
+    // Use the shared textarea helper for the create dialog title input as well
+    // so both title and description consistently use the same editing helpers.
+    let createDialogTitleHelper: ReturnType<typeof createTextareaHelper> | null = null;
+    try {
+      if (createDialogTitleInput) {
+        createDialogTitleHelper = createTextareaHelper(createDialogTitleInput as any, screen as any);
+        try { createDialogTitleHelper.attachUpdateCursorOverride(); } catch (_) {}
+        try {
+          if (typeof createDialogTitleInput.on === 'function') {
+            createDialogTitleInput.on('focus', () => { try { createDialogTitleHelper?.startReading(); } catch (_) {} });
+            createDialogTitleInput.on('blur', () => { try { createDialogTitleHelper?.endReading(); } catch (_) {} });
+          }
+        } catch (_) {}
+
+        try {
+          const widget: any = createDialogTitleInput as any;
+          const built = createDialogTitleHelper?.buildKeyHandler();
+
+          // Preserve and remove existing keypress listeners so the helper is
+          // the single source of edits. Save them for tests so they can be
+          // restored if needed.
+          try {
+            if (typeof widget.listeners === 'function') {
+              widget.__opencode_saved_keypress_listeners = widget.listeners('keypress') || [];
+              for (const l of widget.__opencode_saved_keypress_listeners) {
+                try { widget.removeListener('keypress', l); } catch (_) {}
+              }
+            }
+          } catch (_) {}
+          try {
+            if (typeof createDialog?.listeners === 'function') {
+              createDialog.__opencode_saved_keypress_listeners = createDialog.listeners('keypress') || [];
+              for (const l of createDialog.__opencode_saved_keypress_listeners) {
+                try { createDialog.removeListener('keypress', l); } catch (_) {}
+              }
+            }
+          } catch (_) {}
+
+          try { if (typeof widget._listener === 'function') widget.__opencode_orig_listener = widget._listener; } catch (_) {}
+
+          // Install a helper-backed listener that handles Tab/Shift-Tab (focus cycling)
+          // and delegates other keys to the helper. Always return false to stop
+          // further propagation so the helper is the single source of edits.
+          widget._listener = function patchedCreateDialogTitleListener(ch: unknown, key: KeyInfo | undefined) {
+            if (!createDialog.hidden && (screen as any).focused === widget) {
+              const isTab = key?.name === 'tab' && !key?.shift;
+              const isShiftTab = key?.name === 'S-tab' || (key?.name === 'tab' && Boolean(key?.shift));
+              if (isTab) {
+                try { createDialogTitleHelper?.endReading(); } catch (_) {}
+                createDialogFocusManager.cycle(1);
+                createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+                return false;
+              }
+              if (isShiftTab) {
+                try { createDialogTitleHelper?.endReading(); } catch (_) {}
+                createDialogFocusManager.cycle(-1);
+                createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+                return false;
+              }
+            }
+            try {
+              const handled = built ? built(ch, key as any) : undefined;
+              if (!handled) {
+                try { widget.__opencode_orig_listener?.call(widget, ch, key); } catch (_) {}
+              }
+            } catch (_) {}
+            return false;
+          };
+        } catch (_) {}
+      }
+    } catch (_) {
+      createDialogTitleHelper = null;
+    }
     // Replace the patched listener for the multi-line create dialog description
     // with the shared textarea helper so behavior matches the update dialog.
     let createDialogDescriptionHelper: ReturnType<typeof createTextareaHelper> | null = null;
@@ -714,7 +786,12 @@ export class TuiController {
                 return false;
               }
             }
-            try { built?.(ch, key as any); } catch (_) {}
+            try {
+              const handled = built ? built(ch, key as any) : undefined;
+              if (!handled) {
+                try { widget.__opencode_orig_listener?.call(widget, ch, key); } catch (_) {}
+              }
+            } catch (_) {}
             return false;
           };
         } catch (_) {}
