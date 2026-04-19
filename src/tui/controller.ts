@@ -737,6 +737,28 @@ export class TuiController {
       if (createDialogDescription) {
         createDialogDescriptionHelper = createTextareaHelper(createDialogDescription as any, screen as any);
         try { createDialogDescriptionHelper.attachUpdateCursorOverride(); } catch (_) {}
+        // Remove blessed's construction-time inputOnFocus focus listener before
+        // registering our own.  blessed registers it as
+        //   this.on('focus', this.readInput.bind(this, null))
+        // at widget creation time.  Setting options.inputOnFocus=false or shadowing
+        // widget.readInput afterward both fail: bind() captured the prototype
+        // method at call time, not a dynamic property lookup.  The bound function
+        // has name "bound " (empty original because blessed uses anonymous
+        // function expressions).  Safest fix: remove ALL focus listeners now
+        // (only the inputOnFocus one exists at this point) and re-add only ours.
+        try {
+          if (typeof (createDialogDescription as any).removeAllListeners === 'function') {
+            (createDialogDescription as any).removeAllListeners('focus');
+          } else {
+            // Fallback: find and remove by checking bound-function name pattern
+            const descFls: Function[] = (createDialogDescription as any).listeners?.('focus') ?? [];
+            for (const fl of descFls) {
+              if (typeof fl === 'function' && fl.name.startsWith('bound ')) {
+                try { (createDialogDescription as any).removeListener('focus', fl); } catch (_) {}
+              }
+            }
+          }
+        } catch (_) {}
         // Start/end reading on focus/blur to show/hide cursor and prepare helper state
         try {
           if (typeof createDialogDescription.on === 'function') {
@@ -754,12 +776,8 @@ export class TuiController {
         //   3. Register a single explicit keypress listener driven by the helper.
         try {
           const widget: any = createDialogDescription as any;
-          // Shadow readInput() with a no-op so blessed's construction-time
-          // inputOnFocus focus listener (this.on('focus', this.readInput.bind(...)))
-          // never registers its own _listener.  Setting options.inputOnFocus=false
-          // is insufficient because that focus listener is already wired at widget
-          // creation time.  Our startReading/endReading focus/blur handlers take
-          // over full responsibility for cursor management instead.
+          // Shadow readInput() as an extra belt-and-suspenders guard, though the
+          // primary defence is the focus listener removal above.
           try { widget.readInput = function() {}; } catch (_) {}
           // Remove ALL existing keypress listeners so the helper is the sole
           // mutator of the textarea value.
