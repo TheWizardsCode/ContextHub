@@ -754,9 +754,13 @@ export class TuiController {
         //   3. Register a single explicit keypress listener driven by the helper.
         try {
           const widget: any = createDialogDescription as any;
-          // Disable automatic readInput() so blessed doesn't re-register its own
-          // _listener on every focus event.
-          try { if (widget.options) widget.options.inputOnFocus = false; } catch (_) {}
+          // Shadow readInput() with a no-op so blessed's construction-time
+          // inputOnFocus focus listener (this.on('focus', this.readInput.bind(...)))
+          // never registers its own _listener.  Setting options.inputOnFocus=false
+          // is insufficient because that focus listener is already wired at widget
+          // creation time.  Our startReading/endReading focus/blur handlers take
+          // over full responsibility for cursor management instead.
+          try { widget.readInput = function() {}; } catch (_) {}
           // Remove ALL existing keypress listeners so the helper is the sole
           // mutator of the textarea value.
           try {
