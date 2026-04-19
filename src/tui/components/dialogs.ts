@@ -63,7 +63,7 @@ export class DialogsComponent {
       content: '',
     });
 
-    this.detailClose = this.blessedImpl.box({
+    this.detailClose = this.createText({
       parent: this.detailModal,
       top: 0,
       right: 1,
@@ -89,14 +89,13 @@ export class DialogsComponent {
       style: { border: { fg: 'magenta' } },
     });
 
-    this.closeDialogText = this.blessedImpl.box({
+    this.closeDialogText = this.createText({
       parent: this.closeDialog,
       top: 1,
       left: 2,
       height: 2,
       width: '100%-4',
       content: 'Close selected item with stage:',
-      tags: false,
     });
 
     this.closeDialogOptions = this.createList({
@@ -123,14 +122,13 @@ export class DialogsComponent {
       style: { border: { fg: 'magenta' } },
     });
 
-    this.updateDialogText = this.blessedImpl.box({
+    this.updateDialogText = this.createText({
       parent: this.updateDialog,
       top: 1,
       left: 2,
       height: 3,
       width: '100%-4',
       content: 'Update selected item fields:',
-      tags: false,
     });
 
     const updateDialogColumnWidth = '33%-2';
@@ -292,14 +290,13 @@ export class DialogsComponent {
       style: { border: { fg: 'magenta' } },
     });
 
-    this.createDialogText = this.blessedImpl.box({
+    this.createDialogText = this.createText({
       parent: this.createDialog,
       top: 1,
       left: 2,
       height: 1,
       width: '100%-4',
       content: '',
-      tags: false,
     });
 
     // Title input field
@@ -471,6 +468,18 @@ export class DialogsComponent {
       scrollbar: { ch: ' ', inverse: true },
     } as any;
     return this.blessedImpl.textarea(Object.assign({}, defaults, opts)) as BlessedTextarea;
+  }
+
+  /**
+   * Create a compact text box used for simple dialog text content.
+   * @param opts Partial blessed box options.
+   */
+  private createText(opts: any): BlessedBox {
+    const defaults = {
+      height: 1,
+      tags: false,
+    } as any;
+    return this.blessedImpl.box(Object.assign({}, defaults, opts)) as BlessedBox;
   }
 
   /**
