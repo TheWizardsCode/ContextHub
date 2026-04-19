@@ -744,66 +744,56 @@ export class TuiController {
             createDialogDescription.on('blur', () => { try { createDialogDescriptionHelper?.endReading(); } catch (_) {} });
           }
         } catch (_) {}
-        // Replace the widget's internal editing listener with one driven by the helper
+        // Switch the description to the explicit on('keypress') approach (same as
+        // updateDialogComment) rather than _listener patching.  Patching _listener
+        // is unreliable for multi-line textareas: blessed's readInput() rebinds
+        // _listener in a nextTick on every focus event, which can produce a second
+        // active keypress handler and cause double-input.  Instead we:
+        //   1. Disable inputOnFocus so blessed never calls readInput() automatically.
+        //   2. Remove any pre-existing keypress listeners.
+        //   3. Register a single explicit keypress listener driven by the helper.
         try {
           const widget: any = createDialogDescription as any;
-          const built = createDialogDescriptionHelper?.buildKeyHandler();
-          // Preserve and remove any existing keypress listeners so the helper
-          // is the sole mutator of the textarea value. Save them for tests
-          // so they can be restored if needed.
+          // Disable automatic readInput() so blessed doesn't re-register its own
+          // _listener on every focus event.
+          try { if (widget.options) widget.options.inputOnFocus = false; } catch (_) {}
+          // Remove ALL existing keypress listeners so the helper is the sole
+          // mutator of the textarea value.
           try {
             if (typeof widget.listeners === 'function') {
-              widget.__opencode_saved_keypress_listeners = widget.listeners('keypress') || [];
-              for (const l of widget.__opencode_saved_keypress_listeners) {
+              const existing = widget.listeners('keypress') || [];
+              for (const l of existing) {
                 try { widget.removeListener('keypress', l); } catch (_) {}
               }
             }
           } catch (_) {}
-          try {
-            if (typeof createDialog?.listeners === 'function') {
-              createDialog.__opencode_saved_keypress_listeners = createDialog.listeners('keypress') || [];
-              for (const l of createDialog.__opencode_saved_keypress_listeners) {
-                try { createDialog.removeListener('keypress', l); } catch (_) {}
-              }
+          const built = createDialogDescriptionHelper?.buildKeyHandler();
+          const descKeyHandler = (ch: unknown, key: unknown) => {
+            if (createDialog.hidden) return;
+            if ((screen as any).focused !== widget) return;
+            const k = key as KeyInfo | undefined;
+            if (k?.name === 'tab' && !k?.shift) {
+              try { createDialogDescriptionHelper?.endReading(); } catch (_) {}
+              createDialogFocusManager.cycle(1);
+              createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+              return false;
             }
-          } catch (_) {}
-
-          // Preserve any existing low-level listener for tests/debugging
-          try { if (typeof widget._listener === 'function') widget.__opencode_orig_listener = widget._listener; } catch (_) {}
-
-          // Install a helper-backed listener that handles Tab/Shift-Tab (focus cycling)
-          // and delegates other keys to the helper. Always return false to stop
-          // further propagation so the helper is the single source of edits.
-          widget._listener = function patchedCreateDialogDescriptionListener(ch: unknown, key: KeyInfo | undefined) {
-            if (!createDialog.hidden && (screen as any).focused === widget) {
-              const isTab = key?.name === 'tab' && !key?.shift;
-              const isShiftTab = key?.name === 'S-tab' || (key?.name === 'tab' && Boolean(key?.shift));
-              if (isTab) {
-                try { createDialogDescriptionHelper?.endReading(); } catch (_) {}
-                createDialogFocusManager.cycle(1);
-                createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
-                return false;
-              }
-              if (isShiftTab) {
-                try { createDialogDescriptionHelper?.endReading(); } catch (_) {}
-                createDialogFocusManager.cycle(-1);
-                createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
-                return false;
-              }
+            if (k?.name === 'S-tab' || (k?.name === 'tab' && Boolean(k?.shift))) {
+              try { createDialogDescriptionHelper?.endReading(); } catch (_) {}
+              createDialogFocusManager.cycle(-1);
+              createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[createDialogFocusManager.getIndex()]);
+              return false;
             }
-            try {
-              const handled = built ? built(ch, key as any) : undefined;
-              // Only call original listener if helper did not handle the key at all
-              // (handled === undefined). When handled === false the helper did
-              // process the key but returned false to indicate propagation should
-              // stop; in that case we must not call the original listener which
-              // would insert characters again (double input).
-              if (handled === undefined) {
-                try { widget.__opencode_orig_listener?.call(widget, ch, key); } catch (_) {}
-              }
-            } catch (_) {}
-            return false;
+            // Delegate all other keys (including space, enter, backspace, arrows)
+            // to the textarea helper.  Return false unconditionally to prevent
+            // any remaining program-level handlers from firing.
+            const result = built ? built(ch, key as any) : undefined;
+            return result !== undefined ? result : false;
           };
+          try {
+            (widget as any).__opencode_desc_key = descKeyHandler;
+            (widget as any).on('keypress', descKeyHandler);
+          } catch (_) {}
         } catch (_) {}
       }
     } catch (_) {
@@ -1082,14 +1072,9 @@ export class TuiController {
           updateDialogFocusHelpers.applyFocusStyles(updateDialogFieldOrder[updateDialogFocusManager.getIndex()]);
           return false;
         }
-        // Block space key from propagating to the main list expand/collapse handler.
-        // KEY_TOGGLE_EXPAND is defined as 'space' in constants.ts. Without this
-        // capture, pressing space in the comment textarea would incorrectly
-        // trigger the main list expand/collapse action.
-        if (k?.name === 'space') {
-          return false;
-        }
-        // Delegate movement/insert/delete to helper
+        // Delegate movement/insert/delete to helper (including space insertion).
+        // The screen-level KEY_TOGGLE_EXPAND handler now has a modal-open guard
+        // so it will not fire when this dialog is visible.
         return built(ch, key as any);
       };
       try { (updateDialogComment as any).__opencode_comment_key = commentKeyHandler; (updateDialogComment as any).on('keypress', commentKeyHandler); } catch (_) {}
@@ -3809,6 +3794,11 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
 
     // Toggle expand/collapse with space
     screen.key(KEY_TOGGLE_EXPAND, () => {
+      // Do not expand/collapse when any modal dialog is open (e.g. the update
+      // dialog comment textarea is focused). Without this guard the space key
+      // typed into a textarea propagates here via the program-level key handler
+      // and triggers an unintended expand/collapse action.
+      if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || isCreateDialogOpen()) return;
       const start = performance.now();
       const idx = getGlobalSelectedIndex();
       const visible = buildVisible();
