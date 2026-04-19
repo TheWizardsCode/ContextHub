@@ -74,18 +74,13 @@ export class DialogsComponent {
       mouse: true,
     });
 
-    this.closeDialog = this.blessedImpl.box({
+    this.closeDialog = this.createContainer({
       parent: this.screen,
       top: 'center',
       left: 'center',
       width: '50%',
       height: 10,
       label: ' Close Work Item ',
-      border: { type: 'line' },
-      hidden: true,
-      tags: true,
-      mouse: true,
-      clickable: true,
       style: { border: { fg: 'magenta' } },
     });
 
@@ -107,18 +102,13 @@ export class DialogsComponent {
       items: ['Close (in_review)', 'Close (done)', 'Close (deleted)', 'Cancel'],
     });
 
-    this.updateDialog = this.blessedImpl.box({
+    this.updateDialog = this.createContainer({
       parent: this.screen,
       top: 'center',
       left: 'center',
       width: '70%',
       height: 24,
       label: ' Update Work Item ',
-      border: { type: 'line' },
-      hidden: true,
-      tags: true,
-      mouse: true,
-      clickable: true,
       style: { border: { fg: 'magenta' } },
     });
 
@@ -275,18 +265,13 @@ export class DialogsComponent {
     } catch (_) {}
 
     // Create Work Item Dialog
-    this.createDialog = this.blessedImpl.box({
+    this.createDialog = this.createContainer({
       parent: this.screen,
       top: 'center',
       left: 'center',
       width: '70%',
       height: 32,
       label: ' Create Work Item ',
-      border: { type: 'line' },
-      hidden: true,
-      tags: true,
-      mouse: true,
-      clickable: true,
       style: { border: { fg: 'magenta' } },
     });
 
@@ -375,40 +360,32 @@ export class DialogsComponent {
     });
 
     // Create Item button
-    this.createDialogCreateButton = this.blessedImpl.box({
+    this.createDialogCreateButton = this.createButton({
       parent: this.createDialog,
       top: 23,
       left: '20%',
       width: '25%',
       height: 3,
       content: '{center}Create Item (Ctrl+S){/center}',
-      tags: true,
-      border: { type: 'line' },
       style: {
         border: { fg: 'green' },
         bg: 'green',
         fg: 'white',
       },
-      mouse: true,
-      clickable: true,
     });
 
     // Cancel button
-    this.createDialogCancelButton = this.blessedImpl.box({
+    this.createDialogCancelButton = this.createButton({
       parent: this.createDialog,
       top: 23,
       left: '55%',
       width: '25%',
       height: 3,
       content: '{center}Cancel (Esc){/center}',
-      tags: true,
-      border: { type: 'line' },
       style: {
         border: { fg: 'red' },
         fg: 'white',
       },
-      mouse: true,
-      clickable: true,
     });
 
     // Layout update function for create dialog
@@ -478,6 +455,36 @@ export class DialogsComponent {
     const defaults = {
       height: 1,
       tags: false,
+    } as any;
+    return this.blessedImpl.box(Object.assign({}, defaults, opts)) as BlessedBox;
+  }
+
+  /**
+   * Create a small helper for dialog containers with sensible defaults.
+   * @param opts Partial blessed box options.
+   */
+  private createContainer(opts: any): BlessedBox {
+    const defaults = {
+      border: { type: 'line' },
+      hidden: true,
+      tags: true,
+      mouse: true,
+      clickable: true,
+      style: { border: { fg: 'magenta' } },
+    } as any;
+    return this.blessedImpl.box(Object.assign({}, defaults, opts)) as BlessedBox;
+  }
+
+  /**
+   * Create a helper for dialog buttons with sensible defaults.
+   * @param opts Partial blessed box options.
+   */
+  private createButton(opts: any): BlessedBox {
+    const defaults = {
+      tags: true,
+      border: { type: 'line' },
+      mouse: true,
+      clickable: true,
     } as any;
     return this.blessedImpl.box(Object.assign({}, defaults, opts)) as BlessedBox;
   }
