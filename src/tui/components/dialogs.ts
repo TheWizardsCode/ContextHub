@@ -99,17 +99,12 @@ export class DialogsComponent {
       tags: false,
     });
 
-    this.closeDialogOptions = this.blessedImpl.list({
+    this.closeDialogOptions = this.createList({
       parent: this.closeDialog,
       top: 4,
       left: 2,
       width: '100%-4',
       height: 4,
-      keys: true,
-      mouse: true,
-      style: {
-        selected: { bg: 'blue' },
-      },
       items: ['Close (in_review)', 'Close (done)', 'Close (deleted)', 'Cancel'],
     });
 
@@ -203,17 +198,12 @@ export class DialogsComponent {
       items: [],
     });
 
-    const priorityList = this.blessedImpl.list({
+    const priorityList = this.createList({
       parent: this.updateDialog,
       top: updateDialogListTop,
       left: '66%+1',
       width: updateDialogColumnWidth,
       height: updateDialogListHeight,
-      keys: true,
-      mouse: true,
-      style: {
-        selected: { bg: 'blue' },
-      },
       items: ['critical', 'high', 'medium', 'low'],
     });
 
@@ -431,15 +421,12 @@ export class DialogsComponent {
       style: { fg: 'cyan', bold: true },
     });
 
-    this.createDialogPriorityOptions = this.blessedImpl.list({
+    this.createDialogPriorityOptions = this.createList({
       parent: this.createDialog,
       top: 17,
       left: '35%',
       width: '30%',
       height: 5,
-      keys: true,
-      mouse: true,
-      style: { selected: { bg: 'blue' } },
       items: ['critical', 'high', 'medium', 'low'],
     });
 
@@ -502,6 +489,54 @@ export class DialogsComponent {
         this.screen.on('resize', updateCreateLayout);
       }
     } catch (_) {}
+  }
+
+  /**
+   * Create a configured Blessed List with sensible defaults for dialogs.
+   * @param opts Partial blessed list options; parent/position/items may be provided.
+   */
+  private createList(opts: any): BlessedList {
+    const defaults = {
+      keys: true,
+      mouse: true,
+      style: { selected: { bg: 'blue' } },
+      items: [],
+    } as any;
+    return this.blessedImpl.list(Object.assign({}, defaults, opts)) as BlessedList;
+  }
+
+  /**
+   * Create a configured Blessed Textarea with sensible defaults.
+   * @param opts Partial blessed textarea options.
+   */
+  private createTextarea(opts: any): BlessedTextarea {
+    const defaults = {
+      input: true,
+      inputOnFocus: true,
+      vi: true,
+      wrap: true,
+      keys: true,
+      mouse: true,
+      scrollable: true,
+      alwaysScroll: true,
+      border: { type: 'line' },
+      style: { fg: theme.tui.colors.lightText, bg: 'black', border: { fg: 'gray' } },
+      scrollbar: { ch: ' ', inverse: true },
+    } as any;
+    return this.blessedImpl.textarea(Object.assign({}, defaults, opts)) as BlessedTextarea;
+  }
+
+  /**
+   * Create a label box used as a section header inside dialogs.
+   * @param opts Partial blessed box options.
+   */
+  private createLabel(opts: any): BlessedBox {
+    const defaults = {
+      height: 1,
+      tags: false,
+      style: { fg: 'cyan', bold: true },
+    } as any;
+    return this.blessedImpl.box(Object.assign({}, defaults, opts)) as BlessedBox;
   }
 
   create(): this {

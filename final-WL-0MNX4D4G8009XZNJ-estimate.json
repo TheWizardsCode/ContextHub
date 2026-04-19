@@ -1,0 +1,26 @@
+{
+  "issue": "WL-0MNX4D4G8009XZNJ",
+  "items": [
+    {"id": "WL-0MO5NZL99006LFPH", "title": "Private dialog widget helpers", "o": 1, "m": 2, "p": 4, "probability": 2, "impact": 2},
+    {"id": "WL-0MO5NZQLW0090TKN", "title": "Replace inline widget constructions", "o": 4, "m": 8, "p": 12, "probability": 3, "impact": 3},
+    {"id": "WL-0MO5NZVFF000P7JP", "title": "Dialog integration parity tests", "o": 1, "m": 2, "p": 3, "probability": 2, "impact": 2},
+    {"id": "WL-0MO5O00UN001OD9J", "title": "Manual smoke-run & PR checklist", "o": 0.5, "m": 1, "p": 2, "probability": 1, "impact": 1},
+    {"id": "WL-0MO5O06K10079BS7", "title": "Extract dialog helpers to shared module", "o": 0.5, "m": 1, "p": 2, "probability": 2, "impact": 2},
+    {"id": "WL-0MO5O0ACM0069GGF", "title": "Destroy & lifecycle cleanup", "o": 1, "m": 2, "p": 3, "probability": 2, "impact": 2}
+  ],
+  "o": 8,
+  "m": 16,
+  "p": 26,
+  "expected_effort_without_overheads": 16.333333333333332,
+  "overheads": {"coordination": 2, "review": 2, "testing": 2, "risk_buffer": 2},
+  "expected_effort_with_overheads": 24.333333333333332,
+  "range_with_overheads": {"min": 21.333333333333332, "max": 27.333333333333332},
+  "tshirt": "Medium",
+  "parent_risk": {"probability": 2, "impact": 2, "score": 4, "level": "Low"},
+  "top_risk_drivers": ["Replace inline widget constructions (complexity of maintaining visual parity)", "Inadequate test coverage for layout behavior"],
+  "mitigations": ["Keep changes small and iterative", "Add/adjust integration smoke tests", "Manual smoke-run and PR checklist for reviewers"],
+  "confidence_pct": 70,
+  "assumptions": ["No major API changes to blessed or TUI controller", "Modal base design (WL-0MNU782BD004HO2W) does not introduce breaking constraints before extraction"],
+  "unknowns": ["Any hidden terminal-dependent layout edge-cases", "Potential blessed behavior differences across terminals"],
+  "generatedAt": "2026-04-19T11:13:00Z"
+}
