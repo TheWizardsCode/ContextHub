@@ -170,31 +170,21 @@ export class DialogsComponent {
       style: { fg: 'cyan', bold: true },
     });
 
-    const statusList = this.blessedImpl.list({
+    const statusList = this.createList({
       parent: this.updateDialog,
       top: updateDialogListTop,
       left: 2,
       width: updateDialogColumnWidth,
       height: updateDialogListHeight,
-      keys: true,
-      mouse: true,
-      style: {
-        selected: { bg: 'blue' },
-      },
       items: [],
     });
 
-    const stageList = this.blessedImpl.list({
+    const stageList = this.createList({
       parent: this.updateDialog,
       top: updateDialogListTop,
       left: '33%+1',
       width: updateDialogColumnWidth,
       height: updateDialogListHeight,
-      keys: true,
-      mouse: true,
-      style: {
-        selected: { bg: 'blue' },
-      },
       items: [],
     });
 
@@ -219,7 +209,7 @@ export class DialogsComponent {
     // with `top` and `bottom` so it fills the available space inside the
     // dialog. This prevents it from rendering below the dialog on small
     // terminals and ensures it behaves as a multiline input.
-    this.updateDialogComment = this.blessedImpl.textarea({
+    this.updateDialogComment = this.createTextarea({
       parent: this.updateDialog,
       // initial placement; updateLayout will adjust on show/resize
       top: updateDialogListTop + updateDialogListHeight + 1,
@@ -228,21 +218,9 @@ export class DialogsComponent {
       width: '100%-4',
       // Do not set `height` here — use `bottom` in updateLayout so the
       // textarea expands to available space inside the dialog.
-      input: true,
       inputOnFocus: false,
-      vi: true,
-      wrap: true,
-      keys: true,
-      mouse: true,
-      scrollable: true,
-      alwaysScroll: true,
-      // Provide a visible, grey border and a title label
-      border: { type: 'line' },
       label: ' Comment ',
-      style: { fg: theme.tui.colors.lightText, bg: 'black', border: { fg: 'gray' } },
-      // show a scrollbar when text exceeds the box
-      scrollbar: { ch: ' ', inverse: true },
-    }) as BlessedTextarea;
+    });
 
     const updateLayout = () => {
       const screenHeight = Math.max(0, this.screen.height as number);
@@ -341,20 +319,13 @@ export class DialogsComponent {
       style: { fg: 'cyan', bold: true },
     });
 
-    this.createDialogTitleInput = this.blessedImpl.textarea({
+    this.createDialogTitleInput = this.createTextarea({
       parent: this.createDialog,
       top: 4,
       left: 2,
       right: 2,
       height: 3,
-      input: true,
-      inputOnFocus: true,
-      keys: true,
-      mouse: true,
-      border: { type: 'line' },
-      style: { fg: theme.tui.colors.lightText, bg: 'black', border: { fg: 'gray' } },
-      scrollbar: { ch: ' ', inverse: true },
-    }) as BlessedTextarea;
+    });
 
     // Description textarea
     this.blessedImpl.box({
@@ -367,25 +338,14 @@ export class DialogsComponent {
       style: { fg: 'cyan', bold: true },
     });
 
-    this.createDialogDescription = this.blessedImpl.textarea({
+    this.createDialogDescription = this.createTextarea({
       parent: this.createDialog,
       top: 9,
       left: 2,
       right: 2,
       height: 6,
-      input: true,
-      inputOnFocus: true,
-      vi: true,
-      wrap: true,
-      keys: true,
-      mouse: true,
-      scrollable: true,
-      alwaysScroll: true,
-      border: { type: 'line' },
       label: ' Description ',
-      style: { fg: theme.tui.colors.lightText, bg: 'black', border: { fg: 'gray' } },
-      scrollbar: { ch: ' ', inverse: true },
-    }) as BlessedTextarea;
+    });
 
     // Issue Type list
     this.blessedImpl.box({
@@ -398,15 +358,12 @@ export class DialogsComponent {
       style: { fg: 'cyan', bold: true },
     });
 
-    this.createDialogIssueTypeOptions = this.blessedImpl.list({
+    this.createDialogIssueTypeOptions = this.createList({
       parent: this.createDialog,
       top: 17,
       left: 2,
       width: '30%',
       height: 5,
-      keys: true,
-      mouse: true,
-      style: { selected: { bg: 'blue' } },
       items: ['feature', 'bug', 'task', 'epic', 'chore'],
     });
 
