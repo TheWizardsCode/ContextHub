@@ -44,6 +44,21 @@ describe('Dialog integration tests', () => {
     // Title input should be available for setting values during submit flow
     expect(titleInput).toBeTruthy();
 
+    // Verify textarea heights are set for proper rendering
+    // The create dialog sets heights in widget options (height: 3, 6, 5, etc.)
+    // After dialog is shown, heights should be assigned (number or valid string)
+    const titleInputHeight = layout.dialogsComponent.createDialogTitleInput.height;
+    expect(titleInputHeight !== undefined).toBe(true);
+
+    const descInputHeight = layout.dialogsComponent.createDialogDescription.height;
+    expect(descInputHeight !== undefined).toBe(true);
+
+    const issueTypeHeight = layout.dialogsComponent.createDialogIssueTypeOptions.height;
+    expect(issueTypeHeight !== undefined).toBe(true);
+
+    const priorityHeight = layout.dialogsComponent.createDialogPriorityOptions.height;
+    expect(priorityHeight !== undefined).toBe(true);
+
     // Provide getValue so submit can read title
     titleInput.getValue = () => 'New Create Item';
 
@@ -75,6 +90,17 @@ describe('Dialog integration tests', () => {
     await new Promise(r => setTimeout(r, 10));
 
     expect(updateDialog.hidden).toBe(false);
+
+    // Verify list heights are set for proper rendering
+    // Update dialog lists get heights set in updateLayout when dialog is shown
+    const statusListHeight = layout.dialogsComponent.updateDialogStatusOptions.height;
+    expect(statusListHeight !== undefined).toBe(true);
+
+    const stageListHeight = layout.dialogsComponent.updateDialogStageOptions.height;
+    expect(stageListHeight !== undefined).toBe(true);
+
+    const priorityListHeight = layout.dialogsComponent.updateDialogPriorityOptions.height;
+    expect(priorityListHeight !== undefined).toBe(true);
 
     // Select a different priority (0 -> 'critical')
     if (typeof updateDialogPriorityOptions.select === 'function') updateDialogPriorityOptions.select(0);
