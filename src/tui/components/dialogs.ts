@@ -137,37 +137,31 @@ export class DialogsComponent {
     const updateDialogListHeight = 15;
     const updateDialogListTop = 6;
 
-    this.blessedImpl.box({
+    this.createLabel({
       parent: this.updateDialog,
       top: 5,
       left: 2,
       height: 1,
       width: updateDialogColumnWidth,
       content: 'Status',
-      tags: false,
-      style: { fg: 'cyan', bold: true },
     });
 
-    this.blessedImpl.box({
+    this.createLabel({
       parent: this.updateDialog,
       top: 5,
       left: '33%+1',
       height: 1,
       width: updateDialogColumnWidth,
       content: 'Stage',
-      tags: false,
-      style: { fg: 'cyan', bold: true },
     });
 
-    this.blessedImpl.box({
+    this.createLabel({
       parent: this.updateDialog,
       top: 5,
       left: '66%+1',
       height: 1,
       width: updateDialogColumnWidth,
       content: 'Priority',
-      tags: false,
-      style: { fg: 'cyan', bold: true },
     });
 
     const statusList = this.createList({
@@ -309,14 +303,13 @@ export class DialogsComponent {
     });
 
     // Title input field
-    this.blessedImpl.box({
+    this.createLabel({
       parent: this.createDialog,
       top: 3,
       left: 2,
       height: 1,
       width: '100%-4',
       content: 'Title (required)',
-      style: { fg: 'cyan', bold: true },
     });
 
     this.createDialogTitleInput = this.createTextarea({
@@ -328,14 +321,13 @@ export class DialogsComponent {
     });
 
     // Description textarea
-    this.blessedImpl.box({
+    this.createLabel({
       parent: this.createDialog,
       top: 8,
       left: 2,
       height: 1,
       width: '100%-4',
       content: 'Description',
-      style: { fg: 'cyan', bold: true },
     });
 
     this.createDialogDescription = this.createTextarea({
@@ -348,14 +340,13 @@ export class DialogsComponent {
     });
 
     // Issue Type list
-    this.blessedImpl.box({
+    this.createLabel({
       parent: this.createDialog,
       top: 16,
       left: 2,
       height: 1,
       width: '30%',
       content: 'Issue Type',
-      style: { fg: 'cyan', bold: true },
     });
 
     this.createDialogIssueTypeOptions = this.createList({
@@ -368,14 +359,13 @@ export class DialogsComponent {
     });
 
     // Priority list
-    this.blessedImpl.box({
+    this.createLabel({
       parent: this.createDialog,
       top: 16,
       left: '35%',
       height: 1,
       width: '30%',
       content: 'Priority',
-      style: { fg: 'cyan', bold: true },
     });
 
     this.createDialogPriorityOptions = this.createList({
