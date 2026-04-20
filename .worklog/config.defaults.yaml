@@ -1,7 +1,7 @@
 projectName: TestProject
 prefix: TEST
 autoExport: true
-humanDisplay: concise
+humanDisplay: full
 autoSync: false
 githubLabelPrefix: "wl:"
 githubImportCreateNew: true

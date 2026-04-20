@@ -167,7 +167,7 @@ if (_parsedWatch.enabled) {
 }
 
 // Allowed formats for validation
-const ALLOWED_FORMATS = new Set(['concise', 'normal', 'full', 'raw']);
+const ALLOWED_FORMATS = new Set(['concise', 'summary', 'normal', 'full', 'raw', 'markdown', 'text', 'plain']);
 
 function isValidFormat(fmt: any): boolean {
   if (!fmt || typeof fmt !== 'string') return false;
@@ -183,7 +183,7 @@ program
   .version(getVersion())
   .option('--json', 'Output in JSON format (machine-readable)')
   .option('--verbose', 'Show verbose output including debug messages')
-  .option('-F, --format <format>', 'Human display format (choices: concise|normal|full|raw)')
+  .option('-F, --format <format>', 'Human display format (choices: full|summary|concise|normal|raw|markdown)')
   .option('-w, --watch [seconds]', 'Rerun the command every N seconds (default: 5)');
 
 // Validate CLI-provided format early before any command action runs

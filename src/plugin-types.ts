@@ -7,6 +7,20 @@ import type { WorklogDatabase } from './database.js';
 import type { WorklogConfig } from './types.js';
 
 /**
+ * Output helpers with markdown rendering support
+ */
+export interface MarkdownOutput {
+  /** Print markdown-formatted text to stdout */
+  print: (text: string) => void;
+  /** Print markdown-formatted text to stderr */
+  printError: (text: string) => void;
+  /** Render markdown without printing */
+  render: (text: string) => string;
+  /** Check if markdown formatting is active */
+  isFormatted: () => boolean;
+}
+
+/**
  * Shared context passed to all plugin register functions
  */
 export interface PluginContext {
@@ -28,6 +42,9 @@ export interface PluginContext {
     /** Output error message (respects --json flag) */
     error: (message: string, jsonData?: any) => void;
   };
+  
+  /** Markdown output helpers (respects --format markdown flag) */
+  markdown: MarkdownOutput;
   
   /** Utilities */
   utils: {

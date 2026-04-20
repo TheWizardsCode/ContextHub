@@ -503,7 +503,8 @@ describe('CLI Issue Status Tests', () => {
       const created = JSON.parse(createStdout);
       const itemId = created.workItem.id;
 
-      const { stdout } = await execAsync(`tsx ${cliPath} in-progress`);
+      // Default is now full format, use --format concise for old behavior
+      const { stdout } = await execAsync(`tsx ${cliPath} in-progress --format concise`);
 
       expect(stdout).toContain('Test Task');
       expect(stdout).toContain(`- ${itemId}`);

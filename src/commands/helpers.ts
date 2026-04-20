@@ -241,9 +241,9 @@ function colorizeAuditExcerpt(auditText: string, tui?: boolean): string {
   return isTui ? theme.tui.text.readyNo(firstLine) : theme.text.readyNo(firstLine);
 }
 
-// Standard human formatter: supports 'concise' | 'normal' | 'full' | 'raw'
+// Standard human formatter: supports 'summary' | 'concise' | 'normal' | 'full' | 'raw'
 export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, format: string | undefined, tui?: boolean): string {
-  const fmt = (format || loadConfig()?.humanDisplay || 'concise').toLowerCase();
+  const fmt = (format || loadConfig()?.humanDisplay || 'full').toLowerCase();
   const isTui = Boolean(tui);
   const sortIndexLabel = `SortIndex: ${item.sortIndex}`;
   const rules = loadStatusStageRules();
@@ -251,6 +251,15 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   const lines: string[] = [];
   const titleLine = `Title: ${isTui ? formatTitleOnlyTUI(item) : formatTitleOnly(item)}`;
   const idLine = `ID:    ${isTui ? theme.tui.text.muted(item.id) : theme.text.muted(item.id)}`;
+
+  // summary: truly minimal - just title, status, priority
+  if (fmt === 'summary') {
+    const lines: string[] = [];
+    lines.push(`${isTui ? formatTitleOnlyTUI(item) : formatTitleOnly(item)} ${isTui ? theme.tui.text.muted(item.id) : theme.text.muted(item.id)}`);
+    const statusLabel = getStatusLabel(item.status, rules) || item.status;
+    lines.push(`Status: ${statusLabel} | Priority: ${item.priority || '—'}`);
+    return lines.join('\n');
+  }
 
   if (fmt === 'raw') {
     return JSON.stringify(item, null, 2);
@@ -421,12 +430,12 @@ export function resolveFormat(program: Command, provided?: string): string {
   const cliFormat = program.opts().format;
   if (cliFormat && typeof cliFormat === 'string' && cliFormat.trim() !== '') return cliFormat;
   if (provided && provided.trim() !== '') return provided;
-  return loadConfig()?.humanDisplay || 'concise';
+  return loadConfig()?.humanDisplay || 'full';
 }
 
 // Human formatter for comments
 export function humanFormatComment(comment: Comment, format?: string): string {
-  const fmt = (format || loadConfig()?.humanDisplay || 'concise').toLowerCase();
+  const fmt = (format || loadConfig()?.humanDisplay || 'full').toLowerCase();
   if (fmt === 'raw') return JSON.stringify(comment, null, 2);
   if (fmt === 'concise') {
     const excerpt = comment.comment.split('\n')[0];

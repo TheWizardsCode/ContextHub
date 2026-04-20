@@ -9,8 +9,35 @@ These options apply to any command:
 - `-V, --version` — Print the CLI version.
 - `--json` — Produce machine-readable JSON output instead of human text.
 - `--verbose` — Enable verbose output (extra timing / debug info where supported).
-- `-F, --format <format>` — Choose human display format for work items: `concise`, `normal`, `full`, `raw`.
+- `-F, --format <format>` — Choose human display format: `full` (default), `summary`, `concise`, `normal`, `raw`, `markdown`, `text`/`plain`.
 - `-w, --watch [seconds]` — Rerun the command every N seconds (default: 5).
+
+
+### Markdown formatting (default in TTY)
+
+By default, CLI output is rendered through the project's markdown renderer in interactive terminals. This formats:
+
+- Headers (`#`, `##`) → bold white text
+- Inline code (\`code\`) → magenta text
+- Code fences (\`\`\`) → cyan labeled code blocks
+- Lists (`-` or `*`) → bullet points
+- Links → underlined blue text with URL shown
+
+Opt out in TTY with `--format text` or `--format plain`:
+
+```sh
+# Default in TTY: markdown formatted
+wl show WL-123
+
+# Opt out: plain text
+wl show WL-123 --format text
+
+# Explicit: markdown (useful in non-TTY)
+wl show WL-123 -F markdown
+```
+
+
+Auto-disabled in non-TTY (CI/logs) for safe plain-text output. Size guard (100KB) protects performance.
 
 
 These flags control overall CLI behavior: output format (JSON vs human), verbosity for debugging, the display format for human-readable commands, and auto-refresh via watch mode. Use `--json` for automation and `--format` when you need more or less detail in terminal output.

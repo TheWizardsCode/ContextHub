@@ -7,6 +7,7 @@ import { WorklogDatabase } from './database.js';
 import { loadConfig, loadConfigRelaxed, isInitialized, getDefaultPrefix } from './config.js';
 import { getDefaultDataPath } from './jsonl.js';
 import type { PluginContext } from './plugin-types.js';
+import { renderCliMarkdown, shouldUseFormattedOutput, type CliOutputOptions } from './cli-output.js';
 
 import { WORKLOG_VERSION } from './version.js';
 
@@ -35,6 +36,80 @@ export function createOutputHelpers(program: Command) {
       } else {
         console.error(message);
       }
+    }
+  };
+}
+
+/**
+ * Create markdown-formatted output helpers for the CLI.
+ * Uses the CLI format option to determine whether to render markdown.
+ * In JSON mode, output is unchanged (JSON consumers handle their own formatting).
+ * 
+ * @param program - The commander program instance
+ * @param opts - Optional CLI output options for markdown rendering
+ * @returns Output helpers with markdown rendering support
+ */
+export function createMarkdownOutputHelpers(program: Command, opts?: CliOutputOptions) {
+  const base = createOutputHelpers(program);
+  const programOpts = program.opts();
+  
+  // Determine if markdown formatting should be used:
+  // - Never use in JSON mode (machine-readable takes precedence)
+  // - Default: markdown in TTY (auto-detect), opt-out with --format text/plain
+  // - Explicit --format markdown: enable
+  let useMarkdown: boolean | undefined = undefined;
+  if (programOpts.json) {
+    useMarkdown = false; // JSON mode takes precedence
+  } else if (programOpts.format === 'markdown') {
+    useMarkdown = true;
+  } else if (programOpts.format === 'text' || programOpts.format === 'plain') {
+    useMarkdown = false;
+  }
+  // else undefined: let shouldUseFormattedOutput() auto-detect based on TTY
+  
+  return {
+    ...base,
+    
+    /**
+     * Print markdown-rendered output to stdout
+     */
+    print: (text: string): void => {
+      if (programOpts.json) {
+        // In JSON mode, just print as-is
+        console.log(text);
+      } else {
+        const rendered = renderCliMarkdown(text, { formatAsMarkdown: useMarkdown, ...opts });
+        console.log(rendered);
+      }
+    },
+    
+    /**
+     * Print markdown-rendered output to stderr
+     */
+    printError: (text: string): void => {
+      if (programOpts.json) {
+        console.error(text);
+      } else {
+        const rendered = renderCliMarkdown(text, { formatAsMarkdown: useMarkdown, ...opts });
+        console.error(rendered);
+      }
+    },
+    
+    /**
+     * Render markdown without printing
+     */
+    render: (text: string): string => {
+      return renderCliMarkdown(text, { formatAsMarkdown: useMarkdown, ...opts });
+    },
+    
+    /**
+     * Check if markdown formatting is active
+     */
+    isFormatted: (): boolean => {
+      // If explicitly set to false, not formatted
+      if (useMarkdown === false) return false;
+      // Otherwise check auto-detection
+      return shouldUseFormattedOutput(useMarkdown);
     }
   };
 }
@@ -114,11 +189,18 @@ export function normalizeCliId(id?: string, overridePrefix?: string): string | u
  * Create shared plugin context
  */
 export function createPluginContext(program: Command): PluginContext {
+  const markdownOutput = createMarkdownOutputHelpers(program);
   return {
     program,
     version: WORKLOG_VERSION,
     dataPath: getDefaultDataPath(),
     output: createOutputHelpers(program),
+    markdown: {
+      print: markdownOutput.print,
+      printError: markdownOutput.printError,
+      render: markdownOutput.render,
+      isFormatted: markdownOutput.isFormatted
+    },
     utils: {
       requireInitialized: createRequireInitialized(program),
       getDatabase: (prefix?: string) => getDatabase(prefix, program),

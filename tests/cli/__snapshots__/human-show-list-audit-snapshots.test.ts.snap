@@ -4,38 +4,65 @@ exports[`Human snapshots: show and list outputs with audit > renders concise/lis
 "Found 2 work item(s):
 
 
-├── Audited task TEST-1
-│   Status: Open · Stage: Undefined | Priority: medium
-│   SortIndex: 0
-│   Risk: —
-│   Effort: —
-│   Audit: Ready to close: Yes
-└── No audit TEST-2
-    Status: Open · Stage: Undefined | Priority: medium
-    SortIndex: 0
-    Risk: —
-    Effort: —
+# Audited task
+
+ID       : TEST-1
+Status   : Open · Stage: Undefined | Priority: medium
+Type     : unknown
+SortIndex: 0
+Risk     : —
+Effort   : —
+
+## Audit
+
+Time: 2026-01-01T00:00:00Z
+Author: alice
+
+Ready to close: Yes
+Extra details
+
+# No audit
+
+ID       : TEST-2
+Status   : Open · Stage: Undefined | Priority: medium
+Type     : unknown
+SortIndex: 0
+Risk     : —
+Effort   : —
 
 "
 `;
 
 exports[`Human snapshots: show and list outputs with audit > renders concise/list and single-item human outputs with and without audit (snapshots) > human-show-with-audit 1`] = `
 "
-└── Audited task TEST-1
-    Status: Open · Stage: Undefined | Priority: medium
+└── # Audited task
+    
+    ID       : TEST-1
+    Status   : Open · Stage: Undefined | Priority: medium
+    Type     : unknown
     SortIndex: 0
-    Risk: —
-    Effort: —
-    Audit: Ready to close: Yes
+    Risk     : —
+    Effort   : —
+    
+    ## Audit
+    
+    Time: 2026-01-01T00:00:00Z
+    Author: alice
+    
+    Ready to close: Yes
+    Extra details
 "
 `;
 
 exports[`Human snapshots: show and list outputs with audit > renders concise/list and single-item human outputs with and without audit (snapshots) > human-show-without-audit 1`] = `
 "
-└── No audit TEST-2
-    Status: Open · Stage: Undefined | Priority: medium
+└── # No audit
+    
+    ID       : TEST-2
+    Status   : Open · Stage: Undefined | Priority: medium
+    Type     : unknown
     SortIndex: 0
-    Risk: —
-    Effort: —
+    Risk     : —
+    Effort   : —
 "
 `;
