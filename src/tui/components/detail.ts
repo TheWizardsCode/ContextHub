@@ -62,6 +62,15 @@ export class DetailComponent {
     return this.copyIdButton;
   }
 
+  /**
+   * Set the height and top position of the detail pane.
+   * This allows dynamic resizing based on terminal size.
+   */
+  setHeightAndTop(height: number, top: number): void {
+    this.detail.height = height;
+    this.detail.top = top;
+  }
+
   setContent(content: string): void {
     this.detail.setContent(renderMarkdownToTags(content));
   }

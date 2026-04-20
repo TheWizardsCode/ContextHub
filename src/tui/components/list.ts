@@ -61,6 +61,14 @@ export class ListComponent {
     return this.footer;
   }
 
+  /**
+   * Set the height of the list pane (in lines).
+   * This allows dynamic resizing based on terminal size.
+   */
+  setHeight(height: number): void {
+    this.list.height = height;
+  }
+
   setItems(items: string[]): void {
     this.list.setItems(items);
   }

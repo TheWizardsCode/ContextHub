@@ -10,6 +10,7 @@ import { DialogsComponent } from '../../src/tui/components/dialogs.js';
 import { HelpMenuComponent } from '../../src/tui/components/help-menu.js';
 import { ModalDialogsComponent } from '../../src/tui/components/modals.js';
 import { OpencodePaneComponent } from '../../src/tui/components/opencode-pane.js';
+import { MIN_TREE_HEIGHT, MAX_TREE_HEIGHT, FOOTER_HEIGHT } from '../../src/tui/constants.js';
 
 // ---------------------------------------------------------------------------
 // Helper: minimal mock blessed factory
@@ -190,6 +191,54 @@ describe('createLayout', () => {
       for (const key of keys) {
         expect(layout.nextDialog).toHaveProperty(key);
       }
+    });
+  });
+
+  describe('layout constants', () => {
+    it('defines MIN_TREE_HEIGHT as 7', () => {
+      expect(MIN_TREE_HEIGHT).toBe(7);
+    });
+
+    it('defines MAX_TREE_HEIGHT as 14', () => {
+      expect(MAX_TREE_HEIGHT).toBe(14);
+    });
+
+    it('defines FOOTER_HEIGHT as 1', () => {
+      expect(FOOTER_HEIGHT).toBe(1);
+    });
+
+    it('MIN_TREE_HEIGHT is less than MAX_TREE_HEIGHT', () => {
+      expect(MIN_TREE_HEIGHT).toBeLessThan(MAX_TREE_HEIGHT);
+    });
+  });
+
+  describe('ListComponent setHeight', () => {
+    it('allows setting height dynamically', () => {
+      const mockScreen = createMockWidget();
+      const mockBlessed = {
+        list: vi.fn(() => createMockWidget({ items: [], height: '50%' })),
+        box: vi.fn(() => createMockWidget()),
+      };
+
+      const comp = new ListComponent({ parent: mockScreen as any, blessed: mockBlessed as any }).create();
+      comp.setHeight(10);
+
+      expect(comp.getList().height).toBe(10);
+    });
+  });
+
+  describe('DetailComponent setHeightAndTop', () => {
+    it('allows setting height and top dynamically', () => {
+      const mockScreen = createMockWidget();
+      const mockBlessed = {
+        box: vi.fn(() => createMockWidget({ top: '50%', height: '50%-1' })),
+      };
+
+      const comp = new DetailComponent({ parent: mockScreen as any, blessed: mockBlessed as any }).create();
+      comp.setHeightAndTop(15, 10);
+
+      expect(comp.getDetail().height).toBe(15);
+      expect(comp.getDetail().top).toBe(10);
     });
   });
 });

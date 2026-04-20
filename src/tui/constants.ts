@@ -181,6 +181,11 @@ export const MIN_INPUT_HEIGHT = 3; // Minimum height for input dialog (single li
 export const MAX_INPUT_LINES = 7;  // Maximum visible lines of input text
 export const FOOTER_HEIGHT = 1;    // Height reserved for the footer
 
+// Layout constants for the split between work item tree and description panes
+// The tree gets a clamped portion: min 7 lines, max 14 lines, defaulting to H/2 (previous behavior)
+export const MIN_TREE_HEIGHT = 7;
+export const MAX_TREE_HEIGHT = 14;
+
 // Port for the OpenCode server; if unset, let the server select its own port.
 const parsedOpencodePort = Number.parseInt(process.env.OPENCODE_SERVER_PORT ?? '', 10);
 export const OPENCODE_SERVER_PORT = Number.isFinite(parsedOpencodePort) ? parsedOpencodePort : 0;

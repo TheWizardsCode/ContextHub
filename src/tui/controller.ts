@@ -36,7 +36,7 @@ import {
 import { OpencodeClient, type OpencodeServerStatus } from './opencode-client.js';
 import ChordHandler from './chords.js';
 import { stripAnsi, stripTags, decorateIdsForClick, extractIdFromLine, extractIdAtColumn, stripTagsAndAnsiWithMap, wrapPlainLineWithMap } from './id-utils.js';
-import { AVAILABLE_COMMANDS, MIN_INPUT_HEIGHT, MAX_INPUT_LINES, FOOTER_HEIGHT, OPENCODE_SERVER_PORT,
+import { AVAILABLE_COMMANDS, MIN_INPUT_HEIGHT, MAX_INPUT_LINES, FOOTER_HEIGHT, OPENCODE_SERVER_PORT, MIN_TREE_HEIGHT, MAX_TREE_HEIGHT,
   KEY_NAV_RIGHT, KEY_NAV_LEFT, KEY_TOGGLE_EXPAND, KEY_QUIT, KEY_ESCAPE, KEY_TOGGLE_HELP, KEY_CHORD_PREFIX, KEY_CHORD_FOLLOWUPS, KEY_OPEN_OPENCODE, KEY_OPEN_SEARCH,
   KEY_TAB, KEY_SHIFT_TAB, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_CREATE_ITEM, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_RUN_AUDIT, KEY_FILTER_BLOCKED, KEY_FILTER_NEEDS_REVIEW, KEY_FILTER_INTAKE_COMPLETED, KEY_FILTER_PLAN_COMPLETED, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW, KEY_MOVE, KEY_REORDER_UP, KEY_REORDER_DOWN, KEY_DELEGATE, KEY_GITHUB_PUSH, KEY_FILTER_COPILOT } from './constants.js';
 import { theme } from '../theme.js';
@@ -385,6 +385,40 @@ export class TuiController {
     const help = listComponent.getFooter();
     const detail = detailComponent.getDetail();
     const copyIdButton = detailComponent.getCopyIdButton();
+
+    // Dynamic layout: compute and apply heights for tree and description panes
+    // Tree gets clamped portion: min 7 lines, max 14 lines.
+    const updateLayoutHeights = () => {
+      const screenHeight = (screen.height as number) || 24;
+      const footerHeight = FOOTER_HEIGHT;
+      const availableHeight = screenHeight - footerHeight - 1; // -1 for potential top border if needed
+
+      // Preferred height: half of available (previous 50/50 split)
+      const preferredTreeHeight = Math.floor(availableHeight / 2);
+
+      // Clamp to min/max bounds
+      const clampedTreeHeight = Math.max(MIN_TREE_HEIGHT, Math.min(MAX_TREE_HEIGHT, preferredTreeHeight));
+      const treeHeight = clampedTreeHeight;
+
+      // Description gets the remaining space
+      const descriptionHeight = availableHeight - treeHeight + 1; // +1 to account for top position offset
+
+      // Apply to components
+      (listComponent as any).setHeight?.(treeHeight);
+      (detailComponent as any).setHeightAndTop?.(descriptionHeight, treeHeight);
+    };
+
+    // Initial layout computation
+    updateLayoutHeights();
+
+    // Handle terminal resize - re-compute layout when terminal size changes
+    // Use optional chaining for compatibility with test mocks
+    try {
+      screen.on?.('resize', () => {
+        updateLayoutHeights();
+        screen.render?.();
+      });
+    } catch (_) {}
     const setDetailContent = (content: string) => {
       const component = detailComponent as unknown as { setContent?: (value: string) => void };
       if (typeof component.setContent === 'function') {
@@ -3485,7 +3519,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       if (options.prefix) {
         args.push('--prefix', options.prefix);
       }
-      const child = spawn('wl', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawnImpl('wl', args, { stdio: ['ignore', 'pipe', 'pipe'] });
       let stdout = '';
       let stderr = '';
 
