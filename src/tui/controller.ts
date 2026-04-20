@@ -406,6 +406,10 @@ export class TuiController {
       // Apply to components
       (listComponent as any).setHeight?.(treeHeight);
       (detailComponent as any).setHeightAndTop?.(descriptionHeight, treeHeight);
+      // Metadata pane also needs to match tree height (top-right pane follows tree height)
+      if (metadataPaneComponent) {
+        (metadataPaneComponent as any).setHeight?.(treeHeight);
+      }
     };
 
     // Initial layout computation

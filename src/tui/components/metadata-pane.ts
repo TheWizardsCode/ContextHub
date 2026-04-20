@@ -54,6 +54,14 @@ export class MetadataPaneComponent {
     return this.box;
   }
 
+  /**
+   * Set the height of the metadata pane (in lines).
+   * This allows dynamic resizing based on terminal size.
+   */
+  setHeight(height: number): void {
+    this.box.height = height;
+  }
+
   private static formatDate(value: Date | string | undefined): string {
     if (!value) return '';
     const d = typeof value === 'string' ? new Date(value) : value;

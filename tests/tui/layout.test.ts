@@ -241,4 +241,18 @@ describe('createLayout', () => {
       expect(comp.getDetail().top).toBe(10);
     });
   });
+
+  describe('MetadataPaneComponent setHeight', () => {
+    it('allows setting height dynamically', () => {
+      const mockScreen = createMockWidget();
+      const mockBlessed = {
+        box: vi.fn(() => createMockWidget({ top: 0, height: '50%' })),
+      };
+
+      const comp = new MetadataPaneComponent({ parent: mockScreen as any, blessed: mockBlessed as any }).create();
+      comp.setHeight(10);
+
+      expect(comp.getBox().height).toBe(10);
+    });
+  });
 });
