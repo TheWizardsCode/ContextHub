@@ -4328,11 +4328,12 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       });
 
     // Close selected item
-     screen.key(KEY_CLOSE_ITEM, () => {
-       if (state.moveMode) return;
-       if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden) {
-        openCloseDialog();
-      }
+    screen.key(KEY_CLOSE_ITEM, () => {
+      if (state.moveMode) return;
+      // Guard: only open close dialog when no overlays/modals are visible and
+      // we're not inside other dialogs (create/update/next/detail/help).
+      if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
+      openCloseDialog();
     });
 
     // Update selected item (quick edit) - shortcut U
