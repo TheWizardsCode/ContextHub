@@ -54,6 +54,88 @@ export interface ModalCloseOptions {
  * - focus trapping while open
  * - best-effort focus restoration on close
  */
+const OPEN_MODAL_SET = new Set<ModalDialogBase>();
+
+export function isAnyDialogOpen(): boolean {
+  for (const m of OPEN_MODAL_SET) {
+    try { if (m.blocksMainInput()) return true; } catch (_) {}
+  }
+  return false;
+}
+
+/**
+ * Register an application-level key handler guarded by modal/input heuristics.
+ *
+ * Behavior and semantics:
+ * - If a ModalDialogBase instance that belongs to the same screen is open
+ *   (ModalDialogBase.blocksMainInput() returns true) the wrapped handler is
+ *   suppressed. This implements the "block when ANY modal is open" policy
+ *   but limits scope to the specific screen to avoid cross-screen interference
+ *   in test harnesses.
+ * - If the currently-focused widget is one of the focusable targets of any
+ *   open modal and appears to be an input/textarea (detects blessed internals
+ *   like `_listener`/`_reading`, options.inputOnFocus, or TUI helper markers
+ *   such as `__opencode_desc_key`), the handler is suppressed so typing into
+ *   textareas does not trigger app-level shortcuts.
+ * - Exceptions: certain global handlers that must still run while a modal is
+ *   visible (for example the top-level Escape handler which dismisses dialogs)
+ *   should not be registered via this helper. Prefer raw screen.key for those
+ *   cases.
+ */
+export function registerAppKey(screen: any, keys: string[] | string, handler: (...args: any[]) => void): void {
+  try {
+    // Wrap the handler so centralized predicate logic can prevent app-level
+    // shortcuts from firing when a modal/dialog is open or when focus is
+    // inside an input/textarea-like widget.
+    const wrapped = (...args: any[]) => {
+      try {
+        // If any modal explicitly blocks main input on this screen, suppress the handler.
+        try {
+          for (const m of OPEN_MODAL_SET) {
+            try { if ((m as any).screen === screen && m.blocksMainInput()) return; } catch (_) {}
+          }
+        } catch (_) {}
+      } catch (_) {}
+
+      try {
+        const focused = (screen as any).focused;
+        if (focused) {
+          // Determine whether the focused widget belongs to any modal's
+          // focusable targets. Use internal access to avoid exposing
+          // additional APIs.
+          let focusedInModal = false;
+          try {
+            for (const m of OPEN_MODAL_SET) {
+              try {
+                const ft = (m as any).focusableTargets as Set<any> | undefined;
+                if (ft && ft.has && ft.has(focused)) { focusedInModal = true; break; }
+              } catch (_) {}
+            }
+          } catch (_) {}
+
+          // If focused widget is inside a modal, suppress global shortcuts
+          // when the widget looks like a textarea/input.
+          if (focusedInModal) {
+            const isInputLike = (
+              !!focused._listener
+              || !!focused._reading
+              || (focused.options && Boolean((focused as any).options?.inputOnFocus))
+              || !!(focused as any).__opencode_desc_key
+              || !!(focused as any).__opencode_autocomplete
+            );
+            if (isInputLike) return;
+          }
+        }
+      } catch (_) {}
+
+      try { return handler(...args); } catch (_) {}
+    };
+
+    // Register wrapped handler on blessed screen.
+    screen.key(keys, wrapped);
+  } catch (_) {}
+}
+
 export class ModalDialogBase {
   private readonly screen: BlessedScreen;
   private readonly dialog: FocusableTarget;
@@ -99,6 +181,8 @@ export class ModalDialogBase {
     this.previousFocus = ((this.screen as any).focused as FocusableTarget | null) || null;
     this.openState = true;
 
+    try { OPEN_MODAL_SET.add(this); } catch (_) {}
+
     try { this.overlay?.show?.(); } catch (_) {}
     try { this.dialog.show?.(); } catch (_) {}
     try { this.overlay?.setFront?.(); } catch (_) {}
@@ -113,6 +197,7 @@ export class ModalDialogBase {
     if (!this.openState) return;
 
     this.openState = false;
+    try { OPEN_MODAL_SET.delete(this); } catch (_) {}
     this.setScreenGrabKeys(false);
     this.detachFocusTrap();
 

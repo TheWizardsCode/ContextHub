@@ -819,4 +819,71 @@ describe('TUI integration: style preservation', () => {
     clickHandler({ y: 1, x: 1 });
     expect(detailModal.show).toHaveBeenCalled();
   });
+
+  it("doesn't open the Close dialog when typing 'x' into create dialog textarea", async () => {
+    vi.resetModules();
+    let savedAction: Function | null = null;
+    const program: any = {
+      opts: () => ({ verbose: false }),
+      command() { return this; },
+      description() { return this; },
+      option() { return this; },
+      action(fn: Function) { savedAction = fn; return this; },
+    };
+
+    const utils = {
+      requireInitialized: () => {},
+      getDatabase: () => ({
+        list: () => [{ id: 'WL-TEST-1', title: 'Item', status: 'open' }],
+        getPrefix: () => 'default',
+        getCommentsForWorkItem: (_id: string) => [],
+        get: () => ({ id: 'WL-TEST-1', title: 'Item', status: 'open' }),
+      }),
+    };
+
+    const opencodeClient = {
+      getStatus: () => ({ status: 'running', port: 9999 }),
+      startServer: vi.fn().mockResolvedValue(undefined),
+      stopServer: vi.fn(),
+      sendPrompt: vi.fn().mockResolvedValue(undefined),
+    };
+
+    vi.doMock('../src/tui/opencode-client.js', () => ({
+      OpencodeClient: function() { return opencodeClient; },
+    }));
+
+    const mod = await import('../src/commands/tui');
+    const register = mod.default || mod;
+    register({ program, utils, blessed: blessedMock } as any);
+
+    await (savedAction as any)({});
+
+    // Open Create dialog using the registered shortcut (Capital C)
+    const createHandler = handlers['screen-key:C'];
+    expect(typeof createHandler).toBe('function');
+    // Invoke handler to open the create dialog
+    createHandler(null, { name: 'C' });
+
+    // Find the last created textarea (should be the description textarea)
+    const ta = (blessedMock as any)._lastTextarea;
+    expect(ta).toBeTruthy();
+
+    // Focus the textarea to simulate user typing
+    ta.focus?.();
+
+    // Ensure Close dialog exists in box calls
+    const boxMock = (blessedMock as any).box?.mock;
+    const boxCalls = boxMock?.calls || [];
+    const closeIndex = boxCalls.findIndex((call: any[]) => call?.[0]?.label === ' Close Work Item ');
+    const closeDialog = closeIndex >= 0 ? boxMock.results[closeIndex]?.value : null;
+    expect(closeDialog).toBeTruthy();
+
+    // Press 'x' (invoke screen-level handler)
+    const screenCloseHandler = handlers['screen-key:x'] || handlers['screen-key:X'];
+    expect(typeof screenCloseHandler).toBe('function');
+    screenCloseHandler(null, { name: 'x' });
+
+    // Close dialog should NOT have been shown
+    expect(closeDialog?.show).not.toHaveBeenCalled();
+  });
 });
