@@ -63,6 +63,25 @@ export function isAnyDialogOpen(): boolean {
   return false;
 }
 
+/**
+ * Register an application-level key handler guarded by modal/input heuristics.
+ *
+ * Behavior and semantics:
+ * - If a ModalDialogBase instance that belongs to the same screen is open
+ *   (ModalDialogBase.blocksMainInput() returns true) the wrapped handler is
+ *   suppressed. This implements the "block when ANY modal is open" policy
+ *   but limits scope to the specific screen to avoid cross-screen interference
+ *   in test harnesses.
+ * - If the currently-focused widget is one of the focusable targets of any
+ *   open modal and appears to be an input/textarea (detects blessed internals
+ *   like `_listener`/`_reading`, options.inputOnFocus, or TUI helper markers
+ *   such as `__opencode_desc_key`), the handler is suppressed so typing into
+ *   textareas does not trigger app-level shortcuts.
+ * - Exceptions: certain global handlers that must still run while a modal is
+ *   visible (for example the top-level Escape handler which dismisses dialogs)
+ *   should not be registered via this helper. Prefer raw screen.key for those
+ *   cases.
+ */
 export function registerAppKey(screen: any, keys: string[] | string, handler: (...args: any[]) => void): void {
   try {
     // Wrap the handler so centralized predicate logic can prevent app-level
