@@ -70,6 +70,15 @@ export function registerAppKey(screen: any, keys: string[] | string, handler: (.
     // inside an input/textarea-like widget.
     const wrapped = (...args: any[]) => {
       try {
+        // If any modal explicitly blocks main input on this screen, suppress the handler.
+        try {
+          for (const m of OPEN_MODAL_SET) {
+            try { if ((m as any).screen === screen && m.blocksMainInput()) return; } catch (_) {}
+          }
+        } catch (_) {}
+      } catch (_) {}
+
+      try {
         const focused = (screen as any).focused;
         if (focused) {
           // Determine whether the focused widget belongs to any modal's
