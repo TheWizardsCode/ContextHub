@@ -54,6 +54,21 @@ export interface ModalCloseOptions {
  * - focus trapping while open
  * - best-effort focus restoration on close
  */
+const OPEN_MODAL_SET = new Set<ModalDialogBase>();
+
+export function isAnyDialogOpen(): boolean {
+  for (const m of OPEN_MODAL_SET) {
+    try { if (m.blocksMainInput()) return true; } catch (_) {}
+  }
+  return false;
+}
+
+export function registerAppKey(screen: any, keys: string[] | string, handler: (...args: any[]) => void): void {
+  try {
+    screen.key(keys, handler);
+  } catch (_) {}
+}
+
 export class ModalDialogBase {
   private readonly screen: BlessedScreen;
   private readonly dialog: FocusableTarget;
@@ -99,6 +114,8 @@ export class ModalDialogBase {
     this.previousFocus = ((this.screen as any).focused as FocusableTarget | null) || null;
     this.openState = true;
 
+    try { OPEN_MODAL_SET.add(this); } catch (_) {}
+
     try { this.overlay?.show?.(); } catch (_) {}
     try { this.dialog.show?.(); } catch (_) {}
     try { this.overlay?.setFront?.(); } catch (_) {}
@@ -113,6 +130,7 @@ export class ModalDialogBase {
     if (!this.openState) return;
 
     this.openState = false;
+    try { OPEN_MODAL_SET.delete(this); } catch (_) {}
     this.setScreenGrabKeys(false);
     this.detachFocusTrap();
 

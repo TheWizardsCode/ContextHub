@@ -17,7 +17,7 @@ import { createTuiState, rebuildTreeState, buildVisibleNodes, expandAncestorsFor
 import { createPersistence } from './persistence.js';
 import { resolveWorklogDir } from '../worklog-paths.js';
 import { createLayout } from './layout.js';
-import { ModalDialogBase } from './components/modal-base.js';
+import { ModalDialogBase, isAnyDialogOpen, registerAppKey } from './components/modal-base.js';
 import { createUpdateDialogFocusManager } from './update-dialog-navigation.js';
 import createFocusHelpers from './dialog-focus.js';
 import { buildUpdateDialogUpdates } from './update-dialog-submit.js';
@@ -4310,7 +4310,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     });
 
     // Copy selected ID
-     screen.key(KEY_COPY_ID, (_ch: any, key: any) => {
+     registerAppKey(screen, KEY_COPY_ID, (_ch: any, key: any) => {
         if (state.moveMode) return;
         if (_ch === 'C' || key?.shift) return;
         if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
@@ -4318,7 +4318,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
      });
 
       // Open parent preview
-       screen.key(KEY_PARENT_PREVIEW, () => {
+       registerAppKey(screen, KEY_PARENT_PREVIEW, () => {
          if (state.moveMode) return;
          if (suppressNextP) {
           debugLog(`Suppressing 'p' handler (just handled Ctrl-W p)`);
@@ -4328,7 +4328,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       });
 
     // Close selected item
-    screen.key(KEY_CLOSE_ITEM, () => {
+    registerAppKey(screen, KEY_CLOSE_ITEM, () => {
       if (state.moveMode) return;
       // Guard: only open close dialog when no overlays/modals are visible and
       // we're not inside other dialogs (create/update/next/detail/help).
@@ -4345,7 +4345,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     });
 
     // Create new work item - shortcut C
-    screen.key(KEY_CREATE_ITEM, () => {
+    registerAppKey(screen, KEY_CREATE_ITEM, () => {
       if (state.moveMode) return;
       if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && !isCreateDialogOpen()) {
         openCreateDialog();
@@ -4380,7 +4380,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     });
 
     // Delegate to GitHub Copilot (shortcut g)
-    screen.key(KEY_DELEGATE, async (_ch: any, key: any) => {
+    registerAppKey(screen, KEY_DELEGATE, async (_ch: any, key: any) => {
       // If the raw character is uppercase 'G', treat it as the GitHub push
       // shortcut and do not handle it here. Blessed may report shift via
       // the raw char (`ch`) rather than `key.shift`/`key.name`.
@@ -4550,7 +4550,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       }
     }
 
-    screen.key(KEY_GITHUB_PUSH, async (_ch: any, key: any) => {
+    registerAppKey(screen, KEY_GITHUB_PUSH, async (_ch: any, key: any) => {
       await handleGithubPushShortcut(_ch, key);
     });
 
