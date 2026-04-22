@@ -3950,7 +3950,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // are multiple call-sites) continue to pass. This branch never runs.
     if (false) { shutdown(); }
 
-    registerAppKey(screen,KEY_ESCAPE, () => {
+    screen.key(KEY_ESCAPE, () => {
       // If a child handler just handled Escape, ignore this global
       // handler to avoid exiting the TUI unexpectedly.
       if (suppressEscapeUntil && Date.now() < suppressEscapeUntil) {
