@@ -318,7 +318,7 @@ export class TuiController {
     // minimal best-effort cleanup (persist minimal state and destroy
     // the screen) so the terminal isn't left in a broken state.
     try {
-      screen.key(KEY_QUIT, () => {
+      registerAppKey(screen,KEY_QUIT, () => {
         try {
           // If the full shutdown helper is defined later, use it.
           // This may throw (TDZ) when shutdown isn't yet initialized,
@@ -3766,7 +3766,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     const detailCloseClickHandler = () => { closeDetails(); };
     try { (detailClose as any).__opencode_click = detailCloseClickHandler; detailClose.on('click', detailCloseClickHandler); } catch (_) {}
 
-    screen.key(KEY_NAV_RIGHT, (_ch: any, key: any) => {
+    registerAppKey(screen,KEY_NAV_RIGHT, (_ch: any, key: any) => {
       if (!updateDialog.hidden || isCreateDialogOpen()) return;
       // In move mode, Enter confirms the target (same as pressing 'm')
       if (state.moveMode && key?.name === 'enter') {
@@ -3824,7 +3824,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       }
     });
 
-    screen.key(KEY_NAV_LEFT, () => {
+    registerAppKey(screen,KEY_NAV_LEFT, () => {
       if (!updateDialog.hidden || isCreateDialogOpen()) return;
       const idx = getGlobalSelectedIndex();
       const visible = buildVisible();
@@ -3853,7 +3853,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     }
 
     // Toggle expand/collapse with space
-    screen.key(KEY_TOGGLE_EXPAND, () => {
+    registerAppKey(screen,KEY_TOGGLE_EXPAND, () => {
       // Do not expand/collapse when any modal dialog is open (e.g. the update
       // dialog comment textarea is focused). Without this guard the space key
       // typed into a textarea propagates here via the program-level key handler
@@ -3933,7 +3933,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
 
     // Quit keys: q and Ctrl-C always quit; Escape should close the help overlay
     // when it's open instead of exiting the whole TUI.
-    screen.key(KEY_QUIT, () => {
+    registerAppKey(screen,KEY_QUIT, () => {
       if (isLocalShellRunning) {
         cancelLocalShell();
         return;
@@ -3950,7 +3950,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // are multiple call-sites) continue to pass. This branch never runs.
     if (false) { shutdown(); }
 
-    screen.key(KEY_ESCAPE, () => {
+    registerAppKey(screen,KEY_ESCAPE, () => {
       // If a child handler just handled Escape, ignore this global
       // handler to avoid exiting the TUI unexpectedly.
       if (suppressEscapeUntil && Date.now() < suppressEscapeUntil) {
@@ -4063,7 +4063,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     }
 
     // Toggle help
-     screen.key(KEY_TOGGLE_HELP, () => {
+     registerAppKey(screen,KEY_TOGGLE_HELP, () => {
        if (!helpMenu.isVisible()) openHelp();
        else closeHelp();
      });
@@ -4138,7 +4138,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         // simply forward to the chordHandler so both the raw keypress path
         // and the older key-based registration behave the same in tests.
         try {
-        screen.key(KEY_CHORD_PREFIX, (_ch: any, key: any) => {
+        registerAppKey(screen,KEY_CHORD_PREFIX, (_ch: any, key: any) => {
             try {
               if (chordHandler.feed(key as KeyInfo)) {
                 debugLog(`screen.key C-w -> chord consumed`);
@@ -4149,7 +4149,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         } catch (_) {}
 
         try {
-          screen.key(KEY_CHORD_FOLLOWUPS, (_ch: any, key: any) => {
+          registerAppKey(screen,KEY_CHORD_FOLLOWUPS, (_ch: any, key: any) => {
             // If the key had a ctrl modifier, let the Ctrl handler deal with it
             if (key?.ctrl) return;
             try {
@@ -4165,7 +4165,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         // Tab / Shift-Tab: cycle focus between tree, metadata, and details panes
         // Only active when no dialog or overlay is open.
         try {
-          screen.key(KEY_TAB, () => {
+          registerAppKey(screen,KEY_TAB, () => {
             if (helpMenu.isVisible()) return;
             if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || isCreateDialogOpen()) return;
             if (opencodeDialog && !opencodeDialog.hidden) return;
@@ -4174,7 +4174,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           });
         } catch (_) {}
         try {
-          screen.key(KEY_SHIFT_TAB, () => {
+          registerAppKey(screen,KEY_SHIFT_TAB, () => {
             if (helpMenu.isVisible()) return;
             if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || isCreateDialogOpen()) return;
             if (opencodeDialog && !opencodeDialog.hidden) return;
@@ -4184,7 +4184,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         } catch (_) {}
 
     // Open opencode prompt dialog (shortcut O)
-     screen.key(KEY_OPEN_OPENCODE, async () => {
+     registerAppKey(screen,KEY_OPEN_OPENCODE, async () => {
        if (state.moveMode) return;
        if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && !isCreateDialogOpen()) {
          await openOpencodeDialog();
@@ -4206,7 +4206,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     };
 
     // Open search/filter modal (shortcut /)
-     screen.key(KEY_OPEN_SEARCH, async () => {
+     registerAppKey(screen,KEY_OPEN_SEARCH, async () => {
        if (state.moveMode) return;
        if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
       try {
@@ -4337,7 +4337,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     });
 
     // Update selected item (quick edit) - shortcut U
-     screen.key(KEY_UPDATE_ITEM, () => {
+     registerAppKey(screen,KEY_UPDATE_ITEM, () => {
        if (state.moveMode) return;
         if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && !isCreateDialogOpen()) {
          openUpdateDialog();
@@ -4353,7 +4353,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     });
 
     // Toggle do-not-delegate tag on selected item (shortcut D)
-     screen.key(KEY_TOGGLE_DO_NOT_DELEGATE, () => {
+     registerAppKey(screen,KEY_TOGGLE_DO_NOT_DELEGATE, () => {
        // Only act when no interfering overlays are visible
        if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
        if (state.moveMode) return;
@@ -4555,7 +4555,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     });
 
     // Toggle needs producer review flag (shortcut r)
-     screen.key(KEY_TOGGLE_NEEDS_REVIEW, () => {
+     registerAppKey(screen,KEY_TOGGLE_NEEDS_REVIEW, () => {
        if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
        if (state.moveMode) return;
       const item = getSelectedItem();
@@ -4579,7 +4579,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     });
 
     // Move/reparent mode (shortcut M)
-    screen.key(KEY_MOVE, () => {
+    registerAppKey(screen,KEY_MOVE, () => {
       // Guard: only active when no overlays are visible
       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
       if (!opencodeDialog.hidden) return;
@@ -4672,14 +4672,14 @@ const visible = buildVisible();
       return;
     });
 
-    screen.key(KEY_REORDER_UP, () => {
+    registerAppKey(screen,KEY_REORDER_UP, () => {
       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
       if (!opencodeDialog.hidden) return;
       if (state.moveMode) return;
       reorderSelectedItemByOffset(-1);
     });
 
-    screen.key(KEY_REORDER_DOWN, () => {
+    registerAppKey(screen,KEY_REORDER_DOWN, () => {
       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
       if (!opencodeDialog.hidden) return;
       if (state.moveMode) return;
@@ -4691,13 +4691,13 @@ const visible = buildVisible();
 
     // Refresh from database
     if (KEY_REFRESH.length > 0) {
-      screen.key(KEY_REFRESH, () => {
+      registerAppKey(screen,KEY_REFRESH, () => {
         refreshFromDatabase();
       });
     }
 
     // Evaluate next item
-     screen.key(KEY_FIND_NEXT, () => {
+     registerAppKey(screen,KEY_FIND_NEXT, () => {
        if (state.moveMode) return;
        if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && nextDialog.hidden && !isCreateDialogOpen()) {
          openNextDialog();
@@ -4705,18 +4705,18 @@ const visible = buildVisible();
      });
 
      // Filter shortcuts
-      screen.key(KEY_FILTER_IN_PROGRESS, () => {
+      registerAppKey(screen,KEY_FILTER_IN_PROGRESS, () => {
         if (state.moveMode) return;
         setFilterNext('in-progress');
       });
 
-      screen.key(KEY_FILTER_OPEN, () => {
+      registerAppKey(screen,KEY_FILTER_OPEN, () => {
          if (state.moveMode) return;
          setFilterNext('open');
        });
 
        // Copilot filter: show items delegated to the canonical Copilot assignee
-       screen.key(KEY_FILTER_COPILOT, () => {
+       registerAppKey(screen,KEY_FILTER_COPILOT, () => {
          if (state.moveMode) return;
          // Use canonical assignee token used by delegate helper local state
          const copilotToken = '@github-copilot';
@@ -4728,7 +4728,7 @@ const visible = buildVisible();
          renderListAndDetail(0);
        });
 
-     screen.key(KEY_RUN_AUDIT, async () => {
+     registerAppKey(screen,KEY_RUN_AUDIT, async () => {
        if (state.moveMode) return;
        if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
        if (isPromptBusy()) {
@@ -4761,22 +4761,22 @@ const visible = buildVisible();
         await runOpencode(`audit ${item.id}`);
      });
 
-      screen.key(KEY_FILTER_BLOCKED, () => {
+      registerAppKey(screen,KEY_FILTER_BLOCKED, () => {
         if (state.moveMode) return;
         setFilterNext('blocked');
       });
 
-      screen.key(KEY_FILTER_INTAKE_COMPLETED, () => {
+      registerAppKey(screen,KEY_FILTER_INTAKE_COMPLETED, () => {
         if (state.moveMode) return;
         setFilterNext('intake_completed');
       });
 
-      screen.key(KEY_FILTER_PLAN_COMPLETED, () => {
+      registerAppKey(screen,KEY_FILTER_PLAN_COMPLETED, () => {
         if (state.moveMode) return;
         setFilterNext('plan_completed');
       });
 
-     screen.key(KEY_FILTER_NEEDS_REVIEW, () => {
+     registerAppKey(screen,KEY_FILTER_NEEDS_REVIEW, () => {
        if (state.moveMode) return;
        if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
        cycleNeedsReviewFilter();
