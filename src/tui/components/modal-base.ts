@@ -65,7 +65,46 @@ export function isAnyDialogOpen(): boolean {
 
 export function registerAppKey(screen: any, keys: string[] | string, handler: (...args: any[]) => void): void {
   try {
-    screen.key(keys, handler);
+    // Wrap the handler so centralized predicate logic can prevent app-level
+    // shortcuts from firing when a modal/dialog is open or when focus is
+    // inside an input/textarea-like widget.
+    const wrapped = (...args: any[]) => {
+      try {
+        const focused = (screen as any).focused;
+        if (focused) {
+          // Determine whether the focused widget belongs to any modal's
+          // focusable targets. Use internal access to avoid exposing
+          // additional APIs.
+          let focusedInModal = false;
+          try {
+            for (const m of OPEN_MODAL_SET) {
+              try {
+                const ft = (m as any).focusableTargets as Set<any> | undefined;
+                if (ft && ft.has && ft.has(focused)) { focusedInModal = true; break; }
+              } catch (_) {}
+            }
+          } catch (_) {}
+
+          // If focused widget is inside a modal, suppress global shortcuts
+          // when the widget looks like a textarea/input.
+          if (focusedInModal) {
+            const isInputLike = (
+              !!focused._listener
+              || !!focused._reading
+              || (focused.options && Boolean((focused as any).options?.inputOnFocus))
+              || !!(focused as any).__opencode_desc_key
+              || !!(focused as any).__opencode_autocomplete
+            );
+            if (isInputLike) return;
+          }
+        }
+      } catch (_) {}
+
+      try { return handler(...args); } catch (_) {}
+    };
+
+    // Register wrapped handler on blessed screen.
+    screen.key(keys, wrapped);
   } catch (_) {}
 }
 
