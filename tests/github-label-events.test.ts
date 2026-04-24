@@ -15,6 +15,7 @@ import {
   getLatestLabelEventTimestamp,
   fetchLabelEventsAsync,
 } from '../src/github.js';
+import throttler from '../src/github-throttler.js';
 import type { LabelEvent, GithubConfig } from '../src/github.js';
 import type { WorkItemStatus, WorkItemPriority } from '../src/types.js';
 
@@ -416,5 +417,18 @@ describe('fetchLabelEventsAsync', () => {
 
     expect(events).toEqual([]);
     expect(cache.has(42)).toBe(true);
+  });
+
+  it('schedules the events fetch via throttler.schedule', async () => {
+    const apiResponse = [
+      { event: 'labeled', label: { name: 'wl:stage:done' }, created_at: '2025-01-01T00:00:00Z' },
+    ];
+    mockSpawn.mockImplementation(createMockSpawnImpl(JSON.stringify(apiResponse)) as any);
+    const cache = new LabelEventCache();
+    const spy = vi.spyOn(throttler, 'schedule');
+    const events = await fetchLabelEventsAsync(defaultConfig, 42, cache);
+    expect(events).toHaveLength(1);
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
   });
 });

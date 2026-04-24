@@ -1626,7 +1626,12 @@ export async function fetchLabelEventsAsync(
 
   try {
     const command = `gh api repos/${owner}/${name}/issues/${issueNumber}/events --paginate`;
-    const result = await runGhJsonDetailedAsync(command);
+    // Schedule the network call through the central throttler so concurrent
+    // runs respect WL_GITHUB_CONCURRENCY and global rate limits. This ensures
+    // callers of fetchLabelEventsAsync do not need to schedule themselves.
+    const result = await throttler.schedule(async () => {
+      return await runGhJsonDetailedAsync(command);
+    });
 
     if (!result.ok || !Array.isArray(result.data)) {
       // API failure — cache empty array to avoid retrying in same run
