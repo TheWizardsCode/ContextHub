@@ -174,6 +174,6 @@ wl migrate jsonl --delete
 
 ## References
 
-- [Data Syncing Guide](./DATA_SYNCING.md)
-- [CLI Reference](./CLI.md)
-- [Migration Guide](../migrations.md)
+- [Data Syncing Guide](../DATA_SYNCING.md)
+- [CLI Reference](../CLI.md)
+- [Migration Guide](./migrations.md)
