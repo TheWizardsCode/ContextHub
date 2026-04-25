@@ -1,6 +1,6 @@
 import blessed from 'blessed';
-import { theme } from '../../theme.js';
 import type { BlessedBox, BlessedFactory, BlessedList, BlessedScreen, BlessedTextarea } from '../types.js';
+import { createLabel as createDialogLabel, createList as createDialogList, createTextarea as createDialogTextarea } from './dialog-helpers.js';
 import type { OverlaysComponent } from './overlays.js';
 
 export interface DialogsComponentOptions {
@@ -417,13 +417,7 @@ export class DialogsComponent {
    * @param opts Partial blessed list options; parent/position/items may be provided.
    */
   private createList(opts: any): BlessedList {
-    const defaults = {
-      keys: true,
-      mouse: true,
-      style: { selected: { bg: 'blue' } },
-      items: [],
-    } as any;
-    return this.blessedImpl.list(Object.assign({}, defaults, opts)) as BlessedList;
+    return createDialogList(this.blessedImpl, opts);
   }
 
   /**
@@ -431,20 +425,7 @@ export class DialogsComponent {
    * @param opts Partial blessed textarea options.
    */
   private createTextarea(opts: any): BlessedTextarea {
-    const defaults = {
-      input: true,
-      inputOnFocus: true,
-      vi: true,
-      wrap: true,
-      keys: true,
-      mouse: true,
-      scrollable: true,
-      alwaysScroll: true,
-      border: { type: 'line' },
-      style: { fg: theme.tui.colors.lightText, bg: 'black', border: { fg: 'gray' } },
-      scrollbar: { ch: ' ', inverse: true },
-    } as any;
-    return this.blessedImpl.textarea(Object.assign({}, defaults, opts)) as BlessedTextarea;
+    return createDialogTextarea(this.blessedImpl, opts);
   }
 
   /**
@@ -494,12 +475,7 @@ export class DialogsComponent {
    * @param opts Partial blessed box options.
    */
   private createLabel(opts: any): BlessedBox {
-    const defaults = {
-      height: 1,
-      tags: false,
-      style: { fg: 'cyan', bold: true },
-    } as any;
-    return this.blessedImpl.box(Object.assign({}, defaults, opts)) as BlessedBox;
+    return createDialogLabel(this.blessedImpl, opts);
   }
 
   create(): this {
