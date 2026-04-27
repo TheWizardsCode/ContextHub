@@ -227,6 +227,29 @@ describe('submitToOpenBrain', () => {
     expect(spawnCalls[0].args).toContain(item.title);
   });
 
+  it('uses fully detached non-blocking spawn mode by default', async () => {
+    const item = makeWorkItem();
+    const spawnCalls: Array<{ cmd: string; args: string[]; opts: any; child: any }> = [];
+
+    const fakeSpawn = (cmd: string, args: string[], opts: any) => {
+      const child = makeFakeChild(0);
+      spawnCalls.push({ cmd, args, opts, child });
+      return child;
+    };
+
+    await submitToOpenBrain(item, {
+      obBin: '/fake/ob',
+      spawnImpl: fakeSpawn as any,
+      queueDir: tmpDir,
+      // default waitForCompletion=false
+    });
+
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0].opts.detached).toBe(true);
+    expect(spawnCalls[0].opts.stdio).toEqual(['pipe', 'ignore', 'ignore']);
+    expect(spawnCalls[0].child.unref).toHaveBeenCalledTimes(1);
+  });
+
   it('does not write to the queue when ob add succeeds', async () => {
     const item = makeWorkItem();
 
