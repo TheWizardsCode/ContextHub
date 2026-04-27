@@ -134,16 +134,67 @@ export async function submitToOpenBrain(
 
   const run = (): Promise<void> =>
     new Promise<void>((resolve) => {
+      const args = ['add', '--stdin', '--title', item.title];
+
+      // Non-blocking mode (default): spawn fully detached with stdout/stderr ignored,
+      // write stdin, and return immediately without waiting for close.
+      // This prevents `wl close` from being delayed by OpenBrain process lifetime.
+      if (!options.waitForCompletion) {
+        let child: ReturnType<typeof spawn>;
+        try {
+          const spawnOpts: SpawnOptions = { stdio: ['pipe', 'ignore', 'ignore'], detached: true };
+          if (verbose) {
+            try { console.error(`[openbrain] spawning (non-blocking): ${obBin} ${args.join(' ')} opts=${JSON.stringify(spawnOpts)}`); } catch (_) { /* ignore */ }
+          }
+          child = spawnImpl(obBin, args, spawnOpts);
+        } catch (spawnErr) {
+          const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
+          console.error(`[openbrain] Failed to spawn ob: ${msg}`);
+          appendToQueue(
+            { workItemId: item.id, title: item.title, summary, enqueuedAt: new Date().toISOString(), reason: msg },
+            options.queueDir
+          );
+          resolve();
+          return;
+        }
+
+        child.once('error', (err) => {
+          const msg = err.message;
+          console.error(`[openbrain] ob add error: ${msg}`);
+          appendToQueue(
+            { workItemId: item.id, title: item.title, summary, enqueuedAt: new Date().toISOString(), reason: msg },
+            options.queueDir
+          );
+        });
+
+        const childStdin = child.stdin;
+        if (childStdin) {
+          childStdin.on('error', (err: NodeJS.ErrnoException) => {
+            if (verbose) {
+              const code = err?.code ? ` code=${String(err.code)}` : '';
+              try { console.error(`[openbrain] stdin write error:${code} ${err.message}`); } catch (_) { /* ignore */ }
+            }
+          });
+          try {
+            childStdin.write(summary, 'utf-8');
+            childStdin.end();
+          } catch {
+            // Best-effort in non-blocking mode.
+          }
+        }
+
+        try { child.unref(); } catch { /* ignore */ }
+        resolve();
+        return;
+      }
+
+      // Wait mode (tests/explicit callers): preserve full close/error handling.
       let child: ReturnType<typeof spawn>;
       let alreadyQueued = false;
       let finished = false;
       const safeResolve = () => { if (!finished) { finished = true; resolve(); } };
       try {
-        const args = ['add', '--stdin', '--title', item.title];
-        // Pipe stdout only in verbose mode so we can capture success messages
-        // that some `ob` implementations print to stdout. Keep stdout ignored
-        // in normal runs to avoid holding unnecessary handles.
-        const spawnOpts: SpawnOptions = { stdio: ['pipe', verbose ? 'pipe' : 'ignore', 'pipe'], detached: !options.waitForCompletion };
+        const spawnOpts: SpawnOptions = { stdio: ['pipe', verbose ? 'pipe' : 'ignore', 'pipe'], detached: false };
         if (verbose) {
           try { console.error(`[openbrain] spawning: ${obBin} ${args.join(' ')} opts=${JSON.stringify(spawnOpts)}`); } catch (_) { /* ignore */ }
         }
@@ -165,12 +216,6 @@ export async function submitToOpenBrain(
         return;
       }
 
-      // Write the markdown summary to the child's stdin.
-      //
-      // Important: write failures like EPIPE can be emitted asynchronously on
-      // the stream and are not caught by try/catch around write(). Attach a
-      // no-throw error handler so failed writes do not surface as unhandled
-      // exceptions during tests or normal CLI execution.
       const childStdin = child.stdin;
       if (childStdin) {
         childStdin.on('error', (err: NodeJS.ErrnoException) => {
@@ -195,7 +240,6 @@ export async function submitToOpenBrain(
         stderrLines.push(s);
         if (verbose) try { console.error(`[openbrain] child stderr chunk: ${s.trim()}`); } catch (_) { /* ignore */ }
       });
-      // Capture stdout chunks when verbose so we can see success/ID output
       child.stdout?.on('data', (chunk: Buffer | string) => {
         const s = chunk.toString();
         stdoutLines.push(s);
@@ -218,7 +262,6 @@ export async function submitToOpenBrain(
         const stderr = stderrLines.join('').trim();
         const stdout = stdoutLines.join('').trim();
         if (code !== 0) {
-          // Only append if we haven't just appended in the `error` handler.
           if (!alreadyQueued) {
             const reason = stderr || `ob add exited with code ${code}`;
             console.error(`[openbrain] ob add failed (exit ${code}): ${reason}`);
@@ -232,19 +275,11 @@ export async function submitToOpenBrain(
           }
         } else {
           if (verbose) try { console.error(`[openbrain] ob add exited 0 (success) for ${item.id}`); } catch (_) { /* ignore */ }
-          // If the child printed an entry id or confirmation on stdout, log it
           if (verbose && stdout) try { console.error(`[openbrain] ob add stdout: ${stdout}`); } catch (_) { /* ignore */ }
         }
         if (verbose) try { console.error(`[openbrain] child close code=${code} for ${item.id}`); } catch (_) { /* ignore */ }
         safeResolve();
       });
-
-      // For non-waiting mode, detach from the event loop immediately after
-      // attaching handlers so the parent process can exit without waiting.
-      if (!options.waitForCompletion) {
-        try { child.unref(); } catch { /* ignore */ }
-        resolve();
-      }
     });
 
   return run();
