@@ -474,7 +474,7 @@ export default function register(ctx: PluginContext): void {
     .description('Import updates from GitHub Issues')
     .option('--repo <owner/name>', 'GitHub repo (owner/name)')
     .option('--label-prefix <prefix>', 'Label prefix for Worklog labels (default: wl:)')
-    .option('--since <iso>', 'Only import issues updated since ISO timestamp')
+    .option('--since <iso>', 'Only import issues updated since ISO timestamp (incremental mode; skips full close-check sweep)')
     .option('--create-new', 'Create new work items for issues without markers')
     .option('--prefix <prefix>', 'Override the default prefix')
     .action(async (options) => {
