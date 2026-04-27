@@ -4,6 +4,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import { getRepoFromGitRemote, normalizeGithubLabelPrefix, SecondaryRateLimitError } from '../github.js';
+import { ProgressReporter, ProgressMode } from '../progress.js';
 import { upsertIssuesFromWorkItems, importIssuesToWorkItems, GithubProgress, GithubSyncResult, SyncedItem, SyncErrorItem, FieldChange } from '../github-sync.js';
 import { loadConfig } from '../config.js';
 import { displayConflictDetails } from './helpers.js';
@@ -48,6 +49,7 @@ export default function register(ctx: PluginContext): void {
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--no-re-sort', 'Skip automatic re-sort after github push')
     .option('--re-sort-sync', 'Force a synchronous re-sort after github push', false)
+    .option('--progress <mode>', 'progress reporting mode (auto|json|human|quiet)', 'auto')
     .action(async (options) => {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
@@ -82,38 +84,27 @@ export default function register(ctx: PluginContext): void {
         }
       };
 
+      const progressMode = (options as any).progress as ProgressMode | undefined;
+      const progressReporter = new ProgressReporter({ mode: progressMode ?? (isJsonMode ? 'json' : undefined) });
       const renderProgress = (progress: GithubProgress) => {
-        if (isJsonMode || process.stdout.isTTY !== true) {
+        if (progress.phase === 'push') {
+          const totalItems = Math.max(pushTotalItems, 0);
+          let message: string;
+          if (totalItems === 0) {
+            message = 'Push: Batch 0/0 Item 0/0';
+          } else {
+            const totalBatches = Math.max(pushTotalBatches, 1);
+            const batchIdx = Math.min(currentBatchIndex, totalBatches - 1);
+            const batchItemCount = currentBatchLength > 0
+              ? currentBatchLength
+              : Math.min(Math.max(totalItems - batchIdx * BATCH_SIZE, 0), BATCH_SIZE);
+            const itemNumberInBatch = Math.min(Math.max(progress.current, 1), batchItemCount || BATCH_SIZE);
+            message = `Push: Batch ${batchIdx + 1}/${totalBatches} Item ${itemNumberInBatch}/${batchItemCount || BATCH_SIZE}`;
+          }
+          progressReporter.render({ phase: 'push', current: progress.current, total: progress.total, note: message });
           return;
         }
-        const label = progress.phase === 'push'
-          ? 'Push'
-          : progress.phase === 'import'
-            ? 'Import'
-            : progress.phase === 'hierarchy'
-              ? 'Hierarchy'
-              : progress.phase === 'comments'
-                ? 'Comments'
-                : progress.phase === 'saving'
-                  ? 'Saving'
-                  : 'Close check';
-        const formatPushProgress = () => {
-          const totalItems = Math.max(pushTotalItems, 0);
-          if (totalItems === 0) {
-            return 'Push: Batch 0/0 Item 0/0';
-          }
-          const totalBatches = Math.max(pushTotalBatches, 1);
-          const batchIdx = Math.min(currentBatchIndex, totalBatches - 1);
-          const batchItemCount = currentBatchLength > 0
-            ? currentBatchLength
-            : Math.min(Math.max(totalItems - batchIdx * BATCH_SIZE, 0), BATCH_SIZE);
-          const itemNumberInBatch = Math.min(Math.max(progress.current, 1), batchItemCount || BATCH_SIZE);
-          return `Push: Batch ${batchIdx + 1}/${totalBatches} Item ${itemNumberInBatch}/${batchItemCount || BATCH_SIZE}`;
-        };
-        const message = label === 'Push'
-          ? formatPushProgress()
-          : `${label}: ${progress.current}/${progress.total}`;
-        writeProgressMessage(message, progress.current === progress.total);
+        progressReporter.render(progress as any);
       };
 
       try {
@@ -477,6 +468,7 @@ export default function register(ctx: PluginContext): void {
     .option('--since <iso>', 'Only import issues updated since ISO timestamp (incremental mode; skips full close-check sweep)')
     .option('--create-new', 'Create new work items for issues without markers')
     .option('--prefix <prefix>', 'Override the default prefix')
+    .option('--progress <mode>', 'progress reporting mode (auto|json|human|quiet)', 'auto')
     .action(async (options) => {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
@@ -488,34 +480,10 @@ export default function register(ctx: PluginContext): void {
       logLine(`--- github import start ${new Date().toISOString()} ---`);
       logLine(`Options json=${isJsonMode} verbose=${isVerbose} createNew=${options.createNew ?? ''} since=${options.since || ''}`);
 
+      const progressMode = (options as any).progress as ProgressMode | undefined;
+      const progressReporter = new ProgressReporter({ mode: progressMode ?? (isJsonMode ? 'json' : undefined) });
       const renderProgress = (progress: GithubProgress) => {
-        if (isJsonMode || process.stdout.isTTY !== true) {
-          return;
-        }
-        const label = progress.phase === 'push'
-          ? 'Push'
-          : progress.phase === 'import'
-            ? 'Import'
-            : progress.phase === 'hierarchy'
-              ? 'Hierarchy'
-              : progress.phase === 'comments'
-                ? 'Comments'
-                : progress.phase === 'saving'
-                  ? 'Saving'
-                  : 'Close check';
-        const message = `${label}: ${progress.current}/${progress.total}`;
-        if (message === lastProgress) {
-          return;
-        }
-        lastProgress = message;
-        const padded = `${message} `.padEnd(lastProgressLength, ' ');
-        lastProgressLength = padded.length;
-        process.stdout.write(`\r${padded}`);
-        if (progress.current === progress.total) {
-          process.stdout.write('\n');
-          lastProgress = '';
-          lastProgressLength = 0;
-        }
+        progressReporter.render(progress as any);
       };
 
       try {
