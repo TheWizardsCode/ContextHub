@@ -721,7 +721,7 @@ export function resolveAllLabelFields(
 export async function importIssuesToWorkItems(
   items: WorkItem[],
   config: GithubConfig,
-  options?: { since?: string; createNew?: boolean; generateId?: () => string; generateCommentId?: () => string; onProgress?: (progress: GithubProgress) => void }
+  options?: { since?: string; createNew?: boolean; generateId?: () => string; generateCommentId?: () => string; onProgress?: (progress: GithubProgress) => void; skipCloseCheck?: boolean }
 ): Promise<{
   updatedItems: WorkItem[];
   createdItems: WorkItem[];
@@ -738,6 +738,7 @@ export async function importIssuesToWorkItems(
   const generateId = options?.generateId;
   const generateCommentId = options?.generateCommentId;
   const onProgress = options?.onProgress;
+  const skipCloseCheck = options?.skipCloseCheck ?? Boolean(since);
   const issues = await listGithubIssuesAsync(config, since);
   const byId = new Map(items.map(item => [item.id, item]));
   const byIssueNumber = new Map<number, WorkItem>();
@@ -958,102 +959,104 @@ export async function importIssuesToWorkItems(
     processed += 1;
   }
 
-  let checked = 0;
-  for (const item of items) {
-    if (!item.githubIssueNumber) {
-      checked += 1;
-      continue;
-    }
-    if (seenIssueNumbers.has(item.githubIssueNumber)) {
-      checked += 1;
-      continue;
-    }
-    if (onProgress) {
-      onProgress({ phase: 'close-check', current: checked + 1, total: items.length });
-    }
-    try {
-    const issue = await getGithubIssueAsync(config, item.githubIssueNumber);
-    const hierarchy = hierarchyByIssueNumber.get(issue.number);
-    const parentIssueNumber = parentByChildIssueNumber.get(issue.number)
-      ?? hierarchy?.parentIssueNumber
-      ?? extractParentIssueNumber(issue.body);
-    const childIssueNumbers = hierarchy?.childIssueNumbers ?? extractChildIssueNumbers(issue.body);
-      const parentId = extractParentId(issue.body);
-      const childIds = extractChildIds(issue.body);
-      const isClosed = issue.state === 'closed';
-
-      // Skip open issues where the local item is also not completed (no state change)
-      if (!isClosed && item.status !== 'completed') {
+  if (!skipCloseCheck) {
+    let checked = 0;
+    for (const item of items) {
+      if (!item.githubIssueNumber) {
         checked += 1;
         continue;
       }
+      if (seenIssueNumbers.has(item.githubIssueNumber)) {
+        checked += 1;
+        continue;
+      }
+      if (onProgress) {
+        onProgress({ phase: 'close-check', current: checked + 1, total: items.length });
+      }
+      try {
+      const issue = await getGithubIssueAsync(config, item.githubIssueNumber);
+      const hierarchy = hierarchyByIssueNumber.get(issue.number);
+      const parentIssueNumber = parentByChildIssueNumber.get(issue.number)
+        ?? hierarchy?.parentIssueNumber
+        ?? extractParentIssueNumber(issue.body);
+      const childIssueNumbers = hierarchy?.childIssueNumbers ?? extractChildIssueNumbers(issue.body);
+        const parentId = extractParentId(issue.body);
+        const childIds = extractChildIds(issue.body);
+        const isClosed = issue.state === 'closed';
 
-      const existingUpdatedAt = item.githubIssueUpdatedAt ? new Date(item.githubIssueUpdatedAt).getTime() : null;
-      const issueUpdatedAt = new Date(issue.updatedAt).getTime();
-      // Skip when the issue hasn't changed and the local status already matches
-      // the expected state (completed for closed issues, non-completed for open)
-      if (existingUpdatedAt !== null && existingUpdatedAt >= issueUpdatedAt) {
-        if (isClosed && item.status === 'completed') {
-          checked += 1;
-          continue;
-        }
+        // Skip open issues where the local item is also not completed (no state change)
         if (!isClosed && item.status !== 'completed') {
           checked += 1;
           continue;
         }
-      }
 
-      const labelFields = issueToWorkItemFields(issue, config.labelPrefix);
-      const tags = labelFields.tags.length > 0
-        ? Array.from(new Set([...item.tags, ...labelFields.tags]))
-        : item.tags;
-        remoteItemsById.set(item.id, {
-          ...item,
-          title: issue.title || item.title,
-          description: issue.body ? stripWorklogMarkers(issue.body) : item.description,
-          status: isClosed ? 'completed' : (labelFields.status || item.status),
-          priority: labelFields.priority || item.priority,
-          tags,
-          risk: (labelFields.risk || item.risk) as WorkItemRiskLevel | '',
-          effort: (labelFields.effort || item.effort) as WorkItemEffortLevel | '',
-          stage: labelFields.stage || item.stage,
-          issueType: labelFields.issueType || item.issueType,
+        const existingUpdatedAt = item.githubIssueUpdatedAt ? new Date(item.githubIssueUpdatedAt).getTime() : null;
+        const issueUpdatedAt = new Date(issue.updatedAt).getTime();
+        // Skip when the issue hasn't changed and the local status already matches
+        // the expected state (completed for closed issues, non-completed for open)
+        if (existingUpdatedAt !== null && existingUpdatedAt >= issueUpdatedAt) {
+          if (isClosed && item.status === 'completed') {
+            checked += 1;
+            continue;
+          }
+          if (!isClosed && item.status !== 'completed') {
+            checked += 1;
+            continue;
+          }
+        }
+
+        const labelFields = issueToWorkItemFields(issue, config.labelPrefix);
+        const tags = labelFields.tags.length > 0
+          ? Array.from(new Set([...item.tags, ...labelFields.tags]))
+          : item.tags;
+          remoteItemsById.set(item.id, {
+            ...item,
+            title: issue.title || item.title,
+            description: issue.body ? stripWorklogMarkers(issue.body) : item.description,
+            status: isClosed ? 'completed' : (labelFields.status || item.status),
+            priority: labelFields.priority || item.priority,
+            tags,
+            risk: (labelFields.risk || item.risk) as WorkItemRiskLevel | '',
+            effort: (labelFields.effort || item.effort) as WorkItemEffortLevel | '',
+            stage: labelFields.stage || item.stage,
+            issueType: labelFields.issueType || item.issueType,
+            updatedAt: issue.updatedAt,
+          });
+        issueClosedById.set(item.id, isClosed);
+        if (parentId) {
+          parentHints.set(item.id, parentId);
+        }
+        if (childIds.length > 0) {
+          childHints.set(item.id, childIds);
+        }
+        if (parentIssueNumber) {
+          parentIssueHints.set(item.id, parentIssueNumber);
+        }
+        if (childIssueNumbers.length > 0) {
+          childIssueHints.set(item.id, childIssueNumbers);
+        }
+        issueMetaById.set(item.id, {
+          number: issue.number,
+          id: issue.id,
           updatedAt: issue.updatedAt,
         });
-      issueClosedById.set(item.id, isClosed);
-      if (parentId) {
-        parentHints.set(item.id, parentId);
-      }
-      if (childIds.length > 0) {
-        childHints.set(item.id, childIds);
-      }
-      if (parentIssueNumber) {
-        parentIssueHints.set(item.id, parentIssueNumber);
-      }
-      if (childIssueNumbers.length > 0) {
-        childIssueHints.set(item.id, childIssueNumbers);
-      }
-      issueMetaById.set(item.id, {
-        number: issue.number,
-        id: issue.id,
-        updatedAt: issue.updatedAt,
-      });
 
-      // Queue event-based resolution for close-check items where label fields differ
-      if (labelFieldsDiffer(labelFields, item)) {
-        pendingResolutions.push({
-          issueNumber: issue.number,
-          itemId: item.id,
-          localItem: item,
-          labelFields,
-          issueUpdatedAt: issue.updatedAt,
-        });
-      }
+        // Queue event-based resolution for close-check items where label fields differ
+        if (labelFieldsDiffer(labelFields, item)) {
+          pendingResolutions.push({
+            issueNumber: issue.number,
+            itemId: item.id,
+            localItem: item,
+            labelFields,
+            issueUpdatedAt: issue.updatedAt,
+          });
+        }
 
-      checked += 1;
-    } catch {
-      checked += 1;
-      continue;
+        checked += 1;
+      } catch {
+        checked += 1;
+        continue;
+      }
     }
   }
 
@@ -1215,13 +1218,40 @@ export async function importIssuesToWorkItems(
     }
   }
 
-  // Fetch comments for every issue that was processed during this import
-  const seenIssueArray = [...seenIssueNumbers];
-  const seenIssueTotal = seenIssueArray.length;
-  let seenIssueIndex = 0;
-  for (const issueNumber of seenIssueArray) {
-    seenIssueIndex++;
-    onProgress?.({ phase: 'comments', current: seenIssueIndex, total: seenIssueTotal });
+  // Only fetch comments for issues that changed since the local GitHub snapshot
+  // (or for newly-created mappings). This avoids per-issue comment API calls for
+  // unchanged issues during full imports.
+  const localByIdForComments = new Map(items.map(item => [item.id, item]));
+  const shouldFetchCommentsForIssue = (issueNumber: number): boolean => {
+    const workItemId = itemIdByIssueNumber.get(issueNumber);
+    if (!workItemId) {
+      return false;
+    }
+    const local = localByIdForComments.get(workItemId);
+    if (!local) {
+      return true;
+    }
+    const issueMeta = issueMetaById.get(workItemId);
+    if (!issueMeta || !issueMeta.updatedAt) {
+      return true;
+    }
+    if (!local.githubIssueUpdatedAt) {
+      return true;
+    }
+    const remoteMs = new Date(issueMeta.updatedAt).getTime();
+    const localMs = new Date(local.githubIssueUpdatedAt).getTime();
+    if (Number.isNaN(remoteMs) || Number.isNaN(localMs)) {
+      return true;
+    }
+    return remoteMs > localMs;
+  };
+
+  const commentIssueNumbers = [...seenIssueNumbers].filter(shouldFetchCommentsForIssue);
+  const commentIssueTotal = commentIssueNumbers.length;
+  let commentIssueIndex = 0;
+  for (const issueNumber of commentIssueNumbers) {
+    commentIssueIndex++;
+    onProgress?.({ phase: 'comments', current: commentIssueIndex, total: commentIssueTotal || 1 });
     const workItemId = itemIdByIssueNumber.get(issueNumber);
     if (!workItemId) continue;
 

@@ -880,6 +880,35 @@ describe('importIssuesToWorkItems label resolution integration', () => {
       // No label events should have been fetched (item was skipped before resolution)
       expect(mockFetchLabelEventsAsync).not.toHaveBeenCalled();
     });
+
+    it('skips Phase 2 close-check entirely when since is provided', async () => {
+      const T_PRIOR_SYNC = '2026-01-10T00:00:00.000Z';
+
+      const localItem = makeLocalItem({
+        id: 'WL-001',
+        status: 'completed' as WorkItemStatus,
+        stage: 'in_review',
+        updatedAt: T_PRIOR_SYNC,
+        githubIssueNumber: 42,
+        githubIssueUpdatedAt: T_PRIOR_SYNC,
+      } as any);
+
+      // Incremental import window returned no updated issues
+      mockListGithubIssues.mockReturnValue([]);
+
+      const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+        since: '2026-01-20T00:00:00.000Z',
+        generateId: () => 'WL-GEN',
+      });
+
+      // Optimization: no per-item getGithubIssueAsync calls during incremental imports
+      expect(mockGetGithubIssueAsync).not.toHaveBeenCalled();
+
+      const merged = result.mergedItems.find(item => item.id === 'WL-001');
+      expect(merged).toBeDefined();
+      expect(merged!.status).toBe('completed');
+      expect(merged!.stage).toBe('in_review');
+    });
   });
 
   describe('Bug reproduction: completed item not updated when GitHub issue is reopened', () => {
