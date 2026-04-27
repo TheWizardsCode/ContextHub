@@ -1218,13 +1218,40 @@ export async function importIssuesToWorkItems(
     }
   }
 
-  // Fetch comments for every issue that was processed during this import
-  const seenIssueArray = [...seenIssueNumbers];
-  const seenIssueTotal = seenIssueArray.length;
-  let seenIssueIndex = 0;
-  for (const issueNumber of seenIssueArray) {
-    seenIssueIndex++;
-    onProgress?.({ phase: 'comments', current: seenIssueIndex, total: seenIssueTotal });
+  // Only fetch comments for issues that changed since the local GitHub snapshot
+  // (or for newly-created mappings). This avoids per-issue comment API calls for
+  // unchanged issues during full imports.
+  const localByIdForComments = new Map(items.map(item => [item.id, item]));
+  const shouldFetchCommentsForIssue = (issueNumber: number): boolean => {
+    const workItemId = itemIdByIssueNumber.get(issueNumber);
+    if (!workItemId) {
+      return false;
+    }
+    const local = localByIdForComments.get(workItemId);
+    if (!local) {
+      return true;
+    }
+    const issueMeta = issueMetaById.get(workItemId);
+    if (!issueMeta || !issueMeta.updatedAt) {
+      return true;
+    }
+    if (!local.githubIssueUpdatedAt) {
+      return true;
+    }
+    const remoteMs = new Date(issueMeta.updatedAt).getTime();
+    const localMs = new Date(local.githubIssueUpdatedAt).getTime();
+    if (Number.isNaN(remoteMs) || Number.isNaN(localMs)) {
+      return true;
+    }
+    return remoteMs > localMs;
+  };
+
+  const commentIssueNumbers = [...seenIssueNumbers].filter(shouldFetchCommentsForIssue);
+  const commentIssueTotal = commentIssueNumbers.length;
+  let commentIssueIndex = 0;
+  for (const issueNumber of commentIssueNumbers) {
+    commentIssueIndex++;
+    onProgress?.({ phase: 'comments', current: commentIssueIndex, total: commentIssueTotal || 1 });
     const workItemId = itemIdByIssueNumber.get(issueNumber);
     if (!workItemId) continue;
 

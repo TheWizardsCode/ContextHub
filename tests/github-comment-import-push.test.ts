@@ -333,6 +333,32 @@ describe('GitHub comment import (GitHub -> Worklog)', () => {
     expect(importedComments.length).toBe(0);
   });
 
+  it('skips comment fetch for unchanged issues during import', async () => {
+    const localItem = makeLocalItem({
+      id: 'WL-IMPORT-31',
+      githubIssueNumber: 31,
+      githubIssueUpdatedAt: T_ISSUE_UPDATE,
+      updatedAt: T_BASE,
+    });
+
+    const issue = makeGithubIssue({
+      number: 31,
+      body: '<!-- worklog:id=WL-IMPORT-31 -->\nIssue body',
+      updatedAt: T_ISSUE_UPDATE,
+    });
+
+    mockListGithubIssues.mockReturnValue([issue]);
+
+    const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+      generateId: () => 'WL-GEN',
+    });
+
+    expect(mockListGithubIssueCommentsAsync).not.toHaveBeenCalled();
+    const importedComments = (result as any).importedComments as Comment[];
+    expect(importedComments).toBeDefined();
+    expect(importedComments.length).toBe(0);
+  });
+
   it('imports multiple comments from multiple issues', async () => {
     const item1 = makeLocalItem({
       id: 'WL-IMPORT-40',
