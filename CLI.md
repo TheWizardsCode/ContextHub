@@ -13,6 +13,19 @@ These options apply to any command:
 - `-w, --watch [seconds]` — Rerun the command every N seconds (default: 5).
 
 
+### GitHub throttling (environment variables)
+
+Worklog includes a central client-side throttler to coordinate outgoing GitHub API
+requests. Configure the throttler at runtime with environment variables (see
+`docs/github-throttling.md` for details and examples):
+
+- `WL_GITHUB_RATE` — tokens per second (default: 6)
+- `WL_GITHUB_BURST` — bucket capacity (default: 12)
+- `WL_GITHUB_CONCURRENCY` — max concurrent scheduled tasks (default: 6)
+
+See `docs/github-throttling.md` for examples and testing guidance.
+
+
 ### Markdown formatting (default in TTY)
 
 By default, CLI output is rendered through the project's markdown renderer in interactive terminals. This formats:
