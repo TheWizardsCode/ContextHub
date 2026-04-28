@@ -36,6 +36,12 @@ export class TokenBucketThrottler {
   private queue: Array<Task<unknown>> = [];
   private debug = false;
 
+  // Low-contention counters for instrumentation. Incrementing these
+  // fields is intentionally lock-free to avoid impacting throttler
+  // throughput. The accessor below exposes these values for diagnostics.
+  private retryCount = 0;
+  private errorCount = 0;
+
   // Expose simple stats without blocking the throttler operation
   getStats() {
     return {
@@ -45,8 +51,13 @@ export class TokenBucketThrottler {
       rate: this.rate,
       burst: this.burst,
       concurrency: this.concurrency,
+      retryCount: this.retryCount,
+      errorCount: this.errorCount,
     };
   }
+
+  incrementRetry() { this.retryCount += 1; }
+  incrementError() { this.errorCount += 1; }
 
   constructor(opts: ThrottlerOptions) {
     this.rate = opts.rate;
@@ -161,6 +172,8 @@ export class TokenBucketThrottler {
       })
       .catch((err) => {
         this.active -= 1;
+        // record error occurrence for diagnostics
+        try { this.incrementError(); } catch (_) {}
         task.reject(err);
         if (this.debug) console.debug(`[throttler] error active=${this.active} tokens=${this.tokens.toFixed(2)} queue=${this.queue.length} err=${String(err?.message ?? err)}`);
         this.processQueue();

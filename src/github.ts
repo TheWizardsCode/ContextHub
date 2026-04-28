@@ -109,6 +109,7 @@ function runGh(command: string, input?: string): string {
       }
       if (attempt < maxRetries && /403|rate limit/i.test(stderr + stdout)) {
         const waitMs = computeFullJitterDelay(attempt);
+        try { throttler.incrementRetry && throttler.incrementRetry(); } catch (_) {}
         logVerbose(`gh rate-limited (sync), retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`);
         // Blocking sleep for sync path
         try {
@@ -124,6 +125,7 @@ function runGh(command: string, input?: string): string {
       }
       const e = err as Error;
       if (stderr) e.message = `${e.message}\n${stderr}`;
+      try { throttler.incrementError && throttler.incrementError(); } catch (_) {}
       throw e;
     }
   }
@@ -220,12 +222,17 @@ async function runGhAsync(command: string, input?: string): Promise<string> {
     // apply backoff with jitter and retry.
     if (attempt < maxRetries && /403|rate limit/i.test(stderr + stdout)) {
       const waitMs = computeFullJitterDelay(attempt);
+      try { throttler.incrementRetry && throttler.incrementRetry(); } catch (_) {}
       try { logVerbose(`gh rate-limited (async spawn), retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`); } catch (_) {}
       await new Promise(r => setTimeout(r, waitMs));
       attempt += 1;
       continue;
     }
-    if (res.error) throw res.error;
+    if (res.error) {
+      try { throttler.incrementError && throttler.incrementError(); } catch (_) {}
+      throw res.error;
+    }
+    try { throttler.incrementError && throttler.incrementError(); } catch (_) {}
     throw new Error(res.stderr || `gh command failed with exit code ${res.code}`);
   }
 }
@@ -274,11 +281,13 @@ async function runGhJsonDetailedAsync(command: string, input?: string, retries =
       // Otherwise, if we have retries left, backoff and retry.
       if (attempt < maxRetries) {
         const waitMs = computeDelay(attempt);
+        try { throttler.incrementRetry && throttler.incrementRetry(); } catch (_) {}
         try { logVerbose(`gh rate-limited/restricted, retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`); } catch (_) {}
         await new Promise(r => setTimeout(r, waitMs));
         attempt += 1;
         continue;
       }
+      try { throttler.incrementError && throttler.incrementError(); } catch (_) {}
       return { ok: false, error: stderr || res.stdout || 'GraphQL request failed' };
     }
     try {
@@ -411,6 +420,7 @@ function runGhJsonDetailed(command: string, input?: string, retries = 3): { ok: 
       // Otherwise, if retries remain, sleep and retry.
       if (attempt < maxRetries) {
         const waitMs = computeDelay(attempt);
+        try { throttler.incrementRetry && throttler.incrementRetry(); } catch (_) {}
         try { // synchronous sleep using Atomics.wait
           const sab = new SharedArrayBuffer(4);
           const ia = new Int32Array(sab);
@@ -424,6 +434,7 @@ function runGhJsonDetailed(command: string, input?: string, retries = 3): { ok: 
         continue;
       }
       const error = result.stderr || result.stdout || 'GraphQL request failed';
+      try { throttler.incrementError && throttler.incrementError(); } catch (_) {}
       return { ok: false, error };
     }
     try {
