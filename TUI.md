@@ -33,6 +33,11 @@ This document describes the interactive terminal UI shipped as the `wl tui` (or 
 - d — delete selected item
 - r — refresh/reload items
 - / — search items
+- Alt+I — quick filter to in-progress items
+- Alt+A — quick filter to open items
+- Alt+B — quick filter to blocked items
+- Alt+T — quick filter to `stage = intake_complete` with non-closed statuses (`open`, `in-progress`, `blocked`)
+- Alt+P — quick filter to `stage = plan_complete` with non-closed statuses (`open`, `in-progress`, `blocked`)
 - v — cycle needs-producer-review filter (on/off/all)
 - h — toggle help menu
 - D — toggle do-not-delegate tag on selected item

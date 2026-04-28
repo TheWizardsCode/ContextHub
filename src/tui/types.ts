@@ -67,7 +67,7 @@ export interface MoveMode {
 export interface TUIState {
   expanded: Set<string>;
   showClosed: boolean;
-  filter?: 'in-progress' | 'open' | 'blocked' | 'all';
+  filter?: 'in-progress' | 'open' | 'blocked' | 'intake_completed' | 'plan_completed' | 'all';
   selectedId?: string;
 }
 
