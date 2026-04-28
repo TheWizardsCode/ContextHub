@@ -107,7 +107,7 @@ export default function register(ctx: PluginContext): void {
           // Append throttler stats to push message for diagnostic visibility
           try {
             const s = throttler?.getStats?.();
-            if (s) message = `${message} [Q:${s.queueLength} A:${s.active}]`;
+            if (s) message = `${message} (queue=${s.queueLength} active=${s.active} retries=${s.retryCount} errors=${s.errorCount})`; 
           } catch (_) {}
           progressReporter.render({ phase: 'push', current: progress.current, total: progress.total, note: message });
           return;
@@ -116,7 +116,7 @@ export default function register(ctx: PluginContext): void {
         try {
           const s = throttler?.getStats?.();
           if (s) {
-            const note = `Q:${s.queueLength} A:${s.active}`;
+            const note = `queue=${s.queueLength} active=${s.active} retries=${s.retryCount} errors=${s.errorCount}`;
             progressReporter.render({ phase: progress.phase, current: progress.current, total: progress.total, note });
             return;
           }
@@ -505,7 +505,7 @@ export default function register(ctx: PluginContext): void {
         try {
           const s = throttler?.getStats?.();
           if (s) {
-            const note = `Q:${s.queueLength} A:${s.active}`;
+            const note = `queue=${s.queueLength} active=${s.active} retries=${s.retryCount} errors=${s.errorCount}`;
             progressReporter.render({ phase: progress.phase, current: progress.current, total: progress.total, note } as any);
             return;
           }

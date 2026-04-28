@@ -233,58 +233,12 @@ export async function upsertIssuesFromWorkItems(
     return latestCommentTime > issueUpdatedAt;
   };
 
-    const upsertGithubIssueComments = (
-    issueConfig: GithubConfig,
-    issueNumber: number,
-    itemComments: Comment[],
-    existingComments: GithubIssueComment[]
-  ): { created: number; updated: number; latestUpdatedAt: string | null } => {
-    // Build map of existing GH comments by worklog comment id (from markers)
-    const byWorklogId = new Map<string, GithubIssueComment>();
-    for (const ghComment of existingComments) {
-      const markerId = extractWorklogCommentId(ghComment.body || undefined);
-      if (!markerId) continue;
-      if (!byWorklogId.has(markerId)) byWorklogId.set(markerId, ghComment);
-    }
+    // Synchronous comment upsert helper removed. Use async helpers
+    // `upsertGithubIssueCommentsAsync` (defined below) which schedule API calls
+    // through the central throttler. The old synchronous helper used direct
+    // sync GH API helpers and could bypass throttler/concurrency limits.
+    // If synchronous behavior is required, wrap the async helper at the callsite.
 
-    let created = 0;
-    let updated = 0;
-    let latestUpdatedAt: string | null = null;
-    const sorted = [...itemComments].sort(sortCommentsByCreatedAt);
-    for (const comment of sorted) {
-      const body = buildGithubCommentBody(comment);
-      const existing = byWorklogId.get(comment.id);
-      if (existing) {
-        // If the GH comment exists, only update if body changed OR GH's updatedAt is newer than our recorded mapping
-        const bodyMatch = (existing.body || '').trim() === body.trim();
-        if (!bodyMatch) {
-          const updatedComment = updateGithubIssueComment(issueConfig, existing.id, body);
-          // Persist mapping back to local comment
-          comment.githubCommentId = existing.id;
-          comment.githubCommentUpdatedAt = updatedComment.updatedAt;
-          if (persistComment) {
-            try { persistComment(comment); } catch (err) { if (onVerboseLog) onVerboseLog && onVerboseLog(`[persist] failed to save comment mapping for ${comment.id}: ${(err as Error).message}`); }
-          }
-          updated += 1;
-          latestUpdatedAt = maxIsoTimestamp(latestUpdatedAt, updatedComment.updatedAt);
-        }
-        continue;
-      }
-
-      // No GH comment mapping found — create a new comment
-      const createdComment = createGithubIssueComment(issueConfig, issueNumber, body);
-      // Persist mapping back to local comment so future runs can directly reference by ID
-      comment.githubCommentId = createdComment.id;
-      comment.githubCommentUpdatedAt = createdComment.updatedAt;
-      if (persistComment) {
-        try { persistComment(comment); } catch (err) { if (onVerboseLog) onVerboseLog && onVerboseLog(`[persist] failed to save comment mapping for ${comment.id}: ${(err as Error).message}`); }
-      }
-      created += 1;
-      latestUpdatedAt = maxIsoTimestamp(latestUpdatedAt, createdComment.updatedAt);
-    }
-
-    return { created, updated, latestUpdatedAt };
-  };
 
   // Concurrency: upsert issues and comments with a bounded concurrency pool
   // The central throttler enforces concurrency/rate limits. Do not rely on

@@ -109,6 +109,7 @@ function runGh(command: string, input?: string): string {
       }
       if (attempt < maxRetries && /403|rate limit/i.test(stderr + stdout)) {
         const waitMs = computeFullJitterDelay(attempt);
+        try { throttler.incrementRetry && throttler.incrementRetry(); } catch (_) {}
         logVerbose(`gh rate-limited (sync), retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`);
         // Blocking sleep for sync path
         try {
@@ -124,6 +125,7 @@ function runGh(command: string, input?: string): string {
       }
       const e = err as Error;
       if (stderr) e.message = `${e.message}\n${stderr}`;
+      try { throttler.incrementError && throttler.incrementError(); } catch (_) {}
       throw e;
     }
   }
@@ -220,12 +222,17 @@ async function runGhAsync(command: string, input?: string): Promise<string> {
     // apply backoff with jitter and retry.
     if (attempt < maxRetries && /403|rate limit/i.test(stderr + stdout)) {
       const waitMs = computeFullJitterDelay(attempt);
+      try { throttler.incrementRetry && throttler.incrementRetry(); } catch (_) {}
       try { logVerbose(`gh rate-limited (async spawn), retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`); } catch (_) {}
       await new Promise(r => setTimeout(r, waitMs));
       attempt += 1;
       continue;
     }
-    if (res.error) throw res.error;
+    if (res.error) {
+      try { throttler.incrementError && throttler.incrementError(); } catch (_) {}
+      throw res.error;
+    }
+    try { throttler.incrementError && throttler.incrementError(); } catch (_) {}
     throw new Error(res.stderr || `gh command failed with exit code ${res.code}`);
   }
 }
@@ -274,11 +281,13 @@ async function runGhJsonDetailedAsync(command: string, input?: string, retries =
       // Otherwise, if we have retries left, backoff and retry.
       if (attempt < maxRetries) {
         const waitMs = computeDelay(attempt);
+        try { throttler.incrementRetry && throttler.incrementRetry(); } catch (_) {}
         try { logVerbose(`gh rate-limited/restricted, retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`); } catch (_) {}
         await new Promise(r => setTimeout(r, waitMs));
         attempt += 1;
         continue;
       }
+      try { throttler.incrementError && throttler.incrementError(); } catch (_) {}
       return { ok: false, error: stderr || res.stdout || 'GraphQL request failed' };
     }
     try {
@@ -300,6 +309,24 @@ async function runGhJsonAsync(command: string, input?: string): Promise<any> {
   const detailed = await runGhJsonDetailedAsync(command, input);
   if (!detailed.ok) throw new Error(detailed.error || 'gh command failed');
   return detailed.data;
+}
+
+export async function ghApiAsyncScheduled(command: string, input?: string): Promise<string> {
+  return await throttler.schedule(async () => {
+    return await runGhAsync(command, input);
+  });
+}
+
+export async function ghApiDetailedScheduled(command: string, input?: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return await throttler.schedule(async () => {
+    return await runGhDetailedAsync(command, input);
+  });
+}
+
+export async function ghApiJsonScheduled(command: string, input?: string): Promise<any> {
+  return await throttler.schedule(async () => {
+    return await runGhJsonAsync(command, input);
+  });
 }
 
 function runGhSafe(command: string, input?: string): string | null {
@@ -393,6 +420,7 @@ function runGhJsonDetailed(command: string, input?: string, retries = 3): { ok: 
       // Otherwise, if retries remain, sleep and retry.
       if (attempt < maxRetries) {
         const waitMs = computeDelay(attempt);
+        try { throttler.incrementRetry && throttler.incrementRetry(); } catch (_) {}
         try { // synchronous sleep using Atomics.wait
           const sab = new SharedArrayBuffer(4);
           const ia = new Int32Array(sab);
@@ -406,6 +434,7 @@ function runGhJsonDetailed(command: string, input?: string, retries = 3): { ok: 
         continue;
       }
       const error = result.stderr || result.stdout || 'GraphQL request failed';
+      try { throttler.incrementError && throttler.incrementError(); } catch (_) {}
       return { ok: false, error };
     }
     try {
@@ -693,38 +722,26 @@ export function getIssueHierarchy(config: GithubConfig, issueNumber: number): Is
 
 // Async wrappers -----------------------------------------------------------
 export async function getIssueNodeIdAsync(config: GithubConfig, issueNumber: number): Promise<string> {
-  // Schedule GraphQL node-id resolution through the central throttler so
-  // concurrent runs respect WL_GITHUB_CONCURRENCY and rate limits.
-  return await throttler.schedule(async () => {
-    const { owner, name } = parseRepoSlug(config.repo);
-    const query = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { id } } }`;
-    const output = await runGhJsonDetailedAsync(
-      `gh api graphql -f query=${quoteShellValue(query)} -f owner=${quoteShellValue(owner)} -f name=${quoteShellValue(name)} -F number=${issueNumber}`
-    );
-    if (!output.ok) {
-      throw new Error(output.error || 'Unable to query GitHub issue node ID');
-    }
-    const id = output.data?.data?.repository?.issue?.id;
-    if (!id) {
-      throw new Error(`Unable to resolve GitHub issue node ID for #${issueNumber}`);
-    }
-    return id;
-  });
+  const { owner, name } = parseRepoSlug(config.repo);
+  const query = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { id } } }`;
+  const data = await ghApiJsonScheduled(
+    `gh api graphql -f query=${quoteShellValue(query)} -f owner=${quoteShellValue(owner)} -f name=${quoteShellValue(name)} -F number=${issueNumber}`
+  );
+  const id = data?.data?.repository?.issue?.id;
+  if (!id) {
+    throw new Error(`Unable to resolve GitHub issue node ID for #${issueNumber}`);
+  }
+  return id;
 }
 
 export async function getIssueHierarchyAsync(config: GithubConfig, issueNumber: number): Promise<IssueHierarchy> {
   const { owner, name } = parseRepoSlug(config.repo);
   const query = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { parent { number } subIssues(first: 100) { nodes { number } } } } }`;
-  const output = await throttler.schedule(async () => {
-    const result = await runGhJsonDetailedAsync(
-      `gh api graphql -f query=${quoteShellValue(query)} -f owner=${quoteShellValue(owner)} -f name=${quoteShellValue(name)} -F number=${issueNumber}`
-    );
-    if (!result.ok) {
-      throw new Error(result.error || 'Unable to query issue hierarchy');
-    }
-    return result;
-  });
-  const issue = output.data?.data?.repository?.issue;
+  const result = await ghApiJsonScheduled(
+    `gh api graphql -f query=${quoteShellValue(query)} -f owner=${quoteShellValue(owner)} -f name=${quoteShellValue(name)} -F number=${issueNumber}`
+  );
+  if (!result) throw new Error('Unable to query issue hierarchy');
+  const issue = result.data?.repository?.issue ?? result.data?.data?.repository?.issue;
   const parentIssueNumber = issue?.parent?.number ?? null;
   const childIssueNumbers = Array.isArray(issue?.subIssues?.nodes)
     ? issue.subIssues.nodes.map((node: any) => node?.number).filter((value: any) => typeof value === 'number')
@@ -975,18 +992,14 @@ export function listGithubIssueComments(config: GithubConfig, issueNumber: numbe
 export async function listGithubIssueCommentsAsync(config: GithubConfig, issueNumber: number): Promise<GithubIssueComment[]> {
   const { owner, name } = parseRepoSlug(config.repo);
   const command = `gh api repos/${owner}/${name}/issues/${issueNumber}/comments --paginate`;
-  // Schedule network call through central throttler to enforce concurrency
-  // and rate limits. Callers should not need to schedule this themselves.
-  return await throttler.schedule(async () => {
-    try {
-      const data = await runGhJsonAsync(command);
-      if (!data) return [];
-      const raw = Array.isArray(data) ? data : [];
-      return raw.map(comment => normalizeGithubIssueComment(comment));
-    } catch {
-      return [];
-    }
-  });
+  try {
+    const data = await ghApiJsonScheduled(command);
+    if (!data) return [];
+    const raw = Array.isArray(data) ? data : [];
+    return raw.map(comment => normalizeGithubIssueComment(comment));
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -1264,9 +1277,7 @@ export async function ensureGithubLabelsAsync(config: GithubConfig, labels: stri
     let existing = existingLabelsCache.get(config.repo);
     if (existing === undefined && !existingLabelsCache.has(config.repo)) {
       try {
-        const existingRaw = await throttler.schedule(async () => {
-          return await runGhJsonAsync(`gh api repos/${owner}/${name}/labels --paginate`);
-        });
+        const existingRaw = await ghApiJsonScheduled(`gh api repos/${owner}/${name}/labels --paginate`);
         const parsedSet = new Set<string>();
         if (existingRaw) {
           for (const entry of existingRaw) {
@@ -1288,14 +1299,12 @@ export async function ensureGithubLabelsAsync(config: GithubConfig, labels: stri
       const color = labelColor(label);
       const createCommand = `gh api -X POST repos/${owner}/${name}/labels -f name=${JSON.stringify(label)} -f color=${JSON.stringify(color)}`;
         try {
-          await throttler.schedule(async () => {
-            return await runGhAsync(createCommand);
-          });
+          await ghApiAsyncScheduled(createCommand);
           existing.add(label);
           continue;
         } catch {
           const fallbackCommand = `gh issue label create ${JSON.stringify(label)} --repo ${config.repo} --color ${color}`;
-          try { await throttler.schedule(async () => { return await runGhAsync(fallbackCommand); }); existing.add(label); } catch (_) { /* ignore */ }
+          try { await ghApiAsyncScheduled(fallbackCommand); existing.add(label); } catch (_) { /* ignore */ }
         }
     }
   } catch {
@@ -1438,9 +1447,7 @@ export async function listGithubIssuesAsync(config: GithubConfig, since?: string
   const sinceParam = since ? `&since=${encodeURIComponent(since)}` : '';
   const apiPath = `repos/${config.repo}/issues?state=all&per_page=100${sinceParam}`;
   const apiCommand = `gh api ${quoteShellValue(apiPath)} --paginate`;
-  const output = await throttler.schedule(async () => {
-    return await runGhAsync(apiCommand);
-  });
+  const output = await ghApiAsyncScheduled(apiCommand);
   const parsed = JSON.parse(output) as any[];
   const issuesOnly = parsed.filter(entry => {
     if (entry.pull_request) return false;
@@ -1648,21 +1655,16 @@ export async function fetchLabelEventsAsync(
 
   try {
     const command = `gh api repos/${owner}/${name}/issues/${issueNumber}/events --paginate`;
-    // Schedule the network call through the central throttler so concurrent
-    // runs respect WL_GITHUB_CONCURRENCY and global rate limits. This ensures
-    // callers of fetchLabelEventsAsync do not need to schedule themselves.
-    const result = await throttler.schedule(async () => {
-      return await runGhJsonDetailedAsync(command);
-    });
+    const data = await ghApiJsonScheduled(command);
 
-    if (!result.ok || !Array.isArray(result.data)) {
+    if (!Array.isArray(data)) {
       // API failure — cache empty array to avoid retrying in same run
       cache.set(issueNumber, []);
       return [];
     }
 
     const labelEvents: LabelEvent[] = [];
-    for (const event of result.data) {
+    for (const event of data) {
       const action = event?.event;
       if (action !== 'labeled' && action !== 'unlabeled') {
         continue;
