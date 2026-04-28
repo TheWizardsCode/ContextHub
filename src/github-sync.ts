@@ -75,6 +75,16 @@ export interface GithubProgress {
   phase: 'push' | 'import' | 'close-check' | 'hierarchy' | 'comments' | 'saving';
   current: number;
   total: number;
+  // items per second (measured since the first event for this phase)
+  rate?: number;
+  // estimated milliseconds remaining (null when not measurable)
+  etaMs?: number | null;
+  // short human note (e.g., push batch details or throttler snapshot)
+  note?: string;
+  // last error message observed for diagnostics
+  lastError?: string | null;
+  // optional throttler snapshot
+  throttler?: { active: number; queueLength: number; tokens?: number; rate?: number; burst?: number; concurrency?: number } | null;
 }
 
 export async function upsertIssuesFromWorkItems(
@@ -114,6 +124,32 @@ export async function upsertIssuesFromWorkItems(
     list.push(comment);
     byItemId.set(comment.workItemId, list);
   }
+
+  // Progress helpers: per-phase start time and a small emitter that augments
+  // the simple {phase,current,total} events with rate and ETA where possible.
+  const _progressStats = new Map<string, { start: number; lastEmit: number }>();
+  const emitProgress = (phase: GithubProgress['phase'], current: number, total: number, note?: string, lastError?: string | null) => {
+    if (!onProgress) return;
+    const now = Date.now();
+    let st = _progressStats.get(phase as string);
+    if (!st) {
+      st = { start: now, lastEmit: 0 };
+      _progressStats.set(phase as string, st);
+    }
+    const elapsedMs = Math.max(1, now - st.start);
+    const rate = current > 0 ? (current / (elapsedMs / 1000)) : 0;
+    const remaining = Math.max(0, total - current);
+    const etaMs = rate > 0 ? Math.round((remaining / rate) * 1000) : null;
+    let throttlerSnapshot = null;
+    try {
+      const s = (typeof throttler !== 'undefined' && (throttler as any).getStats) ? (throttler as any).getStats() : undefined;
+      if (s) throttlerSnapshot = { active: s.active, queueLength: s.queueLength, tokens: s.tokens, rate: s.rate, burst: s.burst, concurrency: s.concurrency } as any;
+    } catch (_) {}
+    try {
+      onProgress({ phase, current, total, rate: Number.isFinite(rate) ? rate : undefined, etaMs, note, lastError: lastError ?? null, throttler: throttlerSnapshot } as GithubProgress);
+    } catch (_) {}
+    st.lastEmit = now;
+  };
 
   const updatedItems: WorkItem[] = [...items];
   const result: GithubSyncResult = { updated: 0, created: 0, closed: 0, skipped: 0, errors: [], syncedItems: [], errorItems: [] };
@@ -261,7 +297,7 @@ export async function upsertIssuesFromWorkItems(
 
   async function upsertMapper(item: WorkItem, idx: number) {
     if (onProgress) {
-      onProgress({ phase: 'push', current: idx + 1, total: issueItems.length });
+      emitProgress('push', idx + 1, issueItems.length);
     }
     // Guard: skip deleted items that have no GitHub issue (prevent accidental creation)
     if (item.status === 'deleted' && !item.githubIssueNumber) {
@@ -507,7 +543,7 @@ export async function upsertIssuesFromWorkItems(
 
   async function mapper(pair: string, idx: number) {
     if (onProgress) {
-      onProgress({ phase: 'hierarchy', current: idx + 1, total: pairs.length || 1 });
+      emitProgress('hierarchy', idx + 1, pairs.length || 1);
     }
     const [parentNumberRaw, childNumberRaw] = pair.split(':');
     const parentNumber = Number(parentNumberRaw);
@@ -738,6 +774,30 @@ export async function importIssuesToWorkItems(
   const generateId = options?.generateId;
   const generateCommentId = options?.generateCommentId;
   const onProgress = options?.onProgress;
+  // progress helpers for import flow
+  const _importProgressStats = new Map<string, { start: number; lastEmit: number }>();
+  const emitProgressImport = (phase: GithubProgress['phase'], current: number, total: number, note?: string, lastError?: string | null) => {
+    if (!onProgress) return;
+    const now = Date.now();
+    let st = _importProgressStats.get(phase as string);
+    if (!st) {
+      st = { start: now, lastEmit: 0 };
+      _importProgressStats.set(phase as string, st);
+    }
+    const elapsedMs = Math.max(1, now - st.start);
+    const rate = current > 0 ? (current / (elapsedMs / 1000)) : 0;
+    const remaining = Math.max(0, total - current);
+    const etaMs = rate > 0 ? Math.round((remaining / rate) * 1000) : null;
+    let throttlerSnapshot = null;
+    try {
+      const s = (typeof throttler !== 'undefined' && (throttler as any).getStats) ? (throttler as any).getStats() : undefined;
+      if (s) throttlerSnapshot = { active: s.active, queueLength: s.queueLength, tokens: s.tokens, rate: s.rate, burst: s.burst, concurrency: s.concurrency } as any;
+    } catch (_) {}
+    try {
+      onProgress({ phase, current, total, rate: Number.isFinite(rate) ? rate : undefined, etaMs, note, lastError: lastError ?? null, throttler: throttlerSnapshot } as GithubProgress);
+    } catch (_) {}
+    st.lastEmit = now;
+  };
   const skipCloseCheck = options?.skipCloseCheck ?? Boolean(since);
   const issues = await listGithubIssuesAsync(config, since);
   const byId = new Map(items.map(item => [item.id, item]));
@@ -756,7 +816,7 @@ export async function importIssuesToWorkItems(
   let hierarchyChecked = 0;
   for (const issueNumber of parentIssueNumbers) {
     if (onProgress) {
-      onProgress({ phase: 'hierarchy', current: hierarchyChecked + 1, total: parentIssueNumbers.length || 1 });
+      emitProgressImport('hierarchy', hierarchyChecked + 1, parentIssueNumbers.length || 1);
     }
     hierarchyChecked += 1;
     try {
@@ -818,7 +878,7 @@ export async function importIssuesToWorkItems(
   let processed = 0;
   for (const issue of issues) {
     if (onProgress) {
-      onProgress({ phase: 'import', current: processed + 1, total: issues.length });
+      emitProgressImport('import', processed + 1, issues.length);
     }
     const markerId = extractWorklogId(issue.body);
     if (markerId) {
@@ -971,7 +1031,7 @@ export async function importIssuesToWorkItems(
         continue;
       }
       if (onProgress) {
-        onProgress({ phase: 'close-check', current: checked + 1, total: items.length });
+        emitProgressImport('close-check', checked + 1, items.length);
       }
       try {
       const issue = await getGithubIssueAsync(config, item.githubIssueNumber);
@@ -1251,7 +1311,7 @@ export async function importIssuesToWorkItems(
   let commentIssueIndex = 0;
   for (const issueNumber of commentIssueNumbers) {
     commentIssueIndex++;
-    onProgress?.({ phase: 'comments', current: commentIssueIndex, total: commentIssueTotal || 1 });
+    emitProgressImport('comments', commentIssueIndex, commentIssueTotal || 1);
     const workItemId = itemIdByIssueNumber.get(issueNumber);
     if (!workItemId) continue;
 
