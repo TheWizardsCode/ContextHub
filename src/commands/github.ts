@@ -3,7 +3,7 @@
  */
 
 import type { PluginContext } from '../plugin-types.js';
-import { getRepoFromGitRemote, normalizeGithubLabelPrefix, SecondaryRateLimitError } from '../github.js';
+import { getRepoFromGitRemote, normalizeGithubLabelPrefix, SecondaryRateLimitError, setVerboseLogger } from '../github.js';
 import { ProgressReporter, ProgressMode } from '../progress.js';
 import throttler from '../github-throttler.js';
 import { upsertIssuesFromWorkItems, importIssuesToWorkItems, GithubProgress, GithubSyncResult, SyncedItem, SyncErrorItem, FieldChange } from '../github-sync.js';
