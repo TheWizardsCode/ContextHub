@@ -5,6 +5,7 @@
 import type { PluginContext } from '../plugin-types.js';
 import { getRepoFromGitRemote, normalizeGithubLabelPrefix, SecondaryRateLimitError } from '../github.js';
 import { ProgressReporter, ProgressMode } from '../progress.js';
+import throttler from '../github-throttler.js';
 import { upsertIssuesFromWorkItems, importIssuesToWorkItems, GithubProgress, GithubSyncResult, SyncedItem, SyncErrorItem, FieldChange } from '../github-sync.js';
 import { loadConfig } from '../config.js';
 import { displayConflictDetails } from './helpers.js';
@@ -101,9 +102,23 @@ export default function register(ctx: PluginContext): void {
             const itemNumberInBatch = Math.min(Math.max(progress.current, 1), batchItemCount || BATCH_SIZE);
             message = `Push: Batch ${batchIdx + 1}/${totalBatches} Item ${itemNumberInBatch}/${batchItemCount || BATCH_SIZE}`;
           }
+          // Append throttler stats to push message for diagnostic visibility
+          try {
+            const s = throttler?.getStats?.();
+            if (s) message = `${message} [Q:${s.queueLength} A:${s.active}]`;
+          } catch (_) {}
           progressReporter.render({ phase: 'push', current: progress.current, total: progress.total, note: message });
           return;
         }
+        // For non-push phases include throttler snapshot in the note when available
+        try {
+          const s = throttler?.getStats?.();
+          if (s) {
+            const note = `Q:${s.queueLength} A:${s.active}`;
+            progressReporter.render({ phase: progress.phase, current: progress.current, total: progress.total, note });
+            return;
+          }
+        } catch (_) {}
         progressReporter.render(progress as any);
       };
 
@@ -483,6 +498,14 @@ export default function register(ctx: PluginContext): void {
       const progressMode = (options as any).progress as ProgressMode | undefined;
       const progressReporter = new ProgressReporter({ mode: progressMode ?? (isJsonMode ? 'json' : undefined) });
       const renderProgress = (progress: GithubProgress) => {
+        try {
+          const s = throttler?.getStats?.();
+          if (s) {
+            const note = `Q:${s.queueLength} A:${s.active}`;
+            progressReporter.render({ phase: progress.phase, current: progress.current, total: progress.total, note } as any);
+            return;
+          }
+        } catch (_) {}
         progressReporter.render(progress as any);
       };
 

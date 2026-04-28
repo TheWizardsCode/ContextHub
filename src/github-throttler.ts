@@ -36,6 +36,18 @@ export class TokenBucketThrottler {
   private queue: Array<Task<unknown>> = [];
   private debug = false;
 
+  // Expose simple stats without blocking the throttler operation
+  getStats() {
+    return {
+      active: this.active,
+      queueLength: this.queue.length,
+      tokens: this.tokens,
+      rate: this.rate,
+      burst: this.burst,
+      concurrency: this.concurrency,
+    };
+  }
+
   constructor(opts: ThrottlerOptions) {
     this.rate = opts.rate;
     this.burst = Math.max(1, Math.floor(opts.burst));
