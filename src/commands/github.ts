@@ -59,6 +59,8 @@ export default function register(ctx: PluginContext): void {
       const reSortSync = Boolean((options as any).reSortSync) || false;
       const isJsonMode = utils.isJsonMode();
       const isVerbose = program.opts().verbose;
+      // Enable verbose GitHub API logging (to stderr) when --verbose is used
+      try { setVerboseLogger(isVerbose ? ((m: string) => console.error(m)) : null); } catch (_) {}
       let lastProgress = '';
       let lastProgressLength = 0;
       const BATCH_SIZE = 10;
@@ -489,6 +491,8 @@ export default function register(ctx: PluginContext): void {
       const db = utils.getDatabase(options.prefix);
       const isJsonMode = utils.isJsonMode();
       const isVerbose = program.opts().verbose;
+      // Enable verbose GitHub API logging (to stderr) when --verbose is used
+      try { setVerboseLogger(isVerbose ? ((m: string) => console.error(m)) : null); } catch (_) {}
       let lastProgress = '';
       let lastProgressLength = 0;
       const logLine = createLogFileWriter(getWorklogLogPath('github_sync.log'));

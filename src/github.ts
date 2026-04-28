@@ -5,6 +5,18 @@ import * as os from 'os';
 import * as path from 'path';
 import { WorkItem, Comment, WorkItemStatus, WorkItemPriority } from './types.js';
 
+// Verbose logger for GH calls; set by CLI when --verbose is used.
+let _verboseLogger: ((msg: string) => void) | null = null;
+export function setVerboseLogger(logger: ((msg: string) => void) | null) {
+  _verboseLogger = logger;
+}
+function logVerbose(msg: string) {
+  try {
+    if (_verboseLogger) _verboseLogger(msg);
+  } catch (_) {}
+}
+
+
 export interface GithubConfig {
   repo: string;
   labelPrefix: string;
@@ -43,6 +55,8 @@ function runGh(command: string, input?: string): string {
     const outFd = fs.openSync(outPath, 'w');
     const errFd = fs.openSync(errPath, 'w');
     try {
+      logVerbose(`runGh (sync paginate): ${command} -> ${outPath}`);
+      const start = Date.now();
       const res = spawnSync('/bin/bash', ['-c', command], {
         encoding: 'utf-8',
         stdio: ['pipe', outFd, errFd],
@@ -50,12 +64,15 @@ function runGh(command: string, input?: string): string {
       });
       const stdout = fs.existsSync(outPath) ? fs.readFileSync(outPath, 'utf-8').trim() : '';
       const stderr = fs.existsSync(errPath) ? fs.readFileSync(errPath, 'utf-8').trim() : '';
+      logVerbose(`runGh (sync paginate) completed in ${Date.now() - start}ms status=${res?.status}`);
       if (res.error) {
         const e = res.error as Error;
         e.message = `${e.message}\n${stderr}`;
+        logVerbose(`runGh (sync paginate) error: ${stderr}`);
         throw e;
       }
       if (res.status !== 0) {
+        logVerbose(`runGh (sync paginate) non-zero exit: ${res.status} stderr=${stderr}`);
         throw new Error(stderr || `gh command failed with exit code ${res.status}`);
       }
       return stdout;
@@ -72,22 +89,27 @@ function runGh(command: string, input?: string): string {
   let attempt = 0;
   while (true) {
     try {
-      return execSync(command, {
+      logVerbose(`runGh (sync): ${command}`);
+      const start = Date.now();
+      const out = execSync(command, {
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe'],
         input,
         shell: '/bin/bash',
       }).toString().trim();
+      logVerbose(`runGh (sync) completed in ${Date.now() - start}ms`);
+      return out;
     } catch (err: any) {
       const stderr = (err?.stderr ? String(err.stderr) : '') || err?.message || '';
       const stdout = (err?.stdout ? String(err.stdout) : '') || '';
+      logVerbose(`runGh (sync) error: ${stderr || stdout}`);
       // If this is clearly the secondary-rate-limit / abuse response, abort
       if (isSecondaryRateLimitText(stderr) || isSecondaryRateLimitText(stdout)) {
         throw new SecondaryRateLimitError('secondary rate limit detected (sync)', { stdout, stderr });
       }
       if (attempt < maxRetries && /403|rate limit/i.test(stderr + stdout)) {
         const waitMs = computeFullJitterDelay(attempt);
-        try { console.error(`gh rate-limited (sync), retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`); } catch (_) {}
+        logVerbose(`gh rate-limited (sync), retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`);
         // Blocking sleep for sync path
         try {
           const sab = new SharedArrayBuffer(4);
@@ -198,7 +220,7 @@ async function runGhAsync(command: string, input?: string): Promise<string> {
     // apply backoff with jitter and retry.
     if (attempt < maxRetries && /403|rate limit/i.test(stderr + stdout)) {
       const waitMs = computeFullJitterDelay(attempt);
-      try { console.error(`gh rate-limited (async spawn), retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`); } catch (_) {}
+      try { logVerbose(`gh rate-limited (async spawn), retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`); } catch (_) {}
       await new Promise(r => setTimeout(r, waitMs));
       attempt += 1;
       continue;
@@ -252,7 +274,7 @@ async function runGhJsonDetailedAsync(command: string, input?: string, retries =
       // Otherwise, if we have retries left, backoff and retry.
       if (attempt < maxRetries) {
         const waitMs = computeDelay(attempt);
-        try { console.error(`gh rate-limited/restricted, retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`); } catch (_) {}
+        try { logVerbose(`gh rate-limited/restricted, retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`); } catch (_) {}
         await new Promise(r => setTimeout(r, waitMs));
         attempt += 1;
         continue;
