@@ -66,7 +66,7 @@ wl tui --in-progress  # Show only in-progress items
 wl tui --perf          # Enable performance instrumentation: show timestamps in debug output and persist metrics to worklogDir/tui-performance.json
 ```
 
-Press `O` in the TUI to access the built-in OpenCode AI assistant. See [TUI.md](TUI.md) for controls.
+Press `O` in the TUI to access the built-in OpenCode AI assistant. See [TUI.md](TUI.md) for controls, including quick stage filters (`Alt+T` for `intake_complete`, `Alt+P` for `plan_complete`) that exclude closed items.
 
 ### Customizing Your Workflow
 
