@@ -160,3 +160,6 @@ stress-logs/
 # Example: test/tmp_mig/backups/worklog.db.2026-02-10T184519
 test/**/backups/
 **/backups/
+
+# Ignore repository tmp directory created by local tests
+tmp/
