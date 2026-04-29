@@ -532,6 +532,13 @@ export class DialogsComponent {
     try { this.updateDialog.removeAllListeners?.(); } catch (_) {}
     try { this.updateDialogOptions.destroy(); } catch (_) {}
     try { this.updateDialogText.destroy(); } catch (_) {}
+    // Ensure the update dialog's comment textarea is explicitly destroyed.
+    // Some environments or blessed versions do not reliably destroy nested
+    // textareas when the parent container is destroyed; explicitly calling
+    // destroy here makes the lifecycle behaviour deterministic and satisfies
+    // tests that spy on the textarea's destroy method.
+    try { this.updateDialogComment.removeAllListeners?.(); } catch (_) {}
+    try { this.updateDialogComment.destroy(); } catch (_) {}
     try { this.updateDialog.destroy(); } catch (_) {}
 
     try { this.createDialogTitleInput.removeAllListeners?.(); } catch (_) {}

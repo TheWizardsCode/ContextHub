@@ -36,13 +36,18 @@ export class DetailComponent {
       content: '',
     });
 
+    // Keep a copy-id placeholder widget so controller code and tests
+    // that reference getCopyIdButton() continue to work, but do not
+    // render the visible '[Copy ID]' label.
     this.copyIdButton = this.blessedImpl.box({
       parent: this.detail,
       top: 0,
       right: 1,
       height: 1,
-      width: 11,
-      content: '[Copy ID]',
+      // set width to 0 and empty content so the visual label is removed
+      // while the widget object remains available for wiring/click handlers.
+      width: 0,
+      content: '',
       tags: false,
       mouse: true,
       align: 'right',
