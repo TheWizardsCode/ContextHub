@@ -147,14 +147,22 @@ export default function register(ctx: PluginContext): void {
         const format = resolveFormat(program);
         console.log(humanFormatWorkItem(refreshed, db, format));
       }
-      // Trigger re-sort after create unless explicitly disabled
-        try {
-          const reSortNo = Boolean(options.noReSort);
-          const reSortSync = Boolean(options.reSortSync);
-          if (!reSortNo && typeof (db as any).reSort === 'function') {
-            if (reSortSync) (db as any).reSort();
-            else void Promise.resolve().then(() => (db as any).reSort());
-          }
-        } catch (_e) {}
+      // Trigger re-sort after create only when the create modified one of the
+      // impactful fields (status, priority, risk, effort, stage). Honor caller
+      // suppression via --no-re-sort and allow forcing synchronous re-sort via
+      // --re-sort-sync.
+      try {
+        // Robustly detect caller intent for --no-re-sort (Commander may expose
+        // the flag as `noReSort` or as `reSort: false` depending on context).
+        const cliNoReSort = process.argv.includes('--no-re-sort') || process.argv.includes('--noReSort');
+        const reSortNo = (((options as any).noReSort === true) || ((options as any).reSort === false) || cliNoReSort);
+        const reSortSync = Boolean((options as any).reSortSync);
+        const impactfulKeys = ['status','priority','risk','effort','stage'];
+        const shouldReSort = impactfulKeys.some(k => normalized.provided.has(k));
+        if (shouldReSort && !reSortNo && typeof (db as any).reSort === 'function') {
+          if (reSortSync) (db as any).reSort();
+          else void Promise.resolve().then(() => (db as any).reSort());
+        }
+      } catch (_e) {}
     });
 }

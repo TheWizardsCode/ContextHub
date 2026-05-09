@@ -100,9 +100,21 @@ Notes:
 
 - Status and stage values are configured in `.worklog/config.defaults.yaml` under `statuses` and `stages`.
 
+Automatic re-sort:
+
+- By default, when `wl create` sets any of the qualifying fields (`status`, `priority`, `risk`, `effort`, or `stage`), Worklog will automatically invoke a background re-sort so `sort_index` ordering reflects the new item scoring. This keeps `wl next` recommendations up-to-date without requiring a manual `wl re-sort`.
+- Pass `--no-re-sort` to suppress the automatic re-sort for callers that do not want sorting to change as part of the create operation.
+- Pass `--re-sort-sync` to force a synchronous (blocking) re-sort when immediate ordering is required.
+
 ### `update` [options] <id...>
 
 Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--needs-producer-review <true|false>` (set needsProducerReview flag), and `--do-not-delegate <true|false>` (set or clear the do-not-delegate tag).
+
+Automatic re-sort:
+
+- `wl update` will automatically invoke a re-sort when one or more updated fields are among: `status`, `priority`, `risk`, `effort`, or `stage`. By default this re-sort runs asynchronously so the CLI is not blocked. This helps `wl next` and other selection-based commands reflect recent priority or status changes without requiring a manual `wl re-sort`.
+- Use `--no-re-sort` to suppress the automatic re-sort for updates.
+- Use `--re-sort-sync` to force the re-sort to run synchronously (blocking) when callers need immediate ordering guarantees.
 
 Example:
 
