@@ -104,6 +104,7 @@ export class MetadataPaneComponent {
     audit?: { text?: string; time?: string };
   } | null, commentCount: number, perfMetrics?: { start: number; label: string }[]): void {
     const perfStart = perfMetrics ? performance.now() : 0;
+    if (perfMetrics) perfMetrics.push({ start: perfStart, label: 'start' });
     if (!item) {
       this.box.setContent('');
       return;
