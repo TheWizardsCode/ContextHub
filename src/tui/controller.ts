@@ -45,7 +45,7 @@ import createTextareaHelper from './textarea-helper.js';
 import { delegateWorkItem, type DelegateResult, type DelegateDb } from '../delegate-helper.js';
 import { resolveGithubConfig } from '../commands/github.js';
 import { upsertIssuesFromWorkItems } from '../github-sync.js';
-import { fileLog, setVerbose } from './logger.js';
+import { fileLog, setVerbose, flushLogs } from './logger.js';
 
 type Item = WorkItem;
 
@@ -163,6 +163,8 @@ export class TuiController {
     const db = utils.getDatabase(options.prefix);
     const isVerbose = !!program.opts().verbose;
     const perfEnabled = Boolean((options as any).perf);
+    const diagnosticsEnabled = perfEnabled || process.env.TUI_PROFILE === '1';
+    setVerbose(isVerbose || perfEnabled || diagnosticsEnabled || !!process.env.TUI_CHORD_DEBUG);
     // Virtualization is enabled by default. Allow callers to opt-out by
     // passing `virtualize: false` (programmatic callers/tests).  The CLI
     // flag was removed and no longer appears in the user-facing help.
@@ -172,7 +174,7 @@ export class TuiController {
     // Debug logging helper. Emit when either verbose mode is enabled or
     // performance instrumentation is explicitly requested via --perf.
     const debugLog = (message: string) => {
-      if (!isVerbose && !perfEnabled) return;
+      if (!isVerbose && !perfEnabled && !diagnosticsEnabled) return;
       fileLog(`[tui:opencode] ${message}`);
     };
     const perfMetrics: {event: string; start: number; end: number; duration: number}[] = [];
@@ -366,6 +368,19 @@ export class TuiController {
     const worklogDir = resolveWorklogDirImpl();
     const worklogRoot = pathImpl.dirname(worklogDir);
     const statePath = pathImpl.join(worklogDir, 'tui-state.json');
+    const diagnosticsPath = pathImpl.join(
+      worklogDir,
+      `tui-profiling-${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}.jsonl`,
+    );
+    const diagnosticEvents: Array<Record<string, unknown>> = [];
+    const recordDiagnosticEvent = (event: string, payload: Record<string, unknown> = {}) => {
+      if (!diagnosticsEnabled) return;
+      diagnosticEvents.push({
+        ts: new Date().toISOString(),
+        event,
+        ...payload,
+      });
+    };
     void statePath;
 
     // Load persisted state for this prefix if present
@@ -2910,6 +2925,34 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // Watcher for database directory changes.
     let dataWatcher: fs.FSWatcher | null = null;
     let isShuttingDown = false;
+    let eventLoopLagTimer: ReturnType<typeof setInterval> | null = null;
+
+    if (diagnosticsEnabled) {
+      const intervalMs = 250;
+      const lagThresholdMs = Number(process.env.TUI_EVENT_LOOP_LAG_MS || 200);
+      let lastTick = performance.now();
+      recordDiagnosticEvent('profiling_started', {
+        intervalMs,
+        lagThresholdMs,
+        perfEnabled,
+        chordDebug: !!process.env.TUI_CHORD_DEBUG,
+      });
+      eventLoopLagTimer = setInterval(() => {
+        const now = performance.now();
+        const elapsed = now - lastTick;
+        const lag = elapsed - intervalMs;
+        if (lag > lagThresholdMs) {
+          recordDiagnosticEvent('event_loop_lag', {
+            lagMs: Number(lag.toFixed(2)),
+            elapsedMs: Number(elapsed.toFixed(2)),
+            thresholdMs: lagThresholdMs,
+          });
+          debugLog(`Event loop lag detected (${lag.toFixed(2)} ms)`);
+        }
+        lastTick = now;
+      }, intervalMs);
+      try { (eventLoopLagTimer as any)?.unref?.(); } catch (_) {}
+    }
 
     const scheduleRefreshFromDatabase = (fallbackIndex?: number) => {
       if (isShuttingDown) return;
@@ -3902,7 +3945,15 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       // Persist state before exiting
       try { void persistence.savePersistedState(db.getPrefix?.() || undefined, { expanded: Array.from(state.expanded) }); } catch (_) {}
       stopDatabaseWatch();
-      // Write performance metrics to file
+      if (eventLoopLagTimer) {
+        try { clearInterval(eventLoopLagTimer); } catch (_) {}
+        eventLoopLagTimer = null;
+      }
+      recordDiagnosticEvent('shutdown', {
+        perfMetricCount: perfMetrics.length,
+        diagnosticEventCount: diagnosticEvents.length,
+      });
+      // Write performance metrics and diagnostics to file
       void (async () => {
         try {
           const perfPath = pathImpl.join(worklogDir, 'tui-performance.json');
@@ -3911,6 +3962,22 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         } catch (err) {
           debugLog(`Failed to write performance metrics: ${err}`);
         }
+
+        if (diagnosticsEnabled) {
+          try {
+            const diagnosticsContent = diagnosticEvents
+              .map((entry) => JSON.stringify(entry))
+              .join('\n');
+            await fsAsync.writeFile(diagnosticsPath, `${diagnosticsContent}\n`);
+            debugLog(`TUI profiling diagnostics written to ${diagnosticsPath}`);
+          } catch (err) {
+            debugLog(`Failed to write TUI profiling diagnostics: ${err}`);
+          }
+        }
+
+        try {
+          await flushLogs();
+        } catch (_) {}
       })();
       // Stop the OpenCode server if we started it
       opencodeClient.stopServer();
@@ -4074,13 +4141,44 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       try {
         (screen as any).on('keypress', (_ch: any, key: any) => {
       debugLog(`Raw keypress: ch="${_ch}", key.name="${key?.name}", key.ctrl=${key?.ctrl}, key.meta=${key?.meta}`);
+        const keyStart = diagnosticsEnabled ? performance.now() : 0;
         try {
           if (chordHandler.feed(key as KeyInfo)) {
             debugLog(`ChordHandler consumed key event`);
+            if (diagnosticsEnabled) {
+              recordDiagnosticEvent('keypress', {
+                ch: _ch,
+                keyName: key?.name,
+                ctrl: !!key?.ctrl,
+                meta: !!key?.meta,
+                shift: !!key?.shift,
+                consumedByChord: true,
+                handlerDurationMs: Number((performance.now() - keyStart).toFixed(2)),
+              });
+            }
             return false;
           }
         } catch (err) {
           debugLog(`ChordHandler.feed threw: ${(err as any)?.message ?? String(err)}`);
+          if (diagnosticsEnabled) {
+            recordDiagnosticEvent('keypress_error', {
+              ch: _ch,
+              keyName: key?.name,
+              message: (err as any)?.message ?? String(err),
+            });
+          }
+        }
+
+        if (diagnosticsEnabled) {
+          recordDiagnosticEvent('keypress', {
+            ch: _ch,
+            keyName: key?.name,
+            ctrl: !!key?.ctrl,
+            meta: !!key?.meta,
+            shift: !!key?.shift,
+            consumedByChord: false,
+            handlerDurationMs: Number((performance.now() - keyStart).toFixed(2)),
+          });
         }
 
         // Some terminals/blessed combinations report Shift+g as raw ch='G'
