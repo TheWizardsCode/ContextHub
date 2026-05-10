@@ -160,7 +160,11 @@ export class TuiController {
     const OpencodeClientImpl = this.deps.OpencodeClient ?? OpencodeClient;
 
     utils.requireInitialized();
+    const previousTuiMode = process.env.WL_TUI_MODE;
+    process.env.WL_TUI_MODE = '1';
     const db = utils.getDatabase(options.prefix);
+    if (previousTuiMode === undefined) delete process.env.WL_TUI_MODE;
+    else process.env.WL_TUI_MODE = previousTuiMode;
     const isVerbose = !!program.opts().verbose;
     const perfEnabled = Boolean((options as any).perf);
     const diagnosticsEnabled = perfEnabled || process.env.TUI_PROFILE === '1';
@@ -180,10 +184,29 @@ export class TuiController {
     const perfMetrics: {event: string; start: number; end: number; duration: number}[] = [];
     const detailCache = new Map<string, string>();
 
+    const isSqliteBusyError = (error: unknown): boolean => {
+      const message = getErrorMessage(error);
+      return /SQLITE_BUSY|database is locked/i.test(message);
+    };
+
+    const listWorkItemsSafely = (
+      queryObj: Partial<Record<string, unknown>>,
+      fallback: Item[] = [],
+      context: string = 'unknown',
+    ): { items: Item[]; busy: boolean } => {
+      try {
+        return { items: db.list(queryObj), busy: false };
+      } catch (error) {
+        if (!isSqliteBusyError(error)) throw error;
+        debugLog(`[db] list busy in ${context}; returning fallback (${fallback.length} items)`);
+        return { items: fallback, busy: true };
+      }
+    };
+
     const query: Partial<Record<string, unknown>> = {};
     if (options.inProgress) query.status = 'in-progress';
 
-    const allItems: Item[] = db.list(query);
+    const allItems: Item[] = listWorkItemsSafely(query, [], 'initial-load').items;
     const showClosed = Boolean(options.all);
     const visibleCandidates = showClosed
       ? allItems
@@ -2880,7 +2903,12 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       const query: any = {};
       if (status) query.status = status;
       if (needsReviewFilter !== null) query.needsProducerReview = needsReviewFilter;
-      state.items = db.list(query);
+      const listed = listWorkItemsSafely(query, state.items.slice(), 'refresh-list');
+      if (listed.busy) {
+        showToast('Database busy; deferred refresh');
+        return;
+      }
+      state.items = listed.items;
       detailCache.clear();
       const nextVisible = includeClosed
         ? state.items.slice()

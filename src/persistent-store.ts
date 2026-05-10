@@ -112,6 +112,13 @@ export class SqlitePersistentStore {
       this.db = new Database(dbPath);
       this.db.pragma('journal_mode = WAL'); // Better concurrency
       this.db.pragma('foreign_keys = ON');
+      // Keep TUI reads responsive under write contention by using a shorter
+      // busy timeout in TUI mode. Override via WL_SQLITE_BUSY_TIMEOUT_MS.
+      const configuredBusyTimeout = Number(process.env.WL_SQLITE_BUSY_TIMEOUT_MS);
+      const busyTimeoutMs = Number.isFinite(configuredBusyTimeout)
+        ? configuredBusyTimeout
+        : (process.env.WL_TUI_MODE === '1' ? 250 : 5000);
+      this.db.pragma(`busy_timeout = ${Math.max(0, Math.floor(busyTimeoutMs))}`);
     } catch (error) {
       throw new Error(`Failed to open database ${dbPath}: ${(error as Error).message}`);
     }
