@@ -2609,11 +2609,24 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
   const scrollEnd = perfEnabled ? performance.now() : 0;
   // Update metadata pane with current item's metadata
   const metaStart = perfEnabled ? performance.now() : 0;
+  let commentsMs = 0;
+  let githubMs = 0;
+  let updateMs = 0;
   if (metadataPaneComponent) {
     type PerfMetric = { start: number; label: string };
     const metadataPerfMetrics: PerfMetric[] | undefined = perfEnabled ? [] : undefined;
+    const c1 = perfEnabled ? performance.now() : 0;
     const commentCount = db ? db.getCommentsForWorkItem(node.item.id).length : 0;
-    metadataPaneComponent.updateFromItem({ ...node.item, githubRepo: tryGetGithubRepo() ?? undefined }, commentCount, metadataPerfMetrics);
+    const c2 = perfEnabled ? performance.now() : 0;
+    commentsMs = c2 - c1;
+    const g1 = perfEnabled ? performance.now() : 0;
+    const githubRepo = tryGetGithubRepo();
+    const g2 = perfEnabled ? performance.now() : 0;
+    githubMs = g2 - g1;
+    const u1 = perfEnabled ? performance.now() : 0;
+    metadataPaneComponent.updateFromItem({ ...node.item, githubRepo: githubRepo ?? undefined }, commentCount, metadataPerfMetrics);
+    const u2 = perfEnabled ? performance.now() : 0;
+    updateMs = u2 - u1;
     if (diagnosticsEnabled && metadataPerfMetrics && metadataPerfMetrics.length > 0) {
       const itemStart = metadataPerfMetrics[0]?.start ?? 0;
       const metadataTiming: Record<string, number> = {};
@@ -2631,7 +2644,9 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       cacheLookupMs: Number((cacheEnd - cacheStart).toFixed(2)),
       setDetailContentMs: Number((sdcEnd - sdcStart).toFixed(2)),
       setScrollMs: Number((scrollEnd - scrollStart).toFixed(2)),
-      metadataPaneMs: Number((metaEnd - metaStart).toFixed(2)),
+      getCommentsMs: Number(commentsMs.toFixed(2)),
+      getGithubRepoMs: Number(githubMs.toFixed(2)),
+      metadataPaneUpdateMs: Number(updateMs.toFixed(2)),
       totalMs: Number((metaEnd - bvStart).toFixed(2)),
     });
   }
