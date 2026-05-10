@@ -61,13 +61,17 @@ Expected signal during a bad run:
 
 ## Root-cause hypothesis and mitigation
 
-Most severe stalls are consistent with synchronous file I/O on the input hot path (especially when debug logging is enabled on slow filesystems).
+Validated RCA from field traces (Tableau-Card-Engine repro logs):
+
+1. **Long freeze class (~30s):** main-thread stalls aligned with database refresh lock contention (`scheduleRefreshFromDatabase` and `renderListAndDetail` blocked for ~31s).
+2. **Residual sluggish class (~1–2s repeated lag):** frequent file-watch-triggered refreshes caused repeated full tree/detail re-renders even when the dataset did not change.
 
 Mitigation implemented in this branch:
 
 - TUI file logging now buffers and flushes asynchronously.
 - Logging writes are bounded by an in-memory queue cap to prevent unbounded growth under sustained input.
 - TUI mode now uses a shorter SQLite busy timeout to avoid multi-second UI stalls when the DB is contended.
+- Watch-refresh path now skips expensive re-render work when the refreshed dataset fingerprint is unchanged (diagnostic event: `refresh_skipped_unchanged`).
 
 You can tune SQLite busy timeout explicitly:
 

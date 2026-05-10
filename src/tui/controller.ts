@@ -204,6 +204,31 @@ export class TuiController {
       }
     };
 
+    const fingerprintItemForRefresh = (item: Item): string => {
+      const tags = Array.isArray(item.tags) ? item.tags.join(',') : '';
+      return [
+        item.id,
+        item.updatedAt || '',
+        item.status || '',
+        item.stage || '',
+        item.priority || '',
+        item.parentId || '',
+        Number.isFinite(item.sortIndex) ? item.sortIndex : '',
+        item.needsProducerReview ? '1' : '0',
+        tags,
+      ].join('|');
+    };
+
+    const areItemsEquivalentForRefresh = (left: Item[], right: Item[]): boolean => {
+      if (left.length !== right.length) return false;
+      for (let i = 0; i < left.length; i += 1) {
+        if (fingerprintItemForRefresh(left[i]) !== fingerprintItemForRefresh(right[i])) {
+          return false;
+        }
+      }
+      return true;
+    };
+
     const query: Partial<Record<string, unknown>> = {};
     if (options.inProgress) query.status = 'in-progress';
 
@@ -2873,6 +2898,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       preferredIndex?: number;
       fallbackIndex?: number;
       allowFallback?: boolean;
+      skipRenderWhenUnchanged?: boolean;
     };
 
     function refreshListWithOptions(opts: ListRefreshOptions = {}) {
@@ -2886,6 +2912,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         preferredIndex,
         fallbackIndex,
         allowFallback = true,
+        skipRenderWhenUnchanged = false,
       } = opts;
 
       if (resetSearch) {
@@ -2911,6 +2938,19 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         showToast('Database busy; deferred refresh');
         return;
       }
+
+      if (skipRenderWhenUnchanged && areItemsEquivalentForRefresh(state.items, listed.items)) {
+        debugLog('refresh-list: unchanged dataset, skipping render');
+        if (diagnosticsEnabled) {
+          recordDiagnosticEvent('refresh_skipped_unchanged', {
+            itemCount: listed.items.length,
+            status: status || null,
+            includeClosed,
+          });
+        }
+        return;
+      }
+
       state.items = listed.items;
       detailCache.clear();
       const nextVisible = includeClosed
@@ -2941,12 +2981,13 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       renderListAndDetail(nextIndex);
     }
 
-    function refreshFromDatabase(preferredIndex?: number, fallbackIndex?: number) {
+    function refreshFromDatabase(preferredIndex?: number, fallbackIndex?: number, skipRenderWhenUnchanged = false) {
       refreshListWithOptions({
         status: options.inProgress ? 'in-progress' : undefined,
         includeClosed: options.all,
         preferredIndex,
         fallbackIndex,
+        skipRenderWhenUnchanged,
       });
     }
 
@@ -3116,7 +3157,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
 
            const refreshStart = Date.now();
            try {
-             refreshFromDatabase(undefined, fallback);
+             refreshFromDatabase(undefined, fallback, true);
            } finally {
              try { debugLog && debugLog(`scheduleRefreshFromDatabase: refresh completed in ${Date.now() - refreshStart}ms`); } catch (_) {}
            }
