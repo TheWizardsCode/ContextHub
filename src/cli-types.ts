@@ -34,6 +34,8 @@ export interface CreateOptions {
   audit?: string;
   /** Preferred audit flag for structured writes */
   auditText?: string;
+  /** Read audit text from a file */
+  auditFile?: string;
   prefix?: string;
   /** Skip automatic re-sort after the create action */
   noReSort?: boolean;
@@ -56,7 +58,7 @@ export interface ListOptions {
   number?: string;
 }
 
-export interface ShowOptions { children?: boolean; prefix?: string }
+export interface ShowOptions { children?: boolean; prefix?: string; noPager?: boolean }
 
 export interface AuditOptions { prefix?: string }
 
@@ -84,6 +86,8 @@ export interface UpdateOptions {
   audit?: string;
   /** Preferred audit flag for structured writes */
   auditText?: string;
+  /** Read audit text from a file */
+  auditFile?: string;
   prefix?: string;
   /** Skip automatic re-sort after the update action */
   noReSort?: boolean;
