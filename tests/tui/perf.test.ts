@@ -1,3 +1,4 @@
+import fs from 'fs';
 import { describe, it, expect, vi } from 'vitest';
 import { TuiController } from '../../src/tui/controller.js';
 import { createTuiTestContext, createTempDir, cleanupTempDir } from '../test-utils';
@@ -108,6 +109,46 @@ describe('TUI performance instrumentation', () => {
       });
 
     expect(hasKeypress).toBe(true);
+
+    cleanupTempDir(tmp);
+  });
+
+  it('does not emit verbose TUI debug log file in perf mode unless TUI_LOG_VERBOSE=1', async () => {
+    const tmp = createTempDir();
+    const ctx = createTuiTestContext();
+    ctx.utils.createSampleItem();
+    const layout = ctx.createLayout();
+
+    class FakeOpencodeClient {
+      getStatus() { return { status: 'running', port: 9999 }; }
+      startServer() { return Promise.resolve(true); }
+      stopServer() { return undefined; }
+      sendPrompt() { return Promise.resolve(); }
+    }
+
+    const prevLogFile = process.env.TUI_LOGFILE;
+    const prevLogVerbose = process.env.TUI_LOG_VERBOSE;
+    const logFile = `${tmp}/tui-debug.log`;
+    process.env.TUI_LOGFILE = logFile;
+    delete process.env.TUI_LOG_VERBOSE;
+
+    const controller = new TuiController(ctx as any, {
+      createLayout: () => layout as any,
+      OpencodeClient: FakeOpencodeClient as any,
+      resolveWorklogDir: () => tmp,
+      createPersistence: () => ({ loadPersistedState: async () => null, savePersistedState: async () => undefined, statePath: `${tmp}/tui-state.json` }),
+    });
+
+    await controller.start({ perf: true });
+    ctx.screen.emit('keypress', 'q', { name: 'q' });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(fs.existsSync(logFile)).toBe(false);
+
+    if (prevLogFile === undefined) delete process.env.TUI_LOGFILE;
+    else process.env.TUI_LOGFILE = prevLogFile;
+    if (prevLogVerbose === undefined) delete process.env.TUI_LOG_VERBOSE;
+    else process.env.TUI_LOG_VERBOSE = prevLogVerbose;
 
     cleanupTempDir(tmp);
   });

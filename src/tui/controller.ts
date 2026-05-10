@@ -168,7 +168,8 @@ export class TuiController {
     const isVerbose = !!program.opts().verbose;
     const perfEnabled = Boolean((options as any).perf);
     const diagnosticsEnabled = perfEnabled || process.env.TUI_PROFILE === '1';
-    setVerbose(isVerbose || perfEnabled || diagnosticsEnabled || !!process.env.TUI_CHORD_DEBUG);
+    const fileLoggingEnabled = isVerbose || process.env.TUI_LOG_VERBOSE === '1' || !!process.env.TUI_CHORD_DEBUG;
+    setVerbose(fileLoggingEnabled);
     // Virtualization is enabled by default. Allow callers to opt-out by
     // passing `virtualize: false` (programmatic callers/tests).  The CLI
     // flag was removed and no longer appears in the user-facing help.
@@ -4021,6 +4022,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     });
 
     const shutdown = () => {
+      if (isShuttingDown) return;
       isShuttingDown = true;
       // Persist state before exiting
       try { void persistence.savePersistedState(db.getPrefix?.() || undefined, { expanded: Array.from(state.expanded) }); } catch (_) {}

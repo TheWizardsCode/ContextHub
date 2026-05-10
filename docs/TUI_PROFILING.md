@@ -38,6 +38,8 @@ TUI_CHORD_DEBUG=1 TUI_LOG_VERBOSE=1 TUI_LOGFILE=./tui-debug.log npm run cli -- t
 
 This records low-level chord activity to the file in `TUI_LOGFILE`.
 
+Note: `--perf` / `TUI_PROFILE=1` no longer imply verbose file logging by default. This avoids logging overhead on the keypress hot path while still collecting profiling artifacts.
+
 ## Known freeze reproduction path (WSL / slow-mounted filesystem)
 
 Use this scenario to reproduce key-input stalls observed in WSL/Windows Terminal setups:
