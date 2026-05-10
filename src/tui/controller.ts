@@ -3515,13 +3515,24 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       // "View" action deterministic across keyboard and mouse paths.
       if (selectedId) {
         try {
+          // Ensure ancestors are expanded so the target becomes visible
+          if (state.itemsById.has(selectedId)) {
+            let cursor = state.itemsById.get(selectedId) as Item | undefined;
+            while (cursor?.parentId && state.itemsById.has(cursor.parentId)) {
+              state.expanded.add(cursor.parentId);
+              cursor = state.itemsById.get(cursor.parentId);
+            }
+            // Rebuild the tree to reflect expansions before computing visible
+            rebuildTree();
+            expandInProgressAncestors();
+          }
+
           const visible = buildVisible();
           const idx = visible.findIndex(node => node.item.id === selectedId);
           if (idx >= 0) {
             renderListAndDetail(idx);
           } else {
-            // If not found in the current visible set, fall back to focusing
-            // the list and leaving selection unchanged.
+            // If not found, focus the list so keyboard users land in the tree
             list.focus();
             paneFocusIndex = getFocusPanes().indexOf(list);
             applyFocusStyles();
