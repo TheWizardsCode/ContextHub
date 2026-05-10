@@ -2055,10 +2055,15 @@ export class TuiController {
     };
 
     // Resolve github repo without throwing — returns null when not configured.
+    // Cache the result so we don't spawn `gh` on every arrow key.
+    let cachedGithubRepo: string | null | undefined = undefined;
     const tryGetGithubRepo = (): string | null => {
+      if (cachedGithubRepo !== undefined) return cachedGithubRepo;
       try {
-        return resolveGithubConfig({}).repo;
+        cachedGithubRepo = resolveGithubConfig({}).repo;
+        return cachedGithubRepo;
       } catch (_) {
+        cachedGithubRepo = null;
         return null;
       }
     };
