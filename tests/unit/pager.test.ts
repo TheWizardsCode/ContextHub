@@ -1,4 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// Mock child_process.spawnSync so we can assert whether the pager was invoked.
+vi.mock('child_process', async () => {
+  const actual = await vi.importActual('child_process');
+  return {
+    ...actual,
+    spawnSync: vi.fn()
+  };
+});
+
 import pageOutput from '../../src/pager.js';
 import * as child from 'child_process';
 
@@ -17,6 +27,11 @@ describe('pager', () => {
     process.stdout.isTTY = origIsTTY;
     (process.stdout as any).rows = origRows;
     writeSpy.mockRestore();
+    // Clear mocked spawnSync call history if present
+    try {
+      const s: any = (child as any).spawnSync;
+      if (s && typeof s.mockClear === 'function') s.mockClear();
+    } catch (_e) {}
     vi.restoreAllMocks();
   });
 
