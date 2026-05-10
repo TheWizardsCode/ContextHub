@@ -38,13 +38,18 @@ export default function register(ctx: PluginContext): void {
     .option('--audit-text <text>', 'Set structured audit text. First non-empty line must be "Ready to close: Yes" or "Ready to close: No" (see docs/AUDIT_STATUS.md)')
     .option('--do-not-delegate <true|false>', 'Set or clear the do-not-delegate tag (true|false|yes|no)')
     .option('--prefix <prefix>', 'Override the default prefix')
+    .option('--no-re-sort', 'Skip automatic re-sort after the update')
+    .option('--re-sort-sync', 'Force a synchronous re-sort after the update', false)
     .action(async (...rawArgs: any[]) => {
       // Accept re-sort flags to control automatic re-sort behavior after writes
       // --no-re-sort: skip auto re-sort
       // --re-sort-sync: force synchronous re-sort (blocking)
       // Normalize re-sort flags from commander/options
       const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','doNotDelegate','prefix','noReSort','reSortSync']);
-      const reSortNo = Boolean((normalized.options as any)?.noReSort);
+      // Robust detection of --no-re-sort that accepts multiple forms Commander
+      // may expose (`noReSort`, `reSort: false`) and also checks raw argv.
+      const cliNoReSort = process.argv.includes('--no-re-sort') || process.argv.includes('--noReSort');
+      const reSortNo = (((normalized.options as any)?.noReSort === true) || ((normalized.options as any)?.reSort === false) || cliNoReSort);
       const reSortSync = Boolean((normalized.options as any)?.reSortSync);
       const knownOptionKeys = [
         'title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','doNotDelegate','prefix','noReSort','reSortSync'
@@ -146,6 +151,9 @@ export default function register(ctx: PluginContext): void {
       }
 
       const results: Array<any> = [];
+      // Track whether any update modified one of the impactful fields
+      // that should trigger an automatic re-sort when the update completes.
+      let impactfulChange = false;
       for (const rawId of idsRaw) {
         const normalizedId = utils.normalizeCliId(rawId, options.prefix) || rawId;
         const updates: UpdateWorkItemInput = {};
@@ -276,6 +284,12 @@ export default function register(ctx: PluginContext): void {
           db.reconcileDependentStatus(normalizedId);
         }
 
+        // Mark that an impactful change was made if any qualifying fields were
+        // included in this per-id update.
+        if (updates.status || updates.priority || updates.risk || updates.effort || updates.stage) {
+          impactfulChange = true;
+        }
+
         // Fire-and-forget: submit a summary to OpenBrain when the item
         // transitions to completed, if the feature is enabled.
         if (updates.status === 'completed') {
@@ -325,10 +339,11 @@ export default function register(ctx: PluginContext): void {
         // in-process runner (which replaces process.exit with a throwing
         // trap) will surface a non-zero exit code to execAsync.
         process.exitCode = 1;
-        // Run re-sort unless explicitly disabled (do this before exit so
-        // external scripts can rely on ordering after a blocking update).
+        // Run re-sort if impactful changes were made and re-sort is not
+        // explicitly disabled (do this before exit so external scripts can
+        // rely on ordering after a blocking update).
         try {
-          if (!reSortNo && typeof (db as any).reSort === 'function') {
+          if (impactfulChange && !reSortNo && typeof (db as any).reSort === 'function') {
             if (reSortSync) (db as any).reSort();
             else void Promise.resolve().then(() => (db as any).reSort());
           }
@@ -336,9 +351,10 @@ export default function register(ctx: PluginContext): void {
         process.exit(1);
       }
 
-      // If reached here and not exiting, trigger re-sort unless disabled
+      // If reached here and not exiting, trigger re-sort if impactful changes
+      // were made and re-sort is not disabled.
         try {
-          if (!reSortNo && typeof (db as any).reSort === 'function') {
+          if (impactfulChange && !reSortNo && typeof (db as any).reSort === 'function') {
             if (reSortSync) (db as any).reSort();
             else void Promise.resolve().then(() => (db as any).reSort());
           }
