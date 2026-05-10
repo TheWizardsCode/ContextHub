@@ -59,4 +59,56 @@ describe('TUI performance instrumentation', () => {
     errSpy.mockRestore();
     cleanupTempDir(tmp);
   });
+
+  it('writes keypress diagnostics JSONL when profiling is enabled', async () => {
+    const tmp = createTempDir();
+    const ctx = createTuiTestContext();
+    ctx.utils.createSampleItem();
+    const layout = ctx.createLayout();
+
+    class FakeOpencodeClient {
+      getStatus() { return { status: 'running', port: 9999 }; }
+      startServer() { return Promise.resolve(true); }
+      stopServer() { return undefined; }
+      sendPrompt() { return Promise.resolve(); }
+    }
+
+    const writeFileSpy = vi.fn(async (_path: string, _data: string) => undefined);
+
+    const controller = new TuiController(ctx as any, {
+      createLayout: () => layout as any,
+      OpencodeClient: FakeOpencodeClient as any,
+      resolveWorklogDir: () => tmp,
+      createPersistence: () => ({ loadPersistedState: async () => null, savePersistedState: async () => undefined, statePath: `${tmp}/tui-state.json` }),
+      fs: { promises: { writeFile: writeFileSpy } } as any,
+    });
+
+    await controller.start({ perf: true });
+
+    ctx.screen.emit('keypress', 'j', { name: 'j' });
+    ctx.screen.emit('keypress', 'q', { name: 'q' });
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(writeFileSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    const profilingCall = writeFileSpy.mock.calls.find(([filePath]) => String(filePath).includes('tui-profiling-'));
+    expect(profilingCall).toBeTruthy();
+
+    const diagnosticsPayload = String(profilingCall?.[1] || '');
+    const hasKeypress = diagnosticsPayload
+      .split('\n')
+      .filter(Boolean)
+      .some((line) => {
+        try {
+          const parsed = JSON.parse(line);
+          return parsed?.event === 'keypress';
+        } catch {
+          return false;
+        }
+      });
+
+    expect(hasKeypress).toBe(true);
+
+    cleanupTempDir(tmp);
+  });
 });
