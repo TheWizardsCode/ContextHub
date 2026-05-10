@@ -2371,6 +2371,7 @@ export class TuiController {
     }
 
     function renderListAndDetail(selectIndex = 0) {
+      appendTrace(`renderListAndDetail called selectIndex=${selectIndex}`);
       const visible = buildVisible();
       const renderStart = perfEnabled ? performance.now() : null;
       const lines = visible.map(n => {
@@ -3732,6 +3733,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // consistent across mouse and keyboard interactions.
     // Uses the cached visible nodes (no tree traversal) for scroll/navigation.
     const updateListSelection = (idx: number, source?: string) => {
+      appendTrace(`updateListSelection called idx=${idx} source=${String(source)}`);
       const scrollStart = perfEnabled ? performance.now() : null;
       const visible = buildVisible();
       // In virtual-scroll mode the caller may pass a viewport-relative index.
