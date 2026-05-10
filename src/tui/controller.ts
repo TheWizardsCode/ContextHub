@@ -2999,6 +2999,22 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     let isShuttingDown = false;
     let eventLoopLagTimer: ReturnType<typeof setInterval> | null = null;
 
+    const readDbWatchSignature = (dbPath: string): string | null => {
+      const walPath = `${dbPath}-wal`;
+      try {
+        const dbStat = fsImpl.statSync?.(dbPath);
+        const walStat = fsImpl.statSync?.(walPath);
+        if (!dbStat) return null;
+        const dbMtime = Number((dbStat as any).mtimeMs || 0);
+        const dbSize = Number((dbStat as any).size || 0);
+        const walMtime = Number((walStat as any)?.mtimeMs || 0);
+        const walSize = Number((walStat as any)?.size || 0);
+        return `${dbMtime}:${dbSize}:${walMtime}:${walSize}`;
+      } catch (_) {
+        return null;
+      }
+    };
+
     if (diagnosticsEnabled) {
       const intervalMs = 250;
       const lagThresholdMs = Number(process.env.TUI_EVENT_LOOP_LAG_MS || 200);
@@ -3172,16 +3188,13 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       const dataDir = pathImpl.dirname(dataPath);
       const dataFile = pathImpl.basename(dataPath);
       try {
-        // Initialize lastJsonlMtime from the current JSONL export if present so
-        // subsequent watch events can compare against a known baseline. If the
-        // stat fails, leave lastJsonlMtime as null which will cause watch events
-        // to be ignored until a successful stat occurs.
-        // No longer consult a JSONL mtime for watch decisions; always refresh
-        // on observed database directory events (debounced).
         // Watch for changes to either the main DB file or the WAL file.
         // In SQLite WAL mode, changes are written to the -wal file first,
         // so we need to watch both files to detect all database changes.
+        // For platforms that report `filename` as undefined, compute a small
+        // signature from db/wal stat metadata and only refresh when it changes.
         let watchDebounce: ReturnType<typeof setTimeout> | null = null;
+        let lastWatchSignature = readDbWatchSignature(dataPath);
         dataWatcher = fsImpl.watch(dataDir, (_eventType, filename) => {
           if (isShuttingDown) return;
           // Accept events from either the main DB file or the WAL file
@@ -3191,20 +3204,19 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           watchDebounce = setTimeout(() => {
             watchDebounce = null;
             const selectedIndex = getGlobalSelectedIndex();
-            // If the watcher provided a specific filename (eg. 'worklog.db' or
-            // 'worklog.db-wal') then refresh unconditionally — the event
-            // directly refers to the database file. When filename is undefined
-            // we only refresh when the transient JSONL export mtime changed to
-            // avoid unnecessary reloads caused by unrelated directory changes.
             if (filename) {
+              lastWatchSignature = readDbWatchSignature(dataPath) ?? lastWatchSignature;
               scheduleRefreshFromDatabase(selectedIndex);
               return;
             }
-            // Always refresh on debounced directory events. The watcher may
-            // provide a filename for the DB or WAL; when it does we refresh
-            // immediately. When filename is undefined (some platforms) we also
-            // refresh — we no longer rely on a JSONL export mtime to gate
-            // updates.
+
+            const signature = readDbWatchSignature(dataPath);
+            if (!signature || signature === lastWatchSignature) {
+              debugLog('watch: ignored directory event without db/wal signature change');
+              return;
+            }
+
+            lastWatchSignature = signature;
             scheduleRefreshFromDatabase(selectedIndex);
           }, 75);
         });

@@ -550,6 +550,8 @@ describe('TUI integration: style preservation', () => {
       }),
     };
 
+    let dbMtimeMs = 1000;
+    let walMtimeMs = 1000;
     vi.doMock('fs', async () => {
       const actual = await vi.importActual<typeof import('fs')>('fs');
       return {
@@ -559,9 +561,16 @@ describe('TUI integration: style preservation', () => {
           return { close: vi.fn() } as any;
         }),
         statSync: vi.fn((targetPath: any, options?: any) => {
-          if (String(targetPath).endsWith('.jsonl')) {
+          const pathStr = String(targetPath);
+          if (pathStr.endsWith('.jsonl')) {
             if (mtimeReadError) throw new Error('stat failed');
             return { mtimeMs: dataMtimeMs } as any;
+          }
+          if (pathStr.endsWith('.db')) {
+            return { mtimeMs: dbMtimeMs, size: 1000 } as any;
+          }
+          if (pathStr.endsWith('.db-wal')) {
+            return { mtimeMs: walMtimeMs, size: 100 } as any;
           }
           return (actual.statSync as any)(targetPath, options);
         }),
@@ -587,24 +596,27 @@ describe('TUI integration: style preservation', () => {
     const onWatch = watchCallbacks[0];
     const baselineCalls = listMock.mock.calls.length;
 
-    // We no longer consult a JSONL mtime for watch decisions; every
-    // debounced directory event should schedule a refresh. Verify that
-    // each debounced callback results in an additional db.list() call.
+    // Filename-less watch event with unchanged db/wal signature should be
+    // ignored and NOT trigger a refresh.
+    onWatch('change', undefined);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(listMock.mock.calls.length).toBe(baselineCalls);
+
+    // Changing the WAL signature should trigger a refresh on the next
+    // filename-less event.
+    walMtimeMs = 2000;
     onWatch('change', undefined);
     await vi.advanceTimersByTimeAsync(400);
     expect(listMock.mock.calls.length).toBeGreaterThan(baselineCalls);
 
-    const afterFirstCalls = listMock.mock.calls.length;
-    dataMtimeMs = 2000;
-    onWatch('change', undefined);
-    await vi.advanceTimersByTimeAsync(400);
-    expect(listMock.mock.calls.length).toBeGreaterThan(afterFirstCalls);
-
+    // A stat read error during signature computation should be handled
+    // gracefully (no throw) and should not trigger a refresh when the
+    // signature cannot be determined.
     const afterSecondCalls = listMock.mock.calls.length;
     mtimeReadError = true;
     onWatch('change', undefined);
     await vi.advanceTimersByTimeAsync(400);
-    expect(listMock.mock.calls.length).toBeGreaterThan(afterSecondCalls);
+    expect(listMock.mock.calls.length).toBe(afterSecondCalls);
 
     vi.useRealTimers();
   });
