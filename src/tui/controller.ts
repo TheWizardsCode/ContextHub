@@ -3507,9 +3507,34 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       runNextWorkItems(0);
     }
 
-    function closeNextDialog() {
+    function closeNextDialog(selectedId?: string) {
       nextDialog.hide();
       nextOverlay.hide();
+      // If a specific item id is provided, ensure it becomes the selected
+      // work item in the tree after the dialog closes. This makes the
+      // "View" action deterministic across keyboard and mouse paths.
+      if (selectedId) {
+        try {
+          const visible = buildVisible();
+          const idx = visible.findIndex(node => node.item.id === selectedId);
+          if (idx >= 0) {
+            renderListAndDetail(idx);
+          } else {
+            // If not found in the current visible set, fall back to focusing
+            // the list and leaving selection unchanged.
+            list.focus();
+            paneFocusIndex = getFocusPanes().indexOf(list);
+            applyFocusStyles();
+          }
+        } catch (_) {
+          try { list.focus(); } catch (_) {}
+          paneFocusIndex = getFocusPanes().indexOf(list);
+          applyFocusStyles();
+        }
+        screen.render();
+        return;
+      }
+
       list.focus();
       paneFocusIndex = getFocusPanes().indexOf(list);
       applyFocusStyles();
@@ -5193,7 +5218,7 @@ const visible = buildVisible();
           return;
         }
         const selected = await viewWorkItemInTree(nextWorkItem.id);
-        if (selected) closeNextDialog();
+        if (selected) closeNextDialog(nextWorkItem.id);
         return;
       }
       if (idx === 1) {
@@ -5218,7 +5243,7 @@ const visible = buildVisible();
           return;
         }
         const selected = await viewWorkItemInTree(nextWorkItem.id);
-        if (selected) closeNextDialog();
+        if (selected) closeNextDialog(nextWorkItem.id);
         return;
       }
       if (idx === 1) {
@@ -5238,7 +5263,7 @@ const visible = buildVisible();
           return;
         }
         const selected = await viewWorkItemInTree(nextWorkItem.id);
-        if (selected) closeNextDialog();
+        if (selected) closeNextDialog(nextWorkItem.id);
         return;
       }
       if (idx === 1) {
