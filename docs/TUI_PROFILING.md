@@ -65,6 +65,13 @@ Mitigation implemented in this branch:
 
 - TUI file logging now buffers and flushes asynchronously.
 - Logging writes are bounded by an in-memory queue cap to prevent unbounded growth under sustained input.
+- TUI mode now uses a shorter SQLite busy timeout to avoid multi-second UI stalls when the DB is contended.
+
+You can tune SQLite busy timeout explicitly:
+
+```bash
+WL_SQLITE_BUSY_TIMEOUT_MS=250 wl tui --perf
+```
 
 ## Output artifacts and default locations
 
