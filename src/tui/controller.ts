@@ -3545,6 +3545,10 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           const idx = visible.findIndex(node => node.item.id === selectedId);
           appendTrace(`computed visible idx=${idx} for ${selectedId} (visibleLen=${visible.length})`);
           if (idx >= 0) {
+            // Temporarily suppress incoming 'select-item' events so our
+            // programmatic selection is not immediately overridden by other
+            // event handlers that may fire concurrently (keypress/mouse).
+            suppressSelectionUntil = Date.now() + 150;
             renderListAndDetail(idx);
             appendTrace(`renderListAndDetail called for idx=${idx}`);
           } else {
@@ -3732,8 +3736,19 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // Centralized list selection handler to keep detail updates/rendering
     // consistent across mouse and keyboard interactions.
     // Uses the cached visible nodes (no tree traversal) for scroll/navigation.
+    let suppressSelectionUntil = 0;
+
     const updateListSelection = (idx: number, source?: string) => {
       appendTrace(`updateListSelection called idx=${idx} source=${String(source)}`);
+      // Suppress select-item events briefly after programmatic selection to
+      // avoid races where external handlers (keypress/mouse) overwrite the
+      // intended selection set by View. Only suppress 'select-item' sources
+      // since user key navigation should still work.
+      if (suppressSelectionUntil && Date.now() < suppressSelectionUntil && source === 'select-item') {
+        appendTrace(`updateListSelection suppressed idx=${idx} source=${String(source)}`);
+        return;
+      }
+
       const scrollStart = perfEnabled ? performance.now() : null;
       const visible = buildVisible();
       // In virtual-scroll mode the caller may pass a viewport-relative index.
