@@ -2575,11 +2575,14 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     content = decorateIdsForClick(brightened);
     const decoEnd = perfEnabled ? performance.now() : 0;
     detailCache.set(node.item.id, content);
-    if (perfEnabled) {
-      debugLog(`[perf:detail] humanFormatWorkItem: ${(fmtEnd - fmtStart).toFixed(2)}ms`);
-      debugLog(`[perf:detail] escapeLiteralBracesPreservingTags: ${(escEnd - escStart).toFixed(2)}ms`);
-      debugLog(`[perf:detail] brightenDetailIdLine: ${(brightEnd - brightStart).toFixed(2)}ms`);
-      debugLog(`[perf:detail] decorateIdsForClick: ${(decoEnd - decoStart).toFixed(2)}ms`);
+    if (diagnosticsEnabled) {
+      recordDiagnosticEvent('detail_format_timing', {
+        itemId: node.item.id,
+        humanFormatMs: Number((fmtEnd - fmtStart).toFixed(2)),
+        escapeBracesMs: Number((escEnd - escStart).toFixed(2)),
+        brightenIdMs: Number((brightEnd - brightStart).toFixed(2)),
+        decorateIdsMs: Number((decoEnd - decoStart).toFixed(2)),
+      });
     }
   }
   setDetailContent(content);
@@ -2602,12 +2605,13 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     const metadataPerfMetrics: PerfMetric[] | undefined = perfEnabled ? [] : undefined;
     const commentCount = db ? db.getCommentsForWorkItem(node.item.id).length : 0;
     metadataPaneComponent.updateFromItem({ ...node.item, githubRepo: tryGetGithubRepo() ?? undefined }, commentCount, metadataPerfMetrics);
-    if (perfEnabled && metadataPerfMetrics && metadataPerfMetrics.length > 0) {
+    if (diagnosticsEnabled && metadataPerfMetrics && metadataPerfMetrics.length > 0) {
       const itemStart = metadataPerfMetrics[0]?.start ?? 0;
+      const metadataTiming: Record<string, number> = {};
       for (const m of metadataPerfMetrics) {
-        const dur = m.start - itemStart;
-        debugLog(`[perf:metadata] ${m.label}: ${dur.toFixed(2)}ms`);
+        metadataTiming[m.label] = Number((m.start - itemStart).toFixed(2));
       }
+      recordDiagnosticEvent('metadata_timing', { itemId: node.item.id, ...metadataTiming });
     }
   }
 }
@@ -3793,6 +3797,36 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // consistent across mouse and keyboard interactions.
     // Uses the cached visible nodes (no tree traversal) for scroll/navigation.
     let suppressSelectionUntil = 0;
+    let pendingRenderTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingRenderIdx = 0;
+
+    const flushPendingRender = () => {
+      pendingRenderTimer = null;
+      const scrollStart = perfEnabled ? performance.now() : null;
+      const visible = buildVisible();
+      const idx = pendingRenderIdx;
+      const globalIdx = vl ? vl.offset + idx : idx;
+      if (vl) vl.selectAbsolute(globalIdx);
+      const detailStart = perfEnabled ? performance.now() : 0;
+      updateDetailForIndex(globalIdx, visible);
+      const detailEnd = perfEnabled ? performance.now() : 0;
+      const renderStart = perfEnabled ? performance.now() : 0;
+      screen.render();
+      const renderEnd = perfEnabled ? performance.now() : 0;
+      if (perfEnabled && scrollStart !== null) {
+        const scrollEnd = performance.now();
+        const dur = scrollEnd - scrollStart;
+        perfMetrics.push({ event: 'scroll', start: scrollStart, end: scrollEnd, duration: dur });
+        if (diagnosticsEnabled) {
+          recordDiagnosticEvent('scroll_timing', {
+            source: 'flush',
+            totalMs: Number(dur.toFixed(2)),
+            updateDetailMs: Number((detailEnd - detailStart).toFixed(2)),
+            screenRenderMs: Number((renderEnd - renderStart).toFixed(2)),
+          });
+        }
+      }
+    };
 
     const updateListSelection = (idx: number, source?: string) => {
       // Suppress select-item events briefly after programmatic selection to
@@ -3800,6 +3834,18 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       // intended selection set by View. Only suppress 'select-item' sources
       // since user key navigation should still work.
       if (suppressSelectionUntil && Date.now() < suppressSelectionUntil && source === 'select-item') {
+        return;
+      }
+
+      // Debounce rapid consecutive keyboard navigation (up/down/j/k) so
+      // expensive screen.render() only fires once after the burst ends.
+      // Mouse clicks ('select'/'select-item' from clicks) bypass debounce
+      // for immediate visual feedback.
+      const isKeyboardNav = source === 'keypress';
+      if (isKeyboardNav) {
+        pendingRenderIdx = idx;
+        if (pendingRenderTimer) clearTimeout(pendingRenderTimer);
+        pendingRenderTimer = setTimeout(flushPendingRender, 16);
         return;
       }
 
@@ -3819,8 +3865,14 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         const scrollEnd = performance.now();
         const dur = scrollEnd - scrollStart;
         perfMetrics.push({ event: 'scroll', start: scrollStart, end: scrollEnd, duration: dur });
-        debugLog(`scroll/select (${source ?? 'unknown'}) took ${dur.toFixed(2)} ms`);
-        debugLog(`[perf:scroll] updateDetailForIndex: ${(detailEnd - detailStart).toFixed(2)}ms, screen.render: ${(renderEnd - renderStart).toFixed(2)}ms`);
+        if (diagnosticsEnabled) {
+          recordDiagnosticEvent('scroll_timing', {
+            source: source ?? 'unknown',
+            totalMs: Number(dur.toFixed(2)),
+            updateDetailMs: Number((detailEnd - detailStart).toFixed(2)),
+            screenRenderMs: Number((renderEnd - renderStart).toFixed(2)),
+          });
+        }
       }
     };
 
@@ -4161,6 +4213,10 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       if (suppressNextPTimeout) {
         try { clearTimeout(suppressNextPTimeout); } catch (_) {}
         suppressNextPTimeout = null;
+      }
+      if (pendingRenderTimer) {
+        try { clearTimeout(pendingRenderTimer); } catch (_) {}
+        pendingRenderTimer = null;
       }
       screen.destroy();
     };
