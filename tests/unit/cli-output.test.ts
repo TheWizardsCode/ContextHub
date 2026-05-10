@@ -6,6 +6,7 @@ import {
   isTty,
   shouldUseFormattedOutput
 } from '../../src/cli-output.js';
+import * as markdownRenderer from '../../src/tui/markdown-renderer.js';
 
 describe('cli-output', () => {
   describe('renderCliMarkdown', () => {
@@ -56,11 +57,28 @@ describe('cli-output', () => {
       expect(output).toContain('code');
     });
 
-    it('falls back for large inputs', () => {
+    it('falls back for large inputs over maxSize', () => {
       const big = '# Header\n' + 'a'.repeat(150_000);
       const output = renderCliMarkdown(big, { formatAsMarkdown: true, maxSize: 100_000 });
-      // Should return original (or stripped) without rendering
       expect(output).toContain('a'.repeat(100));
+      expect(output).toContain('# Header');
+    });
+
+    it('renders input exactly at maxSize boundary', () => {
+      const input = '# ' + 'a'.repeat(20);
+      const output = renderCliMarkdown(input, { formatAsMarkdown: true, maxSize: input.length });
+      expect(output).toContain('{white-fg}{bold}');
+    });
+
+    it('uses fallback value when renderer throws', () => {
+      const spy = vi.spyOn(markdownRenderer, 'renderMarkdownToTags').mockImplementation(() => {
+        throw new Error('renderer failure');
+      });
+
+      const output = renderCliMarkdown('# Header', { formatAsMarkdown: true, fallback: 'fallback text' });
+      expect(output).toBe('fallback text');
+
+      spy.mockRestore();
     });
   });
 

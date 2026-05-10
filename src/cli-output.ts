@@ -66,10 +66,10 @@ export function renderCliMarkdown(input: string, opts?: CliOutputOptions): strin
 
   try {
     return renderMarkdownToTags(input, rendererOpts);
-  } catch (error) {
-    // On rendering failure, return original input (safe fallback)
+  } catch (_error) {
+    // On rendering failure, prefer explicit fallback, then plain input
     console.error('Warning: markdown rendering failed, falling back to plain text');
-    return input;
+    return opts?.fallback ?? input;
   }
 }
 
