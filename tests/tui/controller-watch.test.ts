@@ -429,7 +429,10 @@ describe('TuiController - Database Watch', () => {
     const watchCallback = mockFs.watchCallback;
     const initialCallCount = listCallCount;
 
-    // Simulate a watch event (should trigger refresh regardless of mtime)
+    // Advance mtime so the signature changes and the refresh proceeds
+    currentMtime = 2000;
+
+    // Simulate a watch event (should trigger refresh when signature changes)
     watchCallback('change', 'worklog.db');
 
     // Wait for debounce
@@ -591,6 +594,158 @@ describe('TuiController - Database Watch', () => {
     expect(listCallCount).toBe(initialCallCount);
   });
 
+  it('ignores filename watch events when db/wal signature is unchanged', async () => {
+    const screen = makeScreen();
+    const list = makeList();
+    const footer = makeBox();
+    const detail = makeBox();
+    const copyIdButton = makeBox();
+    const toastBox = { show: vi.fn() } as any;
+
+    const overlays = {
+      detailOverlay: makeBox(),
+      closeOverlay: makeBox(),
+      updateOverlay: makeBox(),
+      createOverlay: makeBox(),
+    };
+    const dialogs = {
+      detailModal: makeBox(),
+      detailClose: makeBox(),
+      closeDialog: makeBox(),
+      closeDialogText: makeBox(),
+      closeDialogOptions: makeList(),
+      updateDialog: makeBox(),
+      updateDialogText: makeBox(),
+      updateDialogOptions: makeList(),
+      updateDialogStageOptions: makeList(),
+      updateDialogStatusOptions: makeList(),
+      updateDialogPriorityOptions: makeList(),
+      updateDialogComment: makeBox(),
+      createDialog: makeBox(),
+      createDialogText: makeBox(),
+      createDialogTitleInput: makeTextarea(),
+      createDialogDescription: makeTextarea(),
+      createDialogIssueTypeOptions: makeList(),
+      createDialogPriorityOptions: makeList(),
+      createDialogCreateButton: makeBox(),
+      createDialogCancelButton: makeBox(),
+    };
+    const helpMenu = {
+      isVisible: vi.fn(() => false),
+      show: vi.fn(),
+      hide: vi.fn(),
+    };
+    const modalDialogs = {
+      selectList: vi.fn(async () => 0),
+      editTextarea: vi.fn(async () => null),
+      confirmTextbox: vi.fn(async () => false),
+      forceCleanup: vi.fn(),
+    };
+    const opencodeUi = {
+      serverStatusBox: makeBox(),
+      dialog: makeBox(),
+      textarea: makeBox(),
+      suggestionHint: makeBox(),
+      sendButton: makeBox(),
+      cancelButton: makeBox(),
+      ensureResponsePane: vi.fn(() => makeBox()),
+    };
+    const layout = {
+      screen,
+      listComponent: { getList: () => list, getFooter: () => footer },
+      detailComponent: { getDetail: () => detail, getCopyIdButton: () => copyIdButton },
+      toastComponent: toastBox,
+      overlaysComponent: overlays,
+      dialogsComponent: dialogs,
+      helpMenu,
+      modalDialogs,
+      opencodeUi,
+      nextDialog: {
+        overlay: makeBox(),
+        dialog: makeBox(),
+        close: makeBox(),
+        text: makeBox(),
+        options: makeList(),
+      },
+    };
+
+    const createLayout = vi.fn(() => layout) as unknown as (options?: any) => any;
+    class FakeOpencodeClient {
+      getStatus() { return { status: 'stopped', port: 9999 }; }
+      startServer() { return Promise.resolve(true); }
+      stopServer() { return undefined; }
+      sendPrompt() { return Promise.resolve(); }
+    }
+
+    let listCallCount = 0;
+    const mockDbList = vi.fn(() => {
+      listCallCount++;
+      return [
+        {
+          id: 'WL-TEST-1',
+          title: 'Test Item',
+          description: '',
+          status: 'open',
+          priority: 'medium',
+          sortIndex: 0,
+          parentId: null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          tags: [],
+          assignee: '',
+          stage: '',
+          issueType: 'task',
+          createdBy: '',
+          deletedBy: '',
+          deleteReason: '',
+          risk: '',
+          effort: '',
+        },
+      ];
+    });
+
+    const program = { opts: () => ({ verbose: false }) } as any;
+    const ctx = {
+      program,
+      utils: {
+        requireInitialized: vi.fn(),
+        getDatabase: vi.fn(() => ({
+          list: mockDbList,
+          getPrefix: () => undefined,
+          getCommentsForWorkItem: () => [],
+          update: () => ({}),
+          createComment: () => ({}),
+          get: () => null,
+        })),
+      },
+    } as any;
+
+    const controller = new TuiController(ctx, {
+      createLayout: createLayout as any,
+      OpencodeClient: FakeOpencodeClient as any,
+      resolveWorklogDir: () => '/tmp',
+      createPersistence: () => ({
+        loadPersistedState: async () => null,
+        savePersistedState: async () => undefined,
+        statePath: '/tmp/tui-state.json',
+      }),
+      fs: mockFs,
+      path: mockPath,
+    });
+
+    await controller.start({});
+
+    const watchCallback = mockFs.watchCallback;
+    const initialCallCount = listCallCount;
+
+    // filename is 'worklog.db' but signature is unchanged -> should be ignored
+    watchCallback('change', 'worklog.db');
+
+    await new Promise(resolve => setTimeout(resolve, 400));
+
+    expect(listCallCount).toBe(initialCallCount);
+  });
+
   it('skips expensive re-render on watch refresh when dataset is unchanged', async () => {
     const screen = makeScreen();
     const list = makeList();
@@ -736,6 +891,9 @@ describe('TuiController - Database Watch', () => {
     const watchCallback = mockFs.watchCallback;
     const initialListCallCount = listCallCount;
     const initialSetItemsCount = (list.setItems as any).mock.calls.length;
+
+    // Advance mtime so the signature changes and the refresh proceeds
+    currentMtime = 2000;
 
     watchCallback('change', 'worklog.db');
     await new Promise(resolve => setTimeout(resolve, 400));

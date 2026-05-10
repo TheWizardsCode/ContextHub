@@ -2561,12 +2561,26 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
   const node = v[idx] || v[0];
   // Use cache for formatted detail content
   let content = detailCache.get(node.item.id);
-    if (!content) {
+  if (!content) {
+    const fmtStart = perfEnabled ? performance.now() : 0;
     const text = humanFormatWorkItem(node.item, db, 'detail-pane', true);
+    const fmtEnd = perfEnabled ? performance.now() : 0;
+    const escStart = perfEnabled ? performance.now() : 0;
     const escaped = escapeLiteralBracesPreservingTags(text);
+    const escEnd = perfEnabled ? performance.now() : 0;
+    const brightStart = perfEnabled ? performance.now() : 0;
     const brightened = brightenDetailIdLine(escaped);
+    const brightEnd = perfEnabled ? performance.now() : 0;
+    const decoStart = perfEnabled ? performance.now() : 0;
     content = decorateIdsForClick(brightened);
+    const decoEnd = perfEnabled ? performance.now() : 0;
     detailCache.set(node.item.id, content);
+    if (perfEnabled) {
+      debugLog(`[perf:detail] humanFormatWorkItem: ${(fmtEnd - fmtStart).toFixed(2)}ms`);
+      debugLog(`[perf:detail] escapeLiteralBracesPreservingTags: ${(escEnd - escStart).toFixed(2)}ms`);
+      debugLog(`[perf:detail] brightenDetailIdLine: ${(brightEnd - brightStart).toFixed(2)}ms`);
+      debugLog(`[perf:detail] decorateIdsForClick: ${(decoEnd - decoStart).toFixed(2)}ms`);
+    }
   }
   setDetailContent(content);
   // Reset scroll only when navigating to a different item. Preserve the
@@ -3003,12 +3017,20 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       const walPath = `${dbPath}-wal`;
       try {
         const dbStat = fsImpl.statSync?.(dbPath);
-        const walStat = fsImpl.statSync?.(walPath);
         if (!dbStat) return null;
         const dbMtime = Number((dbStat as any).mtimeMs || 0);
         const dbSize = Number((dbStat as any).size || 0);
-        const walMtime = Number((walStat as any)?.mtimeMs || 0);
-        const walSize = Number((walStat as any)?.size || 0);
+        let walMtime = 0;
+        let walSize = 0;
+        try {
+          const walStat = fsImpl.statSync?.(walPath);
+          if (walStat) {
+            walMtime = Number((walStat as any).mtimeMs || 0);
+            walSize = Number((walStat as any).size || 0);
+          }
+        } catch (_) {
+          // WAL may not exist; treat as zero-size/zero-mtime
+        }
         return `${dbMtime}:${dbSize}:${walMtime}:${walSize}`;
       } catch (_) {
         return null;
@@ -3205,7 +3227,12 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
             watchDebounce = null;
             const selectedIndex = getGlobalSelectedIndex();
             if (filename) {
-              lastWatchSignature = readDbWatchSignature(dataPath) ?? lastWatchSignature;
+              const signature = readDbWatchSignature(dataPath);
+              if (!signature || signature === lastWatchSignature) {
+                debugLog('watch: ignored filename event without db/wal signature change');
+                return;
+              }
+              lastWatchSignature = signature;
               scheduleRefreshFromDatabase(selectedIndex);
               return;
             }
@@ -3782,13 +3809,18 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       // Convert to the global (full-list) index before updating the detail pane.
       const globalIdx = vl ? vl.offset + idx : idx;
       if (vl) vl.selectAbsolute(globalIdx);
+      const detailStart = perfEnabled ? performance.now() : 0;
       updateDetailForIndex(globalIdx, visible);
+      const detailEnd = perfEnabled ? performance.now() : 0;
+      const renderStart = perfEnabled ? performance.now() : 0;
       screen.render();
+      const renderEnd = perfEnabled ? performance.now() : 0;
       if (perfEnabled && scrollStart !== null) {
         const scrollEnd = performance.now();
         const dur = scrollEnd - scrollStart;
         perfMetrics.push({ event: 'scroll', start: scrollStart, end: scrollEnd, duration: dur });
         debugLog(`scroll/select (${source ?? 'unknown'}) took ${dur.toFixed(2)} ms`);
+        debugLog(`[perf:scroll] updateDetailForIndex: ${(detailEnd - detailStart).toFixed(2)}ms, screen.render: ${(renderEnd - renderStart).toFixed(2)}ms`);
       }
     };
 
