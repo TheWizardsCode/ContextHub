@@ -275,4 +275,106 @@ describe('Next dialog View selects item (controller-level)', () => {
     expect(idx).toBeGreaterThanOrEqual(0);
     expect(list.select).toHaveBeenCalledWith(idx);
   });
+
+  it('selects recommended item when another item was selected before opening Next dialog', async () => {
+    const screen = makeScreen();
+    const list = makeList();
+    const nextOptions = makeList(['View', 'Next recommendation', 'Close']);
+
+    const ctx: any = {
+      program: { opts: () => ({ verbose: false }) },
+      utils: {
+        requireInitialized: vi.fn(),
+        getDatabase: vi.fn(() => ({
+          list: () => [
+            { id: 'WL-A', title: 'A', status: 'open', priority: 'medium', parentId: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tags: [], assignee: '', stage: 'idea', issueType: 'task' },
+            { id: 'WL-B', title: 'B', status: 'open', priority: 'medium', parentId: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tags: [], assignee: '', stage: 'idea', issueType: 'task' },
+            { id: 'WL-C', title: 'C', status: 'open', priority: 'medium', parentId: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tags: [], assignee: '', stage: 'idea', issueType: 'task' },
+          ],
+          get: () => null,
+          getCommentsForWorkItem: () => [],
+          update: () => ({}),
+          getPrefix: () => undefined,
+        }))
+      },
+      toast: { show: () => {} },
+    };
+
+    const createLayout = () => ({
+      screen,
+      listComponent: { getList: () => list, getFooter: () => makeBox() },
+      detailComponent: { getDetail: () => makeBox(), getCopyIdButton: () => makeBox() },
+      metadataPaneComponent: { updateFromItem: vi.fn() },
+      toastComponent: { show: vi.fn() },
+      emptyStateComponent: makeBox(),
+      overlaysComponent: { detailOverlay: makeBox(), closeOverlay: makeBox(), updateOverlay: makeBox(), createOverlay: makeBox() },
+      dialogsComponent: {
+        detailModal: makeBox(),
+        detailClose: makeBox(),
+        closeDialog: makeBox(),
+        closeDialogText: makeBox(),
+        closeDialogOptions: makeList(),
+        updateDialog: makeBox(),
+        updateDialogText: makeBox(),
+        updateDialogOptions: makeList(),
+        updateDialogStageOptions: makeList(),
+        updateDialogStatusOptions: makeList(),
+        updateDialogPriorityOptions: makeList(),
+        updateDialogComment: makeBox(),
+        createDialog: makeBox(),
+        createDialogText: makeBox(),
+        createDialogTitleInput: makeTextarea(),
+        createDialogDescription: makeTextarea(),
+        createDialogIssueTypeOptions: makeList(),
+        createDialogPriorityOptions: makeList(),
+        createDialogCreateButton: makeBox(),
+        createDialogCancelButton: makeBox(),
+      },
+      helpMenu: { isVisible: () => false, show: () => {}, hide: () => {} },
+      modalDialogs: {
+        selectList: vi.fn(async () => 0),
+        editTextarea: vi.fn(async () => null),
+        confirmYesNo: vi.fn(async () => true),
+        forceCleanup: vi.fn(),
+      },
+      opencodeUi: { serverStatusBox: makeBox(), dialog: makeBox(), textarea: makeBox(), suggestionHint: makeBox(), sendButton: makeBox(), cancelButton: makeBox(), ensureResponsePane: () => makeBox() },
+      nextDialog: { overlay: makeBox(), dialog: makeBox(), close: makeBox(), text: makeBox(), options: nextOptions },
+    });
+
+    const spawnImpl = (_cmd: string, _args: string[], _opts: any) => {
+      const proc: any = new EventEmitter();
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.on = (ev: string, cb: any) => { proc.addListener(ev, cb); };
+      const payload = JSON.stringify({ success: true, results: [{ workItem: { id: 'WL-C', title: 'C', status: 'open', priority: 'medium', parentId: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tags: [], assignee: '', stage: 'idea', issueType: 'task' }, reason: 'recommended' }] });
+      setTimeout(() => { proc.stdout.emit('data', Buffer.from(payload)); proc.emit('close', 0); }, 10);
+      return proc as unknown as ChildProcess;
+    };
+
+    const controller = new TuiController(ctx as any, { createLayout, spawn: spawnImpl });
+    await controller.start({});
+
+    // Simulate user selecting WL-A then WL-B via arrow keys
+    // We trigger the list 'select item' handler to emulate list.select()
+    list.select(1);
+    if (typeof (list.emit) === 'function') list.emit('select item', null, 1);
+
+    // Now open Next dialog
+    const handler = (screen as any)._keyHandlers.find((h: any) => {
+      const ks = Array.isArray(h.keys) ? h.keys : [h.keys];
+      return ks.includes('n');
+    });
+    expect(handler).toBeTruthy();
+    await handler.cb();
+    await new Promise(r => setTimeout(r, 30));
+
+    // Spy and trigger View
+    list.select = vi.fn(list.select.bind(list));
+    nextOptions.emit('select', null, 0);
+
+    const idx = (list.items || []).map((it: any) => (typeof it === 'string' ? it : (it.getContent ? it.getContent() : String(it)))).findIndex((s: string) => s.includes('WL-C'));
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(list.select).toHaveBeenCalledWith(idx);
+  });
+
 });
