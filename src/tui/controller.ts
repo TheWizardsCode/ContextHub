@@ -2552,7 +2552,9 @@ function invalidateDetailCache(itemId: string): void {
 }
 
 function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
+  const bvStart = perfEnabled ? performance.now() : 0;
   const v = visible || buildVisible();
+  const bvEnd = perfEnabled ? performance.now() : 0;
   if (v.length === 0) {
     setDetailContent('');
     if (metadataPaneComponent) metadataPaneComponent.updateFromItem(null, 0);
@@ -2560,7 +2562,9 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
   }
   const node = v[idx] || v[0];
   // Use cache for formatted detail content
+  const cacheStart = perfEnabled ? performance.now() : 0;
   let content = detailCache.get(node.item.id);
+  const cacheEnd = perfEnabled ? performance.now() : 0;
   if (!content) {
     const fmtStart = perfEnabled ? performance.now() : 0;
     const text = humanFormatWorkItem(node.item, db, 'detail-pane', true);
@@ -2585,9 +2589,12 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       });
     }
   }
+  const sdcStart = perfEnabled ? performance.now() : 0;
   setDetailContent(content);
+  const sdcEnd = perfEnabled ? performance.now() : 0;
   // Reset scroll only when navigating to a different item. Preserve the
   // user's scroll position when the same item is re-rendered to avoid jarring jumps.
+  const scrollStart = perfEnabled ? performance.now() : 0;
   try {
     const currentId = node.item.id;
     const prevId = lastDetailItemId;
@@ -2599,7 +2606,9 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // best-effort fallback: try to reset scroll when APIs are available
     try { if (typeof detail.setScroll === 'function') detail.setScroll(0); } catch (_) {}
   }
+  const scrollEnd = perfEnabled ? performance.now() : 0;
   // Update metadata pane with current item's metadata
+  const metaStart = perfEnabled ? performance.now() : 0;
   if (metadataPaneComponent) {
     type PerfMetric = { start: number; label: string };
     const metadataPerfMetrics: PerfMetric[] | undefined = perfEnabled ? [] : undefined;
@@ -2613,6 +2622,18 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       }
       recordDiagnosticEvent('metadata_timing', { itemId: node.item.id, ...metadataTiming });
     }
+  }
+  const metaEnd = perfEnabled ? performance.now() : 0;
+  if (diagnosticsEnabled) {
+    recordDiagnosticEvent('updateDetail_timing', {
+      itemId: node.item.id,
+      buildVisibleMs: Number((bvEnd - bvStart).toFixed(2)),
+      cacheLookupMs: Number((cacheEnd - cacheStart).toFixed(2)),
+      setDetailContentMs: Number((sdcEnd - sdcStart).toFixed(2)),
+      setScrollMs: Number((scrollEnd - scrollStart).toFixed(2)),
+      metadataPaneMs: Number((metaEnd - metaStart).toFixed(2)),
+      totalMs: Number((metaEnd - bvStart).toFixed(2)),
+    });
   }
 }
 
