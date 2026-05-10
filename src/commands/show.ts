@@ -5,7 +5,8 @@
 import type { PluginContext } from '../plugin-types.js';
 import type { ShowOptions } from '../cli-types.js';
 import type { WorkItem, Comment, ShowJsonOutput } from '../types.js';
-import { displayItemTree, displayItemTreeWithFormat, humanFormatComment, resolveFormat, humanFormatWorkItem } from './helpers.js';
+import { displayItemTree, displayItemTreeWithFormat, displayItemTreeWithFormatToString, humanFormatComment, resolveFormat, humanFormatWorkItem } from './helpers.js';
+import pageOutput from '../pager.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -15,6 +16,7 @@ export default function register(ctx: PluginContext): void {
     .description('Show details of a work item')
     .option('-c, --children', 'Also show children')
     .option('--prefix <prefix>', 'Override the default prefix')
+    .option('--no-pager', 'Disable interactive paging even in a TTY')
     .action((id: string, options: ShowOptions) => {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
@@ -57,33 +59,36 @@ export default function register(ctx: PluginContext): void {
 
       const chosenFormat = resolveFormat(program);
 
+      // Build the full human output into a string so we can decide whether to
+      // pipe it through a pager (TTY) or write straight to stdout (non-TTY).
+      let finalOutput = '';
+
       if (options.children) {
         const itemsToDisplay = [item, ...db.getDescendants(normalizedId)];
 
-        console.log('');
-        // Always show a tree with hierarchy markers; the per-item formatting
-        // is controlled by `chosenFormat` so `-F full` will include comments
-        // inline for each item while concise/normal stay compact.
-        displayItemTreeWithFormat(itemsToDisplay, db, chosenFormat);
-        console.log('');
+        // Render the tree into a string (keeps same formatting as before)
+        finalOutput += '\n';
+        finalOutput += displayItemTreeWithFormatToString(itemsToDisplay, db, chosenFormat);
+        finalOutput += '\n\n';
 
         // For non-full formats, also show comments for the root item (legacy behavior)
         if (chosenFormat !== 'full') {
           const comments = db.getCommentsForWorkItem(normalizedId);
           if (comments.length > 0) {
-            console.log('Comments:');
+            finalOutput += 'Comments:\n';
             comments.forEach(c => {
-              console.log(humanFormatComment(c, chosenFormat));
-              console.log('');
+              finalOutput += humanFormatComment(c, chosenFormat) + '\n\n';
             });
           }
         }
+
+        pageOutput(finalOutput, { noPager: Boolean(options.noPager) });
         return;
       }
-      console.log('');
-      // For single-item show, display as a tree (preserves the same visual
-      // layout used when showing children). This ensures a consistent
-      // hierarchy marker is present even for a single item in human mode.
-      displayItemTreeWithFormat([item], db, chosenFormat);
+
+      finalOutput += '\n';
+      finalOutput += displayItemTreeWithFormatToString([item], db, chosenFormat);
+
+      pageOutput(finalOutput, { noPager: Boolean(options.noPager) });
     });
 }

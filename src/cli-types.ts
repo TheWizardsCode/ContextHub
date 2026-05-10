@@ -56,7 +56,7 @@ export interface ListOptions {
   number?: string;
 }
 
-export interface ShowOptions { children?: boolean; prefix?: string }
+export interface ShowOptions { children?: boolean; prefix?: string; noPager?: boolean }
 
 export interface AuditOptions { prefix?: string }
 

@@ -184,6 +184,60 @@ export function displayItemTreeWithFormat(items: WorkItem[], db: WorklogDatabase
   });
 }
 
+/**
+ * Render the same tree output as `displayItemTreeWithFormat` but return it as
+ * a single string instead of printing directly. This is useful when callers
+ * wish to pipe the output through a pager or otherwise capture it.
+ */
+export function displayItemTreeWithFormatToString(items: WorkItem[], db: WorklogDatabase | null, format: string): string {
+  const outLines: string[] = [];
+  const itemIds = new Set(items.map(i => i.id));
+  const orderedItems = db
+    ? db.getAllOrderedByHierarchySortIndex().filter(item => itemIds.has(item.id))
+    : null;
+  const sortChildren = (list: WorkItem[]): WorkItem[] => {
+    if (!orderedItems) {
+      return list.slice().sort(sortByPriorityAndDate);
+    }
+    const positions = new Map(orderedItems.map((item, index) => [item.id, index]));
+    return list
+      .slice()
+      .sort((a, b) => {
+        const aPos = positions.get(a.id);
+        const bPos = positions.get(b.id);
+        if (aPos === undefined && bPos === undefined) {
+          return sortByPriorityAndDate(a, b);
+        }
+        if (aPos === undefined) return 1;
+        if (bPos === undefined) return -1;
+        if (aPos !== bPos) return aPos - bPos;
+        return sortByPriorityAndDate(a, b);
+      });
+  };
+
+  walkItemTree(items, {
+    sortRootItems: sortChildren,
+    sortChildItems: sortChildren,
+    render: (item, { indent, isLast, inheritedStage }) => {
+      const prefix = indent + (isLast ? '└── ' : '├── ');
+      const detailIndent = indent + (isLast ? '    ' : '│   ');
+
+      const displayItem = Object.assign({}, item, { stage: item.stage ?? inheritedStage });
+      if (displayItem.stage === '') {
+        // keep as empty string to signal 'Undefined' label
+      }
+      const formatted = humanFormatWorkItem(displayItem, db, format);
+      const lines = formatted.split('\n');
+      outLines.push(prefix + lines[0]);
+      for (let i = 1; i < lines.length; i++) {
+        outLines.push(detailIndent + lines[i]);
+      }
+    }
+  });
+
+  return outLines.join('\n');
+}
+
 type TreeRenderContext = {
   indent: string;
   isLast: boolean;
