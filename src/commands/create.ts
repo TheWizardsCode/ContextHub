@@ -35,11 +35,12 @@ export default function register(ctx: PluginContext): void {
     .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag for the new item (true|false|yes|no)')
     .option('--audit <text>', 'Legacy alias for --audit-text')
     .option('--audit-text <text>', 'Set structured audit text. First non-empty line must be "Ready to close: Yes" or "Ready to close: No" (see docs/AUDIT_STATUS.md)')
+    .option('--audit-file <file>', 'Read audit text from a file')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--no-re-sort', 'Skip automatic re-sort after creating the item')
     .option('--re-sort-sync', 'Force a synchronous re-sort after creating the item', false)
     .action(async (...rawArgs: any[]) => {
-      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','prefix','noReSort','reSortSync']);
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','prefix','noReSort','reSortSync']);
       let options: CreateOptions = normalized.options as any || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
@@ -85,7 +86,16 @@ export default function register(ctx: PluginContext): void {
         }
       }
 
-      const auditTextInput = options.auditText ?? options.audit;
+      let auditTextInput = options.auditText ?? options.audit;
+
+      if (options.auditFile) {
+        try {
+          auditTextInput = await fs.readFile(options.auditFile, 'utf8');
+        } catch (err) {
+          console.error(`Failed to read audit file: ${options.auditFile}`);
+          process.exit(1);
+        }
+      }
 
       if (auditTextInput !== undefined && !auditWriteEnabled) {
         output.error('Audit writes are disabled by config (`auditWriteEnabled: false`).', {

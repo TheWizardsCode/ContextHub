@@ -36,6 +36,7 @@ export default function register(ctx: PluginContext): void {
     .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag (true|false|yes|no)')
     .option('--audit <text>', 'Legacy alias for --audit-text')
     .option('--audit-text <text>', 'Set structured audit text. First non-empty line must be "Ready to close: Yes" or "Ready to close: No" (see docs/AUDIT_STATUS.md)')
+    .option('--audit-file <file>', 'Read audit text from a file')
     .option('--do-not-delegate <true|false>', 'Set or clear the do-not-delegate tag (true|false|yes|no)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--no-re-sort', 'Skip automatic re-sort after the update')
@@ -45,7 +46,7 @@ export default function register(ctx: PluginContext): void {
       // --no-re-sort: skip auto re-sort
       // --re-sort-sync: force synchronous re-sort (blocking)
       // Normalize re-sort flags from commander/options
-      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','doNotDelegate','prefix','noReSort','reSortSync']);
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','doNotDelegate','prefix','noReSort','reSortSync']);
       // Robust detection of --no-re-sort that accepts multiple forms Commander
       // may expose (`noReSort`, `reSort: false`) and also checks raw argv.
       const cliNoReSort = process.argv.includes('--no-re-sort') || process.argv.includes('--noReSort');
@@ -77,6 +78,22 @@ export default function register(ctx: PluginContext): void {
       // Precompute global candidates that don't require per-id state.
       // Use normalized.provided to detect whether the user supplied a flag.
       const hasProvided = (name: keyof UpdateOptions) => normalized.provided.has(name as string);
+
+      // If caller supplied --audit-file, read the file contents once and
+      // present it as if --audit-text were provided. This mirrors the
+      // --description-file pattern and avoids needing to shell-escape user
+      // content when passing audit text to other commands.
+      if (hasProvided('auditFile')) {
+        try {
+          // Read relative to current working directory
+          (options as any).auditText = await fs.readFile(String((options as any).auditFile), 'utf8');
+          // Mark auditText as provided so downstream checks pick it up
+          try { normalized.provided.add('auditText'); } catch (_) { /* ignore */ }
+        } catch (err) {
+          output.error(`Failed to read audit file: ${(options as any).auditFile}`);
+          process.exit(1);
+        }
+      }
 
       if (process.env.WL_DEBUG_UPDATE_ACTION) {
         try {
