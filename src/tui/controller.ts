@@ -471,6 +471,16 @@ export class TuiController {
         (detail as any).setContent(content);
       }
     };
+
+    // Debug tracing helper for reproducible workflows. Appends minimal
+    // events to /tmp/wl-next-debug.log so reproductions can be inspected.
+    function appendTrace(line: string) {
+      try {
+        const ts = new Date().toISOString();
+        try { fs.appendFileSync('/tmp/wl-next-debug.log', `${ts} ${line}\n`); } catch (e) { /* ignore */ }
+      } catch (_) {}
+    }
+
     const metadataPane = metadataPaneComponent?.getBox?.() ?? null;
 
     const detailOverlay = overlaysComponent.detailOverlay;
@@ -3514,9 +3524,11 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       // work item in the tree after the dialog closes. This makes the
       // "View" action deterministic across keyboard and mouse paths.
       if (selectedId) {
+        appendTrace(`closeNextDialog called selectedId=${selectedId}`);
         try {
           // Ensure ancestors are expanded so the target becomes visible
           if (state.itemsById.has(selectedId)) {
+            appendTrace(`expanding ancestors for ${selectedId}`);
             let cursor = state.itemsById.get(selectedId) as Item | undefined;
             while (cursor?.parentId && state.itemsById.has(cursor.parentId)) {
               state.expanded.add(cursor.parentId);
@@ -3525,19 +3537,23 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
             // Rebuild the tree to reflect expansions before computing visible
             rebuildTree();
             expandInProgressAncestors();
+            appendTrace(`after rebuild/expand: expandedCount=${state.expanded.size}`);
           }
 
           const visible = buildVisible();
           const idx = visible.findIndex(node => node.item.id === selectedId);
+          appendTrace(`computed visible idx=${idx} for ${selectedId} (visibleLen=${visible.length})`);
           if (idx >= 0) {
             renderListAndDetail(idx);
+            appendTrace(`renderListAndDetail called for idx=${idx}`);
           } else {
             // If not found, focus the list so keyboard users land in the tree
             list.focus();
             paneFocusIndex = getFocusPanes().indexOf(list);
             applyFocusStyles();
           }
-        } catch (_) {
+        } catch (e) {
+          appendTrace(`closeNextDialog error: ${String(e)}`);
           try { list.focus(); } catch (_) {}
           paneFocusIndex = getFocusPanes().indexOf(list);
           applyFocusStyles();
@@ -3553,16 +3569,20 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     }
 
     async function viewWorkItemInTree(id: string): Promise<boolean> {
+      appendTrace(`viewWorkItemInTree called id=${id}`);
       const visible = buildVisible();
       let found = visible.findIndex(node => node.item.id === id);
+      appendTrace(`initial visible find idx=${found} (len=${visible.length})`);
       if (found >= 0) {
         renderListAndDetail(found);
+        appendTrace(`renderListAndDetail called for found=${found}`);
         list.focus();
         screen.render();
         return true;
       }
 
       if (state.itemsById.has(id)) {
+        appendTrace(`id present in itemsById, expanding ancestors`);
         let cursor = state.itemsById.get(id) as Item | undefined;
         while (cursor?.parentId && state.itemsById.has(cursor.parentId)) {
           state.expanded.add(cursor.parentId);
@@ -3570,14 +3590,17 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         }
         const expandedVisible = buildVisible();
         found = expandedVisible.findIndex(node => node.item.id === id);
+        appendTrace(`after expand visible find idx=${found} (len=${expandedVisible.length})`);
         if (found >= 0) {
           renderListAndDetail(found);
+          appendTrace(`renderListAndDetail called for expanded found=${found}`);
           list.focus();
           screen.render();
           return true;
         }
       }
 
+      appendTrace(`viewWorkItemInTree: not visible, prompting to switch to ALL`);
       closeNextDialog();
       const choice = await modalDialogs.selectList({
         title: 'Switch to ALL items?',
@@ -3602,6 +3625,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       expandInProgressAncestors();
       let refreshed = buildVisible();
       let refreshedIndex = refreshed.findIndex(node => node.item.id === id);
+      appendTrace(`after switching to ALL refreshedIndex=${refreshedIndex} (len=${refreshed.length})`);
       if (refreshedIndex < 0 && state.itemsById.has(id)) {
         let cursor = state.itemsById.get(id) as Item | undefined;
         while (cursor?.parentId && state.itemsById.has(cursor.parentId)) {
@@ -3610,11 +3634,13 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         }
         refreshed = buildVisible();
         refreshedIndex = refreshed.findIndex(node => node.item.id === id);
+        appendTrace(`after expand in ALL refreshedIndex=${refreshedIndex}`);
       }
       if (refreshedIndex >= 0) {
         renderListAndDetail(refreshedIndex);
         list.focus();
         screen.render();
+        appendTrace(`renderListAndDetail called for refreshedIndex=${refreshedIndex}`);
         return true;
       }
 
