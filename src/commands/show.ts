@@ -7,6 +7,7 @@ import type { ShowOptions } from '../cli-types.js';
 import type { WorkItem, Comment, ShowJsonOutput } from '../types.js';
 import { displayItemTree, displayItemTreeWithFormat, displayItemTreeWithFormatToString, humanFormatComment, resolveFormat, humanFormatWorkItem } from './helpers.js';
 import pageOutput from '../pager.js';
+import { createCliOutputFromCommand } from '../cli-output.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -24,6 +25,12 @@ export default function register(ctx: PluginContext): void {
       const normalizedId = utils.normalizeCliId(id, options.prefix) || id;
       const item = db.get(normalizedId);
       if (!item) {
+        // Use the CLI output renderer for stderr when available so errors
+        // look consistent with other CLI output in TTY. Fall back to
+        // output.error which already prints JSON when --json is used.
+        const cliOut = createCliOutputFromCommand(program.opts());
+        cliOut.printError(`Work item not found: ${normalizedId}`);
+        // Also signal JSON consumers with structured error via output.error
         output.error(`Work item not found: ${normalizedId}`, { success: false, error: `Work item not found: ${normalizedId}` });
         process.exit(1);
       }
