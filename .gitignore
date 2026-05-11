@@ -163,3 +163,6 @@ test/**/backups/
 
 # Ignore repository tmp directory created by local tests
 tmp/
+
+# Ignore generated test timings from local test runs
+test-timings.json
