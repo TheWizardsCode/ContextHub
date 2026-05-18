@@ -142,7 +142,7 @@ export default function register(ctx: PluginContext): void {
         // Eagerly capture writeLastPushTimestamp when the pre-filter module is
         // available.  It may be resolved during the pre-filter import below or
         // via a standalone import before the batch loop.
-        let _writeLastPushTimestamp: ((ts: string, db?: { setMetadata?: (k: string, v: string) => void }) => void) | null = null;
+        let _writeLastPushTimestamp: ((ts: string, db?: { setMetadata?: (k: string, v: string) => void }, repo?: string | null) => void) | null = null;
 
         const forceAll = Boolean(options.all) || Boolean(options.force);
         if (forceAll) {
@@ -154,7 +154,9 @@ export default function register(ctx: PluginContext): void {
           try {
             const preFilterMod = await import('../github-pre-filter.js');
             _writeLastPushTimestamp = preFilterMod.writeLastPushTimestamp;
-            lastPush = preFilterMod.readLastPushTimestamp(dbForMetadata);
+            // Read last-push using a repo-scoped key when available to avoid
+            // cross-repo timestamp collisions in multi-repo runs.
+            lastPush = preFilterMod.readLastPushTimestamp(dbForMetadata, githubConfig.repo);
             const { filteredItems, filteredComments, totalCandidates, skippedCount } = preFilterMod.filterItemsForPush(items, comments, lastPush);
             itemsToProcess = filteredItems;
             commentsToProcess = filteredComments;
@@ -342,7 +344,7 @@ export default function register(ctx: PluginContext): void {
           // pushStartTimestamp was captured before processing began.
           if (writeTimestamp) {
             try {
-              writeTimestamp(pushStartTimestamp, dbForMetadata);
+              writeTimestamp(pushStartTimestamp, dbForMetadata, githubConfig.repo);
               logLine(`github push: batch ${batchIndex + 1}/${totalBatches} timestamp updated to ${pushStartTimestamp}`);
             } catch (_tsErr) {
               logLine(`github push: batch ${batchIndex + 1}/${totalBatches} failed to update timestamp`);
@@ -368,7 +370,7 @@ export default function register(ctx: PluginContext): void {
           // Write once more to cover the zero-batch / safety-net case.
           if (writeTimestamp) {
             try {
-              writeTimestamp(pushStartTimestamp, dbForMetadata);
+              writeTimestamp(pushStartTimestamp, dbForMetadata, githubConfig.repo);
             } catch (_tsErr) {
               logLine('github push: failed to write final last-push timestamp');
             }

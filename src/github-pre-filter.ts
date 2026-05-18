@@ -10,19 +10,38 @@ export interface PreFilterResult {
   skippedCount: number;
 }
 
-const TIMESTAMP_FILENAME = 'github-last-push';
+// Base filename and metadata key used historically. For compatibility we
+// continue to support the old global names but prefer per-repo keys when
+// a repo identifier is provided.
+const TIMESTAMP_FILENAME_BASE = 'github-last-push';
+const METADATA_KEY_BASE = 'githubLastPush';
 
-// Prefer DB metadata when available. The WorklogDatabase exposes getMetadata/setMetadata
-// so callers may pass the database instance as the first argument. If db is not
-// provided or metadata access fails we fall back to the file-based implementation
-// for backward compatibility.
-const METADATA_KEY = 'githubLastPush';
+function sanitizeRepo(repo: string): string {
+  // Replace path separator with a safe token and remove unsafe chars
+  return repo.replace(/\//g, '__').replace(/[^a-zA-Z0-9_.-]/g, '-');
+}
 
-export function readLastPushTimestamp(db?: { getMetadata?: (k: string) => string | null }): string | null {
-  // Try DB metadata first when a database instance is provided
+function timestampFilenameForRepo(repo?: string | null): string {
+  if (!repo) return TIMESTAMP_FILENAME_BASE;
+  return `${TIMESTAMP_FILENAME_BASE}-${sanitizeRepo(repo)}`;
+}
+
+function metadataKeyForRepo(repo?: string | null): string {
+  if (!repo) return METADATA_KEY_BASE;
+  return `${METADATA_KEY_BASE}:${repo}`;
+}
+
+export function readLastPushTimestamp(db?: { getMetadata?: (k: string) => string | null }, repo?: string | null): string | null {
+  // Try DB metadata first when a database instance is provided. Prefer
+  // repo-specific metadata key, but fall back to the legacy global key for
+  // backward compatibility.
   try {
     if (db && typeof db.getMetadata === 'function') {
-      const v = db.getMetadata(METADATA_KEY);
+      if (repo) {
+        const v = db.getMetadata(metadataKeyForRepo(repo));
+        if (v) return v;
+      }
+      const v = db.getMetadata(METADATA_KEY_BASE);
       if (v) return v;
     }
   } catch (_err) {
@@ -31,7 +50,13 @@ export function readLastPushTimestamp(db?: { getMetadata?: (k: string) => string
 
   try {
     const dir = resolveWorklogDir();
-    const p = path.join(dir, TIMESTAMP_FILENAME);
+    // Try repo-specific file first, then fallback to the legacy filename.
+    const repoFile = path.join(dir, timestampFilenameForRepo(repo));
+    if (repo && fs.existsSync(repoFile)) {
+      const content = fs.readFileSync(repoFile, { encoding: 'utf8' }).trim();
+      return content || null;
+    }
+    const p = path.join(dir, TIMESTAMP_FILENAME_BASE);
     if (!fs.existsSync(p)) return null;
     const content = fs.readFileSync(p, { encoding: 'utf8' }).trim();
     return content || null;
@@ -40,11 +65,19 @@ export function readLastPushTimestamp(db?: { getMetadata?: (k: string) => string
   }
 }
 
-export function writeLastPushTimestamp(ts: string, db?: { setMetadata?: (k: string, v: string) => void }): void {
-  // Try DB metadata when available, but also write the human-friendly file
+export function writeLastPushTimestamp(ts: string, db?: { setMetadata?: (k: string, v: string) => void }, repo?: string | null): void {
+  // Try DB metadata when available. Prefer writing a repo-specific key,
+  // but also write the legacy global key for backward compatibility.
   if (db && typeof db.setMetadata === 'function') {
     try {
-      db.setMetadata(METADATA_KEY, ts);
+      if (repo) {
+        try {
+          db.setMetadata(metadataKeyForRepo(repo), ts);
+        } catch (_e) {
+          // Best-effort: continue and try writing the legacy key
+        }
+      }
+      db.setMetadata(METADATA_KEY_BASE, ts);
     } catch (err) {
       // Best-effort: log and continue to file write
       console.error(`Failed to write last-push timestamp to DB metadata: ${(err as Error).message}`);
@@ -57,7 +90,17 @@ export function writeLastPushTimestamp(ts: string, db?: { setMetadata?: (k: stri
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-    const p = path.join(dir, TIMESTAMP_FILENAME);
+    // Write repo-specific file (if repo provided) and also the legacy file
+    // to preserve existing expectations from other tools/tests.
+    if (repo) {
+      const repoPath = path.join(dir, timestampFilenameForRepo(repo));
+      try {
+        fs.writeFileSync(repoPath, `${ts}\n`, { encoding: 'utf8' });
+      } catch (err) {
+        console.error(`Failed to write last-push timestamp (${repoPath}): ${(err as Error).message}`);
+      }
+    }
+    const p = path.join(dir, TIMESTAMP_FILENAME_BASE);
     // include a trailing newline for easier human inspection
     fs.writeFileSync(p, `${ts}\n`, { encoding: 'utf8' });
   } catch (err) {
