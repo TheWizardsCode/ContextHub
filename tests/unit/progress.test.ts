@@ -80,4 +80,18 @@ describe('ProgressReporter', () => {
     expect(lines).toHaveLength(1);
     rep.stopHeartbeat();
   });
+
+  it('pads shorter human messages to clear previous terminal content', () => {
+    const writes: string[] = [];
+    const outStream = { write: (s: string) => { writes.push(s); }, isTTY: true } as any;
+    const rep = new ProgressReporter({ mode: 'human', rateMs: 1000, outStream });
+
+    rep.render({ phase: 'import', current: 1, total: 3, note: 'queue=123 active=9 retries=88 errors=1; heartbeat (post-import): no updates for 120s' });
+    vi.setSystemTime(Date.now() + 1200);
+    rep.render({ phase: 'import', current: 2, total: 3, note: 'queue=0 active=0 retries=0 errors=0' });
+
+    const firstRenderWrite = writes[0] ?? '';
+    const secondRenderWrite = writes[1] ?? '';
+    expect(secondRenderWrite.length).toBeGreaterThanOrEqual(firstRenderWrite.length);
+  });
 });

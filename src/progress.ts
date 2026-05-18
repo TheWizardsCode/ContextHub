@@ -32,6 +32,7 @@ export class ProgressReporter {
   private heartbeatNotePrefix: string;
   private lastProgressEvent: ProgressEvent | null;
   private lastProgressAtMs: number;
+  private lastHumanRenderLength: number;
 
   constructor(opts?: ProgressOptions) {
     this.mode = opts?.mode ?? 'auto';
@@ -44,6 +45,7 @@ export class ProgressReporter {
     this.heartbeatNotePrefix = 'heartbeat';
     this.lastProgressEvent = null;
     this.lastProgressAtMs = 0;
+    this.lastHumanRenderLength = 0;
   }
 
   // Format a short human-friendly label for a phase
@@ -81,6 +83,18 @@ export class ProgressReporter {
     return this.outStream && (this.outStream as any).isTTY === true;
   }
 
+  private writeHumanMessage(msg: string, isComplete: boolean): void {
+    try {
+      const padded = `${msg} `.padEnd(this.lastHumanRenderLength, ' ');
+      this.lastHumanRenderLength = padded.length;
+      this.outStream.write(`\r${padded}`);
+      if (isComplete) {
+        this.outStream.write('\n');
+        this.lastHumanRenderLength = 0;
+      }
+    } catch (_) {}
+  }
+
   private emit(ev: ProgressEvent, force = false, completeOverride?: boolean): void {
     if (this.mode === 'quiet') return;
 
@@ -101,12 +115,7 @@ export class ProgressReporter {
 
     if (this.mode === 'human') {
       const msg = this.formatHuman(ev);
-      try {
-        const padded = `${msg} `;
-        // carriage return to overwrite
-        this.outStream.write(`\r${padded}`);
-        if (isComplete) this.outStream.write('\n');
-      } catch (_) {}
+      this.writeHumanMessage(msg, isComplete);
       return;
     }
 
@@ -115,11 +124,7 @@ export class ProgressReporter {
       const isTty = (this.outStream && (this.outStream as any).isTTY === true);
       if (isTty) {
         const msg = this.formatHuman(ev);
-        try {
-          const padded = `${msg} `;
-          this.outStream.write(`\r${padded}`);
-          if (isComplete) this.outStream.write('\n');
-        } catch (_) {}
+        this.writeHumanMessage(msg, isComplete);
         return;
       }
       try { this.jsonStream.write(this.formatJson(ev) + '\n'); } catch (_) {}
