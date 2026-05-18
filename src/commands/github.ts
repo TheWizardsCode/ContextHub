@@ -543,7 +543,22 @@ export default function register(ctx: PluginContext): void {
 
       const progressMode = (options as any).progress as ProgressMode | undefined;
       const progressReporter = new ProgressReporter({ mode: progressMode ?? (isJsonMode ? 'json' : undefined) });
+      const heartbeatIntervalRaw = Number(process.env.WL_GH_IMPORT_HEARTBEAT_MS || '15000');
+      const heartbeatIntervalMs = Number.isFinite(heartbeatIntervalRaw) ? Math.max(1000, heartbeatIntervalRaw) : 15000;
+      let postImportHeartbeatStarted = false;
       const renderProgress = (progress: GithubProgress) => {
+        if (
+          !postImportHeartbeatStarted
+          && progress.phase === 'import'
+          && progress.total > 0
+          && progress.current >= progress.total
+        ) {
+          progressReporter.startHeartbeat({
+            intervalMs: heartbeatIntervalMs,
+            notePrefix: 'heartbeat (post-import)',
+          });
+          postImportHeartbeatStarted = true;
+        }
         try {
           const s = throttler?.getStats?.();
           if (s) {
@@ -666,8 +681,10 @@ export default function register(ctx: PluginContext): void {
             );
           }
         }
+        progressReporter.stopHeartbeat();
         logLine(`--- github import end ${new Date().toISOString()} ---`);
       } catch (error) {
+        progressReporter.stopHeartbeat();
         logLine(`GitHub import failed: ${(error as Error).message}`);
         output.error(`GitHub import failed: ${(error as Error).message}`, { success: false, error: (error as Error).message });
         process.exit(1);

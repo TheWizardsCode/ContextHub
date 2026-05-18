@@ -16,12 +16,22 @@ export interface ProgressOptions {
   jsonStream?: NodeJS.WriteStream; // json output (default: process.stderr)
 }
 
+export interface ProgressHeartbeatOptions {
+  intervalMs?: number;
+  notePrefix?: string;
+}
+
 export class ProgressReporter {
   private mode: ProgressMode;
   private rateMs: number;
   private outStream: NodeJS.WriteStream;
   private jsonStream: NodeJS.WriteStream;
   private lastEmitByPhase: Map<string, number>;
+  private heartbeatTimer: NodeJS.Timeout | null;
+  private heartbeatIntervalMs: number;
+  private heartbeatNotePrefix: string;
+  private lastProgressEvent: ProgressEvent | null;
+  private lastProgressAtMs: number;
 
   constructor(opts?: ProgressOptions) {
     this.mode = opts?.mode ?? 'auto';
@@ -29,6 +39,11 @@ export class ProgressReporter {
     this.outStream = opts?.outStream ?? process.stdout;
     this.jsonStream = opts?.jsonStream ?? process.stderr;
     this.lastEmitByPhase = new Map();
+    this.heartbeatTimer = null;
+    this.heartbeatIntervalMs = 15000;
+    this.heartbeatNotePrefix = 'heartbeat';
+    this.lastProgressEvent = null;
+    this.lastProgressAtMs = 0;
   }
 
   // Format a short human-friendly label for a phase
@@ -56,14 +71,23 @@ export class ProgressReporter {
     return JSON.stringify({ type: 'progress', phase: ev.phase, current: ev.current, total: ev.total, note: ev.note, timestamp: Date.now() });
   }
 
-  // Render a single progress event respecting mode and rate-limiting
-  render(ev: ProgressEvent): void {
+  private supportsHumanHeartbeat(): boolean {
+    if (this.mode === 'quiet' || this.mode === 'json') {
+      return false;
+    }
+    if (this.mode === 'human') {
+      return true;
+    }
+    return this.outStream && (this.outStream as any).isTTY === true;
+  }
+
+  private emit(ev: ProgressEvent, force = false, completeOverride?: boolean): void {
     if (this.mode === 'quiet') return;
 
     const now = Date.now();
     const phaseKey = `${ev.phase}`;
     const last = this.lastEmitByPhase.get(phaseKey) || 0;
-    const shouldEmit = (now - last) >= this.rateMs || ev.current === ev.total;
+    const shouldEmit = force || (now - last) >= this.rateMs || ev.current === ev.total;
     if (!shouldEmit) return;
     this.lastEmitByPhase.set(phaseKey, now);
 
@@ -73,13 +97,15 @@ export class ProgressReporter {
       return;
     }
 
+    const isComplete = completeOverride ?? (ev.current === ev.total);
+
     if (this.mode === 'human') {
       const msg = this.formatHuman(ev);
       try {
         const padded = `${msg} `;
         // carriage return to overwrite
         this.outStream.write(`\r${padded}`);
-        if (ev.current === ev.total) this.outStream.write('\n');
+        if (isComplete) this.outStream.write('\n');
       } catch (_) {}
       return;
     }
@@ -92,11 +118,59 @@ export class ProgressReporter {
         try {
           const padded = `${msg} `;
           this.outStream.write(`\r${padded}`);
-          if (ev.current === ev.total) this.outStream.write('\n');
+          if (isComplete) this.outStream.write('\n');
         } catch (_) {}
         return;
       }
       try { this.jsonStream.write(this.formatJson(ev) + '\n'); } catch (_) {}
     }
+  }
+
+  // Render a single progress event respecting mode and rate-limiting
+  render(ev: ProgressEvent): void {
+    this.lastProgressEvent = ev;
+    this.lastProgressAtMs = Date.now();
+    this.emit(ev);
+  }
+
+  startHeartbeat(opts?: ProgressHeartbeatOptions): void {
+    this.stopHeartbeat();
+    if (!this.supportsHumanHeartbeat()) {
+      return;
+    }
+    const intervalMsRaw = Number(opts?.intervalMs ?? this.heartbeatIntervalMs);
+    const intervalMs = Number.isFinite(intervalMsRaw) ? Math.max(1000, intervalMsRaw) : this.heartbeatIntervalMs;
+    const notePrefix = (opts?.notePrefix || this.heartbeatNotePrefix || 'heartbeat').trim() || 'heartbeat';
+    this.heartbeatIntervalMs = intervalMs;
+    this.heartbeatNotePrefix = notePrefix;
+
+    this.heartbeatTimer = setInterval(() => {
+      if (!this.lastProgressEvent || this.lastProgressAtMs <= 0) {
+        return;
+      }
+      const idleMs = Date.now() - this.lastProgressAtMs;
+      if (idleMs < this.heartbeatIntervalMs) {
+        return;
+      }
+      const idleSeconds = Math.floor(idleMs / 1000);
+      const heartbeatNote = `${this.heartbeatNotePrefix}: no updates for ${idleSeconds}s`;
+      const note = this.lastProgressEvent.note
+        ? `${this.lastProgressEvent.note}; ${heartbeatNote}`
+        : heartbeatNote;
+      this.emit({ ...this.lastProgressEvent, note }, true, false);
+    }, this.heartbeatIntervalMs);
+
+    const timer = this.heartbeatTimer as any;
+    if (timer && typeof timer.unref === 'function') {
+      timer.unref();
+    }
+  }
+
+  stopHeartbeat(): void {
+    if (!this.heartbeatTimer) {
+      return;
+    }
+    clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
   }
 }

@@ -51,4 +51,33 @@ describe('ProgressReporter', () => {
     rep.render({ phase: 'import', current: 2, total: 3 });
     expect(out.includes('2/3')).toBe(true);
   });
+
+  it('emits heartbeat in human mode after inactivity', () => {
+    let out = '';
+    const outStream = { write: (s: string) => { out += s; }, isTTY: true } as any;
+    const rep = new ProgressReporter({ mode: 'human', rateMs: 1000, outStream });
+
+    rep.render({ phase: 'import', current: 4, total: 4, note: 'queue=0 active=0 retries=0 errors=0' });
+    rep.startHeartbeat({ intervalMs: 5000, notePrefix: 'heartbeat (post-import)' });
+
+    vi.advanceTimersByTime(5000);
+
+    expect(out).toContain('heartbeat (post-import): no updates for 5s');
+    rep.stopHeartbeat();
+  });
+
+  it('does not emit heartbeat in json mode', () => {
+    let buf = '';
+    const jsonStream = { write: (s: string) => { buf += s; } } as any;
+    const rep = new ProgressReporter({ mode: 'json', rateMs: 1000, jsonStream });
+
+    rep.render({ phase: 'import', current: 2, total: 2 });
+    rep.startHeartbeat({ intervalMs: 5000, notePrefix: 'heartbeat (post-import)' });
+
+    vi.advanceTimersByTime(5000);
+
+    const lines = buf.trim().split('\n').filter(Boolean);
+    expect(lines).toHaveLength(1);
+    rep.stopHeartbeat();
+  });
 });
