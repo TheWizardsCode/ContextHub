@@ -51,4 +51,47 @@ describe('ProgressReporter', () => {
     rep.render({ phase: 'import', current: 2, total: 3 });
     expect(out.includes('2/3')).toBe(true);
   });
+
+  it('emits heartbeat in human mode after inactivity', () => {
+    let out = '';
+    const outStream = { write: (s: string) => { out += s; }, isTTY: true } as any;
+    const rep = new ProgressReporter({ mode: 'human', rateMs: 1000, outStream });
+
+    rep.render({ phase: 'import', current: 4, total: 4, note: 'queue=0 active=0 retries=0 errors=0' });
+    rep.startHeartbeat({ intervalMs: 5000, notePrefix: 'heartbeat (post-import)' });
+
+    vi.advanceTimersByTime(5000);
+
+    expect(out).toContain('heartbeat (post-import): no updates for 5s');
+    rep.stopHeartbeat();
+  });
+
+  it('does not emit heartbeat in json mode', () => {
+    let buf = '';
+    const jsonStream = { write: (s: string) => { buf += s; } } as any;
+    const rep = new ProgressReporter({ mode: 'json', rateMs: 1000, jsonStream });
+
+    rep.render({ phase: 'import', current: 2, total: 2 });
+    rep.startHeartbeat({ intervalMs: 5000, notePrefix: 'heartbeat (post-import)' });
+
+    vi.advanceTimersByTime(5000);
+
+    const lines = buf.trim().split('\n').filter(Boolean);
+    expect(lines).toHaveLength(1);
+    rep.stopHeartbeat();
+  });
+
+  it('pads shorter human messages to clear previous terminal content', () => {
+    const writes: string[] = [];
+    const outStream = { write: (s: string) => { writes.push(s); }, isTTY: true } as any;
+    const rep = new ProgressReporter({ mode: 'human', rateMs: 1000, outStream });
+
+    rep.render({ phase: 'import', current: 1, total: 3, note: 'queue=123 active=9 retries=88 errors=1; heartbeat (post-import): no updates for 120s' });
+    vi.setSystemTime(Date.now() + 1200);
+    rep.render({ phase: 'import', current: 2, total: 3, note: 'queue=0 active=0 retries=0 errors=0' });
+
+    const firstRenderWrite = writes[0] ?? '';
+    const secondRenderWrite = writes[1] ?? '';
+    expect(secondRenderWrite.length).toBeGreaterThanOrEqual(firstRenderWrite.length);
+  });
 });
