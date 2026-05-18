@@ -227,7 +227,7 @@ describe('github-sync deleted item handling', () => {
     expect(result.updated).toBe(1);
     expect(result.closed).toBe(1);
 
-    // deleted-without-issue is excluded by the filter (items.length - issueItems.length = 1)
+    // deleted-without-issue is excluded by pre-filter (skipped >= 1 includes the guard skip)
     expect(result.skipped).toBeGreaterThanOrEqual(1);
   });
 

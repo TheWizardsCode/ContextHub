@@ -124,4 +124,20 @@ describe('github push --force (deprecated alias)', () => {
       leaveTempDir(state);
     }
   });
+
+  it('--force emits a deprecation warning', async () => {
+    const state = enterTempDir();
+    try {
+      writeConfig(state.tempDir);
+      writeInitSemaphore(state.tempDir);
+      seedWorkItems(state.tempDir, []);
+
+      const { stdout, stderr } = await execAsync(`tsx ${cliPath} github push --repo owner/name --force`, { cwd: state.tempDir });
+
+      // Should emit a deprecation warning on stderr
+      expect(stderr).toContain('deprecated');
+    } finally {
+      leaveTempDir(state);
+    }
+  });
 });

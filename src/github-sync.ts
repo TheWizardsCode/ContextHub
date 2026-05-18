@@ -105,7 +105,10 @@ export async function upsertIssuesFromWorkItems(
   } catch (_) {}
   const beforeMetrics = snapshot();
   const labelPrefix = normalizeGithubLabelPrefix(config.labelPrefix);
-  const issueItems = items.filter(item => item.status !== 'deleted' || item.githubIssueNumber != null);
+  // Note: deleted items without githubIssueNumber are excluded by the
+  // pre-filter (filterItemsForPush) before items reach this function.
+  // A defensive guard inside upsertMapper() also skips deleted items
+  // without githubIssueNumber in case items arrive unfiltered (e.g. --all).
   const linkedPairs = new Set<string>();
   let linkedCount = 0;
   const nodeIdCache = new Map<number, string>();
@@ -251,7 +254,7 @@ export async function upsertIssuesFromWorkItems(
 
   async function upsertMapper(item: WorkItem, idx: number) {
     if (onProgress) {
-      emitProgress('push', idx + 1, issueItems.length);
+      emitProgress('push', idx + 1, items.length);
     }
     // Guard: skip deleted items that have no GitHub issue (prevent accidental creation)
     if (item.status === 'deleted' && !item.githubIssueNumber) {
@@ -452,11 +455,11 @@ export async function upsertIssuesFromWorkItems(
   // Promise.all on an array of async functions is fine because the mapper
   // already yields periodically; keep behavior unchanged but surface a
   // lastStartTime/lastEndTime pair for diagnostic consumption.
-  await Promise.all(issueItems.map((it, idx) => upsertMapper(it, idx)));
+  await Promise.all(items.map((it, idx) => upsertMapper(it, idx)));
 
   try { (upsertIssuesFromWorkItems as any).__lastEndTime = Date.now(); } catch (_) {}
 
-  result.skipped = items.length - issueItems.length + skippedUpdates;
+  result.skipped = skippedUpdates;
 
   for (let idx = 0; idx < updatedItems.length; idx += 1) {
     const item = updatedItems[idx];

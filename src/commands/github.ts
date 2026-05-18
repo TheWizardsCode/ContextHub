@@ -44,7 +44,7 @@ export default function register(ctx: PluginContext): void {
     .option('--repo <owner/name>', 'GitHub repo (owner/name)')
     .option('--label-prefix <prefix>', 'Label prefix for Worklog labels (default: wl:)')
     .option('--all', 'Force a full push of all items, ignoring the last-push timestamp')
-    .option('--force', 'Deprecated alias for --all (bypass pre-filter and process all items)', false)
+    .option('--force', 'Deprecated: use --all instead', false)
     .option('--no-update-timestamp', 'Do not write last-push timestamp after push')
     .option('--id <work-item-id>', 'Push a single work item by ID')
     .option('--prefix <prefix>', 'Override the default prefix')
@@ -145,10 +145,27 @@ export default function register(ctx: PluginContext): void {
         let _writeLastPushTimestamp: ((ts: string, db?: { setMetadata?: (k: string, v: string) => void }, repo?: string | null) => void) | null = null;
 
         const forceAll = Boolean(options.all) || Boolean(options.force);
+        if (options.force && !options.all) {
+          if (!isJsonMode) console.error('Warning: --force is deprecated and will be removed in a future release. Use --all instead.');
+          logLine('github push: --force is deprecated; use --all instead');
+        }
+        // Pre-filter skip counts are accumulated alongside upsert skip counts to
+        // produce the total skip count reported in CLI output.
+        let preFilterSkippedCount = 0;
+        let preFilterDeletedWithoutIssueCount = 0;
         if (forceAll) {
           // Bypass pre-filter when --all (or deprecated --force) specified
           if (!isJsonMode) console.log(`Full push (--all): processing all ${items.length} items`);
           logLine('github push: --all mode enabled - processing all items');
+          // Still need the timestamp writer even in --all mode; resolve it here.
+          if (!_writeLastPushTimestamp) {
+            try {
+              const mod = await import('../github-pre-filter.js');
+              _writeLastPushTimestamp = mod.writeLastPushTimestamp;
+            } catch (_err) {
+              logLine('github push: failed to load writeLastPushTimestamp; timestamps will not be updated');
+            }
+          }
         } else {
           // Pre-filter items to only those changed since last push or never pushed
           try {
@@ -157,13 +174,19 @@ export default function register(ctx: PluginContext): void {
             // Read last-push using a repo-scoped key when available to avoid
             // cross-repo timestamp collisions in multi-repo runs.
             lastPush = preFilterMod.readLastPushTimestamp(dbForMetadata, githubConfig.repo);
-            const { filteredItems, filteredComments, totalCandidates, skippedCount } = preFilterMod.filterItemsForPush(items, comments, lastPush);
+            const { filteredItems, filteredComments, totalCandidates, skippedCount, deletedWithoutIssueCount } = preFilterMod.filterItemsForPush(items, comments, lastPush);
             itemsToProcess = filteredItems;
             commentsToProcess = filteredComments;
+            preFilterSkippedCount = skippedCount;
+            preFilterDeletedWithoutIssueCount = deletedWithoutIssueCount;
             if (!isJsonMode) {
-              console.log(`Processing ${itemsToProcess.length} of ${totalCandidates} items (${skippedCount} skipped, unchanged since last push)`);
+              const parts: string[] = [];
+              if (skippedCount > 0) parts.push(`${skippedCount} unchanged since last push`);
+              if (deletedWithoutIssueCount > 0) parts.push(`${deletedWithoutIssueCount} deleted without issue number`);
+              const skipMsg = parts.length > 0 ? ` — ${parts.join(', ')}` : '';
+              console.log(`Processing ${itemsToProcess.length} of ${items.length} items (${preFilterSkippedCount + preFilterDeletedWithoutIssueCount} skipped${skipMsg})`);
             }
-            logLine(`github push: pre-filtered items lastPush=${lastPush ?? 'none'} processed=${itemsToProcess.length} totalCandidates=${totalCandidates} skipped=${skippedCount}`);
+            logLine(`github push: pre-filtered items lastPush=${lastPush ?? 'none'} processed=${itemsToProcess.length} totalItems=${items.length} skipped=${skippedCount} deletedWithoutIssue=${deletedWithoutIssueCount}`);
           } catch (err) {
             // If pre-filter module fails, fall back to original behavior but log the error
             const msg = `Pre-filter failed: ${(err as Error).message}. Continuing without pre-filter.`;
@@ -224,15 +247,9 @@ export default function register(ctx: PluginContext): void {
         // `--no-update-timestamp` (Commander exposes as `updateTimestamp`
         // defaulting to true) suppresses all writes.
         const skipUpdateTimestamp = Boolean(options.noUpdateTimestamp) || options.updateTimestamp === false;
+        // _writeLastPushTimestamp was resolved during the pre-filter import above
+        // (or set to null when pre-filter is unavailable / --no-update-timestamp).
         let writeTimestamp = skipUpdateTimestamp ? null : _writeLastPushTimestamp;
-        if (!skipUpdateTimestamp && !writeTimestamp) {
-          try {
-            const mod = await import('../github-pre-filter.js');
-            writeTimestamp = mod.writeLastPushTimestamp;
-          } catch (_err) {
-            logLine('github push: failed to load writeLastPushTimestamp; timestamps will not be updated');
-          }
-        }
 
         let lastPersistedBatch = 0;
         for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
@@ -360,14 +377,17 @@ export default function register(ctx: PluginContext): void {
           timing.hierarchyVerifyMs += batchResult.timing.hierarchyVerifyMs;
         }
 
-        // Final timestamp write and logging.  Per-batch writes above cover the
-        // common case; this block handles zero-item pushes (where the batch loop
-        // breaks immediately) and acts as a safety-net final write.
+        // Final timestamp write: per-batch writes cover the common case.
+        // This final write handles the edge case where there are zero items to
+        // push (the batch loop breaks immediately), ensuring the timestamp is
+        // still recorded so the next run doesn\'t re-process items that have
+        // already been pushed.
         if (skipUpdateTimestamp) {
           logLine('github push: skipping last-push timestamp update due to --no-update-timestamp');
           if (!isJsonMode) console.log('Note: last-push timestamp was not updated (--no-update-timestamp)');
         } else {
-          // Write once more to cover the zero-batch / safety-net case.
+          // Final write to cover zero-item edge case only; per-batch writes
+          // already updated the timestamp for normal flows.
           if (writeTimestamp) {
             try {
               writeTimestamp(pushStartTimestamp, dbForMetadata, githubConfig.repo);
@@ -382,8 +402,12 @@ export default function register(ctx: PluginContext): void {
           }
         }
 
+        // Combine skip counts: pre-filter skipped deleted-without-issue items and
+        // unchanged items, while upsert reports items skipped because they were
+        // already up-to-date. The total skip count is the sum of both.
+        const totalSkipped = result.skipped + preFilterSkippedCount + preFilterDeletedWithoutIssueCount;
         logLine(`Repo ${githubConfig.repo}`);
-        logLine(`Push summary created=${result.created} updated=${result.updated} closed=${result.closed} skipped=${result.skipped}`);
+        logLine(`Push summary created=${result.created} updated=${result.updated} closed=${result.closed} skipped=${totalSkipped} (preFilter=${preFilterSkippedCount} deletedWithoutIssue=${preFilterDeletedWithoutIssueCount} upsert=${result.skipped})`);
         if ((result.commentsCreated || 0) > 0 || (result.commentsUpdated || 0) > 0) {
           logLine(`Comment summary created=${result.commentsCreated || 0} updated=${result.commentsUpdated || 0}`);
         }
@@ -406,8 +430,17 @@ export default function register(ctx: PluginContext): void {
           }));
           output.json({
             success: true,
-            ...result,
+            preFilterSkipped: preFilterSkippedCount,
+            preFilterDeletedWithoutIssue: preFilterDeletedWithoutIssueCount,
+            updated: result.updated,
+            created: result.created,
+            closed: result.closed,
+            skipped: totalSkipped,
+            errors: result.errors,
             syncedItems: syncedItemsWithUrls,
+            errorItems: result.errorItems,
+            commentsCreated: result.commentsCreated,
+            commentsUpdated: result.commentsUpdated,
             repo: githubConfig.repo,
           });
         } else {
@@ -425,7 +458,14 @@ export default function register(ctx: PluginContext): void {
           console.log(`  Created: ${result.created}`);
           console.log(`  Updated: ${result.updated}`);
           console.log(`  Closed: ${result.closed}`);
-          console.log(`  Skipped: ${result.skipped}`);
+          console.log(`  Skipped: ${totalSkipped}`);
+          if (preFilterSkippedCount > 0 || preFilterDeletedWithoutIssueCount > 0) {
+            const skipParts: string[] = [];
+            if (preFilterSkippedCount > 0) skipParts.push(`${preFilterSkippedCount} unchanged since last push`);
+            if (preFilterDeletedWithoutIssueCount > 0) skipParts.push(`${preFilterDeletedWithoutIssueCount} deleted without issue number`);
+            if (result.skipped > 0) skipParts.push(`${result.skipped} up-to-date`);
+            console.log(`    (${skipParts.join(', ')})`);
+          }
           if (forceAll) console.log('  Note: --all was used; pre-filter was bypassed');
           if ((result.commentsCreated || 0) > 0 || (result.commentsUpdated || 0) > 0) {
             console.log(`  Comments created: ${result.commentsCreated || 0}`);

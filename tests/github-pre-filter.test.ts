@@ -1,4 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 import { filterItemsForPush, readLastPushTimestamp, writeLastPushTimestamp } from '../src/github-pre-filter.js';
 
 const baseTime = new Date('2025-01-01T00:00:00.000Z').toISOString();
@@ -44,6 +47,7 @@ describe('github pre-filter', () => {
       expect(res.filteredComments.length).toBe(2);
       expect(res.skippedCount).toBe(0);
       expect(res.totalCandidates).toBe(2);
+      expect(res.deletedWithoutIssueCount).toBe(0);
     });
 
     it('returns all items when lastPushTimestamp is empty string', () => {
@@ -282,6 +286,7 @@ describe('github pre-filter', () => {
       expect(res.filteredComments.map(c => c.workItemId).sort()).toEqual(['changed', 'deleted-with-issue', 'new-item']);
       expect(res.totalCandidates).toBe(4); // excludes deleted-no-issue only
       expect(res.skippedCount).toBe(1); // only 'unchanged'
+      expect(res.deletedWithoutIssueCount).toBe(1); // deleted-no-issue
     });
   });
 
@@ -295,6 +300,7 @@ describe('github pre-filter', () => {
       expect(res.filteredComments.length).toBe(0);
       expect(res.totalCandidates).toBe(0);
       expect(res.skippedCount).toBe(0);
+      expect(res.deletedWithoutIssueCount).toBe(0);
     });
 
     it('handles empty items with valid timestamp', () => {
@@ -368,11 +374,85 @@ describe('github pre-filter', () => {
       // totalCandidates = 6 (G excluded as deleted without githubIssueNumber)
       // filtered = C, D, E => 3
       // skipped = A, B, F => 3
+      // deletedWithoutIssueCount = 1 (G)
       expect(res.totalCandidates).toBe(6);
       expect(res.filteredItems.length).toBe(3);
       expect(res.skippedCount).toBe(3);
-      // Verify the log message can be constructed from these values:
-      // "Processing 3 of 5 items (2 skipped, unchanged since last push)"
+      expect(res.deletedWithoutIssueCount).toBe(1);
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // deletedWithoutIssueCount tracking
+  // -------------------------------------------------------------------
+  describe('deletedWithoutIssueCount', () => {
+    it('counts deleted items without githubIssueNumber', () => {
+      const items = [
+        makeItem('A', baseTime, 1),
+        makeItem('B', baseTime, undefined, 'deleted'),
+        makeItem('C', baseTime, 2, 'deleted'),
+      ];
+      const res = filterItemsForPush(items, [], null);
+      expect(res.deletedWithoutIssueCount).toBe(1); // only B
+      expect(res.totalCandidates).toBe(2); // A and C (B excluded)
+    });
+
+    it('counts multiple deleted items without githubIssueNumber', () => {
+      const items = [
+        makeItem('A', baseTime, 1),
+        makeItem('B', baseTime, undefined, 'deleted'),
+        makeItem('C', baseTime, undefined, 'deleted'),
+        makeItem('D', baseTime, 2, 'deleted'),
+      ];
+      const res = filterItemsForPush(items, [], null);
+      expect(res.deletedWithoutIssueCount).toBe(2); // B and C
+      expect(res.totalCandidates).toBe(2); // A and D only
+    });
+
+    it('returns zero when no deleted items exist', () => {
+      const items = [makeItem('A', baseTime, 1), makeItem('B', baseTime)];
+      const res = filterItemsForPush(items, [], null);
+      expect(res.deletedWithoutIssueCount).toBe(0);
+    });
+
+    it('returns zero when all deleted items have githubIssueNumber', () => {
+      const items = [makeItem('A', baseTime, 1, 'deleted'), makeItem('B', baseTime, 2, 'deleted')];
+      const res = filterItemsForPush(items, [], null);
+      expect(res.deletedWithoutIssueCount).toBe(0);
+      expect(res.totalCandidates).toBe(2);
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // Skip-count composition
+  // -------------------------------------------------------------------
+  describe('skip-count composition', () => {
+    it('skippedCount and deletedWithoutIssueCount are independent', () => {
+      const lastPush = new Date('2025-01-02T00:00:00.000Z').toISOString();
+      const older = new Date('2025-01-01T00:00:00.000Z').toISOString();
+      const items = [
+        makeItem('unchanged', older, 1),      // skipped (unchanged)
+        makeItem('deleted-no-issue', older, undefined, 'deleted'), // excluded from candidates
+      ];
+      const res = filterItemsForPush(items, [], lastPush);
+      expect(res.skippedCount).toBe(1); // unchanged only
+      expect(res.deletedWithoutIssueCount).toBe(1); // deleted-no-issue
+      expect(res.totalCandidates).toBe(1); // unchanged only (deleted-no-issue excluded)
+    });
+
+    it('total skipped = skippedCount + deletedWithoutIssueCount', () => {
+      const lastPush = new Date('2025-01-02T00:00:00.000Z').toISOString();
+      const older = new Date('2025-01-01T00:00:00.000Z').toISOString();
+      const newer = new Date('2025-01-03T00:00:00.000Z').toISOString();
+      const items = [
+        makeItem('new', newer),                          // included
+        makeItem('unchanged', older, 1),                 // skipped
+        makeItem('deleted-no-issue', older, undefined, 'deleted'), // excluded
+      ];
+      const res = filterItemsForPush(items, [], lastPush);
+      const totalSkipped = res.skippedCount + res.deletedWithoutIssueCount;
+      expect(totalSkipped).toBe(2); // 1 unchanged + 1 deleted without issue
+      expect(res.filteredItems.length).toBe(1); // only 'new'
     });
   });
 
@@ -422,6 +502,77 @@ describe('github pre-filter', () => {
       // Should not throw, should fall through to file-based read
       const read = readLastPushTimestamp(fakeDb);
       expect(read === null || typeof read === 'string').toBe(true);
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // Repo-scoped timestamp read/write
+  // -------------------------------------------------------------------
+  describe('repo-scoped timestamp read/write', () => {
+    it('reads repo-scoped metadata key when repo is provided', () => {
+      const ts = '2025-06-15T12:00:00.000Z';
+      const fakeDb = {
+        getMetadata: (key: string) => key === 'githubLastPush:owner/repo' ? ts : null,
+      };
+      const read = readLastPushTimestamp(fakeDb, 'owner/repo');
+      expect(read).toBe(ts);
+    });
+
+    it('falls back to global metadata key when repo-scoped key is absent', () => {
+      const ts = '2025-06-15T12:00:00.000Z';
+      const fakeDb = {
+        getMetadata: (key: string) => key === 'githubLastPush' ? ts : null,
+      };
+      const read = readLastPushTimestamp(fakeDb, 'owner/other-repo');
+      expect(read).toBe(ts);
+    });
+
+    it('prefers repo-scoped key over global key', () => {
+      const globalTs = '2025-01-01T00:00:00.000Z';
+      const repoTs = '2025-06-15T12:00:00.000Z';
+      const fakeDb = {
+        getMetadata: (key: string) => {
+          if (key === 'githubLastPush:owner/repo') return repoTs;
+          if (key === 'githubLastPush') return globalTs;
+          return null;
+        },
+      };
+      const read = readLastPushTimestamp(fakeDb, 'owner/repo');
+      expect(read).toBe(repoTs);
+    });
+
+    it('writes repo-scoped metadata key and global key', () => {
+      const ts = '2025-06-15T12:00:00.000Z';
+      const writtenKeys: Record<string, string> = {};
+      const fakeDb = {
+        setMetadata: (key: string, value: string) => { writtenKeys[key] = value; },
+      };
+      writeLastPushTimestamp(ts, fakeDb, 'owner/repo');
+      expect(writtenKeys['githubLastPush:owner/repo']).toBe(ts);
+      expect(writtenKeys['githubLastPush']).toBe(ts);
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // Atomic writes
+  // -------------------------------------------------------------------
+  describe('atomic write', () => {
+    it('uses atomic write and reads back correctly', () => {
+      const ts = '2025-06-15T12:00:00.000Z';
+      // Write via the module's atomic write (writeLastPushTimestamp writes
+      // to .worklog/github-last-push by default when no DB provided)
+      writeLastPushTimestamp(ts, undefined, undefined);
+      const read = readLastPushTimestamp(undefined, undefined);
+      expect(read).toBe(ts);
+    });
+
+    it('overwrites previous value atomically', () => {
+      const ts1 = '2025-01-01T00:00:00.000Z';
+      const ts2 = '2025-06-15T12:00:00.000Z';
+      writeLastPushTimestamp(ts1, undefined, undefined);
+      writeLastPushTimestamp(ts2, undefined, undefined);
+      const read = readLastPushTimestamp(undefined, undefined);
+      expect(read).toBe(ts2);
     });
   });
 });

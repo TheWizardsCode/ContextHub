@@ -1,6 +1,7 @@
 import { WorkItem, Comment } from './types.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { resolveWorklogDir } from './worklog-paths.js';
 
 export interface PreFilterResult {
@@ -8,6 +9,7 @@ export interface PreFilterResult {
   filteredComments: Comment[];
   totalCandidates: number; // items considered (excluding deleted items without githubIssueNumber)
   skippedCount: number;
+  deletedWithoutIssueCount: number; // items excluded because they are deleted without githubIssueNumber
 }
 
 // Base filename and metadata key used historically. For compatibility we
@@ -92,20 +94,44 @@ export function writeLastPushTimestamp(ts: string, db?: { setMetadata?: (k: stri
     }
     // Write repo-specific file (if repo provided) and also the legacy file
     // to preserve existing expectations from other tools/tests.
+    // Use atomic writes (write to temp file then rename) to prevent
+    // corruption from interrupted writes.
     if (repo) {
       const repoPath = path.join(dir, timestampFilenameForRepo(repo));
       try {
-        fs.writeFileSync(repoPath, `${ts}\n`, { encoding: 'utf8' });
+        atomicWriteFileSync(repoPath, `${ts}\n`, { encoding: 'utf8' });
       } catch (err) {
         console.error(`Failed to write last-push timestamp (${repoPath}): ${(err as Error).message}`);
       }
     }
     const p = path.join(dir, TIMESTAMP_FILENAME_BASE);
     // include a trailing newline for easier human inspection
-    fs.writeFileSync(p, `${ts}\n`, { encoding: 'utf8' });
+    atomicWriteFileSync(p, `${ts}\n`, { encoding: 'utf8' });
   } catch (err) {
     // best-effort: do not throw, allow CLI to continue
     console.error(`Failed to write last-push timestamp: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Atomic file write: write content to a temp file in the same directory,
+ * then rename over the target. Prevents corruption from interrupted
+ * writes.
+ */
+function atomicWriteFileSync(filePath: string, content: string, options: fs.WriteFileOptions): void {
+  const dir = path.dirname(filePath);
+  const tmpFile = path.join(dir, `.${path.basename(filePath)}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+  try {
+    fs.writeFileSync(tmpFile, content, options);
+    fs.renameSync(tmpFile, filePath);
+  } catch (err) {
+    // Clean up temp file on failure
+    try {
+      if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+    } catch (_e) {
+      // Ignore cleanup errors
+    }
+    throw err;
   }
 }
 
@@ -119,6 +145,8 @@ export function filterItemsForPush(items: WorkItem[], comments: Comment[], lastP
   // Exclude deleted items that have no githubIssueNumber (they can never be
   // closed on GitHub). Deleted items WITH a githubIssueNumber are kept so
   // their corresponding GitHub issues can be closed.
+  const deletedWithoutIssue = items.filter(i => i.status === 'deleted' && i.githubIssueNumber == null);
+  const deletedWithoutIssueCount = deletedWithoutIssue.length;
   const candidates = items.filter(i => {
     if (i.status === 'deleted') {
       return i.githubIssueNumber != null;
@@ -133,6 +161,7 @@ export function filterItemsForPush(items: WorkItem[], comments: Comment[], lastP
       filteredComments: comments.filter(c => candidates.find(i => i.id === c.workItemId)),
       totalCandidates: candidates.length,
       skippedCount: 0,
+      deletedWithoutIssueCount,
     };
   }
 
@@ -153,5 +182,6 @@ export function filterItemsForPush(items: WorkItem[], comments: Comment[], lastP
     filteredComments,
     totalCandidates: candidates.length,
     skippedCount: Math.max(0, candidates.length - filtered.length),
+    deletedWithoutIssueCount,
   };
 }
