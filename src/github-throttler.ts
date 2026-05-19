@@ -9,6 +9,8 @@
  * The clock is injectable to allow deterministic unit tests.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 export type Clock = { now(): number };
 
 export type ThrottlerOptions = {
@@ -41,6 +43,10 @@ export class TokenBucketThrottler {
   // throughput. The accessor below exposes these values for diagnostics.
   private retryCount = 0;
   private errorCount = 0;
+
+  // Marks execution that already runs inside this throttler so nested
+  // schedule() calls can run inline without deadlocking on concurrency.
+  private readonly taskContext = new AsyncLocalStorage<boolean>();
 
   // Expose simple stats without blocking the throttler operation
   getStats() {
@@ -103,6 +109,13 @@ export class TokenBucketThrottler {
   }
 
   schedule<T>(fn: () => Promise<T> | T): Promise<T> {
+    // Reentrant path: if we are already inside a scheduled task for this
+    // throttler instance, execute inline to avoid self-deadlock when the
+    // outer task has consumed available concurrency slots.
+    if (this.taskContext.getStore()) {
+      return Promise.resolve().then(fn);
+    }
+
     return new Promise<T>((resolve, reject) => {
       const task: Task<T> = { fn, resolve, reject } as Task<T>;
       this.queue.push(task as Task<unknown>);
@@ -162,7 +175,7 @@ export class TokenBucketThrottler {
 
     // Execute task
     Promise.resolve()
-      .then(() => task.fn())
+      .then(() => this.taskContext.run(true, () => task.fn()))
       .then((res) => {
         this.active -= 1;
         (task.resolve as (v: unknown) => void)(res);
