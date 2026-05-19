@@ -4,6 +4,9 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import { getRepoFromGitRemote, normalizeGithubLabelPrefix, SecondaryRateLimitError, setVerboseLogger } from '../github.js';
+import { getLockPathForJsonl, withFileLock } from '../file-lock.js';
+import { resolveWorklogDir } from '../worklog-paths.js';
+import path from 'node:path';
 import { ProgressReporter, ProgressMode } from '../progress.js';
 import throttler from '../github-throttler.js';
 import { upsertIssuesFromWorkItems, importIssuesToWorkItems, GithubProgress, GithubSyncResult, SyncedItem, SyncErrorItem, FieldChange } from '../github-sync.js';
@@ -88,7 +91,10 @@ export default function register(ctx: PluginContext): void {
       };
 
       const progressMode = (options as any).progress as ProgressMode | undefined;
-      const progressReporter = new ProgressReporter({ mode: progressMode ?? (isJsonMode ? 'json' : undefined) });
+      const progressReporter = new ProgressReporter({
+        mode: progressMode ?? (isJsonMode ? 'json' : undefined),
+        rateMs: 250,
+      });
       const renderProgress = (progress: GithubProgress) => {
         if (progress.phase === 'push') {
           const totalItems = Math.max(pushTotalItems, 0);
@@ -102,7 +108,7 @@ export default function register(ctx: PluginContext): void {
               ? currentBatchLength
               : Math.min(Math.max(totalItems - batchIdx * BATCH_SIZE, 0), BATCH_SIZE);
             const itemNumberInBatch = Math.min(Math.max(progress.current, 1), batchItemCount || BATCH_SIZE);
-            message = `Push: Batch ${batchIdx + 1}/${totalBatches} Item ${itemNumberInBatch}/${batchItemCount || BATCH_SIZE}`;
+            message = `Push: Batch ${batchIdx + 1}/${totalBatches} Completed ${itemNumberInBatch}/${batchItemCount || BATCH_SIZE}`;
           }
           // Append throttler stats to push message for diagnostic visibility
           try {
@@ -125,26 +131,33 @@ export default function register(ctx: PluginContext): void {
       };
 
       try {
-        const githubConfig = resolveGithubConfig({ repo: options.repo, labelPrefix: options.labelPrefix });
-        const repoUrl = `https://github.com/${githubConfig.repo}/issues`;
-        if (!isJsonMode) {
-          console.log(`Pushing to ${repoUrl}`);
-        }
-        const items = db.getAll();
-        const comments = db.getAllComments();
+        // Acquire a per-repo file lock to serialize github push operations and
+        // avoid races where concurrent push runs update the last-push timestamp
+        // out-of-band and cause items to be skipped. Use the JSONL path as the
+        // lock target so it is repo-scoped and consistent with other file-locks.
+        const jsonlPath = path.join(resolveWorklogDir(), 'worklog-data.jsonl');
+        const lockPath = getLockPathForJsonl(jsonlPath);
+        await withFileLock(lockPath, async () => {
+          const githubConfig = resolveGithubConfig({ repo: options.repo, labelPrefix: options.labelPrefix });
+          const repoUrl = `https://github.com/${githubConfig.repo}/issues`;
+          if (!isJsonMode) {
+            console.log(`Pushing to ${repoUrl}`);
+          }
+          const items = db.getAll();
+          const comments = db.getAllComments();
 
-        let itemsToProcess = items;
-        let commentsToProcess = comments;
-        let lastPush: string | null = null;
-        // Pass DB to timestamp helpers when available so they may use metadata
-        const dbForMetadata = typeof db.getAll === 'function' && typeof (db as any).store === 'object' ? (db as any).store : undefined;
+          let itemsToProcess = items;
+          let commentsToProcess = comments;
+          let lastPush: string | null = null;
+          // Pass DB to timestamp helpers when available so they may use metadata
+          const dbForMetadata = typeof db.getAll === 'function' && typeof (db as any).store === 'object' ? (db as any).store : undefined;
 
-        // Eagerly capture writeLastPushTimestamp when the pre-filter module is
-        // available.  It may be resolved during the pre-filter import below or
-        // via a standalone import before the batch loop.
-        let _writeLastPushTimestamp: ((ts: string, db?: { setMetadata?: (k: string, v: string) => void }, repo?: string | null) => void) | null = null;
+          // Eagerly capture writeLastPushTimestamp when the pre-filter module is
+          // available.  It may be resolved during the pre-filter import below or
+          // via a standalone import before the batch loop.
+          let _writeLastPushTimestamp: ((ts: string, db?: { setMetadata?: (k: string, v: string) => void }, repo?: string | null) => void) | null = null;
 
-        const forceAll = Boolean(options.all) || Boolean(options.force);
+          const forceAll = Boolean(options.all) || Boolean(options.force);
         if (options.force && !options.all) {
           if (!isJsonMode) console.error('Warning: --force is deprecated and will be removed in a future release. Use --all instead.');
           logLine('github push: --force is deprecated; use --all instead');
@@ -155,7 +168,7 @@ export default function register(ctx: PluginContext): void {
         let preFilterDeletedWithoutIssueCount = 0;
         if (forceAll) {
           // Bypass pre-filter when --all (or deprecated --force) specified
-          if (!isJsonMode) console.log(`Full push (--all): processing all ${items.length} items`);
+          if (!isJsonMode && !options.id) console.log(`Full push (--all): processing all ${items.length} items`);
           logLine('github push: --all mode enabled - processing all items');
           // Still need the timestamp writer even in --all mode; resolve it here.
           if (!_writeLastPushTimestamp) {
@@ -179,7 +192,7 @@ export default function register(ctx: PluginContext): void {
             commentsToProcess = filteredComments;
             preFilterSkippedCount = skippedCount;
             preFilterDeletedWithoutIssueCount = deletedWithoutIssueCount;
-            if (!isJsonMode) {
+            if (!isJsonMode && !options.id) {
               const parts: string[] = [];
               if (skippedCount > 0) parts.push(`${skippedCount} unchanged since last push`);
               if (deletedWithoutIssueCount > 0) parts.push(`${deletedWithoutIssueCount} deleted without issue number`);
@@ -199,13 +212,49 @@ export default function register(ctx: PluginContext): void {
 
         // --id: restrict to a single work item when provided
         if (options.id) {
-          const singleItem = itemsToProcess.find(i => i.id === options.id);
+          // When --id is supplied, bypass the pre-filter and always push the
+          // specified work item (do not require it to be a candidate in the
+          // pre-filtered set). This ensures explicit single-item pushes always
+          // run even if the pre-filter would otherwise exclude the item.
+          const singleItem = items.find(i => i.id === options.id);
           if (!singleItem) {
-            throw new Error(`Work item '${options.id}' not found (or not a candidate for push).`);
+            throw new Error(`Work item '${options.id}' not found.`);
           }
           itemsToProcess = [singleItem];
-          commentsToProcess = commentsToProcess.filter(c => c.workItemId === options.id);
+          commentsToProcess = comments.filter(c => c.workItemId === options.id);
+          if (!isJsonMode) {
+            console.log(`Processing 1 of ${items.length} items (--id ${options.id})`);
+          }
           logLine(`github push: --id mode; pushing single item ${options.id}`);
+        }
+
+        // Defensive: ensure we didn't miss any items that were updated since
+        // the last push timestamp. In rare race conditions or when the
+        // pre-filter behaved unexpectedly, an item with updatedAt > lastPush
+        // might be missing from itemsToProcess. Add any such items now so the
+        // push run is robust.
+        if (!forceAll && !options.id && lastPush) {
+          try {
+            const lastMs = new Date(lastPush).getTime();
+            if (!Number.isNaN(lastMs)) {
+              const existingIds = new Set(itemsToProcess.map(i => i.id));
+              const additional = items.filter(it => !existingIds.has(it.id)).filter(it => {
+                const updatedMs = new Date(it.updatedAt).getTime();
+                return !Number.isNaN(updatedMs) && updatedMs > lastMs;
+              });
+              if (additional.length > 0) {
+                // Append additional items preserving the natural order from `items`.
+                for (const it of items) {
+                  if (additional.find(a => a.id === it.id)) itemsToProcess.push(it);
+                }
+                // Add comments for additional items
+                for (const c of comments) {
+                  if (additional.find(a => a.id === c.workItemId)) commentsToProcess.push(c);
+                }
+                logLine(`github push: added ${additional.length} item(s) newer than lastPush`);
+              }
+            }
+          } catch (_) {}
         }
 
         // Capture push-start timestamp BEFORE processing begins so that items
@@ -217,6 +266,7 @@ export default function register(ctx: PluginContext): void {
           : undefined;
 
         pushTotalItems = itemsToProcess.length;
+
 
         // Process items in fixed batches of 10 so progress is persisted after
         // each batch and a single failure does not require reprocessing everything.
@@ -266,6 +316,10 @@ export default function register(ctx: PluginContext): void {
           currentBatchLength = batchItems.length;
 
           logLine(`github push: batch ${batchIndex + 1}/${totalBatches} items=${batchItems.length}`);
+          // Diagnostic: list batch item ids for debugging why items may be skipped
+          try {
+            logLine(`github push: batch ${batchIndex + 1} ids=${batchItems.map(i => i.id).join(',')}`);
+          } catch (_) {}
 
           let batchResult;
           try {
@@ -512,6 +566,7 @@ export default function register(ctx: PluginContext): void {
             }
         }
         logLine(`--- github push end ${new Date().toISOString()} ---`);
+          });
       } catch (error) {
         logLine(`GitHub sync failed: ${(error as Error).message}`);
         output.error(`GitHub sync failed: ${(error as Error).message}`, { success: false, error: (error as Error).message });

@@ -157,7 +157,7 @@ export async function upsertIssuesFromWorkItems(
   const updatedItems: WorkItem[] = [...items];
   const result: GithubSyncResult = { updated: 0, created: 0, closed: 0, skipped: 0, errors: [], syncedItems: [], errorItems: [] };
   const updatedById = new Map<string, WorkItem>();
-  let processed = 0;
+  let completed = 0;
   let skippedUpdates = 0;
 
   const sortCommentsByCreatedAt = (left: Comment, right: Comment) => {
@@ -253,51 +253,48 @@ export async function upsertIssuesFromWorkItems(
     title.length <= maxLen ? title : title.slice(0, maxLen - 1) + '\u2026';
 
   async function upsertMapper(item: WorkItem, idx: number) {
-    if (onProgress) {
-      emitProgress('push', idx + 1, items.length);
-    }
-    // Guard: skip deleted items that have no GitHub issue (prevent accidental creation)
-    if (item.status === 'deleted' && !item.githubIssueNumber) {
-      if (onVerboseLog) {
-        onVerboseLog(`[upsert] skip deleted item ${item.id} (no githubIssueNumber)`);
-      }
-      skippedUpdates += 1;
-      return;
-    }
-    const itemComments = byItemId.get(item.id) || [];
-    const shouldSyncComments = commentNeedsSync(item, itemComments);
-    increment('items.processed');
-    if (
-      item.githubIssueNumber &&
-      item.githubIssueUpdatedAt &&
-      new Date(item.updatedAt).getTime() <= new Date(item.githubIssueUpdatedAt).getTime() &&
-      !shouldSyncComments
-    ) {
-      if (onVerboseLog) {
-        onVerboseLog(`[upsert] skip ${item.id} (no issue or comment changes)`);
-      }
-      skippedUpdates += 1;
-      return;
-    }
-    const payload = workItemToIssuePayload(item, itemComments, labelPrefix, items);
-
     try {
+      // Guard: skip deleted items that have no GitHub issue (prevent accidental creation)
+      if (item.status === 'deleted' && !item.githubIssueNumber) {
+        if (onVerboseLog) {
+          onVerboseLog(`[upsert] skip deleted item ${item.id} (no githubIssueNumber)`);
+        }
+        skippedUpdates += 1;
+        return;
+      }
+      const itemComments = byItemId.get(item.id) || [];
+      const shouldSyncComments = commentNeedsSync(item, itemComments);
+      increment('items.processed');
+      if (
+        item.githubIssueNumber &&
+        item.githubIssueUpdatedAt &&
+        new Date(item.updatedAt).getTime() <= new Date(item.githubIssueUpdatedAt).getTime() &&
+        !shouldSyncComments
+      ) {
+        if (onVerboseLog) {
+          onVerboseLog(`[upsert] skip ${item.id} (no issue or comment changes)`);
+        }
+        skippedUpdates += 1;
+        return;
+      }
+      const payload = workItemToIssuePayload(item, itemComments, labelPrefix, items);
+
       let issue: GithubIssueRecord | null = null;
       let issueNumber = item.githubIssueNumber;
       let issueUpdatedAt = item.githubIssueUpdatedAt || null;
       const shouldUpdateIssue = !item.githubIssueNumber
         || !item.githubIssueUpdatedAt
         || new Date(item.updatedAt).getTime() > new Date(item.githubIssueUpdatedAt).getTime();
-    if (shouldUpdateIssue) {
+      if (shouldUpdateIssue) {
         const upsertStart = Date.now();
         if (onVerboseLog) {
           onVerboseLog(`[upsert] ${item.githubIssueNumber ? 'update' : 'create'} ${item.id}`);
         }
-            if (item.githubIssueNumber) {
-              increment('api.issue.update');
-              // updateGithubIssueAsync already schedules via the central throttler
-              // internally (see src/github.ts). Avoid double-scheduling here.
-              issue = await updateGithubIssueAsync(config, item.githubIssueNumber!, payload);
+        if (item.githubIssueNumber) {
+          increment('api.issue.update');
+          // updateGithubIssueAsync already schedules via the central throttler
+          // internally (see src/github.ts). Avoid double-scheduling here.
+          issue = await updateGithubIssueAsync(config, item.githubIssueNumber!, payload);
           if (item.status === 'deleted') {
             result.closed += 1;
             result.syncedItems.push({
@@ -315,14 +312,14 @@ export async function upsertIssuesFromWorkItems(
               issueNumber: item.githubIssueNumber,
             });
           }
-            } else {
-              increment('api.issue.create');
-              // createGithubIssueAsync schedules via the central throttler itself.
-              issue = await createGithubIssueAsync(config, {
-                title: payload.title,
-                body: payload.body,
-                labels: payload.labels,
-              });
+        } else {
+          increment('api.issue.create');
+          // createGithubIssueAsync schedules via the central throttler itself.
+          issue = await createGithubIssueAsync(config, {
+            title: payload.title,
+            body: payload.body,
+            labels: payload.labels,
+          });
           result.created += 1;
           result.syncedItems.push({
             action: 'created',
@@ -350,17 +347,17 @@ export async function upsertIssuesFromWorkItems(
 
       const shouldSyncCommentsNow = itemComments.length > 0 && (shouldSyncComments || shouldUpdateIssue);
       if (shouldSyncCommentsNow && issueNumber) {
-          const commentListStart = Date.now();
-          increment('api.comment.list');
-          // listGithubIssueCommentsAsync now schedules internally via the throttler
-          // (see src/github.ts). Call it directly to avoid double-scheduling.
-          const existingComments = await listGithubIssueCommentsAsync(config, issueNumber!);
-          timing.commentListMs += Date.now() - commentListStart;
-          const commentUpsertStart = Date.now();
-          const commentSummary = await upsertGithubIssueCommentsAsync(config, issueNumber, itemComments, existingComments);
-          timing.commentUpsertMs += Date.now() - commentUpsertStart;
-          // small yield after comment work
-          if (idx % 5 === 0) await new Promise((res) => setImmediate(res));
+        const commentListStart = Date.now();
+        increment('api.comment.list');
+        // listGithubIssueCommentsAsync now schedules internally via the throttler
+        // (see src/github.ts). Call it directly to avoid double-scheduling.
+        const existingComments = await listGithubIssueCommentsAsync(config, issueNumber!);
+        timing.commentListMs += Date.now() - commentListStart;
+        const commentUpsertStart = Date.now();
+        const commentSummary = await upsertGithubIssueCommentsAsync(config, issueNumber, itemComments, existingComments);
+        timing.commentUpsertMs += Date.now() - commentUpsertStart;
+        // small yield after comment work
+        if (idx % 5 === 0) await new Promise((res) => setImmediate(res));
         increment('api.comment.create', commentSummary.created || 0);
         increment('api.comment.update', commentSummary.updated || 0);
         result.commentsCreated = (result.commentsCreated || 0) + commentSummary.created;
@@ -384,6 +381,11 @@ export async function upsertIssuesFromWorkItems(
         error: (error as Error).message,
       });
       updatedById.set(item.id, item);
+    } finally {
+      completed += 1;
+      if (onProgress) {
+        emitProgress('push', completed, items.length);
+      }
     }
   }
 

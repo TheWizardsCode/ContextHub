@@ -94,4 +94,20 @@ describe('ProgressReporter', () => {
     const secondRenderWrite = writes[1] ?? '';
     expect(secondRenderWrite.length).toBeGreaterThanOrEqual(firstRenderWrite.length);
   });
+
+  it('uses note as-is when note already includes the phase label', () => {
+    let out = '';
+    const outStream = { write: (s: string) => { out += s; }, isTTY: true } as any;
+    const rep = new ProgressReporter({ mode: 'human', rateMs: 1000, outStream });
+
+    rep.render({
+      phase: 'push',
+      current: 1,
+      total: 10,
+      note: 'Push: Batch 1/2 Completed 1/10 (queue=0 active=0 retries=0 errors=0)',
+    });
+
+    expect(out).toContain('Push: Batch 1/2 Completed 1/10');
+    expect(out).not.toContain('Push: 1/10 (Push:');
+  });
 });

@@ -171,6 +171,8 @@ export function filterItemsForPush(items: WorkItem[], comments: Comment[], lastP
     if (item.githubIssueNumber == null) return true;
     const updatedMs = new Date(item.updatedAt).getTime();
     if (Number.isNaN(updatedMs)) return true; // treat unknown updatedAt as changed
+    // Compare against the last-push timestamp.
+    // (Explicit --id pushes bypass this filter.)
     return updatedMs > lastMs;
   });
 

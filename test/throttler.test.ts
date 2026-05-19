@@ -63,4 +63,21 @@ describe('TokenBucketThrottler - concurrency cap', () => {
     expect(running).toBeLessThanOrEqual(1);
     await Promise.all(tasks);
   });
+
+  it('allows nested schedule calls without deadlocking', async () => {
+    const clock = new FakeClock();
+    const t = new TokenBucketThrottler({ rate: 10, burst: 10, concurrency: 2, clock });
+
+    const resultPromise = Promise.all([
+      t.schedule(async () => await t.schedule(async () => 'inner-a')),
+      t.schedule(async () => await t.schedule(async () => 'inner-b')),
+    ]);
+
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      setTimeout(() => reject(new Error('nested schedule timed out')), 500);
+    });
+
+    const values = await Promise.race([resultPromise, timeoutPromise]);
+    expect(values.sort()).toEqual(['inner-a', 'inner-b']);
+  });
 });
