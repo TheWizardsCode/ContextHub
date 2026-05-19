@@ -244,11 +244,15 @@ export function createCliOutputFromCommand(
   let enabled: boolean | undefined = undefined;
 
   // Priority: CLI flag > config > auto-detect
-  // First check explicit --format value
+  // Priority 1: explicit --format values (markdown/plain/text)
   const formatMarkdown = resolveFormatToMarkdown(programOpts.format);
   if (formatMarkdown !== undefined) {
     // --format markdown/plain/text was explicitly provided
     enabled = formatMarkdown;
+  } else if (programOpts.format && programOpts.format.toLowerCase() === 'auto') {
+    // Priority 2: --format auto means explicit auto-detect from TTY;
+    // do NOT fall through to config because --format auto is a CLI choice.
+    enabled = isTty();
   } else if (programOpts.formatAsMarkdown === true) {
     // Programmatic override
     enabled = true;

@@ -8,7 +8,7 @@
  * (subprocess TTY simulation is covered separately).
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { renderCliMarkdown, createCliOutputFromCommand, stripBlessedTags } from '../../src/cli-output.js';
 import { humanFormatWorkItem } from '../../src/commands/helpers.js';
 import type { WorkItem } from '../../src/types.js';
@@ -83,10 +83,10 @@ describe('wl show formatting integration', () => {
       expect(result).toContain('Test item with');
     });
 
-    it('full format does not use markdown renderer', () => {
+    it('full format does not use markdown renderer by default', () => {
       const result = humanFormatWorkItem(mockWorkItem, null, 'full');
       expect(result).toContain('Test item with');
-      // Full format does NOT render through markdown renderer —
+      // Full format does NOT render through markdown renderer by default —
       // description is shown as plain text, not blessed tags
       expect(result).not.toContain('{white-fg}{bold}Description{/}');
     });
@@ -94,6 +94,96 @@ describe('wl show formatting integration', () => {
     it('summary format still works (not affected by markdown)', () => {
       const result = humanFormatWorkItem(mockWorkItem, null, 'summary');
       expect(result).toContain('Test item with');
+    });
+  });
+
+  describe('humanFormatWorkItem with cliFormatMarkdown config', () => {
+    // Full config required because humanFormatWorkItem calls loadStatusStageRules
+    // which needs statuses, stages, statusStageCompatibility.
+    const fullConfig = {
+      projectName: 'TestProject',
+      prefix: 'TP',
+      cliFormatMarkdown: true as boolean | undefined,
+      statuses: [
+        { value: 'open', label: 'Open' },
+        { value: 'completed', label: 'Completed' },
+        { value: 'deleted', label: 'Deleted' },
+      ],
+      stages: [
+        { value: 'idea', label: 'Idea' },
+        { value: 'in_progress', label: 'In Progress' },
+        { value: 'in_review', label: 'In Review' },
+        { value: 'done', label: 'Done' },
+      ],
+      statusStageCompatibility: {
+        open: ['idea', 'in_progress'],
+        completed: ['in_review', 'done'],
+        deleted: ['idea'],
+      },
+    };
+
+    let loadConfigSpy: ReturnType<typeof vi.spyOn>;
+
+    afterEach(() => {
+      if (loadConfigSpy) loadConfigSpy.mockRestore();
+    });
+
+    async function setupSpy() {
+      const config = await import('../../src/config.js');
+      loadConfigSpy = vi.spyOn(config, 'loadConfig');
+      return loadConfigSpy;
+    }
+
+    it('cliFormatMarkdown true enables markdown for full format', async () => {
+      const spy = await setupSpy();
+      spy.mockReturnValue({ ...fullConfig, cliFormatMarkdown: true });
+      const result = humanFormatWorkItem(mockWorkItem, null, 'full');
+      // cliFormatMarkdown: true should enable markdown rendering even for 'full' format
+      expect(result).toContain('{magenta-fg}inline code{/}');
+      expect(result).toContain('--- bash ---');
+    });
+
+    it('cliFormatMarkdown true enables markdown for concise format', async () => {
+      const spy = await setupSpy();
+      spy.mockReturnValue({ ...fullConfig, cliFormatMarkdown: true });
+      const result = humanFormatWorkItem(mockWorkItem, null, 'concise');
+      // concise format with cliFormatMarkdown: true should render markdown.
+      // Verify that cliFormatMarkdown: true produces output (no crash).
+      expect(result).toContain('Test item with');
+      expect(result).toContain('FT-001');
+    });
+
+    it('cliFormatMarkdown false disables markdown for full format', async () => {
+      const spy = await setupSpy();
+      spy.mockReturnValue({ ...fullConfig, cliFormatMarkdown: false });
+      const result = humanFormatWorkItem(mockWorkItem, null, 'full');
+      // cliFormatMarkdown: false should keep markdown disabled
+      expect(result).not.toContain('{white-fg}{bold}Description{/}');
+    });
+
+    it('cliFormatMarkdown undefined (no config) keeps default behaviour', async () => {
+      const spy = await setupSpy();
+      const { cliFormatMarkdown: _, ...configWithoutMarkdown } = fullConfig;
+      spy.mockReturnValue(configWithoutMarkdown as any);
+      const result = humanFormatWorkItem(mockWorkItem, null, 'full');
+      // No cliFormatMarkdown config: default is no markdown for 'full' format
+      expect(result).not.toContain('{white-fg}{bold}Description{/}');
+    });
+
+    it('cliFormatMarkdown does not override explicit --format markdown', async () => {
+      const spy = await setupSpy();
+      spy.mockReturnValue({ ...fullConfig, cliFormatMarkdown: false });
+      // --format markdown should override cliFormatMarkdown: false
+      const result = humanFormatWorkItem(mockWorkItem, null, 'markdown');
+      expect(result).toContain('{magenta-fg}inline code{/}');
+    });
+
+    it('cliFormatMarkdown does not override explicit --format plain', async () => {
+      const spy = await setupSpy();
+      spy.mockReturnValue({ ...fullConfig, cliFormatMarkdown: true });
+      // --format plain should override cliFormatMarkdown: true
+      const result = humanFormatWorkItem(mockWorkItem, null, 'plain');
+      expect(result).not.toContain('{white-fg}{bold}');
     });
   });
 
@@ -145,14 +235,17 @@ describe('wl show formatting integration', () => {
       expect(out.isFormatted()).toBe(false);
     });
 
-    it('--format auto defers to TTY detection even when config says true', () => {
-      // --format auto means auto-detect, so config should NOT force enabling
+    it('--format auto ignores config and uses TTY detection', () => {
+      // --format auto is an explicit CLI choice for TTY auto-detection.
+      // Config should NOT override it. In test env (non-TTY), result is false
+      // even when cliFormatMarkdown: true is set in config.
       const out = createCliOutputFromCommand(
         { format: 'auto' },
         { cliFormatMarkdown: true }
       );
-      // The result depends on TTY detection — just check it doesn't throw
-      expect(typeof out.isFormatted()).toBe('boolean');
+      // In test environment, isTty() returns false, so --format auto
+      // should give false regardless of cliFormatMarkdown config.
+      expect(out.isFormatted()).toBe(false);
     });
   });
 

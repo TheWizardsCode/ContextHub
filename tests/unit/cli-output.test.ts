@@ -259,14 +259,17 @@ describe('cli-output', () => {
       expect(out.isFormatted()).toBe(false);
     });
 
-    it('CLI --format auto defers to TTY auto-detect (ignoring config)', () => {
-      // --format auto means "auto-detect", so config should NOT override it
+    it('CLI --format auto ignores config and uses TTY detection', () => {
+      // --format auto is an explicit CLI choice for TTY auto-detection.
+      // Config should NOT override it. In test env (non-TTY), result is false
+      // even when cliFormatMarkdown: true is set in config.
       const out = createCliOutputFromCommand(
         { format: 'auto' },
         { cliFormatMarkdown: true }
       );
-      // Result depends on TTY detection in test env
-      expect(typeof out.isFormatted()).toBe('boolean');
+      // In test environment, isTty() returns false, so --format auto
+      // should give false regardless of cliFormatMarkdown config.
+      expect(out.isFormatted()).toBe(false);
     });
 
     it('config cliFormatMarkdown true enables when no CLI flag', () => {

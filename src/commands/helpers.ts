@@ -302,6 +302,10 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   let fmt = (format || loadConfig()?.humanDisplay || 'full').toLowerCase();
   let markdownEnabled = false;
 
+  // Track if the format explicitly disables markdown rendering.
+  // Used later to prevent config from overriding explicit plain/text.
+  let explicitDisabled = false;
+
   // 'markdown' format means: render full output through the markdown renderer
   if (fmt === 'markdown') {
     fmt = 'full';
@@ -310,6 +314,8 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   // 'auto' means: use markdown rendering if TTY, otherwise plain full
   if (fmt === 'auto') {
     fmt = 'full';
+    // --format auto is an explicit CLI choice: use TTY detection,
+    // do NOT fall through to config (precedence: CLI > config > auto-detect)
     if (isTty()) {
       markdownEnabled = true;
     }
@@ -317,6 +323,20 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   // 'text' or 'plain' format means: plain text, no markdown
   if (fmt === 'text' || fmt === 'plain') {
     fmt = 'full';
+    explicitDisabled = true;
+  }
+
+  // Check cliFormatMarkdown config for standard formats when no explicit
+  // markdown/auto/plain/text flag was specified. Config is NOT checked when
+  // --format auto is used (auto is an explicit CLI choice for TTY detection).
+  // Precedence: CLI flag > config > auto-detect (default: off).
+  if (!markdownEnabled && !explicitDisabled) {
+    const config = loadConfig();
+    if (config?.cliFormatMarkdown === true) {
+      markdownEnabled = true;
+    }
+    // If cliFormatMarkdown is unset/false, respect the default (no markdown).
+    // This keeps default behaviour unchanged per AC2.
   }
 
   const isTui = Boolean(tui);
