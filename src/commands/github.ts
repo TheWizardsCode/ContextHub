@@ -168,7 +168,7 @@ export default function register(ctx: PluginContext): void {
         let preFilterDeletedWithoutIssueCount = 0;
         if (forceAll) {
           // Bypass pre-filter when --all (or deprecated --force) specified
-          if (!isJsonMode) console.log(`Full push (--all): processing all ${items.length} items`);
+          if (!isJsonMode && !options.id) console.log(`Full push (--all): processing all ${items.length} items`);
           logLine('github push: --all mode enabled - processing all items');
           // Still need the timestamp writer even in --all mode; resolve it here.
           if (!_writeLastPushTimestamp) {
@@ -192,7 +192,7 @@ export default function register(ctx: PluginContext): void {
             commentsToProcess = filteredComments;
             preFilterSkippedCount = skippedCount;
             preFilterDeletedWithoutIssueCount = deletedWithoutIssueCount;
-            if (!isJsonMode) {
+            if (!isJsonMode && !options.id) {
               const parts: string[] = [];
               if (skippedCount > 0) parts.push(`${skippedCount} unchanged since last push`);
               if (deletedWithoutIssueCount > 0) parts.push(`${deletedWithoutIssueCount} deleted without issue number`);
@@ -222,6 +222,9 @@ export default function register(ctx: PluginContext): void {
           }
           itemsToProcess = [singleItem];
           commentsToProcess = comments.filter(c => c.workItemId === options.id);
+          if (!isJsonMode) {
+            console.log(`Processing 1 of ${items.length} items (--id ${options.id})`);
+          }
           logLine(`github push: --id mode; pushing single item ${options.id}`);
         }
 

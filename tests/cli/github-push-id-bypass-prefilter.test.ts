@@ -11,7 +11,7 @@ describe('github push --id bypasses pre-filter', () => {
     try {
       writeConfig(state.tempDir);
       writeInitSemaphore(state.tempDir);
-      // Seed a single item that would normally be skipped by pre-filter if
+      // Seed items that would normally be skipped by pre-filter if
       // last-push is set to a far-future timestamp.
       seedWorkItems(state.tempDir, [
         {
@@ -24,6 +24,16 @@ describe('github push --id bypasses pre-filter', () => {
           // updatedAt in the past
           updatedAt: '2025-01-01T00:00:00.000Z',
           // avoid external GH calls in this test path
+          githubIssueUpdatedAt: FAR_FUTURE_TIMESTAMP,
+        },
+        {
+          id: 'WL-BETA',
+          title: 'Beta item',
+          status: 'open' as any,
+          priority: 'medium' as any,
+          githubIssueNumber: 1002,
+          githubIssueId: 5002,
+          updatedAt: '2025-01-01T00:00:00.000Z',
           githubIssueUpdatedAt: FAR_FUTURE_TIMESTAMP,
         },
       ]);
@@ -39,6 +49,8 @@ describe('github push --id bypasses pre-filter', () => {
         { cwd: state.tempDir }
       );
 
+      expect(stdout).toContain('Processing 1 of 2 items (--id WL-ALPHA)');
+      expect(stdout).not.toContain('Processing 0 of 2 items');
       expect(stdout).toContain('GitHub sync complete');
     } finally {
       leaveTempDir(state);
