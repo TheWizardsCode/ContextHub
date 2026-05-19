@@ -29,7 +29,7 @@ export default function register(ctx: PluginContext): void {
         // look consistent with other CLI output in TTY. In JSON mode we
         // skip the human-formatted stderr output to keep stderr machine-
         // readable and rely on output.error to emit structured JSON.
-        const cliOut = createCliOutputFromCommand(program.opts());
+        const cliOut = createCliOutputFromCommand(program.opts(), utils.getConfig() ?? undefined);
         if (!program.opts().json) {
           cliOut.printError(`Work item not found: ${normalizedId}`);
         }

@@ -616,5 +616,73 @@ describe('Configuration', () => {
       const prefix = getDefaultPrefix();
       expect(prefix).toBe('DEF');
     });
+
+    it('should load config with cliFormatMarkdown boolean setting', () => {
+      const configDir = path.join(tempDir, '.worklog');
+      fs.mkdirSync(configDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(configDir, 'config.yaml'),
+        [
+          'projectName: TestProject',
+          'prefix: TP',
+          'cliFormatMarkdown: true',
+          'statuses:',
+          '  - value: open',
+          '    label: Open',
+          '  - value: completed',
+          '    label: Completed',
+          '  - value: deleted',
+          '    label: Deleted',
+          'stages:',
+          '  - value: idea',
+          '    label: Idea',
+          '  - value: done',
+          '    label: Done',
+          'statusStageCompatibility:',
+          '  open: [idea]',
+          '  completed: [done]',
+          '  deleted: [idea]',
+        ].join('\n'),
+        'utf-8'
+      );
+
+      const config = loadConfig();
+      expect(config).not.toBeNull();
+      expect(config?.cliFormatMarkdown).toBe(true);
+    });
+
+    it('should load config with cliFormatMarkdown false', () => {
+      const configDir = path.join(tempDir, '.worklog');
+      fs.mkdirSync(configDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(configDir, 'config.yaml'),
+        [
+          'projectName: TestProject',
+          'prefix: TP',
+          'cliFormatMarkdown: false',
+          'statuses:',
+          '  - value: open',
+          '    label: Open',
+          '  - value: completed',
+          '    label: Completed',
+          '  - value: deleted',
+          '    label: Deleted',
+          'stages:',
+          '  - value: idea',
+          '    label: Idea',
+          '  - value: done',
+          '    label: Done',
+          'statusStageCompatibility:',
+          '  open: [idea]',
+          '  completed: [done]',
+          '  deleted: [idea]',
+        ].join('\n'),
+        'utf-8'
+      );
+
+      const config = loadConfig();
+      expect(config).not.toBeNull();
+      expect(config?.cliFormatMarkdown).toBe(false);
+    });
   });
 });

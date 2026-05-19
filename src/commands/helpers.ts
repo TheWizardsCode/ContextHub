@@ -8,6 +8,7 @@ import type { WorkItem, Comment } from '../types.js';
 import type { SyncResult } from '../sync.js';
 import type { WorklogDatabase } from '../database.js';
 import { loadConfig } from '../config.js';
+import { renderCliMarkdown, stripBlessedTags, shouldUseFormattedOutput, isTty } from '../cli-output.js';
 import { getStageLabel, getStatusLabel, loadStatusStageRules } from '../status-stage-rules.js';
 import type { Command } from 'commander';
 
@@ -295,9 +296,29 @@ function colorizeAuditExcerpt(auditText: string, tui?: boolean): string {
   return isTui ? theme.tui.text.readyNo(firstLine) : theme.text.readyNo(firstLine);
 }
 
-// Standard human formatter: supports 'summary' | 'concise' | 'normal' | 'full' | 'raw'
+// Standard human formatter: supports 'summary' | 'concise' | 'normal' | 'full' | 'raw' | 'markdown' | 'auto'
 export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, format: string | undefined, tui?: boolean): string {
-  const fmt = (format || loadConfig()?.humanDisplay || 'full').toLowerCase();
+  // Resolve 'auto' and 'markdown' format values
+  let fmt = (format || loadConfig()?.humanDisplay || 'full').toLowerCase();
+  let markdownEnabled = false;
+
+  // 'markdown' format means: render full output through the markdown renderer
+  if (fmt === 'markdown') {
+    fmt = 'full';
+    markdownEnabled = true;
+  }
+  // 'auto' means: use markdown rendering if TTY, otherwise plain full
+  if (fmt === 'auto') {
+    fmt = 'full';
+    if (isTty()) {
+      markdownEnabled = true;
+    }
+  }
+  // 'text' or 'plain' format means: plain text, no markdown
+  if (fmt === 'text' || fmt === 'plain') {
+    fmt = 'full';
+  }
+
   const isTui = Boolean(tui);
   const sortIndexLabel = `SortIndex: ${item.sortIndex}`;
   const rules = loadStatusStageRules();
@@ -476,7 +497,14 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push(coloredText);
   }
 
-  return lines.join('\n');
+  const result = lines.join('\n');
+
+  // If markdown rendering is enabled, render the full output through the CLI renderer
+  if (markdownEnabled && !isTui) {
+    return renderCliMarkdown(result, { formatAsMarkdown: true });
+  }
+
+  return result;
 }
 
 // Resolve final format choice: CLI override > provided > config > default

@@ -145,6 +145,10 @@ export interface WorklogConfig {
   githubImportCreateNew?: boolean;
   // Human display format preference for CLI (concise | normal | full | raw)
   humanDisplay?: 'concise' | 'normal' | 'full' | 'raw';
+  // Whether to enable markdown rendering in CLI output (true | false).
+  // When set, this takes precedence over auto-detection but is overridden
+  // by explicit command-line flags (CLI > config > auto-detect).
+  cliFormatMarkdown?: boolean;
   statuses?: Array<{ value: string; label: string }>;
   stages?: Array<{ value: string; label: string }>;
   statusStageCompatibility?: Record<string, string[]>;

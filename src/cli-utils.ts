@@ -53,16 +53,25 @@ export function createMarkdownOutputHelpers(program: Command, opts?: CliOutputOp
   const base = createOutputHelpers(program);
   const programOpts = program.opts();
   
+  // Read config for cliFormatMarkdown setting
+  const config = loadConfig();
+  const configCliFormatMarkdown = config?.cliFormatMarkdown;
+  
   // Determine if markdown formatting should be used:
   // - Never use in JSON mode (machine-readable takes precedence)
   // - Default: markdown in TTY (auto-detect), opt-out with --format text/plain
   // - Explicit --format markdown: enable
+  // - Precedence: CLI > config > auto-detect
   let useMarkdown: boolean | undefined = undefined;
   if (programOpts.json) {
     useMarkdown = false; // JSON mode takes precedence
   } else if (programOpts.format === 'markdown') {
     useMarkdown = true;
   } else if (programOpts.format === 'text' || programOpts.format === 'plain') {
+    useMarkdown = false;
+  } else if (configCliFormatMarkdown === true) {
+    useMarkdown = true;
+  } else if (configCliFormatMarkdown === false) {
     useMarkdown = false;
   }
   // else undefined: let shouldUseFormattedOutput() auto-detect based on TTY
