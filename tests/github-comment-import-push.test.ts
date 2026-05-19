@@ -176,6 +176,17 @@ describe('GitHub comment import (GitHub -> Worklog)', () => {
     mockFetchLabelEventsAsync.mockResolvedValue([]);
   });
 
+  it('emits initial import progress before issue listing completes', async () => {
+    const events: Array<{ phase: string; current: number; total: number; note?: string }> = [];
+
+    await importIssuesToWorkItems([], dummyConfig, {
+      onProgress: (p) => events.push({ phase: p.phase, current: p.current, total: p.total, note: p.note }),
+    });
+
+    expect(events.length).toBeGreaterThan(0);
+    expect(events[0]).toMatchObject({ phase: 'import', current: 0, total: 1 });
+  });
+
   it('imports comments from a GitHub issue into Worklog', async () => {
     // Local item linked to GitHub issue #10
     const localItem = makeLocalItem({

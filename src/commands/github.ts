@@ -546,7 +546,21 @@ export default function register(ctx: PluginContext): void {
       const heartbeatIntervalRaw = Number(process.env.WL_GH_IMPORT_HEARTBEAT_MS || '15000');
       const heartbeatIntervalMs = Number.isFinite(heartbeatIntervalRaw) ? Math.max(1000, heartbeatIntervalRaw) : 15000;
       let postImportHeartbeatStarted = false;
+      let initialFetchHeartbeatActive = false;
       const renderProgress = (progress: GithubProgress) => {
+        const isInitialFetchProgress = progress.phase === 'import' && progress.current === 0 && progress.total === 1;
+
+        if (isInitialFetchProgress && !initialFetchHeartbeatActive) {
+          progressReporter.startHeartbeat({
+            intervalMs: heartbeatIntervalMs,
+            notePrefix: 'heartbeat (issue-list-fetch)',
+          });
+          initialFetchHeartbeatActive = true;
+        } else if (initialFetchHeartbeatActive && !isInitialFetchProgress) {
+          progressReporter.stopHeartbeat();
+          initialFetchHeartbeatActive = false;
+        }
+
         if (
           !postImportHeartbeatStarted
           && progress.phase === 'import'

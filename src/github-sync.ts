@@ -756,6 +756,9 @@ export async function importIssuesToWorkItems(
     st.lastEmit = now;
   };
   const skipCloseCheck = options?.skipCloseCheck ?? Boolean(since);
+  if (onProgress) {
+    emitProgressImport('import', 0, 1, 'fetching issues');
+  }
   const issues = await listGithubIssuesAsync(config, since);
   const byId = new Map(items.map(item => [item.id, item]));
   const byIssueNumber = new Map<number, WorkItem>();
