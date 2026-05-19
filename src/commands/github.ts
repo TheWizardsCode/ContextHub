@@ -227,7 +227,7 @@ export default function register(ctx: PluginContext): void {
         // pre-filter behaved unexpectedly, an item with updatedAt > lastPush
         // might be missing from itemsToProcess. Add any such items now so the
         // push run is robust.
-        if (!forceAll && lastPush) {
+        if (!forceAll && !options.id && lastPush) {
           try {
             const lastMs = new Date(lastPush).getTime();
             if (!Number.isNaN(lastMs)) {
@@ -261,12 +261,6 @@ export default function register(ctx: PluginContext): void {
 
         pushTotalItems = itemsToProcess.length;
 
-        // Diagnostic: log whether the target item is present in the candidate list
-        try {
-          const containsTarget = itemsToProcess.some(i => i.id === 'WL-0MM8SU2R20PTDQ9I');
-          logLine(`github push: itemsToProcess=${itemsToProcess.length} containsTarget=${containsTarget}`);
-          try { console.error(`DEBUG: itemsToProcess=${itemsToProcess.length} containsTarget=${containsTarget}`); } catch (_) {}
-        } catch (_) {}
 
         // Process items in fixed batches of 10 so progress is persisted after
         // each batch and a single failure does not require reprocessing everything.
@@ -319,10 +313,6 @@ export default function register(ctx: PluginContext): void {
           // Diagnostic: list batch item ids for debugging why items may be skipped
           try {
             logLine(`github push: batch ${batchIndex + 1} ids=${batchItems.map(i => i.id).join(',')}`);
-          } catch (_) {}
-          try {
-            // Also print to stderr so interactive runs show diagnostics immediately
-            console.error(`DEBUG: batch ${batchIndex + 1} ids=${batchItems.map(i => i.id).join(',')}`);
           } catch (_) {}
 
           let batchResult;

@@ -23,6 +23,8 @@ describe('github push --id bypasses pre-filter', () => {
           githubIssueId: 5001,
           // updatedAt in the past
           updatedAt: '2025-01-01T00:00:00.000Z',
+          // avoid external GH calls in this test path
+          githubIssueUpdatedAt: FAR_FUTURE_TIMESTAMP,
         },
       ]);
 

@@ -100,6 +100,55 @@ describe('github push --id flag', () => {
     }
   });
 
+  it('--id only processes the requested item even when last-push is old', async () => {
+    const state = enterTempDir();
+    try {
+      writeConfig(state.tempDir);
+      writeInitSemaphore(state.tempDir);
+      seedWorkItems(state.tempDir, [
+        {
+          id: 'WL-ALPHA',
+          title: 'Alpha item',
+          status: 'open' as any,
+          priority: 'medium' as any,
+          githubIssueNumber: 1001,
+          githubIssueId: 5001,
+          githubIssueUpdatedAt: FAR_FUTURE_TIMESTAMP,
+        },
+        {
+          id: 'WL-BETA',
+          title: 'Beta item',
+          status: 'open' as any,
+          priority: 'medium' as any,
+          githubIssueNumber: 1002,
+          githubIssueId: 5002,
+          githubIssueUpdatedAt: FAR_FUTURE_TIMESTAMP,
+        },
+      ]);
+
+      // Make timestamp valid and old so non---id filtering would include both items.
+      const timestampPath = path.join(state.tempDir, '.worklog', 'github-last-push');
+      fs.writeFileSync(timestampPath, '2025-01-01T00:00:00.000Z\n', 'utf8');
+
+      await execAsync(
+        `tsx ${cliPath} github push --repo owner/name --id WL-ALPHA`,
+        { cwd: state.tempDir }
+      );
+
+      const logPath = path.join(state.tempDir, '.worklog', 'logs', 'github_sync.log');
+      const logContent = fs.readFileSync(logPath, 'utf8');
+      const lastBatchIdsLine = logContent
+        .split('\n')
+        .filter(line => line.includes('github push: batch 1 ids='))
+        .pop() || '';
+
+      expect(lastBatchIdsLine).toContain('WL-ALPHA');
+      expect(lastBatchIdsLine).not.toContain('WL-BETA');
+    } finally {
+      leaveTempDir(state);
+    }
+  });
+
   it('--id writes timestamp when --no-update-timestamp is not set', async () => {
     const state = enterTempDir();
     try {

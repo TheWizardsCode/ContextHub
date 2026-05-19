@@ -171,13 +171,8 @@ export function filterItemsForPush(items: WorkItem[], comments: Comment[], lastP
     if (item.githubIssueNumber == null) return true;
     const updatedMs = new Date(item.updatedAt).getTime();
     if (Number.isNaN(updatedMs)) return true; // treat unknown updatedAt as changed
-    // If local mapping to GitHub exists, prefer local changes (updatedAt > githubIssueUpdatedAt)
-    const ghUpdatedAt = (item as any).githubIssueUpdatedAt;
-    const ghUpdatedMs = ghUpdatedAt ? new Date(ghUpdatedAt).getTime() : NaN;
-    if (!Number.isNaN(ghUpdatedMs) && updatedMs > ghUpdatedMs) {
-      return true;
-    }
-    // Otherwise fall back to comparing against the last-push timestamp
+    // Compare against the last-push timestamp.
+    // (Explicit --id pushes bypass this filter.)
     return updatedMs > lastMs;
   });
 

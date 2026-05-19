@@ -130,6 +130,15 @@ describe('github pre-filter', () => {
       expect(res.skippedCount).toBe(1);
     });
 
+    it('does not include items older than lastPush just because githubIssueUpdatedAt is older', () => {
+      const older = new Date('2025-01-01T12:00:00.000Z').toISOString();
+      const item = makeItem('A', older, 5);
+      item.githubIssueUpdatedAt = new Date('2025-01-01T00:00:00.000Z').toISOString();
+      const res = filterItemsForPush([item], [], lastPush);
+      expect(res.filteredItems.length).toBe(0);
+      expect(res.skippedCount).toBe(1);
+    });
+
     it('treats items with invalid updatedAt as changed (included)', () => {
       const items = [makeItem('A', 'not-a-date', 1)];
       const res = filterItemsForPush(items, [], lastPush);
