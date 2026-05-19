@@ -91,7 +91,10 @@ export default function register(ctx: PluginContext): void {
       };
 
       const progressMode = (options as any).progress as ProgressMode | undefined;
-      const progressReporter = new ProgressReporter({ mode: progressMode ?? (isJsonMode ? 'json' : undefined) });
+      const progressReporter = new ProgressReporter({
+        mode: progressMode ?? (isJsonMode ? 'json' : undefined),
+        rateMs: 250,
+      });
       const renderProgress = (progress: GithubProgress) => {
         if (progress.phase === 'push') {
           const totalItems = Math.max(pushTotalItems, 0);
@@ -105,7 +108,7 @@ export default function register(ctx: PluginContext): void {
               ? currentBatchLength
               : Math.min(Math.max(totalItems - batchIdx * BATCH_SIZE, 0), BATCH_SIZE);
             const itemNumberInBatch = Math.min(Math.max(progress.current, 1), batchItemCount || BATCH_SIZE);
-            message = `Push: Batch ${batchIdx + 1}/${totalBatches} Item ${itemNumberInBatch}/${batchItemCount || BATCH_SIZE}`;
+            message = `Push: Batch ${batchIdx + 1}/${totalBatches} Completed ${itemNumberInBatch}/${batchItemCount || BATCH_SIZE}`;
           }
           // Append throttler stats to push message for diagnostic visibility
           try {

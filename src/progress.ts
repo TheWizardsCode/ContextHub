@@ -65,7 +65,13 @@ export class ProgressReporter {
     const label = this.labelFor(ev.phase);
     const pct = ev.total > 0 ? Math.round((ev.current / ev.total) * 100) : 0;
     const base = `${label}: ${ev.current}/${ev.total}`;
-    if (ev.note) return `${base} (${ev.note})`;
+    if (ev.note) {
+      const trimmed = ev.note.trimStart();
+      if (trimmed.startsWith(`${label}:`)) {
+        return trimmed;
+      }
+      return `${base} (${ev.note})`;
+    }
     return `${base} ${pct}%`;
   }
 
