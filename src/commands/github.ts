@@ -132,7 +132,7 @@ export default function register(ctx: PluginContext): void {
         // avoid races where concurrent push runs update the last-push timestamp
         // out-of-band and cause items to be skipped. Use the JSONL path as the
         // lock target so it is repo-scoped and consistent with other file-locks.
-        const jsonlPath = require('path').join(resolveWorklogDir(), 'worklog-data.jsonl');
+        const jsonlPath = path.join(resolveWorklogDir(), 'worklog-data.jsonl');
         const lockPath = getLockPathForJsonl(jsonlPath);
         await withFileLock(lockPath, async () => {
           const githubConfig = resolveGithubConfig({ repo: options.repo, labelPrefix: options.labelPrefix });
