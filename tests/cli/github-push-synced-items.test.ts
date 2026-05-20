@@ -52,7 +52,8 @@ describe('github push synced items output', () => {
       );
 
       expect(stdout).toContain('GitHub sync complete');
-      expect(stdout).toContain('Synced items:');
+      // Verbose mode prints a timing breakdown; per-item list is only shown when there are synced items.
+      expect(stdout).toContain('Timing breakdown:');
     } finally {
       leaveTempDir(state);
     }
