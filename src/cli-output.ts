@@ -5,6 +5,7 @@
  */
 
 import { renderMarkdownToTags, type RendererOptions } from './tui/markdown-renderer.js';
+import chalk from 'chalk';
 
 /**
  * Telemetry event types for CLI rendering.
@@ -160,6 +161,10 @@ export function renderCliMarkdown(input: string, opts?: CliOutputOptions): strin
       inputSize: input.length,
       isTty: isTty()
     });
+
+    // Preserve blessed-format tags for callers; printing functions will
+    // convert to ANSI when writing to an interactive TTY so tests that
+    // assert on blessed tags continue to pass.
     return result;
   } catch (_error) {
     // On rendering failure, prefer explicit fallback, then strip blessed tags from plain input
@@ -185,6 +190,55 @@ export function stripBlessedTags(input: string): string {
 }
 
 /**
+ * Convert a string containing blessed-style tags (e.g. {cyan-fg}{bold}text{/})
+ * into an ANSI-colored string using chalk. This is a best-effort converter
+ * intended for CLI output only; it recognizes common tags used by the TUI
+ * renderer and falls back to leaving text unchanged for unknown tags.
+ */
+function convertBlessedTagsToAnsi(input: string): string {
+  if (!input) return '';
+  // Matches one-or-more opening tags followed by content and a single closing tag {/}
+  // Example: "{cyan-fg}{bold}Hello{/}" -> opens="{cyan-fg}{bold}", content="Hello"
+  const TAG_CONTENT_RE = /((?:\{[^}]+\})+)([\s\S]*?)\{\/\}/g;
+
+  return input.replace(TAG_CONTENT_RE, (_match: string, opens: string, content: string) => {
+    // Extract tag names from the opens string
+    const tagMatches = Array.from(opens.matchAll(/\{([^}]+)\}/g)).map(m => m[1]);
+    if (!tagMatches || tagMatches.length === 0) return content;
+
+    // Build a chain of chalk style functions for the tags
+    let styled = content;
+    for (const tag of tagMatches) {
+      const fn = tagToChalkFn(tag);
+      if (fn) styled = fn(styled);
+    }
+    return styled;
+  });
+}
+
+function tagToChalkFn(tag: string): ((text: string) => string) | null {
+  const t = (tag || '').toLowerCase().trim();
+  // Common color tags
+  if (t === 'bold') return (s: string) => chalk.bold(s);
+  if (t === 'underline') return (s: string) => chalk.underline(s);
+  if (t === 'gray-fg' || t === 'muted') return (s: string) => chalk.gray(s);
+  if (t === 'white-fg' || t === 'white') return (s: string) => chalk.white(s);
+  if (t === 'cyan-fg' || t === 'cyan') return (s: string) => chalk.cyan(s);
+  if (t === 'magenta-fg' || t === 'magenta') return (s: string) => chalk.magenta(s);
+  if (t === 'yellow-fg' || t === 'yellow') return (s: string) => chalk.yellow(s);
+  if (t === 'green-fg' || t === 'green') return (s: string) => chalk.green(s);
+  if (t === 'red-fg' || t === 'red') return (s: string) => chalk.red(s);
+  // Fallback for numeric '214-fg' like tags (approximate mapping)
+  const numMatch = t.match(/^(\d+)-fg$/);
+  if (numMatch) {
+    // Map to a reasonable hex fallback; 214 is a warm yellow in many palettes
+    if (numMatch[1] === '214') return (s: string) => chalk.hex('#DDBB55')(s);
+    return null;
+  }
+  return null;
+}
+
+/**
  * Output wrapper for commands that emit formatted text.
  * Use this to wrap command output for markdown rendering support.
  * 
@@ -203,7 +257,11 @@ export function createCliOutput(opts?: CliOutputOptions) {
      */
     print: (text: string): void => {
       const rendered = renderCliMarkdown(text, opts);
-      console.log(rendered);
+      if (isTty()) {
+        console.log(convertBlessedTagsToAnsi(rendered));
+      } else {
+        console.log(stripBlessedTags(rendered));
+      }
     },
 
     /**
@@ -211,7 +269,11 @@ export function createCliOutput(opts?: CliOutputOptions) {
      */
     printError: (text: string): void => {
       const rendered = renderCliMarkdown(text, opts);
-      console.error(rendered);
+      if (isTty()) {
+        console.error(convertBlessedTagsToAnsi(rendered));
+      } else {
+        console.error(stripBlessedTags(rendered));
+      }
     },
 
     /**
