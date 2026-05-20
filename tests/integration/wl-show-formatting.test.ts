@@ -83,12 +83,28 @@ describe('wl show formatting integration', () => {
       expect(result).toContain('Test item with');
     });
 
-    it('full format does not use markdown renderer by default', () => {
+    it('full format does not use markdown renderer in non-TTY (auto-detect)', () => {
       const result = humanFormatWorkItem(mockWorkItem, null, 'full');
       expect(result).toContain('Test item with');
-      // Full format does NOT render through markdown renderer by default —
-      // description is shown as plain text, not blessed tags
+      // In test environment (non-TTY), auto-detect defaults to off,
+      // so full format does not render through markdown renderer
       expect(result).not.toContain('{white-fg}{bold}Description{/}');
+    });
+
+    it('full format auto-detects markdown from TTY when no config', async () => {
+      // When no CLI flag and no config, auto-detect should use TTY status.
+      // In non-TTY (test env), this means no markdown.
+      // Mock isTty to simulate TTY environment.
+      const cliOutput = await import('../../src/cli-output.js');
+      const spy = vi.spyOn(cliOutput, 'isTty').mockReturnValue(true);
+      try {
+        const result = humanFormatWorkItem(mockWorkItem, null, 'full');
+        // In TTY with no config, auto-detect should enable markdown
+        expect(result).toContain('{magenta-fg}inline code{/}');
+        expect(result).toContain('--- bash ---');
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it('summary format still works (not affected by markdown)', () => {

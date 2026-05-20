@@ -330,17 +330,23 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     explicitDisabled = true;
   }
 
-  // Check cliFormatMarkdown config only when no explicit CLI choice was made.
-  // Config is NOT checked when --format auto/markdown/plain/text was specified
-  // (auto: TTY detection decides; markdown/plain/text: explicit on/off).
-  // Precedence: CLI flag > config > auto-detect (default: off).
+  // Check cliFormatMarkdown config and auto-detect only when no explicit CLI
+  // choice was made. Config is NOT checked when --format auto/markdown/plain/text
+  // was specified (auto: TTY detection decides; markdown/plain/text: explicit
+  // on/off).
+  // Precedence: CLI flag > config > auto-detect (TTY).
+  // When no CLI flag is specified and no config is set, auto-detect from TTY
+  // (enabled in interactive TTY, disabled in non-TTY/CI).
   if (!markdownEnabled && !explicitDisabled && !explicitAuto) {
     const config = loadConfig();
     if (config?.cliFormatMarkdown === true) {
       markdownEnabled = true;
+    } else if (config?.cliFormatMarkdown === false) {
+      markdownEnabled = false;
+    } else {
+      // No config: auto-detect from TTY (default enabled in interactive terminals)
+      markdownEnabled = isTty();
     }
-    // If cliFormatMarkdown is unset/false, respect the default (no markdown).
-    // This keeps default behaviour unchanged per AC2.
   }
 
   const isTui = Boolean(tui);
