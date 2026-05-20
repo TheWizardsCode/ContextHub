@@ -62,6 +62,10 @@ export function createMarkdownOutputHelpers(program: Command, opts?: CliOutputOp
   // - Default: markdown in TTY (auto-detect), opt-out with --format text/plain
   // - Explicit --format markdown: enable
   // - Precedence: CLI > config > auto-detect
+  // Determine if markdown formatting should be used:
+  // - Never use in JSON mode (machine-readable takes precedence)
+  // - Precedence: CLI flag > config > auto-detect (TTY)
+  // - --format auto is an explicit CLI choice: use TTY detection, skip config
   let useMarkdown: boolean | undefined = undefined;
   if (programOpts.json) {
     useMarkdown = false; // JSON mode takes precedence
@@ -69,6 +73,9 @@ export function createMarkdownOutputHelpers(program: Command, opts?: CliOutputOp
     useMarkdown = true;
   } else if (programOpts.format === 'text' || programOpts.format === 'plain') {
     useMarkdown = false;
+  } else if (programOpts.format && programOpts.format.toLowerCase() === 'auto') {
+    // --format auto: explicit CLI choice to auto-detect from TTY; skip config.
+    useMarkdown = process.stdout.isTTY === true;
   } else if (configCliFormatMarkdown === true) {
     useMarkdown = true;
   } else if (configCliFormatMarkdown === false) {
