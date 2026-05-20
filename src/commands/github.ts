@@ -529,8 +529,8 @@ export default function register(ctx: PluginContext): void {
             console.log(`  Errors: ${result.errors.length}`);
             console.log('  Hint: re-run with --json to view error details');
           }
-          // Per-item sync output
-          if (result.syncedItems.length > 0) {
+          // Per-item sync output (only show when verbose)
+          if (isVerbose && result.syncedItems.length > 0) {
             console.log('');
             console.log('  Synced items:');
             for (const si of result.syncedItems) {
