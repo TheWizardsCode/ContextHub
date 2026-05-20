@@ -7,6 +7,7 @@ import {
   isTty,
   shouldUseFormattedOutput,
   resolveFormatToMarkdown,
+  resolveMarkdownEnabled,
   onCliRenderEvent,
   type CliRenderTelemetryEvent
 } from '../../src/cli-output.js';
@@ -415,6 +416,111 @@ describe('cli-output', () => {
       const result = renderCliMarkdown(helpText, { formatAsMarkdown: false });
       expect(result).not.toContain('{magenta-fg}');
       expect(result).toContain('wl status');
+    });
+  });
+
+  describe('resolveMarkdownEnabled', () => {
+    it('returns true for --format markdown', () => {
+      expect(resolveMarkdownEnabled({ format: 'markdown' })).toBe(true);
+    });
+
+    it('returns false for --format plain', () => {
+      expect(resolveMarkdownEnabled({ format: 'plain' })).toBe(false);
+    });
+
+    it('returns false for --format text', () => {
+      expect(resolveMarkdownEnabled({ format: 'text' })).toBe(false);
+    });
+
+    it('returns TTY status for --format auto (non-TTY = false)', () => {
+      // In test environment (non-TTY), --format auto should resolve to false
+      const result = resolveMarkdownEnabled({ format: 'auto' });
+      expect(result).toBe(false);
+    });
+
+    it('returns TTY status for --format auto (mocked TTY = true)', () => {
+      const original = process.stdout.isTTY;
+      Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+      try {
+        expect(resolveMarkdownEnabled({ format: 'auto' })).toBe(true);
+      } finally {
+        Object.defineProperty(process.stdout, 'isTTY', { value: original, configurable: true });
+      }
+    });
+
+    it('--format auto ignores cliFormatMarkdown config (non-TTY)', () => {
+      // Even with cliFormatMarkdown: true, --format auto should use TTY detection
+      expect(resolveMarkdownEnabled({ format: 'auto', cliFormatMarkdown: true })).toBe(false);
+    });
+
+    it('--format auto ignores cliFormatMarkdown config (mocked TTY)', () => {
+      const original = process.stdout.isTTY;
+      Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+      try {
+        // --format auto with cliFormatMarkdown: false should still use TTY
+        expect(resolveMarkdownEnabled({ format: 'auto', cliFormatMarkdown: false })).toBe(true);
+      } finally {
+        Object.defineProperty(process.stdout, 'isTTY', { value: original, configurable: true });
+      }
+    });
+
+    it('returns undefined for display formats like full/summary/concise', () => {
+      // These formats don't affect markdown rendering
+      expect(resolveMarkdownEnabled({ format: 'full' })).toBeUndefined();
+      expect(resolveMarkdownEnabled({ format: 'summary' })).toBeUndefined();
+      expect(resolveMarkdownEnabled({ format: 'concise' })).toBeUndefined();
+      expect(resolveMarkdownEnabled({ format: 'normal' })).toBeUndefined();
+      expect(resolveMarkdownEnabled({ format: 'raw' })).toBeUndefined();
+    });
+
+    it('returns undefined when no format is specified', () => {
+      expect(resolveMarkdownEnabled({})).toBeUndefined();
+      expect(resolveMarkdownEnabled({ format: undefined })).toBeUndefined();
+    });
+
+    it('respects formatAsMarkdown programmatic override true', () => {
+      expect(resolveMarkdownEnabled({ formatAsMarkdown: true })).toBe(true);
+    });
+
+    it('respects formatAsMarkdown programmatic override false', () => {
+      expect(resolveMarkdownEnabled({ formatAsMarkdown: false })).toBe(false);
+    });
+
+    it('respects cliFormatMarkdown config true when no CLI flag', () => {
+      expect(resolveMarkdownEnabled({ cliFormatMarkdown: true })).toBe(true);
+    });
+
+    it('respects cliFormatMarkdown config false when no CLI flag', () => {
+      expect(resolveMarkdownEnabled({ cliFormatMarkdown: false })).toBe(false);
+    });
+
+    it('CLI flag overrides cliFormatMarkdown config true', () => {
+      // --format plain overrides cliFormatMarkdown: true
+      expect(resolveMarkdownEnabled({ format: 'plain', cliFormatMarkdown: true })).toBe(false);
+    });
+
+    it('CLI flag overrides cliFormatMarkdown config false', () => {
+      // --format markdown overrides cliFormatMarkdown: false
+      expect(resolveMarkdownEnabled({ format: 'markdown', cliFormatMarkdown: false })).toBe(true);
+    });
+
+    it('formatAsMarkdown overrides cliFormatMarkdown config true', () => {
+      // formatAsMarkdown: false overrides cliFormatMarkdown: true
+      expect(resolveMarkdownEnabled({ formatAsMarkdown: false, cliFormatMarkdown: true })).toBe(false);
+    });
+
+    it('undefined result means caller should auto-detect from TTY', () => {
+      // When resolveMarkdownEnabled returns undefined, the caller 
+      // should use shouldUseFormattedOutput() or isTty() to decide
+      const result = resolveMarkdownEnabled({});
+      expect(result).toBeUndefined();
+    });
+
+    it('is case-insensitive for format values', () => {
+      expect(resolveMarkdownEnabled({ format: 'MARKDOWN' })).toBe(true);
+      expect(resolveMarkdownEnabled({ format: 'Plain' })).toBe(false);
+      expect(resolveMarkdownEnabled({ format: 'AUTO' })).toBe(false); // non-TTY
+      expect(resolveMarkdownEnabled({ format: 'TEXT' })).toBe(false);
     });
   });
 });

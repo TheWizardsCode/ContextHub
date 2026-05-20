@@ -6,7 +6,7 @@
 import { Command } from 'commander';
 import { createPluginContext, getVersion } from './cli-utils.js';
 import { loadPlugins } from './plugin-loader.js';
-import { renderCliMarkdown } from './cli-output.js';
+import { renderCliMarkdown, resolveMarkdownEnabled } from './cli-output.js';
 import { loadConfig } from './config.js';
 
 // Import built-in command modules
@@ -311,27 +311,15 @@ const formatHelp = (cmd: any, helper: any) => {
   const description = cmd.description() || '';
 
   // Determine if we should render help text through the markdown renderer.
-  // Precedence: CLI flag > config > auto-detect (TTY).
+  // Use the shared precedence resolver for CLI > config > auto-detect.
   const programOpts = program.opts();
-  let shouldRenderHelp = false;
-  if (programOpts.format === 'markdown') {
-    shouldRenderHelp = true;
-  } else if (programOpts.format === 'plain' || programOpts.format === 'text') {
-    shouldRenderHelp = false;
-  } else if (programOpts.format === 'auto') {
-    // --format auto: explicit CLI choice to auto-detect from TTY; skip config.
-    shouldRenderHelp = process.stdout.isTTY === true;
-  } else {
-    // No explicit markdown format: check config, then auto-detect (TTY).
-    const config = loadConfig();
-    if (config?.cliFormatMarkdown === true) {
-      shouldRenderHelp = true;
-    } else if (config?.cliFormatMarkdown === false) {
-      shouldRenderHelp = false;
-    } else {
-      shouldRenderHelp = process.stdout.isTTY === true;
-    }
-  }
+  const config = loadConfig();
+  const resolved = resolveMarkdownEnabled({
+    format: programOpts.format,
+    cliFormatMarkdown: config?.cliFormatMarkdown,
+  });
+  // resolved is: true → render, false → plain, undefined → auto-detect from TTY
+  const shouldRenderHelp = resolved === true ? true : resolved === false ? false : process.stdout.isTTY === true;
 
   // Build groups and mapping of command name -> group
   const groupsDef: { name: string; names: string[] }[] = [

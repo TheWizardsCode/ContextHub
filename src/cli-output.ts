@@ -231,9 +231,52 @@ export function createCliOutput(opts?: CliOutputOptions) {
 }
 
 /**
+ * Resolve whether markdown formatting should be enabled based on CLI flags,
+ * config settings, and TTY auto-detection.
+ *
+ * This is the single source of truth for the CLI > config > auto-detect
+ * precedence chain. All code paths that need to decide whether to render
+ * markdown should use this function to avoid duplicating precedence logic.
+ *
+ * Precedence:
+ * 1. --format markdown/plain/text → explicit on/off
+ * 2. --format auto               → TTY auto-detect (skip config)
+ * 3. programmatic override        → explicit on/off
+ * 4. cliFormatMarkdown config     → explicit on/off
+ * 5. (default)                   → TTY auto-detect
+ *
+ * @param opts - CLI and config options
+ * @returns boolean | undefined — true=enabled, false=disabled, undefined=auto-detect
+ */
+export function resolveMarkdownEnabled(opts: {
+  format?: string;
+  formatAsMarkdown?: boolean;
+  cliFormatMarkdown?: boolean;
+}): boolean | undefined {
+  // Priority 1: explicit --format values (markdown/plain/text)
+  const formatMarkdown = resolveFormatToMarkdown(opts.format);
+  if (formatMarkdown !== undefined) {
+    return formatMarkdown;
+  }
+  // Priority 2: --format auto is an explicit CLI choice for TTY auto-detect;
+  // do NOT fall through to config.
+  if (opts.format && opts.format.toLowerCase() === 'auto') {
+    return isTty();
+  }
+  // Priority 3: programmatic override
+  if (opts.formatAsMarkdown === true) return true;
+  if (opts.formatAsMarkdown === false) return false;
+  // Priority 4: config file setting
+  if (opts.cliFormatMarkdown === true) return true;
+  if (opts.cliFormatMarkdown === false) return false;
+  // Priority 5: undefined — auto-detect from TTY
+  return undefined;
+}
+
+/**
  * Create CLI output from command options (program opts) and config.
  * Merges CLI flag with config setting using priority: CLI > config > auto-detect.
- * 
+ *
  * @param programOpts - Parsed CLI options (e.g. program.opts())
  * @param configOpts - Config file options (e.g. cliFormatMarkdown setting)
  */
@@ -241,31 +284,11 @@ export function createCliOutputFromCommand(
   programOpts: { format?: string; formatAsMarkdown?: boolean },
   configOpts?: { cliFormatMarkdown?: boolean }
 ): ReturnType<typeof createCliOutput> {
-  let enabled: boolean | undefined = undefined;
-
-  // Priority: CLI flag > config > auto-detect
-  // Priority 1: explicit --format values (markdown/plain/text)
-  const formatMarkdown = resolveFormatToMarkdown(programOpts.format);
-  if (formatMarkdown !== undefined) {
-    // --format markdown/plain/text was explicitly provided
-    enabled = formatMarkdown;
-  } else if (programOpts.format && programOpts.format.toLowerCase() === 'auto') {
-    // Priority 2: --format auto means explicit auto-detect from TTY;
-    // do NOT fall through to config because --format auto is a CLI choice.
-    enabled = isTty();
-  } else if (programOpts.formatAsMarkdown === true) {
-    // Programmatic override
-    enabled = true;
-  } else if (programOpts.formatAsMarkdown === false) {
-    enabled = false;
-  } else if (configOpts?.cliFormatMarkdown === true) {
-    // Config file setting
-    enabled = true;
-  } else if (configOpts?.cliFormatMarkdown === false) {
-    enabled = false;
-  }
-  // else: undefined — let shouldUseFormattedOutput() auto-detect from TTY
-
+  const enabled = resolveMarkdownEnabled({
+    format: programOpts.format,
+    formatAsMarkdown: programOpts.formatAsMarkdown,
+    cliFormatMarkdown: configOpts?.cliFormatMarkdown,
+  });
   return createCliOutput({ formatAsMarkdown: enabled });
 }
 

@@ -8,7 +8,7 @@ import type { WorkItem, Comment } from '../types.js';
 import type { SyncResult } from '../sync.js';
 import type { WorklogDatabase } from '../database.js';
 import { loadConfig } from '../config.js';
-import { renderCliMarkdown, stripBlessedTags, shouldUseFormattedOutput, isTty } from '../cli-output.js';
+import { renderCliMarkdown, stripBlessedTags, shouldUseFormattedOutput, isTty, resolveMarkdownEnabled } from '../cli-output.js';
 import { getStageLabel, getStatusLabel, loadStatusStageRules } from '../status-stage-rules.js';
 import type { Command } from 'commander';
 
@@ -305,11 +305,9 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   let fmt = (format || config?.humanDisplay || 'full').toLowerCase();
   let markdownEnabled = false;
 
-  // Track if the format explicitly disables markdown rendering.
-  // Used later to prevent config from overriding explicit plain/text.
+  // Track if the format explicitly disables or enables markdown rendering.
+  // These flags prevent config from overriding explicit CLI choices.
   let explicitDisabled = false;
-  // Track if --format auto was explicitly specified.
-  // Used later to prevent config from overriding TTY detection.
   let explicitAuto = false;
 
   // 'markdown' format means: render full output through the markdown renderer
@@ -321,11 +319,6 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   if (fmt === 'auto') {
     fmt = 'full';
     explicitAuto = true;
-    // --format auto is an explicit CLI choice: use TTY detection,
-    // do NOT fall through to config (precedence: CLI > config > auto-detect)
-    if (isTty()) {
-      markdownEnabled = true;
-    }
   }
   // 'text' or 'plain' format means: plain text, no markdown
   if (fmt === 'text' || fmt === 'plain') {
@@ -333,20 +326,19 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     explicitDisabled = true;
   }
 
-  // Check cliFormatMarkdown config and auto-detect only when no explicit CLI
-  // choice was made. Config is NOT checked when --format auto/markdown/plain/text
-  // was specified (auto: TTY detection decides; markdown/plain/text: explicit
-  // on/off).
-  // Precedence: CLI flag > config > auto-detect (TTY).
-  // When no CLI flag is specified and no config is set, auto-detect from TTY
-  // (enabled in interactive TTY, disabled in non-TTY/CI).
+  // Use the shared precedence resolver when no explicit markdown/plain/text/auto
+  // flag was specified. This preserves the CLI > config > auto-detect chain.
   if (!markdownEnabled && !explicitDisabled && !explicitAuto) {
-    if (config?.cliFormatMarkdown === true) {
+    const resolved = resolveMarkdownEnabled({
+      format: undefined, // format is already resolved into fmt/explicit flags above
+      cliFormatMarkdown: config?.cliFormatMarkdown,
+    });
+    if (resolved === true) {
       markdownEnabled = true;
-    } else if (config?.cliFormatMarkdown === false) {
+    } else if (resolved === false) {
       markdownEnabled = false;
     } else {
-      // No config: auto-detect from TTY (default enabled in interactive terminals)
+      // undefined: auto-detect from TTY
       markdownEnabled = isTty();
     }
   }

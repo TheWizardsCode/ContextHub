@@ -7,7 +7,7 @@ import { WorklogDatabase } from './database.js';
 import { loadConfig, loadConfigRelaxed, isInitialized, getDefaultPrefix } from './config.js';
 import { getDefaultDataPath } from './jsonl.js';
 import type { PluginContext } from './plugin-types.js';
-import { renderCliMarkdown, shouldUseFormattedOutput, type CliOutputOptions } from './cli-output.js';
+import { renderCliMarkdown, shouldUseFormattedOutput, resolveMarkdownEnabled, type CliOutputOptions } from './cli-output.js';
 
 import { WORKLOG_VERSION } from './version.js';
 
@@ -53,35 +53,16 @@ export function createMarkdownOutputHelpers(program: Command, opts?: CliOutputOp
   const base = createOutputHelpers(program);
   const programOpts = program.opts();
   
-  // Read config for cliFormatMarkdown setting
+  // Use the shared precedence resolver for CLI > config > auto-detect.
+  // JSON mode always disables markdown (machine-readable takes precedence).
   const config = loadConfig();
-  const configCliFormatMarkdown = config?.cliFormatMarkdown;
-  
-  // Determine if markdown formatting should be used:
-  // - Never use in JSON mode (machine-readable takes precedence)
-  // - Default: markdown in TTY (auto-detect), opt-out with --format text/plain
-  // - Explicit --format markdown: enable
-  // - Precedence: CLI > config > auto-detect
-  // Determine if markdown formatting should be used:
-  // - Never use in JSON mode (machine-readable takes precedence)
-  // - Precedence: CLI flag > config > auto-detect (TTY)
-  // - --format auto is an explicit CLI choice: use TTY detection, skip config
-  let useMarkdown: boolean | undefined = undefined;
-  if (programOpts.json) {
-    useMarkdown = false; // JSON mode takes precedence
-  } else if (programOpts.format === 'markdown') {
-    useMarkdown = true;
-  } else if (programOpts.format === 'text' || programOpts.format === 'plain') {
-    useMarkdown = false;
-  } else if (programOpts.format && programOpts.format.toLowerCase() === 'auto') {
-    // --format auto: explicit CLI choice to auto-detect from TTY; skip config.
-    useMarkdown = process.stdout.isTTY === true;
-  } else if (configCliFormatMarkdown === true) {
-    useMarkdown = true;
-  } else if (configCliFormatMarkdown === false) {
-    useMarkdown = false;
-  }
-  // else undefined: let shouldUseFormattedOutput() auto-detect based on TTY
+  const resolved = resolveMarkdownEnabled({
+    format: programOpts.format,
+    formatAsMarkdown: programOpts.formatAsMarkdown,
+    cliFormatMarkdown: config?.cliFormatMarkdown,
+  });
+  // JSON mode forces markdown off regardless of other settings
+  const useMarkdown: boolean | undefined = programOpts.json ? false : resolved;
   
   return {
     ...base,
