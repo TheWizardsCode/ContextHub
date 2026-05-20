@@ -185,6 +185,19 @@ describe('wl show formatting integration', () => {
       const result = humanFormatWorkItem(mockWorkItem, null, 'plain');
       expect(result).not.toContain('{white-fg}{bold}');
     });
+
+    it('cliFormatMarkdown does not override --format auto (non-TTY)', async () => {
+      const spy = await setupSpy();
+      spy.mockReturnValue({ ...fullConfig, cliFormatMarkdown: true });
+      // --format auto is an explicit CLI choice for TTY detection.
+      // In non-TTY (test env), --format auto should give plain output,
+      // even when cliFormatMarkdown: true is set in config.
+      const result = humanFormatWorkItem(mockWorkItem, null, 'auto');
+      // In non-TTY, --format auto should NOT enable markdown,
+      // regardless of cliFormatMarkdown config.
+      expect(result).not.toContain('{white-fg}{bold}Description{/}');
+      expect(result).not.toContain('{magenta-fg}inline code{/}');
+    });
   });
 
   describe('createCliOutputFromCommand with config', () => {

@@ -305,6 +305,9 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   // Track if the format explicitly disables markdown rendering.
   // Used later to prevent config from overriding explicit plain/text.
   let explicitDisabled = false;
+  // Track if --format auto was explicitly specified.
+  // Used later to prevent config from overriding TTY detection.
+  let explicitAuto = false;
 
   // 'markdown' format means: render full output through the markdown renderer
   if (fmt === 'markdown') {
@@ -314,6 +317,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   // 'auto' means: use markdown rendering if TTY, otherwise plain full
   if (fmt === 'auto') {
     fmt = 'full';
+    explicitAuto = true;
     // --format auto is an explicit CLI choice: use TTY detection,
     // do NOT fall through to config (precedence: CLI > config > auto-detect)
     if (isTty()) {
@@ -326,11 +330,11 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     explicitDisabled = true;
   }
 
-  // Check cliFormatMarkdown config for standard formats when no explicit
-  // markdown/auto/plain/text flag was specified. Config is NOT checked when
-  // --format auto is used (auto is an explicit CLI choice for TTY detection).
+  // Check cliFormatMarkdown config only when no explicit CLI choice was made.
+  // Config is NOT checked when --format auto/markdown/plain/text was specified
+  // (auto: TTY detection decides; markdown/plain/text: explicit on/off).
   // Precedence: CLI flag > config > auto-detect (default: off).
-  if (!markdownEnabled && !explicitDisabled) {
+  if (!markdownEnabled && !explicitDisabled && !explicitAuto) {
     const config = loadConfig();
     if (config?.cliFormatMarkdown === true) {
       markdownEnabled = true;
