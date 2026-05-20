@@ -298,8 +298,11 @@ function colorizeAuditExcerpt(auditText: string, tui?: boolean): string {
 
 // Standard human formatter: supports 'summary' | 'concise' | 'normal' | 'full' | 'raw' | 'markdown' | 'auto'
 export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, format: string | undefined, tui?: boolean): string {
+  // Load config once and reuse for both humanDisplay and cliFormatMarkdown
+  const config = loadConfig();
+
   // Resolve 'auto' and 'markdown' format values
-  let fmt = (format || loadConfig()?.humanDisplay || 'full').toLowerCase();
+  let fmt = (format || config?.humanDisplay || 'full').toLowerCase();
   let markdownEnabled = false;
 
   // Track if the format explicitly disables markdown rendering.
@@ -338,7 +341,6 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   // When no CLI flag is specified and no config is set, auto-detect from TTY
   // (enabled in interactive TTY, disabled in non-TTY/CI).
   if (!markdownEnabled && !explicitDisabled && !explicitAuto) {
-    const config = loadConfig();
     if (config?.cliFormatMarkdown === true) {
       markdownEnabled = true;
     } else if (config?.cliFormatMarkdown === false) {
