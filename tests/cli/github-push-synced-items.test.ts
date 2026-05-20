@@ -40,6 +40,9 @@ describe('github push synced items output', () => {
           title: 'Two item',
           status: 'open' as any,
           priority: 'medium' as any,
+          githubIssueNumber: 1002,
+          githubIssueId: 5002,
+          githubIssueUpdatedAt: '2025-01-01T00:00:00.000Z',
         },
       ]);
 
