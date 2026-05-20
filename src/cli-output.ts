@@ -5,6 +5,65 @@
  */
 
 import { renderMarkdownToTags, type RendererOptions } from './tui/markdown-renderer.js';
+import chalk from 'chalk';
+
+/**
+ * Telemetry event types for CLI rendering.
+ * These are lightweight events that can be collected by observability tools.
+ */
+export interface CliRenderTelemetryEvent {
+  /** Event name */
+  event: 'cli_render_used' | 'cli_render_fallback_size' | 'cli_render_error';
+  /** The CLI command that triggered the event */
+  command?: string;
+  /** Size of the input in characters */
+  inputSize?: number;
+  /** Maximum allowed size (for fallback_size events) */
+  maxAllowed?: number;
+  /** Whether the output is TTY */
+  isTty?: boolean;
+  /** Type of error (for error events) */
+  errorType?: string;
+}
+
+/** Global telemetry event listeners */
+const telemetryListeners: Array<(event: CliRenderTelemetryEvent) => void> = [];
+
+/**
+ * Register a telemetry event listener.
+ * @param listener - Called when a telemetry event is emitted
+ * @returns A function to unregister the listener
+ */
+export function onCliRenderEvent(listener: (event: CliRenderTelemetryEvent) => void): () => void {
+  telemetryListeners.push(listener);
+  return () => {
+    const idx = telemetryListeners.indexOf(listener);
+    if (idx >= 0) telemetryListeners.splice(idx, 1);
+  };
+}
+
+/**
+ * Emit a telemetry event to all registered listeners.
+ */
+function emitTelemetryEvent(event: CliRenderTelemetryEvent): void {
+  for (const listener of telemetryListeners) {
+    try {
+      listener(event);
+    } catch (_) {
+      // Telemetry errors should never affect rendering
+    }
+  }
+}
+
+/**
+ * Debug logger for CLI rendering events.
+ * Uses WL_VERBOSE env var to control verbosity; falls back to silent.
+ */
+function debugLog(message: string): void {
+  if (process.env.WL_VERBOSE) {
+    console.error(`[cli-render] ${message}`);
+  }
+}
 
 /**
  * Check if stdout is a TTY (interactive terminal)
@@ -35,12 +94,30 @@ export interface CliOutputOptions extends RendererOptions {
 }
 
 /**
+ * Resolve --format value to a formatAsMarkdown boolean.
+ * Supports: markdown -> true, plain/text -> false, auto -> TTY auto-detect (undefined).
+ * Returns undefined for unrecognized values (let auto-detection decide).
+ */
+export function resolveFormatToMarkdown(formatValue?: string): boolean | undefined {
+  if (!formatValue) return undefined;
+  const normalized = formatValue.toLowerCase().trim();
+  if (normalized === 'markdown') return true;
+  if (normalized === 'plain' || normalized === 'text') return false;
+  if (normalized === 'auto') return undefined; // let TTY auto-detect decide
+  // For other format values (full, summary, concise, normal, raw),
+  // don't change markdown rendering — let auto-detect decide
+  return undefined;
+}
+
+/**
  * Render markdown for CLI output.
  * 
  * This function:
  * - Detects TTY environment and falls back to plain text in non-TTY
  * - Respects explicit formatAsMarkdown flag
  * - Has a size guard to avoid expensive rendering on large content
+ * - Strips blessed tags when falling back for CI safety
+ * - Emits telemetry events for rendering, size fallback, and errors
  * - Returns safe output for CI logs (no control characters outside TTY)
  * 
  * @param input - The markdown text to render
@@ -64,12 +141,42 @@ export function renderCliMarkdown(input: string, opts?: CliOutputOptions): strin
     maxSize
   };
 
+  // Check size guard before rendering — if input exceeds maxSize,
+  // strip blessed tags to ensure no control characters remain in output.
+  if (input.length > maxSize) {
+    emitTelemetryEvent({
+      event: 'cli_render_fallback_size',
+      inputSize: input.length,
+      maxAllowed: maxSize,
+      isTty: isTty()
+    });
+    debugLog(`Size guard: input ${input.length} chars exceeds max ${maxSize}, falling back to plain text`);
+    return stripBlessedTags(input);
+  }
+
   try {
-    return renderMarkdownToTags(input, rendererOpts);
+    const result = renderMarkdownToTags(input, rendererOpts);
+    emitTelemetryEvent({
+      event: 'cli_render_used',
+      inputSize: input.length,
+      isTty: isTty()
+    });
+
+    // Preserve blessed-format tags for callers; printing functions will
+    // convert to ANSI when writing to an interactive TTY so tests that
+    // assert on blessed tags continue to pass.
+    return result;
   } catch (_error) {
-    // On rendering failure, prefer explicit fallback, then plain input
-    console.error('Warning: markdown rendering failed, falling back to plain text');
-    return opts?.fallback ?? input;
+    // On rendering failure, prefer explicit fallback, then strip blessed tags from plain input
+    // to ensure no control characters remain
+    emitTelemetryEvent({
+      event: 'cli_render_error',
+      errorType: _error instanceof Error ? _error.message : 'unknown',
+      inputSize: input.length,
+      isTty: isTty()
+    });
+    debugLog(`Rendering failed, falling back to plain text`);
+    return opts?.fallback ?? stripBlessedTags(input);
   }
 }
 
@@ -80,6 +187,55 @@ export function renderCliMarkdown(input: string, opts?: CliOutputOptions): strin
 export function stripBlessedTags(input: string): string {
   if (!input) return '';
   return input.replace(/\{[^}]+\}/g, '');
+}
+
+/**
+ * Convert a string containing blessed-style tags (e.g. {cyan-fg}{bold}text{/})
+ * into an ANSI-colored string using chalk. This is a best-effort converter
+ * intended for CLI output only; it recognizes common tags used by the TUI
+ * renderer and falls back to leaving text unchanged for unknown tags.
+ */
+function convertBlessedTagsToAnsi(input: string): string {
+  if (!input) return '';
+  // Matches one-or-more opening tags followed by content and a single closing tag {/}
+  // Example: "{cyan-fg}{bold}Hello{/}" -> opens="{cyan-fg}{bold}", content="Hello"
+  const TAG_CONTENT_RE = /((?:\{[^}]+\})+)([\s\S]*?)\{\/\}/g;
+
+  return input.replace(TAG_CONTENT_RE, (_match: string, opens: string, content: string) => {
+    // Extract tag names from the opens string
+    const tagMatches = Array.from(opens.matchAll(/\{([^}]+)\}/g)).map(m => m[1]);
+    if (!tagMatches || tagMatches.length === 0) return content;
+
+    // Build a chain of chalk style functions for the tags
+    let styled = content;
+    for (const tag of tagMatches) {
+      const fn = tagToChalkFn(tag);
+      if (fn) styled = fn(styled);
+    }
+    return styled;
+  });
+}
+
+function tagToChalkFn(tag: string): ((text: string) => string) | null {
+  const t = (tag || '').toLowerCase().trim();
+  // Common color tags
+  if (t === 'bold') return (s: string) => chalk.bold(s);
+  if (t === 'underline') return (s: string) => chalk.underline(s);
+  if (t === 'gray-fg' || t === 'muted') return (s: string) => chalk.gray(s);
+  if (t === 'white-fg' || t === 'white') return (s: string) => chalk.white(s);
+  if (t === 'cyan-fg' || t === 'cyan') return (s: string) => chalk.cyan(s);
+  if (t === 'magenta-fg' || t === 'magenta') return (s: string) => chalk.magenta(s);
+  if (t === 'yellow-fg' || t === 'yellow') return (s: string) => chalk.yellow(s);
+  if (t === 'green-fg' || t === 'green') return (s: string) => chalk.green(s);
+  if (t === 'red-fg' || t === 'red') return (s: string) => chalk.red(s);
+  // Fallback for numeric '214-fg' like tags (approximate mapping)
+  const numMatch = t.match(/^(\d+)-fg$/);
+  if (numMatch) {
+    // Map to a reasonable hex fallback; 214 is a warm yellow in many palettes
+    if (numMatch[1] === '214') return (s: string) => chalk.hex('#DDBB55')(s);
+    return null;
+  }
+  return null;
 }
 
 /**
@@ -101,7 +257,11 @@ export function createCliOutput(opts?: CliOutputOptions) {
      */
     print: (text: string): void => {
       const rendered = renderCliMarkdown(text, opts);
-      console.log(rendered);
+      if (isTty()) {
+        console.log(convertBlessedTagsToAnsi(rendered));
+      } else {
+        console.log(stripBlessedTags(rendered));
+      }
     },
 
     /**
@@ -109,7 +269,11 @@ export function createCliOutput(opts?: CliOutputOptions) {
      */
     printError: (text: string): void => {
       const rendered = renderCliMarkdown(text, opts);
-      console.error(rendered);
+      if (isTty()) {
+        console.error(convertBlessedTagsToAnsi(rendered));
+      } else {
+        console.error(stripBlessedTags(rendered));
+      }
     },
 
     /**
@@ -129,26 +293,64 @@ export function createCliOutput(opts?: CliOutputOptions) {
 }
 
 /**
- * Create CLI output from command options (program opts).
- * Merges CLI flag with config setting.
+ * Resolve whether markdown formatting should be enabled based on CLI flags,
+ * config settings, and TTY auto-detection.
+ *
+ * This is the single source of truth for the CLI > config > auto-detect
+ * precedence chain. All code paths that need to decide whether to render
+ * markdown should use this function to avoid duplicating precedence logic.
+ *
+ * Precedence:
+ * 1. --format markdown/plain/text → explicit on/off
+ * 2. --format auto               → TTY auto-detect (skip config)
+ * 3. programmatic override        → explicit on/off
+ * 4. cliFormatMarkdown config     → explicit on/off
+ * 5. (default)                   → TTY auto-detect
+ *
+ * @param opts - CLI and config options
+ * @returns boolean | undefined — true=enabled, false=disabled, undefined=auto-detect
+ */
+export function resolveMarkdownEnabled(opts: {
+  format?: string;
+  formatAsMarkdown?: boolean;
+  cliFormatMarkdown?: boolean;
+}): boolean | undefined {
+  // Priority 1: explicit --format values (markdown/plain/text)
+  const formatMarkdown = resolveFormatToMarkdown(opts.format);
+  if (formatMarkdown !== undefined) {
+    return formatMarkdown;
+  }
+  // Priority 2: --format auto is an explicit CLI choice for TTY auto-detect;
+  // do NOT fall through to config.
+  if (opts.format && opts.format.toLowerCase() === 'auto') {
+    return isTty();
+  }
+  // Priority 3: programmatic override
+  if (opts.formatAsMarkdown === true) return true;
+  if (opts.formatAsMarkdown === false) return false;
+  // Priority 4: config file setting
+  if (opts.cliFormatMarkdown === true) return true;
+  if (opts.cliFormatMarkdown === false) return false;
+  // Priority 5: undefined — auto-detect from TTY
+  return undefined;
+}
+
+/**
+ * Create CLI output from command options (program opts) and config.
+ * Merges CLI flag with config setting using priority: CLI > config > auto-detect.
+ *
+ * @param programOpts - Parsed CLI options (e.g. program.opts())
+ * @param configOpts - Config file options (e.g. cliFormatMarkdown setting)
  */
 export function createCliOutputFromCommand(
   programOpts: { format?: string; formatAsMarkdown?: boolean },
   configOpts?: { cliFormatMarkdown?: boolean }
 ): ReturnType<typeof createCliOutput> {
-  let enabled: boolean | undefined = undefined;
-
-  // Priority: CLI flag > config > auto-detect
-  if (programOpts.format === 'markdown') {
-    enabled = true;
-  } else if (programOpts.formatAsMarkdown === true) {
-    enabled = true;
-  } else if (configOpts?.cliFormatMarkdown === true) {
-    enabled = true;
-  } else if (programOpts.format === 'plain' || configOpts?.cliFormatMarkdown === false) {
-    enabled = false;
-  }
-
+  const enabled = resolveMarkdownEnabled({
+    format: programOpts.format,
+    formatAsMarkdown: programOpts.formatAsMarkdown,
+    cliFormatMarkdown: configOpts?.cliFormatMarkdown,
+  });
   return createCliOutput({ formatAsMarkdown: enabled });
 }
 

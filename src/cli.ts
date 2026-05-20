@@ -6,6 +6,8 @@
 import { Command } from 'commander';
 import { createPluginContext, getVersion } from './cli-utils.js';
 import { loadPlugins } from './plugin-loader.js';
+import { renderCliMarkdown, resolveMarkdownEnabled } from './cli-output.js';
+import { loadConfig } from './config.js';
 
 // Import built-in command modules
 import initCommand from './commands/init.js';
@@ -167,7 +169,7 @@ if (_parsedWatch.enabled) {
 }
 
 // Allowed formats for validation
-const ALLOWED_FORMATS = new Set(['concise', 'summary', 'normal', 'full', 'raw', 'markdown', 'text', 'plain']);
+const ALLOWED_FORMATS = new Set(['concise', 'summary', 'normal', 'full', 'raw', 'markdown', 'text', 'plain', 'auto']);
 
 function isValidFormat(fmt: any): boolean {
   if (!fmt || typeof fmt !== 'string') return false;
@@ -183,7 +185,7 @@ program
   .version(getVersion())
   .option('--json', 'Output in JSON format (machine-readable)')
   .option('--verbose', 'Show verbose output including debug messages')
-  .option('-F, --format <format>', 'Human display format (choices: full|summary|concise|normal|raw|markdown)')
+  .option('-F, --format <format>', 'Human display format (choices: full|summary|concise|normal|raw|markdown|plain|text|auto)')
   .option('-w, --watch [seconds]', 'Rerun the command every N seconds (default: 5)');
 
 // Validate CLI-provided format early before any command action runs
@@ -308,6 +310,17 @@ const formatHelp = (cmd: any, helper: any) => {
   const usage = helper.commandUsage(cmd);
   const description = cmd.description() || '';
 
+  // Determine if we should render help text through the markdown renderer.
+  // Use the shared precedence resolver for CLI > config > auto-detect.
+  const programOpts = program.opts();
+  const config = loadConfig();
+  const resolved = resolveMarkdownEnabled({
+    format: programOpts.format,
+    cliFormatMarkdown: config?.cliFormatMarkdown,
+  });
+  // resolved is: true → render, false → plain, undefined → auto-detect from TTY
+  const shouldRenderHelp = resolved === true ? true : resolved === false ? false : process.stdout.isTTY === true;
+
   // Build groups and mapping of command name -> group
   const groupsDef: { name: string; names: string[] }[] = [
     { name: 'Issue Management', names: ['create', 'update', 'comment', 'close', 'delete', 'dep', 'reviewed', 'audit'] },
@@ -390,6 +403,13 @@ const formatHelp = (cmd: any, helper: any) => {
       out += `  ${term.padEnd(padOptions)} ${desc}\n`;
     }
     out += '\n';
+  }
+
+  // Render help text through the markdown renderer when in a TTY or when
+  // --format markdown is explicitly requested. This formats inline code,
+  // headers, and lists in a readable way.
+  if (shouldRenderHelp) {
+    return renderCliMarkdown(out, { formatAsMarkdown: true });
   }
 
   return out;

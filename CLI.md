@@ -9,7 +9,7 @@ These options apply to any command:
 - `-V, --version` — Print the CLI version.
 - `--json` — Produce machine-readable JSON output instead of human text.
 - `--verbose` — Enable verbose output (extra timing / debug info where supported).
-- `-F, --format <format>` — Choose human display format: `full` (default), `summary`, `concise`, `normal`, `raw`, `markdown`, `text`/`plain`.
+- `-F, --format <format>` — Choose human display format: `full` (default), `summary`, `concise`, `normal`, `raw`, `markdown`, `text`/`plain`, or `auto`.
 - `-w, --watch [seconds]` — Rerun the command every N seconds (default: 5).
 
 
@@ -26,17 +26,33 @@ requests. Configure the throttler at runtime with environment variables (see
 See `docs/github-throttling.md` for examples and testing guidance.
 
 
-### Markdown formatting (default in TTY)
+### Markdown formatting (--format and config)
 
-By default, CLI output is rendered through the project's markdown renderer in interactive terminals. This formats:
+CLI output can be rendered through the project's markdown renderer. This formats:
 
 - Headers (`#`, `##`) → bold white text
-- Inline code (\`code\`) → magenta text
-- Code fences (\`\`\`) → cyan labeled code blocks
+- Inline code (`code`) → magenta text
+- Code fences (```) → cyan labeled code blocks
 - Lists (`-` or `*`) → bullet points
 - Links → underlined blue text with URL shown
 
-Opt out in TTY with `--format text` or `--format plain`:
+#### Precedence
+
+Markdown rendering is controlled by three levels, in priority order:
+
+1. **CLI flag** `--format <value>` — highest priority
+   - `markdown` → force markdown rendering on
+   - `plain` or `text` → force rendering off (plain text)
+   - `auto` → auto-detect based on TTY (default)
+2. **Config key** `cliFormatMarkdown: true|false` in `.worklog/config.yaml`
+3. **Auto-detect** (default) — enabled in TTY, disabled in non-TTY/CI
+
+> **Note:** `--format auto` explicitly uses TTY detection and **does not** fall through
+to the `cliFormatMarkdown` config key. This means `wl show --format auto` in
+non-TTY will always produce plain output, even if `cliFormatMarkdown: true` is
+set in config. Use `--format markdown` to force markdown on regardless of TTY.
+
+#### Examples
 
 ```sh
 # Default in TTY: markdown formatted
@@ -44,13 +60,31 @@ wl show WL-123
 
 # Opt out: plain text
 wl show WL-123 --format text
+wl show WL-123 --format plain
 
-# Explicit: markdown (useful in non-TTY)
+# Explicit: markdown (useful in non-TTY/pipe)
 wl show WL-123 -F markdown
+
+# Auto-detect (based on TTY)
+wl show WL-123 -F auto
 ```
 
+#### Config file
 
-Auto-disabled in non-TTY (CI/logs) for safe plain-text output. Size guard (100KB) protects performance.
+Set `cliFormatMarkdown` in `.worklog/config.yaml` to control default behaviour:
+
+```yaml
+projectName: MyProject
+prefix: MYPROJ
+cliFormatMarkdown: true   # always render markdown in CLI output
+# or
+cliFormatMarkdown: false  # never render markdown
+```
+
+#### CI / Size Guard
+
+Auto-disabled in non-TTY (CI/logs) for safe plain-text output. Size guard (default 100KB)
+falls back to plain text for large content. CLI flag and config override auto-detect when needed.
 
 
 These flags control overall CLI behavior: output format (JSON vs human), verbosity for debugging, the display format for human-readable commands, and auto-refresh via watch mode. Use `--json` for automation and `--format` when you need more or less detail in terminal output.

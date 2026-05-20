@@ -8,6 +8,7 @@ import type { WorkItem, Comment } from '../types.js';
 import type { SyncResult } from '../sync.js';
 import type { WorklogDatabase } from '../database.js';
 import { loadConfig } from '../config.js';
+import { renderCliMarkdown, stripBlessedTags, shouldUseFormattedOutput, isTty, resolveMarkdownEnabled } from '../cli-output.js';
 import { getStageLabel, getStatusLabel, loadStatusStageRules } from '../status-stage-rules.js';
 import type { Command } from 'commander';
 
@@ -295,9 +296,53 @@ function colorizeAuditExcerpt(auditText: string, tui?: boolean): string {
   return isTui ? theme.tui.text.readyNo(firstLine) : theme.text.readyNo(firstLine);
 }
 
-// Standard human formatter: supports 'summary' | 'concise' | 'normal' | 'full' | 'raw'
+// Standard human formatter: supports 'summary' | 'concise' | 'normal' | 'full' | 'raw' | 'markdown' | 'auto'
 export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, format: string | undefined, tui?: boolean): string {
-  const fmt = (format || loadConfig()?.humanDisplay || 'full').toLowerCase();
+  // Load config once and reuse for both humanDisplay and cliFormatMarkdown
+  const config = loadConfig();
+
+  // Resolve 'auto' and 'markdown' format values
+  let fmt = (format || config?.humanDisplay || 'full').toLowerCase();
+  let markdownEnabled = false;
+
+  // Track if the format explicitly disables or enables markdown rendering.
+  // These flags prevent config from overriding explicit CLI choices.
+  let explicitDisabled = false;
+  let explicitAuto = false;
+
+  // 'markdown' format means: render full output through the markdown renderer
+  if (fmt === 'markdown') {
+    fmt = 'full';
+    markdownEnabled = true;
+  }
+  // 'auto' means: use markdown rendering if TTY, otherwise plain full
+  if (fmt === 'auto') {
+    fmt = 'full';
+    explicitAuto = true;
+  }
+  // 'text' or 'plain' format means: plain text, no markdown
+  if (fmt === 'text' || fmt === 'plain') {
+    fmt = 'full';
+    explicitDisabled = true;
+  }
+
+  // Use the shared precedence resolver when no explicit markdown/plain/text/auto
+  // flag was specified. This preserves the CLI > config > auto-detect chain.
+  if (!markdownEnabled && !explicitDisabled && !explicitAuto) {
+    const resolved = resolveMarkdownEnabled({
+      format: undefined, // format is already resolved into fmt/explicit flags above
+      cliFormatMarkdown: config?.cliFormatMarkdown,
+    });
+    if (resolved === true) {
+      markdownEnabled = true;
+    } else if (resolved === false) {
+      markdownEnabled = false;
+    } else {
+      // undefined: auto-detect from TTY
+      markdownEnabled = isTty();
+    }
+  }
+
   const isTui = Boolean(tui);
   const sortIndexLabel = `SortIndex: ${item.sortIndex}`;
   const rules = loadStatusStageRules();
@@ -476,7 +521,14 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push(coloredText);
   }
 
-  return lines.join('\n');
+  const result = lines.join('\n');
+
+  // If markdown rendering is enabled, render the full output through the CLI renderer
+  if (markdownEnabled && !isTui) {
+    return renderCliMarkdown(result, { formatAsMarkdown: true });
+  }
+
+  return result;
 }
 
 // Resolve final format choice: CLI override > provided > config > default
