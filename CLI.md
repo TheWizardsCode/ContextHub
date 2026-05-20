@@ -47,6 +47,11 @@ Markdown rendering is controlled by three levels, in priority order:
 2. **Config key** `cliFormatMarkdown: true|false` in `.worklog/config.yaml`
 3. **Auto-detect** (default) — enabled in TTY, disabled in non-TTY/CI
 
+> **Note:** `--format auto` explicitly uses TTY detection and **does not** fall through
+to the `cliFormatMarkdown` config key. This means `wl show --format auto` in
+non-TTY will always produce plain output, even if `cliFormatMarkdown: true` is
+set in config. Use `--format markdown` to force markdown on regardless of TTY.
+
 #### Examples
 
 ```sh
