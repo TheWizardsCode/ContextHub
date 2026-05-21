@@ -1,10 +1,35 @@
 {
   "name": "tui",
-  "version": "0.1.0",
-  "description": "Pi package for the ContextHub TUI",
-  "main": "../src/tui/index.js",
-  "scripts": {},
-  "keywords": [],
-  "author": "OpenAI-Agent",
-  "license": "MIT"
+  "version": "0.2.0",
+  "description": "Pi-based TUI for the Worklog CLI with agent chat, action palette, and work item management",
+  "main": "../dist/index.js",
+  "bin": {
+    "wl-piman": "../dist/commands/tui.js"
+  },
+  "scripts": {
+    "build": "cd .. && npm run build",
+    "test": "cd .. && npm test",
+    "smoke": "node -e \"require('../dist/tui/chatPane.js'); require('../dist/tui/actionPalette.js'); console.log('OK')\""
+  },
+  "keywords": [
+    "worklog",
+    "tui",
+    "agent",
+    "pi",
+    "cli"
+  ],
+  "author": "ContextHub Team",
+  "license": "MIT",
+  "peerDependencies": {
+    "worklog": "*"
+  },
+  "pi": {
+    "extensions": [
+      "../src/tui/chatPane.ts",
+      "../src/tui/actionPalette.ts"
+    ],
+    "commands": [
+      "wl-piman"
+    ]
+  }
 }
