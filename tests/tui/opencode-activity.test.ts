@@ -293,7 +293,7 @@ describe('OpenCode prompt spinner', () => {
     } as any;
 
     let onComplete: (() => void) | undefined;
-    class FakeOpencodeClient {
+    class FakePiAdapter {
       getStatus() { return { status: 'running', port: 9999 }; }
       startServer() { return Promise.resolve(true); }
       stopServer() { return undefined; }
@@ -302,7 +302,7 @@ describe('OpenCode prompt spinner', () => {
 
     const controller = new TuiController(ctx, {
       createLayout: () => layout as any,
-      OpencodeClient: FakeOpencodeClient as any,
+      PiAdapter: FakePiAdapter as any,
       resolveWorklogDir: () => '/tmp',
       createPersistence: () => ({
         loadPersistedState: async () => null,

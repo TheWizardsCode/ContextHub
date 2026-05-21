@@ -154,7 +154,7 @@ describe('TUI audit lifecycle', () => {
     let capturedPrompt: string | null = null;
     const instances: any[] = [];
 
-    class FakeOpencodeClient {
+    class FakePiAdapter {
       child: any = null;
       _running = false;
       constructor(_opts: any) {
@@ -229,7 +229,7 @@ describe('TUI audit lifecycle', () => {
 
     const controller = new TuiController(ctx, {
       createLayout: () => layout as any,
-      OpencodeClient: FakeOpencodeClient as any,
+      PiAdapter: FakePiAdapter as any,
       resolveWorklogDir: () => '/tmp',
       createPersistence: () => ({
         loadPersistedState: async () => null,

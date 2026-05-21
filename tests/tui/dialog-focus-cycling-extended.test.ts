@@ -149,7 +149,7 @@ describe('Dialog focus cycling extended', () => {
     const { layout } = buildLayout(screen);
     const ctx = { program: { opts: () => ({ verbose: false }) }, utils: { requireInitialized: vi.fn(), getDatabase: vi.fn(() => ({ list: () => [], getPrefix: () => undefined, getCommentsForWorkItem: () => [], update: vi.fn(), createComment: vi.fn(), get: vi.fn(() => null) })) } } as any;
 
-    const controller = new TuiController(ctx, { createLayout: () => layout as any, OpencodeClient: (class { getStatus() { return { status: 'stopped', port: 0 }; } }) as any, resolveWorklogDir: () => '/tmp', createPersistence: () => ({ loadPersistedState: async () => null, savePersistedState: async () => undefined, statePath: '/tmp/tui-state.json' }) });
+    const controller = new TuiController(ctx, { createLayout: () => layout as any, PiAdapter: (class { getStatus() { return { status: 'stopped', port: 0 }; } }) as any, resolveWorklogDir: () => '/tmp', createPersistence: () => ({ loadPersistedState: async () => null, savePersistedState: async () => undefined, statePath: '/tmp/tui-state.json' }) });
     await controller.start({});
 
     // Open create dialog via SHIFT-C (controller maps 'C' to create)
@@ -238,7 +238,7 @@ describe('Dialog focus cycling extended', () => {
       },
     } as any;
 
-    const controller = new TuiController(ctx, { createLayout: () => layout as any, OpencodeClient: (class { getStatus() { return { status: 'stopped', port: 0 }; } }) as any, resolveWorklogDir: () => '/tmp', createPersistence: () => ({ loadPersistedState: async () => null, savePersistedState: async () => undefined, statePath: '/tmp/tui-state.json' }) });
+    const controller = new TuiController(ctx, { createLayout: () => layout as any, PiAdapter: (class { getStatus() { return { status: 'stopped', port: 0 }; } }) as any, resolveWorklogDir: () => '/tmp', createPersistence: () => ({ loadPersistedState: async () => null, savePersistedState: async () => undefined, statePath: '/tmp/tui-state.json' }) });
     await controller.start({});
 
     // Open update dialog via 'u'

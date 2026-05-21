@@ -162,7 +162,7 @@ describe('TuiController', () => {
     };
 
     let capturedPrompt: string | null = null;
-    class FakeOpencodeClient {
+    class FakePiAdapter {
       getStatus() { return { status: 'running', port: 9999 }; }
       startServer() { return Promise.resolve(true); }
       stopServer() { return undefined; }
@@ -211,7 +211,7 @@ describe('TuiController', () => {
 
     const controller = new TuiController(ctx, {
       createLayout: () => layout as any,
-      OpencodeClient: FakeOpencodeClient as any,
+      PiAdapter: FakePiAdapter as any,
       resolveWorklogDir: () => '/tmp',
       createPersistence: () => ({
         loadPersistedState: async () => null,
@@ -243,9 +243,9 @@ describe('TuiController', () => {
     const pane = layout.agentPane.ensureResponsePane();
     expect((pane.pushLine as any).mock.calls.length).toBeGreaterThanOrEqual(0);
     // Expect the TUI path to attempt to stop the server when input is requested
-    // by the assistant (defensive cleanup). The FakeOpencodeClient.stopServer
+    // by the assistant (defensive cleanup). The FakePiAdapter.stopServer
     // should be callable without throwing; here we just assert it exists.
-    expect(typeof (FakeOpencodeClient as any).prototype.stopServer).toBe('function');
+    expect(typeof (FakePiAdapter as any).prototype.stopServer).toBe('function');
   });
 
   it('starts and stops the Opencode server around audit prompt when not already running', async () => {
@@ -331,7 +331,7 @@ describe('TuiController', () => {
     let capturedPrompt: string | null = null;
     const startServer = vi.fn(async () => true);
     const stopServer = vi.fn(() => undefined);
-    class FakeOpencodeClient {
+    class FakePiAdapter {
       getStatus() { return { status: 'stopped', port: 0 }; }
       startServer() { return startServer(); }
       stopServer() { return stopServer(); }
@@ -380,7 +380,7 @@ describe('TuiController', () => {
 
     const controller = new TuiController(ctx, {
       createLayout: () => layout as any,
-      OpencodeClient: FakeOpencodeClient as any,
+      PiAdapter: FakePiAdapter as any,
       resolveWorklogDir: () => '/tmp',
       createPersistence: () => ({
         loadPersistedState: async () => null,
@@ -483,7 +483,7 @@ describe('TuiController', () => {
     };
 
     let capturedPrompt: string | null = null;
-    class FakeOpencodeClient {
+    class FakePiAdapter {
       getStatus() { return { status: 'running', port: 9999 }; }
       async startServer() {
         // Delay to simulate slow server start
@@ -536,7 +536,7 @@ describe('TuiController', () => {
 
     const controller = new TuiController(ctx, {
       createLayout: () => layout as any,
-      OpencodeClient: FakeOpencodeClient as any,
+      PiAdapter: FakePiAdapter as any,
       resolveWorklogDir: () => '/tmp',
       createPersistence: () => ({
         loadPersistedState: async () => null,
@@ -640,10 +640,10 @@ describe('TuiController', () => {
     };
 
     const createLayout = vi.fn(() => layout) as unknown as (options?: any) => any;
-    const opencodeCtorCalls: any[] = [];
-    class FakeOpencodeClient {
+    const piAdapterCtorCalls: any[] = [];
+    class FakePiAdapter {
       constructor(options: any) {
-        opencodeCtorCalls.push(options);
+        piAdapterCtorCalls.push(options);
       }
       getStatus() { return { status: 'stopped', port: 9999 }; }
       startServer() { return Promise.resolve(true); }
@@ -690,7 +690,7 @@ describe('TuiController', () => {
 
     const controller = new TuiController(ctx, {
       createLayout: createLayout as any,
-      OpencodeClient: FakeOpencodeClient as any,
+      PiAdapter: FakePiAdapter as any,
       resolveWorklogDir: () => '/tmp',
       createPersistence: () => ({
         loadPersistedState: async () => null,
@@ -702,8 +702,8 @@ describe('TuiController', () => {
     await controller.start({});
 
     expect(createLayout).toHaveBeenCalled();
-    expect(opencodeCtorCalls.length).toBe(1);
-    expect(opencodeCtorCalls[0].port).toBe(0);
+    expect(piAdapterCtorCalls.length).toBe(1);
+    
   });
 
   it('shows empty state when there are no items', async () => {
@@ -799,7 +799,7 @@ describe('TuiController', () => {
 
     const controller = new TuiController(ctx, {
       createLayout: createLayout as any,
-      OpencodeClient: class FakeOpencodeClient {
+      PiAdapter: class FakePiAdapter {
         constructor() {}
         startServer = vi.fn();
       } as any,
@@ -927,7 +927,7 @@ describe('TuiController', () => {
 
     const controller = new TuiController(ctx, {
       createLayout: createLayout as any,
-      OpencodeClient: class FakeOpencodeClient { constructor() {} startServer = vi.fn(); } as any,
+      PiAdapter: class FakePiAdapter { constructor() {} startServer = vi.fn(); } as any,
       resolveWorklogDir: () => '/tmp',
       createPersistence: () => ({
         loadPersistedState: async () => null,
@@ -1037,10 +1037,10 @@ describe('TuiController', () => {
       })
       .mockImplementation(() => layout) as unknown as (options?: any) => any;
 
-    const opencodeCtorCalls: any[] = [];
-    class FakeOpencodeClient {
+    const piAdapterCtorCalls: any[] = [];
+    class FakePiAdapter {
       constructor(options: any) {
-        opencodeCtorCalls.push(options);
+        piAdapterCtorCalls.push(options);
       }
       getStatus() { return { status: 'stopped', port: 9999 }; }
       startServer() { return Promise.resolve(true); }
@@ -1093,7 +1093,7 @@ describe('TuiController', () => {
     try {
       const controller = new TuiController(ctx, {
         createLayout: createLayout as any,
-        OpencodeClient: FakeOpencodeClient as any,
+        PiAdapter: FakePiAdapter as any,
         resolveWorklogDir: () => '/tmp',
         createPersistence: () => ({
           loadPersistedState: async () => null,
@@ -1123,7 +1123,7 @@ describe('TuiController', () => {
       expect(stderrSpy).toHaveBeenCalledWith(
         '[wl tui] If needed, run: TERM=xterm-256color wl tui'
       );
-      expect(opencodeCtorCalls.length).toBe(1);
+      expect(piAdapterCtorCalls.length).toBe(1);
     } finally {
       stderrSpy.mockRestore();
       if (previousTerm === undefined) {
@@ -1211,7 +1211,7 @@ describe('TuiController', () => {
 
     const createLayout = vi.fn(() => layout) as unknown as (options?: any) => any;
 
-    class FakeOpencodeClient {
+    class FakePiAdapter {
       constructor(_options: any) {}
       getStatus() { return { status: 'stopped', port: 9999 }; }
       startServer() { return Promise.resolve(true); }
@@ -1264,7 +1264,7 @@ describe('TuiController', () => {
     try {
       const controller = new TuiController(ctx, {
         createLayout: createLayout as any,
-        OpencodeClient: FakeOpencodeClient as any,
+        PiAdapter: FakePiAdapter as any,
         resolveWorklogDir: () => '/tmp',
         createPersistence: () => ({
           loadPersistedState: async () => null,

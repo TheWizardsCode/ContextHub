@@ -182,7 +182,7 @@ describe('OpenCode prompt input modes', () => {
       },
     } as any;
 
-    class FakeOpencodeClient {
+    class FakePiAdapter {
       getStatus() { return { status: 'stopped', port: 9999 }; }
       startServer() { return Promise.resolve(true); }
       stopServer() { return undefined; }
@@ -191,7 +191,7 @@ describe('OpenCode prompt input modes', () => {
 
     const controller = new TuiController(ctx, {
       createLayout: () => layout as any,
-      OpencodeClient: FakeOpencodeClient as any,
+      PiAdapter: FakePiAdapter as any,
       resolveWorklogDir: () => '/tmp',
       createPersistence: () => ({
         loadPersistedState: async () => null,
@@ -353,7 +353,7 @@ describe('OpenCode prompt input modes', () => {
       },
     } as any;
 
-    class FakeOpencodeClient {
+    class FakePiAdapter {
       getStatus() { return { status: 'stopped', port: 9999 }; }
       startServer() { return Promise.resolve(true); }
       stopServer() { return undefined; }
@@ -362,7 +362,7 @@ describe('OpenCode prompt input modes', () => {
 
     const controller = new TuiController(ctx, {
       createLayout: () => layout as any,
-      OpencodeClient: FakeOpencodeClient as any,
+      PiAdapter: FakePiAdapter as any,
       resolveWorklogDir: () => '/tmp',
       createPersistence: () => ({
         loadPersistedState: async () => null,
@@ -495,7 +495,7 @@ describe('OpenCode prompt input modes', () => {
       },
     } as any;
 
-    class FakeOpencodeClient {
+    class FakePiAdapter {
       getStatus() { return { status: 'stopped', port: 9999 }; }
       startServer() { return Promise.resolve(true); }
       stopServer() { return undefined; }
@@ -504,7 +504,7 @@ describe('OpenCode prompt input modes', () => {
 
     const controller = new TuiController(ctx, {
       createLayout: () => layout as any,
-      OpencodeClient: FakeOpencodeClient as any,
+      PiAdapter: FakePiAdapter as any,
       resolveWorklogDir: () => '/tmp',
       createPersistence: () => ({
         loadPersistedState: async () => null,

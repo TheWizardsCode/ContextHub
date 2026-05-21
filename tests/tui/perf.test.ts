@@ -15,7 +15,7 @@ describe('TUI performance instrumentation', () => {
 
     const layout = ctx.createLayout();
 
-    class FakeOpencodeClient {
+    class FakePiAdapter {
       getStatus() { return { status: 'running', port: 9999 }; }
       startServer() { return Promise.resolve(true); }
       stopServer() { return undefined; }
@@ -26,7 +26,7 @@ describe('TUI performance instrumentation', () => {
 
     const controller = new TuiController(ctx as any, {
       createLayout: () => layout as any,
-      OpencodeClient: FakeOpencodeClient as any,
+      PiAdapter: FakePiAdapter as any,
       resolveWorklogDir: () => tmp,
       createPersistence: () => ({ loadPersistedState: async () => null, savePersistedState: async () => undefined, statePath: `${tmp}/tui-state.json` }),
       fs: { promises: { writeFile: writeFileSpy } } as any,
@@ -67,7 +67,7 @@ describe('TUI performance instrumentation', () => {
     ctx.utils.createSampleItem();
     const layout = ctx.createLayout();
 
-    class FakeOpencodeClient {
+    class FakePiAdapter {
       getStatus() { return { status: 'running', port: 9999 }; }
       startServer() { return Promise.resolve(true); }
       stopServer() { return undefined; }
@@ -78,7 +78,7 @@ describe('TUI performance instrumentation', () => {
 
     const controller = new TuiController(ctx as any, {
       createLayout: () => layout as any,
-      OpencodeClient: FakeOpencodeClient as any,
+      PiAdapter: FakePiAdapter as any,
       resolveWorklogDir: () => tmp,
       createPersistence: () => ({ loadPersistedState: async () => null, savePersistedState: async () => undefined, statePath: `${tmp}/tui-state.json` }),
       fs: { promises: { writeFile: writeFileSpy } } as any,
@@ -119,7 +119,7 @@ describe('TUI performance instrumentation', () => {
     ctx.utils.createSampleItem();
     const layout = ctx.createLayout();
 
-    class FakeOpencodeClient {
+    class FakePiAdapter {
       getStatus() { return { status: 'running', port: 9999 }; }
       startServer() { return Promise.resolve(true); }
       stopServer() { return undefined; }
@@ -134,7 +134,7 @@ describe('TUI performance instrumentation', () => {
 
     const controller = new TuiController(ctx as any, {
       createLayout: () => layout as any,
-      OpencodeClient: FakeOpencodeClient as any,
+      PiAdapter: FakePiAdapter as any,
       resolveWorklogDir: () => tmp,
       createPersistence: () => ({ loadPersistedState: async () => null, savePersistedState: async () => undefined, statePath: `${tmp}/tui-state.json` }),
     });

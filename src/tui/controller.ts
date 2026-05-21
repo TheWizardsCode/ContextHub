@@ -34,10 +34,10 @@ import {
   getStatusValueFromLabel,
   loadStatusStageRules,
 } from '../status-stage-rules.js';
-import { OpencodeClient, type OpencodeServerStatus } from './opencode-client.js';
+import { PiAdapter, type PiAdapterStatus } from './pi-adapter.js';
 import ChordHandler from './chords.js';
 import { stripAnsi, stripTags, decorateIdsForClick, extractIdFromLine, extractIdAtColumn, stripTagsAndAnsiWithMap, wrapPlainLineWithMap } from './id-utils.js';
-import { AVAILABLE_COMMANDS, MIN_INPUT_HEIGHT, MAX_INPUT_LINES, FOOTER_HEIGHT, OPENCODE_SERVER_PORT, MIN_TREE_HEIGHT, MAX_TREE_HEIGHT,
+import { AVAILABLE_COMMANDS, MIN_INPUT_HEIGHT, MAX_INPUT_LINES, FOOTER_HEIGHT, MIN_TREE_HEIGHT, MAX_TREE_HEIGHT,
   KEY_NAV_RIGHT, KEY_NAV_LEFT, KEY_TOGGLE_EXPAND, KEY_QUIT, KEY_ESCAPE, KEY_TOGGLE_HELP, KEY_CHORD_PREFIX, KEY_CHORD_FOLLOWUPS, KEY_OPEN_OPENCODE, KEY_OPEN_SEARCH,
   KEY_TAB, KEY_SHIFT_TAB, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_CREATE_ITEM, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_RUN_AUDIT, KEY_FILTER_BLOCKED, KEY_FILTER_NEEDS_REVIEW, KEY_FILTER_INTAKE_COMPLETED, KEY_FILTER_PLAN_COMPLETED, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW, KEY_MOVE, KEY_REORDER_UP, KEY_REORDER_DOWN, KEY_DELEGATE, KEY_GITHUB_PUSH, KEY_FILTER_COPILOT } from './constants.js';
 import { theme } from '../theme.js';
@@ -95,7 +95,7 @@ export interface TuiControllerDeps {
   resolveWorklogDir?: typeof resolveWorklogDir;
   createPersistence?: typeof createPersistence;
   createLayout?: typeof createLayout;
-  OpencodeClient?: typeof OpencodeClient;
+  PiAdapter?: typeof PiAdapter;
 }
 
 const TUI_FALLBACK_TERMINAL = 'xterm-256color';
@@ -162,7 +162,7 @@ export class TuiController {
     const resolveWorklogDirImpl = this.deps.resolveWorklogDir ?? resolveWorklogDir;
     const createPersistenceImpl = this.deps.createPersistence ?? createPersistence;
     const createLayoutImpl = this.deps.createLayout ?? (this.ctx as any).createLayout ?? createLayout;
-    const OpencodeClientImpl = this.deps.OpencodeClient ?? OpencodeClient;
+    const PiAdapterImpl = this.deps.PiAdapter ?? PiAdapter;
 
     utils.requireInitialized();
     const previousTuiMode = process.env.WL_TUI_MODE;
@@ -1973,7 +1973,7 @@ export class TuiController {
        screen.render();
 
        // Start the server if not already running
-       await opencodeClient.startServer();
+       await piAdapter.startServer();
 
        // Open the response pane automatically
        ensureOpencodePane();
@@ -2005,7 +2005,7 @@ export class TuiController {
 
     // OpenCode server management (port defined in src/tui/constants.ts)
 
-    function updateServerStatus(status: OpencodeServerStatus, port: number) {
+    function updateServerStatus(status: PiAdapterStatus, port: number) {
       let statusText = '';
       switch (status) {
         case 'stopped':
@@ -2073,8 +2073,7 @@ export class TuiController {
       }
     };
 
-    const opencodeClient = new OpencodeClientImpl({
-      port: OPENCODE_SERVER_PORT,
+    const piAdapter = new PiAdapterImpl({
       cwd: worklogRoot,
       log: debugLog,
       showToast,
@@ -2088,7 +2087,7 @@ export class TuiController {
       onStatusChange: updateServerStatus,
     });
 
-    const initialStatus = opencodeClient.getStatus();
+    const initialStatus = piAdapter.getStatus();
     updateServerStatus(initialStatus.status, initialStatus.port);
     
     function ensureOpencodePane(label = ' opencode [esc] ') {
@@ -2210,19 +2209,19 @@ export class TuiController {
 
       // Check server is running. If not, attempt to start it and ensure we
       // stop it after the prompt completes to avoid leaving orphaned
-      // opencode server processes. We only stop the server if we started it.
-      const serverStatus = opencodeClient.getStatus();
+      // pi process. We only stop the process if we started it.
+      const serverStatus = piAdapter.getStatus();
       let startedServer = false;
       if (serverStatus.status !== 'running' || serverStatus.port === 0) {
         try {
-          const started = await opencodeClient.startServer();
+          const started = await piAdapter.startServer();
           startedServer = !!started;
         } catch (err) {
           // startServer failed; notify user and abort
           showToast('Failed to start OpenCode server');
           return;
         }
-        const refreshed = opencodeClient.getStatus();
+        const refreshed = piAdapter.getStatus();
         if (refreshed.status !== 'running' || refreshed.port === 0) {
           showToast('OpenCode server not running');
           return;
@@ -2243,7 +2242,7 @@ export class TuiController {
       // Use HTTP API to communicate with server. Ensure we stop a server
       // we started after the prompt finishes to avoid orphaned processes.
       try {
-        await opencodeClient.sendPrompt({
+        await piAdapter.sendPrompt({
           prompt,
           pane: opencodePane,
           indicator: null,
@@ -2256,7 +2255,7 @@ export class TuiController {
             updateOpencodePromptLabel('idle');
             openOpencodeDialog();
             // Best-effort stop of server we started for this prompt.
-            try { if (startedServer && typeof opencodeClient.stopServer === 'function') opencodeClient.stopServer(); } catch (_) {}
+            try { if (startedServer && typeof piAdapter.stopServer === 'function') piAdapter.stopServer(); } catch (_) {}
           },
         });
       } catch (err) {
@@ -2268,9 +2267,9 @@ export class TuiController {
         screen.render();
       } finally {
         try {
-          if (startedServer && typeof opencodeClient.stopServer === 'function') {
+          if (startedServer && typeof piAdapter.stopServer === 'function') {
             // Best-effort stop of the server we started for this prompt.
-            opencodeClient.stopServer();
+            piAdapter.stopServer();
           }
         } catch (_) {
           // ignore stop errors; we made a best-effort to clean up
@@ -2286,7 +2285,7 @@ export class TuiController {
     };
     try { (opencodeSend as any).__click_handler = opencodeSendClickHandler; opencodeSend.on('click', opencodeSendClickHandler); } catch (_) {}
 
-    // Add Escape key handler to close the opencode dialog
+    // Add Escape key handler to close the agent dialog
     const opencodeTextEscapeHandler = function(this: any) {
       endOpencodeTextReading();
       opencodeDialog.hide();
@@ -4242,7 +4241,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         } catch (_) {}
       })();
       // Stop the OpenCode server if we started it
-      opencodeClient.stopServer();
+      piAdapter.stopServer();
       // Clear pending timers to avoid keeping the process alive
       try { chordHandler.reset(); } catch (_) {}
       if (refreshTimer) {
@@ -4547,7 +4546,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           });
         } catch (_) {}
 
-    // Open opencode prompt dialog (shortcut O)
+    // Open agent prompt dialog (shortcut O)
      registerAppKey(screen,KEY_OPEN_OPENCODE, async () => {
        if (state.moveMode) return;
        if (detailModal.hidden && !helpMenu.isVisible() && closeDialog.hidden && updateDialog.hidden && !isCreateDialogOpen()) {

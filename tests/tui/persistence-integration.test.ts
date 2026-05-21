@@ -204,7 +204,7 @@ function buildCtx(items: any[]) {
   } as any;
 }
 
-class FakeOpencodeClient {
+class FakePiAdapter {
   getStatus() { return { status: 'stopped', port: 9999 }; }
   startServer() { return Promise.resolve(true); }
   stopServer() { return undefined; }
@@ -222,7 +222,7 @@ function buildControllerWithPersistence(
 
   const controller = new TuiController(ctx, {
     createLayout: () => layout as any,
-    OpencodeClient: FakeOpencodeClient as any,
+    PiAdapter: FakePiAdapter as any,
     resolveWorklogDir: () => '/tmp/test-worklog',
     createPersistence: (() => persistenceSpy) as any,
   });

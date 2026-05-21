@@ -195,7 +195,7 @@ describe('TuiController - Database Watch Integration', () => {
     };
 
     const createLayout = vi.fn(() => layout) as unknown as (options?: any) => any;
-    class FakeOpencodeClient {
+    class FakePiAdapter {
       getStatus() { return { status: 'stopped', port: 9999 }; }
       startServer() { return Promise.resolve(true); }
       stopServer() { return undefined; }
@@ -234,7 +234,7 @@ describe('TuiController - Database Watch Integration', () => {
 
     const controller = new TuiController(ctx, {
       createLayout: createLayout as any,
-      OpencodeClient: FakeOpencodeClient as any,
+      PiAdapter: FakePiAdapter as any,
       resolveWorklogDir: () => tempDir,
       createPersistence: () => ({
         loadPersistedState: async () => null,
@@ -332,7 +332,7 @@ describe('TuiController - Database Watch Integration', () => {
     };
 
     const createLayout = vi.fn(() => layout) as unknown as (options?: any) => any;
-    class FakeOpencodeClient {
+    class FakePiAdapter {
       getStatus() { return { status: 'stopped', port: 9999 }; }
       startServer() { return Promise.resolve(true); }
       stopServer() { return undefined; }
@@ -369,7 +369,7 @@ describe('TuiController - Database Watch Integration', () => {
 
     const controller = new TuiController(ctx, {
       createLayout: createLayout as any,
-      OpencodeClient: FakeOpencodeClient as any,
+      PiAdapter: FakePiAdapter as any,
       resolveWorklogDir: () => tempDir,
       createPersistence: () => ({
         loadPersistedState: async () => null,
