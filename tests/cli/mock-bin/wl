@@ -1,0 +1,44 @@
+#!/usr/bin/env node
+// Mock wl command for TUI tests
+// Returns predefined test data for wl list/show commands
+
+const args = process.argv.slice(2);
+const isJson = args.includes('--json');
+
+if (args[0] === 'list' || args[0] === 'show') {
+  if (isJson) {
+    const item = {
+      id: 'WL-0000000010000001',
+      title: 'Test item 1',
+      description: 'A test work item',
+      status: 'open',
+      priority: 'medium',
+      sortIndex: 1000,
+      parentId: null,
+      createdAt: '2024-01-01T00:00:00.000Z',
+      updatedAt: '2024-01-01T00:00:00.000Z',
+      tags: [],
+      assignee: '',
+      stage: 'idea',
+      issueType: 'task',
+      createdBy: '',
+      deletedBy: '',
+      deleteReason: '',
+      risk: '',
+      effort: ''
+    };
+    // For 'show' return single item, for 'list' return array
+    if (args[0] === 'list') {
+      console.log(JSON.stringify([item]));
+    } else {
+      console.log(JSON.stringify(item));
+    }
+  } else {
+    console.log('Test item 1 (WL-0000000010000001) - open, medium priority');
+  }
+  process.exit(0);
+} else {
+  // Unknown command
+  console.error(`Unknown command: ${args[0] || '(no command)'}`);
+  process.exit(1);
+}
