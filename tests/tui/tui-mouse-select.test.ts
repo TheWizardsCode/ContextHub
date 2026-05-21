@@ -183,6 +183,19 @@ function buildLayout(screen: any) {
 }
 
 function buildCtx(items: any[]) {
+  const createMockWlDbAdapter = () => ({
+    list: () => items,
+    get: (id: string) => items.find(i => i.id === id) ?? null,
+    create: () => null,
+    update: () => null,
+    getPrefix: () => undefined,
+    getCommentsForWorkItem: () => [],
+    createComment: () => null,
+    getAll: () => items,
+    getAllComments: () => [],
+    getChildren: () => [],
+    upsertItems: () => {},
+  });
   return {
     ctx: {
       program: { opts: () => ({ verbose: false }) },
@@ -198,6 +211,7 @@ function buildCtx(items: any[]) {
         })),
       },
     } as any,
+    createWlDbAdapter: createMockWlDbAdapter,
   };
 }
 
@@ -218,7 +232,7 @@ describe('TUI mouse click-to-select (regression)', () => {
     const item2 = makeItem('WL-MOUSE-2');
     const screen = makeScreen();
     const { layout, detail, list, updateFromItemMock } = buildLayout(screen);
-    const { ctx } = buildCtx([item1, item2]);
+    const { ctx, createWlDbAdapter } = buildCtx([item1, item2]);
 
     const controller = new TuiController(ctx, {
       createLayout: () => layout as any,
@@ -229,6 +243,7 @@ describe('TUI mouse click-to-select (regression)', () => {
         savePersistedState: async () => undefined,
         statePath: '/tmp/tui-state.json',
       }),
+      createWlDbAdapter,
     });
 
     await controller.start({});

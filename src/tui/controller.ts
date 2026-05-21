@@ -4,7 +4,7 @@
  */
 
 import type { PluginContext } from '../plugin-types.js';
-import type { WorkItem, WorkItemStatus } from '../types.js';
+import type { WorkItem, WorkItemStatus, Comment } from '../types.js';
 import type { ChildProcess } from 'child_process';
 import blessed from 'blessed';
 import { performance } from 'perf_hooks';
@@ -35,6 +35,7 @@ import {
   loadStatusStageRules,
 } from '../status-stage-rules.js';
 import { PiAdapter, type PiAdapterStatus } from './pi-adapter.js';
+import { createWlDbAdapter, type WlDbInterface } from './wl-db-adapter.js';
 import ChordHandler from './chords.js';
 import { stripAnsi, stripTags, decorateIdsForClick, extractIdFromLine, extractIdAtColumn, stripTagsAndAnsiWithMap, wrapPlainLineWithMap } from './id-utils.js';
 import { AVAILABLE_COMMANDS, MIN_INPUT_HEIGHT, MAX_INPUT_LINES, FOOTER_HEIGHT, MIN_TREE_HEIGHT, MAX_TREE_HEIGHT,
@@ -96,6 +97,7 @@ export interface TuiControllerDeps {
   createPersistence?: typeof createPersistence;
   createLayout?: typeof createLayout;
   PiAdapter?: typeof PiAdapter;
+  createWlDbAdapter?: () => WlDbInterface;
 }
 
 const TUI_FALLBACK_TERMINAL = 'xterm-256color';
@@ -163,11 +165,13 @@ export class TuiController {
     const createPersistenceImpl = this.deps.createPersistence ?? createPersistence;
     const createLayoutImpl = this.deps.createLayout ?? (this.ctx as any).createLayout ?? createLayout;
     const PiAdapterImpl = this.deps.PiAdapter ?? PiAdapter;
+    const WlDbAdapterImpl = this.deps.createWlDbAdapter ?? createWlDbAdapter;
 
     utils.requireInitialized();
     const previousTuiMode = process.env.WL_TUI_MODE;
     process.env.WL_TUI_MODE = '1';
-    const db = utils.getDatabase(options.prefix);
+    // Use WlDbAdapter to route all Worklog DB operations through the wl CLI
+    const dbAdapter = WlDbAdapterImpl();
     if (previousTuiMode === undefined) delete process.env.WL_TUI_MODE;
     else process.env.WL_TUI_MODE = previousTuiMode;
     const isVerbose = !!program.opts().verbose;
@@ -201,10 +205,10 @@ export class TuiController {
       context: string = 'unknown',
     ): { items: Item[]; busy: boolean } => {
       try {
-        return { items: db.list(queryObj), busy: false };
+        return { items: dbAdapter.list(queryObj) as unknown as Item[], busy: false };
       } catch (error) {
-        if (!isSqliteBusyError(error)) throw error;
-        debugLog(`[db] list busy in ${context}; returning fallback (${fallback.length} items)`);
+        // WlDbAdapter uses spawnSync so errors are from CLI issues, not SQLite busy
+        debugLog(`[dbAdapter] list error in ${context}: ${String(error)}; returning fallback (${fallback.length} items)`);
         return { items: fallback, busy: true };
       }
     };
@@ -249,7 +253,7 @@ export class TuiController {
 
     // Persisted state handling extracted to src/tui/persistence.ts
     const persistence = createPersistenceImpl(resolveWorklogDirImpl(), { debugLog: debugLog, fs: fsAsync });
-    const persisted = await persistence.loadPersistedState(db.getPrefix?.() || undefined);
+    const persisted = await persistence.loadPersistedState(dbAdapter.getPrefix?.() || undefined);
     const persistedExpanded = persisted && Array.isArray(persisted.expanded) ? persisted.expanded : undefined;
     const state = createTuiState(items, showClosed, persistedExpanded);
 
@@ -389,7 +393,7 @@ export class TuiController {
         }
 
         try {
-          void persistence.savePersistedState(db.getPrefix?.() || undefined, { expanded: Array.from(state.expanded) });
+          void persistence.savePersistedState(dbAdapter.getPrefix?.() || undefined, { expanded: Array.from(state.expanded) });
         } catch (_) {}
         try { screen.destroy(); } catch (_) {}
       });
@@ -2082,7 +2086,7 @@ export class TuiController {
       persistedState: {
         load: persistence.loadPersistedState,
         save: persistence.savePersistedState,
-        getPrefix: () => db.getPrefix?.(),
+        getPrefix: () => dbAdapter.getPrefix?.(),
       },
       onStatusChange: updateServerStatus,
     });
@@ -2576,7 +2580,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
   const cacheEnd = perfEnabled ? performance.now() : 0;
   if (!content) {
     const fmtStart = perfEnabled ? performance.now() : 0;
-    const text = humanFormatWorkItem(node.item, db, 'detail-pane', true);
+    const text = humanFormatWorkItem(node.item, null, 'detail-pane', true);
     const fmtEnd = perfEnabled ? performance.now() : 0;
     const escStart = perfEnabled ? performance.now() : 0;
     const escaped = escapeLiteralBracesPreservingTags(text);
@@ -2625,7 +2629,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     type PerfMetric = { start: number; label: string };
     const metadataPerfMetrics: PerfMetric[] | undefined = perfEnabled ? [] : undefined;
     const c1 = perfEnabled ? performance.now() : 0;
-    const commentCount = db ? db.getCommentsForWorkItem(node.item.id).length : 0;
+    const commentCount = dbAdapter ? dbAdapter.getCommentsForWorkItem(node.item.id).length : 0;
     const c2 = perfEnabled ? performance.now() : 0;
     commentsMs = c2 - c1;
     const g1 = perfEnabled ? performance.now() : 0;
@@ -2727,13 +2731,13 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     // global handler from acting on the same key event.
     let suppressEscapeUntil = 0;
     function openDetailsForId(id: string) {
-      const item = db.get(id);
+      const item = dbAdapter.get(id) as unknown as Item | null;
       if (!item) {
         showToast('Item not found');
         return;
       }
       detailOverlay.show();
-      const text = humanFormatWorkItem(item, db, 'full', true);
+      const text = humanFormatWorkItem(item, null, 'full', true);
       const escaped = escapeLiteralBracesPreservingTags(text);
       const brightened = brightenDetailIdLine(escaped);
       detailModal.setContent(decorateIdsForClick(brightened));
@@ -2907,7 +2911,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       const priority: 'critical' | 'high' | 'medium' | 'low' = priorityValues[priorityIndex] || 'medium';
 
       try {
-        const newItem = db.create({
+        const newItem = dbAdapter.create({
           title,
           description,
           issueType,
@@ -3417,7 +3421,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         const existingSort = Number.isFinite(existing?.sortIndex) ? Number(existing?.sortIndex) : 0;
         if (existingSort === next.sortIndex) continue;
 
-        const updated = db.update(next.id, { sortIndex: next.sortIndex });
+        const updated = dbAdapter.update(next.id, { sortIndex: next.sortIndex });
         if (!updated) {
           showToast('Reorder failed');
           return;
@@ -3464,7 +3468,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
 
       if (stage === 'deleted') {
         try {
-          const updated = db.update(item.id, { status: 'deleted', stage: '' });
+          const updated = dbAdapter.update(item.id, { status: 'deleted', stage: '' });
           if (!updated) {
             showToast('Delete failed');
             return;
@@ -3488,7 +3492,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           showToast('Close blocked');
           return;
         }
-        const updated = db.update(item.id, updates);
+        const updated = dbAdapter.update(item.id, updates);
         if (!updated) {
           showToast('Close failed');
           return;
@@ -3733,7 +3737,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       state.showClosed = true;
       options.inProgress = false;
       options.all = true;
-      state.items = db.list({}).filter((item: any) => item.status !== 'completed' && item.status !== 'deleted');
+      state.items = dbAdapter.list({}) as unknown as Item[];
       rebuildTree();
       expandInProgressAncestors();
       let refreshed = buildVisible();
@@ -4089,7 +4093,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
             return;
           }
           try {
-            const updated = db.update(sourceId, { parentId: null });
+            const updated = dbAdapter.update(sourceId, { parentId: null });
             if (!updated) { showToast('Move failed'); exitMoveMode(state); renderListAndDetail(getGlobalSelectedIndex()); return; }
             invalidateDetailCache(sourceId);
             showToast(`Moved ${sourceItem?.title || sourceId} to root level`);
@@ -4103,7 +4107,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         }
         // Reparent under target
         try {
-          const updated = db.update(sourceId, { parentId: targetId });
+          const updated = dbAdapter.update(sourceId, { parentId: targetId });
           if (!updated) { showToast('Move failed'); exitMoveMode(state); renderListAndDetail(getGlobalSelectedIndex()); return; }
           invalidateDetailCache(sourceId);
           const sourceItem = state.itemsById.get(sourceId);
@@ -4186,7 +4190,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       }
       renderListAndDetail(idx);
       // persist state
-      void persistence.savePersistedState(db.getPrefix?.() || undefined, { expanded: Array.from(state.expanded) });
+      void persistence.savePersistedState(dbAdapter.getPrefix?.() || undefined, { expanded: Array.from(state.expanded) });
       const end = performance.now();
       const duration = end - start;
       perfMetrics.push({event: 'expand_toggle', start, end, duration});
@@ -4204,7 +4208,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       if (isShuttingDown) return;
       isShuttingDown = true;
       // Persist state before exiting
-      try { void persistence.savePersistedState(db.getPrefix?.() || undefined, { expanded: Array.from(state.expanded) }); } catch (_) {}
+      try { void persistence.savePersistedState(dbAdapter.getPrefix?.() || undefined, { expanded: Array.from(state.expanded) }); } catch (_) {}
       stopDatabaseWatch();
       if (eventLoopLagTimer) {
         try { clearInterval(eventLoopLagTimer); } catch (_) {}
@@ -4728,7 +4732,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       try {
         const has = Array.isArray(item.tags) && item.tags.includes('do-not-delegate');
         const newTags = has ? item.tags.filter(t => t !== 'do-not-delegate') : Array.from(new Set([...(item.tags || []), 'do-not-delegate']));
-        const updated = db.update(item.id, { tags: newTags });
+        const updated = dbAdapter.update(item.id, { tags: newTags });
         if (!updated) {
           showToast('Update failed');
           return;
@@ -4800,8 +4804,24 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
 
       try {
         const githubConfig = resolveGithubConfig({});
+        // Create a DelegateDb-compatible view of the wl CLI adapter
+        const delegateDb: DelegateDb = {
+          get: (id: string) => dbAdapter.get(id) as unknown as Item | null,
+          getAll: () => dbAdapter.getAll() as unknown as Item[],
+          getChildren: (parentId: string) => dbAdapter.getChildren(parentId) as unknown as Item[],
+          update: (id: string, input: Record<string, unknown>) => dbAdapter.update(id, input) as unknown as Item | null,
+          upsertItems: (items: Item[]) => dbAdapter.upsertItems(items as any),
+          createComment: (input) => {
+            const result = dbAdapter.createComment(input);
+            return result ? { ...result, references: [] as string[] } : null;
+          },
+          getAllComments: () => {
+            // Cast WorkItemComment[] to Comment[] by adding missing references field
+            return dbAdapter.getAllComments() as unknown as Comment[];
+          },
+        };
         const result: DelegateResult = await delegateWorkItem(
-          db as DelegateDb,
+          delegateDb,
           githubConfig,
           item.id,
           {
@@ -4895,7 +4915,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         await (helperModule as any).default({
           item,
           screen,
-          db,
+          db: dbAdapter,
           showToast,
           fsImpl,
           spawnImpl,
@@ -4928,7 +4948,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       }
       try {
         const nextValue = !Boolean(item.needsProducerReview);
-        const updated = db.update(item.id, { needsProducerReview: nextValue });
+        const updated = dbAdapter.update(item.id, { needsProducerReview: nextValue });
         if (!updated) {
           showToast('Update failed');
           return;
@@ -4980,7 +5000,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           return;
         }
         try {
-          const updated = db.update(sourceId, { parentId: null });
+          const updated = dbAdapter.update(sourceId, { parentId: null });
           if (!updated) {
             showToast('Move failed');
             exitMoveMode(state);
@@ -5007,7 +5027,7 @@ const visible = buildVisible();
 
       // Reparent: move source under target (F4)
       try {
-        const updated = db.update(sourceId, { parentId: targetId });
+        const updated = dbAdapter.update(sourceId, { parentId: targetId });
         if (!updated) {
           showToast('Move failed');
           exitMoveMode(state);
@@ -5084,7 +5104,7 @@ const visible = buildVisible();
          // Use canonical assignee token used by delegate helper local state
          const copilotToken = '@github-copilot';
          // Filter items by assignee equals the canonical copilot token
-         state.items = db.list({}).filter((item: any) => item.status !== 'completed' && item.status !== 'deleted' && item.assignee === copilotToken);
+         state.items = dbAdapter.list({}) as unknown as Item[];
          state.showClosed = false;
          rebuildTree();
          expandInProgressAncestors();
@@ -5289,7 +5309,7 @@ const visible = buildVisible();
         if (Object.keys(updates).length > 0) {
           try { debugLog(`submitting updates for ${item?.id}: ${JSON.stringify(updates)}`); } catch (_) {}
           try {
-            const res = db.update(item.id, updates);
+            const res = dbAdapter.update(item.id, updates);
             try { debugLog(`db.update returned: ${JSON.stringify(res)}`); } catch (_) {}
           } catch (err) {
             try { debugLog(`db.update threw: ${String(err)}`); } catch (_) {}
@@ -5297,7 +5317,7 @@ const visible = buildVisible();
           }
         }
         if (comment) {
-          db.createComment({ workItemId: item.id, comment, author: '@tui' });
+          dbAdapter.createComment({ workItemId: item.id, comment, author: '@tui' });
         }
         invalidateDetailCache(item.id);
         showToast('Updated');

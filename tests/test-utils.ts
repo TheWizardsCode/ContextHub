@@ -161,6 +161,60 @@ export function createTuiTestContext() {
     lastIsError: () => toast._lastIsError,
   } as any;
 
+  // Mock WlDbAdapter that returns test data from the in-memory items store
+  const createMockWlDbAdapter = () => ({
+    list: (query?: Record<string, unknown>) => {
+      let allItems = Array.from(items.values());
+      // Apply status filter if present
+      if (query?.status) {
+        const statuses = Array.isArray(query.status) ? query.status : [query.status];
+        allItems = allItems.filter(item => statuses.includes(item.status));
+      }
+      return allItems;
+    },
+    get: (id: string) => items.get(id) ?? null,
+    create: (item: Record<string, unknown>) => {
+      const id = `WL-TEST-${nextId++}`;
+      const now = new Date().toISOString();
+      const newItem = {
+        id,
+        title: String(item.title ?? 'Untitled'),
+        description: String(item.description ?? ''),
+        status: 'open',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: now,
+        updatedAt: now,
+        tags: [],
+        assignee: '',
+        stage: 'idea',
+        issueType: 'task',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '',
+        effort: '',
+      };
+      items.set(id, newItem);
+      return newItem;
+    },
+    update: (id: string, updates: Record<string, unknown>) => {
+      const cur = items.get(id);
+      if (!cur) return null;
+      const next = Object.assign({}, cur, updates);
+      items.set(id, next);
+      return next;
+    },
+    getPrefix: () => undefined,
+    getCommentsForWorkItem: (id: string) => [],
+    createComment: (_: any) => ({}),
+    getAll: () => Array.from(items.values()),
+    getAllComments: () => [],
+    getChildren: (parentId: string) => Array.from(items.values()).filter(i => i.parentId === parentId),
+    upsertItems: (_: any[]) => {},
+  });
+
   // Minimal box/screen factories used by the layout mocks
   const makeBox = () => {
     let _content = '';
@@ -341,6 +395,7 @@ export function createTuiTestContext() {
     blessed: blessedImpl,
     screen,
     createLayout: () => layout,
+    createWlDbAdapter: createMockWlDbAdapter,
     runCli,
   } as any;
 }

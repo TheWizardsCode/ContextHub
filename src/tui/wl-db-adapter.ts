@@ -63,6 +63,11 @@ export interface WlDbInterface {
   getPrefix?(): string | undefined;
   getCommentsForWorkItem(workItemId: string): WorkItemComment[];
   createComment(params: { workItemId: string; comment: string; author: string }): WorkItemComment | null;
+  // DelegateDb compatibility methods
+  getAll(): WorkItem[];
+  getAllComments(): WorkItemComment[];
+  getChildren(parentId: string): WorkItem[];
+  upsertItems(items: WorkItem[]): void;
 }
 
 /**
@@ -249,6 +254,49 @@ export function createWlDbAdapter(): WlDbInterface {
         author: result.author ?? params.author,
         createdAt: result.createdAt ?? result.created_at ?? new Date().toISOString(),
       };
+    },
+
+    // DelegateDb compatibility methods
+    getAll(): WorkItem[] {
+      // Get all items using wl list with no filters
+      const result = wlJsonSync('list', ['--all']);
+      if (!result || !Array.isArray(result)) return [];
+      return result.map(toWorkItem);
+    },
+
+    getAllComments(): WorkItemComment[] {
+      // Get all comments by listing all items and fetching their comments
+      const items = this.getAll();
+      const allComments: WorkItemComment[] = [];
+      for (const item of items) {
+        const comments = this.getCommentsForWorkItem(item.id);
+        allComments.push(...comments);
+      }
+      return allComments;
+    },
+
+    getChildren(parentId: string): WorkItem[] {
+      // Use wl list --parent to get direct children
+      const result = wlJsonSync('list', ['--parent', parentId]);
+      if (!result || !Array.isArray(result)) return [];
+      return result.map(toWorkItem);
+    },
+
+    upsertItems(items: WorkItem[]): void {
+      // Update each item via the update CLI command
+      for (const item of items) {
+        // Build updates from the item's fields (excluding id which identifies the item)
+        const updates: Record<string, unknown> = {};
+        if (item.status) updates.status = item.status;
+        if (item.stage) updates.stage = item.stage;
+        if (item.priority) updates.priority = item.priority;
+        if (item.parentId !== undefined) updates.parentId = item.parentId;
+        if (item.tags !== undefined) updates.tags = item.tags;
+        if (item.assignee) updates.assignee = item.assignee;
+        if (updates.status || updates.stage || updates.priority || updates.parentId !== undefined || updates.tags || updates.assignee) {
+          this.update(item.id, updates);
+        }
+      }
     },
   };
 }
