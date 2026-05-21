@@ -377,13 +377,13 @@ describe('Plugin Loader', () => {
     it('should use XDG_CONFIG_HOME when set', () => {
       process.env.XDG_CONFIG_HOME = '/custom/config';
       const dir = getGlobalPluginDir();
-      expect(dir).toBe(path.join('/custom/config', 'opencode', '.worklog', 'plugins'));
+      expect(dir).toBe(path.join('/custom/config', 'worklog', '.worklog', 'plugins'));
     });
 
     it('should fall back to $HOME/.config when XDG_CONFIG_HOME is unset', () => {
       delete process.env.XDG_CONFIG_HOME;
       const dir = getGlobalPluginDir();
-      expect(dir).toBe(path.join(os.homedir(), '.config', 'opencode', '.worklog', 'plugins'));
+      expect(dir).toBe(path.join(os.homedir(), '.config', 'worklog', '.worklog', 'plugins'));
     });
 
     it('should return an absolute path', () => {

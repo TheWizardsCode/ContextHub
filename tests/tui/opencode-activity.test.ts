@@ -228,7 +228,7 @@ describe('OpenCode prompt spinner', () => {
     const opencodeText = makeTextarea();
     const opencodeDialog = makeBox();
     const responsePane = makeBox();
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: opencodeDialog,
       textarea: opencodeText,
@@ -246,7 +246,7 @@ describe('OpenCode prompt spinner', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),
@@ -314,7 +314,7 @@ describe('OpenCode prompt spinner', () => {
     await controller.start({});
 
     opencodeText.setValue('hello');
-    const sendHandler = (opencodeUi.sendButton as any).__opencode_click as (() => void) | undefined;
+    const sendHandler = (agentPane.sendButton as any).__click_handler as (() => void) | undefined;
     expect(typeof sendHandler).toBe('function');
     sendHandler?.();
 

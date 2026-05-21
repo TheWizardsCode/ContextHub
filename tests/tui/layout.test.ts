@@ -9,7 +9,7 @@ import { OverlaysComponent } from '../../src/tui/components/overlays.js';
 import { DialogsComponent } from '../../src/tui/components/dialogs.js';
 import { HelpMenuComponent } from '../../src/tui/components/help-menu.js';
 import { ModalDialogsComponent } from '../../src/tui/components/modals.js';
-import { OpencodePaneComponent } from '../../src/tui/components/opencode-pane.js';
+import { AgentPaneComponent } from '../../src/tui/components/opencode-pane.js';
 import { MIN_TREE_HEIGHT, MAX_TREE_HEIGHT, FOOTER_HEIGHT } from '../../src/tui/constants.js';
 
 // ---------------------------------------------------------------------------
@@ -65,7 +65,7 @@ describe('createLayout', () => {
       expect(layout.dialogsComponent).toBeInstanceOf(DialogsComponent);
       expect(layout.helpMenu).toBeInstanceOf(HelpMenuComponent);
       expect(layout.modalDialogs).toBeInstanceOf(ModalDialogsComponent);
-      expect(layout.opencodeUi).toBeInstanceOf(OpencodePaneComponent);
+      expect(layout.agentPane).toBeInstanceOf(AgentPaneComponent);
     });
 
     it('returns next-dialog widgets', () => {
@@ -122,7 +122,7 @@ describe('createLayout', () => {
       expect(layout.dialogsComponent).toBeInstanceOf(DialogsComponent);
       expect(layout.helpMenu).toBeInstanceOf(HelpMenuComponent);
       expect(layout.modalDialogs).toBeInstanceOf(ModalDialogsComponent);
-      expect(layout.opencodeUi).toBeInstanceOf(OpencodePaneComponent);
+      expect(layout.agentPane).toBeInstanceOf(AgentPaneComponent);
     });
 
     it('forwards custom screenOptions to the screen factory', () => {
@@ -170,7 +170,7 @@ describe('createLayout', () => {
         'dialogsComponent',
         'helpMenu',
         'modalDialogs',
-        'opencodeUi',
+        'agentPane',
         'nextDialog',
       ];
       for (const key of keys) {

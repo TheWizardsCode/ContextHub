@@ -163,7 +163,7 @@ describe('TuiController - Database Watch', () => {
       confirmTextbox: vi.fn(async () => false),
       forceCleanup: vi.fn(),
     };
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
       textarea: makeBox(),
@@ -181,7 +181,7 @@ describe('TuiController - Database Watch', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),
@@ -332,7 +332,7 @@ describe('TuiController - Database Watch', () => {
       confirmTextbox: vi.fn(async () => false),
       forceCleanup: vi.fn(),
     };
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
       textarea: makeBox(),
@@ -350,7 +350,7 @@ describe('TuiController - Database Watch', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),
@@ -489,7 +489,7 @@ describe('TuiController - Database Watch', () => {
       confirmTextbox: vi.fn(async () => false),
       forceCleanup: vi.fn(),
     };
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
       textarea: makeBox(),
@@ -507,7 +507,7 @@ describe('TuiController - Database Watch', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),
@@ -641,7 +641,7 @@ describe('TuiController - Database Watch', () => {
       confirmTextbox: vi.fn(async () => false),
       forceCleanup: vi.fn(),
     };
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
       textarea: makeBox(),
@@ -659,7 +659,7 @@ describe('TuiController - Database Watch', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),
@@ -793,7 +793,7 @@ describe('TuiController - Database Watch', () => {
       confirmTextbox: vi.fn(async () => false),
       forceCleanup: vi.fn(),
     };
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
       textarea: makeBox(),
@@ -811,7 +811,7 @@ describe('TuiController - Database Watch', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),
@@ -949,7 +949,7 @@ describe('TuiController - Database Watch', () => {
       confirmTextbox: vi.fn(async () => false),
       forceCleanup: vi.fn(),
     };
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
       textarea: makeBox(),
@@ -967,7 +967,7 @@ describe('TuiController - Database Watch', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),

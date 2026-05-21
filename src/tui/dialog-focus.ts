@@ -67,12 +67,12 @@ export const createFocusHelpers = (
       }
 
       // Mark the field with a test-only flag so tests can assert focus was applied
-      try { (field as any).__opencode_focus_applied = isFocused; } catch (_) {}
+      try { (field as any).__focus_applied = isFocused; } catch (_) {}
       // Also stamp a stable identifier so tests can validate we mutated the
       // same object instance they hold references to. This helps detect
       // situations where a wrapper replaced the token or a clone was used.
       try {
-        if (!(field as any).__opencode_id) (field as any).__opencode_id = Math.random().toString(36).slice(2, 9);
+        if (!(field as any).__focus_id) (field as any).__focus_id = Math.random().toString(36).slice(2, 9);
       } catch (_) {}
     });
     try { if (screen && typeof screen.render === 'function') screen.render(); } catch (_) {}
@@ -111,7 +111,7 @@ export const createFocusHelpers = (
           if (next && (next as any).style && (next as any).style.border) {
             try { (next as any).style.border.fg = 'cyan'; } catch (_) {}
           }
-          try { (next as any).__opencode_focus_applied = true; } catch (_) {}
+          try { (next as any).__focus_applied = true; } catch (_) {}
         } catch (_) {}
         applyFocusStyles(fieldOrder[focusManager.getIndex()]);
         return false;
@@ -129,7 +129,7 @@ export const createFocusHelpers = (
           if (next && (next as any).style && (next as any).style.border) {
             try { (next as any).style.border.fg = 'cyan'; } catch (_) {}
           }
-          try { (next as any).__opencode_focus_applied = true; } catch (_) {}
+          try { (next as any).__focus_applied = true; } catch (_) {}
         } catch (_) {}
         applyFocusStyles(fieldOrder[focusManager.getIndex()]);
         return false;
@@ -147,16 +147,16 @@ export const createFocusHelpers = (
         // observe the same focus changes regardless of wrapped handler
         // identity. This keeps tests stable without changing runtime
         // registered handlers.
-        (field as any).__opencode_key_tab_raw = fieldTabHandler;
-        (field as any).__opencode_key_stab_raw = fieldShiftTabHandler;
+        (field as any).__tab_handler_raw = fieldTabHandler;
+        (field as any).__stab_handler_raw = fieldShiftTabHandler;
         // Deterministic invokers used by tests: ensure the field appears
         // focused to the handler and then run the original handler so the
         // shared focusManager + applyFocusStyles path executes reliably.
-        (field as any).__opencode_key_tab = () => {
+        (field as any).__tab_handler = () => {
           try { if (isHidden()) return; (screen as any).focused = field; } catch (_) {}
           try { return fieldTabHandler(); } catch (_) { return; }
         };
-        (field as any).__opencode_key_stab = () => {
+        (field as any).__stab_handler = () => {
           try { if (isHidden()) return; (screen as any).focused = field; } catch (_) {}
           try { return fieldShiftTabHandler(); } catch (_) { return; }
         };
@@ -168,15 +168,15 @@ export const createFocusHelpers = (
           // discoverability so tests invoke the same function instance
           // that the runtime will call.
           try {
-            const wrapped = (field as any).__opencode_registered_wrapped;
+            const wrapped = (field as any).__wrapped_tab;
             if (wrapped) {
-              (field as any).__opencode_key_tab = wrapped;
+              (field as any).__tab_handler = wrapped;
             }
             // Some registerers may attach separate wrapped functions for
             // shift-tab; prefer any explicit stab wrapper if present.
-            const wrappedStab = (field as any).__opencode_registered_wrapped_stab || (field as any).__opencode_registered_wrapped;
+            const wrappedStab = (field as any).__wrapped_stab || (field as any).__wrapped_tab;
             if (wrappedStab) {
-              (field as any).__opencode_key_stab = wrappedStab;
+              (field as any).__stab_handler = wrappedStab;
             }
           } catch (_) {}
         } else {

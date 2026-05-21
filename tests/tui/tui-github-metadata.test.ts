@@ -54,7 +54,7 @@ function buildLayoutWithMetadataMock(ctx: ReturnType<typeof createTuiTestContext
       confirmTextbox: async () => false, forceCleanup: () => {},
       messageBox: () => ({ update: () => {}, close: () => {} }),
     },
-    opencodeUi: {
+    agentPane: {
       serverStatusBox: ctx.blessed.box(), dialog: ctx.blessed.box(), textarea: ctx.blessed.box(),
       suggestionHint: ctx.blessed.box(), sendButton: ctx.blessed.box(), cancelButton: ctx.blessed.box(),
       ensureResponsePane: () => ctx.blessed.box(),

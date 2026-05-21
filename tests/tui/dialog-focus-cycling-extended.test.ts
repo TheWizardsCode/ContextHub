@@ -98,15 +98,15 @@ function buildLayout(screen: any) {
   };
   const helpMenu = { isVisible: vi.fn(() => false), show: vi.fn(), hide: vi.fn() };
   const modalDialogs = { selectList: vi.fn(async () => 0), editTextarea: vi.fn(async () => null), confirmTextbox: vi.fn(async () => false), forceCleanup: vi.fn() };
-  const opencodeUi = { serverStatusBox: makeBox(), dialog: makeBox(), textarea: makeBox(), suggestionHint: makeBox(), sendButton: makeBox(), cancelButton: makeBox(), ensureResponsePane: vi.fn(() => makeBox()) };
+  const agentPane = { serverStatusBox: makeBox(), dialog: makeBox(), textarea: makeBox(), suggestionHint: makeBox(), sendButton: makeBox(), cancelButton: makeBox(), ensureResponsePane: vi.fn(() => makeBox()) };
 
   return {
     screen,
     list,
     detail,
     metadataBox,
-    opencodeDialog: opencodeUi.dialog,
-    opencodeText: opencodeUi.textarea,
+    opencodeDialog: agentPane.dialog,
+    opencodeText: agentPane.textarea,
     layout: {
       screen,
       listComponent: { getList: () => list, getFooter: () => footer },
@@ -117,7 +117,7 @@ function buildLayout(screen: any) {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: { overlay: makeBox(), dialog: makeBox(), close: makeBox(), text: makeBox(), options: makeList() },
     },
   };

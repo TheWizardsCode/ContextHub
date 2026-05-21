@@ -153,7 +153,7 @@ function buildLayout(screen: any) {
     confirmTextbox: vi.fn(async () => false),
     forceCleanup: vi.fn(),
   };
-  const opencodeUi = {
+  const agentPane = {
     serverStatusBox: makeBox(),
     dialog: makeBox(),
     textarea: makeBox(),
@@ -169,8 +169,8 @@ function buildLayout(screen: any) {
     detail,
     metadataBox,
     updateFromItemMock,
-    opencodeDialog: opencodeUi.dialog,
-    opencodeText: opencodeUi.textarea,
+    opencodeDialog: agentPane.dialog,
+    opencodeText: agentPane.textarea,
     layout: {
       screen,
       listComponent: { getList: () => list, getFooter: () => footer },
@@ -181,7 +181,7 @@ function buildLayout(screen: any) {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),

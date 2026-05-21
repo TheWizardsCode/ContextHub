@@ -176,7 +176,7 @@ describe('TuiController - Database Watch Integration', () => {
         confirmTextbox: vi.fn(async () => false),
         forceCleanup: vi.fn(),
       },
-      opencodeUi: {
+      agentPane: {
         serverStatusBox: makeBox(),
         dialog: makeBox(),
         textarea: makeBox(),
@@ -313,7 +313,7 @@ describe('TuiController - Database Watch Integration', () => {
         confirmTextbox: vi.fn(async () => false),
         forceCleanup: vi.fn(),
       },
-      opencodeUi: {
+      agentPane: {
         serverStatusBox: makeBox(),
         dialog: makeBox(),
         textarea: makeBox(),

@@ -185,7 +185,7 @@ export class TuiController {
     // performance instrumentation is explicitly requested via --perf.
     const debugLog = (message: string) => {
       if (!isVerbose && !perfEnabled && !diagnosticsEnabled) return;
-      fileLog(`[tui:opencode] ${message}`);
+      fileLog(`[tui:agent] ${message}`);
     };
     const perfMetrics: {event: string; start: number; end: number; duration: number}[] = [];
     const detailCache = new Map<string, string>();
@@ -298,7 +298,7 @@ export class TuiController {
       dialogsComponent,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
     } = layout;
 
     // Expose minimal test helpers even when we take the early empty-state
@@ -339,7 +339,7 @@ export class TuiController {
               for (let j = 0; j < fields.length; j++) {
                 const f = fields[j];
                 try { if (f && f.style && f.style.border) f.style.border.fg = j === idx ? 'cyan' : 'gray'; } catch (_) {}
-                try { if (f) f.__opencode_focus_applied = j === idx; } catch (_) {}
+                try { if (f) f.__focus_applied = j === idx; } catch (_) {}
               }
               try { (screen as any).focused = fields[(this._test as any)._create_index] ?? title; } catch (_) {}
             } catch (_) {}
@@ -398,7 +398,7 @@ export class TuiController {
     if (state.currentVisibleItems.length === 0) {
       // When there are no visible items show the empty state.
       // Return early so we don't try to access layout properties (nextDialog,
-      // opencodeUi, etc.) that aren't provided by all test layout mocks.
+      // agentPane, etc.) that aren't provided by all test layout mocks.
       list.hide();
       if (emptyStateComponent) {
         emptyStateComponent.show();
@@ -592,7 +592,7 @@ export class TuiController {
           for (let j = 0; j < fields.length; j++) {
             const f = fields[j];
             try { if (f && f.style && f.style.border) f.style.border.fg = j === clamped ? 'cyan' : 'gray'; } catch (_) {}
-            try { if (f) f.__opencode_focus_applied = j === clamped; } catch (_) {}
+            try { if (f) f.__focus_applied = j === clamped; } catch (_) {}
           }
           try { (screen as any).focused = fields[clamped] ?? createDialogTitleInput; } catch (_) {}
           try { createDialogFocusHelpers.applyFocusStyles(fields[clamped]); } catch (_) {}
@@ -649,10 +649,10 @@ export class TuiController {
           // Clear other fields' markers and set the focused one
           for (const f of createDialogFieldOrder) {
             try { if (f && (f as any).style && (f as any).style.border) (f as any).style.border.fg = 'gray'; } catch (_) {}
-            try { if (f) (f as any).__opencode_focus_applied = false; } catch (_) {}
+            try { if (f) (f as any).__focus_applied = false; } catch (_) {}
           }
           if (next && (next as any).style && (next as any).style.border) (next as any).style.border.fg = 'cyan';
-          try { if (next) (next as any).__opencode_focus_applied = true; } catch (_) {}
+          try { if (next) (next as any).__focus_applied = true; } catch (_) {}
           try { (screen as any).focused = next; } catch (_) {}
         } catch (_) {}
       };
@@ -665,7 +665,7 @@ export class TuiController {
         createDialogFocusHelpers.applyFocusStyles(field);
       };
       try {
-        (field as any).__opencode_focus = fieldFocusHandler;
+        (field as any).__focus_target = fieldFocusHandler;
         field.on('focus', fieldFocusHandler);
       } catch (_) {}
     });
@@ -726,12 +726,12 @@ export class TuiController {
     };
 
     const patchCreateTextarea = (widget: any, fieldIndex: number) => {
-      if (!widget || widget.__opencode_orig_listener) return;
+      if (!widget || widget.__orig_listener) return;
       // If the widget doesn't expose a _listener (test doubles), allow
       // patching by using a no-op original listener so the patched
       // function consistently exists for tests.
       const originalListener = typeof widget._listener === 'function' ? widget._listener : (() => {});
-      widget.__opencode_orig_listener = originalListener;
+      widget.__orig_listener = originalListener;
       const fieldTabHandler = () => {
         if (createDialog.hidden) return;
         createDialogFocusManager.cycle(1);
@@ -784,22 +784,22 @@ export class TuiController {
           // restored if needed.
           try {
             if (typeof widget.listeners === 'function') {
-              widget.__opencode_saved_keypress_listeners = widget.listeners('keypress') || [];
-              for (const l of widget.__opencode_saved_keypress_listeners) {
+              widget.__saved_keypress_listeners = widget.listeners('keypress') || [];
+              for (const l of widget.__saved_keypress_listeners) {
                 try { widget.removeListener('keypress', l); } catch (_) {}
               }
             }
           } catch (_) {}
           try {
             if (typeof createDialog?.listeners === 'function') {
-              createDialog.__opencode_saved_keypress_listeners = createDialog.listeners('keypress') || [];
-              for (const l of createDialog.__opencode_saved_keypress_listeners) {
+              createDialog.__saved_keypress_listeners = createDialog.listeners('keypress') || [];
+              for (const l of createDialog.__saved_keypress_listeners) {
                 try { createDialog.removeListener('keypress', l); } catch (_) {}
               }
             }
           } catch (_) {}
 
-          try { if (typeof widget._listener === 'function') widget.__opencode_orig_listener = widget._listener; } catch (_) {}
+          try { if (typeof widget._listener === 'function') widget.__orig_listener = widget._listener; } catch (_) {}
 
           // Install a helper-backed listener that handles Tab/Shift-Tab (focus cycling)
           // and delegates other keys to the helper. Always return false to stop
@@ -829,7 +829,7 @@ export class TuiController {
               // stop; in that case we must not call the original listener which
               // would insert characters again (double input).
               if (handled === undefined) {
-                try { widget.__opencode_orig_listener?.call(widget, ch, key); } catch (_) {}
+                try { widget.__orig_listener?.call(widget, ch, key); } catch (_) {}
               }
             } catch (_) {}
             return false;
@@ -922,7 +922,7 @@ export class TuiController {
             return result !== undefined ? result : false;
           };
           try {
-            (widget as any).__opencode_desc_key = descKeyHandler;
+            (widget as any).__desc_key = descKeyHandler;
             (widget as any).on('keypress', descKeyHandler);
           } catch (_) {}
         } catch (_) {}
@@ -946,7 +946,7 @@ export class TuiController {
         // Defensive style application for lightweight test doubles
         try { if (next && (next as any).style && (next as any).style.border) (next as any).style.border.fg = 'cyan'; } catch (_) {}
         try { if (process.env.WL_DEBUG) /* eslint-disable-next-line no-console */ console.log('DEBUG createDialogTabHandler: after cycle idx=', idx, 'nextIdx=', idx); } catch (_) {}
-        try { if (next) (next as any).__opencode_focus_applied = true; } catch (_) {}
+        try { if (next) (next as any).__focus_applied = true; } catch (_) {}
         createDialogFocusHelpers.applyFocusStyles(next);
       };
       const createDialogShiftTabHandler = () => {
@@ -958,7 +958,7 @@ export class TuiController {
         try { (screen as any).focused = next; } catch (_) {}
         try { if (next && (next as any).style && (next as any).style.border) (next as any).style.border.fg = 'cyan'; } catch (_) {}
         try { if (process.env.WL_DEBUG) /* eslint-disable-next-line no-console */ console.log('DEBUG createDialogShiftTabHandler: after cycle idx=', idx, 'nextIdx=', idx); } catch (_) {}
-        try { if (next) (next as any).__opencode_focus_applied = true; } catch (_) {}
+        try { if (next) (next as any).__focus_applied = true; } catch (_) {}
         createDialogFocusHelpers.applyFocusStyles(next);
       };
       try { createDialogModal.registerKeyHandler(createDialog as any, KEY_TAB, createDialogTabHandler); } catch (_) { try { (createDialog as any).key(KEY_TAB as any, createDialogTabHandler); } catch (_) {} }
@@ -1166,7 +1166,7 @@ export class TuiController {
           if (!updateDialog.hidden) applyStatusStageCompatibility(getSelectedItem());
           if (field === updateDialogComment) endUpdateDialogCommentReading();
         };
-        try { (field as any).__opencode_focus = fieldFocusHandler; (field as any).__opencode_blur = fieldBlurHandler; field.on('focus', fieldFocusHandler); field.on('blur', fieldBlurHandler); } catch (_) {}
+        try { (field as any).__focus_target = fieldFocusHandler; (field as any).__blur_handler = fieldBlurHandler; field.on('focus', fieldFocusHandler); field.on('blur', fieldBlurHandler); } catch (_) {}
       }
     });
 
@@ -1208,7 +1208,7 @@ export class TuiController {
         // so it will not fire when this dialog is visible.
         return built(ch, key as any);
       };
-      try { (updateDialogComment as any).__opencode_comment_key = commentKeyHandler; (updateDialogComment as any).on('keypress', commentKeyHandler); } catch (_) {}
+      try { (updateDialogComment as any).__comment_key = commentKeyHandler; (updateDialogComment as any).on('keypress', commentKeyHandler); } catch (_) {}
     }
 
     // (attachment of per-widget ctrl-w handlers moved to after opencodeText is defined)
@@ -1230,9 +1230,9 @@ export class TuiController {
         }
       };
       try {
-        (list as any)[`__opencode_select_${source}`] = selectHandler;
-        (list as any)[`__opencode_click_${source}`] = clickHandler;
-        (list as any)[`__opencode_keypress_${source}`] = keypressHandler;
+        (list as any)[`__select_${source}`] = selectHandler;
+        (list as any)[`__click_${source}`] = clickHandler;
+        (list as any)[`__keypress_${source}`] = keypressHandler;
         list.on('select', selectHandler);
         list.on('click', clickHandler);
         list.on('keypress', keypressHandler);
@@ -1243,8 +1243,8 @@ export class TuiController {
     wireUpdateDialogSelectionListeners(updateDialogStageOptions, 'stage');
     wireUpdateDialogSelectionListeners(updateDialogPriorityOptions, 'priority');
 
-    // Next-dialog, help, modals, opencode — created by layout factory
-    // Some test layouts may omit nextDialog or opencodeUi properties; use
+    // Next-dialog, help, modals, agent — created by layout factory
+    // Some test layouts may omit nextDialog or agentPane properties; use
     // optional chaining so those code paths degrade gracefully.
     const nextOverlay = layout.nextDialog?.overlay;
     const nextDialog = layout.nextDialog?.dialog;
@@ -1252,12 +1252,12 @@ export class TuiController {
     const nextDialogText = layout.nextDialog?.text;
     const nextDialogOptions = layout.nextDialog?.options;
 
-    const serverStatusBox = opencodeUi?.serverStatusBox;
-    const opencodeDialog = opencodeUi?.dialog;
-    const opencodeText = opencodeUi?.textarea;
-    const suggestionHint = opencodeUi?.suggestionHint;
-    const opencodeSend = opencodeUi?.sendButton;
-    const opencodeCancel = opencodeUi?.cancelButton;
+    const serverStatusBox = agentPane?.serverStatusBox;
+    const opencodeDialog = agentPane?.dialog;
+    const opencodeText = agentPane?.textarea;
+    const suggestionHint = agentPane?.suggestionHint;
+    const opencodeSend = agentPane?.sendButton;
+    const opencodeCancel = agentPane?.cancelButton;
 
     // Create ChordHandler and register Ctrl-W sequences now that opencodeText exists.
     // We preserve the small suppression flags used elsewhere (suppressNextP, lastCtrlWKeyHandled)
@@ -1506,14 +1506,14 @@ export class TuiController {
 
     const setOpencodeCursorIndex = (value: string, nextIndex: number) => {
       opencodeCursorIndex = clampNumber(nextIndex, 0, value.length);
-      (opencodeText as any).__opencode_cursor = opencodeCursorIndex;
+      (opencodeText as any).__cursor_pos = opencodeCursorIndex;
     };
 
     const isPromptBusy = () => isWaitingForResponse || isLocalShellRunning;
 
     const setOpencodeInputMode = (mode: OpencodeInputMode) => {
       opencodeInputMode = mode;
-      (opencodeText as any).__opencode_mode = opencodeInputMode;
+      (opencodeText as any).__input_mode = opencodeInputMode;
       updateOpencodePromptLabel(isPromptBusy() ? 'waiting' : 'idle');
     };
 
@@ -1590,7 +1590,7 @@ export class TuiController {
       updateOpencodeCursor();
     };
 
-    const opencodeTextBaseUpdateCursor = (opencodeText as any)._updateCursor?.bind(opencodeText);
+    const opencodeTextBaseUpdateCursor = (opencodeText as any)?._updateCursor?.bind(opencodeText);
     const opencodeTextUpdateCursor = function(this: any, get?: boolean) {
       if (this.screen?.focused !== this) return;
       const lpos = get ? this.lpos : this._getCoords?.();
@@ -1740,18 +1740,18 @@ export class TuiController {
           updateOpencodeInputLayout();
         });
     };
-    try { (opencodeText as any).__opencode_keypress = opencodeTextKeypressHandler; (opencodeText as any).on('keypress', opencodeTextKeypressHandler); } catch (_) {}
+    try { (opencodeText as any).__keypress_handler = opencodeTextKeypressHandler; (opencodeText as any).on('keypress', opencodeTextKeypressHandler); } catch (_) {}
 
     const opencodeTextInputHandler = function(this: any, ch: any, key: KeyInfo | undefined) {
       const value = typeof this.value === 'string' ? this.value : '';
       const name = key?.name;
       const hasCtrl = !!key?.ctrl;
       const keyObj = key as any;
-      if (keyObj && keyObj.__opencode_input_handled) {
+      if (keyObj && keyObj.__input_handled) {
         return true;
       }
       if (keyObj) {
-        keyObj.__opencode_input_handled = true;
+        keyObj.__input_handled = true;
       }
 
       if (hasCtrl && name === 'n') {
@@ -2096,7 +2096,7 @@ export class TuiController {
       const currentHeight = opencodeDialog.height || MIN_INPUT_HEIGHT;
       const bottomOffset = currentHeight + FOOTER_HEIGHT;
 
-      opencodePane = opencodeUi.ensureResponsePane({
+      opencodePane = agentPane.ensureResponsePane({
         bottom: bottomOffset,
         height: paneHeight(),
         label,
@@ -2284,7 +2284,7 @@ export class TuiController {
       closeOpencodeDialog();
       runOpencode(prompt);
     };
-    try { (opencodeSend as any).__opencode_click = opencodeSendClickHandler; opencodeSend.on('click', opencodeSendClickHandler); } catch (_) {}
+    try { (opencodeSend as any).__click_handler = opencodeSendClickHandler; opencodeSend.on('click', opencodeSendClickHandler); } catch (_) {}
 
     // Add Escape key handler to close the opencode dialog
     const opencodeTextEscapeHandler = function(this: any) {
@@ -2298,7 +2298,7 @@ export class TuiController {
       applyFocusStyles();
       screen.render();
     };
-    try { (opencodeText as any).__opencode_key_escape = opencodeTextEscapeHandler; opencodeText.key(KEY_ESCAPE, opencodeTextEscapeHandler); } catch (_) {}
+    try { (opencodeText as any).__escape_key = opencodeTextEscapeHandler; opencodeText.key(KEY_ESCAPE, opencodeTextEscapeHandler); } catch (_) {}
 
     const opencodeTextCtrlCHandler = function(this: any) {
       if (isLocalShellRunning) {
@@ -2306,7 +2306,7 @@ export class TuiController {
         return;
       }
     };
-    try { (opencodeText as any).__opencode_key_cc = opencodeTextCtrlCHandler; opencodeText.key(['C-c'], opencodeTextCtrlCHandler); } catch (_) {}
+    try { (opencodeText as any).__ctrl_c_key = opencodeTextCtrlCHandler; opencodeText.key(['C-c'], opencodeTextCtrlCHandler); } catch (_) {}
 
     // Accept Ctrl+S to send (keep for backward compatibility)
     const opencodeTextCSHandler = function(this: any) {
@@ -2314,7 +2314,7 @@ export class TuiController {
       closeOpencodeDialog();
       runOpencode(prompt);
     };
-    try { (opencodeText as any).__opencode_key_cs = opencodeTextCSHandler; opencodeText.key(KEY_CS, opencodeTextCSHandler); } catch (_) {}
+    try { (opencodeText as any).__ctrl_shift_i_key = opencodeTextCSHandler; opencodeText.key(KEY_CS, opencodeTextCSHandler); } catch (_) {}
 
      // Accept Enter to send, Ctrl+Enter for newline
     const opencodeTextEnterHandler = function(this: any) {
@@ -2322,7 +2322,7 @@ export class TuiController {
         closeOpencodeDialog();
         runOpencode(prompt);
       };
-       try { (opencodeText as any).__opencode_key_enter = opencodeTextEnterHandler; opencodeText.key(KEY_ENTER, opencodeTextEnterHandler); } catch (_) {}
+       try { (opencodeText as any).__enter_key = opencodeTextEnterHandler; opencodeText.key(KEY_ENTER, opencodeTextEnterHandler); } catch (_) {}
 
     // Tab accepts the autocomplete suggestion (conventional shell/IDE behavior).
     // When no suggestion is active Tab is a no-op (prevents blessed from
@@ -2334,7 +2334,7 @@ export class TuiController {
       // Consume the event so blessed doesn't insert a tab character
       return false;
     };
-    try { (opencodeText as any).__opencode_key_tab = opencodeTextTabHandler; opencodeText.key(KEY_TAB, opencodeTextTabHandler); } catch (_) {}
+    try { (opencodeText as any).__tab_key = opencodeTextTabHandler; opencodeText.key(KEY_TAB, opencodeTextTabHandler); } catch (_) {}
 
       // Suppress j/k keys when they're part of Ctrl-W commands
        const opencodeTextJHandler = function(this: any) {
@@ -2344,7 +2344,7 @@ export class TuiController {
            return false;
          }
        };
-    try { (opencodeText as any).__opencode_key_j = opencodeTextJHandler; opencodeText.key(KEY_J, opencodeTextJHandler); } catch (_) {}
+    try { (opencodeText as any).__j_key = opencodeTextJHandler; opencodeText.key(KEY_J, opencodeTextJHandler); } catch (_) {}
 
       const opencodeTextKHandler = function(this: any) {
         debugLog(`opencodeText.key(['k']): lastCtrlWKeyHandled=${lastCtrlWKeyHandled}`);
@@ -2353,7 +2353,7 @@ export class TuiController {
           return false;
         }
       };
-    try { (opencodeText as any).__opencode_key_k = opencodeTextKHandler; opencodeText.key(KEY_K, opencodeTextKHandler); } catch (_) {}
+    try { (opencodeText as any).__k_key = opencodeTextKHandler; opencodeText.key(KEY_K, opencodeTextKHandler); } catch (_) {}
     
     // Initialize the extracted autocomplete module and wire it to the
     // textarea widget. The module is statically imported at the top of
@@ -2367,7 +2367,7 @@ export class TuiController {
       },
     });
     // Expose the instance on the widget for tests that inspect it.
-    (opencodeText as any).__opencode_autocomplete = autocompleteInstance;
+    (opencodeText as any).__autocomplete_instance = autocompleteInstance;
 
 
     // Pressing Escape while the dialog (or any child) is focused should
@@ -2388,7 +2388,7 @@ export class TuiController {
       applyFocusStyles();
       screen.render();
     };
-    try { (opencodeDialog as any).__opencode_key_escape = opencodeDialogEscapeHandler; opencodeDialog.key(KEY_ESCAPE, opencodeDialogEscapeHandler); } catch (_) {}
+    try { (opencodeDialog as any).__escape_key = opencodeDialogEscapeHandler; opencodeDialog.key(KEY_ESCAPE, opencodeDialogEscapeHandler); } catch (_) {}
 
 
     state.listLines = [];
@@ -3922,7 +3922,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     const listSelectHandler = (_el: any, idx: number) => {
       updateListSelection(idx, 'select');
     };
-    try { (list as any).__opencode_select = listSelectHandler; list.on('select', listSelectHandler); } catch (_) {}
+    try { (list as any).__select_handler = listSelectHandler; list.on('select', listSelectHandler); } catch (_) {}
 
     // 'select item' fires via List.prototype.select() for ALL selection changes,
     // including mouse clicks on a different item (where 'select' is NOT emitted).
@@ -3930,7 +3930,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     const listSelectItemHandler = (_item: any, idx: number) => {
       updateListSelection(idx, 'select-item');
     };
-    try { (list as any).__opencode_select_item = listSelectItemHandler; list.on('select item', listSelectItemHandler); } catch (_) {}
+    try { (list as any).__select_item = listSelectItemHandler; list.on('select item', listSelectItemHandler); } catch (_) {}
 
     // Update details immediately when navigating with keys or mouse.
     // When virtual scrolling is active we also detect viewport-edge navigation
@@ -3997,19 +3997,19 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         // ignore render errors
       }
     };
-    try { (list as any).__opencode_keypress = listKeypressHandler; list.on('keypress', listKeypressHandler); } catch (_) {}
+    try { (list as any).__keypress_handler = listKeypressHandler; list.on('keypress', listKeypressHandler); } catch (_) {}
 
     const listFocusHandler = () => { paneFocusIndex = getFocusPanes().indexOf(list); applyFocusStylesForPane(list); };
-    try { (list as any).__opencode_focus = listFocusHandler; list.on('focus', listFocusHandler); } catch (_) {}
+    try { (list as any).__focus_target = listFocusHandler; list.on('focus', listFocusHandler); } catch (_) {}
 
     const detailFocusHandler = () => { paneFocusIndex = getFocusPanes().indexOf(detail); applyFocusStylesForPane(detail); };
-    try { (detail as any).__opencode_focus = detailFocusHandler; detail.on('focus', detailFocusHandler); } catch (_) {}
+    try { (detail as any).__focus_target = detailFocusHandler; detail.on('focus', detailFocusHandler); } catch (_) {}
 
     const opencodeDialogFocusHandler = () => { paneFocusIndex = getFocusPanes().indexOf(opencodeDialog); applyFocusStylesForPane(opencodeDialog); };
-    try { (opencodeDialog as any).__opencode_focus = opencodeDialogFocusHandler; opencodeDialog.on('focus', opencodeDialogFocusHandler); } catch (_) {}
+    try { (opencodeDialog as any).__focus_target = opencodeDialogFocusHandler; opencodeDialog.on('focus', opencodeDialogFocusHandler); } catch (_) {}
 
     const opencodeTextFocusHandler = () => { paneFocusIndex = getFocusPanes().indexOf(opencodeDialog); applyFocusStylesForPane(opencodeDialog); };
-    try { (opencodeText as any).__opencode_focus = opencodeTextFocusHandler; opencodeText.on('focus', opencodeTextFocusHandler); } catch (_) {}
+    try { (opencodeText as any).__focus_target = opencodeTextFocusHandler; opencodeText.on('focus', opencodeTextFocusHandler); } catch (_) {}
 
     // NOTE: List click-to-select is handled via screen.on('mouse') below,
     // because blessed routes mouse events to list *item* child elements
@@ -4021,7 +4021,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       applyFocusStylesForPane(detail);
       openDetailsFromClick(getRenderedLineAtClick(detail as any, data));
     };
-    try { (detail as any).__opencode_click = detailClickHandler; detail.on('click', detailClickHandler); } catch (_) {}
+    try { (detail as any).__click_handler = detailClickHandler; detail.on('click', detailClickHandler); } catch (_) {}
 
     const detailModalClickHandler = (data: any) => {
       detailModal.focus();
@@ -4029,7 +4029,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       applyFocusStylesForPane(detail);
       openDetailsFromClick(getRenderedLineAtClick(detailModal as any, data));
     };
-    try { (detailModal as any).__opencode_click = detailModalClickHandler; detailModal.on('click', detailModalClickHandler); } catch (_) {}
+    try { (detailModal as any).__click_handler = detailModalClickHandler; detailModal.on('click', detailModalClickHandler); } catch (_) {}
 
     const detailMouseHandler = (data: any) => {
       if (data?.action === 'click') {
@@ -4039,7 +4039,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         openDetailsFromClick(getRenderedLineAtClick(detail as any, data));
       }
     };
-    try { (detail as any).__opencode_mouse = detailMouseHandler; detail.on('mouse', detailMouseHandler); } catch (_) {}
+    try { (detail as any).__mouse_handler = detailMouseHandler; detail.on('mouse', detailMouseHandler); } catch (_) {}
 
     const detailMouseDownHandler = (data: any) => {
       detail.focus();
@@ -4047,7 +4047,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       applyFocusStylesForPane(detail);
       openDetailsFromClick(getRenderedLineAtScreen(detail as any, data));
     };
-    try { (detail as any).__opencode_mousedown = detailMouseDownHandler; detail.on('mousedown', detailMouseDownHandler); } catch (_) {}
+    try { (detail as any).__mouse_handlerdown = detailMouseDownHandler; detail.on('mousedown', detailMouseDownHandler); } catch (_) {}
 
     const detailMouseUpHandler = (data: any) => {
       detail.focus();
@@ -4055,7 +4055,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       applyFocusStylesForPane(detail);
       openDetailsFromClick(getRenderedLineAtScreen(detail as any, data));
     };
-    try { (detail as any).__opencode_mouseup = detailMouseUpHandler; detail.on('mouseup', detailMouseUpHandler); } catch (_) {}
+    try { (detail as any).__mouse_handlerup = detailMouseUpHandler; detail.on('mouseup', detailMouseUpHandler); } catch (_) {}
 
     const detailModalMouseHandler = (data: any) => {
       if (data?.action === 'click') {
@@ -4065,10 +4065,10 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         openDetailsFromClick(getRenderedLineAtClick(detailModal as any, data));
       }
     };
-    try { (detailModal as any).__opencode_mouse = detailModalMouseHandler; detailModal.on('mouse', detailModalMouseHandler); } catch (_) {}
+    try { (detailModal as any).__mouse_handler = detailModalMouseHandler; detailModal.on('mouse', detailModalMouseHandler); } catch (_) {}
 
     const detailCloseClickHandler = () => { closeDetails(); };
-    try { (detailClose as any).__opencode_click = detailCloseClickHandler; detailClose.on('click', detailCloseClickHandler); } catch (_) {}
+    try { (detailClose as any).__click_handler = detailCloseClickHandler; detailClose.on('click', detailCloseClickHandler); } catch (_) {}
 
     registerAppKey(screen,KEY_NAV_RIGHT, (_ch: any, key: any) => {
       if (!updateDialog.hidden || isCreateDialogOpen()) return;
@@ -5166,13 +5166,13 @@ const visible = buildVisible();
       }
       openHelp();
     };
-    try { (help as any).__opencode_click = helpClickHandler; help.on('click', helpClickHandler); } catch (_) {}
+    try { (help as any).__click_handler = helpClickHandler; help.on('click', helpClickHandler); } catch (_) {}
 
     const copyIdButtonClickHandler = () => { copySelectedId().catch(() => {}); };
-    try { (copyIdButton as any).__opencode_click = copyIdButtonClickHandler; copyIdButton.on('click', copyIdButtonClickHandler); } catch (_) {}
+    try { (copyIdButton as any).__click_handler = copyIdButtonClickHandler; copyIdButton.on('click', copyIdButtonClickHandler); } catch (_) {}
 
     const closeOverlayClickHandler = () => { closeCloseDialog(); };
-    try { (closeOverlay as any).__opencode_click = closeOverlayClickHandler; closeOverlay.on('click', closeOverlayClickHandler); } catch (_) {}
+    try { (closeOverlay as any).__click_handler = closeOverlayClickHandler; closeOverlay.on('click', closeOverlayClickHandler); } catch (_) {}
 
     const updateOverlayClickHandler = async () => {
       // Check for unsaved changes before dismissing
@@ -5187,7 +5187,7 @@ const visible = buildVisible();
       }
       closeUpdateDialog();
     };
-    try { (updateOverlay as any).__opencode_click = updateOverlayClickHandler; updateDialogModal.registerMouseHandler(updateOverlay as any, 'click', updateOverlayClickHandler); } catch (_) {}
+    try { (updateOverlay as any).__click_handler = updateOverlayClickHandler; updateDialogModal.registerMouseHandler(updateOverlay as any, 'click', updateOverlayClickHandler); } catch (_) {}
 
     closeDialogOptions.on('select', (_el: any, idx: number) => {
       if (idx === 0) closeSelectedItem('in_review');
@@ -5202,21 +5202,21 @@ const visible = buildVisible();
     });
 
     const updateDialogEscapeHandler = () => { closeUpdateDialog(); };
-    try { (updateDialog as any).__opencode_key_escape = updateDialogEscapeHandler; updateDialogModal.registerKeyHandler(updateDialog as any, KEY_ESCAPE, updateDialogEscapeHandler); } catch (_) {}
+    try { (updateDialog as any).__escape_key = updateDialogEscapeHandler; updateDialogModal.registerKeyHandler(updateDialog as any, KEY_ESCAPE, updateDialogEscapeHandler); } catch (_) {}
 
     // Escape closes the dialog from any of the three inline selection lists.
     // updateDialogOptions aliases updateDialogStageOptions, so both are covered.
     const updateDialogOptionsEscapeHandler = () => { closeUpdateDialog(); };
-    try { (updateDialogOptions as any).__opencode_key_escape = updateDialogOptionsEscapeHandler; updateDialogModal.registerKeyHandler(updateDialogOptions as any, KEY_ESCAPE, updateDialogOptionsEscapeHandler); } catch (_) {}
+    try { (updateDialogOptions as any).__escape_key = updateDialogOptionsEscapeHandler; updateDialogModal.registerKeyHandler(updateDialogOptions as any, KEY_ESCAPE, updateDialogOptionsEscapeHandler); } catch (_) {}
 
     const updateDialogStatusEscapeHandler = () => { closeUpdateDialog(); };
-    try { (updateDialogStatusOptions as any).__opencode_key_escape = updateDialogStatusEscapeHandler; updateDialogModal.registerKeyHandler(updateDialogStatusOptions as any, KEY_ESCAPE, updateDialogStatusEscapeHandler); } catch (_) {}
+    try { (updateDialogStatusOptions as any).__escape_key = updateDialogStatusEscapeHandler; updateDialogModal.registerKeyHandler(updateDialogStatusOptions as any, KEY_ESCAPE, updateDialogStatusEscapeHandler); } catch (_) {}
 
     const updateDialogPriorityEscapeHandler = () => { closeUpdateDialog(); };
-    try { (updateDialogPriorityOptions as any).__opencode_key_escape = updateDialogPriorityEscapeHandler; updateDialogModal.registerKeyHandler(updateDialogPriorityOptions as any, KEY_ESCAPE, updateDialogPriorityEscapeHandler); } catch (_) {}
+    try { (updateDialogPriorityOptions as any).__escape_key = updateDialogPriorityEscapeHandler; updateDialogModal.registerKeyHandler(updateDialogPriorityOptions as any, KEY_ESCAPE, updateDialogPriorityEscapeHandler); } catch (_) {}
 
     const updateDialogCommentEscapeHandler = () => { closeUpdateDialog(); };
-    try { (updateDialogComment as any).__opencode_key_escape = updateDialogCommentEscapeHandler; updateDialogModal.registerKeyHandler(updateDialogComment as any, KEY_ESCAPE, updateDialogCommentEscapeHandler); } catch (_) {}
+    try { (updateDialogComment as any).__escape_key = updateDialogCommentEscapeHandler; updateDialogModal.registerKeyHandler(updateDialogComment as any, KEY_ESCAPE, updateDialogCommentEscapeHandler); } catch (_) {}
 
     // Comment textarea key handling is centralized in its widget keypress
     // listener to avoid duplicate handling from overlapping global key hooks.
@@ -5314,115 +5314,115 @@ const visible = buildVisible();
     };
 
     const updateDialogEnterHandler = () => { if (updateDialog.hidden) return; submitUpdateDialog(); };
-    try { (updateDialog as any).__opencode_key_enter = updateDialogEnterHandler; updateDialogModal.registerKeyHandler(updateDialog as any, KEY_ENTER, updateDialogEnterHandler); } catch (_) {}
+    try { (updateDialog as any).__enter_key = updateDialogEnterHandler; updateDialogModal.registerKeyHandler(updateDialog as any, KEY_ENTER, updateDialogEnterHandler); } catch (_) {}
 
     const updateDialogCSHandler = () => { if (updateDialog.hidden) return; submitUpdateDialog(); };
-    try { (updateDialog as any).__opencode_key_cs = updateDialogCSHandler; updateDialogModal.registerKeyHandler(updateDialog as any, KEY_CS, updateDialogCSHandler); } catch (_) {}
+    try { (updateDialog as any).__ctrl_shift_i_key = updateDialogCSHandler; updateDialogModal.registerKeyHandler(updateDialog as any, KEY_CS, updateDialogCSHandler); } catch (_) {}
 
     const updateDialogStatusEnterHandler = () => { submitUpdateDialog(); };
-    try { (updateDialogStatusOptions as any).__opencode_key_enter = updateDialogStatusEnterHandler; updateDialogModal.registerKeyHandler(updateDialogStatusOptions as any, KEY_ENTER, updateDialogStatusEnterHandler); } catch (_) {}
+    try { (updateDialogStatusOptions as any).__enter_key = updateDialogStatusEnterHandler; updateDialogModal.registerKeyHandler(updateDialogStatusOptions as any, KEY_ENTER, updateDialogStatusEnterHandler); } catch (_) {}
 
     const updateDialogStageEnterHandler = () => { submitUpdateDialog(); };
-    try { (updateDialogStageOptions as any).__opencode_key_enter = updateDialogStageEnterHandler; updateDialogModal.registerKeyHandler(updateDialogStageOptions as any, KEY_ENTER, updateDialogStageEnterHandler); } catch (_) {}
+    try { (updateDialogStageOptions as any).__enter_key = updateDialogStageEnterHandler; updateDialogModal.registerKeyHandler(updateDialogStageOptions as any, KEY_ENTER, updateDialogStageEnterHandler); } catch (_) {}
 
     const updateDialogPriorityEnterHandler = () => { submitUpdateDialog(); };
-    try { (updateDialogPriorityOptions as any).__opencode_key_enter = updateDialogPriorityEnterHandler; updateDialogModal.registerKeyHandler(updateDialogPriorityOptions as any, KEY_ENTER, updateDialogPriorityEnterHandler); } catch (_) {}
+    try { (updateDialogPriorityOptions as any).__enter_key = updateDialogPriorityEnterHandler; updateDialogModal.registerKeyHandler(updateDialogPriorityOptions as any, KEY_ENTER, updateDialogPriorityEnterHandler); } catch (_) {}
 
     const updateDialogTabHandler = () => { if (updateDialog.hidden) return; updateDialogFocusManager.cycle(1); };
-    try { (updateDialog as any).__opencode_key_tab = updateDialogTabHandler; updateDialogModal.registerKeyHandler(updateDialog as any, KEY_TAB, updateDialogTabHandler); } catch (_) {}
+    try { (updateDialog as any).__tab_key = updateDialogTabHandler; updateDialogModal.registerKeyHandler(updateDialog as any, KEY_TAB, updateDialogTabHandler); } catch (_) {}
 
     const updateDialogSTabHandler = () => { if (updateDialog.hidden) return; updateDialogFocusManager.cycle(-1); };
-    try { (updateDialog as any).__opencode_key_stab = updateDialogSTabHandler; updateDialogModal.registerKeyHandler(updateDialog as any, KEY_SHIFT_TAB, updateDialogSTabHandler); } catch (_) {}
+    try { (updateDialog as any).__shift_tab_key = updateDialogSTabHandler; updateDialogModal.registerKeyHandler(updateDialog as any, KEY_SHIFT_TAB, updateDialogSTabHandler); } catch (_) {}
 
     // Create dialog keyboard handlers using ModalDialogBase
     const createDialogEscapeHandler = () => { closeCreateDialog(); };
-    try { (createDialog as any).__opencode_key_escape = createDialogEscapeHandler; createDialogModal.registerKeyHandler(createDialog as any, KEY_ESCAPE, createDialogEscapeHandler); } catch (_) {}
+    try { (createDialog as any).__escape_key = createDialogEscapeHandler; createDialogModal.registerKeyHandler(createDialog as any, KEY_ESCAPE, createDialogEscapeHandler); } catch (_) {}
 
     const createDialogTitleEscapeHandler = () => { closeCreateDialog(); };
-    try { (createDialogTitleInput as any).__opencode_key_escape = createDialogTitleEscapeHandler; createDialogModal.registerKeyHandler(createDialogTitleInput as any, KEY_ESCAPE, createDialogTitleEscapeHandler); } catch (_) {}
+    try { (createDialogTitleInput as any).__escape_key = createDialogTitleEscapeHandler; createDialogModal.registerKeyHandler(createDialogTitleInput as any, KEY_ESCAPE, createDialogTitleEscapeHandler); } catch (_) {}
 
     const createDialogDescEscapeHandler = () => { closeCreateDialog(); };
-    try { (createDialogDescription as any).__opencode_key_escape = createDialogDescEscapeHandler; createDialogModal.registerKeyHandler(createDialogDescription as any, KEY_ESCAPE, createDialogDescEscapeHandler); } catch (_) {}
+    try { (createDialogDescription as any).__escape_key = createDialogDescEscapeHandler; createDialogModal.registerKeyHandler(createDialogDescription as any, KEY_ESCAPE, createDialogDescEscapeHandler); } catch (_) {}
 
     const createDialogIssueTypeEscapeHandler = () => { closeCreateDialog(); };
-    try { (createDialogIssueTypeOptions as any).__opencode_key_escape = createDialogIssueTypeEscapeHandler; createDialogModal.registerKeyHandler(createDialogIssueTypeOptions as any, KEY_ESCAPE, createDialogIssueTypeEscapeHandler); } catch (_) {}
+    try { (createDialogIssueTypeOptions as any).__escape_key = createDialogIssueTypeEscapeHandler; createDialogModal.registerKeyHandler(createDialogIssueTypeOptions as any, KEY_ESCAPE, createDialogIssueTypeEscapeHandler); } catch (_) {}
 
     const createDialogPriorityEscapeHandler = () => { closeCreateDialog(); };
-    try { (createDialogPriorityOptions as any).__opencode_key_escape = createDialogPriorityEscapeHandler; createDialogModal.registerKeyHandler(createDialogPriorityOptions as any, KEY_ESCAPE, createDialogPriorityEscapeHandler); } catch (_) {}
+    try { (createDialogPriorityOptions as any).__escape_key = createDialogPriorityEscapeHandler; createDialogModal.registerKeyHandler(createDialogPriorityOptions as any, KEY_ESCAPE, createDialogPriorityEscapeHandler); } catch (_) {}
 
     const createDialogCSHandler = () => { submitCreateDialog(); };
-    try { (createDialog as any).__opencode_key_cs = createDialogCSHandler; createDialogModal.registerKeyHandler(createDialog as any, KEY_CS, createDialogCSHandler); } catch (_) {}
+    try { (createDialog as any).__ctrl_shift_i_key = createDialogCSHandler; createDialogModal.registerKeyHandler(createDialog as any, KEY_CS, createDialogCSHandler); } catch (_) {}
 
     const createDialogTitleCSHandler = () => { submitCreateDialog(); };
-    try { (createDialogTitleInput as any).__opencode_key_cs = createDialogTitleCSHandler; createDialogModal.registerKeyHandler(createDialogTitleInput as any, KEY_CS, createDialogTitleCSHandler); } catch (_) {}
+    try { (createDialogTitleInput as any).__ctrl_shift_i_key = createDialogTitleCSHandler; createDialogModal.registerKeyHandler(createDialogTitleInput as any, KEY_CS, createDialogTitleCSHandler); } catch (_) {}
 
     const createDialogDescCSHandler = () => { submitCreateDialog(); };
-    try { (createDialogDescription as any).__opencode_key_cs = createDialogDescCSHandler; createDialogModal.registerKeyHandler(createDialogDescription as any, KEY_CS, createDialogDescCSHandler); } catch (_) {}
+    try { (createDialogDescription as any).__ctrl_shift_i_key = createDialogDescCSHandler; createDialogModal.registerKeyHandler(createDialogDescription as any, KEY_CS, createDialogDescCSHandler); } catch (_) {}
 
     const createDialogIssueTypeEnterHandler = () => { submitCreateDialog(); };
-    try { (createDialogIssueTypeOptions as any).__opencode_key_enter = createDialogIssueTypeEnterHandler; createDialogModal.registerKeyHandler(createDialogIssueTypeOptions as any, KEY_ENTER, createDialogIssueTypeEnterHandler); } catch (_) {}
+    try { (createDialogIssueTypeOptions as any).__enter_key = createDialogIssueTypeEnterHandler; createDialogModal.registerKeyHandler(createDialogIssueTypeOptions as any, KEY_ENTER, createDialogIssueTypeEnterHandler); } catch (_) {}
 
     const createDialogPriorityEnterHandler = () => { submitCreateDialog(); };
-    try { (createDialogPriorityOptions as any).__opencode_key_enter = createDialogPriorityEnterHandler; createDialogModal.registerKeyHandler(createDialogPriorityOptions as any, KEY_ENTER, createDialogPriorityEnterHandler); } catch (_) {}
+    try { (createDialogPriorityOptions as any).__enter_key = createDialogPriorityEnterHandler; createDialogModal.registerKeyHandler(createDialogPriorityOptions as any, KEY_ENTER, createDialogPriorityEnterHandler); } catch (_) {}
 
     // Create dialog mouse click handlers
     const createOverlayClickHandler = () => { closeCreateDialog(); };
-    try { (createOverlay as any).__opencode_click = createOverlayClickHandler; createDialogModal.registerMouseHandler(createOverlay as any, 'click', createOverlayClickHandler); } catch (_) {}
+    try { (createOverlay as any).__click_handler = createOverlayClickHandler; createDialogModal.registerMouseHandler(createOverlay as any, 'click', createOverlayClickHandler); } catch (_) {}
 
     const createDialogTitleInputClickHandler = () => {
       if (createDialog.hidden) return;
       createDialogFocusManager.focusIndex(0);
       createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[0]);
     };
-    try { (createDialogTitleInput as any).__opencode_click = createDialogTitleInputClickHandler; createDialogModal.registerMouseHandler(createDialogTitleInput as any, 'click', createDialogTitleInputClickHandler); } catch (_) {}
+    try { (createDialogTitleInput as any).__click_handler = createDialogTitleInputClickHandler; createDialogModal.registerMouseHandler(createDialogTitleInput as any, 'click', createDialogTitleInputClickHandler); } catch (_) {}
 
     const createDialogDescriptionClickHandler = () => {
       if (createDialog.hidden) return;
       createDialogFocusManager.focusIndex(1);
       createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[1]);
     };
-    try { (createDialogDescription as any).__opencode_click = createDialogDescriptionClickHandler; createDialogModal.registerMouseHandler(createDialogDescription as any, 'click', createDialogDescriptionClickHandler); } catch (_) {}
+    try { (createDialogDescription as any).__click_handler = createDialogDescriptionClickHandler; createDialogModal.registerMouseHandler(createDialogDescription as any, 'click', createDialogDescriptionClickHandler); } catch (_) {}
 
     const createDialogIssueTypeClickHandler = () => {
       if (createDialog.hidden) return;
       createDialogFocusManager.focusIndex(2);
       createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[2]);
     };
-    try { (createDialogIssueTypeOptions as any).__opencode_click = createDialogIssueTypeClickHandler; createDialogModal.registerMouseHandler(createDialogIssueTypeOptions as any, 'click', createDialogIssueTypeClickHandler); } catch (_) {}
+    try { (createDialogIssueTypeOptions as any).__click_handler = createDialogIssueTypeClickHandler; createDialogModal.registerMouseHandler(createDialogIssueTypeOptions as any, 'click', createDialogIssueTypeClickHandler); } catch (_) {}
 
     const createDialogPriorityClickHandler = () => {
       if (createDialog.hidden) return;
       createDialogFocusManager.focusIndex(3);
       createDialogFocusHelpers.applyFocusStyles(createDialogFieldOrder[3]);
     };
-    try { (createDialogPriorityOptions as any).__opencode_click = createDialogPriorityClickHandler; createDialogModal.registerMouseHandler(createDialogPriorityOptions as any, 'click', createDialogPriorityClickHandler); } catch (_) {}
+    try { (createDialogPriorityOptions as any).__click_handler = createDialogPriorityClickHandler; createDialogModal.registerMouseHandler(createDialogPriorityOptions as any, 'click', createDialogPriorityClickHandler); } catch (_) {}
 
     const createDialogCreateButtonClickHandler = () => { submitCreateDialog(); };
-    try { (createDialogCreateButton as any).__opencode_click = createDialogCreateButtonClickHandler; createDialogModal.registerMouseHandler(createDialogCreateButton as any, 'click', createDialogCreateButtonClickHandler); } catch (_) {}
+    try { (createDialogCreateButton as any).__click_handler = createDialogCreateButtonClickHandler; createDialogModal.registerMouseHandler(createDialogCreateButton as any, 'click', createDialogCreateButtonClickHandler); } catch (_) {}
 
     const createDialogCreateButtonEnterHandler = () => { submitCreateDialog(); };
-    try { (createDialogCreateButton as any).__opencode_key_enter = createDialogCreateButtonEnterHandler; createDialogModal.registerKeyHandler(createDialogCreateButton as any, KEY_ENTER, createDialogCreateButtonEnterHandler); } catch (_) {}
+    try { (createDialogCreateButton as any).__enter_key = createDialogCreateButtonEnterHandler; createDialogModal.registerKeyHandler(createDialogCreateButton as any, KEY_ENTER, createDialogCreateButtonEnterHandler); } catch (_) {}
 
     const createDialogCancelButtonClickHandler = () => { closeCreateDialog(); };
-    try { (createDialogCancelButton as any).__opencode_click = createDialogCancelButtonClickHandler; createDialogModal.registerMouseHandler(createDialogCancelButton as any, 'click', createDialogCancelButtonClickHandler); } catch (_) {}
+    try { (createDialogCancelButton as any).__click_handler = createDialogCancelButtonClickHandler; createDialogModal.registerMouseHandler(createDialogCancelButton as any, 'click', createDialogCancelButtonClickHandler); } catch (_) {}
 
     const createDialogCancelButtonEnterHandler = () => { closeCreateDialog(); };
-    try { (createDialogCancelButton as any).__opencode_key_enter = createDialogCancelButtonEnterHandler; createDialogModal.registerKeyHandler(createDialogCancelButton as any, KEY_ENTER, createDialogCancelButtonEnterHandler); } catch (_) {}
+    try { (createDialogCancelButton as any).__enter_key = createDialogCancelButtonEnterHandler; createDialogModal.registerKeyHandler(createDialogCancelButton as any, KEY_ENTER, createDialogCancelButtonEnterHandler); } catch (_) {}
 
     const closeDialogEscapeHandler = () => { closeCloseDialog(); };
-    try { (closeDialog as any).__opencode_key_escape = closeDialogEscapeHandler; closeDialog.key(KEY_ESCAPE, closeDialogEscapeHandler); } catch (_) {}
+    try { (closeDialog as any).__escape_key = closeDialogEscapeHandler; closeDialog.key(KEY_ESCAPE, closeDialogEscapeHandler); } catch (_) {}
 
     const closeDialogOptionsEscapeHandler = () => { closeCloseDialog(); };
-    try { (closeDialogOptions as any).__opencode_key_escape = closeDialogOptionsEscapeHandler; closeDialogOptions.key(KEY_ESCAPE, closeDialogOptionsEscapeHandler); } catch (_) {}
+    try { (closeDialogOptions as any).__escape_key = closeDialogOptionsEscapeHandler; closeDialogOptions.key(KEY_ESCAPE, closeDialogOptionsEscapeHandler); } catch (_) {}
 
     const nextDialogEscapeHandler = () => { closeNextDialog(); };
-    try { (nextDialog as any).__opencode_key_escape = nextDialogEscapeHandler; nextDialog.key(KEY_ESCAPE, nextDialogEscapeHandler); } catch (_) {}
+    try { (nextDialog as any).__escape_key = nextDialogEscapeHandler; nextDialog.key(KEY_ESCAPE, nextDialogEscapeHandler); } catch (_) {}
 
     const nextOverlayClickHandler = () => { closeNextDialog(); };
-    try { (nextOverlay as any).__opencode_click = nextOverlayClickHandler; nextOverlay.on('click', nextOverlayClickHandler); } catch (_) {}
+    try { (nextOverlay as any).__click_handler = nextOverlayClickHandler; nextOverlay.on('click', nextOverlayClickHandler); } catch (_) {}
 
     const nextDialogCloseClickHandler = () => { closeNextDialog(); };
-    try { (nextDialogClose as any).__opencode_click = nextDialogCloseClickHandler; nextDialogClose.on('click', nextDialogCloseClickHandler); } catch (_) {}
+    try { (nextDialogClose as any).__click_handler = nextDialogCloseClickHandler; nextDialogClose.on('click', nextDialogCloseClickHandler); } catch (_) {}
 
     const nextDialogOptionsSelectHandler = async (_el: any, idx: number) => {
       if (idx === 0) {
@@ -5442,7 +5442,7 @@ const visible = buildVisible();
         closeNextDialog();
       }
     };
-    try { (nextDialogOptions as any).__opencode_select = nextDialogOptionsSelectHandler; nextDialogOptions.on('select', nextDialogOptionsSelectHandler); } catch (_) {}
+    try { (nextDialogOptions as any).__select_handler = nextDialogOptionsSelectHandler; nextDialogOptions.on('select', nextDialogOptionsSelectHandler); } catch (_) {}
 
     const nextDialogOptionsClickHandler = async () => {
       const idx = (nextDialogOptions as any).selected ?? 0;
@@ -5467,7 +5467,7 @@ const visible = buildVisible();
         closeNextDialog();
       }
     };
-    try { (nextDialogOptions as any).__opencode_click = nextDialogOptionsClickHandler; nextDialogOptions.on('click', nextDialogOptionsClickHandler); } catch (_) {}
+    try { (nextDialogOptions as any).__click_handler = nextDialogOptionsClickHandler; nextDialogOptions.on('click', nextDialogOptionsClickHandler); } catch (_) {}
 
     const nextDialogOptionsSelectItemHandler = async (_el: any, idx: number) => {
       if (idx === 0) {
@@ -5487,16 +5487,16 @@ const visible = buildVisible();
         closeNextDialog();
       }
     };
-    try { (nextDialogOptions as any).__opencode_select_item = nextDialogOptionsSelectItemHandler; nextDialogOptions.on('select item', nextDialogOptionsSelectItemHandler); } catch (_) {}
+    try { (nextDialogOptions as any).__select_item = nextDialogOptionsSelectItemHandler; nextDialogOptions.on('select item', nextDialogOptionsSelectItemHandler); } catch (_) {}
 
     const nextDialogOptionsNHandler = () => { if (nextDialog.hidden) return; advanceNextRecommendation(); };
     try { (nextDialogOptions as any).__opencode_key_n = nextDialogOptionsNHandler; nextDialogOptions.key(KEY_FIND_NEXT, nextDialogOptionsNHandler); } catch (_) {}
 
     const nextDialogOptionsEscapeHandler = () => { closeNextDialog(); };
-    try { (nextDialogOptions as any).__opencode_key_escape = nextDialogOptionsEscapeHandler; nextDialogOptions.key(KEY_ESCAPE, nextDialogOptionsEscapeHandler); } catch (_) {}
+    try { (nextDialogOptions as any).__escape_key = nextDialogOptionsEscapeHandler; nextDialogOptions.key(KEY_ESCAPE, nextDialogOptionsEscapeHandler); } catch (_) {}
 
     const detailOverlayClickHandler = () => { closeDetails(); };
-    try { (detailOverlay as any).__opencode_click = detailOverlayClickHandler; detailOverlay.on('click', detailOverlayClickHandler); } catch (_) {}
+    try { (detailOverlay as any).__click_handler = detailOverlayClickHandler; detailOverlay.on('click', detailOverlayClickHandler); } catch (_) {}
 
     detailModal.key(KEY_ESCAPE, () => {
       closeDetails();

@@ -138,7 +138,7 @@ describe('Next dialog View selects item (controller-level)', () => {
         confirmYesNo: vi.fn(async () => true),
         forceCleanup: vi.fn(),
       },
-      opencodeUi: { serverStatusBox: makeBox(), dialog: makeBox(), textarea: makeBox(), suggestionHint: makeBox(), sendButton: makeBox(), cancelButton: makeBox(), ensureResponsePane: () => makeBox() },
+      agentPane: { serverStatusBox: makeBox(), dialog: makeBox(), textarea: makeBox(), suggestionHint: makeBox(), sendButton: makeBox(), cancelButton: makeBox(), ensureResponsePane: () => makeBox() },
       nextDialog: { overlay: makeBox(), dialog: makeBox(), close: makeBox(), text: makeBox(), options: nextOptions },
     });
 
@@ -241,7 +241,7 @@ describe('Next dialog View selects item (controller-level)', () => {
         confirmYesNo: vi.fn(async () => true),
         forceCleanup: vi.fn(),
       },
-      opencodeUi: { serverStatusBox: makeBox(), dialog: makeBox(), textarea: makeBox(), suggestionHint: makeBox(), sendButton: makeBox(), cancelButton: makeBox(), ensureResponsePane: () => makeBox() },
+      agentPane: { serverStatusBox: makeBox(), dialog: makeBox(), textarea: makeBox(), suggestionHint: makeBox(), sendButton: makeBox(), cancelButton: makeBox(), ensureResponsePane: () => makeBox() },
       nextDialog: { overlay: makeBox(), dialog: makeBox(), close: makeBox(), text: makeBox(), options: nextOptions },
     });
 
@@ -337,7 +337,7 @@ describe('Next dialog View selects item (controller-level)', () => {
         confirmYesNo: vi.fn(async () => true),
         forceCleanup: vi.fn(),
       },
-      opencodeUi: { serverStatusBox: makeBox(), dialog: makeBox(), textarea: makeBox(), suggestionHint: makeBox(), sendButton: makeBox(), cancelButton: makeBox(), ensureResponsePane: () => makeBox() },
+      agentPane: { serverStatusBox: makeBox(), dialog: makeBox(), textarea: makeBox(), suggestionHint: makeBox(), sendButton: makeBox(), cancelButton: makeBox(), ensureResponsePane: () => makeBox() },
       nextDialog: { overlay: makeBox(), dialog: makeBox(), close: makeBox(), text: makeBox(), options: nextOptions },
     });
 

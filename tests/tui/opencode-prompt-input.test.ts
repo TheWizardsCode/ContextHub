@@ -118,7 +118,7 @@ describe('OpenCode prompt input modes', () => {
       forceCleanup: vi.fn(),
     };
     const opencodeText = makeTextarea();
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
       textarea: opencodeText,
@@ -136,7 +136,7 @@ describe('OpenCode prompt input modes', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),
@@ -218,28 +218,28 @@ describe('OpenCode prompt input modes', () => {
     inputHandler.call(opencodeText, 'a', { name: 'a' });
     inputHandler.call(opencodeText, 'b', { name: 'b' });
     expect(opencodeText.getValue()).toBe('ab');
-    expect((opencodeText as any).__opencode_cursor).toBe(2);
+    expect((opencodeText as any).__cursor_pos).toBe(2);
 
     inputHandler.call(opencodeText, '', { name: 'n', ctrl: true });
-    expect((opencodeText as any).__opencode_mode).toBe('normal');
+    expect((opencodeText as any).__input_mode).toBe('normal');
 
     inputHandler.call(opencodeText, '', { name: 'h' });
     expect(opencodeText.getValue()).toBe('ab');
-    expect((opencodeText as any).__opencode_cursor).toBe(1);
+    expect((opencodeText as any).__cursor_pos).toBe(1);
 
     inputHandler.call(opencodeText, '', { name: 'l' });
-    expect((opencodeText as any).__opencode_cursor).toBe(2);
+    expect((opencodeText as any).__cursor_pos).toBe(2);
 
     inputHandler.call(opencodeText, '', { name: 'i' });
-    expect((opencodeText as any).__opencode_mode).toBe('insert');
+    expect((opencodeText as any).__input_mode).toBe('insert');
 
     inputHandler.call(opencodeText, '', { name: 'left' });
     expect(opencodeText.getValue()).toBe('ab');
-    expect((opencodeText as any).__opencode_cursor).toBe(1);
+    expect((opencodeText as any).__cursor_pos).toBe(1);
 
     inputHandler.call(opencodeText, 'c', { name: 'c' });
     expect(opencodeText.getValue()).toBe('acb');
-    expect((opencodeText as any).__opencode_cursor).toBe(2);
+    expect((opencodeText as any).__cursor_pos).toBe(2);
   });
 
   it('guards against duplicate input handling for a single key event', async () => {
@@ -289,7 +289,7 @@ describe('OpenCode prompt input modes', () => {
       forceCleanup: vi.fn(),
     };
     const opencodeText = makeTextarea();
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
       textarea: opencodeText,
@@ -307,7 +307,7 @@ describe('OpenCode prompt input modes', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),
@@ -431,7 +431,7 @@ describe('OpenCode prompt input modes', () => {
     };
     const opencodeText = makeTextarea();
     const opencodeDialog = makeBox();
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: opencodeDialog,
       textarea: opencodeText,
@@ -449,7 +449,7 @@ describe('OpenCode prompt input modes', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),
@@ -515,7 +515,7 @@ describe('OpenCode prompt input modes', () => {
 
     await controller.start({});
 
-    const keypressHandler = (opencodeText as any).__opencode_keypress as (ch: any, key: any) => void;
+    const keypressHandler = (opencodeText as any).__keypress_handler as (ch: any, key: any) => void;
     expect(typeof keypressHandler).toBe('function');
 
     opencodeText.setValue('wrapped line');

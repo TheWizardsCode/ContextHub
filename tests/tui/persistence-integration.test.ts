@@ -152,7 +152,7 @@ function buildLayout(screen: any) {
     confirmTextbox: vi.fn(async () => false),
     forceCleanup: vi.fn(),
   };
-  const opencodeUi = {
+  const agentPane = {
     serverStatusBox: makeBox(),
     dialog: makeBox(),
     textarea: makeBox(),
@@ -175,7 +175,7 @@ function buildLayout(screen: any) {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),

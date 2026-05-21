@@ -3,7 +3,7 @@
  *
  * Plugins are discovered from two directories (in priority order):
  *   1. Project-local: <project>/.worklog/plugins/  (highest priority)
- *   2. Global: ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/.worklog/plugins/
+ *   2. Global: ${XDG_CONFIG_HOME:-$HOME/.config}/worklog/.worklog/plugins/
  *
  * When the same plugin filename exists in both directories the project-local
  * version takes precedence and the global copy is silently skipped.
@@ -31,15 +31,15 @@ export function getDefaultPluginDir(): string {
 /**
  * Get the global plugin directory path.
  *
- * Resolution: ${XDG_CONFIG_HOME}/opencode/.worklog/plugins/
- * Falls back to $HOME/.config/opencode/.worklog/plugins/ when
+ * Resolution: ${XDG_CONFIG_HOME}/worklog/.worklog/plugins/
+ * Falls back to $HOME/.config/worklog/.worklog/plugins/ when
  * XDG_CONFIG_HOME is unset.
  *
  * @returns Absolute path to the global plugin directory
  */
 export function getGlobalPluginDir(): string {
   const configHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
-  return path.join(configHome, 'opencode', '.worklog', 'plugins');
+  return path.join(configHome, 'worklog', '.worklog', 'plugins');
 }
 
 /**
@@ -192,7 +192,7 @@ export async function loadPlugin(
  *
  * Otherwise, plugins are discovered from:
  *   1. Project-local: <project>/.worklog/plugins/
- *   2. Global: ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/.worklog/plugins/
+ *   2. Global: ${XDG_CONFIG_HOME:-$HOME/.config}/worklog/.worklog/plugins/
  *
  * Project-local plugins override global plugins with the same filename.
  *

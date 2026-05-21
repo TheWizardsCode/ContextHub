@@ -209,7 +209,7 @@ describe('spawnImpl injection in TuiController', () => {
             confirmTextbox: vi.fn(async () => false),
             forceCleanup: vi.fn(),
           },
-          opencodeUi: {
+          agentPane: {
             serverStatusBox: makeBox(),
             dialog: makeBox(),
             textarea: makeBox(),
@@ -338,7 +338,7 @@ describe('spawnImpl injection in TuiController', () => {
             confirmTextbox: vi.fn(async () => false),
             forceCleanup: vi.fn(),
           },
-          opencodeUi: {
+          agentPane: {
             serverStatusBox: makeBox(),
             dialog: makeBox(),
             textarea: makeBox(),

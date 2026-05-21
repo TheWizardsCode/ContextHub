@@ -101,10 +101,10 @@ export class ListComponent {
       // Remove any attached ctrl-w handler if present
       // eslint-disable-next-line @typescript-eslint/ban-ts-comment
       // @ts-ignore
-      const h = (this.list as any).__opencode_ctrlw;
+      const h = (this.list as any).__ctrlw_handler;
       if (h && typeof (this.list as any).removeListener === 'function') {
         try { (this.list as any).removeListener('keypress', h); } catch (_) {}
-        try { delete (this.list as any).__opencode_ctrlw; } catch (_) {}
+        try { delete (this.list as any).__ctrlw_handler; } catch (_) {}
       }
     } catch (_) {}
     // eslint-disable-next-line @typescript-eslint/ban-ts-comment

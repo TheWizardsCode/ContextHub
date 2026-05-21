@@ -123,7 +123,7 @@ describe('TUI audit lifecycle', () => {
       confirmTextbox: vi.fn(async () => false),
       forceCleanup: vi.fn(),
     };
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
       textarea: makeBox(),
@@ -141,7 +141,7 @@ describe('TUI audit lifecycle', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),

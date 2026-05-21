@@ -7,6 +7,6 @@ export { MetadataPaneComponent, type MetadataPaneOptions } from './metadata-pane
 export { OverlaysComponent, type OverlaysComponentOptions } from './overlays.js';
 export { DialogsComponent, type DialogsComponentOptions } from './dialogs.js';
 export { createList, createTextarea, createLabel, type HelperOpts } from './dialog-helpers.js';
-export { OpencodePaneComponent, type OpencodePaneComponentOptions } from './opencode-pane.js';
+export { AgentPaneComponent, type AgentPaneComponentOptions } from './opencode-pane.js';
 export { ModalDialogsComponent, type ModalDialogsOptions } from './modals.js';
 export { EmptyStateComponent, type EmptyStateOptions } from './empty-state.js';

@@ -167,7 +167,7 @@ function buildLayout(screen: any) {
 
   const dialog = makeBox();
 
-  const opencodeUi = {
+  const agentPane = {
     serverStatusBox: makeBox(),
     dialog,
     textarea,
@@ -192,7 +192,7 @@ function buildLayout(screen: any) {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),

@@ -150,7 +150,7 @@ function buildLayout(screen: any) {
     confirmTextbox: vi.fn(async () => false),
     forceCleanup: vi.fn(),
   };
-  const opencodeUi = {
+  const agentPane = {
     serverStatusBox: makeBox(),
     dialog: makeBox(),
     textarea: makeBox(),
@@ -176,7 +176,7 @@ function buildLayout(screen: any) {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: { overlay: makeBox(), dialog: makeBox(), close: makeBox(), text: makeBox(), options: makeList() },
     },
   };
@@ -233,8 +233,8 @@ describe('TUI mouse click-to-select (regression)', () => {
 
     await controller.start({});
 
-    // The 'select item' handler is stored via __opencode_select_item
-    const selectItemHandler = (list as any).__opencode_select_item;
+    // The 'select item' handler is stored via __select_item
+    const selectItemHandler = (list as any).__select_item;
     expect(typeof selectItemHandler).toBe('function');
 
     // Record the initial detail content shown for item 1 (index 0)
@@ -283,7 +283,7 @@ describe('TUI mouse click-to-select (regression)', () => {
     (detail.setScroll as any).mockClear();
 
     // Simulate clicking the already-selected item (index 0)
-    const selectItemHandler = (list as any).__opencode_select_item;
+    const selectItemHandler = (list as any).__select_item;
     if (typeof selectItemHandler === 'function') {
       selectItemHandler(list.items?.[0] ?? {}, 0);
     }
@@ -292,7 +292,7 @@ describe('TUI mouse click-to-select (regression)', () => {
     expect(detail.setScroll).not.toHaveBeenCalled();
   });
 
-  it('registers __opencode_select_item handler on startup', async () => {
+  it('registers __select_item handler on startup', async () => {
     const item = makeItem('WL-MOUSE-4');
     const screen = makeScreen();
     const { layout, list } = buildLayout(screen);
@@ -312,8 +312,8 @@ describe('TUI mouse click-to-select (regression)', () => {
     await controller.start({});
 
     // Verify the handler was registered
-    expect((list as any).__opencode_select_item).toBeDefined();
-    expect(typeof (list as any).__opencode_select_item).toBe('function');
+    expect((list as any).__select_item).toBeDefined();
+    expect(typeof (list as any).__select_item).toBe('function');
 
     // Verify it was registered via list.on('select item', ...)
     const onCalls = (list.on as any).mock.calls;

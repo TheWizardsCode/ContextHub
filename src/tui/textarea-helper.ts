@@ -30,7 +30,7 @@ export default function createTextareaHelper(widget: AnyWidget, screen: AnyWidge
 
   const setCursorIndex = (value: string, nextIndex: number) => {
     cursorIndex = clamp(value, nextIndex);
-    try { if (widget) (widget as any).__opencode_cursor = cursorIndex; } catch (_) {}
+    try { if (widget) (widget as any).__cursor = cursorIndex; } catch (_) {}
   };
 
   const getLineColumnFromIndex = (value: string, index: number) => {

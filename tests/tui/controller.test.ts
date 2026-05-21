@@ -133,7 +133,7 @@ describe('TuiController', () => {
       confirmTextbox: vi.fn(async () => false),
       forceCleanup: vi.fn(),
     };
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
       textarea: makeBox(),
@@ -151,7 +151,7 @@ describe('TuiController', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),
@@ -232,15 +232,15 @@ describe('TuiController', () => {
     await auditKey!.handler();
     expect(capturedPrompt).toBe('audit WL-AUDIT-1');
     // The opencode textarea should have been populated immediately with the prompt
-    expect(layout.opencodeUi.textarea.setValue).toHaveBeenCalled();
-    const setCalls = (layout.opencodeUi.textarea.setValue as any).mock.calls.map((c: any[]) => c[0]);
+    expect(layout.agentPane.textarea.setValue).toHaveBeenCalled();
+    const setCalls = (layout.agentPane.textarea.setValue as any).mock.calls.map((c: any[]) => c[0]);
     expect(setCalls).toContain('audit WL-AUDIT-1');
     // Expect a toast was shown and the response pane contains a Running audit banner
     expect((ctx as any).toast?.show).toBeUndefined();
     // Our controller routes showToast to ctx.toast.show if present; the layout's toastComponent.show is used
-    expect(layout.opencodeUi.ensureResponsePane).toHaveBeenCalled();
+    expect(layout.agentPane.ensureResponsePane).toHaveBeenCalled();
     // The fake opencode pane returned by ensureResponsePane has pushLine mocked; verify it was called
-    const pane = layout.opencodeUi.ensureResponsePane();
+    const pane = layout.agentPane.ensureResponsePane();
     expect((pane.pushLine as any).mock.calls.length).toBeGreaterThanOrEqual(0);
     // Expect the TUI path to attempt to stop the server when input is requested
     // by the assistant (defensive cleanup). The FakeOpencodeClient.stopServer
@@ -300,7 +300,7 @@ describe('TuiController', () => {
       confirmTextbox: vi.fn(async () => false),
       forceCleanup: vi.fn(),
     };
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
       textarea: makeBox(),
@@ -318,7 +318,7 @@ describe('TuiController', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),
@@ -399,7 +399,7 @@ describe('TuiController', () => {
 
     // invoke the handler and assert the opencode response pane was used
     await auditKey!.handler();
-    expect(layout.opencodeUi.ensureResponsePane).toHaveBeenCalled();
+    expect(layout.agentPane.ensureResponsePane).toHaveBeenCalled();
   });
 
   it('populates opencode input immediately even when server start is slow', async () => {
@@ -454,7 +454,7 @@ describe('TuiController', () => {
       confirmTextbox: vi.fn(async () => false),
       forceCleanup: vi.fn(),
     };
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
       textarea: makeBox(),
@@ -472,7 +472,7 @@ describe('TuiController', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),
@@ -559,7 +559,7 @@ describe('TuiController', () => {
     // can complete and call setValue(initialInput) before we assert.
     await Promise.resolve();
     // At this point the startServer is still delaying; ensure textarea was set
-    expect(layout.opencodeUi.textarea.setValue).toHaveBeenCalled();
+    expect(layout.agentPane.textarea.setValue).toHaveBeenCalled();
     await handlerPromise;
     expect(capturedPrompt).toBe('audit WL-AUDIT-1');
   });
@@ -611,7 +611,7 @@ describe('TuiController', () => {
       confirmTextbox: vi.fn(async () => false),
       forceCleanup: vi.fn(),
     };
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
       textarea: makeBox(),
@@ -629,7 +629,7 @@ describe('TuiController', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),
@@ -752,7 +752,7 @@ describe('TuiController', () => {
       selectList: vi.fn(async () => 0),
       editTextarea: vi.fn(async () => null),
     };
-    const opencodeUi = {
+    const agentPane = {
       show: vi.fn(),
       hide: vi.fn(),
     };
@@ -775,7 +775,7 @@ describe('TuiController', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       metadataPaneComponent: {
         getBox: () => metadataPane,
       },
@@ -878,7 +878,7 @@ describe('TuiController', () => {
       selectList: vi.fn(async () => 0),
       editTextarea: vi.fn(async () => null),
     };
-    const opencodeUi = {
+    const agentPane = {
       show: vi.fn(),
       hide: vi.fn(),
     };
@@ -901,7 +901,7 @@ describe('TuiController', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       metadataPaneComponent: {
         getBox: () => metadataPane,
       },
@@ -1002,7 +1002,7 @@ describe('TuiController', () => {
       confirmTextbox: vi.fn(async () => false),
       forceCleanup: vi.fn(),
     };
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
       textarea: makeBox(),
@@ -1020,7 +1020,7 @@ describe('TuiController', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),
@@ -1181,7 +1181,7 @@ describe('TuiController', () => {
       confirmTextbox: vi.fn(async () => false),
       forceCleanup: vi.fn(),
     };
-    const opencodeUi = {
+    const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
       textarea: makeBox(),
@@ -1199,7 +1199,7 @@ describe('TuiController', () => {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),

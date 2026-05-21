@@ -3,12 +3,12 @@ import { theme } from '../../theme.js';
 import { KEY_ESCAPE } from '../constants.js';
 import type { BlessedBox, BlessedFactory, BlessedScreen, BlessedTextarea, BlessedText } from '../types.js';
 
-export interface OpencodePaneComponentOptions {
+export interface AgentPaneComponentOptions {
   parent: BlessedScreen;
   blessed?: BlessedFactory;
 }
 
-export class OpencodePaneComponent {
+export class AgentPaneComponent {
   private blessedImpl: BlessedFactory;
   private screen: BlessedScreen;
 
@@ -21,7 +21,7 @@ export class OpencodePaneComponent {
 
   private responsePane: BlessedBox | null = null;
 
-  constructor(options: OpencodePaneComponentOptions) {
+  constructor(options: AgentPaneComponentOptions) {
     this.screen = options.parent;
     this.blessedImpl = options.blessed || blessed;
 
@@ -45,7 +45,7 @@ export class OpencodePaneComponent {
       left: 'center',
       width: '80%',
       height: '60%',
-      label: ' Run opencode ',
+      label: ' Agent ', 
       border: { type: 'line' },
       hidden: true,
       tags: true,
@@ -157,7 +157,7 @@ export class OpencodePaneComponent {
     if (options.onEscape) {
       // Attach escape handler but tag it so we can remove it on destroy
       const escHandler = options.onEscape;
-      (this.responsePane as any).__opencode_esc = escHandler;
+      (this.responsePane as any).__esc_handler = escHandler;
       this.responsePane.key(KEY_ESCAPE, escHandler);
     }
 
@@ -197,7 +197,7 @@ export class OpencodePaneComponent {
         try { this.responsePane.removeAllListeners?.(); } catch (_) {}
         // If we installed a named escape handler, remove that exact listener
         try {
-          const esc = (this.responsePane as any).__opencode_esc;
+          const esc = (this.responsePane as any).__esc_handler;
           if (esc && typeof (this.responsePane as any).removeListener === 'function') {
             try { (this.responsePane as any).removeListener('key', esc); } catch (_) {}
           }

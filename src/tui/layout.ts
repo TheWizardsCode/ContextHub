@@ -21,7 +21,7 @@ import {
   ListComponent,
   MetadataPaneComponent,
   ModalDialogsComponent,
-  OpencodePaneComponent,
+  AgentPaneComponent,
   OverlaysComponent,
   ToastComponent,
 } from './components/index.js';
@@ -52,7 +52,7 @@ export interface TuiLayout {
   dialogsComponent: DialogsComponent;
   helpMenu: HelpMenuComponent;
   modalDialogs: ModalDialogsComponent;
-  opencodeUi: OpencodePaneComponent;
+  agentPane: AgentPaneComponent;
 
   // "Next recommendation" dialog (raw blessed widgets, not yet wrapped in a component)
   nextDialog: NextDialogWidgets;
@@ -253,7 +253,7 @@ export function createLayout(options: CreateLayoutOptions = {}): TuiLayout {
   }).create();
 
   // ── Opencode pane ───────────────────────────────────────────────────
-  const opencodeUi = new OpencodePaneComponent({
+  const agentPane = new AgentPaneComponent({
     parent: screen,
     blessed: blessedImpl,
   }).create();
@@ -282,7 +282,7 @@ export function createLayout(options: CreateLayoutOptions = {}): TuiLayout {
     dialogsComponent,
     helpMenu,
     modalDialogs,
-    opencodeUi,
+    agentPane,
     ...(virtualList !== undefined ? { virtualList } : {}),
     nextDialog: {
       overlay: nextOverlay,

@@ -315,7 +315,7 @@ describe('Global Plugin Discovery Integration Tests', () => {
   beforeEach(() => {
     tempDir = createTempDir();
     localPluginDir = path.join(tempDir, '.worklog', 'plugins');
-    globalPluginDir = path.join(tempDir, 'xdg-config', 'opencode', '.worklog', 'plugins');
+    globalPluginDir = path.join(tempDir, 'xdg-config', 'worklog', '.worklog', 'plugins');
     fs.mkdirSync(localPluginDir, { recursive: true });
     fs.mkdirSync(globalPluginDir, { recursive: true });
     
@@ -490,7 +490,7 @@ export default function register(ctx) {}
     const globalP = result.plugins.find((p: any) => p.name === 'global-only.mjs');
     expect(localP.source).toContain('.worklog');
     expect(localP.source).toContain('plugins');
-    expect(globalP.source).toContain('opencode');
+    expect(globalP.source).toContain('worklog');
     expect(globalP.source).toContain('plugins');
   });
 

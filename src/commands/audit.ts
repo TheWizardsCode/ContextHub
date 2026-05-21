@@ -1,6 +1,6 @@
 import type { PluginContext } from '../plugin-types.js';
 import type { AuditOptions } from '../cli-types.js';
-import { runOpencodeAudit } from '../opencode-audit.js';
+import { runPiAudit } from '../pi-audit.js';
 import { theme } from '../theme.js';
 
 const toErrorMessage = (error: unknown): string => {
@@ -30,7 +30,7 @@ export default function register(ctx: PluginContext): void {
       }
 
       try {
-        const result = await runOpencodeAudit({
+        const result = await runPiAudit({
           workItemId: normalizedId,
           cwd: process.cwd(),
         });

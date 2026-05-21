@@ -172,7 +172,7 @@ function buildLayout(screen: any) {
   const suggestionHint = makeBox();
   suggestionHint.hidden = true;
 
-  const opencodeUi = {
+  const agentPane = {
     serverStatusBox: makeBox(),
     dialog,
     textarea,
@@ -198,7 +198,7 @@ function buildLayout(screen: any) {
       dialogsComponent: dialogs,
       helpMenu,
       modalDialogs,
-      opencodeUi,
+      agentPane,
       nextDialog: {
         overlay: makeBox(),
         dialog: makeBox(),

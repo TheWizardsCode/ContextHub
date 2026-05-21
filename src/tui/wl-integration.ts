@@ -41,10 +41,18 @@ export async function runWl(
     cwd: options.cwd,
     env: options.env,
   });
-  // If there was an error, propagate it via the event system (already emitted by runWlCommand)
+  // If there was an error, re-throw it for the caller to handle
   if (result.error) {
     // The lower-level already emitted "command:error"
     throw result.error;
+  }
+  // If JSON parse failed but exit code was 0, still return the raw stdout
+  if (!result.json && result.stdout) {
+    try {
+      result.json = JSON.parse(result.stdout);
+    } catch {
+      // Return whatever we could parse
+    }
   }
   // Successful result contains parsed JSON in result.json
   return result.json;

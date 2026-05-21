@@ -75,7 +75,7 @@ export function isAnyDialogOpen(): boolean {
  * - If the currently-focused widget is one of the focusable targets of any
  *   open modal and appears to be an input/textarea (detects blessed internals
  *   like `_listener`/`_reading`, options.inputOnFocus, or TUI helper markers
- *   such as `__opencode_desc_key`), the handler is suppressed so typing into
+ *   such as `__desc_key`), the handler is suppressed so typing into
  *   textareas does not trigger app-level shortcuts.
  * - Exceptions: certain global handlers that must still run while a modal is
  *   visible (for example the top-level Escape handler which dismisses dialogs)
@@ -120,8 +120,8 @@ export function registerAppKey(screen: any, keys: string[] | string, handler: (.
               !!focused._listener
               || !!focused._reading
               || (focused.options && Boolean((focused as any).options?.inputOnFocus))
-              || !!(focused as any).__opencode_desc_key
-              || !!(focused as any).__opencode_autocomplete
+              || !!(focused as any).__desc_key
+              || !!(focused as any).__autocomplete
             );
             if (isInputLike) return;
           }
@@ -231,9 +231,9 @@ export class ModalDialogBase {
   ): void {
     if (!target || typeof target.key !== 'function') return;
     const wrapped = (...args: any[]) => {
-      try { if (process.env.WL_DEBUG) /* eslint-disable-next-line no-console */ console.log('DEBUG ModalDialogBase.wrapped: invoked, openState=', this.openState, 'handlerName=', (wrapped as any).__opencode_original?.name); } catch (_) {}
+      try { if (process.env.WL_DEBUG) /* eslint-disable-next-line no-console */ console.log('DEBUG ModalDialogBase.wrapped: invoked, openState=', this.openState, 'handlerName=', (wrapped as any).__original_handler?.name); } catch (_) {}
       if (!this.openState) return;
-      try { return (wrapped as any).__opencode_original?.apply?.(null, args) ?? handler(...args); } catch (err) { try { handler(...args); } catch (_) {} }
+      try { return (wrapped as any).__original_handler?.apply?.(null, args) ?? handler(...args); } catch (err) { try { handler(...args); } catch (_) {} }
     };
     // Log registration for diagnostics when running tests.
     try { if (process.env.WL_DEBUG) /* eslint-disable-next-line no-console */ console.log('DEBUG ModalDialogBase.registerKeyHandler: registering keys=', keys); } catch (_) {}
@@ -242,8 +242,8 @@ export class ModalDialogBase {
     // identify the original handler and target. This helps the test
     // harness discover the exact function instance that will run.
     try {
-      (wrapped as any).__opencode_original = handler;
-      (wrapped as any).__opencode_target = target;
+      (wrapped as any).__original_handler = handler;
+      (wrapped as any).__handler_target = target;
     } catch (_) {}
     // Expose the actual wrapped handler on the target for test-harness
     // discoverability. Tests in this repo sometimes inspect mocked
@@ -253,15 +253,15 @@ export class ModalDialogBase {
     // function instance that will actually run at runtime.
     try {
       const asAny = target as any;
-      asAny.__opencode_registered_wrapped = wrapped;
+      asAny.__wrapped_handler = wrapped;
       // Also expose named shortcut properties for common keys so tests
-      // that expect __opencode_key_tab/__opencode_key_stab continue to
+      // that expect __tab_handler/__stab_handler continue to
       // work regardless of whether registration happened via the
       // modal-level helper or directly on the widget.
       const setNamed = (k: string) => {
         const low = k.toLowerCase();
-        if (low === 'tab' || low === 'c-i') asAny.__opencode_key_tab = wrapped;
-        if (low === 's-tab' || low === 'c-s-i' || (low.includes('s') && low.includes('tab'))) asAny.__opencode_key_stab = wrapped;
+        if (low === 'tab' || low === 'c-i') asAny.__tab_handler = wrapped;
+        if (low === 's-tab' || low === 'c-s-i' || (low.includes('s') && low.includes('tab'))) asAny.__stab_handler = wrapped;
         if (low === 'enter') asAny.__opencode_key_enter = wrapped;
         if (low === 'escape' || low === 'esc') asAny.__opencode_key_escape = wrapped;
       };
