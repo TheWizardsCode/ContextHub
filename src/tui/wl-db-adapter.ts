@@ -8,9 +8,14 @@
  *
  * This adapter preserves the original method signatures so controller.ts
  * can be migrated with minimal code changes.
+ *
+ * NOTE: The methods below are synchronous wrappers that execute `wl` CLI
+ * commands synchronously via `child_process.spawnSync`.  In production use
+ * the async `runWl` path is preferred, but the controller currently calls
+ * db methods synchronously so we must match that signature.
  */
 
-import { runWl } from './wl-integration.js';
+import { spawnSync } from 'child_process';
 
 /**
  * Minimal work-item shape matching what the controller expects.
@@ -61,12 +66,20 @@ export interface WlDbInterface {
 }
 
 /**
- * Run a wl command and return parsed JSON, or null on failure.
+ * Run a wl command synchronously and return parsed JSON, or null on failure.
  */
-async function wlJson(cmd: string, args: string[] = []): Promise<any> {
+function wlJsonSync(cmd: string, args: string[] = []): any {
   try {
-    const result = await runWl(cmd, args, { timeout: 15000 });
-    return result;
+    const result = spawnSync('wl', [...args, '--json'], {
+      cwd: process.cwd(),
+      timeout: 15000,
+      env: { ...process.env, WL_TUI_MODE: '1' },
+      encoding: 'utf-8',
+    });
+    if (result.status !== 0 || !result.stdout?.trim()) {
+      return null;
+    }
+    return JSON.parse(result.stdout);
   } catch {
     return null;
   }
@@ -181,29 +194,29 @@ function buildCreateArgs(item: Partial<WorkItem>): string[] {
  */
 export function createWlDbAdapter(): WlDbInterface {
   return {
-    async list(query: Record<string, unknown> = {}): Promise<WorkItem[]> {
+    list(query: Record<string, unknown> = {}): WorkItem[] {
       const args = buildListArgs(query);
-      const result = await wlJson('list', args);
+      const result = wlJsonSync('list', args);
       if (!result || !Array.isArray(result)) return [];
       return result.map(toWorkItem);
     },
 
-    async get(id: string): Promise<WorkItem | null> {
-      const result = await wlJson('show', [id]);
+    get(id: string): WorkItem | null {
+      const result = wlJsonSync('show', [id]);
       if (!result) return null;
       return toWorkItem(result);
     },
 
-    async create(item: Partial<WorkItem>): Promise<WorkItem | null> {
+    create(item: Partial<WorkItem>): WorkItem | null {
       const args = buildCreateArgs(item);
-      const result = await wlJson('create', args);
+      const result = wlJsonSync('create', args);
       if (!result) return null;
       return toWorkItem(result);
     },
 
-    async update(id: string, updates: Record<string, unknown>): Promise<WorkItem | null> {
+    update(id: string, updates: Record<string, unknown>): WorkItem | null {
       const args = buildUpdateArgs(id, updates);
-      const result = await wlJson('update', args);
+      const result = wlJsonSync('update', args);
       if (!result) return null;
       return toWorkItem(result);
     },
@@ -214,8 +227,8 @@ export function createWlDbAdapter(): WlDbInterface {
       return undefined;
     },
 
-    async getCommentsForWorkItem(workItemId: string): Promise<WorkItemComment[]> {
-      const result = await wlJson('comment', ['list', workItemId]);
+    getCommentsForWorkItem(workItemId: string): WorkItemComment[] {
+      const result = wlJsonSync('comment', ['list', workItemId]);
       if (!result || !Array.isArray(result)) return [];
       return result.map((c: any) => ({
         id: c.id ?? '',
@@ -226,8 +239,8 @@ export function createWlDbAdapter(): WlDbInterface {
       }));
     },
 
-    async createComment(params: { workItemId: string; comment: string; author: string }): Promise<WorkItemComment | null> {
-      const result = await wlJson('comment', ['add', params.workItemId, '-c', params.comment, '-a', params.author]);
+    createComment(params: { workItemId: string; comment: string; author: string }): WorkItemComment | null {
+      const result = wlJsonSync('comment', ['add', params.workItemId, '-c', params.comment, '-a', params.author]);
       if (!result) return null;
       return {
         id: result.id ?? '',
