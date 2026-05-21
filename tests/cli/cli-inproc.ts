@@ -6,6 +6,19 @@ import { createPluginContext } from '../../src/cli-utils.js';
 // the database while background tasks still run.
 import throttler from '../../src/github-throttler.js';
 import * as path from 'path';
+import * as fs from 'fs';
+
+// Ensure the mock-bin directory (containing the `gh` mock) is on PATH
+// so that GitHub CLI commands invoked by the in-process CLI use the mock.
+try {
+  const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const mockBin = path.join(projectRoot, 'tests', 'cli', 'mock-bin');
+  if (fs.existsSync(mockBin) && !process.env.PATH?.includes(mockBin)) {
+    process.env.PATH = `${mockBin}:${process.env.PATH}`;
+  }
+} catch (_e) {
+  // ignore
+}
 
 // Import built-in commands (same set as src/cli.ts)
 import initCommand from '../../src/commands/init.js';
