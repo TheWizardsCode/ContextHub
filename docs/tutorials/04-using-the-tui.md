@@ -11,7 +11,7 @@ By the end of this tutorial you will be able to:
 - Launch and navigate the interactive TUI
 - Create, edit, and manage work items visually
 - Use keyboard shortcuts for efficient navigation
-- Access the built-in OpenCode AI assistant
+- Access the built-in Pi agent assistant
 
 ## Step 1: Launch the TUI
 
@@ -102,9 +102,9 @@ Use window-management shortcuts to move focus:
 | Ctrl+W, l | Focus the details pane |
 | Ctrl+W, p | Focus the previous pane |
 
-## Step 6: Use the OpenCode AI assistant
+## Step 6: Use the Pi agent assistant
 
-Press `O` (capital O) to open the OpenCode AI assistant dialog. The server starts automatically and a status indicator appears:
+Press `O` (capital O) to open the Pi agent assistant dialog. The server starts automatically and a status indicator appears:
 
 - `[-]` -- Server stopped
 - `[~]` -- Server starting
@@ -174,7 +174,7 @@ Press `q`, `Esc`, or `Ctrl+C` to quit the TUI. All changes made during the sessi
 | Delete item | d |
 | Search | / |
 | Move/reparent | m |
-| OpenCode AI | O |
+| Pi agent | O |
 | Switch panes | Ctrl+W, Ctrl+W |
 | Help | h |
 | Quit | q / Esc / Ctrl+C |

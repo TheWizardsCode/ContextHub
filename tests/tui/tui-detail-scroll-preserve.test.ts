@@ -136,8 +136,8 @@ function buildLayout(screen: any) {
     detail,
     metadataBox,
     updateFromItemMock,
-    opencodeDialog: agentPane.dialog,
-    opencodeText: agentPane.textarea,
+    agentDialog: agentPane.dialog,
+    agentText: agentPane.textarea,
     layout: {
       screen,
       listComponent: { getList: () => list, getFooter: () => footer },
@@ -218,7 +218,7 @@ describe('TUI detail-scroll preservation', () => {
 
     // Trigger the registered select handler to force a re-render of the same item
     const listBox = list as any;
-    const selectHandler = (listBox as any).__opencode_select;
+    const selectHandler = (listBox as any).__agent_select;
     if (typeof selectHandler === 'function') selectHandler(null, list.selected);
 
     // Since the same item is being re-rendered, setScroll should NOT be called again

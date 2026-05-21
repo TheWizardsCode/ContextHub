@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
-import initAutocomplete, { computeSuggestion } from '../../src/tui/opencode-autocomplete.js';
+import initAutocomplete, { computeSuggestion } from '../../src/tui/command-autocomplete.js';
 
-describe('opencode autocomplete widget integration', () => {
+describe('agent autocomplete widget integration', () => {
   it('updates suggestionHint when textarea value changes', () => {
     const textarea = { getValue: () => '/c' } as any;
     const suggestionHint = { setContent: vi.fn() } as any;

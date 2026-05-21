@@ -169,8 +169,8 @@ function buildLayout(screen: any) {
     detail,
     metadataBox,
     updateFromItemMock,
-    opencodeDialog: agentPane.dialog,
-    opencodeText: agentPane.textarea,
+    agentDialog: agentPane.dialog,
+    agentText: agentPane.textarea,
     layout: {
       screen,
       listComponent: { getList: () => list, getFooter: () => footer },

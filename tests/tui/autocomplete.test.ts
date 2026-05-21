@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { computeSuggestion } from '../../src/tui/opencode-autocomplete.js';
+import { computeSuggestion } from '../../src/tui/command-autocomplete.js';
 
-describe('opencode autocomplete computeSuggestion', () => {
+describe('agent autocomplete computeSuggestion', () => {
   const commands = ['/create', '/commit', '/help', '/open'];
 
   it('returns null for empty input', () => {

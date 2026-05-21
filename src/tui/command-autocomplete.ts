@@ -1,5 +1,5 @@
 /**
- * Extracted OpenCode autocomplete logic.
+ * Command autocomplete logic.
  * Provides a small, testable API for computing and rendering slash-command
  * suggestions for the TUI input widget.
  */

@@ -1,5 +1,5 @@
 /**
- * End-to-end integration tests for the OpenCode slash-autocomplete feature
+ * End-to-end integration tests for the Command slash-autocomplete feature
  * in compact mode.
  *
  * These tests verify that:
@@ -14,7 +14,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TuiController } from '../../src/tui/controller.js';
 import { MIN_INPUT_HEIGHT, FOOTER_HEIGHT, AVAILABLE_COMMANDS } from '../../src/tui/constants.js';
-import initAutocomplete from '../../src/tui/opencode-autocomplete.js';
+import initAutocomplete from '../../src/tui/command-autocomplete.js';
 
 // ── Blessed mock helpers ──────────────────────────────────────────────
 
@@ -272,7 +272,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
 
     await controller.start({});
 
-    // Open the opencode dialog via the 'o' key handler
+    // Open the agent dialog via the 'o' key handler
     const openHandler = getKeyHandler(screen.key, ['o', 'O']);
     if (openHandler) {
       await openHandler();
@@ -280,7 +280,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
 
     // The controller now uses a static import and always initializes the
     // autocomplete module. Verify it was wired correctly.
-    if (!(built.textarea as any).__opencode_autocomplete) {
+    if (!(built.textarea as any).__agent_autocomplete) {
       // In test environments the controller may not have fully initialized
       // the autocomplete module (e.g. if blessed mocks prevent start() from
       // reaching the wiring code). Wire it manually as a test-only fallback.
@@ -304,7 +304,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
           },
         }
       );
-      (built.textarea as any).__opencode_autocomplete = inst;
+      (built.textarea as any).__agent_autocomplete = inst;
     }
 
     return { ...built, controller, screen };
@@ -323,7 +323,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
 
   it('autocomplete module is wired onto the textarea', async () => {
     const { textarea } = await setup();
-    const inst = (textarea as any).__opencode_autocomplete;
+    const inst = (textarea as any).__agent_autocomplete;
     expect(inst).toBeTruthy();
     expect(typeof inst.updateFromValue).toBe('function');
     expect(typeof inst.applySuggestion).toBe('function');
@@ -333,7 +333,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
 
   it('typing a slash prefix triggers suggestion and shows the hint', async () => {
     const { textarea, suggestionHint } = await setup();
-    const inst = (textarea as any).__opencode_autocomplete;
+    const inst = (textarea as any).__agent_autocomplete;
     if (!inst) return; // skip if module not loadable in test env
 
     // Simulate typing '/c' — should match '/create', '/commit', '/close', etc.
@@ -350,7 +350,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
 
   it('dialog grows by 1 row when a suggestion is active', async () => {
     const { textarea, dialog } = await setup();
-    const inst = (textarea as any).__opencode_autocomplete;
+    const inst = (textarea as any).__agent_autocomplete;
     if (!inst) return;
 
     const baseHeight = dialog.height as number;
@@ -366,7 +366,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
 
   it('dialog shrinks back when suggestion is cleared', async () => {
     const { textarea, dialog } = await setup();
-    const inst = (textarea as any).__opencode_autocomplete;
+    const inst = (textarea as any).__agent_autocomplete;
     if (!inst) return;
 
     const baseHeight = dialog.height as number;
@@ -384,7 +384,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
 
   it('applySuggestion sets value with trailing space and hides the hint', async () => {
     const { textarea, suggestionHint } = await setup();
-    const inst = (textarea as any).__opencode_autocomplete;
+    const inst = (textarea as any).__agent_autocomplete;
     if (!inst) return;
 
     // Set up a suggestion
@@ -402,7 +402,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
 
   it('suggestionHint is repositioned below the textarea in compact mode', async () => {
     const { textarea, suggestionHint } = await setup();
-    const inst = (textarea as any).__opencode_autocomplete;
+    const inst = (textarea as any).__agent_autocomplete;
     if (!inst) return;
 
     // Activate suggestion to trigger layout
@@ -415,7 +415,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
 
   it('response pane bottom adjusts to account for the suggestion row', async () => {
     const { textarea, dialog } = await setup();
-    const inst = (textarea as any).__opencode_autocomplete;
+    const inst = (textarea as any).__agent_autocomplete;
     if (!inst) return;
 
     // Activate suggestion
@@ -429,7 +429,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
 
   it('exact command match does not show suggestion', async () => {
     const { textarea, suggestionHint } = await setup();
-    const inst = (textarea as any).__opencode_autocomplete;
+    const inst = (textarea as any).__agent_autocomplete;
     if (!inst) return;
 
     // Typing the exact command — no suggestion should appear
@@ -443,7 +443,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
 
   it('multi-line input does not trigger autocomplete', async () => {
     const { textarea } = await setup();
-    const inst = (textarea as any).__opencode_autocomplete;
+    const inst = (textarea as any).__agent_autocomplete;
     if (!inst) return;
 
     textarea.getValue = vi.fn(() => '/crea\nsomething else');
@@ -453,7 +453,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
 
   it('non-slash input does not trigger autocomplete', async () => {
     const { textarea } = await setup();
-    const inst = (textarea as any).__opencode_autocomplete;
+    const inst = (textarea as any).__agent_autocomplete;
     if (!inst) return;
 
     textarea.getValue = vi.fn(() => 'hello world');
@@ -463,7 +463,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
 
   it('suggestion hint text includes [Tab] instruction', async () => {
     const { textarea, suggestionHint } = await setup();
-    const inst = (textarea as any).__opencode_autocomplete;
+    const inst = (textarea as any).__agent_autocomplete;
     if (!inst) return;
 
     textarea.getValue = vi.fn(() => '/crea');
@@ -480,7 +480,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
 
   it('Tab handler accepts the suggestion when one is active', async () => {
     const { textarea } = await setup();
-    const inst = (textarea as any).__opencode_autocomplete;
+    const inst = (textarea as any).__agent_autocomplete;
     if (!inst) return;
 
     // Activate a suggestion
@@ -498,7 +498,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
 
   it('Tab handler is a no-op when no suggestion is active', async () => {
     const { textarea } = await setup();
-    const inst = (textarea as any).__opencode_autocomplete;
+    const inst = (textarea as any).__agent_autocomplete;
     if (!inst) return;
 
     // No suggestion active
@@ -516,7 +516,7 @@ describe('OpenCode autocomplete compact-mode integration', () => {
 
   it('Enter does not accept autocomplete — it always sends the prompt', async () => {
     const { textarea } = await setup();
-    const inst = (textarea as any).__opencode_autocomplete;
+    const inst = (textarea as any).__agent_autocomplete;
     if (!inst) return;
 
     // Activate a suggestion

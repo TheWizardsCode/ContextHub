@@ -1,11 +1,11 @@
 /**
- * Integration tests for TUI opencode layout resizing and textarea.style
+ * Integration tests for TUI agent layout resizing and textarea.style
  * object preservation through the TuiController.
  *
  * This covers:
  * - ensureOpencodeTextStyle() never replaces the style object
  * - clearOpencodeTextBorders() clears border keys in-place
- * - applyOpencodeCompactLayout() resizes the dialog and textarea correctly
+ * - applyAgentCompactLayout() resizes the dialog and textarea correctly
  * - updateOpencodeInputLayout() adjusts height based on content lines
  *
  * Related work item: WL-0MLR6RXK10A4PKH5
@@ -242,12 +242,12 @@ function getKeyHandler(mockFn: ReturnType<typeof vi.fn>, keyOrKeys: string | str
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
-describe('TUI opencode layout integration', () => {
+describe('TUI agent layout integration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('textarea.style object reference is preserved after opening opencode dialog', async () => {
+  it('textarea.style object reference is preserved after opening agent dialog', async () => {
     const root = makeItem('WL-LAYOUT-1');
     const screen = makeScreen();
     const { layout, textarea } = buildLayout(screen);
@@ -269,7 +269,7 @@ describe('TUI opencode layout integration', () => {
 
     await controller.start({});
 
-    // Open the opencode dialog via the 'o' key handler
+    // Open the agent dialog via the 'o' key handler
     const openHandler = getKeyHandler(screen.key, ['o', 'O']);
     if (openHandler) {
       await openHandler();
@@ -302,7 +302,7 @@ describe('TUI opencode layout integration', () => {
 
     await controller.start({});
 
-    // Open the opencode dialog which triggers applyOpencodeCompactLayout
+    // Open the agent dialog which triggers applyAgentCompactLayout
     const openHandler = getKeyHandler(screen.key, ['o', 'O']);
     if (openHandler) {
       await openHandler();
@@ -315,7 +315,7 @@ describe('TUI opencode layout integration', () => {
     expect(textarea.style.border.type).toBeUndefined();
   });
 
-  it('opencode dialog dimensions are set correctly in compact mode', async () => {
+  it('agent dialog dimensions are set correctly in compact mode', async () => {
     const root = makeItem('WL-LAYOUT-1');
     const screen = makeScreen();
     const { layout, dialog } = buildLayout(screen);
@@ -334,7 +334,7 @@ describe('TUI opencode layout integration', () => {
 
     await controller.start({});
 
-    // Open the opencode dialog
+    // Open the agent dialog
     const openHandler = getKeyHandler(screen.key, ['o', 'O']);
     if (openHandler) {
       await openHandler();
@@ -450,7 +450,7 @@ describe('TUI opencode layout integration', () => {
     expect(typeof textarea.style).toBe('object');
   });
 
-  it('opening opencode dialog does not throw even when style starts empty', async () => {
+  it('opening agent dialog does not throw even when style starts empty', async () => {
     const root = makeItem('WL-LAYOUT-1');
     const screen = makeScreen();
     const { layout, textarea } = buildLayout(screen);

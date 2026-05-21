@@ -160,7 +160,7 @@ describe('TUI integration: style preservation', () => {
       }),
     };
 
-    const opencodeClient = {
+    const piClient = {
       getStatus: () => ({ status: 'running', port: 9999 }),
       startServer: vi.fn().mockResolvedValue(undefined),
       stopServer: vi.fn(),
@@ -173,8 +173,8 @@ describe('TUI integration: style preservation', () => {
     // fragile module-cache tricks.
     // Import the module under test using ESM dynamic import so the test
     // environment's module resolution works correctly.
-    vi.doMock('../src/tui/opencode-client.js', () => ({
-      OpencodeClient: function() { return opencodeClient; },
+    vi.doMock('../src/tui/pi-adapter.js', () => ({
+      PiAdapter: function() { return piClient; },
     }));
 
     const mod = await import('../src/commands/tui');
@@ -207,7 +207,7 @@ describe('TUI integration: style preservation', () => {
     expect(created).toBeTruthy();
     const originalStyleRef = created.style;
 
-    // Find keypress handler registered by opencodeText.on('keypress', ...)
+    // Find keypress handler registered by agentText.on('keypress', ...)
     const kp = handlers['keypress'];
     expect(typeof kp).toBe('function');
 
@@ -334,15 +334,15 @@ describe('TUI integration: style preservation', () => {
       }),
     };
 
-    const opencodeClient = {
+    const piClient = {
       getStatus: () => ({ status: 'running', port: 9999 }),
       startServer: vi.fn().mockResolvedValue(undefined),
       stopServer: vi.fn(),
       sendPrompt: vi.fn().mockResolvedValue(undefined),
     };
 
-    vi.doMock('../src/tui/opencode-client.js', () => ({
-      OpencodeClient: function() { return opencodeClient; },
+    vi.doMock('../src/tui/pi-adapter.js', () => ({
+      PiAdapter: function() { return piClient; },
     }));
 
     const mod = await import('../src/commands/tui');
@@ -399,15 +399,15 @@ describe('TUI integration: style preservation', () => {
       }),
     };
 
-    const opencodeClient = {
+    const piClient = {
       getStatus: () => ({ status: 'running', port: 9999 }),
       startServer: vi.fn().mockResolvedValue(undefined),
       stopServer: vi.fn(),
       sendPrompt: vi.fn().mockResolvedValue(undefined),
     };
 
-    vi.doMock('../src/tui/opencode-client.js', () => ({
-      OpencodeClient: function() { return opencodeClient; },
+    vi.doMock('../src/tui/pi-adapter.js', () => ({
+      PiAdapter: function() { return piClient; },
     }));
 
     const mod = await import('../src/commands/tui');
@@ -433,7 +433,7 @@ describe('TUI integration: style preservation', () => {
       sendHandler.call(textarea, null, { name: 'enter' });
     }
     const updatedBoxCalls = boxMock?.calls || [];
-    const responsePaneIndex = updatedBoxCalls.findIndex((call: any[]) => call?.[0]?.label === ' opencode [esc] ');
+    const responsePaneIndex = updatedBoxCalls.findIndex((call: any[]) => call?.[0]?.label === ' agent [esc] ');
     const responsePane = responsePaneIndex >= 0 ? boxMock.results[responsePaneIndex]?.value : null;
     expect(responsePane).toBeTruthy();
 
@@ -477,15 +477,15 @@ describe('TUI integration: style preservation', () => {
       }),
     };
 
-    const opencodeClient = {
+    const piClient = {
       getStatus: () => ({ status: 'running', port: 9999 }),
       startServer: vi.fn().mockResolvedValue(undefined),
       stopServer: vi.fn(),
       sendPrompt: vi.fn().mockResolvedValue(undefined),
     };
 
-    vi.doMock('../src/tui/opencode-client.js', () => ({
-      OpencodeClient: function() { return opencodeClient; },
+    vi.doMock('../src/tui/pi-adapter.js', () => ({
+      PiAdapter: function() { return piClient; },
     }));
 
     const mod = await import('../src/commands/tui');
@@ -504,7 +504,7 @@ describe('TUI integration: style preservation', () => {
     if (sendHandler) sendHandler.call(textarea, null, { name: 'enter' });
 
     const updatedBoxCalls = boxMock?.calls || [];
-    const responsePaneIndex = updatedBoxCalls.findIndex((call: any[]) => call?.[0]?.label === ' opencode [esc] ');
+    const responsePaneIndex = updatedBoxCalls.findIndex((call: any[]) => call?.[0]?.label === ' agent [esc] ');
     const responsePane = responsePaneIndex >= 0 ? boxMock.results[responsePaneIndex]?.value : null;
     expect(responsePane).toBeTruthy();
     responsePane?.show?.();
@@ -577,14 +577,14 @@ describe('TUI integration: style preservation', () => {
       };
     });
 
-    const opencodeClient = {
+    const piClient = {
       getStatus: () => ({ status: 'running', port: 9999 }),
       startServer: vi.fn().mockResolvedValue(undefined),
       stopServer: vi.fn(),
       sendPrompt: vi.fn().mockResolvedValue(undefined),
     };
-    vi.doMock('../src/tui/opencode-client.js', () => ({
-      OpencodeClient: function() { return opencodeClient; },
+    vi.doMock('../src/tui/pi-adapter.js', () => ({
+      PiAdapter: function() { return piClient; },
     }));
 
     const mod = await import('../src/commands/tui');
@@ -642,15 +642,15 @@ describe('TUI integration: style preservation', () => {
       }),
     };
 
-    const opencodeClient = {
+    const piClient = {
       getStatus: () => ({ status: 'running', port: 9999 }),
       startServer: vi.fn().mockResolvedValue(undefined),
       stopServer: vi.fn(),
       sendPrompt: vi.fn().mockResolvedValue(undefined),
     };
 
-    vi.doMock('../src/tui/opencode-client.js', () => ({
-      OpencodeClient: function() { return opencodeClient; },
+    vi.doMock('../src/tui/pi-adapter.js', () => ({
+      PiAdapter: function() { return piClient; },
     }));
 
     const mod = await import('../src/commands/tui');
@@ -803,15 +803,15 @@ describe('TUI integration: style preservation', () => {
       }),
     };
 
-    const opencodeClient = {
+    const piClient = {
       getStatus: () => ({ status: 'running', port: 9999 }),
       startServer: vi.fn().mockResolvedValue(undefined),
       stopServer: vi.fn(),
       sendPrompt: vi.fn().mockResolvedValue(undefined),
     };
 
-    vi.doMock('../src/tui/opencode-client.js', () => ({
-      OpencodeClient: function() { return opencodeClient; },
+    vi.doMock('../src/tui/pi-adapter.js', () => ({
+      PiAdapter: function() { return piClient; },
     }));
 
     const mod = await import('../src/commands/tui');
@@ -857,15 +857,15 @@ describe('TUI integration: style preservation', () => {
       }),
     };
 
-    const opencodeClient = {
+    const piClient = {
       getStatus: () => ({ status: 'running', port: 9999 }),
       startServer: vi.fn().mockResolvedValue(undefined),
       stopServer: vi.fn(),
       sendPrompt: vi.fn().mockResolvedValue(undefined),
     };
 
-    vi.doMock('../src/tui/opencode-client.js', () => ({
-      OpencodeClient: function() { return opencodeClient; },
+    vi.doMock('../src/tui/pi-adapter.js', () => ({
+      PiAdapter: function() { return piClient; },
     }));
 
     const mod = await import('../src/commands/tui');

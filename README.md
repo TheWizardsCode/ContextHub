@@ -8,7 +8,7 @@ A lightweight, Git-friendly issue tracker designed for AI agents and development
 - **Git-Friendly Syncing**: JSONL format enables seamless team collaboration via Git with automatic conflict resolution
 - **Hierarchical Work Items**: Parent-child relationships for organizing epics, features, and tasks
 - **Plugin System**: Extend the CLI with custom commands (see [Plugin Guide](PLUGIN_GUIDE.md))
-- **AI Agent Integration**: Built-in OpenCode assistant with real-time streaming and interactive input
+- **AI Agent Integration**: Built-in Pi agent with real-time streaming, interactive agent chat pane, and agent-driven action palette. Also supports OpenCode integration for legacy workflows.
 - **Multi-Project Support**: Custom prefixes for issue IDs per project
 
 ## Installation
@@ -67,7 +67,9 @@ wl tui --perf         # Enable performance instrumentation and write diagnostics
 TUI_PROFILE=1 wl tui  # Enable profiling via environment variable
 ```
 
-Press `O` in the TUI to access the built-in OpenCode AI assistant. See [TUI.md](TUI.md) for controls, including quick stage filters (`Alt+T` for `intake_complete`, `Alt+P` for `plan_complete`) that exclude closed items.
+Press `O` in the TUI to access the agent chat pane. The TUI supports both the new Pi-based agent integration (natural language chat, action palette, and agent-driven flows) and the legacy OpenCode integration. See [TUI.md](TUI.md) for controls, including quick stage filters (`Alt+T` for `intake_complete`, `Alt+P` for `plan_complete`) that exclude closed items.
+
+For the Pi-based TUI design checklist, see [docs/ux/design-checklist.md](docs/ux/design-checklist.md).
 
 For freeze triage and profiling details (including `TUI_CHORD_DEBUG`, `strace`, and artifact locations), see [docs/TUI_PROFILING.md](docs/TUI_PROFILING.md).
 
@@ -118,7 +120,8 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 
 | Document | Description |
 |----------|-------------|
-| [docs/opencode-tui.md](docs/opencode-tui.md) | OpenCode TUI integration details |
+| [docs/opencode-tui.md](docs/opencode-tui.md) | OpenCode TUI integration details (legacy) |
+| [docs/ux/design-checklist.md](docs/ux/design-checklist.md) | Pi-based TUI design checklist |
 | [docs/tui-ci.md](docs/tui-ci.md) | Headless TUI testing for CI |
 | [docs/migrations.md](docs/migrations.md) | Database migration system |
 | [docs/prd/sort_order_PRD.md](docs/prd/sort_order_PRD.md) | Sort order product requirements |
@@ -133,7 +136,7 @@ Step-by-step guides for learning Worklog:
 | [Your First Work Item](docs/tutorials/01-your-first-work-item.md) | New users | Install, init, create, update, and close work items |
 | [Team Collaboration](docs/tutorials/02-team-collaboration.md) | Team leads | Git sync, GitHub mirroring, multi-user workflow |
 | [Building a Plugin](docs/tutorials/03-building-a-plugin.md) | Developers | Plugin API, database access, testing |
-| [Using the TUI](docs/tutorials/04-using-the-tui.md) | Any user | Interactive tree view, keyboard shortcuts, OpenCode AI |
+| [Using the TUI](docs/tutorials/04-using-the-tui.md) | Any user | Interactive tree view, keyboard shortcuts, Pi agent chat, action palette |
 | [Planning an Epic](docs/tutorials/05-planning-an-epic.md) | Project leads | Epics, child items, dependencies, wl next |
 
 See [docs/tutorials/README.md](docs/tutorials/README.md) for the full tutorial index.

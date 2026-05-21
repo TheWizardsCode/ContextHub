@@ -9,7 +9,7 @@ import { OverlaysComponent } from '../../src/tui/components/overlays.js';
 import { DialogsComponent } from '../../src/tui/components/dialogs.js';
 import { HelpMenuComponent } from '../../src/tui/components/help-menu.js';
 import { ModalDialogsComponent } from '../../src/tui/components/modals.js';
-import { AgentPaneComponent } from '../../src/tui/components/opencode-pane.js';
+import { AgentPaneComponent } from '../../src/tui/components/agent-pane.js';
 import { MIN_TREE_HEIGHT, MAX_TREE_HEIGHT, FOOTER_HEIGHT } from '../../src/tui/constants.js';
 
 // ---------------------------------------------------------------------------

@@ -117,11 +117,11 @@ describe('OpenCode prompt input modes', () => {
       confirmTextbox: vi.fn(async () => true),
       forceCleanup: vi.fn(),
     };
-    const opencodeText = makeTextarea();
+    const agentText = makeTextarea();
     const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
-      textarea: opencodeText,
+      textarea: agentText,
       suggestionHint: makeBox(),
       sendButton: makeBox(),
       cancelButton: makeBox(),
@@ -202,44 +202,44 @@ describe('OpenCode prompt input modes', () => {
 
     await controller.start({});
 
-    const inputHandler = (opencodeText as any)._listener as (ch: any, key: any) => void;
+    const inputHandler = (agentText as any)._listener as (ch: any, key: any) => void;
     expect(typeof inputHandler).toBe('function');
 
-    (opencodeText as any).screen = screen;
-    screen.focused = opencodeText;
-    (opencodeText as any).lpos = { yi: 0, yl: 10, xi: 0, xl: 10 };
-    (opencodeText as any).iheight = 0;
-    (opencodeText as any).itop = 0;
-    (opencodeText as any).ileft = 0;
-    (opencodeText as any)._clines = Object.assign([''], { ftor: [[0]] });
-    (opencodeText as any).strWidth = (value: string) => value.length;
-    (opencodeText as any)._getCoords = () => (opencodeText as any).lpos;
+    (agentText as any).screen = screen;
+    screen.focused = agentText;
+    (agentText as any).lpos = { yi: 0, yl: 10, xi: 0, xl: 10 };
+    (agentText as any).iheight = 0;
+    (agentText as any).itop = 0;
+    (agentText as any).ileft = 0;
+    (agentText as any)._clines = Object.assign([''], { ftor: [[0]] });
+    (agentText as any).strWidth = (value: string) => value.length;
+    (agentText as any)._getCoords = () => (agentText as any).lpos;
 
-    inputHandler.call(opencodeText, 'a', { name: 'a' });
-    inputHandler.call(opencodeText, 'b', { name: 'b' });
-    expect(opencodeText.getValue()).toBe('ab');
-    expect((opencodeText as any).__cursor_pos).toBe(2);
+    inputHandler.call(agentText, 'a', { name: 'a' });
+    inputHandler.call(agentText, 'b', { name: 'b' });
+    expect(agentText.getValue()).toBe('ab');
+    expect((agentText as any).__cursor_pos).toBe(2);
 
-    inputHandler.call(opencodeText, '', { name: 'n', ctrl: true });
-    expect((opencodeText as any).__input_mode).toBe('normal');
+    inputHandler.call(agentText, '', { name: 'n', ctrl: true });
+    expect((agentText as any).__input_mode).toBe('normal');
 
-    inputHandler.call(opencodeText, '', { name: 'h' });
-    expect(opencodeText.getValue()).toBe('ab');
-    expect((opencodeText as any).__cursor_pos).toBe(1);
+    inputHandler.call(agentText, '', { name: 'h' });
+    expect(agentText.getValue()).toBe('ab');
+    expect((agentText as any).__cursor_pos).toBe(1);
 
-    inputHandler.call(opencodeText, '', { name: 'l' });
-    expect((opencodeText as any).__cursor_pos).toBe(2);
+    inputHandler.call(agentText, '', { name: 'l' });
+    expect((agentText as any).__cursor_pos).toBe(2);
 
-    inputHandler.call(opencodeText, '', { name: 'i' });
-    expect((opencodeText as any).__input_mode).toBe('insert');
+    inputHandler.call(agentText, '', { name: 'i' });
+    expect((agentText as any).__input_mode).toBe('insert');
 
-    inputHandler.call(opencodeText, '', { name: 'left' });
-    expect(opencodeText.getValue()).toBe('ab');
-    expect((opencodeText as any).__cursor_pos).toBe(1);
+    inputHandler.call(agentText, '', { name: 'left' });
+    expect(agentText.getValue()).toBe('ab');
+    expect((agentText as any).__cursor_pos).toBe(1);
 
-    inputHandler.call(opencodeText, 'c', { name: 'c' });
-    expect(opencodeText.getValue()).toBe('acb');
-    expect((opencodeText as any).__cursor_pos).toBe(2);
+    inputHandler.call(agentText, 'c', { name: 'c' });
+    expect(agentText.getValue()).toBe('acb');
+    expect((agentText as any).__cursor_pos).toBe(2);
   });
 
   it('guards against duplicate input handling for a single key event', async () => {
@@ -288,11 +288,11 @@ describe('OpenCode prompt input modes', () => {
       confirmTextbox: vi.fn(async () => true),
       forceCleanup: vi.fn(),
     };
-    const opencodeText = makeTextarea();
+    const agentText = makeTextarea();
     const agentPane = {
       serverStatusBox: makeBox(),
       dialog: makeBox(),
-      textarea: opencodeText,
+      textarea: agentText,
       suggestionHint: makeBox(),
       sendButton: makeBox(),
       cancelButton: makeBox(),
@@ -373,14 +373,14 @@ describe('OpenCode prompt input modes', () => {
 
     await controller.start({});
 
-    const inputHandler = (opencodeText as any)._listener as (ch: any, key: any) => void;
+    const inputHandler = (agentText as any)._listener as (ch: any, key: any) => void;
     expect(typeof inputHandler).toBe('function');
 
     const key = { name: 'a' } as any;
-    inputHandler.call(opencodeText, 'a', key);
-    inputHandler.call(opencodeText, 'a', key);
+    inputHandler.call(agentText, 'a', key);
+    inputHandler.call(agentText, 'a', key);
 
-    expect(opencodeText.getValue()).toBe('a');
+    expect(agentText.getValue()).toBe('a');
   });
 
   it('auto-resizes prompt height based on wrapped visual lines', async () => {
@@ -429,12 +429,12 @@ describe('OpenCode prompt input modes', () => {
       confirmTextbox: vi.fn(async () => true),
       forceCleanup: vi.fn(),
     };
-    const opencodeText = makeTextarea();
-    const opencodeDialog = makeBox();
+    const agentText = makeTextarea();
+    const agentDialog = makeBox();
     const agentPane = {
       serverStatusBox: makeBox(),
-      dialog: opencodeDialog,
-      textarea: opencodeText,
+      dialog: agentDialog,
+      textarea: agentText,
       suggestionHint: makeBox(),
       sendButton: makeBox(),
       cancelButton: makeBox(),
@@ -515,22 +515,22 @@ describe('OpenCode prompt input modes', () => {
 
     await controller.start({});
 
-    const keypressHandler = (opencodeText as any).__keypress_handler as (ch: any, key: any) => void;
+    const keypressHandler = (agentText as any).__keypress_handler as (ch: any, key: any) => void;
     expect(typeof keypressHandler).toBe('function');
 
-    opencodeText.setValue('wrapped line');
-    (opencodeText as any)._clines = new Array(5).fill('line');
+    agentText.setValue('wrapped line');
+    (agentText as any)._clines = new Array(5).fill('line');
 
-    keypressHandler.call(opencodeText, 'a', { name: 'a' });
+    keypressHandler.call(agentText, 'a', { name: 'a' });
     await new Promise<void>(resolve => process.nextTick(resolve));
 
-    expect(opencodeDialog.height).toBe(7);
-    expect(opencodeText.height).toBe(5);
+    expect(agentDialog.height).toBe(7);
+    expect(agentText.height).toBe(5);
 
-    (opencodeText as any)._clines = new Array(20).fill('line');
-    keypressHandler.call(opencodeText, 'b', { name: 'b' });
+    (agentText as any)._clines = new Array(20).fill('line');
+    keypressHandler.call(agentText, 'b', { name: 'b' });
     await new Promise<void>(resolve => process.nextTick(resolve));
 
-    expect(opencodeText.setScrollPerc).toHaveBeenCalledWith(100);
+    expect(agentText.setScrollPerc).toHaveBeenCalledWith(100);
   });
 });

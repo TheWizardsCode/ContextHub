@@ -85,7 +85,7 @@ export function wait(ms: number): Promise<void> {
  *
  * These are thin wrappers around the controller's internal dialog helpers
  * and provide a stable surface so tests do not need to inspect or modify
- * private widget internals (for example, `__opencode_*` properties).
+ * private widget internals (for example, `__agent_*` properties).
  *
  * Example usage:
  *   const controller = new TuiController(ctx, { blessed: ctx.blessed });

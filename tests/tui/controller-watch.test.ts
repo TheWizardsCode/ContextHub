@@ -192,10 +192,10 @@ describe('TuiController - Database Watch', () => {
     };
 
     const createLayout = vi.fn(() => layout) as unknown as (options?: any) => any;
-    const opencodeCtorCalls: any[] = [];
+    const agentCtorCalls: any[] = [];
     class FakePiAdapter {
       constructor(options: any) {
-        opencodeCtorCalls.push(options);
+        agentCtorCalls.push(options);
       }
       getStatus() { return { status: 'stopped', port: 9999 }; }
       startServer() { return Promise.resolve(true); }

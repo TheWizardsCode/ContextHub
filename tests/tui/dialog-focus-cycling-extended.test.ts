@@ -105,8 +105,8 @@ function buildLayout(screen: any) {
     list,
     detail,
     metadataBox,
-    opencodeDialog: agentPane.dialog,
-    opencodeText: agentPane.textarea,
+    agentDialog: agentPane.dialog,
+    agentText: agentPane.textarea,
     layout: {
       screen,
       listComponent: { getList: () => list, getFooter: () => footer },

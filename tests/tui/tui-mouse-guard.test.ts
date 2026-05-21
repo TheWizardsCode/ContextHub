@@ -186,7 +186,7 @@ describe('TUI Mouse Guard', () => {
 
       // Register click handler matching the pattern from closeOverlay/detailOverlay
       const updateOverlayClickHandler = () => { closeUpdateDialog(); };
-      (updateOverlay as any).__opencode_click = updateOverlayClickHandler;
+      (updateOverlay as any).__agent_click = updateOverlayClickHandler;
       updateOverlay.on('click', updateOverlayClickHandler);
 
       // Simulate click

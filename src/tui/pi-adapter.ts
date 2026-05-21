@@ -193,7 +193,7 @@ class PiJsonParser {
 /**
  * PiAdapter wraps the `pi` CLI to provide agent interaction from the TUI.
  *
- * It maintains a single persistent `pi` process (similar to opencode's server)
+ * It maintains a single persistent `pi` process (similar to a long-running agent server)
  * and sends prompts via stdin. Responses are streamed via the JSON mode output.
  */
 export class PiAdapter {

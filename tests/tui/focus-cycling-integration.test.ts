@@ -162,8 +162,8 @@ function buildLayout(screen: any) {
     list,
     detail,
     metadataBox,
-    opencodeDialog: agentPane.dialog,
-    opencodeText: agentPane.textarea,
+    agentDialog: agentPane.dialog,
+    agentText: agentPane.textarea,
     layout: {
       screen,
       listComponent: { getList: () => list, getFooter: () => footer },
@@ -524,7 +524,7 @@ describe('TUI focus cycling integration', () => {
 
     await controller.start({});
 
-    // With opencode dialog hidden, there are 3 panes: list, metadata, detail
+    // With agent dialog hidden, there are 3 panes: list, metadata, detail
     // Cycle forward three times to wrap back to list
     simulateCtrlWChord(screen, 'w');
     expect(metadataBox.style.border.fg).toBe('green');

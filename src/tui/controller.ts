@@ -41,7 +41,7 @@ import { AVAILABLE_COMMANDS, MIN_INPUT_HEIGHT, MAX_INPUT_LINES, FOOTER_HEIGHT, M
   KEY_NAV_RIGHT, KEY_NAV_LEFT, KEY_TOGGLE_EXPAND, KEY_QUIT, KEY_ESCAPE, KEY_TOGGLE_HELP, KEY_CHORD_PREFIX, KEY_CHORD_FOLLOWUPS, KEY_OPEN_OPENCODE, KEY_OPEN_SEARCH,
   KEY_TAB, KEY_SHIFT_TAB, KEY_CS, KEY_ENTER, KEY_LINEFEED, KEY_J, KEY_K, KEY_COPY_ID, KEY_CREATE_ITEM, KEY_PARENT_PREVIEW, KEY_CLOSE_ITEM, KEY_UPDATE_ITEM, KEY_REFRESH, KEY_FIND_NEXT, KEY_FILTER_IN_PROGRESS, KEY_FILTER_OPEN, KEY_RUN_AUDIT, KEY_FILTER_BLOCKED, KEY_FILTER_NEEDS_REVIEW, KEY_FILTER_INTAKE_COMPLETED, KEY_FILTER_PLAN_COMPLETED, KEY_MENU_CLOSE, KEY_TOGGLE_DO_NOT_DELEGATE, KEY_TOGGLE_NEEDS_REVIEW, KEY_MOVE, KEY_REORDER_UP, KEY_REORDER_DOWN, KEY_DELEGATE, KEY_GITHUB_PUSH, KEY_FILTER_COPILOT } from './constants.js';
 import { theme } from '../theme.js';
-import { initAutocomplete, type AutocompleteInstance } from './opencode-autocomplete.js';
+import { initAutocomplete, type AutocompleteInstance } from './command-autocomplete.js';
 import createTextareaHelper from './textarea-helper.js';
 import { delegateWorkItem, type DelegateResult, type DelegateDb } from '../delegate-helper.js';
 import { resolveGithubConfig } from '../commands/github.js';
@@ -1211,7 +1211,7 @@ export class TuiController {
       try { (updateDialogComment as any).__comment_key = commentKeyHandler; (updateDialogComment as any).on('keypress', commentKeyHandler); } catch (_) {}
     }
 
-    // (attachment of per-widget ctrl-w handlers moved to after opencodeText is defined)
+    // (attachment of per-widget ctrl-w handlers moved to after agentText is defined)
 
     const handleUpdateDialogSelectionChange = (source?: 'status' | 'stage' | 'priority') => {
       updateDialogLastChanged = source ?? updateDialogLastChanged;
@@ -1253,13 +1253,13 @@ export class TuiController {
     const nextDialogOptions = layout.nextDialog?.options;
 
     const serverStatusBox = agentPane?.serverStatusBox;
-    const opencodeDialog = agentPane?.dialog;
-    const opencodeText = agentPane?.textarea;
+    const agentDialog = agentPane?.dialog;
+    const agentText = agentPane?.textarea;
     const suggestionHint = agentPane?.suggestionHint;
-    const opencodeSend = agentPane?.sendButton;
-    const opencodeCancel = agentPane?.cancelButton;
+    const agentSend = agentPane?.sendButton;
+    const agentCancel = agentPane?.cancelButton;
 
-    // Create ChordHandler and register Ctrl-W sequences now that opencodeText exists.
+    // Create ChordHandler and register Ctrl-W sequences now that agentText exists.
     // We preserve the small suppression flags used elsewhere (suppressNextP, lastCtrlWKeyHandled)
     // and provide the same timeout semantics as the legacy implementation.
     const chordHandler = new ChordHandler({ timeoutMs: 2000 });
@@ -1274,7 +1274,7 @@ export class TuiController {
       // Best-effort cleanup: widget lifecycle differs across blessed versions
       // and test doubles, so failures here should not block user input flow.
       try {
-        const widget = opencodeText as any;
+        const widget = agentText as any;
         if (typeof widget?.cancel === 'function') widget.cancel();
       } catch (_) {}
       try { (screen as any).grabKeys = false; } catch (_) {}
@@ -1328,11 +1328,11 @@ export class TuiController {
     chordHandler.register(['C-w', 'j'], () => {
       if (helpMenu.isVisible()) return;
       if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || isCreateDialogOpen()) return;
-      if (opencodeDialog.hidden) return;
-      if (!opencodePane || (opencodePane as any).hidden) return;
+      if (agentDialog.hidden) return;
+      if (!agentResponsePane || (agentResponsePane as any).hidden) return;
       clearCtrlWPending();
       // Focus the input textarea
-      (opencodeText as Pane).focus?.();
+      (agentText as Pane).focus?.();
       syncFocusFromScreen();
       screen.render();
       // Suppress widget-level typing for a short moment so the 'j' doesn't also insert
@@ -1344,11 +1344,11 @@ export class TuiController {
     chordHandler.register(['C-w', 'k'], () => {
       if (helpMenu.isVisible()) return;
       if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || isCreateDialogOpen()) return;
-      if (opencodeDialog.hidden) return;
-      if (!opencodePane || (opencodePane as any).hidden) return;
+      if (agentDialog.hidden) return;
+      if (!agentResponsePane || (agentResponsePane as any).hidden) return;
       endOpencodeTextReading();
       clearCtrlWPending();
-      (opencodePane as Pane).focus?.();
+      (agentResponsePane as Pane).focus?.();
       syncFocusFromScreen();
       screen.render();
       lastCtrlWKeyHandled = true;
@@ -1388,8 +1388,8 @@ export class TuiController {
       if (metadataPane) setBorderFocusStyle(metadataPane as unknown as Pane, focused);
     };
 
-    const setOpencodeBorderFocusStyle = (focused: boolean) => {
-      setBorderFocusStyle(opencodeDialog, focused);
+    const setAgentBorderFocusStyle = (focused: boolean) => {
+      setBorderFocusStyle(agentDialog, focused);
     };
 
     const paneForNode = (node: unknown): Pane | null => {
@@ -1397,8 +1397,8 @@ export class TuiController {
       if (node === list) return list as unknown as Pane;
       if (node === detail) return detail as unknown as Pane;
       if (metadataPane && node === metadataPane) return metadataPane as unknown as Pane;
-      if (node === opencodeDialog || node === opencodeText) return opencodeDialog as unknown as Pane;
-      if (node === opencodePane) return opencodeDialog as unknown as Pane;
+      if (node === agentDialog || node === agentText) return agentDialog as unknown as Pane;
+      if (node === agentResponsePane) return agentDialog as unknown as Pane;
       return null;
     };
     let paneFocusIndex = 0;
@@ -1413,7 +1413,7 @@ export class TuiController {
     const getFocusPanes = (): Pane[] => {
       const panes: Pane[] = [list as unknown as Pane, detail as unknown as Pane];
       if (metadataPane) panes.splice(1, 0, metadataPane as unknown as Pane);
-      if (!opencodeDialog.hidden) panes.push(opencodeDialog as unknown as Pane);
+      if (!agentDialog.hidden) panes.push(agentDialog as unknown as Pane);
       return panes;
     };
 
@@ -1444,8 +1444,8 @@ export class TuiController {
       lastPaneFocusIndex = paneFocusIndex;
       paneFocusIndex = clamped;
       const target = panes[clamped];
-      if (target === opencodeDialog) {
-        (opencodeText as Pane).focus?.();
+      if (target === agentDialog) {
+        (agentText as Pane).focus?.();
       } else {
         (target as Pane).focus?.();
       }
@@ -1462,14 +1462,14 @@ export class TuiController {
       setListBorderFocusStyle(active === list);
       setMetadataBorderFocusStyle(active === metadataPane);
       setDetailBorderFocusStyle(active === detail);
-      setOpencodeBorderFocusStyle(active === opencodeDialog);
+      setAgentBorderFocusStyle(active === agentDialog);
     };
 
     const applyFocusStylesForPane = (pane: any) => {
       setListBorderFocusStyle(pane === list);
       setMetadataBorderFocusStyle(pane === metadataPane);
       setDetailBorderFocusStyle(pane === detail);
-      setOpencodeBorderFocusStyle(pane === opencodeDialog);
+      setAgentBorderFocusStyle(pane === agentDialog);
     };
 
     let suppressNextP = false;  // Flag to suppress 'p' handler after Ctrl-W p
@@ -1495,36 +1495,36 @@ export class TuiController {
     let promptSpinnerIndex = 0;
     let promptSpinnerTimer: ReturnType<typeof setInterval> | null = null;
 
-    type OpencodeInputMode = 'insert' | 'normal';
-    let opencodeInputMode: OpencodeInputMode = 'insert';
-    let opencodeCursorIndex = 0;
-    let opencodeDesiredColumn: number | null = null;
+    type AgentInputMode = 'insert' | 'normal';
+    let agentInputMode: AgentInputMode = 'insert';
+    let agentCursorIndex = 0;
+    let agentDesiredColumn: number | null = null;
 
     const clampNumber = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
-    const getOpencodeValue = () => (opencodeText.getValue ? opencodeText.getValue() : '');
+    const getAgentValue = () => (agentText.getValue ? agentText.getValue() : '');
 
     const setOpencodeCursorIndex = (value: string, nextIndex: number) => {
-      opencodeCursorIndex = clampNumber(nextIndex, 0, value.length);
-      (opencodeText as any).__cursor_pos = opencodeCursorIndex;
+      agentCursorIndex = clampNumber(nextIndex, 0, value.length);
+      (agentText as any).__cursor_pos = agentCursorIndex;
     };
 
     const isPromptBusy = () => isWaitingForResponse || isLocalShellRunning;
 
-    const setOpencodeInputMode = (mode: OpencodeInputMode) => {
-      opencodeInputMode = mode;
-      (opencodeText as any).__input_mode = opencodeInputMode;
+    const setAgentInputMode = (mode: AgentInputMode) => {
+      agentInputMode = mode;
+      (agentText as any).__input_mode = agentInputMode;
       updateOpencodePromptLabel(isPromptBusy() ? 'waiting' : 'idle');
     };
 
     const updateOpencodePromptLabel = (state: 'idle' | 'waiting') => {
-      const modeSuffix = opencodeInputMode === 'normal' ? ' [normal]' : '';
+      const modeSuffix = agentInputMode === 'normal' ? ' [normal]' : '';
       let stateSuffix = '';
       if (state === 'waiting') {
         const spinner = promptSpinnerFrames[promptSpinnerIndex % promptSpinnerFrames.length] || promptSpinnerFrames[0];
         stateSuffix = ` (waiting ${spinner})`;
       }
-      opencodeDialog.setLabel(` prompt${stateSuffix} [esc]${modeSuffix} `);
+      agentDialog.setLabel(` prompt${stateSuffix} [esc]${modeSuffix} `);
     };
 
     const startPromptSpinner = () => {
@@ -1573,38 +1573,38 @@ export class TuiController {
     };
 
     const moveOpencodeCursorHorizontal = (delta: number) => {
-      const value = getOpencodeValue();
-      setOpencodeCursorIndex(value, opencodeCursorIndex + delta);
-      const { column } = getLineColumnFromIndex(value, opencodeCursorIndex);
-      opencodeDesiredColumn = column;
+      const value = getAgentValue();
+      setOpencodeCursorIndex(value, agentCursorIndex + delta);
+      const { column } = getLineColumnFromIndex(value, agentCursorIndex);
+      agentDesiredColumn = column;
       updateOpencodeCursor();
     };
 
     const moveOpencodeCursorVertical = (delta: number) => {
-      const value = getOpencodeValue();
-      const position = getLineColumnFromIndex(value, opencodeCursorIndex);
+      const value = getAgentValue();
+      const position = getLineColumnFromIndex(value, agentCursorIndex);
       const targetLine = position.line + delta;
-      const desiredColumn = opencodeDesiredColumn ?? position.column;
+      const desiredColumn = agentDesiredColumn ?? position.column;
       const nextIndex = getIndexFromLineColumn(value, targetLine, desiredColumn);
       setOpencodeCursorIndex(value, nextIndex);
       updateOpencodeCursor();
     };
 
-    const opencodeTextBaseUpdateCursor = (opencodeText as any)?._updateCursor?.bind(opencodeText);
-    const opencodeTextUpdateCursor = function(this: any, get?: boolean) {
+    const agentTextBaseUpdateCursor = (agentText as any)?._updateCursor?.bind(agentText);
+    const agentTextUpdateCursor = function(this: any, get?: boolean) {
       if (this.screen?.focused !== this) return;
       const lpos = get ? this.lpos : this._getCoords?.();
       if (!lpos || !this.screen?.program) {
-        opencodeTextBaseUpdateCursor?.(get);
+        agentTextBaseUpdateCursor?.(get);
         return;
       }
       if (!this._clines || !Array.isArray(this._clines) || !Array.isArray(this._clines.ftor)) {
-        opencodeTextBaseUpdateCursor?.(get);
+        agentTextBaseUpdateCursor?.(get);
         return;
       }
 
       const value = typeof this.value === 'string' ? this.value : '';
-      const { line, column } = getLineColumnFromIndex(value, opencodeCursorIndex);
+      const { line, column } = getLineColumnFromIndex(value, agentCursorIndex);
       const wrappedIndexes: number[] = this._clines.ftor[line] ?? [];
       const fallbackIndex = Math.min(line, Math.max(0, this._clines.length - 1));
       const wrapped = wrappedIndexes.length ? wrappedIndexes : [fallbackIndex];
@@ -1625,7 +1625,7 @@ export class TuiController {
       }
 
       if (wrappedIndex == null || wrappedIndex < 0) {
-        opencodeTextBaseUpdateCursor?.(get);
+        agentTextBaseUpdateCursor?.(get);
         return;
       }
 
@@ -1658,10 +1658,10 @@ export class TuiController {
         program.cup(cy, cx);
       }
     };
-    try { (opencodeText as any)._updateCursor = opencodeTextUpdateCursor; } catch (_) {}
+    try { (agentText as any)._updateCursor = agentTextUpdateCursor; } catch (_) {}
 
     const updateOpencodeCursor = () => {
-      try { (opencodeText as any)._updateCursor?.(); } catch (_) {}
+      try { (agentText as any)._updateCursor?.(); } catch (_) {}
       screen.render();
     };
 
@@ -1688,19 +1688,19 @@ export class TuiController {
     }
 
       // Hook into textarea input to update autocomplete
-    const opencodeTextKeypressHandler = function(this: any, _ch: any, _key: any) {
-        debugLog(`opencodeText keypress: _ch="${_ch}", key.name="${_key?.name}", key.ctrl=${_key?.ctrl}, lastCtrlWKeyHandled=${lastCtrlWKeyHandled}`);
+    const agentTextKeypressHandler = function(this: any, _ch: any, _key: any) {
+        debugLog(`agentText keypress: _ch="${_ch}", key.name="${_key?.name}", key.ctrl=${_key?.ctrl}, lastCtrlWKeyHandled=${lastCtrlWKeyHandled}`);
 
         // Suppress j/k when they were just handled as Ctrl-W commands
         if (lastCtrlWKeyHandled && ['j', 'k'].includes(_key?.name)) {
-          debugLog(`opencodeText: Suppressing '${_key?.name}' key (Ctrl-W command) - returning false`);
+          debugLog(`agentText: Suppressing '${_key?.name}' key (Ctrl-W command) - returning false`);
           return false;  // Consume the event
         }
 
         // ALSO check if a chord prefix (e.g. Ctrl-W) is pending — if so, consume
         // the follow-up j/k so it isn't inserted into the textarea.
         if (chordHandler.isPending() && ['j', 'k'].includes(_key?.name)) {
-          debugLog(`opencodeText: chordHandler is pending and key is ${_key?.name} - consuming event`);
+          debugLog(`agentText: chordHandler is pending and key is ${_key?.name} - consuming event`);
           return false;
         }
 
@@ -1740,9 +1740,9 @@ export class TuiController {
           updateOpencodeInputLayout();
         });
     };
-    try { (opencodeText as any).__keypress_handler = opencodeTextKeypressHandler; (opencodeText as any).on('keypress', opencodeTextKeypressHandler); } catch (_) {}
+    try { (agentText as any).__keypress_handler = agentTextKeypressHandler; (agentText as any).on('keypress', agentTextKeypressHandler); } catch (_) {}
 
-    const opencodeTextInputHandler = function(this: any, ch: any, key: KeyInfo | undefined) {
+    const agentTextInputHandler = function(this: any, ch: any, key: KeyInfo | undefined) {
       const value = typeof this.value === 'string' ? this.value : '';
       const name = key?.name;
       const hasCtrl = !!key?.ctrl;
@@ -1755,13 +1755,13 @@ export class TuiController {
       }
 
       if (hasCtrl && name === 'n') {
-        setOpencodeInputMode(opencodeInputMode === 'insert' ? 'normal' : 'insert');
+        setAgentInputMode(agentInputMode === 'insert' ? 'normal' : 'insert');
         return true;
       }
 
-      if (opencodeInputMode === 'normal') {
+      if (agentInputMode === 'normal') {
         if (name === 'i') {
-          setOpencodeInputMode('insert');
+          setAgentInputMode('insert');
           return true;
         }
         if (name === 'left' || name === 'h') {
@@ -1800,10 +1800,10 @@ export class TuiController {
         return true;
       }
       if (name === 'backspace') {
-        if (opencodeCursorIndex > 0) {
-          const nextValue = value.slice(0, opencodeCursorIndex - 1) + value.slice(opencodeCursorIndex);
-          setOpencodeCursorIndex(nextValue, opencodeCursorIndex - 1);
-          opencodeDesiredColumn = null;
+        if (agentCursorIndex > 0) {
+          const nextValue = value.slice(0, agentCursorIndex - 1) + value.slice(agentCursorIndex);
+          setOpencodeCursorIndex(nextValue, agentCursorIndex - 1);
+          agentDesiredColumn = null;
           this.setValue?.(nextValue);
           updateOpencodeInputLayout();
           screen.render();
@@ -1811,10 +1811,10 @@ export class TuiController {
         return true;
       }
       if (name === 'delete') {
-        if (opencodeCursorIndex < value.length) {
-          const nextValue = value.slice(0, opencodeCursorIndex) + value.slice(opencodeCursorIndex + 1);
-          setOpencodeCursorIndex(nextValue, opencodeCursorIndex);
-          opencodeDesiredColumn = null;
+        if (agentCursorIndex < value.length) {
+          const nextValue = value.slice(0, agentCursorIndex) + value.slice(agentCursorIndex + 1);
+          setOpencodeCursorIndex(nextValue, agentCursorIndex);
+          agentDesiredColumn = null;
           this.setValue?.(nextValue);
           updateOpencodeInputLayout();
           screen.render();
@@ -1829,20 +1829,20 @@ export class TuiController {
       const insertChar = isLinefeed ? '\n' : (typeof ch === 'string' ? ch : '');
       if (!insertChar) return;
       if (/^[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]$/.test(insertChar)) return;
-      const nextValue = value.slice(0, opencodeCursorIndex) + insertChar + value.slice(opencodeCursorIndex);
-      setOpencodeCursorIndex(nextValue, opencodeCursorIndex + insertChar.length);
-      opencodeDesiredColumn = null;
+      const nextValue = value.slice(0, agentCursorIndex) + insertChar + value.slice(agentCursorIndex);
+      setOpencodeCursorIndex(nextValue, agentCursorIndex + insertChar.length);
+      agentDesiredColumn = null;
       this.setValue?.(nextValue);
       updateOpencodeInputLayout();
       screen.render();
       return true;
     };
-    try { (opencodeText as any)._listener = opencodeTextInputHandler; } catch (_) {}
+    try { (agentText as any)._listener = agentTextInputHandler; } catch (_) {}
 
 
 
-    // Active opencode pane/process tracking
-    let opencodePane: any = null;
+    // Agent response pane/process tracking
+    let agentResponsePane: any = null;
 
     // Layout constants moved to src/tui/constants.ts
     const availableHeight = () => Math.max(10, (screen.height as number) - FOOTER_HEIGHT);
@@ -1850,21 +1850,21 @@ export class TuiController {
     const paneHeight = () => Math.max(6, Math.floor(availableHeight() * 0.5));
 
     const ensureOpencodeTextStyle = () => {
-      if (!opencodeText.style) {
-        (opencodeText as any).style = {};
+      if (!agentText.style) {
+        (agentText as any).style = {};
       }
     };
 
     const clearOpencodeTextBorders = () => {
       ensureOpencodeTextStyle();
-      if (opencodeText.style.border) {
-        Object.keys(opencodeText.style.border).forEach(key => {
-          delete opencodeText.style.border[key];
+      if (agentText.style.border) {
+        Object.keys(agentText.style.border).forEach(key => {
+          delete agentText.style.border[key];
         });
       }
-      if (opencodeText.style.focus?.border) {
-        Object.keys(opencodeText.style.focus.border).forEach(key => {
-          delete opencodeText.style.focus.border[key];
+      if (agentText.style.focus?.border) {
+        Object.keys(agentText.style.focus.border).forEach(key => {
+          delete agentText.style.focus.border[key];
         });
       }
     };
@@ -1876,13 +1876,13 @@ export class TuiController {
       const extra = hasSugg ? 1 : 0;
       const effectiveHeight = desiredHeight + extra;
 
-      opencodeDialog.height = effectiveHeight;
+      agentDialog.height = effectiveHeight;
 
-      (opencodeText as any).border = false;
-      opencodeText.top = 0;
-      opencodeText.left = 0;
-      opencodeText.width = '100%-2';
-      opencodeText.height = desiredHeight - 2;
+      (agentText as any).border = false;
+      agentText.top = 0;
+      agentText.left = 0;
+      agentText.width = '100%-2';
+      agentText.height = desiredHeight - 2;
       clearOpencodeTextBorders();
 
       // Position the suggestion hint just below the textarea, inside the
@@ -1894,9 +1894,9 @@ export class TuiController {
         suggestionHint.width = '100%-4';
       } catch (_) {}
 
-      if (opencodePane) {
-        opencodePane.bottom = effectiveHeight + FOOTER_HEIGHT;
-        opencodePane.height = paneHeight();
+      if (agentResponsePane) {
+        agentResponsePane.bottom = effectiveHeight + FOOTER_HEIGHT;
+        agentResponsePane.height = paneHeight();
       }
     };
 
@@ -1905,7 +1905,7 @@ export class TuiController {
     };
 
     const getOpencodeVisualLineCount = (value: string) => {
-      const clines = (opencodeText as any)._clines;
+      const clines = (agentText as any)._clines;
       if (Array.isArray(clines) && clines.length > 0) {
         return clines.length;
       }
@@ -1913,15 +1913,15 @@ export class TuiController {
     };
 
     function updateOpencodeInputLayout() {
-      if (!opencodeText.getValue) return;
-      const value = opencodeText.getValue();
+      if (!agentText.getValue) return;
+      const value = agentText.getValue();
       const visualLines = getOpencodeVisualLineCount(value);
       // Dialog height = content lines + 2 for borders
       const desiredHeight = calculateOpencodeDesiredHeight(visualLines);
       applyOpencodeCompactLayout(desiredHeight);
       const maxVisibleLines = Math.max(1, desiredHeight - 2);
-      if (visualLines > maxVisibleLines && typeof opencodeText.setScrollPerc === 'function') {
-        opencodeText.setScrollPerc(100);
+      if (visualLines > maxVisibleLines && typeof agentText.setScrollPerc === 'function') {
+        agentText.setScrollPerc(100);
       }
       screen.render();
     }
@@ -1929,32 +1929,32 @@ export class TuiController {
     async function openOpencodeDialog(initialInput?: string) {
       // Always use compact mode at bottom
       updateOpencodePromptLabel('idle');
-      opencodeDialog.top = undefined;  // Clear the center positioning
-      opencodeDialog.left = 0;  // Clear the center positioning
-      opencodeDialog.bottom = FOOTER_HEIGHT;
-      opencodeDialog.width = '100%';
-      opencodeDialog.height = MIN_INPUT_HEIGHT;
+      agentDialog.top = undefined;  // Clear the center positioning
+      agentDialog.left = 0;  // Clear the center positioning
+      agentDialog.bottom = FOOTER_HEIGHT;
+      agentDialog.width = '100%';
+      agentDialog.height = MIN_INPUT_HEIGHT;
       
       // Adjust button positioning for compact mode
       suggestionHint.hide();
-      opencodeSend.hide();  // Hide the send button
-      opencodeCancel.hide();  // Hide the old cancel button since it's in the label now
+      agentSend.hide();  // Hide the send button
+      agentCancel.hide();  // Hide the old cancel button since it's in the label now
       // Remove textarea border since dialog has the border
       applyOpencodeCompactLayout(MIN_INPUT_HEIGHT);
       
-      opencodeDialog.show();
-      opencodeDialog.setFront();
+      agentDialog.show();
+      agentDialog.setFront();
       
        // Clear previous contents and focus textbox so typed characters appear
-       try { if (typeof opencodeText.clearValue === 'function') opencodeText.clearValue(); } catch (_) {}
-       try { if (typeof opencodeText.setValue === 'function') opencodeText.setValue(''); } catch (_) {}
+       try { if (typeof agentText.clearValue === 'function') agentText.clearValue(); } catch (_) {}
+       try { if (typeof agentText.setValue === 'function') agentText.setValue(''); } catch (_) {}
        setOpencodeCursorIndex('', 0);
 
        // Reset autocomplete state
        if (autocompleteInstance) { autocompleteInstance.reset(); }
        suggestionHint.setContent('');
-       opencodeText.focus();
-       paneFocusIndex = getFocusPanes().indexOf(opencodeDialog);
+       agentText.focus();
+       paneFocusIndex = getFocusPanes().indexOf(agentDialog);
        applyFocusStyles();
        // Don't move cursor since there's no prompt anymore
        updateOpencodeInputLayout();
@@ -1962,8 +1962,8 @@ export class TuiController {
        // If caller provided an initial input (eg. "audit <id>"), populate
        // it so the user sees it immediately in the input box while the
        // OpenCode server starts in the background.
-       if (initialInput && typeof opencodeText.setValue === 'function') {
-         try { opencodeText.setValue(initialInput); } catch (_) {}
+       if (initialInput && typeof agentText.setValue === 'function') {
+         try { agentText.setValue(initialInput); } catch (_) {}
          try { setOpencodeCursorIndex(initialInput, initialInput.length); } catch (_) {}
          try { updateOpencodeInputLayout(); } catch (_) {}
        }
@@ -1976,7 +1976,7 @@ export class TuiController {
        await piAdapter.startServer();
 
        // Open the response pane automatically
-       ensureOpencodePane();
+       ensureAgentPane();
 
        screen.render();
     }
@@ -1985,8 +1985,8 @@ export class TuiController {
       // In compact mode, don't hide the dialog - it stays as the input bar
       // Just clear the input and keep it open
       endOpencodeTextReading();
-      try { if (typeof opencodeText.clearValue === 'function') opencodeText.clearValue(); } catch (_) {}
-      try { if (typeof opencodeText.setValue === 'function') opencodeText.setValue(''); } catch (_) {}
+      try { if (typeof agentText.clearValue === 'function') agentText.clearValue(); } catch (_) {}
+      try { if (typeof agentText.setValue === 'function') agentText.setValue(''); } catch (_) {}
       setOpencodeCursorIndex('', 0);
       paneFocusIndex = getFocusPanes().indexOf(list);
       applyFocusStyles();
@@ -1995,8 +1995,8 @@ export class TuiController {
 
     function closeOpencodePane() {
       endOpencodeTextReading();
-      if (opencodePane) {
-        opencodePane.hide();
+      if (agentResponsePane) {
+        agentResponsePane.hide();
       }
       paneFocusIndex = getFocusPanes().indexOf(list);
       applyFocusStyles();
@@ -2090,12 +2090,12 @@ export class TuiController {
     const initialStatus = piAdapter.getStatus();
     updateServerStatus(initialStatus.status, initialStatus.port);
     
-    function ensureOpencodePane(label = ' opencode [esc] ') {
+    function ensureAgentPane(label = ' agent [esc] ') {
       // In compact mode, adjust pane position to be above the input
-      const currentHeight = opencodeDialog.height || MIN_INPUT_HEIGHT;
+      const currentHeight = agentDialog.height || MIN_INPUT_HEIGHT;
       const bottomOffset = currentHeight + FOOTER_HEIGHT;
 
-      opencodePane = agentPane.ensureResponsePane({
+      agentResponsePane = agentPane.ensureResponsePane({
         bottom: bottomOffset,
         height: paneHeight(),
         label,
@@ -2107,18 +2107,18 @@ export class TuiController {
           try { closeOpencodePane(); } catch (_) {}
           // Return focus to the input textbox if it's visible so the
           // user can continue typing.
-          try { opencodeText.focus(); } catch (_) {}
+          try { agentText.focus(); } catch (_) {}
         },
       });
     }
 
     const appendLocalShellOutput = (chunk: string) => {
       localShellOutput += theme.tui.text.shellOutput(escapeBlessedTags(chunk));
-      if (opencodePane?.setContent) {
-        opencodePane.setContent(localShellOutput);
+      if (agentResponsePane?.setContent) {
+        agentResponsePane.setContent(localShellOutput);
       }
-      if (opencodePane?.setScrollPerc) {
-        opencodePane.setScrollPerc(100);
+      if (agentResponsePane?.setScrollPerc) {
+        agentResponsePane.setScrollPerc(100);
       }
       screen.render();
     };
@@ -2147,14 +2147,14 @@ export class TuiController {
         return;
       }
 
-      ensureOpencodePane(' shell [esc] ');
-      opencodePane.show();
-      opencodePane.setFront();
+      ensureAgentPane(' shell [esc] ');
+      agentResponsePane.show();
+      agentResponsePane.setFront();
       screen.render();
 
       localShellOutput = `${theme.tui.text.shellCommand(`$ ${escapeBlessedTags(command)}`)}\n`;
-      if (opencodePane?.setContent) opencodePane.setContent(localShellOutput);
-      if (opencodePane?.setScrollPerc) opencodePane.setScrollPerc(100);
+      if (agentResponsePane?.setContent) agentResponsePane.setContent(localShellOutput);
+      if (agentResponsePane?.setScrollPerc) agentResponsePane.setScrollPerc(100);
 
       isLocalShellRunning = true;
       startPromptSpinner();
@@ -2228,9 +2228,9 @@ export class TuiController {
         }
       }
 
-      ensureOpencodePane();
-      opencodePane.show();
-      opencodePane.setFront();
+      ensureAgentPane();
+      agentResponsePane.show();
+      agentResponsePane.setFront();
       screen.render();
 
       // Set flag to block new requests and update label
@@ -2244,9 +2244,9 @@ export class TuiController {
       try {
         await piAdapter.sendPrompt({
           prompt,
-          pane: opencodePane,
+          pane: agentResponsePane,
           indicator: null,
-          inputField: opencodeText,
+          inputField: agentText,
           getSelectedItemId: () => getSelectedItem()?.id ?? null,
           onComplete: () => {
             // Clear flag when response completes and restore label
@@ -2263,7 +2263,7 @@ export class TuiController {
         isWaitingForResponse = false;
         stopPromptSpinner();
         updateOpencodePromptLabel('idle');
-        opencodePane.pushLine(`{red-fg}Server communication error: ${err}{/red-fg}`);
+        agentResponsePane.pushLine(`{red-fg}Server communication error: ${err}{/red-fg}`);
         screen.render();
       } finally {
         try {
@@ -2278,86 +2278,86 @@ export class TuiController {
     }
 
     // Opencode dialog controls
-    const opencodeSendClickHandler = () => {
-      const prompt = opencodeText.getValue ? opencodeText.getValue() : '';
+    const agentSendClickHandler = () => {
+      const prompt = agentText.getValue ? agentText.getValue() : '';
       closeOpencodeDialog();
       runOpencode(prompt);
     };
-    try { (opencodeSend as any).__click_handler = opencodeSendClickHandler; opencodeSend.on('click', opencodeSendClickHandler); } catch (_) {}
+    try { (agentSend as any).__click_handler = agentSendClickHandler; agentSend.on('click', agentSendClickHandler); } catch (_) {}
 
     // Add Escape key handler to close the agent dialog
-    const opencodeTextEscapeHandler = function(this: any) {
+    const agentTextEscapeHandler = function(this: any) {
       endOpencodeTextReading();
-      opencodeDialog.hide();
-      if (opencodePane) {
-        opencodePane.hide();
+      agentDialog.hide();
+      if (agentResponsePane) {
+        agentResponsePane.hide();
       }
       list.focus();
       paneFocusIndex = getFocusPanes().indexOf(list);
       applyFocusStyles();
       screen.render();
     };
-    try { (opencodeText as any).__escape_key = opencodeTextEscapeHandler; opencodeText.key(KEY_ESCAPE, opencodeTextEscapeHandler); } catch (_) {}
+    try { (agentText as any).__escape_key = agentTextEscapeHandler; agentText.key(KEY_ESCAPE, agentTextEscapeHandler); } catch (_) {}
 
-    const opencodeTextCtrlCHandler = function(this: any) {
+    const agentTextCtrlCHandler = function(this: any) {
       if (isLocalShellRunning) {
         cancelLocalShell();
         return;
       }
     };
-    try { (opencodeText as any).__ctrl_c_key = opencodeTextCtrlCHandler; opencodeText.key(['C-c'], opencodeTextCtrlCHandler); } catch (_) {}
+    try { (agentText as any).__ctrl_c_key = agentTextCtrlCHandler; agentText.key(['C-c'], agentTextCtrlCHandler); } catch (_) {}
 
     // Accept Ctrl+S to send (keep for backward compatibility)
-    const opencodeTextCSHandler = function(this: any) {
+    const agentTextCSHandler = function(this: any) {
       const prompt = this.getValue ? this.getValue() : '';
       closeOpencodeDialog();
       runOpencode(prompt);
     };
-    try { (opencodeText as any).__ctrl_shift_i_key = opencodeTextCSHandler; opencodeText.key(KEY_CS, opencodeTextCSHandler); } catch (_) {}
+    try { (agentText as any).__ctrl_shift_i_key = agentTextCSHandler; agentText.key(KEY_CS, agentTextCSHandler); } catch (_) {}
 
      // Accept Enter to send, Ctrl+Enter for newline
-    const opencodeTextEnterHandler = function(this: any) {
+    const agentTextEnterHandler = function(this: any) {
         const prompt = this.getValue ? this.getValue() : '';
         closeOpencodeDialog();
         runOpencode(prompt);
       };
-       try { (opencodeText as any).__enter_key = opencodeTextEnterHandler; opencodeText.key(KEY_ENTER, opencodeTextEnterHandler); } catch (_) {}
+       try { (agentText as any).__enter_key = agentTextEnterHandler; agentText.key(KEY_ENTER, agentTextEnterHandler); } catch (_) {}
 
     // Tab accepts the autocomplete suggestion (conventional shell/IDE behavior).
     // When no suggestion is active Tab is a no-op (prevents blessed from
     // inserting whitespace into the prompt).
-    const opencodeTextTabHandler = function(this: any) {
+    const agentTextTabHandler = function(this: any) {
       if (applyCommandSuggestion(this)) {
         return;
       }
       // Consume the event so blessed doesn't insert a tab character
       return false;
     };
-    try { (opencodeText as any).__tab_key = opencodeTextTabHandler; opencodeText.key(KEY_TAB, opencodeTextTabHandler); } catch (_) {}
+    try { (agentText as any).__tab_key = agentTextTabHandler; agentText.key(KEY_TAB, agentTextTabHandler); } catch (_) {}
 
       // Suppress j/k keys when they're part of Ctrl-W commands
-       const opencodeTextJHandler = function(this: any) {
-         debugLog(`opencodeText.key(['j']): lastCtrlWKeyHandled=${lastCtrlWKeyHandled}`);
+       const agentTextJHandler = function(this: any) {
+         debugLog(`agentText.key(['j']): lastCtrlWKeyHandled=${lastCtrlWKeyHandled}`);
          if (lastCtrlWKeyHandled) {
-           debugLog(`opencodeText.key: Suppressing 'j' key (Ctrl-W command) - returning false`);
+           debugLog(`agentText.key: Suppressing 'j' key (Ctrl-W command) - returning false`);
            return false;
          }
        };
-    try { (opencodeText as any).__j_key = opencodeTextJHandler; opencodeText.key(KEY_J, opencodeTextJHandler); } catch (_) {}
+    try { (agentText as any).__j_key = agentTextJHandler; agentText.key(KEY_J, agentTextJHandler); } catch (_) {}
 
-      const opencodeTextKHandler = function(this: any) {
-        debugLog(`opencodeText.key(['k']): lastCtrlWKeyHandled=${lastCtrlWKeyHandled}`);
+      const agentTextKHandler = function(this: any) {
+        debugLog(`agentText.key(['k']): lastCtrlWKeyHandled=${lastCtrlWKeyHandled}`);
         if (lastCtrlWKeyHandled) {
-          debugLog(`opencodeText.key: Suppressing 'k' key (Ctrl-W command) - returning false`);
+          debugLog(`agentText.key: Suppressing 'k' key (Ctrl-W command) - returning false`);
           return false;
         }
       };
-    try { (opencodeText as any).__k_key = opencodeTextKHandler; opencodeText.key(KEY_K, opencodeTextKHandler); } catch (_) {}
+    try { (agentText as any).__k_key = agentTextKHandler; agentText.key(KEY_K, agentTextKHandler); } catch (_) {}
     
     // Initialize the extracted autocomplete module and wire it to the
     // textarea widget. The module is statically imported at the top of
     // this file so it is always available.
-    autocompleteInstance = initAutocomplete({ textarea: opencodeText, suggestionHint }, {
+    autocompleteInstance = initAutocomplete({ textarea: agentText, suggestionHint }, {
       availableCommands: AVAILABLE_COMMANDS,
       onSuggestionChange: (_active: boolean) => {
         // Re-run the compact layout so the dialog grows/shrinks to
@@ -2366,18 +2366,18 @@ export class TuiController {
       },
     });
     // Expose the instance on the widget for tests that inspect it.
-    (opencodeText as any).__autocomplete_instance = autocompleteInstance;
+    (agentText as any).__autocomplete_instance = autocompleteInstance;
 
 
     // Pressing Escape while the dialog (or any child) is focused should
     // close both the input dialog and the response pane so the user returns
     // to the main list. Use a named handler so it can be removed during
     // cleanup in tests that repeatedly create/destroy dialogs.
-    const opencodeDialogEscapeHandler = () => {
+    const agentDialogEscapeHandler = () => {
       endOpencodeTextReading();
-      opencodeDialog.hide();
-      if (opencodePane) {
-        opencodePane.hide();
+      agentDialog.hide();
+      if (agentResponsePane) {
+        agentResponsePane.hide();
       }
       // Prevent the global Escape handler from acting on the same
       // keypress and exiting the TUI.
@@ -2387,7 +2387,7 @@ export class TuiController {
       applyFocusStyles();
       screen.render();
     };
-    try { (opencodeDialog as any).__escape_key = opencodeDialogEscapeHandler; opencodeDialog.key(KEY_ESCAPE, opencodeDialogEscapeHandler); } catch (_) {}
+    try { (agentDialog as any).__escape_key = agentDialogEscapeHandler; agentDialog.key(KEY_ESCAPE, agentDialogEscapeHandler); } catch (_) {}
 
 
     state.listLines = [];
@@ -4004,11 +4004,11 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     const detailFocusHandler = () => { paneFocusIndex = getFocusPanes().indexOf(detail); applyFocusStylesForPane(detail); };
     try { (detail as any).__focus_target = detailFocusHandler; detail.on('focus', detailFocusHandler); } catch (_) {}
 
-    const opencodeDialogFocusHandler = () => { paneFocusIndex = getFocusPanes().indexOf(opencodeDialog); applyFocusStylesForPane(opencodeDialog); };
-    try { (opencodeDialog as any).__focus_target = opencodeDialogFocusHandler; opencodeDialog.on('focus', opencodeDialogFocusHandler); } catch (_) {}
+    const agentDialogFocusHandler = () => { paneFocusIndex = getFocusPanes().indexOf(agentDialog); applyFocusStylesForPane(agentDialog); };
+    try { (agentDialog as any).__focus_target = agentDialogFocusHandler; agentDialog.on('focus', agentDialogFocusHandler); } catch (_) {}
 
-    const opencodeTextFocusHandler = () => { paneFocusIndex = getFocusPanes().indexOf(opencodeDialog); applyFocusStylesForPane(opencodeDialog); };
-    try { (opencodeText as any).__focus_target = opencodeTextFocusHandler; opencodeText.on('focus', opencodeTextFocusHandler); } catch (_) {}
+    const agentTextFocusHandler = () => { paneFocusIndex = getFocusPanes().indexOf(agentDialog); applyFocusStylesForPane(agentDialog); };
+    try { (agentText as any).__focus_target = agentTextFocusHandler; agentText.on('focus', agentTextFocusHandler); } catch (_) {}
 
     // NOTE: List click-to-select is handled via screen.on('mouse') below,
     // because blessed routes mouse events to list *item* child elements
@@ -4305,11 +4305,11 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         closeCreateDialog();
         return;
       }
-      if (!opencodeDialog.hidden) {
+      if (!agentDialog.hidden) {
         closeOpencodeDialog();
         return;
       }
-      if (opencodePane) {
+      if (agentResponsePane) {
         closeOpencodePane();
         return;
       }
@@ -4366,16 +4366,16 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       await openOpencodeDialog(`audit ${item.id}`);
       try { showToast(`Running audit: ${item.id}`); } catch (_) {}
       try {
-        if (opencodePane && typeof (opencodePane as any).pushLine === 'function') {
-          (opencodePane as any).pushLine(`{yellow-fg}Running audit for ${item.id}...{/}`);
-        } else if (opencodePane && typeof (opencodePane as any).setContent === 'function') {
-          const prev = typeof opencodePane.getContent === 'function' ? (opencodePane.getContent() || '') : '';
-          try { opencodePane.setContent(`${prev}\n{yellow-fg}Running audit for ${item.id}...{/}`); } catch (_) {}
+        if (agentResponsePane && typeof (agentResponsePane as any).pushLine === 'function') {
+          (agentResponsePane as any).pushLine(`{yellow-fg}Running audit for ${item.id}...{/}`);
+        } else if (agentResponsePane && typeof (agentResponsePane as any).setContent === 'function') {
+          const prev = typeof agentResponsePane.getContent === 'function' ? (agentResponsePane.getContent() || '') : '';
+          try { agentResponsePane.setContent(`${prev}\n{yellow-fg}Running audit for ${item.id}...{/}`); } catch (_) {}
         }
       } catch (_) {}
       try { screen.render(); } catch (_) {}
 
-      try { if (typeof opencodeText.setValue === 'function') opencodeText.setValue(`audit ${item.id}`); } catch (_) {}
+      try { if (typeof agentText.setValue === 'function') agentText.setValue(`audit ${item.id}`); } catch (_) {}
       try { updateOpencodeInputLayout(); } catch (_) {}
       closeOpencodeDialog();
       await runOpencode(`audit ${item.id}`);
@@ -4476,14 +4476,14 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         // so reordering remains reliable across environments.
         if (key?.shift && key?.name === 'up') {
           if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
-          if (!opencodeDialog.hidden) return;
+          if (!agentDialog.hidden) return;
           if (state.moveMode) return;
           reorderSelectedItemByOffset(-1);
           return false;
         }
         if (key?.shift && key?.name === 'down') {
           if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
-          if (!opencodeDialog.hidden) return;
+          if (!agentDialog.hidden) return;
           if (state.moveMode) return;
           reorderSelectedItemByOffset(1);
           return false;
@@ -4531,7 +4531,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           registerAppKey(screen,KEY_TAB, () => {
             if (helpMenu.isVisible()) return;
             if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || isCreateDialogOpen()) return;
-            if (opencodeDialog && !opencodeDialog.hidden) return;
+            if (agentDialog && !agentDialog.hidden) return;
             cycleFocus(1);
             screen.render();
           });
@@ -4540,7 +4540,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
           registerAppKey(screen,KEY_SHIFT_TAB, () => {
             if (helpMenu.isVisible()) return;
             if (!detailModal.hidden || !nextDialog.hidden || !closeDialog.hidden || !updateDialog.hidden || isCreateDialogOpen()) return;
-            if (opencodeDialog && !opencodeDialog.hidden) return;
+            if (agentDialog && !agentDialog.hidden) return;
             cycleFocus(-1);
             screen.render();
           });
@@ -4755,7 +4755,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       if (key?.shift) return;
       // Guard: suppress when overlays are visible or in move mode
       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
-      if (!opencodeDialog.hidden) return;
+      if (!agentDialog.hidden) return;
       if (state.moveMode) return;
 
       const item = getSelectedItem();
@@ -4945,7 +4945,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     registerAppKey(screen,KEY_MOVE, () => {
       // Guard: only active when no overlays are visible
       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
-      if (!opencodeDialog.hidden) return;
+      if (!agentDialog.hidden) return;
 
       const item = getSelectedItem();
       if (!item) {
@@ -5037,14 +5037,14 @@ const visible = buildVisible();
 
     registerAppKey(screen,KEY_REORDER_UP, () => {
       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
-      if (!opencodeDialog.hidden) return;
+      if (!agentDialog.hidden) return;
       if (state.moveMode) return;
       reorderSelectedItemByOffset(-1);
     });
 
     registerAppKey(screen,KEY_REORDER_DOWN, () => {
       if (!detailModal.hidden || helpMenu.isVisible() || !closeDialog.hidden || !updateDialog.hidden || !nextDialog.hidden || isCreateDialogOpen()) return;
-      if (!opencodeDialog.hidden) return;
+      if (!agentDialog.hidden) return;
       if (state.moveMode) return;
       reorderSelectedItemByOffset(1);
     });
@@ -5109,16 +5109,16 @@ const visible = buildVisible();
         // Immediate user feedback: toast and a short banner in the response pane
         try { showToast(`Running audit: ${item.id}`); } catch (_) {}
         try {
-          if (opencodePane && typeof (opencodePane as any).pushLine === 'function') {
-            (opencodePane as any).pushLine(`{yellow-fg}Running audit for ${item.id}...{/}`);
-          } else if (opencodePane && typeof (opencodePane as any).setContent === 'function') {
-            const prev = typeof opencodePane.getContent === 'function' ? (opencodePane.getContent() || '') : '';
-            try { opencodePane.setContent(`${prev}\n{yellow-fg}Running audit for ${item.id}...{/}`); } catch (_) {}
+          if (agentResponsePane && typeof (agentResponsePane as any).pushLine === 'function') {
+            (agentResponsePane as any).pushLine(`{yellow-fg}Running audit for ${item.id}...{/}`);
+          } else if (agentResponsePane && typeof (agentResponsePane as any).setContent === 'function') {
+            const prev = typeof agentResponsePane.getContent === 'function' ? (agentResponsePane.getContent() || '') : '';
+            try { agentResponsePane.setContent(`${prev}\n{yellow-fg}Running audit for ${item.id}...{/}`); } catch (_) {}
           }
         } catch (_) {}
         try { screen.render(); } catch (_) {}
 
-        try { if (typeof opencodeText.setValue === 'function') opencodeText.setValue(`audit ${item.id}`); } catch (_) {}
+        try { if (typeof agentText.setValue === 'function') agentText.setValue(`audit ${item.id}`); } catch (_) {}
         try { updateOpencodeInputLayout(); } catch (_) {}
         closeOpencodeDialog();
         await runOpencode(`audit ${item.id}`);
@@ -5489,7 +5489,7 @@ const visible = buildVisible();
     try { (nextDialogOptions as any).__select_item = nextDialogOptionsSelectItemHandler; nextDialogOptions.on('select item', nextDialogOptionsSelectItemHandler); } catch (_) {}
 
     const nextDialogOptionsNHandler = () => { if (nextDialog.hidden) return; advanceNextRecommendation(); };
-    try { (nextDialogOptions as any).__opencode_key_n = nextDialogOptionsNHandler; nextDialogOptions.key(KEY_FIND_NEXT, nextDialogOptionsNHandler); } catch (_) {}
+    try { (nextDialogOptions as any).__agent_key_n = nextDialogOptionsNHandler; nextDialogOptions.key(KEY_FIND_NEXT, nextDialogOptionsNHandler); } catch (_) {}
 
     const nextDialogOptionsEscapeHandler = () => { closeNextDialog(); };
     try { (nextDialogOptions as any).__escape_key = nextDialogOptionsEscapeHandler; nextDialogOptions.key(KEY_ESCAPE, nextDialogOptionsEscapeHandler); } catch (_) {}

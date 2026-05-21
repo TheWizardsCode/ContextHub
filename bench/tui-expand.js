@@ -89,7 +89,7 @@ function createLayout() {
     },
     helpMenu: { isVisible: () => false, show: () => {}, hide: () => {} },
     modalDialogs: { selectList: async () => 0, editTextarea: async () => null, confirmTextbox: async () => false, forceCleanup: () => {} },
-    opencodeUi: { serverStatusBox: make(), dialog: make(), textarea: make(), suggestionHint: make(), sendButton: make(), cancelButton: make(), ensureResponsePane: () => make() },
+    agentUi: { serverStatusBox: make(), dialog: make(), textarea: make(), suggestionHint: make(), sendButton: make(), cancelButton: make(), ensureResponsePane: () => make() },
     nextDialog: { overlay: make(), dialog: make(), close: make(), text: make(), options: make() },
   };
   return layout;

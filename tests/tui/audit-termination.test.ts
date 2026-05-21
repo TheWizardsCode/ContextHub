@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { TuiController } from '../../src/tui/controller.js';
 
 // Minimal widget factories copied from existing controller tests to keep
-// this test focused on opencode lifecycle assertions.
+// this test focused on agent lifecycle assertions.
 const makeBox = () => ({
   hidden: true,
   width: 0,
@@ -71,7 +71,7 @@ const makeScreen = () => {
 };
 
 describe('TUI audit lifecycle', () => {
-  it('stops the opencode child when assistant requests input (no orphaned child)', async () => {
+  it('stops the agent child when assistant requests input (no orphaned child)', async () => {
     const screen = makeScreen() as any;
     screen._keys = [] as Array<{ keys: string[] | string; handler: (...args: any[]) => any }>;
     screen.key = vi.fn((keys: string[] | string, handler: (...args: any[]) => any) => {

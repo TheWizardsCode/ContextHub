@@ -8,7 +8,8 @@ This document describes the interactive terminal UI shipped as the `wl tui` (or 
 - It can show all items, or be limited to in-progress items via `--in-progress`.
 - The details pane uses the same human formatter as the CLI so what you see in the TUI matches `wl show --format full`.
 - The metadata pane (top-right) shows Status, Stage, Priority, Risk, Effort, Comments, Tags, Assignee, Created, Updated, and GitHub link for the selected item. `Risk` and `Effort` always appear; when a field has no value a placeholder `—` is shown.
-- Integrated OpenCode AI assistant for intelligent work item management and coding assistance.
+- Integrated Pi agent chat pane with natural language interaction and action palette for agent-driven flows.
+- Legacy OpenCode AI assistant still available for backward compatibility.
 
 ## Controls
 
@@ -20,9 +21,9 @@ This document describes the interactive terminal UI shipped as the `wl tui` (or 
 - Space — toggle expand/collapse
 - Mouse — click to select and scroll
 - q / Esc / Ctrl-C — quit
-- Ctrl+W, Ctrl+W — cycle focus between list, details, and OpenCode
+- Ctrl+W, Ctrl+W — cycle focus between list, details, and agent chat
 - Ctrl+W, h / l — focus list or details
-- Ctrl+W, k / j — move focus between OpenCode response and input
+- Ctrl+W, k / j — move focus between agent response and input
 - Ctrl+W, p — focus previous pane
 
 ### Work Item Actions
@@ -57,21 +58,31 @@ While in move mode:
 
 Other action keys (close, update, search, filters, etc.) are suppressed during move mode to prevent accidental edits.
 
-### OpenCode AI Integration
+### Pi Agent Chat Pane
 
-- **O** (capital O) — open OpenCode AI assistant dialog
+- **O** (capital O) — open Pi agent chat dialog
   - Ctrl+S — send prompt
   - Enter — accept autocomplete or add newline
   - Escape — close dialog
+  - Natural language processing for work item commands (list, create, update, close, show, next, search, claim, comment)
   - Prefix `!` to run a local shell command in the project root
   - Ctrl+C cancels a running `!` command without closing the prompt
   - Command shows in orange; output streams in white
-- When OpenCode is active:
+- When agent chat is active:
   - Response appears in bottom pane
   - Input fields appear when agent needs information
   - q or click [x] to close response pane
 
-## OpenCode Features
+### Action Palette
+
+- The action palette provides quick access to common agent-driven flows
+- Select an action to trigger a wl CLI command
+- Available actions: wl next, wl list, wl create, wl update, wl close, wl search, wl show, wl claim
+- Use keyboard navigation to select actions and Enter to execute
+
+## Legacy OpenCode Integration
+
+> **Note:** The OpenCode integration is available for backward compatibility but is being phased out in favor of the Pi-based agent chat pane.
 
 ### Auto-start Server
 
@@ -84,7 +95,7 @@ The OpenCode server automatically starts when you press O. Server status indicat
 
 ### Slash Commands
 
-Type `/` in the OpenCode dialog to see available commands:
+Type `/` in the agent dialog to see available commands:
 
 - `/help` — Get help with OpenCode
 - `/edit` — Edit files with AI assistance
@@ -95,7 +106,7 @@ Type `/` in the OpenCode dialog to see available commands:
 
 ### `/create` — Create Work Items from the TUI
 
-The `/create` command lets you create Worklog work items directly from the OpenCode prompt without leaving the TUI.
+The `/create` command lets you create Worklog work items directly from the agent prompt without leaving the TUI.
 
 **Usage:**
 
@@ -129,7 +140,7 @@ The new item is created at root level by default. To make it a child of a specif
 - All user input is passed via heredoc-style escaping to prevent shell injection.
 - Changes to permission scope (e.g., allowing edits to existing items) require Producer approval.
 
-For the full command specification, see `.opencode/command/create.md`. For the parent feature context, see Add /create OpenCode command for creating work items from TUI (WL-0MLSDIRLA0BXRCDB).
+For the full command specification, see `.opencode/command/create.md` (legacy OpenCode integration). For the parent feature context, see Add /create agent command for creating work items from TUI (WL-0MLSDIRLA0BXRCDB).
 
 ### Interactive Sessions
 
@@ -138,7 +149,7 @@ For the full command specification, see `.opencode/command/create.md`. For the p
 - Interactive input when agents need clarification
 - Tool usage highlighted in colors
 
-For detailed OpenCode documentation, see `docs/opencode-tui.md`.
+For detailed legacy OpenCode documentation, see `docs/opencode-tui.md`.
 
 ## Usage
 

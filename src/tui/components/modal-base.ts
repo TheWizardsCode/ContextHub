@@ -262,8 +262,8 @@ export class ModalDialogBase {
         const low = k.toLowerCase();
         if (low === 'tab' || low === 'c-i') asAny.__tab_handler = wrapped;
         if (low === 's-tab' || low === 'c-s-i' || (low.includes('s') && low.includes('tab'))) asAny.__stab_handler = wrapped;
-        if (low === 'enter') asAny.__opencode_key_enter = wrapped;
-        if (low === 'escape' || low === 'esc') asAny.__opencode_key_escape = wrapped;
+        if (low === 'enter') asAny.__agent_key_enter = wrapped;
+        if (low === 'escape' || low === 'esc') asAny.__agent_key_escape = wrapped;
       };
       if (typeof keys === 'string') setNamed(keys);
       else if (Array.isArray(keys)) keys.forEach(setNamed);

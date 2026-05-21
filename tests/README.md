@@ -81,7 +81,7 @@ Tests are spread across two top-level directories:
 - **`filter.test.ts`** — Item filtering
 - **`move-mode.test.ts`** — Move/reparent mode
 - **`autocomplete.test.ts`** / **`autocomplete-widget.test.ts`** — Autocomplete
-- **`opencode-*.test.ts`** — OpenCode integration, SSE, prompt, sessions, layout
+- **`agent-*.test.ts`** — Agent integration, prompt, sessions, layout
 - **`persistence*.test.ts`** — TUI persistence
 - **`focus-cycling-integration.test.ts`** — Focus cycling
 - **`widget-create-destroy*.test.ts`** — Widget lifecycle
@@ -98,8 +98,8 @@ Tests are spread across two top-level directories:
 - **`doctor-dependency-check.test.ts`** / **`doctor-status-stage.test.ts`** — `wl doctor` checks
 - **`comment-update.test.ts`** — Comment update operations
 - **`validator.test.ts`** — Additional validation tests
-- **`tui-integration.test.ts`** / **`tui-opencode-integration.test.ts`** — TUI integration
-- **`tui-opencode-sse-handler.test.ts`** — OpenCode SSE handler
+- **`tui-integration.test.ts`** — TUI integration
+- **`tui-opencode-sse-handler.test.ts`** — OpenCode SSE handler (legacy)
 - **`tui-chords.test.ts`** — Keyboard chord handling
 - **`tui-style.test.ts`** — TUI styling
 

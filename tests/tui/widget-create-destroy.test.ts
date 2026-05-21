@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import blessed from 'blessed';
-import { AgentPaneComponent } from '../../src/tui/components/opencode-pane.js';
+import { AgentPaneComponent } from '../../src/tui/components/agent-pane.js';
 import { ModalDialogsComponent } from '../../src/tui/components/modals.js';
 import { DialogsComponent } from '../../src/tui/components/dialogs.js';
 import { HelpMenuComponent } from '../../src/tui/components/help-menu.js';

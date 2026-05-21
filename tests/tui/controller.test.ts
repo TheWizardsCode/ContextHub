@@ -231,7 +231,7 @@ describe('TuiController', () => {
     // invoke the handler and assert prompt was sent
     await auditKey!.handler();
     expect(capturedPrompt).toBe('audit WL-AUDIT-1');
-    // The opencode textarea should have been populated immediately with the prompt
+    // The agent textarea should have been populated immediately with the prompt
     expect(layout.agentPane.textarea.setValue).toHaveBeenCalled();
     const setCalls = (layout.agentPane.textarea.setValue as any).mock.calls.map((c: any[]) => c[0]);
     expect(setCalls).toContain('audit WL-AUDIT-1');
@@ -239,7 +239,7 @@ describe('TuiController', () => {
     expect((ctx as any).toast?.show).toBeUndefined();
     // Our controller routes showToast to ctx.toast.show if present; the layout's toastComponent.show is used
     expect(layout.agentPane.ensureResponsePane).toHaveBeenCalled();
-    // The fake opencode pane returned by ensureResponsePane has pushLine mocked; verify it was called
+    // The fake agent pane returned by ensureResponsePane has pushLine mocked; verify it was called
     const pane = layout.agentPane.ensureResponsePane();
     expect((pane.pushLine as any).mock.calls.length).toBeGreaterThanOrEqual(0);
     // Expect the TUI path to attempt to stop the server when input is requested
@@ -397,12 +397,12 @@ describe('TuiController', () => {
     });
     expect(auditKey).toBeTruthy();
 
-    // invoke the handler and assert the opencode response pane was used
+    // invoke the handler and assert the agent response pane was used
     await auditKey!.handler();
     expect(layout.agentPane.ensureResponsePane).toHaveBeenCalled();
   });
 
-  it('populates opencode input immediately even when server start is slow', async () => {
+  it('populates agent input immediately even when server start is slow', async () => {
     const screen = makeScreen() as any;
     screen._keys = [] as Array<{ keys: string[] | string; handler: (...args: any[]) => any }>;
     screen.key = vi.fn((keys: string[] | string, handler: (...args: any[]) => any) => {
