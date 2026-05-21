@@ -45,7 +45,8 @@ cat test-timings.json | jq '.rows | sort_by(-.durationMs) | .[0:20]'
 ```
 
 Related work:
-- `WL-0MLLHF9GX1VYY0H0` — parent epic for the collector and report.
+- `WL-0MLLG2HTE1CJ71LZ` — parent epic for reducing test-suite runtime and preventing CI timeouts.
+- `WL-0MLLHF9GX1VYY0H0` — direct child task that implements the collector and report under that epic.
 - `WL-0MLIGVY450A3936K` — audit/precedent item used to validate the 5s threshold and output shape.
 
 ## Test Organization
