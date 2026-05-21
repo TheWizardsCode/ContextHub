@@ -18,15 +18,35 @@ npm run test:coverage
 npm run test:tui
 
 # Generate per-test timings
-```bash
-# You can generate a JSON report of per-test timings which helps
-# identify slow tests to refactor or move to integration-only runs.
-# Run the timings collector (writes test-timings.json at repo root)
 npm run test:timings
+# or
+node ./scripts/test-timings.cjs
+```
 
-# Open test-timings.json for the slowest tests and candidates to move
+## Per-test timings
+
+Use `npm run test:timings` (or `node ./scripts/test-timings.cjs`) to run Vitest with the JSON reporter and write `test-timings.json` at the repository root.
+
+The report shape is intentionally small:
+
+```json
+{
+  "generatedAt": "2026-05-21T12:00:00.000Z",
+  "rows": [
+    { "file": "tests/cli/status.test.ts", "title": "reports status output", "durationMs": 842 }
+  ]
+}
+```
+
+Use `durationMs` to find slow tests. As a rule of thumb, treat tests over 5s as candidates to refactor, mock more aggressively, or move to integration-only coverage.
+
+```bash
 cat test-timings.json | jq '.rows | sort_by(-.durationMs) | .[0:20]'
 ```
+
+Related work:
+- `WL-0MLLHF9GX1VYY0H0` — parent epic for the collector and report.
+- `WL-0MLIGVY450A3936K` — audit/precedent item used to validate the 5s threshold and output shape.
 
 ## Test Organization
 
