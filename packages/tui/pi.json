@@ -1,0 +1,10 @@
+{
+  "name": "tui",
+  "version": "0.1.0",
+  "description": "Pi package for the ContextHub TUI",
+  "main": "../src/tui/index.js",
+  "scripts": {},
+  "keywords": [],
+  "author": "OpenAI-Agent",
+  "license": "MIT"
+}

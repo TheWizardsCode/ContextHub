@@ -747,6 +747,8 @@ describe('TUI integration: style preservation', () => {
     const firstCall = spawnMock.mock.results[0]?.value;
     firstCall._emitStdout(JSON.stringify(payload));
     firstCall._emit('close', 0);
+    // Allow the async runNextWorkItems to complete and update the UI
+    await new Promise(r => setTimeout(r, 10));
 
     const listMock = (blessedMock as any).list?.mock;
     const listCalls = listMock?.calls || [];
@@ -769,6 +771,8 @@ describe('TUI integration: style preservation', () => {
     expect(secondCall).toBeTruthy();
     secondCall._emitStdout(JSON.stringify(payload));
     secondCall._emit('close', 0);
+    // Allow the async runNextWorkItems to complete
+    await new Promise(r => setTimeout(r, 10));
 
     const updatedCalls = boxMock?.results
       ?.map((res: any) => res?.value?.setContent?.mock?.calls || [])

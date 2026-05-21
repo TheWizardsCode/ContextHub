@@ -10,6 +10,7 @@ import blessed from 'blessed';
 import { performance } from 'perf_hooks';
 import { spawn } from 'child_process';
 import { copyToClipboard } from '../clipboard.js';
+import { runWlCommand, setCustomSpawn } from '../wl-integration/spawn.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { humanFormatWorkItem, formatTitleOnlyTUI } from '../commands/helpers.js';
@@ -151,6 +152,10 @@ export class TuiController {
     // If not provided, fall back to the real blessed import.
     const blessedImpl = this.deps.blessed ?? (this.ctx as any).blessed ?? blessed;
     const spawnImpl: (...args: any[]) => ChildProcess = this.deps.spawn ?? (this.ctx as any).spawn ?? spawn;
+    // Inject custom spawn into the wl integration layer for testability.
+    if (this.deps.spawn) {
+      setCustomSpawn(this.deps.spawn);
+    }
     const fsImpl = this.deps.fs ?? fs;
     const fsAsync = (fsImpl as typeof fs).promises ?? fs.promises;
     const pathImpl = this.deps.path ?? path;
@@ -3754,50 +3759,41 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       return false;
     }
 
-    function runNextWorkItems(targetIndex: number) {
+    async function runNextWorkItems(targetIndex: number) {
       if (nextWorkItemRunning) return;
       nextWorkItemRunning = true;
-      const count = Math.max(1, targetIndex + 1);
-      const args = ['next', '--json', '--number', String(count)];
-      if (options.prefix) {
-        args.push('--prefix', options.prefix);
-      }
-      const child = spawnImpl('wl', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-      let stdout = '';
-      let stderr = '';
-
-      child.stdout?.on('data', (chunk) => {
-        stdout += chunk.toString();
-      });
-
-      child.stderr?.on('data', (chunk) => {
-        stderr += chunk.toString();
-      });
-
-      child.on('error', (err) => {
-        nextWorkItemRunning = false;
-        const message = `Error running wl next: ${String(err)}`;
-        setNextDialogContent(`{red-fg}${message}{/red-fg}`);
-      });
-
-      child.on('close', (code) => {
-        nextWorkItemRunning = false;
-        if (code !== 0) {
-          const errText = stderr.trim() || `wl next exited with code ${code}`;
-          setNextDialogContent(`{red-fg}${errText}{/red-fg}`);
+      try {
+        const count = Math.max(1, targetIndex + 1);
+        const args = ['next', '--json', '--number', String(count)];
+        if (options.prefix) {
+          args.push('--prefix', options.prefix);
+        }
+        // Use the wl CLI integration layer instead of raw spawn.
+        // This provides timeout handling, JSON parsing, retry support,
+        // and event emission for the UI.
+        const result = await runWlCommand(args, { timeoutMs: 10_000 });
+        if (result.error) {
+          nextWorkItemRunning = false;
+          setNextDialogContent(`{red-fg}wl next failed: ${result.error.message}{/red-fg}`);
           return;
         }
 
         let payload: any = null;
         try {
-          payload = JSON.parse(stdout.trim());
-        } catch (err) {
-          setNextDialogContent(`{red-fg}Failed to parse wl next output{/red-fg}`);
-          return;
+          payload = result.json;
+        } catch {
+          try {
+            payload = JSON.parse(result.stdout.trim());
+          } catch {
+            setNextDialogContent(`{red-fg}Failed to parse wl next output{/red-fg}`);
+            nextWorkItemRunning = false;
+            return;
+          }
         }
 
         if (!payload?.success) {
           setNextDialogContent(`{red-fg}wl next did not return a result{/red-fg}`);
+          nextWorkItemRunning = false;
           return;
         }
 
@@ -3812,16 +3808,22 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
         if (nextWorkItems.length === 0) {
           const reason = payload.reason ? `\nReason: ${payload.reason}` : '';
           setNextDialogContent(`No work item found.${reason}`);
+          nextWorkItemRunning = false;
           return;
         }
 
         if (targetIndex >= nextWorkItems.length) {
           renderNextDialogItem(nextWorkItem, nextWorkItemReason, 'No further recommendations available.');
+          nextWorkItemRunning = false;
           return;
         }
 
         setNextWorkItemFromIndex(targetIndex);
-      });
+        nextWorkItemRunning = false;
+      } catch (err) {
+        nextWorkItemRunning = false;
+        setNextDialogContent(`{red-fg}Error running wl next: ${String(err)}{/red-fg}`);
+      }
     }
 
     function advanceNextRecommendation() {
