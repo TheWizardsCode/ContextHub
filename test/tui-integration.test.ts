@@ -378,7 +378,7 @@ describe('TUI integration: style preservation', () => {
     expect(listWidget?.focus).toHaveBeenCalled();
   });
 
-  it('moves focus between OpenCode response and input with Ctrl+W then k/j', async () => {
+  it('moves focus between Pi agent response and input with Ctrl+W then k/j', async () => {
     vi.resetModules();
     let savedAction: Function | null = null;
     const program: any = {
@@ -418,12 +418,12 @@ describe('TUI integration: style preservation', () => {
 
     const boxMock = (blessedMock as any).box?.mock;
     const boxCalls = boxMock?.calls || [];
-    const opencodeDialogIndex = boxCalls.findIndex((call: any[]) => call?.[0]?.label === ' Run opencode ');
-    const opencodeDialog = opencodeDialogIndex >= 0 ? boxMock.results[opencodeDialogIndex]?.value : null;
+    const agentPaneIndex = boxCalls.findIndex((call: any[]) => call?.[0]?.label === ' agent [esc] ');
+    const agentPane = agentPaneIndex >= 0 ? boxMock.results[agentPaneIndex]?.value : null;
 
     const textarea = (blessedMock as any)._lastTextarea;
 
-    // Open OpenCode dialog and response pane (force creation)
+    // Open Pi agent chat pane and response pane (force creation)
     const ensureHandler = handlers['screen-key:o'] || handlers['screen-key:O'];
     if (ensureHandler) {
       await ensureHandler(null, { name: 'o' });
@@ -456,7 +456,7 @@ describe('TUI integration: style preservation', () => {
     expect(textarea?.focus).toHaveBeenCalled();
   });
 
-  it('releases screen grabKeys when leaving opencode textarea via Ctrl+W then k', async () => {
+  it('releases screen grabKeys when leaving agent textarea via Ctrl+W then k', async () => {
     vi.resetModules();
     let savedAction: Function | null = null;
     const program: any = {

@@ -75,3 +75,6 @@ jobs:
 
       - name: Run full test suite
         run: npm test
+
+      - name: Run E2E agent flow tests
+        run: npx vitest run tests/e2e/agent-flow.test.ts

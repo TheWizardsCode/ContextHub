@@ -201,6 +201,27 @@ Running subsets of tests
 - Run TUI/headless tests (CI helper):
   - `npm run test:tui`
 
+## E2E Tests
+
+End-to-end tests live under `tests/e2e/`. They exercise the real `wl` CLI and verify agent-driven flows:
+
+```bash
+# Run all E2E tests
+npx vitest run tests/e2e/
+
+# Run a specific E2E test file
+npx vitest run tests/e2e/agent-flow.test.ts
+```
+
+The E2E tests in `tests/e2e/agent-flow.test.ts` verify:
+
+- Chat pane natural language routing (list, next, show, create, update, close)
+- Action palette with default actions and filtering
+- `runWl` CLI integration layer with real `wl` commands
+- Full chat pane to wl CLI pipeline for create/update flows
+
+These tests are also gated in CI via `.github/workflows/install-and-smoke-test.yml`.
+
 Guidance for authors
 
 - Mark legitimately long simulations with the `describeLong` / `itLong` helpers from `tests/test-utils.ts`. This ensures CI remains fast and reliable while still allowing engineers to run exhaustive load simulations locally when needed.

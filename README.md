@@ -8,7 +8,7 @@ A lightweight, Git-friendly issue tracker designed for AI agents and development
 - **Git-Friendly Syncing**: JSONL format enables seamless team collaboration via Git with automatic conflict resolution
 - **Hierarchical Work Items**: Parent-child relationships for organizing epics, features, and tasks
 - **Plugin System**: Extend the CLI with custom commands (see [Plugin Guide](PLUGIN_GUIDE.md))
-- **AI Agent Integration**: Built-in Pi agent with real-time streaming, interactive agent chat pane, and agent-driven action palette. Also supports OpenCode integration for legacy workflows.
+- **AI Agent Integration**: Built-in Pi agent with real-time streaming, interactive agent chat pane, and agent-driven action palette.
 - **Multi-Project Support**: Custom prefixes for issue IDs per project
 
 ## Installation
@@ -67,7 +67,7 @@ wl tui --perf         # Enable performance instrumentation and write diagnostics
 TUI_PROFILE=1 wl tui  # Enable profiling via environment variable
 ```
 
-Press `O` in the TUI to access the agent chat pane. The TUI supports both the new Pi-based agent integration (natural language chat, action palette, and agent-driven flows) and the legacy OpenCode integration. See [TUI.md](TUI.md) for controls, including quick stage filters (`Alt+T` for `intake_complete`, `Alt+P` for `plan_complete`) that exclude closed items.
+Press `O` in the TUI to access the Pi agent chat pane. The Pi-based TUI provides natural language chat, an action palette with agent-driven flows, and all work item operations through the `wl` CLI. See [TUI.md](TUI.md) for controls, including quick stage filters (`Alt+T` for `intake_complete`, `Alt+P` for `plan_complete`) that exclude closed items.
 
 For the Pi-based TUI design checklist, see [docs/ux/design-checklist.md](docs/ux/design-checklist.md).
 
@@ -120,7 +120,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 
 | Document | Description |
 |----------|-------------|
-| [docs/opencode-tui.md](docs/opencode-tui.md) | OpenCode TUI integration details (legacy) |
+| [docs/opencode-to-pi-migration.md](docs/opencode-to-pi-migration.md) | Migration guide from OpenCode to Pi framework |
 | [docs/ux/design-checklist.md](docs/ux/design-checklist.md) | Pi-based TUI design checklist |
 | [docs/tui-ci.md](docs/tui-ci.md) | Headless TUI testing for CI |
 | [docs/migrations.md](docs/migrations.md) | Database migration system |

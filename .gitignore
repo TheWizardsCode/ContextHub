@@ -147,8 +147,8 @@ Worklog Specific Ignores
 
 !.worklog/config.yaml
 
-# opencode temporary files
-.opencode/tmp/
+# opencode temporary files and directories
+.opencode/
 .tmp
 
 # Stress test logs (scripts/stress-file-lock.sh output)
