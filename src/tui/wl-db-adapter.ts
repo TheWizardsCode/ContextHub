@@ -75,9 +75,10 @@ export interface WlDbInterface {
  */
 function wlJsonSync(cmd: string, args: string[] = []): any {
   try {
-    const result = spawnSync('wl', [...args, '--json'], {
+    const result = spawnSync('wl', [cmd, ...args, '--json'], {
       cwd: process.cwd(),
       timeout: 15000,
+      maxBuffer: 20 * 1024 * 1024,
       env: { ...process.env, WL_TUI_MODE: '1' },
       encoding: 'utf-8',
     });
@@ -115,6 +116,28 @@ function toWorkItem(raw: any): WorkItem {
     effort: raw.effort ?? '',
     needsProducerReview: raw.needsProducerReview ?? false,
   };
+}
+
+function extractWorkItem(result: any): any | null {
+  if (!result) return null;
+  if (Array.isArray(result)) return result[0] ?? null;
+  return result.workItem ?? result.workItems?.[0] ?? result.item ?? result;
+}
+
+function extractWorkItems(result: any): any[] {
+  if (!result) return [];
+  if (Array.isArray(result)) return result;
+  if (Array.isArray(result.workItems)) return result.workItems;
+  if (result.workItem) return [result.workItem];
+  return [];
+}
+
+function extractComments(result: any): any[] {
+  if (!result) return [];
+  if (Array.isArray(result)) return result;
+  if (Array.isArray(result.comments)) return result.comments;
+  if (result.comment) return [result.comment];
+  return [];
 }
 
 /**
@@ -202,28 +225,27 @@ export function createWlDbAdapter(): WlDbInterface {
     list(query: Record<string, unknown> = {}): WorkItem[] {
       const args = buildListArgs(query);
       const result = wlJsonSync('list', args);
-      if (!result || !Array.isArray(result)) return [];
-      return result.map(toWorkItem);
+      return extractWorkItems(result).map(toWorkItem);
     },
 
     get(id: string): WorkItem | null {
       const result = wlJsonSync('show', [id]);
-      if (!result) return null;
-      return toWorkItem(result);
+      const item = extractWorkItem(result);
+      return item ? toWorkItem(item) : null;
     },
 
     create(item: Partial<WorkItem>): WorkItem | null {
       const args = buildCreateArgs(item);
       const result = wlJsonSync('create', args);
-      if (!result) return null;
-      return toWorkItem(result);
+      const created = extractWorkItem(result);
+      return created ? toWorkItem(created) : null;
     },
 
     update(id: string, updates: Record<string, unknown>): WorkItem | null {
       const args = buildUpdateArgs(id, updates);
       const result = wlJsonSync('update', args);
-      if (!result) return null;
-      return toWorkItem(result);
+      const updated = extractWorkItem(result);
+      return updated ? toWorkItem(updated) : null;
     },
 
     getPrefix(): string | undefined {
@@ -234,8 +256,9 @@ export function createWlDbAdapter(): WlDbInterface {
 
     getCommentsForWorkItem(workItemId: string): WorkItemComment[] {
       const result = wlJsonSync('comment', ['list', workItemId]);
-      if (!result || !Array.isArray(result)) return [];
-      return result.map((c: any) => ({
+      const comments = extractComments(result);
+      if (comments.length === 0) return [];
+      return comments.map((c: any) => ({
         id: c.id ?? '',
         workItemId,
         comment: c.comment ?? c.body ?? '',
@@ -246,13 +269,14 @@ export function createWlDbAdapter(): WlDbInterface {
 
     createComment(params: { workItemId: string; comment: string; author: string }): WorkItemComment | null {
       const result = wlJsonSync('comment', ['add', params.workItemId, '-c', params.comment, '-a', params.author]);
-      if (!result) return null;
+      const comment = extractComments(result)[0];
+      if (!comment) return null;
       return {
-        id: result.id ?? '',
+        id: comment.id ?? '',
         workItemId: params.workItemId,
-        comment: result.comment ?? result.body ?? params.comment,
-        author: result.author ?? params.author,
-        createdAt: result.createdAt ?? result.created_at ?? new Date().toISOString(),
+        comment: comment.comment ?? comment.body ?? params.comment,
+        author: comment.author ?? params.author,
+        createdAt: comment.createdAt ?? comment.created_at ?? new Date().toISOString(),
       };
     },
 
@@ -260,8 +284,7 @@ export function createWlDbAdapter(): WlDbInterface {
     getAll(): WorkItem[] {
       // Get all items using wl list with no filters
       const result = wlJsonSync('list', ['--all']);
-      if (!result || !Array.isArray(result)) return [];
-      return result.map(toWorkItem);
+      return extractWorkItems(result).map(toWorkItem);
     },
 
     getAllComments(): WorkItemComment[] {
@@ -278,8 +301,7 @@ export function createWlDbAdapter(): WlDbInterface {
     getChildren(parentId: string): WorkItem[] {
       // Use wl list --parent to get direct children
       const result = wlJsonSync('list', ['--parent', parentId]);
-      if (!result || !Array.isArray(result)) return [];
-      return result.map(toWorkItem);
+      return extractWorkItems(result).map(toWorkItem);
     },
 
     upsertItems(items: WorkItem[]): void {
