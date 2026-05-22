@@ -337,7 +337,7 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
           try {
             const stat = fs.statSync(lockPath);
             const fileAge = Date.now() - stat.mtimeMs;
-            const graceMs = Math.max(currentDelay * 2, 500);
+            const graceMs = 1000;
             if (fileAge > graceMs) {
               debugLog(`Stale lock detected: corrupted lock file (age ${Math.round(fileAge)}ms > grace ${graceMs}ms), removing ${lockPath}`);
               try {
