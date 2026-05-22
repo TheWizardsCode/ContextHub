@@ -1,44 +1,135 @@
 #!/usr/bin/env node
 // Mock wl command for TUI tests
-// Returns predefined test data for wl list/show commands
+// Returns predefined test data for the most common wl commands used by the TUI.
 
 const args = process.argv.slice(2);
 const isJson = args.includes('--json');
+const command = args[0] || '';
 
-if (args[0] === 'list' || args[0] === 'show') {
-  if (isJson) {
-    const item = {
-      id: 'WL-0000000010000001',
-      title: 'Test item 1',
-      description: 'A test work item',
-      status: 'open',
-      priority: 'medium',
-      sortIndex: 1000,
-      parentId: null,
-      createdAt: '2024-01-01T00:00:00.000Z',
-      updatedAt: '2024-01-01T00:00:00.000Z',
-      tags: [],
-      assignee: '',
-      stage: 'idea',
-      issueType: 'task',
-      createdBy: '',
-      deletedBy: '',
-      deleteReason: '',
-      risk: '',
-      effort: ''
-    };
-    // For 'show' return single item, for 'list' return array
-    if (args[0] === 'list') {
-      console.log(JSON.stringify([item]));
-    } else {
-      console.log(JSON.stringify(item));
+function baseItem(overrides = {}) {
+  return {
+    id: 'WL-0000000010000001',
+    title: 'Test item 1',
+    description: 'A test work item',
+    status: 'open',
+    priority: 'medium',
+    sortIndex: 1000,
+    parentId: null,
+    createdAt: '2024-01-01T00:00:00.000Z',
+    updatedAt: '2024-01-01T00:00:00.000Z',
+    tags: [],
+    assignee: '',
+    stage: 'idea',
+    issueType: 'task',
+    createdBy: '',
+    deletedBy: '',
+    deleteReason: '',
+    risk: '',
+    effort: '',
+    ...overrides,
+  };
+}
+
+function jsonOut(value) {
+  console.log(JSON.stringify(value));
+}
+
+function parseOption(flagNames) {
+  for (const flag of flagNames) {
+    const idx = args.indexOf(flag);
+    if (idx >= 0 && idx + 1 < args.length) {
+      return args[idx + 1];
     }
+  }
+  return undefined;
+}
+
+function nextItem() {
+  return baseItem({
+    title: 'Suggested next task',
+    description: 'Mock next work item',
+    id: 'WL-0000000010000001',
+  });
+}
+
+if (command === 'list' || command === 'show') {
+  const item = baseItem();
+  if (isJson) {
+    jsonOut(command === 'list' ? [item] : item);
   } else {
     console.log('Test item 1 (WL-0000000010000001) - open, medium priority');
   }
   process.exit(0);
-} else {
-  // Unknown command
-  console.error(`Unknown command: ${args[0] || '(no command)'}`);
-  process.exit(1);
 }
+
+if (command === 'next') {
+  if (isJson) {
+    jsonOut({
+      success: true,
+      workItem: nextItem(),
+      reason: 'Mock next task',
+    });
+  } else {
+    const item = nextItem();
+    console.log(`${item.id}: ${item.title} [${item.status}]`);
+  }
+  process.exit(0);
+}
+
+if (command === 'create') {
+  const title = parseOption(['-t', '--title']) || 'New work item';
+  const description = parseOption(['-d', '--description']) || title;
+  const item = baseItem({
+    id: `WL-TEST-CREATED-${Date.now()}`,
+    title,
+    description,
+    updatedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+  });
+  if (isJson) {
+    jsonOut({
+      success: true,
+      workItem: item,
+    });
+  } else {
+    console.log(`Created: ${item.id}`);
+  }
+  process.exit(0);
+}
+
+if (command === 'update') {
+  const id = args[1] || 'WL-0000000010000001';
+  const item = baseItem({
+    id,
+    updatedAt: new Date().toISOString(),
+  });
+  if (args.includes('--status')) {
+    item.status = String(parseOption(['--status']) || item.status);
+  }
+  if (args.includes('--description')) {
+    item.description = String(parseOption(['--description']) || item.description);
+  }
+  if (args.includes('--reviewed')) {
+    item.needsProducerReview = String(parseOption(['--reviewed']) || 'false') === 'true';
+  }
+  if (isJson) {
+    jsonOut({ success: true, workItem: item });
+  } else {
+    console.log(`Updated: ${item.id}`);
+  }
+  process.exit(0);
+}
+
+if (command === 'close') {
+  const id = args[1] || 'WL-0000000010000001';
+  if (isJson) {
+    jsonOut({ success: true, workItem: baseItem({ id, status: 'closed' }) });
+  } else {
+    console.log(`Closed: ${id}`);
+  }
+  process.exit(0);
+}
+
+// Unknown command
+console.error(`Unknown command: ${command || '(no command)'}`);
+process.exit(1);

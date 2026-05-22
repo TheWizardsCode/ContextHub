@@ -54,7 +54,14 @@ export async function runWl(
       // Return whatever we could parse
     }
   }
-  // Successful result contains parsed JSON in result.json
+  // Successful result contains parsed JSON in result.json.  For commands
+  // that return an envelope with `workItem`, unwrap it so TUI callers can
+  // consume the actual item directly while still allowing list/show commands
+  // to return their original shapes.
+  if (result.json && typeof result.json === 'object') {
+    const payload = (result.json as any).workItem ?? result.json;
+    return payload;
+  }
   return result.json;
 }
 

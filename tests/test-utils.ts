@@ -93,9 +93,10 @@ export function wait(ms: number): Promise<void> {
  *   (controller as any)._test.openCreateDialog();
  *   (controller as any)._test.submitCreateDialog();
  */
-export function createTuiTestContext() {
+export function createTuiTestContext(options?: { prefix?: string }) {
   let nextId = 1;
   const items = new Map<string, any>();
+  const testPrefix = options?.prefix ?? undefined;
 
   const utils = {
     createSampleItem: ({ tags = [] } = {}) => {
@@ -138,7 +139,7 @@ export function createTuiTestContext() {
     requireInitialized: () => {},
     getDatabase: (prefix?: string) => ({
       list: (query?: any) => Array.from(items.values()),
-      getPrefix: () => undefined,
+      getPrefix: () => testPrefix,
       getCommentsForWorkItem: (id: string) => [],
       update: (id: string, updates: any) => {
         const cur = items.get(id);
@@ -170,6 +171,29 @@ export function createTuiTestContext() {
         const statuses = Array.isArray(query.status) ? query.status : [query.status];
         allItems = allItems.filter(item => statuses.includes(item.status));
       }
+      // Apply stage filter if present (supports non-closed stage filtering)
+      if (query?.stage) {
+        const stages = Array.isArray(query.stage) ? query.stage : [query.stage];
+        allItems = allItems.filter(item => {
+          if (!item.stage) return true; // items without stage match
+          if (stages.length === 1 && stages[0] === 'non-closed') {
+            return item.stage !== 'done' && item.stage !== 'closed';
+          }
+          return stages.includes(item.stage);
+        });
+      }
+      // Apply needsProducerReview filter if present
+      if (query?.needsProducerReview) {
+        allItems = allItems.filter(item => item.needsProducerReview === true);
+      }
+      // Apply assignee filter (supports @github-copilot)
+      if (query?.assignee) {
+        const assignee = String(query.assignee).toLowerCase();
+        allItems = allItems.filter(item => {
+          const itemAssignee = (item.assignee || '').toLowerCase();
+          return itemAssignee.includes(assignee);
+        });
+      }
       return allItems;
     },
     get: (id: string) => items.get(id) ?? null,
@@ -181,20 +205,22 @@ export function createTuiTestContext() {
         title: String(item.title ?? 'Untitled'),
         description: String(item.description ?? ''),
         status: 'open',
-        priority: 'medium',
+        priority: String(item.priority ?? 'medium'),
         sortIndex: 0,
         parentId: null,
         createdAt: now,
         updatedAt: now,
-        tags: [],
-        assignee: '',
+        tags: item.tags ? (Array.isArray(item.tags) ? item.tags : []) : [],
+        assignee: String(item.assignee ?? ''),
         stage: 'idea',
-        issueType: 'task',
-        createdBy: '',
+        issueType: String(item.issueType ?? 'task'),
+        createdBy: String(item.createdBy ?? ''),
         deletedBy: '',
         deleteReason: '',
-        risk: '',
-        effort: '',
+        risk: String(item.risk ?? ''),
+        effort: String(item.effort ?? ''),
+        needsProducerReview: Boolean(item.needsProducerReview ?? false),
+        doNotDelegate: Boolean(item.doNotDelegate ?? false),
       };
       items.set(id, newItem);
       return newItem;
@@ -206,11 +232,37 @@ export function createTuiTestContext() {
       items.set(id, next);
       return next;
     },
-    getPrefix: () => undefined,
-    getCommentsForWorkItem: (id: string) => [],
-    createComment: (_: any) => ({}),
+    getPrefix: () => testPrefix,
+    getCommentsForWorkItem: (id: string) => {
+      const comments = Array.from(items.values())
+        .filter(i => i._isComment && i.workItemId === id)
+        .map(i => ({
+          id: i.id,
+          workItemId: i.workItemId,
+          author: i.author ?? '',
+          comment: i.comment ?? '',
+          createdAt: i.createdAt ?? '',
+          references: i.references ?? [],
+        }));
+      return comments;
+    },
+    createComment: (params: { workItemId: string; comment: string; author: string }) => {
+      const id = `WL-TEST-COMMENT-${nextId++}`;
+      const now = new Date().toISOString();
+      const comment = {
+        id,
+        workItemId: params.workItemId,
+        author: params.author ?? '',
+        comment: params.comment ?? '',
+        createdAt: now,
+        references: [],
+        _isComment: true,
+      };
+      items.set(id, comment);
+      return comment;
+    },
     getAll: () => Array.from(items.values()),
-    getAllComments: () => [],
+    getAllComments: () => Array.from(items.values()).filter(i => i._isComment),
     getChildren: (parentId: string) => Array.from(items.values()).filter(i => i.parentId === parentId),
     upsertItems: (_: any[]) => {},
   });

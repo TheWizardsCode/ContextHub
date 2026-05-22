@@ -165,13 +165,60 @@ export class TuiController {
     const createPersistenceImpl = this.deps.createPersistence ?? createPersistence;
     const createLayoutImpl = this.deps.createLayout ?? (this.ctx as any).createLayout ?? createLayout;
     const PiAdapterImpl = this.deps.PiAdapter ?? PiAdapter;
-    const WlDbAdapterImpl = this.deps.createWlDbAdapter ?? createWlDbAdapter;
+
+    const wrapDatabase = (db: ReturnType<typeof utils.getDatabase>): WlDbInterface => ({
+      list: (query: Record<string, unknown> = {}) => (db as any).list(query),
+      get: (id: string) => (db as any).get(id),
+      create: (item: Partial<WorkItem>) => (db as any).create(item),
+      update: (id: string, updates: Record<string, unknown>) => (db as any).update(id, updates),
+      getPrefix: () => (typeof (db as any).getPrefix === 'function' ? (db as any).getPrefix() : undefined),
+      getCommentsForWorkItem: (workItemId: string) => (
+        typeof (db as any).getCommentsForWorkItem === 'function'
+          ? (db as any).getCommentsForWorkItem(workItemId)
+          : []
+      ),
+      createComment: (params: { workItemId: string; comment: string; author: string }) => (
+        typeof (db as any).createComment === 'function'
+          ? (db as any).createComment(params)
+          : null
+      ),
+      getAll: () => (
+        typeof (db as any).getAll === 'function'
+          ? (db as any).getAll()
+          : (typeof (db as any).list === 'function' ? (db as any).list({}) : [])
+      ),
+      getAllComments: () => (
+        typeof (db as any).getAllComments === 'function'
+          ? (db as any).getAllComments()
+          : []
+      ),
+      getChildren: (parentId: string) => (
+        typeof (db as any).getChildren === 'function'
+          ? (db as any).getChildren(parentId)
+          : (typeof (db as any).list === 'function' ? (db as any).list({ parentId }) : [])
+      ),
+      upsertItems: (items: any[]) => {
+        if (typeof (db as any).upsertItems === 'function') {
+          (db as any).upsertItems(items);
+        }
+      },
+    });
+
+    const resolveDbAdapter = (): WlDbInterface => {
+      const injectedFactory = this.deps.createWlDbAdapter ?? (this.ctx as any).createWlDbAdapter;
+      if (typeof injectedFactory === 'function') {
+        return injectedFactory();
+      }
+      return wrapDatabase(utils.getDatabase(options.prefix));
+    };
 
     utils.requireInitialized();
     const previousTuiMode = process.env.WL_TUI_MODE;
     process.env.WL_TUI_MODE = '1';
-    // Use WlDbAdapter to route all Worklog DB operations through the wl CLI
-    const dbAdapter = WlDbAdapterImpl();
+    // Prefer an injected adapter, but fall back to the plugin context's
+    // database helper so tests can supply an in-memory db without going
+    // through the wl CLI layer.
+    const dbAdapter = resolveDbAdapter();
     if (previousTuiMode === undefined) delete process.env.WL_TUI_MODE;
     else process.env.WL_TUI_MODE = previousTuiMode;
     const isVerbose = !!program.opts().verbose;
@@ -2027,6 +2074,9 @@ export class TuiController {
       }
       const taggedContent = `{white-fg}${statusText}{/}`;
       const plainLength = statusText.length;
+      if (!serverStatusBox || typeof serverStatusBox.setContent !== 'function') {
+        return;
+      }
       serverStatusBox.setContent(taggedContent);
       serverStatusBox.width = Math.max(1, plainLength + 2);
       screen.render();
@@ -2580,7 +2630,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
   const cacheEnd = perfEnabled ? performance.now() : 0;
   if (!content) {
     const fmtStart = perfEnabled ? performance.now() : 0;
-    const text = humanFormatWorkItem(node.item, null, 'detail-pane', true);
+    const text = humanFormatWorkItem(node.item, dbAdapter as any, 'detail-pane', true);
     const fmtEnd = perfEnabled ? performance.now() : 0;
     const escStart = perfEnabled ? performance.now() : 0;
     const escaped = escapeLiteralBracesPreservingTags(text);

@@ -213,6 +213,40 @@ describe('TuiController', () => {
       createLayout: () => layout as any,
       PiAdapter: FakePiAdapter as any,
       resolveWorklogDir: () => '/tmp',
+      createWlDbAdapter: () => ({
+        list: () => [
+          {
+            id: 'WL-AUDIT-1',
+            title: 'Audit me',
+            description: '',
+            status: 'open',
+            priority: 'medium',
+            sortIndex: 0,
+            parentId: null,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            tags: [],
+            assignee: '',
+            stage: '',
+            issueType: 'task',
+            createdBy: '',
+            deletedBy: '',
+            deleteReason: '',
+            risk: '',
+            effort: '',
+          },
+        ],
+        get: () => null,
+        create: () => null,
+        update: () => ({}),
+        getPrefix: () => undefined,
+        getCommentsForWorkItem: () => [],
+        createComment: () => ({}),
+        getAll: () => [],
+        getAllComments: () => [],
+        getChildren: () => [],
+        upsertItems: () => {},
+      }),
       createPersistence: () => ({
         loadPersistedState: async () => null,
         savePersistedState: async () => undefined,
@@ -802,6 +836,7 @@ describe('TuiController', () => {
       PiAdapter: class FakePiAdapter {
         constructor() {}
         startServer = vi.fn();
+        getStatus() { return { status: 'stopped', port: 9999 }; }
       } as any,
       resolveWorklogDir: () => '/tmp',
       createPersistence: () => ({
@@ -927,7 +962,7 @@ describe('TuiController', () => {
 
     const controller = new TuiController(ctx, {
       createLayout: createLayout as any,
-      PiAdapter: class FakePiAdapter { constructor() {} startServer = vi.fn(); } as any,
+      PiAdapter: class FakePiAdapter { constructor() {} startServer = vi.fn(); getStatus() { return { status: 'stopped', port: 9999 }; } } as any,
       resolveWorklogDir: () => '/tmp',
       createPersistence: () => ({
         loadPersistedState: async () => null,

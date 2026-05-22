@@ -61,6 +61,7 @@ describe('TUI c key copy ID to clipboard', () => {
     const controller = new TuiController(ctx as any, {
       blessed: ctx.blessed,
       spawn: mockSpawn as any,
+      createWlDbAdapter: ctx.createWlDbAdapter,
     });
 
     // Create a sample work item
@@ -93,6 +94,7 @@ describe('TUI c key copy ID to clipboard', () => {
     const controller = new TuiController(ctx as any, {
       blessed: ctx.blessed,
       spawn: mockSpawn as any,
+      createWlDbAdapter: ctx.createWlDbAdapter,
     });
 
     const id = ctx.utils.createSampleItem({ tags: [] });
@@ -114,6 +116,7 @@ describe('TUI c key copy ID to clipboard', () => {
     const controller = new TuiController(ctx as any, {
       blessed: ctx.blessed,
       spawn: mockSpawn as any,
+      createWlDbAdapter: ctx.createWlDbAdapter,
     });
 
     ctx.utils.createSampleItem({ tags: [] });
@@ -169,6 +172,7 @@ describe('TUI c key copy ID to clipboard', () => {
     const controller = new TuiController(ctx as any, {
       blessed: ctx.blessed,
       spawn: failSpawn as any,
+      createWlDbAdapter: ctx.createWlDbAdapter,
     });
 
     ctx.utils.createSampleItem({ tags: [] });
@@ -216,6 +220,7 @@ describe('TUI c key copy ID to clipboard', () => {
     const controller = new TuiController(ctx as any, {
       blessed: ctx.blessed,
       spawn: mockSpawn as any,
+      createWlDbAdapter: ctx.createWlDbAdapter,
     });
 
     // start returns early with 'No work items found' message
@@ -235,6 +240,7 @@ describe('TUI c key copy ID to clipboard', () => {
     const controller = new TuiController(ctx as any, {
       blessed: ctx.blessed,
       spawn: mockSpawn as any,
+      createWlDbAdapter: ctx.createWlDbAdapter,
     });
 
     ctx.utils.createSampleItem({ tags: [] });

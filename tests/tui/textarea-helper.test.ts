@@ -24,7 +24,6 @@ const makeWidget = (value = '') => {
     setValue: vi.fn((v: string) => { w.value = v; }),
     _updateCursor: vi.fn(),
     // minimal layout internals used by the override
-    _clines: ['hello world'],
     _clines: [] as string[],
     itop: 0,
     ileft: 0,
@@ -70,10 +69,6 @@ describe('textarea-helper', () => {
       value: 'line1\nline2\nline3',
       getValue: function () { return this.value; },
       setValue: vi.fn((v: string) => { widget.value = v; }),
-      _clines: ['line1', 'line2', 'line3'],
-      _clines: [] as any,
-      // fake ftor mapping lines to wrapped indexes
-      _clines: { ftor: [[0], [1], [2]] } as any,
       _clines: [] as any,
       itop: 0,
       ileft: 0,
