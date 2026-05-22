@@ -450,6 +450,9 @@ Examples:
 ```sh
 wl list
 wl list -s open -p high
+wl list -s open,in-progress    # status is open OR in-progress
+wl list --status open,completed,blocked
+wl list -s open,in-progress --stage in_review  # status AND stage filters
 wl search "signup"
 wl -F concise list -s in-progress
 wl --json list -s open --tags backlog

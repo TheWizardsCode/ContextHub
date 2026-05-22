@@ -147,12 +147,8 @@ function buildListArgs(query: Record<string, unknown>): string[] {
   const args: string[] = [];
   // Map common query fields to wl list flags
   if (query.status) {
-    // Support array of statuses
-    if (Array.isArray(query.status)) {
-      query.status.forEach((s: string) => args.push('--status', s));
-    } else {
-      args.push('--status', String(query.status));
-    }
+    const raw = Array.isArray(query.status) ? (query.status as string[]).join(',') : String(query.status);
+    args.push('--status', raw);
   }
   if (query.inProgress === true) {
     args.push('--in-progress');

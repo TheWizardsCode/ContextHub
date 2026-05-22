@@ -178,6 +178,63 @@ describe('CLI Issue Status Tests', () => {
       expect(humanStdout).toContain('Found 1 work item');
     });
 
+    it('should filter by multiple comma-separated statuses', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list -s open,in-progress`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(2);
+      const statuses = result.workItems.map((item: any) => item.status);
+      expect(statuses).toContain('open');
+      expect(statuses).toContain('in-progress');
+    });
+
+    it('should filter by multiple statuses with --status open,completed', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list --status open,completed`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(2);
+      const statuses = result.workItems.map((item: any) => item.status);
+      expect(statuses).toContain('open');
+      expect(statuses).toContain('completed');
+    });
+
+    it('should combine comma-separated --status with --stage', async () => {
+      seedWorkItems(tempState.tempDir, [
+        { title: 'Open In Progress', status: 'open', stage: 'in_progress' },
+        { title: 'In Progress Review', status: 'in-progress', stage: 'in_review' },
+        { title: 'Completed Done', status: 'completed', stage: 'done' },
+      ]);
+
+      // --status open,in-progress AND --stage in_review should return only items matching both
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list --status open,in-progress --stage in_review`);
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(1);
+      expect(result.workItems[0].title).toBe('In Progress Review');
+    });
+
+    it('should return error for invalid status value', async () => {
+      try {
+        await execAsync(`tsx ${cliPath} --json list -s invalid_status`);
+        expect.fail('Should have thrown an error');
+      } catch (error: any) {
+        const result = JSON.parse(error.stderr || '{}');
+        expect(result.success).toBe(false);
+      }
+    });
+
+    it('should return error when any status in comma-separated list is invalid', async () => {
+      try {
+        await execAsync(`tsx ${cliPath} --json list -s open,invalid_status`);
+        expect.fail('Should have thrown an error');
+      } catch (error: any) {
+        const result = JSON.parse(error.stderr || '{}');
+        expect(result.success).toBe(false);
+      }
+    });
+
     it('should still hide completed items in human mode when no stage filter is set', async () => {
       // The default behavior (no --stage, no --status) should still hide completed items in human mode
       const { stdout: humanStdout } = await execAsync(`tsx ${cliPath} list`);

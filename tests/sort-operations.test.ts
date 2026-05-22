@@ -517,7 +517,7 @@ describe('Sort Operations', () => {
       const item2 = db.create({ title: 'Task 2', status: 'in-progress', sortIndex: 100 });
       const item3 = db.create({ title: 'Task 3', status: 'open', sortIndex: 200 });
 
-      const openItems = db.list({ status: 'open' });
+      const openItems = db.list({ status: ['open'] });
 
       expect(openItems).toHaveLength(2);
       // Check sortIndex values are preserved

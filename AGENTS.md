@@ -176,6 +176,7 @@ wl list --json
 wl list -n 5 --json
 # List items filtered by status (open, in-progress, closed, etc.)
 wl list --status open --json
+wl list --status open,in-progress --json  # comma-separated: matches any listed status
 # List items filtered by priority (critical, high, medium, low)
 wl list --priority high --json
 # List items filtered by comma-separated tags

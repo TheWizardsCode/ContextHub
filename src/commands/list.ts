@@ -30,7 +30,18 @@ export default function register(ctx: PluginContext): void {
       const db = utils.getDatabase(options?.prefix);
       
       const query: WorkItemQuery = {};
-      if (options.status) query.status = options.status as WorkItemStatus;
+      if (options.status) {
+        const validStatuses = ['open', 'in-progress', 'completed', 'blocked', 'deleted', 'input-needed'];
+        const statuses = options.status.split(',').map(s => s.trim());
+        for (const s of statuses) {
+          const normalized = s.replace(/_/g, '-');
+          if (!validStatuses.includes(normalized)) {
+            output.error(`Invalid status value: ${s}. Valid values: ${validStatuses.join(', ')}`, { success: false, error: 'invalid-arg' });
+            process.exit(1);
+          }
+        }
+        query.status = statuses.map(s => s.replace(/_/g, '-') as WorkItemStatus);
+      }
       if (options.priority) query.priority = options.priority as WorkItemPriority;
       if (options.parent) {
         const normalizedParentId = utils.normalizeCliId(options.parent, options.prefix) || options.parent;
