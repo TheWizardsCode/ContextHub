@@ -11,6 +11,7 @@ import { canValidateStatusStage, validateStatusStageCompatibility, validateStatu
 import { normalizeActionArgs } from './cli-utils.js';
 import { buildAuditEntry, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
 import { submitToOpenBrain } from '../openbrain.js';
+import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -116,7 +117,17 @@ export default function register(ctx: PluginContext): void {
         }
       }
       const statusCandidate = hasProvided('status') ? options.status : undefined;
-      const priorityCandidate = hasProvided('priority') ? options.priority : undefined;
+      let priorityCandidate = hasProvided('priority') ? options.priority : undefined;
+      // Validate priority if provided: normalize case, reject P* and unknown tokens
+      if (priorityCandidate !== undefined) {
+        const np = normalizePriority(priorityCandidate);
+        if (!np) {
+          const allowed = CANONICAL_PRIORITIES.join(', ');
+          output.error(`Invalid priority: "${priorityCandidate}". Allowed values: ${allowed} (case-insensitive). P0-P3 values are not accepted for update; use "wl doctor" to migrate legacy data.`, { success: false, error: 'invalid-priority' });
+          process.exit(1);
+        }
+        priorityCandidate = np;
+      }
       // Commander populates a `parent` property on option objects (the parent
       // command), so we must check that the user actually provided the
       // `--parent` flag. Use hasOwnProperty to detect presence of the option

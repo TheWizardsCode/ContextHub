@@ -10,6 +10,7 @@ import { canValidateStatusStage, validateStatusStageCompatibility, validateStatu
 import { promises as fs } from 'fs';
 import { normalizeActionArgs } from './cli-utils.js';
 import { buildAuditEntry, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
+import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -84,6 +85,16 @@ export default function register(ctx: PluginContext): void {
         for (const warning of warnings) {
           console.error(warning);
         }
+      }
+
+      if (normalized.provided.has('priority') && options.priority !== undefined) {
+        const np = normalizePriority(options.priority);
+        if (!np) {
+          const allowed = CANONICAL_PRIORITIES.join(', ');
+          output.error(`Invalid priority: "${options.priority}". Allowed values: ${allowed} (case-insensitive). P0-P3 values are not accepted at creation time; use "wl doctor" to migrate legacy data.`, { success: false, error: 'invalid-priority' });
+          process.exit(1);
+        }
+        options.priority = np;
       }
 
       let auditTextInput = options.auditText ?? options.audit;

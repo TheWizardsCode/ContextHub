@@ -11,6 +11,7 @@ import { importFromJsonl } from '../jsonl.js';
 import { mergeWorkItems, mergeComments } from '../sync.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import { normalizePriority, isValidPriority, isMappablePriority, PRIORITY_MAP, CANONICAL_PRIORITIES } from '../validators/priority.js';
 
 interface DoctorOptions {
   prefix?: string;
@@ -231,6 +232,92 @@ export default function register(ctx: PluginContext): void {
     });
 
   doctor
+    .command('priority')
+    .description('Detect and fix invalid priority values in the database')
+    .option('--dry-run', 'Show invalid priorities without modifying them')
+    .option('--apply', 'Apply priority mapping (P0-P3 -> canonical values)')
+    .option('--prefix <prefix>', 'Override the default prefix')
+    .action(async (opts: { dryRun?: boolean; apply?: boolean; prefix?: string }) => {
+      utils.requireInitialized();
+      const db = utils.getDatabase(opts.prefix);
+      const all = db.getAll();
+
+      const invalid: Array<{ id: string; current: string; mapped?: string }> = [];
+
+      for (const item of all) {
+        const p = item.priority;
+        if (p && !isValidPriority(p)) {
+          const mapped = isMappablePriority(p) ? normalizePriority(p) : undefined;
+          invalid.push({ id: item.id, current: p, mapped: mapped ?? undefined });
+        }
+      }
+
+      if (invalid.length === 0) {
+        if (utils.isJsonMode()) {
+          output.json({ success: true, invalid: [], fixed: [] });
+          return;
+        }
+        console.log('Doctor priority: no invalid priorities found.');
+        return;
+      }
+
+      if (opts.dryRun || !opts.apply) {
+        if (utils.isJsonMode()) {
+          const out: any = { dryRun: true, invalid, count: invalid.length };
+          if (!opts.dryRun) out.hint = 'Use --apply to fix invalid priorities';
+          output.json(out);
+          return;
+        }
+        console.log(`Doctor priority: found ${invalid.length} work item(s) with invalid priorities.`);
+        console.log(`Canonical priority values: ${CANONICAL_PRIORITIES.join(', ')}`);
+        console.log(`P* mapping: P0->critical, P1->high, P2->medium, P3->low`);
+        console.log('');
+        for (const entry of invalid) {
+          const hint = entry.mapped ? ` (would map to "${entry.mapped}")` : ' (no mapping available)';
+          console.log(` - ${entry.id}: current="${entry.current}"${hint}`);
+        }
+        if (!opts.dryRun) {
+          console.log('');
+          console.log('Use --dry-run to preview or --apply to apply the P* mapping.');
+        }
+        return;
+      }
+
+      // --apply: apply mapping for mappable values
+      const fixed: Array<{ id: string; from: string; to: string }> = [];
+      const unfixable: Array<{ id: string; current: string }> = [];
+
+      for (const entry of invalid) {
+        if (entry.mapped) {
+          try {
+            db.update(entry.id, { priority: entry.mapped as any });
+            fixed.push({ id: entry.id, from: entry.current, to: entry.mapped });
+          } catch (err) {
+            unfixable.push({ id: entry.id, current: entry.current });
+          }
+        } else {
+          unfixable.push({ id: entry.id, current: entry.current });
+        }
+      }
+
+      if (utils.isJsonMode()) {
+        output.json({ fixed, unfixable, fixedCount: fixed.length, unfixableCount: unfixable.length });
+        return;
+      }
+
+      console.log(`Doctor priority: fixed ${fixed.length} item(s).`);
+      for (const f of fixed) {
+        console.log(` - ${f.id}: "${f.from}" -> "${f.to}"`);
+      }
+      if (unfixable.length > 0) {
+        console.log(`\n${unfixable.length} item(s) with unmappable priorities (requires manual fix):`);
+        for (const u of unfixable) {
+          console.log(` - ${u.id}: "${u.current}"`);
+        }
+      }
+    });
+
+  doctor
     .command('migrate')
     .description('Migrate from persistent JSONL to SQLite-only architecture (ephemeral JSONL pattern)')
     .option('-f, --file <filepath>', 'JSONL file path to migrate (default: .worklog/worklog-data.jsonl)')
@@ -382,9 +469,39 @@ export default function register(ctx: PluginContext): void {
       }
 
       const dependencyEdges = db.getAllDependencyEdges();
-      let findings = [
+      const priorityFindings: Array<{
+        checkId: string;
+        type: string;
+        severity: string;
+        itemId: string;
+        message: string;
+        proposedFix: Record<string, unknown> | null;
+        safe: boolean;
+        context: Record<string, unknown>;
+      }> = [];
+      for (const item of items) {
+        const p = item.priority;
+        if (p && !isValidPriority(p)) {
+          const mapped = isMappablePriority(p) ? normalizePriority(p) : null;
+          priorityFindings.push({
+            checkId: 'priority.invalid',
+            type: 'invalid-priority',
+            severity: 'warning',
+            itemId: item.id,
+            message: mapped
+              ? `Invalid priority "${p}" (maps to "${mapped}" via P* mapping)`
+              : `Invalid priority "${p}" (not a canonical value: ${CANONICAL_PRIORITIES.join(', ')})`,
+            proposedFix: mapped ? { priority: mapped } as Record<string, unknown> : null,
+            safe: !!mapped,
+            context: { current: p, mapped } as Record<string, unknown>,
+          });
+        }
+      }
+
+      let findings: any[] = [
         ...validateStatusStageItems(items, rules),
         ...validateDependencyEdges(items, dependencyEdges),
+        ...priorityFindings,
       ];
 
       // If --fix was provided, attempt to apply safe fixes and prompt per non-safe finding
@@ -446,6 +563,7 @@ export default function register(ctx: PluginContext): void {
               const update: any = {};
               if ((f.proposedFix as any).status) update.status = (f.proposedFix as any).status;
               if ((f.proposedFix as any).stage) update.stage = (f.proposedFix as any).stage;
+              if ((f.proposedFix as any).priority) update.priority = (f.proposedFix as any).priority;
               if (Object.keys(update).length > 0) {
                 try {
                   db.update(itemId, update);
@@ -488,7 +606,8 @@ export default function register(ctx: PluginContext): void {
 
           const hasActionableFix = f.proposedFix && typeof f.proposedFix === 'object' && (
             Object.prototype.hasOwnProperty.call(f.proposedFix, 'status') ||
-            Object.prototype.hasOwnProperty.call(f.proposedFix, 'stage')
+            Object.prototype.hasOwnProperty.call(f.proposedFix, 'stage') ||
+            Object.prototype.hasOwnProperty.call(f.proposedFix, 'priority')
           );
 
           if (!hasActionableFix) {
@@ -513,6 +632,7 @@ export default function register(ctx: PluginContext): void {
                 const update: any = {};
                 if ((f.proposedFix as any).status) update.status = (f.proposedFix as any).status;
                 if ((f.proposedFix as any).stage) update.stage = (f.proposedFix as any).stage;
+                if ((f.proposedFix as any).priority) update.priority = (f.proposedFix as any).priority;
                 if (Object.keys(update).length > 0) {
                   try { db.update(f.itemId, update); continue; } catch (err) { /* fall through to keep in report */ }
                 }
@@ -566,7 +686,8 @@ export default function register(ctx: PluginContext): void {
         const proposed = f.proposedFix as any;
         const hasActionableFix = proposed && typeof proposed === 'object' && (
           Object.prototype.hasOwnProperty.call(proposed, 'status') ||
-          Object.prototype.hasOwnProperty.call(proposed, 'stage')
+          Object.prototype.hasOwnProperty.call(proposed, 'stage') ||
+          Object.prototype.hasOwnProperty.call(proposed, 'priority')
         );
         return !!ctx.requiresManualFix || !hasActionableFix;
       });
@@ -594,6 +715,7 @@ export default function register(ctx: PluginContext): void {
               if (proposed.allowedStatuses) suggestions.push(`allowedStatuses=${JSON.stringify(proposed.allowedStatuses)}`);
               if (proposed.stage) suggestions.push(`proposedStage=${String(proposed.stage)}`);
               if (proposed.status) suggestions.push(`proposedStatus=${String(proposed.status)}`);
+              if (proposed.priority) suggestions.push(`proposedPriority=${String(proposed.priority)}`);
             }
             // Also check context for same keys
             if (ctx.allowedStages && !suggestions.some(s => s.startsWith('allowedStages='))) {
