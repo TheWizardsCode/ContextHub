@@ -286,7 +286,7 @@ export class TuiController {
     };
 
     const query: Partial<Record<string, unknown>> = {};
-    if (options.inProgress) query.status = 'in-progress';
+    if (options.inProgress) query.status = ['in-progress'];
 
     const allItems: Item[] = listWorkItemsSafely(query, [], 'initial-load').items;
     const showClosed = Boolean(options.all);
@@ -3048,7 +3048,7 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
       const selected = getSelectedItem();
       const selectedId = selected?.id;
       const query: any = {};
-      if (status) query.status = status;
+      if (status) query.status = [status];
       if (needsReviewFilter !== null) query.needsProducerReview = needsReviewFilter;
       const listed = listWorkItemsSafely(query, state.items.slice(), 'refresh-list');
       if (listed.busy) {

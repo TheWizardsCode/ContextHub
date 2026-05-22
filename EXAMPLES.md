@@ -29,6 +29,10 @@ worklog list --parent null
 # Filter by status
 worklog list -s in-progress
 
+# Filter by multiple statuses (comma-separated, OR semantics)
+worklog list -s open,in-progress
+worklog list --status open,completed,blocked
+
 # Filter by priority
 worklog list -p high
 
@@ -37,6 +41,9 @@ worklog list --tags "backend,api"
 
 # Combine filters
 worklog list -s open -p high
+
+# Combine multi-status with stage filter (AND semantics)
+worklog list -s open,in-progress --stage in_review
 ```
 
 ### Viewing Work Items

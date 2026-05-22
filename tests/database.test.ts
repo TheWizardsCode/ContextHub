@@ -151,7 +151,7 @@ describe('WorklogDatabase', () => {
     it('should normalize status when querying with underscore form', () => {
       db.create({ title: 'Test', status: 'in-progress' });
       // Query using underscore form — should still find the item
-      const results = db.list({ status: 'in_progress' as any });
+      const results = db.list({ status: ['in_progress'] as any });
       expect(results.length).toBe(1);
       expect(results[0].status).toBe('in-progress');
     });
@@ -189,9 +189,17 @@ describe('WorklogDatabase', () => {
     });
 
     it('should filter by status', () => {
-      const openItems = db.list({ status: 'open' });
+      const openItems = db.list({ status: ['open'] });
       expect(openItems).toHaveLength(2);
       openItems.forEach(item => expect(item.status).toBe('open'));
+    });
+
+    it('should filter by multiple statuses', () => {
+      const items = db.list({ status: ['open', 'completed'] });
+      expect(items).toHaveLength(3);
+      const statuses = items.map(item => item.status);
+      expect(statuses.filter(s => s === 'open')).toHaveLength(2);
+      expect(statuses.filter(s => s === 'completed')).toHaveLength(1);
     });
 
     it('should filter by priority', () => {
@@ -201,10 +209,20 @@ describe('WorklogDatabase', () => {
     });
 
     it('should filter by status and priority', () => {
-      const items = db.list({ status: 'open', priority: 'high' });
+      const items = db.list({ status: ['open'], priority: 'high' });
       expect(items).toHaveLength(2);
       items.forEach(item => {
         expect(item.status).toBe('open');
+        expect(item.priority).toBe('high');
+      });
+    });
+
+    it('should combine multiple statuses with priority', () => {
+      const items = db.list({ status: ['open', 'blocked'], priority: 'high' });
+      expect(items).toHaveLength(2);
+      const statuses = items.map(item => item.status);
+      expect(statuses.filter(s => s === 'open')).toHaveLength(2);
+      items.forEach(item => {
         expect(item.priority).toBe('high');
       });
     });

@@ -114,7 +114,7 @@ export interface UpdateWorkItemInput {
   audit?: WorkItemAudit;
 }
 export interface WorkItemQuery {
-  status?: WorkItemStatus;
+  status?: WorkItemStatus[];
   priority?: WorkItemPriority;
   parentId?: string | null;
   tags?: string[];

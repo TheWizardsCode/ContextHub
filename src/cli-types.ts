@@ -44,7 +44,7 @@ export interface CreateOptions {
 }
 
 export interface ListOptions {
-  status?: WorkItemStatus;
+  status?: string;
   priority?: WorkItemPriority;
   parent?: string;
   tags?: string;

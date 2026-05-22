@@ -20,7 +20,7 @@ export default function register(ctx: PluginContext): void {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
       
-      const query: WorkItemQuery = { status: 'in-progress' as WorkItemStatus };
+      const query: WorkItemQuery = { status: ['in-progress' as WorkItemStatus] };
       if (options.assignee) {
         query.assignee = options.assignee;
       }

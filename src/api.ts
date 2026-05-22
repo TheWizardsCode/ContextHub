@@ -157,7 +157,8 @@ export function createAPI(db: WorklogDatabase) {
     const query: WorkItemQuery = {};
     
     if (req.query.status) {
-      query.status = req.query.status as WorkItemStatus;
+      const raw = Array.isArray(req.query.status) ? (req.query.status as string[]).join(',') : req.query.status as string;
+      query.status = raw.split(',').map(s => s.trim()) as WorkItemStatus[];
     }
     if (req.query.priority) {
       query.priority = req.query.priority as WorkItemPriority;
@@ -362,7 +363,8 @@ export function createAPI(db: WorklogDatabase) {
     const query: WorkItemQuery = {};
     
     if (req.query.status) {
-      query.status = req.query.status as WorkItemStatus;
+      const raw = Array.isArray(req.query.status) ? (req.query.status as string[]).join(',') : req.query.status as string;
+      query.status = raw.split(',').map(s => s.trim()) as WorkItemStatus[];
     }
     if (req.query.priority) {
       query.priority = req.query.priority as WorkItemPriority;

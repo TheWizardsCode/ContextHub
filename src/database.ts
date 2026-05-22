@@ -813,11 +813,11 @@ export class WorklogDatabase {
     let items = this.store.getAllWorkItems();
 
       if (query) {
-      if (query.status) {
+      if (query.status && query.status.length > 0) {
         // Status values are normalized to hyphenated form on write/import,
-        // so we only need to normalize the query parameter for user input.
-        const normalizedQueryStatus = normalizeStatusValue(query.status) ?? query.status;
-        items = items.filter(item => item.status === normalizedQueryStatus);
+        // so we normalize each query value for comparison.
+        const normalizedStatuses = query.status.map(s => normalizeStatusValue(s) ?? s);
+        items = items.filter(item => normalizedStatuses.includes(item.status));
       }
       if (query.priority) {
         items = items.filter(item => item.priority === query.priority);

@@ -142,7 +142,7 @@ describe('createWlDbAdapter', () => {
   it('uses wl subcommands and unwraps list/show/create/update envelopes', () => {
     const db = createWlDbAdapter();
 
-    expect(db.list({ status: 'open', assignee: 'Map' })).toEqual([baseWorkItem]);
+    expect(db.list({ status: ['open'], assignee: 'Map' })).toEqual([baseWorkItem]);
     expect(db.get('WL-TEST-1')).toEqual(baseWorkItem);
     expect(db.create({ title: 'Created item', description: 'Created description' })).toEqual({
       ...baseWorkItem,
