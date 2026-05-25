@@ -5,9 +5,11 @@
 The **wl CLI Integration Layer** provides a safe, reliable way for the TUI and Pi agents to execute `wl` commands via subprocess spawn. It handles:
 
 - **Command spawning** – wraps `child_process.spawn` with configurable timeout, retries, and working directory.
-- **JSON parsing** – automatically parses `--json` output and surfaces parse errors.
+- **JSON parsing** – automatically parses `--json` output with robust recovery from partial/malformed output.
 - **Event emission** – emits lifecycle events (`command:start`, `command:success`, `command:error`) for UI consumers to react.
 - **Structured errors** – all failures return a `WlError` with a machine-readable `code` field.
+- **Exponential backoff** – retry delays use exponential backoff with jitter to avoid thundering herd.
+- **Attempts tracking** – `CommandResult.attempts` reports how many attempts were made.
 
 ## Quick Start
 
@@ -58,7 +60,16 @@ wlEvents.on('command:error', ({ error, args }) => {
 | -------------- | ----------------------------------------- | ---------- |
 | `TIMEOUT`      | Command exceeded the configured timeout   | Yes        |
 | `NON_ZERO_EXIT`| `wl` exited with a non-zero code          | No         |
-| `JSON_PARSE`   | `--json` output was not valid JSON        | No         |
+| `JSON_PARSE`   | `--json` output was not valid JSON        | Yes        |
+
+## JSON Recovery
+
+When `--json` output contains non-JSON noise (e.g. log lines before the JSON), the parser attempts three strategies:
+1. Parse the full stdout as JSON.
+2. Extract and parse the last complete `{...}` object via regex.
+3. Parse the last non-empty line of output.
+
+If all strategies fail, a `JSON_PARSE` error is returned and the command is retried (if retries are configured).
 
 ## Migration Notes for Existing TUI Code
 
@@ -103,8 +114,8 @@ try {
 | Option        | Default         | Description                                  |
 | ------------- | --------------- | -------------------------------------------- |
 | `timeoutMs`   | `undefined`     | Kill command after this many ms (0 = no limit)|
-| `retries`     | `0`             | Automatic retries on `TIMEOUT` errors        |
-| `retryDelayMs`| `200`           | Delay between retry attempts                 |
+| `retries`     | `0`             | Automatic retries on `TIMEOUT` and `JSON_PARSE` errors |
+| `retryDelayMs`| `200`           | Base delay for exponential backoff (capped at 5s with jitter) |
 | `cwd`         | `process.cwd()` | Working directory for the subprocess          |
 | `env`         | `process.env`   | Environment variable overrides                |
 
