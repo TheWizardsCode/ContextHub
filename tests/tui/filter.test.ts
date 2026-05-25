@@ -70,8 +70,11 @@ describe("TUI '/' search/filter", () => {
     program.opts = () => ({ json: false, verbose: false }) as any;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
+    // Reset any custom spawn injection
+    const spawnMod = await import('../../src/wl-integration/spawn.js');
+    spawnMod.setCustomSpawn(null);
   });
 
   it('opens modal and cancel returns focus to list', async () => {
@@ -107,9 +110,12 @@ describe("TUI '/' search/filter", () => {
       return e;
     });
 
+    // Inject mock spawn into the integration layer
+    const spawnMod = await import('../../src/wl-integration/spawn.js');
+    spawnMod.setCustomSpawn(mockSpawn);
+
     const ctx = createPluginContext(program) as any;
     ctx.blessed = blessedImpl;
-    ctx.spawn = mockSpawn;
     ctx.utils.requireInitialized = () => undefined;
     ctx.utils.getDatabase = () => ({
       list: () => [ { id: 'WL-1', title: 'one', status: 'open', needsProducerReview: true } ],
@@ -140,9 +146,16 @@ describe("TUI '/' search/filter", () => {
       await handler.cb();
     }
 
-    // Expect spawn to have been called by the handler
+    // Give the async handler time to complete
+    await new Promise(r => setTimeout(r, 50));
+
+    // Expect spawn to have been called via the integration layer
     expect(mockSpawn).toHaveBeenCalled();
     const spawnArgs = (mockSpawn as any).mock.calls?.[0]?.[1] || [];
     expect(spawnArgs).toContain('--needs-producer-review');
+    expect(spawnArgs).toContain('--json');
+
+    // Clean up custom spawn
+    spawnMod.setCustomSpawn(null);
   });
 });
