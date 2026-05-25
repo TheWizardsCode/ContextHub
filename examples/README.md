@@ -10,9 +10,10 @@ A comprehensive example showing database access, JSON output mode support, initi
 
 **Features:**
 - Shows total work items
-- Breaks down items by status and priority
+- Breaks down items by status, priority, and type
 - Counts items with parents, tags, and comments
 - Supports both human-readable and JSON output
+- Groups work items with no type or an unexpected type under `unknown`
 
 **Installation:**
 

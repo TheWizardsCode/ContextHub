@@ -71,6 +71,7 @@ export default function register(ctx) {
           total: items.length,
           byStatus: {},
           byPriority: {},
+          byType: {},
           withParent: items.filter(i => i.parentId !== null).length,
           withComments: 0,
           withTags: items.filter(i => i.tags && i.tags.length > 0).length
@@ -86,6 +87,14 @@ export default function register(ctx) {
         items.forEach(item => {
           const priority = item.priority || 'none';
           stats.byPriority[priority] = (stats.byPriority[priority] || 0) + 1;
+        });
+
+        // Count by issue type
+        const knownTypes = ['bug', 'feature', 'task', 'epic', 'chore'];
+        items.forEach(item => {
+          const type = (item.issueType || '').toLowerCase().trim();
+          const bucket = type && knownTypes.includes(type) ? type : 'unknown';
+          stats.byType[bucket] = (stats.byType[bucket] || 0) + 1;
         });
         
         // Count items with comments
@@ -310,6 +319,48 @@ export default function register(ctx) {
               const bar = renderStackedBar(countsByPriority[priority], count, stats.total, 20);
               const paddedLabel = colorizePriority(priority, priority.padEnd(totalsLabelWidth));
               const paddedCount = count.toString().padStart(totalsCountWidth);
+              const paddedPercent = percentage.toString().padStart(percentWidth);
+              console.log(`  ${paddedLabel} ${paddedCount} (${paddedPercent}%) ${bar}`);
+            }
+          });
+
+          // By Type section
+          const typeBaseline = ['bug', 'feature', 'task', 'epic', 'chore'];
+          const otherTypes = Object.keys(stats.byType)
+            .filter(type => !typeBaseline.includes(type))
+            .sort((a, b) => a.localeCompare(b));
+          const typeOrder = [...typeBaseline.filter(t => (stats.byType[t] || 0) > 0), ...otherTypes];
+          const typeMax = Object.values(stats.byType).reduce((max, value) => Math.max(max, value), 0);
+          const typeLabelWidth = typeOrder.reduce((max, label) => Math.max(max, label.length), 0);
+          const typeCountWidth = Math.max(3, typeOrder.reduce((max, label) => Math.max(max, (stats.byType[label] || 0).toString().length), 0));
+
+          const typeColorForType = (type) => {
+            const t = (type || '').toLowerCase().trim();
+            switch (t) {
+              case 'bug':
+                return ansi.redBright;
+              case 'feature':
+                return ansi.greenBright;
+              case 'task':
+                return ansi.blueBright;
+              case 'epic':
+                return ansi.magentaBright;
+              case 'chore':
+                return ansi.white;
+              case 'unknown':
+              default:
+                return ansi.gray;
+            }
+          };
+
+          console.log(`\n${ansi.blue('By Type')}`);
+          typeOrder.forEach(type => {
+            const count = stats.byType[type] || 0;
+            if (count > 0) {
+              const percentage = stats.total > 0 ? ((count / stats.total) * 100).toFixed(1) : '0.0';
+              const bar = renderBar(count, typeMax, 20);
+              const paddedLabel = typeColorForType(type)(type.padEnd(Math.max(typeLabelWidth, 'Priority'.length)));
+              const paddedCount = count.toString().padStart(Math.max(typeCountWidth, totalsCountWidth));
               const paddedPercent = percentage.toString().padStart(percentWidth);
               console.log(`  ${paddedLabel} ${paddedCount} (${paddedPercent}%) ${bar}`);
             }
