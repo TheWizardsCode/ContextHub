@@ -3,19 +3,20 @@
  *
  * The TUI controller previously accessed the SQLite database directly via
  * `db.list()`, `db.get()`, `db.create()`, and `db.update()`.  All of these
- * calls are now routed through the `wl` CLI (via `runWl`) so the TUI
- * performs zero direct database access.
+ * calls are now routed through the `wl` CLI (via `runWlCommandSync`)
+ * so the TUI performs zero direct database access.
  *
  * This adapter preserves the original method signatures so controller.ts
  * can be migrated with minimal code changes.
  *
  * NOTE: The methods below are synchronous wrappers that execute `wl` CLI
- * commands synchronously via `child_process.spawnSync`.  In production use
- * the async `runWl` path is preferred, but the controller currently calls
- * db methods synchronously so we must match that signature.
+ * commands synchronously via the integration layer's `runWlCommandSync`.
+ * The async `runWlCommand` path is used by the TUI for interactive flows;
+ * this sync variant is used here because the controller calls db methods
+ * synchronously.
  */
 
-import { spawnSync } from 'child_process';
+import { runWlCommandSync } from '../wl-integration/spawn.js';
 
 /**
  * Minimal work-item shape matching what the controller expects.
@@ -71,24 +72,15 @@ export interface WlDbInterface {
 }
 
 /**
- * Run a wl command synchronously and return parsed JSON, or null on failure.
+ * Run a wl command synchronously via the integration layer and return
+ * parsed JSON, or null on failure.
  */
 function wlJsonSync(cmd: string, args: string[] = []): any {
-  try {
-    const result = spawnSync('wl', [cmd, ...args, '--json'], {
-      cwd: process.cwd(),
-      timeout: 15000,
-      maxBuffer: 20 * 1024 * 1024,
-      env: { ...process.env, WL_TUI_MODE: '1' },
-      encoding: 'utf-8',
-    });
-    if (result.status !== 0 || !result.stdout?.trim()) {
-      return null;
-    }
-    return JSON.parse(result.stdout);
-  } catch {
+  const result = runWlCommandSync([cmd, ...args, '--json']);
+  if (result.error || !result.json) {
     return null;
   }
+  return result.json;
 }
 
 /**
