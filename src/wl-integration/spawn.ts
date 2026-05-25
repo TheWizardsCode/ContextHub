@@ -26,6 +26,8 @@ export interface CommandResult {
   json?: any;
   exitCode: number;
   error?: WlError;
+  /** Number of attempts made (1 = no retries) */
+  attempts?: number;
 }
 
 /** Structured error for the integration layer */
@@ -78,6 +80,40 @@ export async function runWlCommand(
   } = options;
 
   let attempt = 0;
+
+  /**
+   * Calculate retry delay with exponential backoff and jitter.
+   * delay = baseDelay * 2^attempt + random(0..100ms)
+   */
+  const calculateRetryDelay = (baseDelay: number, attempt: number): number => {
+    const exponential = baseDelay * Math.pow(2, attempt);
+    const jitter = Math.random() * 100;
+    return Math.min(exponential + jitter, 5000); // cap at 5s
+  };
+
+  /**
+   * Attempt to extract valid JSON from potentially partial/malformed output.
+   * Tries: full parse, then last complete JSON object via regex, then last JSON line.
+   */
+  const tryParseJson = (raw: string): { parsed: any; error: Error | null } => {
+    if (!raw || !raw.trim()) return { parsed: null, error: null };
+    // First try: full parse
+    try { return { parsed: JSON.parse(raw), error: null }; } catch {}
+    // Second try: find the last complete JSON object
+    const jsonMatch = raw.match(/\{[^{}]*\}/g);
+    if (jsonMatch && jsonMatch.length > 0) {
+      const last = jsonMatch[jsonMatch.length - 1];
+      try { return { parsed: JSON.parse(last), error: null }; } catch {}
+    }
+    // Third try: parse the last non-empty line
+    const lines = raw.split('\n').filter(l => l.trim());
+    if (lines.length > 0) {
+      const lastLine = lines[lines.length - 1];
+      try { return { parsed: JSON.parse(lastLine), error: null }; } catch {}
+    }
+    return { parsed: null, error: new Error('No valid JSON found in output') };
+  };
+
   const exec = (): Promise<CommandResult> => {
     return new Promise((resolve) => {
       wlEvents.emit("command-start", { args });
@@ -128,20 +164,20 @@ export async function runWlCommand(
         }
         // Success path – attempt JSON parse if requested
         if (args.includes("--json")) {
-          try {
-            result.json = JSON.parse(stdout);
-          } catch (e) {
+          const { parsed, error: parseErr } = tryParseJson(stdout);
+          if (parseErr) {
             const err = new WlError(
-              "Failed to parse JSON output",
+              `Failed to parse JSON output: ${parseErr.message}`,
               "JSON_PARSE",
               args,
-              e as Error
+              parseErr
             );
             result.error = err;
             wlEvents.emit("command-error", { error: err, args });
             resolve(result);
             return;
           }
+          result.json = parsed;
         }
         wlEvents.emit("command-end", { result });
         wlEvents.emit("command:success", { result });
@@ -153,16 +189,20 @@ export async function runWlCommand(
   while (attempt <= retries) {
     const res = await exec();
     if (!res.error) {
+      res.attempts = attempt + 1;
       return res;
     }
-    // If timeout or non-zero, consider retryable only for timeout
-    if (res.error.code === "TIMEOUT") {
+    // Retry logic: TIMEOUT and JSON_PARSE errors are retryable
+    if (res.error.code === "TIMEOUT" || res.error.code === "JSON_PARSE") {
       attempt++;
+      res.attempts = attempt;
       if (attempt > retries) return res;
-      await new Promise((r) => setTimeout(r, retryDelayMs));
+      const delay = calculateRetryDelay(retryDelayMs, attempt - 1);
+      await new Promise((r) => setTimeout(r, delay));
       continue;
     }
     // Non-retryable error
+    res.attempts = attempt + 1;
     return res;
   }
   // Should not reach here
