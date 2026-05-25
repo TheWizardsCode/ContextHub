@@ -826,6 +826,31 @@ Example (JSON):
 wl --json init
 ```
 
+### `piman` | `pi` [options]
+
+Launch the Pi-based TUI: browse and manage work items with agent chat and action palette. This is the agent-centric TUI that replaces the legacy Opencode-based interface. All worklog operations are performed via the `wl` CLI.
+
+Options:
+
+- `--in-progress` — Show only in-progress items.
+- `--all` — Include completed/deleted items in the list.
+- `--prefix <prefix>` — Override the default prefix.
+- `--headless` — Run in headless mode for CI scripting and automated tests.
+
+Example:
+
+```sh
+wl piman
+wl pi --in-progress
+```
+
+The Pi TUI can also be installed as a Pi package:
+
+```sh
+pi install ./packages/tui
+wl-piman
+```
+
 ### `status` [options]
 
 Show Worklog system and database status (counts, configuration values).

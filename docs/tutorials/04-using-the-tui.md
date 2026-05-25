@@ -183,4 +183,4 @@ Press `q`, `Esc`, or `Ctrl+C` to quit the TUI. All changes made during the sessi
 
 - [Planning and Tracking an Epic](05-planning-an-epic.md) -- organize complex features
 - [TUI Reference](../../TUI.md) -- complete TUI documentation
-- [OpenCode TUI Integration](../../docs/opencode-tui.md) -- detailed OpenCode docs
+- [Pi TUI Migration Guide](../../docs/opencode-to-pi-migration.md) -- migrating from OpenCode to Pi
