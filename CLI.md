@@ -826,6 +826,23 @@ Example (JSON):
 wl --json init
 ```
 
+### `piman` | `pi` [options]
+
+Launch the Pi-based TUI for browsing and managing work items with agent chat and action palette. All Worklog reads/writes use the wl CLI (no direct database access).
+
+Options:
+
+- `--in-progress` — Show only in-progress items.
+- `--all` — Include completed/deleted items in the list.
+- `--prefix <prefix>` — Override the default prefix.
+- `--perf` — Enable performance instrumentation.
+
+Example:
+
+```sh
+wl piman --in-progress
+```
+
 ### `status` [options]
 
 Show Worklog system and database status (counts, configuration values).
