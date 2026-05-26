@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   createDefaultListWorkItems,
   createWorklogBrowseExtension,
-  formatBrowseOption,
 } from '../../packages/tui/extensions/index.ts';
 
 describe('Worklog browse pi extension', () => {
@@ -34,7 +33,7 @@ describe('Worklog browse pi extension', () => {
     );
   });
 
-  it('shows first five items and posts wl show details to chat for selected item', async () => {
+  it('posts selected item title to chat each time selection changes', async () => {
     const listWorkItems = vi.fn().mockResolvedValue([
       { id: 'WL-1', title: 'One', status: 'open' },
       { id: 'WL-2', title: 'Two', status: 'in-progress' },
@@ -43,35 +42,39 @@ describe('Worklog browse pi extension', () => {
       { id: 'WL-5', title: 'Five', status: 'open' },
       { id: 'WL-6', title: 'Six', status: 'open' },
     ]);
-    const showWorkItem = vi.fn().mockResolvedValue('show output');
 
-    const extension = createWorklogBrowseExtension({ listWorkItems, showWorkItem });
+    const chooseWorkItem = vi.fn(async (items, _ctx, onSelectionChange) => {
+      onSelectionChange(items[1]);
+      onSelectionChange(items[3]);
+      return items[3];
+    });
+
+    const extension = createWorklogBrowseExtension({ listWorkItems, chooseWorkItem });
     extension(makePi() as any);
 
     const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
     expect(typeof commandHandler).toBe('function');
 
-    const options = [
-      formatBrowseOption({ id: 'WL-1', title: 'One', status: 'open' }),
-      formatBrowseOption({ id: 'WL-2', title: 'Two', status: 'in-progress' }),
-      formatBrowseOption({ id: 'WL-3', title: 'Three', status: 'open' }),
-      formatBrowseOption({ id: 'WL-4', title: 'Four', status: 'blocked' }),
-      formatBrowseOption({ id: 'WL-5', title: 'Five', status: 'open' }),
-    ];
-
-    const select = vi.fn().mockResolvedValue(options[1]);
     const notify = vi.fn();
+    await commandHandler('', { ui: { notify } });
 
-    await commandHandler('', { ui: { select, notify } });
-
-    expect(select).toHaveBeenCalledWith('Browse Worklog next items (top 5)', options);
     expect(listWorkItems).toHaveBeenCalledTimes(1);
-    expect(showWorkItem).toHaveBeenCalledWith('WL-2');
-    expect(sendMessage).toHaveBeenCalledWith(
+    expect(chooseWorkItem).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      1,
       expect.objectContaining({
-        customType: 'worklog-browse',
+        customType: 'worklog-browse-selection',
         display: true,
-        content: expect.stringContaining('wl show WL-2'),
+        content: 'Two',
+      }),
+      expect.objectContaining({ triggerTurn: false }),
+    );
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        customType: 'worklog-browse-selection',
+        display: true,
+        content: 'Four',
       }),
       expect.objectContaining({ triggerTurn: false }),
     );
@@ -79,18 +82,18 @@ describe('Worklog browse pi extension', () => {
 
   it('reports explicit empty state when no items exist', async () => {
     const listWorkItems = vi.fn().mockResolvedValue([]);
-    const showWorkItem = vi.fn();
+    const chooseWorkItem = vi.fn();
 
-    const extension = createWorklogBrowseExtension({ listWorkItems, showWorkItem });
+    const extension = createWorklogBrowseExtension({ listWorkItems, chooseWorkItem });
     extension(makePi() as any);
 
     const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
     const notify = vi.fn();
 
-    await commandHandler('', { ui: { select: vi.fn(), notify } });
+    await commandHandler('', { ui: { notify } });
 
     expect(notify).toHaveBeenCalledWith('No work items available to browse.', 'info');
-    expect(showWorkItem).not.toHaveBeenCalled();
+    expect(chooseWorkItem).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();
   });
 

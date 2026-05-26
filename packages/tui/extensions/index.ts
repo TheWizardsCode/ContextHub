@@ -10,15 +10,36 @@ export interface WorklogBrowseItem {
 }
 
 type RunWlFn = (args: string[], includeJson?: boolean) => Promise<string>;
+type SelectionChangeHandler = (item: WorklogBrowseItem) => void;
+type ChooseWorkItemFn = (
+  items: WorklogBrowseItem[],
+  ctx: BrowseContext,
+  onSelectionChange: SelectionChangeHandler,
+) => Promise<WorklogBrowseItem | undefined>;
 
 interface WorklogBrowseDependencies {
   listWorkItems?: () => Promise<WorklogBrowseItem[]>;
-  showWorkItem?: (id: string) => Promise<string>;
   runWl?: RunWlFn;
+  chooseWorkItem?: ChooseWorkItemFn;
 }
 
 interface BrowseUi {
-  select: (title: string, options: string[]) => Promise<string | undefined>;
+  select?: (title: string, options: string[]) => Promise<string | undefined>;
+  custom?: <T>(
+    render: (
+      tui: { requestRender: () => void },
+      theme: {
+        fg: (color: string, text: string) => string;
+        bold: (text: string) => string;
+      },
+      keybindings: unknown,
+      done: (value: T) => void,
+    ) => {
+      render: (width: number) => string[];
+      invalidate: () => void;
+      handleInput?: (data: string) => void;
+    },
+  ) => Promise<T>;
   notify: (message: string, level?: 'info' | 'warning' | 'error') => void;
 }
 
@@ -110,19 +131,118 @@ async function defaultListWorkItems(run: RunWlFn = runWl): Promise<WorklogBrowse
   return createDefaultListWorkItems(run)();
 }
 
-async function defaultShowWorkItem(id: string): Promise<string> {
-  const output = await runWl(['show', id], false);
-  return output.trim();
+function buildSelectionMessage(item: WorklogBrowseItem): string {
+  return item.title;
 }
 
-function buildShowMessage(id: string, showOutput: string): string {
-  return `wl show ${id}\n\n${showOutput}`;
+function truncateLine(line: string, width: number): string {
+  if (width <= 0) return '';
+  if (line.length <= width) return line;
+  return `${line.slice(0, Math.max(0, width - 1))}…`;
+}
+
+function isUpKey(data: string): boolean {
+  return data === '\u001b[A' || data === 'up';
+}
+
+function isDownKey(data: string): boolean {
+  return data === '\u001b[B' || data === 'down';
+}
+
+function isEnterKey(data: string): boolean {
+  return data === '\r' || data === '\n' || data === 'enter' || data === 'return';
+}
+
+function isEscapeKey(data: string): boolean {
+  return data === '\u001b' || data === 'escape';
+}
+
+async function defaultChooseWorkItem(
+  items: WorklogBrowseItem[],
+  ctx: BrowseContext,
+  onSelectionChange: SelectionChangeHandler,
+): Promise<WorklogBrowseItem | undefined> {
+  if (!ctx.ui.custom) {
+    if (!ctx.ui.select) {
+      throw new Error('Selection UI is unavailable in this environment.');
+    }
+
+    const options = items.map(formatBrowseOption);
+    const selected = await ctx.ui.select('Browse Worklog next items (top 5)', options);
+    if (!selected) return undefined;
+
+    const selectedIndex = options.indexOf(selected);
+    if (selectedIndex < 0) {
+      ctx.ui.notify('Invalid selection.', 'warning');
+      return undefined;
+    }
+
+    const selectedItem = items[selectedIndex];
+    onSelectionChange(selectedItem);
+    return selectedItem;
+  }
+
+  const selectedItem = await ctx.ui.custom<WorklogBrowseItem | null>((tui, theme, _keybindings, done) => {
+    let selectedIndex = 0;
+    let lastSelectionId = items[0]?.id;
+
+    const moveSelection = (nextIndex: number) => {
+      if (nextIndex < 0 || nextIndex >= items.length || nextIndex === selectedIndex) return;
+      selectedIndex = nextIndex;
+      const item = items[selectedIndex];
+      if (item && item.id !== lastSelectionId) {
+        lastSelectionId = item.id;
+        onSelectionChange(item);
+      }
+    };
+
+    return {
+      render: (width: number) => {
+        const title = truncateLine(theme.fg('accent', theme.bold('Browse Worklog next items (top 5)')), width);
+        const help = truncateLine(theme.fg('dim', '↑↓ navigate • enter select • esc cancel'), width);
+        const options = items.map((item, index) => {
+          const prefix = index === selectedIndex ? theme.fg('accent', '› ') : '  ';
+          const optionLine = `${prefix}${formatBrowseOption(item)}`;
+          return truncateLine(optionLine, width);
+        });
+
+        return [title, '', ...options, '', help];
+      },
+      invalidate: () => {
+        // no-op: all rendering is derived from local state
+      },
+      handleInput: (data: string) => {
+        if (isUpKey(data)) {
+          moveSelection(selectedIndex - 1);
+          tui.requestRender();
+          return;
+        }
+
+        if (isDownKey(data)) {
+          moveSelection(selectedIndex + 1);
+          tui.requestRender();
+          return;
+        }
+
+        if (isEnterKey(data)) {
+          done(items[selectedIndex] ?? null);
+          return;
+        }
+
+        if (isEscapeKey(data)) {
+          done(null);
+        }
+      },
+    };
+  });
+
+  return selectedItem ?? undefined;
 }
 
 export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {}) {
   const runWlImpl = deps.runWl ?? runWl;
   const listWorkItems = deps.listWorkItems ?? (() => defaultListWorkItems(runWlImpl));
-  const showWorkItem = deps.showWorkItem ?? defaultShowWorkItem;
+  const chooseWorkItem = deps.chooseWorkItem ?? defaultChooseWorkItem;
 
   return function registerWorklogBrowseExtension(pi: PiLike): void {
     const runBrowseFlow = async (ctx: BrowseContext): Promise<void> => {
@@ -133,27 +253,25 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
           return;
         }
 
-        const options = items.map(formatBrowseOption);
-        const selected = await ctx.ui.select('Browse Worklog next items (top 5)', options);
-        if (!selected) return;
+        let lastAnnouncedId: string | undefined;
+        const announceSelection = (item: WorklogBrowseItem) => {
+          if (item.id === lastAnnouncedId) return;
+          lastAnnouncedId = item.id;
 
-        const selectedIndex = options.indexOf(selected);
-        if (selectedIndex < 0) {
-          ctx.ui.notify('Invalid selection.', 'warning');
-          return;
-        }
+          pi.sendMessage(
+            {
+              customType: 'worklog-browse-selection',
+              content: buildSelectionMessage(item),
+              display: true,
+            },
+            { triggerTurn: false },
+          );
+        };
 
-        const selectedItem = items[selectedIndex];
-        const showOutput = await showWorkItem(selectedItem.id);
+        const selectedItem = await chooseWorkItem(items, ctx, announceSelection);
+        if (!selectedItem) return;
 
-        pi.sendMessage(
-          {
-            customType: 'worklog-browse',
-            content: buildShowMessage(selectedItem.id, showOutput),
-            display: true,
-          },
-          { triggerTurn: false },
-        );
+        announceSelection(selectedItem);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(`Failed to browse work items: ${message}`, 'error');
@@ -161,14 +279,14 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     };
 
     pi.registerCommand('wl', {
-      description: 'Browse the next 5 recommended work items and open wl show details in chat',
+      description: 'Browse next 5 work items and stream selected titles to chat',
       handler: async (_args: string, ctx: BrowseContext) => {
         await runBrowseFlow(ctx);
       },
     });
 
     pi.registerShortcut('ctrl+shift+b', {
-      description: 'Browse next 5 recommended work items (avoids built-in Ctrl+B cursor-left conflict)',
+      description: 'Browse next 5 recommended work items and stream selected titles',
       handler: async (ctx: BrowseContext) => {
         await runBrowseFlow(ctx);
       },
