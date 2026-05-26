@@ -67,7 +67,7 @@ wl tui --perf         # Enable performance instrumentation and write diagnostics
 TUI_PROFILE=1 wl tui  # Enable profiling via environment variable
 ```
 
-Press `O` in the TUI to access the Pi agent chat pane. The Pi-based TUI provides natural language chat, an action palette with agent-driven flows, and all work item operations through the `wl` CLI. See [TUI.md](TUI.md) for controls, including quick stage filters (`Alt+T` for `intake_complete`, `Alt+P` for `plan_complete`) that exclude closed items.
+Press `O` in the TUI to access the Pi agent chat pane. The Pi-based TUI provides natural language chat, an action palette with agent-driven flows, and all work item operations through the `wl` CLI. The action palette includes a browse flow (`Ctrl+B`) that loads the first 5 work items and opens `wl show <id>` details in chat when you press Enter on a selection. See [TUI.md](TUI.md) for controls, including quick stage filters (`Alt+T` for `intake_complete`, `Alt+P` for `plan_complete`) that exclude closed items.
 
 For the Pi-based TUI design checklist, see [docs/ux/design-checklist.md](docs/ux/design-checklist.md).
 

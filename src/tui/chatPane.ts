@@ -161,7 +161,7 @@ export class ChatPane {
     }
 
     // "show <id>" or "show me <id>"
-    const showMatch = message.match(/\bshow\b\s+(?:me\s+)?([A-Z]+-\d+)/i);
+    const showMatch = message.match(/\bshow\b\s+(?:me\s+)?([A-Z]+-[A-Z0-9]+)/i);
     if (showMatch) {
       return await this.handleWlShow(showMatch[1], message);
     }
@@ -172,13 +172,13 @@ export class ChatPane {
     }
 
     // "update <id> with <details>"
-    const updateMatch = message.match(/\bupdate\b\s+(?:work\s+item\s+)?([A-Z]+-\d+)\b.*?(?:with|to|set)\s+(.+)/i);
+    const updateMatch = message.match(/\bupdate\b\s+(?:work\s+item\s+)?([A-Z]+-[A-Z0-9]+)\b.*?(?:with|to|set)\s+(.+)/i);
     if (updateMatch) {
       return await this.handleWlUpdate(updateMatch[1], updateMatch[2], message);
     }
 
     // "close <id>" or "close work item <id>"
-    const closeMatch = message.match(/\bclose\b.*?([A-Z]+-\d+)/i);
+    const closeMatch = message.match(/\bclose\b.*?([A-Z]+-[A-Z0-9]+)/i);
     if (closeMatch) {
       return await this.handleWlClose(closeMatch[1], message);
     }
@@ -200,7 +200,7 @@ export class ChatPane {
     }
 
     // "comment on <id>" or "add a comment to <id>"
-    const commentMatch = message.match(/\b(comment|add\s+a\s+comment|note)\b.*?([A-Z]+-\d+)\b.*?(?:to|on)\s+(.+)/i);
+    const commentMatch = message.match(/\b(comment|add\s+a\s+comment|note)\b.*?([A-Z]+-[A-Z0-9]+)\b.*?(?:to|on)\s+(.+)/i);
     if (commentMatch) {
       return await this.handleWlComment(commentMatch[2], commentMatch[3], message);
     }

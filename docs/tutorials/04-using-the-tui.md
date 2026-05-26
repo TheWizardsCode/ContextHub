@@ -12,6 +12,7 @@ By the end of this tutorial you will be able to:
 - Create, edit, and manage work items visually
 - Use keyboard shortcuts for efficient navigation
 - Access the built-in Pi agent assistant
+- Browse the first 5 work items and open details in chat with `Ctrl+B`
 
 ## Step 1: Launch the TUI
 
@@ -147,6 +148,16 @@ Example:
 ```
 
 This creates a work item with an auto-generated title, description, and appropriate issue type and priority.
+
+### Browse items and open details in chat
+
+From the action palette, use `Ctrl+B` to launch **Browse Work Items**. The browse flow:
+
+1. Loads exactly the first 5 items from `wl list`.
+2. Lets you move the selection with arrow keys.
+3. Runs `wl show <selected-id>` and renders details in the active chat stream when you press Enter.
+
+If no items are available, the TUI shows an explicit empty-state message instead of failing.
 
 ### Navigate OpenCode panes
 
