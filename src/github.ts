@@ -189,6 +189,12 @@ function spawnCommand(command: string, input?: string, timeout = 120000): Promis
     child.stdout.on('data', (chunk: string) => { stdout += chunk; });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+    child.stdin.on('error', (err: any) => {
+      // Child processes can close stdin early; ignore async EPIPE to avoid unhandled exceptions.
+      if (err?.code !== 'EPIPE' && err?.message) {
+        stderr += `${stderr ? '\n' : ''}${err.message}`;
+      }
+    });
     child.on('error', (err) => {
       clearTimeout(timer);
       resolve({ stdout: stdout.trim(), stderr: stderr.trim() || err.message, code: child.exitCode, error: err });

@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createWorklogBrowseExtension, formatBrowseOption } from '../../packages/tui/extensions/index.ts';
+import {
+  createDefaultListWorkItems,
+  createWorklogBrowseExtension,
+  formatBrowseOption,
+} from '../../packages/tui/extensions/index.ts';
 
 describe('Worklog browse pi extension', () => {
   const registerCommand = vi.fn();
@@ -16,12 +20,12 @@ describe('Worklog browse pi extension', () => {
     vi.clearAllMocks();
   });
 
-  it('registers a browse command and Ctrl+Shift+B shortcut', () => {
+  it('registers /wl command and Ctrl+Shift+B shortcut', () => {
     const extension = createWorklogBrowseExtension();
     extension(makePi() as any);
 
     expect(registerCommand).toHaveBeenCalledWith(
-      'wl-browse',
+      'wl',
       expect.objectContaining({ description: expect.any(String), handler: expect.any(Function) }),
     );
     expect(registerShortcut).toHaveBeenCalledWith(
@@ -44,7 +48,7 @@ describe('Worklog browse pi extension', () => {
     const extension = createWorklogBrowseExtension({ listWorkItems, showWorkItem });
     extension(makePi() as any);
 
-    const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl-browse')?.[1]?.handler;
+    const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
     expect(typeof commandHandler).toBe('function');
 
     const options = [
@@ -60,7 +64,7 @@ describe('Worklog browse pi extension', () => {
 
     await commandHandler('', { ui: { select, notify } });
 
-    expect(select).toHaveBeenCalledWith('Browse Worklog items (first 5)', options);
+    expect(select).toHaveBeenCalledWith('Browse Worklog next items (top 5)', options);
     expect(listWorkItems).toHaveBeenCalledTimes(1);
     expect(showWorkItem).toHaveBeenCalledWith('WL-2');
     expect(sendMessage).toHaveBeenCalledWith(
@@ -80,7 +84,7 @@ describe('Worklog browse pi extension', () => {
     const extension = createWorklogBrowseExtension({ listWorkItems, showWorkItem });
     extension(makePi() as any);
 
-    const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl-browse')?.[1]?.handler;
+    const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
     const notify = vi.fn();
 
     await commandHandler('', { ui: { select: vi.fn(), notify } });
@@ -88,5 +92,18 @@ describe('Worklog browse pi extension', () => {
     expect(notify).toHaveBeenCalledWith('No work items available to browse.', 'info');
     expect(showWorkItem).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('uses wl next -n 5 and parses results.workItem payload', async () => {
+    const runWl = vi.fn().mockResolvedValue(`{\n  "success": true,\n  "count": 2,\n  "results": [\n    { "workItem": { "id": "WL-10", "title": "Ten", "status": "open" } },\n    { "workItem": { "id": "WL-11", "title": "Eleven", "status": "blocked" } }\n  ]\n}`);
+
+    const listWorkItems = createDefaultListWorkItems(runWl as any);
+    const items = await listWorkItems();
+
+    expect(runWl).toHaveBeenCalledWith(['next', '-n', '5']);
+    expect(items).toEqual([
+      { id: 'WL-10', title: 'Ten', status: 'open' },
+      { id: 'WL-11', title: 'Eleven', status: 'blocked' },
+    ]);
   });
 });

@@ -9,9 +9,12 @@ export interface WorklogBrowseItem {
   status: string;
 }
 
+type RunWlFn = (args: string[], includeJson?: boolean) => Promise<string>;
+
 interface WorklogBrowseDependencies {
   listWorkItems?: () => Promise<WorklogBrowseItem[]>;
   showWorkItem?: (id: string) => Promise<string>;
+  runWl?: RunWlFn;
 }
 
 interface BrowseUi {
@@ -50,11 +53,17 @@ function extractJsonObject(raw: string): unknown {
 }
 
 function normalizeListPayload(payload: unknown): WorklogBrowseItem[] {
-  const itemList = Array.isArray(payload)
+  const directItems = Array.isArray(payload)
     ? payload
     : (payload && typeof payload === 'object' && Array.isArray((payload as any).workItems)
       ? (payload as any).workItems
       : []);
+
+  const nextItems = payload && typeof payload === 'object' && Array.isArray((payload as any).results)
+    ? (payload as any).results.map((entry: any) => entry?.workItem).filter(Boolean)
+    : [];
+
+  const itemList = [...directItems, ...nextItems];
 
   return itemList
     .map((item: any) => ({
@@ -89,10 +98,16 @@ async function runWl(args: string[], includeJson = true): Promise<string> {
   throw new Error(`Unable to execute wl/worklog CLI: ${String(lastError)}`);
 }
 
-async function defaultListWorkItems(): Promise<WorklogBrowseItem[]> {
-  const output = await runWl(['list', '-n', '5']);
-  const payload = extractJsonObject(output);
-  return normalizeListPayload(payload).slice(0, 5);
+export function createDefaultListWorkItems(run: RunWlFn = runWl): () => Promise<WorklogBrowseItem[]> {
+  return async (): Promise<WorklogBrowseItem[]> => {
+    const output = await run(['next', '-n', '5']);
+    const payload = extractJsonObject(output);
+    return normalizeListPayload(payload).slice(0, 5);
+  };
+}
+
+async function defaultListWorkItems(run: RunWlFn = runWl): Promise<WorklogBrowseItem[]> {
+  return createDefaultListWorkItems(run)();
 }
 
 async function defaultShowWorkItem(id: string): Promise<string> {
@@ -105,7 +120,8 @@ function buildShowMessage(id: string, showOutput: string): string {
 }
 
 export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {}) {
-  const listWorkItems = deps.listWorkItems ?? defaultListWorkItems;
+  const runWlImpl = deps.runWl ?? runWl;
+  const listWorkItems = deps.listWorkItems ?? (() => defaultListWorkItems(runWlImpl));
   const showWorkItem = deps.showWorkItem ?? defaultShowWorkItem;
 
   return function registerWorklogBrowseExtension(pi: PiLike): void {
@@ -118,7 +134,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         }
 
         const options = items.map(formatBrowseOption);
-        const selected = await ctx.ui.select('Browse Worklog items (first 5)', options);
+        const selected = await ctx.ui.select('Browse Worklog next items (top 5)', options);
         if (!selected) return;
 
         const selectedIndex = options.indexOf(selected);
@@ -144,15 +160,15 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
       }
     };
 
-    pi.registerCommand('wl-browse', {
-      description: 'Browse first 5 work items and open wl show details in chat',
+    pi.registerCommand('wl', {
+      description: 'Browse the next 5 recommended work items and open wl show details in chat',
       handler: async (_args: string, ctx: BrowseContext) => {
         await runBrowseFlow(ctx);
       },
     });
 
     pi.registerShortcut('ctrl+shift+b', {
-      description: 'Browse first 5 work items (avoids built-in Ctrl+B cursor-left conflict)',
+      description: 'Browse next 5 recommended work items (avoids built-in Ctrl+B cursor-left conflict)',
       handler: async (ctx: BrowseContext) => {
         await runBrowseFlow(ctx);
       },
