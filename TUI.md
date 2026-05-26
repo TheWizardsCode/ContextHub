@@ -77,9 +77,7 @@ Other action keys (close, update, search, filters, etc.) are suppressed during m
 
 - The action palette provides quick access to common agent-driven flows
 - Select an action to trigger a wl CLI command
-- Available actions: wl next, wl list, wl browse, wl create, wl update, wl close, wl search, wl show, wl claim
-- `wl browse` (`Ctrl+B`) loads the first 5 items from `wl list`, lets you move selection with arrow keys, and opens `wl show <selected-id>` in the active chat stream when you press Enter
-- If no items are available, browse mode shows an explicit empty-state message (`No work items available to browse.`)
+- Available actions: wl next, wl list, wl create, wl update, wl close, wl search, wl show, wl claim
 - Use keyboard navigation to select actions and Enter to execute
 
 ## Legacy OpenCode Integration

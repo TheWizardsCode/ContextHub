@@ -851,6 +851,13 @@ pi install ./packages/tui
 wl-piman
 ```
 
+For the standalone Pi Worklog browse extension (`/wl-browse`, `Ctrl+B`), link this repository's extension directory into the target project's `.pi/extensions` path:
+
+```sh
+npm run install:pi-extension -- /path/to/workdir
+# then start pi in /path/to/workdir and run /reload
+```
+
 ### `status` [options]
 
 Show Worklog system and database status (counts, configuration values).

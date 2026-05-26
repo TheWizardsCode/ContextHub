@@ -29,12 +29,6 @@ export interface Action {
   category?: string;
 }
 
-interface BrowseItem {
-  id: string;
-  title: string;
-  status: string;
-}
-
 /**
  * ActionPalette provides a keyboard-first palette UI for invoking
  * agent-driven flows that map to wl CLI commands.
@@ -46,8 +40,6 @@ export class ActionPalette {
   private filteredActions: Action[] = [];
   private filterText = "";
   private isOpen = false;
-  private browseItems: BrowseItem[] = [];
-  private browseSelectedIndex = -1;
 
   constructor(
     private chatPane: ChatPane,
@@ -116,7 +108,6 @@ export class ActionPalette {
   close(): void {
     this.isOpen = false;
     this.selectedIndex = -1;
-    this.clearBrowseMode();
     this.emit("palette-close", {});
   }
 
@@ -140,18 +131,6 @@ export class ActionPalette {
    * Move selection up by one.
    */
   selectPrev(): void {
-    if (this.isBrowsing()) {
-      this.browseSelectedIndex =
-        this.browseSelectedIndex <= 0
-          ? this.browseItems.length - 1
-          : this.browseSelectedIndex - 1;
-      this.emit("browse-selection-change", {
-        index: this.browseSelectedIndex,
-        item: this.browseItems[this.browseSelectedIndex],
-      });
-      return;
-    }
-
     if (this.filteredActions.length === 0) return;
     this.selectedIndex =
       this.selectedIndex <= 0
@@ -164,16 +143,6 @@ export class ActionPalette {
    * Move selection down by one.
    */
   selectNext(): void {
-    if (this.isBrowsing()) {
-      this.browseSelectedIndex =
-        this.browseSelectedIndex >= this.browseItems.length - 1 ? 0 : this.browseSelectedIndex + 1;
-      this.emit("browse-selection-change", {
-        index: this.browseSelectedIndex,
-        item: this.browseItems[this.browseSelectedIndex],
-      });
-      return;
-    }
-
     if (this.filteredActions.length === 0) return;
     this.selectedIndex =
       this.selectedIndex >= this.filteredActions.length - 1 ? 0 : this.selectedIndex + 1;
@@ -184,10 +153,6 @@ export class ActionPalette {
    * Execute the currently selected action.
    */
   async executeSelected(): Promise<string | void> {
-    if (this.isBrowsing()) {
-      return this.executeBrowseSelection();
-    }
-
     if (this.selectedIndex < 0 || this.selectedIndex >= this.filteredActions.length) {
       return;
     }
@@ -211,8 +176,7 @@ export class ActionPalette {
   /**
    * Subscribe to palette events.
    * Events: "palette-open", "palette-close", "selection-change",
-   *         "browse-open", "browse-selection-change", "browse-empty-state",
-   *         "browse-executed", "confirm-action", "action-executed", "error"
+   *         "confirm-action", "action-executed", "error"
    */
   on(event: string, listener: (data: any) => void): void {
     this.eventEmitter.on(event, listener);
@@ -230,27 +194,6 @@ export class ActionPalette {
    */
   private emit(event: string, data: unknown): void {
     this.eventEmitter.emit(event, data);
-  }
-
-  private isBrowsing(): boolean {
-    return this.browseItems.length > 0 && this.browseSelectedIndex >= 0;
-  }
-
-  private clearBrowseMode(): void {
-    this.browseItems = [];
-    this.browseSelectedIndex = -1;
-  }
-
-  private async executeBrowseSelection(): Promise<string | void> {
-    if (!this.isBrowsing()) {
-      return;
-    }
-
-    const item = this.browseItems[this.browseSelectedIndex];
-    await this.chatPane.sendMessage(`show ${item.id}`);
-    this.emit("browse-executed", { index: this.browseSelectedIndex, item });
-    this.clearBrowseMode();
-    return `Opened ${item.id} in chat.`;
   }
 
   /**
@@ -312,43 +255,6 @@ export class ActionPalette {
           return "No work items found.";
         } catch (err) {
           throw new Error(`wl list failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      },
-    });
-
-    this.registerAction({
-      id: "wl-browse",
-      label: "Browse Work Items",
-      description: "Browse the first 5 work items and press Enter to open details in chat",
-      shortcut: "Ctrl+B",
-      category: "Navigation",
-      execute: async () => {
-        try {
-          const items = await runWl("list", ["-n", "5"]);
-          const browseItems = Array.isArray(items)
-            ? items.slice(0, 5).map((item: any) => ({
-                id: String(item.id),
-                title: item.title || "Untitled",
-                status: item.status || "unknown",
-              }))
-            : [];
-
-          if (browseItems.length === 0) {
-            this.clearBrowseMode();
-            this.emit("browse-empty-state", { message: "No work items available to browse." });
-            return "No work items available to browse.";
-          }
-
-          this.browseItems = browseItems;
-          this.browseSelectedIndex = 0;
-          this.emit("browse-open", {
-            items: this.browseItems,
-            index: this.browseSelectedIndex,
-            item: this.browseItems[this.browseSelectedIndex],
-          });
-          return "Browse mode opened. Use arrow keys to move, then press Enter to open details in chat.";
-        } catch (err) {
-          throw new Error(`wl browse failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       },
     });
