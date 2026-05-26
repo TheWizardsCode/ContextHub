@@ -851,7 +851,7 @@ pi install ./packages/tui
 wl-piman
 ```
 
-For the standalone Pi Worklog browse extension (`/wl`, `Ctrl+Shift+B`), link this repository's extension directory into the target project's `.pi/extensions` path. The extension lists `wl next -n 5` and previews selected item titles in a widget above the editor as you move selection:
+For the standalone Pi Worklog browse extension (`/wl`, `Ctrl+Shift+B`), link this repository's extension directory into the target project's `.pi/extensions` path. The extension lists `wl next -n 5` and previews the selected item in a widget above the editor (`title <id>`, `Priority/Stage/Status`, `Risk/Effort`, and first 7 description lines) as you move selection:
 
 ```sh
 npm run install:pi-extension -- /path/to/workdir

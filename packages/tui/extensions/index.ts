@@ -7,6 +7,11 @@ export interface WorklogBrowseItem {
   id: string;
   title: string;
   status: string;
+  priority?: string;
+  stage?: string;
+  risk?: string;
+  effort?: string;
+  description?: string;
 }
 
 type RunWlFn = (args: string[], includeJson?: boolean) => Promise<string>;
@@ -92,6 +97,11 @@ function normalizeListPayload(payload: unknown): WorklogBrowseItem[] {
       id: String(item?.id ?? ''),
       title: String(item?.title ?? 'Untitled'),
       status: String(item?.status ?? 'unknown'),
+      priority: item?.priority ? String(item.priority) : undefined,
+      stage: item?.stage ? String(item.stage) : undefined,
+      risk: item?.risk ? String(item.risk) : undefined,
+      effort: item?.effort ? String(item.effort) : undefined,
+      description: item?.description ? String(item.description) : undefined,
     }))
     .filter(item => item.id.length > 0);
 }
@@ -132,8 +142,24 @@ async function defaultListWorkItems(run: RunWlFn = runWl): Promise<WorklogBrowse
   return createDefaultListWorkItems(run)();
 }
 
+function descriptionPreview(description: string | undefined, maxLines = 7): string[] {
+  if (!description || description.trim().length === 0) return ['—'];
+  return description.split(/\r?\n/).slice(0, maxLines);
+}
+
 function buildSelectionWidget(item: WorklogBrowseItem): string[] {
-  return [item.title];
+  const priority = item.priority ?? '—';
+  const stage = item.stage ?? '—';
+  const status = item.status ?? '—';
+  const risk = item.risk ?? '—';
+  const effort = item.effort ?? '—';
+
+  return [
+    `${item.title} <${item.id}>`,
+    `Priority/Stage/Status: ${priority}/${stage}/${status}`,
+    `Risk/Effort: ${risk}/${effort}`,
+    ...descriptionPreview(item.description, 7),
+  ];
 }
 
 function truncateLine(line: string, width: number): string {

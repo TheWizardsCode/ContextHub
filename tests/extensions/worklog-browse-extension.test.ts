@@ -33,12 +33,30 @@ describe('Worklog browse pi extension', () => {
     );
   });
 
-  it('updates above-editor widget title each time selection changes', async () => {
+  it('updates above-editor widget with details each time selection changes', async () => {
     const listWorkItems = vi.fn().mockResolvedValue([
       { id: 'WL-1', title: 'One', status: 'open' },
-      { id: 'WL-2', title: 'Two', status: 'in-progress' },
+      {
+        id: 'WL-2',
+        title: 'Two',
+        status: 'in-progress',
+        priority: 'high',
+        stage: 'plan_complete',
+        risk: 'Medium',
+        effort: 'Small',
+        description: 'L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8',
+      },
       { id: 'WL-3', title: 'Three', status: 'open' },
-      { id: 'WL-4', title: 'Four', status: 'blocked' },
+      {
+        id: 'WL-4',
+        title: 'Four',
+        status: 'blocked',
+        priority: 'critical',
+        stage: 'in_progress',
+        risk: 'High',
+        effort: 'Large',
+        description: 'A\nB\nC\nD\nE\nF\nG\nH\nI',
+      },
       { id: 'WL-5', title: 'Five', status: 'open' },
       { id: 'WL-6', title: 'Six', status: 'open' },
     ]);
@@ -61,8 +79,30 @@ describe('Worklog browse pi extension', () => {
 
     expect(listWorkItems).toHaveBeenCalledTimes(1);
     expect(chooseWorkItem).toHaveBeenCalledTimes(1);
-    expect(setWidget).toHaveBeenNthCalledWith(1, 'worklog-browse-selection', ['Two']);
-    expect(setWidget).toHaveBeenNthCalledWith(2, 'worklog-browse-selection', ['Four']);
+    expect(setWidget).toHaveBeenNthCalledWith(1, 'worklog-browse-selection', [
+      'Two <WL-2>',
+      'Priority/Stage/Status: high/plan_complete/in-progress',
+      'Risk/Effort: Medium/Small',
+      'L1',
+      'L2',
+      'L3',
+      'L4',
+      'L5',
+      'L6',
+      'L7',
+    ]);
+    expect(setWidget).toHaveBeenNthCalledWith(2, 'worklog-browse-selection', [
+      'Four <WL-4>',
+      'Priority/Stage/Status: critical/in_progress/blocked',
+      'Risk/Effort: High/Large',
+      'A',
+      'B',
+      'C',
+      'D',
+      'E',
+      'F',
+      'G',
+    ]);
     expect(setWidget).toHaveBeenLastCalledWith('worklog-browse-selection', undefined);
     expect(sendMessage).not.toHaveBeenCalled();
   });
@@ -87,15 +127,33 @@ describe('Worklog browse pi extension', () => {
   });
 
   it('uses wl next -n 5 and parses results.workItem payload', async () => {
-    const runWl = vi.fn().mockResolvedValue(`{\n  "success": true,\n  "count": 2,\n  "results": [\n    { "workItem": { "id": "WL-10", "title": "Ten", "status": "open" } },\n    { "workItem": { "id": "WL-11", "title": "Eleven", "status": "blocked" } }\n  ]\n}`);
+    const runWl = vi.fn().mockResolvedValue(`{\n  "success": true,\n  "count": 2,\n  "results": [\n    { "workItem": { "id": "WL-10", "title": "Ten", "status": "open", "priority": "medium", "stage": "idea", "risk": "Low", "effort": "Small", "description": "alpha\\nbeta" } },\n    { "workItem": { "id": "WL-11", "title": "Eleven", "status": "blocked", "priority": "high", "stage": "in_progress", "risk": "High", "effort": "Large", "description": "gamma\\ndelta" } }\n  ]\n}`);
 
     const listWorkItems = createDefaultListWorkItems(runWl as any);
     const items = await listWorkItems();
 
     expect(runWl).toHaveBeenCalledWith(['next', '-n', '5']);
     expect(items).toEqual([
-      { id: 'WL-10', title: 'Ten', status: 'open' },
-      { id: 'WL-11', title: 'Eleven', status: 'blocked' },
+      {
+        id: 'WL-10',
+        title: 'Ten',
+        status: 'open',
+        priority: 'medium',
+        stage: 'idea',
+        risk: 'Low',
+        effort: 'Small',
+        description: 'alpha\nbeta',
+      },
+      {
+        id: 'WL-11',
+        title: 'Eleven',
+        status: 'blocked',
+        priority: 'high',
+        stage: 'in_progress',
+        risk: 'High',
+        effort: 'Large',
+        description: 'gamma\ndelta',
+      },
     ]);
   });
 });
