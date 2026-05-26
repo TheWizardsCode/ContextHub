@@ -40,6 +40,7 @@ interface BrowseUi {
       handleInput?: (data: string) => void;
     },
   ) => Promise<T>;
+  setWidget?: (id: string, content?: string[]) => void;
   notify: (message: string, level?: 'info' | 'warning' | 'error') => void;
 }
 
@@ -131,8 +132,8 @@ async function defaultListWorkItems(run: RunWlFn = runWl): Promise<WorklogBrowse
   return createDefaultListWorkItems(run)();
 }
 
-function buildSelectionMessage(item: WorklogBrowseItem): string {
-  return item.title;
+function buildSelectionWidget(item: WorklogBrowseItem): string[] {
+  return [item.title];
 }
 
 function truncateLine(line: string, width: number): string {
@@ -257,15 +258,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         const announceSelection = (item: WorklogBrowseItem) => {
           if (item.id === lastAnnouncedId) return;
           lastAnnouncedId = item.id;
-
-          pi.sendMessage(
-            {
-              customType: 'worklog-browse-selection',
-              content: buildSelectionMessage(item),
-              display: true,
-            },
-            { triggerTurn: false },
-          );
+          ctx.ui.setWidget?.('worklog-browse-selection', buildSelectionWidget(item));
         };
 
         const selectedItem = await chooseWorkItem(items, ctx, announceSelection);
@@ -275,18 +268,20 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(`Failed to browse work items: ${message}`, 'error');
+      } finally {
+        ctx.ui.setWidget?.('worklog-browse-selection', undefined);
       }
     };
 
     pi.registerCommand('wl', {
-      description: 'Browse next 5 work items and stream selected titles to chat',
+      description: 'Browse next 5 work items and preview selected title above editor',
       handler: async (_args: string, ctx: BrowseContext) => {
         await runBrowseFlow(ctx);
       },
     });
 
     pi.registerShortcut('ctrl+shift+b', {
-      description: 'Browse next 5 recommended work items and stream selected titles',
+      description: 'Browse next 5 recommended work items and preview selected title',
       handler: async (ctx: BrowseContext) => {
         await runBrowseFlow(ctx);
       },

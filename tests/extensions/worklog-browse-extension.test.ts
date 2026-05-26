@@ -33,7 +33,7 @@ describe('Worklog browse pi extension', () => {
     );
   });
 
-  it('posts selected item title to chat each time selection changes', async () => {
+  it('updates above-editor widget title each time selection changes', async () => {
     const listWorkItems = vi.fn().mockResolvedValue([
       { id: 'WL-1', title: 'One', status: 'open' },
       { id: 'WL-2', title: 'Two', status: 'in-progress' },
@@ -56,28 +56,15 @@ describe('Worklog browse pi extension', () => {
     expect(typeof commandHandler).toBe('function');
 
     const notify = vi.fn();
-    await commandHandler('', { ui: { notify } });
+    const setWidget = vi.fn();
+    await commandHandler('', { ui: { notify, setWidget } });
 
     expect(listWorkItems).toHaveBeenCalledTimes(1);
     expect(chooseWorkItem).toHaveBeenCalledTimes(1);
-    expect(sendMessage).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({
-        customType: 'worklog-browse-selection',
-        display: true,
-        content: 'Two',
-      }),
-      expect.objectContaining({ triggerTurn: false }),
-    );
-    expect(sendMessage).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        customType: 'worklog-browse-selection',
-        display: true,
-        content: 'Four',
-      }),
-      expect.objectContaining({ triggerTurn: false }),
-    );
+    expect(setWidget).toHaveBeenNthCalledWith(1, 'worklog-browse-selection', ['Two']);
+    expect(setWidget).toHaveBeenNthCalledWith(2, 'worklog-browse-selection', ['Four']);
+    expect(setWidget).toHaveBeenLastCalledWith('worklog-browse-selection', undefined);
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it('reports explicit empty state when no items exist', async () => {
@@ -89,12 +76,14 @@ describe('Worklog browse pi extension', () => {
 
     const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
     const notify = vi.fn();
+    const setWidget = vi.fn();
 
-    await commandHandler('', { ui: { notify } });
+    await commandHandler('', { ui: { notify, setWidget } });
 
     expect(notify).toHaveBeenCalledWith('No work items available to browse.', 'info');
     expect(chooseWorkItem).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();
+    expect(setWidget).toHaveBeenCalledWith('worklog-browse-selection', undefined);
   });
 
   it('uses wl next -n 5 and parses results.workItem payload', async () => {
