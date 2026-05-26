@@ -77,13 +77,13 @@ For freeze triage and profiling details (including `TUI_CHORD_DEBUG`, `strace`, 
 
 The repository includes a Pi extension that adds a Worklog browse flow (`/wl` and `Ctrl+Shift+B`) which lists the next 5 recommended work items (`wl next -n 5`) and previews the selected item in a widget above the editor as selection changes (`title <id>`, `Priority/Stage/Status`, `Risk/Effort`, and the first 7 description lines).
 
-Install it into a project work directory by creating a symlink under `.pi/extensions`:
+Install it globally by creating a symlink under `~/.pi/agent/extensions`:
 
 ```bash
-npm run install:pi-extension -- /path/to/workdir
+npm run install:pi-extension
 ```
 
-Then start `pi` in that work directory and run:
+Then start (or restart) `pi` and run:
 
 ```text
 /reload
