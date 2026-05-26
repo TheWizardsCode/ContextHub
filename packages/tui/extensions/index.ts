@@ -59,8 +59,22 @@ interface PiLike {
   sendMessage: (message: { customType: string; content: string; display: boolean }, options?: { triggerTurn?: boolean }) => void;
 }
 
-export function formatBrowseOption(item: WorklogBrowseItem): string {
-  return `${item.id} — ${item.title} [${item.status}]`;
+export function formatBrowseOption(item: WorklogBrowseItem, maxWidth?: number): string {
+  const idPart = `(${item.id})`;
+  const full = `${item.title} ${idPart}`;
+
+  if (!maxWidth || maxWidth <= 0 || full.length <= maxWidth) {
+    return full;
+  }
+
+  const separatorAndId = ` ${idPart}`;
+  if (maxWidth <= separatorAndId.length) {
+    return truncateLine(idPart, maxWidth);
+  }
+
+  const titleWidth = maxWidth - separatorAndId.length;
+  const truncatedTitle = truncateLine(item.title, titleWidth);
+  return `${truncatedTitle}${separatorAndId}`;
 }
 
 function extractJsonObject(raw: string): unknown {
@@ -229,7 +243,8 @@ async function defaultChooseWorkItem(
         const help = truncateLine(theme.fg('dim', '↑↓ navigate • enter select • esc cancel'), width);
         const options = items.map((item, index) => {
           const prefix = index === selectedIndex ? theme.fg('accent', '› ') : '  ';
-          const optionLine = `${prefix}${formatBrowseOption(item)}`;
+          const contentWidth = Math.max(0, width - 2);
+          const optionLine = `${prefix}${formatBrowseOption(item, contentWidth)}`;
           return truncateLine(optionLine, width);
         });
 

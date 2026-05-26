@@ -2,9 +2,25 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   createDefaultListWorkItems,
   createWorklogBrowseExtension,
+  formatBrowseOption,
 } from '../../packages/tui/extensions/index.ts';
 
 describe('Worklog browse pi extension', () => {
+  it('formats browse options as title followed by id in parentheses', () => {
+    expect(formatBrowseOption({ id: 'WL-42', title: 'Implement thing', status: 'open' })).toBe(
+      'Implement thing (WL-42)',
+    );
+  });
+
+  it('truncates title to keep id visible within width constraints', () => {
+    expect(
+      formatBrowseOption(
+        { id: 'WL-123456', title: 'A very long work item title that will not fit', status: 'open' },
+        24,
+      ),
+    ).toBe('A very long… (WL-123456)');
+  });
+
   const registerCommand = vi.fn();
   const registerShortcut = vi.fn();
   const sendMessage = vi.fn();
