@@ -16,7 +16,7 @@ describe('Worklog browse pi extension', () => {
     vi.clearAllMocks();
   });
 
-  it('registers a browse command and Ctrl+B shortcut', () => {
+  it('registers a browse command and Ctrl+Shift+B shortcut', () => {
     const extension = createWorklogBrowseExtension();
     extension(makePi() as any);
 
@@ -25,7 +25,7 @@ describe('Worklog browse pi extension', () => {
       expect.objectContaining({ description: expect.any(String), handler: expect.any(Function) }),
     );
     expect(registerShortcut).toHaveBeenCalledWith(
-      'ctrl+b',
+      'ctrl+shift+b',
       expect.objectContaining({ description: expect.any(String), handler: expect.any(Function) }),
     );
   });

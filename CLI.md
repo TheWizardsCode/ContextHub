@@ -851,7 +851,7 @@ pi install ./packages/tui
 wl-piman
 ```
 
-For the standalone Pi Worklog browse extension (`/wl-browse`, `Ctrl+B`), link this repository's extension directory into the target project's `.pi/extensions` path:
+For the standalone Pi Worklog browse extension (`/wl-browse`, `Ctrl+Shift+B`), link this repository's extension directory into the target project's `.pi/extensions` path:
 
 ```sh
 npm run install:pi-extension -- /path/to/workdir

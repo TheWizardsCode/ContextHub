@@ -75,7 +75,7 @@ For freeze triage and profiling details (including `TUI_CHORD_DEBUG`, `strace`, 
 
 ### Install the Pi Worklog browse extension
 
-The repository includes a Pi extension that adds a Worklog browse flow (`/wl-browse` and `Ctrl+B`) which lists the first 5 work items and posts `wl show <id>` output into chat for the selected item.
+The repository includes a Pi extension that adds a Worklog browse flow (`/wl-browse` and `Ctrl+Shift+B`) which lists the first 5 work items and posts `wl show <id>` output into chat for the selected item.
 
 Install it into a project work directory by creating a symlink under `.pi/extensions`:
 

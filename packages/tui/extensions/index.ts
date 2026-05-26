@@ -151,8 +151,8 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
       },
     });
 
-    pi.registerShortcut('ctrl+b', {
-      description: 'Browse first 5 work items',
+    pi.registerShortcut('ctrl+shift+b', {
+      description: 'Browse first 5 work items (avoids built-in Ctrl+B cursor-left conflict)',
       handler: async (ctx: BrowseContext) => {
         await runBrowseFlow(ctx);
       },
