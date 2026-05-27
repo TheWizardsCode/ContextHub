@@ -49,7 +49,7 @@ describe('Worklog browse pi extension', () => {
     );
   });
 
-  it('updates above-editor widget with details each time selection changes', async () => {
+  it('updates above-editor widget with details each time selection changes and renders full markdown on Enter', async () => {
     const listWorkItems = vi.fn().mockResolvedValue([
       { id: 'WL-1', title: 'One', status: 'open' },
       {
@@ -83,7 +83,9 @@ describe('Worklog browse pi extension', () => {
       return items[3];
     });
 
-    const extension = createWorklogBrowseExtension({ listWorkItems, chooseWorkItem });
+    const runWl = vi.fn().mockResolvedValue('## Four Details\n\nLine1\nLine2\nLine3');
+
+    const extension = createWorklogBrowseExtension({ listWorkItems, chooseWorkItem, runWl });
     extension(makePi() as any);
 
     const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
@@ -95,6 +97,8 @@ describe('Worklog browse pi extension', () => {
 
     expect(listWorkItems).toHaveBeenCalledTimes(1);
     expect(chooseWorkItem).toHaveBeenCalledTimes(1);
+    expect(runWl).toHaveBeenCalledWith(['show', 'WL-4', '--format', 'markdown'], false);
+
     expect(setWidget).toHaveBeenNthCalledWith(1, 'worklog-browse-selection', [
       'Two <WL-2>',
       'Priority/Stage/Status: high/plan_complete/in-progress',
@@ -119,10 +123,40 @@ describe('Worklog browse pi extension', () => {
       'F',
       'G',
     ]);
-    expect(setWidget).toHaveBeenLastCalledWith('worklog-browse-selection', undefined);
+    expect(setWidget).toHaveBeenCalledWith('worklog-browse-selection', ['## Four Details', '', 'Line1', 'Line2', 'Line3']);
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
+  it('shows notification on wl show failure and keeps preview', async () => {
+    const listWorkItems = vi.fn().mockResolvedValue([
+      { id: 'WL-1', title: 'One', status: 'open', description: 'Only' },
+    ]);
+
+    const chooseWorkItem = vi.fn(async (items, _ctx, onSelectionChange) => {
+      onSelectionChange(items[0]);
+      return items[0];
+    });
+
+    const runWl = vi.fn().mockRejectedValue(new Error('not found'));
+
+    const extension = createWorklogBrowseExtension({ listWorkItems, chooseWorkItem, runWl });
+    extension(makePi() as any);
+
+    const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
+    const notify = vi.fn();
+    const setWidget = vi.fn();
+
+    await commandHandler('', { ui: { notify, setWidget } });
+
+    expect(runWl).toHaveBeenCalledWith(['show', 'WL-1', '--format', 'markdown'], false);
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('Failed to render work item details'), 'error');
+    expect(setWidget).toHaveBeenCalledWith('worklog-browse-selection', [
+      'One <WL-1>',
+      'Priority/Stage/Status: —/—/open',
+      'Risk/Effort: —/—',
+      'Only',
+    ]);
+  });
   it('reports explicit empty state when no items exist', async () => {
     const listWorkItems = vi.fn().mockResolvedValue([]);
     const chooseWorkItem = vi.fn();

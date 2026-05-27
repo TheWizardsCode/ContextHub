@@ -292,6 +292,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         const items = (await listWorkItems()).slice(0, 5);
         if (items.length === 0) {
           ctx.ui.notify('No work items available to browse.', 'info');
+          ctx.ui.setWidget?.('worklog-browse-selection', undefined);
           return;
         }
 
@@ -303,14 +304,29 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         };
 
         const selectedItem = await chooseWorkItem(items, ctx, announceSelection);
-        if (!selectedItem) return;
+        if (!selectedItem) {
+          // user cancelled selection; clear preview widget
+          ctx.ui.setWidget?.('worklog-browse-selection', undefined);
+          return;
+        }
 
+        // Ensure the final selection is announced (in case chooseWorkItem didn't emit it)
         announceSelection(selectedItem);
+
+        // On Enter: fetch full markdown and render it into the above-editor widget. Do not render
+        // error text into the widget; show a notification on failure instead and keep the preview.
+        try {
+          const mdOutput = await runWlImpl(['show', selectedItem.id, '--format', 'markdown'], false);
+          const lines = mdOutput.split(/\r?\n/);
+          ctx.ui.setWidget?.('worklog-browse-selection', lines);
+        } catch (innerErr) {
+          const message = innerErr instanceof Error ? innerErr.message : String(innerErr);
+          ctx.ui.notify(`Failed to render work item details: ${message}`, 'error');
+          // keep the existing preview widget instead of replacing it with an error
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(`Failed to browse work items: ${message}`, 'error');
-      } finally {
-        ctx.ui.setWidget?.('worklog-browse-selection', undefined);
       }
     };
 
