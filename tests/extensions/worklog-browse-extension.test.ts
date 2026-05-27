@@ -123,7 +123,19 @@ describe('Worklog browse pi extension', () => {
       'F',
       'G',
     ]);
-    expect(setWidget).toHaveBeenCalledWith('worklog-browse-selection', ['## Four Details', '', 'Line1', 'Line2', 'Line3']);
+
+    // The final widget is a scrollable component factory. Ensure setWidget was called with a factory
+    const factoryCall = setWidget.mock.calls.find(c => c[0] === 'worklog-browse-selection' && typeof c[1] === 'function');
+    expect(factoryCall).toBeDefined();
+    const factory = factoryCall?.[1];
+
+    // Simulate the TUI calling the factory to get a component and rendering it
+    const fakeTui = { getHeight: () => 80, requestRender: () => {} };
+    const fakeTheme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+    const comp = factory(fakeTui, fakeTheme);
+    expect(typeof comp.render).toBe('function');
+    expect(comp.render(80)).toEqual(['## Four Details', '', 'Line1', 'Line2', 'Line3']);
+
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
