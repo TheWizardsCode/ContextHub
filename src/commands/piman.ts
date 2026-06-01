@@ -60,21 +60,39 @@ export default function register(ctx: PluginContext): void {
       if (options.all) env.WL_PIMAN_ALL = '1';
       if (options.prefix) env.WL_PIMAN_PREFIX = options.prefix;
 
+      // Pipe stdin so we can inject the /wl command after startup;
+      // stdout/stderr are inherited so the user sees and interacts with Pi's
+      // TUI directly.
       const child = spawn('pi', piArgs, {
-        stdio: 'inherit',
+        stdio: ['pipe', 'inherit', 'inherit'],
         env,
         cwd: process.cwd(),
       });
 
-      // Wait for pi to exit; forward its exit code.
+      // Once Pi's TUI has initialised and loaded extensions, /wl triggers the
+      // worklog browse flow automatically so the user lands directly in the
+      // item browser without having to type the command.
+      const INIT_DELAY_MS = 1500;
+      const autoBrowseTimer = setTimeout(() => {
+        if (child.stdin && !child.killed) {
+          child.stdin.write('/wl\n');
+
+          // After injecting the command, forward all further terminal input
+          // to the child so the user can interact normally.
+          process.stdin.pipe(child.stdin);
+        }
+      }, INIT_DELAY_MS);
+
+      // Wait for pi to exit.
       return new Promise<void>((resolvePromise, reject) => {
         child.on('error', (err) => {
+          clearTimeout(autoBrowseTimer);
           reject(new Error(`Failed to launch pi: ${err.message}`));
         });
         child.on('exit', (code) => {
-          if (code !== 0 && code !== null) {
-            // Non-zero exit, but we still resolve — user may have quit normally
-          }
+          clearTimeout(autoBrowseTimer);
+          // Unpipe terminal input when child exits
+          try { process.stdin.unpipe(child.stdin!); } catch { /* ignore */ }
           resolvePromise();
         });
       });
