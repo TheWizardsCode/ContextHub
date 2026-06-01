@@ -828,34 +828,20 @@ wl --json init
 
 ### `piman` | `pi` [options]
 
-Launch the Pi-based TUI: browse and manage work items with agent chat and action palette. This is the agent-centric TUI that replaces the legacy Opencode-based interface. All worklog operations are performed via the `wl` CLI.
+Launch the Pi-based TUI for browsing and managing work items with agent chat and action palette. This is the agent-centric TUI that replaces the legacy Opencode-based interface. All Worklog reads/writes use the wl CLI (no direct database access).
 
 Options:
 
 - `--in-progress` — Show only in-progress items.
 - `--all` — Include completed/deleted items in the list.
 - `--prefix <prefix>` — Override the default prefix.
+- `--perf` — Enable performance instrumentation.
 - `--headless` — Run in headless mode for CI scripting and automated tests.
 
 Example:
 
 ```sh
-wl piman
-wl pi --in-progress
-```
-
-The Pi TUI can also be installed as a Pi package:
-
-```sh
-pi install ./packages/tui
-wl-piman
-```
-
-For the standalone Pi Worklog browse extension (`/wl`, `Ctrl+Shift+B`), link this repository's extension directory into the global Pi extension path (`~/.pi/agent/extensions`). The extension lists `wl next -n 5` and previews the selected item in a widget above the editor (`title <id>`, `Priority/Stage/Status`, `Risk/Effort`, and first 7 description lines) as you move selection:
-
-```sh
-npm run install:pi-extension
-# then start or restart pi and run /reload
+wl piman --in-progress
 ```
 
 ### `status` [options]

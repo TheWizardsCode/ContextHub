@@ -28,6 +28,7 @@ import closeCommand from './commands/close.js';
 import recentCommand from './commands/recent.js';
 import pluginsCommand from './commands/plugins.js';
 import tuiCommand from './commands/tui.js';
+import pimanCommand from './commands/piman.js';
 import migrateCommand from './commands/migrate.js';
 import depCommand from './commands/dep.js';
 import reSortCommand from './commands/re-sort.js';
@@ -243,6 +244,7 @@ const builtInCommands = [
   recentCommand,
   pluginsCommand,
   tuiCommand,
+  pimanCommand,
   migrateCommand,
   depCommand,
   reSortCommand,
@@ -273,6 +275,7 @@ const builtInCommandNames = new Set([
   'recent',
   'plugins',
   'tui',
+  'piman',
   'migrate',
   'dep',
   're-sort',
