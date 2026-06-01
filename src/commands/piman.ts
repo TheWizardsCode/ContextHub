@@ -3,12 +3,13 @@
  *
  * Launches the Pi coding agent's interactive TUI with ContextHub worklog
  * extensions pre-loaded, providing a unified agent chat + work item management
- * experience. Unlike `wl tui` (blessed-based), this uses the Pi TUI framework.
+ * experience. The extensions auto-run the /wl browse flow on `session_start`
+ * when launched from this command (detected via the WL_PIMAN env var).
  *
  * Usage:
- *   wl piman              # Launch Pi TUI with worklog extensions
- *   wl piman --in-progress # (forwarded to pi)
- *   wl piman --all         # Include completed/deleted items in the list
+ *   wl piman              # Launch Pi TUI → worklog browse flow
+ *   wl piman --in-progress # forwarded via WL_PIMAN_IN_PROGRESS
+ *   wl piman --all         # forwarded via WL_PIMAN_ALL
  */
 
 import { spawn } from 'child_process';
@@ -40,7 +41,6 @@ export default function register(ctx: PluginContext): void {
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--perf', 'Enable performance instrumentation')
     .action(async (options: PimanOptions) => {
-      // Resolve extension paths relative to the project root
       const browseExt = resolveExtension('index.ts');
       const widgetExt = resolveExtension('worklog-widgets.ts');
 
@@ -53,48 +53,22 @@ export default function register(ctx: PluginContext): void {
         piArgs.push('--verbose');
       }
 
-      // Spawn pi in interactive mode; forward some options via env so
-      // extensions can pick them up if needed.
-      const env = { ...process.env };
+      // Signal the extension to auto-run /wl on session_start
+      const env: Record<string, string> = { ...process.env, WL_PIMAN: '1' };
       if (options.inProgress) env.WL_PIMAN_IN_PROGRESS = '1';
       if (options.all) env.WL_PIMAN_ALL = '1';
       if (options.prefix) env.WL_PIMAN_PREFIX = options.prefix;
 
-      // Pipe stdin so we can inject the /wl command after startup;
-      // stdout/stderr are inherited so the user sees and interacts with Pi's
-      // TUI directly.
+      // Inherit stdio so Pi has direct terminal access for its TUI
       const child = spawn('pi', piArgs, {
-        stdio: ['pipe', 'inherit', 'inherit'],
+        stdio: 'inherit',
         env,
         cwd: process.cwd(),
       });
 
-      // Once Pi's TUI has initialised and loaded extensions, /wl triggers the
-      // worklog browse flow automatically so the user lands directly in the
-      // item browser without having to type the command.
-      const INIT_DELAY_MS = 1500;
-      const autoBrowseTimer = setTimeout(() => {
-        if (child.stdin && !child.killed) {
-          child.stdin.write('/wl\n');
-
-          // After injecting the command, forward all further terminal input
-          // to the child so the user can interact normally.
-          process.stdin.pipe(child.stdin);
-        }
-      }, INIT_DELAY_MS);
-
-      // Wait for pi to exit.
       return new Promise<void>((resolvePromise, reject) => {
-        child.on('error', (err) => {
-          clearTimeout(autoBrowseTimer);
-          reject(new Error(`Failed to launch pi: ${err.message}`));
-        });
-        child.on('exit', (code) => {
-          clearTimeout(autoBrowseTimer);
-          // Unpipe terminal input when child exits
-          try { process.stdin.unpipe(child.stdin!); } catch { /* ignore */ }
-          resolvePromise();
-        });
+        child.on('error', (err) => reject(new Error(`Failed to launch pi: ${err.message}`)));
+        child.on('exit', () => resolvePromise());
       });
     });
 }

@@ -61,6 +61,7 @@ interface PiLike {
   registerCommand: (name: string, command: { description: string; handler: (args: string, ctx: BrowseContext) => Promise<void> }) => void;
   registerShortcut: (shortcut: string, shortcutDef: { description: string; handler: (ctx: BrowseContext) => Promise<void> }) => void;
   sendMessage: (message: { customType: string; content: string; display: boolean }, options?: { triggerTurn?: boolean }) => void;
+  on: (event: string, handler: (event: unknown, ctx: { ui: BrowseUi }) => void) => void;
 }
 
 export function formatBrowseOption(item: WorklogBrowseItem, maxWidth?: number): string {
@@ -486,6 +487,18 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         await runBrowseFlow(ctx);
       },
     });
+
+    // When launched via `wl piman` (detected by WL_PIMAN env var), auto-trigger
+    // the browse flow on session_start so the user lands directly in the item
+    // browser without having to type /wl.
+    if (typeof process !== 'undefined' && process.env?.WL_PIMAN === '1') {
+      pi.on('session_start', (_event, ctx) => {
+        // Defer so Pi's TUI can finish initialising before we show the selector
+        setTimeout(() => {
+          void runBrowseFlow(ctx as unknown as BrowseContext);
+        }, 500);
+      });
+    }
   };
 }
 
