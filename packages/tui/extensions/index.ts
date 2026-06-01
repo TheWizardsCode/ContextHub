@@ -28,6 +28,8 @@ interface WorklogBrowseDependencies {
   chooseWorkItem?: ChooseWorkItemFn;
 }
 
+type TerminalInputHandler = (data: string) => { consume?: boolean; data?: string } | undefined;
+
 interface BrowseUi {
   select?: (title: string, options: string[]) => Promise<string | undefined>;
   custom?: <T>(
@@ -45,8 +47,10 @@ interface BrowseUi {
       handleInput?: (data: string) => void;
     },
   ) => Promise<T>;
-  setWidget?: (id: string, content?: string[]) => void;
+  setWidget?: (id: string, content?: string[] | ((tui: unknown, theme: unknown) => { render: (width: number) => string[]; invalidate: () => void; handleInput?: (data: string) => void; dispose?: () => void; })) => void;
   notify: (message: string, level?: 'info' | 'warning' | 'error') => void;
+  /** Register a raw terminal input listener. Returns an unsubscribe function. */
+  onTerminalInput?: (handler: TerminalInputHandler) => () => void;
 }
 
 interface BrowseContext {
@@ -281,6 +285,96 @@ async function defaultChooseWorkItem(
   return selectedItem ?? undefined;
 }
 
+/**
+ * Create a scrollable widget factory for rendering work item details.
+ *
+ * Returns a factory function that the TUI calls with (tui, theme) to get a
+ * component with render(width), invalidate(), and handleInput(data). The
+ * component supports keyboard navigation: Up/Down, PageUp/PageDown/Space,
+ * g (top), G (bottom).
+ *
+ * Exported for testing. In production the factory is passed to
+ * ctx.ui.setWidget('worklog-browse-selection', factory).
+ */
+export function createScrollableWidget(contentLines: string[]): (tui: any, theme: any) => {
+  render: (width: number) => string[];
+  invalidate: () => void;
+  handleInput: (data: string) => void;
+} {
+  return (tui: any, _theme: any) => {
+    let offset = 0;
+
+    const getViewport = () => {
+      try {
+        const height = typeof tui?.getHeight === 'function' ? tui.getHeight() : tui?.height;
+        if (typeof height === 'number' && height > 8) return Math.max(3, Math.floor(height - 6));
+      } catch (_) {
+        // ignore
+      }
+      return Math.max(12, contentLines.length);
+    };
+
+    const render = (width: number) => {
+      const vp = getViewport();
+      const start = Math.min(Math.max(0, offset), Math.max(0, contentLines.length - vp));
+      const end = Math.min(contentLines.length, start + vp);
+      return contentLines.slice(start, end);
+    };
+
+    const invalidate = () => {
+      try { tui?.requestRender?.(); } catch (_) {}
+    };
+
+    const clampOffset = () => {
+      const vp = getViewport();
+      offset = Math.max(0, Math.min(offset, Math.max(0, contentLines.length - vp)));
+    };
+
+    const handleInput = (data: string) => {
+      if (isUpKey(data)) {
+        offset = Math.max(0, offset - 1);
+        invalidate();
+        return;
+      }
+
+      if (isDownKey(data)) {
+        offset = Math.min(Math.max(0, contentLines.length - 1), offset + 1);
+        clampOffset();
+        invalidate();
+        return;
+      }
+
+      if (data === '\u001b[5~' || data === 'pageup') {
+        offset = Math.max(0, offset - getViewport());
+        clampOffset();
+        invalidate();
+        return;
+      }
+
+      if (data === '\u001b[6~' || data === 'pagedown' || data === ' ') {
+        offset = Math.min(Math.max(0, contentLines.length - 1), offset + getViewport());
+        clampOffset();
+        invalidate();
+        return;
+      }
+
+      if (data === 'g') {
+        offset = 0;
+        invalidate();
+        return;
+      }
+
+      if (data === 'G') {
+        offset = Math.max(0, contentLines.length - getViewport());
+        invalidate();
+        return;
+      }
+    };
+
+    return { render, invalidate, handleInput };
+  };
+}
+
 export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {}) {
   const runWlImpl = deps.runWl ?? runWl;
   const listWorkItems = deps.listWorkItems ?? (() => defaultListWorkItems(runWlImpl));
@@ -319,91 +413,55 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
           const mdOutput = await runWlImpl(['show', selectedItem.id, '--format', 'markdown'], false);
           const lines = mdOutput.split(/\r?\n/);
 
-          // Create an interactive, scrollable widget factory. The TUI will call the factory
-          // with (tui, theme) and expect a component-like object with render(width) and
-          // invalidate(). We also provide handleInput to support up/down/page navigation.
-          const createScrollableWidget = (contentLines: string[]) => (tui: any, _theme: any) => {
-            let offset = 0;
+          // We store a reference to the created widget instance so the input listener can
+          // call handleInput() on it. The widget factory is called synchronously during
+          // setWidget, so the reference is populated before we register the listener.
+          let widgetInstance: {
+            render: (width: number) => string[];
+            invalidate: () => void;
+            handleInput: (data: string) => void;
+            dispose?: () => void;
+          } | null = null;
 
-            const getViewport = () => {
-              try {
-                // Try to estimate a viewport height from tui if available. Fall back to a large
-                // default so tests that call render() get the full content back.
-                const height = typeof tui?.getHeight === 'function' ? tui.getHeight() : tui?.height;
-                if (typeof height === 'number' && height > 8) return Math.max(3, Math.floor(height - 6));
-              } catch (_) {
-                // ignore
-              }
-
-              // Default viewport large enough to show the whole document in tests.
-              return Math.max(12, contentLines.length);
-            };
-
-            const render = (width: number) => {
-              const vp = getViewport();
-              const start = Math.min(Math.max(0, offset), Math.max(0, contentLines.length - vp));
-              const end = Math.min(contentLines.length, start + vp);
-              return contentLines.slice(start, end);
-            };
-
-            const invalidate = () => {
-              // noop — TUI will call render when it needs to redraw; if available, ask it to rerender
-              try { tui?.requestRender?.(); } catch (_) {}
-            };
-
-            const clampOffset = () => {
-              const vp = getViewport();
-              offset = Math.max(0, Math.min(offset, Math.max(0, contentLines.length - vp)));
-            };
-
-            const handleInput = (data: string) => {
-              // Re-use existing key checks for up/down
-              if (isUpKey(data)) {
-                offset = Math.max(0, offset - 1);
-                invalidate();
-                return;
-              }
-
-              if (isDownKey(data)) {
-                offset = Math.min(Math.max(0, contentLines.length - 1), offset + 1);
-                clampOffset();
-                invalidate();
-                return;
-              }
-
-              // Page up / Page down
-              if (data === '\u001b[5~' || data === 'pageup') {
-                offset = Math.max(0, offset - getViewport());
-                clampOffset();
-                invalidate();
-                return;
-              }
-
-              if (data === '\u001b[6~' || data === 'pagedown' || data === ' ') {
-                offset = Math.min(Math.max(0, contentLines.length - 1), offset + getViewport());
-                clampOffset();
-                invalidate();
-                return;
-              }
-
-              // go to top/bottom
-              if (data === 'g') {
-                offset = 0;
-                invalidate();
-                return;
-              }
-
-              if (data === 'G') {
-                offset = Math.max(0, contentLines.length - getViewport());
-                invalidate();
-                return;
-              }
-            };
-
-            return { render, invalidate, handleInput };
+          // Create scrollable widget using the module-level factory, wrapping
+          // it to capture the widget instance for the input listener.
+          const factory = createScrollableWidget(lines);
+          const wrappedFactory = (tui: any, theme: any) => {
+            const instance = factory(tui, theme);
+            widgetInstance = instance;
+            return instance;
           };
 
-          ctx.ui.setWidget?.('worklog-browse-selection', createScrollableWidget(lines));
+          // Display the scrollable widget via setWidget (factory is called synchronously)
+          ctx.ui.setWidget?.('worklog-browse-selection', wrappedFactory);
+
+          // Register a raw terminal input listener to route navigation keys to the widget.
+          if (ctx.ui.onTerminalInput && widgetInstance) {
+            const inputUnsubscribe = ctx.ui.onTerminalInput((data: string) => {
+              if (!widgetInstance) return undefined;
+
+              // Navigation keys: forward to widget handleInput and consume
+              if (
+                isUpKey(data) || isDownKey(data) ||
+                data === '\u001b[5~' || data === 'pageup' ||
+                data === '\u001b[6~' || data === 'pagedown' ||
+                data === ' ' || data === 'g' || data === 'G'
+              ) {
+                widgetInstance.handleInput(data);
+                return { consume: true };
+              }
+
+              // Escape dismisses the scrollable widget and cleans up the listener
+              if (isEscapeKey(data)) {
+                ctx.ui.setWidget?.('worklog-browse-selection', undefined);
+                inputUnsubscribe();
+                return { consume: true };
+              }
+
+              // All other keys pass through to the editor unmodified
+              return undefined;
+            });
+          }
         } catch (innerErr) {
           const message = innerErr instanceof Error ? innerErr.message : String(innerErr);
           ctx.ui.notify(`Failed to render work item details: ${message}`, 'error');
