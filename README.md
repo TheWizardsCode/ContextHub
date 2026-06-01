@@ -75,7 +75,7 @@ For freeze triage and profiling details (including `TUI_CHORD_DEBUG`, `strace`, 
 
 ### Install the Pi Worklog browse extension
 
-The repository includes a Pi extension that adds a Worklog browse flow (`/wl` and `Ctrl+Shift+B`) which lists the next 5 recommended work items (`wl next -n 5`) and previews the selected item in a widget above the editor as selection changes (`title <id>`, `Priority/Stage/Status`, `Risk/Effort`, and the first 7 description lines).
+The repository includes a Pi extension that adds a Worklog browse flow (`/wl` and `Ctrl+Shift+B`) which lists the next 5 recommended work items (`wl next -n 5`) and previews the selected item in a widget above the editor as selection changes (`title <id>`, `Priority/Stage/Status`, `Risk/Effort`, and the first 7 description lines). Pressing Enter on a selected item will run `wl show <id> --format markdown` and render the full markdown output in the above-editor widget for immediate inspection.
 
 Install it globally by creating a symlink under `~/.pi/agent/extensions`:
 

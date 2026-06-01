@@ -292,6 +292,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         const items = (await listWorkItems()).slice(0, 5);
         if (items.length === 0) {
           ctx.ui.notify('No work items available to browse.', 'info');
+          ctx.ui.setWidget?.('worklog-browse-selection', undefined);
           return;
         }
 
@@ -303,14 +304,114 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         };
 
         const selectedItem = await chooseWorkItem(items, ctx, announceSelection);
-        if (!selectedItem) return;
+        if (!selectedItem) {
+          // user cancelled selection; clear preview widget
+          ctx.ui.setWidget?.('worklog-browse-selection', undefined);
+          return;
+        }
 
+        // Ensure the final selection is announced (in case chooseWorkItem didn't emit it)
         announceSelection(selectedItem);
+
+        // On Enter: fetch full markdown and render it into the above-editor widget. Do not render
+        // error text into the widget; show a notification on failure instead and keep the preview.
+        try {
+          const mdOutput = await runWlImpl(['show', selectedItem.id, '--format', 'markdown'], false);
+          const lines = mdOutput.split(/\r?\n/);
+
+          // Create an interactive, scrollable widget factory. The TUI will call the factory
+          // with (tui, theme) and expect a component-like object with render(width) and
+          // invalidate(). We also provide handleInput to support up/down/page navigation.
+          const createScrollableWidget = (contentLines: string[]) => (tui: any, _theme: any) => {
+            let offset = 0;
+
+            const getViewport = () => {
+              try {
+                // Try to estimate a viewport height from tui if available. Fall back to a large
+                // default so tests that call render() get the full content back.
+                const height = typeof tui?.getHeight === 'function' ? tui.getHeight() : tui?.height;
+                if (typeof height === 'number' && height > 8) return Math.max(3, Math.floor(height - 6));
+              } catch (_) {
+                // ignore
+              }
+
+              // Default viewport large enough to show the whole document in tests.
+              return Math.max(12, contentLines.length);
+            };
+
+            const render = (width: number) => {
+              const vp = getViewport();
+              const start = Math.min(Math.max(0, offset), Math.max(0, contentLines.length - vp));
+              const end = Math.min(contentLines.length, start + vp);
+              return contentLines.slice(start, end);
+            };
+
+            const invalidate = () => {
+              // noop — TUI will call render when it needs to redraw; if available, ask it to rerender
+              try { tui?.requestRender?.(); } catch (_) {}
+            };
+
+            const clampOffset = () => {
+              const vp = getViewport();
+              offset = Math.max(0, Math.min(offset, Math.max(0, contentLines.length - vp)));
+            };
+
+            const handleInput = (data: string) => {
+              // Re-use existing key checks for up/down
+              if (isUpKey(data)) {
+                offset = Math.max(0, offset - 1);
+                invalidate();
+                return;
+              }
+
+              if (isDownKey(data)) {
+                offset = Math.min(Math.max(0, contentLines.length - 1), offset + 1);
+                clampOffset();
+                invalidate();
+                return;
+              }
+
+              // Page up / Page down
+              if (data === '\u001b[5~' || data === 'pageup') {
+                offset = Math.max(0, offset - getViewport());
+                clampOffset();
+                invalidate();
+                return;
+              }
+
+              if (data === '\u001b[6~' || data === 'pagedown' || data === ' ') {
+                offset = Math.min(Math.max(0, contentLines.length - 1), offset + getViewport());
+                clampOffset();
+                invalidate();
+                return;
+              }
+
+              // go to top/bottom
+              if (data === 'g') {
+                offset = 0;
+                invalidate();
+                return;
+              }
+
+              if (data === 'G') {
+                offset = Math.max(0, contentLines.length - getViewport());
+                invalidate();
+                return;
+              }
+            };
+
+            return { render, invalidate, handleInput };
+          };
+
+          ctx.ui.setWidget?.('worklog-browse-selection', createScrollableWidget(lines));
+        } catch (innerErr) {
+          const message = innerErr instanceof Error ? innerErr.message : String(innerErr);
+          ctx.ui.notify(`Failed to render work item details: ${message}`, 'error');
+          // keep the existing preview widget instead of replacing it with an error
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(`Failed to browse work items: ${message}`, 'error');
-      } finally {
-        ctx.ui.setWidget?.('worklog-browse-selection', undefined);
       }
     };
 
