@@ -333,24 +333,20 @@ async function defaultChooseWorkItem(
  */
 export function createScrollableWidget(
   contentLines: string[],
-  debug: boolean = false,
-): (tui: any, theme: any, debugFlag?: boolean) => {
+): (tui: any, theme: any) => {
   render: (width: number) => string[];
   invalidate: () => void;
   handleInput: (data: string) => void;
-  _offset?: number;
 } {
-  return (tui: any, _theme: any, debugFlag: boolean = debug) => {
+  return (tui: any, _theme: any) => {
     let offset = 0;
-
-    const log = (...args: any[]) => {
-      if (debugFlag) console.error('[wl-browse-widget]', ...args);
-    };
 
     const getViewport = () => {
       try {
         const height = typeof tui?.getHeight === 'function' ? tui.getHeight() : tui?.height;
-        if (typeof height === 'number' && height > 8) return Math.max(3, Math.floor(height - 6));
+        if (typeof height === 'number' && height > 8) {
+          return Math.min(Math.max(3, Math.floor(height - 6)), contentLines.length);
+        }
       } catch (_) {
         // ignore
       }
@@ -361,77 +357,52 @@ export function createScrollableWidget(
       const vp = getViewport();
       const start = Math.min(Math.max(0, offset), Math.max(0, contentLines.length - vp));
       const end = Math.min(contentLines.length, start + vp);
-      const lines = contentLines.slice(start, end).map(line => truncateToWidth(line, width));
-      log('render: offset=', offset, ' start=', start, ' vp=', vp, ' lines=', lines.length);
-      return lines;
+      return contentLines.slice(start, end).map(line => truncateToWidth(line, width));
     };
 
     const invalidate = () => {
       try { tui?.requestRender?.(); } catch (_) {}
     };
 
-    const clampOffset = () => {
-      const vp = getViewport();
-      offset = Math.max(0, Math.min(offset, Math.max(0, contentLines.length - vp)));
-    };
-
     const handleInput = (data: string) => {
-      log('input received: len=', data.length, 'data=', JSON.stringify(data));
       if (isUpKey(data)) {
-        const oldOffset = offset;
         offset = Math.max(0, offset - 1);
-        log('up: offset', oldOffset, '→', offset);
         invalidate();
         return;
       }
 
       if (isDownKey(data)) {
-        const oldOffset = offset;
         offset = Math.min(Math.max(0, contentLines.length - 1), offset + 1);
-        log('down: offset', oldOffset, '→', offset);
-        clampOffset();
         invalidate();
         return;
       }
 
       if (data === '\u001b[5~' || data === 'pageup') {
-        const oldOffset = offset;
         offset = Math.max(0, offset - getViewport());
-        log('pgup: offset', oldOffset, '→', offset);
-        clampOffset();
         invalidate();
         return;
       }
 
       if (data === '\u001b[6~' || data === 'pagedown' || data === ' ') {
-        const oldOffset = offset;
         offset = Math.min(Math.max(0, contentLines.length - 1), offset + getViewport());
-        log('pgdn: offset', oldOffset, '→', offset);
-        clampOffset();
         invalidate();
         return;
       }
 
       if (data === 'g') {
-        const oldOffset = offset;
         offset = 0;
-        log('g: offset', oldOffset, '→', offset);
         invalidate();
         return;
       }
 
       if (data === 'G') {
-        const oldOffset = offset;
         offset = Math.max(0, contentLines.length - getViewport());
-        log('G: offset', oldOffset, '→', offset);
         invalidate();
         return;
       }
-
-      log('key not handled:', JSON.stringify(data));
     };
 
-    return { render, invalidate, handleInput, _offset: offset };
+    return { render, invalidate, handleInput };
   };
 }
 
@@ -492,7 +463,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
           await ctx.ui.custom<string | null>(
             (tui, _theme, _keybindings, done) => {
               const factory = createScrollableWidget(detailLines);
-              const widget = factory(tui, _theme, true /* debug */);
+              const widget = factory(tui, _theme);
 
               return {
                 focused: false,
