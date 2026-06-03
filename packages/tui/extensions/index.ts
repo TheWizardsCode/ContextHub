@@ -330,13 +330,21 @@ async function defaultChooseWorkItem(
  * Exported for testing. In production the factory is passed to
  * ctx.ui.setWidget('worklog-browse-selection', factory).
  */
-export function createScrollableWidget(contentLines: string[]): (tui: any, theme: any) => {
+export function createScrollableWidget(
+  contentLines: string[],
+  debug: boolean = false,
+): (tui: any, theme: any, debugFlag?: boolean) => {
   render: (width: number) => string[];
   invalidate: () => void;
   handleInput: (data: string) => void;
+  _offset?: number;
 } {
-  return (tui: any, _theme: any) => {
+  return (tui: any, _theme: any, debugFlag: boolean = debug) => {
     let offset = 0;
+
+    const log = (...args: any[]) => {
+      if (debugFlag) console.error('[wl-browse-widget]', ...args);
+    };
 
     const getViewport = () => {
       try {
@@ -352,7 +360,9 @@ export function createScrollableWidget(contentLines: string[]): (tui: any, theme
       const vp = getViewport();
       const start = Math.min(Math.max(0, offset), Math.max(0, contentLines.length - vp));
       const end = Math.min(contentLines.length, start + vp);
-      return contentLines.slice(start, end).map(line => truncateToWidth(line, width));
+      const lines = contentLines.slice(start, end).map(line => truncateToWidth(line, width));
+      log('render: offset=', offset, ' start=', start, ' vp=', vp, ' lines=', lines.length);
+      return lines;
     };
 
     const invalidate = () => {
@@ -365,47 +375,62 @@ export function createScrollableWidget(contentLines: string[]): (tui: any, theme
     };
 
     const handleInput = (data: string) => {
+      log('input received: len=', data.length, 'data=', JSON.stringify(data));
       if (isUpKey(data)) {
+        const oldOffset = offset;
         offset = Math.max(0, offset - 1);
+        log('up: offset', oldOffset, '→', offset);
         invalidate();
         return;
       }
 
       if (isDownKey(data)) {
+        const oldOffset = offset;
         offset = Math.min(Math.max(0, contentLines.length - 1), offset + 1);
+        log('down: offset', oldOffset, '→', offset);
         clampOffset();
         invalidate();
         return;
       }
 
       if (data === '\u001b[5~' || data === 'pageup') {
+        const oldOffset = offset;
         offset = Math.max(0, offset - getViewport());
+        log('pgup: offset', oldOffset, '→', offset);
         clampOffset();
         invalidate();
         return;
       }
 
       if (data === '\u001b[6~' || data === 'pagedown' || data === ' ') {
+        const oldOffset = offset;
         offset = Math.min(Math.max(0, contentLines.length - 1), offset + getViewport());
+        log('pgdn: offset', oldOffset, '→', offset);
         clampOffset();
         invalidate();
         return;
       }
 
       if (data === 'g') {
+        const oldOffset = offset;
         offset = 0;
+        log('g: offset', oldOffset, '→', offset);
         invalidate();
         return;
       }
 
       if (data === 'G') {
+        const oldOffset = offset;
         offset = Math.max(0, contentLines.length - getViewport());
+        log('G: offset', oldOffset, '→', offset);
         invalidate();
         return;
       }
+
+      log('key not handled:', JSON.stringify(data));
     };
 
-    return { render, invalidate, handleInput };
+    return { render, invalidate, handleInput, _offset: offset };
   };
 }
 
@@ -466,13 +491,16 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
           await ctx.ui.custom<string | null>(
             (tui, _theme, _keybindings, done) => {
               const factory = createScrollableWidget(detailLines);
-              const widget = factory(tui, _theme);
+              const widget = factory(tui, _theme, true /* debug */);
 
               return {
                 render: (width: number) => widget.render(width),
                 invalidate: () => widget.invalidate(),
                 handleInput: (data: string) => {
+                  const dataHex = data === '\u001b' ? '\\u001b' : data === '\u001b[A' ? '\\u001b[A(up)' : data === '\u001b[B' ? '\\u001b[B(down)' : data === '\u001b[5~' ? '\\u001b[5~(pgup)' : data === '\u001b[6~' ? '\\u001b[6~(pgdn)' : JSON.stringify(data);
+                  console.error(`[wl-browse-modal] handleInput: ${dataHex}  len=${data.length}`);
                   if (isEscapeKey(data)) {
+                    console.error('[wl-browse-modal] Escape → done(null)');
                     done(null);
                     return;
                   }
