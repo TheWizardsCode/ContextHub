@@ -276,6 +276,7 @@ async function defaultChooseWorkItem(
     };
 
     return {
+      focused: false,
       render: (width: number) => {
         const title = truncateLine(theme.fg('accent', theme.bold('Browse Worklog next items (top 5)')), width);
         const help = truncateLine(theme.fg('dim', '↑↓ navigate • enter select • esc cancel'), width);
@@ -494,13 +495,11 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
               const widget = factory(tui, _theme, true /* debug */);
 
               return {
+                focused: false,
                 render: (width: number) => widget.render(width),
                 invalidate: () => widget.invalidate(),
                 handleInput: (data: string) => {
-                  const dataHex = data === '\u001b' ? '\\u001b' : data === '\u001b[A' ? '\\u001b[A(up)' : data === '\u001b[B' ? '\\u001b[B(down)' : data === '\u001b[5~' ? '\\u001b[5~(pgup)' : data === '\u001b[6~' ? '\\u001b[6~(pgdn)' : JSON.stringify(data);
-                  console.error(`[wl-browse-modal] handleInput: ${dataHex}  len=${data.length}`);
                   if (isEscapeKey(data)) {
-                    console.error('[wl-browse-modal] Escape → done(null)');
                     done(null);
                     return;
                   }

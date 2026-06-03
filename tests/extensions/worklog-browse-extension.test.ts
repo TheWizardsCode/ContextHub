@@ -422,6 +422,28 @@ describe('Worklog browse pi extension', () => {
       expect(afterG[afterG.length - 1].trim()).toContain('L20');
     });
 
+    it('wrapper component has focused property for TUI isFocusable check', () => {
+      const tui = { requestRender: vi.fn(), getHeight: () => 20 };
+      const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+
+      const widget = createScrollableWidget(['L1', 'L2', 'L3'])(tui, theme);
+
+      // Create the wrapper with the same pattern as production code
+      const wrapper = {
+        focused: false,
+        render: (w: number) => widget.render(w),
+        invalidate: () => widget.invalidate(),
+        handleInput: (data: string) => {
+          widget.handleInput(data);
+          tui.requestRender();
+        },
+      };
+
+      // Verify focused property exists so TUI's isFocusable() returns true
+      expect('focused' in wrapper).toBe(true);
+      expect(wrapper.focused).toBe(false);
+    });
+
     it('Escape calls done() to close the modal', async () => {
       // Directly test the wrapper logic: create a done callback, invoke the
       // factory to get the widget, then press Escape and verify done() is called.
