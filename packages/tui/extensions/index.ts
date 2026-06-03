@@ -51,6 +51,8 @@ interface BrowseUi {
   notify: (message: string, level?: 'info' | 'warning' | 'error') => void;
   /** Register a raw terminal input listener. Returns an unsubscribe function. */
   onTerminalInput?: (handler: TerminalInputHandler) => () => void;
+  /** Return the height of the usable rendering area (terminal rows minus header/footer). */
+  getHeight?: () => number;
 }
 
 interface BrowseContext {
@@ -64,6 +66,37 @@ interface PiLike {
   on: (event: string, handler: (event: unknown, ctx: { ui: BrowseUi }) => void) => void;
 }
 
+/**
+ * Truncate a string to fit within maxWidth visible characters.
+ * Handles ANSI escape codes gracefully by stripping them for width
+ * calculation while preserving ANSI sequences in the output.
+ */
+function truncateToWidth(text: string, maxWidth: number, ellipsis = '…'): string {
+  if (maxWidth <= 0) return '';
+  // Strip ANSI codes for visible-width calculation
+  const clean = text.replace(/\x1b\[[0-9;]*m/g, '');
+  if (clean.length <= maxWidth) return text;
+  // Reserve space for ellipsis so total visible chars fit within maxWidth
+  const contentWidth = Math.max(0, maxWidth - ellipsis.length);
+  // Walk the original string, counting visible chars and preserving ANSI codes
+  let visible = 0;
+  let result = '';
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === '\x1b') {
+      // Copy the full ANSI sequence
+      const m = text.slice(i).match(/^\x1b\[[0-9;]*m/);
+      if (m) { result += m[0]; i += m[0].length; continue; }
+    }
+    if (visible >= contentWidth) break;
+    result += text[i];
+    visible++;
+    i++;
+  }
+  result += ellipsis;
+  return result;
+}
+
 export function formatBrowseOption(item: WorklogBrowseItem, maxWidth?: number): string {
   const idPart = `(${item.id})`;
   const full = `${item.title} ${idPart}`;
@@ -74,11 +107,11 @@ export function formatBrowseOption(item: WorklogBrowseItem, maxWidth?: number): 
 
   const separatorAndId = ` ${idPart}`;
   if (maxWidth <= separatorAndId.length) {
-    return truncateLine(idPart, maxWidth);
+    return truncateToWidth(idPart, maxWidth);
   }
 
   const titleWidth = maxWidth - separatorAndId.length;
-  const truncatedTitle = truncateLine(item.title, titleWidth);
+  const truncatedTitle = truncateToWidth(item.title, titleWidth);
   return `${truncatedTitle}${separatorAndId}`;
 }
 
@@ -319,7 +352,7 @@ export function createScrollableWidget(contentLines: string[]): (tui: any, theme
       const vp = getViewport();
       const start = Math.min(Math.max(0, offset), Math.max(0, contentLines.length - vp));
       const end = Math.min(contentLines.length, start + vp);
-      return contentLines.slice(start, end);
+      return contentLines.slice(start, end).map(line => truncateToWidth(line, width));
     };
 
     const invalidate = () => {
@@ -408,61 +441,49 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         // Ensure the final selection is announced (in case chooseWorkItem didn't emit it)
         announceSelection(selectedItem);
 
-        // On Enter: fetch full markdown and render it into the above-editor widget. Do not render
-        // error text into the widget; show a notification on failure instead and keep the preview.
+        // On Enter: fetch full markdown and show it in a focused scrollable modal.
+        // Using ctx.ui.custom() gives the widget proper keyboard focus so that
+        // Up/Down/PageUp/PageDown/g/G/Escape are received by handleInput() rather
+        // than being swallowed by the editor.  The preview widget remains visible
+        // underneath and is not affected when the modal closes.
+        if (!ctx.ui.custom) {
+          ctx.ui.notify('Scrollable detail view requires a TUI that supports custom overlays.', 'warning');
+          return;
+        }
+
         try {
           const mdOutput = await runWlImpl(['show', selectedItem.id, '--format', 'markdown'], false);
-          const lines = mdOutput.split(/\r?\n/);
+          // Strip blessed-style markup tags ({tag}) which pi's TUI doesn't understand;
+          // these appear as literal text and inflate visible width, causing render errors.
+          const cleanOutput = mdOutput.replace(/\{[^}]*\}/g, '');
+          const detailLines = cleanOutput.split(/\r?\n/);
 
-          // We store a reference to the created widget instance so the input listener can
-          // call handleInput() on it. The widget factory is called synchronously during
-          // setWidget, so the reference is populated before we register the listener.
-          let widgetInstance: {
-            render: (width: number) => string[];
-            invalidate: () => void;
-            handleInput: (data: string) => void;
-            dispose?: () => void;
-          } | null = null;
+          // Wrap the scrollable widget so Escape calls done() to close the modal.
+          // The scrollable widget's handleInput calls invalidate(), which in turn
+          // calls tui.requestRender() — but we need the wrapper to forward Escape
+          // to done() (which closes the custom modal) and to pass through all
+          // other keys to the scrollable widget.
+          await ctx.ui.custom<string | null>(
+            (tui, _theme, _keybindings, done) => {
+              const factory = createScrollableWidget(detailLines);
+              const widget = factory(tui, _theme);
 
-          // Create scrollable widget using the module-level factory, wrapping
-          // it to capture the widget instance for the input listener.
-          const factory = createScrollableWidget(lines);
-          const wrappedFactory = (tui: any, theme: any) => {
-            const instance = factory(tui, theme);
-            widgetInstance = instance;
-            return instance;
-          };
-
-          // Display the scrollable widget via setWidget (factory is called synchronously)
-          ctx.ui.setWidget?.('worklog-browse-selection', wrappedFactory);
-
-          // Register a raw terminal input listener to route navigation keys to the widget.
-          if (ctx.ui.onTerminalInput && widgetInstance) {
-            const inputUnsubscribe = ctx.ui.onTerminalInput((data: string) => {
-              if (!widgetInstance) return undefined;
-
-              // Navigation keys: forward to widget handleInput and consume
-              if (
-                isUpKey(data) || isDownKey(data) ||
-                data === '\u001b[5~' || data === 'pageup' ||
-                data === '\u001b[6~' || data === 'pagedown' ||
-                data === ' ' || data === 'g' || data === 'G'
-              ) {
-                widgetInstance.handleInput(data);
-                return { consume: true };
-              }
-
-              // Escape dismisses the scrollable widget and cleans up the listener
-              if (isEscapeKey(data)) {
-                ctx.ui.setWidget?.('worklog-browse-selection', undefined);
-                inputUnsubscribe();
-                return { consume: true };
-              }
-
-              // All other keys pass through to the editor unmodified
-              return undefined;
-            });
-          }
+              return {
+                render: (width: number) => widget.render(width),
+                invalidate: () => widget.invalidate(),
+                handleInput: (data: string) => {
+                  if (isEscapeKey(data)) {
+                    done(null);
+                    return;
+                  }
+                  widget.handleInput(data);
+                  tui.requestRender();
+                },
+              };
+            },
+          ).catch(() => {
+            // user pressed Escape or closed the modal — this is expected
+          });
         } catch (innerErr) {
           const message = innerErr instanceof Error ? innerErr.message : String(innerErr);
           ctx.ui.notify(`Failed to render work item details: ${message}`, 'error');

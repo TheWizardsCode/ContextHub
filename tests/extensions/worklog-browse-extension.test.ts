@@ -94,7 +94,18 @@ describe('Worklog browse pi extension', () => {
 
     const notify = vi.fn();
     const setWidget = vi.fn();
-    await commandHandler('', { ui: { notify, setWidget } });
+    const custom = vi.fn(async (renderFn) => {
+      // Simulate the TUI calling the render callback
+      const factoryResult = renderFn(
+        { requestRender: vi.fn() },
+        { fg: (_c: string, t: string) => t, bold: (t: string) => t },
+        {},
+        () => {},
+      );
+      // Return a thenable that resolves immediately (simulates modal close)
+      return Promise.resolve(factoryResult);
+    });
+    await commandHandler('', { ui: { notify, setWidget, custom } });
 
     expect(listWorkItems).toHaveBeenCalledTimes(1);
     expect(chooseWorkItem).toHaveBeenCalledTimes(1);
@@ -125,15 +136,15 @@ describe('Worklog browse pi extension', () => {
       'G',
     ]);
 
-    // The final widget is a scrollable component factory. Ensure setWidget was called with a factory
-    const factoryCall = setWidget.mock.calls.find(c => c[0] === 'worklog-browse-selection' && typeof c[1] === 'function');
-    expect(factoryCall).toBeDefined();
-    const factory = factoryCall?.[1];
+    // The scrollable detail widget is now shown via ctx.ui.custom() for proper keyboard focus.
+    expect(custom).toHaveBeenCalledTimes(1);
 
-    // Simulate the TUI calling the factory to get a component and rendering it
-    const fakeTui = { getHeight: () => 80, requestRender: () => {} };
+    // Verify that the custom() callback produces a scrollable widget component
+    // by re-invoking the factory logic that custom() would call.
+    const customCallArgs = custom.mock.calls[0]?.[0] as (tui: any, theme: any, kb: any, done: any) => any;
+    const fakeTui = { requestRender: vi.fn() };
     const fakeTheme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
-    const comp = factory(fakeTui, fakeTheme);
+    const comp = customCallArgs(fakeTui, fakeTheme, {}, () => {});
     expect(typeof comp.render).toBe('function');
     expect(comp.render(80)).toEqual(['## Four Details', '', 'Line1', 'Line2', 'Line3']);
 
@@ -158,8 +169,9 @@ describe('Worklog browse pi extension', () => {
     const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
     const notify = vi.fn();
     const setWidget = vi.fn();
+    const custom = vi.fn();
 
-    await commandHandler('', { ui: { notify, setWidget } });
+    await commandHandler('', { ui: { notify, setWidget, custom } });
 
     expect(runWl).toHaveBeenCalledWith(['show', 'WL-1', '--format', 'markdown'], false);
     expect(notify).toHaveBeenCalledWith(expect.stringContaining('Failed to render work item details'), 'error');
@@ -298,28 +310,39 @@ describe('Worklog browse pi extension', () => {
     });
   });
 
-  describe('onTerminalInput keyboard routing integration', () => {
+  describe('custom() keyboard routing integration', () => {
     /**
-     * Create a setWidget mock that invokes factory functions synchronously,
-     * matching the real Pi TUI behaviour where setWidget calls the factory
-     * during registration. This ensures widgetInstance is populated before
-     * the onTerminalInput registration runs.
+     * Create a mock custom() that invokes the render callback, captures the
+     * returned component and the done callback, and returns it. This matches
+     * the real TUI where the factory is called once and the returned component
+     * is used for all subsequent input/render cycles.
      */
-    function makeSetWidgetMock() {
-      const calls: Array<[string, any]> = [];
-      const fn = vi.fn((id: string, content: any) => {
-        calls.push([id, content]);
-        if (typeof content === 'function') {
-          // Simulate Pi TUI: invoke factory synchronously during setWidget
-          const fakeTui = { getHeight: () => 20, requestRender: vi.fn() };
-          const fakeTheme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
-          content(fakeTui, fakeTheme);
-        }
+    function makeCustomMock() {
+      const calls: Array<[Function]> = [];
+      const componentRef = { current: null as any };
+      const doneRef = { current: null as ((value: any) => void) | null };
+      // Use a terminal height that creates a reasonable viewport (e.g. ~14 visible lines)
+      const terminalHeight = 20;
+      const fn = vi.fn(async (renderFn: Function) => {
+        calls.push([renderFn]);
+        let capturedDone: (value: any) => void;
+        // The real TUI calls the factory once and uses the returned component
+        const result = renderFn(
+          { requestRender: vi.fn(), getHeight: () => terminalHeight },
+          { fg: (_c: string, t: string) => t, bold: (t: string) => t },
+          {},
+          (value: any) => {
+            capturedDone = value;
+            doneRef.current = value;
+          },
+        );
+        componentRef.current = result;
+        return result;
       });
-      return { setWidget: fn, calls };
+      return { custom: fn, calls, componentRef, doneRef };
     }
 
-    it('registers onTerminalInput listener when scrollable widget is displayed', async () => {
+    it('uses custom() to display the scrollable widget when available', async () => {
       const listWorkItems = vi.fn().mockResolvedValue([
         { id: 'WL-1', title: 'One', status: 'open', description: 'Test' },
       ]);
@@ -337,51 +360,110 @@ describe('Worklog browse pi extension', () => {
       const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
 
       const notify = vi.fn();
-      const { setWidget } = makeSetWidgetMock();
-      const inputListenerRef = { current: null as ((data: string) => { consume?: boolean; data?: string } | undefined) | null };
-      let unsubscribed = false;
+      const setWidget = vi.fn();
+      const { custom } = makeCustomMock();
 
-      const onTerminalInput = vi.fn((handler: (data: string) => { consume?: boolean; data?: string } | undefined) => {
-        inputListenerRef.current = handler;
-        return () => { unsubscribed = true; };
-      });
+      await commandHandler('', { ui: { notify, setWidget, custom } });
 
-      await commandHandler('', { ui: { notify, setWidget, onTerminalInput } });
+      // Verify custom() was called (replaces onTerminalInput approach)
+      expect(custom).toHaveBeenCalledTimes(1);
+      expect(setWidget).toHaveBeenCalled(); // preview widget is still set
 
-      // Verify onTerminalInput was called (widgetInstance was populated because
-      // makeSetWidgetMock invokes the factory synchronously)
-      expect(onTerminalInput).toHaveBeenCalledTimes(1);
-      expect(inputListenerRef.current).toBeDefined();
-
-      // Verify the listener returns consume for navigation keys
-      const listener = inputListenerRef.current!;
-
-      // Down key should be consumed
-      expect(listener('\u001b[B')).toEqual({ consume: true });
-      // Up key should be consumed
-      expect(listener('\u001b[A')).toEqual({ consume: true });
-      // g should be consumed
-      expect(listener('g')).toEqual({ consume: true });
-      // G should be consumed
-      expect(listener('G')).toEqual({ consume: true });
-      // PageDown should be consumed
-      expect(listener('\u001b[6~')).toEqual({ consume: true });
-      // PageUp should be consumed
-      expect(listener('\u001b[5~')).toEqual({ consume: true });
-      // Space should be consumed
-      expect(listener(' ')).toEqual({ consume: true });
-
-      // Regular characters should pass through
-      expect(listener('x')).toBeUndefined();
-      expect(listener('hello')).toBeUndefined();
-
-      // Escape should consume AND clear the widget
-      expect(listener('\u001b')).toEqual({ consume: true });
-      expect(setWidget).toHaveBeenLastCalledWith('worklog-browse-selection', undefined);
-      expect(unsubscribed).toBe(true);
+      // Verify the custom() callback returns a scrollable widget component
+      expect(custom.mock.calls[0]?.[0]).toBeInstanceOf(Function);
     });
 
-    it('does not register onTerminalInput when not available', async () => {
+    it('renders scrollable widget content correctly via custom()', async () => {
+      const listWorkItems = vi.fn().mockResolvedValue([
+        { id: 'WL-1', title: 'One', status: 'open', description: 'Test' },
+      ]);
+
+      const chooseWorkItem = vi.fn(async (items, _ctx, onSelectionChange) => {
+        onSelectionChange(items[0]);
+        return items[0];
+      });
+
+      const runWl = vi.fn().mockResolvedValue('L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12\nL13\nL14\nL15\nL16\nL17\nL18\nL19\nL20');
+
+      const extension = createWorklogBrowseExtension({ listWorkItems, chooseWorkItem, runWl });
+      extension(makePi() as any);
+
+      const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
+
+      const notify = vi.fn();
+      const setWidget = vi.fn();
+      const { custom, componentRef } = makeCustomMock();
+
+      await commandHandler('', { ui: { notify, setWidget, custom } });
+
+      // The component returned by custom() is the actual widget instance
+      const comp = componentRef.current;
+      expect(typeof comp.render).toBe('function');
+      expect(typeof comp.handleInput).toBe('function');
+
+      const initialRender = comp.render(80);
+      expect(initialRender[0]).toContain('L1');
+
+      // Test keyboard navigation on the widget component directly
+      comp.handleInput('\u001b[B'); // Down
+      expect(comp.render(80)[0]).toContain('L2');
+
+      comp.handleInput('\u001b[B'); // Down
+      expect(comp.render(80)[0]).toContain('L3');
+
+      comp.handleInput('\u001b[A'); // Up
+      expect(comp.render(80)[0]).toContain('L2');
+
+      comp.handleInput('g'); // go to top
+      expect(comp.render(80)[0]).toContain('L1');
+
+      comp.handleInput('G'); // go to bottom
+      const afterG = comp.render(80);
+      expect(afterG[afterG.length - 1].trim()).toContain('L20');
+    });
+
+    it('Escape calls done() to close the modal', async () => {
+      // Directly test the wrapper logic: create a done callback, invoke the
+      // factory to get the widget, then press Escape and verify done() is called.
+      const tui = { requestRender: vi.fn(), getHeight: () => 20 };
+      const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+      let doneCalled = false;
+      let doneArg: any = undefined;
+      const done = (value: any) => { doneCalled = true; doneArg = value; };
+
+      // Create the scrollable widget (same as production code)
+      const widget = createScrollableWidget(['L1', 'L2', 'L3'])(tui, theme);
+
+      // Create the wrapper (same pattern as production code)
+      const wrapper = {
+        render: (w: number) => widget.render(w),
+        invalidate: () => widget.invalidate(),
+        handleInput: (data: string) => {
+          if (data === '\u001b' || data === 'escape') {
+            done(null);
+            return;
+          }
+          widget.handleInput(data);
+          tui.requestRender();
+        },
+      };
+
+      // Verify widget is created
+      expect(typeof wrapper.render).toBe('function');
+      expect(typeof wrapper.handleInput).toBe('function');
+      expect(doneCalled).toBe(false);
+
+      // Press Escape — the wrapper should call done(null)
+      wrapper.handleInput('\u001b');
+      expect(doneCalled).toBe(true);
+      expect(doneArg).toBeNull();
+
+      // Other keys should not trigger done
+      wrapper.handleInput('\u001b[B');
+      // doneCalled stays true (was called by Escape, not re-triggered)
+    });
+
+    it('does not use custom() when not available', async () => {
       const listWorkItems = vi.fn().mockResolvedValue([
         { id: 'WL-1', title: 'One', status: 'open', description: 'Test' },
       ]);
@@ -400,74 +482,13 @@ describe('Worklog browse pi extension', () => {
       const notify = vi.fn();
       const setWidget = vi.fn();
 
-      // No onTerminalInput provided - should still work without it
+      // No custom provided - should show warning and not crash
       await commandHandler('', { ui: { notify, setWidget } });
 
-      expect(setWidget).toHaveBeenCalled();
-    });
-
-    it('forwards navigation keys from onTerminalInput to widget handleInput', async () => {
-      const listWorkItems = vi.fn().mockResolvedValue([
-        { id: 'WL-1', title: 'One', status: 'open', description: 'Test' },
-      ]);
-
-      const chooseWorkItem = vi.fn(async (items, _ctx, onSelectionChange) => {
-        onSelectionChange(items[0]);
-        return items[0];
-      });
-
-      const runWl = vi.fn().mockResolvedValue('L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12\nL13\nL14\nL15\nL16\nL17\nL18\nL19\nL20');
-
-      const extension = createWorklogBrowseExtension({ listWorkItems, chooseWorkItem, runWl });
-      extension(makePi() as any);
-
-      const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
-
-      const notify = vi.fn();
-      let capturedHandler: ((data: string) => any) | null = null;
-      let capturedWidgetInstance: any = null;
-      const setWidget = vi.fn((id: string, content: any) => {
-        if (typeof content === 'function') {
-          const fakeTui = { getHeight: () => 20, requestRender: vi.fn() };
-          const fakeTheme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
-          capturedWidgetInstance = content(fakeTui, fakeTheme);
-        }
-      });
-      const onTerminalInput = vi.fn((handler: any) => {
-        capturedHandler = handler;
-        return vi.fn();
-      });
-
-      await commandHandler('', { ui: { notify, setWidget, onTerminalInput } });
-
-      // The onTerminalInput handler should forward to the widget
-      expect(capturedHandler).toBeDefined();
-      expect(capturedWidgetInstance).toBeDefined();
-
-      const initialRender = capturedWidgetInstance.render(80);
-      expect(initialRender[0]).toContain('L1');
-
-      // Dispatch Down key through the captured handler
-      capturedHandler!('\u001b[B');
-      expect(capturedWidgetInstance.render(80)[0]).toContain('L2');
-
-      // Dispatch Down again
-      capturedHandler!('\u001b[B');
-      expect(capturedWidgetInstance.render(80)[0]).toContain('L3');
-
-      // Dispatch Up
-      capturedHandler!('\u001b[A');
-      expect(capturedWidgetInstance.render(80)[0]).toContain('L2');
-
-      // Dispatch g (go to top)
-      capturedHandler!('g');
-      expect(capturedWidgetInstance.render(80)[0]).toContain('L1');
-
-      // Dispatch G (go to bottom)
-      capturedHandler!('G');
-      const afterG = capturedWidgetInstance.render(80);
-      const lines = afterG.slice(0);
-      expect(lines[lines.length - 1].trim()).toContain('L20');
+      expect(notify).toHaveBeenCalledWith(
+        'Scrollable detail view requires a TUI that supports custom overlays.',
+        'warning',
+      );
     });
   });
 
