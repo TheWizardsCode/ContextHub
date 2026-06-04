@@ -1,5 +1,4 @@
 import os from 'node:os';
-import type { WorkItemAudit } from './types.js';
 
 const READY_TO_CLOSE_YES = 'Ready to close: Yes';
 const READY_TO_CLOSE_NO = 'Ready to close: No';
@@ -58,7 +57,12 @@ export function hasAcceptanceCriteria(description?: string): boolean {
   return /acceptance\s*criteria|acceptance_criteria|success\s*criteria|success_criteria|acceptance\s*:/i.test(description);
 }
 
-export function buildAuditEntry(auditText: string, author?: string, opts?: BuildAuditOptions): WorkItemAudit {
+export function buildAuditEntry(auditText: string, author?: string, opts?: BuildAuditOptions): {
+  time: string;
+  author: string;
+  text: string;
+  status: 'Complete' | 'Partial' | 'Missing Criteria';
+} {
   // Ensure audit text is redacted before persistence to avoid storing raw PII
   const redacted = redactAuditText(auditText);
   const parsed = parseReadinessLine(redacted);
@@ -105,7 +109,7 @@ export function formatInvalidAuditFirstLineMessage(inspection: AuditFirstLineIns
  *   - `Ready to close: No` -> `Partial`
  * - Otherwise return `Missing Criteria`.
  */
-export function parseReadinessLine(auditText: string): WorkItemAudit['status'] {
+export function parseReadinessLine(auditText: string): 'Complete' | 'Partial' | 'Missing Criteria' {
   const inspection = inspectAuditFirstLine(auditText);
   if (inspection.trimmedFirstNonEmptyLine === READY_TO_CLOSE_YES) return 'Complete';
   if (inspection.trimmedFirstNonEmptyLine === READY_TO_CLOSE_NO) return 'Partial';

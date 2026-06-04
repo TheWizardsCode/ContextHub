@@ -4,7 +4,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { UpdateOptions } from '../cli-types.js';
-import type { UpdateWorkItemInput, WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel, WorkItemAudit } from '../types.js';
+import type { UpdateWorkItemInput, WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel } from '../types.js';
 import { promises as fs } from 'fs';
 import { humanFormatWorkItem, resolveFormat } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
@@ -148,7 +148,12 @@ export default function register(ctx: PluginContext): void {
       const deleteReasonCandidate = hasProvided('deleteReason') ? options.deleteReason : undefined;
       const auditCandidate = hasProvided('auditText') ? options.auditText : (hasProvided('audit') ? options.audit : undefined);
       let auditWritten = false;
-      let auditEntryForOutput: WorkItemAudit | null = null;
+      let auditEntryForOutput: {
+        time: string;
+        author: string;
+        text: string;
+        status: string;
+      } | null = null;
       if (auditCandidate !== undefined && !auditWriteEnabled) {
         output.error('Audit writes are disabled by config (`auditWriteEnabled: false`).', {
           success: false,
