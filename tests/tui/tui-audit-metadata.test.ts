@@ -78,7 +78,7 @@ describe('MetadataPaneComponent audit display', () => {
     const content = getContent();
     expect(content).toContain('Audit Passed:');
     expect(content).toContain('Unknown');
-    expect(content).toContain('{orange-fg}Unknown{/orange-fg}');
+    expect(content).toContain('{214-fg}Unknown{/214-fg}');
   });
 
   it('shows "Audit Passed: Unknown" in orange if no auditResult is provided', () => {
@@ -91,6 +91,6 @@ describe('MetadataPaneComponent audit display', () => {
     const content = getContent();
     expect(content).toContain('Audit Passed:');
     expect(content).toContain('Unknown');
-    expect(content).toContain('{orange-fg}Unknown{/orange-fg}');
+    expect(content).toContain('{214-fg}Unknown{/214-fg}');
   });
 });

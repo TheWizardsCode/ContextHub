@@ -129,14 +129,14 @@ export class MetadataPaneComponent {
     // Surface a one-line Audit summary if present.
     try {
       if (item.auditResult) {
-        let auditLabel = 'Audit Passed:';
-        let auditValue = '{orange-fg}Unknown{/orange-fg}';
-        if (item.auditResult.readyToClose === true) auditValue = '{green-fg}Yes{/green-fg}';
-        else if (item.auditResult.readyToClose === false) auditValue = '{red-fg}No{/red-fg}';
+        const auditLabel = 'Audit Passed:';
+        let auditValue = theme.tui.text.readyNo('Unknown');
+        if (item.auditResult.readyToClose === true) auditValue = theme.tui.text.readyYes('Yes');
+        else if (item.auditResult.readyToClose === false) auditValue = theme.tui.text.error('No');
         lines.push(`${auditLabel} ${auditValue}`);
       } else {
-        // If no audit at all, show unknown
-        lines.push('Audit Passed: {orange-fg}Unknown{/orange-fg}');
+        // If no audit at all, show unknown using the theme's readyNo color (orange/214)
+        lines.push(`Audit Passed: ${theme.tui.text.readyNo('Unknown')}`);
       }
     } catch (err) {
       // Non-fatal: if audit formatting fails, do not break the metadata pane
