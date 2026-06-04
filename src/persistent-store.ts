@@ -29,7 +29,7 @@ interface DbMetadata {
   schemaVersion: number;
 }
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 /**
  * Normalize a single value for use as a better-sqlite3 binding parameter.
@@ -267,6 +267,21 @@ export class SqlitePersistentStore {
         PRIMARY KEY (fromId, toId),
         FOREIGN KEY (fromId) REFERENCES workitems(id) ON DELETE CASCADE,
         FOREIGN KEY (toId) REFERENCES workitems(id) ON DELETE CASCADE
+      )
+    `);
+
+    // Create audit_results table for storing the latest audit per work item
+    // This table is the sole source of truth for audit state (see WL-0MPZNJVWT000IKG7).
+    // Only one row per work item is kept (latest-only, upsert via INSERT OR REPLACE).
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS audit_results (
+        work_item_id TEXT PRIMARY KEY,
+        ready_to_close INTEGER NOT NULL DEFAULT 0,
+        audited_at TEXT NOT NULL,
+        summary TEXT,
+        raw_output TEXT,
+        author TEXT,
+        FOREIGN KEY (work_item_id) REFERENCES workitems(id) ON DELETE CASCADE
       )
     `);
 
@@ -796,6 +811,62 @@ export class SqlitePersistentStore {
     const stmt = this.db.prepare('DELETE FROM dependency_edges WHERE fromId = ? OR toId = ?');
     const result = stmt.run(itemId, itemId);
     return result.changes;
+  }
+
+  // ── Audit Results ────────────────────────────────────────────────
+
+  /**
+   * Save or update an audit result for a work item (upsert).
+   * Only the latest audit per work item is kept.
+   */
+  saveAuditResult(audit: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null }): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO audit_results (work_item_id, ready_to_close, audited_at, summary, raw_output, author)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(work_item_id) DO UPDATE SET
+        ready_to_close = excluded.ready_to_close,
+        audited_at = excluded.audited_at,
+        summary = excluded.summary,
+        raw_output = excluded.raw_output,
+        author = excluded.author
+    `);
+    const values: unknown[] = [
+      audit.workItemId,
+      audit.readyToClose ? 1 : 0,
+      audit.auditedAt,
+      audit.summary ?? null,
+      audit.rawOutput ?? null,
+      audit.author ?? null,
+    ];
+    const normalized = normalizeSqliteBindings(values);
+    stmt.run(...normalized);
+  }
+
+  /**
+   * Get the audit result for a work item.
+   * Returns null if no audit result exists.
+   */
+  getAuditResult(workItemId: string): { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null {
+    const stmt = this.db.prepare('SELECT * FROM audit_results WHERE work_item_id = ?');
+    const row = stmt.get(workItemId) as any;
+    if (!row) return null;
+    return {
+      workItemId: row.work_item_id,
+      readyToClose: Boolean(row.ready_to_close),
+      auditedAt: row.audited_at,
+      summary: row.summary ?? null,
+      rawOutput: row.raw_output ?? null,
+      author: row.author ?? null,
+    };
+  }
+
+  /**
+   * Delete the audit result for a work item.
+   */
+  deleteAuditResult(workItemId: string): boolean {
+    const stmt = this.db.prepare('DELETE FROM audit_results WHERE work_item_id = ?');
+    const result = stmt.run(workItemId);
+    return result.changes > 0;
   }
 
   // ── FTS5 Full-Text Search ──────────────────────────────────────────

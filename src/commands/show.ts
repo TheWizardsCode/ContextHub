@@ -42,13 +42,19 @@ export default function register(ctx: PluginContext): void {
         // Prepare JSON-safe copies that omit the `audit` field when absent.
         // Keep the audit object verbatim when present so JSON consumers can
         // rely on the structured { time, author, text } shape.
+        // Additionally, include structured audit_result data from the new table.
         const stripAudit = (src: WorkItem) => {
           const copy: any = Object.assign({}, src);
           if (copy.audit === undefined || copy.audit === null) delete copy.audit;
           return copy as WorkItem;
         };
 
+        const auditResult = db.getAuditResult(normalizedId);
+
         const result: ShowJsonOutput = { success: true, workItem: stripAudit(item) };
+        // Include structured audit result from the dedicated table
+        (result as any).auditResult = auditResult;
+
         result.comments = db.getCommentsForWorkItem(normalizedId) as Comment[];
         if (options.children) {
            const children = db.getDescendants(normalizedId).map(stripAudit);

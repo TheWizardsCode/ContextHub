@@ -16,6 +16,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import Database from 'better-sqlite3';
 import { createTempDir, cleanupTempDir } from './test-utils.js';
+import { runMigrations, listPendingMigrations } from '../src/migrations/index.js';
 
 // ---------------------------------------------------------------------------
 // Helper: Create a legacy database with audit data
@@ -106,12 +107,21 @@ describe('Backfill migration: valid audit data', () => {
         { id: 'SA-001', auditText: 'Ready to close: Yes\nReviewed', author: 'alice', time: '2026-05-01T10:00:00.000Z' }
       ]);
 
-      // After implementing the backfill migration, this test should verify:
-      // const { runBackfillMigration } = require('../src/migrations/index.js');
-      // runBackfillMigration(dbPath);
+      // Run migrations which includes the backfill
+      const result = runMigrations({ confirm: true }, dbPath);
 
-      // For now, assert the expected behavior (will fail until implementation)
-      expect(true).toBe(false); // Placeholder - implementation pending
+      // Verify the audit was backfilled
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        const row = db.prepare('SELECT * FROM audit_results WHERE work_item_id = ?').get('SA-001') as any;
+        expect(row).toBeDefined();
+        expect(row.ready_to_close).toBe(1); // Complete status
+        expect(row.audited_at).toBe('2026-05-01T10:00:00.000Z');
+        expect(row.summary).toContain('Ready to close: Yes');
+        expect(row.author).toBe('alice');
+      } finally {
+        db.close();
+      }
     } finally {
       cleanupTempDir(tmp);
     }
@@ -131,7 +141,16 @@ describe('Backfill migration: invalid entries', () => {
         { id: 'SA-002', auditText: null }
       ]);
 
-      expect(true).toBe(false); // Placeholder - implementation pending
+      runMigrations({ confirm: true }, dbPath);
+
+      // Verify no audit_result was created for null audit
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        const rows = db.prepare('SELECT * FROM audit_results').all() as any[];
+        expect(rows.length).toBe(0);
+      } finally {
+        db.close();
+      }
     } finally {
       cleanupTempDir(tmp);
     }
@@ -145,7 +164,16 @@ describe('Backfill migration: invalid entries', () => {
         { id: 'SA-003', auditText: undefined as any }
       ]);
 
-      expect(true).toBe(false); // Placeholder - implementation pending
+      runMigrations({ confirm: true }, dbPath);
+
+      // Verify no audit_result was created for undefined audit
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        const rows = db.prepare('SELECT * FROM audit_results').all() as any[];
+        expect(rows.length).toBe(0);
+      } finally {
+        db.close();
+      }
     } finally {
       cleanupTempDir(tmp);
     }
@@ -156,7 +184,7 @@ describe('Backfill migration: invalid entries', () => {
     try {
       const dbPath = path.join(tmp, 'worklog.db');
 
-      // Create the base tables
+      // Create the base tables + audit column with invalid JSON
       const db = new Database(dbPath);
       db.exec(`
         CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -170,7 +198,7 @@ describe('Backfill migration: invalid entries', () => {
           githubIssueNumber INTEGER, githubIssueId INTEGER, githubIssueUpdatedAt TEXT,
           needsProducerReview INTEGER NOT NULL DEFAULT 0, audit TEXT
         );
-        INSERT OR REPLACE INTO metadata (key, value) VALUES ('schemaVersion', '7');
+        INSERT OR REPLACE INTO metadata (key, value) VALUES ('schemaVersion', '6');
       `);
 
       // Insert workitem with invalid JSON in audit column
@@ -186,7 +214,16 @@ describe('Backfill migration: invalid entries', () => {
       `).run('SA-004', 'not valid json {');
       db.close();
 
-      expect(true).toBe(false); // Placeholder - implementation pending
+      runMigrations({ confirm: true }, dbPath);
+
+      // Verify the invalid audit didn't create an audit_result row
+      const db2 = new Database(dbPath, { readonly: true });
+      try {
+        const rows = db2.prepare('SELECT * FROM audit_results').all() as any[];
+        expect(rows.length).toBe(0);
+      } finally {
+        db2.close();
+      }
     } finally {
       cleanupTempDir(tmp);
     }
@@ -206,7 +243,21 @@ describe('Backfill migration: data integrity', () => {
         { id: 'SA-005', auditText: 'Ready to close: Yes\nFull review done', author: 'bob', time: '2026-05-15T14:30:00.000Z' }
       ]);
 
-      expect(true).toBe(false); // Placeholder - implementation pending
+      runMigrations({ confirm: true }, dbPath);
+
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        const row = db.prepare('SELECT * FROM audit_results WHERE work_item_id = ?').get('SA-005') as any;
+        expect(row).toBeDefined();
+        expect(row.work_item_id).toBe('SA-005');
+        expect(row.ready_to_close).toBe(1);
+        expect(row.audited_at).toBe('2026-05-15T14:30:00.000Z');
+        expect(row.summary).toBe('Ready to close: Yes\nFull review done');
+        expect(row.author).toBe('bob');
+        expect(row.raw_output).toBeNull();
+      } finally {
+        db.close();
+      }
     } finally {
       cleanupTempDir(tmp);
     }
@@ -226,7 +277,23 @@ describe('Backfill migration: idempotency', () => {
         { id: 'SA-006', auditText: 'Ready to close: No\nNeeds work', author: 'charlie', time: '2026-05-20T09:00:00.000Z' }
       ]);
 
-      expect(true).toBe(false); // Placeholder - implementation pending
+      // Run migrations twice
+      runMigrations({ confirm: true }, dbPath);
+      const secondRun = runMigrations({ confirm: true }, dbPath);
+
+      // Second run should have no new migrations applied
+      expect(secondRun.applied.length).toBe(0);
+
+      // Verify exactly one audit_result row
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        const rows = db.prepare('SELECT * FROM audit_results WHERE work_item_id = ?').all('SA-006') as any[];
+        expect(rows.length).toBe(1);
+        expect(rows[0].ready_to_close).toBe(0); // Partial status
+        expect(rows[0].author).toBe('charlie');
+      } finally {
+        db.close();
+      }
     } finally {
       cleanupTempDir(tmp);
     }

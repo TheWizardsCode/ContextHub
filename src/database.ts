@@ -582,6 +582,31 @@ export class WorklogDatabase {
     this.store.close();
   }
 
+  // ── Audit Results ────────────────────────────────────────────────
+
+  /**
+   * Save or update an audit result for a work item (upsert).
+   * Only the latest audit per work item is kept.
+   */
+  saveAuditResult(audit: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null }): void {
+    this.store.saveAuditResult(audit);
+  }
+
+  /**
+   * Get the audit result for a work item.
+   * Returns null if no audit result exists.
+   */
+  getAuditResult(workItemId: string): { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null {
+    return this.store.getAuditResult(workItemId);
+  }
+
+  /**
+   * Delete the audit result for a work item.
+   */
+  deleteAuditResult(workItemId: string): boolean {
+    return this.store.deleteAuditResult(workItemId);
+  }
+
   /**
    * Set the prefix for this database
    */

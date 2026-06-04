@@ -119,7 +119,7 @@ describe('audit_results table: schema DDL', () => {
       expect(col).toBeDefined();
       expect(col!.type.toUpperCase()).toBe('INTEGER');
       expect(col!.notnull).toBe(1);
-      expect(col!.dflt_value).toBe(0);
+      expect(col!.dflt_value).toBe('0');
     } finally {
       cleanupTempDir(tmp);
     }

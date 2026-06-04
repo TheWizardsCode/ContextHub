@@ -47,6 +47,84 @@ const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; requir
         db.exec(`ALTER TABLE workitems ADD COLUMN audit TEXT`);
       }
     }
+  },
+  {
+    id: '20260604-add-audit-results',
+    description: 'Add audit_results table for structured audit storage (latest-only per work item)',
+    safe: true,
+    requiredColumn: '__table:audit_results',
+    apply: (db: Database.Database) => {
+      // Check if audit_results table already exists
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='audit_results'").all() as any[];
+      if (tables.length === 0) {
+        db.exec(`
+          CREATE TABLE audit_results (
+            work_item_id TEXT PRIMARY KEY,
+            ready_to_close INTEGER NOT NULL DEFAULT 0,
+            audited_at TEXT NOT NULL,
+            summary TEXT,
+            raw_output TEXT,
+            author TEXT,
+            FOREIGN KEY (work_item_id) REFERENCES workitems(id) ON DELETE CASCADE
+          )
+        `);
+      }
+    }
+  },
+  {
+    id: '20260604-backfill-audit-results',
+    description: 'Backfill audit_results from workitems.audit field',
+    safe: true,
+    requiredColumn: '__meta:audit_backfill_complete',
+    apply: (db: Database.Database) => {
+      // Check if audit_results table exists; if not, skip backfill
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='audit_results'").all() as any[];
+      if (tables.length === 0) {
+        // Mark backfill as complete even though there's nothing to backfill
+        try {
+          db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('audit_backfill_complete', '1');
+        } catch (_e) { /* best-effort */ }
+        return;
+      }
+
+      // Read all work items that have a non-null audit field
+      const rows = db.prepare("SELECT id, audit FROM workitems WHERE audit IS NOT NULL").all() as Array<{ id: string; audit: string }>;
+
+      const upsertStmt = db.prepare(`
+        INSERT INTO audit_results (work_item_id, ready_to_close, audited_at, summary, raw_output, author)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(work_item_id) DO UPDATE SET
+          ready_to_close = excluded.ready_to_close,
+          audited_at = excluded.audited_at,
+          summary = excluded.summary,
+          raw_output = excluded.raw_output,
+          author = excluded.author
+      `);
+
+      for (const row of rows) {
+        try {
+          const parsed = JSON.parse(row.audit);
+          if (!parsed || typeof parsed !== 'object') {
+            continue;
+          }
+
+          // Derive ready_to_close from the status field
+          const readyToClose = parsed.status === 'Complete' ? 1 : 0;
+          const auditedAt = parsed.time || new Date().toISOString();
+          const summary = typeof parsed.text === 'string' ? parsed.text : null;
+          const author = typeof parsed.author === 'string' ? parsed.author : null;
+
+          upsertStmt.run(row.id, readyToClose, auditedAt, summary, null, author);
+        } catch (_e) {
+          // Invalid JSON in audit field — skip silently
+        }
+      }
+
+      // Mark backfill as complete
+      try {
+        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('audit_backfill_complete', '1');
+      } catch (_e) { /* best-effort */ }
+    }
   }
 ];
 
@@ -67,7 +145,28 @@ export function listPendingMigrations(dbPath?: string): MigrationInfo[] {
   try {
     const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
     const existingCols = new Set(cols.map(c => String(c.name)));
+    // Also check which tables exist in the database
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as any[];
+    const existingTables = new Set(tables.map(t => t.name));
+    // Also check metadata for migration markers
+    let existingMeta: Set<string>;
+    try {
+      const metaRows = db.prepare('SELECT key FROM metadata').all() as any[];
+      existingMeta = new Set(metaRows.map(r => String(r.key)));
+    } catch (_e) {
+      existingMeta = new Set();
+    }
     const pending = MIGRATIONS.filter(m => {
+        // Sentinel values starting with __table: represent table-existence checks
+        if (m.requiredColumn.startsWith('__table:')) {
+          const tableName = m.requiredColumn.slice('__table:'.length);
+          return !existingTables.has(tableName);
+        }
+        // Sentinel values starting with __meta: represent metadata-key checks
+        if (m.requiredColumn.startsWith('__meta:')) {
+          const metaKey = m.requiredColumn.slice('__meta:'.length);
+          return !existingMeta.has(metaKey);
+        }
         return !existingCols.has(m.requiredColumn);
       })
       .map(m => ({ id: m.id, description: m.description, safe: m.safe }));
@@ -140,19 +239,49 @@ export function runMigrations(opts: RunOptions = {}, dbPath?: string, filter?: {
   const applied: MigrationInfo[] = [];
   try {
     const tx = db.transaction(() => {
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as any[];
+      const existingTables = new Set(tables.map(t => t.name));
+      let existingMeta: Set<string>;
+      try {
+        const metaRows = db.prepare('SELECT key FROM metadata').all() as any[];
+        existingMeta = new Set(metaRows.map(r => String(r.key)));
+      } catch (_e) {
+        existingMeta = new Set();
+      }
       for (const m of MIGRATIONS) {
         if (filter?.safeOnly && !m.safe) continue;
-        const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
-        const existingCols = new Set(cols.map(c => String(c.name)));
-        if (!existingCols.has(m.requiredColumn)) {
+        // Sentinel values starting with __table: represent table-existence checks
+        // Sentinel values starting with __meta: represent metadata-key checks
+        let alreadyApplied: boolean;
+        if (m.requiredColumn.startsWith('__table:')) {
+          const tableName = m.requiredColumn.slice('__table:'.length);
+          alreadyApplied = existingTables.has(tableName);
+        } else if (m.requiredColumn.startsWith('__meta:')) {
+          const metaKey = m.requiredColumn.slice('__meta:'.length);
+          alreadyApplied = existingMeta.has(metaKey);
+        } else {
+          const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
+          const existingCols = new Set(cols.map(c => String(c.name)));
+          alreadyApplied = existingCols.has(m.requiredColumn);
+        }
+        if (!alreadyApplied) {
           m.apply(db);
           applied.push({ id: m.id, description: m.description, safe: m.safe });
+          // Refresh metadata set after each migration in case a migration adds a metadata key
+          try {
+            const metaRows = db.prepare('SELECT key FROM metadata').all() as any[];
+            existingMeta = new Set(metaRows.map(r => String(r.key)));
+          } catch (_e) { /* best-effort */ }
+          // Refresh tables set after each migration in case a migration creates a table
+          const t = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as any[];
+          existingTables.clear();
+          for (const row of t) existingTables.add(row.name);
         }
       }
 
       // Update metadata schemaVersion deterministically to current schema.
       try {
-        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('schemaVersion', '7');
+        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('schemaVersion', '8');
       } catch (err) {
         // Best-effort: don't fail migration if metadata update fails, but log
         logger.error?.(`Failed to update metadata.schemaVersion: ${(err as Error).message}`);

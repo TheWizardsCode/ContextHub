@@ -214,6 +214,59 @@ wl --json audit WL-ABC123
 wl audit WL-ABC123 --prefix WL
 ```
 
+### `audit-show` [options] <id>
+
+Show the latest audit result for a work item from the `audit_results` table (the sole source of truth for audit state).
+
+Behavior:
+
+- Requires an explicit work item id.
+- Returns the most recent audit record from the `audit_results` table.
+- In `--json` mode, returns structured output with `workItemId`, `readyToClose`, `auditedAt`, `summary`, `rawOutput`, and `author`.
+- If no audit result exists for the work item, prints `No audit result for <id>` (human) or `{ success: true, audit: null }` (JSON).
+
+Options:
+
+- `--prefix <prefix>` — Override default ID prefix (optional).
+- `--json` — Output in JSON format.
+
+Examples:
+
+```sh
+wl audit-show WL-ABC123
+wl audit-show WL-ABC123 --json
+wl audit-show WL-ABC123 --prefix WL
+```
+
+### `audit-set` [options] <id>
+
+Set or update the audit result for a work item in the `audit_results` table.
+
+Behavior:
+
+- Requires an explicit work item id and `--ready-to-close`.
+- `--ready-to-close` accepts `yes` or `no`.
+- Uses INSERT OR REPLACE to maintain latest-only audit state.
+- Automatically sets `audited_at` to the current ISO 8601 timestamp.
+- Derives `author` from `WL_USER` / `USER` / `USERNAME` environment variables unless overridden by `--author`.
+
+Options:
+
+- `--ready-to-close <yes|no>` — Whether the work item is ready to close (required).
+- `--summary <text>` — Human-readable summary of the audit.
+- `--raw-output <text>` — Machine-readable raw output from the audit tool.
+- `--author <author>` — Author of the audit (defaults to current user).
+- `--prefix <prefix>` — Override default ID prefix (optional).
+- `--json` — Output in JSON format.
+
+Examples:
+
+```sh
+wl audit-set WL-ABC123 --ready-to-close yes --summary "All criteria met"
+wl audit-set WL-ABC123 --ready-to-close no --summary "Outstanding work items" --json
+wl audit-set WL-ABC123 --ready-to-close yes --author "bot" --raw-output "..."
+```
+
 ### `delete` [options] <id>
 
 Delete a work item (marks as deleted): this sets the work item status to `deleted` in the local database. If you prefer to set the status explicitly, use `wl update <id> -s deleted` instead.

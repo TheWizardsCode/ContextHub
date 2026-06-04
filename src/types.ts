@@ -8,6 +8,19 @@ export type WorkItemPriority = 'low' | 'medium' | 'high' | 'critical';
 export type WorkItemRiskLevel = 'Low' | 'Medium' | 'High' | 'Severe';
 export type WorkItemEffortLevel = 'XS' | 'S' | 'M' | 'L' | 'XL';
 
+/**
+ * Structured audit result stored in the audit_results table.
+ * This is the sole source of truth for audit state.
+ */
+export interface AuditResult {
+  workItemId: string;
+  readyToClose: boolean;
+  auditedAt: string;
+  summary: string | null;
+  rawOutput: string | null;
+  author: string | null;
+}
+
 export interface WorkItemAudit {
   time: string;
   author: string;

@@ -227,7 +227,19 @@ export default function register(ctx: PluginContext): void {
             continue;
           }
 
+          // Write to the legacy audit field for backwards compatibility
           updates.audit = buildAuditEntry(String(auditCandidate));
+
+          // Also write to the new audit_results table (sole source of truth)
+          const auditEntry = buildAuditEntry(String(auditCandidate));
+          db.saveAuditResult({
+            workItemId: normalizedId,
+            readyToClose: auditEntry.status === 'Complete',
+            auditedAt: auditEntry.time,
+            summary: auditEntry.text,
+            rawOutput: null,
+            author: auditEntry.author,
+          });
         }
 
         // Validate status/stage per-id if needed.
