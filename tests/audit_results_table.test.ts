@@ -224,4 +224,14 @@ describe('audit_results table: foreign key constraints', () => {
       db.close();
       const db2 = new Database(dbPath, { readonly: false });
       db2.exec('PRAGMA foreign_keys = ON');
-      db2.exec("DELETE FROM workitems WHERE id = 'SA-C
+      db2.exec("DELETE FROM workitems WHERE id = 'SA-CASC-001'");
+
+      // Verify audit_results rows were also deleted due to CASCADE
+      const remainingAuditRows = db2.prepare('SELECT COUNT(*) as count FROM audit_results').get() as any;
+      expect(remainingAuditRows.count).toBe(0);
+      db2.close();
+    } finally {
+      cleanupTempDir(tmp);
+    }
+  });
+});
