@@ -101,7 +101,7 @@ export class MetadataPaneComponent {
     updatedAt?: Date | string;
     githubIssueNumber?: number;
     githubRepo?: string;
-    audit?: { text?: string; time?: string };
+    auditResult?: { readyToClose: boolean; auditedAt: string; summary: string | null };
   } | null, commentCount: number, perfMetrics?: { start: number; label: string }[]): void {
     const perfStart = perfMetrics ? performance.now() : 0;
     if (perfMetrics) perfMetrics.push({ start: perfStart, label: 'start' });
@@ -126,14 +126,14 @@ export class MetadataPaneComponent {
 
     if (perfMetrics) perfMetrics.push({ start: performance.now(), label: 'audit-extract' });
 
-    // Surface a one-line Audit summary if present. Use a lightweight direct
-    // extraction instead of humanFormatWorkItem to avoid expensive full-item
-    // traversal and formatting in the hot path.
+    // Surface a one-line Audit summary if present.
     try {
-      // Audit info is now stored in the dedicated audit_results table.
-      // The TUI metadata pane does not have direct database access, so we
-      // skip audit display here. The `wl show` and `wl audit-show` commands
-      // provide full audit information from the new table.
+      if (item.auditResult) {
+        const ready = item.auditResult.readyToClose ? '{green-fg}Yes{/green-fg}' : '{red-fg}No{/red-fg}';
+        const summary = item.auditResult.summary || '(no summary)';
+        const time = MetadataPaneComponent.formatShortDateTime(item.auditResult.auditedAt);
+        lines.push(`Audit:     ${ready} ${summary} (${time})`);
+      }
     } catch (err) {
       // Non-fatal: if audit formatting fails, do not break the metadata pane
       // — fall through and continue rendering other rows.

@@ -2692,7 +2692,12 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
     const g2 = perfEnabled ? performance.now() : 0;
     githubMs = g2 - g1;
     const u1 = perfEnabled ? performance.now() : 0;
-    metadataPaneComponent.updateFromItem({ ...node.item, githubRepo: githubRepo ?? undefined }, commentCount, metadataPerfMetrics);
+    const auditResult = dbAdapter ? dbAdapter.getAuditResult(node.item.id) : null;
+    metadataPaneComponent.updateFromItem(
+      { ...node.item, githubRepo: githubRepo ?? undefined, auditResult: auditResult ?? undefined },
+      commentCount,
+      metadataPerfMetrics
+    );
     const u2 = perfEnabled ? performance.now() : 0;
     updateMs = u2 - u1;
     if (diagnosticsEnabled && metadataPerfMetrics && metadataPerfMetrics.length > 0) {
