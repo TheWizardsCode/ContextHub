@@ -221,11 +221,33 @@ function truncateLine(line: string, width: number): string {
 }
 
 function isUpKey(data: string): boolean {
-  return data === '\u001b[A' || data === 'up';
+  return data === '\u001b[A' || data === 'up' || /^\u001b\[1;\d+(?::\d+)?A$/.test(data);
 }
 
 function isDownKey(data: string): boolean {
-  return data === '\u001b[B' || data === 'down';
+  return data === '\u001b[B' || data === 'down' || /^\u001b\[1;\d+(?::\d+)?B$/.test(data);
+}
+
+function isPageUpKey(data: string): boolean {
+  return (
+    data === '\u001b[5~'
+    || data === '\u001b[[5~'
+    || data === 'pageup'
+    || data === 'pageUp'
+    || /^\u001b\[5;\d+(?::\d+)?~$/.test(data)
+  );
+}
+
+function isPageDownKey(data: string): boolean {
+  return (
+    data === '\u001b[6~'
+    || data === '\u001b[[6~'
+    || data === 'pagedown'
+    || data === 'pageDown'
+    || data === ' '
+    || data === 'space'
+    || /^\u001b\[6;\d+(?::\d+)?~$/.test(data)
+  );
 }
 
 function isEnterKey(data: string): boolean {
@@ -342,9 +364,17 @@ export function createScrollableWidget(
     let offset = 0;
 
     const getViewport = () => {
+      // The TUI instance exposes terminal dimensions via `terminal.rows`.
+      // `getHeight()` is not a public API on the pi TUI, so fall back to
+      // `tui.terminal.rows` (the actual terminal height) and finally
+      // `tui.height` (legacy / blessed compatibility).
       try {
-        const height = typeof tui?.getHeight === 'function' ? tui.getHeight() : tui?.height;
+        const height =
+          typeof tui?.getHeight === 'function'
+            ? tui.getHeight()
+            : tui?.terminal?.rows ?? tui?.height;
         if (typeof height === 'number' && height > 8) {
+          // Reserve ~6 rows for header / footer / controls
           return Math.min(Math.max(3, Math.floor(height - 6)), contentLines.length);
         }
       } catch (_) {
@@ -377,13 +407,13 @@ export function createScrollableWidget(
         return;
       }
 
-      if (data === '\u001b[5~' || data === 'pageup') {
+      if (isPageUpKey(data)) {
         offset = Math.max(0, offset - getViewport());
         invalidate();
         return;
       }
 
-      if (data === '\u001b[6~' || data === 'pagedown' || data === ' ') {
+      if (isPageDownKey(data)) {
         offset = Math.min(Math.max(0, contentLines.length - 1), offset + getViewport());
         invalidate();
         return;

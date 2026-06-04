@@ -230,6 +230,34 @@ describe('Worklog browse pi extension', () => {
       expect(comp.render(80)[0]).toContain('Line 2');
     });
 
+    it('handles Kitty arrow sequences (e.g. \x1b[1;1A/\x1b[1;1B)', () => {
+      const factory = createScrollableWidget(longContent);
+      const comp = factory(makeTui(), makeTheme());
+
+      comp.handleInput('\u001b[1;1B'); // Kitty Down
+      expect(comp.render(80)[0]).toContain('Line 2');
+
+      comp.handleInput('\u001b[1;1A'); // Kitty Up
+      expect(comp.render(80)[0]).toContain('Line 1');
+    });
+
+    it('handles Kitty/Page key-id page up/down variants', () => {
+      const factory = createScrollableWidget(longContent);
+      const comp = factory(makeTui(), makeTheme());
+
+      comp.handleInput('\u001b[6;1~'); // Kitty PageDown
+      expect(comp.render(80)[0]).not.toBe('Line 1');
+
+      comp.handleInput('g');
+      expect(comp.render(80)[0]).toBe('Line 1');
+
+      comp.handleInput('pageDown'); // normalized key-id from parseKey
+      expect(comp.render(80)[0]).not.toBe('Line 1');
+
+      comp.handleInput('pageUp');
+      expect(comp.render(80)[0]).toBe('Line 1');
+    });
+
     it('handles g key to scroll to top', () => {
       const factory = createScrollableWidget(longContent);
       const comp = factory(makeTui(), makeTheme());
@@ -310,6 +338,49 @@ describe('Worklog browse pi extension', () => {
     });
   });
 
+  describe('createScrollableWidget viewport when getHeight is unavailable', () => {
+    // Simulates the real pi TUI which does NOT have getHeight().
+    // The TUI exposes terminal dimensions via tui.terminal.rows.
+    const longContent = Array.from({ length: 50 }, (_, i) => `Line ${i + 1}`);
+    const makeTuiNoGetHeight = () => ({
+      terminal: { rows: 24 },
+      requestRender: vi.fn(),
+    });
+    const makeTheme = () => ({ fg: (_c: string, t: string) => t, bold: (t: string) => t });
+
+    it('uses terminal.rows to determine viewport when getHeight is missing', () => {
+      const factory = createScrollableWidget(longContent);
+      const comp = factory(makeTuiNoGetHeight(), makeTheme());
+
+      // With terminal height 24, viewport should be floor(24-6) = 18 lines
+      const initial = comp.render(80);
+      expect(initial.length).toBe(18);
+      expect(initial[0]).toContain('Line 1');
+
+      // Scrolling down 20 steps with viewport of 18 → lines 21-38
+      for (let i = 0; i < 20; i++) comp.handleInput('\u001b[B');
+      const afterScroll = comp.render(80);
+      expect(afterScroll[0]).toContain('Line 21');
+      expect(afterScroll[afterScroll.length - 1]).toContain('Line 38');
+    });
+
+    it('clamps viewport at content length when content is shorter than terminal', () => {
+      const shortContent = ['A', 'B', 'C'];
+      const factory = createScrollableWidget(shortContent);
+      const comp = factory(makeTuiNoGetHeight(), makeTheme());
+
+      const rendered = comp.render(80);
+      expect(rendered.length).toBe(3);
+      expect(rendered).toEqual(['A', 'B', 'C']);
+
+      // Scrolling should not produce empty lines
+      comp.handleInput('\u001b[B');
+      comp.handleInput('\u001b[B');
+      const clamped = comp.render(80);
+      expect(clamped.length).toBe(3);
+    });
+  });
+
   describe('custom() keyboard routing integration', () => {
     /**
      * Create a mock custom() that invokes the render callback, captures the
@@ -322,13 +393,17 @@ describe('Worklog browse pi extension', () => {
       const componentRef = { current: null as any };
       const doneRef = { current: null as ((value: any) => void) | null };
       // Use a terminal height that creates a reasonable viewport (e.g. ~14 visible lines)
+      // The real pi TUI exposes terminal dimensions via terminal.rows (not getHeight).
       const terminalHeight = 20;
       const fn = vi.fn(async (renderFn: Function) => {
         calls.push([renderFn]);
         let capturedDone: (value: any) => void;
         // The real TUI calls the factory once and uses the returned component
         const result = renderFn(
-          { requestRender: vi.fn(), getHeight: () => terminalHeight },
+          {
+            requestRender: vi.fn(),
+            terminal: { rows: terminalHeight },
+          },
           { fg: (_c: string, t: string) => t, bold: (t: string) => t },
           {},
           (value: any) => {
