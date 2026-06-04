@@ -219,7 +219,7 @@ describe('TUI audit lifecycle', () => {
             },
           ],
           getPrefix: () => undefined,
-          getCommentsForWorkItem: () => [],
+          getCommentsForWorkItem: () => [], getAuditResult: () => null,
           update: () => ({}),
           createComment: () => ({}),
           get: () => null,

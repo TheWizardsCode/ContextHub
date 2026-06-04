@@ -84,7 +84,7 @@ describe("TUI '/' search/filter", () => {
     ctx.utils.getDatabase = () => ({
       list: () => [{ id: 'WL-1', title: 'one', status: 'open', needsProducerReview: true }],
       get: () => null,
-      getCommentsForWorkItem: () => [],
+      getCommentsForWorkItem: () => [], getAuditResult: () => null,
       update: () => ({}),
       remove: () => undefined,
       getPrefix: () => undefined,
@@ -120,7 +120,7 @@ describe("TUI '/' search/filter", () => {
     ctx.utils.getDatabase = () => ({
       list: () => [ { id: 'WL-1', title: 'one', status: 'open', needsProducerReview: true } ],
       get: () => null,
-      getCommentsForWorkItem: () => [],
+      getCommentsForWorkItem: () => [], getAuditResult: () => null,
       update: () => ({}),
       remove: () => undefined,
       getPrefix: () => undefined,

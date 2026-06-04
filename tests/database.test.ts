@@ -87,16 +87,21 @@ describe('WorklogDatabase', () => {
       const item = db.create({
         title: 'Audited item',
         description: 'Success criteria: ship it',
-        audit: {
-          time: new Date().toISOString(),
-          author: 'tester',
-          text: 'Ready to close: Yes',
-        },
+      });
+      // Write audit to the audit_results table
+      db.saveAuditResult({
+        workItemId: item.id,
+        readyToClose: true,
+        auditedAt: new Date().toISOString(),
+        author: 'tester',
+        summary: 'Ready to close: Yes',
+        rawOutput: null,
       });
 
-      expect(item.audit).toBeDefined();
-      expect(item.audit?.author).toBe('tester');
-      expect(item.audit?.text).toBe('Ready to close: Yes');
+      const auditResult = db.getAuditResult(item.id);
+      expect(auditResult).not.toBeNull();
+      expect(auditResult?.author).toBe('tester');
+      expect(auditResult?.summary).toBe('Ready to close: Yes');
     });
 
     it('should create a work item with a parent', () => {
@@ -289,17 +294,20 @@ describe('WorklogDatabase', () => {
 
     it('should update structured audit fields', () => {
       const item = db.create({ title: 'Task' });
-      const updated = db.update(item.id, {
-        audit: {
-          time: new Date().toISOString(),
-          author: 'updater',
-          text: 'Ready to close: No',
-        },
+      // Write audit to the audit_results table
+      db.saveAuditResult({
+        workItemId: item.id,
+        readyToClose: false,
+        auditedAt: new Date().toISOString(),
+        author: 'updater',
+        summary: 'Ready to close: No',
+        rawOutput: null,
       });
 
-      expect(updated?.audit).toBeDefined();
-      expect(updated?.audit?.author).toBe('updater');
-      expect(db.get(item.id)?.audit?.text).toBe('Ready to close: No');
+      const auditResult = db.getAuditResult(item.id);
+      expect(auditResult).not.toBeNull();
+      expect(auditResult?.author).toBe('updater');
+      expect(auditResult?.summary).toBe('Ready to close: No');
     });
 
     it('should return null for non-existent ID', () => {

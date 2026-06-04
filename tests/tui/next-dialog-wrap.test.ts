@@ -158,7 +158,7 @@ describe('next dialog text wrapping', () => {
       get: () => null,
       update: () => ({}),
       remove: () => undefined,
-      getCommentsForWorkItem: () => [],
+      getCommentsForWorkItem: () => [], getAuditResult: () => null,
     });
 
     const register = (await import('../../src/commands/tui.js')).default;

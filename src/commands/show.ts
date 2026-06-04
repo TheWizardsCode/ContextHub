@@ -39,31 +39,32 @@ export default function register(ctx: PluginContext): void {
       }
       
       if (utils.isJsonMode()) {
-        // Prepare JSON-safe copies that omit the `audit` field when absent.
-        // Keep the audit object verbatim when present so JSON consumers can
-        // rely on the structured { time, author, text } shape.
-        // Additionally, include structured audit_result data from the new table.
-        const stripAudit = (src: WorkItem) => {
-          const copy: any = Object.assign({}, src);
-          if (copy.audit === undefined || copy.audit === null) delete copy.audit;
-          return copy as WorkItem;
-        };
-
+        // Include structured audit_result data from the dedicated table.
+        // The legacy `audit` field on WorkItem is no longer used.
         const auditResult = db.getAuditResult(normalizedId);
 
-        const result: ShowJsonOutput = { success: true, workItem: stripAudit(item) };
+        const result: ShowJsonOutput = { success: true, workItem: item };
         // Include structured audit result from the dedicated table
         (result as any).auditResult = auditResult;
+        // For backwards compatibility, also populate workItem.audit from audit_results
+        if (auditResult) {
+          (result.workItem as any).audit = {
+            time: auditResult.auditedAt,
+            author: auditResult.author,
+            text: auditResult.summary,
+            status: auditResult.readyToClose ? 'Complete' : 'Partial',
+          };
+        }
 
         result.comments = db.getCommentsForWorkItem(normalizedId) as Comment[];
         if (options.children) {
-           const children = db.getDescendants(normalizedId).map(stripAudit);
+           const children = db.getDescendants(normalizedId);
            const ancestors: any[] = [];
           let currentParentId = item.parentId;
           while (currentParentId) {
             const parent = db.get(currentParentId);
             if (!parent) break;
-            ancestors.push(stripAudit(parent));
+            ancestors.push(parent);
             currentParentId = parent.parentId;
           }
           result.children = children;

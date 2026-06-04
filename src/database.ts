@@ -719,7 +719,6 @@ export class WorklogDatabase {
       githubIssueUpdatedAt: undefined,
       // default for the new flag
       needsProducerReview: input.needsProducerReview ?? false,
-      audit: input.audit,
     };
 
     this.store.saveWorkItem(item);
@@ -768,7 +767,6 @@ export class WorklogDatabase {
       githubIssueNumber: item.githubIssueNumber,
       githubIssueId: item.githubIssueId,
       githubIssueUpdatedAt: item.githubIssueUpdatedAt,
-      audit: input.audit ?? item.audit,
     };
 
     if (process.env.WL_DEBUG_SQL_BINDINGS) {

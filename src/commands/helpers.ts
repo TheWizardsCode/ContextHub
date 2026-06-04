@@ -301,6 +301,9 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   // Load config once and reuse for both humanDisplay and cliFormatMarkdown
   const config = loadConfig();
 
+  // Read audit result from the dedicated table (sole source of truth)
+  const auditResult = db ? db.getAuditResult(item.id) : null;
+
   // Resolve 'auto' and 'markdown' format values
   let fmt = (format || config?.humanDisplay || 'full').toLowerCase();
   let markdownEnabled = false;
@@ -381,10 +384,10 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push(`Risk: ${item.risk || '—'}`);
     lines.push(`Effort: ${item.effort || '—'}`);
     if (item.assignee) lines.push(`Assignee: ${item.assignee}`);
-      if (item.audit) {
+      if (auditResult) {
       // For human outputs, show a truncated, redacted one-line audit excerpt.
       // Do not include the author in concise output to keep it compact.
-        const raw = String(item.audit.text || '');
+        const raw = String(auditResult.summary || '');
         const redacted = redactAuditText(raw);
         const colorized = colorizeAuditExcerpt(redacted, isTui);
         lines.push(`Audit: ${colorized}`);
@@ -393,7 +396,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
       // in normal/concise human outputs so operators notice without failing
       // the write. This is intentionally non-fatal and mirrors the
       // conservative policy implemented in buildAuditEntry.
-      if (item.audit.status === 'Missing Criteria') {
+      if (!auditResult.readyToClose && !auditResult.summary?.startsWith('Ready to close:')) {
         lines.push(`Warning: Audit claim could not be verified (Missing Criteria)`);
       }
     }
@@ -417,8 +420,8 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push(`Risk: ${item.risk || '—'}`);
     lines.push(`Effort: ${item.effort || '—'}`);
     if (item.assignee) lines.push(`Assignee: ${item.assignee}`);
-      if (item.audit) {
-        const raw = String(item.audit.text || '');
+      if (auditResult) {
+        const raw = String(auditResult.summary || '');
         const redacted = redactAuditText(raw);
         const colorized = colorizeAuditExcerpt(redacted, isTui);
         // Keep concise audit excerpt in normal output as well (author omitted).
@@ -507,18 +510,21 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
       }
     }
 
-  if (item.audit) {
+  if (auditResult) {
     lines.push('');
     lines.push('## Audit');
     lines.push('');
-    lines.push(`Time: ${item.audit.time}`);
-    lines.push(`Author: ${item.audit.author}`);
-    lines.push('');
-    const redacted = redactAuditText(String(item.audit.text || ''));
-    const colorizedFirstLine = colorizeAuditExcerpt(redacted, isTui);
-    const remainingLines = redacted.split(/\r?\n/).slice(1).join('\n');
-    const coloredText = remainingLines ? `${colorizedFirstLine}\n${remainingLines}` : colorizedFirstLine;
-    lines.push(coloredText);
+    lines.push(`Ready to close: ${auditResult.readyToClose ? 'Yes' : 'No'}`);
+    lines.push(`Audited at: ${auditResult.auditedAt}`);
+    if (auditResult.author) lines.push(`Author: ${auditResult.author}`);
+    if (auditResult.summary) {
+      const redacted = redactAuditText(auditResult.summary);
+      const colorizedFirstLine = colorizeAuditExcerpt(redacted, isTui);
+      const remainingLines = redacted.split(/\r?\n/).slice(1).join('\n');
+      const coloredText = remainingLines ? `${colorizedFirstLine}\n${remainingLines}` : colorizedFirstLine;
+      lines.push('');
+      lines.push(coloredText);
+    }
   }
 
   const result = lines.join('\n');

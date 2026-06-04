@@ -130,23 +130,10 @@ export class MetadataPaneComponent {
     // extraction instead of humanFormatWorkItem to avoid expensive full-item
     // traversal and formatting in the hot path.
     try {
-      if (item.audit && typeof item.audit.text === 'string') {
-        const raw = String(item.audit.text || '');
-        const excerpt = (redactAuditText(raw).split(/\r?\n/).find(l => l.trim() !== '') || '').trim();
-        if (excerpt) {
-          const excerptPlain = stripTags(stripAnsi(excerpt));
-          const redactedExcerpt = redactAuditText(excerptPlain);
-          const colorExcerpt = excerptPlain.includes('Ready to close: Yes')
-            ? theme.tui.text.readyYes(redactedExcerpt)
-            : theme.tui.text.readyNo(redactedExcerpt);
-          // Append short audit timestamp (DD/MM HH:MM) if available. Prefer
-          // the structured audit.time field; fall back to item.updatedAt.
-          const auditTime = item.audit?.time ?? (item.updatedAt ?? undefined);
-          const shortTs = MetadataPaneComponent.formatShortDateTime(auditTime);
-          const tsPart = shortTs ? ` ${theme.tui.text.muted(`(${shortTs})`)}` : '';
-          lines.push(`${colorExcerpt}${tsPart}`);
-        }
-      }
+      // Audit info is now stored in the dedicated audit_results table.
+      // The TUI metadata pane does not have direct database access, so we
+      // skip audit display here. The `wl show` and `wl audit-show` commands
+      // provide full audit information from the new table.
     } catch (err) {
       // Non-fatal: if audit formatting fails, do not break the metadata pane
       // — fall through and continue rendering other rows.

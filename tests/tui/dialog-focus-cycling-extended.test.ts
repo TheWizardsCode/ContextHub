@@ -147,7 +147,7 @@ describe('Dialog focus cycling extended', () => {
   it('cycles focus across all create dialog fields with Tab and Shift+Tab', async () => {
     const screen = makeScreen();
     const { layout } = buildLayout(screen);
-    const ctx = { program: { opts: () => ({ verbose: false }) }, utils: { requireInitialized: vi.fn(), getDatabase: vi.fn(() => ({ list: () => [], getPrefix: () => undefined, getCommentsForWorkItem: () => [], update: vi.fn(), createComment: vi.fn(), get: vi.fn(() => null) })) } } as any;
+    const ctx = { program: { opts: () => ({ verbose: false }) }, utils: { requireInitialized: vi.fn(), getDatabase: vi.fn(() => ({ list: () => [], getPrefix: () => undefined, getCommentsForWorkItem: () => [], getAuditResult: () => null, update: vi.fn(), createComment: vi.fn(), get: vi.fn(() => null) })) } } as any;
 
     const controller = new TuiController(ctx, { createLayout: () => layout as any, PiAdapter: (class { getStatus() { return { status: 'stopped', port: 0 }; } }) as any, resolveWorklogDir: () => '/tmp', createPersistence: () => ({ loadPersistedState: async () => null, savePersistedState: async () => undefined, statePath: '/tmp/tui-state.json' }) });
     await controller.start({});
@@ -230,7 +230,7 @@ describe('Dialog focus cycling extended', () => {
         getDatabase: vi.fn(() => ({
           list: () => [item],
           getPrefix: () => undefined,
-          getCommentsForWorkItem: () => [],
+          getCommentsForWorkItem: () => [], getAuditResult: () => null,
           update: updateCalled,
           createComment: createCommentCalled,
           get: (id: string) => (id === item.id ? item : null),

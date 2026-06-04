@@ -64,6 +64,7 @@ export interface WlDbInterface {
   getPrefix?(): string | undefined;
   getCommentsForWorkItem(workItemId: string): WorkItemComment[];
   createComment(params: { workItemId: string; comment: string; author: string }): WorkItemComment | null;
+  getAuditResult(workItemId: string): { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null;
   // DelegateDb compatibility methods
   getAll(): WorkItem[];
   getAllComments(): WorkItemComment[];
@@ -253,6 +254,19 @@ export function createWlDbAdapter(): WlDbInterface {
         author: c.author ?? c.by ?? '',
         createdAt: c.createdAt ?? c.created_at ?? '',
       }));
+    },
+
+    getAuditResult(workItemId: string): { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null {
+      const result = wlJsonSync('audit-show', [workItemId]);
+      if (!result) return null;
+      return {
+        workItemId: result.workItemId ?? result.work_item_id ?? workItemId,
+        readyToClose: Boolean(result.readyToClose ?? result.ready_to_close),
+        auditedAt: result.auditedAt ?? result.audited_at ?? '',
+        summary: result.summary ?? null,
+        rawOutput: result.rawOutput ?? result.raw_output ?? null,
+        author: result.author ?? null,
+      };
     },
 
     createComment(params: { workItemId: string; comment: string; author: string }): WorkItemComment | null {

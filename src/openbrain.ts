@@ -50,7 +50,7 @@ function isVerbose(): boolean {
 /**
  * Build a concise markdown summary for a completed work item.
  */
-export function buildOpenBrainSummary(item: WorkItem): string {
+export function buildOpenBrainSummary(item: WorkItem, auditResult?: { summary: string | null; readyToClose: boolean } | null): string {
   const lines: string[] = [];
   lines.push(`# ${item.title}`);
   lines.push('');
@@ -67,10 +67,10 @@ export function buildOpenBrainSummary(item: WorkItem): string {
     lines.push('');
   }
 
-  if (item.audit?.text && item.audit.text.trim() !== '') {
+  if (auditResult?.summary && auditResult.summary.trim() !== '') {
     lines.push('## What was done');
     lines.push('');
-    lines.push(item.audit.text.trim());
+    lines.push(auditResult.summary.trim());
     lines.push('');
   }
 
@@ -125,7 +125,7 @@ export async function submitToOpenBrain(
 ): Promise<void> {
   const obBin = options.obBin ?? resolveObBinary();
   const spawnImpl = options.spawnImpl ?? spawn;
-  const summary = buildOpenBrainSummary(item);
+  const summary = buildOpenBrainSummary(item);  // auditResult intentionally omitted here; callers may pass it separately
 
   const verbose = options.verbose !== undefined ? Boolean(options.verbose) : isVerbose();
   if (verbose) {

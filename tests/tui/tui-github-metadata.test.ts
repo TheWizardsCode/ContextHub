@@ -225,7 +225,7 @@ describe('TUI G key (shift+G) GitHub action', () => {
     ctx.utils.getDatabase = () => ({
       list: () => [],
       getPrefix: () => undefined,
-      getCommentsForWorkItem: () => [],
+      getCommentsForWorkItem: () => [], getAuditResult: () => null,
       update: () => ({}),
       createComment: () => ({}),
       get: () => null,
@@ -302,7 +302,7 @@ describe('TUI G key (shift+G) GitHub action', () => {
       upsertIssuesFromWorkItems: vi.fn() as any,
       openUrl: openUrlSpy,
       copyToClipboard: async () => ({ success: false }),
-      db: { getCommentsForWorkItem: () => [] },
+      db: { getCommentsForWorkItem: () => [], getAuditResult: () => null },
     });
 
     // The open URL function should have been called with the GitHub issue URL

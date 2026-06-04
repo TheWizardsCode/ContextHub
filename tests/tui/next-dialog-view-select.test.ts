@@ -92,7 +92,7 @@ describe('Next dialog View selects item (controller-level)', () => {
             { id: 'WL-B', title: 'B', status: 'open', priority: 'medium', parentId: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tags: [], assignee: '', stage: 'idea', issueType: 'task' },
           ],
           get: () => null,
-          getCommentsForWorkItem: () => [],
+          getCommentsForWorkItem: () => [], getAuditResult: () => null,
           update: () => ({}),
           getPrefix: () => undefined,
         }))
@@ -196,7 +196,7 @@ describe('Next dialog View selects item (controller-level)', () => {
             { id: 'WL-C', title: 'C', status: 'open', priority: 'medium', parentId: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tags: [], assignee: '', stage: 'idea', issueType: 'task' },
           ],
           get: () => null,
-          getCommentsForWorkItem: () => [],
+          getCommentsForWorkItem: () => [], getAuditResult: () => null,
           update: () => ({}),
           getPrefix: () => undefined,
         }))
@@ -292,7 +292,7 @@ describe('Next dialog View selects item (controller-level)', () => {
             { id: 'WL-C', title: 'C', status: 'open', priority: 'medium', parentId: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tags: [], assignee: '', stage: 'idea', issueType: 'task' },
           ],
           get: () => null,
-          getCommentsForWorkItem: () => [],
+          getCommentsForWorkItem: () => [], getAuditResult: () => null,
           update: () => ({}),
           getPrefix: () => undefined,
         }))

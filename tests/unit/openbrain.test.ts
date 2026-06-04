@@ -85,17 +85,16 @@ describe('buildOpenBrainSummary', () => {
   });
 
   it('includes audit text when present', () => {
-    const item = makeWorkItem({
-      audit: { time: '2024-01-02T00:00:00.000Z', author: 'alice', text: 'Ready to close: Yes\nDid the work' },
-    });
-    const summary = buildOpenBrainSummary(item);
+    const item = makeWorkItem({});
+    const auditResult = { workItemId: 'TEST-1', readyToClose: true, auditedAt: '2024-01-02T00:00:00.000Z', summary: 'Ready to close: Yes\nDid the work', rawOutput: null, author: 'alice' };
+    const summary = buildOpenBrainSummary(item, auditResult);
     expect(summary).toContain('Did the work');
     expect(summary).toContain('## What was done');
   });
 
   it('omits audit section when audit is missing', () => {
-    const item = makeWorkItem({ audit: undefined });
-    const summary = buildOpenBrainSummary(item);
+    const item = makeWorkItem({});
+    const summary = buildOpenBrainSummary(item, null);
     expect(summary).not.toContain('## What was done');
   });
 

@@ -17,37 +17,65 @@ function parseNeedsProducerReview(value: unknown): boolean | undefined {
   return undefined;
 }
 
-function normalizeCreateInputWithAudit(input: CreateWorkItemInput): CreateWorkItemInput {
+function normalizeCreateInputWithAudit(input: CreateWorkItemInput, db: WorklogDatabase): { input: CreateWorkItemInput; auditResult: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null } {
   const rawAudit = (input as any).audit;
   if (typeof rawAudit === 'string') {
+    const entry = buildAuditEntry(rawAudit, undefined, { hasAcceptanceCriteria: hasAcceptanceCriteria(input.description) });
+    // Return cleaned input without audit field, plus audit result for the new table
+    const cleanedInput = { ...input };
+    delete (cleanedInput as any).audit;
     return {
-      ...input,
-      audit: buildAuditEntry(rawAudit, undefined, { hasAcceptanceCriteria: hasAcceptanceCriteria(input.description) }),
+      input: cleanedInput,
+      auditResult: {
+        workItemId: '', // Will be set after item is created
+        readyToClose: entry.status === 'Complete',
+        auditedAt: entry.time,
+        summary: entry.text,
+        rawOutput: null,
+        author: entry.author,
+      },
     };
   }
-  return input;
+  return { input, auditResult: null };
 }
 
-function normalizeUpdateInputWithAudit(input: UpdateWorkItemInput): UpdateWorkItemInput {
+function normalizeUpdateInputWithAudit(input: UpdateWorkItemInput, itemId: string, db: WorklogDatabase): { input: UpdateWorkItemInput; auditResult: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null } {
   const rawAudit = (input as any).audit;
   if (typeof rawAudit === 'string') {
+    const entry = buildAuditEntry(rawAudit, undefined, { hasAcceptanceCriteria: hasAcceptanceCriteria((input as any).description) });
+    const cleanedInput = { ...input };
+    delete (cleanedInput as any).audit;
     return {
-      ...input,
-      // We cannot reliably determine acceptance criteria here because the
-      // caller may be updating description simultaneously. For simplicity
-      // assume the provided body includes the same description as current
-      // stored item; the API layer does not have the current item here, so
-      // we conservatively set hasAcceptanceCriteria to true when the
-      // incoming request includes a description that looks like it has criteria.
-      audit: buildAuditEntry(rawAudit, undefined, { hasAcceptanceCriteria: hasAcceptanceCriteria((input as any).description) }),
+      input: cleanedInput,
+      auditResult: {
+        workItemId: itemId,
+        readyToClose: entry.status === 'Complete',
+        auditedAt: entry.time,
+        summary: entry.text,
+        rawOutput: null,
+        author: entry.author,
+      },
     };
   }
-  return input;
+  return { input, auditResult: null };
 }
 
 function hasAuditField(input: unknown): boolean {
   if (!input || typeof input !== 'object') return false;
   return Object.prototype.hasOwnProperty.call(input as object, 'audit') && (input as any).audit !== undefined;
+}
+
+/**
+ * Write an audit result to the audit_results table.
+ * This is the sole source of truth for audit state.
+ */
+function writeAuditResult(db: WorklogDatabase, auditResult: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null }): void {
+  try {
+    db.saveAuditResult(auditResult);
+  } catch (_e) {
+    // Best-effort: log but do not fail the request
+    console.error('Failed to write audit result:', _e);
+  }
 }
 
 export function createAPI(db: WorklogDatabase) {
@@ -80,8 +108,13 @@ export function createAPI(db: WorklogDatabase) {
         res.status(400).json({ error: 'Audit writes are disabled by config (auditWriteEnabled: false)' });
         return;
       }
-      const input: CreateWorkItemInput = normalizeCreateInputWithAudit(req.body);
-      const item = db.create(input);
+      const { input: createInput, auditResult: createAuditResult } = normalizeCreateInputWithAudit(req.body, db);
+      const item = db.create(createInput);
+      // Write audit result to the dedicated audit_results table
+      if (createAuditResult) {
+        createAuditResult.workItemId = item.id;
+        writeAuditResult(db, createAuditResult);
+      }
       res.status(201).json(item);
     } catch (error) {
       const message = (error as Error).message || 'Invalid request';
@@ -113,25 +146,20 @@ export function createAPI(db: WorklogDatabase) {
         res.status(404).json({ error: 'Work item not found' });
         return;
       }
-      // If the caller provided a string `audit`, build the structured audit entry
-      // using information from the stored item when the request does not include
-      // a description. This ensures the hasAcceptanceCriteria signal is derived
-      // from the correct source (incoming description when present, otherwise
-      // the current stored description).
       let normalizedBody: any = req.body;
+      // If the caller provided an `audit` field, route it to the audit_results table
+      // instead of the legacy `workitems.audit` column.
       const rawAudit = (req.body as any).audit;
-      if (typeof rawAudit === 'string') {
-        const descriptionCandidate = Object.prototype.hasOwnProperty.call(req.body, 'description') ? (req.body as any).description : current.description;
-        normalizedBody = {
-          ...req.body,
-          audit: buildAuditEntry(rawAudit, undefined, { hasAcceptanceCriteria: hasAcceptanceCriteria(descriptionCandidate) }),
-        };
-      }
-      const input: UpdateWorkItemInput = normalizeUpdateInputWithAudit(normalizedBody);
-      const item = db.update(req.params.id, input);
+      delete normalizedBody.audit;
+      const { input: updateInput, auditResult: updateAuditResult } = normalizeUpdateInputWithAudit(normalizedBody, req.params.id, db);
+      const item = db.update(req.params.id, updateInput);
       if (!item) {
         res.status(404).json({ error: 'Work item not found' });
         return;
+      }
+      // Write audit result to the dedicated audit_results table
+      if (updateAuditResult) {
+        writeAuditResult(db, updateAuditResult);
       }
       res.json(item);
     } catch (error) {
@@ -291,8 +319,13 @@ export function createAPI(db: WorklogDatabase) {
         res.status(400).json({ error: 'Audit writes are disabled by config (auditWriteEnabled: false)' });
         return;
       }
-      const input: CreateWorkItemInput = normalizeCreateInputWithAudit(req.body);
-      const item = db.create(input);
+      const { input: createInput, auditResult: createAuditResult } = normalizeCreateInputWithAudit(req.body, db);
+      const item = db.create(createInput);
+      // Write audit result to the dedicated audit_results table
+      if (createAuditResult) {
+        createAuditResult.workItemId = item.id;
+        writeAuditResult(db, createAuditResult);
+      }
       res.status(201).json(item);
     } catch (error) {
       const message = (error as Error).message || 'Invalid request';
@@ -322,24 +355,18 @@ export function createAPI(db: WorklogDatabase) {
         res.status(404).json({ error: 'Work item not found' });
         return;
       }
-      // See comment in the non-prefixed update handler — prefer the incoming
-      // description when present, otherwise use the stored item's description
-      // to determine whether acceptance criteria exist for conservative status
-      // resolution.
       let normalizedBody: any = req.body;
-      const rawAudit = (req.body as any).audit;
-      if (typeof rawAudit === 'string') {
-        const descriptionCandidate = Object.prototype.hasOwnProperty.call(req.body, 'description') ? (req.body as any).description : current.description;
-        normalizedBody = {
-          ...req.body,
-          audit: buildAuditEntry(rawAudit, undefined, { hasAcceptanceCriteria: hasAcceptanceCriteria(descriptionCandidate) }),
-        };
-      }
-      const input: UpdateWorkItemInput = normalizeUpdateInputWithAudit(normalizedBody);
-      const item = db.update(req.params.id, input);
+      // Route audit field to the audit_results table
+      delete normalizedBody.audit;
+      const { input: updateInput, auditResult: updateAuditResult } = normalizeUpdateInputWithAudit(normalizedBody, req.params.id, db);
+      const item = db.update(req.params.id, updateInput);
       if (!item) {
         res.status(404).json({ error: 'Work item not found' });
         return;
+      }
+      // Write audit result to the dedicated audit_results table
+      if (updateAuditResult) {
+        writeAuditResult(db, updateAuditResult);
       }
       res.json(item);
     } catch (error) {

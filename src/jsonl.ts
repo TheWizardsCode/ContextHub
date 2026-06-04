@@ -334,9 +334,6 @@ export function importFromJsonlContent(content: string): { items: WorkItem[], co
         if ((item as any).needsProducerReview !== undefined) {
           (item as any).needsProducerReview = Boolean((item as any).needsProducerReview);
         }
-        if ((item as any).audit === undefined || (item as any).audit === null) {
-          (item as any).audit = undefined;
-        }
         // Normalize status to canonical hyphenated form (e.g. in_progress -> in-progress)
         // on import so all downstream consumers see consistent values.
         item.status = (normalizeStatusValue(item.status) ?? item.status) as WorkItem['status'];
@@ -395,9 +392,6 @@ export function importFromJsonlContent(content: string): { items: WorkItem[], co
         }
         if ((item as any).githubIssueUpdatedAt === undefined) {
           (item as any).githubIssueUpdatedAt = undefined;
-        }
-        if ((item as any).audit === undefined || (item as any).audit === null) {
-          (item as any).audit = undefined;
         }
         if ((item as any).githubIssueNumber !== undefined && (item as any).githubIssueNumber !== null) {
           (item as any).githubIssueNumber = Number((item as any).githubIssueNumber);

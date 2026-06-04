@@ -211,7 +211,7 @@ describe('TUI c key copy ID to clipboard', () => {
     ctx.utils.getDatabase = () => ({
       list: () => [],
       getPrefix: () => undefined,
-      getCommentsForWorkItem: () => [],
+      getCommentsForWorkItem: () => [], getAuditResult: () => null,
       update: () => ({}),
       createComment: () => ({}),
       get: () => null,

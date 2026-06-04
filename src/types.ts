@@ -72,7 +72,6 @@ export interface WorkItem {
   githubIssueUpdatedAt?: string;
   // Indicates whether the item needs a Producer to review/sign-off. Default: false
   needsProducerReview?: boolean;
-  audit?: WorkItemAudit;
 }
 
 /**
@@ -98,7 +97,6 @@ export interface CreateWorkItemInput {
   effort?: WorkItemEffortLevel | '';
   /** When present, sets the needsProducerReview flag on the created item */
   needsProducerReview?: boolean;
-  audit?: WorkItemAudit;
 }
 
 /**
@@ -124,7 +122,6 @@ export interface UpdateWorkItemInput {
   effort?: WorkItemEffortLevel | '';
   /** When present, sets the needsProducerReview flag */
   needsProducerReview?: boolean;
-  audit?: WorkItemAudit;
 }
 export interface WorkItemQuery {
   status?: WorkItemStatus[];

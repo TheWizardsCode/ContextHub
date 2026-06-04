@@ -189,7 +189,7 @@ function buildCtx(items: any[]) {
     create: () => null,
     update: () => null,
     getPrefix: () => undefined,
-    getCommentsForWorkItem: () => [],
+    getCommentsForWorkItem: () => [], getAuditResult: () => null,
     createComment: () => null,
     getAll: () => items,
     getAllComments: () => [],
@@ -204,7 +204,7 @@ function buildCtx(items: any[]) {
         getDatabase: vi.fn(() => ({
           list: () => items,
           getPrefix: () => 'test-prefix',
-          getCommentsForWorkItem: () => [],
+          getCommentsForWorkItem: () => [], getAuditResult: () => null,
           update: () => ({}),
           createComment: () => ({}),
           get: (id: string) => items.find(i => i.id === id) ?? null,

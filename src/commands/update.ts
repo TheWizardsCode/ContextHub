@@ -4,7 +4,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { UpdateOptions } from '../cli-types.js';
-import type { UpdateWorkItemInput, WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel } from '../types.js';
+import type { UpdateWorkItemInput, WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel, WorkItemAudit } from '../types.js';
 import { promises as fs } from 'fs';
 import { humanFormatWorkItem, resolveFormat } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
@@ -147,6 +147,8 @@ export default function register(ctx: PluginContext): void {
       const deletedByCandidate = hasProvided('deletedBy') ? options.deletedBy : undefined;
       const deleteReasonCandidate = hasProvided('deleteReason') ? options.deleteReason : undefined;
       const auditCandidate = hasProvided('auditText') ? options.auditText : (hasProvided('audit') ? options.audit : undefined);
+      let auditWritten = false;
+      let auditEntryForOutput: WorkItemAudit | null = null;
       if (auditCandidate !== undefined && !auditWriteEnabled) {
         output.error('Audit writes are disabled by config (`auditWriteEnabled: false`).', {
           success: false,
@@ -227,10 +229,7 @@ export default function register(ctx: PluginContext): void {
             continue;
           }
 
-          // Write to the legacy audit field for backwards compatibility
-          updates.audit = buildAuditEntry(String(auditCandidate));
-
-          // Also write to the new audit_results table (sole source of truth)
+          // Write to the audit_results table (sole source of truth for audit state)
           const auditEntry = buildAuditEntry(String(auditCandidate));
           db.saveAuditResult({
             workItemId: normalizedId,
@@ -240,6 +239,8 @@ export default function register(ctx: PluginContext): void {
             rawOutput: null,
             author: auditEntry.author,
           });
+          auditWritten = true;
+          auditEntryForOutput = auditEntry;
         }
 
         // Validate status/stage per-id if needed.
@@ -340,6 +341,12 @@ export default function register(ctx: PluginContext): void {
               // so the update command is never blocked or aborted.
             });
           }
+        }
+
+        // Include audit data in JSON output when audit was written
+        if (auditWritten && auditEntryForOutput) {
+          (item as any).auditResult = db.getAuditResult(normalizedId);
+          (item as any).audit = { time: auditEntryForOutput.time, author: auditEntryForOutput.author, text: auditEntryForOutput.text, status: auditEntryForOutput.status };
         }
 
         results.push({ id: normalizedId, success: true, workItem: item });

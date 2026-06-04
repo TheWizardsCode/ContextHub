@@ -206,7 +206,7 @@ function buildCtx(items: any[], comments: any[] = []) {
         getDatabase: vi.fn(() => ({
           list: () => items,
           getPrefix: () => 'test-prefix',
-          getCommentsForWorkItem: getCommentsMock,
+          getCommentsForWorkItem: getCommentsMock, getAuditResult: () => null,
           update: () => ({}),
           createComment: createCommentMock,
           get: (id: string) => items.find(i => i.id === id) ?? null,

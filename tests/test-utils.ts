@@ -141,6 +141,7 @@ export function createTuiTestContext(options?: { prefix?: string }) {
       list: (query?: any) => Array.from(items.values()),
       getPrefix: () => testPrefix,
       getCommentsForWorkItem: (id: string) => [],
+      getAuditResult: (id: string) => null,
       update: (id: string, updates: any) => {
         const cur = items.get(id);
         if (!cur) return false;
@@ -246,6 +247,7 @@ export function createTuiTestContext(options?: { prefix?: string }) {
         }));
       return comments;
     },
+    getAuditResult: (_id: string) => null,
     createComment: (params: { workItemId: string; comment: string; author: string }) => {
       const id = `WL-TEST-COMMENT-${nextId++}`;
       const now = new Date().toISOString();

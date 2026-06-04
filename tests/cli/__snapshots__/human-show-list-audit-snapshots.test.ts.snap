@@ -13,14 +13,6 @@ SortIndex: 0
 Risk     : —
 Effort   : —
 
-## Audit
-
-Time: 2026-01-01T00:00:00Z
-Author: alice
-
-Ready to close: Yes
-Extra details
-
 # No audit
 
 ID       : TEST-2
@@ -43,14 +35,6 @@ exports[`Human snapshots: show and list outputs with audit > renders concise/lis
     SortIndex: 0
     Risk     : —
     Effort   : —
-    
-    ## Audit
-    
-    Time: 2026-01-01T00:00:00Z
-    Author: alice
-    
-    Ready to close: Yes
-    Extra details
 "
 `;
 

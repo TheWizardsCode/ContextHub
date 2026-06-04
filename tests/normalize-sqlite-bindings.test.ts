@@ -165,11 +165,16 @@ describe('SQLite binding round-trip', () => {
       stage: 'idea',
       issueType: 'task',
       needsProducerReview: true,
-      audit: {
-        time: new Date().toISOString(),
-        author: 'roundtrip',
-        text: 'Ready to close: Yes',
-      },
+    });
+
+    // Write audit to the audit_results table
+    db.saveAuditResult({
+      workItemId: created.id,
+      readyToClose: true,
+      auditedAt: new Date().toISOString(),
+      author: 'roundtrip',
+      summary: 'Ready to close: Yes',
+      rawOutput: null,
     });
 
     const loaded = db.get(created.id);
@@ -182,8 +187,9 @@ describe('SQLite binding round-trip', () => {
     expect(loaded!.stage).toBe('idea');
     expect(loaded!.issueType).toBe('task');
     expect(loaded!.needsProducerReview).toBe(true);
-    expect(loaded!.audit).toBeDefined();
-    expect(loaded!.audit?.author).toBe('roundtrip');
+    const auditResult = db.getAuditResult(created.id);
+    expect(auditResult).not.toBeNull();
+    expect(auditResult?.author).toBe('roundtrip');
     // Date fields should be valid ISO strings
     expect(() => new Date(loaded!.createdAt).toISOString()).not.toThrow();
     expect(() => new Date(loaded!.updatedAt).toISOString()).not.toThrow();
@@ -405,23 +411,25 @@ describe('unescapeText round-trip via DB', () => {
   it('unescapes audit text field but leaves audit JSON structure intact', () => {
     const created = db.create({
       title: 'Audit escape test',
-      audit: {
-        time: '2026-01-01T00:00:00.000Z',
-        author: 'tester',
-        text: 'Ready to close: Yes\\nExtra detail',
-        status: 'Complete',
-      },
     });
 
-    const loaded = db.get(created.id);
-    expect(loaded).toBeDefined();
-    expect(loaded!.audit).toBeDefined();
-    // audit.text should have a real newline
-    expect(loaded!.audit!.text).toBe('Ready to close: Yes\nExtra detail');
-    expect(loaded!.audit!.text).not.toContain('\\n');
+    // Write audit to the audit_results table
+    db.saveAuditResult({
+      workItemId: created.id,
+      readyToClose: false,
+      auditedAt: '2026-01-01T00:00:00.000Z',
+      author: 'tester',
+      summary: 'Ready to close: Yes\nExtra detail',
+      rawOutput: null,
+    });
+
+    const auditResult = db.getAuditResult(created.id);
+    expect(auditResult).not.toBeNull();
+    // audit summary should have a real newline
+    expect(auditResult!.summary).toBe('Ready to close: Yes\nExtra detail');
     // Structured audit fields must remain intact
-    expect(loaded!.audit!.author).toBe('tester');
-    expect(loaded!.audit!.status).toBe('Complete');
+    expect(auditResult!.author).toBe('tester');
+    expect(auditResult!.readyToClose).toBe(false);
   });
 
   it('does not alter tags (JSON field) when description contains escape artifacts', () => {

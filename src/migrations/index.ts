@@ -37,15 +37,18 @@ const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; requir
   },
   {
     id: '20260315-add-audit',
-    description: 'Add audit TEXT column to workitems',
+    description: 'Legacy: Add audit TEXT column to workitems (now replaced by audit_results table)',
     safe: true,
-    requiredColumn: 'audit',
+    requiredColumn: '__meta:audit_migration_noop',
     apply: (db: Database.Database) => {
-      const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
-      const existingCols = new Set(cols.map(c => String(c.name)));
-      if (!existingCols.has('audit')) {
-        db.exec(`ALTER TABLE workitems ADD COLUMN audit TEXT`);
-      }
+      // This migration is now a no-op. The audit column has been replaced by the
+      // audit_results table. If the audit column doesn't exist, we skip adding it
+      // since it will be dropped anyway by the 20260604-drop-audit-column migration.
+      // If it already exists (legacy databases), we leave it in place for the
+      // backfill migration to read from before the drop migration removes it.
+      try {
+        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('audit_migration_noop', '1');
+      } catch (_e) { /* best-effort */ }
     }
   },
   {
@@ -73,56 +76,68 @@ const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; requir
   },
   {
     id: '20260604-backfill-audit-results',
-    description: 'Backfill audit_results from workitems.audit field',
+    description: 'Backfill audit_results from existing workitems.audit JSON column',
     safe: true,
     requiredColumn: '__meta:audit_backfill_complete',
     apply: (db: Database.Database) => {
-      // Check if audit_results table exists; if not, skip backfill
-      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='audit_results'").all() as any[];
-      if (tables.length === 0) {
-        // Mark backfill as complete even though there's nothing to backfill
-        try {
-          db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('audit_backfill_complete', '1');
-        } catch (_e) { /* best-effort */ }
+      // Check if backfill has already been done
+      let alreadyDone = false;
+      try {
+        const metaRow = db.prepare('SELECT value FROM metadata WHERE key = ?').get('audit_backfill_complete');
+        if (metaRow && String((metaRow as any).value) === '1') {
+          alreadyDone = true;
+        }
+      } catch (_e) { /* metadata table may not exist */ }
+      if (alreadyDone) return;
+
+      // Check if workitems table has an audit column
+      const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
+      const hasAuditColumn = cols.some(c => String(c.name) === 'audit');
+      if (!hasAuditColumn) {
+        // No audit column to backfill; mark as done
+        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('audit_backfill_complete', '1');
         return;
       }
 
-      // Read all work items that have a non-null audit field
-      const rows = db.prepare("SELECT id, audit FROM workitems WHERE audit IS NOT NULL").all() as Array<{ id: string; audit: string }>;
-
-      const upsertStmt = db.prepare(`
-        INSERT INTO audit_results (work_item_id, ready_to_close, audited_at, summary, raw_output, author)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(work_item_id) DO UPDATE SET
-          ready_to_close = excluded.ready_to_close,
-          audited_at = excluded.audited_at,
-          summary = excluded.summary,
-          raw_output = excluded.raw_output,
-          author = excluded.author
-      `);
+      // Read all workitems that have non-null audit data
+      const rows = db.prepare('SELECT id, audit FROM workitems WHERE audit IS NOT NULL AND audit != \'\'').all() as any[];
+      const insertStmt = db.prepare('INSERT OR REPLACE INTO audit_results (work_item_id, ready_to_close, audited_at, summary, raw_output, author) VALUES (?, ?, ?, ?, ?, ?)');
 
       for (const row of rows) {
         try {
           const parsed = JSON.parse(row.audit);
-          if (!parsed || typeof parsed !== 'object') {
-            continue;
+          if (parsed && typeof parsed === 'object' && parsed.text) {
+            const readyToClose = parsed.status === 'Complete' ? 1 : 0;
+            const auditedAt = parsed.time || '';
+            const summary = parsed.text || '';
+            const author = parsed.author || '';
+            insertStmt.run(row.id, readyToClose, auditedAt, summary, null, author);
           }
-
-          // Derive ready_to_close from the status field
-          const readyToClose = parsed.status === 'Complete' ? 1 : 0;
-          const auditedAt = parsed.time || new Date().toISOString();
-          const summary = typeof parsed.text === 'string' ? parsed.text : null;
-          const author = typeof parsed.author === 'string' ? parsed.author : null;
-
-          upsertStmt.run(row.id, readyToClose, auditedAt, summary, null, author);
         } catch (_e) {
-          // Invalid JSON in audit field — skip silently
+          // Skip invalid JSON entries
         }
       }
 
       // Mark backfill as complete
+      db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('audit_backfill_complete', '1');
+    }
+  },
+  {
+    id: '20260604-drop-audit-column',
+    description: 'Drop legacy audit TEXT column from workitems table (replaced by audit_results)',
+    safe: false,
+    requiredColumn: '__meta:audit_column_dropped',
+    apply: (db: Database.Database) => {
+      // SQLite 3.35.0+ supports ALTER TABLE DROP COLUMN
+      // Check if the audit column still exists before dropping
+      const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
+      const existingCols = new Set(cols.map(c => String(c.name)));
+      if (existingCols.has('audit')) {
+        db.exec(`ALTER TABLE workitems DROP COLUMN audit`);
+      }
+      // Mark migration as complete
       try {
-        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('audit_backfill_complete', '1');
+        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('audit_column_dropped', '1');
       } catch (_e) { /* best-effort */ }
     }
   }

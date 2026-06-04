@@ -117,6 +117,7 @@ export default function register(ctx: PluginContext): void {
       }
 
       let auditEntry;
+      let auditResultData: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null = null;
       if (auditTextInput !== undefined) {
         const redacted = redactAuditText(String(auditTextInput));
         const inspection = inspectAuditFirstLine(redacted);
@@ -137,6 +138,15 @@ export default function register(ctx: PluginContext): void {
         }
 
         auditEntry = buildAuditEntry(String(auditTextInput));
+        // Prepare audit result for the new audit_results table
+        auditResultData = {
+          workItemId: '', // Will be set after item creation
+          readyToClose: auditEntry.status === 'Complete',
+          auditedAt: auditEntry.time,
+          summary: auditEntry.text,
+          rawOutput: null,
+          author: auditEntry.author,
+        };
       }
 
       const item = db.createWithNextSortIndex({
@@ -157,10 +167,21 @@ export default function register(ctx: PluginContext): void {
         needsProducerReview: (options.needsProducerReview !== undefined) ?
           (['true','yes','1'].includes(String(options.needsProducerReview).toLowerCase())) :
           false,
-        audit: auditEntry,
       });
 
+      // Write audit result to the dedicated audit_results table
+      if (auditResultData) {
+        auditResultData.workItemId = item.id;
+        db.saveAuditResult(auditResultData);
+      }
+
       const refreshed = db.get(item.id) || item;
+
+      // Include audit data in JSON output when audit was provided
+      if (auditResultData) {
+        (refreshed as any).auditResult = db.getAuditResult(item.id);
+        (refreshed as any).audit = { time: auditEntry!.time, author: auditEntry!.author, text: auditEntry!.text, status: auditEntry!.status };
+      }
       
       if (utils.isJsonMode()) {
         output.json({ success: true, workItem: refreshed });

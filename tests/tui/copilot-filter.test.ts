@@ -78,7 +78,7 @@ describe('Copilot filter (Alt+g)', () => {
         { id: 'WL-2', title: 'two', status: 'open', assignee: '@alice' },
       ],
       get: (id: string) => null,
-      getCommentsForWorkItem: () => [],
+      getCommentsForWorkItem: () => [], getAuditResult: () => null,
       update: () => ({}),
       remove: () => undefined,
       getPrefix: () => undefined,

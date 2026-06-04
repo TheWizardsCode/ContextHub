@@ -177,6 +177,11 @@ export class TuiController {
           ? (db as any).getCommentsForWorkItem(workItemId)
           : []
       ),
+      getAuditResult: (workItemId: string) => (
+        typeof (db as any).getAuditResult === 'function'
+          ? (db as any).getAuditResult(workItemId)
+          : null
+      ),
       createComment: (params: { workItemId: string; comment: string; author: string }) => (
         typeof (db as any).createComment === 'function'
           ? (db as any).createComment(params)

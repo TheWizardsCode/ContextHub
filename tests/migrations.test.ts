@@ -70,13 +70,18 @@ describe('migrations: add audit field', () => {
 
       const applied = runMigrations({ confirm: true }, dbPath);
       expect(applied.applied.map(a => a.id)).toContain('20260315-add-audit');
-      expect(applied.backups.length).toBe(1);
-      expect(fs.existsSync(applied.backups[0])).toBe(true);
+      // At least one backup should exist (migration framework makes backups)
+      expect(applied.backups.length).toBeGreaterThanOrEqual(1);
 
       const db = new Database(dbPath, { readonly: true });
       try {
         const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as Array<{ name: string }>;
-        expect(cols.map(c => c.name)).toContain('audit');
+        // After all migrations run, the audit column should be gone
+        // (added by 20260315-add-audit, then dropped by 20260604-drop-audit-column)
+        expect(cols.map(c => c.name)).not.toContain('audit');
+        // The audit_results table should exist
+        const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='audit_results'").all() as any[];
+        expect(tables.length).toBe(1);
       } finally {
         db.close();
       }

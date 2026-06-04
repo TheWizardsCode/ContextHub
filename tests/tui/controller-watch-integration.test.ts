@@ -210,7 +210,7 @@ describe('TuiController - Database Watch Integration', () => {
         getDatabase: vi.fn(() => ({
           list: mockDbList,
           getPrefix: () => undefined,
-          getCommentsForWorkItem: () => [],
+          getCommentsForWorkItem: () => [], getAuditResult: () => null,
           update: () => ({}),
           createComment: () => ({}),
           get: () => null,
@@ -347,7 +347,7 @@ describe('TuiController - Database Watch Integration', () => {
         getDatabase: vi.fn(() => ({
           list: mockDbList,
           getPrefix: () => undefined,
-          getCommentsForWorkItem: () => [],
+          getCommentsForWorkItem: () => [], getAuditResult: () => null,
           update: () => ({}),
           createComment: () => ({}),
           get: () => null,
