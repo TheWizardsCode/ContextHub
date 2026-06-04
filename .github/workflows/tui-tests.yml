@@ -41,6 +41,7 @@ jobs:
               - 'tests/cli.test.ts'
               - 'tests/**/*.test.ts'
               - 'test/**/*.test.ts'
+              - 'tests/e2e/**'
             tui:
               - 'src/commands/tui.ts'
               - 'src/tui/**'
