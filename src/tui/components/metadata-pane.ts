@@ -169,11 +169,8 @@ export class MetadataPaneComponent {
   }
 
   setContent(content: string): void {
-    // Skip expensive markdown rendering for plain text content that has no
-    // markdown characters. This avoids unnecessary parsing in the hot path
-    // when displaying simple lines like the GitHub configuration hint.
-    const needsMarkdown = HAS_MARKDOWN_RE.test(content);
-    this.box.setContent(needsMarkdown ? renderMarkdownToTags(content) : content);
+    // Always render with markdown so blessed color tags like {orange-fg}...{/orange-fg} are processed.
+    this.box.setContent(renderMarkdownToTags(content));
   }
 
   focus(): void {
