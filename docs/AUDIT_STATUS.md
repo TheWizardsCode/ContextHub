@@ -2,21 +2,61 @@
 
 This document explains how Worklog derives and surfaces a conservative "readiness" status for structured audit metadata stored on work items.
 
-Goals
-- Provide a deterministic readiness summary based on an explicit first-line contract.
-- Ensure valid audits are accepted when the first non-empty line is well-formed.
-- Return actionable errors when the first-line contract is violated.
+## Overview
 
-How status is derived
+Worklog stores audit results in a dedicated `audit_results` table, separate from the `workitems` table. Each work item has at most one audit result (latest-only storage). The audit result captures:
+
+- **work_item_id** — Foreign key to the work item
+- **ready_to_close** — Boolean (stored as INTEGER): `1` = Complete, `0` = Partial
+- **audited_at** — ISO 8601 timestamp of when the audit was performed
+- **summary** — Human-readable summary text (the full audit text)
+- **raw_output** — Optional machine-readable output (null if not provided)
+- **author** — Who performed the audit
+
+## Migration
+
+The `audit_results` table was introduced in schema version 8. A migration backfills data from the legacy `workitems.audit` JSON column and then drops that column. The migration is:
+
+1. **20260604-add-audit-results** — Creates the `audit_results` table
+2. **20260604-backfill-audit-results** — Reads `workitems.audit` JSON and inserts rows into `audit_results`
+3. **20260604-drop-audit-column** — Drops the `audit` column from `workitems`
+
+The legacy `20260315-add-audit` migration is now a no-op since the audit column is no longer needed.
+
+## CLI Commands
+
+### Setting audit results
+
+```bash
+# Set audit via --audit-text (existing interface, now writes to audit_results)
+wl update SA-123 --audit-text "Ready to close: Yes
+All acceptance criteria verified."
+
+# Set audit via the new dedicated command
+wl audit-set SA-123 --ready-to-close --summary "All acceptance criteria verified." --author agent
+```
+
+### Viewing audit results
+
+```bash
+# View audit for a work item (JSON output)
+wl audit-show SA-123 --json
+
+# Audit result is also included in wl show --json as workItem.auditResult
+wl show SA-123 --json
+```
+
+## Status Derivation
+
 - Only the first non-empty line of the audit text is inspected.
 - The trimmed line must exactly match one of:
-  - `Ready to close: Yes` -> `Complete`
-  - `Ready to close: No` -> `Partial`
+  - `Ready to close: Yes` → `Complete` (ready_to_close = 1)
+  - `Ready to close: No` → `Partial` (ready_to_close = 0)
 - Any other first line is invalid for CLI `--audit-text` writes and is rejected with:
   - `error: audit-invalid-first-line`
   - a `message` containing the found trimmed first line and indicators for BOM/non-printable/gutter characters.
 
-Valid examples
+## Valid Examples
 
 ```text
 Ready to close: Yes
@@ -32,7 +72,7 @@ All acceptance criteria verified.
 Two checks still failing.
 ```
 
-Invalid examples
+## Invalid Examples
 
 ```text
 Ready to close
@@ -46,20 +86,24 @@ Looks good to me
 ┃ Ready to close: No
 ```
 
-Redaction
-- Email-like strings are redacted deterministically before being persisted: local part becomes first-character + `***` and the domain is kept (e.g. `alice@example.com` -> `a***@example.com`).
+## Redaction
 
-Human outputs
-- The audit status is stored with the audit object and available in JSON output as `workItem.audit.status`.
+- Email-like strings are redacted deterministically before being persisted: local part becomes first-character + `***` and the domain is kept (e.g. `alice@example.com` → `a***@example.com`).
 
-Why strict first-line matching?
+## Human Outputs
+
+- The audit status is available in JSON output as `workItem.auditResult.readyToClose` (boolean), `workItem.auditResult.summary` (string), and `workItem.auditResult.auditedAt` (ISO timestamp).
+- For backwards compatibility, `workItem.audit` is also populated in JSON output with `{ time, author, text, status }` derived from the `audit_results` table.
+
+## Why Strict First-Line Matching?
+
 - It provides deterministic behavior and clear operator expectations.
 - It avoids accidental status inference from arbitrary prose.
 - It makes validation errors precise and actionable.
 
-Operational notes
-- Config: `auditWriteEnabled` controls whether audit writes are allowed.
-- Stored format: audit objects are stored as JSON in the existing `audit` TEXT column and include `time`, `author`, `text`, and `status`.
-- Tests: Unit and integration tests cover valid first-line parsing, invalid first-line errors, redaction, whitespace handling, and reported edge cases.
+## Operational Notes
 
-If you'd like, I can add a short note to CLI help text (`create --help` / `update --help`) to explain this behavior.
+- Config: `auditWriteEnabled` controls whether audit writes are allowed.
+- Storage: audit data is stored in the `audit_results` table with foreign key constraints and CASCADE DELETE semantics.
+- Migration: Use `wl doctor upgrade --confirm` to apply schema migrations on existing databases.
+- Tests: Unit and integration tests cover valid first-line parsing, invalid first-line errors, redaction, whitespace handling, CRUD operations on the `audit_results` table, migration backfill, and legacy column removal.

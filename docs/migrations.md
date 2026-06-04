@@ -80,8 +80,12 @@ Reference
 
 Audit field migration note
 --------------------------
-- Migration `20260315-add-audit` adds the `audit` column to `workitems`.
-- The migration does not backfill historical comment-based audit content.
-- Structured audit data is only written when explicitly provided via write paths (for example `wl update --audit-text "..."`).
-- Audit write semantics are overwrite-only for the single `audit` object (no history array in this slice).
+- Migration `20260315-add-audit` is now a no-op. The `audit` column has been replaced by the `audit_results` table.
+- Migration `20260604-add-audit-results` creates the `audit_results` table with columns: `work_item_id TEXT PRIMARY KEY`, `ready_to_close INTEGER NOT NULL DEFAULT 0`, `audited_at TEXT NOT NULL`, `summary TEXT`, `raw_output TEXT`, `author TEXT`, and a foreign key on `work_item_id` referencing `workitems(id)` with `ON DELETE CASCADE`.
+- Migration `20260604-backfill-audit-results` reads existing `workitems.audit` JSON data and inserts corresponding rows into `audit_results`. This migration is idempotent (tracked via `audit_backfill_complete` metadata key).
+- Migration `20260604-drop-audit-column` drops the legacy `audit TEXT` column from `workitems`.
+- Structured audit data is now stored in the `audit_results` table (latest-only per work item).
+- Use `wl audit-show <id>` to view audit results and `wl audit-set <id> --ready-to-close --summary <text>` to set them.
+- Use `wl update --audit-text <text>` to set audit via the existing CLI interface (writes to `audit_results` table).
 - Redaction/safety rules for audit text are tracked separately in `Redaction and Safety Rules for Audit Text (WL-0MMNCOIYS15A1YSI)`.
+- See `docs/AUDIT_STATUS.md` for full documentation on audit status semantics.

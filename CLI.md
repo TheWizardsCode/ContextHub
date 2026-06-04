@@ -118,7 +118,7 @@ Options:
 - `--deleted-by <deletedBy>` — Interoperability: deleted by (optional).
 - `--delete-reason <deleteReason>` — Interoperability: delete reason (optional).
 - `--needs-producer-review <true|false>` — Set needsProducerReview flag (true|false|yes|no) (optional).
-- `--audit-text <text>` — Set structured audit text when creating an item. Prefer `--audit-file` for file-based input to avoid shell-escaping issues (see docs/AUDIT_STATUS.md).
+- `--audit-text <text>` — Set structured audit text when creating an item. The audit result is stored in the `audit_results` table (the sole source of truth for audit state). Prefer `--audit-file` for file-based input to avoid shell-escaping issues (see docs/AUDIT_STATUS.md).
 - `--audit-file <file>` — Read audit text from a file (recommended for large or shell-sensitive content).
 - `--prefix <prefix>` — Override default ID prefix (repo-local scope) (optional).
 - `--json` — Output JSON (optional).
@@ -144,7 +144,7 @@ Automatic re-sort:
 
 ### `update` [options] <id...>
 
-Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file), `--needs-producer-review <true|false>` (set needsProducerReview flag), and `--do-not-delegate <true|false>` (set or clear the do-not-delegate tag).
+Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--needs-producer-review <true|false>` (set needsProducerReview flag), and `--do-not-delegate <true|false>` (set or clear the do-not-delegate tag).
 
 Automatic re-sort:
 
