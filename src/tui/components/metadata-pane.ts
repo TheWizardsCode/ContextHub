@@ -129,10 +129,14 @@ export class MetadataPaneComponent {
     // Surface a one-line Audit summary if present.
     try {
       if (item.auditResult) {
-        const ready = item.auditResult.readyToClose ? '{green-fg}Yes{/green-fg}' : '{red-fg}No{/red-fg}';
-        const summary = item.auditResult.summary || '(no summary)';
-        const time = MetadataPaneComponent.formatShortDateTime(item.auditResult.auditedAt);
-        lines.push(`Audit:     ${ready} ${summary} (${time})`);
+        let auditLabel = 'Audit Passed:';
+        let auditValue = '{orange-fg}Unknown{/orange-fg}';
+        if (item.auditResult.readyToClose === true) auditValue = '{green-fg}Yes{/green-fg}';
+        else if (item.auditResult.readyToClose === false) auditValue = '{red-fg}No{/red-fg}';
+        lines.push(`${auditLabel} ${auditValue}`);
+      } else {
+        // If no audit at all, show unknown
+        lines.push('Audit Passed: {orange-fg}Unknown{/orange-fg}');
       }
     } catch (err) {
       // Non-fatal: if audit formatting fails, do not break the metadata pane

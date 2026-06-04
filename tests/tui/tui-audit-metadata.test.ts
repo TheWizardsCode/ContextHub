@@ -21,7 +21,7 @@ function createMockMetadataPane() {
 }
 
 describe('MetadataPaneComponent audit display', () => {
-  it('displays audit information when present', () => {
+  it('displays "Audit Passed:" and Yes when readyToClose is true', () => {
     const { comp, getContent } = createMockMetadataPane();
     const auditResult = {
       readyToClose: true,
@@ -36,16 +36,12 @@ describe('MetadataPaneComponent audit display', () => {
     }, 0);
 
     const content = getContent();
-    expect(content).toContain('Audit:');
+    expect(content).toContain('Audit Passed:');
     expect(content).toContain('Yes');
-    expect(content).toContain('All checks passed');
-    // Check for short date format (DD/MM HH:MM)
-    // 2026-06-04T22:00:00Z -> 04/06 followed by some time
-    // formatShortDateTime uses local time, so we just check for the date part or the general pattern
-    expect(content).toMatch(/\d{2}\/\d{2}/);
+    expect(content).not.toContain('All checks passed'); // summary should not appear
   });
 
-  it('displays "No" for readyToClose: false', () => {
+  it('displays "Audit Passed:" and No when readyToClose is false', () => {
     const { comp, getContent } = createMockMetadataPane();
     const auditResult = {
       readyToClose: false,
@@ -60,14 +56,15 @@ describe('MetadataPaneComponent audit display', () => {
     }, 0);
 
     const content = getContent();
+    expect(content).toContain('Audit Passed:');
     expect(content).toContain('No');
-    expect(content).toContain('One test failed');
+    expect(content).not.toContain('One test failed');
   });
 
-  it('handles missing summary gracefully', () => {
+  it('shows "Audit Passed: Unknown" in orange when auditResult.readyToClose is missing', () => {
     const { comp, getContent } = createMockMetadataPane();
     const auditResult = {
-      readyToClose: true,
+      readyToClose: undefined as unknown as boolean,
       auditedAt: '2026-06-04T22:00:00Z',
       summary: null,
     };
@@ -79,10 +76,12 @@ describe('MetadataPaneComponent audit display', () => {
     }, 0);
 
     const content = getContent();
-    expect(content).toContain('(no summary)');
+    expect(content).toContain('Audit Passed:');
+    expect(content).toContain('Unknown');
+    expect(content).toContain('{orange-fg}Unknown{/orange-fg}');
   });
 
-  it('omits audit section if no auditResult is provided', () => {
+  it('shows "Audit Passed: Unknown" in orange if no auditResult is provided', () => {
     const { comp, getContent } = createMockMetadataPane();
     comp.updateFromItem({
       id: 'WL-123',
@@ -90,6 +89,8 @@ describe('MetadataPaneComponent audit display', () => {
     }, 0);
 
     const content = getContent();
-    expect(content).not.toContain('Audit:');
+    expect(content).toContain('Audit Passed:');
+    expect(content).toContain('Unknown');
+    expect(content).toContain('{orange-fg}Unknown{/orange-fg}');
   });
 });
