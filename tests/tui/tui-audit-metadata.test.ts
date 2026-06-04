@@ -79,6 +79,8 @@ describe('MetadataPaneComponent audit display', () => {
     expect(content).toContain('Audit Passed:');
     expect(content).toContain('Unknown');
     expect(content).toContain('{214-fg}Unknown{/214-fg}');
+    // Timestamp should be present when an auditedAt value is provided
+    expect(content).toMatch(/\d{2}\/\d{2}/);
   });
 
   it('shows "Audit Passed: Unknown" in orange if no auditResult is provided', () => {
@@ -92,5 +94,7 @@ describe('MetadataPaneComponent audit display', () => {
     expect(content).toContain('Audit Passed:');
     expect(content).toContain('Unknown');
     expect(content).toContain('{214-fg}Unknown{/214-fg}');
+    // No timestamp when there is no auditResult
+    expect(content).not.toMatch(/\d{2}\/\d{2}/);
   });
 });

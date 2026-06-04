@@ -133,7 +133,12 @@ export class MetadataPaneComponent {
         let auditValue = theme.tui.text.readyNo('Unknown');
         if (item.auditResult.readyToClose === true) auditValue = theme.tui.text.readyYes('Yes');
         else if (item.auditResult.readyToClose === false) auditValue = theme.tui.text.error('No');
-        lines.push(`${auditLabel} ${auditValue}`);
+        const time = MetadataPaneComponent.formatShortDateTime(item.auditResult.auditedAt);
+        if (time) {
+          lines.push(`${auditLabel} ${auditValue} ${theme.tui.text.muted(`(${time})`)} `);
+        } else {
+          lines.push(`${auditLabel} ${auditValue}`);
+        }
       } else {
         // If no audit at all, show unknown using the theme's readyNo color (orange/214)
         lines.push(`Audit Passed: ${theme.tui.text.readyNo('Unknown')}`);
