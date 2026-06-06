@@ -5,7 +5,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { WorkItem, Comment, DependencyEdge, WorkItemDependency } from './types.js';
+import { WorkItem, Comment, DependencyEdge, WorkItemDependency, AuditResult } from './types.js';
 import { stripWorklogMarkers } from './github.js';
 import { resolveWorklogDir } from './worklog-paths.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
@@ -27,8 +27,8 @@ function stableStringify(value: any): string {
 }
 
 interface JsonlRecord {
-  type: 'workitem' | 'comment';
-  data: WorkItem | Comment;
+  type: 'workitem' | 'comment' | 'audit_result';
+  data: WorkItem | Comment | AuditResult;
 }
 
 function normalizeDependencies(input: WorkItemDependency[] | undefined): WorkItemDependency[] {
@@ -60,7 +60,8 @@ function mergeDependencyEdges(edges: DependencyEdge[]): DependencyEdge[] {
 function buildJsonlContent(
   items: WorkItem[],
   comments: Comment[],
-  dependencyEdges: DependencyEdge[] = []
+  dependencyEdges: DependencyEdge[] = [],
+  auditResults: AuditResult[] = []
 ): string {
   const lines: string[] = [];
 
@@ -73,6 +74,7 @@ function buildJsonlContent(
     if (ca !== 0) return ca;
     return a.id.localeCompare(b.id);
   });
+  const sortedAudits = [...auditResults].sort((a, b) => a.workItemId.localeCompare(b.workItemId));
 
   // Add work items
   sortedItems.forEach(item => {
@@ -93,20 +95,26 @@ function buildJsonlContent(
     lines.push(stableStringify({ type: 'comment', data: outComment }));
   });
 
+  // Add audit results
+  sortedAudits.forEach(audit => {
+    lines.push(stableStringify({ type: 'audit_result', data: audit }));
+  });
+
   return lines.join('\n') + '\n';
 }
 
 
 /**
- * Export work items and comments to a JSONL file
+ * Export work items, comments, and audit results to a JSONL file
  */
 export function exportToJsonl(
   items: WorkItem[],
   comments: Comment[],
   filepath: string,
-  dependencyEdges: DependencyEdge[] = []
+  dependencyEdges: DependencyEdge[] = [],
+  auditResults: AuditResult[] = []
 ): number {
-  const content = buildJsonlContent(items, comments, dependencyEdges);
+  const content = buildJsonlContent(items, comments, dependencyEdges, auditResults);
 
   // Ensure directory exists
   const dir = path.dirname(filepath);
@@ -138,6 +146,7 @@ export async function exportToJsonlAsync(
   comments: Comment[],
   filepath: string,
   dependencyEdges: DependencyEdge[] = [],
+  auditResults: AuditResult[] = [],
   options?: any
 ): Promise<number> {
   // Prefer worker_threads to move CPU-heavy JSONL building/writing off the
@@ -177,7 +186,7 @@ export async function exportToJsonlAsync(
       "function mergeDependencyEdges(edges) { const merged = new Map(); for (const edge of edges || []) { merged.set(edge.fromId + '::' + edge.toId, edge); } return Array.from(merged.values()); }",
       "function dependenciesFromEdges(edges, itemId) { return (edges || []).filter(function(e){ return e.fromId === itemId; }).map(function(e){ return { from: e.fromId, to: e.toId }; }).sort(function(a,b){ const d = a.from.localeCompare(b.from); return d !== 0 ? d : a.to.localeCompare(b.to); }); }",
       "try {",
-      "  const { items, comments, dependencyEdges, filepath } = workerData;",
+      "  const { items, comments, dependencyEdges, auditResults, filepath } = workerData;",
       "  const dir = path.dirname(filepath); if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });",
       "  const tempName = path.basename(filepath) + '.tmp-' + Math.random().toString(36).slice(2,10);",
       "  const tempPath = path.join(dir, tempName);",
@@ -185,16 +194,18 @@ export async function exportToJsonlAsync(
       "  const sortedItems = (items || []).slice().sort(function(a,b){ return a.id.localeCompare(b.id); });",
       "  const normalizedEdges = mergeDependencyEdges(dependencyEdges || []);",
       "  const sortedComments = (comments || []).slice().sort(function(a,b){ const wi = a.workItemId.localeCompare(b.workItemId); if (wi !== 0) return wi; const ca = a.createdAt.localeCompare(b.createdAt); if (ca !== 0) return ca; return a.id.localeCompare(b.id); });",
-      "  const total = sortedItems.length + sortedComments.length;",
+      "  const sortedAudits = (auditResults || []).slice().sort(function(a,b){ return a.workItemId.localeCompare(b.workItemId); });",
+      "  const total = sortedItems.length + sortedComments.length + sortedAudits.length;",
       "  let processed = 0;",
       "  for (let i = 0; i < sortedItems.length; i++) { const item = sortedItems[i]; const deps = dependenciesFromEdges(normalizedEdges, item.id); const itemWithDeps = Object.assign({}, item, { dependencies: deps.length > 0 ? deps : [] }); out.write(stableStringify({ type: 'workitem', data: itemWithDeps }) + '\\n'); processed += 1; if (processed % 100 === 0 || processed === total) { const percent = total > 0 ? Math.floor((processed / total) * 100) : 100; parentPort.postMessage({ type: 'progress', percent: percent, itemsProcessed: processed }); } }",
       "  for (let i = 0; i < sortedComments.length; i++) { const comment = sortedComments[i]; const outComment = Object.assign({}, comment); if (outComment.githubCommentId === undefined) delete outComment.githubCommentId; if (outComment.githubCommentUpdatedAt === undefined) delete outComment.githubCommentUpdatedAt; out.write(stableStringify({ type: 'comment', data: outComment }) + '\\n'); processed += 1; if (processed % 100 === 0 || processed === total) { const percent = total > 0 ? Math.floor((processed / total) * 100) : 100; parentPort.postMessage({ type: 'progress', percent: percent, itemsProcessed: processed }); } }",
+      "  for (let i = 0; i < sortedAudits.length; i++) { out.write(stableStringify({ type: 'audit_result', data: sortedAudits[i] }) + '\\n'); processed += 1; if (processed % 100 === 0 || processed === total) { const percent = total > 0 ? Math.floor((processed / total) * 100) : 100; parentPort.postMessage({ type: 'progress', percent: percent, itemsProcessed: processed }); } }",
       "  out.end(function() { try { fs.renameSync(tempPath, filepath); const stats = fs.statSync(filepath); parentPort.postMessage({ type: 'done', mtimeMs: stats.mtimeMs }); } catch (err) { try { fs.unlinkSync(tempPath); } catch (_) {} parentPort.postMessage({ type: 'error', error: String(err) }); } });",
       "} catch (err) { parentPort.postMessage({ type: 'error', error: String(err) }); }"
     ].join('\n');
 
     return new Promise<number>((resolve, reject) => {
-      const worker = new Worker(workerCode, { eval: true, workerData: { items, comments, dependencyEdges, filepath } });
+      const worker = new Worker(workerCode, { eval: true, workerData: { items, comments, dependencyEdges, auditResults, filepath } });
 
       worker.on('message', (msg: any) => {
         if (!msg || typeof msg !== 'object') return;
@@ -229,7 +240,7 @@ export async function exportToJsonlAsync(
   } catch (err) {
     // Worker-based export failed; fall back to previous in-process path.
     try {
-      const content = buildJsonlContent(items, comments, dependencyEdges);
+      const content = buildJsonlContent(items, comments, dependencyEdges, auditResults);
       const dir = path.dirname(filepath);
       const tempName = `${path.basename(filepath)}.tmp-${Math.random().toString(36).slice(2, 10)}`;
       const tempPath = path.join(dir, tempName);
@@ -257,9 +268,9 @@ export async function exportToJsonlAsync(
 }
 
 /**
- * Import work items and comments from a JSONL file
+ * Import work items, comments, and audit results from a JSONL file
  */
-export function importFromJsonl(filepath: string): { items: WorkItem[], comments: Comment[], dependencyEdges: DependencyEdge[] } {
+export function importFromJsonl(filepath: string): { items: WorkItem[], comments: Comment[], dependencyEdges: DependencyEdge[], auditResults: AuditResult[] } {
   if (!fs.existsSync(filepath)) {
     throw new Error(`File not found: ${filepath}`);
   }
@@ -268,12 +279,13 @@ export function importFromJsonl(filepath: string): { items: WorkItem[], comments
   return importFromJsonlContent(content);
 }
 
-export function importFromJsonlContent(content: string): { items: WorkItem[], comments: Comment[], dependencyEdges: DependencyEdge[] } {
+export function importFromJsonlContent(content: string): { items: WorkItem[], comments: Comment[], dependencyEdges: DependencyEdge[], auditResults: AuditResult[] } {
   const lines = content.split('\n').filter(line => line.trim() !== '');
   
   const items: WorkItem[] = [];
   const comments: Comment[] = [];
   const dependencyEdges: DependencyEdge[] = [];
+  const auditResults: AuditResult[] = [];
   
   for (const line of lines) {
     try {
@@ -352,8 +364,11 @@ export function importFromJsonlContent(content: string): { items: WorkItem[], co
         if (normalized.githubCommentId === undefined) normalized.githubCommentId = undefined;
         if (normalized.githubCommentUpdatedAt === undefined) normalized.githubCommentUpdatedAt = undefined;
         comments.push(normalized as Comment);
-      } else {
-        // Handle old format (no type field) - assume it's a work item
+      } else if (parsed.type === 'audit_result' && parsed.data) {
+        const audit = parsed.data as AuditResult;
+        auditResults.push(audit);
+      } else if (parsed.type === undefined && !parsed.data) {
+        // Handle old format (no type field, no data wrapper) - assume it's a work item
         console.warn(`Warning: Found entry without type field, assuming it's a work item. Consider migrating to the new format.`);
         const item = parsed as WorkItem;
         const dependencies = normalizeDependencies(item.dependencies);
@@ -416,7 +431,7 @@ export function importFromJsonlContent(content: string): { items: WorkItem[], co
     }
   }
   
-  return { items, comments, dependencyEdges };
+  return { items, comments, dependencyEdges, auditResults };
 }
 
 /**

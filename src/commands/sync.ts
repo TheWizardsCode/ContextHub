@@ -9,6 +9,7 @@ import type { GitTarget, SyncResult } from '../sync.js';
 import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges } from '../sync.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
 import { importFromJsonlContent } from '../jsonl.js';
+import { mergeAuditResults } from '../sync.js';
 import { loadConfig } from '../config.js';
 import { displayConflictDetails } from './helpers.js';
 import { createLogFileWriter, getWorklogLogPath, logConflictDetails } from '../logging.js';
@@ -75,12 +76,16 @@ async function performSync(
   let remoteComments: Comment[] = [];
   let remoteEdges: DependencyEdge[] = [];
 
+  const localAudits = db.getAllAuditResults();
+  
   const remoteContent = await getRemoteDataFileContent(options.file, gitTarget);
+  let remoteAudits: any[] = [];
   if (remoteContent) {
     const remoteData = importFromJsonlContent(remoteContent);
     remoteItems = remoteData.items;
     remoteComments = remoteData.comments;
     remoteEdges = remoteData.dependencyEdges || [];
+    remoteAudits = remoteData.auditResults || [];
   }
 
   if (!isJsonMode && !isSilent) {
@@ -98,6 +103,11 @@ async function performSync(
   }
   const commentMergeResult = mergeComments(localComments, remoteComments);
   const edgeMergeResult = mergeDependencyEdges(localEdges, remoteEdges || []);
+  
+  if (!isJsonMode && !isSilent) {
+    console.log('Merging audit results...');
+  }
+  const auditMergeResult = mergeAuditResults(localAudits, remoteAudits);
   
   const itemsAdded = itemMergeResult.merged.length - localItems.length;
   const itemsUpdated = itemMergeResult.conflicts.filter(c => c.includes('Conflicting fields') || c.includes('Same updatedAt')).length;
@@ -181,7 +191,7 @@ async function performSync(
   // SAFETY: db.import() is destructive (clears all items before inserting).
   // This is safe here because itemMergeResult.merged is the complete merged
   // set of local + remote items — no data is lost.
-  db.import(itemMergeResult.merged, edgeMergeResult.merged);
+  db.import(itemMergeResult.merged, edgeMergeResult.merged, auditMergeResult.merged);
   db.importComments(commentMergeResult.merged);
   if (autoSyncEnabled) {
     db.setAutoSync(true, () => Promise.resolve());

@@ -40,7 +40,7 @@ export default function register(ctx: PluginContext): void {
           } catch {}
         };
 
-        await exportToJsonlAsync(items, comments, filePath, dependencyEdges, { onProgress: progressHandler });
+        await exportToJsonlAsync(items, comments, filePath, dependencyEdges, [], { onProgress: progressHandler });
         
         if (utils.isJsonMode()) {
           output.json({ 

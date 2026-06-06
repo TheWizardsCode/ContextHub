@@ -5,6 +5,7 @@
 import type { PluginContext } from '../plugin-types.js';
 import type { MigrateOptions } from '../cli-types.js';
 import { importFromJsonl } from '../jsonl.js';
+import { mergeWorkItems, mergeComments, mergeAuditResults } from '../sync.js';
 import * as fs from 'fs';
 
 const DEFAULT_SORT_GAP = 100;
@@ -84,53 +85,56 @@ export default function register(ctx: PluginContext): void {
       const db = utils.getDatabase(options.prefix);
       
       try {
-        const { items, comments, dependencyEdges } = importFromJsonl(filePath);
+        const { items, comments, dependencyEdges, auditResults } = importFromJsonl(filePath);
         
         // Check if SQLite already has data
         const existingItems = db.getAll();
         const existingComments = db.getAllComments();
+        const existingAudits = db.getAllAuditResults();
         
         if (existingItems.length > 0 || existingComments.length > 0) {
           // Merge instead of replace to preserve existing data
-          const { mergeWorkItems, mergeComments } = require('../sync.js');
           const itemMergeResult = mergeWorkItems(existingItems, items);
           const commentMergeResult = mergeComments(existingComments, comments);
+          const auditMergeResult = mergeAuditResults(existingAudits, auditResults);
           
-          db.import(itemMergeResult.merged, dependencyEdges);
+          db.import(itemMergeResult.merged, dependencyEdges, auditMergeResult.merged);
           db.importComments(commentMergeResult.merged);
           
           if (utils.isJsonMode()) {
             output.json({
               success: true,
-              message: `Merged ${items.length} work items and ${comments.length} comments from JSONL`,
+              message: `Merged ${items.length} work items, ${comments.length} comments, and ${auditResults.length} audit results from JSONL`,
               itemsImported: items.length,
               commentsImported: comments.length,
+              auditImported: auditResults.length,
               itemsMerged: itemMergeResult.conflicts.length,
               file: filePath,
               migrated: true
             });
           } else {
-            console.log(`Merged ${items.length} work items and ${comments.length} comments from ${filePath}`);
+            console.log(`Merged ${items.length} work items, ${comments.length} comments, and ${auditResults.length} audit results from ${filePath}`);
             if (itemMergeResult.conflicts.length > 0) {
               console.log(`Note: ${itemMergeResult.conflicts.length} items had conflicting updates and were merged.`);
             }
           }
         } else {
           // SQLite is empty, just import
-          db.import(items, dependencyEdges);
+          db.import(items, dependencyEdges, auditResults);
           db.importComments(comments);
           
           if (utils.isJsonMode()) {
             output.json({
               success: true,
-              message: `Imported ${items.length} work items and ${comments.length} comments from JSONL`,
+              message: `Imported ${items.length} work items, ${comments.length} comments, and ${auditResults.length} audit results from JSONL`,
               itemsImported: items.length,
               commentsImported: comments.length,
+              auditImported: auditResults.length,
               file: filePath,
               migrated: true
             });
           } else {
-            console.log(`Imported ${items.length} work items and ${comments.length} comments from ${filePath}`);
+            console.log(`Imported ${items.length} work items, ${comments.length} comments, and ${auditResults.length} audit results from ${filePath}`);
           }
         }
         

@@ -2,7 +2,7 @@
  * Sync functionality for merging local and remote work items with conflict resolution
  */
 
-import { WorkItem, Comment, ConflictDetail, ConflictFieldDetail, DependencyEdge } from './types.js';
+import { WorkItem, Comment, ConflictDetail, ConflictFieldDetail, DependencyEdge, AuditResult } from './types.js';
 import { isDefaultValue, stableValueKey, stableItemKey, mergeTags } from './sync/merge-utils.js';
 import * as childProcess from 'child_process';
 import * as fs from 'fs';
@@ -413,6 +413,33 @@ export function mergeComments(
   return {
     merged: Array.from(mergedMap.values()),
     conflicts: [] // Comments don't have conflicts in this simple model
+  };
+}
+
+/**
+ * Merge audit results by unique work item id.
+ * Local audits take precedence over remote ones.
+ */
+export function mergeAuditResults(
+  localAudits: AuditResult[],
+  remoteAudits: AuditResult[]
+): { merged: AuditResult[] } {
+  const mergedMap = new Map<string, AuditResult>();
+  
+  // Add all local audit results to the map
+  localAudits.forEach(audit => {
+    mergedMap.set(audit.workItemId, audit);
+  });
+  
+  // Add remote audit results (deduplicate by workItemId, local wins)
+  remoteAudits.forEach(remoteAudit => {
+    if (!mergedMap.has(remoteAudit.workItemId)) {
+      mergedMap.set(remoteAudit.workItemId, remoteAudit);
+    }
+  });
+  
+  return {
+    merged: Array.from(mergedMap.values()),
   };
 }
 

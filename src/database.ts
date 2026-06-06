@@ -5,10 +5,10 @@
 import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { WorkItem, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge } from './types.js';
+import { WorkItem, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult } from './types.js';
 import { SqlitePersistentStore, FtsSearchResult } from './persistent-store.js';
 import { importFromJsonl, importFromJsonlContent, exportToJsonlAsync, getDefaultDataPath } from './jsonl.js';
-import { mergeWorkItems, mergeComments, getRemoteDataFileContent, GitTarget } from './sync.js';
+import { mergeWorkItems, mergeComments, mergeAuditResults, getRemoteDataFileContent, GitTarget } from './sync.js';
 import { withFileLock, getLockPathForJsonl } from './file-lock.js';
 import * as searchMetrics from './search-metrics.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
@@ -102,16 +102,18 @@ export class WorklogDatabase {
       }
 
       // Parse remote data
-      const { items: remoteItems, comments: remoteComments, dependencyEdges } = importFromJsonlContent(remoteContent);
+      const { items: remoteItems, comments: remoteComments, dependencyEdges, auditResults: remoteAudits } = importFromJsonlContent(remoteContent);
       
       // Get local state
       const localItems = this.store.getAllWorkItems();
       const localComments = this.store.getAllComments();
       const localEdges = this.store.getAllDependencyEdges();
+      const localAudits = this.store.getAllAuditResults();
 
       // Merge data
       const itemMergeResult = mergeWorkItems(localItems, remoteItems);
       const commentMergeResult = mergeComments(localComments, remoteComments);
+      const auditMergeResult = mergeAuditResults(localAudits, remoteAudits);
       
       // Calculate changes
       const itemsAdded = Math.max(0, itemMergeResult.merged.length - localItems.length);
@@ -126,6 +128,11 @@ export class WorklogDatabase {
         if (this.store.getWorkItem(edge.fromId) && this.store.getWorkItem(edge.toId)) {
           this.store.saveDependencyEdge(edge);
         }
+      }
+      
+      // Import audit results
+      if (auditMergeResult.merged.length > 0) {
+        this.store.saveAuditResults(auditMergeResult.merged);
       }
 
       // Update metadata to prevent re-import of the same data
@@ -193,9 +200,10 @@ export class WorklogDatabase {
     const items = this.store.getAllWorkItems();
     const comments = this.store.getAllComments();
     const dependencyEdges = this.store.getAllDependencyEdges();
+    const auditResults = this.store.getAllAuditResults();
 
     // Export to JSONL
-    await exportToJsonlAsync(items, comments, this.jsonlPath, dependencyEdges, { onProgress: options?.onProgress });
+    await exportToJsonlAsync(items, comments, this.jsonlPath, dependencyEdges, auditResults, { onProgress: options?.onProgress });
 
     return this.jsonlPath;
   }
@@ -253,12 +261,17 @@ export class WorklogDatabase {
           // Debug: send to stderr so JSON stdout is preserved for --json mode
           this.debug(`Refreshing database from ${this.jsonlPath}...`);
         }
-        const { items: jsonlItems, comments: jsonlComments, dependencyEdges } = importFromJsonl(this.jsonlPath);
+        const { items: jsonlItems, comments: jsonlComments, dependencyEdges, auditResults: jsonlAuditResults } = importFromJsonl(this.jsonlPath);
         this.store.importData(jsonlItems, jsonlComments);
         for (const edge of dependencyEdges) {
           if (this.store.getWorkItem(edge.fromId) && this.store.getWorkItem(edge.toId)) {
             this.store.saveDependencyEdge(edge);
           }
+        }
+
+        // Import audit results (they are included in JSONL but must be explicitly upserted)
+        if (jsonlAuditResults.length > 0) {
+          this.store.saveAuditResults(jsonlAuditResults);
         }
 
         // Update metadata
@@ -267,7 +280,7 @@ export class WorklogDatabase {
         this.store.setMetadata('lastJsonlImportAt', new Date().toISOString());
 
         if (!this.silent) {
-          this.debug(`Loaded ${jsonlItems.length} work items and ${jsonlComments.length} comments from JSONL`);
+          this.debug(`Loaded ${jsonlItems.length} work items, ${jsonlComments.length} comments, and ${jsonlAuditResults.length} audit results from JSONL`);
         }
       }
     } catch (error) {
@@ -605,6 +618,21 @@ export class WorklogDatabase {
    */
   deleteAuditResult(workItemId: string): boolean {
     return this.store.deleteAuditResult(workItemId);
+  }
+
+  /**
+   * Get all audit results (for JSONL export / sync).
+   */
+  getAllAuditResults(): AuditResult[] {
+    return this.store.getAllAuditResults();
+  }
+
+  /**
+   * Import audit results (upsert, bulk).
+   */
+  importAuditResults(audits: AuditResult[]): void {
+    this.store.saveAuditResults(audits);
+    this.triggerAutoSync();
   }
 
   /**
@@ -1823,8 +1851,10 @@ export class WorklogDatabase {
    * @param items - The full set of work items to store.
    * @param dependencyEdges - Optional full set of dependency edges. When
    *   provided, existing edges are cleared and replaced with these.
+   * @param auditResults - Optional full set of audit results. When provided,
+   *   existing audit results are replaced with these.
    */
-  import(items: WorkItem[], dependencyEdges?: DependencyEdge[]): void {
+  import(items: WorkItem[], dependencyEdges?: DependencyEdge[], auditResults?: AuditResult[]): void {
     this.store.clearWorkItems();
     for (const item of items) {
       this.store.saveWorkItem(item);
@@ -1836,6 +1866,9 @@ export class WorklogDatabase {
           this.store.saveDependencyEdge(edge);
         }
       }
+    }
+    if (auditResults) {
+      this.store.saveAuditResults(auditResults);
     }
     this.triggerAutoSync();
   }

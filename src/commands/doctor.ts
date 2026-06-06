@@ -8,7 +8,7 @@ import { validateStatusStageItems } from '../doctor/status-stage-check.js';
 import { validateDependencyEdges } from '../doctor/dependency-check.js';
 import { listPendingMigrations, runMigrations } from '../migrations/index.js';
 import { importFromJsonl } from '../jsonl.js';
-import { mergeWorkItems, mergeComments } from '../sync.js';
+import { mergeWorkItems, mergeComments, mergeAuditResults } from '../sync.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { normalizePriority, isValidPriority, isMappablePriority, PRIORITY_MAP, CANONICAL_PRIORITIES } from '../validators/priority.js';
@@ -346,26 +346,29 @@ export default function register(ctx: PluginContext): void {
         const commentsBefore = db.getAllComments().length;
         
         // Import JSONL data
-        const { items, comments, dependencyEdges } = importFromJsonl(filePath);
+        const { items, comments, dependencyEdges, auditResults } = importFromJsonl(filePath);
         
         // Check if SQLite already has data
         if (itemsBefore > 0 || commentsBefore > 0) {
           // Merge instead of replace to preserve existing data
           const localItems = db.getAll();
           const localComments = db.getAllComments();
+          const localAudits = db.getAllAuditResults();
           
           const itemMergeResult = mergeWorkItems(localItems, items);
           const commentMergeResult = mergeComments(localComments, comments);
+          const auditMergeResult = mergeAuditResults(localAudits, auditResults);
           
-          db.import(itemMergeResult.merged, dependencyEdges);
+          db.import(itemMergeResult.merged, dependencyEdges, auditMergeResult.merged);
           db.importComments(commentMergeResult.merged);
           
           if (utils.isJsonMode()) {
             output.json({
               success: true,
-              message: `Merged ${items.length} work items and ${comments.length} comments from JSONL`,
+              message: `Merged ${items.length} work items, ${comments.length} comments, and ${auditResults.length} audit results from JSONL`,
               itemsImported: items.length,
               commentsImported: comments.length,
+              auditImported: auditResults.length,
               itemsMerged: itemMergeResult.conflicts.length,
               file: filePath,
               itemsBefore,
@@ -375,23 +378,24 @@ export default function register(ctx: PluginContext): void {
               migrated: true
             });
           } else {
-            console.log(`Doctor: Merged ${items.length} work items and ${comments.length} comments from ${filePath}`);
+            console.log(`Doctor: Merged ${items.length} work items, ${comments.length} comments, and ${auditResults.length} audit results from ${filePath}`);
             if (itemMergeResult.conflicts.length > 0) {
               console.log(`Note: ${itemMergeResult.conflicts.length} items had conflicting updates and were merged.`);
             }
-            console.log(`Database now contains ${db.getAll().length} work items and ${db.getAllComments().length} comments.`);
+            console.log(`Database now contains ${db.getAll().length} work items, ${db.getAllComments().length} comments, and ${db.getAllAuditResults().length} audit results.`);
           }
         } else {
           // SQLite is empty, just import
-          db.import(items, dependencyEdges);
+          db.import(items, dependencyEdges, auditResults);
           db.importComments(comments);
           
           if (utils.isJsonMode()) {
             output.json({
               success: true,
-              message: `Imported ${items.length} work items and ${comments.length} comments from JSONL`,
+              message: `Imported ${items.length} work items, ${comments.length} comments, and ${auditResults.length} audit results from JSONL`,
               itemsImported: items.length,
               commentsImported: comments.length,
+              auditImported: auditResults.length,
               file: filePath,
               itemsBefore: 0,
               itemsAfter: items.length,
@@ -400,7 +404,7 @@ export default function register(ctx: PluginContext): void {
               migrated: true
             });
           } else {
-            console.log(`Doctor: Imported ${items.length} work items and ${comments.length} comments from ${filePath}`);
+            console.log(`Doctor: Imported ${items.length} work items, ${comments.length} comments, and ${auditResults.length} audit results from ${filePath}`);
           }
         }
         

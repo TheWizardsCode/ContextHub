@@ -21,23 +21,24 @@ export default function register(ctx: PluginContext): void {
       const lockPath = getLockPathForJsonl(filePath);
       withFileLock(lockPath, () => {
         const db = utils.getDatabase(options.prefix);
-        const { items, comments, dependencyEdges } = importFromJsonl(filePath);
+        const { items, comments, dependencyEdges, auditResults } = importFromJsonl(filePath);
         // SAFETY: db.import() is destructive (clears all items before inserting).
         // This is intentional here — the import command replaces the entire
         // database with the contents of the JSONL file.
-        db.import(items, dependencyEdges);
+        db.import(items, dependencyEdges, auditResults);
         db.importComments(comments);
         
         if (utils.isJsonMode()) {
           output.json({ 
             success: true, 
-            message: `Imported ${items.length} work items and ${comments.length} comments`,
+            message: `Imported ${items.length} work items, ${comments.length} comments, and ${auditResults.length} audit results`,
             itemsCount: items.length,
             commentsCount: comments.length,
+            auditCount: auditResults.length,
             file: options.file
           });
         } else {
-          console.log(`Imported ${items.length} work items and ${comments.length} comments from ${filePath}`);
+          console.log(`Imported ${items.length} work items, ${comments.length} comments, and ${auditResults.length} audit results from ${filePath}`);
         }
       });
     });

@@ -8,7 +8,7 @@ import type { DependencyEdge } from '../types.js';
 import { initConfig, loadConfig, configExists, isInitialized, readInitSemaphore, writeInitSemaphore, type InitConfigOptions } from '../config.js';
 import { resolveWorklogDir } from '../worklog-paths.js';
 import { exportToJsonlAsync } from '../jsonl.js';
-import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges } from '../sync.js';
+import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, mergeAuditResults } from '../sync.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
 import { importFromJsonlContent } from '../jsonl.js';
 import * as fs from 'fs';
@@ -831,6 +831,7 @@ async function performInitSync(dataPath: string, prefix?: string, isJsonMode: bo
   const localItems = db.getAll();
   const localComments = db.getAllComments();
   const localEdges = db.getAllDependencyEdges();
+  const localAudits = db.getAllAuditResults();
   
   const gitTarget = { remote: defaults.gitRemote, branch: defaults.gitBranch };
   const remoteContent = await getRemoteDataFileContent(dataPath, gitTarget);
@@ -838,16 +839,19 @@ async function performInitSync(dataPath: string, prefix?: string, isJsonMode: bo
   let remoteItems: any[] = [];
   let remoteComments: any[] = [];
   let remoteEdges: DependencyEdge[] = [];
+  let remoteAudits: any[] = [];
   if (remoteContent) {
     const remoteData = importFromJsonlContent(remoteContent);
     remoteItems = remoteData.items;
     remoteComments = remoteData.comments;
     remoteEdges = remoteData.dependencyEdges || [];
+    remoteAudits = remoteData.auditResults || [];
   }
   
   const itemMergeResult = mergeWorkItems(localItems, remoteItems);
   const commentMergeResult = mergeComments(localComments, remoteComments);
   const edgeMergeResult = mergeDependencyEdges(localEdges, remoteEdges);
+  const auditMergeResult = mergeAuditResults(localAudits, remoteAudits);
   
   const autoSyncEnabled = config?.autoSync === true;
   if (autoSyncEnabled) {
@@ -856,7 +860,7 @@ async function performInitSync(dataPath: string, prefix?: string, isJsonMode: bo
   // SAFETY: db.import() is destructive (clears all items before inserting).
   // This is safe here because itemMergeResult.merged is the complete merged
   // set of local + remote items — no data is lost.
-  db.import(itemMergeResult.merged, edgeMergeResult.merged);
+  db.import(itemMergeResult.merged, edgeMergeResult.merged, auditMergeResult.merged);
   db.importComments(commentMergeResult.merged);
   if (autoSyncEnabled) {
     db.setAutoSync(true, () => Promise.resolve());

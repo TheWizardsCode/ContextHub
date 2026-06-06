@@ -5,7 +5,7 @@
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
-import { WorkItem, Comment, DependencyEdge } from './types.js';
+import { WorkItem, Comment, DependencyEdge, AuditResult } from './types.js';
 import { listPendingMigrations } from './migrations/index.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
 
@@ -858,6 +858,54 @@ export class SqlitePersistentStore {
     const stmt = this.db.prepare('DELETE FROM audit_results WHERE work_item_id = ?');
     const result = stmt.run(workItemId);
     return result.changes > 0;
+  }
+
+  /**
+   * Get all audit results (for JSONL export / sync).
+   */
+  getAllAuditResults(): AuditResult[] {
+    const stmt = this.db.prepare('SELECT * FROM audit_results');
+    const rows = stmt.all() as any[];
+    return rows.map(row => ({
+      workItemId: row.work_item_id,
+      readyToClose: Boolean(row.ready_to_close),
+      auditedAt: row.audited_at,
+      summary: row.summary ?? null,
+      rawOutput: row.raw_output ?? null,
+      author: row.author ?? null,
+    }));
+  }
+
+  /**
+   * Save or update audit results (upsert, bulk).
+   */
+  saveAuditResults(audits: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null }[]): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO audit_results (work_item_id, ready_to_close, audited_at, summary, raw_output, author)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(work_item_id) DO UPDATE SET
+        ready_to_close = excluded.ready_to_close,
+        audited_at = excluded.audited_at,
+        summary = excluded.summary,
+        raw_output = excluded.raw_output,
+        author = excluded.author
+    `);
+    const normalized = audits.map(audit => {
+      const values: unknown[] = [
+        audit.workItemId,
+        audit.readyToClose ? 1 : 0,
+        audit.auditedAt,
+        audit.summary ?? null,
+        audit.rawOutput ?? null,
+        audit.author ?? null,
+      ];
+      return normalizeSqliteBindings(values);
+    });
+    this.db.transaction(() => {
+      for (const values of normalized) {
+        stmt.run(...values);
+      }
+    })();
   }
 
   // ── FTS5 Full-Text Search ──────────────────────────────────────────

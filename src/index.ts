@@ -6,7 +6,7 @@ import { WorklogDatabase } from './database.js';
 import { createAPI } from './api.js';
 import { loadConfig } from './config.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from './sync-defaults.js';
-import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, GitTarget } from './sync.js';
+import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, mergeAuditResults, GitTarget } from './sync.js';
 import { importFromJsonlContent, exportToJsonlAsync, getDefaultDataPath } from './jsonl.js';
 
 const PORT = process.env.PORT || 3000;
@@ -43,14 +43,16 @@ async function performServerSync(): Promise<void> {
 
   try {
     const remoteContent = await getRemoteDataFileContent(dataPath, gitTarget);
-    const remoteData = remoteContent ? importFromJsonlContent(remoteContent) : { items: [], comments: [], dependencyEdges: [] };
+    const remoteData = remoteContent ? importFromJsonlContent(remoteContent) : { items: [], comments: [], dependencyEdges: [], auditResults: [] };
     const localItems = db.getAll();
     const localComments = db.getAllComments();
     const localEdges = db.getAllDependencyEdges();
+    const localAudits = db.getAllAuditResults();
 
     const itemMergeResult = mergeWorkItems(localItems, remoteData.items);
     const commentMergeResult = mergeComments(localComments, remoteData.comments);
     const edgeMergeResult = mergeDependencyEdges(localEdges, remoteData.dependencyEdges || []);
+    const auditMergeResult = mergeAuditResults(localAudits, remoteData.auditResults || []);
 
     const originalAutoSync = autoSync;
     if (originalAutoSync) {
@@ -59,7 +61,7 @@ async function performServerSync(): Promise<void> {
     // SAFETY: db.import() is destructive (clears all items before inserting).
     // This is safe here because itemMergeResult.merged is the complete merged
     // set of local + remote items — no data is lost.
-    db.import(itemMergeResult.merged, edgeMergeResult.merged);
+    db.import(itemMergeResult.merged, edgeMergeResult.merged, auditMergeResult.merged);
     db.importComments(commentMergeResult.merged);
     if (originalAutoSync) {
       db.setAutoSync(true, () => {
@@ -67,7 +69,7 @@ async function performServerSync(): Promise<void> {
         return Promise.resolve();
       });
     }
-    await exportToJsonlAsync(itemMergeResult.merged, commentMergeResult.merged, dataPath, edgeMergeResult.merged);
+    await exportToJsonlAsync(itemMergeResult.merged, commentMergeResult.merged, dataPath, edgeMergeResult.merged, auditMergeResult.merged);
 
     await gitPushDataFileToBranch(dataPath, 'Sync work items and comments', gitTarget);
   } catch (error) {
