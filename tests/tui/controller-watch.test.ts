@@ -746,7 +746,7 @@ describe('TuiController - Database Watch', () => {
     expect(listCallCount).toBe(initialCallCount);
   });
 
-  it('skips expensive re-render on watch refresh when dataset is unchanged', async () => {
+  it('always re-renders on watch refresh even when dataset appears unchanged (to catch secondary-table updates like audit)', async () => {
     const screen = makeScreen();
     const list = makeList();
     const footer = makeBox();
@@ -899,7 +899,10 @@ describe('TuiController - Database Watch', () => {
     await new Promise(resolve => setTimeout(resolve, 400));
 
     expect(listCallCount).toBeGreaterThan(initialListCallCount);
-    expect((list.setItems as any).mock.calls.length).toBe(initialSetItemsCount);
+    // Even though the dataset appears unchanged, the watcher must re-render
+    // so that secondary-table changes (audit_results, metadata etc.) are
+    // picked up by the metadata pane.
+    expect((list.setItems as any).mock.calls.length).toBeGreaterThan(initialSetItemsCount);
   });
 
   it('should watch WAL file for SQLite WAL mode', async () => {
@@ -1055,5 +1058,211 @@ describe('TuiController - Database Watch', () => {
 
     // Should have triggered a refresh for WAL file too
     expect(listCallCount).toBeGreaterThan(initialCallCount);
+  });
+
+  it('should re-render metadata pane after watcher-triggered refresh', async () => {
+    const screen = makeScreen();
+    const list = makeList();
+    const footer = makeBox();
+    const detail = makeBox();
+    const copyIdButton = makeBox();
+    const toastBox = { show: vi.fn() } as any;
+    // Create a tracked metadata pane
+    const metadataPaneComponent = {
+      updateFromItem: vi.fn(),
+      getBox: () => makeBox(),
+      setHeight: vi.fn(),
+    };
+
+    const overlays = {
+      detailOverlay: makeBox(),
+      closeOverlay: makeBox(),
+      updateOverlay: makeBox(),
+      createOverlay: makeBox(),
+    };
+    const dialogs = {
+      detailModal: makeBox(),
+      detailClose: makeBox(),
+      closeDialog: makeBox(),
+      closeDialogText: makeBox(),
+      closeDialogOptions: makeList(),
+      updateDialog: makeBox(),
+      updateDialogText: makeBox(),
+      updateDialogOptions: makeList(),
+      updateDialogStageOptions: makeList(),
+      updateDialogStatusOptions: makeList(),
+      updateDialogPriorityOptions: makeList(),
+      updateDialogComment: makeBox(),
+      createDialog: makeBox(),
+      createDialogText: makeBox(),
+      createDialogTitleInput: makeTextarea(),
+      createDialogDescription: makeTextarea(),
+      createDialogIssueTypeOptions: makeList(),
+      createDialogPriorityOptions: makeList(),
+      createDialogCreateButton: makeBox(),
+      createDialogCancelButton: makeBox(),
+    };
+    const helpMenu = {
+      isVisible: vi.fn(() => false),
+      show: vi.fn(),
+      hide: vi.fn(),
+    };
+    const modalDialogs = {
+      selectList: vi.fn(async () => 0),
+      editTextarea: vi.fn(async () => null),
+      confirmTextbox: vi.fn(async () => false),
+      forceCleanup: vi.fn(),
+    };
+    const agentPane = {
+      serverStatusBox: makeBox(),
+      dialog: makeBox(),
+      textarea: makeBox(),
+      suggestionHint: makeBox(),
+      sendButton: makeBox(),
+      cancelButton: makeBox(),
+      ensureResponsePane: vi.fn(() => makeBox()),
+    };
+    const layout = {
+      screen,
+      listComponent: { getList: () => list, getFooter: () => footer },
+      detailComponent: { getDetail: () => detail, getCopyIdButton: () => copyIdButton },
+      metadataPaneComponent,
+      toastComponent: toastBox,
+      overlaysComponent: overlays,
+      dialogsComponent: dialogs,
+      helpMenu,
+      modalDialogs,
+      agentPane,
+      nextDialog: {
+        overlay: makeBox(),
+        dialog: makeBox(),
+        close: makeBox(),
+        text: makeBox(),
+        options: makeList(),
+      },
+    };
+
+    const createLayout = vi.fn(() => layout) as unknown as (options?: any) => any;
+    class FakePiAdapter {
+      getStatus() { return { status: 'stopped', port: 9999 }; }
+      startServer() { return Promise.resolve(true); }
+      stopServer() { return undefined; }
+      sendPrompt() { return Promise.resolve(); }
+    }
+
+    // Track calls to getAuditResult
+    let auditResultValue: any = null;
+    const mockGetAuditResult = vi.fn(() => auditResultValue);
+
+    let listCallCount = 0;
+    const workItemId = 'WL-TEST-1';
+    const constantUpdatedAt = '2026-05-10T00:00:00.000Z';
+    const mockDbList = vi.fn(() => {
+      listCallCount++;
+      return [
+        {
+          id: workItemId,
+          title: 'Test Item',
+          description: '',
+          status: 'open',
+          priority: 'medium',
+          sortIndex: 0,
+          parentId: null,
+          createdAt: constantUpdatedAt,
+          updatedAt: constantUpdatedAt,
+          tags: [],
+          assignee: '',
+          stage: '',
+          issueType: 'task',
+          createdBy: '',
+          deletedBy: '',
+          deleteReason: '',
+          risk: '',
+          effort: '',
+        },
+      ];
+    });
+
+    const program = { opts: () => ({ verbose: false }) } as any;
+    const ctx = {
+      program,
+      utils: {
+        requireInitialized: vi.fn(),
+        getDatabase: vi.fn(() => ({
+          list: mockDbList,
+          getPrefix: () => undefined,
+          getCommentsForWorkItem: () => [],
+          getAuditResult: mockGetAuditResult,
+          update: () => ({}),
+          createComment: () => ({}),
+          get: () => null,
+        })),
+      },
+    } as any;
+
+    const controller = new TuiController(ctx, {
+      createLayout: createLayout as any,
+      PiAdapter: FakePiAdapter as any,
+      resolveWorklogDir: () => '/tmp',
+      createPersistence: () => ({
+        loadPersistedState: async () => null,
+        savePersistedState: async () => undefined,
+        statePath: '/tmp/tui-state.json',
+      }),
+      fs: mockFs,
+      path: mockPath,
+    });
+
+    await controller.start({});
+
+    const watchCallback = mockFs.watchCallback;
+
+    // Initially, no audit result
+    expect(mockGetAuditResult).toHaveBeenCalledWith(workItemId);
+
+    // Track the initial updateFromItem call count
+    const initialListCallCount = listCallCount;
+    const initialSetItemsCount = (list.setItems as any).mock.calls.length;
+    const initialUpdateCount = metadataPaneComponent.updateFromItem.mock.calls.length;
+
+    // Simulate external audit update: set audit result
+    auditResultValue = {
+      workItemId,
+      readyToClose: true,
+      auditedAt: new Date().toISOString(),
+      summary: 'Audit passed all criteria',
+      rawOutput: null,
+      author: 'test-user',
+    };
+
+    // Advance mtime so signature changes
+    currentMtime = 5000;
+
+    // Simulate a WAL file change event (as triggered by wl audit-set)
+    watchCallback('change', 'worklog.db-wal');
+
+    // Wait for debounce + refresh
+    await new Promise(resolve => setTimeout(resolve, 600));
+
+    // Debug: check if the list was refreshed
+    expect(listCallCount).toBeGreaterThan(initialListCallCount);
+
+    // Verify the watcher triggered a list refresh
+    expect(listCallCount).toBeGreaterThan(initialListCallCount);
+
+    // The refresh should have triggered renderListAndDetail (list.setItems called again)
+    expect((list.setItems as any).mock.calls.length).toBeGreaterThan(initialSetItemsCount);
+
+    // Verify that the metadata pane was updated with the new audit result
+    const callsAfterUpdate = metadataPaneComponent.updateFromItem.mock.calls
+      .slice(initialUpdateCount);
+    const auditCalls = callsAfterUpdate.filter((call: any) => {
+      const arg = call[0];
+      return arg && arg.auditResult && arg.auditResult.readyToClose === true;
+    });
+    expect(auditCalls.length).toBeGreaterThan(0);
+
+    // Verify getAuditResult was called again after the update (from refresh)
+    expect(mockGetAuditResult.mock.calls.length).toBeGreaterThan(1);
   });
 });

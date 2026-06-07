@@ -3302,7 +3302,10 @@ function updateDetailForIndex(idx: number, visible?: VisibleNode[]) {
 
            const refreshStart = Date.now();
            try {
-             refreshFromDatabase(undefined, fallback, true);
+             // force a full refresh (skipRenderWhenUnchanged=false) so that
+             // changes limited to secondary tables (e.g. audit_results) are
+             // picked up even when the work-items dataset appears identical.
+             refreshFromDatabase(undefined, fallback);
            } finally {
              try { debugLog && debugLog(`scheduleRefreshFromDatabase: refresh completed in ${Date.now() - refreshStart}ms`); } catch (_) {}
            }
