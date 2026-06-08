@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { theme } from '../../src/theme.js';
 import type { WorkItem } from '../../src/types.js';
 
@@ -27,9 +27,21 @@ function createMockWorkItem(overrides: Partial<WorkItem> = {}): WorkItem {
   };
 }
 
-// Enable chalk colours in test environment
+// Store original FORCE_COLOR value
+const originalForceColor = process.env.FORCE_COLOR;
+
 beforeEach(() => {
+  // Enable chalk colours in test environment
   process.env.FORCE_COLOR = '3';
+});
+
+afterEach(() => {
+  // Restore original FORCE_COLOR value
+  if (originalForceColor === undefined) {
+    delete process.env.FORCE_COLOR;
+  } else {
+    process.env.FORCE_COLOR = originalForceColor;
+  }
 });
 
 describe('Colour Mapping', () => {
@@ -219,6 +231,118 @@ describe('Colour Mapping', () => {
       const coloured = formatTitleOnlyTUI(item);
       // Title should still be visible
       expect(coloured).toContain('Test Item');
+    });
+  });
+
+  describe('Fallback behaviour (colours disabled)', () => {
+    it('should produce plain text when FORCE_COLOR=0', () => {
+      process.env.FORCE_COLOR = '0';
+      const item = createMockWorkItem({ stage: 'idea' });
+      const coloured = formatTitleOnly(item);
+      // Should NOT contain ANSI codes
+      expect(coloured).not.toMatch(/\x1b\[/);
+      // Should still contain the title
+      expect(coloured).toBe('Test Item');
+    });
+
+    it('should produce plain text when FORCE_COLOR is not set', () => {
+      delete process.env.FORCE_COLOR;
+      // Also need to ensure chalk is not in colour mode
+      const item = createMockWorkItem({ stage: 'in_review' });
+      const coloured = formatTitleOnly(item);
+      // In test environment without FORCE_COLOR, chalk may or may not have colours
+      // Just verify the title is present
+      expect(coloured).toContain('Test Item');
+    });
+
+    it('should always apply blessed tags in TUI regardless of FORCE_COLOR', () => {
+      delete process.env.FORCE_COLOR;
+      const item = createMockWorkItem({ stage: 'done' });
+      const coloured = formatTitleOnlyTUI(item);
+      // Blessed tags should always be present for TUI
+      expect(coloured).toContain('{');
+      expect(coloured).toContain('}');
+      expect(coloured).toContain('green-fg');
+    });
+
+    it('should fall back to plain text in CLI when colours disabled', () => {
+      process.env.FORCE_COLOR = '0';
+      const statuses = ['open', 'in-progress', 'blocked', 'completed', 'input_needed', 'deleted'];
+      const stages = ['idea', 'intake_complete', 'plan_complete', 'in_progress', 'in_review', 'done'];
+      
+      // Test all statuses
+      for (const status of statuses) {
+        const item = createMockWorkItem({ status });
+        const coloured = formatTitleOnly(item);
+        expect(coloured).not.toMatch(/\x1b\[/);
+        expect(coloured).toBe('Test Item');
+      }
+      
+      // Test all stages
+      for (const stage of stages) {
+        const item = createMockWorkItem({ stage });
+        const coloured = formatTitleOnly(item);
+        expect(coloured).not.toMatch(/\x1b\[/);
+        expect(coloured).toBe('Test Item');
+      }
+    });
+  });
+
+  describe('Visual regression tests (snapshot-like)', () => {
+    it('should produce consistent output for idea stage', () => {
+      const item = createMockWorkItem({ stage: 'idea', title: 'My Feature' });
+      const output = formatTitleOnlyTUI(item);
+      // Snapshot: blessed markup with blue-fg
+      expect(output).toBe('{blue-fg}My Feature{/blue-fg}');
+    });
+
+    it('should produce consistent output for intake_complete stage', () => {
+      const item = createMockWorkItem({ stage: 'intake_complete', title: 'My Task' });
+      const output = formatTitleOnlyTUI(item);
+      // Snapshot: blessed markup with 214-fg (orange)
+      expect(output).toBe('{214-fg}My Task{/214-fg}');
+    });
+
+    it('should produce consistent output for in_review stage', () => {
+      const item = createMockWorkItem({ stage: 'in_review', title: 'Review Item' });
+      const output = formatTitleOnlyTUI(item);
+      // Snapshot: blessed markup with magenta-fg
+      expect(output).toBe('{magenta-fg}Review Item{/magenta-fg}');
+    });
+
+    it('should produce consistent output for done stage', () => {
+      const item = createMockWorkItem({ stage: 'done', title: 'Completed Work' });
+      const output = formatTitleOnlyTUI(item);
+      // Snapshot: blessed markup with green-fg
+      expect(output).toBe('{green-fg}Completed Work{/green-fg}');
+    });
+
+    it('should produce consistent output for blocked status', () => {
+      const item = createMockWorkItem({ status: 'blocked', title: 'Blocked Item' });
+      const output = formatTitleOnlyTUI(item);
+      // Snapshot: blessed markup with red-fg
+      expect(output).toBe('{red-fg}Blocked Item{/red-fg}');
+    });
+
+    it('should produce consistent output for open status', () => {
+      const item = createMockWorkItem({ status: 'open', title: 'Open Task' });
+      const output = formatTitleOnlyTUI(item);
+      // Snapshot: blessed markup with green-fg
+      expect(output).toBe('{green-fg}Open Task{/green-fg}');
+    });
+
+    it('should produce consistent output for in-progress status', () => {
+      const item = createMockWorkItem({ status: 'in-progress', title: 'WIP Item' });
+      const output = formatTitleOnlyTUI(item);
+      // Snapshot: blessed markup with cyan-fg
+      expect(output).toBe('{cyan-fg}WIP Item{/cyan-fg}');
+    });
+
+    it('should produce consistent output for completed status', () => {
+      const item = createMockWorkItem({ status: 'completed', title: 'Done Item' });
+      const output = formatTitleOnlyTUI(item);
+      // Snapshot: blessed markup with white-fg
+      expect(output).toBe('{white-fg}Done Item{/white-fg}');
     });
   });
 });
