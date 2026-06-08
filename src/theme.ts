@@ -21,6 +21,16 @@ export const theme = {
     inProgress: chalk.cyan,
     blocked: chalk.redBright,
     completed: chalk.white,
+    inputNeeded: chalk.yellow,
+    deleted: chalk.gray,
+  },
+  stage: {
+    idea: chalk.blueBright,
+    intakeComplete: chalk.hex('#FFA500'),
+    planComplete: chalk.white,
+    inProgress: chalk.cyan,
+    inReview: chalk.magenta,
+    done: chalk.green,
   },
   priority: {
     critical: chalk.redBright,
@@ -50,6 +60,16 @@ export const theme = {
       inProgress: tuiWrap('cyan-fg'),
       blocked: tuiWrap('red-fg'),
       completed: tuiWrap('white-fg'),
+      inputNeeded: tuiWrap('yellow-fg'),
+      deleted: tuiWrap('gray-fg'),
+    },
+    stage: {
+      idea: tuiWrap('blue-fg'),
+      intakeComplete: tuiWrap('214-fg'),
+      planComplete: tuiWrap('white-fg'),
+      inProgress: tuiWrap('cyan-fg'),
+      inReview: tuiWrap('magenta-fg'),
+      done: tuiWrap('green-fg'),
     },
   },
 } as const;

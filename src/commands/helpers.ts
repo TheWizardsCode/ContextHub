@@ -75,6 +75,10 @@ function titleColorForStatus(status?: string): (text: string) => string {
       return theme.status.inProgress;
     case 'blocked':
       return theme.status.blocked;
+    case 'input_needed':
+      return theme.status.inputNeeded;
+    case 'deleted':
+      return theme.status.deleted;
     case 'open':
     default:
       return theme.status.open;
@@ -91,20 +95,70 @@ function titleColorForStatusTUI(status?: string): (text: string) => string {
       return theme.tui.status.inProgress;
     case 'blocked':
       return theme.tui.status.blocked;
+    case 'input_needed':
+      return theme.tui.status.inputNeeded;
+    case 'deleted':
+      return theme.tui.status.deleted;
     case 'open':
     default:
       return theme.tui.status.open;
   }
 }
 
-// Render a work item title with the color appropriate to its status (console output)
+// Return chalk function appropriate for a given stage (for console output)
+function titleColorForStage(stage?: string): (text: string) => string {
+  const s = (stage || '').toLowerCase().trim();
+  switch (s) {
+    case 'idea':
+      return theme.stage.idea;
+    case 'intake_complete':
+      return theme.stage.intakeComplete;
+    case 'plan_complete':
+      return theme.stage.planComplete;
+    case 'in_progress':
+      return theme.stage.inProgress;
+    case 'in_review':
+      return theme.stage.inReview;
+    case 'done':
+      return theme.stage.done;
+    default:
+      return theme.status.open;
+  }
+}
+
+// Return blessed markup tags appropriate for a given stage (for TUI output)
+function titleColorForStageTUI(stage?: string): (text: string) => string {
+  const s = (stage || '').toLowerCase().trim();
+  switch (s) {
+    case 'idea':
+      return theme.tui.stage.idea;
+    case 'intake_complete':
+      return theme.tui.stage.intakeComplete;
+    case 'plan_complete':
+      return theme.tui.stage.planComplete;
+    case 'in_progress':
+      return theme.tui.stage.inProgress;
+    case 'in_review':
+      return theme.tui.stage.inReview;
+    case 'done':
+      return theme.tui.stage.done;
+    default:
+      return theme.tui.status.open;
+  }
+}
+
+// Render a work item title with the color appropriate to its status or stage (console output)
 function renderTitle(item: WorkItem, prefix: string = ''): string {
-  return titleColorForStatus(item.status)(prefix + item.title);
+  // Prefer stage-based colour when a stage is set; fall back to status-based colour
+  const colorFn = item.stage ? titleColorForStage(item.stage) : titleColorForStatus(item.status);
+  return colorFn(prefix + item.title);
 }
 
 // Render a work item title with blessed markup colors for TUI output
 function renderTitleTUI(item: WorkItem, prefix: string = ''): string {
-  return titleColorForStatusTUI(item.status)(prefix + item.title);
+  // Prefer stage-based colour when a stage is set; fall back to status-based colour
+  const colorFn = item.stage ? titleColorForStageTUI(item.stage) : titleColorForStatusTUI(item.status);
+  return colorFn(prefix + item.title);
 }
 
 // Helper to display work items in a tree structure
