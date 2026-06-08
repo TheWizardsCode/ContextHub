@@ -90,10 +90,43 @@ Looks good to me
 
 - Email-like strings are redacted deterministically before being persisted: local part becomes first-character + `***` and the domain is kept (e.g. `alice@example.com` → `a***@example.com`).
 
-## Human Outputs
+## JSON Output Format
 
-- The audit status is available in JSON output as `workItem.auditResult.readyToClose` (boolean), `workItem.auditResult.summary` (string), and `workItem.auditResult.auditedAt` (ISO timestamp).
-- For backwards compatibility, `workItem.audit` is also populated in JSON output with `{ time, author, text, status }` derived from the `audit_results` table.
+When using `wl show <id> --json`, the audit data is included in two formats:
+
+### `workItem.audit` (backwards-compatible format)
+
+```json
+{
+  "text": "Ready to close: Yes\nAll acceptance criteria verified.",
+  "author": "agent-name",
+  "time": "2026-06-07T12:30:00.000Z",
+  "status": "Complete"
+}
+```
+
+Fields:
+- **text** — The full audit text with email addresses redacted
+- **author** — Who performed the audit
+- **time** — ISO 8601 timestamp of when the audit was performed
+- **status** — Derived from the first line: `Complete` or `Partial`
+
+### `workItem.auditResult` (normalized format)
+
+```json
+{
+  "readyToClose": true,
+  "summary": "Ready to close: Yes\nAll acceptance criteria verified.",
+  "auditedAt": "2026-06-07T12:30:00.000Z",
+  "author": "agent-name"
+}
+```
+
+Fields:
+- **readyToClose** — Boolean: `true` if ready to close, `false` otherwise
+- **summary** — The full audit text
+- **auditedAt** — ISO 8601 timestamp
+- **author** — Who performed the audit
 
 ## Why Strict First-Line Matching?
 

@@ -80,6 +80,26 @@ worklog reviewed WI-0J8L1JQ3H8ZQ2K6D
 worklog reviewed WI-0J8L1JQ3H8ZQ2K6D true
 ```
 
+### Audit Operations
+
+Audit functionality allows you to attach structured readiness metadata to work items. The first line must be either "Ready to close: Yes" or "Ready to close: No".
+
+```bash
+# Set audit text on a work item
+wl update WI-123 --audit-text "Ready to close: Yes\nAll acceptance criteria verified."
+
+# Set audit from a file (useful for shell scripts)
+wl update WI-123 --audit-file audit-report.txt
+
+# Set audit on create
+wl create -t "New feature" --audit-text "Ready to close: No\nNeeds code review"
+
+# View audit via show --json
+wl show WI-123 --json
+# Returns: workItem.audit = { text, author, time, status }
+# Returns: workItem.auditResult = { readyToClose, summary, auditedAt, author }
+```
+
 ### Deleting Work Items
 
 ```bash
@@ -187,6 +207,120 @@ await fetch(`http://localhost:3000/items/${newItem.id}`, {
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ status: 'in-progress' })
 });
+```
+
+## Automation & Scripting Examples
+
+### Shell Script: Run Audit and Parse JSON Output
+
+```bash
+#!/bin/bash
+# audit-work-item.sh - Run an audit on a work item and check results
+
+WORK_ITEM_ID="$1"
+
+if [ -z "$WORK_ITEM_ID" ]; then
+  echo "Usage: $0 <work-item-id>"
+  exit 1
+fi
+
+# Run audit and get JSON output
+AUDIT_RESULT=$(wl show "$WORK_ITEM_ID" --json)
+
+if [ $? -ne 0 ]; then
+  echo "Error: Failed to show work item"
+  exit 1
+fi
+
+# Parse audit status using jq
+AUDIT_STATUS=$(echo "$AUDIT_RESULT" | jq -r '.workItem.audit.status // "none"')
+AUDIT_TEXT=$(echo "$AUDIT_RESULT" | jq -r '.workItem.audit.text // "none"')
+READY_TO_CLOSE=$(echo "$AUDIT_RESULT" | jq -r '.workItem.auditResult.readyToClose // false')
+
+echo "Work Item: $WORK_ITEM_ID"
+echo "Audit Status: $AUDIT_STATUS"
+echo "Ready to Close: $READY_TO_CLOSE"
+echo "Audit Text: $AUDIT_TEXT"
+
+# Exit with appropriate code
+if [ "$READY_TO_CLOSE" = "true" ]; then
+  exit 0  # Ready to close
+else
+  exit 1  # Not ready
+fi
+```
+
+### Shell Script: Set Audit via Automation
+
+```bash
+#!/bin/bash
+# set-audit.sh - Set audit text on a work item from automation
+
+WORK_ITEM_ID="$1"
+AUDIT_STATUS="$2"  # "yes" or "no"
+DETAILS="$3"
+
+if [ -z "$WORK_ITEM_ID" ] || [ -z "$AUDIT_STATUS" ]; then
+  echo "Usage: $0 <work-item-id> <yes|no> [details]"
+  exit 1
+fi
+
+# Build audit text
+if [ "$AUDIT_STATUS" = "yes" ]; then
+  FIRST_LINE="Ready to close: Yes"
+else
+  FIRST_LINE="Ready to close: No"
+fi
+
+AUDIT_TEXT="$FIRST_LINE"
+if [ -n "$DETAILS" ]; then
+  AUDIT_TEXT="$AUDIT_TEXT\n$DETAILS"
+fi
+
+# Set audit via CLI
+RESULT=$(wl update "$WORK_ITEM_ID" --audit-text "$AUDIT_TEXT" --json)
+
+if [ $? -ne 0 ]; then
+  echo "Error: Failed to set audit"
+  exit 1
+fi
+
+# Verify the audit was set
+VERIFY=$(wl show "$WORK_ITEM_ID" --json | jq -r '.workItem.audit.status')
+echo "Audit status set to: $VERIFY"
+```
+
+### Node.js: Read Audit Field Programmatically
+
+```javascript
+import { execSync } from 'child_process';
+
+// Get audit data for a work item
+function getAuditData(workItemId) {
+  const result = execSync(`wl show ${workItemId} --json`, {
+    encoding: 'utf-8'
+  });
+  const data = JSON.parse(result);
+  
+  return {
+    // Backwards-compatible format
+    audit: data.workItem?.audit,
+    // Normalized format
+    auditResult: data.workItem?.auditResult
+  };
+}
+
+// Check if work item is ready to close
+function isReadyToClose(workItemId) {
+  const { auditResult } = getAuditData(workItemId);
+  return auditResult?.readyToClose ?? false;
+}
+
+// Example usage
+const auditData = getAuditData('WI-123');
+console.log('Audit text:', auditData.audit?.text);
+console.log('Status:', auditData.audit?.status);
+console.log('Ready to close:', auditData.auditResult?.readyToClose);
 ```
 
 ## Git Workflow Example

@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execAsync, enterTempDir, leaveTempDir, writeConfig, writeInitSemaphore, cliPath } from '../cli/cli-helpers.js';
+import { writeFileSync } from 'fs';
+import { join } from 'path';
 
 describe('integration: audit skill CLI write path', () => {
   let state: { tempDir: string; originalCwd: string };
@@ -111,6 +113,121 @@ describe('integration: audit skill CLI write path', () => {
       expect(result.error).toBe('audit-invalid-first-line');
       expect(result.message).toContain("Found: 'Ready to close'");
     }
+  });
+
+  it('sets audit via create --audit-text and shows in wl show --json', async () => {
+    // Test the full lifecycle: create with audit text
+    const { stdout: created } = await execAsync(
+      `tsx ${cliPath} --json create -t "Audit on create test" --audit-text "Ready to close: Yes\nAll criteria met."`
+    );
+    const createdRes = JSON.parse(created);
+    expect(createdRes.success).toBe(true);
+    expect(createdRes.workItem.audit).toBeDefined();
+    expect(createdRes.workItem.audit.text).toBe('Ready to close: Yes\nAll criteria met.');
+    expect(createdRes.workItem.audit.status).toBe('Complete');
+    expect(createdRes.workItem.audit.author).toBeTruthy();
+    expect(createdRes.workItem.audit.time).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{3}Z$/);
+
+    const id = createdRes.workItem.id;
+
+    // Verify it persists via show --json
+    const { stdout: shown } = await execAsync(`tsx ${cliPath} --json show ${id}`);
+    const shownRes = JSON.parse(shown);
+    expect(shownRes.success).toBe(true);
+    expect(shownRes.workItem.audit.text).toBe('Ready to close: Yes\nAll criteria met.');
+    expect(shownRes.workItem.audit.status).toBe('Complete');
+  });
+
+  it('sets audit via --audit-file and reads back correctly', async () => {
+    // Create work item
+    const { stdout: created } = await execAsync(`tsx ${cliPath} --json create -t "Audit file test"`);
+    const id = JSON.parse(created).workItem.id;
+
+    // Write audit text to a file
+    const auditFile = join(state.tempDir, 'audit.txt');
+    writeFileSync(auditFile, 'Ready to close: No\nNeeds more work:\n- Add tests\n- Update docs');
+
+    // Set audit via --audit-file
+    const { stdout: updated } = await execAsync(
+      `tsx ${cliPath} --json update ${id} --audit-file "${auditFile}"`
+    );
+    const updatedRes = JSON.parse(updated);
+    expect(updatedRes.success).toBe(true);
+    expect(updatedRes.workItem.audit).toBeDefined();
+    expect(updatedRes.workItem.audit.text).toBe('Ready to close: No\nNeeds more work:\n- Add tests\n- Update docs');
+    expect(updatedRes.workItem.audit.status).toBe('Partial');
+
+    // Verify it reads back correctly
+    const { stdout: shown } = await execAsync(`tsx ${cliPath} --json show ${id}`);
+    const shownRes = JSON.parse(shown);
+    expect(shownRes.workItem.audit.text).toBe('Ready to close: No\nNeeds more work:\n- Add tests\n- Update docs');
+    expect(shownRes.workItem.audit.status).toBe('Partial');
+  });
+
+  it('verifies audit object contains all required fields', async () => {
+    const { stdout: created } = await execAsync(`tsx ${cliPath} --json create -t "Field verification test"`);
+    const id = JSON.parse(created).workItem.id;
+
+    await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "Ready to close: Yes"`);
+
+    const { stdout: shown } = await execAsync(`tsx ${cliPath} --json show ${id}`);
+    const shownRes = JSON.parse(shown);
+    const audit = shownRes.workItem.audit;
+
+    // Verify all required fields exist with correct types
+    expect(audit).toBeDefined();
+    expect(typeof audit.text).toBe('string');
+    expect(typeof audit.author).toBe('string');
+    expect(typeof audit.time).toBe('string');
+    expect(typeof audit.status).toBe('string');
+
+    // Verify field values
+    expect(audit.text).toBe('Ready to close: Yes');
+    expect(audit.status).toBe('Complete');
+    expect(audit.time).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{3}Z$/);
+    // Author should be non-empty (system user or configured author)
+    expect(audit.author.length).toBeGreaterThan(0);
+  });
+
+  it('derives readiness status correctly from first line', async () => {
+    const { stdout: created1 } = await execAsync(`tsx ${cliPath} --json create -t "Status test Complete"`);
+    const id1 = JSON.parse(created1).workItem.id;
+
+    const { stdout: created2 } = await execAsync(`tsx ${cliPath} --json create -t "Status test Partial"`);
+    const id2 = JSON.parse(created2).workItem.id;
+
+    // Test Complete status
+    await execAsync(`tsx ${cliPath} --json update ${id1} --audit-text "Ready to close: Yes\nAll good."`);
+    const { stdout: shown1 } = await execAsync(`tsx ${cliPath} --json show ${id1}`);
+    expect(JSON.parse(shown1).workItem.audit.status).toBe('Complete');
+
+    // Test Partial status
+    await execAsync(`tsx ${cliPath} --json update ${id2} --audit-text "Ready to close: No\nNeeds work."`);
+    const { stdout: shown2 } = await execAsync(`tsx ${cliPath} --json show ${id2}`);
+    expect(JSON.parse(shown2).workItem.audit.status).toBe('Partial');
+  });
+
+  it('persists email redaction through full roundtrip', async () => {
+    const { stdout: created } = await execAsync(`tsx ${cliPath} --json create -t "Redaction roundtrip"`);
+    const id = JSON.parse(created).workItem.id;
+
+    const auditText = 'Ready to close: Yes\nReviewed by developer@company.com and qa@test.io';
+    await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "${auditText}"`);
+
+    // Verify redaction in show --json
+    const { stdout: shown } = await execAsync(`tsx ${cliPath} --json show ${id}`);
+    const shownRes = JSON.parse(shown);
+    expect(shownRes.workItem.audit.text).toBe(
+      'Ready to close: Yes\nReviewed by d***@company.com and q***@test.io'
+    );
+
+    // Update again and verify redaction persists
+    const { stdout: updated } = await execAsync(
+      `tsx ${cliPath} --json update ${id} --audit-text "Ready to close: Yes\nFinal review by manager@corp.com"`
+    );
+    expect(JSON.parse(updated).workItem.audit.text).toBe(
+      'Ready to close: Yes\nFinal review by m***@corp.com'
+    );
   });
 
   it('handles the reported example and flags gutter-character variant', async () => {
