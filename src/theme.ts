@@ -16,21 +16,16 @@ export const theme = {
     readyYes: chalk.green,
     readyNo: chalk.hex('#FFA500'),
   },
-  status: {
-    open: chalk.greenBright,
-    inProgress: chalk.cyan,
-    blocked: chalk.redBright,
-    completed: chalk.white,
-    inputNeeded: chalk.yellow,
-    deleted: chalk.gray,
-  },
+  // Blocked status override: always red, regardless of stage
+  blocked: chalk.redBright,
+  // Stage-progression colours: gray → blue → cyan → yellow → green → white
   stage: {
-    idea: chalk.blueBright,
-    intakeComplete: chalk.hex('#FFA500'),
-    planComplete: chalk.white,
-    inProgress: chalk.cyan,
-    inReview: chalk.magenta,
-    done: chalk.green,
+    idea: chalk.gray,
+    intakeComplete: chalk.blue,
+    planComplete: chalk.cyan,
+    inProgress: chalk.yellow,
+    inReview: chalk.green,
+    done: chalk.white,
   },
   priority: {
     critical: chalk.redBright,
@@ -55,21 +50,16 @@ export const theme = {
       readyYes: tuiWrap('green-fg'),
       readyNo: tuiWrap('214-fg'),
     },
-    status: {
-      open: tuiWrap('green-fg'),
-      inProgress: tuiWrap('cyan-fg'),
-      blocked: tuiWrap('red-fg'),
-      completed: tuiWrap('white-fg'),
-      inputNeeded: tuiWrap('yellow-fg'),
-      deleted: tuiWrap('gray-fg'),
-    },
+    // Blocked status override: always red, regardless of stage
+    blocked: tuiWrap('red-fg'),
+    // Stage-progression colours: gray → blue → cyan → yellow → green → white
     stage: {
-      idea: tuiWrap('blue-fg'),
-      intakeComplete: tuiWrap('214-fg'),
-      planComplete: tuiWrap('white-fg'),
-      inProgress: tuiWrap('cyan-fg'),
-      inReview: tuiWrap('magenta-fg'),
-      done: tuiWrap('green-fg'),
+      idea: tuiWrap('gray-fg'),
+      intakeComplete: tuiWrap('blue-fg'),
+      planComplete: tuiWrap('cyan-fg'),
+      inProgress: tuiWrap('yellow-fg'),
+      inReview: tuiWrap('green-fg'),
+      done: tuiWrap('white-fg'),
     },
   },
 } as const;

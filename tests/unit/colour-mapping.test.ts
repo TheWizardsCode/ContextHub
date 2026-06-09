@@ -66,139 +66,181 @@ describe('Colour Mapping', () => {
       expect(theme.tui.stage.done).toBeTypeOf('function');
     });
 
-    it('should have status colours defined including new statuses', () => {
-      expect(theme.status.inputNeeded).toBeTypeOf('function');
-      expect(theme.status.deleted).toBeTypeOf('function');
+    it('should have a blocked colour override defined for CLI', () => {
+      expect(theme.blocked).toBeTypeOf('function');
     });
 
-    it('should have TUI status colours defined including new statuses', () => {
-      expect(theme.tui.status.inputNeeded).toBeTypeOf('function');
-      expect(theme.tui.status.deleted).toBeTypeOf('function');
+    it('should have a blocked colour override defined for TUI', () => {
+      expect(theme.tui.blocked).toBeTypeOf('function');
+    });
+
+    it('should NOT have status colours defined (removed)', () => {
+      expect((theme as any).status).toBeUndefined();
+      expect((theme.tui as any).status).toBeUndefined();
     });
   });
 
   describe('Stage-based colour mapping (CLI)', () => {
-    it('should colour idea stage items', () => {
+    it('should colour idea stage items with gray', () => {
       const item = createMockWorkItem({ stage: 'idea' });
       const coloured = formatTitleOnly(item);
-      // Verify function returns a string
       expect(coloured).toBeTypeOf('string');
       expect(coloured.length).toBeGreaterThan(0);
     });
 
-    it('should colour intake_complete stage items', () => {
+    it('should colour intake_complete stage items with blue', () => {
       const item = createMockWorkItem({ stage: 'intake_complete' });
       const coloured = formatTitleOnly(item);
       expect(coloured).toBeTypeOf('string');
       expect(coloured.length).toBeGreaterThan(0);
     });
 
-    it('should colour plan_complete stage items', () => {
+    it('should colour plan_complete stage items with cyan', () => {
       const item = createMockWorkItem({ stage: 'plan_complete' });
       const coloured = formatTitleOnly(item);
       expect(coloured).toBeTypeOf('string');
       expect(coloured.length).toBeGreaterThan(0);
     });
 
-    it('should colour in_progress stage items', () => {
+    it('should colour in_progress stage items with yellow', () => {
       const item = createMockWorkItem({ stage: 'in_progress' });
       const coloured = formatTitleOnly(item);
       expect(coloured).toBeTypeOf('string');
       expect(coloured.length).toBeGreaterThan(0);
     });
 
-    it('should colour in_review stage items', () => {
+    it('should colour in_review stage items with green', () => {
       const item = createMockWorkItem({ stage: 'in_review' });
       const coloured = formatTitleOnly(item);
       expect(coloured).toBeTypeOf('string');
       expect(coloured.length).toBeGreaterThan(0);
     });
 
-    it('should colour done stage items', () => {
+    it('should colour done stage items with white', () => {
       const item = createMockWorkItem({ stage: 'done' });
       const coloured = formatTitleOnly(item);
       expect(coloured).toBeTypeOf('string');
       expect(coloured.length).toBeGreaterThan(0);
     });
+  });
 
-    it('should have stage colours defined', () => {
-      const item = createMockWorkItem({ stage: 'idea' });
-      const coloured = formatTitleOnlyTUI(item);
-      // Should contain blessed tags
-      expect(coloured).toContain('{');
-      expect(coloured).toContain('}');
-    });
-
-    it('should apply blessed markup tags for in_review stage', () => {
-      const item = createMockWorkItem({ stage: 'in_review' });
-      const coloured = formatTitleOnlyTUI(item);
-      // Should contain magenta-fg tag
-      expect(coloured).toContain('magenta-fg');
-    });
-
-    it('should apply blessed markup tags for done stage', () => {
-      const item = createMockWorkItem({ stage: 'done' });
-      const coloured = formatTitleOnlyTUI(item);
-      // Should contain green-fg tag
-      expect(coloured).toContain('green-fg');
-    });
-
+  describe('Stage-based colour mapping (TUI)', () => {
     it('should apply blessed markup tags for idea stage', () => {
       const item = createMockWorkItem({ stage: 'idea' });
       const coloured = formatTitleOnlyTUI(item);
-      // Should contain blue-fg tag
-      expect(coloured).toContain('blue-fg');
+      expect(coloured).toContain('gray-fg');
     });
 
     it('should apply blessed markup tags for intake_complete stage', () => {
       const item = createMockWorkItem({ stage: 'intake_complete' });
       const coloured = formatTitleOnlyTUI(item);
-      // Should contain 214-fg (orange) tag
-      expect(coloured).toContain('214-fg');
+      expect(coloured).toContain('blue-fg');
+    });
+
+    it('should apply blessed markup tags for plan_complete stage', () => {
+      const item = createMockWorkItem({ stage: 'plan_complete' });
+      const coloured = formatTitleOnlyTUI(item);
+      expect(coloured).toContain('cyan-fg');
+    });
+
+    it('should apply blessed markup tags for in_progress stage', () => {
+      const item = createMockWorkItem({ stage: 'in_progress' });
+      const coloured = formatTitleOnlyTUI(item);
+      expect(coloured).toContain('yellow-fg');
+    });
+
+    it('should apply blessed markup tags for in_review stage', () => {
+      const item = createMockWorkItem({ stage: 'in_review' });
+      const coloured = formatTitleOnlyTUI(item);
+      expect(coloured).toContain('green-fg');
+    });
+
+    it('should apply blessed markup tags for done stage', () => {
+      const item = createMockWorkItem({ stage: 'done' });
+      const coloured = formatTitleOnlyTUI(item);
+      expect(coloured).toContain('white-fg');
     });
 
     it('should produce different blessed tags for different stages', () => {
-      const stages = ['idea', 'in_review', 'done'];
+      const stages = ['idea', 'intake_complete', 'in_progress', 'done'];
       const outputs = stages.map(stage => {
         const item = createMockWorkItem({ stage });
         return formatTitleOnlyTUI(item);
       });
-      // All outputs should be distinct
       const uniqueOutputs = new Set(outputs);
       expect(uniqueOutputs.size).toBe(stages.length);
     });
   });
 
-  describe('Priority: stage over status', () => {
-    it('should prefer stage colour over status colour when stage is set', () => {
-      const item = createMockWorkItem({ 
-        stage: 'in_review', 
-        status: 'open' 
-      });
+  describe('Blocked status override', () => {
+    it('should apply red colour when status is blocked, regardless of stage (CLI)', () => {
+      const item = createMockWorkItem({ status: 'blocked', stage: 'in_review', title: 'Blocked Item' });
+      const coloured = formatTitleOnly(item);
+      // The title text should be present (colour applied via chalk, content unchanged)
+      expect(coloured).toContain('Blocked Item');
+    });
+
+    it('should apply red colour when status is blocked, even with done stage (TUI)', () => {
+      const item = createMockWorkItem({ status: 'blocked', stage: 'done', title: 'Blocked Done' });
       const coloured = formatTitleOnlyTUI(item);
-      // Should use stage colour (magenta), not status colour (green-fg)
-      expect(coloured).toContain('magenta-fg');
+      // Blocked overrides stage: should use red-fg, not green-fg (done) or white-fg
+      expect(coloured).toContain('red-fg');
       expect(coloured).not.toContain('green-fg');
     });
 
-    it('should fall back to status colour when stage is undefined', () => {
-      const item = createMockWorkItem({ 
-        stage: undefined, 
-        status: 'blocked' 
-      });
+    it('should apply red colour when status is blocked with no stage (TUI)', () => {
+      const item = createMockWorkItem({ status: 'blocked', stage: undefined, title: 'Blocked No Stage' });
       const coloured = formatTitleOnlyTUI(item);
-      // Should use status colour (red-fg for blocked)
       expect(coloured).toContain('red-fg');
     });
 
-    it('should fall back to status colour when stage is empty string', () => {
-      const item = createMockWorkItem({ 
-        stage: '', 
-        status: 'in-progress' 
-      });
+    it('should apply red colour when status is blocked with idea stage (TUI)', () => {
+      const item = createMockWorkItem({ status: 'blocked', stage: 'idea', title: 'Blocked Idea' });
       const coloured = formatTitleOnlyTUI(item);
-      // Should use status colour (cyan-fg for in-progress)
-      expect(coloured).toContain('cyan-fg');
+      expect(coloured).toContain('red-fg');
+      expect(coloured).not.toContain('gray-fg');
+    });
+
+    it('should use stage colour when status is not blocked', () => {
+      const item = createMockWorkItem({ status: 'open', stage: 'in_progress', title: 'Normal Item' });
+      const coloured = formatTitleOnlyTUI(item);
+      // Should use yellow-fg for in_progress, not red-fg
+      expect(coloured).toContain('yellow-fg');
+      expect(coloured).not.toContain('red-fg');
+    });
+
+    it('should produce consistent output for blocked status in TUI', () => {
+      const item = createMockWorkItem({ status: 'blocked', stage: 'in_review', title: 'Blocked Item' });
+      const output = formatTitleOnlyTUI(item);
+      // Snapshot: blessed markup with red-fg (blocked overrides stage)
+      expect(output).toBe('{red-fg}Blocked Item{/red-fg}');
+    });
+  });
+
+  describe('Default/fallback behaviour', () => {
+    it('should use gray (idea) colour when stage is undefined and status is not blocked (TUI)', () => {
+      const item = createMockWorkItem({ stage: undefined, status: 'open', title: 'No Stage' });
+      const coloured = formatTitleOnlyTUI(item);
+      // Should fall back to gray-fg (idea/idea default colour)
+      expect(coloured).toContain('gray-fg');
+    });
+
+    it('should use gray (idea) colour when stage is empty string and status is not blocked (TUI)', () => {
+      const item = createMockWorkItem({ stage: '', status: 'open', title: 'Empty Stage' });
+      const coloured = formatTitleOnlyTUI(item);
+      expect(coloured).toContain('gray-fg');
+    });
+
+    it('should use gray (idea) colour when stage is unknown and status is not blocked (TUI)', () => {
+      const item = createMockWorkItem({ stage: 'unknown_stage', status: 'open', title: 'Unknown Stage' });
+      const coloured = formatTitleOnlyTUI(item);
+      expect(coloured).toContain('gray-fg');
+    });
+
+    it('should still use red for blocked status even when stage is undefined', () => {
+      const item = createMockWorkItem({ status: 'blocked', stage: undefined, title: 'Blocked Undefined' });
+      const coloured = formatTitleOnlyTUI(item);
+      expect(coloured).toContain('red-fg');
     });
   });
 
@@ -232,6 +274,18 @@ describe('Colour Mapping', () => {
       // Title should still be visible
       expect(coloured).toContain('Test Item');
     });
+
+    it('should preserve text for blocked items', () => {
+      const item = createMockWorkItem({
+        title: 'Blocked Work',
+        status: 'blocked',
+        stage: 'in_progress',
+      });
+      const cliColoured = formatTitleOnly(item);
+      const tuiColoured = formatTitleOnlyTUI(item);
+      expect(cliColoured).toContain('Blocked Work');
+      expect(tuiColoured).toContain('Blocked Work');
+    });
   });
 
   describe('Fallback behaviour (colours disabled)', () => {
@@ -262,23 +316,13 @@ describe('Colour Mapping', () => {
       // Blessed tags should always be present for TUI
       expect(coloured).toContain('{');
       expect(coloured).toContain('}');
-      expect(coloured).toContain('green-fg');
+      expect(coloured).toContain('white-fg');
     });
 
-    it('should fall back to plain text in CLI when colours disabled', () => {
+    it('should fall back to plain text in CLI when colours disabled for all stages', () => {
       process.env.FORCE_COLOR = '0';
-      const statuses = ['open', 'in-progress', 'blocked', 'completed', 'input_needed', 'deleted'];
       const stages = ['idea', 'intake_complete', 'plan_complete', 'in_progress', 'in_review', 'done'];
       
-      // Test all statuses
-      for (const status of statuses) {
-        const item = createMockWorkItem({ status });
-        const coloured = formatTitleOnly(item);
-        expect(coloured).not.toMatch(/\x1b\[/);
-        expect(coloured).toBe('Test Item');
-      }
-      
-      // Test all stages
       for (const stage of stages) {
         const item = createMockWorkItem({ stage });
         const coloured = formatTitleOnly(item);
@@ -286,63 +330,86 @@ describe('Colour Mapping', () => {
         expect(coloured).toBe('Test Item');
       }
     });
+
+    it('should fall back to plain text for blocked items when colours disabled', () => {
+      process.env.FORCE_COLOR = '0';
+      const item = createMockWorkItem({ status: 'blocked', stage: 'in_review' });
+      const coloured = formatTitleOnly(item);
+      expect(coloured).not.toMatch(/\x1b\[/);
+      expect(coloured).toBe('Test Item');
+    });
+
+    it('should fall back to idea/gray for undefined stage when colours disabled', () => {
+      process.env.FORCE_COLOR = '0';
+      const item = createMockWorkItem({ stage: undefined, status: 'open' });
+      const coloured = formatTitleOnly(item);
+      expect(coloured).not.toMatch(/\x1b\[/);
+      expect(coloured).toBe('Test Item');
+    });
   });
 
   describe('Visual regression tests (snapshot-like)', () => {
     it('should produce consistent output for idea stage', () => {
       const item = createMockWorkItem({ stage: 'idea', title: 'My Feature' });
       const output = formatTitleOnlyTUI(item);
-      // Snapshot: blessed markup with blue-fg
-      expect(output).toBe('{blue-fg}My Feature{/blue-fg}');
+      // Snapshot: blessed markup with gray-fg
+      expect(output).toBe('{gray-fg}My Feature{/gray-fg}');
     });
 
     it('should produce consistent output for intake_complete stage', () => {
       const item = createMockWorkItem({ stage: 'intake_complete', title: 'My Task' });
       const output = formatTitleOnlyTUI(item);
-      // Snapshot: blessed markup with 214-fg (orange)
-      expect(output).toBe('{214-fg}My Task{/214-fg}');
+      // Snapshot: blessed markup with blue-fg
+      expect(output).toBe('{blue-fg}My Task{/blue-fg}');
+    });
+
+    it('should produce consistent output for plan_complete stage', () => {
+      const item = createMockWorkItem({ stage: 'plan_complete', title: 'My Plan' });
+      const output = formatTitleOnlyTUI(item);
+      // Snapshot: blessed markup with cyan-fg
+      expect(output).toBe('{cyan-fg}My Plan{/cyan-fg}');
+    });
+
+    it('should produce consistent output for in_progress stage', () => {
+      const item = createMockWorkItem({ stage: 'in_progress', title: 'WIP Item' });
+      const output = formatTitleOnlyTUI(item);
+      // Snapshot: blessed markup with yellow-fg
+      expect(output).toBe('{yellow-fg}WIP Item{/yellow-fg}');
     });
 
     it('should produce consistent output for in_review stage', () => {
       const item = createMockWorkItem({ stage: 'in_review', title: 'Review Item' });
       const output = formatTitleOnlyTUI(item);
-      // Snapshot: blessed markup with magenta-fg
-      expect(output).toBe('{magenta-fg}Review Item{/magenta-fg}');
+      // Snapshot: blessed markup with green-fg
+      expect(output).toBe('{green-fg}Review Item{/green-fg}');
     });
 
     it('should produce consistent output for done stage', () => {
       const item = createMockWorkItem({ stage: 'done', title: 'Completed Work' });
       const output = formatTitleOnlyTUI(item);
-      // Snapshot: blessed markup with green-fg
-      expect(output).toBe('{green-fg}Completed Work{/green-fg}');
+      // Snapshot: blessed markup with white-fg
+      expect(output).toBe('{white-fg}Completed Work{/white-fg}');
     });
 
-    it('should produce consistent output for blocked status', () => {
-      const item = createMockWorkItem({ status: 'blocked', title: 'Blocked Item' });
+    it('should produce consistent output for blocked status overriding stage', () => {
+      const item = createMockWorkItem({ status: 'blocked', stage: 'in_review', title: 'Blocked Item' });
       const output = formatTitleOnlyTUI(item);
-      // Snapshot: blessed markup with red-fg
+      // Snapshot: blessed markup with red-fg (blocked overrides stage)
       expect(output).toBe('{red-fg}Blocked Item{/red-fg}');
     });
 
-    it('should produce consistent output for open status', () => {
-      const item = createMockWorkItem({ status: 'open', title: 'Open Task' });
+    it('should produce consistent output for undefined stage (not blocked)', () => {
+      const item = createMockWorkItem({ stage: undefined, status: 'open', title: 'No Stage' });
       const output = formatTitleOnlyTUI(item);
-      // Snapshot: blessed markup with green-fg
-      expect(output).toBe('{green-fg}Open Task{/green-fg}');
+      // Snapshot: blessed markup with gray-fg (idea/default colour)
+      expect(output).toBe('{gray-fg}No Stage{/gray-fg}');
     });
 
-    it('should produce consistent output for in-progress status', () => {
-      const item = createMockWorkItem({ status: 'in-progress', title: 'WIP Item' });
+    it('should produce consistent output for empty stage (not blocked)', () => {
+      const item = createMockWorkItem({ stage: '', status: 'open', title: 'Empty Stage' });
       const output = formatTitleOnlyTUI(item);
-      // Snapshot: blessed markup with cyan-fg
-      expect(output).toBe('{cyan-fg}WIP Item{/cyan-fg}');
-    });
-
-    it('should produce consistent output for completed status', () => {
-      const item = createMockWorkItem({ status: 'completed', title: 'Done Item' });
-      const output = formatTitleOnlyTUI(item);
-      // Snapshot: blessed markup with white-fg
-      expect(output).toBe('{white-fg}Done Item{/white-fg}');
+      // Snapshot: blessed markup with gray-fg (idea/default colour)
+      expect(output).toBe('{gray-fg}Empty Stage{/gray-fg}');
     });
   });
 });

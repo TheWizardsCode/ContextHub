@@ -65,47 +65,8 @@ export function formatTitleOnlyTUI(item: WorkItem): string {
   return renderTitleTUI(item);
 }
 
-// Return a chalk function appropriate for a given status (for console output)
-function titleColorForStatus(status?: string): (text: string) => string {
-  const s = (status || '').toLowerCase().trim();
-  switch (s) {
-    case 'completed':
-      return theme.status.completed;
-    case 'in-progress':
-      return theme.status.inProgress;
-    case 'blocked':
-      return theme.status.blocked;
-    case 'input_needed':
-      return theme.status.inputNeeded;
-    case 'deleted':
-      return theme.status.deleted;
-    case 'open':
-    default:
-      return theme.status.open;
-  }
-}
-
-// Return blessed markup tags appropriate for a given status (for TUI output)
-function titleColorForStatusTUI(status?: string): (text: string) => string {
-  const s = (status || '').toLowerCase().trim();
-  switch (s) {
-    case 'completed':
-      return theme.tui.status.completed;
-    case 'in-progress':
-      return theme.tui.status.inProgress;
-    case 'blocked':
-      return theme.tui.status.blocked;
-    case 'input_needed':
-      return theme.tui.status.inputNeeded;
-    case 'deleted':
-      return theme.tui.status.deleted;
-    case 'open':
-    default:
-      return theme.tui.status.open;
-  }
-}
-
 // Return chalk function appropriate for a given stage (for console output)
+// Stage progression: gray → blue → cyan → yellow → green → white
 function titleColorForStage(stage?: string): (text: string) => string {
   const s = (stage || '').toLowerCase().trim();
   switch (s) {
@@ -122,11 +83,12 @@ function titleColorForStage(stage?: string): (text: string) => string {
     case 'done':
       return theme.stage.done;
     default:
-      return theme.status.open;
+      return theme.stage.idea; // default to idea/gray colour
   }
 }
 
 // Return blessed markup tags appropriate for a given stage (for TUI output)
+// Stage progression: gray-fg → blue-fg → cyan-fg → yellow-fg → green-fg → white-fg
 function titleColorForStageTUI(stage?: string): (text: string) => string {
   const s = (stage || '').toLowerCase().trim();
   switch (s) {
@@ -143,21 +105,31 @@ function titleColorForStageTUI(stage?: string): (text: string) => string {
     case 'done':
       return theme.tui.stage.done;
     default:
-      return theme.tui.status.open;
+      return theme.tui.stage.idea; // default to idea/gray-fg colour
   }
 }
 
 // Render a work item title with the color appropriate to its status or stage (console output)
+// Blocked items always appear red, regardless of stage. Otherwise, stage-based colours apply.
 function renderTitle(item: WorkItem, prefix: string = ''): string {
-  // Prefer stage-based colour when a stage is set; fall back to status-based colour
-  const colorFn = item.stage ? titleColorForStage(item.stage) : titleColorForStatus(item.status);
+  // Blocked status overrides everything
+  if (item.status === 'blocked') {
+    return theme.blocked(prefix + item.title);
+  }
+  // Use stage-based colour; fallback to idea/gray when stage is undefined or empty
+  const colorFn = titleColorForStage(item.stage || undefined);
   return colorFn(prefix + item.title);
 }
 
 // Render a work item title with blessed markup colors for TUI output
+// Blocked items always appear red, regardless of stage. Otherwise, stage-based colours apply.
 function renderTitleTUI(item: WorkItem, prefix: string = ''): string {
-  // Prefer stage-based colour when a stage is set; fall back to status-based colour
-  const colorFn = item.stage ? titleColorForStageTUI(item.stage) : titleColorForStatusTUI(item.status);
+  // Blocked status overrides everything
+  if (item.status === 'blocked') {
+    return theme.tui.blocked(prefix + item.title);
+  }
+  // Use stage-based colour; fallback to idea/gray when stage is undefined or empty
+  const colorFn = titleColorForStageTUI(item.stage || undefined);
   return colorFn(prefix + item.title);
 }
 
