@@ -259,8 +259,9 @@ describe('TUI integration: style preservation', () => {
 
     const setContentCalls = detail?.setContent?.mock?.calls || [];
     const content = setContentCalls.length > 0 ? setContentCalls[setContentCalls.length - 1][0] : '';
-    expect(content).toContain('{green-fg}');
-    expect(content).toContain('{/green-fg}');
+    // After colour-mapping refactoring, items without a stage fall back to gray-fg (idea colour)
+    expect(content).toContain('{gray-fg}');
+    expect(content).toContain('{/gray-fg}');
     expect(content).toContain('{open}');
     expect(content).toContain('{close}');
   });
