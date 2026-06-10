@@ -560,6 +560,44 @@ describe('Worklog browse pi extension', () => {
       // doneCalled stays true (was called by Escape, not re-triggered)
     });
 
+    it('Escape in detail view clears the worklog-browse-selection widget', async () => {
+      // This test verifies the fix for WL-0MQ8KG8R2006E6BS
+      // When ESC is pressed in the detail view, the preview widget should be cleared
+      const listWorkItems = vi.fn().mockResolvedValue([
+        { id: 'WL-1', title: 'One', status: 'open', description: 'Test' },
+      ]);
+
+      const chooseWorkItem = vi.fn(async (items, _ctx, onSelectionChange) => {
+        onSelectionChange(items[0]);
+        return items[0];
+      });
+
+      const runWl = vi.fn().mockResolvedValue('# Detail\n\nContent');
+
+      const extension = createWorklogBrowseExtension({ listWorkItems, chooseWorkItem, runWl });
+      extension(makePi() as any);
+
+      const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
+
+      const notify = vi.fn();
+      const setWidget = vi.fn();
+      const { custom } = makeCustomMock();
+
+      await commandHandler('', { ui: { notify, setWidget, custom } });
+
+      // Find the handleInput function from the custom mock
+      const customCallArgs = custom.mock.calls[0]?.[0] as Function;
+      const tui = { requestRender: vi.fn(), getHeight: () => 20 };
+      const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+      const comp = customCallArgs(tui, theme, {}, () => {});
+
+      // Press Escape
+      comp.handleInput('\u001b');
+
+      // Verify setWidget was called to clear the preview widget
+      expect(setWidget).toHaveBeenCalledWith('worklog-browse-selection', undefined);
+    });
+
     it('does not use custom() when not available', async () => {
       const listWorkItems = vi.fn().mockResolvedValue([
         { id: 'WL-1', title: 'One', status: 'open', description: 'Test' },

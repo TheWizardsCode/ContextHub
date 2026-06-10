@@ -501,6 +501,8 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
                 invalidate: () => widget.invalidate(),
                 handleInput: (data: string) => {
                   if (isEscapeKey(data)) {
+                    // Clear the preview widget before closing the modal
+                    ctx.ui.setWidget?.('worklog-browse-selection', undefined);
                     done(null);
                     return;
                   }
