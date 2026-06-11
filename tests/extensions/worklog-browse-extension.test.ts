@@ -111,7 +111,14 @@ describe('Worklog browse pi extension', () => {
     expect(chooseWorkItem).toHaveBeenCalledTimes(1);
     expect(runWl).toHaveBeenCalledWith(['show', 'WL-4', '--format', 'markdown'], false);
 
-    expect(setWidget).toHaveBeenNthCalledWith(1, 'worklog-browse-selection', [
+    expect(setWidget).toHaveBeenNthCalledWith(1, 'worklog-browse-selection', expect.any(Function), { placement: 'belowEditor' });
+    expect(setWidget).toHaveBeenNthCalledWith(2, 'worklog-browse-selection', expect.any(Function), { placement: 'belowEditor' });
+
+    // Verify the factory function produces correct output
+    const factory1 = setWidget.mock.calls[0][1];
+    const mockTheme1 = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+    const comp1 = factory1({}, mockTheme1);
+    expect(comp1.render(80)).toEqual([
       'Two <WL-2>',
       'Priority/Stage/Status: high/plan_complete/in-progress',
       'Risk/Effort: Medium/Small',
@@ -122,18 +129,6 @@ describe('Worklog browse pi extension', () => {
       'L5',
       'L6',
       'L7',
-    ]);
-    expect(setWidget).toHaveBeenNthCalledWith(2, 'worklog-browse-selection', [
-      'Four <WL-4>',
-      'Priority/Stage/Status: critical/in_progress/blocked',
-      'Risk/Effort: High/Large',
-      'A',
-      'B',
-      'C',
-      'D',
-      'E',
-      'F',
-      'G',
     ]);
 
     // The scrollable detail widget is now shown via ctx.ui.custom() for proper keyboard focus.
@@ -175,7 +170,13 @@ describe('Worklog browse pi extension', () => {
 
     expect(runWl).toHaveBeenCalledWith(['show', 'WL-1', '--format', 'markdown'], false);
     expect(notify).toHaveBeenCalledWith(expect.stringContaining('Failed to render work item details'), 'error');
-    expect(setWidget).toHaveBeenCalledWith('worklog-browse-selection', [
+    expect(setWidget).toHaveBeenCalledWith('worklog-browse-selection', expect.any(Function), { placement: 'belowEditor' });
+    
+    // Verify the factory function produces correct output
+    const factory = setWidget.mock.calls[0][1];
+    const mockTheme2 = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+    const comp = factory({}, mockTheme2);
+    expect(comp.render(80)).toEqual([
       'One <WL-1>',
       'Priority/Stage/Status: —/—/open',
       'Risk/Effort: —/—',

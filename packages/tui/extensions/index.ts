@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { applyStageColour, stageColourToken } from './worklog-helpers.js';
+import { applyStageColour, type PiTheme } from './worklog-helpers.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -98,40 +98,25 @@ function truncateToWidth(text: string, maxWidth: number, ellipsis = '…'): stri
   return result;
 }
 
-export function formatBrowseOption(item: WorklogBrowseItem, maxWidth?: number): string {
-  const idPart = `(${item.id})`;
-  const full = `${item.title} ${idPart}`;
-
-  if (!maxWidth || maxWidth <= 0 || full.length <= maxWidth) {
-    return full;
-  }
-
-  const separatorAndId = ` ${idPart}`;
-  if (maxWidth <= separatorAndId.length) {
-    return truncateToWidth(idPart, maxWidth);
-  }
-
-  const titleWidth = maxWidth - separatorAndId.length;
-  const truncatedTitle = truncateToWidth(item.title, titleWidth);
-  return `${truncatedTitle}${separatorAndId}`;
-}
-
-/**
- * Format a browse option with stage-based colour applied to the title.
- */
-export function formatBrowseOptionColoured(
+export function formatBrowseOption(
   item: WorklogBrowseItem,
-  theme: { fg: (color: string, text: string) => string; bold: (text: string) => string },
   maxWidth?: number,
+  theme?: PiTheme,
 ): string {
   const idPart = `(${item.id})`;
   const titleText = item.title;
   const fullVisibleLength = titleText.length + 1 + idPart.length; // +1 for space
 
+  // Apply colour to title if theme is provided
+  const formatTitle = (title: string): string => {
+    if (theme) {
+      return applyStageColour(title, item.stage, item.status, theme);
+    }
+    return title;
+  };
+
   if (!maxWidth || maxWidth <= 0 || fullVisibleLength <= maxWidth) {
-    // Apply colour to title, keep id plain
-    const colouredTitle = applyStageColour(titleText, item.stage, item.status, theme);
-    return `${colouredTitle} ${idPart}`;
+    return `${formatTitle(titleText)} ${idPart}`;
   }
 
   const separatorAndId = ` ${idPart}`;
@@ -141,8 +126,7 @@ export function formatBrowseOptionColoured(
 
   const titleWidth = maxWidth - separatorAndId.length;
   const truncatedTitle = truncateToWidth(titleText, titleWidth);
-  const colouredTitle = applyStageColour(truncatedTitle, item.stage, item.status, theme);
-  return `${colouredTitle}${separatorAndId}`;
+  return `${formatTitle(truncatedTitle)}${separatorAndId}`;
 }
 
 function extractJsonObject(raw: string): unknown {
@@ -240,7 +224,7 @@ function descriptionPreview(description: string | undefined, maxLines = 7): stri
  */
 export function buildSelectionWidget(
   item: WorklogBrowseItem,
-): (tui: any, theme: { fg: (color: string, text: string) => string; bold: (text: string) => string }) => {
+): (tui: any, theme: PiTheme) => {
   render: (width: number) => string[];
   invalidate: () => void;
 } {
@@ -276,11 +260,7 @@ export function buildSelectionWidget(
   };
 }
 
-function truncateLine(line: string, width: number): string {
-  if (width <= 0) return '';
-  if (line.length <= width) return line;
-  return `${line.slice(0, Math.max(0, width - 1))}…`;
-}
+
 
 function isUpKey(data: string): boolean {
   return data === '\u001b[A' || data === 'up' || /^\u001b\[1;\d+(?::\d+)?A$/.test(data);
@@ -362,13 +342,13 @@ async function defaultChooseWorkItem(
     return {
       focused: false,
       render: (width: number) => {
-        const title = truncateLine(theme.fg('accent', theme.bold('Browse Worklog next items (top 5)')), width);
-        const help = truncateLine(theme.fg('dim', '↑↓ navigate • enter select • esc cancel'), width);
+        const title = truncateToWidth(theme.fg('accent', theme.bold('Browse Worklog next items (top 5)')), width);
+        const help = truncateToWidth(theme.fg('dim', '↑↓ navigate • enter select • esc cancel'), width);
         const options = items.map((item, index) => {
           const prefix = index === selectedIndex ? theme.fg('accent', '› ') : '  ';
           const contentWidth = Math.max(0, width - 2);
-          const optionLine = `${prefix}${formatBrowseOptionColoured(item, theme, contentWidth)}`;
-          return truncateLine(optionLine, width);
+          const optionLine = `${prefix}${formatBrowseOption(item, theme, contentWidth)}`;
+          return truncateToWidth(optionLine, width);
         });
 
         return [title, '', ...options, '', help];
