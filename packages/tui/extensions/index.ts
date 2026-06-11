@@ -513,9 +513,24 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         const announceSelection: SelectionChangeHandler = (
           item: WorklogBrowseItem,
         ) => {
+          // Debug: write to file
+          try {
+            const fs = require('fs');
+            fs.appendFileSync('/tmp/wl-debug.log', `[${new Date().toISOString()}] announceSelection called for item: ${item.id}\n`);
+          } catch (e) {
+            // ignore
+          }
           if (item.id === lastAnnouncedId) return;
           lastAnnouncedId = item.id;
-          ctx.ui.setWidget?.('worklog-browse-selection', buildSelectionWidget(item), { placement: 'belowEditor' });
+          const widgetFactory = buildSelectionWidget(item);
+          // Debug: write factory type
+          try {
+            const fs = require('fs');
+            fs.appendFileSync('/tmp/wl-debug.log', `  Widget factory type: ${typeof widgetFactory}\n`);
+          } catch (e) {
+            // ignore
+          }
+          ctx.ui.setWidget?.('worklog-browse-selection', widgetFactory, { placement: 'belowEditor' });
         };
 
         const selectedItem = await chooseWorkItem(items, ctx, announceSelection);
