@@ -42,11 +42,9 @@ export default function register(ctx: PluginContext): void {
     .option('--perf', 'Enable performance instrumentation')
     .action(async (options: PimanOptions) => {
       const browseExt = resolveExtension('index.ts');
-      const widgetExt = resolveExtension('worklog-widgets.ts');
 
       const piArgs: string[] = [
         '-e', browseExt,
-        '-e', widgetExt,
       ];
 
       if (options.perf) {
