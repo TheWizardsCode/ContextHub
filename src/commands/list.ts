@@ -25,7 +25,12 @@ export default function register(ctx: PluginContext): void {
     .option('--stage <stage>', 'Filter by stage')
     .option('--needs-producer-review [value]', 'Filter by needsProducerReview flag (true|false|yes|no; default true when omitted)')
     .option('--prefix <prefix>', 'Override the default prefix')
+    .option('--no-icons', 'Disable icon rendering for clean text output')
     .action((search: string | undefined, options: ListOptions) => {
+      // Apply --no-icons flag by setting env var before any icon functions are called
+      if (options.noIcons === true) {
+        process.env.WL_NO_ICONS = '1';
+      }
       utils.requireInitialized();
       const db = utils.getDatabase(options?.prefix);
       

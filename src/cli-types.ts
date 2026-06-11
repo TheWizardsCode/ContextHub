@@ -56,9 +56,11 @@ export interface ListOptions {
   deleted?: boolean;
   prefix?: string;
   number?: string;
+  /** Disable icon rendering for scripting/copy-paste */
+  noIcons?: boolean;
 }
 
-export interface ShowOptions { children?: boolean; prefix?: string; noPager?: boolean }
+export interface ShowOptions { children?: boolean; prefix?: string; noPager?: boolean; noIcons?: boolean }
 
 export interface AuditOptions { prefix?: string }
 
