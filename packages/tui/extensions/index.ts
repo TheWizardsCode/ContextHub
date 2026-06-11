@@ -222,30 +222,22 @@ export function buildSelectionWidget(
     const risk = item.risk ?? '—';
     const effort = item.effort ?? '—';
 
-    // Apply stage-based colour to the title, with blocked status override
-    const colouredTitle = applyStageColour(
-      `${item.title} <${item.id}>`,
-      item.stage,
-      item.status,
-      theme,
-    );
-
-    // Debug: write to file when factory is called
-    try {
-      const fs = require('fs');
-      const debugLine = `[${new Date().toISOString()}] Factory called, theme available: ${!!theme}, stage: ${item.stage}, colouredTitle: ${colouredTitle.substring(0, 50)}...\n`;
-      fs.appendFileSync('/tmp/wl-debug.log', debugLine);
-    } catch (_) {
-      // ignore debug write errors
-    }
-
     return {
-      render: (_width: number) => [
-        colouredTitle,
-        `Priority/Stage/Status: ${priority}/${stage}/${status}`,
-        `Risk/Effort: ${risk}/${effort}`,
-        ...descriptionPreview(item.description, 7),
-      ],
+      render: (_width: number) => {
+        // Apply stage-based colour to the title, with blocked status override
+        const colouredTitle = applyStageColour(
+          `${item.title} <${item.id}>`,
+          item.stage,
+          item.status,
+          theme,
+        );
+        return [
+          colouredTitle,
+          `Priority/Stage/Status: ${priority}/${stage}/${status}`,
+          `Risk/Effort: ${risk}/${effort}`,
+          ...descriptionPreview(item.description, 7),
+        ];
+      },
       invalidate: () => {
         // no-op: all rendering is derived from local state
       },
