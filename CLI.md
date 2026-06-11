@@ -382,6 +382,7 @@ Options:
 
 `-c, --children` — Also display descendants in a tree layout (optional).
 `--prefix <prefix>` (optional)
+`--no-icons` — Disable icon rendering for clean text output. When icons are disabled, priority and status display as plain text (e.g., `[CRIT]`, `[OPEN]`) instead of emoji. This is useful for scripting or copy-paste operations.
 
 The output always includes `Risk` and `Effort` fields. When a field has no value a placeholder `—` is shown so the field is consistently visible for triage and prioritization.
 
@@ -496,6 +497,7 @@ Options:
 `--deleted` (optional) — Include items with `deleted` status in the output (hidden by default).
 `--needs-producer-review [value]` (optional; defaults to `true` when omitted; accepts true|false|yes|no)
 `--prefix <prefix>` (optional)
+`--no-icons` (optional) — Disable icon rendering for clean text output. When icons are disabled, priority and status display as plain text (e.g., `[CRIT]`, `[OPEN]`) instead of emoji. This is useful for scripting or copy-paste operations.
 `--json` (optional)
 
 Examples:

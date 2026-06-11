@@ -2,6 +2,10 @@
 
 > Work item: Design icon set & accessibility spec (WL-0MP160SZ3000LMO7)
 > Parent: Icons for priority and status (WL-0MNAGKMG5002L3XJ)
+> Status: **Implemented** — see commits [69bd2a0](https://github.com/TheWizardsCode/ContextHub/commit/69bd2a0),
+> [92fa240](https://github.com/TheWizardsCode/ContextHub/commit/92fa240),
+> [dcb09ac](https://github.com/TheWizardsCode/ContextHub/commit/dcb09ac),
+> [f3ca18b](https://github.com/TheWizardsCode/ContextHub/commit/f3ca18b)
 
 ## Overview
 
@@ -280,4 +284,55 @@ const pIcon = priorityIcon(item.priority, { noIcons: !useIcons });
 const sIcon = statusIcon(item.status, { noIcons: !useIcons });
 lines.push(`Status:   ${sIcon} ${item.status}`);
 lines.push(`Priority: ${pIcon} ${item.priority}`);
+```
+
+---
+
+## 10. Implementation Summary
+
+### Files Created/Modified
+
+| File | Change |
+|------|--------|
+| `src/icons.ts` | Core icon module with emoji, fallback, and label functions |
+| `src/tui/controller.ts` | Added icon rendering to TUI list rows |
+| `src/tui/components/metadata-pane.ts` | Added icon rendering to metadata pane |
+| `src/commands/helpers.ts` | Added icon formatting to CLI output (summary, concise, normal, full) |
+| `src/commands/list.ts` | Added `--no-icons` CLI flag |
+| `src/commands/show.ts` | Added `--no-icons` CLI flag |
+| `src/cli-types.ts` | Added `noIcons` to ListOptions and ShowOptions |
+| `tests/unit/icons.test.ts` | 58 unit tests for icon functions |
+
+### CLI Usage
+
+```bash
+# Default: icons enabled when output is a TTY
+wl list --format full
+
+# Disable icons for clean text output
+wl list --format full --no-icons
+# or
+WL_NO_ICONS=1 wl list --format full
+```
+
+### Output Examples
+
+**CLI (TTY) with icons:**
+```
+ID:    TEST-1
+Title: Set up CI pipeline
+Status: 🟢 Open [OPEN] · Stage: In Progress | Priority: 🔵 medium [MED ]
+```
+
+**CLI with icons disabled:**
+```
+ID:    TEST-1
+Title: Set up CI pipeline
+Status: [OPEN] · Stage: In Progress | Priority: medium
+```
+
+**TUI list:**
+```
+▸ 🔴 🔄 Set up CI pipeline (TEST-1)
+  ├── 🔵 ✅ Write tests (TEST-2)
 ```
