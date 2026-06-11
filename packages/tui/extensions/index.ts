@@ -347,7 +347,7 @@ async function defaultChooseWorkItem(
         const options = items.map((item, index) => {
           const prefix = index === selectedIndex ? theme.fg('accent', '› ') : '  ';
           const contentWidth = Math.max(0, width - 2);
-          const optionLine = `${prefix}${formatBrowseOption(item, theme, contentWidth)}`;
+          const optionLine = `${prefix}${formatBrowseOption(item, contentWidth, theme)}`;
           return truncateToWidth(optionLine, width);
         });
 
