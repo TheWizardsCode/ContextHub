@@ -230,8 +230,14 @@ export function buildSelectionWidget(
       theme,
     );
 
-    // Debug: log when factory is called
-    console.log('[worklog-browse-selection] Factory called, theme available:', !!theme, 'stage:', item.stage);
+    // Debug: write to file when factory is called
+    try {
+      const fs = require('fs');
+      const debugLine = `[${new Date().toISOString()}] Factory called, theme available: ${!!theme}, stage: ${item.stage}, colouredTitle: ${colouredTitle.substring(0, 50)}...\n`;
+      fs.appendFileSync('/tmp/wl-debug.log', debugLine);
+    } catch (_) {
+      // ignore debug write errors
+    }
 
     return {
       render: (_width: number) => [
