@@ -230,6 +230,9 @@ export function buildSelectionWidget(
       theme,
     );
 
+    // Debug: log when factory is called
+    console.log('[worklog-browse-selection] Factory called, theme available:', !!theme, 'stage:', item.stage);
+
     return {
       render: (_width: number) => [
         colouredTitle,
@@ -487,7 +490,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         ) => {
           if (item.id === lastAnnouncedId) return;
           lastAnnouncedId = item.id;
-          ctx.ui.setWidget?.('worklog-browse-selection', buildSelectionWidget(item));
+          ctx.ui.setWidget?.('worklog-browse-selection', buildSelectionWidget(item), { placement: 'belowEditor' });
         };
 
         const selectedItem = await chooseWorkItem(items, ctx, announceSelection);
