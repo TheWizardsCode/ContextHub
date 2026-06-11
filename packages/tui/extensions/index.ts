@@ -321,6 +321,13 @@ async function defaultChooseWorkItem(
   ctx: BrowseContext,
   onSelectionChange: SelectionChangeHandler,
 ): Promise<WorklogBrowseItem | undefined> {
+  // Debug: write to file
+  try {
+    const fs = require('fs');
+    fs.appendFileSync('/tmp/wl-debug.log', `[${new Date().toISOString()}] defaultChooseWorkItem called, items: ${items.length}, ctx.ui.custom: ${typeof ctx.ui.custom}, ctx.ui.select: ${typeof ctx.ui.select}\n`);
+  } catch (e) {
+    // ignore
+  }
   if (!ctx.ui.custom) {
     if (!ctx.ui.select) {
       throw new Error('Selection UI is unavailable in this environment.');
@@ -337,6 +344,13 @@ async function defaultChooseWorkItem(
     }
 
     const selectedItem = items[selectedIndex];
+    // Debug: write to file
+    try {
+      const fs = require('fs');
+      fs.appendFileSync('/tmp/wl-debug.log', `[${new Date().toISOString()}] Calling onSelectionChange (select fallback)\n`);
+    } catch (e) {
+      // ignore
+    }
     onSelectionChange(selectedItem);
     return selectedItem;
   }
@@ -351,6 +365,13 @@ async function defaultChooseWorkItem(
       const item = items[selectedIndex];
       if (item && item.id !== lastSelectionId) {
         lastSelectionId = item.id;
+        // Debug: write to file
+        try {
+          const fs = require('fs');
+          fs.appendFileSync('/tmp/wl-debug.log', `[${new Date().toISOString()}] Calling onSelectionChange (moveSelection)\n`);
+        } catch (e) {
+          // ignore
+        }
         onSelectionChange(item);
       }
     };
@@ -501,6 +522,13 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
 
   return function registerWorklogBrowseExtension(pi: PiLike): void {
     const runBrowseFlow = async (ctx: BrowseContext): Promise<void> => {
+      // Debug: write to file
+      try {
+        const fs = require('fs');
+        fs.appendFileSync('/tmp/wl-debug.log', `[${new Date().toISOString()}] runBrowseFlow started\n`);
+      } catch (e) {
+        // ignore
+      }
       try {
         const items = (await listWorkItems()).slice(0, 5);
         if (items.length === 0) {
