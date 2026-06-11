@@ -216,6 +216,23 @@ export function buildSelectionWidget(
   invalidate: () => void;
 } {
   return (_tui, theme) => {
+    // Debug: write to file
+    try {
+      const fs = require('fs');
+      const debugInfo = {
+        timestamp: new Date().toISOString(),
+        itemId: item.id,
+        stage: item.stage,
+        status: item.status,
+        themeAvailable: !!theme,
+        themeFgType: typeof theme?.fg,
+        themeKeys: theme ? Object.keys(theme) : [],
+      };
+      fs.appendFileSync('/tmp/wl-debug.log', JSON.stringify(debugInfo) + '\n');
+    } catch (e) {
+      // ignore
+    }
+
     const priority = item.priority ?? '—';
     const stage = item.stage ?? '—';
     const status = item.status ?? '—';
@@ -224,12 +241,19 @@ export function buildSelectionWidget(
 
     // Apply stage-based colour to the title, with blocked status override
     // Theme is only available in the factory function, not in render()
-    const colouredTitle = applyStageColour(
-      `${item.title} <${item.id}>`,
-      item.stage,
-      item.status,
-      theme,
-    );
+    let colouredTitle = `${item.title} <${item.id}>`;
+    if (theme && typeof theme.fg === 'function') {
+      const token = stageColourToken(item.stage);
+      colouredTitle = theme.fg(token, colouredTitle);
+      
+      // Debug: write result
+      try {
+        const fs = require('fs');
+        fs.appendFileSync('/tmp/wl-debug.log', `Applied colour: token=${token}, result=${colouredTitle.substring(0, 60)}...\n`);
+      } catch (e) {
+        // ignore
+      }
+    }
 
     // Pre-build the lines with colours applied
     const lines = [
