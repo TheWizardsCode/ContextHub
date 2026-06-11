@@ -386,6 +386,11 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     const icon = statusIcon(status, { noIcons: !iconsEnabled() });
     const fallback = statusFallback(status);
     const label = getStatusLabel(status, rules) || status;
+    // If noIcons mode, icon already returned the fallback text - just show label + fallback
+    // Otherwise show icon + label + fallback (icon for visual, fallback for copy/paste)
+    if (icon === fallback) {
+      return `${label} ${fallback}`;
+    }
     return icon ? `${icon} ${label} ${fallback}` : label;
   };
 
@@ -397,6 +402,11 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     }
     const icon = priorityIcon(priority, { noIcons: !iconsEnabled() });
     const fallback = priorityFallback(priority);
+    // If noIcons mode, icon already returned the fallback text - just show priority + fallback
+    // Otherwise show icon + priority + fallback (icon for visual, fallback for copy/paste)
+    if (icon === fallback) {
+      return `${priority} ${fallback}`;
+    }
     return icon ? `${icon} ${priority} ${fallback}` : priority;
   };
 
