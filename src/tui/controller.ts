@@ -14,6 +14,7 @@ import { runWlCommand, setCustomSpawn } from '../wl-integration/spawn.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { humanFormatWorkItem, formatTitleOnlyTUI } from '../commands/helpers.js';
+import { priorityIcon, statusIcon, iconsEnabled } from '../icons.js';
 import { createTuiState, rebuildTreeState, buildVisibleNodes, expandAncestorsForInProgress, isClosedStatus, enterMoveMode, exitMoveMode, sortBySortIndexDateAndId, incrementalExpand, incrementalCollapse } from './state.js';
 import { createPersistence } from './persistence.js';
 import { resolveWorklogDir } from '../worklog-paths.js';
@@ -2456,6 +2457,28 @@ export class TuiController {
       return 'Review: All';
     }
 
+    /**
+     * Render an icon with blessed color tags matching its priority/status category.
+     * Returns the icon wrapped in color tags, or empty string if icon text is empty.
+     */
+    function renderIcon(icon: string, value: string): string {
+      if (!icon) return '';
+      const v = (value || '').toLowerCase().trim();
+      // Priority colors
+      if (v === 'critical') return `{red-fg}${icon}{/red-fg}`;
+      if (v === 'high') return `{yellow-fg}${icon}{/yellow-fg}`;
+      if (v === 'medium') return `{blue-fg}${icon}{/blue-fg}`;
+      if (v === 'low') return `{gray-fg}${icon}{/gray-fg}`;
+      // Status colors
+      if (v === 'open') return `{green-fg}${icon}{/green-fg}`;
+      if (v === 'in-progress') return `{yellow-fg}${icon}{/yellow-fg}`;
+      if (v === 'completed') return `{white-fg}${icon}{/white-fg}`;
+      if (v === 'blocked') return `{red-fg}${icon}{/red-fg}`;
+      if (v === 'deleted') return `{red-fg}${icon}{/red-fg}`;
+      if (v === 'input_needed') return `{yellow-fg}${icon}{/yellow-fg}`;
+      return icon;
+    }
+
     function renderListAndDetail(selectIndex = 0) {
       const visible = buildVisible();
       const renderStart = perfEnabled ? performance.now() : null;
@@ -2468,8 +2491,14 @@ export class TuiController {
         const needsReviewBadge = n.item.needsProducerReview
           ? '{magenta-fg}●{/magenta-fg} '
           : '';
+        // Build priority and status icons with blessed color tags
+        const useIcons = iconsEnabled();
+        const pIcon = renderIcon(priorityIcon(n.item.priority || '', { noIcons: !useIcons }), n.item.priority || '');
+        const sIcon = renderIcon(statusIcon(n.item.status || '', { noIcons: !useIcons }), n.item.status || '');
+        const iconPrefix = pIcon || sIcon ? `${pIcon}${sIcon} ` : '';
+
         const title = formatTitleOnlyTUI(n.item);
-        let line = `${indent}${marker} ${needsReviewBadge}${doNotDelegateBadge}${title} {cyan-fg}({underline}${n.item.id}{/underline}){/cyan-fg}`;
+        let line = `${indent}${marker} ${iconPrefix}${needsReviewBadge}${doNotDelegateBadge}${title} {cyan-fg}({underline}${n.item.id}{/underline}){/cyan-fg}`;
         // Move mode visual feedback
         if (state.moveMode) {
           if (n.item.id === state.moveMode.sourceId) {
