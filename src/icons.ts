@@ -17,12 +17,13 @@ export interface IconOptions {
 }
 
 // ─── Priority Icons ────────────────────────────────────────────────────
+// More graphical icons that visually convey priority levels
 
 const PRIORITY_ICON: Record<string, string> = {
-  critical: '\u{1F534}',   // 🔴 Red circle
-  high:     '\u{1F7E0}',   // 🟠 Orange circle
-  medium:   '\u{1F535}',   // 🔵 Blue circle
-  low:      '\u{26AA}',    // ⚪ White circle
+  critical: '\u{1F6A8}',   // 🚨 Rotating light - urgent/danger
+  high:     '\u{2B50}',    // ⭐ Star - important
+  medium:   '\u{1F4CB}',   // 📋 Clipboard - standard task
+  low:      '\u{1F422}',   // 🐢 Turtle - slow/low priority
 };
 
 const PRIORITY_FALLBACK: Record<string, string> = {

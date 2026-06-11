@@ -22,16 +22,18 @@ across the TUI (blessed) and CLI (chalk) rendering paths. It covers:
 
 ## 1. Priority Icons
 
-| Priority  | Icon   | Text Fallback | Accessible Label        |
-|-----------|--------|---------------|-------------------------|
-| critical  | `🔴`   | `[CRIT]`      | "Critical priority"     |
-| high      | `🟠`   | `[HIGH]`      | "High priority"         |
-| medium    | `🔵`   | `[MED]`       | "Medium priority"       |
-| low       | `⚪`   | `[LOW]`       | "Low priority"          |
+| Priority  | Icon   | Text Fallback | Accessible Label        | Visual Meaning        |
+|-----------|--------|---------------|-------------------------|---------------------|
+| critical  | `🚨`   | `[CRIT]`      | "Critical priority"     | Rotating light - urgent/danger |
+| high      | `⭐`   | `[HIGH]`      | "High priority"         | Star - important     |
+| medium    | `📋`   | `[MED]`       | "Medium priority"       | Clipboard - standard task |
+| low       | `🐢`   | `[LOW]`       | "Low priority"          | Turtle - slow/low priority |
 
-**Colour association:** The emoji colours match the existing colour scheme in the
-theme (`theme.priority` / `theme.tui` priority colours) so scanning by colour
-remains consistent across icon and non-icon contexts.
+**Colour association:** The emoji colours are enhanced with blessed/chalk color tags to match the existing colour scheme in the theme (`theme.priority` / `theme.tui` priority colours) so scanning by colour remains consistent.
+- critical: red (🚨)
+- high: yellow (⭐)
+- medium: blue (📋)
+- low: gray (🐢)
 
 ---
 

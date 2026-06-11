@@ -11,19 +11,19 @@ import {
 
 describe('priorityIcon', () => {
   it('returns emoji for critical priority', () => {
-    expect(priorityIcon('critical')).toBe('\u{1F534}'); // 🔴
+    expect(priorityIcon('critical')).toBe('\u{1F6A8}'); // 🚨
   });
 
   it('returns emoji for high priority', () => {
-    expect(priorityIcon('high')).toBe('\u{1F7E0}'); // 🟠
+    expect(priorityIcon('high')).toBe('\u{2B50}'); // ⭐
   });
 
   it('returns emoji for medium priority', () => {
-    expect(priorityIcon('medium')).toBe('\u{1F535}'); // 🔵
+    expect(priorityIcon('medium')).toBe('\u{1F4CB}'); // 📋
   });
 
   it('returns emoji for low priority', () => {
-    expect(priorityIcon('low')).toBe('\u{26AA}'); // ⚪
+    expect(priorityIcon('low')).toBe('\u{1F422}'); // 🐢
   });
 
   it('returns empty string for unknown priority', () => {
@@ -37,9 +37,9 @@ describe('priorityIcon', () => {
   });
 
   it('is case-insensitive', () => {
-    expect(priorityIcon('CRITICAL')).toBe('\u{1F534}');
-    expect(priorityIcon('High')).toBe('\u{1F7E0}');
-    expect(priorityIcon('MEDIUM')).toBe('\u{1F535}');
+    expect(priorityIcon('CRITICAL')).toBe('\u{1F6A8}');
+    expect(priorityIcon('High')).toBe('\u{2B50}');
+    expect(priorityIcon('MEDIUM')).toBe('\u{1F4CB}');
   });
 
   describe('with noIcons option', () => {
