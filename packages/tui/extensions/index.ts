@@ -216,23 +216,6 @@ export function buildSelectionWidget(
   invalidate: () => void;
 } {
   return (_tui, theme) => {
-    // Debug: write to file
-    try {
-      const fs = require('fs');
-      const debugInfo = {
-        timestamp: new Date().toISOString(),
-        itemId: item.id,
-        stage: item.stage,
-        status: item.status,
-        themeAvailable: !!theme,
-        themeFgType: typeof theme?.fg,
-        themeKeys: theme ? Object.keys(theme) : [],
-      };
-      fs.appendFileSync('/tmp/wl-debug.log', JSON.stringify(debugInfo) + '\n');
-    } catch (e) {
-      // ignore
-    }
-
     const priority = item.priority ?? '—';
     const stage = item.stage ?? '—';
     const status = item.status ?? '—';
@@ -240,20 +223,12 @@ export function buildSelectionWidget(
     const effort = item.effort ?? '—';
 
     // Apply stage-based colour to the title, with blocked status override
-    // Theme is only available in the factory function, not in render()
-    let colouredTitle = `${item.title} <${item.id}>`;
-    if (theme && typeof theme.fg === 'function') {
-      const token = stageColourToken(item.stage);
-      colouredTitle = theme.fg(token, colouredTitle);
-      
-      // Debug: write result
-      try {
-        const fs = require('fs');
-        fs.appendFileSync('/tmp/wl-debug.log', `Applied colour: token=${token}, result=${colouredTitle.substring(0, 60)}...\n`);
-      } catch (e) {
-        // ignore
-      }
-    }
+    const colouredTitle = applyStageColour(
+      `${item.title} <${item.id}>`,
+      item.stage,
+      item.status,
+      theme,
+    );
 
     // Pre-build the lines with colours applied
     const lines = [
@@ -264,7 +239,7 @@ export function buildSelectionWidget(
     ];
 
     return {
-      render: (_width: number) => lines,
+      render: (width: number) => lines.map(line => truncateToWidth(line, width)),
       invalidate: () => {
         // no-op: all rendering is derived from local state
       },
@@ -321,13 +296,6 @@ async function defaultChooseWorkItem(
   ctx: BrowseContext,
   onSelectionChange: SelectionChangeHandler,
 ): Promise<WorklogBrowseItem | undefined> {
-  // Debug: write to file
-  try {
-    const fs = require('fs');
-    fs.appendFileSync('/tmp/wl-debug.log', `[${new Date().toISOString()}] defaultChooseWorkItem called, items: ${items.length}, ctx.ui.custom: ${typeof ctx.ui.custom}, ctx.ui.select: ${typeof ctx.ui.select}\n`);
-  } catch (e) {
-    // ignore
-  }
   if (!ctx.ui.custom) {
     if (!ctx.ui.select) {
       throw new Error('Selection UI is unavailable in this environment.');
@@ -344,13 +312,6 @@ async function defaultChooseWorkItem(
     }
 
     const selectedItem = items[selectedIndex];
-    // Debug: write to file
-    try {
-      const fs = require('fs');
-      fs.appendFileSync('/tmp/wl-debug.log', `[${new Date().toISOString()}] Calling onSelectionChange (select fallback)\n`);
-    } catch (e) {
-      // ignore
-    }
     onSelectionChange(selectedItem);
     return selectedItem;
   }
@@ -365,13 +326,6 @@ async function defaultChooseWorkItem(
       const item = items[selectedIndex];
       if (item && item.id !== lastSelectionId) {
         lastSelectionId = item.id;
-        // Debug: write to file
-        try {
-          const fs = require('fs');
-          fs.appendFileSync('/tmp/wl-debug.log', `[${new Date().toISOString()}] Calling onSelectionChange (moveSelection)\n`);
-        } catch (e) {
-          // ignore
-        }
         onSelectionChange(item);
       }
     };
@@ -522,13 +476,6 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
 
   return function registerWorklogBrowseExtension(pi: PiLike): void {
     const runBrowseFlow = async (ctx: BrowseContext): Promise<void> => {
-      // Debug: write to file
-      try {
-        const fs = require('fs');
-        fs.appendFileSync('/tmp/wl-debug.log', `[${new Date().toISOString()}] runBrowseFlow started\n`);
-      } catch (e) {
-        // ignore
-      }
       try {
         const items = (await listWorkItems()).slice(0, 5);
         if (items.length === 0) {
@@ -541,34 +488,12 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         const announceSelection: SelectionChangeHandler = (
           item: WorklogBrowseItem,
         ) => {
-          // Debug: write to file
-          try {
-            const fs = require('fs');
-            fs.appendFileSync('/tmp/wl-debug.log', `[${new Date().toISOString()}] announceSelection called for item: ${item.id}\n`);
-          } catch (e) {
-            // ignore
-          }
           if (item.id === lastAnnouncedId) return;
           lastAnnouncedId = item.id;
-          const widgetFactory = buildSelectionWidget(item);
-          // Debug: write factory type
-          try {
-            const fs = require('fs');
-            fs.appendFileSync('/tmp/wl-debug.log', `  Widget factory type: ${typeof widgetFactory}\n`);
-          } catch (e) {
-            // ignore
-          }
-          ctx.ui.setWidget?.('worklog-browse-selection', widgetFactory, { placement: 'belowEditor' });
+          ctx.ui.setWidget?.('worklog-browse-selection', buildSelectionWidget(item), { placement: 'belowEditor' });
         };
 
         const selectedItem = await chooseWorkItem(items, ctx, announceSelection);
-        // Debug: write to file
-        try {
-          const fs = require('fs');
-          fs.appendFileSync('/tmp/wl-debug.log', `[${new Date().toISOString()}] chooseWorkItem returned, selectedItem: ${selectedItem?.id ?? 'null'}\n`);
-        } catch (e) {
-          // ignore
-        }
         if (!selectedItem) {
           // user cancelled selection; clear preview widget
           ctx.ui.setWidget?.('worklog-browse-selection', undefined);
@@ -576,13 +501,6 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         }
 
         // Ensure the final selection is announced (in case chooseWorkItem didn't emit it)
-        // Debug: write to file
-        try {
-          const fs = require('fs');
-          fs.appendFileSync('/tmp/wl-debug.log', `[${new Date().toISOString()}] Calling announceSelection after chooseWorkItem\n`);
-        } catch (e) {
-          // ignore
-        }
         announceSelection(selectedItem);
 
         // On Enter: fetch full markdown and show it in a focused scrollable modal.
