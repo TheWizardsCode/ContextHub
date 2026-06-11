@@ -57,10 +57,10 @@ export interface ListOptions {
   prefix?: string;
   number?: string;
   /** Disable icon rendering for scripting/copy-paste */
-  noIcons?: boolean;
+  icons?: boolean;
 }
 
-export interface ShowOptions { children?: boolean; prefix?: string; noPager?: boolean; noIcons?: boolean }
+export interface ShowOptions { children?: boolean; prefix?: string; noPager?: boolean; icons?: boolean }
 
 export interface AuditOptions { prefix?: string }
 
