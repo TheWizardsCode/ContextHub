@@ -16,10 +16,7 @@ export interface WorklogBrowseItem {
 }
 
 type RunWlFn = (args: string[], includeJson?: boolean) => Promise<string>;
-type SelectionChangeHandler = (
-  item: WorklogBrowseItem,
-  theme?: { fg: (color: string, text: string) => string; bold: (text: string) => string },
-) => void;
+type SelectionChangeHandler = (item: WorklogBrowseItem) => void;
 type ChooseWorkItemFn = (
   items: WorklogBrowseItem[],
   ctx: BrowseContext,
@@ -203,30 +200,48 @@ function descriptionPreview(description: string | undefined, maxLines = 7): stri
   return description.split(/\r?\n/).slice(0, maxLines);
 }
 
-function buildSelectionWidget(
+/**
+ * Create a selection widget factory that renders work item details.
+ *
+ * Returns a factory function that the TUI calls with (tui, theme) to get a
+ * component with render(width). The theme is used to apply stage-based
+ * colours to the title line.
+ *
+ * Exported for testing.
+ */
+export function buildSelectionWidget(
   item: WorklogBrowseItem,
-  theme?: { fg: (color: string, text: string) => string; bold: (text: string) => string },
-): string[] {
-  const priority = item.priority ?? '—';
-  const stage = item.stage ?? '—';
-  const status = item.status ?? '—';
-  const risk = item.risk ?? '—';
-  const effort = item.effort ?? '—';
+): (tui: any, theme: { fg: (color: string, text: string) => string; bold: (text: string) => string }) => {
+  render: (width: number) => string[];
+  invalidate: () => void;
+} {
+  return (_tui, theme) => {
+    const priority = item.priority ?? '—';
+    const stage = item.stage ?? '—';
+    const status = item.status ?? '—';
+    const risk = item.risk ?? '—';
+    const effort = item.effort ?? '—';
 
-  // Apply stage-based colour to the title, with blocked status override
-  const colouredTitle = applyStageColour(
-    `${item.title} <${item.id}>`,
-    item.stage,
-    item.status,
-    theme,
-  );
+    // Apply stage-based colour to the title, with blocked status override
+    const colouredTitle = applyStageColour(
+      `${item.title} <${item.id}>`,
+      item.stage,
+      item.status,
+      theme,
+    );
 
-  return [
-    colouredTitle,
-    `Priority/Stage/Status: ${priority}/${stage}/${status}`,
-    `Risk/Effort: ${risk}/${effort}`,
-    ...descriptionPreview(item.description, 7),
-  ];
+    return {
+      render: (_width: number) => [
+        colouredTitle,
+        `Priority/Stage/Status: ${priority}/${stage}/${status}`,
+        `Risk/Effort: ${risk}/${effort}`,
+        ...descriptionPreview(item.description, 7),
+      ],
+      invalidate: () => {
+        // no-op: all rendering is derived from local state
+      },
+    };
+  };
 }
 
 function truncateLine(line: string, width: number): string {
@@ -308,7 +323,7 @@ async function defaultChooseWorkItem(
       const item = items[selectedIndex];
       if (item && item.id !== lastSelectionId) {
         lastSelectionId = item.id;
-        onSelectionChange(item, theme);
+        onSelectionChange(item);
       }
     };
 
@@ -469,11 +484,10 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         let lastAnnouncedId: string | undefined;
         const announceSelection: SelectionChangeHandler = (
           item: WorklogBrowseItem,
-          theme?: { fg: (color: string, text: string) => string; bold: (text: string) => string },
         ) => {
           if (item.id === lastAnnouncedId) return;
           lastAnnouncedId = item.id;
-          ctx.ui.setWidget?.('worklog-browse-selection', buildSelectionWidget(item, theme));
+          ctx.ui.setWidget?.('worklog-browse-selection', buildSelectionWidget(item));
         };
 
         const selectedItem = await chooseWorkItem(items, ctx, announceSelection);
