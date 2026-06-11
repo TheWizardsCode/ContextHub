@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { applyStageColour } from './worklog-helpers.js';
+import { applyStageColour, stageColourToken } from './worklog-helpers.js';
 
 const execFileAsync = promisify(execFile);
 
