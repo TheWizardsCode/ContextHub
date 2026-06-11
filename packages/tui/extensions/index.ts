@@ -562,6 +562,13 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         };
 
         const selectedItem = await chooseWorkItem(items, ctx, announceSelection);
+        // Debug: write to file
+        try {
+          const fs = require('fs');
+          fs.appendFileSync('/tmp/wl-debug.log', `[${new Date().toISOString()}] chooseWorkItem returned, selectedItem: ${selectedItem?.id ?? 'null'}\n`);
+        } catch (e) {
+          // ignore
+        }
         if (!selectedItem) {
           // user cancelled selection; clear preview widget
           ctx.ui.setWidget?.('worklog-browse-selection', undefined);
@@ -569,6 +576,13 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         }
 
         // Ensure the final selection is announced (in case chooseWorkItem didn't emit it)
+        // Debug: write to file
+        try {
+          const fs = require('fs');
+          fs.appendFileSync('/tmp/wl-debug.log', `[${new Date().toISOString()}] Calling announceSelection after chooseWorkItem\n`);
+        } catch (e) {
+          // ignore
+        }
         announceSelection(selectedItem);
 
         // On Enter: fetch full markdown and show it in a focused scrollable modal.
