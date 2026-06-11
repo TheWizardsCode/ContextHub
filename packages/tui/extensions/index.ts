@@ -116,6 +116,35 @@ export function formatBrowseOption(item: WorklogBrowseItem, maxWidth?: number): 
   return `${truncatedTitle}${separatorAndId}`;
 }
 
+/**
+ * Format a browse option with stage-based colour applied to the title.
+ */
+export function formatBrowseOptionColoured(
+  item: WorklogBrowseItem,
+  theme: { fg: (color: string, text: string) => string; bold: (text: string) => string },
+  maxWidth?: number,
+): string {
+  const idPart = `(${item.id})`;
+  const titleText = item.title;
+  const fullVisibleLength = titleText.length + 1 + idPart.length; // +1 for space
+
+  if (!maxWidth || maxWidth <= 0 || fullVisibleLength <= maxWidth) {
+    // Apply colour to title, keep id plain
+    const colouredTitle = applyStageColour(titleText, item.stage, item.status, theme);
+    return `${colouredTitle} ${idPart}`;
+  }
+
+  const separatorAndId = ` ${idPart}`;
+  if (maxWidth <= separatorAndId.length) {
+    return truncateToWidth(idPart, maxWidth);
+  }
+
+  const titleWidth = maxWidth - separatorAndId.length;
+  const truncatedTitle = truncateToWidth(titleText, titleWidth);
+  const colouredTitle = applyStageColour(truncatedTitle, item.stage, item.status, theme);
+  return `${colouredTitle}${separatorAndId}`;
+}
+
 function extractJsonObject(raw: string): unknown {
   const start = raw.indexOf('{');
   if (start < 0) throw new Error('No JSON object in output');
@@ -338,7 +367,7 @@ async function defaultChooseWorkItem(
         const options = items.map((item, index) => {
           const prefix = index === selectedIndex ? theme.fg('accent', '› ') : '  ';
           const contentWidth = Math.max(0, width - 2);
-          const optionLine = `${prefix}${formatBrowseOption(item, contentWidth)}`;
+          const optionLine = `${prefix}${formatBrowseOptionColoured(item, theme, contentWidth)}`;
           return truncateLine(optionLine, width);
         });
 
