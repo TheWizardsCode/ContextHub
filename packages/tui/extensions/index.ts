@@ -310,7 +310,7 @@ async function defaultChooseWorkItem(
       throw new Error('Selection UI is unavailable in this environment.');
     }
 
-    const options = items.map(formatBrowseOption);
+    const options = items.map(item => formatBrowseOption(item));
     const selected = await ctx.ui.select('Browse Worklog next items (top 5)', options);
     if (!selected) return undefined;
 
