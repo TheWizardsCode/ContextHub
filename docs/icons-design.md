@@ -100,12 +100,12 @@ Implementation in the TUI list and detail panes should:
 CLI output uses `chalk` to colour output. When icons are enabled:
 
 ```
-🔴 [CRIT] ← icon + fallback in muted colour beside it
+🚨 [CRIT] ← icon + fallback in muted colour beside it
 ```
 
 The **text fallback is always appended** to the icon in CLI output, separated
 by a space. This ensures:
-- Copy/paste captures `[CRIT]` not just `🔴`.
+- Copy/paste captures `[CRIT]` not just `🚨`.
 - Screen readers pick up `[CRIT]` after the icon.
 - Scripts parsing the output can use `[CRIT]` as a reliable marker.
 
@@ -150,7 +150,7 @@ In CLI output (e.g. `wl list`, `wl show`), lines that display priority and
 status SHALL include both the icon and the text fallback:
 
 ```
-Priority: 🔴 [CRIT]   (or  [CRIT]  when icons disabled)
+Priority: 🚨 [CRIT]   (or  [CRIT]  when icons disabled)
 Status:   🟢 [OPEN]   (or  [OPEN]  when icons disabled)
 ```
 
@@ -323,18 +323,18 @@ WL_NO_ICONS=1 wl list --format full
 ```
 ID:    TEST-1
 Title: Set up CI pipeline
-Status: 🟢 Open [OPEN] · Stage: In Progress | Priority: 🔵 medium [MED ]
+Status: 🟢 Open [OPEN] · Stage: In Progress | Priority: 🚨 critical [CRIT]
 ```
 
 **CLI with icons disabled:**
 ```
 ID:    TEST-1
 Title: Set up CI pipeline
-Status: [OPEN] · Stage: In Progress | Priority: medium
+Status: [OPEN] · Stage: In Progress | Priority: critical
 ```
 
 **TUI list:**
 ```
-▸ 🔴 🔄 Set up CI pipeline (TEST-1)
-  ├── 🔵 ✅ Write tests (TEST-2)
+▸ 🚨 ⭐ Set up CI pipeline (TEST-1)
+  ├── 📋 🔄 Write tests (TEST-2)
 ```
