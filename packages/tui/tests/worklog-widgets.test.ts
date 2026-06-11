@@ -208,11 +208,11 @@ describe('stageColourToken', () => {
     expect(stageColourToken('idea')).toBe('dim');
   });
 
-  it('returns accent for intake_complete stage', () => {
-    expect(stageColourToken('intake_complete')).toBe('accent');
+  it('returns mdLink for intake_complete stage (blue-like)', () => {
+    expect(stageColourToken('intake_complete')).toBe('mdLink');
   });
 
-  it('returns accent for plan_complete stage', () => {
+  it('returns accent for plan_complete stage (cyan-like)', () => {
     expect(stageColourToken('plan_complete')).toBe('accent');
   });
 
@@ -270,12 +270,12 @@ describe('applyStageColour', () => {
     expect(result).toBe('[dim]Test Title[/dim]');
   });
 
-  it('applies accent colour for intake_complete stage', () => {
+  it('applies mdLink colour (blue-like) for intake_complete stage', () => {
     const result = applyStageColour('Test Title', 'intake_complete', 'open', mockTheme);
-    expect(result).toBe('[accent]Test Title[/accent]');
+    expect(result).toBe('[mdLink]Test Title[/mdLink]');
   });
 
-  it('applies accent colour for plan_complete stage', () => {
+  it('applies accent colour (cyan-like) for plan_complete stage', () => {
     const result = applyStageColour('Test Title', 'plan_complete', 'open', mockTheme);
     expect(result).toBe('[accent]Test Title[/accent]');
   });

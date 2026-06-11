@@ -29,8 +29,8 @@ export interface PiTheme {
  *
  * Stage progression maps to Pi TUI theme tokens:
  * - idea → dim (muted/low priority)
- * - intake_complete → accent (blue-like accent)
- * - plan_complete → accent (cyan-like accent)
+ * - intake_complete → mdLink (blue-like)
+ * - plan_complete → accent (cyan-like)
  * - in_progress → warning (yellow)
  * - in_review → success (green)
  * - done → text (default/white)
@@ -44,9 +44,9 @@ export function stageColourToken(stage?: string): string {
     case 'idea':
       return 'dim';
     case 'intake_complete':
-      return 'accent';
+      return 'mdLink'; // blue-like (#81a2be)
     case 'plan_complete':
-      return 'accent';
+      return 'accent'; // cyan-like (#8abeb7)
     case 'in_progress':
       return 'warning';
     case 'in_review':
