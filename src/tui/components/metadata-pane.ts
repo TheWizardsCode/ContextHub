@@ -5,6 +5,7 @@ import { redactAuditText } from '../../audit.js';
 import { stripAnsi, stripTags } from '../id-utils.js';
 import { theme } from '../../theme.js';
 import { renderMarkdownToTags } from '../markdown-renderer.js';
+import { priorityIcon, statusIcon, iconsEnabled } from '../../icons.js';
 
 export interface MetadataPaneOptions {
   parent: BlessedScreen;
@@ -12,6 +13,25 @@ export interface MetadataPaneOptions {
 }
 
 const HAS_MARKDOWN_RE = /[#*`_\[\]]/;
+
+// Render an icon with blessed color tags matching its priority/status category.
+function renderIcon(icon: string, value: string): string {
+  if (!icon) return '';
+  const v = (value || '').toLowerCase().trim();
+  // Priority colors
+  if (v === 'critical') return `{red-fg}${icon}{/red-fg}`;
+  if (v === 'high') return `{yellow-fg}${icon}{/yellow-fg}`;
+  if (v === 'medium') return `{blue-fg}${icon}{/blue-fg}`;
+  if (v === 'low') return `{gray-fg}${icon}{/gray-fg}`;
+  // Status colors
+  if (v === 'open') return `{green-fg}${icon}{/green-fg}`;
+  if (v === 'in-progress') return `{yellow-fg}${icon}{/yellow-fg}`;
+  if (v === 'completed') return `{white-fg}${icon}{/white-fg}`;
+  if (v === 'blocked') return `{red-fg}${icon}{/red-fg}`;
+  if (v === 'deleted') return `{red-fg}${icon}{/red-fg}`;
+  if (v === 'input_needed') return `{yellow-fg}${icon}{/yellow-fg}`;
+  return icon;
+}
 
 export class MetadataPaneComponent {
   private blessedImpl: BlessedFactory;
@@ -112,9 +132,13 @@ export class MetadataPaneComponent {
     const placeholder = '—';
     const lines: string[] = [];
     lines.push(`ID: ${item.id ?? ''}`);
-    lines.push(`Status:   ${item.status ?? ''}`);
+    // Build priority and status icons with blessed color tags
+    const useIcons = iconsEnabled();
+    const pIcon = renderIcon(priorityIcon(item.priority || '', { noIcons: !useIcons }), item.priority || '');
+    const sIcon = renderIcon(statusIcon(item.status || '', { noIcons: !useIcons }), item.status || '');
+    lines.push(`Status:   ${sIcon ? `${sIcon} ` : ''}${item.status ?? ''}`);
     lines.push(`Stage:    ${item.stage ?? ''}`);
-    lines.push(`Priority: ${item.priority ?? ''}`);
+    lines.push(`Priority: ${pIcon ? `${pIcon} ` : ''}${item.priority ?? ''}`);
     // Compact Risk and Effort into a single, predictable line to make the
     // metadata pane easier to scan. Use the same placeholders as before.
     const riskVal = item.risk && item.risk.trim() ? item.risk : placeholder;

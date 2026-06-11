@@ -10,6 +10,7 @@ import type { WorklogDatabase } from '../database.js';
 import { loadConfig } from '../config.js';
 import { renderCliMarkdown, stripBlessedTags, shouldUseFormattedOutput, isTty, resolveMarkdownEnabled } from '../cli-output.js';
 import { getStageLabel, getStatusLabel, loadStatusStageRules } from '../status-stage-rules.js';
+import { priorityIcon, statusIcon, priorityFallback, statusFallback, iconsEnabled } from '../icons.js';
 import type { Command } from 'commander';
 
 // Priority ordering for sorting work items (higher number = higher priority)
@@ -376,6 +377,29 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   const sortIndexLabel = `SortIndex: ${item.sortIndex}`;
   const rules = loadStatusStageRules();
 
+  // Helper to format status line with icon (for CLI with fallback, TUI without)
+  const formatStatusWithIcon = (status: string): string => {
+    if (isTui) {
+      // TUI: just show status value, icons are in the metadata pane instead
+      return getStatusLabel(status, rules) || status;
+    }
+    const icon = statusIcon(status, { noIcons: !iconsEnabled() });
+    const fallback = statusFallback(status);
+    const label = getStatusLabel(status, rules) || status;
+    return icon ? `${icon} ${label} ${fallback}` : label;
+  };
+
+  // Helper to format priority line with icon (for CLI with fallback, TUI without)
+  const formatPriorityWithIcon = (priority: string): string => {
+    if (isTui) {
+      // TUI: just show priority value, icons are in the metadata pane instead
+      return priority;
+    }
+    const icon = priorityIcon(priority, { noIcons: !iconsEnabled() });
+    const fallback = priorityFallback(priority);
+    return icon ? `${icon} ${priority} ${fallback}` : priority;
+  };
+
   const lines: string[] = [];
   const titleLine = `Title: ${isTui ? formatTitleOnlyTUI(item) : formatTitleOnly(item)}`;
   const idLine = `ID:    ${isTui ? theme.tui.text.muted(item.id) : theme.text.muted(item.id)}`;
@@ -384,8 +408,13 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   if (fmt === 'summary') {
     const lines: string[] = [];
     lines.push(`${isTui ? formatTitleOnlyTUI(item) : formatTitleOnly(item)} ${isTui ? theme.tui.text.muted(item.id) : theme.text.muted(item.id)}`);
-    const statusLabel = getStatusLabel(item.status, rules) || item.status;
-    lines.push(`Status: ${statusLabel} | Priority: ${item.priority || '—'}`);
+    if (isTui) {
+      const statusLabel = getStatusLabel(item.status, rules) || item.status;
+      lines.push(`Status: ${statusLabel} | Priority: ${item.priority || '—'}`);
+    } else {
+      const sLine = formatStatusWithIcon(item.status);
+      lines.push(`Status: ${sLine} | Priority: ${formatPriorityWithIcon(item.priority)}`);
+    }
     return lines.join('\n');
   }
 
@@ -401,10 +430,18 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     if (item.stage !== undefined) {
       const stageLabel = item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage;
       const statusLabel = getStatusLabel(item.status, rules) || item.status;
-      lines.push(`Status: ${statusLabel} · Stage: ${stageLabel} | Priority: ${item.priority}`);
+      if (isTui) {
+        lines.push(`Status: ${statusLabel} · Stage: ${stageLabel} | Priority: ${item.priority}`);
+      } else {
+        lines.push(`Status: ${formatStatusWithIcon(item.status)} · Stage: ${stageLabel} | Priority: ${formatPriorityWithIcon(item.priority)}`);
+      }
     } else {
-      const statusLabel = getStatusLabel(item.status, rules) || item.status;
-      lines.push(`Status: ${statusLabel} | Priority: ${item.priority}`);
+      if (isTui) {
+        const statusLabel = getStatusLabel(item.status, rules) || item.status;
+        lines.push(`Status: ${statusLabel} | Priority: ${item.priority}`);
+      } else {
+        lines.push(`Status: ${formatStatusWithIcon(item.status)} | Priority: ${formatPriorityWithIcon(item.priority)}`);
+      }
     }
     lines.push(sortIndexLabel);
     lines.push(`Risk: ${item.risk || '—'}`);
@@ -436,11 +473,19 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push(titleLine);
     if (item.stage !== undefined) {
       const stageLabel = item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage;
-      const statusLabel = getStatusLabel(item.status, rules) || item.status;
-      lines.push(`Status: ${statusLabel} · Stage: ${stageLabel} | Priority: ${item.priority}`);
+      if (isTui) {
+        const statusLabel = getStatusLabel(item.status, rules) || item.status;
+        lines.push(`Status: ${statusLabel} · Stage: ${stageLabel} | Priority: ${item.priority}`);
+      } else {
+        lines.push(`Status: ${formatStatusWithIcon(item.status)} · Stage: ${stageLabel} | Priority: ${formatPriorityWithIcon(item.priority)}`);
+      }
     } else {
-      const statusLabel = getStatusLabel(item.status, rules) || item.status;
-      lines.push(`Status: ${statusLabel} | Priority: ${item.priority}`);
+      if (isTui) {
+        const statusLabel = getStatusLabel(item.status, rules) || item.status;
+        lines.push(`Status: ${statusLabel} | Priority: ${item.priority}`);
+      } else {
+        lines.push(`Status: ${formatStatusWithIcon(item.status)} | Priority: ${formatPriorityWithIcon(item.priority)}`);
+      }
     }
     lines.push(sortIndexLabel);
     lines.push(`Risk: ${item.risk || '—'}`);
@@ -489,9 +534,17 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   lines.push(isTui ? renderTitleTUI(item, '# ') : renderTitle(item, '# '));
   lines.push('');
   const issueTypeLabel = item.issueType && item.issueType.trim() !== '' ? item.issueType : 'unknown';
+  // Build status/priority line with icons for CLI, plain for TUI
+  const statusPriorityValue = item.stage !== undefined
+    ? (isTui
+        ? `${getStatusLabel(item.status, rules) || item.status} · Stage: ${item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage} | Priority: ${item.priority}`
+        : `${formatStatusWithIcon(item.status)} · Stage: ${item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage} | Priority: ${formatPriorityWithIcon(item.priority)}`)
+    : (isTui
+        ? `${getStatusLabel(item.status, rules) || item.status} | Priority: ${item.priority}`
+        : `${formatStatusWithIcon(item.status)} | Priority: ${formatPriorityWithIcon(item.priority)}`);
   const frontmatter: Array<[string, string]> = [
     ['ID', isTui ? theme.tui.text.muted(item.id) : theme.text.muted(item.id)],
-    ['Status', item.stage !== undefined ? `${getStatusLabel(item.status, rules) || item.status} · Stage: ${item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage} | Priority: ${item.priority}` : `${getStatusLabel(item.status, rules) || item.status} | Priority: ${item.priority}`],
+    ['Status', statusPriorityValue],
     ['Type', issueTypeLabel],
     ['SortIndex', String(item.sortIndex)]
   ];
