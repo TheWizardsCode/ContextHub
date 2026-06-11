@@ -133,12 +133,41 @@ function extractJsonObject(raw: string): unknown {
   const start = raw.indexOf('{');
   if (start < 0) throw new Error('No JSON object in output');
 
+  // Try to parse the full output - it may be valid JSON already
+  const trimmed = raw.trim();
+  const lastOpenQuote = trimmed.lastIndexOf('"');
+  const lastCloseBrace = trimmed.lastIndexOf('}');
+
+  // If it looks like complete JSON, try to parse it
+  if (lastCloseBrace > lastOpenQuote) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      // Fall through to manual extraction
+    }
+  }
+
+  // Manual extraction: count braces while respecting string boundaries
   let depth = 0;
+  let inString = false;
   for (let i = start; i < raw.length; i += 1) {
-    if (raw[i] === '{') depth += 1;
-    if (raw[i] === '}') depth -= 1;
-    if (depth === 0) {
-      return JSON.parse(raw.slice(start, i + 1));
+    const c = raw[i];
+    if (c === '"') {
+      // Count preceding backslashes to check if quote is escaped
+      let backslashes = 0;
+      for (let j = i - 1; j >= start && raw[j] === '\\'; j--) {
+        backslashes++;
+      }
+      if (backslashes % 2 === 0) {
+        inString = !inString;
+      }
+    }
+    if (!inString) {
+      if (c === '{') depth += 1;
+      if (c === '}') depth -= 1;
+      if (depth === 0) {
+        return JSON.parse(raw.slice(start, i + 1));
+      }
     }
   }
 
