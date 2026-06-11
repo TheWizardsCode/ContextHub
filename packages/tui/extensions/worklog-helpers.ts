@@ -17,6 +17,75 @@ export interface WorkItem {
 }
 
 /**
+ * Theme interface matching the Pi TUI theme.fg() API.
+ */
+export interface PiTheme {
+  fg: (color: string, text: string) => string;
+  bold: (text: string) => string;
+}
+
+/**
+ * Get the theme colour token for a given work item stage.
+ *
+ * Stage progression maps to Pi TUI theme tokens:
+ * - idea → dim (muted/low priority)
+ * - intake_complete → accent (blue-like accent)
+ * - plan_complete → accent (cyan-like accent)
+ * - in_progress → warning (yellow)
+ * - in_review → success (green)
+ * - done → text (default/white)
+ *
+ * @param stage - The work item stage (lowercase with underscores)
+ * @returns The Pi TUI theme colour token name
+ */
+export function stageColourToken(stage?: string): string {
+  const s = (stage || '').toLowerCase().trim();
+  switch (s) {
+    case 'idea':
+      return 'dim';
+    case 'intake_complete':
+      return 'accent';
+    case 'plan_complete':
+      return 'accent';
+    case 'in_progress':
+      return 'warning';
+    case 'in_review':
+      return 'success';
+    case 'done':
+      return 'text';
+    default:
+      return 'dim'; // default to dim for unknown/undefined stages
+  }
+}
+
+/**
+ * Apply stage-based colour to text using the Pi TUI theme.
+ *
+ * Blocked work items appear in red regardless of stage.
+ * Otherwise, stage-based colours apply.
+ *
+ * @param text - The text to colour
+ * @param stage - The work item stage
+ * @param status - The work item status
+ * @param theme - The Pi TUI theme object
+ * @returns The coloured text string
+ */
+export function applyStageColour(
+  text: string,
+  stage?: string,
+  status?: string,
+  theme?: PiTheme,
+): string {
+  if (!theme) return text;
+  // Blocked status overrides everything
+  if (status === 'blocked') {
+    return theme.fg('error', text);
+  }
+  const token = stageColourToken(stage);
+  return theme.fg(token, text);
+}
+
+/**
  * Get a status icon character for the given status.
  */
 export function getStatusIcon(status: string): string {

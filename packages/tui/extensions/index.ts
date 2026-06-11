@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { applyStageColour } from './worklog-helpers.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -15,7 +16,10 @@ export interface WorklogBrowseItem {
 }
 
 type RunWlFn = (args: string[], includeJson?: boolean) => Promise<string>;
-type SelectionChangeHandler = (item: WorklogBrowseItem) => void;
+type SelectionChangeHandler = (
+  item: WorklogBrowseItem,
+  theme?: { fg: (color: string, text: string) => string; bold: (text: string) => string },
+) => void;
 type ChooseWorkItemFn = (
   items: WorklogBrowseItem[],
   ctx: BrowseContext,
@@ -199,15 +203,26 @@ function descriptionPreview(description: string | undefined, maxLines = 7): stri
   return description.split(/\r?\n/).slice(0, maxLines);
 }
 
-function buildSelectionWidget(item: WorklogBrowseItem): string[] {
+function buildSelectionWidget(
+  item: WorklogBrowseItem,
+  theme?: { fg: (color: string, text: string) => string; bold: (text: string) => string },
+): string[] {
   const priority = item.priority ?? '—';
   const stage = item.stage ?? '—';
   const status = item.status ?? '—';
   const risk = item.risk ?? '—';
   const effort = item.effort ?? '—';
 
-  return [
+  // Apply stage-based colour to the title, with blocked status override
+  const colouredTitle = applyStageColour(
     `${item.title} <${item.id}>`,
+    item.stage,
+    item.status,
+    theme,
+  );
+
+  return [
+    colouredTitle,
     `Priority/Stage/Status: ${priority}/${stage}/${status}`,
     `Risk/Effort: ${risk}/${effort}`,
     ...descriptionPreview(item.description, 7),
@@ -293,7 +308,7 @@ async function defaultChooseWorkItem(
       const item = items[selectedIndex];
       if (item && item.id !== lastSelectionId) {
         lastSelectionId = item.id;
-        onSelectionChange(item);
+        onSelectionChange(item, theme);
       }
     };
 
@@ -452,10 +467,13 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         }
 
         let lastAnnouncedId: string | undefined;
-        const announceSelection = (item: WorklogBrowseItem) => {
+        const announceSelection: SelectionChangeHandler = (
+          item: WorklogBrowseItem,
+          theme?: { fg: (color: string, text: string) => string; bold: (text: string) => string },
+        ) => {
           if (item.id === lastAnnouncedId) return;
           lastAnnouncedId = item.id;
-          ctx.ui.setWidget?.('worklog-browse-selection', buildSelectionWidget(item));
+          ctx.ui.setWidget?.('worklog-browse-selection', buildSelectionWidget(item, theme));
         };
 
         const selectedItem = await chooseWorkItem(items, ctx, announceSelection);

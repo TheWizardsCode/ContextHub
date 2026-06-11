@@ -12,7 +12,10 @@ import {
   buildWorklogDetailsLines,
   getStatusIcon,
   truncate,
+  stageColourToken,
+  applyStageColour,
   type WorkItem,
+  type PiTheme,
 } from '../extensions/worklog-helpers.js';
 
 const mockItems = [
@@ -197,5 +200,103 @@ describe('truncate', () => {
 
   it('handles empty string', () => {
     expect(truncate('', 10)).toBe('');
+  });
+});
+
+describe('stageColourToken', () => {
+  it('returns dim for idea stage', () => {
+    expect(stageColourToken('idea')).toBe('dim');
+  });
+
+  it('returns accent for intake_complete stage', () => {
+    expect(stageColourToken('intake_complete')).toBe('accent');
+  });
+
+  it('returns accent for plan_complete stage', () => {
+    expect(stageColourToken('plan_complete')).toBe('accent');
+  });
+
+  it('returns warning for in_progress stage', () => {
+    expect(stageColourToken('in_progress')).toBe('warning');
+  });
+
+  it('returns success for in_review stage', () => {
+    expect(stageColourToken('in_review')).toBe('success');
+  });
+
+  it('returns text for done stage', () => {
+    expect(stageColourToken('done')).toBe('text');
+  });
+
+  it('returns dim for undefined stage', () => {
+    expect(stageColourToken(undefined)).toBe('dim');
+  });
+
+  it('returns dim for empty stage', () => {
+    expect(stageColourToken('')).toBe('dim');
+  });
+
+  it('returns dim for unknown stage', () => {
+    expect(stageColourToken('unknown')).toBe('dim');
+  });
+
+  it('handles case-insensitive stage values', () => {
+    expect(stageColourToken('IN_PROGRESS')).toBe('warning');
+    expect(stageColourToken('In_Progress')).toBe('warning');
+  });
+
+  it('handles whitespace in stage values', () => {
+    expect(stageColourToken('  in_progress  ')).toBe('warning');
+  });
+});
+
+describe('applyStageColour', () => {
+  const mockTheme: PiTheme = {
+    fg: (color, text) => `[${color}]${text}[/${color}]`,
+    bold: (text) => `**${text}**`,
+  };
+
+  it('returns plain text when no theme is provided', () => {
+    expect(applyStageColour('Test', 'in_progress', 'open', undefined)).toBe('Test');
+  });
+
+  it('applies error colour for blocked status regardless of stage', () => {
+    const result = applyStageColour('Test Title', 'in_progress', 'blocked', mockTheme);
+    expect(result).toBe('[error]Test Title[/error]');
+  });
+
+  it('applies dim colour for idea stage', () => {
+    const result = applyStageColour('Test Title', 'idea', 'open', mockTheme);
+    expect(result).toBe('[dim]Test Title[/dim]');
+  });
+
+  it('applies accent colour for intake_complete stage', () => {
+    const result = applyStageColour('Test Title', 'intake_complete', 'open', mockTheme);
+    expect(result).toBe('[accent]Test Title[/accent]');
+  });
+
+  it('applies accent colour for plan_complete stage', () => {
+    const result = applyStageColour('Test Title', 'plan_complete', 'open', mockTheme);
+    expect(result).toBe('[accent]Test Title[/accent]');
+  });
+
+  it('applies warning colour for in_progress stage', () => {
+    const result = applyStageColour('Test Title', 'in_progress', 'open', mockTheme);
+    expect(result).toBe('[warning]Test Title[/warning]');
+  });
+
+  it('applies success colour for in_review stage', () => {
+    const result = applyStageColour('Test Title', 'in_review', 'open', mockTheme);
+    expect(result).toBe('[success]Test Title[/success]');
+  });
+
+  it('applies text colour for done stage', () => {
+    const result = applyStageColour('Test Title', 'done', 'open', mockTheme);
+    expect(result).toBe('[text]Test Title[/text]');
+  });
+
+  it('applies dim colour for undefined stage', () => {
+    const result = applyStageColour('Test Title', undefined, 'open', mockTheme);
+    expect(result).toBe('[dim]Test Title[/dim]');
   });
 });
