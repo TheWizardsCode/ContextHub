@@ -552,7 +552,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         }
 
         try {
-          const mdOutput = await runWlImpl(['show', selectedItem.id, '--format', 'markdown'], false);
+          const mdOutput = await runWlImpl(['show', selectedItem.id, '--format', 'markdown', '--no-icons'], false);
           // Strip blessed-style markup tags ({tag}) which pi's TUI doesn't understand;
           // these appear as literal text and inflate visible width, causing render errors.
           const cleanOutput = mdOutput.replace(/\{[^}]*\}/g, '');

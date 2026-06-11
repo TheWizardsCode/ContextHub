@@ -109,7 +109,7 @@ describe('Worklog browse pi extension', () => {
 
     expect(listWorkItems).toHaveBeenCalledTimes(1);
     expect(chooseWorkItem).toHaveBeenCalledTimes(1);
-    expect(runWl).toHaveBeenCalledWith(['show', 'WL-4', '--format', 'markdown'], false);
+    expect(runWl).toHaveBeenCalledWith(['show', 'WL-4', '--format', 'markdown', '--no-icons'], false);
 
     expect(setWidget).toHaveBeenNthCalledWith(1, 'worklog-browse-selection', expect.any(Function), { placement: 'belowEditor' });
     expect(setWidget).toHaveBeenNthCalledWith(2, 'worklog-browse-selection', expect.any(Function), { placement: 'belowEditor' });
@@ -168,7 +168,7 @@ describe('Worklog browse pi extension', () => {
 
     await commandHandler('', { ui: { notify, setWidget, custom } });
 
-    expect(runWl).toHaveBeenCalledWith(['show', 'WL-1', '--format', 'markdown'], false);
+    expect(runWl).toHaveBeenCalledWith(['show', 'WL-1', '--format', 'markdown', '--no-icons'], false);
     expect(notify).toHaveBeenCalledWith(expect.stringContaining('Failed to render work item details'), 'error');
     expect(setWidget).toHaveBeenCalledWith('worklog-browse-selection', expect.any(Function), { placement: 'belowEditor' });
     

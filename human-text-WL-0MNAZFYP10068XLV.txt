@@ -1,5 +1,0 @@
-# Effort and Risk Report
-
-Effort     | Medium      |  18.67h
-Risk       | Medium  |  6/20
-Confidence | 65%     |  unknowns: Exact size of JSONL exports in practice; Whether native APIs already exist
