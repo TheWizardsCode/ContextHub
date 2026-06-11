@@ -222,22 +222,25 @@ export function buildSelectionWidget(
     const risk = item.risk ?? '—';
     const effort = item.effort ?? '—';
 
+    // Apply stage-based colour to the title, with blocked status override
+    // Theme is only available in the factory function, not in render()
+    const colouredTitle = applyStageColour(
+      `${item.title} <${item.id}>`,
+      item.stage,
+      item.status,
+      theme,
+    );
+
+    // Pre-build the lines with colours applied
+    const lines = [
+      colouredTitle,
+      `Priority/Stage/Status: ${priority}/${stage}/${status}`,
+      `Risk/Effort: ${risk}/${effort}`,
+      ...descriptionPreview(item.description, 7),
+    ];
+
     return {
-      render: (_width: number) => {
-        // Apply stage-based colour to the title, with blocked status override
-        const colouredTitle = applyStageColour(
-          `${item.title} <${item.id}>`,
-          item.stage,
-          item.status,
-          theme,
-        );
-        return [
-          colouredTitle,
-          `Priority/Stage/Status: ${priority}/${stage}/${status}`,
-          `Risk/Effort: ${risk}/${effort}`,
-          ...descriptionPreview(item.description, 7),
-        ];
-      },
+      render: (_width: number) => lines,
       invalidate: () => {
         // no-op: all rendering is derived from local state
       },
