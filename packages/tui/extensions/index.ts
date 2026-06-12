@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { priorityIcon, statusIcon, iconsEnabled } from '../../../src/icons.js';
 import { applyStageColour, type WorkItem, type PiTheme } from './worklog-helpers.js';
-import { truncateToTerminalWidth, visibleWidth, isDoubleWidthEmoji } from './terminal-utils.js';
+import { truncateToTerminalWidth } from './terminal-utils.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -72,7 +72,6 @@ interface PiLike {
 /**
  * Truncate a string to fit within maxWidth visible terminal columns.
  * Delegates to shared truncateToTerminalWidth function.
- * Preserves ANSI escape sequences while truncating.
  */
 export function truncateToWidth(text: string, maxWidth: number, ellipsis = '…'): string {
   return truncateToTerminalWidth(text, maxWidth, { ellipsis });

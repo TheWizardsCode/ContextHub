@@ -5,6 +5,10 @@
  * Both the Pi extension and the unit tests import from this module.
  */
 
+import { truncateToTerminalWidth } from './terminal-utils.js';
+
+// ─── Work Item Interface ───────────────────────────────────────────────
+
 export interface WorkItem {
   id: string;
   title: string;
@@ -98,8 +102,6 @@ export function getStatusIcon(status: string): string {
     default: return '○';
   }
 }
-
-import { truncateToTerminalWidth } from './terminal-utils.js';
 
 /**
  * Truncate text to fit within maxLen visible characters.
