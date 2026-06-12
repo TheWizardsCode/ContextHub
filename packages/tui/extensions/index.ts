@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { priorityIcon, statusIcon, iconsEnabled } from '../../../src/icons.js';
 import { applyStageColour, type WorkItem, type PiTheme } from './worklog-helpers.js';
 
 const execFileAsync = promisify(execFile);
@@ -255,6 +256,28 @@ function descriptionPreview(description: string | undefined, maxLines = 7): stri
 }
 
 /**
+ * Apply blessed color tags to an icon based on its value.
+ * Mirrors the icon color logic in src/tui/controller.ts.
+ */
+function applyIconColour(icon: string, value: string): string {
+  if (!icon) return '';
+  const v = (value || '').toLowerCase().trim();
+  // Priority colors
+  if (v === 'critical') return `{red-fg}${icon}{/red-fg}`;
+  if (v === 'high') return `{yellow-fg}${icon}{/yellow-fg}`;
+  if (v === 'medium') return `{blue-fg}${icon}{/blue-fg}`;
+  if (v === 'low') return `{gray-fg}${icon}{/gray-fg}`;
+  // Status colors
+  if (v === 'open') return `{green-fg}${icon}{/green-fg}`;
+  if (v === 'in-progress') return `{yellow-fg}${icon}{/yellow-fg}`;
+  if (v === 'completed') return `{white-fg}${icon}{/white-fg}`;
+  if (v === 'blocked') return `{red-fg}${icon}{/red-fg}`;
+  if (v === 'deleted') return `{red-fg}${icon}{/red-fg}`;
+  if (v === 'input_needed') return `{yellow-fg}${icon}{/yellow-fg}`;
+  return icon;
+}
+
+/**
  * Create a selection widget factory that renders work item details.
  *
  * Returns a factory function that the TUI calls with (tui, theme) to get a
@@ -270,6 +293,16 @@ export function buildSelectionWidget(
   invalidate: () => void;
 } {
   return (_tui, theme) => {
+    // Build icon prefix using emoji icons with blessed color tags
+    const useIcons = iconsEnabled();
+    const pIcon = priorityIcon(item.priority || '', { noIcons: !useIcons });
+    const sIcon = statusIcon(item.status || '', { noIcons: !useIcons });
+
+    // Apply blessed color tags to icons based on priority/status
+    const colouredPIcon = pIcon ? applyIconColour(pIcon, item.priority) : '';
+    const colouredSIcon = sIcon ? applyIconColour(sIcon, item.status) : '';
+    const iconPrefix = (pIcon || sIcon) ? `${colouredPIcon}${colouredSIcon} ` : '';
+
     const priority = item.priority ?? '—';
     const stage = item.stage ?? '—';
     const status = item.status ?? '—';
@@ -278,7 +311,7 @@ export function buildSelectionWidget(
 
     // Apply stage-based colour to the title, with blocked status override
     const colouredTitle = applyStageColour(
-      `${item.title} <${item.id}>`,
+      `${iconPrefix}${item.title} <${item.id}>`,
       item.stage,
       item.status,
       theme,
