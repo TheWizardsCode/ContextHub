@@ -119,7 +119,7 @@ describe('Worklog browse pi extension', () => {
     const mockTheme1 = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
     const comp1 = factory1({}, mockTheme1);
     expect(comp1.render(80)).toEqual([
-      '{yellow-fg}⭐{/yellow-fg}{yellow-fg}🔄{/yellow-fg} Two <WL-2>',
+      '⭐🔄 Two <WL-2>',
       'Priority/Stage/Status: high/plan_complete/in-progress',
       'Risk/Effort: Medium/Small',
       'L1',
@@ -177,7 +177,7 @@ describe('Worklog browse pi extension', () => {
     const mockTheme2 = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
     const comp = factory({}, mockTheme2);
     expect(comp.render(80)).toEqual([
-      '{green-fg}🟢{/green-fg} One <WL-1>',
+      '🟢 One <WL-1>',
       'Priority/Stage/Status: —/—/open',
       'Risk/Effort: —/—',
       'Only',

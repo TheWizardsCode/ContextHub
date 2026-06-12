@@ -177,20 +177,13 @@ export function buildWorklogWidgetLines(
  * @param item - The selected work item (or null)
  * @returns Array of line strings for rendering
  */
-/**
- * Build the details widget lines for the selected item.
- *
- * @param width - Available width in characters
- * @param item - The selected work item (or null)
- * @returns Array of line strings for rendering
- */
 export function buildWorklogDetailsLines(
   width: number,
   item: WorkItem | null
 ): string[] {
   if (!item) return ['  No item selected'];
 
-  // Emoji icons with color tags
+  // Emoji icons (no blessed tags - Pi handles styling)
   const statusIcon = getStatusIcon(item.status);
   const priorityIcon = getPriorityIcon(item.priority);
 
