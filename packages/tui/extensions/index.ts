@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { applyStageColour, type PiTheme } from './worklog-helpers.js';
+import { applyStageColour, type WorkItem, type PiTheme } from './worklog-helpers.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -72,11 +72,17 @@ interface PiLike {
  * Handles ANSI escape codes gracefully by stripping them for width
  * calculation while preserving ANSI sequences in the output.
  */
-function truncateToWidth(text: string, maxWidth: number, ellipsis = '…'): string {
+export function truncateToWidth(text: string, maxWidth: number, ellipsis = '…'): string {
   if (maxWidth <= 0) return '';
   // Strip ANSI codes for visible-width calculation
   const clean = text.replace(/\x1b\[[0-9;]*m/g, '');
-  if (clean.length <= maxWidth) return text;
+  // Calculate visible width (emoji = 2 columns)
+  let cleanWidth = 0;
+  for (const c of clean) {
+    const cp = c.codePointAt(0) || 0;
+    cleanWidth += (cp >= 0x1F300 && cp <= 0x1F9FF) ? 2 : 1;
+  }
+  if (cleanWidth <= maxWidth) return text;
   // Reserve space for ellipsis so total visible chars fit within maxWidth
   const contentWidth = Math.max(0, maxWidth - ellipsis.length);
   // Walk the original string, counting visible chars and preserving ANSI codes
@@ -89,9 +95,11 @@ function truncateToWidth(text: string, maxWidth: number, ellipsis = '…'): stri
       const m = text.slice(i).match(/^\x1b\[[0-9;]*m/);
       if (m) { result += m[0]; i += m[0].length; continue; }
     }
+    const cp = text[i].codePointAt(0) || 0;
+    const charWidth = (cp >= 0x1F300 && cp <= 0x1F9FF) ? 2 : 1;
     if (visible >= contentWidth) break;
     result += text[i];
-    visible++;
+    visible += charWidth;
     i++;
   }
   result += ellipsis;

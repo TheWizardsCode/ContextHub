@@ -100,9 +100,37 @@ export function getStatusIcon(status: string): string {
 /**
  * Truncate text to fit within maxLen characters.
  */
+/**
+ * Truncate text to fit within maxLen visible characters.
+ * Handles emoji (2 columns each) and ANSI escape codes.
+ */
 export function truncate(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  return text.slice(0, maxLen - 3) + '...';
+  const visibleWidth = (s: string): number => {
+    // Strip ANSI codes
+    const stripped = s.replace(/\x1b\[[0-9;]*m/g, '');
+    // Count codepoints - emoji are 2 columns, other chars are 1
+    let width = 0;
+    for (const c of stripped) {
+      const cp = c.codePointAt(0) || 0;
+      // Emoji range (rough approximation) - these take 2 columns in terminal
+      if (cp >= 0x1F300 && cp <= 0x1F9FF) width += 2;
+      else width += 1;
+    }
+    return width;
+  };
+
+  if (visibleWidth(text) <= maxLen) return text;
+
+  let result = '';
+  let w = 0;
+  for (const c of text) {
+    const cp = c.codePointAt(0) || 0;
+    const charWidth = (cp >= 0x1F300 && cp <= 0x1F9FF) ? 2 : 1;
+    if (w + charWidth + 3 > maxLen) break; // Reserve space for "..."
+    result += c;
+    w += charWidth;
+  }
+  return result + '...';
 }
 
 /**
