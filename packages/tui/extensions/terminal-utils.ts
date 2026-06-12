@@ -80,13 +80,13 @@ export function truncateToTerminalWidth(
     
     if (visible >= contentWidth) break;
     
-    // Check for surrogate pairs (emoji)
+    // Use string.slice to get the full character (handles surrogate pairs)
     const char = text[i];
     const charW = getCharWidth(char);
     
     result += char;
     visible += charW;
-    i += charW === 2 ? 2 : 1; // Skip both surrogates if it's a 2-char emoji
+    i++; // Move forward - getCharWidth uses codePointAt which handles the surrogate
   }
 
   return result + ellipsis;
