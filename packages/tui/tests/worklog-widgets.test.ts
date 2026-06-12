@@ -75,8 +75,8 @@ describe('buildWorklogWidgetLines', () => {
   it('includes status icons', () => {
     const lines = buildWorklogWidgetLines(80, mockItems, 0);
     const joined = lines.join('\n');
-    expect(joined).toContain('◐'); // in_progress
-    expect(joined).toContain('○'); // open
+    expect(joined).toContain('🔄'); // in_progress
+    expect(joined).toContain('🟢'); // open
   });
 
   it('truncates long titles', () => {
@@ -166,20 +166,20 @@ describe('buildWorklogDetailsLines', () => {
 
 describe('getStatusIcon', () => {
   it('returns a progress icon for in_progress', () => {
-    expect(getStatusIcon('in_progress')).toBe('◐');
+    expect(getStatusIcon('in_progress')).toBe('🔄');
   });
 
   it('returns a check icon for completed', () => {
-    expect(getStatusIcon('completed')).toBe('✓');
+    expect(getStatusIcon('completed')).toBe('✅');
   });
 
   it('returns a blocked icon for blocked', () => {
-    expect(getStatusIcon('blocked')).toBe('⊘');
+    expect(getStatusIcon('blocked')).toBe('⛔');
   });
 
   it('returns a circle icon for unknown statuses', () => {
     expect(getStatusIcon('unknown')).toBe('○');
-    expect(getStatusIcon('open')).toBe('○');
+    expect(getStatusIcon('open')).toBe('🟢');
   });
 });
 

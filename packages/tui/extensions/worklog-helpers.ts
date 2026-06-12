@@ -90,9 +90,11 @@ export function applyStageColour(
  */
 export function getStatusIcon(status: string): string {
   switch (status) {
-    case 'in_progress': return '◐';
-    case 'completed': return '✓';
-    case 'blocked': return '⊘';
+    case 'open': return '🟢';
+    case 'in_progress': return '🔄';
+    case 'completed': return '✅';
+    case 'blocked': return '⛔';
+    case 'deleted': return '🗑️';
     default: return '○';
   }
 }
@@ -175,17 +177,28 @@ export function buildWorklogWidgetLines(
  * @param item - The selected work item (or null)
  * @returns Array of line strings for rendering
  */
+/**
+ * Build the details widget lines for the selected item.
+ *
+ * @param width - Available width in characters
+ * @param item - The selected work item (or null)
+ * @returns Array of line strings for rendering
+ */
 export function buildWorklogDetailsLines(
   width: number,
   item: WorkItem | null
 ): string[] {
   if (!item) return ['  No item selected'];
 
+  // Emoji icons with color tags
+  const statusIcon = getStatusIcon(item.status);
+  const priorityIcon = getPriorityIcon(item.priority);
+
   const lines: string[] = [];
   lines.push(` ${item.id}`);
   lines.push(` Title:    ${truncate(item.title, width - 12)}`);
-  lines.push(` Status:   ${item.status}`);
-  lines.push(` Priority: ${item.priority}`);
+  lines.push(` Status:   ${statusIcon} ${item.status}`);
+  lines.push(` Priority: ${priorityIcon} ${item.priority || '—'}`);
   if (item.assignee) lines.push(` Assignee: ${item.assignee}`);
   if (item.stage) lines.push(` Stage:    ${item.stage}`);
   if (item.issueType) lines.push(` Type:     ${item.issueType}`);
@@ -200,4 +213,18 @@ export function buildWorklogDetailsLines(
   }
 
   return lines;
+}
+
+/**
+ * Get a priority icon character for the given priority.
+ */
+function getPriorityIcon(priority: string | undefined): string {
+  if (!priority) return '';
+  switch (priority.toLowerCase()) {
+    case 'critical': return '🚨';
+    case 'high': return '⭐';
+    case 'medium': return '📋';
+    case 'low': return '🐢';
+    default: return '';
+  }
 }
