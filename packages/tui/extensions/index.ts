@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { priorityIcon, statusIcon, iconsEnabled } from '../../../src/icons.js';
 import { applyStageColour, type WorkItem, type PiTheme } from './worklog-helpers.js';
+import { truncateToTerminalWidth, visibleWidth, isDoubleWidthEmoji } from './terminal-utils.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -69,46 +70,12 @@ interface PiLike {
 }
 
 /**
- * Truncate a string to fit within maxWidth visible characters.
- * Handles ANSI escape codes gracefully by stripping them for width
- * calculation while preserving ANSI sequences in the output.
+ * Truncate a string to fit within maxWidth visible terminal columns.
+ * Delegates to shared truncateToTerminalWidth function.
+ * Preserves ANSI escape sequences while truncating.
  */
 export function truncateToWidth(text: string, maxWidth: number, ellipsis = '…'): string {
-  if (maxWidth <= 0) return '';
-  // Strip ANSI codes for visible-width calculation
-  const clean = text.replace(/\x1b\[[0-9;]*m/g, '');
-  // Calculate visible width (emoji = 2 columns)
-  // Emoji ranges include: 1F300–1F9FF (Misc Symbols and Pictographs) and 2600–26FF (Misc symbols)
-  // Also includes: 2700–27BF (Dingbats), 1F900–1F9FF (Supplemental Symbols)
-  let cleanWidth = 0;
-  for (const c of clean) {
-    const cp = c.codePointAt(0) || 0;
-    // Emoji and special symbol ranges that take 2 terminal columns
-    const isEmoji = (cp >= 0x1F300 && cp <= 0x1F9FF) || (cp >= 0x2600 && cp <= 0x2B5F);
-    cleanWidth += isEmoji ? 2 : 1;
-  }
-  if (cleanWidth <= maxWidth) return text;
-  // Reserve space for ellipsis so total visible chars fit within maxWidth
-  const contentWidth = Math.max(0, maxWidth - ellipsis.length);
-  // Walk the original string, counting visible chars and preserving ANSI codes
-  let visible = 0;
-  let result = '';
-  let i = 0;
-  while (i < text.length) {
-    if (text[i] === '\x1b') {
-      // Copy the full ANSI sequence
-      const m = text.slice(i).match(/^\x1b\[[0-9;]*m/);
-      if (m) { result += m[0]; i += m[0].length; continue; }
-    }
-    const cp = text[i].codePointAt(0) || 0;
-    const charWidth = ((cp >= 0x1F300 && cp <= 0x1F9FF) || (cp >= 0x2600 && cp <= 0x2B5F)) ? 2 : 1;
-    if (visible >= contentWidth) break;
-    result += text[i];
-    visible += charWidth;
-    i++;
-  }
-  result += ellipsis;
-  return result;
+  return truncateToTerminalWidth(text, maxWidth, { ellipsis });
 }
 
 export function formatBrowseOption(
