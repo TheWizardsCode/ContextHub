@@ -77,10 +77,14 @@ export function truncateToWidth(text: string, maxWidth: number, ellipsis = '…'
   // Strip ANSI codes for visible-width calculation
   const clean = text.replace(/\x1b\[[0-9;]*m/g, '');
   // Calculate visible width (emoji = 2 columns)
+  // Emoji ranges include: 1F300–1F9FF (Misc Symbols and Pictographs) and 2600–26FF (Misc symbols)
+  // Also includes: 2700–27BF (Dingbats), 1F900–1F9FF (Supplemental Symbols)
   let cleanWidth = 0;
   for (const c of clean) {
     const cp = c.codePointAt(0) || 0;
-    cleanWidth += (cp >= 0x1F300 && cp <= 0x1F9FF) ? 2 : 1;
+    // Emoji and special symbol ranges that take 2 terminal columns
+    const isEmoji = (cp >= 0x1F300 && cp <= 0x1F9FF) || (cp >= 0x2600 && cp <= 0x27BF);
+    cleanWidth += isEmoji ? 2 : 1;
   }
   if (cleanWidth <= maxWidth) return text;
   // Reserve space for ellipsis so total visible chars fit within maxWidth
@@ -96,7 +100,7 @@ export function truncateToWidth(text: string, maxWidth: number, ellipsis = '…'
       if (m) { result += m[0]; i += m[0].length; continue; }
     }
     const cp = text[i].codePointAt(0) || 0;
-    const charWidth = (cp >= 0x1F300 && cp <= 0x1F9FF) ? 2 : 1;
+    const charWidth = ((cp >= 0x1F300 && cp <= 0x1F9FF) || (cp >= 0x2600 && cp <= 0x27BF)) ? 2 : 1;
     if (visible >= contentWidth) break;
     result += text[i];
     visible += charWidth;

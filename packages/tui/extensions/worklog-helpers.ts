@@ -112,9 +112,9 @@ export function truncate(text: string, maxLen: number): string {
     let width = 0;
     for (const c of stripped) {
       const cp = c.codePointAt(0) || 0;
-      // Emoji range (rough approximation) - these take 2 columns in terminal
-      if (cp >= 0x1F300 && cp <= 0x1F9FF) width += 2;
-      else width += 1;
+      // Emoji and special symbol ranges that take 2 terminal columns
+      const isEmoji = (cp >= 0x1F300 && cp <= 0x1F9FF) || (cp >= 0x2600 && cp <= 0x27BF);
+      width += isEmoji ? 2 : 1;
     }
     return width;
   };
@@ -125,7 +125,7 @@ export function truncate(text: string, maxLen: number): string {
   let w = 0;
   for (const c of text) {
     const cp = c.codePointAt(0) || 0;
-    const charWidth = (cp >= 0x1F300 && cp <= 0x1F9FF) ? 2 : 1;
+    const charWidth = ((cp >= 0x1F300 && cp <= 0x1F9FF) || (cp >= 0x2600 && cp <= 0x27BF)) ? 2 : 1;
     if (w + charWidth + 3 > maxLen) break; // Reserve space for "..."
     result += c;
     w += charWidth;
