@@ -84,7 +84,7 @@ export function truncateToWidth(text: string, maxWidth: number, ellipsis = '…'
   for (const c of clean) {
     const cp = c.codePointAt(0) || 0;
     // Emoji and special symbol ranges that take 2 terminal columns
-    const isEmoji = (cp >= 0x1F300 && cp <= 0x1F9FF) || (cp >= 0x2600 && cp <= 0x27BF);
+    const isEmoji = (cp >= 0x1F300 && cp <= 0x1F9FF) || (cp >= 0x2600 && cp <= 0x2B5F);
     cleanWidth += isEmoji ? 2 : 1;
   }
   if (cleanWidth <= maxWidth) return text;
@@ -101,7 +101,7 @@ export function truncateToWidth(text: string, maxWidth: number, ellipsis = '…'
       if (m) { result += m[0]; i += m[0].length; continue; }
     }
     const cp = text[i].codePointAt(0) || 0;
-    const charWidth = ((cp >= 0x1F300 && cp <= 0x1F9FF) || (cp >= 0x2600 && cp <= 0x27BF)) ? 2 : 1;
+    const charWidth = ((cp >= 0x1F300 && cp <= 0x1F9FF) || (cp >= 0x2600 && cp <= 0x2B5F)) ? 2 : 1;
     if (visible >= contentWidth) break;
     result += text[i];
     visible += charWidth;

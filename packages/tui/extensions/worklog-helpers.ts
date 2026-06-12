@@ -115,7 +115,9 @@ export function truncate(text: string, maxLen: number): string {
     for (const c of stripped) {
       const cp = c.codePointAt(0) || 0;
       // Emoji and special symbol ranges that take 2 terminal columns
-      const isEmoji = (cp >= 0x1F300 && cp <= 0x1F9FF) || (cp >= 0x2600 && cp <= 0x27BF);
+      // Includes: Misc Symbols (2600–26FF), Dingbats (2700–27BF), and Misc Symbols & Pictographs (1F300–1F9FF)
+      // Also includes star (2B50) and other symbol ranges
+      const isEmoji = (cp >= 0x1F300 && cp <= 0x1F9FF) || (cp >= 0x2600 && cp <= 0x2B5F);
       width += isEmoji ? 2 : 1;
     }
     return width;
@@ -127,7 +129,7 @@ export function truncate(text: string, maxLen: number): string {
   let w = 0;
   for (const c of text) {
     const cp = c.codePointAt(0) || 0;
-    const charWidth = ((cp >= 0x1F300 && cp <= 0x1F9FF) || (cp >= 0x2600 && cp <= 0x27BF)) ? 2 : 1;
+    const charWidth = ((cp >= 0x1F300 && cp <= 0x1F9FF) || (cp >= 0x2600 && cp <= 0x2B5F)) ? 2 : 1;
     if (w + charWidth + 3 > maxLen) break; // Reserve space for "..."
     result += c;
     w += charWidth;
@@ -159,7 +161,9 @@ export function buildWorklogWidgetLines(
     const marker = i === selectedIndex ? '▸' : ' ';
     const num = i + 1;
     const statusIcon = getStatusIcon(item.status);
-    const title = truncate(item.title, width - 12);
+    // Prefix: "  marker num: icon " = 9 chars + 2 cols for emoji icon
+    const prefixCols = 9 + (statusIcon ? 2 : 0);
+    const title = truncate(item.title, width - prefixCols);
     lines.push(`  ${marker} ${num}: ${statusIcon} ${title}`);
   }
 
