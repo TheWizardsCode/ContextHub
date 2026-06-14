@@ -1,5 +1,10 @@
 [
   {
+    "key": "c",
+    "command": "/intake\n<desc>\nPriority: medium",
+    "view": "both"
+  },
+  {
     "key": "i",
     "command": "/skill:implement <id>",
     "view": "both"
