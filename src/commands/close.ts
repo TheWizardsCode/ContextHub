@@ -51,7 +51,7 @@ export default function register(ctx: PluginContext): void {
         }
 
         try {
-          const updated = db.update(id, { status: 'completed' });
+          const updated = db.update(id, { status: 'completed', stage: 'done' });
           if (!updated) {
             results.push({ id, success: false, error: 'Failed to update status' });
             continue;
