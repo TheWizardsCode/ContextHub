@@ -637,18 +637,24 @@ describe('Worklog browse pi extension', () => {
     function makeListCustomMock() {
       const componentRef: { current: any } = { current: null };
       const doneCalls: any[] = [];
+      let resolvePromise: (value: any) => void;
+      const promise = new Promise<any>((resolve) => {
+        resolvePromise = resolve;
+      });
       const custom = vi.fn((renderFn: Function) => {
         const result = renderFn(
           { requestRender: vi.fn(), terminal: { rows: 20 } },
           { fg: (_c: string, t: string) => t, bold: (t: string) => t },
           {},
-          (val: any) => { doneCalls.push(val); },
+          (val: any) => {
+            doneCalls.push(val);
+            resolvePromise(val);
+          },
         );
         componentRef.current = result;
-        // Never resolve — the test will interact with the component directly
-        return new Promise(() => {});
+        return promise;
       });
-      return { custom, componentRef, doneCalls };
+      return { custom, componentRef, doneCalls, promise };
     }
 
     it('dispatches n key as intake <id> in the browse list view', async () => {
@@ -661,7 +667,7 @@ describe('Worklog browse pi extension', () => {
       const ctx: any = { ui: { custom, notify: vi.fn() } };
 
       // Start defaultChooseWorkItem — it will call custom() which calls renderFn synchronously
-      void defaultChooseWorkItem(items, ctx, () => {}, registry);
+      const resultPromise = defaultChooseWorkItem(items, ctx, () => {}, registry);
       // Yield to let custom() be called
       await new Promise(r => setTimeout(r, 0));
 
@@ -671,8 +677,11 @@ describe('Worklog browse pi extension', () => {
       // Press 'n' — should trigger intake shortcut and return ShortcutResult
       comp.handleInput('n');
 
-      // Verify done() was called with ShortcutResult (caller will set editor text after modal closes)
+      // Verify done() was called with ShortcutResult
       expect(doneCalls[0]).toEqual({ type: 'shortcut', command: 'intake WL-99' });
+      // Verify the return value is the ShortcutResult (propagated through done())
+      const result = await resultPromise;
+      expect(result).toEqual({ type: 'shortcut', command: 'intake WL-99' });
     });
 
     it('shortcut result has no trailing newline for review before submission', async () => {
@@ -684,7 +693,7 @@ describe('Worklog browse pi extension', () => {
       ]);
       const ctx: any = { ui: { custom, notify: vi.fn() } };
 
-      void defaultChooseWorkItem(items, ctx, () => {}, registry);
+      const resultPromise2 = defaultChooseWorkItem(items, ctx, () => {}, registry);
       await new Promise(r => setTimeout(r, 0));
 
       componentRef.current.handleInput('n');
@@ -694,6 +703,9 @@ describe('Worklog browse pi extension', () => {
       // No trailing newline
       expect(doneCalls[0].command.endsWith('\n')).toBe(false);
       expect(doneCalls[0].command.endsWith('\r')).toBe(false);
+      // Verify the return value matches the done() call
+      const result2 = await resultPromise2;
+      expect(result2).toEqual({ type: 'shortcut', command: 'intake WL-ABC' });
     });
 
     it('still navigates with up/down keys while shortcut keys trigger commands', async () => {
@@ -709,7 +721,7 @@ describe('Worklog browse pi extension', () => {
       ]);
       const ctx: any = { ui: { custom, notify: vi.fn() } };
 
-      void defaultChooseWorkItem(items, ctx, () => {}, registry);
+      const resultPromise3 = defaultChooseWorkItem(items, ctx, () => {}, registry);
       await new Promise(r => setTimeout(r, 0));
 
       const comp = componentRef.current;
@@ -723,6 +735,9 @@ describe('Worklog browse pi extension', () => {
 
       // Verify done() was called with ShortcutResult
       expect(doneCalls[0]).toEqual({ type: 'shortcut', command: 'intake WL-3' });
+      // Verify the return value matches
+      const result3 = await resultPromise3;
+      expect(result3).toEqual({ type: 'shortcut', command: 'intake WL-3' });
     });
 
     it('dispatches n key as intake <id> in the detail scrollable view', async () => {
@@ -784,7 +799,7 @@ describe('Worklog browse pi extension', () => {
       const ctx: any = { ui: { custom, notify: vi.fn() } };
 
       // Start defaultChooseWorkItem — it will call custom() which calls renderFn synchronously
-      void defaultChooseWorkItem(items, ctx, () => {}, registry);
+      const resultPromise4 = defaultChooseWorkItem(items, ctx, () => {}, registry);
       // Yield to let custom() be called
       await new Promise(r => setTimeout(r, 0));
 
@@ -794,11 +809,14 @@ describe('Worklog browse pi extension', () => {
       // Press 'a' — should trigger audit shortcut and return ShortcutResult
       comp.handleInput('a');
 
-      // Verify done() was called with ShortcutResult (caller will set editor text after modal closes)
+      // Verify done() was called with ShortcutResult
       expect(doneCalls[0]).toEqual({ type: 'shortcut', command: 'audit WL-50' });
       // No trailing newline
       expect(doneCalls[0].command.endsWith('\n')).toBe(false);
       expect(doneCalls[0].command.endsWith('\r')).toBe(false);
+      // Verify return value
+      const result4 = await resultPromise4;
+      expect(result4).toEqual({ type: 'shortcut', command: 'audit WL-50' });
     });
 
     it('shortcut result for audit has no trailing newline', async () => {
@@ -810,7 +828,7 @@ describe('Worklog browse pi extension', () => {
       ]);
       const ctx: any = { ui: { custom, notify: vi.fn() } };
 
-      void defaultChooseWorkItem(items, ctx, () => {}, registry);
+      const resultPromise5 = defaultChooseWorkItem(items, ctx, () => {}, registry);
       await new Promise(r => setTimeout(r, 0));
 
       componentRef.current.handleInput('a');
@@ -820,6 +838,9 @@ describe('Worklog browse pi extension', () => {
       // No trailing newline
       expect(doneCalls[0].command.endsWith('\n')).toBe(false);
       expect(doneCalls[0].command.endsWith('\r')).toBe(false);
+      // Verify return value
+      const result5 = await resultPromise5;
+      expect(result5).toEqual({ type: 'shortcut', command: 'audit WL-AUD' });
     });
 
     it('still navigates with up/down keys while a key triggers audit command', async () => {
@@ -835,7 +856,7 @@ describe('Worklog browse pi extension', () => {
       ]);
       const ctx: any = { ui: { custom, notify: vi.fn() } };
 
-      void defaultChooseWorkItem(items, ctx, () => {}, registry);
+      const resultPromise6 = defaultChooseWorkItem(items, ctx, () => {}, registry);
       await new Promise(r => setTimeout(r, 0));
 
       const comp = componentRef.current;
@@ -849,6 +870,9 @@ describe('Worklog browse pi extension', () => {
 
       // Verify done() was called with ShortcutResult
       expect(doneCalls[0]).toEqual({ type: 'shortcut', command: 'audit WL-3' });
+      // Verify return value
+      const result6 = await resultPromise6;
+      expect(result6).toEqual({ type: 'shortcut', command: 'audit WL-3' });
     });
 
     it('dispatches a key as audit <id> in the detail scrollable view', async () => {
@@ -930,11 +954,13 @@ describe('Worklog browse pi extension', () => {
       const { custom: listCustom, componentRef: listComp, doneCalls: listDone } = makeListCustomMock();
       const listCtx: any = { ui: { custom: listCustom, notify: vi.fn() } };
 
-      void defaultChooseWorkItem(listItems, listCtx, () => {}, registry);
+      const listResultPromise = defaultChooseWorkItem(listItems, listCtx, () => {}, registry);
       await new Promise(r => setTimeout(r, 0));
 
       listComp.current.handleInput('i');
       expect(listDone[0]).toEqual({ type: 'shortcut', command: 'implement WL-LIST' });
+      const listResult = await listResultPromise;
+      expect(listResult).toEqual({ type: 'shortcut', command: 'implement WL-LIST' });
 
       // Step 4: Dispatch in detail view
       const listWorkItems = vi.fn().mockResolvedValue([
@@ -978,17 +1004,19 @@ describe('Worklog browse pi extension', () => {
       // List view: unregistered key does not call setEditorText
       const setEditorTextList = vi.fn();
       const listItems = [{ id: 'WL-X', title: 'Test', status: 'open' }];
-      const { custom: listCustom2, componentRef: listComp2 } = makeListCustomMock();
+      const { custom: listCustom2, componentRef: listComp2, doneCalls: doneCallsX } = makeListCustomMock();
       const registryX = new ShortcutRegistry([
         { key: 'i', command: 'implement <id>', view: 'both' },
       ]);
       const listCtx2: any = { ui: { custom: listCustom2, setEditorText: setEditorTextList, notify: vi.fn() } };
 
-      void defaultChooseWorkItem(listItems, listCtx2, () => {}, registryX);
+      const unregPromise = defaultChooseWorkItem(listItems, listCtx2, () => {}, registryX);
       await new Promise(r => setTimeout(r, 0));
 
       listComp2.current.handleInput('x');
       expect(setEditorTextList).not.toHaveBeenCalled();
+      // Unregistered key should not trigger done() - verify promise hasn't resolved
+      expect(doneCallsX).toHaveLength(0);
 
       // Detail view: unregistered key does not call setEditorText
       const setEditorTextDetail = vi.fn();
@@ -1043,7 +1071,7 @@ describe('Worklog browse pi extension', () => {
       const { custom: navListCustom, componentRef: navListComp, doneCalls: navDoneCalls } = makeListCustomMock();
       const navListCtx: any = { ui: { custom: navListCustom, notify: vi.fn() } };
 
-      void defaultChooseWorkItem(testItems, navListCtx, () => {}, testRegistry);
+      const navResultPromise = defaultChooseWorkItem(testItems, navListCtx, () => {}, testRegistry);
       await new Promise(r => setTimeout(r, 0));
 
       const navComp = navListComp.current;
@@ -1055,6 +1083,8 @@ describe('Worklog browse pi extension', () => {
       // Press shortcut 'i' - should dispatch for item at index 1
       navComp.handleInput('i');
       expect(navDoneCalls[0]).toEqual({ type: 'shortcut', command: 'implement WL-2' });
+      const navResult = await navResultPromise;
+      expect(navResult).toEqual({ type: 'shortcut', command: 'implement WL-2' });
 
       // Detail view: scrollable widget handles PageUp/PageDown/g/G
       const tui = { requestRender: vi.fn(), getHeight: () => 20 };
@@ -1079,6 +1109,50 @@ describe('Worklog browse pi extension', () => {
       // PageUp
       widget.handleInput('\u001b[5~');
       expect(widget.render(80)[0]).not.toBe('Line 30');
+    });
+
+    it('Enter key selects a work item and returns it from defaultChooseWorkItem', async () => {
+      const items = [
+        { id: 'WL-E1', title: 'First', status: 'open' },
+        { id: 'WL-E2', title: 'Second', status: 'open' },
+      ];
+
+      const { custom, componentRef, doneCalls } = makeListCustomMock();
+      const ctx: any = { ui: { custom, notify: vi.fn() } };
+      const onSelectionChange = vi.fn();
+
+      const enterPromise = defaultChooseWorkItem(items, ctx, onSelectionChange);
+      await new Promise(r => setTimeout(r, 0));
+
+      // Navigate down and press Enter
+      componentRef.current.handleInput('\u001b[B');
+      componentRef.current.handleInput('\r');
+
+      // done() should have been called with the selected item
+      expect(doneCalls[0]).toEqual(items[1]);
+      // onSelectionChange should have been called for the navigation
+      expect(onSelectionChange).toHaveBeenCalledWith(items[1]);
+      // Return value should be the selected work item
+      const enterResult = await enterPromise;
+      expect(enterResult).toEqual(items[1]);
+    });
+
+    it('Escape key cancels and returns undefined from defaultChooseWorkItem', async () => {
+      const items = [{ id: 'WL-C1', title: 'Cancel test', status: 'open' }];
+
+      const { custom, componentRef, doneCalls } = makeListCustomMock();
+      const ctx: any = { ui: { custom, notify: vi.fn() } };
+
+      const escapePromise = defaultChooseWorkItem(items, ctx, vi.fn());
+      await new Promise(r => setTimeout(r, 0));
+
+      componentRef.current.handleInput('\u001b');
+
+      // done() should have been called with null
+      expect(doneCalls[0]).toBeNull();
+      // Return value should be undefined (null ?? undefined)
+      const escapeResult = await escapePromise;
+      expect(escapeResult).toBeUndefined();
     });
   });
 

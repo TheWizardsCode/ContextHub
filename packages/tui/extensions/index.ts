@@ -365,7 +365,7 @@ export async function defaultChooseWorkItem(
     return selectedItem;
   }
 
-  const selectedItem = await ctx.ui.custom<WorklogBrowseItem | null>((tui, theme, _keybindings, done) => {
+  const result = await ctx.ui.custom<WorklogBrowseItem | ShortcutResult | null>((tui, theme, _keybindings, done) => {
     let selectedIndex = 0;
     let lastSelectionId = items[0]?.id;
 
@@ -435,6 +435,8 @@ export async function defaultChooseWorkItem(
       },
     };
   });
+
+  return result ?? undefined;
 }
 
 /**
@@ -601,7 +603,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
           // calls tui.requestRender() — but we need the wrapper to forward Escape
           // to done() (which closes the custom modal) and to pass through all
           // other keys to the scrollable widget.
-          await ctx.ui.custom<string | null>(
+          const detailResult = await ctx.ui.custom<string | null>(
             (tui, _theme, _keybindings, done) => {
               const factory = createScrollableWidget(detailLines);
               const widget = factory(tui, _theme);
@@ -633,9 +635,12 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
                 },
               };
             },
-          ).catch(() => {
-            // user pressed Escape or closed the modal — this is expected
-          });
+          ).catch(() => null);
+          // Handle shortcut result from detail view (editor text set after modal closes)
+          if (detailResult && typeof detailResult === 'object' && (detailResult as any).type === 'shortcut') {
+            ctx.ui.setEditorText?.((detailResult as any).command);
+            ctx.ui.setWidget?.('worklog-browse-selection', undefined);
+          }
         } catch (innerErr) {
           const message = innerErr instanceof Error ? innerErr.message : String(innerErr);
           ctx.ui.notify(`Failed to render work item details: ${message}`, 'error');
