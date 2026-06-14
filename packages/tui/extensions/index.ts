@@ -509,8 +509,12 @@ export async function defaultChooseWorkItem(
                     .replace(/^\/(skill:)?/, '');
                   const chord = (e as Record<string, unknown>).chord;
                   if (Array.isArray(chord) && chord.length >= 2) {
-                    const chordStr = (chord as string[]).slice(0, 2).join('-');
-                    return `${chordStr}:${label}`;
+                    const secondKey = (chord as string[])[1];
+                    // Drop the first word of the label (e.g. "update priority" → "priority")
+                    // since it's implied by the leader key context.
+                    const rest = label.split(/\s+/).slice(1).join(' ');
+                    const hint = rest.length > 0 ? `${secondKey}:${rest}` : secondKey;
+                    return hint;
                   }
                   return formatEntryLabel(e);
                 })

@@ -125,11 +125,11 @@ Chord shortcuts let you dispatch commands with a two-key sequence. Press the **l
 
 #### Chord Help Text
 
-When a chord leader key is pressed, the help line replaces the normal shortcut hints with the available chord completions for that leader. In this pending state the full chord pattern is shown (e.g., `u-p:update priority`) so the user knows exactly what keys to press next.
+When a chord leader key is pressed, the help line replaces the normal shortcut hints with the available chord completions for that leader. The pending state shows only the second key and the distinguishing part of the label (the first word is dropped since it's implied by the leader context).
 
 For example, pressing `u` while the help line is visible would show:
 ```
-🔗 u-p:update priority u-t:update title
+🔗 p:priority t:title
 ```
 
 #### Chord Stage Filtering
@@ -170,10 +170,10 @@ For example:
 - Selecting an item in `intake_complete` shows `i:implement`, `p:plan`, `u:update...`, and `a:audit`.
 - Selecting an item in `in_progress` shows `u:update...`, and `a:audit`.
 
-When a chord leader key (e.g. `u`) is pressed, the help line temporarily updates to show only the available chord completions for that leader, prefixed with `🔗`:
+When a chord leader key (e.g. `u`) is pressed, the help line temporarily updates to show only the available chord completions for that leader, prefixed with `🔗`. Each completion is shown as the second key followed by the distinguishing part of the label:
 
 ```
-🔗 u-p:update priority u-t:update title
+🔗 p:priority t:title
 ```
 
 ### How It Works
