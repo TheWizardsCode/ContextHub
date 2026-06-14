@@ -772,6 +772,129 @@ describe('Worklog browse pi extension', () => {
       // No trailing newline
       expect((setEditorText.mock.calls[0] as any)[0].endsWith('\n')).toBe(false);
     });
+
+    it('dispatches a key as audit <id> in the browse list view', async () => {
+      const setEditorText = vi.fn();
+      const items = [{ id: 'WL-50', title: 'Audit me', status: 'open' }];
+
+      const { custom, componentRef } = makeListCustomMock();
+      const registry = new ShortcutRegistry([
+        { key: 'a', command: 'audit <id>', view: 'both' },
+      ]);
+      const ctx: any = { ui: { custom, setEditorText, notify: vi.fn() } };
+
+      // Start defaultChooseWorkItem — it will call custom() which calls renderFn synchronously
+      void defaultChooseWorkItem(items, ctx, () => {}, registry);
+      // Yield to let custom() be called
+      await new Promise(r => setTimeout(r, 0));
+
+      const comp = componentRef.current;
+      expect(typeof comp.handleInput).toBe('function');
+
+      // Press 'a' — should trigger audit shortcut
+      comp.handleInput('a');
+
+      // Verify setEditorText was called with the audit command (no trailing newline)
+      expect(setEditorText).toHaveBeenCalledWith('audit WL-50');
+    });
+
+    it('inserts no trailing newline for audit shortcut so user can review before submitting', async () => {
+      const setEditorText = vi.fn();
+      const items = [{ id: 'WL-AUD', title: 'Audit item', status: 'open' }];
+
+      const { custom, componentRef } = makeListCustomMock();
+      const registry = new ShortcutRegistry([
+        { key: 'a', command: 'audit <id>', view: 'both' },
+      ]);
+      const ctx: any = { ui: { custom, setEditorText, notify: vi.fn() } };
+
+      void defaultChooseWorkItem(items, ctx, () => {}, registry);
+      await new Promise(r => setTimeout(r, 0));
+
+      componentRef.current.handleInput('a');
+
+      const insertedText = (setEditorText.mock.calls[0] as any)[0];
+      expect(insertedText).toBe('audit WL-AUD');
+      expect(insertedText.endsWith('\n')).toBe(false);
+      expect(insertedText.endsWith('\r')).toBe(false);
+    });
+
+    it('still navigates with up/down keys while a key triggers audit command', async () => {
+      const setEditorText = vi.fn();
+      const items = [
+        { id: 'WL-1', title: 'One', status: 'open' },
+        { id: 'WL-2', title: 'Two', status: 'open' },
+        { id: 'WL-3', title: 'Three', status: 'open' },
+      ];
+
+      const { custom, componentRef } = makeListCustomMock();
+      const registry = new ShortcutRegistry([
+        { key: 'a', command: 'audit <id>', view: 'both' },
+      ]);
+      const ctx: any = { ui: { custom, setEditorText, notify: vi.fn() } };
+
+      void defaultChooseWorkItem(items, ctx, () => {}, registry);
+      await new Promise(r => setTimeout(r, 0));
+
+      const comp = componentRef.current;
+
+      // Press Down twice: index 0 → 1 → 2
+      comp.handleInput('\u001b[B');
+      comp.handleInput('\u001b[B');
+
+      // Now press 'a' — should use item at index 2
+      comp.handleInput('a');
+
+      expect(setEditorText).toHaveBeenCalledWith('audit WL-3');
+    });
+
+    it('dispatches a key as audit <id> in the detail scrollable view', async () => {
+      const setEditorText = vi.fn();
+      const setWidget = vi.fn();
+      const listWorkItems = vi.fn().mockResolvedValue([
+        { id: 'WL-AUDIT', title: 'Audit item', status: 'open', description: 'test' },
+      ]);
+      const chooseWorkItem = vi.fn(async (items, _ctx, onSelectionChange) => {
+        onSelectionChange(items[0]);
+        return items[0];
+      });
+      const runWl = vi.fn().mockResolvedValue('## Detail\n\nSome content');
+
+      const extension = createWorklogBrowseExtension({ listWorkItems, chooseWorkItem, runWl });
+      extension(makePi() as any);
+
+      const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
+
+      // Capture the renderFn from custom() calls
+      const renderFnCapture: Function[] = [];
+      const custom = vi.fn(async (renderFn: Function) => {
+        renderFnCapture.push(renderFn);
+        return null;
+      });
+
+      await commandHandler('', { ui: { notify: vi.fn(), setWidget, custom, setEditorText } as any });
+
+      // custom() was called once (detail view; browse list bypassed by chooseWorkItem mock)
+      expect(custom).toHaveBeenCalledTimes(1);
+
+      // Extract the component from the captured renderFn
+      const component = renderFnCapture[0](
+        { requestRender: vi.fn(), terminal: { rows: 20 } },
+        { fg: (_c: string, t: string) => t, bold: (t: string) => t },
+        {},
+        () => {},
+      );
+
+      // Press 'a' in detail view — should trigger audit shortcut
+      component.handleInput('a');
+
+      // Verify setEditorText was called with the audit command
+      expect(setEditorText).toHaveBeenCalledWith('audit WL-AUDIT');
+      // Verify setWidget was called to clear the preview widget
+      expect(setWidget).toHaveBeenCalledWith('worklog-browse-selection', undefined);
+      // No trailing newline
+      expect((setEditorText.mock.calls[0] as any)[0].endsWith('\n')).toBe(false);
+    });
   });
 
   it('uses wl next -n 5 and parses results.workItem payload', async () => {
