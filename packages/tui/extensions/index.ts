@@ -54,6 +54,8 @@ interface BrowseUi {
   ) => Promise<T>;
   setWidget?: (id: string, content?: string[] | ((tui: unknown, theme: unknown) => { render: (width: number) => string[]; invalidate: () => void; handleInput?: (data: string) => void; dispose?: () => void; })) => void;
   notify: (message: string, level?: 'info' | 'warning' | 'error') => void;
+  /** Set the text in the core input editor. */
+  setEditorText?: (text: string) => void;
   /** Register a raw terminal input listener. Returns an unsubscribe function. */
   onTerminalInput?: (handler: TerminalInputHandler) => () => void;
   /** Return the height of the usable rendering area (terminal rows minus header/footer). */
