@@ -88,9 +88,10 @@ describe('Browse list help text with shortcuts', () => {
 
     const helpLine = getHelpLine();
     expect(helpLine).not.toBeNull();
-    expect(helpLine!).toContain('↑↓ navigate');
-    expect(helpLine!).toContain('enter select');
-    expect(helpLine!).toContain('esc cancel');
+    // Static navigation text has been removed; only shortcut hints remain
+    expect(helpLine!).not.toContain('↑↓ navigate');
+    expect(helpLine!).not.toContain('enter select');
+    expect(helpLine!).not.toContain('esc cancel');
     // Should include hints for 'both' and 'list' view entries
     expect(helpLine!).toContain('i:implement');
     expect(helpLine!).toContain('p:plan');
@@ -99,13 +100,13 @@ describe('Browse list help text with shortcuts', () => {
     expect(helpLine!).not.toContain('a:audit');
   });
 
-  it('uses correct help text format with bullet separators', async () => {
+  it('uses correct help text format with spaces', async () => {
     const { ctx, getHelpLine } = createMockContext();
     defaultChooseWorkItem(items, ctx, vi.fn(), registry);
     await new Promise(process.nextTick);
 
     const helpLine = getHelpLine();
-    expect(helpLine!).toMatch(/↑↓ navigate • enter select • esc cancel • /);
+    // Only shortcut hints remain, separated by spaces
     expect(helpLine!).toMatch(/i:implement p:plan n:intake/);
   });
 
@@ -115,8 +116,9 @@ describe('Browse list help text with shortcuts', () => {
     await new Promise(process.nextTick);
 
     const helpLine = getHelpLine();
-    expect(helpLine!).toContain('↑↓ navigate • enter select • esc cancel');
-    expect(helpLine!).not.toMatch(/ • [a-z]+:/);
+    // Static navigation text removed and no shortcuts — help line is empty
+    expect(helpLine!).toBe('');
+    expect(helpLine!).not.toMatch(/[a-z]+:/);
   });
 
   it('omits shortcut hints when registry has no list/both entries', async () => {
@@ -128,8 +130,9 @@ describe('Browse list help text with shortcuts', () => {
     await new Promise(process.nextTick);
 
     const helpLine = getHelpLine();
-    expect(helpLine!).toContain('↑↓ navigate • enter select • esc cancel');
-    expect(helpLine!).not.toMatch(/ • [a-z]+:/);
+    // Static navigation text removed and no applicable shortcuts — help line is empty
+    expect(helpLine!).toBe('');
+    expect(helpLine!).not.toMatch(/[a-z]+:/);
   });
 
   it('omits shortcut hints when registry has no entries', async () => {
@@ -139,14 +142,15 @@ describe('Browse list help text with shortcuts', () => {
     await new Promise(process.nextTick);
 
     const helpLine = getHelpLine();
-    expect(helpLine!).toContain('↑↓ navigate • enter select • esc cancel');
-    expect(helpLine!).not.toMatch(/ • [a-z]+:/);
+    // Static navigation text removed and no shortcuts — help line is empty
+    expect(helpLine!).toBe('');
+    expect(helpLine!).not.toMatch(/[a-z]+:/);
   });
 
   it('extracts clean labels from various command formats', async () => {
     const variedCommands = new ShortcutRegistry([
       { key: 'i', command: '/skill:implement <id>', view: 'both' },
-      { key: 'c', command: '/intake\n<desc>\nPriority: medium', view: 'list' },
+      { key: 'c', command: '/create\n<desc>\nPriority: medium', view: 'list' },
       { key: 'p', command: '/plan <id>', view: 'both' },
     ]);
     const { ctx, getHelpLine } = createMockContext();
@@ -155,7 +159,7 @@ describe('Browse list help text with shortcuts', () => {
 
     const helpLine = getHelpLine();
     expect(helpLine!).toContain('i:implement');
-    expect(helpLine!).toContain('c:intake');
+    expect(helpLine!).toContain('c:create');
     expect(helpLine!).toContain('p:plan');
     // Should NOT contain raw command parts
     expect(helpLine!).not.toContain('/skill:');
@@ -169,8 +173,8 @@ describe('Browse list help text with shortcuts', () => {
     await new Promise(process.nextTick);
 
     const helpLine = getHelpLine();
-    // Verify it's the help line (contains navigation text)
-    expect(helpLine!).toContain('↑↓ navigate');
+    // Static navigation text removed; only shortcut hints remain
+    expect(helpLine!).not.toContain('↑↓ navigate');
     expect(helpLine!).toContain('i:implement');
   });
 });

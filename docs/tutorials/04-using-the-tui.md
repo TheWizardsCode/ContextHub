@@ -171,6 +171,7 @@ In the browse selection list (when you see a list of work items), press one of t
 | `i` | `implement <selected-id>` |
 | `p` | `plan <selected-id>` |
 | `n` | `intake <selected-id>` |
+| `c` | `create <description>` |
 | `a` | `audit <selected-id>` |
 
 The command text is inserted into the Pi editor (without a trailing newline), allowing you to review or edit it before pressing Enter to submit.
@@ -211,6 +212,7 @@ Press `q`, `Esc`, or `Ctrl+C` to quit the TUI. All changes made during the sessi
 | Pi extension: implement | `i` (browse view) |
 | Pi extension: plan | `p` (browse view) |
 | Pi extension: intake | `n` (browse view) |
+| Pi extension: create | `c` (browse view) |
 | Pi extension: audit | `a` (browse view) |
 
 ## Next steps

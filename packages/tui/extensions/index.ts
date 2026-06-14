@@ -454,8 +454,10 @@ export async function defaultChooseWorkItem(
         const title = truncateToWidth(theme.fg('accent', theme.bold('Browse Worklog next items (top 5)')), width);
 
         // Build help text with dynamic shortcut hints from the registry,
-        // filtered by the current selection's stage
-        let helpText = '↑↓ navigate • enter select • esc cancel';
+        // filtered by the current selection's stage.
+        // Static navigation text ("↑↓ navigate • enter select • esc cancel")
+        // has been removed — only dynamic shortcut hints are shown.
+        let helpText = '';
         if (shortcutRegistry) {
           const selectedStage = items[selectedIndex]?.stage;
           const relevantEntries = shortcutRegistry
@@ -472,7 +474,7 @@ export async function defaultChooseWorkItem(
                 return `${e.key}:${label}`;
               })
               .join(' ');
-            helpText += ` • ${hints}`;
+            helpText = hints;
           }
         }
         const help = truncateToWidth(theme.fg('dim', helpText), width);

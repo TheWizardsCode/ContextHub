@@ -1,7 +1,7 @@
 [
   {
     "key": "c",
-    "command": "/intake\n<desc>\nPriority: medium",
+    "command": "/create\n<desc>\nPriority: medium",
     "view": "both",
     "stages": ["idea"]
   },
