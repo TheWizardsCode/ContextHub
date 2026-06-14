@@ -636,29 +636,29 @@ describe('Worklog browse pi extension', () => {
      */
     function makeListCustomMock() {
       const componentRef: { current: any } = { current: null };
+      const doneCalls: any[] = [];
       const custom = vi.fn((renderFn: Function) => {
         const result = renderFn(
           { requestRender: vi.fn(), terminal: { rows: 20 } },
           { fg: (_c: string, t: string) => t, bold: (t: string) => t },
           {},
-          () => {},
+          (val: any) => { doneCalls.push(val); },
         );
         componentRef.current = result;
         // Never resolve — the test will interact with the component directly
         return new Promise(() => {});
       });
-      return { custom, componentRef };
+      return { custom, componentRef, doneCalls };
     }
 
     it('dispatches n key as intake <id> in the browse list view', async () => {
-      const setEditorText = vi.fn();
       const items = [{ id: 'WL-99', title: 'Intake me', status: 'open' }];
 
-      const { custom, componentRef } = makeListCustomMock();
+      const { custom, componentRef, doneCalls } = makeListCustomMock();
       const registry = new ShortcutRegistry([
         { key: 'n', command: 'intake <id>', view: 'both' },
       ]);
-      const ctx: any = { ui: { custom, setEditorText, notify: vi.fn() } };
+      const ctx: any = { ui: { custom, notify: vi.fn() } };
 
       // Start defaultChooseWorkItem — it will call custom() which calls renderFn synchronously
       void defaultChooseWorkItem(items, ctx, () => {}, registry);
@@ -668,47 +668,46 @@ describe('Worklog browse pi extension', () => {
       const comp = componentRef.current;
       expect(typeof comp.handleInput).toBe('function');
 
-      // Press 'n' — should trigger intake shortcut
+      // Press 'n' — should trigger intake shortcut and return ShortcutResult
       comp.handleInput('n');
 
-      // Verify setEditorText was called with the intake command (no trailing newline)
-      expect(setEditorText).toHaveBeenCalledWith('intake WL-99');
+      // Verify done() was called with ShortcutResult (caller will set editor text after modal closes)
+      expect(doneCalls[0]).toEqual({ type: 'shortcut', command: 'intake WL-99' });
     });
 
-    it('inserts no trailing newline so user can review before submitting', async () => {
-      const setEditorText = vi.fn();
+    it('shortcut result has no trailing newline for review before submission', async () => {
       const items = [{ id: 'WL-ABC', title: 'Some item', status: 'open' }];
 
-      const { custom, componentRef } = makeListCustomMock();
+      const { custom, componentRef, doneCalls } = makeListCustomMock();
       const registry = new ShortcutRegistry([
         { key: 'n', command: 'intake <id>', view: 'both' },
       ]);
-      const ctx: any = { ui: { custom, setEditorText, notify: vi.fn() } };
+      const ctx: any = { ui: { custom, notify: vi.fn() } };
 
       void defaultChooseWorkItem(items, ctx, () => {}, registry);
       await new Promise(r => setTimeout(r, 0));
 
       componentRef.current.handleInput('n');
 
-      const insertedText = (setEditorText.mock.calls[0] as any)[0];
-      expect(insertedText).toBe('intake WL-ABC');
-      expect(insertedText.endsWith('\n')).toBe(false);
-      expect(insertedText.endsWith('\r')).toBe(false);
+      // Verify done() was called with ShortcutResult containing the command
+      expect(doneCalls[0]).toEqual({ type: 'shortcut', command: 'intake WL-ABC' });
+      // No trailing newline
+      expect(doneCalls[0].command.endsWith('\n')).toBe(false);
+      expect(doneCalls[0].command.endsWith('\r')).toBe(false);
     });
 
     it('still navigates with up/down keys while shortcut keys trigger commands', async () => {
-      const setEditorText = vi.fn();
       const items = [
         { id: 'WL-1', title: 'One', status: 'open' },
         { id: 'WL-2', title: 'Two', status: 'open' },
         { id: 'WL-3', title: 'Three', status: 'open' },
       ];
 
-      const { custom, componentRef } = makeListCustomMock();
+      const { custom, componentRef, doneCalls } = makeListCustomMock();
       const registry = new ShortcutRegistry([
         { key: 'n', command: 'intake <id>', view: 'both' },
       ]);
-      const ctx: any = { ui: { custom, setEditorText, notify: vi.fn() } };
+      const ctx: any = { ui: { custom, notify: vi.fn() } };
 
       void defaultChooseWorkItem(items, ctx, () => {}, registry);
       await new Promise(r => setTimeout(r, 0));
@@ -722,7 +721,8 @@ describe('Worklog browse pi extension', () => {
       // Now press 'n' — should use item at index 2
       comp.handleInput('n');
 
-      expect(setEditorText).toHaveBeenCalledWith('intake WL-3');
+      // Verify done() was called with ShortcutResult
+      expect(doneCalls[0]).toEqual({ type: 'shortcut', command: 'intake WL-3' });
     });
 
     it('dispatches n key as intake <id> in the detail scrollable view', async () => {
@@ -742,10 +742,11 @@ describe('Worklog browse pi extension', () => {
 
       const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
 
-      // Capture the renderFn from custom() calls
+      // Capture the renderFn and done result from custom() calls
       const renderFnCapture: Function[] = [];
+      const doneResults: any[] = [];
       const custom = vi.fn(async (renderFn: Function) => {
-        renderFnCapture.push(renderFn);
+        renderFnCapture.push((tui: any, theme: any, kb: any, done: any) => renderFn(tui, theme, kb, (v: any) => { doneResults.push(v); }));
         return null;
       });
 
@@ -755,33 +756,32 @@ describe('Worklog browse pi extension', () => {
       expect(custom).toHaveBeenCalledTimes(1);
 
       // Extract the component from the captured renderFn
+      const doneWrapper = (val: any) => doneResults.push(val);
       const component = renderFnCapture[0](
         { requestRender: vi.fn(), terminal: { rows: 20 } },
         { fg: (_c: string, t: string) => t, bold: (t: string) => t },
         {},
-        () => {},
+        doneWrapper,
       );
 
-      // Press 'n' in detail view — should trigger intake shortcut
+      // Press 'n' in detail view — should trigger intake shortcut and return ShortcutResult
       component.handleInput('n');
 
-      // Verify setEditorText was called with the intake command
-      expect(setEditorText).toHaveBeenCalledWith('intake WL-DEET');
-      // Verify setWidget was called to clear the preview widget
-      expect(setWidget).toHaveBeenCalledWith('worklog-browse-selection', undefined);
+      // Verify ShortcutResult was returned (caller will set editor text after modal closes)
+      expect(doneResults[0]).toEqual({ type: 'shortcut', command: 'intake WL-DEET' });
       // No trailing newline
-      expect((setEditorText.mock.calls[0] as any)[0].endsWith('\n')).toBe(false);
+      expect(doneResults[0].command.endsWith('\n')).toBe(false);
+      expect(doneResults[0].command.endsWith('\r')).toBe(false);
     });
 
     it('dispatches a key as audit <id> in the browse list view', async () => {
-      const setEditorText = vi.fn();
       const items = [{ id: 'WL-50', title: 'Audit me', status: 'open' }];
 
-      const { custom, componentRef } = makeListCustomMock();
+      const { custom, componentRef, doneCalls } = makeListCustomMock();
       const registry = new ShortcutRegistry([
         { key: 'a', command: 'audit <id>', view: 'both' },
       ]);
-      const ctx: any = { ui: { custom, setEditorText, notify: vi.fn() } };
+      const ctx: any = { ui: { custom, notify: vi.fn() } };
 
       // Start defaultChooseWorkItem — it will call custom() which calls renderFn synchronously
       void defaultChooseWorkItem(items, ctx, () => {}, registry);
@@ -791,47 +791,49 @@ describe('Worklog browse pi extension', () => {
       const comp = componentRef.current;
       expect(typeof comp.handleInput).toBe('function');
 
-      // Press 'a' — should trigger audit shortcut
+      // Press 'a' — should trigger audit shortcut and return ShortcutResult
       comp.handleInput('a');
 
-      // Verify setEditorText was called with the audit command (no trailing newline)
-      expect(setEditorText).toHaveBeenCalledWith('audit WL-50');
+      // Verify done() was called with ShortcutResult (caller will set editor text after modal closes)
+      expect(doneCalls[0]).toEqual({ type: 'shortcut', command: 'audit WL-50' });
+      // No trailing newline
+      expect(doneCalls[0].command.endsWith('\n')).toBe(false);
+      expect(doneCalls[0].command.endsWith('\r')).toBe(false);
     });
 
-    it('inserts no trailing newline for audit shortcut so user can review before submitting', async () => {
-      const setEditorText = vi.fn();
+    it('shortcut result for audit has no trailing newline', async () => {
       const items = [{ id: 'WL-AUD', title: 'Audit item', status: 'open' }];
 
-      const { custom, componentRef } = makeListCustomMock();
+      const { custom, componentRef, doneCalls } = makeListCustomMock();
       const registry = new ShortcutRegistry([
         { key: 'a', command: 'audit <id>', view: 'both' },
       ]);
-      const ctx: any = { ui: { custom, setEditorText, notify: vi.fn() } };
+      const ctx: any = { ui: { custom, notify: vi.fn() } };
 
       void defaultChooseWorkItem(items, ctx, () => {}, registry);
       await new Promise(r => setTimeout(r, 0));
 
       componentRef.current.handleInput('a');
 
-      const insertedText = (setEditorText.mock.calls[0] as any)[0];
-      expect(insertedText).toBe('audit WL-AUD');
-      expect(insertedText.endsWith('\n')).toBe(false);
-      expect(insertedText.endsWith('\r')).toBe(false);
+      // Verify done() was called with ShortcutResult
+      expect(doneCalls[0]).toEqual({ type: 'shortcut', command: 'audit WL-AUD' });
+      // No trailing newline
+      expect(doneCalls[0].command.endsWith('\n')).toBe(false);
+      expect(doneCalls[0].command.endsWith('\r')).toBe(false);
     });
 
     it('still navigates with up/down keys while a key triggers audit command', async () => {
-      const setEditorText = vi.fn();
       const items = [
         { id: 'WL-1', title: 'One', status: 'open' },
         { id: 'WL-2', title: 'Two', status: 'open' },
         { id: 'WL-3', title: 'Three', status: 'open' },
       ];
 
-      const { custom, componentRef } = makeListCustomMock();
+      const { custom, componentRef, doneCalls } = makeListCustomMock();
       const registry = new ShortcutRegistry([
         { key: 'a', command: 'audit <id>', view: 'both' },
       ]);
-      const ctx: any = { ui: { custom, setEditorText, notify: vi.fn() } };
+      const ctx: any = { ui: { custom, notify: vi.fn() } };
 
       void defaultChooseWorkItem(items, ctx, () => {}, registry);
       await new Promise(r => setTimeout(r, 0));
@@ -845,7 +847,8 @@ describe('Worklog browse pi extension', () => {
       // Now press 'a' — should use item at index 2
       comp.handleInput('a');
 
-      expect(setEditorText).toHaveBeenCalledWith('audit WL-3');
+      // Verify done() was called with ShortcutResult
+      expect(doneCalls[0]).toEqual({ type: 'shortcut', command: 'audit WL-3' });
     });
 
     it('dispatches a key as audit <id> in the detail scrollable view', async () => {
@@ -865,10 +868,11 @@ describe('Worklog browse pi extension', () => {
 
       const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
 
-      // Capture the renderFn from custom() calls
+      // Capture the renderFn and done result from custom() calls
       const renderFnCapture: Function[] = [];
+      const doneResults: any[] = [];
       const custom = vi.fn(async (renderFn: Function) => {
-        renderFnCapture.push(renderFn);
+        renderFnCapture.push((tui: any, theme: any, kb: any, done: any) => renderFn(tui, theme, kb, (v: any) => { doneResults.push(v); }));
         return null;
       });
 
@@ -878,22 +882,22 @@ describe('Worklog browse pi extension', () => {
       expect(custom).toHaveBeenCalledTimes(1);
 
       // Extract the component from the captured renderFn
+      const doneWrapper = (val: any) => doneResults.push(val);
       const component = renderFnCapture[0](
         { requestRender: vi.fn(), terminal: { rows: 20 } },
         { fg: (_c: string, t: string) => t, bold: (t: string) => t },
         {},
-        () => {},
+        doneWrapper,
       );
 
-      // Press 'a' in detail view — should trigger audit shortcut
+      // Press 'a' in detail view — should trigger audit shortcut and return ShortcutResult
       component.handleInput('a');
 
-      // Verify setEditorText was called with the audit command
-      expect(setEditorText).toHaveBeenCalledWith('audit WL-AUDIT');
-      // Verify setWidget was called to clear the preview widget
-      expect(setWidget).toHaveBeenCalledWith('worklog-browse-selection', undefined);
+      // Verify ShortcutResult was returned (caller will set editor text after modal closes)
+      expect(doneResults[0]).toEqual({ type: 'shortcut', command: 'audit WL-AUDIT' });
       // No trailing newline
-      expect((setEditorText.mock.calls[0] as any)[0].endsWith('\n')).toBe(false);
+      expect(doneResults[0].command.endsWith('\n')).toBe(false);
+      expect(doneResults[0].command.endsWith('\r')).toBe(false);
     });
 
     it('full config→load→dispatch→setEditorText flow in both views', async () => {
@@ -923,16 +927,14 @@ describe('Worklog browse pi extension', () => {
 
       // Step 3: Dispatch in list view
       const listItems = [{ id: 'WL-LIST', title: 'List item', status: 'open' }];
-      const { custom: listCustom, componentRef: listComp } = makeListCustomMock();
-      const listCtx: any = { ui: { custom: listCustom, setEditorText, notify: vi.fn() } };
+      const { custom: listCustom, componentRef: listComp, doneCalls: listDone } = makeListCustomMock();
+      const listCtx: any = { ui: { custom: listCustom, notify: vi.fn() } };
 
       void defaultChooseWorkItem(listItems, listCtx, () => {}, registry);
       await new Promise(r => setTimeout(r, 0));
 
       listComp.current.handleInput('i');
-      expect(setEditorText).toHaveBeenLastCalledWith('implement WL-LIST');
-
-      setEditorText.mockClear();
+      expect(listDone[0]).toEqual({ type: 'shortcut', command: 'implement WL-LIST' });
 
       // Step 4: Dispatch in detail view
       const listWorkItems = vi.fn().mockResolvedValue([
@@ -949,8 +951,9 @@ describe('Worklog browse pi extension', () => {
 
       const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
       const renderFnCapture: Function[] = [];
+      const doneResults: any[] = [];
       const detailCustom = vi.fn(async (renderFn: Function) => {
-        renderFnCapture.push(renderFn);
+        renderFnCapture.push((tui: any, theme: any, kb: any, done: any) => renderFn(tui, theme, kb, (v: any) => { doneResults.push(v); }));
         return null;
       });
 
@@ -966,9 +969,7 @@ describe('Worklog browse pi extension', () => {
       );
 
       detailComponent.handleInput('p');
-      expect(setEditorText).toHaveBeenCalledWith('plan WL-DEET');
-      // setWidget was called to clear preview widget
-      expect(setWidget).toHaveBeenCalledWith('worklog-browse-selection', undefined);
+      expect(doneResults[0]).toEqual({ type: 'shortcut', command: 'plan WL-DEET' });
     });
 
     it('unregistered keys are no-ops in both list and detail views', async () => {
@@ -1039,8 +1040,8 @@ describe('Worklog browse pi extension', () => {
         { key: 'i', command: 'implement <id>', view: 'both' },
       ]);
 
-      const { custom: navListCustom, componentRef: navListComp } = makeListCustomMock();
-      const navListCtx: any = { ui: { custom: navListCustom, setEditorText, notify: vi.fn() } };
+      const { custom: navListCustom, componentRef: navListComp, doneCalls: navDoneCalls } = makeListCustomMock();
+      const navListCtx: any = { ui: { custom: navListCustom, notify: vi.fn() } };
 
       void defaultChooseWorkItem(testItems, navListCtx, () => {}, testRegistry);
       await new Promise(r => setTimeout(r, 0));
@@ -1053,7 +1054,7 @@ describe('Worklog browse pi extension', () => {
       navComp.handleInput('\u001b[A');
       // Press shortcut 'i' - should dispatch for item at index 1
       navComp.handleInput('i');
-      expect(setEditorText).toHaveBeenCalledWith('implement WL-2');
+      expect(navDoneCalls[0]).toEqual({ type: 'shortcut', command: 'implement WL-2' });
 
       // Detail view: scrollable widget handles PageUp/PageDown/g/G
       const tui = { requestRender: vi.fn(), getHeight: () => 20 };

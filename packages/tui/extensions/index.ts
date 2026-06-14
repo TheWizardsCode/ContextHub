@@ -25,7 +25,7 @@ type ChooseWorkItemFn = (
   items: WorklogBrowseItem[],
   ctx: BrowseContext,
   onSelectionChange: SelectionChangeHandler,
-) => Promise<WorklogBrowseItem | undefined>;
+) => Promise<WorklogBrowseItem | ShortcutResult | undefined>;
 
 interface WorklogBrowseDependencies {
   listWorkItems?: () => Promise<WorklogBrowseItem[]>;
@@ -321,12 +321,21 @@ function isEscapeKey(data: string): boolean {
 }
 
 /**
+ * Shortcut result type - returned when a shortcut key is pressed in the browse list.
+ * The caller should set editor text with the resolved command.
+ */
+export interface ShortcutResult {
+  type: 'shortcut';
+  command: string;
+}
+
+/**
  * Default work item chooser that renders a custom overlay with the browse list.
  *
  * Supports dynamic shortcut dispatch via a `ShortcutRegistry`. When a
  * registered shortcut key is pressed, the overlay is closed and the command
- * + selected item ID is inserted into Pi's editor via `ctx.ui.setEditorText()`
- * (no submit — the user can review/edit before pressing Enter).
+ * + selected item ID is returned as a ShortcutResult. The caller handles
+ * setting the editor text after the modal closes.
  *
  * @internal — exported for testing
  */
@@ -335,7 +344,7 @@ export async function defaultChooseWorkItem(
   ctx: BrowseContext,
   onSelectionChange: SelectionChangeHandler,
   shortcutRegistry?: ShortcutRegistry,
-): Promise<WorklogBrowseItem | undefined> {
+): Promise<WorklogBrowseItem | ShortcutResult | undefined> {
   if (!ctx.ui.custom) {
     if (!ctx.ui.select) {
       throw new Error('Selection UI is unavailable in this environment.');
@@ -396,9 +405,8 @@ export async function defaultChooseWorkItem(
           if (lookupKey) {
             const command = shortcutRegistry.lookup(lookupKey, 'list');
             if (command) {
-              const selectedItem = items[selectedIndex];
-              ctx.ui.setEditorText?.(command.replace('<id>', selectedItem.id));
-              done(null);
+              // Return the shortcut result - caller will set editor text after modal closes
+              done({ type: 'shortcut', command: command.replace('<id>', items[selectedIndex].id) } as any);
               return;
             }
           }
@@ -427,8 +435,6 @@ export async function defaultChooseWorkItem(
       },
     };
   });
-
-  return selectedItem ?? undefined;
 }
 
 /**
@@ -532,7 +538,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
   // If no custom registry is provided via deps, a default registry is built.
   const shortcutRegistry = deps.shortcutRegistry ?? loadShortcutConfig();
   const chooseWorkItem = deps.chooseWorkItem
-    ? (deps.chooseWorkItem as (items: WorklogBrowseItem[], ctx: BrowseContext, onSelectionChange: SelectionChangeHandler, registry?: ShortcutRegistry) => Promise<WorklogBrowseItem | undefined>)
+    ? (deps.chooseWorkItem as (items: WorklogBrowseItem[], ctx: BrowseContext, onSelectionChange: SelectionChangeHandler, registry?: ShortcutRegistry) => Promise<WorklogBrowseItem | ShortcutResult | undefined>)
     : (items: WorklogBrowseItem[], ctx: BrowseContext, onSelectionChange: SelectionChangeHandler) => defaultChooseWorkItem(items, ctx, onSelectionChange, shortcutRegistry);
 
   return function registerWorklogBrowseExtension(pi: PiLike): void {
@@ -554,7 +560,16 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
           ctx.ui.setWidget?.('worklog-browse-selection', buildSelectionWidget(item), { placement: 'belowEditor' });
         };
 
-        const selectedItem = await chooseWorkItem(items, ctx, announceSelection);
+        const result = await chooseWorkItem(items, ctx, announceSelection);
+        // Handle shortcut result - set editor text after browse list modal closes
+        if (result && result.type === 'shortcut') {
+          ctx.ui.setEditorText?.(result.command);
+          ctx.ui.setWidget?.('worklog-browse-selection', undefined);
+          return;
+        }
+
+        const selectedItem = result as WorklogBrowseItem | undefined;
+
         if (!selectedItem) {
           // user cancelled selection; clear preview widget
           ctx.ui.setWidget?.('worklog-browse-selection', undefined);
@@ -601,10 +616,8 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
                   if (lookupKey) {
                     const command = shortcutRegistry.lookup(lookupKey, 'detail');
                     if (command) {
-                      // Clear the preview widget before closing the modal
-                      ctx.ui.setWidget?.('worklog-browse-selection', undefined);
-                      ctx.ui.setEditorText?.(command.replace('<id>', selectedItem.id));
-                      done(null);
+                      // Return shortcut result - caller will set editor text after modal closes
+                      done({ type: 'shortcut', command: command.replace('<id>', selectedItem.id) } as any);
                       return;
                     }
                   }
