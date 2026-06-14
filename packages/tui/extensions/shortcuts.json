@@ -1,11 +1,11 @@
 [
   {
     "key": "c",
-    "command": "/create\n<desc>\nPriority: medium",
+    "command": "/intake\n<desc>\nPriority: medium",
     "view": "both",
     "stages": ["idea"],
-    "label": "create",
-    "description": "Create a new work item with a description and priority template"
+    "label": "create new",
+    "description": "Create a new work item with a description and priority."
   },
   {
     "key": "i",
