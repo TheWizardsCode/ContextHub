@@ -83,7 +83,7 @@ Chord entry:
 | `chord` | string[] _(mutually exclusive with `key`)_ | Two-or-more character sequence that triggers the shortcut. The first key is the **leader** — pressing it enters a pending-chord state and the help line updates to show available completions. The second key (or remaining keys) completes the chord. Example: `["u", "p"]` means press `u` then `p`. |
 | `command` | string | Template string to insert into the Pi editor. The placeholder `<id>` is replaced with the selected work item's ID. |
 | `view` | string | Which view the shortcut applies to: `"list"` (browse selection only), `"detail"` (detail view only), or `"both"` (both views). |
-| `label` | string _(optional)_ | Short display label shown in the browse help line (e.g., `"implement"`, `"plan"`). When provided, overrides the label derived from the command string. Chord entries are displayed as `leader-second:label` (e.g., `u-p:update priority`). |
+| `label` | string _(optional)_ | Short display label shown in the browse help line (e.g., `"implement"`, `"plan"`). When provided, overrides the label derived from the command string. Chord entries are displayed as `leader:firstWord...` (e.g., `u:update...`) to keep the help line compact. |
 | `description` | string _(optional)_ | One-sentence description of the command for use in help screens (e.g., `"Run the implement workflow on the selected work item"`). |
 | `stages` | string[] _(optional)_ | Allow-list of work item stages for which the shortcut is available. When omitted or empty, the shortcut is unconditionally available (backward compatible). The stage comparison is case-sensitive, exact match. |
 
@@ -125,7 +125,7 @@ Chord shortcuts let you dispatch commands with a two-key sequence. Press the **l
 
 #### Chord Help Text
 
-When a chord leader key is pressed, the help line replaces the normal shortcut hints with the available chord completions for that leader. The format is `leader-second:label`.
+When a chord leader key is pressed, the help line replaces the normal shortcut hints with the available chord completions for that leader. In this pending state the full chord pattern is shown (e.g., `u-p:update priority`) so the user knows exactly what keys to press next.
 
 For example, pressing `u` while the help line is visible would show:
 ```
@@ -166,9 +166,9 @@ The same reserved navigation keys (`g`, `G`, ` `) that cannot be used as shortcu
 The help text shown in the browse list dynamically filters shortcuts based on the currently selected item's stage. As you navigate between items with different stages, the help text updates to show only applicable shortcuts. Both key-based and chord-based shortcuts are included in the help line.
 
 For example:
-- Selecting an item in the `idea` stage shows `c:create`, `n:intake`, `u-p:update priority`, `u-t:update title`, and `a:audit`.
-- Selecting an item in `intake_complete` shows `i:implement`, `p:plan`, `u-p:update priority`, `u-t:update title`, and `a:audit`.
-- Selecting an item in `in_progress` shows `u-p:update priority`, `u-t:update title`, and `a:audit`.
+- Selecting an item in the `idea` stage shows `c:create`, `n:intake`, `u:update...`, and `a:audit`.
+- Selecting an item in `intake_complete` shows `i:implement`, `p:plan`, `u:update...`, and `a:audit`.
+- Selecting an item in `in_progress` shows `u:update...`, and `a:audit`.
 
 When a chord leader key (e.g. `u`) is pressed, the help line temporarily updates to show only the available chord completions for that leader, prefixed with `🔗`:
 

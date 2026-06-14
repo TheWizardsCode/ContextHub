@@ -463,11 +463,14 @@ export async function defaultChooseWorkItem(
         .split(/\r?\n/)[0]
         .trim()
         .replace(/^\/(skill:)?/, '');
-      // If this is a chord entry, format as chord:label
+      // If this is a chord entry, show just the first key and first word of
+      // the label, followed by ellipsis (e.g. "u:update...") to keep the help
+      // line compact while hinting at available chord leaders.
       const chord = (e as Record<string, unknown>).chord;
       if (Array.isArray(chord) && chord.length >= 2) {
-        const chordStr = (chord as string[]).slice(0, 2).join('-');
-        return `${chordStr}:${label}`;
+        const leaderKey = (chord as string[])[0];
+        const firstWord = label.split(/\s+/)[0];
+        return `${leaderKey}:${firstWord}...`;
       }
       return `${e.key}:${label}`;
     };
@@ -484,7 +487,10 @@ export async function defaultChooseWorkItem(
           const selectedStage = items[selectedIndex]?.stage;
 
           if (pendingChordLeader !== null) {
-            // Show chord completions for the pending leader key
+            // Show chord completions for the pending leader key.
+            // In the pending state we show the full chord pattern (e.g.
+            // "u-p:update priority") so the user knows exactly what keys
+            // to press next.
             const chords = shortcutRegistry.getChordByLeader(pendingChordLeader, 'list');
             if (chords.length > 0) {
               const hints = chords
@@ -495,7 +501,19 @@ export async function defaultChooseWorkItem(
                   }
                   return true;
                 })
-                .map(e => formatEntryLabel(e))
+                .map(e => {
+                  const label = e.label ?? e.command
+                    .replace(/<[^>]+>/g, '')
+                    .split(/\r?\n/)[0]
+                    .trim()
+                    .replace(/^\/(skill:)?/, '');
+                  const chord = (e as Record<string, unknown>).chord;
+                  if (Array.isArray(chord) && chord.length >= 2) {
+                    const chordStr = (chord as string[]).slice(0, 2).join('-');
+                    return `${chordStr}:${label}`;
+                  }
+                  return formatEntryLabel(e);
+                })
                 .join(' ');
               if (hints.length > 0) {
                 helpText = `🔗 ${hints}`;
