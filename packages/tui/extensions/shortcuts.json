@@ -40,16 +40,30 @@
   },
   {
     "chord": ["u", "p"],
-    "command": "!!wl update --priority <id>",
+    "command": "!!wl update <id> --priority ",
     "view": "both",
     "label": "update priority",
     "description": "Update the priority of the selected work item"
   },
   {
     "chord": ["u", "t"],
-    "command": "!!wl update --title <id>",
+    "command": "!!wl update <id> --title ",
     "view": "both",
     "label": "update title",
     "description": "Update the title of the selected work item"
+  },
+  {
+    "chord": ["x", "c"],
+    "command": "!!wl close <id>",
+    "view": "both",
+    "label": "close done",
+    "description": "Close the work item as done."
+  },
+  {
+    "chord": ["x", "d"],
+    "command": "!!wl delete <id>",
+    "view": "both",
+    "label": "close deleted",
+    "description": "Delete the work item."
   }
 ]
