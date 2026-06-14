@@ -419,7 +419,7 @@ export async function defaultChooseWorkItem(
           const command = shortcutRegistry.lookup(lookupKey, 'list');
           if (command) {
             // Return the shortcut result - caller will set editor text after modal closes
-            done({ type: 'shortcut', command: command.replace('<id>', items[selectedIndex].id) } as any);
+            done({ type: 'shortcut' as const, command: command.replace('<id>', items[selectedIndex].id) });
             return;
           }
         }
@@ -576,7 +576,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
 
         const result = await chooseWorkItem(items, ctx, announceSelection);
         // Handle shortcut result - set editor text after browse list modal closes
-        if (result && result.type === 'shortcut') {
+        if (result && 'type' in result && result.type === 'shortcut') {
           ctx.ui.setEditorText?.(result.command);
           ctx.ui.setWidget?.('worklog-browse-selection', undefined);
           return;
@@ -615,7 +615,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
           // calls tui.requestRender() — but we need the wrapper to forward Escape
           // to done() (which closes the custom modal) and to pass through all
           // other keys to the scrollable widget.
-          const detailResult = await ctx.ui.custom<string | null>(
+          const detailResult = await ctx.ui.custom<ShortcutResult | string | null>(
             (tui, _theme, _keybindings, done) => {
               const factory = createScrollableWidget(detailLines);
               const widget = factory(tui, _theme);
@@ -633,7 +633,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
                     const command = shortcutRegistry.lookup(lookupKey, 'detail');
                     if (command) {
                       // Return shortcut result - caller will set editor text after modal closes
-                      done({ type: 'shortcut', command: command.replace('<id>', selectedItem.id) } as any);
+                      done({ type: 'shortcut' as const, command: command.replace('<id>', selectedItem.id) });
                       return;
                     }
                   }
@@ -651,8 +651,8 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
             },
           ).catch(() => null);
           // Handle shortcut result from detail view (editor text set after modal closes)
-          if (detailResult && typeof detailResult === 'object' && (detailResult as any).type === 'shortcut') {
-            ctx.ui.setEditorText?.((detailResult as any).command);
+          if (detailResult && typeof detailResult === 'object' && detailResult.type === 'shortcut') {
+            ctx.ui.setEditorText?.(detailResult.command);
             ctx.ui.setWidget?.('worklog-browse-selection', undefined);
           }
         } catch (innerErr) {

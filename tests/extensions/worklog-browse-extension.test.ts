@@ -784,7 +784,7 @@ describe('Worklog browse pi extension', () => {
       component.handleInput('n');
 
       // Verify ShortcutResult was returned (caller will set editor text after modal closes)
-      expect(doneResults[0]).toEqual({ type: 'shortcut', command: 'intake WL-DEET' });
+      expect(doneResults[0]).toEqual({ type: 'shortcut', command: '/intake WL-DEET' });
       // No trailing newline
       expect(doneResults[0].command.endsWith('\n')).toBe(false);
       expect(doneResults[0].command.endsWith('\r')).toBe(false);
@@ -919,7 +919,7 @@ describe('Worklog browse pi extension', () => {
       component.handleInput('a');
 
       // Verify ShortcutResult was returned (caller will set editor text after modal closes)
-      expect(doneResults[0]).toEqual({ type: 'shortcut', command: 'audit WL-AUDIT' });
+      expect(doneResults[0]).toEqual({ type: 'shortcut', command: '/skill:audit WL-AUDIT' });
       // No trailing newline
       expect(doneResults[0].command.endsWith('\n')).toBe(false);
       expect(doneResults[0].command.endsWith('\r')).toBe(false);
@@ -996,7 +996,7 @@ describe('Worklog browse pi extension', () => {
       );
 
       detailComponent.handleInput('p');
-      expect(doneResults[0]).toEqual({ type: 'shortcut', command: 'plan WL-DEET' });
+      expect(doneResults[0]).toEqual({ type: 'shortcut', command: '/plan WL-DEET' });
     });
 
     it('unregistered keys are no-ops in both list and detail views', async () => {
