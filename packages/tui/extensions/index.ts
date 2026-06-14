@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { priorityIcon, statusIcon, iconsEnabled } from '../../../src/icons.js';
 import { applyStageColour, type WorkItem, type PiTheme } from './worklog-helpers.js';
-import { truncateToTerminalWidth } from './terminal-utils.js';
+import { truncateToTerminalWidth, wrapToTerminalWidth } from './terminal-utils.js';
 import { type ShortcutRegistry, loadShortcutConfig } from './shortcut-config.js';
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 
@@ -670,8 +670,12 @@ export function createScrollableWidget(
 } {
   return (tui: any, _theme: any) => {
     let offset = 0;
+    // Cache the last wrapped lines and viewport so handleInput can use them
+    // without re-wrapping (width doesn't change between render and input).
+    let lastWrappedLines: string[] = [];
+    let lastViewport = 12;
 
-    const getViewport = () => {
+    const computeViewport = (totalLines: number) => {
       // The TUI instance exposes terminal dimensions via `terminal.rows`.
       // `getHeight()` is not a public API on the pi TUI, so fall back to
       // `tui.terminal.rows` (the actual terminal height) and finally
@@ -683,19 +687,27 @@ export function createScrollableWidget(
             : tui?.terminal?.rows ?? tui?.height;
         if (typeof height === 'number' && height > 8) {
           // Reserve ~6 rows for header / footer / controls
-          return Math.min(Math.max(3, Math.floor(height - 6)), contentLines.length);
+          return Math.min(Math.max(3, Math.floor(height - 6)), totalLines);
         }
       } catch (_) {
         // ignore
       }
-      return Math.max(12, contentLines.length);
+      return Math.max(12, totalLines);
     };
 
     const render = (width: number) => {
-      const vp = getViewport();
-      const start = Math.min(Math.max(0, offset), Math.max(0, contentLines.length - vp));
-      const end = Math.min(contentLines.length, start + vp);
-      return contentLines.slice(start, end).map(line => truncateToWidth(line, width));
+      // Wrap each content line; each line may produce multiple wrapped lines
+      lastWrappedLines = contentLines.flatMap(
+        line => wrapToTerminalWidth(line, width),
+      );
+      lastViewport = computeViewport(lastWrappedLines.length);
+      const start = Math.min(
+        Math.max(0, offset),
+        Math.max(0, lastWrappedLines.length - lastViewport),
+      );
+      const end = Math.min(lastWrappedLines.length, start + lastViewport);
+      offset = start; // keep offset valid
+      return lastWrappedLines.slice(start, end);
     };
 
     const invalidate = () => {
@@ -703,6 +715,9 @@ export function createScrollableWidget(
     };
 
     const handleInput = (data: string) => {
+      const totalLines = lastWrappedLines.length || contentLines.length;
+      const vp = lastViewport;
+
       if (isUpKey(data)) {
         offset = Math.max(0, offset - 1);
         invalidate();
@@ -710,19 +725,19 @@ export function createScrollableWidget(
       }
 
       if (isDownKey(data)) {
-        offset = Math.min(Math.max(0, contentLines.length - 1), offset + 1);
+        offset = Math.min(Math.max(0, totalLines - 1), offset + 1);
         invalidate();
         return;
       }
 
       if (isPageUpKey(data)) {
-        offset = Math.max(0, offset - getViewport());
+        offset = Math.max(0, offset - vp);
         invalidate();
         return;
       }
 
       if (isPageDownKey(data)) {
-        offset = Math.min(Math.max(0, contentLines.length - 1), offset + getViewport());
+        offset = Math.min(Math.max(0, totalLines - 1), offset + vp);
         invalidate();
         return;
       }
@@ -734,7 +749,7 @@ export function createScrollableWidget(
       }
 
       if (data === 'G') {
-        offset = Math.max(0, contentLines.length - getViewport());
+        offset = Math.max(0, totalLines - vp);
         invalidate();
         return;
       }

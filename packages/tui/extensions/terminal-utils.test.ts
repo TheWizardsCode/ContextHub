@@ -10,6 +10,7 @@ import {
   getCharWidth,
   visibleWidth,
   truncateToTerminalWidth,
+  wrapToTerminalWidth,
 } from './terminal-utils.js';
 
 describe('terminal-utils', () => {
@@ -69,6 +70,114 @@ describe('terminal-utils', () => {
     it('ignores ANSI escape codes', () => {
       expect(visibleWidth('\x1b[32m🟢\x1b[0m')).toBe(2);
       expect(visibleWidth('\x1b[1mhello\x1b[0m')).toBe(5);
+    });
+  });
+
+  describe('wrapToTerminalWidth', () => {
+    it('returns a single line when text fits within maxWidth', () => {
+      expect(wrapToTerminalWidth('hello', 10)).toEqual(['hello']);
+    });
+
+    it('wraps at word boundaries for a simple sentence', () => {
+      const result = wrapToTerminalWidth('hello world foo', 8);
+      expect(result).toEqual(['hello', 'world', 'foo']);
+    });
+
+    it('wraps when text exactly equals maxWidth', () => {
+      expect(wrapToTerminalWidth('hello', 5)).toEqual(['hello']);
+    });
+
+    it('preserves multiple spaces as a single word separator', () => {
+      const result = wrapToTerminalWidth('hello   world', 8);
+      expect(result).toEqual(['hello', 'world']);
+    });
+
+    it('handles leading and trailing whitespace gracefully', () => {
+      const result = wrapToTerminalWidth('  hello world  ', 10);
+      expect(result).toEqual(['hello', 'world']);
+    });
+
+    it('falls back to character-break for words longer than maxWidth', () => {
+      const result = wrapToTerminalWidth('abcdefghij', 5);
+      expect(result).toEqual(['abcde', 'fghij']);
+    });
+
+    it('character-breaks across multiple lines for a single long word', () => {
+      const result = wrapToTerminalWidth('superlongword', 4);
+      expect(result).toEqual(['supe', 'rlon', 'gwor', 'd']);
+    });
+
+    it('preserves ANSI escape sequences at word boundaries', () => {
+      const input = '\x1b[32mhello world\x1b[0m foo';
+      const result = wrapToTerminalWidth(input, 8);
+      // Each line preserves the ANSI codes that were active
+      expect(result.some(l => l.includes('\x1b[32m'))).toBe(true);
+      expect(result.some(l => l.includes('\x1b[0m'))).toBe(true);
+    });
+
+    it('re-applies active ANSI codes at the start of wrapped lines', () => {
+      const input = '\x1b[32mhello world foo\x1b[0m';
+      const result = wrapToTerminalWidth(input, 8);
+      expect(result).toEqual([
+        '\x1b[32mhello',
+        '\x1b[32mworld',
+        '\x1b[32mfoo\x1b[0m',
+      ]);
+    });
+
+    it('handles double-width emoji in wrapping (emoji counts as 2 columns)', () => {
+      const result = wrapToTerminalWidth('🟢a🟢b', 4);
+      expect(result).toEqual(['🟢a', '🟢b']);
+    });
+
+    it('word-wraps text with emoji correctly', () => {
+      const result = wrapToTerminalWidth('hello 🟢 world 🟢 foo', 12);
+      expect(result).toEqual(['hello 🟢', 'world 🟢 foo']);
+    });
+
+    it('returns empty array for empty string', () => {
+      expect(wrapToTerminalWidth('', 10)).toEqual([]);
+    });
+
+    it('returns empty array for zero or negative maxWidth', () => {
+      expect(wrapToTerminalWidth('hello', 0)).toEqual([]);
+      expect(wrapToTerminalWidth('hello', -1)).toEqual([]);
+    });
+
+    it('preserves ANSI codes within a word during character-break', () => {
+      // One long word with embedded ANSI codes (no spaces)
+      const input = 'before\x1b[31mred\x1b[0mafter';
+      // visible: 6 + 3 + 5 = 14, break at 10
+      // First line fills to maxWidth: 'before\x1b[31mred\x1b[0ma' = 10 visible cols
+      const result = wrapToTerminalWidth(input, 10);
+      expect(result).toEqual(['before\x1b[31mred\x1b[0ma', 'fter']);
+    });
+
+    it('handles words with mixed ANSI codes spanning wrap boundaries', () => {
+      const input = '\x1b[32mhello world\x1b[0m';
+      const result = wrapToTerminalWidth(input, 8);
+      expect(result).toEqual([
+        '\x1b[32mhello',
+        '\x1b[32mworld\x1b[0m',
+      ]);
+    });
+
+    it('preserves existing line breaks in the input', () => {
+      expect(wrapToTerminalWidth('hello\nworld', 10)).toEqual(['hello', 'world']);
+    });
+
+    it('each wrapped line has visible width <= maxWidth', () => {
+      const longText = 'The quick brown fox jumps over the lazy dog near the riverbank.';
+      const result = wrapToTerminalWidth(longText, 20);
+      for (const line of result) {
+        expect(visibleWidth(line)).toBeLessThanOrEqual(20);
+      }
+    });
+
+    it('handles a single space-separated word list correctly', () => {
+      const input = 'a bb ccc dddd eeeee ffffff';
+      const result = wrapToTerminalWidth(input, 6);
+      expect(result).toEqual(['a bb', 'ccc', 'dddd', 'eeeee', 'ffffff']);
     });
   });
 
