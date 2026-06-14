@@ -32,6 +32,7 @@ describe('Worklog browse pi extension', () => {
     registerCommand,
     registerShortcut,
     sendMessage,
+    on: vi.fn(),
   });
 
   beforeEach(() => {
@@ -1153,6 +1154,183 @@ describe('Worklog browse pi extension', () => {
       // Return value should be undefined (null ?? undefined)
       const escapeResult = await escapePromise;
       expect(escapeResult).toBeUndefined();
+    });
+
+    describe('navigation key protection (WL-0MQDR4V7O007O7TZ)', () => {
+      it('browse list: reserved navigation key g does not dispatch shortcut', async () => {
+        // If a shortcut is configured for 'g' in the browse list, it should be
+        // ignored because 'g' is a reserved navigation key.
+        const items = [{ id: 'WL-G', title: 'G item', status: 'open' }];
+        const { custom, componentRef, doneCalls } = makeListCustomMock();
+        const registry = new ShortcutRegistry([
+          { key: 'g', command: 'go <id>', view: 'both' },
+        ]);
+        const ctx: any = { ui: { custom, notify: vi.fn() } };
+
+        const resultPromise = defaultChooseWorkItem(items, ctx, () => {}, registry);
+        await new Promise(r => setTimeout(r, 0));
+
+        // Press 'g' - should NOT trigger shortcut since it's reserved
+        componentRef.current.handleInput('g');
+
+        // done() should NOT have been called (g is not enter/escape)
+        expect(doneCalls).toHaveLength(0);
+      });
+
+      it('detail view: reserved navigation key g does not dispatch shortcut', async () => {
+        // Use a custom registry that HAS a shortcut configured for 'g'.
+        // The defensive set should prevent it from dispatching.
+        const navRegistry = new ShortcutRegistry([
+          { key: 'g', command: 'g-command <id>', view: 'detail' },
+        ]);
+        const setEditorText = vi.fn();
+        const setWidget = vi.fn();
+        const listWorkItems = vi.fn().mockResolvedValue([
+          { id: 'WL-G', title: 'G item', status: 'open', description: 'test' },
+        ]);
+        const chooseWorkItem = vi.fn(async (items, _ctx, onSelectionChange) => {
+          onSelectionChange(items[0]);
+          return items[0];
+        });
+        const runWl = vi.fn().mockResolvedValue('## Detail\n\nContent');
+
+        const extension = createWorklogBrowseExtension({ listWorkItems, chooseWorkItem, runWl, shortcutRegistry: navRegistry });
+        extension(makePi() as any);
+
+        const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
+
+        const renderFnCapture: Function[] = [];
+        const doneResults: any[] = [];
+        const custom = vi.fn(async (renderFn: Function) => {
+          renderFnCapture.push((tui: any, theme: any, kb: any, done: any) => renderFn(tui, theme, kb, (v: any) => { doneResults.push(v); }));
+          return null;
+        });
+
+        await commandHandler('', { ui: { notify: vi.fn(), setWidget, custom, setEditorText } as any });
+
+        expect(custom).toHaveBeenCalledTimes(1);
+
+        const component = renderFnCapture[0](
+          { requestRender: vi.fn(), terminal: { rows: 20 } },
+          { fg: (_c: string, t: string) => t, bold: (t: string) => t },
+          {},
+          () => {},
+        );
+
+        // Press 'g' in detail view — should NOT trigger shortcut (g is reserved for scroll-to-top)
+        component.handleInput('g');
+        expect(doneResults).toHaveLength(0);
+      });
+
+      it('detail view: reserved navigation key G does not dispatch shortcut', async () => {
+        // Use a custom registry that HAS a shortcut configured for 'G'
+        const navRegistry = new ShortcutRegistry([
+          { key: 'G', command: 'G-command <id>', view: 'detail' },
+        ]);
+        const setEditorText = vi.fn();
+        const setWidget = vi.fn();
+        const listWorkItems = vi.fn().mockResolvedValue([
+          { id: 'WL-GCAP', title: 'G cap item', status: 'open', description: 'test' },
+        ]);
+        const chooseWorkItem = vi.fn(async (items, _ctx, onSelectionChange) => {
+          onSelectionChange(items[0]);
+          return items[0];
+        });
+        const runWl = vi.fn().mockResolvedValue('## Detail\n\nContent');
+
+        const extension = createWorklogBrowseExtension({ listWorkItems, chooseWorkItem, runWl, shortcutRegistry: navRegistry });
+        extension(makePi() as any);
+
+        const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
+
+        const renderFnCapture: Function[] = [];
+        const doneResults: any[] = [];
+        const custom = vi.fn(async (renderFn: Function) => {
+          renderFnCapture.push((tui: any, theme: any, kb: any, done: any) => renderFn(tui, theme, kb, (v: any) => { doneResults.push(v); }));
+          return null;
+        });
+
+        await commandHandler('', { ui: { notify: vi.fn(), setWidget, custom, setEditorText } as any });
+
+        expect(custom).toHaveBeenCalledTimes(1);
+
+        const component = renderFnCapture[0](
+          { requestRender: vi.fn(), terminal: { rows: 20 } },
+          { fg: (_c: string, t: string) => t, bold: (t: string) => t },
+          {},
+          () => {},
+        );
+
+        // Press 'G' in detail view — should NOT trigger shortcut (G is reserved for scroll-to-bottom)
+        component.handleInput('G');
+        expect(doneResults).toHaveLength(0);
+      });
+
+      it('detail view: reserved navigation key space does not dispatch shortcut', async () => {
+        // Use a custom registry that HAS a shortcut configured for space
+        const navRegistry = new ShortcutRegistry([
+          { key: ' ', command: 'space-command <id>', view: 'detail' },
+        ]);
+        const setEditorText = vi.fn();
+        const setWidget = vi.fn();
+        const listWorkItems = vi.fn().mockResolvedValue([
+          { id: 'WL-SP', title: 'Space item', status: 'open', description: 'test' },
+        ]);
+        const chooseWorkItem = vi.fn(async (items, _ctx, onSelectionChange) => {
+          onSelectionChange(items[0]);
+          return items[0];
+        });
+        const runWl = vi.fn().mockResolvedValue('## Detail\n\nContent');
+
+        const extension = createWorklogBrowseExtension({ listWorkItems, chooseWorkItem, runWl, shortcutRegistry: navRegistry });
+        extension(makePi() as any);
+
+        const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
+
+        const renderFnCapture: Function[] = [];
+        const doneResults: any[] = [];
+        const custom = vi.fn(async (renderFn: Function) => {
+          renderFnCapture.push((tui: any, theme: any, kb: any, done: any) => renderFn(tui, theme, kb, (v: any) => { doneResults.push(v); }));
+          return null;
+        });
+
+        await commandHandler('', { ui: { notify: vi.fn(), setWidget, custom, setEditorText } as any });
+
+        expect(custom).toHaveBeenCalledTimes(1);
+
+        const component = renderFnCapture[0](
+          { requestRender: vi.fn(), terminal: { rows: 20 } },
+          { fg: (_c: string, t: string) => t, bold: (t: string) => t },
+          {},
+          () => {},
+        );
+
+        // Press space in detail view — should NOT trigger shortcut (space is reserved for page down)
+        component.handleInput(' ');
+        expect(doneResults).toHaveLength(0);
+      });
+
+      it('non-navigation keys still dispatch shortcuts despite reserved set', async () => {
+        // Regression: non-navigation single-char keys should still dispatch
+        const items = [{ id: 'WL-MIX', title: 'Mixed', status: 'open' }];
+        const { custom, componentRef, doneCalls } = makeListCustomMock();
+        const registry = new ShortcutRegistry([
+          { key: 'i', command: 'implement <id>', view: 'both' },
+          { key: 'g', command: 'go <id>', view: 'both' },
+          { key: ' ', command: 'space <id>', view: 'both' },
+        ]);
+        const ctx: any = { ui: { custom, notify: vi.fn() } };
+
+        const resultPromise = defaultChooseWorkItem(items, ctx, () => {}, registry);
+        await new Promise(r => setTimeout(r, 0));
+
+        // Press 'i' — should still dispatch (i is NOT a reserved navigation key)
+        componentRef.current.handleInput('i');
+
+        expect(doneCalls[0]).toEqual({ type: 'shortcut', command: 'implement WL-MIX' });
+        const result = await resultPromise;
+        expect(result).toEqual({ type: 'shortcut', command: 'implement WL-MIX' });
+      });
     });
   });
 

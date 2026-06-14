@@ -282,6 +282,21 @@ export function buildSelectionWidget(
 
 
 
+/**
+ * Set of single-character keys that are reserved for navigation and MUST NOT
+ * be overridable by config-driven shortcuts.
+ *
+ * Currently:
+ * - `g` — scroll to top (detail view scrollable widget)
+ * - `G` — scroll to bottom (detail view scrollable widget)
+ * - ` ` — page down (detail view scrollable widget, via isPageDownKey)
+ *
+ * Multi-character navigation keys (e.g., escape sequences for arrow keys,
+ * key-id strings like "enter", "escape", "up", "down") are already excluded
+ * from shortcut lookup because the dispatcher only checks `data.length === 1`.
+ */
+const RESERVED_NAVIGATION_KEYS = new Set(['g', 'G', ' ']);
+
 function isUpKey(data: string): boolean {
   return data === '\u001b[A' || data === 'up' || /^\u001b\[1;\d+(?::\d+)?A$/.test(data);
 }
@@ -397,18 +412,15 @@ export async function defaultChooseWorkItem(
         // no-op: all rendering is derived from local state
       },
       handleInput: (data: string) => {
-        // Check for shortcut keys first (config-driven dispatch)
-        if (shortcutRegistry) {
-          // Convert key-id strings (e.g. "enter", "escape") to their single-char form
-          // for lookup against the registry.  Only look up single-letter keys.
-          const lookupKey = data.length === 1 ? data : undefined;
-          if (lookupKey) {
-            const command = shortcutRegistry.lookup(lookupKey, 'list');
-            if (command) {
-              // Return the shortcut result - caller will set editor text after modal closes
-              done({ type: 'shortcut', command: command.replace('<id>', items[selectedIndex].id) } as any);
-              return;
-            }
+        // Only attempt shortcut dispatch if the key is NOT a reserved navigation key.
+        // Navigation keys (g, G, space) must always take precedence over shortcuts.
+        const lookupKey = data.length === 1 ? data : undefined;
+        if (lookupKey && !RESERVED_NAVIGATION_KEYS.has(lookupKey) && shortcutRegistry) {
+          const command = shortcutRegistry.lookup(lookupKey, 'list');
+          if (command) {
+            // Return the shortcut result - caller will set editor text after modal closes
+            done({ type: 'shortcut', command: command.replace('<id>', items[selectedIndex].id) } as any);
+            return;
           }
         }
 
@@ -613,9 +625,11 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
                 render: (width: number) => widget.render(width),
                 invalidate: () => widget.invalidate(),
                 handleInput: (data: string) => {
-                  // Check for shortcut keys first (config-driven dispatch)
+                  // Only attempt shortcut dispatch if the key is NOT a reserved
+                  // navigation key. Navigation keys (g, G, space) must always
+                  // take precedence over configurable shortcuts.
                   const lookupKey = data.length === 1 ? data : undefined;
-                  if (lookupKey) {
+                  if (lookupKey && !RESERVED_NAVIGATION_KEYS.has(lookupKey)) {
                     const command = shortcutRegistry.lookup(lookupKey, 'detail');
                     if (command) {
                       // Return shortcut result - caller will set editor text after modal closes
