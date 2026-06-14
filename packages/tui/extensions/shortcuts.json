@@ -1,22 +1,22 @@
 [
   {
     "key": "i",
-    "command": "implement <id>",
+    "command": "/skill:implement <id>",
     "view": "both"
   },
   {
     "key": "p",
-    "command": "plan <id>",
+    "command": "/plan <id>",
     "view": "both"
   },
   {
     "key": "n",
-    "command": "intake <id>",
+    "command": "/intake <id>",
     "view": "both"
   },
   {
     "key": "a",
-    "command": "audit <id>",
+    "command": "/skill:audit <id>",
     "view": "both"
   }
 ]
