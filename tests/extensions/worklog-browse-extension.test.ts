@@ -3,8 +3,10 @@ import {
   createDefaultListWorkItems,
   createScrollableWidget,
   createWorklogBrowseExtension,
+  defaultChooseWorkItem,
   formatBrowseOption,
 } from '../../packages/tui/extensions/index.ts';
+import { ShortcutRegistry } from '../../packages/tui/extensions/shortcut-config.js';
 
 describe('Worklog browse pi extension', () => {
   it('formats browse options as title followed by id in parentheses', () => {
@@ -625,6 +627,150 @@ describe('Worklog browse pi extension', () => {
         'Scrollable detail view requires a TUI that supports custom overlays.',
         'warning',
       );
+    });
+  });
+
+  describe('shortcut dispatch integration', () => {
+    /**
+     * Test shortcut key dispatch in the browse list view using defaultChooseWorkItem directly.
+     */
+    function makeListCustomMock() {
+      const componentRef: { current: any } = { current: null };
+      const custom = vi.fn((renderFn: Function) => {
+        const result = renderFn(
+          { requestRender: vi.fn(), terminal: { rows: 20 } },
+          { fg: (_c: string, t: string) => t, bold: (t: string) => t },
+          {},
+          () => {},
+        );
+        componentRef.current = result;
+        // Never resolve — the test will interact with the component directly
+        return new Promise(() => {});
+      });
+      return { custom, componentRef };
+    }
+
+    it('dispatches n key as intake <id> in the browse list view', async () => {
+      const setEditorText = vi.fn();
+      const items = [{ id: 'WL-99', title: 'Intake me', status: 'open' }];
+
+      const { custom, componentRef } = makeListCustomMock();
+      const registry = new ShortcutRegistry([
+        { key: 'n', command: 'intake <id>', view: 'both' },
+      ]);
+      const ctx: any = { ui: { custom, setEditorText, notify: vi.fn() } };
+
+      // Start defaultChooseWorkItem — it will call custom() which calls renderFn synchronously
+      void defaultChooseWorkItem(items, ctx, () => {}, registry);
+      // Yield to let custom() be called
+      await new Promise(r => setTimeout(r, 0));
+
+      const comp = componentRef.current;
+      expect(typeof comp.handleInput).toBe('function');
+
+      // Press 'n' — should trigger intake shortcut
+      comp.handleInput('n');
+
+      // Verify setEditorText was called with the intake command (no trailing newline)
+      expect(setEditorText).toHaveBeenCalledWith('intake WL-99');
+    });
+
+    it('inserts no trailing newline so user can review before submitting', async () => {
+      const setEditorText = vi.fn();
+      const items = [{ id: 'WL-ABC', title: 'Some item', status: 'open' }];
+
+      const { custom, componentRef } = makeListCustomMock();
+      const registry = new ShortcutRegistry([
+        { key: 'n', command: 'intake <id>', view: 'both' },
+      ]);
+      const ctx: any = { ui: { custom, setEditorText, notify: vi.fn() } };
+
+      void defaultChooseWorkItem(items, ctx, () => {}, registry);
+      await new Promise(r => setTimeout(r, 0));
+
+      componentRef.current.handleInput('n');
+
+      const insertedText = (setEditorText.mock.calls[0] as any)[0];
+      expect(insertedText).toBe('intake WL-ABC');
+      expect(insertedText.endsWith('\n')).toBe(false);
+      expect(insertedText.endsWith('\r')).toBe(false);
+    });
+
+    it('still navigates with up/down keys while shortcut keys trigger commands', async () => {
+      const setEditorText = vi.fn();
+      const items = [
+        { id: 'WL-1', title: 'One', status: 'open' },
+        { id: 'WL-2', title: 'Two', status: 'open' },
+        { id: 'WL-3', title: 'Three', status: 'open' },
+      ];
+
+      const { custom, componentRef } = makeListCustomMock();
+      const registry = new ShortcutRegistry([
+        { key: 'n', command: 'intake <id>', view: 'both' },
+      ]);
+      const ctx: any = { ui: { custom, setEditorText, notify: vi.fn() } };
+
+      void defaultChooseWorkItem(items, ctx, () => {}, registry);
+      await new Promise(r => setTimeout(r, 0));
+
+      const comp = componentRef.current;
+
+      // Press Down twice: index 0 → 1 → 2
+      comp.handleInput('\u001b[B');
+      comp.handleInput('\u001b[B');
+
+      // Now press 'n' — should use item at index 2
+      comp.handleInput('n');
+
+      expect(setEditorText).toHaveBeenCalledWith('intake WL-3');
+    });
+
+    it('dispatches n key as intake <id> in the detail scrollable view', async () => {
+      const setEditorText = vi.fn();
+      const setWidget = vi.fn();
+      const listWorkItems = vi.fn().mockResolvedValue([
+        { id: 'WL-DEET', title: 'Detail item', status: 'open', description: 'test' },
+      ]);
+      const chooseWorkItem = vi.fn(async (items, _ctx, onSelectionChange) => {
+        onSelectionChange(items[0]);
+        return items[0];
+      });
+      const runWl = vi.fn().mockResolvedValue('## Detail\n\nSome content');
+
+      const extension = createWorklogBrowseExtension({ listWorkItems, chooseWorkItem, runWl });
+      extension(makePi() as any);
+
+      const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
+
+      // Capture the renderFn from custom() calls
+      const renderFnCapture: Function[] = [];
+      const custom = vi.fn(async (renderFn: Function) => {
+        renderFnCapture.push(renderFn);
+        return null;
+      });
+
+      await commandHandler('', { ui: { notify: vi.fn(), setWidget, custom, setEditorText } as any });
+
+      // custom() was called once (detail view; browse list bypassed by chooseWorkItem mock)
+      expect(custom).toHaveBeenCalledTimes(1);
+
+      // Extract the component from the captured renderFn
+      const component = renderFnCapture[0](
+        { requestRender: vi.fn(), terminal: { rows: 20 } },
+        { fg: (_c: string, t: string) => t, bold: (t: string) => t },
+        {},
+        () => {},
+      );
+
+      // Press 'n' in detail view — should trigger intake shortcut
+      component.handleInput('n');
+
+      // Verify setEditorText was called with the intake command
+      expect(setEditorText).toHaveBeenCalledWith('intake WL-DEET');
+      // Verify setWidget was called to clear the preview widget
+      expect(setWidget).toHaveBeenCalledWith('worklog-browse-selection', undefined);
+      // No trailing newline
+      expect((setEditorText.mock.calls[0] as any)[0].endsWith('\n')).toBe(false);
     });
   });
 
