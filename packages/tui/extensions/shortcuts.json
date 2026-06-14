@@ -26,7 +26,7 @@
     "key": "i",
     "command": "/skill:implement <id>",
     "view": "both",
-    "stages": ["plan_complete"],
+    "stages": ["intake_complete", "plan_complete"],
     "label": "implement",
     "description": "Run the implement workflow on the selected work item"
   },
