@@ -105,3 +105,17 @@ describe('loadShortcutConfig', () => {
     expect(registry.lookup('x', 'list')).toBeUndefined();
   });
 });
+
+describe('ShortcutRegistry unregistered keys (dispatcher)', () => {
+  it('returns undefined for unregistered key', () => {
+    const entries: ShortcutEntry[] = [
+      { key: 'i', command: 'implement <id>', view: 'both' },
+      { key: 'p', command: 'plan <id>', view: 'both' },
+    ];
+    const registry = new ShortcutRegistry(entries);
+
+    expect(registry.lookup('x', 'list')).toBeUndefined();
+    expect(registry.lookup('y', 'detail')).toBeUndefined();
+    expect(registry.lookup('zz', 'both')).toBeUndefined();
+  });
+});

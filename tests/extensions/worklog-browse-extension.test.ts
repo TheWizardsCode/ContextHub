@@ -895,6 +895,190 @@ describe('Worklog browse pi extension', () => {
       // No trailing newline
       expect((setEditorText.mock.calls[0] as any)[0].endsWith('\n')).toBe(false);
     });
+
+    it('full config→load→dispatch→setEditorText flow in both views', async () => {
+      // Simulates the complete flow: config file loaded → ShortcutRegistry built
+      // → shortcut key dispatches correct command in both list and detail views.
+      const setEditorText = vi.fn();
+      const setWidget = vi.fn();
+
+      // Step 1: Build registry from config entries (simulates loadShortcutConfig)
+      const registry = new ShortcutRegistry([
+        { key: 'i', command: 'implement <id>', view: 'both' },
+        { key: 'p', command: 'plan <id>', view: 'both' },
+        { key: 'n', command: 'intake <id>', view: 'both' },
+        { key: 'a', command: 'audit <id>', view: 'both' },
+      ]);
+      expect(registry.getEntries()).toHaveLength(4);
+
+      // Step 2: Verify registry resolves commands in both views
+      expect(registry.lookup('i', 'list')).toBe('implement <id>');
+      expect(registry.lookup('i', 'detail')).toBe('implement <id>');
+      expect(registry.lookup('p', 'list')).toBe('plan <id>');
+      expect(registry.lookup('p', 'detail')).toBe('plan <id>');
+      expect(registry.lookup('n', 'list')).toBe('intake <id>');
+      expect(registry.lookup('n', 'detail')).toBe('intake <id>');
+      expect(registry.lookup('a', 'list')).toBe('audit <id>');
+      expect(registry.lookup('a', 'detail')).toBe('audit <id>');
+
+      // Step 3: Dispatch in list view
+      const listItems = [{ id: 'WL-LIST', title: 'List item', status: 'open' }];
+      const { custom: listCustom, componentRef: listComp } = makeListCustomMock();
+      const listCtx: any = { ui: { custom: listCustom, setEditorText, notify: vi.fn() } };
+
+      void defaultChooseWorkItem(listItems, listCtx, () => {}, registry);
+      await new Promise(r => setTimeout(r, 0));
+
+      listComp.current.handleInput('i');
+      expect(setEditorText).toHaveBeenLastCalledWith('implement WL-LIST');
+
+      setEditorText.mockClear();
+
+      // Step 4: Dispatch in detail view
+      const listWorkItems = vi.fn().mockResolvedValue([
+        { id: 'WL-DEET', title: 'Detail item', status: 'open', description: 'test' },
+      ]);
+      const chooseWorkItem = vi.fn(async (items, _ctx, onSelectionChange) => {
+        onSelectionChange(items[0]);
+        return items[0];
+      });
+      const runWl = vi.fn().mockResolvedValue('## Detail\n\nSome content');
+
+      const extension = createWorklogBrowseExtension({ listWorkItems, chooseWorkItem, runWl });
+      extension(makePi() as any);
+
+      const commandHandler = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
+      const renderFnCapture: Function[] = [];
+      const detailCustom = vi.fn(async (renderFn: Function) => {
+        renderFnCapture.push(renderFn);
+        return null;
+      });
+
+      await commandHandler('', { ui: { notify: vi.fn(), setWidget, custom: detailCustom, setEditorText } as any });
+
+      expect(detailCustom).toHaveBeenCalledTimes(1);
+
+      const detailComponent = renderFnCapture[0](
+        { requestRender: vi.fn(), terminal: { rows: 20 } },
+        { fg: (_c: string, t: string) => t, bold: (t: string) => t },
+        {},
+        () => {},
+      );
+
+      detailComponent.handleInput('p');
+      expect(setEditorText).toHaveBeenCalledWith('plan WL-DEET');
+      // setWidget was called to clear preview widget
+      expect(setWidget).toHaveBeenCalledWith('worklog-browse-selection', undefined);
+    });
+
+    it('unregistered keys are no-ops in both list and detail views', async () => {
+      // Verify that keys not in the registry do not trigger any shortcut dispatch.
+
+      // List view: unregistered key does not call setEditorText
+      const setEditorTextList = vi.fn();
+      const listItems = [{ id: 'WL-X', title: 'Test', status: 'open' }];
+      const { custom: listCustom2, componentRef: listComp2 } = makeListCustomMock();
+      const registryX = new ShortcutRegistry([
+        { key: 'i', command: 'implement <id>', view: 'both' },
+      ]);
+      const listCtx2: any = { ui: { custom: listCustom2, setEditorText: setEditorTextList, notify: vi.fn() } };
+
+      void defaultChooseWorkItem(listItems, listCtx2, () => {}, registryX);
+      await new Promise(r => setTimeout(r, 0));
+
+      listComp2.current.handleInput('x');
+      expect(setEditorTextList).not.toHaveBeenCalled();
+
+      // Detail view: unregistered key does not call setEditorText
+      const setEditorTextDetail = vi.fn();
+      const setWidget2 = vi.fn();
+      const lw2 = vi.fn().mockResolvedValue([
+        { id: 'WL-Y', title: 'Test', status: 'open', description: 'test' },
+      ]);
+      const cw2 = vi.fn(async (items, _ctx, onSelectionChange) => {
+        onSelectionChange(items[0]);
+        return items[0];
+      });
+      const rw2 = vi.fn().mockResolvedValue('## Detail\n\nContent');
+
+      const ext2 = createWorklogBrowseExtension({ listWorkItems: lw2, chooseWorkItem: cw2, runWl: rw2 });
+      ext2(makePi() as any);
+
+      const cmdHandler2 = registerCommand.mock.calls.find(c => c[0] === 'wl')?.[1]?.handler;
+      const rc2: Function[] = [];
+      const cust2 = vi.fn(async (renderFn: Function) => {
+        rc2.push(renderFn);
+        return null;
+      });
+
+      await cmdHandler2('', { ui: { notify: vi.fn(), setWidget: setWidget2, custom: cust2, setEditorText: setEditorTextDetail } as any });
+
+      const detailComp2 = rc2[0](
+        { requestRender: vi.fn(), terminal: { rows: 20 } },
+        { fg: (_c: string, t: string) => t, bold: (t: string) => t },
+        {},
+        () => {},
+      );
+
+      detailComp2.handleInput('z');
+      expect(setEditorTextDetail).not.toHaveBeenCalled();
+    });
+
+    it('navigation keys remain functional in the presence of shortcuts', async () => {
+      // Regression test: confirms that all existing navigation keys continue to work
+      // correctly after the dynamic dispatcher was introduced.
+
+      // List view: navigation keys (Up/Down) work alongside shortcuts
+      const setEditorText = vi.fn();
+      const testItems = [
+        { id: 'WL-1', title: 'One', status: 'open' },
+        { id: 'WL-2', title: 'Two', status: 'open' },
+        { id: 'WL-3', title: 'Three', status: 'open' },
+      ];
+      const testRegistry = new ShortcutRegistry([
+        { key: 'i', command: 'implement <id>', view: 'both' },
+      ]);
+
+      const { custom: navListCustom, componentRef: navListComp } = makeListCustomMock();
+      const navListCtx: any = { ui: { custom: navListCustom, setEditorText, notify: vi.fn() } };
+
+      void defaultChooseWorkItem(testItems, navListCtx, () => {}, testRegistry);
+      await new Promise(r => setTimeout(r, 0));
+
+      const navComp = navListComp.current;
+      // Navigate down twice: index 0 → 1 → 2
+      navComp.handleInput('\u001b[B'); // → index 1
+      navComp.handleInput('\u001b[B'); // → index 2
+      // Navigate up once: index 2 → 1
+      navComp.handleInput('\u001b[A');
+      // Press shortcut 'i' - should dispatch for item at index 1
+      navComp.handleInput('i');
+      expect(setEditorText).toHaveBeenCalledWith('implement WL-2');
+
+      // Detail view: scrollable widget handles PageUp/PageDown/g/G
+      const tui = { requestRender: vi.fn(), getHeight: () => 20 };
+      const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+
+      const scrollItems = Array.from({ length: 30 }, (_, i) => `Line ${i + 1}`);
+      const widget = createScrollableWidget(scrollItems)(tui, theme);
+
+      // g → top
+      widget.handleInput('g');
+      expect(widget.render(80)[0]).toBe('Line 1');
+
+      // G → bottom
+      widget.handleInput('G');
+      expect(widget.render(80).at(-1)?.trim()).toContain('Line 30');
+
+      // Space (PageDown)
+      widget.handleInput('g'); // back to top
+      widget.handleInput(' ');
+      expect(widget.render(80)[0]).not.toBe('Line 1');
+
+      // PageUp
+      widget.handleInput('\u001b[5~');
+      expect(widget.render(80)[0]).not.toBe('Line 30');
+    });
   });
 
   it('uses wl next -n 5 and parses results.workItem payload', async () => {
