@@ -4,6 +4,7 @@ import { priorityIcon, statusIcon, iconsEnabled } from '../../../src/icons.js';
 import { applyStageColour, type WorkItem, type PiTheme } from './worklog-helpers.js';
 import { truncateToTerminalWidth } from './terminal-utils.js';
 import { type ShortcutRegistry, loadShortcutConfig } from './shortcut-config.js';
+import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 
 const execFileAsync = promisify(execFile);
 
@@ -35,6 +36,12 @@ interface WorklogBrowseDependencies {
 
 type TerminalInputHandler = (data: string) => { consume?: boolean; data?: string } | undefined;
 
+/**
+ * Browse UI interface - matches the subset of ExtensionUIContext we use.
+ *
+ * Note: When the extension runs in Pi, the actual ctx.ui is ExtensionUIContext
+ * which includes setEditorText. We declare it here for TypeScript compatibility.
+ */
 interface BrowseUi {
   select?: (title: string, options: string[]) => Promise<string | undefined>;
   custom?: <T>(
@@ -54,24 +61,19 @@ interface BrowseUi {
   ) => Promise<T>;
   setWidget?: (id: string, content?: string[] | ((tui: unknown, theme: unknown) => { render: (width: number) => string[]; invalidate: () => void; handleInput?: (data: string) => void; dispose?: () => void; })) => void;
   notify: (message: string, level?: 'info' | 'warning' | 'error') => void;
-  /** Set the text in the core input editor. */
+  /** Set the text in the core input editor. Available in Pi's ExtensionUIContext. */
   setEditorText?: (text: string) => void;
+  /** Get the current text from the core input editor. Available in Pi's ExtensionUIContext. */
+  getEditorText?: () => string;
   /** Register a raw terminal input listener. Returns an unsubscribe function. */
   onTerminalInput?: (handler: TerminalInputHandler) => () => void;
   /** Return the height of the usable rendering area (terminal rows minus header/footer). */
   getHeight?: () => number;
 }
 
-interface BrowseContext {
-  ui: BrowseUi;
-}
-
-interface PiLike {
-  registerCommand: (name: string, command: { description: string; handler: (args: string, ctx: BrowseContext) => Promise<void> }) => void;
-  registerShortcut: (shortcut: string, shortcutDef: { description: string; handler: (ctx: BrowseContext) => Promise<void> }) => void;
-  sendMessage: (message: { customType: string; content: string; display: boolean }, options?: { triggerTurn?: boolean }) => void;
-  on: (event: string, handler: (event: unknown, ctx: { ui: BrowseUi }) => void) => void;
-}
+// Use the real Pi types for runtime, but declare a compatibility type for testing
+type BrowseContext = { ui: BrowseUi };
+type PiLike = ExtensionAPI;
 
 /**
  * Truncate a string to fit within maxWidth visible terminal columns.
