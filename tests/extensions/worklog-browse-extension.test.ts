@@ -123,16 +123,7 @@ describe('Worklog browse pi extension', () => {
     const mockTheme1 = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
     const comp1 = factory1({}, mockTheme1);
     expect(comp1.render(80)).toEqual([
-      '⭐🔄 Two <WL-2>',
-      'Priority/Stage/Status: high/plan_complete/in-progress',
-      'Risk/Effort: Medium/Small',
-      'L1',
-      'L2',
-      'L3',
-      'L4',
-      'L5',
-      'L6',
-      'L7',
+      'Two <WL-2> 🔄 ⭐HIGH plan_complete Medium/Small',
     ]);
 
     // The scrollable detail widget is now shown via ctx.ui.custom() for proper keyboard focus.
@@ -181,10 +172,7 @@ describe('Worklog browse pi extension', () => {
     const mockTheme2 = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
     const comp = factory({}, mockTheme2);
     expect(comp.render(80)).toEqual([
-      '🟢 One <WL-1>',
-      'Priority/Stage/Status: —/—/open',
-      'Risk/Effort: —/—',
-      'Only',
+      'One <WL-1> 🟢 — — —/—',
     ]);
   });
   it('reports explicit empty state when no items exist', async () => {

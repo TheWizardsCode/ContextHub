@@ -262,13 +262,14 @@ async function defaultListWorkItemsWithStage(stage: string, run: RunWlFn = runWl
   return createListWorkItemsWithStage(run)(stage);
 }
 
-function descriptionPreview(description: string | undefined, maxLines = 7): string[] {
-  if (!description || description.trim().length === 0) return ['—'];
-  return description.split(/\r?\n/).slice(0, maxLines);
-}
 
 /**
- * Create a selection widget factory that renders work item details.
+ * Create a selection widget factory that renders a compact single-line
+ * summary of work item metadata.
+ *
+ * The single line includes: title (stage-coloured), ID, status icon,
+ * priority icon+text, stage, and risk/effort — in that order. If the line
+ * exceeds the available width it is truncated via `truncateToWidth`.
  *
  * Returns a factory function that the TUI calls with (tui, theme) to get a
  * component with render(width). The theme is used to apply stage-based
@@ -283,36 +284,49 @@ export function buildSelectionWidget(
   invalidate: () => void;
 } {
   return (_tui, theme) => {
-    // Build icon prefix using emoji icons (no blessed tags - Pi handles styling)
     const useIcons = iconsEnabled();
-    const pIcon = priorityIcon(item.priority || '', { noIcons: !useIcons });
-    const sIcon = statusIcon(item.status || '', { noIcons: !useIcons });
-    const iconPrefix = (pIcon || sIcon) ? `${pIcon}${sIcon} ` : '';
 
-    const priority = item.priority ?? '—';
+    // Normalize status: worklog uses underscore (in_progress) but icons.ts uses hyphen (in-progress)
+    const normalizedStatus = (item.status || '').replace(/_/g, '-');
+
+    // Get emoji icons for status and priority (text fallbacks if icons disabled)
+    const sIcon = statusIcon(normalizedStatus, { noIcons: !useIcons });
+    const pIcon = priorityIcon(item.priority || '', { noIcons: !useIcons });
+
+    // Build priority part: icon + uppercase text when using emoji,
+    // or just the fallback text when icons are disabled
+    const priorityText = item.priority ?? '—';
+    const priorityPart = pIcon && useIcons
+      ? `${pIcon}${priorityText.toUpperCase()}`
+      : (pIcon || priorityText.toUpperCase());
+
+    // Get other metadata with defaults
     const stage = item.stage ?? '—';
-    const status = item.status ?? '—';
     const risk = item.risk ?? '—';
     const effort = item.effort ?? '—';
 
-    // Apply stage-based colour to the title, with blocked status override
+    // Apply stage-based colour to the title only (with blocked status override)
     const colouredTitle = applyStageColour(
-      `${iconPrefix}${item.title} <${item.id}>`,
+      item.title,
       item.stage,
       item.status,
       theme,
     );
 
-    // Pre-build the lines with colours applied
-    const lines = [
+    // Build single-line parts: title, ID, status icon, priority icon+text, stage, risk/effort
+    const parts = [
       colouredTitle,
-      `Priority/Stage/Status: ${priority}/${stage}/${status}`,
-      `Risk/Effort: ${risk}/${effort}`,
-      ...descriptionPreview(item.description, 7),
-    ];
+      `<${item.id}>`,
+      sIcon,
+      priorityPart,
+      stage,
+      `${risk}/${effort}`,
+    ].filter(Boolean);
+
+    const line = parts.join(' ');
 
     return {
-      render: (width: number) => lines.map(line => truncateToWidth(line, width)),
+      render: (width: number) => [truncateToWidth(line, width)],
       invalidate: () => {
         // no-op: all rendering is derived from local state
       },
