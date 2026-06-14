@@ -466,7 +466,8 @@ export async function defaultChooseWorkItem(
           if (relevantEntries.length > 0) {
             const hints = relevantEntries
               .map(e => {
-                const label = e.command
+                // Use explicit label if provided, otherwise derive from command
+                const label = e.label ?? e.command
                   .replace(/<[^>]+>/g, '')
                   .split(/\r?\n/)[0]
                   .trim()

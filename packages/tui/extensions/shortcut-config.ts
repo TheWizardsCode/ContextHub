@@ -34,6 +34,15 @@ export interface ShortcutEntry {
   command: string;
   view: 'list' | 'detail' | 'both';
   /**
+   * Optional short label displayed in the browse help line (e.g. "implement", "plan").
+   * When provided, this is used instead of deriving a label from the command string.
+   */
+  label?: string;
+  /**
+   * Optional one-sentence description of the command for use in help screens.
+   */
+  description?: string;
+  /**
    * Optional allow-list of item stages for which the shortcut is available.
    * When undefined or empty, the shortcut is unconditionally available.
    * Example: ["idea"] means the shortcut only appears for items in the "idea" stage.
@@ -211,6 +220,18 @@ export function loadShortcutConfig(): ShortcutRegistry {
       stages.every((s: unknown) => typeof s === 'string')
     ) {
       shortcutEntry.stages = stages as string[];
+    }
+
+    // Include optional label if present and non-empty
+    const label = entry.label;
+    if (typeof label === 'string' && label.trim().length > 0) {
+      shortcutEntry.label = label.trim();
+    }
+
+    // Include optional description if present and non-empty
+    const description = entry.description;
+    if (typeof description === 'string' && description.trim().length > 0) {
+      shortcutEntry.description = description.trim();
     }
 
     validEntries.push(shortcutEntry);

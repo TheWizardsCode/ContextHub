@@ -3,29 +3,39 @@
     "key": "c",
     "command": "/create\n<desc>\nPriority: medium",
     "view": "both",
-    "stages": ["idea"]
+    "stages": ["idea"],
+    "label": "create",
+    "description": "Create a new work item with a description and priority template"
   },
   {
     "key": "i",
     "command": "/skill:implement <id>",
     "view": "both",
-    "stages": ["intake_complete"]
+    "stages": ["intake_complete"],
+    "label": "implement",
+    "description": "Run the implement workflow on the selected work item"
   },
   {
     "key": "p",
     "command": "/plan <id>",
     "view": "both",
-    "stages": ["intake_complete"]
+    "stages": ["intake_complete"],
+    "label": "plan",
+    "description": "Run the plan workflow on the selected work item"
   },
   {
     "key": "n",
     "command": "/intake <id>",
     "view": "both",
-    "stages": ["idea"]
+    "stages": ["idea"],
+    "label": "intake",
+    "description": "Create a new work item from the selected item via intake"
   },
   {
     "key": "a",
     "command": "/skill:audit <id>",
-    "view": "both"
+    "view": "both",
+    "label": "audit",
+    "description": "Run an audit on the selected work item"
   }
 ]

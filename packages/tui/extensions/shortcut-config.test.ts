@@ -213,24 +213,32 @@ describe('loadShortcutConfig', () => {
     expect(implementEntry!.command).toBe('/skill:implement <id>');
     expect(implementEntry!.view).toBe('both');
     expect(implementEntry!.stages).toEqual(['intake_complete']);
+    expect(implementEntry!.label).toBe('implement');
+    expect(implementEntry!.description).toBe('Run the implement workflow on the selected work item');
 
     const planEntry = entries.find(e => e.key === 'p');
     expect(planEntry).toBeDefined();
     expect(planEntry!.command).toBe('/plan <id>');
     expect(planEntry!.view).toBe('both');
     expect(planEntry!.stages).toEqual(['intake_complete']);
+    expect(planEntry!.label).toBe('plan');
+    expect(planEntry!.description).toBe('Run the plan workflow on the selected work item');
 
     const intakeEntry = entries.find(e => e.key === 'n');
     expect(intakeEntry).toBeDefined();
     expect(intakeEntry!.command).toBe('/intake <id>');
     expect(intakeEntry!.view).toBe('both');
     expect(intakeEntry!.stages).toEqual(['idea']);
+    expect(intakeEntry!.label).toBe('intake');
+    expect(intakeEntry!.description).toBe('Create a new work item from the selected item via intake');
 
     const auditEntry = entries.find(e => e.key === 'a');
     expect(auditEntry).toBeDefined();
     expect(auditEntry!.command).toBe('/skill:audit <id>');
     expect(auditEntry!.view).toBe('both');
     expect(auditEntry!.stages).toBeUndefined();
+    expect(auditEntry!.label).toBe('audit');
+    expect(auditEntry!.description).toBe('Run an audit on the selected work item');
   });
 
   it('lookup resolves shortcuts loaded from file with stage parameter', () => {

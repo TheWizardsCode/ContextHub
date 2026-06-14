@@ -57,7 +57,9 @@ Each shortcut entry is a JSON object:
   "key": "i",
   "command": "implement <id>",
   "view": "both",
-  "stages": ["intake_complete"]
+  "stages": ["intake_complete"],
+  "label": "implement",
+  "description": "Run the implement workflow on the selected work item"
 }
 ```
 
@@ -66,6 +68,8 @@ Each shortcut entry is a JSON object:
 | `key` | string | Single character key to trigger the shortcut (e.g., `"i"`, `"p"`) |
 | `command` | string | Template string to insert into the Pi editor. The placeholder `<id>` is replaced with the selected work item's ID. |
 | `view` | string | Which view the shortcut applies to: `"list"` (browse selection only), `"detail"` (detail view only), or `"both"` (both views). |
+| `label` | string _(optional)_ | Short display label shown in the browse help line (e.g., `"implement"`, `"plan"`). When provided, overrides the label derived from the command string. |
+| `description` | string _(optional)_ | One-sentence description of the command for use in help screens (e.g., `"Run the implement workflow on the selected work item"`). |
 | `stages` | string[] _(optional)_ | Allow-list of work item stages for which the shortcut is available. When omitted or empty, the shortcut is unconditionally available (backward compatible). The stage comparison is case-sensitive, exact match. |
 
 ### Stage-Based Visibility
@@ -88,13 +92,13 @@ This allows contextual shortcuts — for example, showing an **intake** shortcut
 
 ### Current Shortcuts
 
-| Key | Command | View | Stages |
-|-----|---------|------|--------|
-| `c` | `create <desc>` | both | `["idea"]` |
-| `i` | `implement <id>` | both | `["intake_complete"]` |
-| `p` | `plan <id>` | both | `["intake_complete"]` |
-| `n` | `intake <id>` | both | `["idea"]` |
-| `a` | `audit <id>` | both | (always available) |
+| Key | Command | View | Stages | Label | Description |
+|-----|---------|------|--------|-------|-------------|
+| `c` | `create <desc>` | both | `["idea"]` | create | Create a new work item with a description and priority template |
+| `i` | `implement <id>` | both | `["intake_complete"]` | implement | Run the implement workflow on the selected work item |
+| `p` | `plan <id>` | both | `["intake_complete"]` | plan | Run the plan workflow on the selected work item |
+| `n` | `intake <id>` | both | `["idea"]` | intake | Create a new work item from the selected item via intake |
+| `a` | `audit <id>` | both | (always available) | audit | Run an audit on the selected work item |
 
 ### Help Text Filtering
 
