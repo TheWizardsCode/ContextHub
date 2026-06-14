@@ -520,12 +520,24 @@ export async function defaultChooseWorkItem(
               }
             }
           } else {
-            // Normal help text with shortcut hints
+            // Normal help text with shortcut hints.
+            // Deduplicate chord entries: show each leader key only once
+            // so the line doesn't get cluttered with repeats.
             const relevantEntries = shortcutRegistry
               .getEntriesForStage(selectedStage)
               .filter(e => e.view === 'list' || e.view === 'both');
             if (relevantEntries.length > 0) {
+              const seenChordLeaders = new Set<string>();
               helpText = relevantEntries
+                .filter(e => {
+                  const chord = (e as Record<string, unknown>).chord;
+                  if (Array.isArray(chord) && chord.length >= 2) {
+                    const leader = (chord as string[])[0];
+                    if (seenChordLeaders.has(leader)) return false;
+                    seenChordLeaders.add(leader);
+                  }
+                  return true;
+                })
                 .map(e => formatEntryLabel(e))
                 .join(' ');
             }
