@@ -398,7 +398,29 @@ export async function defaultChooseWorkItem(
       focused: false,
       render: (width: number) => {
         const title = truncateToWidth(theme.fg('accent', theme.bold('Browse Worklog next items (top 5)')), width);
-        const help = truncateToWidth(theme.fg('dim', '↑↓ navigate • enter select • esc cancel'), width);
+
+        // Build help text with dynamic shortcut hints from the registry
+        let helpText = '↑↓ navigate • enter select • esc cancel';
+        if (shortcutRegistry) {
+          const relevantEntries = shortcutRegistry
+            .getEntries()
+            .filter(e => e.view === 'list' || e.view === 'both');
+          if (relevantEntries.length > 0) {
+            const hints = relevantEntries
+              .map(e => {
+                const label = e.command
+                  .replace(/<[^>]+>/g, '')
+                  .split(/\r?\n/)[0]
+                  .trim()
+                  .replace(/^\/(skill:)?/, '');
+                return `${e.key}:${label}`;
+              })
+              .join(' ');
+            helpText += ` • ${hints}`;
+          }
+        }
+        const help = truncateToWidth(theme.fg('dim', helpText), width);
+
         const options = items.map((item, index) => {
           const prefix = index === selectedIndex ? theme.fg('accent', '› ') : '  ';
           const contentWidth = Math.max(0, width - 2);
