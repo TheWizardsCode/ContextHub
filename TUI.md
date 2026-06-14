@@ -45,6 +45,17 @@ This document describes the interactive terminal UI shipped as the `wl tui` (or 
 - **g — delegate selected item to GitHub Copilot** (opens confirmation modal with optional Force override; see `wl github delegate` for CLI equivalent)
 - **m — move/reparent item** (see below)
 
+### Pi Extension Browse Shortcuts
+
+When using the Worklog Pi extension (via `piman`), the following keyboard shortcuts are available in the browse selection list and detail views. These shortcuts are defined in `packages/tui/extensions/shortcuts.json` and can be extended without modifying source code.
+
+- **i** — insert `implement <id>` into the editor
+- **p** — insert `plan <id>` into the editor
+- **n** — insert `intake <id>` into the editor
+- **a** — insert `audit <id>` into the editor
+
+Each shortcut replaces the `<id>` placeholder with the selected work item's ID and inserts the resulting text without a trailing newline, allowing review and editing before submission. See [TUI Extensions README](packages/tui/extensions/README.md) for full details on the config-driven shortcut system.
+
 ### Move / Reparent Mode
 
 Press **m** on a selected item to enter move mode. The source item is marked with a yellow `[M]` prefix and its descendants are dimmed (they cannot be chosen as targets). The footer shows move mode instructions.
