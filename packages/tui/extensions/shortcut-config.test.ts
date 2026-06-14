@@ -206,7 +206,7 @@ describe('loadShortcutConfig', () => {
   it('loads valid entries from shortcuts.json', () => {
     const registry = loadShortcutConfig();
     const entries = registry.getEntries();
-    expect(entries).toHaveLength(5);
+    expect(entries).toHaveLength(7);
 
     const implementEntry = entries.find(e => e.key === 'i');
     expect(implementEntry).toBeDefined();
@@ -271,6 +271,35 @@ describe('loadShortcutConfig', () => {
     expect(registry.lookup('i', 'list')).toBe('/skill:implement <id>');
     expect(registry.lookup('p', 'list')).toBe('/plan <id>');
     expect(registry.lookup('a', 'list')).toBe('/skill:audit <id>');
+  });
+
+  it('loads chord entries from shortcuts.json', () => {
+    const registry = loadShortcutConfig();
+    const entries = registry.getEntries();
+
+    const upChords = registry.getChordEntries();
+    expect(upChords).toHaveLength(2);
+
+    const upEntry = upChords.find((e: any) =>
+      Array.isArray((e as any).chord) && (e as any).chord[0] === 'u' && (e as any).chord[1] === 'p',
+    );
+    expect(upEntry).toBeDefined();
+    expect((upEntry as any).chord).toEqual(['u', 'p']);
+    expect(upEntry!.command).toBe('!!wl update --priority <id>');
+    expect(upEntry!.view).toBe('both');
+    expect(upEntry!.label).toBe('update priority');
+    expect(upEntry!.description).toBe('Update the priority of the selected work item');
+    expect(upEntry!.stages).toBeUndefined();
+
+    const utEntry = upChords.find((e: any) =>
+      Array.isArray((e as any).chord) && (e as any).chord[0] === 'u' && (e as any).chord[1] === 't',
+    );
+    expect(utEntry).toBeDefined();
+    expect((utEntry as any).chord).toEqual(['u', 't']);
+    expect(utEntry!.command).toBe('!!wl update --title <id>');
+    expect(utEntry!.view).toBe('both');
+    expect(utEntry!.label).toBe('update title');
+    expect(utEntry!.description).toBe('Update the title of the selected work item');
   });
 
   it('returns empty registry for unregistered key', () => {
