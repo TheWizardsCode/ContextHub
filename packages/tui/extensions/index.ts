@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import { priorityIcon, statusIcon, iconsEnabled } from '../../../src/icons.js';
 import { applyStageColour, type WorkItem, type PiTheme } from './worklog-helpers.js';
 import { truncateToTerminalWidth } from './terminal-utils.js';
+import { type ShortcutRegistry, loadShortcutConfig } from './shortcut-config.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -29,6 +30,7 @@ interface WorklogBrowseDependencies {
   listWorkItems?: () => Promise<WorklogBrowseItem[]>;
   runWl?: RunWlFn;
   chooseWorkItem?: ChooseWorkItemFn;
+  shortcutRegistry?: ShortcutRegistry;
 }
 
 type TerminalInputHandler = (data: string) => { consume?: boolean; data?: string } | undefined;
@@ -314,10 +316,21 @@ function isEscapeKey(data: string): boolean {
   return data === '\u001b' || data === 'escape';
 }
 
-async function defaultChooseWorkItem(
+/**
+ * Default work item chooser that renders a custom overlay with the browse list.
+ *
+ * Supports dynamic shortcut dispatch via a `ShortcutRegistry`. When a
+ * registered shortcut key is pressed, the overlay is closed and the command
+ * + selected item ID is inserted into Pi's editor via `ctx.ui.setEditorText()`
+ * (no submit — the user can review/edit before pressing Enter).
+ *
+ * @internal — exported for testing
+ */
+export async function defaultChooseWorkItem(
   items: WorklogBrowseItem[],
   ctx: BrowseContext,
   onSelectionChange: SelectionChangeHandler,
+  shortcutRegistry?: ShortcutRegistry,
 ): Promise<WorklogBrowseItem | undefined> {
   if (!ctx.ui.custom) {
     if (!ctx.ui.select) {
@@ -371,6 +384,22 @@ async function defaultChooseWorkItem(
         // no-op: all rendering is derived from local state
       },
       handleInput: (data: string) => {
+        // Check for shortcut keys first (config-driven dispatch)
+        if (shortcutRegistry) {
+          // Convert key-id strings (e.g. "enter", "escape") to their single-char form
+          // for lookup against the registry.  Only look up single-letter keys.
+          const lookupKey = data.length === 1 ? data : undefined;
+          if (lookupKey) {
+            const command = shortcutRegistry.lookup(lookupKey, 'list');
+            if (command) {
+              const selectedItem = items[selectedIndex];
+              ctx.ui.setEditorText?.(command.replace('<id>', selectedItem.id));
+              done(null);
+              return;
+            }
+          }
+        }
+
         if (isUpKey(data)) {
           moveSelection(selectedIndex - 1);
           tui.requestRender();
@@ -495,7 +524,12 @@ export function createScrollableWidget(
 export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {}) {
   const runWlImpl = deps.runWl ?? runWl;
   const listWorkItems = deps.listWorkItems ?? (() => defaultListWorkItems(runWlImpl));
-  const chooseWorkItem = deps.chooseWorkItem ?? defaultChooseWorkItem;
+  // Build the shortcut registry: loads shortcuts.json from the extension directory.
+  // If no custom registry is provided via deps, a default registry is built.
+  const shortcutRegistry = deps.shortcutRegistry ?? loadShortcutConfig();
+  const chooseWorkItem = deps.chooseWorkItem
+    ? (deps.chooseWorkItem as (items: WorklogBrowseItem[], ctx: BrowseContext, onSelectionChange: SelectionChangeHandler, registry?: ShortcutRegistry) => Promise<WorklogBrowseItem | undefined>)
+    : (items: WorklogBrowseItem[], ctx: BrowseContext, onSelectionChange: SelectionChangeHandler) => defaultChooseWorkItem(items, ctx, onSelectionChange, shortcutRegistry);
 
   return function registerWorklogBrowseExtension(pi: PiLike): void {
     const runBrowseFlow = async (ctx: BrowseContext): Promise<void> => {
@@ -558,6 +592,19 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
                 render: (width: number) => widget.render(width),
                 invalidate: () => widget.invalidate(),
                 handleInput: (data: string) => {
+                  // Check for shortcut keys first (config-driven dispatch)
+                  const lookupKey = data.length === 1 ? data : undefined;
+                  if (lookupKey) {
+                    const command = shortcutRegistry.lookup(lookupKey, 'detail');
+                    if (command) {
+                      // Clear the preview widget before closing the modal
+                      ctx.ui.setWidget?.('worklog-browse-selection', undefined);
+                      ctx.ui.setEditorText?.(command.replace('<id>', selectedItem.id));
+                      done(null);
+                      return;
+                    }
+                  }
+
                   if (isEscapeKey(data)) {
                     // Clear the preview widget before closing the modal
                     ctx.ui.setWidget?.('worklog-browse-selection', undefined);
