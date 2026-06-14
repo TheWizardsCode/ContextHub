@@ -8,6 +8,24 @@ import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@e
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Map of shorthand stage aliases to canonical stage names.
+ * Both keys and values are valid stage values for the /wl command.
+ */
+export const STAGE_MAP: Record<string, string> = {
+  intake: 'intake_complete',
+  plan: 'plan_complete',
+  progress: 'in_progress',
+  review: 'in_review',
+  // Canonical names mapped to themselves for validation
+  intake_complete: 'intake_complete',
+  plan_complete: 'plan_complete',
+  in_progress: 'in_progress',
+  in_review: 'in_review',
+};
+
+const VALID_STAGES = new Set(Object.keys(STAGE_MAP));
+
 export interface WorklogBrowseItem {
   id: string;
   title: string;
@@ -29,6 +47,7 @@ type ChooseWorkItemFn = (
 
 interface WorklogBrowseDependencies {
   listWorkItems?: () => Promise<WorklogBrowseItem[]>;
+  listWorkItemsWithStage?: (stage: string) => Promise<WorklogBrowseItem[]>;
   runWl?: RunWlFn;
   chooseWorkItem?: ChooseWorkItemFn;
   shortcutRegistry?: ShortcutRegistry;
@@ -218,8 +237,29 @@ export function createDefaultListWorkItems(run: RunWlFn = runWl): () => Promise<
   };
 }
 
+/**
+ * Create a listWorkItemsWithStage function that runs `wl next -n 5 --stage <stage>`.
+ *
+ * @param run - The run function to execute the CLI command (defaults to `runWl`)
+ * @returns A function that takes a stage and returns filtered work items
+ */
+export function createListWorkItemsWithStage(run: RunWlFn = runWl): (stage: string) => Promise<WorklogBrowseItem[]> {
+  return async (stage: string): Promise<WorklogBrowseItem[]> => {
+    const output = await run(['next', '-n', '5', '--stage', stage]);
+    const payload = extractJsonObject(output);
+    return normalizeListPayload(payload).slice(0, 5);
+  };
+}
+
 async function defaultListWorkItems(run: RunWlFn = runWl): Promise<WorklogBrowseItem[]> {
   return createDefaultListWorkItems(run)();
+}
+
+/**
+ * Default listWorkItemsWithStage function that defaults to runWl.
+ */
+async function defaultListWorkItemsWithStage(stage: string, run: RunWlFn = runWl): Promise<WorklogBrowseItem[]> {
+  return createListWorkItemsWithStage(run)(stage);
 }
 
 function descriptionPreview(description: string | undefined, maxLines = 7): string[] {
@@ -570,6 +610,7 @@ export function createScrollableWidget(
 export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {}) {
   const runWlImpl = deps.runWl ?? runWl;
   const listWorkItems = deps.listWorkItems ?? (() => defaultListWorkItems(runWlImpl));
+  const listWorkItemsWithStage = deps.listWorkItemsWithStage ?? ((stage: string) => defaultListWorkItemsWithStage(stage, runWlImpl));
   // Build the shortcut registry: loads shortcuts.json from the extension directory.
   // If no custom registry is provided via deps, a default registry is built.
   const shortcutRegistry = deps.shortcutRegistry ?? loadShortcutConfig();
@@ -578,9 +619,11 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     : (items: WorklogBrowseItem[], ctx: BrowseContext, onSelectionChange: SelectionChangeHandler) => defaultChooseWorkItem(items, ctx, onSelectionChange, shortcutRegistry);
 
   return function registerWorklogBrowseExtension(pi: PiLike): void {
-    const runBrowseFlow = async (ctx: BrowseContext): Promise<void> => {
+    const runBrowseFlow = async (ctx: BrowseContext, stage?: string): Promise<void> => {
       try {
-        const items = (await listWorkItems()).slice(0, 5);
+        const items = stage
+          ? (await listWorkItemsWithStage(stage)).slice(0, 5)
+          : (await listWorkItems()).slice(0, 5);
         if (items.length === 0) {
           ctx.ui.notify('No work items available to browse.', 'info');
           ctx.ui.setWidget?.('worklog-browse-selection', undefined);
@@ -689,9 +732,27 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     };
 
     pi.registerCommand('wl', {
-      description: 'Browse next 5 work items and preview selected title above editor',
+      description: 'Browse next 5 work items, optionally filtered by stage (e.g. /wl progress, /wl in_progress)',
       handler: async (_args: string, ctx: BrowseContext) => {
+        const trimmed = _args?.trim() ?? '';
+        if (trimmed.length === 0) {
+          await runBrowseFlow(ctx);
+          return;
+        }
+        const canonical = STAGE_MAP[trimmed];
+        if (canonical) {
+          await runBrowseFlow(ctx, canonical);
+          return;
+        }
+        ctx.ui.notify(`Unknown stage value: '${trimmed}'`, 'error');
         await runBrowseFlow(ctx);
+      },
+      getArgumentCompletions: (prefix: string) => {
+        const allStages = [...VALID_STAGES].sort();
+        const filtered = allStages.filter(s => s.startsWith(prefix));
+        return filtered.length > 0
+          ? filtered.map(s => ({ value: s, label: s }))
+          : null;
       },
     });
 

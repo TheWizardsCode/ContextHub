@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   createDefaultListWorkItems,
+  createListWorkItemsWithStage,
   createScrollableWidget,
   createWorklogBrowseExtension,
   defaultChooseWorkItem,
@@ -1332,6 +1333,227 @@ describe('Worklog browse pi extension', () => {
         expect(result).toEqual({ type: 'shortcut', command: 'implement WL-MIX' });
       });
     });
+  });
+
+  describe('Stage filtering via /wl <stage>', () => {
+    const makeStageTestPi = () => {
+      const registerCommand = vi.fn();
+      const registerShortcut = vi.fn();
+      const sendMessage = vi.fn();
+      return {
+        registerCommand,
+        registerShortcut,
+        sendMessage,
+        on: vi.fn(),
+      };
+    };
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it('createListWorkItemsWithStage runs wl next -n 5 --stage', async () => {
+      const runWl = vi.fn().mockResolvedValue(JSON.stringify({
+        success: true,
+        count: 1,
+        results: [{ workItem: { id: 'WL-S1', title: 'Stage item', status: 'open', stage: 'in_review' } }],
+      }));
+
+      const listFn = createListWorkItemsWithStage(runWl as any);
+      const items = await listFn('in_review');
+
+      expect(runWl).toHaveBeenCalledWith(['next', '-n', '5', '--stage', 'in_review']);
+      expect(items).toEqual([
+        { id: 'WL-S1', title: 'Stage item', status: 'open', stage: 'in_review' },
+      ]);
+    });
+
+    it('handler with no args uses default listWorkItems (backward compatibility)', async () => {
+      const pi = makeStageTestPi();
+      const listWorkItems = vi.fn().mockResolvedValue([
+        { id: 'WL-D', title: 'Default', status: 'open' },
+      ]);
+      const chooseWorkItem = vi.fn();
+      const extension = createWorklogBrowseExtension({ listWorkItems, chooseWorkItem });
+      extension(pi as any);
+
+      const handler = pi.registerCommand.mock.calls.find((c: any) => c[0] === 'wl')?.[1]?.handler;
+      expect(typeof handler).toBe('function');
+
+      const notify = vi.fn();
+      await handler('', { ui: { notify } });
+
+      expect(listWorkItems).toHaveBeenCalledTimes(1);
+      expect(chooseWorkItem).toHaveBeenCalledTimes(1);
+    });
+
+    it('handler with shorthand stage calls listWorkItemsWithStage with canonical name', async () => {
+      const pi = makeStageTestPi();
+      const listWorkItems = vi.fn().mockResolvedValue([]);
+      const listWorkItemsWithStage = vi.fn().mockResolvedValue([
+        { id: 'WL-P', title: 'In Progress', status: 'in-progress', stage: 'in_progress' },
+      ]);
+      const chooseWorkItem = vi.fn();
+      const extension = createWorklogBrowseExtension({ listWorkItems, listWorkItemsWithStage, chooseWorkItem });
+      extension(pi as any);
+
+      const handler = pi.registerCommand.mock.calls.find((c: any) => c[0] === 'wl')?.[1]?.handler;
+
+      const notify = vi.fn();
+      await handler('progress', { ui: { notify } });
+
+      expect(listWorkItemsWithStage).toHaveBeenCalledWith('in_progress');
+      expect(listWorkItems).not.toHaveBeenCalled();
+      expect(chooseWorkItem).toHaveBeenCalledTimes(1);
+    });
+
+    it('handler with canonical stage name calls listWorkItemsWithStage with that stage', async () => {
+      const pi = makeStageTestPi();
+      const listWorkItemsWithStage = vi.fn().mockResolvedValue([
+        { id: 'WL-R', title: 'In Review', status: 'open', stage: 'in_review' },
+      ]);
+      const chooseWorkItem = vi.fn();
+      const extension = createWorklogBrowseExtension({ listWorkItemsWithStage, chooseWorkItem });
+      extension(pi as any);
+
+      const handler = pi.registerCommand.mock.calls.find((c: any) => c[0] === 'wl')?.[1]?.handler;
+
+      const notify = vi.fn();
+      await handler('in_review', { ui: { notify } });
+
+      expect(listWorkItemsWithStage).toHaveBeenCalledWith('in_review');
+      expect(chooseWorkItem).toHaveBeenCalledTimes(1);
+    });
+
+    it('handler with whitespace-only args falls back to default unfiltered list', async () => {
+      const pi = makeStageTestPi();
+      const listWorkItems = vi.fn().mockResolvedValue([
+        { id: 'WL-W', title: 'Whitespace', status: 'open' },
+      ]);
+      const listWorkItemsWithStage = vi.fn();
+      const chooseWorkItem = vi.fn();
+      const extension = createWorklogBrowseExtension({ listWorkItems, listWorkItemsWithStage, chooseWorkItem });
+      extension(pi as any);
+
+      const handler = pi.registerCommand.mock.calls.find((c: any) => c[0] === 'wl')?.[1]?.handler;
+
+      const notify = vi.fn();
+      await handler('   ', { ui: { notify } });
+
+      expect(listWorkItems).toHaveBeenCalledTimes(1);
+      expect(listWorkItemsWithStage).not.toHaveBeenCalled();
+      expect(chooseWorkItem).toHaveBeenCalledTimes(1);
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    it('handler with invalid stage shows error notification and falls back to default', async () => {
+      const pi = makeStageTestPi();
+      const listWorkItems = vi.fn().mockResolvedValue([
+        { id: 'WL-X', title: 'Fallback', status: 'open' },
+      ]);
+      const listWorkItemsWithStage = vi.fn();
+      const chooseWorkItem = vi.fn();
+      const extension = createWorklogBrowseExtension({ listWorkItems, listWorkItemsWithStage, chooseWorkItem });
+      extension(pi as any);
+
+      const handler = pi.registerCommand.mock.calls.find((c: any) => c[0] === 'wl')?.[1]?.handler;
+
+      const notify = vi.fn();
+      await handler('bogus', { ui: { notify } });
+
+      expect(notify).toHaveBeenCalledWith("Unknown stage value: 'bogus'", 'error');
+      expect(listWorkItems).toHaveBeenCalledTimes(1);
+      expect(listWorkItemsWithStage).not.toHaveBeenCalled();
+      expect(chooseWorkItem).toHaveBeenCalledTimes(1);
+    });
+
+    it('handler returns ShortcutResult when a shortcut key is pressed in filtered view', async () => {
+      const pi = makeStageTestPi();
+      const listWorkItemsWithStage = vi.fn().mockResolvedValue([
+        { id: 'WL-P', title: 'In Progress', status: 'in-progress', stage: 'in_progress' },
+        { id: 'WL-P2', title: 'In Progress 2', status: 'in-progress', stage: 'in_progress' },
+      ]);
+
+      // Simulate the chooseWorkItem returning a ShortcutResult (e.g., from pressing 'i')
+      const chooseWorkItem = vi.fn().mockResolvedValue({
+        type: 'shortcut',
+        command: 'implement WL-P',
+      });
+
+      const extension = createWorklogBrowseExtension({ listWorkItemsWithStage, chooseWorkItem });
+      extension(pi as any);
+
+      const handler = pi.registerCommand.mock.calls.find((c: any) => c[0] === 'wl')?.[1]?.handler;
+
+      const notify = vi.fn();
+      const setEditorText = vi.fn();
+      await handler('progress', { ui: { notify, setEditorText } });
+
+      // Shortcut result should set editor text
+      expect(setEditorText).toHaveBeenCalledWith('implement WL-P');
+    });
+
+    it('getArgumentCompletions returns sorted stage values including shorthands and canonical names', () => {
+      const pi = makeStageTestPi();
+      const extension = createWorklogBrowseExtension();
+      extension(pi as any);
+
+      const commandOpts = pi.registerCommand.mock.calls.find((c: any) => c[0] === 'wl')?.[1];
+      const completions = commandOpts.getArgumentCompletions('');
+
+      expect(completions).toEqual([
+        { value: 'in_progress', label: 'in_progress' },
+        { value: 'in_review', label: 'in_review' },
+        { value: 'intake', label: 'intake' },
+        { value: 'intake_complete', label: 'intake_complete' },
+        { value: 'plan', label: 'plan' },
+        { value: 'plan_complete', label: 'plan_complete' },
+        { value: 'progress', label: 'progress' },
+        { value: 'review', label: 'review' },
+      ]);
+    });
+
+    it('getArgumentCompletions filters by prefix', () => {
+      const pi = makeStageTestPi();
+      const extension = createWorklogBrowseExtension();
+      extension(pi as any);
+
+      const commandOpts = pi.registerCommand.mock.calls.find((c: any) => c[0] === 'wl')?.[1];
+
+      // Filter by 'in_'
+      const completions = commandOpts.getArgumentCompletions('in_');
+      expect(completions).toEqual([
+        { value: 'in_progress', label: 'in_progress' },
+        { value: 'in_review', label: 'in_review' },
+      ]);
+
+      // Filter by 'int'
+      const intakeCompletions = commandOpts.getArgumentCompletions('int');
+      expect(intakeCompletions).toEqual([
+        { value: 'intake', label: 'intake' },
+        { value: 'intake_complete', label: 'intake_complete' },
+      ]);
+    });
+
+    it('getArgumentCompletions returns null when no completion matches prefix', () => {
+      const pi = makeStageTestPi();
+      const extension = createWorklogBrowseExtension();
+      extension(pi as any);
+
+      const commandOpts = pi.registerCommand.mock.calls.find((c: any) => c[0] === 'wl')?.[1];
+      const completions = commandOpts.getArgumentCompletions('zzz');
+      expect(completions).toBeNull();
+    });
+
+    it('description is updated to reflect stage filtering capability', () => {
+      const pi = makeStageTestPi();
+      const extension = createWorklogBrowseExtension();
+      extension(pi as any);
+
+      const commandOpts = pi.registerCommand.mock.calls.find((c: any) => c[0] === 'wl')?.[1];
+      expect(commandOpts.description).toContain('filtered by stage');
+    });
+
   });
 
   it('uses wl next -n 5 and parses results.workItem payload', async () => {

@@ -2,6 +2,48 @@
 
 Extension modules for the Worklog TUI and Pi agent integration.
 
+## `/wl` Slash Command — Stage Filtering
+
+The `/wl` slash command browses up to 5 work items recommended by the `wl next` algorithm. It supports an optional stage filter argument.
+
+### Usage
+
+```
+/wl              # Show top 5 unfiltered work items (default)
+/wl intake       # Show items in intake_complete stage
+/wl plan         # Show items in plan_complete stage
+/wl progress     # Show items in in_progress stage
+/wl review       # Show items in in_review stage
+/wl in_progress  # Canonical stage names also work
+/wl in_review    # Canonical stage names also work
+```
+
+### Stage Shorthand Aliases
+
+| Shorthand | Canonical Stage |
+|-----------|----------------|
+| `intake`  | `intake_complete` |
+| `plan`    | `plan_complete` |
+| `progress`| `in_progress` |
+| `review`  | `in_review` |
+
+All canonical stage names (`in_progress`, `in_review`, `intake_complete`, `plan_complete`) are also recognised directly.
+
+### Invalid Values
+
+Typing an unrecognised stage value produces an error notification and falls back to the default unfiltered list without crashing.
+
+### Autocomplete
+
+The `/wl` command registers `getArgumentCompletions`, so Pi's editor shows autocomplete suggestions for valid stage values (both shorthand and canonical) when typing arguments.
+
+### Example
+
+- `/wl progress` — filters to items in `in_progress` stage
+- `/wl in_review` — filters to items in `in_review` stage
+- `/wl` — shows the default unfiltered top 5 items (backward compatible)
+- `/wl   ` — whitespace-only arguments are treated as "no arguments" and show unfiltered items
+
 ## Shortcuts
 
 The `shortcuts.json` config file defines a **config-driven shortcut system** that allows keyboard shortcuts in the Pi extension's worklog browse views (list and detail) to be expressed declaratively rather than hardcoded.
