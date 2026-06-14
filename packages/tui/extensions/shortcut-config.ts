@@ -11,7 +11,8 @@
  * matching command and inserts it into the editor via `ctx.ui.setEditorText()`.
  *
  * Config entry schema:
- * - key (string): single key (e.g. "i", "p")
+ * - key (string): single key (e.g. "i", "p") — mutually exclusive with `chord`
+ * - chord (string[]): multi-key chord (e.g. ["u", "p"]) — mutually exclusive with `key`
  * - command (string): text to insert into editor (e.g. "implement <id>")
  * - view ("list" | "detail" | "both"): which view the shortcut applies in
  * - stages (string[]): optional allow-list of item stages for which the shortcut
@@ -30,9 +31,20 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * A single shortcut entry as defined in shortcuts.json.
  */
 export interface ShortcutEntry {
+  /**
+   * Single key for immediate dispatch (e.g. "i", "p").
+   * Mutually exclusive with `chord` — exactly one of `key` or `chord` must be set.
+   */
   key: string;
   command: string;
   view: 'list' | 'detail' | 'both';
+  /**
+   * Optional chord sequence (array of 2+ keys, e.g. ["u", "p"]).
+   * Mutually exclusive with `key` — only one should be defined per entry.
+   * When a chord is defined, the entry is matched via `lookupChord()`
+   * rather than `lookup()`.
+   */
+  chord?: string[];
   /**
    * Optional short label displayed in the browse help line (e.g. "implement", "plan").
    * When provided, this is used instead of deriving a label from the command string.
@@ -53,15 +65,31 @@ export interface ShortcutEntry {
 /**
  * Registry of loaded shortcut entries with lookup capability.
  *
- * The registry stores entries by key and provides a `lookup(key, view)`
- * method that returns the matching command string (with `<id>` replaced)
- * or `undefined` if no entry matches the given key + view combination.
+ * The registry stores entries by key and provides `lookup(key, view)` and
+ * `lookupChord(chordKeys, view, stage)` methods that return the matching
+ * command string (with `<id>` replaced) or `undefined` if no entry matches.
+ *
+ * Chord entries are tracked separately for efficient leader-key lookup via
+ * `getChordByLeader()`.
  */
 export class ShortcutRegistry {
   private entries: ShortcutEntry[];
+  private chordEntries: Map<string, ShortcutEntry[]>;
 
   constructor(entries: ShortcutEntry[]) {
     this.entries = entries;
+
+    // Index chord entries by leader key for fast lookup
+    this.chordEntries = new Map();
+    for (const entry of entries) {
+      const chord = (entry as Record<string, unknown>).chord;
+      if (Array.isArray(chord) && chord.length >= 2) {
+        const [leader] = chord as [string, ...string[]];
+        const existing = this.chordEntries.get(leader) ?? [];
+        existing.push(entry);
+        this.chordEntries.set(leader, existing);
+      }
+    }
   }
 
   /**
@@ -74,6 +102,9 @@ export class ShortcutRegistry {
    * - if `stage` is provided, the entry's `stages` allow-list is either
    *   undefined/empty, or includes the given stage value
    *
+   * NOTE: Only key-based entries (those with a `key` field) are matched by
+   * this method. Chord entries must be looked up via `lookupChord()`.
+   *
    * @param key - The pressed key (e.g. "i")
    * @param view - The current view ("list" or "detail")
    * @param stage - Optional item stage to filter by (e.g. "idea", "intake_complete")
@@ -81,6 +112,7 @@ export class ShortcutRegistry {
    */
   lookup(key: string, view: string, stage?: string): string | undefined {
     const match = this.entries.find(entry => {
+      // Only match key-based entries — chord entries are handled by lookupChord
       if (entry.key !== key) return false;
       if (entry.view !== 'both' && entry.view !== view) return false;
       // If stage is provided, check the stages allow-list
@@ -114,6 +146,84 @@ export class ShortcutRegistry {
    */
   getEntries(): ReadonlyArray<ShortcutEntry> {
     return this.entries;
+  }
+
+  // ── Chord methods ─────────────────────────────────────────────────────
+
+  /**
+   * Get all chord entries whose first key (leader) matches the given key.
+   *
+   * When `view` is provided, only chord entries that are visible in that view
+   * (view === "both" or view === the provided view) are returned.
+   *
+   * @param leaderKey - The first key of the chord (e.g. "u")
+   * @param view - Optional view filter ("list" | "detail")
+   * @returns Array of matching chord ShortcutEntry objects (may be empty)
+   */
+  getChordByLeader(leaderKey: string, view?: string): ShortcutEntry[] {
+    const chords = this.chordEntries.get(leaderKey);
+    if (!chords || chords.length === 0) return [];
+
+    if (view === undefined) {
+      return chords;
+    }
+
+    return chords.filter(entry => entry.view === 'both' || entry.view === view);
+  }
+
+  /**
+   * Look up a chord by its full key sequence, view, and optional stage.
+   *
+   * Returns the command string for the first matching entry, or `undefined`
+   * if no entry matches.  An entry matches when:
+   * - its `chord` array exactly equals the given `chordKeys` array
+   * - its `view` is either `"both"` or exactly matches the given view string
+   * - if `stage` is provided, the entry's `stages` allow-list is either
+   *   undefined/empty, or includes the given stage value
+   *
+   * @param chordKeys - The full chord key sequence (e.g. ["u", "p"])
+   * @param view - The current view ("list" or "detail")
+   * @param stage - Optional item stage to filter by
+   * @returns The command string or undefined
+   */
+  lookupChord(chordKeys: string[], view: string, stage?: string): string | undefined {
+    // chordKeys must match the entry's chord array exactly
+    const match = this.entries.find(entry => {
+      const chord = (entry as Record<string, unknown>).chord;
+      if (!Array.isArray(chord)) return false;
+      if (chord.length !== chordKeys.length) return false;
+
+      // Compare chord arrays element-by-element
+      for (let i = 0; i < chord.length; i++) {
+        if (chord[i] !== chordKeys[i]) return false;
+      }
+
+      // View filter
+      if (entry.view !== 'both' && entry.view !== view) return false;
+
+      // Stage filter
+      if (stage !== undefined && entry.stages !== undefined && entry.stages.length > 0) {
+        if (!entry.stages.includes(stage)) return false;
+      }
+
+      return true;
+    });
+
+    return match?.command;
+  }
+
+  /**
+   * Return all chord entries (for help text rendering / introspection).
+   */
+  getChordEntries(): ShortcutEntry[] {
+    const result: ShortcutEntry[] = [];
+    for (const entry of this.entries) {
+      const chord = (entry as Record<string, unknown>).chord;
+      if (Array.isArray(chord) && chord.length >= 2) {
+        result.push(entry);
+      }
+    }
+    return result;
   }
 }
 
@@ -162,13 +272,46 @@ export function loadShortcutConfig(): ShortcutRegistry {
       continue;
     }
 
-    const key = entry.key;
+    const rawKey = entry.key;
+    const rawChord = entry.chord;
     const command = entry.command;
     const view = entry.view;
 
-    if (!key || typeof key !== 'string') {
-      console.warn(`[shortcut-config] Skipping entry at index ${i}: missing or invalid "key" field`);
+    // Validate key/chord mutual exclusivity and presence
+    const hasKey = rawKey !== undefined && typeof rawKey === 'string' && (rawKey as string).length > 0;
+    const hasChord = Array.isArray(rawChord) && (rawChord as unknown[]).length > 0;
+
+    if (hasKey && hasChord) {
+      console.warn(
+        `[shortcut-config] Skipping entry at index ${i}: entry has both "key" and "chord" fields — they are mutually exclusive`,
+      );
       continue;
+    }
+
+    if (!hasKey && !hasChord) {
+      console.warn(
+        `[shortcut-config] Skipping entry at index ${i}: missing or invalid "key" or "chord" field — exactly one is required`,
+      );
+      continue;
+    }
+
+    // If chord entry, validate chord is an array of 2+ strings
+    if (hasChord) {
+      const chordArr = rawChord as unknown[];
+      if (chordArr.length < 2) {
+        console.warn(
+          `[shortcut-config] Skipping entry at index ${i}: "chord" must be an array of at least 2 strings`,
+        );
+        continue;
+      }
+      for (let j = 0; j < chordArr.length; j++) {
+        if (typeof chordArr[j] !== 'string') {
+          console.warn(
+            `[shortcut-config] Skipping entry at index ${i}: "chord" entry at index ${j} is not a string`,
+          );
+          continue;
+        }
+      }
     }
 
     if (!command || typeof command !== 'string') {
@@ -207,11 +350,18 @@ export function loadShortcutConfig(): ShortcutRegistry {
       }
     }
 
+    // Build the shortcut entry with either key or chord
     const shortcutEntry: ShortcutEntry = {
-      key,
+      key: rawChord !== undefined ? '' : (entry.key as string),
       command,
       view: view as 'list' | 'detail' | 'both',
     };
+
+    // If it's a chord entry, set the chord field on the entry
+    // We use a spread to add chord since the interface type doesn't require it
+    if (hasChord) {
+      (shortcutEntry as Record<string, unknown>).chord = rawChord as string[];
+    }
 
     // Only include stages if it is a non-empty array of strings
     if (

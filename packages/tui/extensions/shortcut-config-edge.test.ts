@@ -192,3 +192,303 @@ describe('loadShortcutConfig edge cases (fs.mocked)', () => {
     });
   });
 });
+
+// ─── Chord validation in loadShortcutConfig ─────────────────────────────
+//
+// These tests verify that loadShortcutConfig properly validates chord
+// entries. They use the same mocked fs pattern as the tests above.
+//
+
+describe('chord validation in loadShortcutConfig', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.restoreAllMocks();
+  });
+
+  it('accepts entries with a valid chord array of 2+ strings', () => {
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        {
+          chord: ['u', 'p'],
+          command: '!!wl update --priority',
+          view: 'both',
+        },
+        {
+          chord: ['u', 't'],
+          command: '!!wl update --title',
+          view: 'both',
+        },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+    const entries = registry.getEntries();
+    expect(entries).toHaveLength(2);
+
+    const upEntry = entries.find((e: any) => e.chord?.[0] === 'u' && e.chord?.[1] === 'p');
+    expect(upEntry).toBeDefined();
+    expect(upEntry!.command).toBe('!!wl update --priority');
+
+    const utEntry = entries.find((e: any) => e.chord?.[0] === 'u' && e.chord?.[1] === 't');
+    expect(utEntry).toBeDefined();
+    expect(utEntry!.command).toBe('!!wl update --title');
+  });
+
+  it('rejects entries with chord array of fewer than 2 keys', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        {
+          chord: ['u'],
+          command: '!!wl update --priority',
+          view: 'both',
+        },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringContaining('chord'),
+    );
+    expect(registry.getEntries()).toHaveLength(0);
+    mockWarn.mockRestore();
+  });
+
+  it('rejects entries with empty chord array', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        {
+          chord: [],
+          command: '!!wl update --priority',
+          view: 'both',
+        },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringContaining('chord'),
+    );
+    expect(registry.getEntries()).toHaveLength(0);
+    mockWarn.mockRestore();
+  });
+
+  it('rejects entries with chord that is not an array', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        {
+          chord: 'up',
+          command: '!!wl update --priority',
+          view: 'both',
+        },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringContaining('chord'),
+    );
+    expect(registry.getEntries()).toHaveLength(0);
+    mockWarn.mockRestore();
+  });
+
+  it('rejects entries that define both key and chord (mutual exclusivity)', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        {
+          key: 'u',
+          chord: ['u', 'p'],
+          command: '!!wl update --priority',
+          view: 'both',
+        },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringContaining('key'),
+    );
+    expect(registry.getEntries()).toHaveLength(0);
+    mockWarn.mockRestore();
+  });
+
+  it('rejects entries with neither key nor chord field', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        {
+          command: '!!wl update --priority',
+          view: 'both',
+        },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringContaining('missing'),
+    );
+    expect(registry.getEntries()).toHaveLength(0);
+    mockWarn.mockRestore();
+  });
+
+  it('accepts chord entries with optional label and description', () => {
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        {
+          chord: ['u', 'p'],
+          command: '!!wl update --priority',
+          view: 'both',
+          label: 'update priority',
+          description: 'Update the priority of the selected work item',
+        },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+    const entry = registry.getEntries()[0];
+    expect(entry).toBeDefined();
+    expect((entry as any).label).toBe('update priority');
+    expect((entry as any).description).toBe(
+      'Update the priority of the selected work item',
+    );
+  });
+
+  it('accepts chord entries with stages array', () => {
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        {
+          chord: ['u', 'p'],
+          command: '!!wl update --priority',
+          view: 'both',
+          stages: ['intake_complete', 'plan_complete'],
+        },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+    const entry = registry.getEntries()[0];
+    expect(entry).toBeDefined();
+    expect(entry.stages).toEqual(['intake_complete', 'plan_complete']);
+  });
+
+  it('maintains backward compatibility with single-key entries when chord validation is present', () => {
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        { key: 'i', command: 'implement <id>', view: 'both' },
+        { key: 'p', command: 'plan <id>', view: 'both' },
+        {
+          chord: ['u', 'p'],
+          command: 'update-priority <id>',
+          view: 'both',
+        },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+    expect(registry.getEntries()).toHaveLength(3);
+    expect(registry.lookup('i', 'list')).toBe('implement <id>');
+    expect(registry.lookup('p', 'list')).toBe('plan <id>');
+  });
+
+  it('loads valid chord entries alongside valid key entries, skipping invalid ones', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        { key: 'i', command: 'implement <id>', view: 'both' },
+        {
+          chord: ['u', 'p'],
+          command: 'update-priority <id>',
+          view: 'both',
+        },
+        {
+          chord: ['u'],
+          command: 'invalid-chord <id>',
+          view: 'both',
+        },
+        {
+          key: 'x',
+          chord: ['x', 'y'],
+          command: 'both-fields <id>',
+          view: 'both',
+        },
+        { key: 'p', command: 'plan <id>', view: 'both' },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+    // The two invalid entries should be skipped, leaving 3 valid entries
+    expect(registry.getEntries()).toHaveLength(3);
+    expect(registry.lookup('i', 'list')).toBe('implement <id>');
+    expect(registry.lookup('p', 'list')).toBe('plan <id>');
+
+    // The chord entry ('u','p') should have been loaded
+    const chordEntry = registry
+      .getEntries()
+      .find((e: any) => Array.isArray(e.chord));
+    expect(chordEntry).toBeDefined();
+    expect((chordEntry as any).chord).toEqual(['u', 'p']);
+
+    expect(mockWarn).toHaveBeenCalledTimes(2);
+    mockWarn.mockRestore();
+  });
+
+  it('chord entries accept view values list, detail, and both', () => {
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        {
+          chord: ['u', 'p'],
+          command: 'update-priority <id>',
+          view: 'list',
+        },
+        {
+          chord: ['u', 't'],
+          command: 'update-title <id>',
+          view: 'detail',
+        },
+        {
+          chord: ['u', 's'],
+          command: 'update-status <id>',
+          view: 'both',
+        },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+    expect(registry.getEntries()).toHaveLength(3);
+  });
+
+  it('rejects chord entry with invalid view value', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        {
+          chord: ['u', 'p'],
+          command: 'update-priority <id>',
+          view: 'modal',
+        },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringContaining('unknown "view"'),
+    );
+    expect(registry.getEntries()).toHaveLength(0);
+    mockWarn.mockRestore();
+  });
+});

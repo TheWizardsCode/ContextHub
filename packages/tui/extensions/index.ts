@@ -434,6 +434,10 @@ export async function defaultChooseWorkItem(
     return selectedItem;
   }
 
+  // ── Chord state: tracks whether a chord leader key has been pressed.
+  // Null means no pending chord; a string value is the leader key.
+  let pendingChordLeader: string | null = null;
+
   const result = await ctx.ui.custom<WorklogBrowseItem | ShortcutResult | null>((tui, theme, _keybindings, done) => {
     let selectedIndex = 0;
     let lastSelectionId = items[0]?.id;
@@ -448,34 +452,65 @@ export async function defaultChooseWorkItem(
       }
     };
 
+    /**
+     * Format a shortcut entry into a help-text label.
+     * Key-based entries: "i:implement"
+     * Chord entries: "u-p:update priority"
+     */
+    const formatEntryLabel = (e: ShortcutEntry): string => {
+      const label = e.label ?? e.command
+        .replace(/<[^>]+>/g, '')
+        .split(/\r?\n/)[0]
+        .trim()
+        .replace(/^\/(skill:)?/, '');
+      // If this is a chord entry, format as chord:label
+      const chord = (e as Record<string, unknown>).chord;
+      if (Array.isArray(chord) && chord.length >= 2) {
+        const chordStr = (chord as string[]).slice(0, 2).join('-');
+        return `${chordStr}:${label}`;
+      }
+      return `${e.key}:${label}`;
+    };
+
     return {
       focused: false,
       render: (width: number) => {
         const title = truncateToWidth(theme.fg('accent', theme.bold('Browse Worklog next items (top 5)')), width);
 
-        // Build help text with dynamic shortcut hints from the registry,
-        // filtered by the current selection's stage.
-        // Static navigation text ("↑↓ navigate • enter select • esc cancel")
-        // has been removed — only dynamic shortcut hints are shown.
+        // Build help text: if a chord leader is pending, show chord
+        // completions; otherwise show normal shortcut hints.
         let helpText = '';
         if (shortcutRegistry) {
           const selectedStage = items[selectedIndex]?.stage;
-          const relevantEntries = shortcutRegistry
-            .getEntriesForStage(selectedStage)
-            .filter(e => e.view === 'list' || e.view === 'both');
-          if (relevantEntries.length > 0) {
-            const hints = relevantEntries
-              .map(e => {
-                // Use explicit label if provided, otherwise derive from command
-                const label = e.label ?? e.command
-                  .replace(/<[^>]+>/g, '')
-                  .split(/\r?\n/)[0]
-                  .trim()
-                  .replace(/^\/(skill:)?/, '');
-                return `${e.key}:${label}`;
-              })
-              .join(' ');
-            helpText = hints;
+
+          if (pendingChordLeader !== null) {
+            // Show chord completions for the pending leader key
+            const chords = shortcutRegistry.getChordByLeader(pendingChordLeader, 'list');
+            if (chords.length > 0) {
+              const hints = chords
+                .filter(c => {
+                  // Filter by stage as well
+                  if (selectedStage !== undefined && c.stages !== undefined && c.stages.length > 0) {
+                    return c.stages.includes(selectedStage);
+                  }
+                  return true;
+                })
+                .map(e => formatEntryLabel(e))
+                .join(' ');
+              if (hints.length > 0) {
+                helpText = `🔗 ${hints}`;
+              }
+            }
+          } else {
+            // Normal help text with shortcut hints
+            const relevantEntries = shortcutRegistry
+              .getEntriesForStage(selectedStage)
+              .filter(e => e.view === 'list' || e.view === 'both');
+            if (relevantEntries.length > 0) {
+              helpText = relevantEntries
+                .map(e => formatEntryLabel(e))
+                .join(' ');
+            }
           }
         }
         const help = truncateToWidth(theme.fg('dim', helpText), width);
@@ -493,16 +528,62 @@ export async function defaultChooseWorkItem(
         // no-op: all rendering is derived from local state
       },
       handleInput: (data: string) => {
-        // Only attempt shortcut dispatch if the key is NOT a reserved navigation key.
-        // Navigation keys (g, G, space) must always take precedence over shortcuts.
         const lookupKey = data.length === 1 ? data : undefined;
+
+        // ── Pending chord state ──────────────────────────────────────
+        if (pendingChordLeader !== null && lookupKey) {
+          if (isEscapeKey(data)) {
+            pendingChordLeader = null;
+            tui.requestRender();
+            return;
+          }
+          // Try to complete the chord
+          const selectedStage = items[selectedIndex]?.stage;
+          const chordCommand = shortcutRegistry!.lookupChord(
+            [pendingChordLeader, lookupKey],
+            'list',
+            selectedStage,
+          );
+          if (chordCommand) {
+            pendingChordLeader = null;
+            done({
+              type: 'shortcut' as const,
+              command: chordCommand.replace('<id>', items[selectedIndex].id),
+            });
+            return;
+          }
+          // Unrecognised second key — cancel
+          pendingChordLeader = null;
+          tui.requestRender();
+          return;
+        }
+
+        // ── Normal input handling ────────────────────────────────────
         if (lookupKey && !RESERVED_NAVIGATION_KEYS.has(lookupKey) && shortcutRegistry) {
           const selectedStage = items[selectedIndex]?.stage;
+
+          // 1) Try single-key shortcut first
           const command = shortcutRegistry.lookup(lookupKey, 'list', selectedStage);
           if (command) {
-            // Return the shortcut result - caller will set editor text after modal closes
             done({ type: 'shortcut' as const, command: command.replace('<id>', items[selectedIndex].id) });
             return;
+          }
+
+          // 2) No match — check if key is a chord leader
+          const chords = shortcutRegistry.getChordByLeader(lookupKey, 'list');
+          if (chords.length > 0) {
+            // Only enter pending state if chords are applicable for this stage
+            const applicableChords = chords.filter(c => {
+              if (selectedStage !== undefined && c.stages !== undefined && c.stages.length > 0) {
+                return c.stages.includes(selectedStage);
+              }
+              return true;
+            });
+            if (applicableChords.length > 0) {
+              pendingChordLeader = lookupKey;
+              tui.requestRender();
+              return;
+            }
           }
         }
 
@@ -524,7 +605,9 @@ export async function defaultChooseWorkItem(
         }
 
         if (isEscapeKey(data)) {
-          done(null);
+          if (pendingChordLeader === null) {
+            done(null);
+          }
         }
       },
     };
@@ -700,6 +783,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
           // calls tui.requestRender() — but we need the wrapper to forward Escape
           // to done() (which closes the custom modal) and to pass through all
           // other keys to the scrollable widget.
+          let detailPendingChordLeader: string | null = null;
           const detailResult = await ctx.ui.custom<ShortcutResult | string | null>(
             (tui, _theme, _keybindings, done) => {
               const factory = createScrollableWidget(detailLines);
@@ -710,23 +794,68 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
                 render: (width: number) => widget.render(width),
                 invalidate: () => widget.invalidate(),
                 handleInput: (data: string) => {
-                  // Only attempt shortcut dispatch if the key is NOT a reserved
-                  // navigation key. Navigation keys (g, G, space) must always
-                  // take precedence over configurable shortcuts.
                   const lookupKey = data.length === 1 ? data : undefined;
+
+                  // ── Pending chord state ────────────────────────────
+                  if (detailPendingChordLeader !== null && lookupKey) {
+                    if (isEscapeKey(data)) {
+                      detailPendingChordLeader = null;
+                      tui.requestRender();
+                      return;
+                    }
+                    const chordCommand = shortcutRegistry.lookupChord(
+                      [detailPendingChordLeader, lookupKey],
+                      'detail',
+                      selectedItem.stage,
+                    );
+                    if (chordCommand) {
+                      detailPendingChordLeader = null;
+                      done({
+                        type: 'shortcut' as const,
+                        command: chordCommand.replace('<id>', selectedItem.id),
+                      });
+                      return;
+                    }
+                    // Unrecognised second key — cancel
+                    detailPendingChordLeader = null;
+                    tui.requestRender();
+                    return;
+                  }
+
+                  // ── Normal input ────────────────────────────────────
                   if (lookupKey && !RESERVED_NAVIGATION_KEYS.has(lookupKey)) {
+                    // 1) Try single-key shortcut
                     const command = shortcutRegistry.lookup(lookupKey, 'detail', selectedItem.stage);
                     if (command) {
-                      // Return shortcut result - caller will set editor text after modal closes
                       done({ type: 'shortcut' as const, command: command.replace('<id>', selectedItem.id) });
                       return;
+                    }
+
+                    // 2) Check if key is a chord leader for detail view
+                    const chords = shortcutRegistry.getChordByLeader(lookupKey, 'detail');
+                    if (chords.length > 0) {
+                      const applicableChords = chords.filter(c => {
+                        if (selectedItem.stage !== undefined && c.stages !== undefined && c.stages.length > 0) {
+                          return c.stages.includes(selectedItem.stage);
+                        }
+                        return true;
+                      });
+                      if (applicableChords.length > 0) {
+                        detailPendingChordLeader = lookupKey;
+                        tui.requestRender();
+                        return;
+                      }
                     }
                   }
 
                   if (isEscapeKey(data)) {
-                    // Clear the preview widget before closing the modal
-                    ctx.ui.setWidget?.('worklog-browse-selection', undefined);
-                    done(null);
+                    if (detailPendingChordLeader === null) {
+                      ctx.ui.setWidget?.('worklog-browse-selection', undefined);
+                      done(null);
+                      return;
+                    }
+                    detailPendingChordLeader = null;
+                    tui.requestRender();
                     return;
                   }
                   widget.handleInput(data);
