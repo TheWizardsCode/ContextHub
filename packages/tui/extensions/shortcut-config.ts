@@ -14,6 +14,9 @@
  * - key (string): single key (e.g. "i", "p")
  * - command (string): text to insert into editor (e.g. "implement <id>")
  * - view ("list" | "detail" | "both"): which view the shortcut applies in
+ * - stages (string[]): optional allow-list of item stages for which the shortcut
+ *   is available. When undefined or empty, the shortcut is unconditionally
+ *   available (backward compatible).
  * - <id> placeholder: replaced at dispatch time with the selected work item ID
  */
 
@@ -30,6 +33,12 @@ export interface ShortcutEntry {
   key: string;
   command: string;
   view: 'list' | 'detail' | 'both';
+  /**
+   * Optional allow-list of item stages for which the shortcut is available.
+   * When undefined or empty, the shortcut is unconditionally available.
+   * Example: ["idea"] means the shortcut only appears for items in the "idea" stage.
+   */
+  stages?: string[];
 }
 
 /**
@@ -47,24 +56,48 @@ export class ShortcutRegistry {
   }
 
   /**
-   * Look up a shortcut by key and view.
+   * Look up a shortcut by key, view, and optional stage.
    *
    * Returns the command string for the first matching entry, or `undefined`
-   * if no entry matches.  An entry matches when its `key` equals the given
-   * key **and** its `view` is either `"both"` or exactly matches the given
-   * view string.
+   * if no entry matches.  An entry matches when:
+   * - its `key` equals the given key
+   * - its `view` is either `"both"` or exactly matches the given view string
+   * - if `stage` is provided, the entry's `stages` allow-list is either
+   *   undefined/empty, or includes the given stage value
    *
    * @param key - The pressed key (e.g. "i")
    * @param view - The current view ("list" or "detail")
+   * @param stage - Optional item stage to filter by (e.g. "idea", "intake_complete")
    * @returns The command string or undefined
    */
-  lookup(key: string, view: string): string | undefined {
+  lookup(key: string, view: string, stage?: string): string | undefined {
     const match = this.entries.find(entry => {
       if (entry.key !== key) return false;
-      if (entry.view === 'both') return true;
-      return entry.view === view;
+      if (entry.view !== 'both' && entry.view !== view) return false;
+      // If stage is provided, check the stages allow-list
+      if (stage !== undefined && entry.stages !== undefined && entry.stages.length > 0) {
+        if (!entry.stages.includes(stage)) return false;
+      }
+      return true;
     });
     return match?.command;
+  }
+
+  /**
+   * Return all entries that should be visible for the given stage.
+   *
+   * Entries with no `stages` constraint (or empty array) are always included.
+   * Entries with a `stages` array are only included if it contains the given stage.
+   *
+   * @param stage - The item stage to filter by
+   * @returns Entries applicable for the given stage
+   */
+  getEntriesForStage(stage?: string): ShortcutEntry[] {
+    return this.entries.filter(entry => {
+      if (entry.stages === undefined || entry.stages.length === 0) return true;
+      if (stage === undefined) return false;
+      return entry.stages.includes(stage);
+    });
   }
 
   /**
@@ -146,11 +179,41 @@ export function loadShortcutConfig(): ShortcutRegistry {
       continue;
     }
 
-    validEntries.push({
+    // Validate optional stages field
+    const stages = entry.stages;
+    if (stages !== undefined) {
+      if (!Array.isArray(stages)) {
+        console.warn(
+          `[shortcut-config] Skipping entry at index ${i}: "stages" must be an array of strings`,
+        );
+        continue;
+      }
+      for (let j = 0; j < stages.length; j++) {
+        if (typeof stages[j] !== 'string') {
+          console.warn(
+            `[shortcut-config] Skipping entry at index ${i}: "stages" entry at index ${j} is not a string`,
+          );
+          continue;
+        }
+      }
+    }
+
+    const shortcutEntry: ShortcutEntry = {
       key,
       command,
       view: view as 'list' | 'detail' | 'both',
-    });
+    };
+
+    // Only include stages if it is a non-empty array of strings
+    if (
+      Array.isArray(stages) &&
+      stages.length > 0 &&
+      stages.every((s: unknown) => typeof s === 'string')
+    ) {
+      shortcutEntry.stages = stages as string[];
+    }
+
+    validEntries.push(shortcutEntry);
   }
 
   if (validEntries.length === 0 && parsed.length > 0) {

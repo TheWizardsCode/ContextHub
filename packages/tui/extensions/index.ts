@@ -453,11 +453,13 @@ export async function defaultChooseWorkItem(
       render: (width: number) => {
         const title = truncateToWidth(theme.fg('accent', theme.bold('Browse Worklog next items (top 5)')), width);
 
-        // Build help text with dynamic shortcut hints from the registry
+        // Build help text with dynamic shortcut hints from the registry,
+        // filtered by the current selection's stage
         let helpText = '↑↓ navigate • enter select • esc cancel';
         if (shortcutRegistry) {
+          const selectedStage = items[selectedIndex]?.stage;
           const relevantEntries = shortcutRegistry
-            .getEntries()
+            .getEntriesForStage(selectedStage)
             .filter(e => e.view === 'list' || e.view === 'both');
           if (relevantEntries.length > 0) {
             const hints = relevantEntries
@@ -492,7 +494,8 @@ export async function defaultChooseWorkItem(
         // Navigation keys (g, G, space) must always take precedence over shortcuts.
         const lookupKey = data.length === 1 ? data : undefined;
         if (lookupKey && !RESERVED_NAVIGATION_KEYS.has(lookupKey) && shortcutRegistry) {
-          const command = shortcutRegistry.lookup(lookupKey, 'list');
+          const selectedStage = items[selectedIndex]?.stage;
+          const command = shortcutRegistry.lookup(lookupKey, 'list', selectedStage);
           if (command) {
             // Return the shortcut result - caller will set editor text after modal closes
             done({ type: 'shortcut' as const, command: command.replace('<id>', items[selectedIndex].id) });
@@ -709,7 +712,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
                   // take precedence over configurable shortcuts.
                   const lookupKey = data.length === 1 ? data : undefined;
                   if (lookupKey && !RESERVED_NAVIGATION_KEYS.has(lookupKey)) {
-                    const command = shortcutRegistry.lookup(lookupKey, 'detail');
+                    const command = shortcutRegistry.lookup(lookupKey, 'detail', selectedItem.stage);
                     if (command) {
                       // Return shortcut result - caller will set editor text after modal closes
                       done({ type: 'shortcut' as const, command: command.replace('<id>', selectedItem.id) });

@@ -2,22 +2,26 @@
   {
     "key": "c",
     "command": "/intake\n<desc>\nPriority: medium",
-    "view": "both"
+    "view": "both",
+    "stages": ["idea"]
   },
   {
     "key": "i",
     "command": "/skill:implement <id>",
-    "view": "both"
+    "view": "both",
+    "stages": ["intake_complete"]
   },
   {
     "key": "p",
     "command": "/plan <id>",
-    "view": "both"
+    "view": "both",
+    "stages": ["intake_complete"]
   },
   {
     "key": "n",
     "command": "/intake <id>",
-    "view": "both"
+    "view": "both",
+    "stages": ["idea"]
   },
   {
     "key": "a",

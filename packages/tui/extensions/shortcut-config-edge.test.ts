@@ -111,4 +111,84 @@ describe('loadShortcutConfig edge cases (fs.mocked)', () => {
     const registry = loadShortcutConfig();
     expect(registry.getEntries()).toHaveLength(0);
   });
+
+  describe('stages field validation', () => {
+    it('accepts entries with valid stages array', () => {
+      readFileSyncBehavior = {
+        type: 'invalid',
+        content: JSON.stringify([
+          { key: 'n', command: 'intake <id>', view: 'both', stages: ['idea'] },
+        ]),
+      };
+
+      const registry = loadShortcutConfig();
+      expect(registry.getEntries()).toHaveLength(1);
+      expect(registry.getEntries()[0].stages).toEqual(['idea']);
+    });
+
+    it('accepts entries with multiple stages', () => {
+      readFileSyncBehavior = {
+        type: 'invalid',
+        content: JSON.stringify([
+          { key: 'x', command: 'custom <id>', view: 'both', stages: ['idea', 'in_progress'] },
+        ]),
+      };
+
+      const registry = loadShortcutConfig();
+      expect(registry.getEntries()).toHaveLength(1);
+      expect(registry.getEntries()[0].stages).toEqual(['idea', 'in_progress']);
+    });
+
+    it('skips entry when stages is not an array', () => {
+      const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      readFileSyncBehavior = {
+        type: 'invalid',
+        content: JSON.stringify([
+          { key: 'n', command: 'intake <id>', view: 'both', stages: 'idea' },
+        ]),
+      };
+
+      const registry = loadShortcutConfig();
+      expect(mockWarn).toHaveBeenCalledWith(
+        expect.stringContaining('"stages" must be an array of strings'),
+      );
+      expect(registry.getEntries()).toHaveLength(0);
+      mockWarn.mockRestore();
+    });
+
+    it('accepts entry with empty stages array (treated as unconditional)', () => {
+      readFileSyncBehavior = {
+        type: 'invalid',
+        content: JSON.stringify([
+          { key: 'x', command: 'test <id>', view: 'both', stages: [] },
+        ]),
+      };
+
+      const registry = loadShortcutConfig();
+      expect(registry.getEntries()).toHaveLength(1);
+      expect(registry.getEntries()[0].stages).toBeUndefined();
+    });
+
+    it('still loads valid entries alongside entries with invalid stages', () => {
+      const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      readFileSyncBehavior = {
+        type: 'invalid',
+        content: JSON.stringify([
+          { key: 'i', command: 'implement <id>', view: 'both', stages: ['intake_complete'] },
+          { key: 'x', command: 'bad <id>', view: 'both', stages: 'not-an-array' },
+          { key: 'p', command: 'plan <id>', view: 'both' },
+        ]),
+      };
+
+      const registry = loadShortcutConfig();
+      expect(mockWarn).toHaveBeenCalledWith(
+        expect.stringContaining('"stages" must be an array of strings'),
+      );
+      expect(registry.getEntries()).toHaveLength(2);
+      expect(registry.lookup('i', 'list')).toBe('implement <id>');
+      expect(registry.lookup('p', 'list')).toBe('plan <id>');
+      expect(registry.lookup('x', 'list')).toBeUndefined();
+      mockWarn.mockRestore();
+    });
+  });
 });

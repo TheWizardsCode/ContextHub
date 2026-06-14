@@ -56,7 +56,8 @@ Each shortcut entry is a JSON object:
 {
   "key": "i",
   "command": "implement <id>",
-  "view": "both"
+  "view": "both",
+  "stages": ["intake_complete"]
 }
 ```
 
@@ -65,15 +66,46 @@ Each shortcut entry is a JSON object:
 | `key` | string | Single character key to trigger the shortcut (e.g., `"i"`, `"p"`) |
 | `command` | string | Template string to insert into the Pi editor. The placeholder `<id>` is replaced with the selected work item's ID. |
 | `view` | string | Which view the shortcut applies to: `"list"` (browse selection only), `"detail"` (detail view only), or `"both"` (both views). |
+| `stages` | string[] _(optional)_ | Allow-list of work item stages for which the shortcut is available. When omitted or empty, the shortcut is unconditionally available (backward compatible). The stage comparison is case-sensitive, exact match. |
+
+### Stage-Based Visibility
+
+Shortcuts can be made conditional on the selected work item's stage using the optional `stages` field:
+
+- **With `stages` set**: The shortcut only appears and dispatches when the selected item's stage matches one of the listed values.
+- **Without `stages`** (or `stages: []`): The shortcut is always available, preserving backward compatibility.
+
+This allows contextual shortcuts — for example, showing an **intake** shortcut only for items in the `idea` stage, and an **implement** shortcut only for items in the `intake_complete` stage.
+
+#### Visibility Rules
+
+| `stages` value | Behavior |
+|----------------|----------|
+| `undefined` (omitted) | Shortcut always available |
+| `[]` (empty array) | Shortcut always available |
+| `["idea"]` | Shortcut only available when item stage is `"idea"` |
+| `["idea", "in_progress"]` | Shortcut available when item stage is `"idea"` or `"in_progress"` |
 
 ### Current Shortcuts
 
-| Key | Command | View |
-|-----|---------|------|
-| `i` | `implement <id>` | both |
-| `p` | `plan <id>` | both |
-| `n` | `intake <id>` | both |
-| `a` | `audit <id>` | both |
+| Key | Command | View | Stages |
+|-----|---------|------|--------|
+| `c` | `create <desc>` | both | `["idea"]` |
+| `i` | `implement <id>` | both | `["intake_complete"]` |
+| `p` | `plan <id>` | both | `["intake_complete"]` |
+| `n` | `intake <id>` | both | `["idea"]` |
+| `a` | `audit <id>` | both | (always available) |
+
+### Help Text Filtering
+
+The help text shown in the browse list dynamically filters shortcuts based on the currently selected item's stage. As you navigate between items with different stages, the help text updates to show only applicable shortcuts.
+
+For example:
+- Selecting an item in the `idea` stage shows `c:create`, `n:intake`, and `a:audit`.
+- Selecting an item in `intake_complete` shows `i:implement`, `p:plan`, and `a:audit`.
+- Selecting an item in `in_progress` shows only `a:audit`.
+
+### How It Works
 
 ### How It Works
 
