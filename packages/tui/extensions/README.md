@@ -2,14 +2,48 @@
 
 Extension modules for the Worklog TUI and Pi agent integration.
 
+## Settings
+
+The extension has two user-configurable settings:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `browseItemCount` | `5` | Number of work items shown in the browse list (1–50) |
+| `showIcons` | `true` | Whether to show emoji icons in the browse list and preview widget |
+
+Settings are persisted to `settings.json` in the extension directory (alongside `shortcuts.json`).
+
+### `/wl settings` Command
+
+Open the settings overlay by typing `/wl settings` in the Pi editor. This opens an interactive overlay where you can change settings using the arrow keys and Enter.
+
+- **Number of items**: Cycle through presets (3, 5, 10, 15, 20). Changes take effect immediately — the next `/wl` browse will use the new count.
+- **Show icons**: Toggle between on/off. Changes are applied immediately — the preview widget and browse list reflect the change.
+
+Press `Escape` to close the settings overlay.
+
+### settings.json
+
+The settings file is a simple JSON object:
+
+```json
+{
+  "browseItemCount": 10,
+  "showIcons": false
+}
+```
+
+If the file is missing or malformed, defaults are used (5 items, icons enabled).
+
 ## `/wl` Slash Command — Stage Filtering
 
-The `/wl` slash command browses up to 5 work items recommended by the `wl next` algorithm. It supports an optional stage filter argument.
+The `/wl` slash command browses work items recommended by the `wl next` algorithm. The number of items shown is controlled by the `browseItemCount` setting (default: 5). It also supports an optional stage filter argument.
 
 ### Usage
 
 ```
-/wl              # Show top 5 unfiltered work items (default)
+/wl              # Show unfiltered work items (count from settings)
+/wl settings     # Open the settings overlay
 /wl intake       # Show items in intake_complete stage
 /wl plan         # Show items in plan_complete stage
 /wl progress     # Show items in in_progress stage
@@ -41,7 +75,8 @@ The `/wl` command registers `getArgumentCompletions`, so Pi's editor shows autoc
 
 - `/wl progress` — filters to items in `in_progress` stage
 - `/wl in_review` — filters to items in `in_review` stage
-- `/wl` — shows the default unfiltered top 5 items (backward compatible)
+- `/wl settings` — opens the settings overlay
+- `/wl` — shows the default unfiltered items (count from settings)
 - `/wl   ` — whitespace-only arguments are treated as "no arguments" and show unfiltered items
 
 ## Shortcuts

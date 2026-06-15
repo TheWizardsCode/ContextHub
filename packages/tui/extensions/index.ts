@@ -1,12 +1,44 @@
 import { execFile } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import { promisify } from 'node:util';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { priorityIcon, statusIcon, stageIcon, auditIcon, iconsEnabled } from '../../../src/icons.js';
 import { applyStageColour, type PiTheme } from './worklog-helpers.js';
 import { truncateToTerminalWidth, wrapToTerminalWidth } from './terminal-utils.js';
 import { type ShortcutRegistry, loadShortcutConfig } from './shortcut-config.js';
+import { loadSettings, type Settings, DEFAULT_SETTINGS } from './settings-config.js';
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 
 const execFileAsync = promisify(execFile);
+
+// ── Settings state ─────────────────────────────────────────────────────
+
+/**
+ * Path to the settings.json file in the extension directory.
+ */
+const SETTINGS_FILE_PATH = join(dirname(fileURLToPath(import.meta.url)), 'settings.json');
+
+/**
+ * Current settings for the extension. Initialised from settings.json on
+ * module load and updated by the /wl settings command.
+ */
+let currentSettings: Settings = loadSettings();
+
+/**
+ * Update the current settings, persist to settings.json, and return the
+ * new settings object.
+ */
+function updateSettings(partial: Partial<Settings>): Settings {
+  currentSettings = { ...currentSettings, ...partial };
+  // Persist to settings.json
+  try {
+    writeFileSync(SETTINGS_FILE_PATH, JSON.stringify(currentSettings, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('[worklog-browse] Failed to persist settings:', err);
+  }
+  return currentSettings;
+}
 
 /**
  * Map of shorthand stage aliases to canonical stage names.
@@ -116,15 +148,19 @@ export function formatBrowseOption(
   item: WorklogBrowseItem,
   maxWidth?: number,
   theme?: PiTheme,
+  settings?: Settings,
 ): string {
   const titleText = item.title;
 
+  // Determine icon preference: explicit settings override env var
+  const showIcons = settings?.showIcons ?? iconsEnabled();
+  const noIcons = !showIcons;
+
   // Build icon prefix: status + stage + audit
-  const useIcons = iconsEnabled();
   const normalizedStatus = (item.status || '').replace(/_/g, '-');
-  const sIcon = statusIcon(normalizedStatus, { noIcons: !useIcons });
-  const stIcon = stageIcon(item.stage, { noIcons: !useIcons });
-  const aIcon = auditIcon(item.auditResult, { noIcons: !useIcons });
+  const sIcon = statusIcon(normalizedStatus, { noIcons });
+  const stIcon = stageIcon(item.stage, { noIcons });
+  const aIcon = auditIcon(item.auditResult, { noIcons });
   const iconPrefix = [sIcon, stIcon, aIcon].filter(Boolean).join(' ');
   const prefixStr = iconPrefix.length > 0 ? `${iconPrefix} ` : '';
 
@@ -242,25 +278,34 @@ async function runWl(args: string[], includeJson = true): Promise<string> {
   throw new Error(`Unable to execute wl/worklog CLI: ${String(lastError)}`);
 }
 
-export function createDefaultListWorkItems(run: RunWlFn = runWl): () => Promise<WorklogBrowseItem[]> {
+export function createDefaultListWorkItems(
+  run: RunWlFn = runWl,
+  count?: number,
+): () => Promise<WorklogBrowseItem[]> {
+  const itemCount = count ?? currentSettings.browseItemCount;
   return async (): Promise<WorklogBrowseItem[]> => {
-    const output = await run(['next', '-n', '5']);
+    const output = await run(['next', '-n', String(itemCount)]);
     const payload = extractJsonObject(output);
-    return normalizeListPayload(payload).slice(0, 5);
+    return normalizeListPayload(payload).slice(0, itemCount);
   };
 }
 
 /**
- * Create a listWorkItemsWithStage function that runs `wl next -n 5 --stage <stage>`.
+ * Create a listWorkItemsWithStage function that runs `wl next -n <count> --stage <stage>`.
  *
  * @param run - The run function to execute the CLI command (defaults to `runWl`)
+ * @param count - Optional item count (defaults to current settings)
  * @returns A function that takes a stage and returns filtered work items
  */
-export function createListWorkItemsWithStage(run: RunWlFn = runWl): (stage: string) => Promise<WorklogBrowseItem[]> {
+export function createListWorkItemsWithStage(
+  run: RunWlFn = runWl,
+  count?: number,
+): (stage: string) => Promise<WorklogBrowseItem[]> {
+  const itemCount = count ?? currentSettings.browseItemCount;
   return async (stage: string): Promise<WorklogBrowseItem[]> => {
-    const output = await run(['next', '-n', '5', '--stage', stage]);
+    const output = await run(['next', '-n', String(itemCount), '--stage', stage]);
     const payload = extractJsonObject(output);
-    return normalizeListPayload(payload).slice(0, 5);
+    return normalizeListPayload(payload).slice(0, itemCount);
   };
 }
 
@@ -292,12 +337,15 @@ async function defaultListWorkItemsWithStage(stage: string, run: RunWlFn = runWl
  */
 export function buildSelectionWidget(
   item: WorklogBrowseItem,
+  settings?: Settings,
 ): (tui: any, theme: PiTheme) => {
   render: (width: number) => string[];
   invalidate: () => void;
 } {
   return (_tui, theme) => {
-    const useIcons = iconsEnabled();
+    // Determine icon preference: explicit settings override env var
+    const showIcons = settings?.showIcons ?? iconsEnabled();
+    const useIcons = showIcons;
 
     // Normalize status: worklog uses underscore (in_progress) but icons.ts uses hyphen (in-progress)
     const normalizedStatus = (item.status || '').replace(/_/g, '-');
@@ -427,8 +475,8 @@ export async function defaultChooseWorkItem(
       throw new Error('Selection UI is unavailable in this environment.');
     }
 
-    const options = items.map(item => formatBrowseOption(item));
-    const selected = await ctx.ui.select('Browse Worklog next items (top 5)', options);
+    const options = items.map(item => formatBrowseOption(item, undefined, undefined, currentSettings));
+    const selected = await ctx.ui.select(`Browse Worklog next items (top ${currentSettings.browseItemCount})`, options);
     if (!selected) return undefined;
 
     const selectedIndex = options.indexOf(selected);
@@ -486,7 +534,8 @@ export async function defaultChooseWorkItem(
     return {
       focused: false,
       render: (width: number) => {
-        const title = truncateToWidth(theme.fg('accent', theme.bold('Browse Worklog next items (top 5)')), width);
+        const browseCount = currentSettings.browseItemCount;
+        const title = truncateToWidth(theme.fg('accent', theme.bold(`Browse Worklog next items (top ${browseCount})`)), width);
 
         // Build help text: if a chord leader is pending, show chord
         // completions; otherwise show normal shortcut hints.
@@ -560,7 +609,7 @@ export async function defaultChooseWorkItem(
         const options = items.map((item, index) => {
           const prefix = index === selectedIndex ? theme.fg('accent', '› ') : '  ';
           const contentWidth = Math.max(0, width - 2);
-          const optionLine = `${prefix}${formatBrowseOption(item, contentWidth, theme)}`;
+          const optionLine = `${prefix}${formatBrowseOption(item, contentWidth, theme, currentSettings)}`;
           return truncateToWidth(optionLine, width);
         });
 
@@ -767,6 +816,150 @@ export function createScrollableWidget(
   };
 }
 
+// ── Settings overlay ──────────────────────────────────────────────────
+
+/**
+ * Lazy-loaded Pi TUI components for the settings overlay.
+ * These are only available in the Pi runtime, not in tests.
+ */
+let piContainerCtor: any = null;
+let piSettingsListCtor: any = null;
+let piTextCtor: any = null;
+let piGetSettingsListTheme: any = null;
+
+async function ensurePiComponents(): Promise<boolean> {
+  if (piContainerCtor && piSettingsListCtor && piTextCtor && piGetSettingsListTheme) {
+    return true;
+  }
+  try {
+    const tui = await import('@earendil-works/pi-tui');
+    const agent = await import('@earendil-works/pi-coding-agent');
+    piContainerCtor = tui.Container;
+    piSettingsListCtor = tui.SettingsList;
+    piTextCtor = tui.Text;
+    piGetSettingsListTheme = agent.getSettingsListTheme;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Open the settings overlay for the Worklog Pi extension.
+ *
+ * Uses Pi's SettingsList component with browseItemCount and showIcons
+ * settings. Changes are applied immediately via onChange callback and
+ * persisted to settings.json.
+ */
+function openSettingsOverlay(ctx: BrowseContext): void {
+  // Build items array from current settings
+  const items = [
+    {
+      id: 'browseItemCount',
+      label: 'Number of items',
+      currentValue: String(currentSettings.browseItemCount),
+      values: ['3', '5', '10', '15', '20'],
+    },
+    {
+      id: 'showIcons',
+      label: 'Show icons',
+      currentValue: currentSettings.showIcons ? 'on' : 'off',
+      values: ['on', 'off'],
+    },
+  ];
+
+  // Open the settings overlay
+  ctx.ui.custom<void>(
+    (tui, theme, _kb, done) => {
+      // Kick off async import but return a placeholder synchronously
+      let ready = false;
+      let component: any = null;
+
+      ensurePiComponents().then((ok) => {
+        if (!ok) {
+          ctx.ui.notify('Settings overlay unavailable: Pi TUI components not found.', 'error');
+          done(undefined);
+          return;
+        }
+
+        const Container = piContainerCtor;
+        const SettingsList = piSettingsListCtor;
+        const Text = piTextCtor;
+        const getSettingsListTheme = piGetSettingsListTheme;
+
+        const container = new Container();
+        container.addChild(
+          new Text(theme.fg('accent', theme.bold('Worklog Settings')), 1, 1),
+        );
+
+        const settingsList = new SettingsList(
+          items,
+          Math.min(items.length + 2, 15),
+          getSettingsListTheme(),
+          (id: string, newValue: string) => {
+            // Apply the setting immediately
+            if (id === 'browseItemCount') {
+              const count = parseInt(newValue, 10);
+              if (!isNaN(count) && count >= 1 && count <= 50) {
+                updateSettings({ browseItemCount: count });
+                ctx.ui.notify(`Browse item count set to ${count}`, 'info');
+              }
+            } else if (id === 'showIcons') {
+              const show = newValue === 'on';
+              updateSettings({ showIcons: show });
+              ctx.ui.notify(`Icons ${show ? 'enabled' : 'disabled'}`, 'info');
+            }
+          },
+          () => {
+            // Close dialog
+            done(undefined);
+          },
+          { enableSearch: false },
+        );
+
+        container.addChild(settingsList);
+
+        component = {
+          render: (width: number) => container.render(width),
+          invalidate: () => container.invalidate(),
+          handleInput: (data: string) => {
+            settingsList.handleInput?.(data);
+            tui.requestRender();
+          },
+        };
+        ready = true;
+        tui.requestRender();
+      }).catch((err) => {
+        console.error('[worklog-browse] Failed to load Pi components:', err);
+        ctx.ui.notify('Failed to open settings overlay.', 'error');
+        done(undefined);
+      });
+
+      return {
+        render: (width: number) => {
+          if (ready && component) {
+            return component.render(width);
+          }
+          return [theme.fg('dim', 'Loading settings...')];
+        },
+        invalidate: () => {
+          if (component) component.invalidate();
+        },
+        handleInput: (_data: string) => {
+          if (ready && component?.handleInput) {
+            component.handleInput(_data);
+            tui.requestRender();
+          }
+        },
+      };
+    },
+  ).catch(() => {
+    // Graceful degradation if overlay fails
+    ctx.ui.notify('Settings overlay requires TUI mode.', 'warning');
+  });
+}
+
+
 export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {}) {
   const runWlImpl = deps.runWl ?? runWl;
   const listWorkItems = deps.listWorkItems ?? (() => defaultListWorkItems(runWlImpl));
@@ -781,9 +974,12 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
   return function registerWorklogBrowseExtension(pi: PiLike): void {
     const runBrowseFlow = async (ctx: BrowseContext, stage?: string): Promise<void> => {
       try {
+        const itemCount = currentSettings.browseItemCount;
+        // The default list functions already slice based on settings,
+        // but we pass the count explicitly for consistency.
         const items = stage
-          ? (await listWorkItemsWithStage(stage)).slice(0, 5)
-          : (await listWorkItems()).slice(0, 5);
+          ? (await listWorkItemsWithStage(stage)).slice(0, itemCount)
+          : (await listWorkItems()).slice(0, itemCount);
         if (items.length === 0) {
           ctx.ui.notify('No work items available to browse.', 'info');
           ctx.ui.setWidget?.('worklog-browse-selection', undefined);
@@ -796,7 +992,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         ) => {
           if (item.id === lastAnnouncedId) return;
           lastAnnouncedId = item.id;
-          ctx.ui.setWidget?.('worklog-browse-selection', buildSelectionWidget(item), { placement: 'belowEditor' });
+          ctx.ui.setWidget?.('worklog-browse-selection', buildSelectionWidget(item, currentSettings), { placement: 'belowEditor' });
         };
 
         const result = await chooseWorkItem(items, ctx, announceSelection);
@@ -938,11 +1134,16 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     };
 
     pi.registerCommand('wl', {
-      description: 'Browse next 5 work items, optionally filtered by stage (e.g. /wl progress, /wl in_progress)',
+      description: `Browse next ${currentSettings.browseItemCount} work items, optionally filtered by stage and settings`,
       handler: async (_args: string, ctx: BrowseContext) => {
         const trimmed = _args?.trim() ?? '';
         if (trimmed.length === 0) {
           await runBrowseFlow(ctx);
+          return;
+        }
+        if (trimmed === 'settings') {
+          // Open settings overlay
+          await openSettingsOverlay(ctx);
           return;
         }
         const canonical = STAGE_MAP[trimmed];
@@ -963,10 +1164,25 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     });
 
     pi.registerShortcut('ctrl+shift+b', {
-      description: 'Browse next 5 recommended work items and preview selected title',
+      description: `Browse next ${currentSettings.browseItemCount} recommended work items and preview selected title`,
       handler: async (ctx: BrowseContext) => {
         await runBrowseFlow(ctx);
       },
+    });
+
+    // ── Session persistence ────────────────────────────────────────────
+    // Reload settings from file on session start and navigation so that any
+    // external changes to settings.json are picked up.
+    const reloadSettings = () => {
+      currentSettings = loadSettings();
+    };
+
+    pi.on('session_start', async (_event) => {
+      reloadSettings();
+    });
+
+    pi.on('session_tree', async (_event) => {
+      reloadSettings();
     });
 
     // When launched via `wl piman` (detected by WL_PIMAN env var), auto-trigger
