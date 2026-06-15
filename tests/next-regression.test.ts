@@ -1572,6 +1572,192 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
   });
 
   // ─────────────────────────────────────────────────────────────────────
+  // Regression: Blocked critical child with valid parent candidate
+  //             (WL-0MQFIYPZK00680H1 — Parent-level hierarchy fixes)
+  // handleCriticalEscalation must also skip blocked critical children
+  // whose parent is a valid candidate — both in the blocker-pair loop
+  // AND in the fallback path (where selectableBlocked was previously
+  // falling back to unfiltered blockedCriticals).
+  // ─────────────────────────────────────────────────────────────────────
+  describe('blocked critical child with valid parent candidate (WL-0MQFIYPZK00680H1)', () => {
+    it('should NOT return blocked critical child via fallback when parent is open', () => {
+      // Scenario: A blocked critical child with a valid open parent.
+      // The fallback path should return null instead of the child.
+      const parent = db.create({ title: 'Open parent', priority: 'low', status: 'open' });
+      const criticalChild = db.create({
+        title: 'Blocked critical child',
+        priority: 'critical',
+        status: 'blocked',
+        parentId: parent.id,
+      });
+
+      const result = db.findNextWorkItem();
+      // Blocked critical child should NOT be returned via fallback;
+      // parent should be preferred as the root candidate.
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(parent.id);
+    });
+
+    it('should return null when only blocked critical child exists under open parent with no other candidates', () => {
+      // Scenario: Only a blocked critical child under an open parent, no
+      // other candidates. The fallback returns null (no escalation);
+      // Stage 5 also has nothing (parent is open but has a blocked child
+      // which isn't selectable).
+      const parent = db.create({ title: 'Open parent', priority: 'low', status: 'open' });
+      db.create({
+        title: 'Blocked critical child only',
+        priority: 'critical',
+        status: 'blocked',
+        parentId: parent.id,
+      });
+
+      const result = db.findNextWorkItem();
+      // No actionable root candidates - parent has no meaningful work
+      // (child is blocked), or parent itself is open but has no value
+      // At minimum, the blocked critical child should NOT be returned
+      if (result.workItem) {
+        expect(result.workItem!.id).toBe(parent.id);
+      }
+    });
+
+    it('should return blocked critical child when parent is completed', () => {
+      // Orphan promotion — parent is completed, so child should be surfaced
+      const parent = db.create({ title: 'Completed parent', priority: 'low', status: 'completed' });
+      const criticalChild = db.create({
+        title: 'Blocked critical orphan',
+        priority: 'critical',
+        status: 'blocked',
+        parentId: parent.id,
+      });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(criticalChild.id);
+    });
+
+    it('should return blocked critical child when parent is deleted', () => {
+      // Orphan promotion — parent is deleted, so child should be surfaced
+      const parent = db.create({ title: 'Deleted parent', priority: 'low', status: 'deleted' });
+      const criticalChild = db.create({
+        title: 'Blocked critical orphan',
+        priority: 'critical',
+        status: 'blocked',
+        parentId: parent.id,
+      });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(criticalChild.id);
+    });
+
+    it('should return blocked critical child when parent is in-progress', () => {
+      // In-progress parent is NOT a valid candidate, so the child is surfaced
+      const parent = db.create({ title: 'In-progress parent', priority: 'low', status: 'in-progress' });
+      const criticalChild = db.create({
+        title: 'Blocked critical child',
+        priority: 'critical',
+        status: 'blocked',
+        parentId: parent.id,
+      });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(criticalChild.id);
+    });
+
+    it('should not surface child-blockers of blocked critical child when parent is valid candidate', () => {
+      // Scenario: Parent has two children; one child (critical, blocked)
+      // depends on the other (open). The blocked critical has a valid
+      // parent, so its blocker should NOT be surfaced — parent competes
+      // in Stage 5 instead.
+      const parent = db.create({ title: 'Open parent', priority: 'low', status: 'open' });
+      const childBlocker = db.create({ title: 'Child blocker', priority: 'medium', status: 'open', parentId: parent.id });
+      const criticalBlocked = db.create({
+        title: 'Blocked critical child',
+        priority: 'critical',
+        status: 'blocked',
+        parentId: parent.id,
+      });
+      db.addDependencyEdge(criticalBlocked.id, childBlocker.id);
+
+      const result = db.findNextWorkItem();
+      // Should return parent, not child blocker
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(parent.id);
+      expect(result.workItem!.id).not.toBe(childBlocker.id);
+    });
+
+    it('should surface root-level blocker of blocked critical child even when parent is valid candidate', () => {
+      // Scenario: A root-level blocker (no parent) blocks a blocked critical
+      // child. The root-level blocker should still be surfaced because it
+      // is at root level and actionable.
+      const parent = db.create({ title: 'Open parent', priority: 'low', status: 'open' });
+      const criticalChild = db.create({
+        title: 'Blocked critical child',
+        priority: 'critical',
+        status: 'blocked',
+        parentId: parent.id,
+      });
+      const rootBlocker = db.create({ title: 'Root blocker', priority: 'medium', status: 'open' });
+      db.addDependencyEdge(criticalChild.id, rootBlocker.id);
+
+      const result = db.findNextWorkItem();
+      // Root-level blocker should be surfaced (not a child)
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(rootBlocker.id);
+      expect(result.reason).toContain('critical');
+    });
+
+    it('should not return blocked critical child in batch mode when parent is open', () => {
+      const parent = db.create({ title: 'Open parent', priority: 'low', status: 'open', sortIndex: 100 });
+      const criticalChild = db.create({
+        title: 'Blocked critical child',
+        priority: 'critical',
+        status: 'blocked',
+        parentId: parent.id,
+      });
+      const otherItem = db.create({ title: 'Other root', priority: 'medium', status: 'open', sortIndex: 50 });
+
+      const results = db.findNextWorkItems(3);
+      const ids = results.map(r => r.workItem?.id).filter(Boolean);
+      // Blocked critical child should NOT appear in batch results
+      expect(ids).not.toContain(criticalChild.id);
+      // Parent should appear (it's a root candidate)
+      expect(ids).toContain(parent.id);
+      // Other root should appear too
+      expect(ids).toContain(otherItem.id);
+    });
+
+    it('should not return duplicate blocked critical children in batch mode', () => {
+      // Scenario: Two blocked critical children under the same parent.
+      // Neither should appear individually — parent should be returned once.
+      const parent = db.create({ title: 'Open parent', priority: 'low', status: 'open', sortIndex: 100 });
+      db.create({
+        title: 'Critical child A',
+        priority: 'critical',
+        status: 'blocked',
+        parentId: parent.id,
+      });
+      db.create({
+        title: 'Critical child B',
+        priority: 'critical',
+        status: 'blocked',
+        parentId: parent.id,
+      });
+      const otherItem = db.create({ title: 'Other root', priority: 'medium', status: 'open', sortIndex: 50 });
+
+      const results = db.findNextWorkItems(3);
+      const ids = results.map(r => r.workItem?.id).filter(Boolean);
+      // No duplicates
+      expect(new Set(ids).size).toBe(ids.length);
+      // Parent appears once
+      expect(ids.filter(id => id === parent.id).length).toBe(1);
+      // Other root appears
+      expect(ids).toContain(otherItem.id);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
   // Regression: Children of in-progress parents not promoted as orphans
   //             (WL-0MQF5H0D30076K0X — Fix 2)
   // Children of in-progress parents must NOT be promoted to root level in

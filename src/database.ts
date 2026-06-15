@@ -1240,6 +1240,24 @@ export class WorklogDatabase {
       const blockingPairs: { blocking: WorkItem; critical: WorkItem }[] = [];
 
       for (const critical of blockedCriticals) {
+        // If the blocked critical has a parent that is a valid (open, not
+        // deleted/completed/in-progress) candidate, skip surfacing its
+        // blockers — the parent will compete in Stage 5 (open item selection)
+        // instead. This ensures that children are not surfaced individually
+        // when their parent is a valid candidate (WL-0MQFIYPZK00680H1).
+        if (critical.parentId) {
+          const critParent = allItems.find(p => p.id === critical.parentId);
+          if (
+            critParent &&
+            critParent.status !== 'deleted' &&
+            critParent.status !== 'completed' &&
+            critParent.status !== 'in-progress'
+          ) {
+            this.debug(`${debugPrefix}   skip blocker pairs for ${critical.id} (valid parent ${critical.parentId})`);
+            continue;
+          }
+        }
+
         // Child blockers (non-closed children implicitly block a parent)
         const blockingChildren = this.getNonClosedChildren(critical.id);
         for (const child of blockingChildren) {
@@ -1294,7 +1312,11 @@ export class WorklogDatabase {
         }
         return true;
       });
-      const selectedBlockedCritical = this.selectBySortIndex(selectableBlocked.length > 0 ? selectableBlocked : blockedCriticals);
+      if (selectableBlocked.length === 0) {
+        this.debug(`${debugPrefix} all blocked criticals filtered out by parent-candidate filter — returning null`);
+        return null;
+      }
+      const selectedBlockedCritical = this.selectBySortIndex(selectableBlocked);
       this.debug(`${debugPrefix} selected blocked critical (fallback)=${selectedBlockedCritical?.id || ''}`);
       return {
         workItem: selectedBlockedCritical,
