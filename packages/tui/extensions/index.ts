@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { priorityIcon, statusIcon, stageIcon, auditIcon, iconsEnabled } from '../../../src/icons.js';
-import { applyStageColour, type WorkItem, type PiTheme } from './worklog-helpers.js';
+import { applyStageColour, type PiTheme } from './worklog-helpers.js';
 import { truncateToTerminalWidth, wrapToTerminalWidth } from './terminal-utils.js';
 import { type ShortcutRegistry, loadShortcutConfig } from './shortcut-config.js';
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
