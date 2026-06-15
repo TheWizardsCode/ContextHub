@@ -926,9 +926,9 @@ describe('WorklogDatabase', () => {
       const grandchild = db.create({ title: 'Grandchild', priority: 'high', status: 'open', parentId: child.id });
       
       const result = db.findNextWorkItem();
-      // Should select the direct child since parent is in-progress
+      // Child is orphan-promoted (parent is in-progress, not in candidate pool)
+      // and selected as the best root candidate
       expect(result.workItem?.id).toBe(child.id);
-      expect(result.reason).toContain('child');
     });
 
     it('should skip completed and deleted items', () => {
@@ -956,7 +956,7 @@ describe('WorklogDatabase', () => {
 
       const result = db.findNextWorkItem();
       expect(result.workItem).toBeNull();
-      expect(result.reason).toContain('No actionable work items');
+      expect(result.reason).toContain('No work items available');
     });
 
     it('should find open children of in-progress parent without returning the parent', () => {
@@ -1280,7 +1280,7 @@ describe('WorklogDatabase', () => {
       //   A: own=low, inherited=high (from grandparent) → effective=high
       //   C: own=medium, inherited=high (from grandparent) → effective=high
       // Both tie on effective priority, so createdAt picks A (older).
-      // Then we descend into A's children and select B.
+      // Previously we descended into children; now we return the root candidate.
       const delay = () => new Promise(resolve => setTimeout(resolve, 10));
       const grandparent = db.create({ title: 'Grandparent', priority: 'high', status: 'open' });
       const itemA = db.create({ title: 'Item A', priority: 'low', status: 'open', parentId: grandparent.id });
@@ -1290,12 +1290,13 @@ describe('WorklogDatabase', () => {
       db.create({ title: 'Item C', priority: 'medium', status: 'open', parentId: grandparent.id });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem?.id).toBe(itemB.id);
+      // Grandparent is the only root candidate and is returned (no descent)
+      expect(result.workItem?.id).toBe(grandparent.id);
     });
 
     it('Phase 4: child wins when parent priority >= sibling (Example 2)', async () => {
       // A (medium, open), B (high, open, child of A), C (medium, open, sibling of A)
-      // Expected: B wins because A (medium) >= C (medium)
+      // Grandparent is the only root candidate and is returned (no descent)
       const delay = () => new Promise(resolve => setTimeout(resolve, 10));
       const grandparent = db.create({ title: 'Grandparent', priority: 'high', status: 'open' });
       const itemA = db.create({ title: 'Item A', priority: 'medium', status: 'open', parentId: grandparent.id });
@@ -1305,12 +1306,12 @@ describe('WorklogDatabase', () => {
       db.create({ title: 'Item C', priority: 'medium', status: 'open', parentId: grandparent.id });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem?.id).toBe(itemB.id);
+      expect(result.workItem?.id).toBe(grandparent.id);
     });
 
     it('Phase 4: low-priority child wins when parent priority >= sibling (Example 3)', async () => {
       // A (medium, open), B (low, open, child of A), C (medium, open, sibling of A)
-      // Expected: B wins because A (medium) >= C (medium), and B is A's child
+      // Grandparent is the only root candidate and is returned (no descent)
       const delay = () => new Promise(resolve => setTimeout(resolve, 10));
       const grandparent = db.create({ title: 'Grandparent', priority: 'high', status: 'open' });
       const itemA = db.create({ title: 'Item A', priority: 'medium', status: 'open', parentId: grandparent.id });
@@ -1320,7 +1321,7 @@ describe('WorklogDatabase', () => {
       db.create({ title: 'Item C', priority: 'medium', status: 'open', parentId: grandparent.id });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem?.id).toBe(itemB.id);
+      expect(result.workItem?.id).toBe(grandparent.id);
     });
 
     it('Phase 4: top-level items without children are selected normally', () => {
@@ -1333,7 +1334,7 @@ describe('WorklogDatabase', () => {
       expect(result.workItem?.id).toBe(highItem.id);
     });
 
-    it('Phase 4: top-level item with children descends to best child', async () => {
+    it('Phase 4: top-level item with children returns the parent (no descent)', async () => {
       const parent = db.create({ title: 'Parent', priority: 'high', status: 'open' });
       const bestChild = db.create({ title: 'Best child', priority: 'high', status: 'open', parentId: parent.id });
       // Small delay to ensure bestChild has an earlier createdAt than otherChild
@@ -1342,8 +1343,8 @@ describe('WorklogDatabase', () => {
       db.create({ title: 'Other child', priority: 'low', status: 'open', parentId: parent.id });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem?.id).toBe(bestChild.id);
-      expect(result.reason).toContain('child');
+      // Parent is the only root candidate and is returned (no descent into children)
+      expect(result.workItem?.id).toBe(parent.id);
     });
 
     // Dependency-blocker filter tests (WL-0MM04HDI618Y7DT0)
@@ -1696,14 +1697,15 @@ describe('WorklogDatabase', () => {
 
       it('should not promote child when parent is still open (non-completed)', () => {
         // Parent is open (not completed) -> child stays under parent in hierarchy
+        // Parent is returned directly (no descent into children)
         const parent = db.create({ title: 'Open parent', priority: 'medium', status: 'open', sortIndex: 100 });
         const child = db.create({ title: 'Child task', priority: 'medium', status: 'open', parentId: parent.id, sortIndex: 200 });
         const otherRoot = db.create({ title: 'Other root', priority: 'medium', status: 'open', sortIndex: 300 });
 
         const result = db.findNextWorkItem();
         expect(result.workItem).not.toBeNull();
-        // Parent has lower sortIndex so it gets selected, then descent finds child
-        expect(result.workItem!.id).toBe(child.id);
+        // Parent has lower sortIndex so it gets selected as root candidate
+        expect(result.workItem!.id).toBe(parent.id);
       });
 
       it('should promote orphan under deleted parent to root level', () => {
@@ -1739,14 +1741,14 @@ describe('WorklogDatabase', () => {
         expect(result.workItem!.id).toBe(criticalEpic.id);
       });
 
-      it('should descend into epic children when they exist', () => {
+      it('should return the epic itself when children exist (no descent)', () => {
         const epic = db.create({ title: 'Parent epic', priority: 'high', status: 'open', issueType: 'epic', sortIndex: 100 });
         const child = db.create({ title: 'Child task', priority: 'medium', status: 'open', parentId: epic.id, sortIndex: 200 });
 
         const result = db.findNextWorkItem();
         expect(result.workItem).not.toBeNull();
-        // Should descend into epic and return the child, not the epic itself
-        expect(result.workItem!.id).toBe(child.id);
+        // Return the epic root candidate directly (no descent into children)
+        expect(result.workItem!.id).toBe(epic.id);
       });
 
       it('should return the epic itself when all children are completed', () => {

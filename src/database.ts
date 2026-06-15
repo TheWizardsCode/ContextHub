@@ -1536,9 +1536,7 @@ export class WorklogDatabase {
    *      blocker immediately (bypasses scoring).
    *   3. Non-critical blocker surfacing: if a non-critical blocked item has priority
    *      >= the best open competitor, surface its blocker so the dependency is resolved.
-   *   4. In-progress parent descent: find in-progress items and descend into their
-   *      actionable children.
-   *   5. Open item selection: SortIndex-based ranking among remaining candidates;
+   *   4. Open item selection: SortIndex-based ranking among remaining candidates;
    *      when all sortIndex values are equal, effective priority (descending,
    *      accounting for priority inheritance from blocked dependents) then age
    *      (ascending) break ties.
@@ -1654,125 +1652,45 @@ export class WorklogDatabase {
       }
     }
 
-    // ── Stage 4: In-progress parent descent ──
-    // In-progress items are excluded from candidates (wl next doesn't recommend
-    // items already being worked on), but we still check for in-progress parents
-    // so we can descend into their actionable children.
-    const inProgressItems = this.applyFilters(
-      items.filter(item =>
-        item.status === 'in-progress' &&
-        (!excluded || !excluded.has(item.id))
-      ),
-      assignee,
-      searchTerm
-    );
-    this.debug(`${debugPrefix} in-progress parents=${inProgressItems.length}`);
+    // ── Stage 5: Open item selection ──
+    // Select among filtered candidates, returning the best root item
+    // without descending into children.
+    if (filteredItems.length === 0) {
+      return { workItem: null, reason: 'No work items available' };
+    }
+    this.debug(`${debugPrefix} open candidates=${filteredItems.length}`);
 
-    if (inProgressItems.length === 0) {
-      // ── Stage 5: Open item selection ──
-      // No in-progress parents; select among filtered candidates
-      if (filteredItems.length === 0) {
-        return { workItem: null, reason: 'No work items available' };
-      }
-      this.debug(`${debugPrefix} open candidates=${filteredItems.length}`);
+    // Identify root-level candidates: items whose parent is not in the candidate set
+    // (orphan promotion: items whose parent is closed/completed and not in the pool
+    // continue to be promoted to root level)
+    const candidateIds = new Set(filteredItems.map(item => item.id));
+    const rootCandidates = filteredItems.filter(item => !item.parentId || !candidateIds.has(item.parentId));
+    this.debug(`${debugPrefix} root candidates=${rootCandidates.length}`);
 
-      // Identify root-level candidates: items whose parent is not in the candidate set
-      const candidateIds = new Set(filteredItems.map(item => item.id));
-      const rootCandidates = filteredItems.filter(item => !item.parentId || !candidateIds.has(item.parentId));
-      this.debug(`${debugPrefix} root candidates=${rootCandidates.length}`);
-
-      if (rootCandidates.length === 0) {
-        // Fallback: all items have parents in the pool (shouldn't happen normally)
-        const selected = this.selectBySortIndex(filteredItems, effectivePriorityCache);
-        this.debug(`${debugPrefix} selected open (fallback)=${selected?.id || ''}`);
-        const effectiveInfo = selected ? this.computeEffectivePriority(selected, effectivePriorityCache) : null;
-        return {
-          workItem: selected,
-          reason: `Next open item by sort_index${selected ? ` (${effectiveInfo?.inheritedFrom ? effectiveInfo.reason : `priority ${selected.priority}`})` : ''}`
-        };
-      }
-
-      const selectedRoot = this.selectBySortIndex(rootCandidates, effectivePriorityCache);
-      this.debug(`${debugPrefix} selected root=${selectedRoot?.id || ''}`);
-
-      if (!selectedRoot) {
-        return { workItem: null, reason: 'No work items available' };
-      }
-
-      // Descend recursively into the subtree: at each level, if the selected item
-      // has open children, pick the best child and continue descending
-      let current = selectedRoot;
-      let depth = 0;
-      const maxDepth = 15; // Guard against circular references
-      while (depth < maxDepth) {
-        const children = filteredItems.filter(item =>
-          item.parentId === current.id
-        ).filter(item => !excluded?.has(item.id));
-        this.debug(`${debugPrefix} descend depth=${depth} current=${current.id} children=${children.length}`);
-
-        if (children.length === 0) break;
-
-        const bestChild = this.selectBySortIndex(children, effectivePriorityCache);
-        if (!bestChild) break;
-
-        current = bestChild;
-        depth++;
-      }
-
-      if (current.id !== selectedRoot.id) {
-        this.debug(`${debugPrefix} selected descendant=${current.id} of root=${selectedRoot.id}`);
-        const effectiveInfo = this.computeEffectivePriority(current, effectivePriorityCache);
-        return {
-          workItem: current,
-          reason: `Next child by sort_index of open item ${selectedRoot.id} (${effectiveInfo.inheritedFrom ? effectiveInfo.reason : `priority ${current.priority}`})`
-        };
-      }
-
-      const rootEffectiveInfo = this.computeEffectivePriority(selectedRoot, effectivePriorityCache);
+    if (rootCandidates.length === 0) {
+      // Fallback: all items have parents in the pool (shouldn't happen normally)
+      const selected = this.selectBySortIndex(filteredItems, effectivePriorityCache);
+      this.debug(`${debugPrefix} selected open (fallback)=${selected?.id || ''}`);
+      const effectiveInfo = selected ? this.computeEffectivePriority(selected, effectivePriorityCache) : null;
       return {
-        workItem: selectedRoot,
-        reason: `Next open item by sort_index (${rootEffectiveInfo.inheritedFrom ? rootEffectiveInfo.reason : `priority ${selectedRoot.priority}`})`
+        workItem: selected,
+        reason: `Next open item by sort_index${selected ? ` (${effectiveInfo?.inheritedFrom ? effectiveInfo.reason : `priority ${selected.priority}`})` : ''}`
       };
     }
 
-    // ── Stage 6: In-progress parent descent (with children) ──
-    // Find the best in-progress item and descend into its actionable children
-    const selectedInProgress = this.selectBySortIndex(inProgressItems, effectivePriorityCache);
-    this.debug(`${debugPrefix} selected in-progress=${selectedInProgress?.id || ''}`);
-    if (!selectedInProgress) {
+    const selectedRoot = this.selectBySortIndex(rootCandidates, effectivePriorityCache);
+    this.debug(`${debugPrefix} selected root=${selectedRoot?.id || ''}`);
+
+    if (!selectedRoot) {
       return { workItem: null, reason: 'No work items available' };
     }
 
-    // Select best direct child from the already-filtered candidate pool
-    const actionableChildren = filteredItems.filter(
-      item => item.parentId === selectedInProgress.id
-    ).filter(item => !excluded?.has(item.id));
-
-    this.debug(`${debugPrefix} actionable children of ${selectedInProgress.id}=${actionableChildren.length}`);
-
-    if (actionableChildren.length === 0) {
-      if (excluded?.has(selectedInProgress.id)) {
-        return { workItem: null, reason: 'No available items after exclusions' };
-      }
-      // No suitable children — fall back to the best candidate that isn't
-      // the in-progress item itself
-      const fallback = this.selectBySortIndex(filteredItems, effectivePriorityCache);
-      if (fallback) {
-        const fallbackEffective = this.computeEffectivePriority(fallback, effectivePriorityCache);
-        return {
-          workItem: fallback,
-          reason: `Next open item by sort_index (in-progress item ${selectedInProgress.id} has no open children, ${fallbackEffective.inheritedFrom ? fallbackEffective.reason : `priority ${fallback.priority}`})`
-        };
-      }
-      return { workItem: null, reason: 'No actionable work items available (only in-progress items remain)' };
-    }
-
-    const selected = this.selectBySortIndex(actionableChildren, effectivePriorityCache);
-    this.debug(`${debugPrefix} selected child=${selected?.id || ''}`);
-    const selectedEffective = selected ? this.computeEffectivePriority(selected, effectivePriorityCache) : null;
+    // Return the selected root directly — do NOT descend into children.
+    // The parent represents the unit of work; children are tracked within it.
+    const rootEffectiveInfo = this.computeEffectivePriority(selectedRoot, effectivePriorityCache);
     return {
-      workItem: selected,
-      reason: `Next child by sort_index of deepest in-progress item ${selectedInProgress.id}${selectedEffective ? ` (${selectedEffective.inheritedFrom ? selectedEffective.reason : `priority ${selected!.priority}`})` : ''}`
+      workItem: selectedRoot,
+      reason: `Next open item by sort_index${rootEffectiveInfo ? ` (${rootEffectiveInfo.inheritedFrom ? rootEffectiveInfo.reason : `priority ${selectedRoot.priority}`})` : ''}`
     };
   }
 
@@ -1818,7 +1736,15 @@ export class WorklogDatabase {
       );
 
       results.push(result);
-      if (result.workItem) excluded.add(result.workItem.id);
+      if (result.workItem) {
+        excluded.add(result.workItem.id);
+        // Also exclude all descendants so children of returned parents
+        // are never surfaced in batch results (AC #4)
+        const descendants = this.getDescendants(result.workItem.id);
+        for (const desc of descendants) {
+          excluded.add(desc.id);
+        }
+      }
     }
 
     return results;

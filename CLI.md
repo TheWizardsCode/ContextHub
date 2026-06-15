@@ -398,6 +398,14 @@ wl show WL-ABC123 -c
 
 Suggest the next work item(s) to work on. Non-actionable items (deleted, completed, in-review, in-progress, dependency-blocked) are excluded by default.
 
+#### Hierarchy-aware selection
+
+`wl next` is hierarchy-aware: it returns **parent items** instead of descending into their children. For example, if an epic has open child tasks, `wl next` returns the epic itself — not one of its children. This surfaces the high-level unit of work for you to claim, after which you can work on its sub-tasks.
+
+Leaf items (items without children, or whose children are all completed) continue to be returned normally. Items whose parent is completed, deleted, or otherwise absent from the candidate pool are promoted to root level (orphan promotion) and compete on their own merit.
+
+In batch mode (`-n <count>`), children of returned parents are also excluded from subsequent results, ensuring the batch never contains items from the same subtree.
+
 #### Automatic re-sort
 
 By default, `wl next` re-sorts all active items by score before selecting candidates. This ensures that recently created or re-prioritized items are immediately reflected in the selection order without requiring a manual `wl re-sort`. The re-sort uses the same scoring logic as `wl re-sort` (priority weight, age, and optional recency policy).
@@ -413,13 +421,15 @@ When multiple candidate items exist, `wl next` ranks them using the following cr
 1. **Priority** — higher-priority items always rank above lower-priority items.
 2. **Blocks high-priority work** — among equal-priority candidates, an item that is a prerequisite for a `high` or `critical` downstream item is preferred. This ensures that unblocking high-value work takes precedence over unrelated tasks at the same priority.
 3. **Blocked penalty** — items with active dependency blockers are excluded by default (see `--include-blocked`).
-4. **Tie-breakers** — sort_index hierarchy position, then age (older items first) break remaining ties.
+4. **Tie-breakers** — sort_index, then age (older items first) break remaining ties.
 
-Items with `status: 'blocked'` that have `critical` priority trigger a special escalation path: their direct blockers are surfaced immediately, bypassing the general ranking logic.
+Items with `status: 'blocked'` that have `critical` priority trigger a special escalation path: their direct blockers are surfaced immediately, bypassing the general ranking logic. Blocked `critical` items that are children of an open parent are still escalated — the parent item's blockers will be surfaced if the critical child is in its tree.
 
 #### Backward compatibility
 
 The `--include-blocked` flag behavior is unchanged. The ranking boost only affects ordering among candidates that are already considered (i.e., unblocked items by default).
+
+The JSON output schema is unchanged — only the selection behavior differs: parent items are now returned instead of children.
 
 Options:
 
