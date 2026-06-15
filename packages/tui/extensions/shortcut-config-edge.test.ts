@@ -492,3 +492,219 @@ describe('chord validation in loadShortcutConfig', () => {
     mockWarn.mockRestore();
   });
 });
+
+describe('duplicate key+view detection in loadShortcutConfig', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.restoreAllMocks();
+  });
+
+  it('warns when two key-based entries share the same key and view', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        { key: 'i', command: 'implement <id>', view: 'both' },
+        { key: 'i', command: 'implement-again <id>', view: 'both' },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringContaining('Duplicate shortcut'),
+    );
+    // Both entries are still loaded (first wins at lookup time)
+    expect(registry.getEntries()).toHaveLength(2);
+    // First entry still wins (backward compatible)
+    expect(registry.lookup('i', 'list')).toBe('implement <id>');
+    mockWarn.mockRestore();
+  });
+
+  it('warns when two chord-based entries share the same chord and view', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        { chord: ['u', 'p'], command: 'update-priority', view: 'both' },
+        { chord: ['u', 'p'], command: 'update-priority-alt', view: 'both' },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringContaining('Duplicate shortcut'),
+    );
+    expect(registry.getEntries()).toHaveLength(2);
+    // First entry still wins
+    expect((registry as any).lookupChord(['u', 'p'], 'list')).toBe('update-priority');
+    mockWarn.mockRestore();
+  });
+
+  it('does NOT warn for entries with same key but different views', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        { key: 'i', command: 'implement <id>', view: 'list' },
+        { key: 'i', command: 'implement-detail <id>', view: 'detail' },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+
+    expect(mockWarn).not.toHaveBeenCalledWith(
+      expect.stringContaining('Duplicate shortcut'),
+    );
+    expect(registry.getEntries()).toHaveLength(2);
+    expect(registry.lookup('i', 'list')).toBe('implement <id>');
+    expect(registry.lookup('i', 'detail')).toBe('implement-detail <id>');
+    mockWarn.mockRestore();
+  });
+
+  it('does NOT warn for entries with different keys and same view', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        { key: 'i', command: 'implement <id>', view: 'both' },
+        { key: 'p', command: 'plan <id>', view: 'both' },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+
+    expect(mockWarn).not.toHaveBeenCalledWith(
+      expect.stringContaining('Duplicate shortcut'),
+    );
+    expect(registry.getEntries()).toHaveLength(2);
+    mockWarn.mockRestore();
+  });
+
+  it('warns separately for each duplicate pair', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        { key: 'i', command: 'implement <id>', view: 'both' },
+        { key: 'i', command: 'implement-alt <id>', view: 'both' },
+        { key: 'p', command: 'plan <id>', view: 'both' },
+        { key: 'p', command: 'plan-alt <id>', view: 'both' },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+
+    // Should have warned twice (one for 'i', one for 'p')
+    const duplicateWarnings = mockWarn.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('Duplicate shortcut'),
+    );
+    expect(duplicateWarnings.length).toBe(2);
+    expect(registry.getEntries()).toHaveLength(4);
+    // First entries still win
+    expect(registry.lookup('i', 'list')).toBe('implement <id>');
+    expect(registry.lookup('p', 'list')).toBe('plan <id>');
+    mockWarn.mockRestore();
+  });
+
+  it('detects mixed duplicates across key and chord entries separately', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        { key: 'i', command: 'implement <id>', view: 'both' },
+        { key: 'i', command: 'implement-alt <id>', view: 'both' },
+        { chord: ['u', 'p'], command: 'update-priority', view: 'list' },
+        { chord: ['u', 'p'], command: 'update-priority-alt', view: 'list' },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+
+    const duplicateWarnings = mockWarn.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('Duplicate shortcut'),
+    );
+    expect(duplicateWarnings.length).toBe(2);
+    expect(registry.getEntries()).toHaveLength(4);
+    // First entries still win
+    expect(registry.lookup('i', 'list')).toBe('implement <id>');
+    expect((registry as any).lookupChord(['u', 'p'], 'list')).toBe('update-priority');
+    mockWarn.mockRestore();
+  });
+
+  it('does NOT warn for unique chord+view combinations', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        { chord: ['u', 'p'], command: 'update-priority', view: 'list' },
+        { chord: ['u', 't'], command: 'update-title', view: 'list' },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+
+    expect(mockWarn).not.toHaveBeenCalledWith(
+      expect.stringContaining('Duplicate shortcut'),
+    );
+    expect(registry.getEntries()).toHaveLength(2);
+    mockWarn.mockRestore();
+  });
+
+  it('does not emit duplicate warning for the first occurrence of a unique combination', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        { key: 'i', command: 'implement <id>', view: 'both' },
+        { key: 'p', command: 'plan <id>', view: 'both' },
+        { key: 'a', command: 'audit <id>', view: 'both' },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+
+    expect(mockWarn).not.toHaveBeenCalledWith(
+      expect.stringContaining('Duplicate shortcut'),
+    );
+    expect(registry.getEntries()).toHaveLength(3);
+    mockWarn.mockRestore();
+  });
+
+  it('warning message includes the shortcut key and view in the text', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        { key: 'i', command: 'implement <id>', view: 'both' },
+        { key: 'i', command: 'implement-alt <id>', view: 'both' },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringMatching(/Duplicate shortcut.*i:both/i),
+    );
+    mockWarn.mockRestore();
+  });
+
+  it('warning includes the index of the duplicate entry', () => {
+    const mockWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    readFileSyncBehavior = {
+      type: 'invalid',
+      content: JSON.stringify([
+        { key: 'i', command: 'implement <id>', view: 'both' },
+        { key: 'i', command: 'implement-alt <id>', view: 'both' },
+      ]),
+    };
+
+    const registry = loadShortcutConfig();
+
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringMatching(/index\s+1/i),
+    );
+    mockWarn.mockRestore();
+  });
+});

@@ -262,6 +262,7 @@ export function loadShortcutConfig(): ShortcutRegistry {
 
   const validEntries: ShortcutEntry[] = [];
   const validViews = new Set(['list', 'detail', 'both']);
+  const seenKeys = new Set<string>();
 
   for (let i = 0; i < parsed.length; i++) {
     const entry = parsed[i] as Record<string, unknown>;
@@ -382,6 +383,18 @@ export function loadShortcutConfig(): ShortcutRegistry {
     const description = entry.description;
     if (typeof description === 'string' && description.trim().length > 0) {
       shortcutEntry.description = description.trim();
+    }
+
+    // Check for duplicate key+view or chord+view combinations
+    const compositeKey = hasChord
+      ? `${(rawChord as string[]).join('+')}:${view}`
+      : `${rawKey}:${view}`;
+    if (seenKeys.has(compositeKey)) {
+      console.warn(
+        `[shortcut-config] Duplicate shortcut at index ${i}: key/chord "${compositeKey}" is already registered — the second entry will be shadowed`,
+      );
+    } else {
+      seenKeys.add(compositeKey);
     }
 
     validEntries.push(shortcutEntry);
