@@ -1913,6 +1913,28 @@ export class WorklogDatabase {
   }
 
   /**
+   * Compare an existing work item against a candidate and return true if any
+   * tracked field has semantically changed.
+   *
+   * Uses the same field set and comparison logic as the no-op guard in {@link update}.
+   */
+  private hasWorkItemChanged(oldItem: WorkItem, newItem: WorkItem): boolean {
+    const fieldsToCompare: (keyof WorkItem)[] = [
+      'title', 'description', 'status', 'priority', 'sortIndex', 'parentId',
+      'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort',
+      'needsProducerReview'
+    ];
+    return fieldsToCompare.some(f => {
+      const oldVal = oldItem[f];
+      const newVal = newItem[f];
+      if (Array.isArray(oldVal) && Array.isArray(newVal)) {
+        return JSON.stringify(oldVal) !== JSON.stringify(newVal);
+      }
+      return oldVal !== newVal;
+    });
+  }
+
+  /**
    * Import work items by **replacing** all existing data.
    *
    * **WARNING — DESTRUCTIVE**: This method calls `clearWorkItems()` (DELETE
@@ -1925,6 +1947,14 @@ export class WorklogDatabase {
    * syncing a subset of items back from GitHub — use {@link upsertItems}
    * instead, which preserves items not in the provided array.
    *
+   * **No-op guard**: Before clearing, this method snapshots existing items.
+   * For each incoming item that already exists and has identical tracked fields
+   * (title, description, status, priority, sortIndex, parentId, tags, assignee,
+   * stage, issueType, risk, effort, needsProducerReview), the original
+   * `updatedAt` is preserved so that sync operations do not silently
+   * re-timestamp unchanged items. Changed items get a new `updatedAt`;
+   * entirely new items use the incoming value as-is.
+   *
    * @param items - The full set of work items to store.
    * @param dependencyEdges - Optional full set of dependency edges. When
    *   provided, existing edges are cleared and replaced with these.
@@ -1932,9 +1962,26 @@ export class WorklogDatabase {
    *   existing audit results are replaced with these.
    */
   import(items: WorkItem[], dependencyEdges?: DependencyEdge[], auditResults?: AuditResult[]): void {
+    // Snapshot existing items before clearing so we can detect unchanged items
+    // and preserve their updatedAt timestamps.
+    const existingItems = new Map<string, WorkItem>();
+    for (const existing of this.store.getAllWorkItems()) {
+      existingItems.set(existing.id, existing);
+    }
+
     this.store.clearWorkItems();
     for (const item of items) {
-      this.store.saveWorkItem(item);
+      const existing = existingItems.get(item.id);
+      if (existing && !this.hasWorkItemChanged(existing, item)) {
+        // No semantic change — preserve the existing updatedAt
+        this.store.saveWorkItem({ ...item, updatedAt: existing.updatedAt });
+      } else if (existing) {
+        // Semantic change detected — bump the timestamp
+        this.store.saveWorkItem({ ...item, updatedAt: new Date().toISOString() });
+      } else {
+        // New item — use the incoming updatedAt as-is
+        this.store.saveWorkItem(item);
+      }
     }
     if (dependencyEdges) {
       this.store.clearDependencyEdges();
@@ -1958,6 +2005,12 @@ export class WorklogDatabase {
    * `saveWorkItem()` (which uses INSERT … ON CONFLICT DO UPDATE) so that
    * existing items not in the provided array are preserved.
    *
+   * **No-op guard**: For each item that already exists in the store AND has
+   * identical tracked fields (same field set as {@link hasWorkItemChanged}),
+   * the save is entirely skipped — preserving the existing `updatedAt`.
+   * Items whose tracked fields differ, or that are new, get a fresh
+   * `updatedAt` timestamp.
+   *
    * When `dependencyEdges` is provided, only edges whose `fromId` or `toId`
    * belongs to the provided items are upserted; all other edges are untouched.
    *
@@ -1969,7 +2022,16 @@ export class WorklogDatabase {
     }
 
     for (const item of items) {
-      this.store.saveWorkItem(item);
+      const existing = this.store.getWorkItem(item.id);
+      if (existing && !this.hasWorkItemChanged(existing, item)) {
+        // No semantic change — skip the save entirely to preserve updatedAt
+        continue;
+      }
+      // Either a new item or a semantic change — bump the timestamp
+      const itemToSave = existing
+        ? { ...item, updatedAt: new Date().toISOString() }
+        : item;
+      this.store.saveWorkItem(itemToSave);
     }
 
     if (dependencyEdges) {
