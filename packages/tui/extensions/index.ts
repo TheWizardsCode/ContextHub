@@ -40,6 +40,20 @@ function updateSettings(partial: Partial<Settings>): Settings {
   return currentSettings;
 }
 
+// Lazy-loaded reference to Pi's matchesKey() for cross-platform keyboard input.
+// When the extension runs inside Pi, this uses @earendil-works/pi-tui's
+// matchesKey() which handles all terminal escape sequences (legacy and Kitty
+// protocol). Falls back to raw ANSI comparison when Pi's TUI is not available
+// (e.g., during testing outside the Pi runtime).
+let _matchesKey: ((data: string, keyId: string) => boolean) | null = null;
+
+try {
+  const { matchesKey } = await import('@earendil-works/pi-tui');
+  _matchesKey = matchesKey;
+} catch {
+  // Pi TUI not available — fall back to raw ANSI sequence comparison
+}
+
 /**
  * Map of shorthand stage aliases to canonical stage names.
  * Both keys and values are valid stage values for the /wl command.
@@ -417,14 +431,17 @@ export function buildSelectionWidget(
 const RESERVED_NAVIGATION_KEYS = new Set(['g', 'G', ' ']);
 
 function isUpKey(data: string): boolean {
+  if (_matchesKey) return _matchesKey(data, 'up');
   return data === '\u001b[A' || data === 'up' || /^\u001b\[1;\d+(?::\d+)?A$/.test(data);
 }
 
 function isDownKey(data: string): boolean {
+  if (_matchesKey) return _matchesKey(data, 'down');
   return data === '\u001b[B' || data === 'down' || /^\u001b\[1;\d+(?::\d+)?B$/.test(data);
 }
 
 function isPageUpKey(data: string): boolean {
+  if (_matchesKey) return _matchesKey(data, 'pageUp');
   return (
     data === '\u001b[5~'
     || data === '\u001b[[5~'
@@ -435,6 +452,7 @@ function isPageUpKey(data: string): boolean {
 }
 
 function isPageDownKey(data: string): boolean {
+  if (_matchesKey) return _matchesKey(data, 'pageDown');
   return (
     data === '\u001b[6~'
     || data === '\u001b[[6~'
@@ -447,10 +465,12 @@ function isPageDownKey(data: string): boolean {
 }
 
 function isEnterKey(data: string): boolean {
+  if (_matchesKey) return _matchesKey(data, 'enter');
   return data === '\r' || data === '\n' || data === 'enter' || data === 'return';
 }
 
 function isEscapeKey(data: string): boolean {
+  if (_matchesKey) return _matchesKey(data, 'escape');
   return data === '\u001b' || data === 'escape';
 }
 
