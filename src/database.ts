@@ -1151,6 +1151,7 @@ export class WorklogDatabase {
       searchTerm?: string;
       excluded?: Set<string>;
       debugPrefix?: string;
+      includeInProgress?: boolean;
     } = {}
   ): NextWorkItemResult | null {
     const {
@@ -1158,10 +1159,13 @@ export class WorklogDatabase {
       searchTerm,
       excluded,
       debugPrefix = '[critical]',
+      includeInProgress = false,
     } = options;
 
     // Find all critical items from the full set, excluding only
-    // deleted items and in-progress items (these are never actionable).
+    // deleted items (these are never actionable).
+    // In-progress items are excluded by default (not actionable for escalation)
+    // unless --include-in-progress is set.
     // Items in the in_review stage are preserved even if their status
     // is 'completed' since they need to appear in wl next for review.
     const criticalItems = allItems.filter(
@@ -1169,7 +1173,7 @@ export class WorklogDatabase {
         item.priority === 'critical' &&
         item.status !== 'deleted' &&
         (item.status !== 'completed' || item.stage === 'in_review') &&
-        item.status !== 'in-progress'
+        (includeInProgress || item.status !== 'in-progress')
     );
     this.debug(`${debugPrefix} critical items from full set=${criticalItems.length}`);
 
@@ -1621,6 +1625,7 @@ export class WorklogDatabase {
         assignee,
         searchTerm,
         excluded,
+        includeInProgress,
         debugPrefix: `${debugPrefix} [critical]`,
       });
       if (criticalResult) {
