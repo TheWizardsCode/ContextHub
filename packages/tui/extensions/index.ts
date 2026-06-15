@@ -357,57 +357,67 @@ export function buildSelectionWidget(
   invalidate: () => void;
 } {
   return (_tui, theme) => {
-    // Determine icon preference: explicit settings override env var
-    const showIcons = settings?.showIcons ?? iconsEnabled();
-    const useIcons = showIcons;
+    let cachedWidth: number | undefined;
+    let cachedLines: string[] | undefined;
 
-    // Normalize status: worklog uses underscore (in_progress) but icons.ts uses hyphen (in-progress)
-    const normalizedStatus = (item.status || '').replace(/_/g, '-');
+    /**
+     * Build the single-line summary from item metadata and current theme.
+     * Called on every render after cache miss so theme changes are reflected
+     * via the mutable `theme` object that Pi updates in-place.
+     */
+    const computeLine = (): string => {
+      const showIcons = settings?.showIcons ?? iconsEnabled();
+      const useIcons = showIcons;
 
-    // Get emoji icons for status, stage, audit, and priority (text fallbacks if icons disabled)
-    const sIcon = statusIcon(normalizedStatus, { noIcons: !useIcons });
-    const stIcon = stageIcon(item.stage, { noIcons: !useIcons });
-    const aIcon = auditIcon(item.auditResult, { noIcons: !useIcons });
-    const pIcon = priorityIcon(item.priority || '', { noIcons: !useIcons });
+      const normalizedStatus = (item.status || '').replace(/_/g, '-');
 
-    // Build priority part: icon + uppercase text when using emoji,
-    // or just the fallback text when icons are disabled
-    const priorityText = item.priority ?? '—';
-    const priorityPart = pIcon && useIcons
-      ? `${pIcon}${priorityText.toUpperCase()}`
-      : (pIcon || priorityText.toUpperCase());
+      const sIcon = statusIcon(normalizedStatus, { noIcons: !useIcons });
+      const stIcon = stageIcon(item.stage, { noIcons: !useIcons });
+      const aIcon = auditIcon(item.auditResult, { noIcons: !useIcons });
+      const pIcon = priorityIcon(item.priority || '', { noIcons: !useIcons });
 
-    // Get other metadata with defaults
-    const stage = item.stage ?? '—';
-    const risk = item.risk ?? '—';
-    const effort = item.effort ?? '—';
+      const priorityText = item.priority ?? '—';
+      const priorityPart = pIcon && useIcons
+        ? `${pIcon}${priorityText.toUpperCase()}`
+        : (pIcon || priorityText.toUpperCase());
 
-    // Apply stage-based colour to the title only (with blocked status override)
-    const colouredTitle = applyStageColour(
-      item.title,
-      item.stage,
-      item.status,
-      theme,
-    );
+      const stage = item.stage ?? '—';
+      const risk = item.risk ?? '—';
+      const effort = item.effort ?? '—';
 
-    // Build icon prefix: status + stage + audit
-    const iconPrefix = [sIcon, stIcon, aIcon].filter(Boolean).join(' ');
+      const colouredTitle = applyStageColour(
+        item.title,
+        item.stage,
+        item.status,
+        theme,
+      );
 
-    // Build single-line parts: icons, title, priority icon+text, stage text, risk/effort
-    const parts = [
-      iconPrefix,
-      colouredTitle,
-      priorityPart,
-      stage,
-      `${risk}/${effort}`,
-    ].filter(Boolean);
+      const iconPrefix = [sIcon, stIcon, aIcon].filter(Boolean).join(' ');
 
-    const line = parts.join(' ');
+      const parts = [
+        iconPrefix,
+        colouredTitle,
+        priorityPart,
+        stage,
+        `${risk}/${effort}`,
+      ].filter(Boolean);
+
+      return parts.join(' ');
+    };
 
     return {
-      render: (width: number) => [truncateToWidth(line, width)],
+      render: (width: number) => {
+        if (cachedLines && cachedWidth === width) {
+          return cachedLines;
+        }
+        const line = computeLine();
+        cachedWidth = width;
+        cachedLines = [truncateToWidth(line, width)];
+        return cachedLines;
+      },
       invalidate: () => {
-        // no-op: all rendering is derived from local state
+        cachedWidth = undefined;
+        cachedLines = undefined;
       },
     };
   };
@@ -517,10 +527,18 @@ export async function defaultChooseWorkItem(
   const result = await ctx.ui.custom<WorklogBrowseItem | ShortcutResult | null>((tui, theme, _keybindings, done) => {
     let selectedIndex = 0;
     let lastSelectionId = items[0]?.id;
+    let cachedWidth: number | undefined;
+    let cachedLines: string[] | undefined;
+
+    const invalidateCache = () => {
+      cachedWidth = undefined;
+      cachedLines = undefined;
+    };
 
     const moveSelection = (nextIndex: number) => {
       if (nextIndex < 0 || nextIndex >= items.length || nextIndex === selectedIndex) return;
       selectedIndex = nextIndex;
+      invalidateCache();
       const item = items[selectedIndex];
       if (item && item.id !== lastSelectionId) {
         lastSelectionId = item.id;
@@ -554,6 +572,10 @@ export async function defaultChooseWorkItem(
     return {
       focused: false,
       render: (width: number) => {
+        if (cachedLines && cachedWidth === width) {
+          return cachedLines;
+        }
+
         const browseCount = currentSettings.browseItemCount;
         const title = truncateToWidth(theme.fg('accent', theme.bold(`Browse Worklog next items (top ${browseCount})`)), width);
 
@@ -633,10 +655,13 @@ export async function defaultChooseWorkItem(
           return truncateToWidth(optionLine, width);
         });
 
-        return [title, '', ...options, '', help];
+        const lines = [title, '', ...options, '', help];
+        cachedWidth = width;
+        cachedLines = lines;
+        return lines;
       },
       invalidate: () => {
-        // no-op: all rendering is derived from local state
+        invalidateCache();
       },
       handleInput: (data: string) => {
         const lookupKey = data.length === 1 ? data : undefined;
@@ -645,6 +670,7 @@ export async function defaultChooseWorkItem(
         if (pendingChordLeader !== null && lookupKey) {
           if (isEscapeKey(data)) {
             pendingChordLeader = null;
+            invalidateCache();
             tui.requestRender();
             return;
           }
@@ -665,6 +691,7 @@ export async function defaultChooseWorkItem(
           }
           // Unrecognised second key — cancel
           pendingChordLeader = null;
+          invalidateCache();
           tui.requestRender();
           return;
         }
@@ -692,6 +719,7 @@ export async function defaultChooseWorkItem(
             });
             if (applicableChords.length > 0) {
               pendingChordLeader = lookupKey;
+              invalidateCache();
               tui.requestRender();
               return;
             }
