@@ -133,7 +133,20 @@ export default function register(ctx: PluginContext): void {
       const limited = limit ? sortedAll.slice(0, limit) : sortedAll;
 
       if (utils.isJsonMode()) {
-        output.json({ success: true, count: limited.length, workItems: limited });
+        // Enrich each work item with audit result data from the dedicated table.
+        // This is needed so consumers (e.g. Pi TUI extension) can show the
+        // correct audit icon (✅/❌/❓) without an extra round-trip per item.
+        // Build a lookup map from all audit results for efficiency with large lists.
+        const auditMap = new Map<string, boolean>();
+        const allAudits = db.getAllAuditResults();
+        for (const ar of allAudits) {
+          auditMap.set(ar.workItemId, ar.readyToClose);
+        }
+        const enrichedItems = limited.map(item => ({
+          ...item,
+          auditResult: auditMap.has(item.id) ? auditMap.get(item.id) : null,
+        }));
+        output.json({ success: true, count: enrichedItems.length, workItems: enrichedItems });
       } else {
         if (items.length === 0) {
           console.log('No work items found');

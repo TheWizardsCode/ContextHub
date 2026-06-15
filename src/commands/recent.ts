@@ -43,7 +43,17 @@ export default function register(ctx: PluginContext): void {
             }
           }
         }
-        output.json({ success: true, count: selected.length, workItems: itemsToOutput });
+        // Enrich each work item with audit result data from the dedicated table.
+        const auditMap = new Map<string, boolean>();
+        const allAudits = db.getAllAuditResults();
+        for (const ar of allAudits) {
+          auditMap.set(ar.workItemId, ar.readyToClose);
+        }
+        const enrichedItems = itemsToOutput.map(item => ({
+          ...item,
+          auditResult: auditMap.has(item.id) ? auditMap.get(item.id) : null,
+        }));
+        output.json({ success: true, count: selected.length, workItems: enrichedItems });
         return;
       }
 

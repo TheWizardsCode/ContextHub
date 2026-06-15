@@ -82,17 +82,32 @@ export default function register(ctx: PluginContext): void {
         : '';
 
       if (utils.isJsonMode()) {
+        // Enrich each work item with audit result data from the dedicated table.
+        // This is needed so consumers (e.g. Pi TUI extension) can show the
+        // correct audit icon (✅/❌/❓) without an extra round-trip per item.
+        const enrichWorkItem = (wi: any) => {
+          if (!wi) return wi;
+          const auditResult = db.getAuditResult(wi.id);
+          return { ...wi, auditResult: auditResult?.readyToClose ?? null };
+        };
+
         if (count === 1) {
           const single = results[0];
-          output.json({ success: true, workItem: single.workItem, reason: single.reason });
+          const enrichedItem = single.workItem ? enrichWorkItem(single.workItem) : single.workItem;
+          output.json({ success: true, workItem: enrichedItem, reason: single.reason });
           return;
         }
 
+        const enrichedResults = availableResults.map((result: any) => ({
+          ...result,
+          workItem: result.workItem ? enrichWorkItem(result.workItem) : result.workItem,
+        }));
+
         output.json({
           success: true,
-          count: availableResults.length,
+          count: enrichedResults.length,
           requested: count,
-          results: availableResults,
+          results: enrichedResults,
           ...(note ? { note } : {})
         });
         return;

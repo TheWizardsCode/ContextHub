@@ -27,7 +27,17 @@ export default function register(ctx: PluginContext): void {
       const items = db.list(query);
       
       if (utils.isJsonMode()) {
-        output.json({ success: true, count: items.length, workItems: items });
+        // Enrich each work item with audit result data from the dedicated table.
+        const auditMap = new Map<string, boolean>();
+        const allAudits = db.getAllAuditResults();
+        for (const ar of allAudits) {
+          auditMap.set(ar.workItemId, ar.readyToClose);
+        }
+        const enrichedItems = items.map(item => ({
+          ...item,
+          auditResult: auditMap.has(item.id) ? auditMap.get(item.id) : null,
+        }));
+        output.json({ success: true, count: enrichedItems.length, workItems: enrichedItems });
       } else {
         if (items.length === 0) {
           console.log('No in-progress work items found');
