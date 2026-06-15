@@ -46,6 +46,13 @@
     "description": "Update the priority of the selected work item"
   },
   {
+    "chord": ["u", "s"],
+    "command": "!!wl update <id> --status <status> --stage <stage> ",
+    "view": "both",
+    "label": "update stage/status",
+    "description": "Update the stage of the selected work item"
+  },
+  {
     "chord": ["u", "t"],
     "command": "!!wl update <id> --title ",
     "view": "both",
@@ -65,5 +72,12 @@
     "view": "both",
     "label": "close deleted",
     "description": "Delete the work item."
+  },
+  {
+    "key": "s",
+    "command": "!!wl search ",
+    "view": "both",
+    "label": "Search",
+    "description": "Search all workitems for keyword(s)."
   }
 ]

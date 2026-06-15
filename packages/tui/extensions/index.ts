@@ -1224,7 +1224,9 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
       },
       getArgumentCompletions: (prefix: string) => {
         const allStages = [...VALID_STAGES].sort();
-        const filtered = allStages.filter(s => s.startsWith(prefix));
+        // Include 'settings' as a valid completion alongside stage values
+        const allCompletions = ['settings', ...allStages].sort();
+        const filtered = allCompletions.filter(s => s.startsWith(prefix));
         return filtered.length > 0
           ? filtered.map(s => ({ value: s, label: s }))
           : null;

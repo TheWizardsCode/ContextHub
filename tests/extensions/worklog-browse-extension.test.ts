@@ -1518,7 +1518,7 @@ describe('Worklog browse pi extension', () => {
       expect(setEditorText).toHaveBeenCalledWith('implement WL-P');
     });
 
-    it('getArgumentCompletions returns sorted stage values including shorthands and canonical names', () => {
+    it('getArgumentCompletions returns sorted stage values including shorthands, canonical names, and settings', () => {
       const pi = makeStageTestPi();
       const extension = createWorklogBrowseExtension();
       extension(pi as any);
@@ -1535,10 +1535,11 @@ describe('Worklog browse pi extension', () => {
         { value: 'plan_complete', label: 'plan_complete' },
         { value: 'progress', label: 'progress' },
         { value: 'review', label: 'review' },
+        { value: 'settings', label: 'settings' },
       ]);
     });
 
-    it('getArgumentCompletions filters by prefix', () => {
+    it('getArgumentCompletions filters by prefix and includes settings match', () => {
       const pi = makeStageTestPi();
       const extension = createWorklogBrowseExtension();
       extension(pi as any);
@@ -1557,6 +1558,12 @@ describe('Worklog browse pi extension', () => {
       expect(intakeCompletions).toEqual([
         { value: 'intake', label: 'intake' },
         { value: 'intake_complete', label: 'intake_complete' },
+      ]);
+
+      // Filter by 'set' should return settings
+      const settingsCompletions = commandOpts.getArgumentCompletions('set');
+      expect(settingsCompletions).toEqual([
+        { value: 'settings', label: 'settings' },
       ]);
     });
 
