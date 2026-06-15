@@ -264,12 +264,15 @@ export function loadShortcutConfig(): ShortcutRegistry {
   const validViews = new Set(['list', 'detail', 'both']);
   const seenKeys = new Set<string>();
 
+  // Collect skipped-entry details for batched warnings
+  const skippedDetails: { index: number; category: string; detail: string }[] = [];
+
   for (let i = 0; i < parsed.length; i++) {
     const entry = parsed[i] as Record<string, unknown>;
 
     // Validate required fields
     if (!entry || typeof entry !== 'object') {
-      console.warn(`[shortcut-config] Skipping invalid entry at index ${i}: not an object`);
+      skippedDetails.push({ index: i, category: 'not-an-object', detail: 'not an object' });
       continue;
     }
 
@@ -283,16 +286,20 @@ export function loadShortcutConfig(): ShortcutRegistry {
     const hasChord = Array.isArray(rawChord) && (rawChord as unknown[]).length > 0;
 
     if (hasKey && hasChord) {
-      console.warn(
-        `[shortcut-config] Skipping entry at index ${i}: entry has both "key" and "chord" fields — they are mutually exclusive`,
-      );
+      skippedDetails.push({
+        index: i,
+        category: 'both-fields',
+        detail: 'entry has both "key" and "chord" fields — they are mutually exclusive',
+      });
       continue;
     }
 
     if (!hasKey && !hasChord) {
-      console.warn(
-        `[shortcut-config] Skipping entry at index ${i}: missing or invalid "key" or "chord" field — exactly one is required`,
-      );
+      skippedDetails.push({
+        index: i,
+        category: 'missing-key-or-chord',
+        detail: 'missing or invalid "key" or "chord" field — exactly one is required',
+      });
       continue;
     }
 
@@ -300,35 +307,48 @@ export function loadShortcutConfig(): ShortcutRegistry {
     if (hasChord) {
       const chordArr = rawChord as unknown[];
       if (chordArr.length < 2) {
-        console.warn(
-          `[shortcut-config] Skipping entry at index ${i}: "chord" must be an array of at least 2 strings`,
-        );
+        skippedDetails.push({
+          index: i,
+          category: 'chord-too-short',
+          detail: '"chord" must be an array of at least 2 strings',
+        });
         continue;
       }
       for (let j = 0; j < chordArr.length; j++) {
         if (typeof chordArr[j] !== 'string') {
-          console.warn(
-            `[shortcut-config] Skipping entry at index ${i}: "chord" entry at index ${j} is not a string`,
-          );
-          continue;
+          skippedDetails.push({
+            index: i,
+            category: 'chord-element-not-string',
+            detail: `"chord" entry at index ${j} is not a string`,
+          });
         }
       }
     }
 
     if (!command || typeof command !== 'string') {
-      console.warn(`[shortcut-config] Skipping entry at index ${i}: missing or invalid "command" field`);
+      skippedDetails.push({
+        index: i,
+        category: 'missing-command',
+        detail: 'missing or invalid "command" field',
+      });
       continue;
     }
 
     if (!view || typeof view !== 'string') {
-      console.warn(`[shortcut-config] Skipping entry at index ${i}: missing or invalid "view" field`);
+      skippedDetails.push({
+        index: i,
+        category: 'missing-view',
+        detail: 'missing or invalid "view" field',
+      });
       continue;
     }
 
     if (!validViews.has(view)) {
-      console.warn(
-        `[shortcut-config] Skipping entry at index ${i}: unknown "view" value "${view}"`,
-      );
+      skippedDetails.push({
+        index: i,
+        category: 'invalid-view',
+        detail: `unknown "view" value "${view}"`,
+      });
       continue;
     }
 
@@ -336,17 +356,20 @@ export function loadShortcutConfig(): ShortcutRegistry {
     const stages = entry.stages;
     if (stages !== undefined) {
       if (!Array.isArray(stages)) {
-        console.warn(
-          `[shortcut-config] Skipping entry at index ${i}: "stages" must be an array of strings`,
-        );
+        skippedDetails.push({
+          index: i,
+          category: 'invalid-stages-type',
+          detail: '"stages" must be an array of strings',
+        });
         continue;
       }
       for (let j = 0; j < stages.length; j++) {
         if (typeof stages[j] !== 'string') {
-          console.warn(
-            `[shortcut-config] Skipping entry at index ${i}: "stages" entry at index ${j} is not a string`,
-          );
-          continue;
+          skippedDetails.push({
+            index: i,
+            category: 'stages-element-not-string',
+            detail: `"stages" entry at index ${j} is not a string`,
+          });
         }
       }
     }
@@ -398,6 +421,32 @@ export function loadShortcutConfig(): ShortcutRegistry {
     }
 
     validEntries.push(shortcutEntry);
+  }
+
+  // Emit batched warnings per structural-issue category
+  if (skippedDetails.length > 0) {
+    const byCategory = new Map<string, { indices: number[]; details: string[] }>();
+    for (const { index, category, detail } of skippedDetails) {
+      if (!byCategory.has(category)) {
+        byCategory.set(category, { indices: [], details: [] });
+      }
+      byCategory.get(category)!.indices.push(index);
+      byCategory.get(category)!.details.push(detail);
+    }
+
+    for (const [, { indices, details }] of byCategory) {
+      if (indices.length === 1) {
+        console.warn(`[shortcut-config] Skipping entry at index ${indices[0]}: ${details[0]}`);
+      } else {
+        console.warn(
+          `[shortcut-config] Skipped ${indices.length} entries at indices [${indices.join(', ')}]: ${details[0]}`,
+        );
+      }
+      // Individual details available via console.debug for debugging
+      for (let j = 0; j < indices.length; j++) {
+        console.debug(`[shortcut-config] Entry at index ${indices[j]}: ${details[j]}`);
+      }
+    }
   }
 
   if (validEntries.length === 0 && parsed.length > 0) {
