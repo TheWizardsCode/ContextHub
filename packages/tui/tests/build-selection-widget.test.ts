@@ -2,13 +2,16 @@
  * Unit tests for buildSelectionWidget.
  *
  * Verifies that the selection preview widget renders a single-line summary
- * with: title (stage-coloured), ID, status icon, priority icon+text, stage,
- * and risk/effort — in that order.
+ * in the format: WL-123456 | tags: tui, ui | GH #608
+ *
+ * The existing preview content (icon prefix, coloured title, priority text,
+ * stage, risk/effort) is entirely replaced — the preview shows only the new
+ * ID/Tags/GitHub ID line.
  *
  * Run: npx vitest run packages/tui/tests/build-selection-widget.test.ts
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { buildSelectionWidget, type WorklogBrowseItem } from '../extensions/index.js';
 import { type PiTheme } from '../extensions/worklog-helpers.js';
 
@@ -25,24 +28,11 @@ const mockItem: WorklogBrowseItem = {
   stage: 'in_progress',
   risk: 'Medium',
   effort: 'Small',
+  tags: ['tui', 'ui'],
+  githubIssueNumber: 608,
 };
 
 describe('buildSelectionWidget', () => {
-  let origEnv: string | undefined;
-
-  beforeEach(() => {
-    origEnv = process.env.WL_NO_ICONS;
-    delete process.env.WL_NO_ICONS;
-  });
-
-  afterEach(() => {
-    if (origEnv === undefined) {
-      delete process.env.WL_NO_ICONS;
-    } else {
-      process.env.WL_NO_ICONS = origEnv;
-    }
-  });
-
   it('returns a single rendered line', () => {
     const factory = buildSelectionWidget(mockItem);
     const widget = factory(null, mockTheme);
@@ -50,222 +40,156 @@ describe('buildSelectionWidget', () => {
     expect(lines).toHaveLength(1);
   });
 
-  it('includes stage and audit icons alongside status, priority, stage, and risk/effort in order', () => {
+  it('displays ID, tags, and GitHub issue number in the expected format', () => {
     const factory = buildSelectionWidget(mockItem);
     const widget = factory(null, mockTheme);
     const line = widget.render(120)[0];
 
-    // Title (stage-coloured)
-    expect(line).toContain('[warning]Implement chat pane[/warning]');
-    // Status icon (in_progress → 🔄)
-    expect(line).toContain('🔄');
-    // Stage icon (in_progress → 🛠️)
-    expect(line).toContain('🛠️');
-    // Audit icon (undefined → ❓ unknown)
-    expect(line).toContain('❓');
-    // Priority icon+text (high → ⭐HIGH)
-    expect(line).toContain('⭐HIGH');
-    // Stage text
-    expect(line).toContain('in_progress');
-    // Risk/Effort
-    expect(line).toContain('Medium/Small');
-
-    // Verify icons come before title
-    const statusIdx = line.indexOf('🔄');
-    const titleIdx = line.indexOf('Implement chat pane');
-    expect(statusIdx).toBeLessThan(titleIdx);
+    // Expected format: WL-123456 | tags: tui, ui | GH #608
+    expect(line).toContain('WL-001');
+    expect(line).toContain('tags: tui, ui');
+    expect(line).toContain('GH #608');
   });
 
-  it('applies stage colour to the title', () => {
+  it('includes pipe separators between segments', () => {
     const factory = buildSelectionWidget(mockItem);
     const widget = factory(null, mockTheme);
     const line = widget.render(120)[0];
 
-    // Title should be wrapped in warning colour for in_progress stage
-    expect(line).toContain('[warning]Implement chat pane[/warning]');
+    // Should have two pipe separators for three segments
+    const pipeCount = (line.match(/\|/g) || []).length;
+    expect(pipeCount).toBe(2);
   });
 
-  it('uses error colour for blocked status', () => {
-    const blockedItem: WorklogBrowseItem = {
+  it('shows "tags: —" when tags array is empty', () => {
+    const noTagsItem: WorklogBrowseItem = {
       ...mockItem,
-      status: 'blocked',
+      tags: [],
     };
-    const factory = buildSelectionWidget(blockedItem);
+    const factory = buildSelectionWidget(noTagsItem);
     const widget = factory(null, mockTheme);
     const line = widget.render(120)[0];
 
-    expect(line).toContain('[error]Implement chat pane[/error]');
+    expect(line).toContain('tags: —');
+    // Should still show GitHub issue number
+    expect(line).toContain('GH #608');
+    expect(line).toContain('WL-001');
   });
 
-  it('truncates line when it exceeds width', () => {
-    const longTitleItem: WorklogBrowseItem = {
+  it('shows "tags: —" when tags is undefined', () => {
+    const noTagsItem: WorklogBrowseItem = {
       ...mockItem,
-      title: 'A'.repeat(200),
+      tags: undefined,
     };
-    const factory = buildSelectionWidget(longTitleItem);
+    const factory = buildSelectionWidget(noTagsItem);
     const widget = factory(null, mockTheme);
-    const line = widget.render(50)[0];
-    // Should be truncated with ellipsis
-    expect(line.length).toBeLessThanOrEqual(55); // 50 + icon prefix + '…'
-    expect(line).toContain('…');
-  });
-
-  it('returns plain text when no theme is provided', () => {
-    const factory = buildSelectionWidget(mockItem);
-    const widget = factory(null, undefined);
     const line = widget.render(120)[0];
 
-    expect(line).toContain('Implement chat pane');
-    // No colour tags should be present
-    expect(line).not.toContain('[warning]');
-    expect(line).not.toContain('[/warning]');
+    expect(line).toContain('tags: —');
+    expect(line).toContain('GH #608');
   });
 
-  it('uses fallback dash values for missing metadata', () => {
+  it('omits the GH # segment when githubIssueNumber is undefined', () => {
+    const noGithubItem: WorklogBrowseItem = {
+      ...mockItem,
+      githubIssueNumber: undefined,
+    };
+    const factory = buildSelectionWidget(noGithubItem);
+    const widget = factory(null, mockTheme);
+    const line = widget.render(120)[0];
+
+    expect(line).toContain('WL-001');
+    expect(line).toContain('tags: tui, ui');
+    expect(line).not.toContain('GH #');
+  });
+
+  it('omits the GH # segment when githubIssueNumber is 0', () => {
+    const zeroGithubItem: WorklogBrowseItem = {
+      ...mockItem,
+      githubIssueNumber: 0,
+    };
+    const factory = buildSelectionWidget(zeroGithubItem);
+    const widget = factory(null, mockTheme);
+    const line = widget.render(120)[0];
+
+    expect(line).toContain('WL-001');
+    expect(line).toContain('tags: tui, ui');
+    expect(line).not.toContain('GH #');
+  });
+
+  it('shows only ID and tags when both tags and githubIssueNumber are missing', () => {
     const minimalItem: WorklogBrowseItem = {
       id: 'WL-000',
       title: 'Minimal',
       status: 'open',
+      tags: undefined,
+      githubIssueNumber: undefined,
     };
     const factory = buildSelectionWidget(minimalItem);
     const widget = factory(null, mockTheme);
     const line = widget.render(120)[0];
 
-    // '—' for missing priority, stage, risk, effort
-    expect(line).toContain('—');
-    // Status icon for 'open' should be present
-    expect(line).toContain('🔓');
+    expect(line).toContain('WL-000');
+    expect(line).toContain('tags: —');
+    expect(line).not.toContain('GH #');
+    // Only one pipe separator (ID | tags)
+    const pipeCount = (line.match(/\|/g) || []).length;
+    expect(pipeCount).toBe(1);
   });
 
-  it('uses text fallback icons when icons are disabled', () => {
-    process.env.WL_NO_ICONS = '1';
-    try {
-      const factory = buildSelectionWidget(mockItem);
-      const widget = factory(null, mockTheme);
-      const line = widget.render(120)[0];
-
-      // Status fallback for in_progress
-      expect(line).toContain('[INPR]');
-      // Stage fallback for in_progress
-      expect(line).toContain('[PROG]');
-      // Audit fallback for unknown
-      expect(line).toContain('[UNKN]');
-      // Priority fallback for high
-      expect(line).toContain('[HIGH]');
-      // No emoji should be present
-      expect(line).not.toContain('🔄');
-      expect(line).not.toContain('🛠️');
-      expect(line).not.toContain('❓');
-      expect(line).not.toContain('⭐');
-    } finally {
-      delete process.env.WL_NO_ICONS;
-    }
-  });
-
-  it('handles unknown priority gracefully', () => {
-    const unknownItem: WorklogBrowseItem = {
+  it('handles a single tag correctly', () => {
+    const singleTagItem: WorklogBrowseItem = {
       ...mockItem,
-      priority: 'unknown',
+      tags: ['bug'],
     };
-    const factory = buildSelectionWidget(unknownItem);
+    const factory = buildSelectionWidget(singleTagItem);
     const widget = factory(null, mockTheme);
     const line = widget.render(120)[0];
 
-    // Unknown priority should have no icon and show UNKNOWN
-    expect(line).toContain('UNKNOWN');
+    expect(line).toContain('tags: bug');
   });
 
-  it('handles unknown status gracefully', () => {
-    const unknownItem: WorklogBrowseItem = {
-      ...mockItem,
-      status: 'florg',
-    };
-    const factory = buildSelectionWidget(unknownItem);
+  it('truncates line when it exceeds width', () => {
+    const factory = buildSelectionWidget(mockItem);
+    const widget = factory(null, mockTheme);
+    const line = widget.render(15)[0];
+    // Should be truncated with ellipsis
+    expect(line.length).toBeLessThanOrEqual(20); // 15 + '…'
+    expect(line).toContain('…');
+  });
+
+  it('does not wrap content in theme colours', () => {
+    const factory = buildSelectionWidget(mockItem);
     const widget = factory(null, mockTheme);
     const line = widget.render(120)[0];
 
-    // Unknown status should have no icon (empty string)
-    // The line should still contain all other metadata
-    expect(line).toContain('Implement chat pane');
-    expect(line).toContain('⭐HIGH');
+    // The new preview is plain text — no colour tags
+    expect(line).not.toContain('[warning]');
+    expect(line).not.toContain('[error]');
+    expect(line).not.toContain('[/warning]');
+    expect(line).not.toContain('[/error]');
   });
 
-  it('includes epic icon and child count for epic items', () => {
-    const epicItem: WorklogBrowseItem = {
-      ...mockItem,
-      issueType: 'epic',
-      childCount: 5,
-    };
-    const factory = buildSelectionWidget(epicItem);
+  it('does not include status icons, stage icons, priority text, stage, or risk/effort', () => {
+    const factory = buildSelectionWidget(mockItem);
     const widget = factory(null, mockTheme);
     const line = widget.render(120)[0];
 
-    expect(line).toContain('🏰(5)');
-    // Epic icon should appear after audit icon and before title
-    const auditIdx = line.indexOf('❓');
-    const epicIdx = line.indexOf('🏰');
-    const titleIdx = line.indexOf('Implement chat pane');
-    expect(auditIdx).toBeLessThan(epicIdx);
-    expect(epicIdx).toBeLessThan(titleIdx);
+    // The old content should not be present
+    expect(line).not.toContain('🔄');
+    expect(line).not.toContain('🛠️');
+    expect(line).not.toContain('❓');
+    expect(line).not.toContain('⭐');
+    expect(line).not.toContain('HIGH');
+    expect(line).not.toContain('Medium/Small');
   });
 
-  it('shows epic icon without child count when childCount is 0', () => {
-    const epicItem: WorklogBrowseItem = {
-      ...mockItem,
-      issueType: 'epic',
-      childCount: 0,
-    };
-    const factory = buildSelectionWidget(epicItem);
+  it('does not include title text in the preview', () => {
+    const factory = buildSelectionWidget(mockItem);
     const widget = factory(null, mockTheme);
     const line = widget.render(120)[0];
 
-    expect(line).toContain('🏰');
-    expect(line).not.toContain('(0)');
-  });
-
-  it('does not include epic icon for non-epic items', () => {
-    const nonEpicItem: WorklogBrowseItem = {
-      ...mockItem,
-      issueType: 'feature',
-    };
-    const factory = buildSelectionWidget(nonEpicItem);
-    const widget = factory(null, mockTheme);
-    const line = widget.render(120)[0];
-
-    expect(line).not.toContain('🏰');
-    expect(line).not.toContain('[EPIC]');
-  });
-
-  it('uses text fallback for epic icon when icons are disabled', () => {
-    const epicItem: WorklogBrowseItem = {
-      ...mockItem,
-      issueType: 'epic',
-      childCount: 3,
-    };
-    process.env.WL_NO_ICONS = '1';
-    try {
-      const factory = buildSelectionWidget(epicItem);
-      const widget = factory(null, mockTheme);
-      const line = widget.render(120)[0];
-
-      expect(line).toContain('[EPIC](3)');
-      expect(line).not.toContain('🏰');
-    } finally {
-      delete process.env.WL_NO_ICONS;
-    }
-  });
-
-  it('shows epic icon alone when childCount is undefined for epic items', () => {
-    const epicItem: WorklogBrowseItem = {
-      ...mockItem,
-      issueType: 'epic',
-      childCount: undefined,
-    };
-    const factory = buildSelectionWidget(epicItem);
-    const widget = factory(null, mockTheme);
-    const line = widget.render(120)[0];
-
-    expect(line).toContain('🏰');
-    expect(line).not.toContain('(undefined)');
+    // The title should NOT appear in the preview (only ID, tags, GH)
+    expect(line).not.toContain('Implement chat pane');
   });
 });

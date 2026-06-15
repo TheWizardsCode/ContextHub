@@ -84,6 +84,8 @@ export interface WorklogBrowseItem {
   auditResult?: boolean | null;
   issueType?: string;
   childCount?: number;
+  tags?: string[];
+  githubIssueNumber?: number;
 }
 
 /**
@@ -278,6 +280,8 @@ function normalizeListPayload(payload: unknown): WorklogBrowseItem[] {
       auditResult: item?.auditResult !== undefined ? item.auditResult : undefined,
       issueType: item?.issueType ? String(item.issueType) : undefined,
       childCount: item?.childCount !== undefined ? Number(item.childCount) : undefined,
+      tags: Array.isArray(item?.tags) ? item.tags.map(String) : undefined,
+      githubIssueNumber: item?.githubIssueNumber !== undefined ? Number(item.githubIssueNumber) : undefined,
     }))
     .filter(item => item.id.length > 0);
 }
@@ -353,78 +357,54 @@ async function defaultListWorkItemsWithStage(stage: string, run: RunWlFn = runWl
  * Create a selection widget factory that renders a compact single-line
  * summary of work item metadata.
  *
- * The single line includes: title (stage-coloured), ID, status icon,
- * priority icon+text, stage, and risk/effort — in that order. If the line
- * exceeds the available width it is truncated via `truncateToWidth`.
+ * The single line displays the work item's ID, tags, and GitHub issue
+ * number in the format: `WL-123456 | tags: tui, ui | GH #608`.
+ * - Tags with no values show `tags: —` (em dash).
+ * - Items with no GitHub issue number omit the `GH #...` segment entirely.
+ *
+ * If the line exceeds the available width it is truncated via
+ * `truncateToWidth`.
  *
  * Returns a factory function that the TUI calls with (tui, theme) to get a
- * component with render(width). The theme is used to apply stage-based
- * colours to the title line.
+ * component with render(width). The theme parameter is accepted but not
+ * used since the new format is plain text (no colouring needed).
  *
  * Exported for testing.
  */
 export function buildSelectionWidget(
   item: WorklogBrowseItem,
-  settings?: Settings,
-): (tui: any, theme: PiTheme) => {
+  _settings?: Settings,
+): (tui: any, _theme: PiTheme) => {
   render: (width: number) => string[];
   invalidate: () => void;
 } {
-  return (_tui, theme) => {
+  return (_tui, _theme) => {
     let cachedWidth: number | undefined;
     let cachedLines: string[] | undefined;
 
     /**
-     * Build the single-line summary from item metadata and current theme.
-     * Called on every render after cache miss so theme changes are reflected
-     * via the mutable `theme` object that Pi updates in-place.
+     * Build the single-line summary from item metadata.
+     * Called on every render after cache miss.
      */
     const computeLine = (): string => {
-      const showIcons = settings?.showIcons ?? iconsEnabled();
-      const useIcons = showIcons;
+      const idPart = item.id;
 
-      const normalizedStatus = (item.status || '').replace(/_/g, '-');
+      // Tags segment
+      const tags = item.tags;
+      const tagStr = Array.isArray(tags) && tags.length > 0
+        ? tags.join(', ')
+        : '—';
+      const tagsPart = `tags: ${tagStr}`;
 
-      const sIcon = statusIcon(normalizedStatus, { noIcons: !useIcons });
-      const stIcon = stageIcon(item.stage, { noIcons: !useIcons });
-      const aIcon = auditIcon(item.auditResult, { noIcons: !useIcons });
-      const pIcon = priorityIcon(item.priority || '', { noIcons: !useIcons });
+      // GitHub issue segment (only if githubIssueNumber is a positive number)
+      const ghPart = (item.githubIssueNumber !== undefined && item.githubIssueNumber > 0)
+        ? `GH #${item.githubIssueNumber}`
+        : null;
 
-      const priorityText = item.priority ?? '—';
-      const priorityPart = pIcon && useIcons
-        ? `${pIcon}${priorityText.toUpperCase()}`
-        : (pIcon || priorityText.toUpperCase());
+      // Assemble segments with pipe separators
+      const parts = [idPart, tagsPart, ghPart].filter(Boolean);
 
-      const stage = item.stage ?? '—';
-      const risk = item.risk ?? '—';
-      const effort = item.effort ?? '—';
-
-      // Add epic icon + child count for epic items
-      let epicSuffix = '';
-      if (item.issueType === 'epic') {
-        const eIcon = epicIcon({ noIcons: !useIcons });
-        const countStr = (item.childCount !== undefined && item.childCount > 0) ? `(${item.childCount})` : '';
-        epicSuffix = `${eIcon}${countStr}`;
-      }
-
-      const colouredTitle = applyStageColour(
-        item.title,
-        item.stage,
-        item.status,
-        theme,
-      );
-
-      const iconPrefix = [sIcon, stIcon, aIcon, epicSuffix].filter(Boolean).join(' ');
-
-      const parts = [
-        iconPrefix,
-        colouredTitle,
-        priorityPart,
-        stage,
-        `${risk}/${effort}`,
-      ].filter(Boolean);
-
-      return parts.join(' ');
+      return parts.join(' | ');
     };
 
     return {
@@ -1063,6 +1043,10 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
           lastAnnouncedId = item.id;
           ctx.ui.setWidget?.('worklog-browse-selection', buildSelectionWidget(item, currentSettings), { placement: 'belowEditor' });
         };
+
+        // Announce the first item (index 0) immediately so the preview
+        // widget appears without requiring the user to press an arrow key.
+        announceSelection(items[0]);
 
         const result = await chooseWorkItem(items, ctx, announceSelection);
         // Handle shortcut result - set editor text after browse list modal closes

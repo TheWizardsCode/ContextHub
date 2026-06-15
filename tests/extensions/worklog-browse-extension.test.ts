@@ -178,12 +178,12 @@ describe('Worklog browse pi extension', () => {
     expect(setWidget).toHaveBeenNthCalledWith(1, 'worklog-browse-selection', expect.any(Function), { placement: 'belowEditor' });
     expect(setWidget).toHaveBeenNthCalledWith(2, 'worklog-browse-selection', expect.any(Function), { placement: 'belowEditor' });
 
-    // Verify the factory function produces correct output
+    // Verify the factory function produces correct output for the first item (WL-1)
     const factory1 = setWidget.mock.calls[0][1];
     const mockTheme1 = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
     const comp1 = factory1({}, mockTheme1);
     expect(comp1.render(80)).toEqual([
-      '🔄 📋 ❓ Two ⭐HIGH plan_complete Medium/Small',
+      'WL-1 | tags: —',
     ]);
 
     // The scrollable detail widget is now shown via ctx.ui.custom() for proper keyboard focus.
@@ -232,7 +232,7 @@ describe('Worklog browse pi extension', () => {
     const mockTheme2 = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
     const comp = factory({}, mockTheme2);
     expect(comp.render(80)).toEqual([
-      '🔓 ❓ One — — —/—',
+      'WL-1 | tags: —',
     ]);
   });
   it('reports explicit empty state when no items exist', async () => {
