@@ -26,7 +26,7 @@
     "key": "i",
     "command": "/skill:implement <id>",
     "view": "both",
-    "stages": ["intake_complete", "plan_complete"],
+    "stages": ["intake_complete", "plan_complete", "in_progress"],
     "label": "implement",
     "description": "Run the implement workflow on the selected work item"
   },
@@ -34,7 +34,7 @@
     "key": "a",
     "command": "/skill:audit <id>",
     "view": "both",
-    "stages": ["in_review"],
+    "stages": ["in_progress", "in_review"],
     "label": "audit",
     "description": "Run an audit on the selected work item"
   },
