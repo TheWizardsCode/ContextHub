@@ -96,7 +96,7 @@ export function getStatusIcon(status: string): string {
   switch (status) {
     case 'open': return '🟢';
     case 'in_progress': return '🔄';
-    case 'completed': return '✅';
+    case 'completed': return '✔️';
     case 'blocked': return '⛔';
     case 'deleted': return '🗑️';
     default: return '○';

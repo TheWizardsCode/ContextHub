@@ -62,10 +62,10 @@ across the TUI (blessed) and CLI (chalk) rendering paths. It covers:
 |----------------|--------|---------------|---------------------------|
 | open           | `🟢`   | `[OPEN]`      | "Status: Open"            |
 | in-progress    | `🔄`   | `[INPR]`      | "Status: In progress"     |
-| completed      | `✅`   | `[DONE]`      | "Status: Completed"       |
+| completed      | `✔️`   | `[DONE]`      | "Status: Completed"       |
 | blocked        | `⛔`   | `[BLKD]`      | "Status: Blocked"         |
 | deleted        | `🗑️`  | `[DEL]`       | "Status: Deleted"         |
-| input_needed   | `❓`   | `[HELP]`      | "Status: Input needed"    |
+| input_needed   | `💬`   | `[HELP]`      | "Status: Input needed"    |
 
 ---
 

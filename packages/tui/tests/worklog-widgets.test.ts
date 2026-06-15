@@ -170,7 +170,7 @@ describe('getStatusIcon', () => {
   });
 
   it('returns a check icon for completed', () => {
-    expect(getStatusIcon('completed')).toBe('✅');
+    expect(getStatusIcon('completed')).toBe('✔️');
   });
 
   it('returns a blocked icon for blocked', () => {

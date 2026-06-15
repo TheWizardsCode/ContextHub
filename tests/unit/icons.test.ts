@@ -81,7 +81,7 @@ describe('statusIcon', () => {
   });
 
   it('returns emoji for completed status', () => {
-    expect(statusIcon('completed')).toBe('\u{2705}'); // ✅
+    expect(statusIcon('completed')).toBe('\u{2714}\u{FE0F}'); // ✔️
   });
 
   it('returns emoji for blocked status', () => {
@@ -93,7 +93,7 @@ describe('statusIcon', () => {
   });
 
   it('returns emoji for input_needed status', () => {
-    expect(statusIcon('input_needed')).toBe('\u{2753}'); // ❓
+    expect(statusIcon('input_needed')).toBe('\u{1F4AC}'); // 💬
   });
 
   it('returns empty string for unknown status', () => {
@@ -109,7 +109,7 @@ describe('statusIcon', () => {
   it('is case-insensitive', () => {
     expect(statusIcon('OPEN')).toBe('\u{1F7E2}');
     expect(statusIcon('In-Progress')).toBe('\u{1F504}');
-    expect(statusIcon('COMPLETED')).toBe('\u{2705}');
+    expect(statusIcon('COMPLETED')).toBe('\u{2714}\u{FE0F}');
   });
 
   describe('with noIcons option', () => {

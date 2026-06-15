@@ -45,10 +45,10 @@ const PRIORITY_LABEL: Record<string, string> = {
 const STATUS_ICON: Record<string, string> = {
   open:          '\u{1F7E2}',   // 🟢 Green circle
   'in-progress': '\u{1F504}',  // 🔄 Arrows (recycling)
-  completed:     '\u{2705}',   // ✅ Check mark
+  completed:     '\u{2714}\u{FE0F}', // ✔️ Heavy check mark
   blocked:       '\u{26D4}',   // ⛔ No entry
   deleted:       '\u{1F5D1}\u{FE0F}', // 🗑️ Wastebasket
-  input_needed:  '\u{2753}',   // ❓ Question mark
+  input_needed:  '\u{1F4AC}',  // 💬 Speech balloon
 };
 
 const STATUS_FALLBACK: Record<string, string> = {
