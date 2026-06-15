@@ -57,8 +57,6 @@ describe('buildSelectionWidget', () => {
 
     // Title (stage-coloured)
     expect(line).toContain('[warning]Implement chat pane[/warning]');
-    // ID
-    expect(line).toContain('<WL-001>');
     // Status icon (in_progress → 🔄)
     expect(line).toContain('🔄');
     // Stage icon (in_progress → 🛠️)
@@ -72,10 +70,10 @@ describe('buildSelectionWidget', () => {
     // Risk/Effort
     expect(line).toContain('Medium/Small');
 
-    // Verify the title comes before the ID in the output
+    // Verify icons come before title
+    const statusIdx = line.indexOf('🔄');
     const titleIdx = line.indexOf('Implement chat pane');
-    const idIdx = line.indexOf('<WL-001>');
-    expect(titleIdx).toBeLessThan(idIdx);
+    expect(statusIdx).toBeLessThan(titleIdx);
   });
 
   it('applies stage colour to the title', () => {
@@ -189,7 +187,6 @@ describe('buildSelectionWidget', () => {
     // Unknown status should have no icon (empty string)
     // The line should still contain all other metadata
     expect(line).toContain('Implement chat pane');
-    expect(line).toContain('<WL-001>');
     expect(line).toContain('⭐HIGH');
   });
 });

@@ -10,19 +10,19 @@ import {
 import { ShortcutRegistry } from '../../packages/tui/extensions/shortcut-config.js';
 
 describe('Worklog browse pi extension', () => {
-  it('formats browse options with status, stage, and audit icons before the title', () => {
+  it('formats browse options with status, stage, and audit icons before the title (no ID)', () => {
     expect(formatBrowseOption({ id: 'WL-42', title: 'Implement thing', status: 'open' })).toBe(
-      '🟢 ❓ Implement thing (WL-42)',
+      '🟢 ❓ Implement thing',
     );
   });
 
-  it('truncates title to keep id visible within width constraints', () => {
+  it('truncates long title to fit width constraints', () => {
     expect(
       formatBrowseOption(
         { id: 'WL-123456', title: 'A very long work item title that will not fit', status: 'open' },
         24,
       ),
-    ).toBe('🟢 ❓ A very… (WL-123456)');
+    ).toBe('🟢 ❓ A very long work …');
   });
 
   const registerCommand = vi.fn();
@@ -123,7 +123,7 @@ describe('Worklog browse pi extension', () => {
     const mockTheme1 = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
     const comp1 = factory1({}, mockTheme1);
     expect(comp1.render(80)).toEqual([
-      '🔄 📋 ❓ Two <WL-2> ⭐HIGH plan_complete Medium/Small',
+      '🔄 📋 ❓ Two ⭐HIGH plan_complete Medium/Small',
     ]);
 
     // The scrollable detail widget is now shown via ctx.ui.custom() for proper keyboard focus.
@@ -172,7 +172,7 @@ describe('Worklog browse pi extension', () => {
     const mockTheme2 = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
     const comp = factory({}, mockTheme2);
     expect(comp.render(80)).toEqual([
-      '🟢 ❓ One <WL-1> — — —/—',
+      '🟢 ❓ One — — —/—',
     ]);
   });
   it('reports explicit empty state when no items exist', async () => {

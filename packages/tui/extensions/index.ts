@@ -108,7 +108,6 @@ export function formatBrowseOption(
   maxWidth?: number,
   theme?: PiTheme,
 ): string {
-  const idPart = `(${item.id})`;
   const titleText = item.title;
 
   // Build icon prefix: status + stage + audit
@@ -120,8 +119,6 @@ export function formatBrowseOption(
   const iconPrefix = [sIcon, stIcon, aIcon].filter(Boolean).join(' ');
   const prefixStr = iconPrefix.length > 0 ? `${iconPrefix} ` : '';
 
-  const fullVisibleLength = prefixStr.length + titleText.length + 1 + idPart.length; // +1 for space
-
   // Apply colour to title if theme is provided
   const formatTitle = (title: string): string => {
     if (theme) {
@@ -130,18 +127,13 @@ export function formatBrowseOption(
     return title;
   };
 
-  if (!maxWidth || maxWidth <= 0 || fullVisibleLength <= maxWidth) {
-    return `${prefixStr}${formatTitle(titleText)} ${idPart}`;
+  const fullLine = `${prefixStr}${formatTitle(titleText)}`;
+
+  if (!maxWidth || maxWidth <= 0) {
+    return fullLine;
   }
 
-  const separatorAndId = ` ${idPart}`;
-  if (maxWidth <= prefixStr.length + separatorAndId.length) {
-    return truncateToWidth(idPart, maxWidth);
-  }
-
-  const titleWidth = maxWidth - prefixStr.length - separatorAndId.length;
-  const truncatedTitle = truncateToWidth(titleText, titleWidth);
-  return `${prefixStr}${formatTitle(truncatedTitle)}${separatorAndId}`;
+  return truncateToWidth(fullLine, maxWidth);
 }
 
 function extractJsonObject(raw: string): unknown {
@@ -330,11 +322,10 @@ export function buildSelectionWidget(
     // Build icon prefix: status + stage + audit
     const iconPrefix = [sIcon, stIcon, aIcon].filter(Boolean).join(' ');
 
-    // Build single-line parts: icons, title, ID, priority icon+text, stage text, risk/effort
+    // Build single-line parts: icons, title, priority icon+text, stage text, risk/effort
     const parts = [
       iconPrefix,
       colouredTitle,
-      `<${item.id}>`,
       priorityPart,
       stage,
       `${risk}/${effort}`,
