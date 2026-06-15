@@ -189,4 +189,83 @@ describe('buildSelectionWidget', () => {
     expect(line).toContain('Implement chat pane');
     expect(line).toContain('⭐HIGH');
   });
+
+  it('includes epic icon and child count for epic items', () => {
+    const epicItem: WorklogBrowseItem = {
+      ...mockItem,
+      issueType: 'epic',
+      childCount: 5,
+    };
+    const factory = buildSelectionWidget(epicItem);
+    const widget = factory(null, mockTheme);
+    const line = widget.render(120)[0];
+
+    expect(line).toContain('🏰(5)');
+    // Epic icon should appear after audit icon and before title
+    const auditIdx = line.indexOf('❓');
+    const epicIdx = line.indexOf('🏰');
+    const titleIdx = line.indexOf('Implement chat pane');
+    expect(auditIdx).toBeLessThan(epicIdx);
+    expect(epicIdx).toBeLessThan(titleIdx);
+  });
+
+  it('shows epic icon without child count when childCount is 0', () => {
+    const epicItem: WorklogBrowseItem = {
+      ...mockItem,
+      issueType: 'epic',
+      childCount: 0,
+    };
+    const factory = buildSelectionWidget(epicItem);
+    const widget = factory(null, mockTheme);
+    const line = widget.render(120)[0];
+
+    expect(line).toContain('🏰');
+    expect(line).not.toContain('(0)');
+  });
+
+  it('does not include epic icon for non-epic items', () => {
+    const nonEpicItem: WorklogBrowseItem = {
+      ...mockItem,
+      issueType: 'feature',
+    };
+    const factory = buildSelectionWidget(nonEpicItem);
+    const widget = factory(null, mockTheme);
+    const line = widget.render(120)[0];
+
+    expect(line).not.toContain('🏰');
+    expect(line).not.toContain('[EPIC]');
+  });
+
+  it('uses text fallback for epic icon when icons are disabled', () => {
+    const epicItem: WorklogBrowseItem = {
+      ...mockItem,
+      issueType: 'epic',
+      childCount: 3,
+    };
+    process.env.WL_NO_ICONS = '1';
+    try {
+      const factory = buildSelectionWidget(epicItem);
+      const widget = factory(null, mockTheme);
+      const line = widget.render(120)[0];
+
+      expect(line).toContain('[EPIC](3)');
+      expect(line).not.toContain('🏰');
+    } finally {
+      delete process.env.WL_NO_ICONS;
+    }
+  });
+
+  it('shows epic icon alone when childCount is undefined for epic items', () => {
+    const epicItem: WorklogBrowseItem = {
+      ...mockItem,
+      issueType: 'epic',
+      childCount: undefined,
+    };
+    const factory = buildSelectionWidget(epicItem);
+    const widget = factory(null, mockTheme);
+    const line = widget.render(120)[0];
+
+    expect(line).toContain('🏰');
+    expect(line).not.toContain('(undefined)');
+  });
 });

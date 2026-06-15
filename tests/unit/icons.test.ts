@@ -12,6 +12,9 @@ import {
   auditIcon,
   auditLabel,
   auditFallback,
+  epicIcon,
+  epicLabel,
+  epicFallback,
   iconsEnabled,
 } from '../../src/icons.js';
 
@@ -493,5 +496,29 @@ describe('auditLabel', () => {
 
   it('returns label for unknown (undefined)', () => {
     expect(auditLabel(undefined)).toBe('Audit: Not run');
+  });
+});
+
+describe('epicIcon', () => {
+  it('returns castle emoji for epic', () => {
+    expect(epicIcon()).toBe('\u{1F3F0}'); // 🏰
+  });
+
+  describe('with noIcons option', () => {
+    it('returns text fallback for epic', () => {
+      expect(epicIcon({ noIcons: true })).toBe('[EPIC]');
+    });
+  });
+});
+
+describe('epicLabel', () => {
+  it('returns label for epic', () => {
+    expect(epicLabel()).toBe('Issue Type: Epic');
+  });
+});
+
+describe('epicFallback', () => {
+  it('returns bracketed text for epic', () => {
+    expect(epicFallback()).toBe('[EPIC]');
   });
 });

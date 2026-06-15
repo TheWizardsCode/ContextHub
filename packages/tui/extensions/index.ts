@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { priorityIcon, statusIcon, stageIcon, auditIcon, iconsEnabled } from '../../../src/icons.js';
+import { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled } from '../../../src/icons.js';
 import { applyStageColour, type PiTheme } from './worklog-helpers.js';
 import { truncateToTerminalWidth, wrapToTerminalWidth } from './terminal-utils.js';
 import { type ShortcutRegistry, loadShortcutConfig } from './shortcut-config.js';
@@ -82,6 +82,8 @@ export interface WorklogBrowseItem {
   effort?: string;
   description?: string;
   auditResult?: boolean | null;
+  issueType?: string;
+  childCount?: number;
 }
 
 /**
@@ -170,12 +172,22 @@ export function formatBrowseOption(
   const showIcons = settings?.showIcons ?? iconsEnabled();
   const noIcons = !showIcons;
 
-  // Build icon prefix: status + stage + audit
+  // Build icon prefix: status + stage + audit + (epic icon + child count)
   const normalizedStatus = (item.status || '').replace(/_/g, '-');
   const sIcon = statusIcon(normalizedStatus, { noIcons });
   const stIcon = stageIcon(item.stage, { noIcons });
   const aIcon = auditIcon(item.auditResult, { noIcons });
-  const iconPrefix = [sIcon, stIcon, aIcon].filter(Boolean).join(' ');
+  const coreIcons = [sIcon, stIcon, aIcon].filter(Boolean).join(' ');
+
+  // Add epic icon + child count for epic items
+  let epicSuffix = '';
+  if (item.issueType === 'epic') {
+    const eIcon = epicIcon({ noIcons });
+    const countStr = (item.childCount !== undefined && item.childCount > 0) ? `(${item.childCount})` : '';
+    epicSuffix = `${eIcon}${countStr}`;
+  }
+
+  const iconPrefix = [coreIcons, epicSuffix].filter(Boolean).join(' ');
   const prefixStr = iconPrefix.length > 0 ? `${iconPrefix} ` : '';
 
   // Apply colour to title if theme is provided
@@ -264,6 +276,8 @@ function normalizeListPayload(payload: unknown): WorklogBrowseItem[] {
       effort: item?.effort ? String(item.effort) : undefined,
       description: item?.description ? String(item.description) : undefined,
       auditResult: item?.auditResult !== undefined ? item.auditResult : undefined,
+      issueType: item?.issueType ? String(item.issueType) : undefined,
+      childCount: item?.childCount !== undefined ? Number(item.childCount) : undefined,
     }))
     .filter(item => item.id.length > 0);
 }
@@ -385,6 +399,14 @@ export function buildSelectionWidget(
       const risk = item.risk ?? '—';
       const effort = item.effort ?? '—';
 
+      // Add epic icon + child count for epic items
+      let epicSuffix = '';
+      if (item.issueType === 'epic') {
+        const eIcon = epicIcon({ noIcons: !useIcons });
+        const countStr = (item.childCount !== undefined && item.childCount > 0) ? `(${item.childCount})` : '';
+        epicSuffix = `${eIcon}${countStr}`;
+      }
+
       const colouredTitle = applyStageColour(
         item.title,
         item.stage,
@@ -392,7 +414,7 @@ export function buildSelectionWidget(
         theme,
       );
 
-      const iconPrefix = [sIcon, stIcon, aIcon].filter(Boolean).join(' ');
+      const iconPrefix = [sIcon, stIcon, aIcon, epicSuffix].filter(Boolean).join(' ');
 
       const parts = [
         iconPrefix,

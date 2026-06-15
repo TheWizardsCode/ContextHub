@@ -51,6 +51,40 @@ describe('Worklog browse pi extension', () => {
     ).toBe('🔓 ❓ A very long work …');
   });
 
+  it('formats epic items with epic icon and no child count when childCount is 0', () => {
+    expect(formatBrowseOption({ id: 'WL-99', title: 'Epic feature', status: 'open', issueType: 'epic', childCount: 0 })).toBe(
+      '🔓 ❓ 🏰 Epic feature',
+    );
+  });
+
+  it('formats epic items with epic icon and child count when childCount > 0', () => {
+    expect(formatBrowseOption({ id: 'WL-99', title: 'Epic feature', status: 'open', issueType: 'epic', childCount: 5 })).toBe(
+      '🔓 ❓ 🏰(5) Epic feature',
+    );
+  });
+
+  it('does not add epic icon for non-epic items', () => {
+    expect(formatBrowseOption({ id: 'WL-42', title: 'Regular task', status: 'open', issueType: 'feature' })).toBe(
+      '🔓 ❓ Regular task',
+    );
+  });
+
+  it('formats epic items with fallback text when icons are disabled', () => {
+    const origEnv = process.env.WL_NO_ICONS;
+    process.env.WL_NO_ICONS = '1';
+    try {
+      expect(formatBrowseOption({ id: 'WL-99', title: 'Epic feature', status: 'open', issueType: 'epic', childCount: 3 })).toBe(
+        '[OPEN] [UNKN] [EPIC](3) Epic feature',
+      );
+    } finally {
+      if (origEnv === undefined) {
+        delete process.env.WL_NO_ICONS;
+      } else {
+        process.env.WL_NO_ICONS = origEnv;
+      }
+    }
+  });
+
   const registerCommand = vi.fn();
   const registerShortcut = vi.fn();
   const sendMessage = vi.fn();
