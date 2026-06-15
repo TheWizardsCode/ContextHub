@@ -1396,4 +1396,68 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       expect(cache.has(item.id)).toBe(true);
     });
   });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // childCount enrichment (WL-0MQF32M6P003GCT9)
+  // `wl next --json` output should include a `childCount` field for each
+  // work item representing the number of direct children.
+  // ─────────────────────────────────────────────────────────────────────
+  describe('childCount enrichment (WL-0MQF32M6P003GCT9)', () => {
+    it('should return 0 for items with no children', () => {
+      const item = db.create({ title: 'Leaf item', priority: 'medium', status: 'open' });
+      const counts = db.getChildCounts();
+      // Items not in the map have no children (count is undefined)
+      expect(counts.has(item.id)).toBe(false);
+    });
+
+    it('should count direct children correctly', () => {
+      const parent = db.create({ title: 'Parent', priority: 'medium', status: 'open' });
+      db.create({ title: 'Child 1', priority: 'medium', status: 'open', parentId: parent.id });
+      db.create({ title: 'Child 2', priority: 'medium', status: 'open', parentId: parent.id });
+
+      const counts = db.getChildCounts();
+      expect(counts.get(parent.id)).toBe(2);
+    });
+
+    it('should not count grandchildren', () => {
+      const grandparent = db.create({ title: 'Grandparent', priority: 'medium', status: 'open' });
+      const parent = db.create({ title: 'Parent', priority: 'medium', status: 'open', parentId: grandparent.id });
+      db.create({ title: 'Child', priority: 'medium', status: 'open', parentId: parent.id });
+
+      const counts = db.getChildCounts();
+      expect(counts.get(grandparent.id)).toBe(1);
+      expect(counts.get(parent.id)).toBe(1);
+    });
+
+    it('should count children regardless of their status', () => {
+      const parent = db.create({ title: 'Parent', priority: 'medium', status: 'open' });
+      db.create({ title: 'Active child', priority: 'medium', status: 'open', parentId: parent.id });
+      db.create({ title: 'Completed child', priority: 'medium', status: 'completed', parentId: parent.id });
+      db.create({ title: 'Deleted child', priority: 'medium', status: 'deleted', parentId: parent.id });
+
+      const counts = db.getChildCounts();
+      expect(counts.get(parent.id)).toBe(3);
+    });
+
+    it('should handle items with no parentId correctly', () => {
+      db.create({ title: 'Root A', priority: 'medium', status: 'open' });
+      db.create({ title: 'Root B', priority: 'medium', status: 'open' });
+
+      const counts = db.getChildCounts();
+      // Neither has children, so neither appears in the map
+      expect(counts.size).toBe(0);
+    });
+
+    it('should return consistent results with the full item set', () => {
+      const p1 = db.create({ title: 'Parent 1', priority: 'high', status: 'open' });
+      const p2 = db.create({ title: 'Parent 2', priority: 'high', status: 'open' });
+      db.create({ title: 'C1', priority: 'medium', status: 'open', parentId: p1.id });
+      db.create({ title: 'C2', priority: 'medium', status: 'open', parentId: p1.id });
+      db.create({ title: 'C3', priority: 'medium', status: 'open', parentId: p2.id });
+
+      const counts = db.getChildCounts();
+      expect(counts.get(p1.id)).toBe(2);
+      expect(counts.get(p2.id)).toBe(1);
+    });
+  });
 });

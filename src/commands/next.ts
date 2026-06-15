@@ -82,13 +82,19 @@ export default function register(ctx: PluginContext): void {
         : '';
 
       if (utils.isJsonMode()) {
+        // Pre-compute child counts for the full item set so we can enrich
+        // each work item with the number of direct children in O(1) per item
+        // instead of N+1 queries.
+        const childCounts = db.getChildCounts();
+
         // Enrich each work item with audit result data from the dedicated table.
         // This is needed so consumers (e.g. Pi TUI extension) can show the
         // correct audit icon (✅/❌/❓) without an extra round-trip per item.
         const enrichWorkItem = (wi: any) => {
           if (!wi) return wi;
           const auditResult = db.getAuditResult(wi.id);
-          return { ...wi, auditResult: auditResult?.readyToClose ?? null };
+          const childCount = childCounts.get(wi.id) ?? 0;
+          return { ...wi, auditResult: auditResult?.readyToClose ?? null, childCount };
         };
 
         if (count === 1) {

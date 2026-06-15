@@ -944,6 +944,24 @@ export class WorklogDatabase {
   }
 
   /**
+   * Get the number of direct children for each work item.
+   * Returns a Map<itemId, count>.
+   * If items is provided, only counts within that subset; otherwise uses all items.
+   * This is more efficient than calling getChildren() for every item individually
+   * because it computes the full map in a single O(n) pass.
+   */
+  getChildCounts(items?: WorkItem[]): Map<string, number> {
+    const source = items ?? this.store.getAllWorkItems();
+    const counts = new Map<string, number>();
+    for (const item of source) {
+      if (item.parentId) {
+        counts.set(item.parentId, (counts.get(item.parentId) ?? 0) + 1);
+      }
+    }
+    return counts;
+  }
+
+  /**
    * Get children that are not closed or deleted
    */
   private getNonClosedChildren(parentId: string): WorkItem[] {

@@ -433,6 +433,25 @@ Options:
 `--recency-policy <policy>` — Recency handling for the re-sort step: `prefer`, `avoid`, or `ignore` (optional; default: `ignore`).
 `--prefix <prefix>` (optional)
 
+#### JSON output (`--json`)
+
+When using `--json` mode with a single item result, the output contains:
+
+- `success` (boolean)
+- `workItem` (object) — the work item fields including:
+  - Standard fields: `id`, `title`, `description`, `status`, `priority`, `sortIndex`, `createdAt`, `updatedAt`, `tags`, `assignee`, `stage`, `parentId`, etc.
+  - `auditResult` — the audit readiness value (`true`, `false`, or `null`).
+  - `childCount` (integer) — number of direct children for this work item. Items with no children return `0`.
+- `reason` (string) — the selection reason.
+
+When requesting multiple items (`-n <count>`), the output wraps results in:
+
+- `success` (boolean)
+- `count` (integer) — number of results returned.
+- `requested` (integer) — the requested count.
+- `results` (array) — array of result objects, each with `workItem` (including `childCount`) and `reason`.
+- `note` (string, optional) — note about available vs requested counts.
+
 Examples:
 
 ```sh

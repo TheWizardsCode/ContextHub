@@ -72,6 +72,7 @@ Worklog uses a **dual-storage model** to combine the benefits of persistent data
 - **tags**: Array of string tags
 - **assignee**: Person assigned to the work item
 - **stage**: Current stage of the work item in the workflow
+- **childCount** (computed, `wl next --json` only): Number of direct children for this work item. Not stored in JSONL; computed at query time from parent-child relationships. Items with no children return `0`. See [`wl next` JSON output](CLI.md#next-options) for details.
 - **issueType**: Optional interoperability field for imported issue types
 - **createdBy**: Optional interoperability field for imported creator/actor
 - **deletedBy**: Optional interoperability field for imported deleter/actor
