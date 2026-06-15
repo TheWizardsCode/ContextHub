@@ -206,7 +206,7 @@ describe('loadShortcutConfig', () => {
   it('loads valid entries from shortcuts.json', () => {
     const registry = loadShortcutConfig();
     const entries = registry.getEntries();
-    expect(entries).toHaveLength(9);
+    expect(entries).toHaveLength(11);
 
     const createEntry = entries.find(e => e.key === 'c');
     expect(createEntry).toBeDefined();
@@ -248,7 +248,7 @@ describe('loadShortcutConfig', () => {
     expect(auditEntry!.label).toBe('audit');
     expect(auditEntry!.description).toBe('Run an audit on the selected work item');
 
-    expect(entries.filter(e => e.key === '').length).toBe(4); // 4 chord entries have empty key
+    expect(entries.filter(e => e.key === '').length).toBe(5); // 5 chord entries have empty key
   });
 
   it('has no duplicate key+view or chord+view combinations in shortcuts.json', () => {
@@ -312,7 +312,7 @@ describe('loadShortcutConfig', () => {
     const entries = registry.getEntries();
 
     const upChords = registry.getChordEntries();
-    expect(upChords).toHaveLength(4);
+    expect(upChords).toHaveLength(5);
 
     const upEntry = upChords.find((e: any) =>
       Array.isArray((e as any).chord) && (e as any).chord[0] === 'u' && (e as any).chord[1] === 'p',

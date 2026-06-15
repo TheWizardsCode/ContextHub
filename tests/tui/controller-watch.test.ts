@@ -896,7 +896,11 @@ describe('TuiController - Database Watch', () => {
     currentMtime = 2000;
 
     watchCallback('change', 'worklog.db');
-    await new Promise(resolve => setTimeout(resolve, 400));
+    // Wait 2000ms to provide ample margin for the timer cascade:
+    //   watch debounce (75ms) + refresh debounce (300ms) = ~376ms minimum.
+    // The original 400ms left only ~24ms margin, causing intermittent
+    // failures under event loop contention during full test suite runs.
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
     expect(listCallCount).toBeGreaterThan(initialListCallCount);
     // Even though the dataset appears unchanged, the watcher must re-render
