@@ -251,6 +251,29 @@ describe('loadShortcutConfig', () => {
     expect(entries.filter(e => e.key === '').length).toBe(4); // 4 chord entries have empty key
   });
 
+  it('has no duplicate key+view or chord+view combinations in shortcuts.json', () => {
+    const registry = loadShortcutConfig();
+    const entries = registry.getEntries();
+
+    const seen = new Set<string>();
+    const duplicates: string[] = [];
+
+    for (const entry of entries) {
+      const chord = (entry as Record<string, unknown>).chord;
+      const composite = Array.isArray(chord)
+        ? `${(chord as string[]).join('+')}:${entry.view}`
+        : `${entry.key}:${entry.view}`;
+
+      if (seen.has(composite)) {
+        duplicates.push(composite);
+      } else {
+        seen.add(composite);
+      }
+    }
+
+    expect(duplicates).toEqual([]);
+  });
+
   it('lookup resolves shortcuts loaded from file with stage parameter', () => {
     const registry = loadShortcutConfig();
 
