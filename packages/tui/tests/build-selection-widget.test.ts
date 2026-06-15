@@ -50,7 +50,7 @@ describe('buildSelectionWidget', () => {
     expect(lines).toHaveLength(1);
   });
 
-  it('includes title, id, status icon, priority, stage, and risk/effort in order', () => {
+  it('includes stage and audit icons alongside status, priority, stage, and risk/effort in order', () => {
     const factory = buildSelectionWidget(mockItem);
     const widget = factory(null, mockTheme);
     const line = widget.render(120)[0];
@@ -61,9 +61,13 @@ describe('buildSelectionWidget', () => {
     expect(line).toContain('<WL-001>');
     // Status icon (in_progress → 🔄)
     expect(line).toContain('🔄');
+    // Stage icon (in_progress → 🛠️)
+    expect(line).toContain('🛠️');
+    // Audit icon (undefined → ❓ unknown)
+    expect(line).toContain('❓');
     // Priority icon+text (high → ⭐HIGH)
     expect(line).toContain('⭐HIGH');
-    // Stage
+    // Stage text
     expect(line).toContain('in_progress');
     // Risk/Effort
     expect(line).toContain('Medium/Small');
@@ -104,7 +108,7 @@ describe('buildSelectionWidget', () => {
     const widget = factory(null, mockTheme);
     const line = widget.render(50)[0];
     // Should be truncated with ellipsis
-    expect(line.length).toBeLessThanOrEqual(53); // 50 + '…' (3 bytes in some encodings)
+    expect(line.length).toBeLessThanOrEqual(55); // 50 + icon prefix + '…'
     expect(line).toContain('…');
   });
 
@@ -144,10 +148,16 @@ describe('buildSelectionWidget', () => {
 
       // Status fallback for in_progress
       expect(line).toContain('[INPR]');
+      // Stage fallback for in_progress
+      expect(line).toContain('[PROG]');
+      // Audit fallback for unknown
+      expect(line).toContain('[UNKN]');
       // Priority fallback for high
       expect(line).toContain('[HIGH]');
       // No emoji should be present
       expect(line).not.toContain('🔄');
+      expect(line).not.toContain('🛠️');
+      expect(line).not.toContain('❓');
       expect(line).not.toContain('⭐');
     } finally {
       delete process.env.WL_NO_ICONS;

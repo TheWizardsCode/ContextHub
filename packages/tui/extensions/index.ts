@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { priorityIcon, statusIcon, iconsEnabled } from '../../../src/icons.js';
+import { priorityIcon, statusIcon, stageIcon, auditIcon, iconsEnabled } from '../../../src/icons.js';
 import { applyStageColour, type WorkItem, type PiTheme } from './worklog-helpers.js';
 import { truncateToTerminalWidth, wrapToTerminalWidth } from './terminal-utils.js';
 import { type ShortcutRegistry, loadShortcutConfig } from './shortcut-config.js';
@@ -35,6 +35,7 @@ export interface WorklogBrowseItem {
   risk?: string;
   effort?: string;
   description?: string;
+  auditResult?: boolean | null;
 }
 
 type RunWlFn = (args: string[], includeJson?: boolean) => Promise<string>;
@@ -109,7 +110,17 @@ export function formatBrowseOption(
 ): string {
   const idPart = `(${item.id})`;
   const titleText = item.title;
-  const fullVisibleLength = titleText.length + 1 + idPart.length; // +1 for space
+
+  // Build icon prefix: status + stage + audit
+  const useIcons = iconsEnabled();
+  const normalizedStatus = (item.status || '').replace(/_/g, '-');
+  const sIcon = statusIcon(normalizedStatus, { noIcons: !useIcons });
+  const stIcon = stageIcon(item.stage, { noIcons: !useIcons });
+  const aIcon = auditIcon(item.auditResult, { noIcons: !useIcons });
+  const iconPrefix = [sIcon, stIcon, aIcon].filter(Boolean).join(' ');
+  const prefixStr = iconPrefix.length > 0 ? `${iconPrefix} ` : '';
+
+  const fullVisibleLength = prefixStr.length + titleText.length + 1 + idPart.length; // +1 for space
 
   // Apply colour to title if theme is provided
   const formatTitle = (title: string): string => {
@@ -120,17 +131,17 @@ export function formatBrowseOption(
   };
 
   if (!maxWidth || maxWidth <= 0 || fullVisibleLength <= maxWidth) {
-    return `${formatTitle(titleText)} ${idPart}`;
+    return `${prefixStr}${formatTitle(titleText)} ${idPart}`;
   }
 
   const separatorAndId = ` ${idPart}`;
-  if (maxWidth <= separatorAndId.length) {
+  if (maxWidth <= prefixStr.length + separatorAndId.length) {
     return truncateToWidth(idPart, maxWidth);
   }
 
-  const titleWidth = maxWidth - separatorAndId.length;
+  const titleWidth = maxWidth - prefixStr.length - separatorAndId.length;
   const truncatedTitle = truncateToWidth(titleText, titleWidth);
-  return `${formatTitle(truncatedTitle)}${separatorAndId}`;
+  return `${prefixStr}${formatTitle(truncatedTitle)}${separatorAndId}`;
 }
 
 function extractJsonObject(raw: string): unknown {
@@ -201,6 +212,7 @@ function normalizeListPayload(payload: unknown): WorklogBrowseItem[] {
       risk: item?.risk ? String(item.risk) : undefined,
       effort: item?.effort ? String(item.effort) : undefined,
       description: item?.description ? String(item.description) : undefined,
+      auditResult: item?.auditResult !== undefined ? item.auditResult : undefined,
     }))
     .filter(item => item.id.length > 0);
 }
@@ -289,8 +301,10 @@ export function buildSelectionWidget(
     // Normalize status: worklog uses underscore (in_progress) but icons.ts uses hyphen (in-progress)
     const normalizedStatus = (item.status || '').replace(/_/g, '-');
 
-    // Get emoji icons for status and priority (text fallbacks if icons disabled)
+    // Get emoji icons for status, stage, audit, and priority (text fallbacks if icons disabled)
     const sIcon = statusIcon(normalizedStatus, { noIcons: !useIcons });
+    const stIcon = stageIcon(item.stage, { noIcons: !useIcons });
+    const aIcon = auditIcon(item.auditResult, { noIcons: !useIcons });
     const pIcon = priorityIcon(item.priority || '', { noIcons: !useIcons });
 
     // Build priority part: icon + uppercase text when using emoji,
@@ -313,11 +327,14 @@ export function buildSelectionWidget(
       theme,
     );
 
-    // Build single-line parts: title, ID, status icon, priority icon+text, stage, risk/effort
+    // Build icon prefix: status + stage + audit
+    const iconPrefix = [sIcon, stIcon, aIcon].filter(Boolean).join(' ');
+
+    // Build single-line parts: icons, title, ID, priority icon+text, stage text, risk/effort
     const parts = [
+      iconPrefix,
       colouredTitle,
       `<${item.id}>`,
-      sIcon,
       priorityPart,
       stage,
       `${risk}/${effort}`,

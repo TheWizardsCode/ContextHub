@@ -37,7 +37,26 @@ across the TUI (blessed) and CLI (chalk) rendering paths. It covers:
 
 ---
 
-## 2. Status Icons
+## 2. Stage Icons
+
+| Stage            | Icon   | Text Fallback | Accessible Label               |
+|------------------|--------|---------------|--------------------------------|
+| idea             | `💡`   | `[IDEA]`      | "Stage: Idea"                  |
+| intake_complete  | `📥`   | `[INTAKE]`    | "Stage: Intake Complete"       |
+| plan_complete    | `📋`   | `[PLAN]`      | "Stage: Plan Complete"         |
+| in_progress      | `🛠️`  | `[PROG]`      | "Stage: In Progress"           |
+| in_review        | `🔍`   | `[REVIEW]`    | "Stage: In Review"             |
+| done             | `🏁`   | `[DONE]`      | "Stage: Done"                  |
+
+## 3. Audit Result Icons
+
+| Result  | Icon   | Text Fallback | Accessible Label      |
+|---------|--------|---------------|-----------------------|
+| yes     | `✅`   | `[YES]`       | "Audit: Passed"       |
+| no      | `❌`   | `[NO]`        | "Audit: Failed"       |
+| unknown | `❓`   | `[UNKN]`      | "Audit: Not run"      |
+
+## 4. Status Icons
 
 | Status         | Icon   | Text Fallback | Accessible Label          |
 |----------------|--------|---------------|---------------------------|
@@ -50,7 +69,7 @@ across the TUI (blessed) and CLI (chalk) rendering paths. It covers:
 
 ---
 
-## 3. Emoji / Glyph Compatibility
+## 5. Emoji / Glyph Compatibility
 
 The chosen emoji are part of the Unicode 12.0+ standard and are supported by:
 
@@ -72,12 +91,12 @@ fallback** is used instead. See §5 below.
 
 ---
 
-## 4. Accessibility Labels
+## 6. Accessibility Labels
 
 Every icon MUST carry an equivalent accessible label so that screen readers and
 tooling that parses CLI output can identify the icon's meaning.
 
-### 4.1 TUI (blessed)
+### 6.1 TUI (blessed)
 
 Blessed does not natively support `aria-label` attributes on box/list items.
 Instead, accessibility is achieved by:
@@ -95,7 +114,7 @@ Implementation in the TUI list and detail panes should:
 {green-fg}[OPEN]{/green-fg} ← when WL_A11Y=1 or icons disabled
 ```
 
-### 4.2 CLI Output
+### 6.2 CLI Output
 
 CLI output uses `chalk` to colour output. When icons are enabled:
 
@@ -111,7 +130,7 @@ by a space. This ensures:
 
 ---
 
-## 5. Text Fallback & Copy/Paste
+## 7. Text Fallback & Copy/Paste
 
 ### Behaviour
 
@@ -156,7 +175,7 @@ Status:   🟢 [OPEN]   (or  [OPEN]  when icons disabled)
 
 ---
 
-## 6. Disabling Icons
+## 8. Disabling Icons
 
 Two mechanisms control icon display:
 
@@ -174,7 +193,7 @@ No env var is set by default; icons are enabled when `process.stdout.isTTY` is
 
 ---
 
-## 7. Rendering Cost
+## 9. Rendering Cost
 
 The icon lookup is a simple `Map<string, string>` or plain object lookup —
 O(1) per call, negligible runtime cost. No SVG, image loading, or network
@@ -220,9 +239,23 @@ export function iconsEnabled(opts?: { noIcons?: boolean }): boolean;
 
 ---
 
-## 8. Implementation Guide
+## 10. Implementation Guide
 
-### 8.1 TUI List Rendering
+### 10.1 Pi TUI List Rendering (`packages/tui/extensions/index.ts`)
+
+The Pi TUI browse selection list renders status, stage, and audit result icons
+before the title in each row:
+
+```
+🔄 🛠️ ✅ Set up CI pipeline (TEST-1)     ← when icons enabled
+[INPR][PROG][YES] Set up CI pipeline (TEST-1)  ← when fallback
+```
+
+The `formatBrowseOption` function prepends the three icons before the title.
+The `buildSelectionWidget` preview also includes them as a group at the
+start of the single-line summary.
+
+### 10.2 TUI List Rendering (blessed)
 
 File: `src/tui/components/list.ts` (via controller rendering in
 `src/tui/controller.ts`)
@@ -237,7 +270,7 @@ List item lines should prepend the priority or status icon before the title:
 The `formatTitleOnlyTUI` helper in `src/commands/helpers.ts` may be extended
 or a new wrapper created that injects the icon before the title.
 
-### 8.2 TUI Detail Pane
+### 10.3 TUI Detail Pane
 
 File: `src/tui/components/detail.ts`, `src/tui/components/metadata-pane.ts`
 
@@ -249,7 +282,7 @@ Status:   🟢 [OPEN]
 Priority: 🔴 [CRIT]
 ```
 
-### 8.3 CLI Output
+### 10.4 CLI Output
 
 File: `src/cli-output.ts`, `src/commands/helpers.ts` (`humanFormatWorkItem`)
 
@@ -259,7 +292,7 @@ The status and priority display lines should include the icon:
 Status: 🟢 Open | Priority: 🔴 Critical
 ```
 
-### 8.4 Tests
+### 10.5 Tests
 
 Tests should verify:
 - Icon functions return expected emoji for valid inputs
@@ -270,7 +303,7 @@ Tests should verify:
 
 ---
 
-## 9. Appendix: Example Usage
+## 11. Appendix: Example Usage
 
 ```ts
 import { priorityIcon, statusIcon, iconsEnabled } from '../icons.js';
@@ -290,7 +323,7 @@ lines.push(`Priority: ${pIcon} ${item.priority}`);
 
 ---
 
-## 10. Implementation Summary
+## 12. Implementation Summary
 
 ### Files Created/Modified
 

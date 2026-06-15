@@ -158,3 +158,136 @@ export function priorityFallback(priority: string): string {
 export function statusFallback(status: string): string {
   return STATUS_FALLBACK[(status || '').toLowerCase().trim()] ?? '';
 }
+
+// ─── Stage Icons ───────────────────────────────────────────────────────
+
+const STAGE_ICON: Record<string, string> = {
+  idea:            '\u{1F4A1}',          // 💡
+  intake_complete: '\u{1F4E5}',          // 📥
+  plan_complete:   '\u{1F4CB}',          // 📋
+  in_progress:     '\u{1F6E0}\u{FE0F}', // 🛠️
+  in_review:       '\u{1F50D}',          // 🔍
+  done:            '\u{1F3C1}',          // 🏁
+};
+
+const STAGE_FALLBACK: Record<string, string> = {
+  idea:            '[IDEA]',
+  intake_complete: '[INTAKE]',
+  plan_complete:   '[PLAN]',
+  in_progress:     '[PROG]',
+  in_review:       '[REVIEW]',
+  done:            '[DONE]',
+};
+
+const STAGE_LABEL: Record<string, string> = {
+  idea:            'Stage: Idea',
+  intake_complete: 'Stage: Intake Complete',
+  plan_complete:   'Stage: Plan Complete',
+  in_progress:     'Stage: In Progress',
+  in_review:       'Stage: In Review',
+  done:            'Stage: Done',
+};
+
+// ─── Audit Result Icons ────────────────────────────────────────────────
+
+/**
+ * Audit result key for icon lookup.
+ * true → 'yes', false → 'no', null/undefined → 'unknown'
+ */
+function auditKey(result: boolean | null | undefined): string {
+  if (result === true) return 'yes';
+  if (result === false) return 'no';
+  return 'unknown';
+}
+
+const AUDIT_ICON: Record<string, string> = {
+  yes:     '\u{2705}',  // ✅
+  no:      '\u{274C}',  // ❌
+  unknown: '\u{2753}',  // ❓
+};
+
+const AUDIT_FALLBACK: Record<string, string> = {
+  yes:     '[YES]',
+  no:      '[NO]',
+  unknown: '[UNKN]',
+};
+
+const AUDIT_LABEL: Record<string, string> = {
+  yes:     'Audit: Passed',
+  no:      'Audit: Failed',
+  unknown: 'Audit: Not run',
+};
+
+// ─── Stage Public API ──────────────────────────────────────────────────
+
+/**
+ * Get the icon string (emoji or text fallback) for a work item stage.
+ *
+ * @param stage - The stage value (e.g. 'idea', 'in_progress', 'done').
+ * @param opts - Options controlling fallback behaviour.
+ * @returns The icon string (emoji or bracketed text).
+ */
+export function stageIcon(stage: string | undefined | null, opts?: IconOptions): string {
+  const key = (stage || '').toLowerCase().trim();
+  if (opts?.noIcons === true) {
+    return STAGE_FALLBACK[key] ?? '';
+  }
+  return STAGE_ICON[key] ?? '';
+}
+
+/**
+ * Get the accessible label for a stage icon.
+ *
+ * @param stage - The stage value.
+ * @returns A human-readable label describing the stage (e.g. "Stage: In Progress").
+ */
+export function stageLabel(stage: string | undefined | null): string {
+  return STAGE_LABEL[(stage || '').toLowerCase().trim()] ?? '';
+}
+
+/**
+ * Get the text fallback for a stage icon.
+ *
+ * @param stage - The stage value.
+ * @returns The bracketed text label (e.g. "[PROG]").
+ */
+export function stageFallback(stage: string | undefined | null): string {
+  return STAGE_FALLBACK[(stage || '').toLowerCase().trim()] ?? '';
+}
+
+// ─── Audit Result Public API ───────────────────────────────────────────
+
+/**
+ * Get the icon string (emoji or text fallback) for an audit result.
+ *
+ * @param result - The audit result: true (yes/passed), false (no/failed), null/undefined (unknown).
+ * @param opts - Options controlling fallback behaviour.
+ * @returns The icon string (emoji or bracketed text).
+ */
+export function auditIcon(result: boolean | null | undefined, opts?: IconOptions): string {
+  const key = auditKey(result);
+  if (opts?.noIcons === true) {
+    return AUDIT_FALLBACK[key] ?? '';
+  }
+  return AUDIT_ICON[key] ?? '';
+}
+
+/**
+ * Get the accessible label for an audit result icon.
+ *
+ * @param result - The audit result value.
+ * @returns A human-readable label (e.g. "Audit: Passed").
+ */
+export function auditLabel(result: boolean | null | undefined): string {
+  return AUDIT_LABEL[auditKey(result)] ?? '';
+}
+
+/**
+ * Get the text fallback for an audit result icon.
+ *
+ * @param result - The audit result value.
+ * @returns The bracketed text label (e.g. "[YES]").
+ */
+export function auditFallback(result: boolean | null | undefined): string {
+  return AUDIT_FALLBACK[auditKey(result)] ?? '';
+}

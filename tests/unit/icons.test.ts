@@ -6,6 +6,12 @@ import {
   statusLabel,
   priorityFallback,
   statusFallback,
+  stageIcon,
+  stageLabel,
+  stageFallback,
+  auditIcon,
+  auditLabel,
+  auditFallback,
   iconsEnabled,
 } from '../../src/icons.js';
 
@@ -280,5 +286,212 @@ describe('iconsEnabled', () => {
   it('noIcons option takes precedence over env var', () => {
     process.env.WL_NO_ICONS = '1';
     expect(iconsEnabled({ noIcons: false })).toBe(true);
+  });
+});
+
+describe('stageIcon', () => {
+  it('returns emoji for idea stage', () => {
+    expect(stageIcon('idea')).toBe('\u{1F4A1}'); // 💡
+  });
+
+  it('returns emoji for intake_complete stage', () => {
+    expect(stageIcon('intake_complete')).toBe('\u{1F4E5}'); // 📥
+  });
+
+  it('returns emoji for plan_complete stage', () => {
+    expect(stageIcon('plan_complete')).toBe('\u{1F4CB}'); // 📋
+  });
+
+  it('returns emoji for in_progress stage', () => {
+    expect(stageIcon('in_progress')).toBe('\u{1F6E0}\u{FE0F}'); // 🛠️
+  });
+
+  it('returns emoji for in_review stage', () => {
+    expect(stageIcon('in_review')).toBe('\u{1F50D}'); // 🔍
+  });
+
+  it('returns emoji for done stage', () => {
+    expect(stageIcon('done')).toBe('\u{1F3C1}'); // 🏁
+  });
+
+  it('returns empty string for unknown stage', () => {
+    expect(stageIcon('unknown')).toBe('');
+    expect(stageIcon('')).toBe('');
+  });
+
+  it('returns empty string for null/undefined stage', () => {
+    expect(stageIcon(null as any)).toBe('');
+    expect(stageIcon(undefined as any)).toBe('');
+  });
+
+  it('is case-insensitive', () => {
+    expect(stageIcon('IDEA')).toBe('\u{1F4A1}');
+    expect(stageIcon('In_Progress')).toBe('\u{1F6E0}\u{FE0F}');
+  });
+
+  describe('with noIcons option', () => {
+    it('returns text fallback for idea', () => {
+      expect(stageIcon('idea', { noIcons: true })).toBe('[IDEA]');
+    });
+
+    it('returns text fallback for intake_complete', () => {
+      expect(stageIcon('intake_complete', { noIcons: true })).toBe('[INTAKE]');
+    });
+
+    it('returns text fallback for plan_complete', () => {
+      expect(stageIcon('plan_complete', { noIcons: true })).toBe('[PLAN]');
+    });
+
+    it('returns text fallback for in_progress', () => {
+      expect(stageIcon('in_progress', { noIcons: true })).toBe('[PROG]');
+    });
+
+    it('returns text fallback for in_review', () => {
+      expect(stageIcon('in_review', { noIcons: true })).toBe('[REVIEW]');
+    });
+
+    it('returns text fallback for done', () => {
+      expect(stageIcon('done', { noIcons: true })).toBe('[DONE]');
+    });
+
+    it('returns empty string for unknown stage with noIcons', () => {
+      expect(stageIcon('unknown', { noIcons: true })).toBe('');
+    });
+  });
+});
+
+describe('stageFallback', () => {
+  it('returns bracketed text for idea', () => {
+    expect(stageFallback('idea')).toBe('[IDEA]');
+  });
+
+  it('returns bracketed text for intake_complete', () => {
+    expect(stageFallback('intake_complete')).toBe('[INTAKE]');
+  });
+
+  it('returns bracketed text for plan_complete', () => {
+    expect(stageFallback('plan_complete')).toBe('[PLAN]');
+  });
+
+  it('returns bracketed text for in_progress', () => {
+    expect(stageFallback('in_progress')).toBe('[PROG]');
+  });
+
+  it('returns bracketed text for in_review', () => {
+    expect(stageFallback('in_review')).toBe('[REVIEW]');
+  });
+
+  it('returns bracketed text for done', () => {
+    expect(stageFallback('done')).toBe('[DONE]');
+  });
+
+  it('returns empty string for unknown stage', () => {
+    expect(stageFallback('unknown')).toBe('');
+  });
+});
+
+describe('stageLabel', () => {
+  it('returns label for idea', () => {
+    expect(stageLabel('idea')).toBe('Stage: Idea');
+  });
+
+  it('returns label for intake_complete', () => {
+    expect(stageLabel('intake_complete')).toBe('Stage: Intake Complete');
+  });
+
+  it('returns label for plan_complete', () => {
+    expect(stageLabel('plan_complete')).toBe('Stage: Plan Complete');
+  });
+
+  it('returns label for in_progress', () => {
+    expect(stageLabel('in_progress')).toBe('Stage: In Progress');
+  });
+
+  it('returns label for in_review', () => {
+    expect(stageLabel('in_review')).toBe('Stage: In Review');
+  });
+
+  it('returns label for done', () => {
+    expect(stageLabel('done')).toBe('Stage: Done');
+  });
+
+  it('returns empty string for unknown stage', () => {
+    expect(stageLabel('unknown')).toBe('');
+  });
+
+  it('is case-insensitive', () => {
+    expect(stageLabel('IDEA')).toBe('Stage: Idea');
+  });
+});
+
+describe('auditIcon', () => {
+  it('returns emoji for yes (true)', () => {
+    expect(auditIcon(true)).toBe('\u{2705}'); // ✅
+  });
+
+  it('returns emoji for no (false)', () => {
+    expect(auditIcon(false)).toBe('\u{274C}'); // ❌
+  });
+
+  it('returns emoji for unknown (null)', () => {
+    expect(auditIcon(null)).toBe('\u{2753}'); // ❓
+  });
+
+  it('returns emoji for unknown (undefined)', () => {
+    expect(auditIcon(undefined)).toBe('\u{2753}'); // ❓
+  });
+
+  describe('with noIcons option', () => {
+    it('returns text fallback for yes', () => {
+      expect(auditIcon(true, { noIcons: true })).toBe('[YES]');
+    });
+
+    it('returns text fallback for no', () => {
+      expect(auditIcon(false, { noIcons: true })).toBe('[NO]');
+    });
+
+    it('returns text fallback for unknown (null)', () => {
+      expect(auditIcon(null, { noIcons: true })).toBe('[UNKN]');
+    });
+
+    it('returns text fallback for unknown (undefined)', () => {
+      expect(auditIcon(undefined, { noIcons: true })).toBe('[UNKN]');
+    });
+  });
+});
+
+describe('auditFallback', () => {
+  it('returns bracketed text for yes', () => {
+    expect(auditFallback(true)).toBe('[YES]');
+  });
+
+  it('returns bracketed text for no', () => {
+    expect(auditFallback(false)).toBe('[NO]');
+  });
+
+  it('returns bracketed text for unknown (null)', () => {
+    expect(auditFallback(null)).toBe('[UNKN]');
+  });
+
+  it('returns bracketed text for unknown (undefined)', () => {
+    expect(auditFallback(undefined)).toBe('[UNKN]');
+  });
+});
+
+describe('auditLabel', () => {
+  it('returns label for yes', () => {
+    expect(auditLabel(true)).toBe('Audit: Passed');
+  });
+
+  it('returns label for no', () => {
+    expect(auditLabel(false)).toBe('Audit: Failed');
+  });
+
+  it('returns label for unknown (null)', () => {
+    expect(auditLabel(null)).toBe('Audit: Not run');
+  });
+
+  it('returns label for unknown (undefined)', () => {
+    expect(auditLabel(undefined)).toBe('Audit: Not run');
   });
 });
