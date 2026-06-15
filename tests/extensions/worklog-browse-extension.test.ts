@@ -1387,7 +1387,7 @@ describe('Worklog browse pi extension', () => {
       const listFn = createListWorkItemsWithStage(runWl as any);
       const items = await listFn('in_review');
 
-      expect(runWl).toHaveBeenCalledWith(['next', '-n', '5', '--stage', 'in_review']);
+      expect(runWl).toHaveBeenCalledWith(['next', '-n', '5', '--stage', 'in_review', '--include-in-progress']);
       expect(items).toEqual([
         { id: 'WL-S1', title: 'Stage item', status: 'open', stage: 'in_review' },
       ]);
@@ -1587,7 +1587,7 @@ describe('Worklog browse pi extension', () => {
     const listWorkItems = createDefaultListWorkItems(runWl as any);
     const items = await listWorkItems();
 
-    expect(runWl).toHaveBeenCalledWith(['next', '-n', '5']);
+    expect(runWl).toHaveBeenCalledWith(['next', '-n', '5', '--include-in-progress']);
     expect(items).toEqual([
       {
         id: 'WL-10',

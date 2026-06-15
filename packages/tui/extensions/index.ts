@@ -312,7 +312,7 @@ export function createDefaultListWorkItems(
 ): () => Promise<WorklogBrowseItem[]> {
   const itemCount = count ?? currentSettings.browseItemCount;
   return async (): Promise<WorklogBrowseItem[]> => {
-    const output = await run(['next', '-n', String(itemCount)]);
+    const output = await run(['next', '-n', String(itemCount), '--include-in-progress']);
     const payload = extractJsonObject(output);
     return normalizeListPayload(payload).slice(0, itemCount);
   };
@@ -331,7 +331,7 @@ export function createListWorkItemsWithStage(
 ): (stage: string) => Promise<WorklogBrowseItem[]> {
   const itemCount = count ?? currentSettings.browseItemCount;
   return async (stage: string): Promise<WorklogBrowseItem[]> => {
-    const output = await run(['next', '-n', String(itemCount), '--stage', stage]);
+    const output = await run(['next', '-n', String(itemCount), '--stage', stage, '--include-in-progress']);
     const payload = extractJsonObject(output);
     return normalizeListPayload(payload).slice(0, itemCount);
   };

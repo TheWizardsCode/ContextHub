@@ -22,6 +22,7 @@ export default function register(ctx: PluginContext): void {
     .option('-n, --number <n>', 'Number of items to return (default: 1)', '1')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--include-blocked', 'Include dependency-blocked items (excluded by default)')
+    .option('--include-in-progress', 'Include in-progress items alongside open items')
     .option('--no-re-sort', 'Skip the automatic re-sort before selection (preserve current sortIndex order)')
     .option('--re-sort-sync', 'Force a synchronous re-sort when auto re-sort is run (blocks until complete)', false)
     .option('--recency-policy <policy>', 'Recency handling for score ordering during re-sort (prefer|avoid|ignore). Default: ignore', 'ignore')
@@ -35,6 +36,7 @@ export default function register(ctx: PluginContext): void {
       const count = Number.isNaN(numRequested) || numRequested < 1 ? 1 : numRequested;
 
       const includeBlocked = Boolean(options.includeBlocked);
+      const includeInProgress = Boolean(options.includeInProgress);
 
       // Validate stage if provided
       if (options.stage) {
@@ -72,8 +74,8 @@ export default function register(ctx: PluginContext): void {
       }
 
       const results = (db as any).findNextWorkItems 
-        ? (db as any).findNextWorkItems(count, options.assignee, options.search, includeBlocked, options.stage) 
-        : [db.findNextWorkItem(options.assignee, options.search, includeBlocked, options.stage)];
+        ? (db as any).findNextWorkItems(count, options.assignee, options.search, includeBlocked, options.stage, includeInProgress) 
+        : [db.findNextWorkItem(options.assignee, options.search, includeBlocked, options.stage, includeInProgress)];
 
       const availableResults = results.filter((result: any) => Boolean(result.workItem));
       const missingCount = Math.max(0, count - availableResults.length);

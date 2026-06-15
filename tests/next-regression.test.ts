@@ -1711,4 +1711,99 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       expect(ids).toContain(otherItem.id);
     });
   });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Feature: --include-in-progress (WL-0MQFC49NT001LBDK)
+  // When --include-in-progress is true, items with status 'in-progress'
+  // appear in wl next alongside open items. Without the flag, the default
+  // behaviour (exclude in-progress) is preserved.
+  // ─────────────────────────────────────────────────────────────────────
+  describe('--include-in-progress (WL-0MQFC49NT001LBDK)', () => {
+    it('should exclude in-progress items by default (backward compatible)', () => {
+      db.create({ title: 'In progress item', priority: 'high', status: 'in-progress' });
+      const openItem = db.create({ title: 'Open item', priority: 'low', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(openItem.id);
+      expect(result.workItem!.status).toBe('open');
+    });
+
+    it('should include in-progress items when includeInProgress=true', () => {
+      const inProgress = db.create({ title: 'In progress item', priority: 'critical', status: 'in-progress' });
+      db.create({ title: 'Open item', priority: 'low', status: 'open' });
+
+      const result = db.findNextWorkItem(undefined, undefined, false, undefined, true);
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(inProgress.id);
+      expect(result.workItem!.status).toBe('in-progress');
+    });
+
+    it('should include in-progress items in batch results', () => {
+      const wip1 = db.create({ title: 'WIP high', priority: 'high', status: 'in-progress' });
+      const wip2 = db.create({ title: 'WIP medium', priority: 'medium', status: 'in-progress' });
+      const open1 = db.create({ title: 'Open high', priority: 'high', status: 'open' });
+
+      const results = db.findNextWorkItems(5, undefined, undefined, false, undefined, true);
+      const ids = results.map(r => r.workItem?.id).filter(Boolean);
+
+      // In-progress items should appear alongside open items
+      expect(ids).toContain(wip1.id);
+      expect(ids).toContain(wip2.id);
+      expect(ids).toContain(open1.id);
+    });
+
+    it('should include in-progress items when used with stage filter', () => {
+      const wipIntake = db.create({ title: 'WIP intake', priority: 'high', status: 'in-progress', stage: 'intake_complete' });
+      db.create({ title: 'WIP other stage', priority: 'high', status: 'in-progress', stage: 'plan_complete' });
+      const openIntake = db.create({ title: 'Open intake', priority: 'low', status: 'open', stage: 'intake_complete' });
+
+      const result = db.findNextWorkItem(undefined, undefined, false, 'intake_complete', true);
+      expect(result.workItem).not.toBeNull();
+      // Both the in-progress and open items in the matching stage are candidates.
+      // The high-priority WIP intake should be preferred over low-priority open.
+      expect(result.workItem!.id).toBe(wipIntake.id);
+    });
+
+    it('should return in-progress item when it is the only candidate', () => {
+      db.create({ title: 'Only WIP', priority: 'medium', status: 'in-progress' });
+
+      const result = db.findNextWorkItem(undefined, undefined, false, undefined, true);
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.status).toBe('in-progress');
+    });
+
+    it('should return null when only in-progress items exist without the flag', () => {
+      db.create({ title: 'Only WIP', priority: 'medium', status: 'in-progress' });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).toBeNull();
+    });
+
+    it('should include both in-progress and open items in mixed pool', () => {
+      const wip = db.create({ title: 'WIP high', priority: 'high', status: 'in-progress' });
+      const open = db.create({ title: 'Open medium', priority: 'medium', status: 'open' });
+
+      const result = db.findNextWorkItem(undefined, undefined, false, undefined, true);
+      expect(result.workItem).not.toBeNull();
+      // High-priority in-progress item should be preferred over medium open
+      expect(result.workItem!.id).toBe(wip.id);
+    });
+
+    it('should still exclude in-progress items in batch mode without the flag', () => {
+      db.create({ title: 'WIP item', priority: 'high', status: 'in-progress' });
+      const openItem = db.create({ title: 'Open item', priority: 'low', status: 'open' });
+
+      const results = db.findNextWorkItems(5);
+      const ids = results.map(r => r.workItem?.id).filter(Boolean);
+
+      expect(ids).not.toContain(undefined);
+      expect(ids).toContain(openItem.id);
+      // No in-progress items should appear
+      for (const id of ids) {
+        const item = results.find(r => r.workItem?.id === id)?.workItem;
+        expect(item?.status).not.toBe('in-progress');
+      }
+    });
+  });
 });

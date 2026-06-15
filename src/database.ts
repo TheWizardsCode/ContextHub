@@ -1489,6 +1489,7 @@ export class WorklogDatabase {
       stage?: string;
       excluded?: Set<string>;
       includeBlocked?: boolean;
+      includeInProgress?: boolean;
       debugPrefix?: string;
     } = {}
   ): { candidates: WorkItem[]; criticalPool: WorkItem[] } {
@@ -1498,6 +1499,7 @@ export class WorklogDatabase {
       stage,
       excluded,
       includeBlocked = false,
+      includeInProgress = false,
       debugPrefix = '[filter]',
     } = options;
 
@@ -1525,10 +1527,15 @@ export class WorklogDatabase {
       this.debug(`${debugPrefix} filter: after completed=${pool.length}`);
     }
 
-    // 4. Remove in-progress items (wl next recommends what to work on next,
-    //    not what's already being worked on)
-    pool = pool.filter(item => item.status !== 'in-progress');
-    this.debug(`${debugPrefix} filter: after in-progress=${pool.length}`);
+    // 4. Remove in-progress items by default (wl next recommends what to work on next,
+    //    not what's already being worked on). Skip this filter when --include-in-progress
+    //    is set so items already being worked on appear in the output.
+    if (!includeInProgress) {
+      pool = pool.filter(item => item.status !== 'in-progress');
+      this.debug(`${debugPrefix} filter: after in-progress=${pool.length}`);
+    } else {
+      this.debug(`${debugPrefix} filter: skip in-progress (includeInProgress=true)`);
+    }
 
     // 5. Remove excluded items (batch mode)
     if (excluded && excluded.size > 0) {
@@ -1583,7 +1590,8 @@ export class WorklogDatabase {
     excluded?: Set<string>,
     debugPrefix: string = '[next]',
     includeBlocked: boolean = false,
-    stage?: string
+    stage?: string,
+    includeInProgress: boolean = false
   ): NextWorkItemResult {
     this.debug(`${debugPrefix} assignee=${assignee || ''} search=${searchTerm || ''} stage=${stage || ''} excluded=${excluded?.size || 0}`);
 
@@ -1598,6 +1606,7 @@ export class WorklogDatabase {
       stage,
       excluded,
       includeBlocked,
+      includeInProgress,
       debugPrefix,
     });
 
@@ -1772,10 +1781,11 @@ export class WorklogDatabase {
     assignee?: string,
     searchTerm?: string,
     includeBlocked: boolean = false,
-    stage?: string
+    stage?: string,
+    includeInProgress: boolean = false
   ): NextWorkItemResult {
     const items = this.store.getAllWorkItems();
-    return this.findNextWorkItemFromItems(items, assignee, searchTerm, undefined, '[next]', includeBlocked, stage);
+    return this.findNextWorkItemFromItems(items, assignee, searchTerm, undefined, '[next]', includeBlocked, stage, includeInProgress);
   }
 
   /**
@@ -1787,7 +1797,8 @@ export class WorklogDatabase {
     assignee?: string,
     searchTerm?: string,
     includeBlocked: boolean = false,
-    stage?: string
+    stage?: string,
+    includeInProgress: boolean = false
   ): NextWorkItemResult[] {
     const results: NextWorkItemResult[] = [];
     const excluded = new Set<string>();
@@ -1800,7 +1811,8 @@ export class WorklogDatabase {
         excluded,
         `[next batch ${i + 1}/${count}]`,
         includeBlocked,
-        stage
+        stage,
+        includeInProgress
       );
 
       results.push(result);
