@@ -1195,6 +1195,26 @@ export class WorklogDatabase {
       this.debug(`${debugPrefix} unblocked criticals after filters=${selectable.length}`);
 
       if (selectable.length > 0) {
+        // Filter out critical children whose parent is a valid candidate
+        // (open, not deleted/completed/in-progress) — the parent should be
+        // preferred for selection via Stage 5.
+        selectable = selectable.filter(item => {
+          if (!item.parentId) return true;
+          const parent = allItems.find(p => p.id === item.parentId);
+          if (!parent) return true;
+          // Parent is a valid candidate if it is actionable
+          if (
+            parent.status !== 'deleted' &&
+            parent.status !== 'completed' &&
+            parent.status !== 'in-progress'
+          ) {
+            return false; // Skip child, parent will compete in Stage 5
+          }
+          return true;
+        });
+      }
+
+      if (selectable.length > 0) {
         const selected = this.selectBySortIndex(selectable);
         this.debug(`${debugPrefix} selected unblocked critical=${selected?.id || ''} title="${selected?.title || ''}"`);
         return {
@@ -1255,6 +1275,21 @@ export class WorklogDatabase {
       if (excluded && excluded.size > 0) {
         selectableBlocked = selectableBlocked.filter(item => !excluded.has(item.id));
       }
+      // Filter out critical children whose parent is a valid candidate — the
+      // parent should be preferred for selection via Stage 5.
+      selectableBlocked = selectableBlocked.filter(item => {
+        if (!item.parentId) return true;
+        const parent = allItems.find(p => p.id === item.parentId);
+        if (!parent) return true;
+        if (
+          parent.status !== 'deleted' &&
+          parent.status !== 'completed' &&
+          parent.status !== 'in-progress'
+        ) {
+          return false;
+        }
+        return true;
+      });
       const selectedBlockedCritical = this.selectBySortIndex(selectableBlocked.length > 0 ? selectableBlocked : blockedCriticals);
       this.debug(`${debugPrefix} selected blocked critical (fallback)=${selectedBlockedCritical?.id || ''}`);
       return {
@@ -1663,13 +1698,22 @@ export class WorklogDatabase {
     // Identify root-level candidates: items whose parent is not in the candidate set
     // (orphan promotion: items whose parent is closed/completed and not in the pool
     // continue to be promoted to root level)
+    // Children of in-progress parents are excluded — the entire in-progress
+    // subtree should be skipped from wl next recommendations.
     const candidateIds = new Set(filteredItems.map(item => item.id));
-    const rootCandidates = filteredItems.filter(item => !item.parentId || !candidateIds.has(item.parentId));
+    const rootCandidates = filteredItems.filter(item => !item.parentId || !candidateIds.has(item.parentId))
+      .filter(item => !this.isInProgressSubtree(item, items));
     this.debug(`${debugPrefix} root candidates=${rootCandidates.length}`);
 
     if (rootCandidates.length === 0) {
-      // Fallback: all items have parents in the pool (shouldn't happen normally)
-      const selected = this.selectBySortIndex(filteredItems, effectivePriorityCache);
+      // Fallback: all items have parents in the pool (shouldn't happen normally).
+      // Still exclude items in an in-progress subtree even in the fallback path
+      // so that the entire in-progress subtree is skipped.
+      const fallbackItems = filteredItems.filter(item => !this.isInProgressSubtree(item, items));
+      if (fallbackItems.length === 0) {
+        return { workItem: null, reason: 'No work items available' };
+      }
+      const selected = this.selectBySortIndex(fallbackItems, effectivePriorityCache);
       this.debug(`${debugPrefix} selected open (fallback)=${selected?.id || ''}`);
       const effectiveInfo = selected ? this.computeEffectivePriority(selected, effectivePriorityCache) : null;
       return {
@@ -1936,6 +1980,18 @@ export class WorklogDatabase {
       return false;
     }
     return true;
+  }
+
+  /**
+   * Check if an item is part of an in-progress subtree by walking up the
+   * parent chain. Returns true if any ancestor has status 'in-progress'.
+   */
+  private isInProgressSubtree(item: WorkItem, allItems: WorkItem[]): boolean {
+    if (!item.parentId) return false;
+    const parent = allItems.find(p => p.id === item.parentId);
+    if (!parent) return false;
+    if (parent.status === 'in-progress') return true;
+    return this.isInProgressSubtree(parent, allItems);
   }
 
   private getActiveDependencyBlockers(itemId: string): WorkItem[] {

@@ -920,15 +920,15 @@ describe('WorklogDatabase', () => {
       expect(result.workItem?.id).toBe(oldest.id);
     });
 
-    it('should select direct child under in-progress item', () => {
+    it('should NOT select child under in-progress parent (entire subtree skipped)', () => {
       const parent = db.create({ title: 'Parent', priority: 'high', status: 'in-progress' });
       const child = db.create({ title: 'Child', priority: 'high', status: 'open', parentId: parent.id });
-      const grandchild = db.create({ title: 'Grandchild', priority: 'high', status: 'open', parentId: child.id });
+      db.create({ title: 'Grandchild', priority: 'high', status: 'open', parentId: child.id });
       
       const result = db.findNextWorkItem();
-      // Child is orphan-promoted (parent is in-progress, not in candidate pool)
-      // and selected as the best root candidate
-      expect(result.workItem?.id).toBe(child.id);
+      // Children of in-progress parents are no longer promoted — the entire
+      // in-progress subtree is skipped from wl next recommendations.
+      expect(result.workItem).toBeNull();
     });
 
     it('should skip completed and deleted items', () => {
@@ -959,13 +959,14 @@ describe('WorklogDatabase', () => {
       expect(result.reason).toContain('No work items available');
     });
 
-    it('should find open children of in-progress parent without returning the parent', () => {
+    it('should return null when only children under in-progress parent exist', () => {
       const parent = db.create({ title: 'WIP Parent', priority: 'high', status: 'in-progress' });
-      const child = db.create({ title: 'Open child', priority: 'medium', status: 'open', parentId: parent.id });
+      db.create({ title: 'Open child', priority: 'medium', status: 'open', parentId: parent.id });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem?.id).toBe(child.id);
-      expect(result.workItem?.id).not.toBe(parent.id);
+      // Children of in-progress parents are no longer promoted — the entire
+      // in-progress subtree is skipped from wl next recommendations.
+      expect(result.workItem).toBeNull();
     });
 
     it('should include blocked in_review items when they have higher effective priority', () => {
@@ -1077,39 +1078,40 @@ describe('WorklogDatabase', () => {
       expect(result.reason).toContain('Next open item by sort_index');
     });
 
-    it('should select highest priority child when multiple children exist', async () => {
+    it('should return null when multiple children under in-progress parent exist', async () => {
       const parent = db.create({ title: 'Parent', priority: 'high', status: 'in-progress' });
-      const lowLeaf = db.create({ title: 'Low leaf', priority: 'low', status: 'open', parentId: parent.id });
+      db.create({ title: 'Low leaf', priority: 'low', status: 'open', parentId: parent.id });
       // Small delay to ensure different timestamps for createdAt tiebreaking
       const delay = () => new Promise(resolve => setTimeout(resolve, 10));
       await delay();
       db.create({ title: 'High leaf', priority: 'high', status: 'open', parentId: parent.id });
       
       const result = db.findNextWorkItem();
-      // With effective priority inheritance, both children inherit high priority
-      // from their in-progress parent. Since effective priorities are equal,
-      // createdAt tiebreaker selects the older child (lowLeaf).
-      expect(result.workItem?.id).toBe(lowLeaf.id);
+      // Children of in-progress parents are no longer promoted — the entire
+      // in-progress subtree is skipped from wl next recommendations.
+      expect(result.workItem).toBeNull();
     });
 
-    it('should apply assignee filter to children', () => {
+    it('should return null when filtered children are under in-progress parent', () => {
       const parent = db.create({ title: 'Parent', priority: 'high', status: 'in-progress', assignee: 'john' });
       db.create({ title: 'Child for jane', priority: 'high', status: 'open', parentId: parent.id, assignee: 'jane' });
-      const johnChild = db.create({ title: 'Child for john', priority: 'low', status: 'open', parentId: parent.id, assignee: 'john' });
+      db.create({ title: 'Child for john', priority: 'low', status: 'open', parentId: parent.id, assignee: 'john' });
       
       const result = db.findNextWorkItem('john');
-      // Should select john's child even though jane's has higher priority
-      expect(result.workItem?.id).toBe(johnChild.id);
+      // Children of in-progress parents are no longer promoted — the entire
+      // in-progress subtree is skipped from wl next recommendations.
+      expect(result.workItem).toBeNull();
     });
 
-    it('should apply search filter to children', () => {
+    it('should return null when searched children are under in-progress parent', () => {
       const parent = db.create({ title: 'Parent task', priority: 'high', status: 'in-progress' });
       db.create({ title: 'Regular child', priority: 'critical', status: 'open', parentId: parent.id });
-      const bugChild = db.create({ title: 'Bug fix needed', priority: 'low', status: 'open', parentId: parent.id });
+      db.create({ title: 'Bug fix needed', priority: 'low', status: 'open', parentId: parent.id });
       
       const result = db.findNextWorkItem(undefined, 'bug');
-      // Should select the bug child even though regular has higher priority
-      expect(result.workItem?.id).toBe(bugChild.id);
+      // Children of in-progress parents are no longer promoted — the entire
+      // in-progress subtree is skipped from wl next recommendations.
+      expect(result.workItem).toBeNull();
     });
 
     it('should select blocking child for blocked item', () => {

@@ -696,12 +696,12 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       expect(result.workItem).toBeNull();
     });
 
-    it('should select direct child under in-progress item', () => {
+    it('should NOT select child under in-progress parent', () => {
       const parent = db.create({ title: 'Parent', priority: 'high', status: 'in-progress' });
-      const child = db.create({ title: 'Child', priority: 'high', status: 'open', parentId: parent.id });
+      db.create({ title: 'Child', priority: 'high', status: 'open', parentId: parent.id });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem!.id).toBe(child.id);
+      expect(result.workItem).toBeNull();
     });
 
     it('should skip in-progress item and select next open item when no open children', () => {
@@ -1457,6 +1457,178 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       const counts = db.getChildCounts();
       expect(counts.get(p1.id)).toBe(2);
       expect(counts.get(p2.id)).toBe(1);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Regression: Critical child not returned when parent is a valid candidate
+  //             (WL-0MQF5H0D30076K0X — Fix 1)
+  // Critical-path escalation (handleCriticalEscalation) must filter out
+  // children whose parent is a valid (non-deleted, non-completed, non-in-progress)
+  // candidate — the parent should compete in Stage 5 instead.
+  // ─────────────────────────────────────────────────────────────────────
+  describe('critical child with valid parent candidate (WL-0MQF5H0D30076K0X — Fix 1)', () => {
+    it('should NOT return critical child when parent is open', () => {
+      const parent = db.create({ title: 'Open parent', priority: 'low', status: 'open' });
+      const criticalChild = db.create({
+        title: 'Critical child',
+        priority: 'critical',
+        status: 'open',
+        parentId: parent.id,
+      });
+
+      const result = db.findNextWorkItem();
+      // Critical child should NOT be returned from escalation;
+      // parent should be preferred as the root candidate.
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(parent.id);
+    });
+
+    it('should return critical child when parent is completed', () => {
+      const parent = db.create({ title: 'Completed parent', priority: 'low', status: 'completed' });
+      const criticalChild = db.create({
+        title: 'Critical child',
+        priority: 'critical',
+        status: 'open',
+        parentId: parent.id,
+      });
+
+      const result = db.findNextWorkItem();
+      // Parent is completed, so child should be promoted via orphan promotion
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(criticalChild.id);
+    });
+
+    it('should return critical child when parent is deleted', () => {
+      const parent = db.create({ title: 'Deleted parent', priority: 'low', status: 'deleted' });
+      const criticalChild = db.create({
+        title: 'Critical child',
+        priority: 'critical',
+        status: 'open',
+        parentId: parent.id,
+      });
+
+      const result = db.findNextWorkItem();
+      // Parent is deleted, so child should be promoted via orphan promotion
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(criticalChild.id);
+    });
+
+    it('should return critical child when parent is in-progress', () => {
+      // Fix 1 filters children when parent is a VALID candidate (open, not
+      // deleted/completed/in-progress). In-progress is excluded from valid, so
+      // the critical child IS surfaced via critical escalation. Fix 2 (Stage 5)
+      // only applies to non-critical children — critical escalation runs first.
+      const parent = db.create({ title: 'In-progress parent', priority: 'low', status: 'in-progress' });
+      const criticalChild = db.create({
+        title: 'Critical child',
+        priority: 'critical',
+        status: 'open',
+        parentId: parent.id,
+      });
+
+      const result = db.findNextWorkItem();
+      // Parent is in-progress, so the child is surfaced via critical escalation
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(criticalChild.id);
+    });
+
+    it('should prefer parent when critical child exists alongside other open items', () => {
+      const parent = db.create({ title: 'Low parent', priority: 'low', status: 'open', sortIndex: 100 });
+      db.create({
+        title: 'Critical child',
+        priority: 'critical',
+        status: 'open',
+        parentId: parent.id,
+      });
+      const otherItem = db.create({ title: 'Medium other', priority: 'medium', status: 'open', sortIndex: 50 });
+
+      const result = db.findNextWorkItem();
+      // Both parent and otherItem are root candidates. otherItem has a better
+      // sortIndex (50 < 100), so it should be selected.
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(otherItem.id);
+    });
+
+    it('should not surface critical child in batch mode when parent is open', () => {
+      const parent = db.create({ title: 'Open parent', priority: 'low', status: 'open', sortIndex: 100 });
+      const criticalChild = db.create({
+        title: 'Critical child',
+        priority: 'critical',
+        status: 'open',
+        parentId: parent.id,
+      });
+      const otherItem = db.create({ title: 'Other root', priority: 'medium', status: 'open', sortIndex: 50 });
+
+      const results = db.findNextWorkItems(3);
+      const ids = results.map(r => r.workItem?.id).filter(Boolean);
+      // Critical child should NOT appear in batch results
+      expect(ids).not.toContain(criticalChild.id);
+      // Parent should appear (it's a root candidate)
+      expect(ids).toContain(parent.id);
+      // Other root should appear too
+      expect(ids).toContain(otherItem.id);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Regression: Children of in-progress parents not promoted as orphans
+  //             (WL-0MQF5H0D30076K0X — Fix 2)
+  // Children of in-progress parents must NOT be promoted to root level in
+  // Stage 5 — the entire in-progress subtree is skipped from wl next.
+  // ─────────────────────────────────────────────────────────────────────
+  describe('children of in-progress parents excluded (WL-0MQF5H0D30076K0X — Fix 2)', () => {
+    it('should NOT promote child when parent is in-progress', () => {
+      const parent = db.create({ title: 'In-progress parent', priority: 'high', status: 'in-progress' });
+      const child = db.create({ title: 'Open child', priority: 'high', status: 'open', parentId: parent.id });
+
+      const result = db.findNextWorkItem();
+      // Child should NOT be promoted — entire in-progress subtree is skipped
+      expect(result.workItem).toBeNull();
+    });
+
+    it('should skip in-progress subtree and select next available root', () => {
+      const parent = db.create({ title: 'In-progress parent', priority: 'high', status: 'in-progress', sortIndex: 100 });
+      db.create({ title: 'Open child', priority: 'high', status: 'open', parentId: parent.id, sortIndex: 200 });
+      const rootItem = db.create({ title: 'Other root item', priority: 'medium', status: 'open', sortIndex: 50 });
+
+      const result = db.findNextWorkItem();
+      // rootItem should be selected, ignoring the in-progress subtree
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(rootItem.id);
+    });
+
+    it('should still promote child when parent is completed (orphan promotion preserved)', () => {
+      const parent = db.create({ title: 'Completed parent', priority: 'high', status: 'completed', sortIndex: 100 });
+      const orphan = db.create({ title: 'Orphan child', priority: 'high', status: 'open', parentId: parent.id, sortIndex: 200 });
+
+      const result = db.findNextWorkItem();
+      // Orphan promotion still works for completed parents
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(orphan.id);
+    });
+
+    it('should still promote child when parent is deleted (orphan promotion preserved)', () => {
+      const parent = db.create({ title: 'Deleted parent', priority: 'high', status: 'deleted', sortIndex: 100 });
+      const orphan = db.create({ title: 'Orphan child', priority: 'high', status: 'open', parentId: parent.id, sortIndex: 200 });
+
+      const result = db.findNextWorkItem();
+      // Orphan promotion still works for deleted parents
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(orphan.id);
+    });
+
+    it('should not surface children of in-progress parent in batch mode', () => {
+      const parent = db.create({ title: 'In-progress parent', priority: 'high', status: 'in-progress', sortIndex: 100 });
+      const child = db.create({ title: 'Child A', priority: 'high', status: 'open', parentId: parent.id, sortIndex: 200 });
+      const rootItem = db.create({ title: 'Root item', priority: 'medium', status: 'open', sortIndex: 50 });
+
+      const results = db.findNextWorkItems(3);
+      const ids = results.map(r => r.workItem?.id).filter(Boolean);
+      // Child should NOT appear in batch results
+      expect(ids).not.toContain(child.id);
+      // Root item should appear
+      expect(ids).toContain(rootItem.id);
     });
   });
 });

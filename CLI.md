@@ -404,6 +404,8 @@ Suggest the next work item(s) to work on. Non-actionable items (deleted, complet
 
 Leaf items (items without children, or whose children are all completed) continue to be returned normally. Items whose parent is completed, deleted, or otherwise absent from the candidate pool are promoted to root level (orphan promotion) and compete on their own merit.
 
+Items whose parent (or ancestor) has status `in-progress` are **not** promoted — the entire in-progress subtree is skipped from `wl next` recommendations. This includes critical-priority children: they are only surfaced when their parent is not a valid (open, non-completed, non-deleted, non-in-progress) candidate.
+
 In batch mode (`-n <count>`), children of returned parents are also excluded from subsequent results, ensuring the batch never contains items from the same subtree.
 
 #### Automatic re-sort
