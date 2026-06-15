@@ -12,6 +12,23 @@ const EMOJI_RANGES = [
   [0x2600, 0x2B5F],   // Miscellaneous Symbols, Dingbats, and more
 ] as const;
 
+// Lazy-loaded references to Pi's built-in terminal utility functions.
+// When the extension runs inside Pi, these delegate to @earendil-works/pi-tui
+// which handles ANSI codes, emoji widths, and wrapping correctly.
+// Falls back to the custom implementations when Pi's TUI is not available.
+let _piVisibleWidth: ((text: string) => number) | null = null;
+let _piTruncateToWidth: ((text: string, width: number, ellipsis?: string) => string) | null = null;
+let _piWrapTextWithAnsi: ((text: string, width: number) => string[]) | null = null;
+
+try {
+  const tui = await import('@earendil-works/pi-tui');
+  _piVisibleWidth = tui.visibleWidth;
+  _piTruncateToWidth = tui.truncateToWidth;
+  _piWrapTextWithAnsi = tui.wrapTextWithAnsi;
+} catch {
+  // Pi TUI not available — fall back to custom implementations
+}
+
 /**
  * Check if a codepoint is an emoji or special symbol that takes 2 terminal columns.
  */
@@ -33,6 +50,7 @@ export function getCharWidth(char: string): number {
  * Calculate the visible terminal width of a string (excluding ANSI codes).
  */
 export function visibleWidth(text: string): number {
+  if (_piVisibleWidth) return _piVisibleWidth(text);
   const stripped = text.replace(/\x1b\[[0-9;]*m/g, '');
   let width = 0;
   for (const c of stripped) {
@@ -55,6 +73,7 @@ export function truncateToTerminalWidth(
   maxWidth: number,
   opts: TruncateOptions = {}
 ): string {
+  if (_piTruncateToWidth) return _piTruncateToWidth(text, maxWidth, opts.ellipsis);
   const ellipsis = opts.ellipsis ?? '…';
   
   if (maxWidth <= 0) return '';
@@ -267,6 +286,7 @@ export function wrapToTerminalWidth(
   maxWidth: number,
   opts: WrapOptions = {},
 ): string[] {
+  if (_piWrapTextWithAnsi) return _piWrapTextWithAnsi(text, maxWidth);
   const { preserveNewlines = true } = opts;
 
   if (maxWidth <= 0) return [];
