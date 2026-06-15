@@ -9,6 +9,32 @@ import {
 } from '../../packages/tui/extensions/index.ts';
 import { ShortcutRegistry } from '../../packages/tui/extensions/shortcut-config.js';
 
+/**
+ * Helper to create a mock for the list 'custom' render function.
+ */
+function makeListCustomMock() {
+  const componentRef: { current: any } = { current: null };
+  const doneCalls: any[] = [];
+  let resolvePromise: (value: any) => void;
+  const promise = new Promise<any>((resolve) => {
+    resolvePromise = resolve;
+  });
+  const custom = vi.fn((renderFn: Function) => {
+    const result = renderFn(
+      { requestRender: vi.fn(), terminal: { rows: 20 } },
+      { fg: (_c: string, t: string) => t, bold: (t: string) => t },
+      {},
+      (val: any) => {
+        doneCalls.push(val);
+        resolvePromise(val);
+      },
+    );
+    componentRef.current = result;
+    return promise;
+  });
+  return { custom, componentRef, doneCalls, promise };
+}
+
 describe('Worklog browse pi extension', () => {
   it('formats browse options with status, stage, and audit icons before the title (no ID)', () => {
     expect(formatBrowseOption({ id: 'WL-42', title: 'Implement thing', status: 'open' })).toBe(
@@ -624,29 +650,6 @@ describe('Worklog browse pi extension', () => {
     /**
      * Test shortcut key dispatch in the browse list view using defaultChooseWorkItem directly.
      */
-    function makeListCustomMock() {
-      const componentRef: { current: any } = { current: null };
-      const doneCalls: any[] = [];
-      let resolvePromise: (value: any) => void;
-      const promise = new Promise<any>((resolve) => {
-        resolvePromise = resolve;
-      });
-      const custom = vi.fn((renderFn: Function) => {
-        const result = renderFn(
-          { requestRender: vi.fn(), terminal: { rows: 20 } },
-          { fg: (_c: string, t: string) => t, bold: (t: string) => t },
-          {},
-          (val: any) => {
-            doneCalls.push(val);
-            resolvePromise(val);
-          },
-        );
-        componentRef.current = result;
-        return promise;
-      });
-      return { custom, componentRef, doneCalls, promise };
-    }
-
     it('dispatches n key as intake <id> in the browse list view', async () => {
       const items = [{ id: 'WL-99', title: 'Intake me', status: 'open' }];
 
