@@ -206,13 +206,21 @@ describe('loadShortcutConfig', () => {
   it('loads valid entries from shortcuts.json', () => {
     const registry = loadShortcutConfig();
     const entries = registry.getEntries();
-    expect(entries).toHaveLength(7);
+    expect(entries).toHaveLength(9);
+
+    const createEntry = entries.find(e => e.key === 'c');
+    expect(createEntry).toBeDefined();
+    expect(createEntry!.command).toBe('/intake\n<desc>\nPriority: medium');
+    expect(createEntry!.view).toBe('both');
+    expect(createEntry!.stages).toBeUndefined();
+    expect(createEntry!.label).toBe('create new');
+    expect(createEntry!.description).toBe('Create a new work item with a description and priority.');
 
     const implementEntry = entries.find(e => e.key === 'i');
     expect(implementEntry).toBeDefined();
     expect(implementEntry!.command).toBe('/skill:implement <id>');
     expect(implementEntry!.view).toBe('both');
-    expect(implementEntry!.stages).toEqual(['plan_complete']);
+    expect(implementEntry!.stages).toEqual(['intake_complete', 'plan_complete']);
     expect(implementEntry!.label).toBe('implement');
     expect(implementEntry!.description).toBe('Run the implement workflow on the selected work item');
 
@@ -239,16 +247,19 @@ describe('loadShortcutConfig', () => {
     expect(auditEntry!.stages).toEqual(['in_review']);
     expect(auditEntry!.label).toBe('audit');
     expect(auditEntry!.description).toBe('Run an audit on the selected work item');
+
+    expect(entries.filter(e => e.key === '').length).toBe(4); // 4 chord entries have empty key
   });
 
   it('lookup resolves shortcuts loaded from file with stage parameter', () => {
     const registry = loadShortcutConfig();
 
-    // 'i' (implement) should only work for plan_complete stage
+    // 'i' (implement) works for intake_complete and plan_complete stages
     expect(registry.lookup('i', 'list', 'plan_complete')).toBe('/skill:implement <id>');
     expect(registry.lookup('i', 'detail', 'plan_complete')).toBe('/skill:implement <id>');
+    expect(registry.lookup('i', 'list', 'intake_complete')).toBe('/skill:implement <id>');
+    expect(registry.lookup('i', 'detail', 'intake_complete')).toBe('/skill:implement <id>');
     expect(registry.lookup('i', 'list', 'idea')).toBeUndefined();
-    expect(registry.lookup('i', 'list', 'intake_complete')).toBeUndefined();
     expect(registry.lookup('i', 'list', 'in_progress')).toBeUndefined();
 
     // 'p' (plan) should only work for intake_complete stage
@@ -278,14 +289,14 @@ describe('loadShortcutConfig', () => {
     const entries = registry.getEntries();
 
     const upChords = registry.getChordEntries();
-    expect(upChords).toHaveLength(2);
+    expect(upChords).toHaveLength(4);
 
     const upEntry = upChords.find((e: any) =>
       Array.isArray((e as any).chord) && (e as any).chord[0] === 'u' && (e as any).chord[1] === 'p',
     );
     expect(upEntry).toBeDefined();
     expect((upEntry as any).chord).toEqual(['u', 'p']);
-    expect(upEntry!.command).toBe('!!wl update --priority <id>');
+    expect(upEntry!.command).toBe('!!wl update <id> --priority ');
     expect(upEntry!.view).toBe('both');
     expect(upEntry!.label).toBe('update priority');
     expect(upEntry!.description).toBe('Update the priority of the selected work item');
@@ -296,10 +307,31 @@ describe('loadShortcutConfig', () => {
     );
     expect(utEntry).toBeDefined();
     expect((utEntry as any).chord).toEqual(['u', 't']);
-    expect(utEntry!.command).toBe('!!wl update --title <id>');
+    expect(utEntry!.command).toBe('!!wl update <id> --title ');
     expect(utEntry!.view).toBe('both');
     expect(utEntry!.label).toBe('update title');
     expect(utEntry!.description).toBe('Update the title of the selected work item');
+
+    // New close/delete chord entries
+    const xcEntry = upChords.find((e: any) =>
+      Array.isArray((e as any).chord) && (e as any).chord[0] === 'x' && (e as any).chord[1] === 'c',
+    );
+    expect(xcEntry).toBeDefined();
+    expect((xcEntry as any).chord).toEqual(['x', 'c']);
+    expect(xcEntry!.command).toBe('!!wl close <id>');
+    expect(xcEntry!.view).toBe('both');
+    expect(xcEntry!.label).toBe('close done');
+    expect(xcEntry!.description).toBe('Close the work item as done.');
+
+    const xdEntry = upChords.find((e: any) =>
+      Array.isArray((e as any).chord) && (e as any).chord[0] === 'x' && (e as any).chord[1] === 'd',
+    );
+    expect(xdEntry).toBeDefined();
+    expect((xdEntry as any).chord).toEqual(['x', 'd']);
+    expect(xdEntry!.command).toBe('!!wl delete <id>');
+    expect(xdEntry!.view).toBe('both');
+    expect(xdEntry!.label).toBe('close deleted');
+    expect(xdEntry!.description).toBe('Delete the work item.');
   });
 
   it('returns empty registry for unregistered key', () => {
@@ -323,10 +355,11 @@ describe('loadShortcutConfig', () => {
     expect(intakeCompleteEntries.find(e => e.key === 'a')).toBeUndefined(); // 'a' requires in_review
     expect(intakeCompleteEntries.find(e => e.key === 'c')).toBeDefined();
     expect(intakeCompleteEntries.find(e => e.key === 'n')).toBeUndefined();
-    expect(intakeCompleteEntries.find(e => e.key === 'i')).toBeUndefined(); // 'i' requires plan_complete
+    expect(intakeCompleteEntries.find(e => e.key === 'i')).toBeDefined(); // 'i' now includes intake_complete
 
     const planCompleteEntries = registry.getEntriesForStage('plan_complete');
     expect(planCompleteEntries.find(e => e.key === 'i')).toBeDefined();
+    expect(planCompleteEntries.find(e => e.key === 'p')).toBeUndefined(); // 'p' requires intake_complete only
     expect(planCompleteEntries.find(e => e.key === 'a')).toBeUndefined(); // 'a' requires in_review
     expect(planCompleteEntries.find(e => e.key === 'c')).toBeDefined();
 

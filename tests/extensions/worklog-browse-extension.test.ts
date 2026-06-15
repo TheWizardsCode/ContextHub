@@ -136,7 +136,7 @@ describe('Worklog browse pi extension', () => {
     const fakeTheme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
     const comp = customCallArgs(fakeTui, fakeTheme, {}, () => {});
     expect(typeof comp.render).toBe('function');
-    expect(comp.render(80)).toEqual(['## Four Details', '', 'Line1', 'Line2', 'Line3']);
+    expect(comp.render(80)).toEqual(['## Four Details', 'Line1', 'Line2', 'Line3']);
 
     expect(sendMessage).not.toHaveBeenCalled();
   });
