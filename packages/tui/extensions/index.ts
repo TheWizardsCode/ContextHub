@@ -570,7 +570,6 @@ export async function defaultChooseWorkItem(
     };
 
     return {
-      focused: false,
       render: (width: number) => {
         if (cachedLines && cachedWidth === width) {
           return cachedLines;
@@ -1091,7 +1090,6 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
               const widget = factory(tui, _theme);
 
               return {
-                focused: false,
                 render: (width: number) => widget.render(width),
                 invalidate: () => widget.invalidate(),
                 handleInput: (data: string) => {
