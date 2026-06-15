@@ -38,6 +38,15 @@ export interface WorklogBrowseItem {
   auditResult?: boolean | null;
 }
 
+/**
+ * Shortcut result type - returned when a shortcut key is pressed in the browse list.
+ * The caller should set editor text with the resolved command.
+ */
+export interface ShortcutResult {
+  type: 'shortcut';
+  command: string;
+}
+
 type RunWlFn = (args: string[], includeJson?: boolean) => Promise<string>;
 type SelectionChangeHandler = (item: WorklogBrowseItem) => void;
 type ChooseWorkItemFn = (
@@ -395,15 +404,6 @@ function isEnterKey(data: string): boolean {
 
 function isEscapeKey(data: string): boolean {
   return data === '\u001b' || data === 'escape';
-}
-
-/**
- * Shortcut result type - returned when a shortcut key is pressed in the browse list.
- * The caller should set editor text with the resolved command.
- */
-export interface ShortcutResult {
-  type: 'shortcut';
-  command: string;
 }
 
 /**
