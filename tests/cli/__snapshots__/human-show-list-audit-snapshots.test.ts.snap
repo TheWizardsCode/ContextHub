@@ -7,7 +7,7 @@ exports[`Human snapshots: show and list outputs with audit > renders concise/lis
 # Audited task
 
 ID       : TEST-1
-Status   : 🟢 Open [OPEN] · Stage: Undefined | Priority: 📋 medium [MED ]
+Status   : 🔓 Open [OPEN] · Stage: Undefined | Priority: 📋 medium [MED ]
 Type     : unknown
 SortIndex: 0
 Risk     : —
@@ -16,7 +16,7 @@ Effort   : —
 # No audit
 
 ID       : TEST-2
-Status   : 🟢 Open [OPEN] · Stage: Undefined | Priority: 📋 medium [MED ]
+Status   : 🔓 Open [OPEN] · Stage: Undefined | Priority: 📋 medium [MED ]
 Type     : unknown
 SortIndex: 0
 Risk     : —
@@ -30,7 +30,7 @@ exports[`Human snapshots: show and list outputs with audit > renders concise/lis
 └── # Audited task
     
     ID       : TEST-1
-    Status   : 🟢 Open [OPEN] · Stage: Undefined | Priority: 📋 medium [MED ]
+    Status   : 🔓 Open [OPEN] · Stage: Undefined | Priority: 📋 medium [MED ]
     Type     : unknown
     SortIndex: 0
     Risk     : —
@@ -43,7 +43,7 @@ exports[`Human snapshots: show and list outputs with audit > renders concise/lis
 └── # No audit
     
     ID       : TEST-2
-    Status   : 🟢 Open [OPEN] · Stage: Undefined | Priority: 📋 medium [MED ]
+    Status   : 🔓 Open [OPEN] · Stage: Undefined | Priority: 📋 medium [MED ]
     Type     : unknown
     SortIndex: 0
     Risk     : —

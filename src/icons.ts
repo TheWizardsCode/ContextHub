@@ -43,7 +43,7 @@ const PRIORITY_LABEL: Record<string, string> = {
 // ─── Status Icons ───────────────────────────────────────────────────────
 
 const STATUS_ICON: Record<string, string> = {
-  open:          '\u{1F7E2}',   // 🟢 Green circle
+  open:          '\u{1F513}',   // 🔓 Unlocked
   'in-progress': '\u{1F504}',  // 🔄 Arrows (recycling)
   completed:     '\u{2714}\u{FE0F}', // ✔️ Heavy check mark
   blocked:       '\u{26D4}',   // ⛔ No entry

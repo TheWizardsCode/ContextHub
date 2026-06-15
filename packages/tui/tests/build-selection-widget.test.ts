@@ -134,7 +134,7 @@ describe('buildSelectionWidget', () => {
     // '—' for missing priority, stage, risk, effort
     expect(line).toContain('—');
     // Status icon for 'open' should be present
-    expect(line).toContain('🟢');
+    expect(line).toContain('🔓');
   });
 
   it('uses text fallback icons when icons are disabled', () => {

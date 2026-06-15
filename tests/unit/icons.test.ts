@@ -73,7 +73,7 @@ describe('priorityIcon', () => {
 
 describe('statusIcon', () => {
   it('returns emoji for open status', () => {
-    expect(statusIcon('open')).toBe('\u{1F7E2}'); // 🟢
+    expect(statusIcon('open')).toBe('\u{1F513}'); // 🔓
   });
 
   it('returns emoji for in-progress status', () => {
@@ -107,7 +107,7 @@ describe('statusIcon', () => {
   });
 
   it('is case-insensitive', () => {
-    expect(statusIcon('OPEN')).toBe('\u{1F7E2}');
+    expect(statusIcon('OPEN')).toBe('\u{1F513}');
     expect(statusIcon('In-Progress')).toBe('\u{1F504}');
     expect(statusIcon('COMPLETED')).toBe('\u{2714}\u{FE0F}');
   });

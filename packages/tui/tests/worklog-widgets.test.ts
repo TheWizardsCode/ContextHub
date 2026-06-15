@@ -76,7 +76,7 @@ describe('buildWorklogWidgetLines', () => {
     const lines = buildWorklogWidgetLines(80, mockItems, 0);
     const joined = lines.join('\n');
     expect(joined).toContain('🔄'); // in_progress
-    expect(joined).toContain('🟢'); // open
+    expect(joined).toContain('🔓'); // open
   });
 
   it('truncates long titles', () => {
@@ -179,7 +179,7 @@ describe('getStatusIcon', () => {
 
   it('returns a circle icon for unknown statuses', () => {
     expect(getStatusIcon('unknown')).toBe('○');
-    expect(getStatusIcon('open')).toBe('🟢');
+    expect(getStatusIcon('open')).toBe('🔓');
   });
 });
 

@@ -60,7 +60,7 @@ across the TUI (blessed) and CLI (chalk) rendering paths. It covers:
 
 | Status         | Icon   | Text Fallback | Accessible Label          |
 |----------------|--------|---------------|---------------------------|
-| open           | `🟢`   | `[OPEN]`      | "Status: Open"            |
+| open           | `🔓`   | `[OPEN]`      | "Status: Open"            |
 | in-progress    | `🔄`   | `[INPR]`      | "Status: In progress"     |
 | completed      | `✔️`   | `[DONE]`      | "Status: Completed"       |
 | blocked        | `⛔`   | `[BLKD]`      | "Status: Blocked"         |

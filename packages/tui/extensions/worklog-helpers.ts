@@ -94,7 +94,7 @@ export function applyStageColour(
  */
 export function getStatusIcon(status: string): string {
   switch (status) {
-    case 'open': return '🟢';
+    case 'open': return '🔓';
     case 'in_progress': return '🔄';
     case 'completed': return '✔️';
     case 'blocked': return '⛔';

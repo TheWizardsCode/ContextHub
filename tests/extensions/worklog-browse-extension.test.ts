@@ -12,7 +12,7 @@ import { ShortcutRegistry } from '../../packages/tui/extensions/shortcut-config.
 describe('Worklog browse pi extension', () => {
   it('formats browse options with status, stage, and audit icons before the title (no ID)', () => {
     expect(formatBrowseOption({ id: 'WL-42', title: 'Implement thing', status: 'open' })).toBe(
-      '🟢 ❓ Implement thing',
+      '🔓 ❓ Implement thing',
     );
   });
 
@@ -22,7 +22,7 @@ describe('Worklog browse pi extension', () => {
         { id: 'WL-123456', title: 'A very long work item title that will not fit', status: 'open' },
         24,
       ),
-    ).toBe('🟢 ❓ A very long work …');
+    ).toBe('🔓 ❓ A very long work …');
   });
 
   const registerCommand = vi.fn();
@@ -172,7 +172,7 @@ describe('Worklog browse pi extension', () => {
     const mockTheme2 = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
     const comp = factory({}, mockTheme2);
     expect(comp.render(80)).toEqual([
-      '🟢 ❓ One — — —/—',
+      '🔓 ❓ One — — —/—',
     ]);
   });
   it('reports explicit empty state when no items exist', async () => {
