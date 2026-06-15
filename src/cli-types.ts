@@ -105,7 +105,6 @@ export interface NextOptions {
   search?: string;
   number?: string;
   prefix?: string;
-  includeInReview?: boolean;
   includeBlocked?: boolean;
   /** Skip automatic re-sort before selection */
   noReSort?: boolean;

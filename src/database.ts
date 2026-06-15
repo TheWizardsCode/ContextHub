@@ -784,6 +784,7 @@ export class WorklogDatabase {
     const previousStatus = item.status;
     const previousStage = item.stage;
 
+    // Build the new state to detect what actually changed
     const updated: WorkItem = {
       ...item,
       ...input,
@@ -791,11 +792,37 @@ export class WorklogDatabase {
       // Normalize status to canonical hyphenated form (e.g. in_progress -> in-progress)
       status: (normalizeStatusValue(input.status ?? item.status) ?? item.status) as WorkItem['status'],
       createdAt: item.createdAt, // Prevent createdAt changes
-      updatedAt: new Date().toISOString(),
       githubIssueNumber: item.githubIssueNumber,
       githubIssueId: item.githubIssueId,
       githubIssueUpdatedAt: item.githubIssueUpdatedAt,
     };
+
+    // Detect whether any tracked field actually changed.  If the update is a
+    // no-op (same values as the existing item), preserve the original
+    // updatedAt to avoid silent re-timestamping during bulk operations.
+    const fieldsToCompare: (keyof WorkItem)[] = [
+      'title', 'description', 'status', 'priority', 'sortIndex', 'parentId',
+      'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort',
+      'needsProducerReview'
+    ];
+    const hasChanged = fieldsToCompare.some(f => {
+      const oldVal = item[f];
+      const newVal = updated[f];
+      if (Array.isArray(oldVal) && Array.isArray(newVal)) {
+        return JSON.stringify(oldVal) !== JSON.stringify(newVal);
+      }
+      return oldVal !== newVal;
+    });
+
+    if (!hasChanged) {
+      // Nothing changed — preserve original updatedAt and return early
+      // without writing to the store or triggering autoSync.
+      updated.updatedAt = item.updatedAt;
+      return updated;
+    }
+
+    // At least one field changed — bump the timestamp.
+    updated.updatedAt = new Date().toISOString();
 
     if (process.env.WL_DEBUG_SQL_BINDINGS) {
       try {
@@ -1105,7 +1132,6 @@ export class WorklogDatabase {
       assignee?: string;
       searchTerm?: string;
       excluded?: Set<string>;
-      includeInReview?: boolean;
       debugPrefix?: string;
     } = {}
   ): NextWorkItemResult | null {
@@ -1113,20 +1139,19 @@ export class WorklogDatabase {
       assignee,
       searchTerm,
       excluded,
-      includeInReview = false,
       debugPrefix = '[critical]',
     } = options;
 
     // Find all critical items from the full set, excluding only
-    // deleted/completed/in-progress (these are never actionable).
-    // Also exclude blocked+in_review items unless includeInReview is set.
+    // deleted items and in-progress items (these are never actionable).
+    // Items in the in_review stage are preserved even if their status
+    // is 'completed' since they need to appear in wl next for review.
     const criticalItems = allItems.filter(
       item =>
         item.priority === 'critical' &&
         item.status !== 'deleted' &&
-        item.status !== 'completed' &&
-        item.status !== 'in-progress' &&
-        (includeInReview || !(item.stage === 'in_review' && item.status === 'blocked'))
+        (item.status !== 'completed' || item.stage === 'in_review') &&
+        item.status !== 'in-progress'
     );
     this.debug(`${debugPrefix} critical items from full set=${criticalItems.length}`);
 
@@ -1279,6 +1304,19 @@ export class WorklogDatabase {
       score += (maxBlockedPriorityValue / 3) * WEIGHTS.blocksHighPriority;
     }
 
+    // In-review boost: items awaiting review are surfaced above medium- and
+    // low-priority items but below critical- and high-priority items.
+    // 600 points = 0.6 * priority weight (1000), which places in-review items
+    // in a band between high (3000) and medium (2000) priority levels:
+    //   - Critical (4000) + in-review (600) = 4600 > high (3000) ✓
+    //   - High (3000) + in-review (600) = 3600 > medium (2000) ✓
+    //   - Medium (2000) + in-review (600) = 2600 < high (3000) ✓
+    //   - Medium (2000) + in-review (600) = 2600 > medium (2000, non-review) ✓
+    //   - Low (1000) + in-review (600) = 1600 < medium (2000) ✓
+    if (item.stage === 'in_review') {
+      score += 600;
+    }
+
     // Age (createdAt) - small boost per day to avoid starvation
     const ageDays = Math.max(0, (now - new Date(item.createdAt).getTime()) / (1000 * 60 * 60 * 24));
     score += Math.min(ageDays, 365) * WEIGHTS.age;
@@ -1381,14 +1419,14 @@ export class WorklogDatabase {
    *     critical items and surface their blockers
    *
    * Filter stages (in order):
+   *   0. Apply stage filter first if specified (before other removals)
    *   1. Remove deleted items
-   *   2. Remove completed items
+   *   2. Remove completed items (preserving in_review stage)
    *   3. Remove in-progress items (wl next skips items already being worked on)
-   *   4. Remove in_review+blocked items (unless includeInReview)
-   *   5. Remove excluded items (batch mode)
-   *   6. Apply assignee and search filters
+   *   4. Remove excluded items (batch mode)
+   *   5. Apply assignee and search filters
    *   --- criticalPool snapshot taken here ---
-   *   7. Remove dependency-blocked items (unless includeBlocked)
+   *   6. Remove dependency-blocked items (unless includeBlocked)
    */
   private filterCandidates(
     items: WorkItem[],
@@ -1397,7 +1435,6 @@ export class WorklogDatabase {
       searchTerm?: string;
       stage?: string;
       excluded?: Set<string>;
-      includeInReview?: boolean;
       includeBlocked?: boolean;
       debugPrefix?: string;
     } = {}
@@ -1407,7 +1444,6 @@ export class WorklogDatabase {
       searchTerm,
       stage,
       excluded,
-      includeInReview = false,
       includeBlocked = false,
       debugPrefix = '[filter]',
     } = options;
@@ -1426,9 +1462,13 @@ export class WorklogDatabase {
     this.debug(`${debugPrefix} filter: after deleted=${pool.length}`);
 
     // 3. Remove completed items (unless stage filter was applied - user is
-    //    explicitly filtering by stage and may want completed items in that stage)
+    //    explicitly filtering by stage and may want completed items in that stage).
+    //    Also preserve items in the in_review stage - they need to appear in
+    //    wl next for review even though their status is 'completed'.
     if (!stage) {
-      pool = pool.filter(item => item.status !== 'completed');
+      pool = pool.filter(
+        item => item.status !== 'completed' || item.stage === 'in_review'
+      );
       this.debug(`${debugPrefix} filter: after completed=${pool.length}`);
     }
 
@@ -1437,15 +1477,7 @@ export class WorklogDatabase {
     pool = pool.filter(item => item.status !== 'in-progress');
     this.debug(`${debugPrefix} filter: after in-progress=${pool.length}`);
 
-    // 5. Remove in_review+blocked items unless opted in
-    if (!includeInReview) {
-      pool = pool.filter(
-        item => !(item.stage === 'in_review' && item.status === 'blocked')
-      );
-      this.debug(`${debugPrefix} filter: after in_review+blocked=${pool.length}`);
-    }
-
-    // 6. Remove excluded items (batch mode)
+    // 5. Remove excluded items (batch mode)
     if (excluded && excluded.size > 0) {
       pool = pool.filter(item => !excluded.has(item.id));
       this.debug(`${debugPrefix} filter: after excluded=${pool.length}`);
@@ -1499,7 +1531,6 @@ export class WorklogDatabase {
     searchTerm?: string,
     excluded?: Set<string>,
     debugPrefix: string = '[next]',
-    includeInReview: boolean = false,
     includeBlocked: boolean = false,
     stage?: string
   ): NextWorkItemResult {
@@ -1515,7 +1546,6 @@ export class WorklogDatabase {
       searchTerm,
       stage,
       excluded,
-      includeInReview,
       includeBlocked,
       debugPrefix,
     });
@@ -1531,7 +1561,6 @@ export class WorklogDatabase {
         assignee,
         searchTerm,
         excluded,
-        includeInReview,
         debugPrefix: `${debugPrefix} [critical]`,
       });
       if (criticalResult) {
@@ -1738,12 +1767,11 @@ export class WorklogDatabase {
   findNextWorkItem(
     assignee?: string,
     searchTerm?: string,
-    includeInReview: boolean = false,
     includeBlocked: boolean = false,
     stage?: string
   ): NextWorkItemResult {
     const items = this.store.getAllWorkItems();
-    return this.findNextWorkItemFromItems(items, assignee, searchTerm, undefined, '[next]', includeInReview, includeBlocked, stage);
+    return this.findNextWorkItemFromItems(items, assignee, searchTerm, undefined, '[next]', includeBlocked, stage);
   }
 
   /**
@@ -1754,7 +1782,6 @@ export class WorklogDatabase {
     count: number,
     assignee?: string,
     searchTerm?: string,
-    includeInReview: boolean = false,
     includeBlocked: boolean = false,
     stage?: string
   ): NextWorkItemResult[] {
@@ -1768,7 +1795,6 @@ export class WorklogDatabase {
         searchTerm,
         excluded,
         `[next batch ${i + 1}/${count}]`,
-        includeInReview,
         includeBlocked,
         stage
       );

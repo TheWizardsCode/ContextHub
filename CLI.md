@@ -427,7 +427,6 @@ Options:
 `--stage <stage>` — Filter by stage: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` (optional).
 `--search <term>` (optional)
 `-n, --number <n>` — Number of items to return (optional; default: `1`).
-`--include-in-review` — Include items with status `blocked` and stage `in_review` (optional).
 `--include-blocked` — Include dependency-blocked items (excluded by default).
 `--no-re-sort` — Skip automatic re-sort before selection, preserving current `sort_index` order (optional).
 `--re-sort-sync` — Force a synchronous (blocking) re-sort when automatic re-sort is triggered. By default automatic re-sorts are run asynchronously to avoid blocking interactive commands.

@@ -968,21 +968,44 @@ describe('WorklogDatabase', () => {
       expect(result.workItem?.id).not.toBe(parent.id);
     });
 
-    it('should exclude blocked in_review items by default', () => {
-      const inReviewBlocked = db.create({ title: 'In review', status: 'blocked', stage: 'in_review', priority: 'high' });
-      const openItem = db.create({ title: 'Open', status: 'open', priority: 'low' });
-
-      const result = db.findNextWorkItem();
-      expect(result.workItem?.id).toBe(openItem.id);
-      expect(result.workItem?.id).not.toBe(inReviewBlocked.id);
-    });
-
-    it('should include blocked in_review items when requested', () => {
+    it('should include blocked in_review items when they have higher effective priority', () => {
       const inReviewBlocked = db.create({ title: 'In review', status: 'blocked', stage: 'in_review', priority: 'high' });
       db.create({ title: 'Open', status: 'open', priority: 'low' });
 
-      const result = db.findNextWorkItem(undefined, undefined, true);
-      expect(result.workItem?.id).toBe(inReviewBlocked.id);
+      const result = db.findNextWorkItem();
+      // Blocked+in_review items pass through the filter pipeline and are
+      // selected based on effective priority (3 for high > 1 for low).
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(inReviewBlocked.id);
+    });
+
+    it('should include completed in_review items by default', () => {
+      const inReview = db.create({ title: 'In review', status: 'completed', stage: 'in_review', priority: 'medium' });
+      db.create({ title: 'Open low', status: 'open', priority: 'low' });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(inReview.id);
+    });
+
+    it('should boost in_review items above same-priority non-review items', () => {
+      const inReview = db.create({ title: 'In review medium', status: 'completed', stage: 'in_review', priority: 'medium' });
+      const openItem = db.create({ title: 'Open medium', status: 'open', priority: 'medium' });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      // In-review boost of +600 should push in_review above same-priority open item
+      expect(result.workItem!.id).toBe(inReview.id);
+    });
+
+    it('should not boost in_review items above higher priority items', () => {
+      db.create({ title: 'In review medium', status: 'completed', stage: 'in_review', priority: 'medium' });
+      const highItem = db.create({ title: 'Open high', status: 'open', priority: 'high' });
+
+      const result = db.findNextWorkItem();
+      // High priority (3000) > medium + in_review boost (2000 + 600 = 2600)
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(highItem.id);
     });
 
     it('should filter by assignee when provided', () => {
@@ -1743,7 +1766,7 @@ describe('WorklogDatabase', () => {
         db.create({ title: 'In progress task', priority: 'high', status: 'open', stage: 'in_progress' });
         db.create({ title: 'Done task', priority: 'critical', status: 'completed', stage: 'done' });
 
-        const result = db.findNextWorkItem(undefined, undefined, false, false, 'idea');
+        const result = db.findNextWorkItem(undefined, undefined, false, 'idea');
         expect(result.workItem).not.toBeNull();
         expect(result.workItem!.id).toBe(ideaItem.id);
         expect(result.workItem!.stage).toBe('idea');
@@ -1753,7 +1776,7 @@ describe('WorklogDatabase', () => {
         db.create({ title: 'Idea task', priority: 'critical', status: 'open', stage: 'idea' });
         const inProgressItem = db.create({ title: 'In progress task', priority: 'low', status: 'open', stage: 'in_progress' });
 
-        const result = db.findNextWorkItem(undefined, undefined, false, false, 'in_progress');
+        const result = db.findNextWorkItem(undefined, undefined, false, 'in_progress');
         expect(result.workItem).not.toBeNull();
         expect(result.workItem!.id).toBe(inProgressItem.id);
         expect(result.workItem!.stage).toBe('in_progress');
@@ -1763,7 +1786,7 @@ describe('WorklogDatabase', () => {
         db.create({ title: 'Idea task', priority: 'critical', status: 'open', stage: 'idea' });
         const doneItem = db.create({ title: 'Done task', priority: 'low', status: 'completed', stage: 'done' });
 
-        const result = db.findNextWorkItem(undefined, undefined, false, false, 'done');
+        const result = db.findNextWorkItem(undefined, undefined, false, 'done');
         expect(result.workItem).not.toBeNull();
         expect(result.workItem!.id).toBe(doneItem.id);
         expect(result.workItem!.stage).toBe('done');
@@ -1773,7 +1796,7 @@ describe('WorklogDatabase', () => {
         db.create({ title: 'Idea task', priority: 'high', status: 'open', stage: 'idea' });
         db.create({ title: 'In progress task', priority: 'high', status: 'open', stage: 'in_progress' });
 
-        const result = db.findNextWorkItem(undefined, undefined, false, false, 'plan_complete');
+        const result = db.findNextWorkItem(undefined, undefined, false, 'plan_complete');
         expect(result.workItem).toBeNull();
       });
 
@@ -1782,7 +1805,7 @@ describe('WorklogDatabase', () => {
         db.create({ title: 'Jane in progress task', priority: 'high', status: 'open', stage: 'in_progress', assignee: 'jane' });
         db.create({ title: 'John idea task', priority: 'critical', status: 'open', stage: 'idea', assignee: 'john' });
 
-        const result = db.findNextWorkItem('jane', undefined, false, false, 'idea');
+        const result = db.findNextWorkItem('jane', undefined, false, 'idea');
         expect(result.workItem).not.toBeNull();
         expect(result.workItem!.id).toBe(janeIdea.id);
       });
@@ -1792,7 +1815,7 @@ describe('WorklogDatabase', () => {
         db.create({ title: 'Feature idea', priority: 'high', status: 'open', stage: 'idea' });
         db.create({ title: 'Bug fix in progress', priority: 'critical', status: 'open', stage: 'in_progress' });
 
-        const result = db.findNextWorkItem(undefined, 'bug', false, false, 'idea');
+        const result = db.findNextWorkItem(undefined, 'bug', false, 'idea');
         expect(result.workItem).not.toBeNull();
         expect(result.workItem!.stage).toBe('idea');
         expect(result.workItem!.title.toLowerCase()).toContain('bug');
@@ -1805,7 +1828,7 @@ describe('WorklogDatabase', () => {
         const idea2 = db.create({ title: 'Idea task 2', priority: 'medium', status: 'open', stage: 'idea' });
         db.create({ title: 'In progress task', priority: 'critical', status: 'open', stage: 'in_progress' });
 
-        const results = db.findNextWorkItems(3, undefined, undefined, false, false, 'idea');
+        const results = db.findNextWorkItems(3, undefined, undefined, false, 'idea');
         expect(results).toHaveLength(3);
         expect(results[0].workItem!.id).toBe(idea1.id);
         expect(results[1].workItem!.id).toBe(idea2.id);
@@ -1815,7 +1838,7 @@ describe('WorklogDatabase', () => {
       it('should handle batch mode with stage filter when items run out', () => {
         const idea1 = db.create({ title: 'Idea task 1', priority: 'high', status: 'open', stage: 'idea' });
 
-        const results = db.findNextWorkItems(3, undefined, undefined, false, false, 'idea');
+        const results = db.findNextWorkItems(3, undefined, undefined, false, 'idea');
         expect(results).toHaveLength(3);
         expect(results[0].workItem!.id).toBe(idea1.id);
         expect(results[1].workItem).toBeNull();

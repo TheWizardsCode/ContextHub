@@ -21,21 +21,19 @@ export default function register(ctx: PluginContext): void {
     .option('--search <term>', 'Search term for fuzzy matching against title, description, and comments')
     .option('-n, --number <n>', 'Number of items to return (default: 1)', '1')
     .option('--prefix <prefix>', 'Override the default prefix')
-    .option('--include-in-review', 'Include items with status blocked and stage in_review (default: excluded)')
     .option('--include-blocked', 'Include dependency-blocked items (excluded by default)')
     .option('--no-re-sort', 'Skip the automatic re-sort before selection (preserve current sortIndex order)')
     .option('--re-sort-sync', 'Force a synchronous re-sort when auto re-sort is run (blocks until complete)', false)
     .option('--recency-policy <policy>', 'Recency handling for score ordering during re-sort (prefer|avoid|ignore). Default: ignore', 'ignore')
     .action(async (...rawArgs: any[]) => {
       // Normalize incoming args: commander may pass a Command instance
-      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'stage', 'search', 'number', 'prefix', 'includeInReview', 'includeBlocked', 'reSort', 'reSortSync', 'recencyPolicy']);
+      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'stage', 'search', 'number', 'prefix', 'includeBlocked', 'reSort', 'reSortSync', 'recencyPolicy']);
       let options: any = normalized.options || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
        const numRequested = parseInt(options.number || '1', 10);
       const count = Number.isNaN(numRequested) || numRequested < 1 ? 1 : numRequested;
 
-      const includeInReview = Boolean(options.includeInReview);
       const includeBlocked = Boolean(options.includeBlocked);
 
       // Validate stage if provided
@@ -74,8 +72,8 @@ export default function register(ctx: PluginContext): void {
       }
 
       const results = (db as any).findNextWorkItems 
-        ? (db as any).findNextWorkItems(count, options.assignee, options.search, includeInReview, includeBlocked, options.stage) 
-        : [db.findNextWorkItem(options.assignee, options.search, includeInReview, includeBlocked, options.stage)];
+        ? (db as any).findNextWorkItems(count, options.assignee, options.search, includeBlocked, options.stage) 
+        : [db.findNextWorkItem(options.assignee, options.search, includeBlocked, options.stage)];
 
       const availableResults = results.filter((result: any) => Boolean(result.workItem));
       const missingCount = Math.max(0, count - availableResults.length);

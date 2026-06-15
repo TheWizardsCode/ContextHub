@@ -249,44 +249,49 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
   });
 
   // ─────────────────────────────────────────────────────────────────────
-  // Regression: In-review exclusion (WL-0ML2TS8I409ALBU6)
-  // Items with status=blocked + stage=in_review must be excluded by
-  // default, but included when --include-in-review is set.
+  // Regression: In-review inclusion (WL-0MQEG3926003YDXW)
+  // In-review items appear in wl next by default with a sort-index boost.
+  // The --include-in-review flag has been removed.
   // ─────────────────────────────────────────────────────────────────────
-  describe('in-review exclusion (WL-0ML2TS8I409ALBU6)', () => {
-    it('should exclude blocked in_review items by default', () => {
+  describe('in-review inclusion (WL-0MQEG3926003YDXW)', () => {
+    it('should include completed in_review items by default', () => {
       const inReview = db.create({
-        title: 'In review',
-        status: 'blocked',
+        title: 'In review completed',
+        status: 'completed',
         stage: 'in_review',
-        priority: 'high',
+        priority: 'medium',
       });
-      const openItem = db.create({ title: 'Open', status: 'open', priority: 'low' });
+      db.create({ title: 'Open low', status: 'open', priority: 'low' });
 
       const result = db.findNextWorkItem();
       expect(result.workItem).not.toBeNull();
-      expect(result.workItem!.id).toBe(openItem.id);
-      expect(result.workItem!.id).not.toBe(inReview.id);
+      expect(result.workItem!.id).toBe(inReview.id);
     });
 
-    it('should include blocked in_review items when includeInReview=true', () => {
+    it('should include blocked in_review items and select based on effective priority', () => {
       const inReview = db.create({
-        title: 'In review',
+        title: 'In review blocked',
         status: 'blocked',
         stage: 'in_review',
         priority: 'high',
       });
       db.create({ title: 'Open', status: 'open', priority: 'low' });
 
-      const result = db.findNextWorkItem(undefined, undefined, true);
+      const result = db.findNextWorkItem();
+      // Blocked+in_review items pass through the filter pipeline.
+      // A high priority blocked item wins over a low priority open item
+      // based on effective priority.
       expect(result.workItem).not.toBeNull();
       expect(result.workItem!.id).toBe(inReview.id);
     });
 
-    it('should return null when only in-review items exist and flag is off', () => {
-      db.create({ title: 'In review only', status: 'blocked', stage: 'in_review', priority: 'critical' });
+    it('should return the in_review item when it is the only actionable item', () => {
+      db.create({ title: 'In review only', status: 'completed', stage: 'in_review', priority: 'critical' });
 
       const result = db.findNextWorkItem();
+      // In-review (completed) items are actionable, so this should return the item
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.stage).toBe('in_review');
     });
   });
 
@@ -374,7 +379,7 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       const itemB = db.create({ title: 'Prerequisite B', priority: 'low', status: 'open' });
       db.addDependencyEdge(itemA.id, itemB.id);
 
-      const result = db.findNextWorkItem(undefined, undefined, false, true);
+      const result = db.findNextWorkItem(undefined, undefined, true);
       expect(result.workItem).not.toBeNull();
       // With includeBlocked, A should be in the candidate pool
     });
@@ -551,28 +556,39 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
   });
 
   // ─────────────────────────────────────────────────────────────────────
-  // Regression: Blocked/in-review flag behavior (WL-0MLC3SUXI0QI9I3L)
-  // The --include-in-review flag must correctly control inclusion of
-  // blocked items with stage=in_review.
+  // In-review boost ranking (WL-0MQEG3926003YDXW)
+  // In-review items receive a sort-index boost placing them between high
+  // and medium priority. The --include-in-review flag has been removed.
   // ─────────────────────────────────────────────────────────────────────
-  describe('blocked/in-review flag behavior (WL-0MLC3SUXI0QI9I3L)', () => {
-    it('should exclude blocked+in_review by default', () => {
-      db.create({ title: 'In review', status: 'blocked', stage: 'in_review', priority: 'critical' });
-      const openItem = db.create({ title: 'Open', status: 'open', priority: 'low' });
+  describe('in-review boost ranking (WL-0MQEG3926003YDXW)', () => {
+    it('should boost in_review completed items above same-priority open items', () => {
+      const inReview = db.create({ title: 'In review', status: 'completed', stage: 'in_review', priority: 'medium' });
+      const openItem = db.create({ title: 'Open medium', status: 'open', priority: 'medium' });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem!.id).toBe(openItem.id);
-    });
-
-    it('should include blocked+in_review when includeInReview=true', () => {
-      const inReview = db.create({ title: 'In review', status: 'blocked', stage: 'in_review', priority: 'critical' });
-      db.create({ title: 'Open', status: 'open', priority: 'low' });
-
-      const result = db.findNextWorkItem(undefined, undefined, true);
+      // In-review medium (2000 + 600 = 2600) > open medium (2000)
       expect(result.workItem!.id).toBe(inReview.id);
     });
 
-    it('should not affect blocked items without in_review stage', () => {
+    it('should keep critical priority items above in_review items', () => {
+      db.create({ title: 'In review medium', status: 'completed', stage: 'in_review', priority: 'medium' });
+      const criticalItem = db.create({ title: 'Critical', status: 'open', priority: 'critical' });
+
+      const result = db.findNextWorkItem();
+      // Critical (4000) > in_review medium (2000 + 600 = 2600)
+      expect(result.workItem!.id).toBe(criticalItem.id);
+    });
+
+    it('should keep high priority items above in_review items', () => {
+      db.create({ title: 'In review medium', status: 'completed', stage: 'in_review', priority: 'medium' });
+      const highItem = db.create({ title: 'High priority', status: 'open', priority: 'high' });
+
+      const result = db.findNextWorkItem();
+      // High (3000) > in_review medium (2000 + 600 = 2600)
+      expect(result.workItem!.id).toBe(highItem.id);
+    });
+
+    it('should still surface blockers for blocked items without in_review stage', () => {
       // A regular blocked item (not in_review) should be handled by normal blocked logic
       const blocked = db.create({ title: 'Blocked', status: 'blocked', priority: 'high' });
       const blocker = db.create({ title: 'Blocker child', status: 'open', priority: 'low', parentId: blocked.id });
@@ -583,7 +599,7 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
     });
 
     it('should not affect open items with in_review stage (edge case)', () => {
-      // An open item with stage=in_review is NOT blocked, so the filter shouldn't apply
+      // An open item with stage=in_review is NOT completed or blocked
       const openInReview = db.create({ title: 'Open in review', status: 'open', stage: 'in_review', priority: 'high' });
 
       const result = db.findNextWorkItem();
@@ -871,25 +887,7 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       expect(result.reason).toContain('no identifiable blocking issues');
     });
 
-    it('should not surface blocked+in_review critical when includeInReview is false', () => {
-      db.create({
-        title: 'In review critical',
-        priority: 'critical',
-        status: 'blocked',
-        stage: 'in_review',
-      });
-      const openItem = db.create({
-        title: 'Open low',
-        priority: 'low',
-        status: 'open',
-      });
-
-      const result = db.findNextWorkItem();
-      expect(result.workItem).not.toBeNull();
-      expect(result.workItem!.id).toBe(openItem.id);
-    });
-
-    it('should surface blocked+in_review critical when includeInReview is true', () => {
+    it('should surface blocked+in_review critical when it has no blockers', () => {
       const critical = db.create({
         title: 'In review critical',
         priority: 'critical',
@@ -902,8 +900,30 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
         status: 'open',
       });
 
-      const result = db.findNextWorkItem(undefined, undefined, true);
+      const result = db.findNextWorkItem();
+      // Blocked+in_review critical passes through the filter pipeline.
+      // Since it's critical and has no blockers, the critical escalation
+      // path selects it.
       expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(critical.id);
+    });
+
+    it('should surface completed+in_review critical by default', () => {
+      const critical = db.create({
+        title: 'In review critical',
+        priority: 'critical',
+        status: 'completed',
+        stage: 'in_review',
+      });
+      db.create({
+        title: 'Open low',
+        priority: 'low',
+        status: 'open',
+      });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      // Critical priority (4000) + in_review boost (600) > low priority (1000)
       expect(result.workItem!.id).toBe(critical.id);
     });
 
