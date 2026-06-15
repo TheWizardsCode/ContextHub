@@ -1666,9 +1666,33 @@ export class WorklogDatabase {
         }
 
         // Apply assignee/search filters to blockers
-        const filteredBlockers = blockingPairs.filter(pair =>
+        let filteredBlockers = blockingPairs.filter(pair =>
           this.applyFilters([pair.blocking], assignee, searchTerm).length > 0
         );
+
+        // Filter out child blockers whose parent is a valid (non-deleted,
+        // non-completed, non-in-progress) candidate — the parent should be
+        // preferred for selection via Stage 5 (open item selection) which
+        // correctly returns parents without descending into children.
+        // This mirrors the hierarchy-aware filtering in Stage 2
+        // (handleCriticalEscalation) for unblocked criticals.
+        filteredBlockers = filteredBlockers.filter(pair => {
+          if (!pair.blocking.parentId) return true;
+          const parent = items.find(p => p.id === pair.blocking.parentId);
+          if (!parent) return true;
+          // Parent is a valid candidate if it is actionable (open, not
+          // deleted/completed/in-progress/blocked). A blocked parent cannot
+          // compete in Stage 5, so its child blockers should be preserved.
+          if (
+            parent.status !== 'deleted' &&
+            parent.status !== 'completed' &&
+            parent.status !== 'in-progress' &&
+            parent.status !== 'blocked'
+          ) {
+            return false; // Skip child blocker, parent will compete in Stage 5
+          }
+          return true;
+        });
 
         this.debug(`${debugPrefix} blocker-surfacing: blockedItem=${blockedItem.id} pri=${blockedItem.priority} blockers=${filteredBlockers.length}`);
 

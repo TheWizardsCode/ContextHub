@@ -1631,4 +1631,84 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       expect(ids).toContain(rootItem.id);
     });
   });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Regression: Stage 3 hierarchy awareness — blocker surfacing should
+  //             not return child items when their parent is a valid
+  //             candidate (WL-0MQF95NCC0024H61)
+  // Stage 3 (non-critical blocker surfacing) was returning child items
+  // directly when the child blocked another child under the same parent.
+  // The fix filters out blockers whose parent is a valid (open,
+  // non-deleted, non-completed, non-in-progress) parent candidate so
+  // that Stage 5 can correctly return the parent instead.
+  // ─────────────────────────────────────────────────────────────────────
+  describe('Stage 3 hierarchy awareness for blocker surfacing (WL-0MQF95NCC0024H61)', () => {
+    it('should return parent instead of child blocker (dependency-edge) when parent is valid candidate', () => {
+      // Scenario: Parent has two children; one child depends on the other.
+      // Stage 3 should NOT return the child blocker — the parent should
+      // be selected by Stage 5 instead.
+      const parent = db.create({ title: 'Parent epic', priority: 'medium', status: 'open' });
+      const childA = db.create({ title: 'Prerequisite child', priority: 'medium', status: 'open', parentId: parent.id });
+      const childB = db.create({ title: 'Blocked child', priority: 'medium', status: 'blocked', parentId: parent.id });
+      // childB depends on childA
+      db.addDependencyEdge(childB.id, childA.id);
+
+      const result = db.findNextWorkItem();
+
+      // Should return parent, not the child blocker
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(parent.id);
+      expect(result.workItem!.id).not.toBe(childA.id);
+      expect(result.reason).toContain('Next open item');
+    });
+
+    it('should still surface root-level dependency-edge blocker normally (not a child)', () => {
+      // Scenario: A root-level dependency-edge blocker should still be
+      // surfaced — hierarchy filter only applies to children.
+      const rootBlocker = db.create({ title: 'Root blocker', priority: 'low', status: 'open' });
+      const blockedItem = db.create({ title: 'Blocked item', priority: 'high', status: 'blocked' });
+      db.addDependencyEdge(blockedItem.id, rootBlocker.id);
+
+      const result = db.findNextWorkItem();
+
+      // Root-level blocker should be surfaced
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(rootBlocker.id);
+      expect(result.reason).toContain('Blocking issue');
+    });
+
+    it('should surface dependency-edge blocker that is an orphan child (parent completed)', () => {
+      // Scenario: The blocker is a child of a completed parent (orphan)
+      // — orphan promotion makes it root-level, so it should be surfaced.
+      const completedParent = db.create({ title: 'Completed parent', priority: 'high', status: 'completed' });
+      const orphanBlocker = db.create({ title: 'Orphan blocker', priority: 'medium', status: 'open', parentId: completedParent.id });
+      const blockedItem = db.create({ title: 'Blocked item', priority: 'high', status: 'blocked' });
+      db.addDependencyEdge(blockedItem.id, orphanBlocker.id);
+
+      const result = db.findNextWorkItem();
+
+      // Orphan blocker should be surfaced (parent completed means no hierarchy suppression)
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(orphanBlocker.id);
+      expect(result.reason).toContain('Blocking issue');
+    });
+
+    it('should suppress child blockers in batch mode when parent is valid candidate', () => {
+      // Batch mode should also suppress child blockers from Stage 3
+      const parent = db.create({ title: 'Parent epic', priority: 'medium', status: 'open' });
+      const childA = db.create({ title: 'Prerequisite child', priority: 'medium', status: 'open', parentId: parent.id });
+      const childB = db.create({ title: 'Blocked child', priority: 'medium', status: 'blocked', parentId: parent.id });
+      db.addDependencyEdge(childB.id, childA.id);
+      const otherItem = db.create({ title: 'Other root item', priority: 'medium', status: 'open' });
+
+      const results = db.findNextWorkItems(5);
+      const ids = results.map(r => r.workItem?.id).filter(Boolean);
+
+      // Child blocker should NOT appear in batch results
+      expect(ids).not.toContain(childA.id);
+      // Parent and other root should appear
+      expect(ids).toContain(parent.id);
+      expect(ids).toContain(otherItem.id);
+    });
+  });
 });
