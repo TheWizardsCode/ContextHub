@@ -344,6 +344,60 @@ describe('WorklogDatabase', () => {
       const result = db.delete('TEST-NONEXISTENT');
       expect(result).toBe(false);
     });
+
+    it('should recursively delete children when deleting a parent', () => {
+      const parent = db.create({ title: 'Parent' });
+      const child1 = db.create({ title: 'Child 1', parentId: parent.id });
+      const child2 = db.create({ title: 'Child 2', parentId: parent.id });
+
+      const deleted = db.delete(parent.id);
+      expect(deleted).toBe(true);
+
+      // Parent should be marked as deleted
+      expect(db.get(parent.id)?.status).toBe('deleted');
+      // Children should also be marked as deleted
+      expect(db.get(child1.id)?.status).toBe('deleted');
+      expect(db.get(child2.id)?.status).toBe('deleted');
+    });
+
+    it('should recursively delete nested descendants (grandchildren)', () => {
+      const grandparent = db.create({ title: 'Grandparent' });
+      const parent = db.create({ title: 'Parent', parentId: grandparent.id });
+      const child = db.create({ title: 'Child', parentId: parent.id });
+
+      const deleted = db.delete(grandparent.id);
+      expect(deleted).toBe(true);
+
+      expect(db.get(grandparent.id)?.status).toBe('deleted');
+      expect(db.get(parent.id)?.status).toBe('deleted');
+      expect(db.get(child.id)?.status).toBe('deleted');
+    });
+
+    it('should not delete siblings or unrelated items when deleting a parent', () => {
+      const parent1 = db.create({ title: 'Parent 1' });
+      const parent2 = db.create({ title: 'Parent 2' });
+      const childOf1 = db.create({ title: 'Child of 1', parentId: parent1.id });
+      const childOf2 = db.create({ title: 'Child of 2', parentId: parent2.id });
+      const unrelated = db.create({ title: 'Unrelated' });
+
+      db.delete(parent1.id);
+
+      // parent1 and its child should be deleted
+      expect(db.get(parent1.id)?.status).toBe('deleted');
+      expect(db.get(childOf1.id)?.status).toBe('deleted');
+      // parent2, its child, and unrelated should remain
+      expect(db.get(parent2.id)?.status).not.toBe('deleted');
+      expect(db.get(childOf2.id)?.status).not.toBe('deleted');
+      expect(db.get(unrelated.id)?.status).not.toBe('deleted');
+    });
+
+    it('should handle delete with no children (no regression)', () => {
+      const item = db.create({ title: 'No children' });
+      const deleted = db.delete(item.id);
+
+      expect(deleted).toBe(true);
+      expect(db.get(item.id)?.status).toBe('deleted');
+    });
   });
 
   describe('getChildren', () => {

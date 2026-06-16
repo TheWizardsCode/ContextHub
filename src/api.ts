@@ -171,7 +171,8 @@ export function createAPI(db: WorklogDatabase) {
   // Delete a work item
   app.delete('/items/:id', (req: Request, res: Response) => {
     db.setPrefix(defaultPrefix);
-    const deleted = db.delete(req.params.id);
+    const recursive = req.query.recursive !== 'false';
+    const deleted = db.delete(req.params.id, recursive);
     if (!deleted) {
       res.status(404).json({ error: 'Work item not found' });
       return;
@@ -377,7 +378,8 @@ export function createAPI(db: WorklogDatabase) {
 
   // Delete a work item with prefix
   app.delete('/projects/:prefix/items/:id', setPrefixMiddleware, (req: Request, res: Response) => {
-    const deleted = db.delete(req.params.id);
+    const recursive = req.query.recursive !== 'false';
+    const deleted = db.delete(req.params.id, recursive);
     if (!deleted) {
       res.status(404).json({ error: 'Work item not found' });
       return;

@@ -857,8 +857,43 @@ export class WorklogDatabase {
 
   /**
    * Delete a work item
+   *
+   * If the item has children, recursively deletes all descendants first,
+   * then deletes the item itself. This prevents orphaned children from
+   * remaining with stale parentId references.
+   *
+   * @param id - The ID of the work item to delete
+   * @param recursive - Whether to recursively delete descendants (default: true)
    */
-  delete(id: string): boolean {
+  delete(id: string, recursive: boolean = true): boolean {
+    const item = this.store.getWorkItem(id);
+    if (!item) {
+      return false;
+    }
+
+    // Recursively delete all descendants first (children, grandchildren, etc.)
+    if (recursive) {
+      const descendants = this.getDescendants(id);
+      // Delete from leaf to root so parent-child relationships are handled
+      // in reverse depth order (descendants sorted deepest-first)
+      const deepestFirst = [...descendants].sort((a, b) => {
+        const depthA = this.getDepth(a.id);
+        const depthB = this.getDepth(b.id);
+        return depthB - depthA;
+      });
+      for (const descendant of deepestFirst) {
+        this.deleteSingle(descendant.id);
+      }
+    }
+
+    // Now delete the item itself
+    return this.deleteSingle(id);
+  }
+
+  /**
+   * Internal: Mark a single work item as deleted (no recursive child handling).
+   */
+  private deleteSingle(id: string): boolean {
     const item = this.store.getWorkItem(id);
     if (!item) {
       return false;
