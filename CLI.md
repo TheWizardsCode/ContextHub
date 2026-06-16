@@ -310,6 +310,16 @@ wl comment delete CMT-0001
 
 Close one or more work items and optionally record a close reason as a comment.
 
+**Recursive close (audit-gated):** If the item is in the `in_review` stage and has an
+associated audit result with `readyToClose: true`, the command recursively closes all
+descendants (children, grandchildren, etc.) before closing the parent. The descendants
+are closed deepest-first so that leaf items are completed before their parents.
+
+- If a child cannot be closed, the operation continues processing remaining children
+  and reports the errors at the end without aborting the entire command.
+- For items that do not meet the recursive condition (not `in_review`, no audit, or
+  `readyToClose` is `false`), only the specified item is closed (current behaviour).
+
 **Automatic unblocking:** When a work item is closed, any dependents that were blocked
 solely by this item are automatically unblocked (their status changes from `blocked` to
 `open`). If a dependent has multiple blockers and other blockers remain active, it stays
@@ -327,6 +337,9 @@ Examples:
 ```sh
 wl close WL-ABC123 -r "Resolved by PR #42" -a alice
 wl close WL-ABC123 WL-DEF456 -r "Cleanup after release"
+
+# Close a parent and all its children (when parent is in_review with audit readyToClose=true)
+wl close WL-PARENT -r "All subtasks completed and audited OK"
 ```
 
 ### `dep` (subcommands)
