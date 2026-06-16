@@ -13,6 +13,42 @@ import { withFileLock, getLockPathForJsonl } from './file-lock.js';
 import * as searchMetrics from './search-metrics.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
 
+/**
+ * Pre-loaded cache of dependency edges and work items to eliminate N+1 queries
+ * during the wl next selection pipeline.
+ */
+interface EdgeCache {
+  /** inbound dependency edges: toId -> edges[] (items that depend on this item) */
+  inbound: Map<string, DependencyEdge[]>;
+  /** outbound dependency edges: fromId -> edges[] (items this item depends on) */
+  outbound: Map<string, DependencyEdge[]>;
+  /** All work items indexed by id for O(1) lookup */
+  itemsById: Map<string, WorkItem>;
+  /**
+   * Children of each parentId (including non-closed children).
+   * Built once from loaded items to avoid per-item SQL queries for getChildren().
+   */
+  childrenByParent: Map<string, WorkItem[]>;
+}
+
+/**
+ * Build a map of parentId -> direct children from a list of work items.
+ */
+function buildChildrenByParent(items: WorkItem[]): Map<string, WorkItem[]> {
+  const map = new Map<string, WorkItem[]>();
+  for (const item of items) {
+    if (item.parentId) {
+      let list = map.get(item.parentId);
+      if (!list) {
+        list = [];
+        map.set(item.parentId, list);
+      }
+      list.push(item);
+    }
+  }
+  return map;
+}
+
 const UNIQUE_TIME_LENGTH = 9;
 const UNIQUE_SEQUENCE_LENGTH = 2;
 const UNIQUE_RANDOM_BYTES = 3;
@@ -300,8 +336,9 @@ export class WorklogDatabase {
     console.error(message);
   }
 
-  private sortItemsByScore(items: WorkItem[], recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore'): WorkItem[] {
+  private sortItemsByScore(items: WorkItem[], recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore', edgeCache?: EdgeCache): WorkItem[] {
     const now = Date.now();
+    const cache = edgeCache ?? this.buildEdgeCache(items);
 
     // Pre-compute ancestors of in-progress items for O(1) per-item lookup.
     // For each in-progress item, walk up the parent chain and record ancestor IDs.
@@ -313,7 +350,7 @@ export class WorklogDatabase {
         let depth = 0;
         while (currentParentId && depth < MAX_ANCESTOR_DEPTH) {
           ancestorsOfInProgress.add(currentParentId);
-          const parent = this.store.getWorkItem(currentParentId);
+          const parent = cache.itemsById.get(currentParentId);
           currentParentId = parent?.parentId ?? null;
           depth++;
         }
@@ -321,8 +358,8 @@ export class WorklogDatabase {
     }
 
     return items.slice().sort((a, b) => {
-      const scoreA = this.computeScore(a, now, recencyPolicy, ancestorsOfInProgress);
-      const scoreB = this.computeScore(b, now, recencyPolicy, ancestorsOfInProgress);
+      const scoreA = this.computeScore(a, now, recencyPolicy, ancestorsOfInProgress, cache);
+      const scoreB = this.computeScore(b, now, recencyPolicy, ancestorsOfInProgress, cache);
       if (scoreB !== scoreA) return scoreB - scoreA;
       const createdA = new Date(a.createdAt).getTime();
       const createdB = new Date(b.createdAt).getTime();
@@ -410,20 +447,7 @@ export class WorklogDatabase {
   }
 
   assignSortIndexValuesForItems(orderedItems: WorkItem[], gap: number): { updated: number } {
-    let updated = 0;
-    for (let index = 0; index < orderedItems.length; index += 1) {
-      const item = orderedItems[index];
-      const nextSortIndex = (index + 1) * gap;
-      if (item.sortIndex !== nextSortIndex) {
-        const updatedItem = {
-          ...item,
-          sortIndex: nextSortIndex,
-          updatedAt: new Date().toISOString(),
-        };
-        this.store.saveWorkItem(updatedItem);
-        updated += 1;
-      }
-    }
+    const updated = this.store.batchUpdateSortIndices(orderedItems, gap);
     this.triggerAutoSync();
     return { updated };
   }
@@ -593,6 +617,50 @@ export class WorklogDatabase {
    */
   close(): void {
     this.store.close();
+  }
+
+  /**
+   * Build an EdgeCache from all dependency edges and work items.
+   * Eliminates N+1 query patterns by loading all edges and items once
+   * into in-memory Maps for O(1) lookups during computeScore() and
+   * filterCandidates().
+   *
+   * @param items - Optional pre-loaded work items to avoid double-loading
+   */
+  private buildEdgeCache(items?: WorkItem[]): EdgeCache {
+    const allEdges = this.store.getAllDependencyEdges();
+    const allItems = items ?? this.store.getAllWorkItems();
+
+    const inbound = new Map<string, DependencyEdge[]>();
+    const outbound = new Map<string, DependencyEdge[]>();
+    const itemsById = new Map<string, WorkItem>();
+
+    for (const edge of allEdges) {
+      // outbound: fromId -> edges (items that depend on others)
+      let fromList = outbound.get(edge.fromId);
+      if (!fromList) {
+        fromList = [];
+        outbound.set(edge.fromId, fromList);
+      }
+      fromList.push(edge);
+
+      // inbound: toId -> edges (items that are depended upon)
+      let toList = inbound.get(edge.toId);
+      if (!toList) {
+        toList = [];
+        inbound.set(edge.toId, toList);
+      }
+      toList.push(edge);
+    }
+
+    for (const item of allItems) {
+      itemsById.set(item.id, item);
+    }
+
+    // Build childrenByParent map once to avoid per-item SQL queries
+    const childrenByParent = buildChildrenByParent(allItems);
+
+    return { inbound, outbound, itemsById, childrenByParent };
   }
 
   // ── Audit Results ────────────────────────────────────────────────
@@ -999,8 +1067,11 @@ export class WorklogDatabase {
   /**
    * Get children that are not closed or deleted
    */
-  private getNonClosedChildren(parentId: string): WorkItem[] {
-    return this.getChildren(parentId).filter(
+  private getNonClosedChildren(parentId: string, edgeCache?: EdgeCache): WorkItem[] {
+    const children = edgeCache
+      ? (edgeCache.childrenByParent.get(parentId) ?? [])
+      : this.getChildren(parentId);
+    return children.filter(
       item => item.status !== 'completed' && item.status !== 'deleted'
     );
   }
@@ -1085,7 +1156,8 @@ export class WorklogDatabase {
    */
   computeEffectivePriority(
     item: WorkItem,
-    cache?: Map<string, { value: number; reason: string; inheritedFrom?: string }>
+    cache?: Map<string, { value: number; reason: string; inheritedFrom?: string }>,
+    edgeCache?: EdgeCache
   ): { value: number; reason: string; inheritedFrom?: string } {
     // Check cache first
     if (cache) {
@@ -1099,9 +1171,13 @@ export class WorklogDatabase {
     let inheritedFromPriority: string | undefined;
 
     // Check inbound dependency edges: items that depend on this item
-    const inboundEdges = this.listDependencyEdgesTo(item.id);
+    const inboundEdges = edgeCache
+      ? (edgeCache.inbound.get(item.id) ?? [])
+      : this.listDependencyEdgesTo(item.id);
     for (const edge of inboundEdges) {
-      const dependent = this.get(edge.fromId);
+      const dependent = edgeCache
+        ? (edgeCache.itemsById.get(edge.fromId) ?? null)
+        : this.get(edge.fromId);
       if (!dependent) continue;
       // Only inherit from active items (not completed or deleted)
       if (dependent.status === 'completed' || dependent.status === 'deleted') continue;
@@ -1115,7 +1191,9 @@ export class WorklogDatabase {
 
     // Also check if this item is a child that implicitly blocks its parent
     if (item.parentId) {
-      const parent = this.get(item.parentId);
+      const parent = edgeCache
+        ? (edgeCache.itemsById.get(item.parentId) ?? null)
+        : this.get(item.parentId);
       if (parent && parent.status !== 'completed' && parent.status !== 'deleted') {
         // A non-closed child blocks its parent — inherit parent's priority
         const parentValue = this.getPriorityValue(parent.priority);
@@ -1154,12 +1232,12 @@ export class WorklogDatabase {
   /**
    * Select the highest priority blocking candidate with critical reference
    */
-  private selectHighestPriorityBlocking(pairs: { blocking: WorkItem; critical: WorkItem }[]): { blocking: WorkItem; critical: WorkItem } | null {
+  private selectHighestPriorityBlocking(pairs: { blocking: WorkItem; critical: WorkItem }[], sortOrderCache?: WorkItem[]): { blocking: WorkItem; critical: WorkItem } | null {
     if (pairs.length === 0) {
       return null;
     }
 
-    const orderedBlocking = this.orderBySortIndex(pairs.map(pair => pair.blocking));
+    const orderedBlocking = this.orderBySortIndex(pairs.map(pair => pair.blocking), sortOrderCache);
     const selected = orderedBlocking[0];
     return selected ? pairs.find(pair => pair.blocking.id === selected.id) ?? null : null;
   }
@@ -1187,6 +1265,8 @@ export class WorklogDatabase {
       excluded?: Set<string>;
       debugPrefix?: string;
       includeInProgress?: boolean;
+      edgeCache?: EdgeCache;
+      sortOrderCache?: WorkItem[];
     } = {}
   ): NextWorkItemResult | null {
     const {
@@ -1195,6 +1275,7 @@ export class WorklogDatabase {
       excluded,
       debugPrefix = '[critical]',
       includeInProgress = false,
+      edgeCache,
     } = options;
 
     // Find all critical items from the full set, excluding only
@@ -1220,7 +1301,7 @@ export class WorklogDatabase {
     // An item is "unblocked" if it is not blocked AND has no non-closed children
     // (children act as implicit blockers).
     const unblockedCriticals = criticalItems.filter(
-      item => item.status !== 'blocked' && this.getNonClosedChildren(item.id).length === 0
+      item => item.status !== 'blocked' && this.getNonClosedChildren(item.id, edgeCache).length === 0
     );
     this.debug(`${debugPrefix} unblocked criticals=${unblockedCriticals.length}`);
 
@@ -1254,7 +1335,7 @@ export class WorklogDatabase {
       }
 
       if (selectable.length > 0) {
-        const selected = this.selectBySortIndex(selectable);
+        const selected = this.selectBySortIndex(selectable, undefined, options.sortOrderCache, options.edgeCache);
         this.debug(`${debugPrefix} selected unblocked critical=${selected?.id || ''} title="${selected?.title || ''}"`);
         return {
           workItem: selected,
@@ -1294,7 +1375,7 @@ export class WorklogDatabase {
         }
 
         // Child blockers (non-closed children implicitly block a parent)
-        const blockingChildren = this.getNonClosedChildren(critical.id);
+        const blockingChildren = this.getNonClosedChildren(critical.id, options.edgeCache);
         for (const child of blockingChildren) {
           if (excluded?.has(child.id)) continue;
           blockingPairs.push({ blocking: child, critical });
@@ -1302,7 +1383,7 @@ export class WorklogDatabase {
         }
 
         // Dependency-edge blockers
-        const dependencyBlockers = this.getActiveDependencyBlockers(critical.id);
+        const dependencyBlockers = this.getActiveDependencyBlockers(critical.id, options.edgeCache);
         for (const blocker of dependencyBlockers) {
           if (excluded?.has(blocker.id)) continue;
           blockingPairs.push({ blocking: blocker, critical });
@@ -1316,7 +1397,7 @@ export class WorklogDatabase {
       );
       this.debug(`${debugPrefix} blocking candidates=${blockingPairs.length} after filters=${filteredBlockingPairs.length}`);
 
-      const selectedBlocking = this.selectHighestPriorityBlocking(filteredBlockingPairs);
+      const selectedBlocking = this.selectHighestPriorityBlocking(filteredBlockingPairs, options.sortOrderCache);
 
       if (selectedBlocking) {
         this.debug(`${debugPrefix} selected blocker=${selectedBlocking.blocking.id} ("${selectedBlocking.blocking.title}") for critical ${selectedBlocking.critical.id}`);
@@ -1351,7 +1432,7 @@ export class WorklogDatabase {
         this.debug(`${debugPrefix} all blocked criticals filtered out by parent-candidate filter — returning null`);
         return null;
       }
-      const selectedBlockedCritical = this.selectBySortIndex(selectableBlocked);
+      const selectedBlockedCritical = this.selectBySortIndex(selectableBlocked, undefined, options.sortOrderCache, options.edgeCache);
       this.debug(`${debugPrefix} selected blocked critical (fallback)=${selectedBlockedCritical?.id || ''}`);
       return {
         workItem: selectedBlockedCritical,
@@ -1371,7 +1452,8 @@ export class WorklogDatabase {
     item: WorkItem,
     now: number,
     recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore',
-    ancestorsOfInProgress?: Set<string>
+    ancestorsOfInProgress?: Set<string>,
+    edgeCache?: EdgeCache
   ): number {
     // Weights are intentionally fixed and not configurable per request
     //
@@ -1400,10 +1482,16 @@ export class WorklogDatabase {
     // This ensures that among equal-priority peers, unblockers rank higher.
     // Uses store-direct access to avoid per-item refreshFromJsonlIfNewer overhead
     // (consistent with the dependency filter at the top of findNextWorkItemFromItems).
-    const inboundEdges = this.store.getDependencyEdgesTo(item.id);
+    // When edgeCache is provided, uses pre-loaded in-memory Maps instead of
+    // per-item SQL queries, eliminating the N+1 query pattern (Bottleneck 1).
+    const inboundEdges = edgeCache
+      ? (edgeCache.inbound.get(item.id) ?? [])
+      : this.store.getDependencyEdgesTo(item.id);
     let maxBlockedPriorityValue = 0;
     for (const edge of inboundEdges) {
-      const dependent = this.store.getWorkItem(edge.fromId);
+      const dependent = edgeCache
+        ? (edgeCache.itemsById.get(edge.fromId) ?? null)
+        : this.store.getWorkItem(edge.fromId);
       if (dependent && dependent.status !== 'completed' && dependent.status !== 'deleted') {
         const depPriority = this.getPriorityValue(dependent.priority);
         // Only boost for high (3) or critical (4) dependents
@@ -1479,8 +1567,8 @@ export class WorklogDatabase {
     return score;
   }
 
-  private orderBySortIndex(items: WorkItem[]): WorkItem[] {
-    const orderedAll = this.store.getAllWorkItemsOrderedByHierarchySortIndexSkipCompleted();
+  private orderBySortIndex(items: WorkItem[], sortOrderCache?: WorkItem[]): WorkItem[] {
+    const orderedAll = sortOrderCache ?? this.store.getAllWorkItemsOrderedByHierarchySortIndexSkipCompleted();
     const positions = new Map(orderedAll.map((item, index) => [item.id, index]));
     return items.slice().sort((a, b) => {
       const aPos = positions.get(a.id);
@@ -1499,7 +1587,9 @@ export class WorklogDatabase {
 
   private selectBySortIndex(
     items: WorkItem[],
-    effectivePriorityCache?: Map<string, { value: number; reason: string; inheritedFrom?: string }>
+    effectivePriorityCache?: Map<string, { value: number; reason: string; inheritedFrom?: string }>,
+    sortOrderCache?: WorkItem[],
+    edgeCache?: EdgeCache
   ): WorkItem | null {
     if (!items || items.length === 0) return null;
     // When all sortIndex values are the same (including all-zero), fall back to
@@ -1510,8 +1600,8 @@ export class WorklogDatabase {
     if (allSame) {
       const cache = effectivePriorityCache ?? new Map();
       const sorted = items.slice().sort((a, b) => {
-        const aEffective = this.computeEffectivePriority(a, cache);
-        const bEffective = this.computeEffectivePriority(b, cache);
+        const aEffective = this.computeEffectivePriority(a, cache, edgeCache);
+        const bEffective = this.computeEffectivePriority(b, cache, edgeCache);
         const priDiff = bEffective.value - aEffective.value;
         if (priDiff !== 0) return priDiff;
         const createdDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
@@ -1520,7 +1610,7 @@ export class WorklogDatabase {
       });
       return sorted[0] ?? null;
     }
-    return this.orderBySortIndex(items)[0] ?? null;
+    return this.orderBySortIndex(items, sortOrderCache)[0] ?? null;
   }
 
   /**
@@ -1552,6 +1642,7 @@ export class WorklogDatabase {
       includeBlocked?: boolean;
       includeInProgress?: boolean;
       debugPrefix?: string;
+      edgeCache?: EdgeCache;
     } = {}
   ): { candidates: WorkItem[]; criticalPool: WorkItem[] } {
     const {
@@ -1614,10 +1705,15 @@ export class WorklogDatabase {
     // 8. Remove dependency-blocked items unless opted in
     let candidates = pool;
     if (!includeBlocked) {
+      const ec = options.edgeCache;
       candidates = pool.filter(item => {
-        const edges = this.store.getDependencyEdgesFrom(item.id);
+        const edges = ec
+          ? (ec.outbound.get(item.id) ?? [])
+          : this.store.getDependencyEdgesFrom(item.id);
         for (const edge of edges) {
-          const target = this.store.getWorkItem(edge.toId);
+          const target = ec
+            ? (ec.itemsById.get(edge.toId) ?? null)
+            : this.store.getWorkItem(edge.toId);
           if (this.isDependencyActive(target ?? null)) {
             return false;
           }
@@ -1652,9 +1748,14 @@ export class WorklogDatabase {
     debugPrefix: string = '[next]',
     includeBlocked: boolean = false,
     stage?: string,
-    includeInProgress: boolean = false
+    includeInProgress: boolean = false,
+    edgeCache?: EdgeCache
   ): NextWorkItemResult {
     this.debug(`${debugPrefix} assignee=${assignee || ''} search=${searchTerm || ''} stage=${stage || ''} excluded=${excluded?.size || 0}`);
+
+    // Build the sort-order cache once from the pre-loaded items array.
+    // This avoids an extra full-table scan of all work items from the database.
+    const sortOrderCache = this.store.orderItemsByHierarchySortIndexSkipCompleted(items);
 
     // Shared effective-priority cache: avoids redundant dependency lookups
     // across all selectBySortIndex calls within this invocation.
@@ -1669,6 +1770,7 @@ export class WorklogDatabase {
       includeBlocked,
       includeInProgress,
       debugPrefix,
+      edgeCache,
     });
 
     // ── Stage 2: Critical-path escalation ──
@@ -1684,6 +1786,8 @@ export class WorklogDatabase {
         excluded,
         includeInProgress,
         debugPrefix: `${debugPrefix} [critical]`,
+        edgeCache,
+        sortOrderCache,
       });
       if (criticalResult) {
         return criticalResult;
@@ -1723,14 +1827,14 @@ export class WorklogDatabase {
         const blockingPairs: { blocking: WorkItem; blocked: WorkItem }[] = [];
 
         // Check dependency blockers
-        const dependencyBlockers = this.getActiveDependencyBlockers(blockedItem.id);
+        const dependencyBlockers = this.getActiveDependencyBlockers(blockedItem.id, edgeCache);
         for (const blocker of dependencyBlockers) {
           if (excluded?.has(blocker.id)) continue;
           blockingPairs.push({ blocking: blocker, blocked: blockedItem });
         }
 
         // Check child blockers
-        const blockingChildren = this.getNonClosedChildren(blockedItem.id);
+        const blockingChildren = this.getNonClosedChildren(blockedItem.id, edgeCache);
         for (const child of blockingChildren) {
           if (excluded?.has(child.id)) continue;
           blockingPairs.push({ blocking: child, blocked: blockedItem });
@@ -1769,7 +1873,7 @@ export class WorklogDatabase {
 
         if (filteredBlockers.length > 0) {
           // Select the best blocker by sort index
-          const orderedBlockers = this.orderBySortIndex(filteredBlockers.map(p => p.blocking));
+          const orderedBlockers = this.orderBySortIndex(filteredBlockers.map(p => p.blocking), sortOrderCache);
           const selectedBlocker = orderedBlockers[0];
           if (selectedBlocker) {
             const pair = filteredBlockers.find(p => p.blocking.id === selectedBlocker.id)!;
@@ -1808,16 +1912,16 @@ export class WorklogDatabase {
       if (fallbackItems.length === 0) {
         return { workItem: null, reason: 'No work items available' };
       }
-      const selected = this.selectBySortIndex(fallbackItems, effectivePriorityCache);
+      const selected = this.selectBySortIndex(fallbackItems, effectivePriorityCache, sortOrderCache, edgeCache);
       this.debug(`${debugPrefix} selected open (fallback)=${selected?.id || ''}`);
-      const effectiveInfo = selected ? this.computeEffectivePriority(selected, effectivePriorityCache) : null;
+      const effectiveInfo = selected ? this.computeEffectivePriority(selected, effectivePriorityCache, edgeCache) : null;
       return {
         workItem: selected,
         reason: `Next open item by sort_index${selected ? ` (${effectiveInfo?.inheritedFrom ? effectiveInfo.reason : `priority ${selected.priority}`})` : ''}`
       };
     }
 
-    const selectedRoot = this.selectBySortIndex(rootCandidates, effectivePriorityCache);
+    const selectedRoot = this.selectBySortIndex(rootCandidates, effectivePriorityCache, sortOrderCache, edgeCache);
     this.debug(`${debugPrefix} selected root=${selectedRoot?.id || ''}`);
 
     if (!selectedRoot) {
@@ -1826,7 +1930,7 @@ export class WorklogDatabase {
 
     // Return the selected root directly — do NOT descend into children.
     // The parent represents the unit of work; children are tracked within it.
-    const rootEffectiveInfo = this.computeEffectivePriority(selectedRoot, effectivePriorityCache);
+    const rootEffectiveInfo = this.computeEffectivePriority(selectedRoot, effectivePriorityCache, edgeCache);
     return {
       workItem: selectedRoot,
       reason: `Next open item by sort_index${rootEffectiveInfo ? ` (${rootEffectiveInfo.inheritedFrom ? rootEffectiveInfo.reason : `priority ${selectedRoot.priority}`})` : ''}`
@@ -1847,7 +1951,8 @@ export class WorklogDatabase {
     includeInProgress: boolean = false
   ): NextWorkItemResult {
     const items = this.store.getAllWorkItems();
-    return this.findNextWorkItemFromItems(items, assignee, searchTerm, undefined, '[next]', includeBlocked, stage, includeInProgress);
+    const edgeCache = this.buildEdgeCache(items);
+    return this.findNextWorkItemFromItems(items, assignee, searchTerm, undefined, '[next]', includeBlocked, stage, includeInProgress, edgeCache);
   }
 
   /**
@@ -1865,16 +1970,22 @@ export class WorklogDatabase {
     const results: NextWorkItemResult[] = [];
     const excluded = new Set<string>();
 
+    // Load all items and dependency edges once, reuse across batch iterations
+    // to avoid N+1 database loads (Bottleneck 4: batch reloads all items per iteration)
+    const allItems = this.store.getAllWorkItems();
+    const edgeCache = this.buildEdgeCache(allItems);
+
     for (let i = 0; i < count; i += 1) {
       const result = this.findNextWorkItemFromItems(
-        this.store.getAllWorkItems(),
+        allItems,
         assignee,
         searchTerm,
         excluded,
         `[next batch ${i + 1}/${count}]`,
         includeBlocked,
         stage,
-        includeInProgress
+        includeInProgress,
+        edgeCache
       );
 
       results.push(result);
@@ -1906,18 +2017,32 @@ export class WorklogDatabase {
     // Filter by search term if provided (fuzzy match against id, title, description, and comments)
     if (searchTerm) {
       const lowerSearchTerm = searchTerm.toLowerCase();
+
+      // Batch-load all comments once into a Map<workItemId, commentText[]>
+      // to avoid N+1 per-item comment queries (Bottleneck 5)
+      const allComments = this.store.getAllComments();
+      const commentsByItemId = new Map<string, string[]>();
+      for (const comment of allComments) {
+        let list = commentsByItemId.get(comment.workItemId);
+        if (!list) {
+          list = [];
+          commentsByItemId.set(comment.workItemId, list);
+        }
+        list.push(comment.comment);
+      }
+
       filtered = filtered.filter(item => {
         const idMatch = item.id.toLowerCase().includes(lowerSearchTerm);
         // Check title and description
         const titleMatch = item.title.toLowerCase().includes(lowerSearchTerm);
         const descriptionMatch = item.description?.toLowerCase().includes(lowerSearchTerm) || false;
-        
-        // Check comments
-        const comments = this.getCommentsForWorkItem(item.id);
-        const commentMatch = comments.some(comment => 
-          comment.comment.toLowerCase().includes(lowerSearchTerm)
-        );
-        
+
+        // Check comments from the pre-loaded batch
+        const itemComments = commentsByItemId.get(item.id);
+        const commentMatch = itemComments
+          ? itemComments.some(comment => comment.toLowerCase().includes(lowerSearchTerm))
+          : false;
+
         return idMatch || titleMatch || descriptionMatch || commentMatch;
       });
     }
@@ -1944,7 +2069,9 @@ export class WorklogDatabase {
   }
 
   getAllOrderedByScore(recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore'): WorkItem[] {
-    return this.sortItemsByScore(this.store.getAllWorkItems(), recencyPolicy);
+    const items = this.store.getAllWorkItems();
+    const cache = this.buildEdgeCache(items);
+    return this.sortItemsByScore(items, recencyPolicy, cache);
   }
 
   /**
@@ -2154,11 +2281,18 @@ export class WorklogDatabase {
     return this.isInProgressSubtree(parent, allItems);
   }
 
-  private getActiveDependencyBlockers(itemId: string): WorkItem[] {
-    const edges = this.listDependencyEdgesFrom(itemId);
+  private getActiveDependencyBlockers(itemId: string, edgeCache?: EdgeCache): WorkItem[] {
+    let edges: DependencyEdge[];
+    if (edgeCache) {
+      edges = edgeCache.outbound.get(itemId) ?? [];
+    } else {
+      edges = this.listDependencyEdgesFrom(itemId);
+    }
     const blockers: WorkItem[] = [];
     for (const edge of edges) {
-      const target = this.get(edge.toId);
+      const target = edgeCache
+        ? (edgeCache.itemsById.get(edge.toId) ?? null)
+        : this.get(edge.toId);
       if (this.isDependencyActive(target) && target) {
         blockers.push(target);
       }

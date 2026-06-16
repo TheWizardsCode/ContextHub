@@ -20,6 +20,8 @@
     "test:tui": "bash ./tests/tui-ci-run.sh",
     "test:timings": "node ./scripts/test-timings.cjs",
     "benchmark:sort-index": "tsx scripts/benchmark-sort-index.ts",
+    "benchmark:wl-next": "tsx bench/wl-next-perf.ts",
+    "benchmark:wl-next:json": "tsx bench/wl-next-perf.ts --json",
     "install:pi-extension": "bash ./scripts/install-pi-extension.sh"
   },
   "keywords": [
