@@ -1869,6 +1869,138 @@ describe('WorklogDatabase', () => {
       }
     });
 
+    // WL-0MQI1SX4W0018V9O: Stage 3 in-progress subtree filtering
+    // Blocked children of in-progress parents should not have their blockers surfaced
+    // because the parent represents the unit of work.
+
+    it('should not surface dependency blocker for blocked child of in-progress parent', () => {
+      // Parent (in-progress) -> Child (blocked) depends on Blocker (open)
+      // Because the child is in an in-progress subtree, Stage 3 should NOT surface
+      // the blocker. Instead, a higher-priority open competitor should win.
+      const parent = db.create({ title: 'In-progress parent', priority: 'high', status: 'in-progress' });
+      const child = db.create({ title: 'Blocked child', priority: 'high', status: 'blocked', parentId: parent.id });
+      const blocker = db.create({ title: 'Dependency blocker', priority: 'low', status: 'open' });
+      db.addDependencyEdge(child.id, blocker.id);
+      const competitor = db.create({ title: 'Open competitor', priority: 'medium', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      // The blocker should NOT be surfaced because the blocked child is in
+      // an in-progress parent subtree. The medium-priority competitor should win.
+      expect(result.workItem?.id).toBe(competitor.id);
+      expect(result.reason).toContain('Next open item by sort_index');
+    });
+
+    it('should not surface dependency blocker for blocked child of in-progress parent with no competitor', () => {
+      // Parent (in-progress) -> Child (blocked) depends on Blocker (open)
+      // No other open items exist. The blocker should NOT be surfaced because
+      // the blocked child is in an in-progress subtree.
+      const parent = db.create({ title: 'In-progress parent', priority: 'high', status: 'in-progress' });
+      const child = db.create({ title: 'Blocked child', priority: 'high', status: 'blocked', parentId: parent.id });
+      const blocker = db.create({ title: 'Dependency blocker', priority: 'low', status: 'open' });
+      db.addDependencyEdge(child.id, blocker.id);
+
+      const result = db.findNextWorkItem();
+      // The blocker itself is a valid open item not in an in-progress subtree.
+      // When no other open items exist, the blocker should be returned as the
+      // next available work item (blocker-surfacing via Stage 3 is correctly
+      // skipped, but the blocker still competes in Stage 5 as a normal candidate).
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(blocker.id);
+      expect(result.reason).toContain('Next open item by sort_index');
+    });
+
+    it('should not surface child blocker for blocked child of in-progress parent', () => {
+      // Parent (in-progress) -> Child (blocked, has its own child blocker)
+      // The blocking child should NOT be surfaced because the blocked child
+      // is in an in-progress subtree.
+      const parent = db.create({ title: 'In-progress parent', priority: 'high', status: 'in-progress' });
+      const child = db.create({ title: 'Blocked child', priority: 'high', status: 'blocked', parentId: parent.id });
+      const childBlocker = db.create({ title: 'Blocking child', priority: 'low', status: 'open', parentId: child.id });
+      const competitor = db.create({ title: 'Open competitor', priority: 'medium', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      // The child blocker should NOT be surfaced. Competitor should win.
+      expect(result.workItem?.id).toBe(competitor.id);
+      expect(result.reason).toContain('Next open item by sort_index');
+    });
+
+    it('should not surface blocker when blocker itself is in an in-progress subtree', () => {
+      // BlockedItem (blocked, high) depends on Blocker (open, child of in-progress parent)
+      // The blocker is in an in-progress subtree, so Stage 3 should filter it out.
+      const blockerParent = db.create({ title: 'Blocker in-progress parent', priority: 'high', status: 'in-progress' });
+      const blocker = db.create({ title: 'Blocker in subtree', priority: 'low', status: 'open', parentId: blockerParent.id });
+      const blocked = db.create({ title: 'Blocked item', priority: 'high', status: 'blocked' });
+      db.addDependencyEdge(blocked.id, blocker.id);
+      const competitor = db.create({ title: 'Open competitor', priority: 'medium', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      // The blocker should be filtered out because it's in an in-progress subtree.
+      expect(result.workItem?.id).toBe(competitor.id);
+      expect(result.reason).toContain('Next open item by sort_index');
+    });
+
+    it('should still surface blocker for blocked item NOT in in-progress subtree (regression guard)', () => {
+      // Normal case: blocked item (not in in-progress subtree) with dependency blocker.
+      // Stage 3 should still surface the blocker.
+      const blocker = db.create({ title: 'Normal blocker', priority: 'medium', status: 'open' });
+      const blocked = db.create({ title: 'Normal blocked item', priority: 'high', status: 'blocked' });
+      db.addDependencyEdge(blocked.id, blocker.id);
+
+      const result = db.findNextWorkItem();
+      // Existing behavior preserved: blocker should be surfaced.
+      expect(result.workItem?.id).toBe(blocker.id);
+      expect(result.reason).toContain('Blocking issue');
+    });
+
+    it('should surface blocker for critical blocked child of in-progress parent (critical exempt)', () => {
+      // Critical items are exempt from in-progress subtree filtering.
+      // A critical blocked item should still have its blocker surfaced.
+      const parent = db.create({ title: 'In-progress parent', priority: 'high', status: 'in-progress' });
+      const criticalChild = db.create({ title: 'Critical blocked child', priority: 'critical', status: 'blocked', parentId: parent.id });
+      const blocker = db.create({ title: 'Critical blocker', priority: 'low', status: 'open' });
+      db.addDependencyEdge(criticalChild.id, blocker.id);
+
+      const result = db.findNextWorkItem();
+      // Critical blocked items are handled by Stage 2 (critical escalation),
+      // so the blocker should still be surfaced.
+      expect(result.workItem?.id).toBe(blocker.id);
+      expect(result.reason).toContain('Blocking issue');
+    });
+
+    it('should not surface blocker for deeply nested blocked item under in-progress grandparent', () => {
+      // Grandparent (in-progress) -> Parent (open) -> Child (blocked, depends on Blocker)
+      // The child is in an in-progress subtree (grandparent is in-progress).
+      const grandparent = db.create({ title: 'In-progress grandparent', priority: 'high', status: 'in-progress' });
+      const parent = db.create({ title: 'Open parent', priority: 'medium', status: 'open', parentId: grandparent.id });
+      const child = db.create({ title: 'Blocked child', priority: 'high', status: 'blocked', parentId: parent.id });
+      const blocker = db.create({ title: 'Dependency blocker', priority: 'low', status: 'open' });
+      db.addDependencyEdge(child.id, blocker.id);
+      const competitor = db.create({ title: 'Open competitor', priority: 'medium', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      // The child is in an in-progress subtree (grandparent), so blocker should not surface.
+      expect(result.workItem?.id).toBe(competitor.id);
+      expect(result.reason).toContain('Next open item by sort_index');
+    });
+
+    it('should not surface blocker when includeInProgress=true and blocked child is in in-progress subtree', () => {
+      // Same as first test but with --include-in-progress. The child should still
+      // be filtered from Stage 3 blocker surfacing.
+      const parent = db.create({ title: 'In-progress parent', priority: 'high', status: 'in-progress' });
+      const child = db.create({ title: 'Blocked child', priority: 'high', status: 'blocked', parentId: parent.id });
+      const blocker = db.create({ title: 'Dependency blocker', priority: 'low', status: 'open' });
+      db.addDependencyEdge(child.id, blocker.id);
+      const competitor = db.create({ title: 'Open competitor', priority: 'medium', status: 'open' });
+
+      const result = db.findNextWorkItem(undefined, undefined, false, undefined, true);
+      // Even with includeInProgress=true, blocked children of in-progress parents
+      // should not have their blockers surfaced. However, when includeInProgress
+      // is true, the in-progress parent itself is a valid candidate and has the
+      // highest effective priority (high).
+      expect(result.workItem?.id).toBe(parent.id);
+      expect(result.reason).toContain('Next open item by sort_index');
+    });
+
     // Fixture-based integration test (WL-0MM0B4V7L1YSH0W7)
     // Uses a generalized JSONL fixture inspired by ToneForge's dependency chain
     // to verify that findNextWorkItem prefers an unblocker over equal-priority peers.

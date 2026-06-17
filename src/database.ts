@@ -1157,7 +1157,8 @@ export class WorklogDatabase {
   computeEffectivePriority(
     item: WorkItem,
     cache?: Map<string, { value: number; reason: string; inheritedFrom?: string }>,
-    edgeCache?: EdgeCache
+    edgeCache?: EdgeCache,
+    items?: WorkItem[]
   ): { value: number; reason: string; inheritedFrom?: string } {
     // Check cache first
     if (cache) {
@@ -1181,6 +1182,11 @@ export class WorklogDatabase {
       if (!dependent) continue;
       // Only inherit from active items (not completed or deleted)
       if (dependent.status === 'completed' || dependent.status === 'deleted') continue;
+      // Skip dependents that are in an in-progress parent subtree —
+      // children of in-progress parents must not influence priority
+      // inheritance for their blockers, as they should be invisible to
+      // the selection algorithm.
+      if (items && this.isInProgressSubtree(dependent, items)) continue;
       const depValue = this.getPriorityValue(dependent.priority);
       if (depValue > maxInheritedValue) {
         maxInheritedValue = depValue;
@@ -1589,7 +1595,8 @@ export class WorklogDatabase {
     items: WorkItem[],
     effectivePriorityCache?: Map<string, { value: number; reason: string; inheritedFrom?: string }>,
     sortOrderCache?: WorkItem[],
-    edgeCache?: EdgeCache
+    edgeCache?: EdgeCache,
+    allItems?: WorkItem[]
   ): WorkItem | null {
     if (!items || items.length === 0) return null;
     // When all sortIndex values are the same (including all-zero), fall back to
@@ -1600,8 +1607,8 @@ export class WorklogDatabase {
     if (allSame) {
       const cache = effectivePriorityCache ?? new Map();
       const sorted = items.slice().sort((a, b) => {
-        const aEffective = this.computeEffectivePriority(a, cache, edgeCache);
-        const bEffective = this.computeEffectivePriority(b, cache, edgeCache);
+        const aEffective = this.computeEffectivePriority(a, cache, edgeCache, allItems);
+        const bEffective = this.computeEffectivePriority(b, cache, edgeCache, allItems);
         const priDiff = bEffective.value - aEffective.value;
         if (priDiff !== 0) return priDiff;
         const createdDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
@@ -1799,9 +1806,15 @@ export class WorklogDatabase {
     // competitor, surface their blocker so that the dependency is resolved
     // first.  This mirrors the old selectDeepestInProgress blocked-item
     // handling that was removed during the filter-pipeline consolidation.
+    //
+    // Blocked items in an in-progress parent subtree are excluded from
+    // Stage 3 — the parent represents the unit of work and children should
+    // be hidden from wl next results. The existing isInProgressSubtree()
+    // filter in Stage 5 already ensures this for open items; Stage 3 must
+    // apply the same filtering for blocker surfacing.
     const nonCriticalBlocked = criticalPool.filter(
       item => item.status === 'blocked' && item.priority !== 'critical'
-    );
+    ).filter(item => !this.isInProgressSubtree(item, items));
     this.debug(`${debugPrefix} non-critical blocked=${nonCriticalBlocked.length}`);
 
     if (nonCriticalBlocked.length > 0 && filteredItems.length > 0) {
@@ -1869,6 +1882,16 @@ export class WorklogDatabase {
           return true;
         });
 
+        // Filter out blockers that belong to an in-progress parent subtree —
+        // children of in-progress parents must not appear as independent
+        // wl next results from any stage, including blocker surfacing.
+        // This complements the in-progress subtree filter above on the
+        // blocked item itself and the existing isInProgressSubtree() filter
+        // in Stage 5 (open item selection).
+        filteredBlockers = filteredBlockers.filter(pair =>
+          !this.isInProgressSubtree(pair.blocking, items)
+        );
+
         this.debug(`${debugPrefix} blocker-surfacing: blockedItem=${blockedItem.id} pri=${blockedItem.priority} blockers=${filteredBlockers.length}`);
 
         if (filteredBlockers.length > 0) {
@@ -1912,16 +1935,16 @@ export class WorklogDatabase {
       if (fallbackItems.length === 0) {
         return { workItem: null, reason: 'No work items available' };
       }
-      const selected = this.selectBySortIndex(fallbackItems, effectivePriorityCache, sortOrderCache, edgeCache);
+      const selected = this.selectBySortIndex(fallbackItems, effectivePriorityCache, sortOrderCache, edgeCache, items);
       this.debug(`${debugPrefix} selected open (fallback)=${selected?.id || ''}`);
-      const effectiveInfo = selected ? this.computeEffectivePriority(selected, effectivePriorityCache, edgeCache) : null;
+      const effectiveInfo = selected ? this.computeEffectivePriority(selected, effectivePriorityCache, edgeCache, items) : null;
       return {
         workItem: selected,
         reason: `Next open item by sort_index${selected ? ` (${effectiveInfo?.inheritedFrom ? effectiveInfo.reason : `priority ${selected.priority}`})` : ''}`
       };
     }
 
-    const selectedRoot = this.selectBySortIndex(rootCandidates, effectivePriorityCache, sortOrderCache, edgeCache);
+    const selectedRoot = this.selectBySortIndex(rootCandidates, effectivePriorityCache, sortOrderCache, edgeCache, items);
     this.debug(`${debugPrefix} selected root=${selectedRoot?.id || ''}`);
 
     if (!selectedRoot) {
@@ -1930,7 +1953,7 @@ export class WorklogDatabase {
 
     // Return the selected root directly — do NOT descend into children.
     // The parent represents the unit of work; children are tracked within it.
-    const rootEffectiveInfo = this.computeEffectivePriority(selectedRoot, effectivePriorityCache, edgeCache);
+    const rootEffectiveInfo = this.computeEffectivePriority(selectedRoot, effectivePriorityCache, edgeCache, items);
     return {
       workItem: selectedRoot,
       reason: `Next open item by sort_index${rootEffectiveInfo ? ` (${rootEffectiveInfo.inheritedFrom ? rootEffectiveInfo.reason : `priority ${selectedRoot.priority}`})` : ''}`
