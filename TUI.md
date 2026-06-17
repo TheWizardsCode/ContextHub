@@ -1,183 +1,80 @@
 # Worklog TUI
 
-This document describes the interactive terminal UI shipped as the `wl tui` (or `worklog tui`) command.
+The Worklog TUI is a Pi-based interactive terminal UI that provides a unified
+agent chat + work item management experience. It is available via the `wl tui`
+and `wl piman` commands (they are aliases for each other).
 
 ## Overview
 
-- The TUI presents a tree view of work items on the left and a details pane on the right.
-- It can show all items, or be limited to in-progress items via `--in-progress`.
-- The details pane uses the same human formatter as the CLI so what you see in the TUI matches `wl show --format full`.
-- The metadata pane (top-right) shows Status, Stage, Priority, Risk, Effort, Comments, Tags, Assignee, Created, Updated, and GitHub link for the selected item. `Risk` and `Effort` always appear; when a field has no value a placeholder `—` is shown.
-- Integrated Pi agent chat pane with natural language interaction and action palette for agent-driven flows.
-- Legacy OpenCode AI assistant still available for backward compatibility.
+The TUI launches the [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)
+with worklog extensions pre-loaded, providing:
 
-## Controls
+- **Browse view**: list and select recommended work items with keyboard-driven navigation
+- **Detail view**: full work item details, comments, and audit results
+- **Shortcut keys**: configurable keyboard shortcuts for common workflows (implement, plan, audit, intake)
+- **Agent chat**: natural language interaction for work item management
 
-### Navigation
+## Usage
 
-- Arrow Up / Down — move selection
-- Right / Enter — expand node
-- Left — collapse node (or collapse parent)
-- Space — toggle expand/collapse
-- Mouse — click to select and scroll
-- q / Esc / Ctrl-C — quit
-- Ctrl+W, Ctrl+W — cycle focus between list, details, and agent chat
-- Ctrl+W, h / l — focus list or details
-- Ctrl+W, k / j — move focus between agent response and input
-- Ctrl+W, p — focus previous pane
+```bash
+# Launch the TUI
+wl tui
+wl piman    # same as wl tui
 
-### Work Item Actions
+# Show only in-progress items
+wl tui --in-progress
+wl piman --in-progress
 
-- n — create new work item
-- e — edit selected item
-- c — add comment to selected item
-- d — delete selected item
-- r — refresh/reload items
-- / — search items
-- Alt+I — quick filter to in-progress items
-- Alt+A — quick filter to open items
-- Alt+B — quick filter to blocked items
-- Alt+T — quick filter to `stage = intake_complete` with non-closed statuses (`open`, `in-progress`, `blocked`)
-- Alt+P — quick filter to `stage = plan_complete` with non-closed statuses (`open`, `in-progress`, `blocked`)
-- v — cycle needs-producer-review filter (on/off/all)
-- h — toggle help menu
-- D — toggle do-not-delegate tag on selected item
-- **g — delegate selected item to GitHub Copilot** (opens confirmation modal with optional Force override; see `wl github delegate` for CLI equivalent)
-- **m — move/reparent item** (see below)
+# Include completed/deleted items
+wl tui --all
 
-### Pi Extension Browse Shortcuts
+# Override the default prefix
+wl tui --prefix PREFIX
 
-When using the Worklog Pi extension (via `piman`), the following keyboard shortcuts are available in the browse selection list and detail views. These shortcuts are defined in `packages/tui/extensions/shortcuts.json` and can be extended without modifying source code.
+# Enable performance instrumentation
+wl tui --perf
+```
+
+## Architecture
+
+The TUI is implemented as a Pi extension located in `packages/tui/`:
+
+- `packages/tui/pi.json` — Extension configuration and entry points
+- `packages/tui/extensions/index.ts` — Main extension that registers the `/wl` browser command
+- `packages/tui/extensions/chatPane.ts` — Chat pane for natural language work item management
+- `packages/tui/extensions/actionPalette.ts` — Keyboard-first action palette
+- `packages/tui/extensions/wl-integration.ts` — Integration layer for executing wl CLI commands
+- `packages/tui/extensions/shortcut-config.ts` — Config-driven keyboard shortcut system
+- `packages/tui/extensions/shortcuts.json` — Default shortcut definitions
+
+## Features
+
+### Browse & Select
+
+On launch, the TUI shows a list of recommended next work items. Navigate with
+Up/Down arrows, press Enter to see full details, or use shortcut keys:
 
 - **i** — insert `implement <id>` into the editor
 - **p** — insert `plan <id>` into the editor
 - **n** — insert `intake <id>` into the editor
 - **a** — insert `audit <id>` into the editor
 
-Each shortcut replaces the `<id>` placeholder with the selected work item's ID and inserts the resulting text without a trailing newline, allowing review and editing before submission. See [TUI Extensions README](packages/tui/extensions/README.md) for full details on the config-driven shortcut system.
+### Agent Chat
 
-### Move / Reparent Mode
+Natural language interaction for work item operations. Type commands like:
+- "list work items"
+- "show WL-123"
+- "create a work item: fix login bug"
+- "claim next task"
 
-Press **m** on a selected item to enter move mode. The source item is marked with a yellow `[M]` prefix and its descendants are dimmed (they cannot be chosen as targets). The footer shows move mode instructions.
+### Settings
 
-While in move mode:
+Press `/wl settings` to open the settings overlay where you can configure:
+- Number of items to browse (3, 5, 10, 15, or 20)
+- Show/hide icons in the browse list
 
-- **Navigate** with the usual up/down/left/right keys to reach the desired target parent.
-- **m or Enter** on the target item — reparent the source under the target. The target's tree node is automatically expanded so you can see the moved item.
-- **m or Enter on the source item itself** — unparent the item (move it to root level). If it is already a root item, a toast message informs you and move mode exits.
-- **Esc** — cancel move mode without making changes.
+## See Also
 
-Other action keys (close, update, search, filters, etc.) are suppressed during move mode to prevent accidental edits.
-
-### Pi Agent Chat Pane
-
-- **O** (capital O) — open Pi agent chat dialog
-  - Ctrl+S — send prompt
-  - Enter — accept autocomplete or add newline
-  - Escape — close dialog
-  - Natural language processing for work item commands (list, create, update, close, show, next, search, claim, comment)
-  - Prefix `!` to run a local shell command in the project root
-  - Ctrl+C cancels a running `!` command without closing the prompt
-  - Command shows in orange; output streams in white
-- When agent chat is active:
-  - Response appears in bottom pane
-  - Input fields appear when agent needs information
-  - q or click [x] to close response pane
-
-### Action Palette
-
-- The action palette provides quick access to common agent-driven flows
-- Select an action to trigger a wl CLI command
-- Available actions: wl next, wl list, wl create, wl update, wl close, wl search, wl show, wl claim
-- Use keyboard navigation to select actions and Enter to execute
-
-## Legacy OpenCode Integration
-
-> **Note:** The OpenCode integration is available for backward compatibility but is being phased out in favor of the Pi-based agent chat pane.
-
-### Auto-start Server
-
-The OpenCode server automatically starts when you press O. Server status indicators:
-
-- `[-]` — Server stopped
-- `[~]` — Server starting
-- `[OK] Port: 9999` — Server running (example; configurable via `OPENCODE_SERVER_PORT` or auto-selected)
-- `[X]` — Server error
-
-### Slash Commands
-
-Type `/` in the agent dialog to see available commands:
-
-- `/help` — Get help with OpenCode
-- `/edit` — Edit files with AI assistance
-- `/create` — Create a new Worklog work item
-- `/test` — Generate or run tests
-- `/fix` — Fix issues in code
-- Plus 20+ more commands
-
-### `/create` — Create Work Items from the TUI
-
-The `/create` command lets you create Worklog work items directly from the agent prompt without leaving the TUI.
-
-**Usage:**
-
-```
-/create <short title or description of the work item>
-```
-
-The command automatically:
-
-- Generates a concise title (up to 72 characters) from your input.
-- Builds a detailed description containing the full verbatim text, creation metadata, and an "Open Questions" section if the input is ambiguous.
-- Chooses an appropriate issue-type and priority based on the description:
-  - Text mentioning bugs, errors, or failing tests defaults to `bug` / `high`.
-  - Text describing user-visible changes defaults to `feature` / `medium`.
-  - All other text defaults to `task` / `medium`.
-- Runs `wl create` and displays the resulting work-item JSON in the response pane.
-
-The new item is created at root level by default. To make it a child of a specific work item, say so explicitly (e.g., `/create child of WL-1234: add input validation`).
-
-**Examples:**
-
-```
-/create Fix login page redirect when session expires
-/create Investigate intermittent database connection errors seen in staging
-/create child of WL-1234: add unit tests for the auth module
-```
-
-**Security notes:**
-
-- The command only invokes `wl create`. It does not run arbitrary shell commands, modify repository files, or mutate existing work items.
-- All user input is passed via heredoc-style escaping to prevent shell injection.
-- Changes to permission scope (e.g., allowing edits to existing items) require Producer approval.
-
-For the full command specification, see `.opencode/command/create.md` (legacy OpenCode integration). For the parent feature context, see Add /create agent command for creating work items from TUI (WL-0MLSDIRLA0BXRCDB).
-
-### Interactive Sessions
-
-- Sessions persist across multiple prompts
-- Real-time streaming responses
-- Interactive input when agents need clarification
-- Tool usage highlighted in colors
-
-For detailed legacy OpenCode documentation, see `docs/opencode-tui.md`.
-
-## Usage
-
-Install dependencies and run from source:
-
-```
-npm install
-npm run cli -- tui
-```
-
-## Options
-
-- `--in-progress` — show only items with status `in-progress`.
-- `--all` — include completed and deleted items in the list.
-- `--prefix <prefix>` — use a different project prefix.
-
-## Notes
-
-- The TUI uses `blessed` for rendering. For a smoother TypeScript developer experience install the types: `npm install -D @types/blessed`.
-- The TUI is intentionally lightweight: it renders items from the current database snapshot. If you want live updates across processes, run a background sync or re-open the TUI.
+- [Pi TUI Extensions README](packages/tui/extensions/README.md) — Details on the
+  config-driven shortcut system and extension architecture
+- `docs/tutorials/04-using-the-tui.md` — Tutorial for getting started with the TUI

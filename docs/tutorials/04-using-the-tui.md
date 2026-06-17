@@ -17,12 +17,14 @@ By the end of this tutorial you will be able to:
 
 ```bash
 wl tui
+wl piman
 ```
 
-The TUI opens with two panes:
+The TUI launches the Pi coding agent with Worklog extensions pre-loaded.
+It shows a browse list of recommended next work items.
 
-- **Left pane**: A tree view of all work items, showing parent/child hierarchy
-- **Right pane**: Details of the currently selected item (same format as `wl show --format full`)
+> **Note:** The TUI is now Pi-based. Both `wl tui` and `wl piman` launch
+> the same interactive browse interface.
 
 ### Filter to in-progress items only
 

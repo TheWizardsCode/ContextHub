@@ -61,10 +61,10 @@ wl github import
 ### Using the TUI
 
 ```bash
-wl tui                # Interactive tree view of all items
-wl tui --in-progress  # Show only in-progress items
+wl tui                # Launch Pi-based TUI (interactive browse + agent chat)
+wl tui --in-progress  # Launch Pi-based TUI, show only in-progress items
 wl tui --perf         # Enable performance instrumentation and write diagnostics artifacts under .worklog/
-TUI_PROFILE=1 wl tui  # Enable profiling via environment variable
+wl tui --perf         # Launch Pi-based TUI with performance instrumentation
 ```
 
 Press `O` in the TUI to access the Pi agent chat pane. The Pi-based TUI provides natural language chat, an action palette with agent-driven flows, and all work item operations through the `wl` CLI. See [TUI.md](TUI.md) for controls, including quick stage filters (`Alt+T` for `intake_complete`, `Alt+P` for `plan_complete`) that exclude closed items.

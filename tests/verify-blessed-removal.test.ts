@@ -228,11 +228,13 @@ describe('Current baseline: Blessed TUI state after F3 (removed)', () => {
     expect(content).not.toContain('titleColorForStageTUI');
   });
 
-  it('Vitest TUI config and CI artifacts still exist (to be removed in F4)', () => {
-    expect(projectPathExists('vitest.tui.config.ts')).toBe(true);
-    expect(projectPathExists('Dockerfile.tui-tests')).toBe(true);
-    expect(projectPathExists('tests/tui-ci-run.sh')).toBe(true);
-    expect(projectPathExists('test-tui.sh')).toBe(true);
+  it('Vitest TUI config and CI artifacts have been removed', () => {
+    expect(projectPathExists('vitest.tui.config.ts')).toBe(false);
+    expect(projectPathExists('Dockerfile.tui-tests')).toBe(false);
+    expect(projectPathExists('tests/tui-ci-run.sh')).toBe(false);
+    expect(projectPathExists('test-tui.sh')).toBe(false);
+    expect(projectPathExists('tui-debug.log')).toBe(false);
+    expect(projectPathExists('tui-prototype.log')).toBe(false);
   });
 });
 
