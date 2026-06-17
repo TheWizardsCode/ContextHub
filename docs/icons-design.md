@@ -252,8 +252,14 @@ When the child count is 0 or undefined, the epic icon is shown without a count:
 ```
 
 The `formatBrowseOption` function prepends the icons before the title.
-The `buildSelectionWidget` preview also includes them as a group at the
-start of the single-line summary.
+The icon prefix (status + stage + audit + optional epic icon/child count)
+is padded to a fixed visible width via per-list dynamic padding so that
+titles start at the same column position across all rows. The padding is
+computed as the maximum icon prefix width across all items in the current
+list, and each item's prefix is padded to that width with spaces.
+See `getIconPrefix()` in the same module for the prefix computation.
+The `buildSelectionWidget` preview uses a different format (ID/tags/GH)
+without the icon prefix.
 
 ### 11.2 TUI List Rendering
 
