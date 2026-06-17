@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   renderCliMarkdown,
-  stripBlessedTags,
   stripAnsi,
   createCliOutput,
   createCliOutputFromCommand,
@@ -140,28 +139,7 @@ describe('cli-output', () => {
     });
   });
 
-  describe('stripBlessedTags', () => {
-    it('removes blessed tag patterns', () => {
-      const input = '{white-fg}{bold}Title{/} and {magenta-fg}code{/}';
-      const output = stripBlessedTags(input);
-      expect(output).toBe('Title and code');
-    });
 
-    it('handles empty and undefined', () => {
-      expect(stripBlessedTags('')).toBe('');
-      expect(stripBlessedTags(undefined as any)).toBe('');
-    });
-
-    it('handles text without tags', () => {
-      expect(stripBlessedTags('plain text')).toBe('plain text');
-    });
-
-    it('strips multiple nested tags', () => {
-      const input = '{red-fg}{bold}Error:{/} file not found{/}';
-      const output = stripBlessedTags(input);
-      expect(output).toBe('Error: file not found');
-    });
-  });
 
   describe('stripAnsi', () => {
     it('strips ANSI escape codes', () => {

@@ -191,30 +191,44 @@ describe('Current baseline: pi.json paths updated', () => {
 // ---------------------------------------------------------------------------
 // Current baseline: Blessed/CI artifacts still exist (to be removed in F3/F4)
 // ---------------------------------------------------------------------------
-describe('Current baseline: remaining Blessed TUI state (to be removed later)', () => {
-  it('src/tui/ directory still exists (remaining files)', () => {
-    expect(projectPathExists('src/tui')).toBe(true);
+describe('Current baseline: Blessed TUI state after F3 (removed)', () => {
+  it('src/tui/ directory no longer exists', () => {
+    expect(projectPathExists('src/tui')).toBe(false);
   });
 
-  it('src/commands/tui.ts still exists', () => {
+  it('src/commands/tui.ts still exists (now an alias to piman)', () => {
     expect(projectPathExists('src/commands/tui.ts')).toBe(true);
   });
 
-  it('src/types/blessed.d.ts still exists', () => {
-    expect(projectPathExists('src/types/blessed.d.ts')).toBe(true);
+  it('src/types/blessed.d.ts no longer exists', () => {
+    expect(projectPathExists('src/types/blessed.d.ts')).toBe(false);
   });
 
-  it('blessed and @types/blessed still in package.json', () => {
-    expect(hasDependency('blessed')).toBe(true);
-    expect(hasDependency('@types/blessed')).toBe(true);
+  it('blessed and @types/blessed removed from package.json', () => {
+    expect(hasDependency('blessed')).toBe(false);
+    expect(hasDependency('@types/blessed')).toBe(false);
   });
 
-  it('stripBlessedTags still exported (deprecated, removed in F3)', async () => {
+  it('stripBlessedTags no longer exported', async () => {
     const mod = await import('../src/cli-output.js');
-    expect(typeof mod.stripBlessedTags).toBe('function');
+    expect(mod.stripBlessedTags).toBeUndefined();
   });
 
-  it('Vitest TUI config and CI artifacts still exist', () => {
+  it('theme.tui no longer exists in theme', () => {
+    const content = readProjectFile('src/theme.ts');
+    expect(content).not.toBeNull();
+    expect(content).not.toContain('theme.tui');
+  });
+
+  it('helpers.ts no longer exports TUI formatting functions', () => {
+    const content = readProjectFile('src/commands/helpers.ts');
+    expect(content).not.toBeNull();
+    expect(content).not.toContain('formatTitleOnlyTUI');
+    expect(content).not.toContain('renderTitleTUI');
+    expect(content).not.toContain('titleColorForStageTUI');
+  });
+
+  it('Vitest TUI config and CI artifacts still exist (to be removed in F4)', () => {
     expect(projectPathExists('vitest.tui.config.ts')).toBe(true);
     expect(projectPathExists('Dockerfile.tui-tests')).toBe(true);
     expect(projectPathExists('tests/tui-ci-run.sh')).toBe(true);
@@ -226,22 +240,29 @@ describe('Current baseline: remaining Blessed TUI state (to be removed later)', 
 // Post-removal tests (to be enabled after F3-F5 complete)
 // These are initially skipped — they validate the desired end state.
 // ---------------------------------------------------------------------------
-describe.skip('Post-removal verification: Blessed TUI removed', () => {
-  it('src/tui/ directory no longer exists', () => {
-    expect(projectPathExists('src/tui')).toBe(false);
+describe.skip('Post-removal verification: F4 and F5 (to be completed)', () => {
+  it('Vitest TUI config and CI artifacts are removed', () => {
+    expect(projectPathExists('vitest.tui.config.ts')).toBe(false);
+    expect(projectPathExists('Dockerfile.tui-tests')).toBe(false);
+    expect(projectPathExists('tests/tui-ci-run.sh')).toBe(false);
+    expect(projectPathExists('test-tui.sh')).toBe(false);
   });
 
-  it('src/types/blessed.d.ts no longer exists', () => {
-    expect(projectPathExists('src/types/blessed.d.ts')).toBe(false);
+  it('tests/tui/ directory no longer exists', () => {
+    expect(projectPathExists('tests/tui')).toBe(false);
   });
 
-  it('src/commands/tui.ts still exists (as alias to piman)', () => {
-    expect(projectPathExists('src/commands/tui.ts')).toBe(true);
+  it('individual TUI test files no longer exist', () => {
+    expect(projectPathExists('test/tui-chords.test.ts')).toBe(false);
+    expect(projectPathExists('test/tui-integration.test.ts')).toBe(false);
+    expect(projectPathExists('test/tui-style.test.ts')).toBe(false);
+    expect(projectPathExists('test/tui/id-utils.test.ts')).toBe(false);
+    expect(projectPathExists('test/tui/virtual-list.test.ts')).toBe(false);
   });
 
-  it('blessed and @types/blessed removed from package.json', () => {
-    expect(hasDependency('blessed')).toBe(false);
-    expect(hasDependency('@types/blessed')).toBe(false);
+  it('log files no longer exist', () => {
+    expect(projectPathExists('tui-debug.log')).toBe(false);
+    expect(projectPathExists('tui-prototype.log')).toBe(false);
   });
 
   it('no import blessed from blessed remains in src/', () => {
@@ -264,42 +285,8 @@ describe.skip('Post-removal verification: Blessed TUI removed', () => {
     expect(checkDir(srcDir)).toBe(false);
   });
 
-  it('theme.ts no longer exports theme.tui.* constants', () => {
-    const content = readProjectFile('src/theme.ts');
-    expect(content).not.toBeNull();
-    expect(content).not.toContain('theme.tui');
-  });
-
-  it('helpers.ts no longer exports formatTitleOnlyTUI or renderTitleTUI', () => {
-    const content = readProjectFile('src/commands/helpers.ts');
-    expect(content).not.toBeNull();
-    expect(content).not.toContain('formatTitleOnlyTUI');
-    expect(content).not.toContain('renderTitleTUI');
-    expect(content).not.toContain('titleColorForStageTUI');
-  });
-
-  it('cli-output.ts no longer exports stripBlessedTags', () => {
-    const content = readProjectFile('src/cli-output.ts');
-    expect(content).not.toBeNull();
-    expect(content).not.toContain('stripBlessedTags');
-  });
-
-  it('Vitest TUI config and CI artifacts are removed', () => {
-    expect(projectPathExists('vitest.tui.config.ts')).toBe(false);
-    expect(projectPathExists('Dockerfile.tui-tests')).toBe(false);
-    expect(projectPathExists('tests/tui-ci-run.sh')).toBe(false);
-    expect(projectPathExists('test-tui.sh')).toBe(false);
-  });
-
-  it('tests/tui/ directory no longer exists', () => {
-    expect(projectPathExists('tests/tui')).toBe(false);
-  });
-
-  it('individual TUI test files no longer exist', () => {
-    expect(projectPathExists('test/tui-chords.test.ts')).toBe(false);
-    expect(projectPathExists('test/tui-integration.test.ts')).toBe(false);
-    expect(projectPathExists('test/tui-style.test.ts')).toBe(false);
-    expect(projectPathExists('test/tui/id-utils.test.ts')).toBe(false);
-    expect(projectPathExists('test/tui/virtual-list.test.ts')).toBe(false);
+  it('documentation references to Blessed TUI are removed', () => {
+    // F5 will handle documentation updates
+    expect(true).toBe(true);
   });
 });
