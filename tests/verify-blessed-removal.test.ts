@@ -239,10 +239,9 @@ describe('Current baseline: Blessed TUI state after F3 (removed)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Post-removal tests (to be enabled after F3-F5 complete)
-// These are initially skipped — they validate the desired end state.
+// Post-removal tests — F3-F5 now complete, these are actively verified.
 // ---------------------------------------------------------------------------
-describe.skip('Post-removal verification: F4 and F5 (to be completed)', () => {
+describe('Post-removal verification: F4 and F5 (completed)', () => {
   it('Vitest TUI config and CI artifacts are removed', () => {
     expect(projectPathExists('vitest.tui.config.ts')).toBe(false);
     expect(projectPathExists('Dockerfile.tui-tests')).toBe(false);
