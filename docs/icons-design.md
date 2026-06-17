@@ -10,7 +10,7 @@
 ## Overview
 
 This document defines the icon set for work item **priority** and **status** used
-across the TUI (blessed) and CLI (chalk) rendering paths. It covers:
+across the CLI (chalk) and TUI rendering paths. It covers:
 
 - Chosen icons (emoji / terminal-safe glyphs)
 - Accessible labels (aria-label equivalents) for screen readers
@@ -29,7 +29,7 @@ across the TUI (blessed) and CLI (chalk) rendering paths. It covers:
 | medium    | `📋`   | `[MED]`       | "Medium priority"       | Clipboard - standard task |
 | low       | `🐢`   | `[LOW]`       | "Low priority"          | Turtle - slow/low priority |
 
-**Colour association:** The emoji colours are enhanced with blessed/chalk color tags to match the existing colour scheme in the theme (`theme.priority` / `theme.tui` priority colours) so scanning by colour remains consistent.
+**Colour association:** The emoji colours are enhanced with chalk color tags to match the existing colour scheme in the theme (`theme.priority` colours) so scanning by colour remains consistent.
 - critical: red (🚨)
 - high: yellow (⭐)
 - medium: blue (📋)
@@ -102,23 +102,10 @@ fallback** is used instead. See §6 below.
 Every icon MUST carry an equivalent accessible label so that screen readers and
 tooling that parses CLI output can identify the icon's meaning.
 
-### 7.1 TUI (blessed)
+### 7.1 TUI Output
 
-Blessed does not natively support `aria-label` attributes on box/list items.
-Instead, accessibility is achieved by:
-
-1. **Prefixing each icon with its text fallback** when an accessibility flag is
-   set (e.g. `WL_A11Y=1`).
-2. **Blessed `tags` mode** can be used to colour the fallback text the same
-   colour as the icon so visual scanning is preserved, while the screen reader
-   receives the textual label.
-
-Implementation in the TUI list and detail panes should:
-
-```
-{green-fg}🟢{/green-fg}    ← visual icon (emoji)
-{green-fg}[OPEN]{/green-fg} ← when WL_A11Y=1 or icons disabled
-```
+The TUI uses the Pi-based rendering framework which supports accessible labels
+natively. Icons can be annotated via the framework's built-in label system.
 
 ### 7.2 CLI Output
 
@@ -268,15 +255,10 @@ The `formatBrowseOption` function prepends the icons before the title.
 The `buildSelectionWidget` preview also includes them as a group at the
 start of the single-line summary.
 
-### 11.2 TUI List Rendering (blessed)
+### 11.2 TUI List Rendering
 
-File: `src/tui/components/list.ts` (via controller rendering in
-`src/tui/controller.ts`)
-
-List item lines should prepend the priority or status icon before the title:
-
-```
-{green-fg}🟢{/green-fg} Set up CI pipeline     ← when icons enabled
+The Pi-based TUI renders list items via the `packages/tui/extensions/`
+folder. Icons are prepended before the title in the browse list.
 {white-fg}[OPEN]{/white-fg} Set up CI pipeline  ← when fallback
 ```
 

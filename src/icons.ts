@@ -2,8 +2,8 @@
  * Icon utilities for work item priority and status.
  *
  * Provides consistent icon rendering (emoji or text fallback) across
- * the TUI (blessed) and CLI (chalk) output paths, with accessible
- * labels for screen readers.
+ * the TUI and CLI output paths, with accessible labels for screen
+ * readers.
  *
  * Design spec: docs/icons-design.md
  */

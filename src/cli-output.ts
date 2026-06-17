@@ -142,7 +142,7 @@ export function renderCliMarkdown(input: string, opts?: CliOutputOptions): strin
   };
 
   // Check size guard before rendering — if input exceeds maxSize,
-  // strip blessed tags to ensure no control characters remain in output.
+  // strip ANSI sequences to ensure no control characters remain in output.
   if (input.length > maxSize) {
     emitTelemetryEvent({
       event: 'cli_render_fallback_size',
@@ -163,10 +163,10 @@ export function renderCliMarkdown(input: string, opts?: CliOutputOptions): strin
     });
 
     // The result is already ANSI/chalk output. Return as-is; the calling
-    // print functions will output it directly (no blessed tag conversion needed).
+    // print functions will output it directly (no conversion needed).
     return result;
   } catch (_error) {
-    // On rendering failure, prefer explicit fallback, then strip blessed tags from plain input
+    // On rendering failure, prefer explicit fallback, then strip ANSI sequences from plain input
     // to ensure no control characters remain
     emitTelemetryEvent({
       event: 'cli_render_error',

@@ -4,10 +4,10 @@
  * Renders a small subset of markdown (headers, lists, inline code, code
  * fences, links) into ANSI-colored output using chalk directly.
  *
- * Replaces the previous blessed-style tag renderer that produced
- * {color-fg} tags. The API signature (renderMarkdownToTags, RendererOptions)
- * is preserved for backward compatibility even though the name "ToTags" is
- * now a misnomer — the output is actually chalk ANSI strings.
+ * Replaces the previous blessed-style tag renderer. The API signature
+ * (renderMarkdownToTags, RendererOptions) is preserved for backward
+ * compatibility even though the name "ToTags" is a misnomer — the output
+ * is actually chalk ANSI strings.
  */
 
 import chalk from 'chalk';
