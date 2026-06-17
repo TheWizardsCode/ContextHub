@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled } from '../../../src/icons.js';
 import { applyStageColour, type PiTheme } from './worklog-helpers.js';
-import { truncateToTerminalWidth, wrapToTerminalWidth } from './terminal-utils.js';
+import { truncateToTerminalWidth, wrapToTerminalWidth, visibleWidth } from './terminal-utils.js';
 import { type ShortcutRegistry, loadShortcutConfig } from './shortcut-config.js';
 import { loadSettings, type Settings, DEFAULT_SETTINGS } from './settings-config.js';
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
@@ -162,19 +162,15 @@ export function truncateToWidth(text: string, maxWidth: number, ellipsis = '…'
   return truncateToTerminalWidth(text, maxWidth, { ellipsis });
 }
 
-export function formatBrowseOption(
-  item: WorklogBrowseItem,
-  maxWidth?: number,
-  theme?: PiTheme,
-  settings?: Settings,
-): string {
-  const titleText = item.title;
-
-  // Determine icon preference: explicit settings override env var
-  const showIcons = settings?.showIcons ?? iconsEnabled();
-  const noIcons = !showIcons;
-
-  // Build icon prefix: status + stage + audit + (epic icon + child count)
+/**
+ * Compute the icon prefix string for a work item (just icon characters, no trailing space).
+ *
+ * Returns the concatenated status + stage + audit icons (and optional epic icon
+ * with child count) without any trailing space or title text.
+ *
+ * Exported for testing so callers can compute prefix widths for alignment.
+ */
+export function getIconPrefix(item: WorklogBrowseItem, noIcons: boolean): string {
   const normalizedStatus = (item.status || '').replace(/_/g, '-');
   const sIcon = statusIcon(normalizedStatus, { noIcons });
   const stIcon = stageIcon(item.stage, { noIcons });
@@ -189,8 +185,41 @@ export function formatBrowseOption(
     epicSuffix = `${eIcon}${countStr}`;
   }
 
-  const iconPrefix = [coreIcons, epicSuffix].filter(Boolean).join(' ');
-  const prefixStr = iconPrefix.length > 0 ? `${iconPrefix} ` : '';
+  return [coreIcons, epicSuffix].filter(Boolean).join(' ');
+}
+
+export function formatBrowseOption(
+  item: WorklogBrowseItem,
+  maxWidth?: number,
+  theme?: PiTheme,
+  settings?: Settings,
+  prefixWidth?: number,
+): string {
+  const titleText = item.title;
+
+  // Determine icon preference: explicit settings override env var
+  const showIcons = settings?.showIcons ?? iconsEnabled();
+  const noIcons = !showIcons;
+
+  // Build icon prefix using the shared helper
+  const iconPrefix = getIconPrefix(item, noIcons);
+
+  // Build prefix string with optional fixed-width padding for alignment.
+  // When prefixWidth is specified, icon prefixes are padded to that visible
+  // width so that titles start at the same column position across all rows.
+  // The mandatory trailing space is included to separate icons from the title.
+  let prefixStr: string;
+  if (iconPrefix.length > 0) {
+    if (prefixWidth !== undefined) {
+      const currentIconWidth = visibleWidth(iconPrefix);
+      const padding = Math.max(0, prefixWidth - currentIconWidth);
+      prefixStr = iconPrefix + ' '.repeat(padding + 1);
+    } else {
+      prefixStr = `${iconPrefix} `;
+    }
+  } else {
+    prefixStr = '';
+  }
 
   // Apply colour to title if theme is provided
   const formatTitle = (title: string): string => {
@@ -507,7 +536,14 @@ export async function defaultChooseWorkItem(
       throw new Error('Selection UI is unavailable in this environment.');
     }
 
-    const options = items.map(item => formatBrowseOption(item, undefined, undefined, currentSettings));
+    // Compute max icon prefix width across items for title alignment
+    const noIcons = !(currentSettings?.showIcons ?? iconsEnabled());
+    const maxPrefixWidth = items.reduce(
+      (max, item) => Math.max(max, visibleWidth(getIconPrefix(item, noIcons))),
+      0,
+    );
+
+    const options = items.map(item => formatBrowseOption(item, undefined, undefined, currentSettings, maxPrefixWidth));
     const selected = await ctx.ui.select(`Browse Worklog next items (top ${currentSettings.browseItemCount})`, options);
     if (!selected) return undefined;
 
@@ -649,10 +685,17 @@ export async function defaultChooseWorkItem(
         }
         const help = truncateToWidth(theme.fg('dim', helpText), width);
 
+        // Compute max icon prefix width across items for title alignment
+        const noIcons = !(currentSettings?.showIcons ?? iconsEnabled());
+        const maxPrefixWidth = items.reduce(
+          (max, item) => Math.max(max, visibleWidth(getIconPrefix(item, noIcons))),
+          0,
+        );
+
         const options = items.map((item, index) => {
           const prefix = index === selectedIndex ? theme.fg('accent', '› ') : '  ';
           const contentWidth = Math.max(0, width - 2);
-          const optionLine = `${prefix}${formatBrowseOption(item, contentWidth, theme, currentSettings)}`;
+          const optionLine = `${prefix}${formatBrowseOption(item, contentWidth, theme, currentSettings, maxPrefixWidth)}`;
           return truncateToWidth(optionLine, width);
         });
 

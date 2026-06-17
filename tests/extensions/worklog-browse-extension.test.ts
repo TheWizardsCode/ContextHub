@@ -6,7 +6,9 @@ import {
   createWorklogBrowseExtension,
   defaultChooseWorkItem,
   formatBrowseOption,
+  getIconPrefix,
 } from '../../packages/tui/extensions/index.ts';
+import { visibleWidth } from '../../packages/tui/extensions/terminal-utils.ts';
 import { ShortcutRegistry } from '../../packages/tui/extensions/shortcut-config.js';
 
 /**
@@ -83,6 +85,126 @@ describe('Worklog browse pi extension', () => {
         process.env.WL_NO_ICONS = origEnv;
       }
     }
+  });
+
+  describe('getIconPrefix', () => {
+    it('returns icon prefix with status and audit for basic item', () => {
+      const prefix = getIconPrefix(
+        { id: 'WL-1', title: 'Test', status: 'open' },
+        false, // noIcons=false = use emoji
+      );
+      expect(prefix).toBe('🔓 ❓');
+    });
+
+    it('includes stage icon when stage is defined', () => {
+      const prefix = getIconPrefix(
+        { id: 'WL-2', title: 'Test', status: 'open', stage: 'in_progress' },
+        false,
+      );
+      expect(prefix).toBe('🔓 🛠️ ❓');
+    });
+
+    it('includes epic icon for epic items without child count', () => {
+      const prefix = getIconPrefix(
+        { id: 'WL-3', title: 'Test', status: 'open', issueType: 'epic', childCount: 0 },
+        false,
+      );
+      expect(prefix).toBe('🔓 ❓ 🏰');
+    });
+
+    it('includes epic icon with child count for epic items with children', () => {
+      const prefix = getIconPrefix(
+        { id: 'WL-4', title: 'Test', status: 'open', issueType: 'epic', childCount: 5 },
+        false,
+      );
+      expect(prefix).toBe('🔓 ❓ 🏰(5)');
+    });
+
+    it('returns text-fallback icons when noIcons=true', () => {
+      const prefix = getIconPrefix(
+        { id: 'WL-5', title: 'Test', status: 'open', stage: 'plan_complete' },
+        true, // noIcons=true = text fallback
+      );
+      expect(prefix).toBe('[OPEN] [PLAN] [UNKN]');
+    });
+  });
+
+  describe('formatBrowseOption icon prefix alignment', () => {
+    it('pads icon prefix to specified prefixWidth for alignment', () => {
+      const item = { id: 'WL-1', title: 'Simple task', status: 'open' };
+      // Default (no prefixWidth): no padding (backward compatible)
+      const noPad = formatBrowseOption(item);
+      expect(noPad).toBe('🔓 ❓ Simple task');
+
+      // With prefixWidth larger than natural icon width: pads with spaces
+      // natural visibleWidth of '🔓 ❓' = 5, prefixWidth = 6 → pad(6-5)=1 → repeat(1+1)=2 spaces
+      const padded = formatBrowseOption(item, undefined, undefined, undefined, 6);
+      expect(padded).toBe('🔓 ❓  Simple task');
+    });
+
+    it('does not add extra padding when prefixWidth equals natural width', () => {
+      const item = { id: 'WL-1', title: 'Task', status: 'open' };
+      // natural visibleWidth of '🔓 ❓' = 5
+      const result = formatBrowseOption(item, undefined, undefined, undefined, 5);
+      expect(result).toBe('🔓 ❓ Task');
+    });
+
+    it('does not add extra padding when prefixWidth is less than natural width', () => {
+      const item = { id: 'WL-1', title: 'Task', status: 'open', stage: 'in_progress' };
+      // natural visibleWidth of '🔓 🛠️ ❓' = 8
+      const result = formatBrowseOption(item, undefined, undefined, undefined, 3);
+      expect(result).toBe('🔓 🛠️ ❓ Task');
+    });
+
+    it('aligns titles at the same column for different icon combinations', () => {
+      // Items with different icon combinations should have same
+      // icon prefix visible width when same prefixWidth is applied.
+      const itemSimple = { id: 'WL-1', title: 'Simple', status: 'open' };
+      const itemWithStage = { id: 'WL-2', title: 'With Stage', status: 'open', stage: 'in_progress' };
+      const itemEpic = { id: 'WL-3', title: 'Epic', status: 'open', issueType: 'epic', childCount: 5 };
+
+      // Compute prefixWidth as max visible width across items
+      const noIcons = false;
+      const maxWidth = Math.max(
+        ...([itemSimple, itemWithStage, itemEpic].map(i =>
+          visibleWidth(getIconPrefix(i, noIcons)),
+        )),
+      );
+
+      const result1 = formatBrowseOption(itemSimple, undefined, undefined, undefined, maxWidth);
+      const result2 = formatBrowseOption(itemWithStage, undefined, undefined, undefined, maxWidth);
+      const result3 = formatBrowseOption(itemEpic, undefined, undefined, undefined, maxWidth);
+
+      // Verify all prefixes have the same visible width before the title
+      const prefix1 = result1.slice(0, result1.indexOf('Simple'));
+      const prefix2 = result2.slice(0, result2.indexOf('With Stage'));
+      const prefix3 = result3.slice(0, result3.indexOf('Epic'));
+
+      expect(visibleWidth(prefix1)).toBe(visibleWidth(prefix2));
+      expect(visibleWidth(prefix2)).toBe(visibleWidth(prefix3));
+    });
+
+    it('pads icon prefix in text-fallback mode', () => {
+      const item = { id: 'WL-1', title: 'Task', status: 'open', stage: 'plan_complete' };
+      const origEnv = process.env.WL_NO_ICONS;
+      process.env.WL_NO_ICONS = '1';
+      try {
+        // Verify default (no prefixWidth): no padding
+        const natural = formatBrowseOption(item);
+        expect(natural).toBe('[OPEN] [PLAN] [UNKN] Task');
+
+        // Pad to wider width: visibleWidth of '[OPEN] [PLAN] [UNKN]' = 20
+        // prefixWidth 24 → pad(24-20)=4 → repeat(4+1)=5 spaces
+        const padded = formatBrowseOption(item, undefined, undefined, undefined, 24);
+        expect(padded).toBe('[OPEN] [PLAN] [UNKN]     Task');
+      } finally {
+        if (origEnv === undefined) {
+          delete process.env.WL_NO_ICONS;
+        } else {
+          process.env.WL_NO_ICONS = origEnv;
+        }
+      }
+    });
   });
 
   const registerCommand = vi.fn();
