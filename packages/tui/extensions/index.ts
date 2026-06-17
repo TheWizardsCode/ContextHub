@@ -315,6 +315,22 @@ function normalizeListPayload(payload: unknown): WorklogBrowseItem[] {
     .filter(item => item.id.length > 0);
 }
 
+/**
+ * Known error message pattern emitted by the wl/worklog CLI and post-pull/push
+ * hooks when Worklog is not initialized in the current checkout or worktree.
+ *
+ * Matches case-insensitively to handle minor formatting variations.
+ * The pattern is derived from the post-pull hook template in src/commands/init.ts.
+ */
+const NOT_INITIALIZED_PATTERN = /worklog:\s*not initialized in this checkout\/worktree/i;
+
+/**
+ * Friendly, actionable message shown to users instead of the raw stderr
+ * when the "not initialized" error is detected.
+ */
+const NOT_INITIALIZED_FRIENDLY =
+  'Worklog is not initialized in this checkout/worktree. Run "wl init" to set up this location.';
+
 async function runWl(args: string[], includeJson = true): Promise<string> {
   const binaries = ['wl', 'worklog'];
   let lastError: unknown;
@@ -332,6 +348,14 @@ async function runWl(args: string[], includeJson = true): Promise<string> {
 
       const stderr = typeof error?.stderr === 'string' ? error.stderr.trim() : '';
       const message = stderr || error?.message || String(error);
+
+      // Detect the known "not initialized" CLI error and surface a friendly message
+      // instead of the raw stderr. This prevents confusing users with generic error
+      // text when they run `wl piman` in a new clone or worktree.
+      if (NOT_INITIALIZED_PATTERN.test(message)) {
+        throw new Error(NOT_INITIALIZED_FRIENDLY);
+      }
+
       throw new Error(message);
     }
   }
