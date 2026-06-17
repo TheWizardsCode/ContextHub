@@ -4,7 +4,7 @@
 
 import { EventEmitter } from "events";
 import { runWl, wlEvents } from "./wl-integration.js";
-import { WlError } from "../wl-integration/spawn.js";
+import { WlError } from "../../../src/wl-integration/spawn.js";
 
 /** A single message in the chat history */
 export interface ChatMessage {

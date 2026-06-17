@@ -1,6 +1,6 @@
 import blessed from 'blessed';
 import type { BlessedBox, BlessedFactory, BlessedScreen } from '../types.js';
-import { renderMarkdownToTags } from '../markdown-renderer.js';
+import { renderMarkdownToTags } from '../../markdown-renderer.js';
 
 export interface DetailComponentOptions {
   parent: BlessedScreen;

@@ -4,7 +4,7 @@ import type { BlessedBox, BlessedFactory, BlessedScreen } from '../types.js';
 import { redactAuditText } from '../../audit.js';
 import { stripAnsi, stripTags } from '../id-utils.js';
 import { theme } from '../../theme.js';
-import { renderMarkdownToTags } from '../markdown-renderer.js';
+import { renderMarkdownToTags } from '../../markdown-renderer.js';
 import { priorityIcon, statusIcon, iconsEnabled } from '../../icons.js';
 
 export interface MetadataPaneOptions {

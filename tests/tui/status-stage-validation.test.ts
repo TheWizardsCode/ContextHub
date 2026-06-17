@@ -3,7 +3,7 @@ import {
   getAllowedStagesForStatus,
   getAllowedStatusesForStage,
   isStatusStageCompatible,
-} from '../../src/tui/status-stage-validation.js';
+} from '../../src/status-stage-validation.js';
 import { loadStatusStageRules, normalizeStageValue, normalizeStatusValue } from '../../src/status-stage-rules.js';
 
 describe('Status/Stage Validation Helper', () => {

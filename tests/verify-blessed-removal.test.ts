@@ -2,19 +2,19 @@
  * Verification tests for Blessed TUI removal.
  *
  * These tests provide scaffolding to verify the removal of all Blessed TUI
- * code from the repository. Some tests verify the CURRENT (pre-removal) state
+ * code from the repository. Some tests verify the CURRENT (post-F2) state
  * as a baseline, and others verify the DESIRED (post-removal) state.
  *
- * As work items F2-F5 complete, the pre-removal tests will need to be updated
- * to reflect the new state of the codebase.
+ * As work items F3-F5 complete, the remaining pre-removal tests will need
+ * to be updated to reflect the new state of the codebase.
  *
  * Note on test lifecycle:
- * - Pre-removal tests (tagged "pre-removal") verify baseline state before changes
- * - Post-removal tests (tagged "post-removal") are toggled on after F2-F5 complete
+ * - Pre-removal tests (tagged "pre-removal") verify current state after F2
+ * - Post-removal tests (tagged "post-removal") are toggled on after F3-F5 complete
  * - Self-check tests (tagged "self-check") verify the test infrastructure itself
  */
 
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
@@ -72,85 +72,94 @@ describe('Self-check: test infrastructure', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Pre-removal baseline: verify Blessed TUI exists before removal
-// These tests confirm the current state before changes are made.
+// Current baseline: verify Blessed TUI state after F2 (relocation)
 // ---------------------------------------------------------------------------
-describe('Pre-removal baseline: Blessed TUI source files', () => {
-  it('src/tui/ directory exists', () => {
-    expect(projectPathExists('src/tui')).toBe(true);
+describe('Current baseline: relocated files', () => {
+  it('src/markdown-renderer.ts exists (new location)', () => {
+    expect(projectPathExists('src/markdown-renderer.ts')).toBe(true);
   });
 
-  it('src/tui/markdown-renderer.ts exists', () => {
-    expect(projectPathExists('src/tui/markdown-renderer.ts')).toBe(true);
+  it('src/status-stage-validation.ts exists (new location)', () => {
+    expect(projectPathExists('src/status-stage-validation.ts')).toBe(true);
   });
 
-  it('src/tui/status-stage-validation.ts exists', () => {
-    expect(projectPathExists('src/tui/status-stage-validation.ts')).toBe(true);
+  it('src/tui/markdown-renderer.ts no longer exists (was relocated)', () => {
+    expect(projectPathExists('src/tui/markdown-renderer.ts')).toBe(false);
   });
 
-  it('src/commands/tui.ts exists', () => {
-    expect(projectPathExists('src/commands/tui.ts')).toBe(true);
+  it('src/tui/status-stage-validation.ts no longer exists (was relocated)', () => {
+    expect(projectPathExists('src/tui/status-stage-validation.ts')).toBe(false);
   });
 
-  it('src/types/blessed.d.ts exists', () => {
-    expect(projectPathExists('src/types/blessed.d.ts')).toBe(true);
+  it('packages/tui/extensions/wl-integration.ts exists', () => {
+    expect(projectPathExists('packages/tui/extensions/wl-integration.ts')).toBe(true);
   });
 
-  it('blessed and @types/blessed are in package.json', () => {
-    expect(hasDependency('blessed')).toBe(true);
-    expect(hasDependency('@types/blessed')).toBe(true);
+  it('packages/tui/extensions/chatPane.ts exists', () => {
+    expect(projectPathExists('packages/tui/extensions/chatPane.ts')).toBe(true);
   });
 
-  it('src/tui/ has multiple source files (not just the two shared ones)', () => {
-    const tuiDir = path.join(projectRoot, 'src', 'tui');
-    if (!fs.existsSync(tuiDir)) {
-      // Already removed — this will fail the pre-removal check intentionally
-      expect(tuiDir).toBe('should exist pre-removal');
-      return;
-    }
-    const files = fs.readdirSync(tuiDir);
-    // Should have more than just markdown-renderer.ts and status-stage-validation.ts
-    expect(files.length).toBeGreaterThan(2);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Pre-removal baseline: markdown renderer uses blessed-style tags
-// ---------------------------------------------------------------------------
-describe('Pre-removal baseline: markdown renderer uses blessed tags', () => {
-  it('renderMarkdownToTags produces blessed-style {color-fg} tags', async () => {
-    const mod = await import('../src/tui/markdown-renderer.js');
-    const result = mod.renderMarkdownToTags('# Hello');
-    // Pre-removal: blessed-style tag like {white-fg}
-    expect(result).toContain('{white-fg}');
-    expect(result).toContain('{/');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Pre-removal baseline: status-stage-validation imports from src/tui/
-// ---------------------------------------------------------------------------
-describe('Pre-removal baseline: status-stage-validation imports correctly', () => {
-  it('src/commands/status-stage-validation.ts imports from ../tui/status-stage-validation', () => {
-    const content = readProjectFile('src/commands/status-stage-validation.ts');
-    expect(content).not.toBeNull();
-    expect(content).toContain('../tui/status-stage-validation');
+  it('packages/tui/extensions/actionPalette.ts exists', () => {
+    expect(projectPathExists('packages/tui/extensions/actionPalette.ts')).toBe(true);
   });
 
-  it('src/doctor/status-stage-check.ts imports from ../tui/status-stage-validation', () => {
-    const content = readProjectFile('src/doctor/status-stage-check.ts');
-    expect(content).not.toBeNull();
-    expect(content).toContain('../tui/status-stage-validation');
-  });
-
-  it('src/cli-output.ts imports from ./tui/markdown-renderer', () => {
+  it('cli-output.ts imports from new markdown-renderer path', () => {
     const content = readProjectFile('src/cli-output.ts');
     expect(content).not.toBeNull();
-    expect(content).toContain('./tui/markdown-renderer');
+    expect(content).toContain("./markdown-renderer.js'");
+    expect(content).not.toContain('./tui/markdown-renderer');
   });
 
-  it('status-stage-validation functions work correctly', async () => {
-    const mod = await import('../src/tui/status-stage-validation.js');
+  it('status-stage-validation imports from new path', () => {
+    const cmdContent = readProjectFile('src/commands/status-stage-validation.ts');
+    expect(cmdContent).not.toBeNull();
+    expect(cmdContent).toContain("../status-stage-validation.js'");
+
+    const docContent = readProjectFile('src/doctor/status-stage-check.ts');
+    expect(docContent).not.toBeNull();
+    expect(docContent).toContain("../status-stage-validation.js'");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Current baseline: markdown renderer uses chalk/ANSI
+// ---------------------------------------------------------------------------
+describe('Current baseline: markdown renderer uses chalk/ANSI', () => {
+  it('renderMarkdownToTags produces no blessed-style tags', async () => {
+    const mod = await import('../src/markdown-renderer.js');
+    const result = mod.renderMarkdownToTags('# Hello');
+    // Post-F2: should use chalk/ANSI, not blessed tags like {white-fg}
+    expect(result).not.toContain('{white-fg}');
+    expect(result).not.toContain('{magenta-fg}');
+    expect(result).not.toContain('{/');
+    // Should not contain any blessed-style {tag} patterns
+    expect(result).not.toMatch(/\{[a-z-]+\}/);
+  });
+
+  it('renderMarkdownToTags handles inline code (no blessed tags)', async () => {
+    const mod = await import('../src/markdown-renderer.js');
+    const result = mod.renderMarkdownToTags('Use `code` here');
+    expect(result).not.toContain('{magenta-fg}');
+    expect(result).not.toContain('{/');
+  });
+
+  it('renderMarkdownToTags handles empty input', async () => {
+    const mod = await import('../src/markdown-renderer.js');
+    expect(mod.renderMarkdownToTags('')).toBe('');
+  });
+
+  it('renderMarkdownToTags is a function', async () => {
+    const mod = await import('../src/markdown-renderer.js');
+    expect(typeof mod.renderMarkdownToTags).toBe('function');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Current baseline: status-stage-validation functions work from new path
+// ---------------------------------------------------------------------------
+describe('Current baseline: status-stage-validation works from new path', () => {
+  it('status-stage-validation functions work correctly from src/', async () => {
+    const mod = await import('../src/status-stage-validation.js');
     expect(typeof mod.getAllowedStagesForStatus).toBe('function');
     expect(typeof mod.isStatusStageCompatible).toBe('function');
     const stages = mod.getAllowedStagesForStatus('open');
@@ -160,26 +169,61 @@ describe('Pre-removal baseline: status-stage-validation imports correctly', () =
 });
 
 // ---------------------------------------------------------------------------
-// Pre-removal baseline: cli-output.ts has blessed tag handling
+// Current baseline: pi.json extension paths updated
 // ---------------------------------------------------------------------------
-describe('Pre-removal baseline: cli-output has blessed helpers', () => {
-  it('stripBlessedTags is exported', async () => {
-    const mod = await import('../src/cli-output.js');
-    expect(typeof mod.stripBlessedTags).toBe('function');
+describe('Current baseline: pi.json paths updated', () => {
+  it('pi.json bin entry points to piman.js', () => {
+    const content = readProjectFile('packages/tui/pi.json');
+    expect(content).not.toBeNull();
+    const parsed = JSON.parse(content);
+    expect(parsed.bin['wl-piman']).toBe('../dist/commands/piman.js');
   });
 
-  it('stripBlessedTags removes {color-fg} tags', () => {
-    const { stripBlessedTags } = require('../dist/cli-output.js') ||
-      // Fallback: test the source
-      { stripBlessedTags: (s: string) => s.replace(/\{[^}]+\}/g, '').replace(/\{\/\}/g, '') };
-    const result = stripBlessedTags('{cyan-fg}hello{/}');
-    expect(result).not.toContain('{cyan-fg}');
-    expect(result).not.toContain('{/}');
+  it('pi.json extensions point to new locations', () => {
+    const content = readProjectFile('packages/tui/pi.json');
+    expect(content).not.toBeNull();
+    const parsed = JSON.parse(content);
+    expect(parsed.pi.extensions).toContain('./extensions/chatPane.ts');
+    expect(parsed.pi.extensions).toContain('./extensions/actionPalette.ts');
   });
 });
 
 // ---------------------------------------------------------------------------
-// Post-removal tests (to be enabled after F2-F5 complete)
+// Current baseline: Blessed/CI artifacts still exist (to be removed in F3/F4)
+// ---------------------------------------------------------------------------
+describe('Current baseline: remaining Blessed TUI state (to be removed later)', () => {
+  it('src/tui/ directory still exists (remaining files)', () => {
+    expect(projectPathExists('src/tui')).toBe(true);
+  });
+
+  it('src/commands/tui.ts still exists', () => {
+    expect(projectPathExists('src/commands/tui.ts')).toBe(true);
+  });
+
+  it('src/types/blessed.d.ts still exists', () => {
+    expect(projectPathExists('src/types/blessed.d.ts')).toBe(true);
+  });
+
+  it('blessed and @types/blessed still in package.json', () => {
+    expect(hasDependency('blessed')).toBe(true);
+    expect(hasDependency('@types/blessed')).toBe(true);
+  });
+
+  it('stripBlessedTags still exported (deprecated, removed in F3)', async () => {
+    const mod = await import('../src/cli-output.js');
+    expect(typeof mod.stripBlessedTags).toBe('function');
+  });
+
+  it('Vitest TUI config and CI artifacts still exist', () => {
+    expect(projectPathExists('vitest.tui.config.ts')).toBe(true);
+    expect(projectPathExists('Dockerfile.tui-tests')).toBe(true);
+    expect(projectPathExists('tests/tui-ci-run.sh')).toBe(true);
+    expect(projectPathExists('test-tui.sh')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Post-removal tests (to be enabled after F3-F5 complete)
 // These are initially skipped — they validate the desired end state.
 // ---------------------------------------------------------------------------
 describe.skip('Post-removal verification: Blessed TUI removed', () => {
@@ -191,7 +235,7 @@ describe.skip('Post-removal verification: Blessed TUI removed', () => {
     expect(projectPathExists('src/types/blessed.d.ts')).toBe(false);
   });
 
-  it('src/commands/tui.ts still exists (as alias)', () => {
+  it('src/commands/tui.ts still exists (as alias to piman)', () => {
     expect(projectPathExists('src/commands/tui.ts')).toBe(true);
   });
 
@@ -218,14 +262,6 @@ describe.skip('Post-removal verification: Blessed TUI removed', () => {
       return false;
     };
     expect(checkDir(srcDir)).toBe(false);
-  });
-
-  it('markdown renderer uses chalk/ANSI (no blessed-style {color-fg} tags)', async () => {
-    const mod = await import('../src/markdown-renderer.js');
-    const result = mod.renderMarkdownToTags('# Hello');
-    // Post-removal: should use chalk, not blessed tags
-    expect(result).not.toContain('{white-fg}');
-    expect(result).not.toContain('{/');
   });
 
   it('theme.ts no longer exports theme.tui.* constants', () => {

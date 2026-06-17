@@ -3,7 +3,7 @@
 // Provides a spawn wrapper, JSON parsing, timeout handling, and event emitter for UI consumers.
 
 import { EventEmitter } from "events";
-import { runWlCommand, wlEvents, WlError } from "../wl-integration/spawn.js";
+import { runWlCommand, wlEvents, WlError } from "../../../src/wl-integration/spawn.js";
 
 /**
  * Options for running a wl command.

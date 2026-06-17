@@ -27,7 +27,7 @@ import {
   getAllowedStagesForStatus,
   getAllowedStatusesForStage,
   isStatusStageCompatible,
-} from './status-stage-validation.js';
+} from '../status-stage-validation.js';
 import {
   getStageLabel,
   getStageValueFromLabel,

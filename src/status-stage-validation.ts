@@ -1,4 +1,4 @@
-import { loadStatusStageRules } from '../status-stage-rules.js';
+import { loadStatusStageRules } from './status-stage-rules.js';
 
 export interface StatusStageValidationRules {
   statusStage?: Record<string, readonly string[]>;

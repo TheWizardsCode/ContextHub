@@ -24,8 +24,13 @@ describe('DetailComponent markdown rendering', () => {
   it('renders markdown headings and bullets in detail content', () => {
     const { comp, getContent } = createMockDetail();
     comp.setContent('## Description\n\n- first\n- second');
-    expect(getContent()).toContain('{white-fg}{bold}Description{/}');
-    expect(getContent()).toContain('• first');
-    expect(getContent()).toContain('• second');
+    const content = getContent();
+    // Post-F2: output uses ANSI/chalk, not blessed-style tags
+    expect(content).not.toContain('{white-fg}');
+    expect(content).not.toContain('{bold}');
+    expect(content).not.toContain('{/');
+    expect(content).toContain('Description');
+    expect(content).toContain('• first');
+    expect(content).toContain('• second');
   });
 });

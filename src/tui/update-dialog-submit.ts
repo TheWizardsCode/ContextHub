@@ -1,5 +1,5 @@
-import type { StatusStageValidationRules } from './status-stage-validation.js';
-import { isStatusStageCompatible } from './status-stage-validation.js';
+import type { StatusStageValidationRules } from '../status-stage-validation.js';
+import { isStatusStageCompatible } from '../status-stage-validation.js';
 
 export interface UpdateDialogItemState {
   status?: string;

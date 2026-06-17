@@ -4,7 +4,7 @@
   "description": "Pi-based TUI for the Worklog CLI with agent chat, action palette, and work item management",
   "main": "../dist/index.js",
   "bin": {
-    "wl-piman": "../dist/commands/tui.js"
+    "wl-piman": "../dist/commands/piman.js"
   },
   "scripts": {
     "build": "cd .. && npm run build",
@@ -25,8 +25,8 @@
   },
   "pi": {
     "extensions": [
-      "../src/tui/chatPane.ts",
-      "../src/tui/actionPalette.ts"
+      "./extensions/chatPane.ts",
+      "./extensions/actionPalette.ts"
     ],
     "commands": [
       "wl-piman"

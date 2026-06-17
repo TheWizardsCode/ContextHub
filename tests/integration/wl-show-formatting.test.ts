@@ -36,21 +36,23 @@ const mockWorkItem: WorkItem = {
 };
 
 describe('wl show formatting integration', () => {
-  describe('markdown format produces blessed tags in output', () => {
+  describe('markdown format produces ANSI/chalk output', () => {
     it('renders description with markdown format through CLI renderer', () => {
       const input = '# My Title\nRun `wl status` for details\n```bash\nwl show FT-1\n```';
       const result = renderCliMarkdown(input, { formatAsMarkdown: true });
-      // Should contain blessed formatting tags
-      expect(result).toContain('{white-fg}{bold}My Title{/}');
-      expect(result).toContain('{magenta-fg}wl status{/}');
+      // Post-F2: output uses ANSI/chalk, not blessed-style tags
+      expect(result).not.toContain('{white-fg}');
+      expect(result).not.toContain('{magenta-fg}');
+      expect(result).not.toContain('{/');
+      expect(result).toContain('My Title');
+      expect(result).toContain('wl status');
       expect(result).toContain('--- bash ---');
     });
 
-    it('plain format strips all blessed tags', () => {
+    it('plain format strips ANSI codes', () => {
       const input = '# My Title\nRun `wl status` for details';
       const result = renderCliMarkdown(input, { formatAsMarkdown: false });
-      expect(result).not.toContain('{white-fg}');
-      expect(result).not.toContain('{magenta-fg}');
+      expect(result).not.toContain('\u001b[');
       expect(result).toContain('My Title');
       expect(result).toContain('wl status');
     });
@@ -59,26 +61,24 @@ describe('wl show formatting integration', () => {
   describe('humanFormatWorkItem handles format values', () => {
     it('handles markdown format by rendering through CLI renderer', () => {
       const result = humanFormatWorkItem(mockWorkItem, null, 'markdown');
-      // Should contain blessed tags from markdown rendering
-      expect(result).toContain('{magenta-fg}inline code{/}');
+      // Post-F2: no blessed tags in output
+      expect(result).not.toContain('{magenta-fg}');
+      expect(result).not.toContain('{/');
+      expect(result).toContain('inline code');
       expect(result).toContain('--- bash ---');
     });
 
     it('handles auto format without errors (TTY-dependent)', () => {
-      // 'auto' defers to TTY detection — result depends on test environment
       const result = humanFormatWorkItem(mockWorkItem, null, 'auto');
       expect(result).toContain('Test item with');
-      // Should not throw
     });
 
-    it('handles plain format as full plain output (no blessed tags)', () => {
+    it('handles plain format as full plain output (no ANSI codes)', () => {
       const result = humanFormatWorkItem(mockWorkItem, null, 'plain');
       expect(result).toContain('Test item with');
-      // Plain format should not produce blessed tags in the formatted portion
-      // (the raw description text is shown but not rendered with blessed tags)
     });
 
-    it('handles text format as full plain output (no blessed tags)', () => {
+    it('handles text format as full plain output (no ANSI codes)', () => {
       const result = humanFormatWorkItem(mockWorkItem, null, 'text');
       expect(result).toContain('Test item with');
     });
@@ -86,21 +86,19 @@ describe('wl show formatting integration', () => {
     it('full format does not use markdown renderer in non-TTY (auto-detect)', () => {
       const result = humanFormatWorkItem(mockWorkItem, null, 'full');
       expect(result).toContain('Test item with');
-      // In test environment (non-TTY), auto-detect defaults to off,
-      // so full format does not render through markdown renderer
-      expect(result).not.toContain('{white-fg}{bold}Description{/}');
+      // In test environment (non-TTY), auto-detect defaults to off
+      expect(result).not.toContain('\u001b[');
     });
 
     it('full format auto-detects markdown from TTY when no config', async () => {
-      // When no CLI flag and no config, auto-detect should use TTY status.
-      // In non-TTY (test env), this means no markdown.
-      // Mock isTty to simulate TTY environment.
       const cliOutput = await import('../../src/cli-output.js');
       const spy = vi.spyOn(cliOutput, 'isTty').mockReturnValue(true);
       try {
         const result = humanFormatWorkItem(mockWorkItem, null, 'full');
         // In TTY with no config, auto-detect should enable markdown
-        expect(result).toContain('{magenta-fg}inline code{/}');
+        expect(result).not.toContain('{magenta-fg}');
+        expect(result).not.toContain('{/');
+        expect(result).toContain('inline code');
         expect(result).toContain('--- bash ---');
       } finally {
         spy.mockRestore();
@@ -114,8 +112,6 @@ describe('wl show formatting integration', () => {
   });
 
   describe('humanFormatWorkItem with cliFormatMarkdown config', () => {
-    // Full config required because humanFormatWorkItem calls loadStatusStageRules
-    // which needs statuses, stages, statusStageCompatibility.
     const fullConfig = {
       projectName: 'TestProject',
       prefix: 'TP',
@@ -154,8 +150,10 @@ describe('wl show formatting integration', () => {
       const spy = await setupSpy();
       spy.mockReturnValue({ ...fullConfig, cliFormatMarkdown: true });
       const result = humanFormatWorkItem(mockWorkItem, null, 'full');
-      // cliFormatMarkdown: true should enable markdown rendering even for 'full' format
-      expect(result).toContain('{magenta-fg}inline code{/}');
+      // cliFormatMarkdown: true should enable markdown rendering
+      expect(result).not.toContain('{magenta-fg}');
+      expect(result).not.toContain('{/');
+      expect(result).toContain('inline code');
       expect(result).toContain('--- bash ---');
     });
 
@@ -163,8 +161,6 @@ describe('wl show formatting integration', () => {
       const spy = await setupSpy();
       spy.mockReturnValue({ ...fullConfig, cliFormatMarkdown: true });
       const result = humanFormatWorkItem(mockWorkItem, null, 'concise');
-      // concise format with cliFormatMarkdown: true should render markdown.
-      // Verify that cliFormatMarkdown: true produces output (no crash).
       expect(result).toContain('Test item with');
       expect(result).toContain('FT-001');
     });
@@ -173,8 +169,7 @@ describe('wl show formatting integration', () => {
       const spy = await setupSpy();
       spy.mockReturnValue({ ...fullConfig, cliFormatMarkdown: false });
       const result = humanFormatWorkItem(mockWorkItem, null, 'full');
-      // cliFormatMarkdown: false should keep markdown disabled
-      expect(result).not.toContain('{white-fg}{bold}Description{/}');
+      expect(result).not.toContain('\u001b[');
     });
 
     it('cliFormatMarkdown undefined (no config) keeps default behaviour', async () => {
@@ -182,37 +177,30 @@ describe('wl show formatting integration', () => {
       const { cliFormatMarkdown: _, ...configWithoutMarkdown } = fullConfig;
       spy.mockReturnValue(configWithoutMarkdown as any);
       const result = humanFormatWorkItem(mockWorkItem, null, 'full');
-      // No cliFormatMarkdown config: default is no markdown for 'full' format
-      expect(result).not.toContain('{white-fg}{bold}Description{/}');
+      expect(result).not.toContain('\u001b[');
     });
 
     it('cliFormatMarkdown does not override explicit --format markdown', async () => {
       const spy = await setupSpy();
       spy.mockReturnValue({ ...fullConfig, cliFormatMarkdown: false });
-      // --format markdown should override cliFormatMarkdown: false
       const result = humanFormatWorkItem(mockWorkItem, null, 'markdown');
-      expect(result).toContain('{magenta-fg}inline code{/}');
+      expect(result).not.toContain('{magenta-fg}');
+      expect(result).not.toContain('{/');
+      expect(result).toContain('inline code');
     });
 
     it('cliFormatMarkdown does not override explicit --format plain', async () => {
       const spy = await setupSpy();
       spy.mockReturnValue({ ...fullConfig, cliFormatMarkdown: true });
-      // --format plain should override cliFormatMarkdown: true
       const result = humanFormatWorkItem(mockWorkItem, null, 'plain');
-      expect(result).not.toContain('{white-fg}{bold}');
+      expect(result).not.toContain('{white-fg}');
     });
 
     it('cliFormatMarkdown does not override --format auto (non-TTY)', async () => {
       const spy = await setupSpy();
       spy.mockReturnValue({ ...fullConfig, cliFormatMarkdown: true });
-      // --format auto is an explicit CLI choice for TTY detection.
-      // In non-TTY (test env), --format auto should give plain output,
-      // even when cliFormatMarkdown: true is set in config.
       const result = humanFormatWorkItem(mockWorkItem, null, 'auto');
-      // In non-TTY, --format auto should NOT enable markdown,
-      // regardless of cliFormatMarkdown config.
-      expect(result).not.toContain('{white-fg}{bold}Description{/}');
-      expect(result).not.toContain('{magenta-fg}inline code{/}');
+      expect(result).not.toContain('\u001b[');
     });
   });
 
@@ -223,9 +211,12 @@ describe('wl show formatting integration', () => {
         { cliFormatMarkdown: true }
       );
       expect(out.isFormatted()).toBe(true);
-      // Rendered content should contain blessed tags
       const result = out.render('# Header\nSome `code`');
-      expect(result).toContain('{white-fg}{bold}Header{/}');
+      // Post-F2: output uses ANSI/chalk, not blessed tags
+      expect(result).not.toContain('{white-fg}');
+      expect(result).not.toContain('{/');
+      expect(result).toContain('Header');
+      expect(result).toContain('code');
     });
 
     it('respects cliFormatMarkdown config when false', () => {
@@ -234,9 +225,8 @@ describe('wl show formatting integration', () => {
         { cliFormatMarkdown: false }
       );
       expect(out.isFormatted()).toBe(false);
-      // Should strip blessed tags
       const result = out.render('# Header\nSome `code`');
-      expect(result).not.toContain('{white-fg}');
+      expect(result).not.toContain('\u001b[');
       expect(result).toContain('Header');
     });
 
@@ -265,49 +255,41 @@ describe('wl show formatting integration', () => {
     });
 
     it('--format auto ignores config and uses TTY detection', () => {
-      // --format auto is an explicit CLI choice for TTY auto-detection.
-      // Config should NOT override it. In test env (non-TTY), result is false
-      // even when cliFormatMarkdown: true is set in config.
       const out = createCliOutputFromCommand(
         { format: 'auto' },
         { cliFormatMarkdown: true }
       );
-      // In test environment, isTty() returns false, so --format auto
-      // should give false regardless of cliFormatMarkdown config.
       expect(out.isFormatted()).toBe(false);
     });
   });
 
   describe('size guard integration', () => {
-    it('strips blessed tags from oversize markdown input', () => {
-      const bigInput = '# Title\n{cyan-fg}highlighted{/}\n' + 'x'.repeat(150_000);
+    it('strips ANSI codes from oversize input', () => {
+      const bigInput = '# Title\nsome text\n' + 'x'.repeat(150_000);
       const result = renderCliMarkdown(bigInput, { formatAsMarkdown: true, maxSize: 100_000 });
-      // Should fall back to plain text (stripped blessed tags)
-      expect(result).not.toContain('{cyan-fg}');
-      expect(result).not.toContain('{/}');
+      // Should fall back to plain text (strip ANSI codes)
+      expect(result).not.toContain('\u001b[');
       expect(result).toContain('Title');
-      expect(result).toContain('highlighted');
+      expect(result).toContain('some text');
     });
 
-    it('preserves blessed tags for input within maxSize', () => {
-      const normalInput = '# Title\n{magenta-fg}code{/}';
+    it('renders content for input within maxSize', () => {
+      const normalInput = '# Title\nSome `code`';
       const result = renderCliMarkdown(normalInput, { formatAsMarkdown: true, maxSize: 100_000 });
-      // Should contain blessed rendering tags (from markdown processing)
-      expect(result).toContain('{white-fg}{bold}');
+      // Should render with ANSI/chalk (no blessed tags)
+      expect(result).not.toContain('{white-fg}');
+      expect(result).not.toContain('{/');
+      expect(result).toContain('Title');
+      expect(result).toContain('code');
     });
 
-    it('rendered oversize output has no control characters (blessed tags)', () => {
-      // Input with embedded blessed-like tags (which would come from partial rendering)
-      const taggedInput = '# Header\n{magenta-fg}code{/}\n' + 'a'.repeat(150_000);
+    it('rendered oversize output has no ANSI control characters', () => {
+      const taggedInput = '# Header\nsome text\n' + 'a'.repeat(150_000);
       const result = renderCliMarkdown(taggedInput, { formatAsMarkdown: true, maxSize: 50_000 });
-      // Verify NO blessed tags remain in output
-      expect(result).not.toContain('{magenta-fg}');
-      expect(result).not.toContain('{/}');
-      expect(result).not.toContain('{white-fg}');
-      expect(result).not.toContain('{bold}');
-      // Plain text should remain
+      // Verify no ANSI codes remain in output
+      expect(result).not.toContain('\u001b[');
       expect(result).toContain('Header');
-      expect(result).toContain('code');
+      expect(result).toContain('some text');
     });
   });
 });

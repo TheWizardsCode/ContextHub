@@ -4,7 +4,7 @@
  * markdown renderer, with TTY awareness and safety for CI/TTY environments.
  */
 
-import { renderMarkdownToTags, type RendererOptions } from './tui/markdown-renderer.js';
+import { renderMarkdownToTags, type RendererOptions } from './markdown-renderer.js';
 import chalk from 'chalk';
 
 /**
@@ -132,8 +132,8 @@ export function renderCliMarkdown(input: string, opts?: CliOutputOptions): strin
 
   // Check if we should use formatted output
   if (!shouldUseFormattedOutput(formatAsMarkdown)) {
-    // Strip any blessed tags for plain text output (CI-safe)
-    return stripBlessedTags(input);
+    // Strip ANSI codes for plain text output (CI-safe)
+    return stripAnsi(input);
   }
 
   // Use the existing renderer with CLI options
@@ -151,7 +151,7 @@ export function renderCliMarkdown(input: string, opts?: CliOutputOptions): strin
       isTty: isTty()
     });
     debugLog(`Size guard: input ${input.length} chars exceeds max ${maxSize}, falling back to plain text`);
-    return stripBlessedTags(input);
+    return stripAnsi(input);
   }
 
   try {
@@ -162,9 +162,8 @@ export function renderCliMarkdown(input: string, opts?: CliOutputOptions): strin
       isTty: isTty()
     });
 
-    // Preserve blessed-format tags for callers; printing functions will
-    // convert to ANSI when writing to an interactive TTY so tests that
-    // assert on blessed tags continue to pass.
+    // The result is already ANSI/chalk output. Return as-is; the calling
+    // print functions will output it directly (no blessed tag conversion needed).
     return result;
   } catch (_error) {
     // On rendering failure, prefer explicit fallback, then strip blessed tags from plain input
@@ -176,13 +175,27 @@ export function renderCliMarkdown(input: string, opts?: CliOutputOptions): strin
       isTty: isTty()
     });
     debugLog(`Rendering failed, falling back to plain text`);
-    return opts?.fallback ?? stripBlessedTags(input);
+    return opts?.fallback ?? stripAnsi(input);
   }
+}
+
+/**
+ * Strip ANSI escape codes from text for plain output (CI-safe).
+ * Removes sequences like \u001b[31m used by chalk and other ANSI formatters.
+ */
+export function stripAnsi(input: string): string {
+  if (!input) return '';
+  // eslint-disable-next-line no-control-regex
+  return input.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
 }
 
 /**
  * Strip blessed tags from text for plain output (CI-safe).
  * Removes {tag} patterns used by blessed.
+ *
+ * @deprecated The Blessed TUI has been removed. This function only exists
+ * for transitional compatibility and will be removed in F3. For new code,
+ * use stripAnsi() instead.
  */
 export function stripBlessedTags(input: string): string {
   if (!input) return '';
@@ -258,9 +271,9 @@ export function createCliOutput(opts?: CliOutputOptions) {
     print: (text: string): void => {
       const rendered = renderCliMarkdown(text, opts);
       if (isTty()) {
-        console.log(convertBlessedTagsToAnsi(rendered));
+        console.log(rendered);
       } else {
-        console.log(stripBlessedTags(rendered));
+        console.log(stripAnsi(rendered));
       }
     },
 
@@ -270,9 +283,9 @@ export function createCliOutput(opts?: CliOutputOptions) {
     printError: (text: string): void => {
       const rendered = renderCliMarkdown(text, opts);
       if (isTty()) {
-        console.error(convertBlessedTagsToAnsi(rendered));
+        console.error(rendered);
       } else {
-        console.error(stripBlessedTags(rendered));
+        console.error(stripAnsi(rendered));
       }
     },
 
