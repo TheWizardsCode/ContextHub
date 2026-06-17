@@ -220,7 +220,7 @@ describe('loadShortcutConfig', () => {
     expect(implementEntry).toBeDefined();
     expect(implementEntry!.command).toBe('/skill:implement <id>');
     expect(implementEntry!.view).toBe('both');
-    expect(implementEntry!.stages).toEqual(['intake_complete', 'plan_complete']);
+    expect(implementEntry!.stages).toEqual(['intake_complete', 'plan_complete', 'in_progress']);
     expect(implementEntry!.label).toBe('implement');
     expect(implementEntry!.description).toBe('Run the implement workflow on the selected work item');
 
@@ -244,7 +244,7 @@ describe('loadShortcutConfig', () => {
     expect(auditEntry).toBeDefined();
     expect(auditEntry!.command).toBe('/skill:audit <id>');
     expect(auditEntry!.view).toBe('both');
-    expect(auditEntry!.stages).toEqual(['in_review']);
+    expect(auditEntry!.stages).toEqual(['in_progress', 'in_review']);
     expect(auditEntry!.label).toBe('audit');
     expect(auditEntry!.description).toBe('Run an audit on the selected work item');
 
@@ -277,13 +277,13 @@ describe('loadShortcutConfig', () => {
   it('lookup resolves shortcuts loaded from file with stage parameter', () => {
     const registry = loadShortcutConfig();
 
-    // 'i' (implement) works for intake_complete and plan_complete stages
+    // 'i' (implement) works for intake_complete, plan_complete, and in_progress stages
     expect(registry.lookup('i', 'list', 'plan_complete')).toBe('/skill:implement <id>');
     expect(registry.lookup('i', 'detail', 'plan_complete')).toBe('/skill:implement <id>');
     expect(registry.lookup('i', 'list', 'intake_complete')).toBe('/skill:implement <id>');
     expect(registry.lookup('i', 'detail', 'intake_complete')).toBe('/skill:implement <id>');
     expect(registry.lookup('i', 'list', 'idea')).toBeUndefined();
-    expect(registry.lookup('i', 'list', 'in_progress')).toBeUndefined();
+    expect(registry.lookup('i', 'list', 'in_progress')).toBe('/skill:implement <id>');
 
     // 'p' (plan) should only work for intake_complete stage
     expect(registry.lookup('p', 'list', 'intake_complete')).toBe('/plan <id>');
@@ -293,10 +293,10 @@ describe('loadShortcutConfig', () => {
     expect(registry.lookup('n', 'detail', 'idea')).toBe('/intake <id>');
     expect(registry.lookup('n', 'detail', 'intake_complete')).toBeUndefined();
 
-    // 'a' (audit) has stages: ['in_review'], works only for that stage
+    // 'a' (audit) has stages: ['in_progress', 'in_review']
     expect(registry.lookup('a', 'list', 'in_review')).toBe('/skill:audit <id>');
     expect(registry.lookup('a', 'detail', 'in_review')).toBe('/skill:audit <id>');
-    expect(registry.lookup('a', 'list', 'in_progress')).toBeUndefined();
+    expect(registry.lookup('a', 'list', 'in_progress')).toBe('/skill:audit <id>');
     expect(registry.lookup('a', 'list', 'idea')).toBeUndefined();
 
     // Without stage parameter, entries with stages constraint still work
