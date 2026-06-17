@@ -15,6 +15,12 @@ import {
   epicIcon,
   epicLabel,
   epicFallback,
+  riskIcon,
+  riskFallback,
+  riskLabel,
+  effortIcon,
+  effortFallback,
+  effortLabel,
   iconsEnabled,
 } from '../../src/icons.js';
 
@@ -520,5 +526,234 @@ describe('epicLabel', () => {
 describe('epicFallback', () => {
   it('returns bracketed text for epic', () => {
     expect(epicFallback()).toBe('[EPIC]');
+  });
+});
+
+// ─── Risk Icons ──────────────────────────────────────────────────────────
+
+describe('riskIcon', () => {
+  it('returns emoji for Low risk', () => {
+    expect(riskIcon('Low')).toBe('\u{1F331}'); // 🌱
+  });
+
+  it('returns emoji for Medium risk', () => {
+    expect(riskIcon('Medium')).toBe('\u{26A0}\u{FE0F}'); // ⚠️
+  });
+
+  it('returns emoji for High risk', () => {
+    expect(riskIcon('High')).toBe('\u{1F525}'); // 🔥
+  });
+
+  it('returns emoji for Severe risk', () => {
+    expect(riskIcon('Severe')).toBe('\u{1F6A8}'); // 🚨
+  });
+
+  it('returns empty string for unknown risk', () => {
+    expect(riskIcon('unknown')).toBe('');
+    expect(riskIcon('')).toBe('');
+  });
+
+  it('returns empty string for null/undefined risk', () => {
+    expect(riskIcon(null as any)).toBe('');
+    expect(riskIcon(undefined as any)).toBe('');
+  });
+
+  it('is case-insensitive', () => {
+    expect(riskIcon('low')).toBe('\u{1F331}');
+    expect(riskIcon('MEDIUM')).toBe('\u{26A0}\u{FE0F}');
+  });
+
+  describe('with noIcons option', () => {
+    it('returns text fallback for Low', () => {
+      expect(riskIcon('Low', { noIcons: true })).toBe('[LOW]');
+    });
+
+    it('returns text fallback for Medium', () => {
+      expect(riskIcon('Medium', { noIcons: true })).toBe('[MED]');
+    });
+
+    it('returns text fallback for High', () => {
+      expect(riskIcon('High', { noIcons: true })).toBe('[HIGH]');
+    });
+
+    it('returns text fallback for Severe', () => {
+      expect(riskIcon('Severe', { noIcons: true })).toBe('[SEV]');
+    });
+
+    it('returns empty string for unknown risk with noIcons', () => {
+      expect(riskIcon('unknown', { noIcons: true })).toBe('');
+    });
+  });
+});
+
+describe('riskFallback', () => {
+  it('returns bracketed text for Low', () => {
+    expect(riskFallback('Low')).toBe('[LOW]');
+  });
+
+  it('returns bracketed text for Medium', () => {
+    expect(riskFallback('Medium')).toBe('[MED]');
+  });
+
+  it('returns bracketed text for High', () => {
+    expect(riskFallback('High')).toBe('[HIGH]');
+  });
+
+  it('returns bracketed text for Severe', () => {
+    expect(riskFallback('Severe')).toBe('[SEV]');
+  });
+
+  it('returns empty string for unknown risk', () => {
+    expect(riskFallback('unknown')).toBe('');
+  });
+});
+
+describe('riskLabel', () => {
+  it('returns label for Low', () => {
+    expect(riskLabel('Low')).toBe('Risk: Low');
+  });
+
+  it('returns label for Medium', () => {
+    expect(riskLabel('Medium')).toBe('Risk: Medium');
+  });
+
+  it('returns label for High', () => {
+    expect(riskLabel('High')).toBe('Risk: High');
+  });
+
+  it('returns label for Severe', () => {
+    expect(riskLabel('Severe')).toBe('Risk: Severe');
+  });
+
+  it('returns empty string for unknown risk', () => {
+    expect(riskLabel('unknown')).toBe('');
+  });
+
+  it('is case-insensitive', () => {
+    expect(riskLabel('LOW')).toBe('Risk: Low');
+  });
+});
+
+// ─── Effort Icons ────────────────────────────────────────────────────────
+
+describe('effortIcon', () => {
+  it('returns emoji for XS effort', () => {
+    expect(effortIcon('XS')).toBe('\u{1F41C}'); // 🐜
+  });
+
+  it('returns emoji for S effort', () => {
+    expect(effortIcon('S')).toBe('\u{1F407}'); // 🐇
+  });
+
+  it('returns emoji for M effort', () => {
+    expect(effortIcon('M')).toBe('\u{1F415}'); // 🐕
+  });
+
+  it('returns emoji for L effort', () => {
+    expect(effortIcon('L')).toBe('\u{1F418}'); // 🐘
+  });
+
+  it('returns emoji for XL effort', () => {
+    expect(effortIcon('XL')).toBe('\u{1F40B}'); // 🐋
+  });
+
+  it('returns empty string for unknown effort', () => {
+    expect(effortIcon('unknown')).toBe('');
+    expect(effortIcon('')).toBe('');
+  });
+
+  it('returns empty string for null/undefined effort', () => {
+    expect(effortIcon(null as any)).toBe('');
+    expect(effortIcon(undefined as any)).toBe('');
+  });
+
+  it('is case-insensitive', () => {
+    expect(effortIcon('xs')).toBe('\u{1F41C}');
+    expect(effortIcon('s')).toBe('\u{1F407}');
+    expect(effortIcon('m')).toBe('\u{1F415}');
+    expect(effortIcon('l')).toBe('\u{1F418}');
+    expect(effortIcon('xl')).toBe('\u{1F40B}');
+  });
+
+  describe('with noIcons option', () => {
+    it('returns text fallback for XS', () => {
+      expect(effortIcon('XS', { noIcons: true })).toBe('[XS]');
+    });
+
+    it('returns text fallback for S', () => {
+      expect(effortIcon('S', { noIcons: true })).toBe('[S]');
+    });
+
+    it('returns text fallback for M', () => {
+      expect(effortIcon('M', { noIcons: true })).toBe('[M]');
+    });
+
+    it('returns text fallback for L', () => {
+      expect(effortIcon('L', { noIcons: true })).toBe('[L]');
+    });
+
+    it('returns text fallback for XL', () => {
+      expect(effortIcon('XL', { noIcons: true })).toBe('[XL]');
+    });
+
+    it('returns empty string for unknown effort with noIcons', () => {
+      expect(effortIcon('unknown', { noIcons: true })).toBe('');
+    });
+  });
+});
+
+describe('effortFallback', () => {
+  it('returns bracketed text for XS', () => {
+    expect(effortFallback('XS')).toBe('[XS]');
+  });
+
+  it('returns bracketed text for S', () => {
+    expect(effortFallback('S')).toBe('[S]');
+  });
+
+  it('returns bracketed text for M', () => {
+    expect(effortFallback('M')).toBe('[M]');
+  });
+
+  it('returns bracketed text for L', () => {
+    expect(effortFallback('L')).toBe('[L]');
+  });
+
+  it('returns bracketed text for XL', () => {
+    expect(effortFallback('XL')).toBe('[XL]');
+  });
+
+  it('returns empty string for unknown effort', () => {
+    expect(effortFallback('unknown')).toBe('');
+  });
+});
+
+describe('effortLabel', () => {
+  it('returns label for XS', () => {
+    expect(effortLabel('XS')).toBe('Effort: XS (extra small)');
+  });
+
+  it('returns label for S', () => {
+    expect(effortLabel('S')).toBe('Effort: S (small)');
+  });
+
+  it('returns label for M', () => {
+    expect(effortLabel('M')).toBe('Effort: M (medium)');
+  });
+
+  it('returns label for L', () => {
+    expect(effortLabel('L')).toBe('Effort: L (large)');
+  });
+
+  it('returns label for XL', () => {
+    expect(effortLabel('XL')).toBe('Effort: XL (extra large)');
+  });
+
+  it('returns empty string for unknown effort', () => {
+    expect(effortLabel('unknown')).toBe('');
+  });
+
+  it('is case-insensitive', () => {
+    expect(effortLabel('xs')).toBe('Effort: XS (extra small)');
   });
 });

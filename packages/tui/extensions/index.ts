@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled } from '../../../src/icons.js';
+import { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, riskIcon, effortIcon } from '../../../src/icons.js';
 import { applyStageColour, type PiTheme } from './worklog-helpers.js';
 import { truncateToTerminalWidth, wrapToTerminalWidth, visibleWidth } from './terminal-utils.js';
 import { type ShortcutRegistry, loadShortcutConfig } from './shortcut-config.js';
@@ -426,7 +426,7 @@ async function defaultListWorkItemsWithStage(stage: string, run: RunWlFn = runWl
  */
 export function buildSelectionWidget(
   item: WorklogBrowseItem,
-  _settings?: Settings,
+  settings?: Settings,
 ): (tui: any, _theme: PiTheme) => {
   render: (width: number) => string[];
   invalidate: () => void;
@@ -454,8 +454,15 @@ export function buildSelectionWidget(
         ? `GH #${item.githubIssueNumber}`
         : null;
 
+      // Risk/Effort icons segment
+      const showIcons = settings?.showIcons ?? iconsEnabled();
+      const noIcons = !showIcons;
+      const effortStr = effortIcon(item.effort, { noIcons });
+      const riskStr = riskIcon(item.risk, { noIcons });
+      const effortRiskPart = [effortStr, riskStr].filter(Boolean).join(' ');
+
       // Assemble segments with pipe separators
-      const parts = [idPart, tagsPart, ghPart].filter(Boolean);
+      const parts = [idPart, tagsPart, ghPart, effortRiskPart].filter(Boolean);
 
       return parts.join(' | ');
     };

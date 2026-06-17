@@ -73,9 +73,32 @@ across the CLI (chalk) and TUI rendering paths. It covers:
 | deleted        | `🗑️`  | `[DEL]`       | "Status: Deleted"         |
 | input_needed   | `💬`   | `[HELP]`      | "Status: Input needed"    |
 
+## 6. Risk Icons
+
+| Risk Level | Icon   | Text Fallback | Accessible Label      |
+|------------|--------|---------------|-----------------------|
+| Low        | `🌱`   | `[LOW]`       | "Risk: Low"           |
+| Medium     | `⚠️`   | `[MED]`       | "Risk: Medium"        |
+| High       | `🔥`   | `[HIGH]`      | "Risk: High"          |
+| Severe     | `🚨`   | `[SEV]`       | "Risk: Severe"        |
+
+**Note:** The 🚨 (Severe risk) icon is the same as the 🚨 (critical priority) icon. This overlap is acceptable because they appear in different positions in the UI — risk icons appear at the end of the information bar as a pipe-separated segment, while priority icons appear in the selection list row icon prefix — making visual disambiguation by context straightforward.
+
+## 7. Effort Icons
+
+| Effort Size | Icon   | Text Fallback | Accessible Label                 |
+|-------------|--------|---------------|----------------------------------|
+| XS          | `🐜`   | `[XS]`        | "Effort: XS (extra small)"       |
+| S           | `🐇`   | `[S]`         | "Effort: S (small)"              |
+| M           | `🐕`   | `[M]`         | "Effort: M (medium)"             |
+| L           | `🐘`   | `[L]`         | "Effort: L (large)"              |
+| XL          | `🐋`   | `[XL]`        | "Effort: XL (extra large)"       |
+
+**Animal analogy:** The effort icons follow a size progression: ant (XS) → rabbit (S) → dog (M) → elephant (L) → whale (XL), making the scale intuitively visual.
+
 ---
 
-## 6. Emoji / Glyph Compatibility
+## 8. Emoji / Glyph Compatibility
 
 The chosen emoji are part of the Unicode 12.0+ standard and are supported by:
 
@@ -88,7 +111,7 @@ The chosen emoji are part of the Unicode 12.0+ standard and are supported by:
 - **Terminal.app** (macOS — partial, `.` may render as emoji style)
 
 **When emoji do not render** (older terminals, CI logs, serial lines) the **text
-fallback** is used instead. See §6 below.
+fallback** is used instead. See §8 below.
 
 > **Compatibility note:** Some terminals require a font with emoji support
 > (e.g. Noto Color Emoji, Apple Color Emoji, Segoe UI Emoji). If the emoji
@@ -97,17 +120,17 @@ fallback** is used instead. See §6 below.
 
 ---
 
-## 7. Accessibility Labels
+## 9. Accessibility Labels
 
 Every icon MUST carry an equivalent accessible label so that screen readers and
 tooling that parses CLI output can identify the icon's meaning.
 
-### 7.1 TUI Output
+### 9.1 TUI Output
 
 The TUI uses the Pi-based rendering framework which supports accessible labels
 natively. Icons can be annotated via the framework's built-in label system.
 
-### 7.2 CLI Output
+### 9.2 CLI Output
 
 CLI output uses `chalk` to colour output. When icons are enabled:
 
@@ -123,7 +146,7 @@ by a space. This ensures:
 
 ---
 
-## 8. Text Fallback & Copy/Paste
+## 10. Text Fallback & Copy/Paste
 
 ### Behaviour
 
@@ -168,7 +191,7 @@ Status:   🟢 [OPEN]   (or  [OPEN]  when icons disabled)
 
 ---
 
-## 9. Disabling Icons
+## 11. Disabling Icons
 
 Two mechanisms control icon display:
 
@@ -186,7 +209,7 @@ No env var is set by default; icons are enabled when `process.stdout.isTTY` is
 
 ---
 
-## 10. Rendering Cost
+## 12. Rendering Cost
 
 The icon lookup is a simple `Map<string, string>` or plain object lookup —
 O(1) per call, negligible runtime cost. No SVG, image loading, or network
@@ -232,9 +255,9 @@ export function iconsEnabled(opts?: { noIcons?: boolean }): boolean;
 
 ---
 
-## 11. Implementation Guide
+## 13. Implementation Guide
 
-### 11.1 Pi TUI List Rendering (`packages/tui/extensions/index.ts`)
+### 13.1 Pi TUI List Rendering (`packages/tui/extensions/index.ts`)
 
 The Pi TUI browse selection list renders status, stage, and audit result icons
 before the title in each row. For epic items (`issueType === 'epic'`), an epic
@@ -258,10 +281,19 @@ titles start at the same column position across all rows. The padding is
 computed as the maximum icon prefix width across all items in the current
 list, and each item's prefix is padded to that width with spaces.
 See `getIconPrefix()` in the same module for the prefix computation.
-The `buildSelectionWidget` preview uses a different format (ID/tags/GH)
-without the icon prefix.
+The `buildSelectionWidget` preview uses a different format (ID/tags/GH/risk-effort)
+without the icon prefix. It shows a single-line summary with risk and effort
+icons appended as a final pipe-separated segment at the end:
 
-### 11.2 TUI List Rendering
+```
+WL-001 | tags: tui | GH #608 | 🐇 🌱      ← when icons enabled
+WL-001 | tags: tui | GH #608 | [S] [MED]   ← when fallback
+```
+
+When effort and/or risk are undefined, the corresponding icon is omitted.
+If both are missing, the final segment is omitted entirely.
+
+### 13.2 TUI List Rendering
 
 The Pi-based TUI renders list items via the `packages/tui/extensions/`
 folder. Icons are prepended before the title in the browse list.
@@ -271,7 +303,7 @@ folder. Icons are prepended before the title in the browse list.
 The `formatTitleOnlyTUI` helper in `src/commands/helpers.ts` may be extended
 or a new wrapper created that injects the icon before the title.
 
-### 11.3 TUI Detail Pane
+### 13.3 TUI Detail Pane
 
 File: `src/tui/components/detail.ts`, `src/tui/components/metadata-pane.ts`
 
@@ -283,7 +315,7 @@ Status:   🟢 [OPEN]
 Priority: 🔴 [CRIT]
 ```
 
-### 11.4 CLI Output
+### 13.4 CLI Output
 
 File: `src/cli-output.ts`, `src/commands/helpers.ts` (`humanFormatWorkItem`)
 
@@ -293,7 +325,7 @@ The status and priority display lines should include the icon:
 Status: 🟢 Open | Priority: 🔴 Critical
 ```
 
-### 11.5 Tests
+### 13.5 Tests
 
 Tests should verify:
 - Icon functions return expected emoji for valid inputs
@@ -304,7 +336,7 @@ Tests should verify:
 
 ---
 
-## 12. Appendix: Example Usage
+## 14. Appendix: Example Usage
 
 ```ts
 import { priorityIcon, statusIcon, iconsEnabled } from '../icons.js';
@@ -324,7 +356,7 @@ lines.push(`Priority: ${pIcon} ${item.priority}`);
 
 ---
 
-## 13. Implementation Summary
+## 15. Implementation Summary
 
 ### Files Created/Modified
 

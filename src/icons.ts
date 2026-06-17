@@ -1,5 +1,5 @@
 /**
- * Icon utilities for work item priority and status.
+ * Icon utilities for work item priority, status, risk, effort, and more.
  *
  * Provides consistent icon rendering (emoji or text fallback) across
  * the TUI and CLI output paths, with accessible labels for screen
@@ -159,6 +159,55 @@ export function statusFallback(status: string): string {
   return STATUS_FALLBACK[(status || '').toLowerCase().trim()] ?? '';
 }
 
+// ─── Risk Icons ─────────────────────────────────────────────────────────
+
+const RISK_ICON: Record<string, string> = {
+  low:    '\u{1F331}',  // 🌱 Seedling
+  medium: '\u{26A0}\u{FE0F}', // ⚠️ Warning
+  high:   '\u{1F525}',  // 🔥 Fire
+  severe: '\u{1F6A8}',  // 🚨 Rotating light
+};
+
+const RISK_FALLBACK: Record<string, string> = {
+  low:    '[LOW]',
+  medium: '[MED]',
+  high:   '[HIGH]',
+  severe: '[SEV]',
+};
+
+const RISK_LABEL: Record<string, string> = {
+  low:    'Risk: Low',
+  medium: 'Risk: Medium',
+  high:   'Risk: High',
+  severe: 'Risk: Severe',
+};
+
+// ─── Effort Icons ───────────────────────────────────────────────────────
+
+const EFFORT_ICON: Record<string, string> = {
+  xs: '\u{1F41C}',  // 🐜 Ant
+  s:  '\u{1F407}',  // 🐇 Rabbit
+  m:  '\u{1F415}',  // 🐕 Dog
+  l:  '\u{1F418}',  // 🐘 Elephant
+  xl: '\u{1F40B}',  // 🐋 Whale
+};
+
+const EFFORT_FALLBACK: Record<string, string> = {
+  xs: '[XS]',
+  s:  '[S]',
+  m:  '[M]',
+  l:  '[L]',
+  xl: '[XL]',
+};
+
+const EFFORT_LABEL: Record<string, string> = {
+  xs: 'Effort: XS (extra small)',
+  s:  'Effort: S (small)',
+  m:  'Effort: M (medium)',
+  l:  'Effort: L (large)',
+  xl: 'Effort: XL (extra large)',
+};
+
 // ─── Epic Icons ──────────────────────────────────────────────────────────
 
 const EPIC_ICON: Record<string, string> = {
@@ -231,6 +280,80 @@ const AUDIT_LABEL: Record<string, string> = {
   no:      'Audit: Failed',
   unknown: 'Audit: Not run',
 };
+
+// ─── Risk Public API ────────────────────────────────────────────────────
+
+/**
+ * Get the icon string (emoji or text fallback) for a work item risk level.
+ *
+ * @param risk - The risk value (e.g. 'Low', 'Medium', 'High', 'Severe').
+ * @param opts - Options controlling fallback behaviour.
+ * @returns The icon string (emoji or bracketed text).
+ */
+export function riskIcon(risk: string | undefined | null, opts?: IconOptions): string {
+  const key = (risk || '').toLowerCase().trim();
+  if (opts?.noIcons === true) {
+    return RISK_FALLBACK[key] ?? '';
+  }
+  return RISK_ICON[key] ?? '';
+}
+
+/**
+ * Get the accessible label for a risk icon.
+ *
+ * @param risk - The risk value.
+ * @returns A human-readable label describing the risk (e.g. "Risk: Medium").
+ */
+export function riskLabel(risk: string | undefined | null): string {
+  return RISK_LABEL[(risk || '').toLowerCase().trim()] ?? '';
+}
+
+/**
+ * Get the text fallback for a risk icon.
+ *
+ * @param risk - The risk value.
+ * @returns The bracketed text label (e.g. "[MED]").
+ */
+export function riskFallback(risk: string | undefined | null): string {
+  return RISK_FALLBACK[(risk || '').toLowerCase().trim()] ?? '';
+}
+
+// ─── Effort Public API ──────────────────────────────────────────────────
+
+/**
+ * Get the icon string (emoji or text fallback) for a work item effort T-shirt size.
+ *
+ * @param effort - The effort value (e.g. 'XS', 'S', 'M', 'L', 'XL').
+ * @param opts - Options controlling fallback behaviour.
+ * @returns The icon string (emoji or bracketed text).
+ */
+export function effortIcon(effort: string | undefined | null, opts?: IconOptions): string {
+  const key = (effort || '').toLowerCase().trim();
+  if (opts?.noIcons === true) {
+    return EFFORT_FALLBACK[key] ?? '';
+  }
+  return EFFORT_ICON[key] ?? '';
+}
+
+/**
+ * Get the accessible label for an effort icon.
+ *
+ * @param effort - The effort value.
+ * @returns A human-readable label describing the effort (e.g. "Effort: M (medium)").
+ */
+export function effortLabel(effort: string | undefined | null): string {
+  return EFFORT_LABEL[(effort || '').toLowerCase().trim()] ?? '';
+}
+
+/**
+ * Get the text fallback for an effort icon.
+ *
+ * @param effort - The effort value.
+ * @returns The bracketed text label (e.g. "[M]").
+ */
+export function effortFallback(effort: string | undefined | null): string {
+  return EFFORT_FALLBACK[(effort || '').toLowerCase().trim()] ?? '';
+}
 
 // ─── Stage Public API ──────────────────────────────────────────────────
 
