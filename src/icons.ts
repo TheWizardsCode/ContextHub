@@ -190,6 +190,13 @@ const EFFORT_ICON: Record<string, string> = {
   m:  '\u{1F415}',  // 🐕 Dog
   l:  '\u{1F418}',  // 🐘 Elephant
   xl: '\u{1F40B}',  // 🐋 Whale
+  // Full-text aliases (used by Worklog CLI and effort-and-risk skill)
+  'extra small': '\u{1F41C}',  // 🐜 Ant
+  small:         '\u{1F407}',  // 🐇 Rabbit
+  medium:        '\u{1F415}',  // 🐕 Dog
+  large:         '\u{1F418}',  // 🐘 Elephant
+  'extra large': '\u{1F40B}',  // 🐋 Whale
+  xlarge:        '\u{1F40B}',  // 🐋 Whale — variant spelling
 };
 
 const EFFORT_FALLBACK: Record<string, string> = {
@@ -198,6 +205,13 @@ const EFFORT_FALLBACK: Record<string, string> = {
   m:  '[M]',
   l:  '[L]',
   xl: '[XL]',
+  // Full-text aliases
+  'extra small': '[XS]',
+  small:         '[S]',
+  medium:        '[M]',
+  large:         '[L]',
+  'extra large': '[XL]',
+  xlarge:        '[XL]',
 };
 
 const EFFORT_LABEL: Record<string, string> = {
@@ -206,6 +220,13 @@ const EFFORT_LABEL: Record<string, string> = {
   m:  'Effort: M (medium)',
   l:  'Effort: L (large)',
   xl: 'Effort: XL (extra large)',
+  // Full-text aliases
+  'extra small': 'Effort: XS (extra small)',
+  small:         'Effort: S (small)',
+  medium:        'Effort: M (medium)',
+  large:         'Effort: L (large)',
+  'extra large': 'Effort: XL (extra large)',
+  xlarge:        'Effort: XL (extra large)',
 };
 
 // ─── Epic Icons ──────────────────────────────────────────────────────────

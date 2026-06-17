@@ -756,4 +756,94 @@ describe('effortLabel', () => {
   it('is case-insensitive', () => {
     expect(effortLabel('xs')).toBe('Effort: XS (extra small)');
   });
+
+  // ─── Full-text effort values ────────────────────────────────────────
+
+  describe('full-text effort values', () => {
+    it('effortIcon returns correct emoji for "Small"', () => {
+      expect(effortIcon('Small')).toBe('\u{1F407}'); // 🐇
+    });
+
+    it('effortIcon returns correct emoji for "Medium"', () => {
+      expect(effortIcon('Medium')).toBe('\u{1F415}'); // 🐕
+    });
+
+    it('effortIcon returns correct emoji for "Large"', () => {
+      expect(effortIcon('Large')).toBe('\u{1F418}'); // 🐘
+    });
+
+    it('effortIcon returns correct emoji for "Extra Small"', () => {
+      expect(effortIcon('Extra Small')).toBe('\u{1F41C}'); // 🐜
+    });
+
+    it('effortIcon returns correct emoji for "Extra Large"', () => {
+      expect(effortIcon('Extra Large')).toBe('\u{1F40B}'); // 🐋
+    });
+
+    it('effortIcon returns correct emoji for "XLarge" (variant)', () => {
+      expect(effortIcon('XLarge')).toBe('\u{1F40B}'); // 🐋
+    });
+
+    it('effortFallback returns bracketed text for "Small"', () => {
+      expect(effortFallback('Small')).toBe('[S]');
+    });
+
+    it('effortFallback returns bracketed text for "Medium"', () => {
+      expect(effortFallback('Medium')).toBe('[M]');
+    });
+
+    it('effortFallback returns bracketed text for "Large"', () => {
+      expect(effortFallback('Large')).toBe('[L]');
+    });
+
+    it('effortFallback returns bracketed text for "Extra Small"', () => {
+      expect(effortFallback('Extra Small')).toBe('[XS]');
+    });
+
+    it('effortFallback returns bracketed text for "Extra Large"', () => {
+      expect(effortFallback('Extra Large')).toBe('[XL]');
+    });
+
+    it('effortFallback returns bracketed text for "XLarge" (variant)', () => {
+      expect(effortFallback('XLarge')).toBe('[XL]');
+    });
+
+    it('effortLabel returns label for "Small"', () => {
+      expect(effortLabel('Small')).toBe('Effort: S (small)');
+    });
+
+    it('effortLabel returns label for "Medium"', () => {
+      expect(effortLabel('Medium')).toBe('Effort: M (medium)');
+    });
+
+    it('effortLabel returns label for "Large"', () => {
+      expect(effortLabel('Large')).toBe('Effort: L (large)');
+    });
+
+    it('effortLabel returns label for "Extra Small"', () => {
+      expect(effortLabel('Extra Small')).toBe('Effort: XS (extra small)');
+    });
+
+    it('effortLabel returns label for "Extra Large"', () => {
+      expect(effortLabel('Extra Large')).toBe('Effort: XL (extra large)');
+    });
+
+    it('effortLabel returns label for "XLarge" (variant)', () => {
+      expect(effortLabel('XLarge')).toBe('Effort: XL (extra large)');
+    });
+
+    it('full-text values are case-insensitive', () => {
+      expect(effortIcon('small')).toBe('\u{1F407}');
+      expect(effortIcon('EXTRA SMALL')).toBe('\u{1F41C}');
+      expect(effortIcon('Extra Large')).toBe('\u{1F40B}');
+    });
+
+    it('existing abbreviated values still work after adding full-text aliases', () => {
+      expect(effortIcon('XS')).toBe('\u{1F41C}');
+      expect(effortIcon('S')).toBe('\u{1F407}');
+      expect(effortIcon('M')).toBe('\u{1F415}');
+      expect(effortIcon('L')).toBe('\u{1F418}');
+      expect(effortIcon('XL')).toBe('\u{1F40B}');
+    });
+  });
 });
