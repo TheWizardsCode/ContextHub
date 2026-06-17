@@ -46,8 +46,8 @@ Derived at runtime from the compatibility mapping.
 
 ### Update Dialog Validation
 TUI update dialog rejects invalid status/stage combinations.
-- Source: src/tui/update-dialog-submit.ts (buildUpdateDialogUpdates)
-- Tests: tests/tui/tui-update-dialog.test.ts
+- Source: src/tui/update-dialog-submit.ts (removed — file was part of the deprecated Blessed TUI)
+- Tests: tests/tui/tui-update-dialog.test.ts (removed — file was part of the deprecated Blessed TUI)
   - Rejects invalid status/stage combinations.
   - Accepts compatible updates and applies changes.
   - Note: The validation logic permits common transitional combinations by default, e.g. `status=in-progress` (or `in_progress`) while `stage` is `idea`, `in_progress`, or `in_review`. This mirrors TUI/agent workflows that may set an item as in-progress before advancing its stage.
@@ -58,7 +58,7 @@ Close dialog sets status/stage pairs as follows:
 - Close (done) -> status=completed, stage=done
 - Close (deleted) -> status=deleted, stage=''
 - Source: src/status-stage-rules.ts (STATUS_STAGE_RULE_NOTES)
-- UI options: src/tui/components/dialogs.ts
+- UI options: src/tui/components/dialogs.ts (removed — file was part of the deprecated Blessed TUI)
 
 ## Dependency Rules (Implied)
 Adding/removing dependency edges affects status based on the dependency stage.

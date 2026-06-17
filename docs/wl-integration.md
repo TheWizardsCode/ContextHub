@@ -14,7 +14,7 @@ The **wl CLI Integration Layer** provides a safe, reliable way for the TUI and P
 ## Quick Start
 
 ```ts
-import { runWlCommand, runWl, wlEvents } from './src/tui/wl-integration.js';
+import { runWlCommand, runWl, wlEvents } from './packages/tui/extensions/wl-integration.js';
 
 // Simple usage – TUI wrapper automatically appends --json
 const items = await runWl('list');

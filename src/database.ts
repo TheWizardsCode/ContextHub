@@ -868,6 +868,10 @@ export class WorklogDatabase {
     // Detect whether any tracked field actually changed.  If the update is a
     // no-op (same values as the existing item), preserve the original
     // updatedAt to avoid silent re-timestamping during bulk operations.
+    // Note: githubIssueNumber/Id/UpdatedAt are intentionally excluded from
+    // this comparison because the update method above explicitly preserves
+    // the existing values for these fields (prevents manual update from
+    // overwriting GitHub metadata). Only hasWorkItemChanged() checks them.
     const fieldsToCompare: (keyof WorkItem)[] = [
       'title', 'description', 'status', 'priority', 'sortIndex', 'parentId',
       'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort',
@@ -2107,7 +2111,8 @@ export class WorklogDatabase {
     const fieldsToCompare: (keyof WorkItem)[] = [
       'title', 'description', 'status', 'priority', 'sortIndex', 'parentId',
       'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort',
-      'needsProducerReview'
+      'needsProducerReview', 'githubIssueNumber', 'githubIssueId',
+      'githubIssueUpdatedAt'
     ];
     return fieldsToCompare.some(f => {
       const oldVal = oldItem[f];
