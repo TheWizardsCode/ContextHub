@@ -29,7 +29,7 @@ let currentSettings: Settings = loadSettings();
  * Update the current settings, persist to settings.json, and return the
  * new settings object.
  */
-function updateSettings(partial: Partial<Settings>): Settings {
+export function updateSettings(partial: Partial<Settings>): Settings {
   currentSettings = { ...currentSettings, ...partial };
   // Persist to settings.json
   try {
@@ -367,8 +367,8 @@ export function createDefaultListWorkItems(
   run: RunWlFn = runWl,
   count?: number,
 ): () => Promise<WorklogBrowseItem[]> {
-  const itemCount = count ?? currentSettings.browseItemCount;
   return async (): Promise<WorklogBrowseItem[]> => {
+    const itemCount = count ?? currentSettings.browseItemCount;
     const output = await run(['next', '-n', String(itemCount), '--include-in-progress']);
     const payload = extractJsonObject(output);
     return normalizeListPayload(payload).slice(0, itemCount);
@@ -386,8 +386,8 @@ export function createListWorkItemsWithStage(
   run: RunWlFn = runWl,
   count?: number,
 ): (stage: string) => Promise<WorklogBrowseItem[]> {
-  const itemCount = count ?? currentSettings.browseItemCount;
   return async (stage: string): Promise<WorklogBrowseItem[]> => {
+    const itemCount = count ?? currentSettings.browseItemCount;
     const output = await run(['next', '-n', String(itemCount), '--stage', stage, '--include-in-progress']);
     const payload = extractJsonObject(output);
     return normalizeListPayload(payload).slice(0, itemCount);
