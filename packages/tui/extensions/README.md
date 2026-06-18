@@ -21,6 +21,7 @@ reassigned work items appear without requiring the user to close and re-open
 the browse dialog.
 
 **Behaviour:**
+
 - The list re-fetches from the database every 5 seconds using the same
   `wl next` command and stage filter as the initial load.
 - The currently selected item remains selected after a refresh, matched by
@@ -32,8 +33,50 @@ the browse dialog.
 - No visual flash, spinner, or notification is shown — the data updates
   silently in-place.
 - Auto-refresh is a hardcoded feature (5-second interval) with no
-  configuration UI. It only applies to the browse list overlay, not to the
-  detail view.
+  configuration UI. It only applies to the browse list overlay, not
+  to the detail view.
+
+### Hierarchical Navigation (Drill into Children)
+
+The browse selection list now supports navigating into child work items
+when an item has children. This allows you to drill down through the
+work-item hierarchy without leaving the browse dialog.
+
+**How it works:**
+
+- When an item in the browse list has children (`childCount > 0`), pressing
+  **Enter** on that item shows its children in the list instead of opening
+  the detail view. All items with children are visually marked with a child
+  count indicator (e.g., `(3)`), regardless of their issue type.
+- When viewing children, a **".." (parent) entry** appears at the top of
+  the list. Selecting it and pressing **Enter** navigates back to the
+  parent level.
+- Pressing **Escape** while viewing children also navigates back one level
+  in the hierarchy.
+- You can drill down **arbitrarily deep** through the hierarchy (children
+  of children of children, etc.) using the same Enter mechanism at each
+  level.
+- When navigating back to a parent level (via Escape or the ".." entry),
+  the previously selected item and list state are restored, so you return
+  to the same position you left.
+- When at the root level (no parent context), pressing Enter on an item
+  without children opens the detail view as before — behavior is unchanged
+  for non-parent items.
+
+**Example flow:**
+
+1. Browse the root list — items with children show `(N)` count indicators.
+2. Press Enter on an epic or other item with children → the list updates
+   to show its child work items, with a ".." entry at the top.
+3. Press Enter on a child that also has children → navigate further down.
+4. Press Escape to go back up one level.
+5. Press Enter on the ".." entry to also go back up one level.
+6. At root level, pressing Enter on a leaf item opens the detail view.
+7. Escape at root level closes the browse overlay.
+
+**Note:** The auto-refresh feature is automatically disabled while you
+are navigating within child items to prevent disrupting your current
+view. Refresh resumes when you return to the root level.
 
 ### `/wl settings` Command
 

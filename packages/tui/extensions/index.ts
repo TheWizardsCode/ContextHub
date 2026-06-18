@@ -177,15 +177,24 @@ export function getIconPrefix(item: WorklogBrowseItem, noIcons: boolean): string
   const aIcon = auditIcon(item.auditResult, { noIcons });
   const coreIcons = [sIcon, stIcon, aIcon].filter(Boolean).join(' ');
 
-  // Add epic icon + child count for epic items
-  let epicSuffix = '';
-  if (item.issueType === 'epic') {
+  // Add child count indicator for any item with children (not just epics)
+  let childSuffix = '';
+  if (item.childCount !== undefined && item.childCount > 0) {
+    const countStr = `(${item.childCount})`;
+    // For epic items, include the epic icon before the child count
+    if (item.issueType === 'epic') {
+      const eIcon = epicIcon({ noIcons });
+      childSuffix = `${eIcon}${countStr}`;
+    } else {
+      childSuffix = countStr;
+    }
+  } else if (item.issueType === 'epic') {
+    // Epic items without children still show the epic icon
     const eIcon = epicIcon({ noIcons });
-    const countStr = (item.childCount !== undefined && item.childCount > 0) ? `(${item.childCount})` : '';
-    epicSuffix = `${eIcon}${countStr}`;
+    childSuffix = eIcon;
   }
 
-  return [coreIcons, epicSuffix].filter(Boolean).join(' ');
+  return [coreIcons, childSuffix].filter(Boolean).join(' ');
 }
 
 export function formatBrowseOption(
@@ -562,6 +571,7 @@ export async function defaultChooseWorkItem(
   onSelectionChange: SelectionChangeHandler,
   shortcutRegistry?: ShortcutRegistry,
   reFetchItems?: () => Promise<WorklogBrowseItem[]>,
+  fetchChildren?: (parentId: string) => Promise<WorklogBrowseItem[]>,
 ): Promise<WorklogBrowseItem | ShortcutResult | undefined> {
   if (!ctx.ui.custom) {
     if (!ctx.ui.select) {
@@ -678,6 +688,21 @@ export async function defaultChooseWorkItem(
       }
     };
 
+    // ── Hierarchical navigation stack ────────────────────────────────
+    // Each entry stores a snapshot of the parent-level items and selection
+    // state so that navigating back (via ".." entry or Escape) restores the
+    // exact previous view, including the selected item position.
+    interface NavStackEntry {
+      items: WorklogBrowseItem[];
+      selectedIndex: number;
+      lastSelectionId: string | undefined;
+    }
+    const navStack: NavStackEntry[] = [];
+
+    // Flag to prevent concurrent async operations (e.g., double-Enter while
+    // children are being fetched) and to suppress input during transitions.
+    let isLoadingChildren = false;
+
     /**
      * Format a shortcut entry into a help-text label.
      * Key-based entries: "i:implement"
@@ -789,7 +814,11 @@ export async function defaultChooseWorkItem(
         const options = items.map((item, index) => {
           const prefix = index === selectedIndex ? theme.fg('accent', '› ') : '  ';
           const contentWidth = Math.max(0, width - 2);
-          const optionLine = `${prefix}${formatBrowseOption(item, contentWidth, theme, currentSettings, maxPrefixWidth)}`;
+          // The synthetic ".." entry should render without icon prefix
+          // to visually distinguish it from real work items
+          const optionLine = item.id === '..'
+            ? `${prefix}${item.title || '..'}`
+            : `${prefix}${formatBrowseOption(item, contentWidth, theme, currentSettings, maxPrefixWidth)}`;
           return truncateToWidth(optionLine, width);
         });
 
@@ -877,14 +906,123 @@ export async function defaultChooseWorkItem(
         }
 
         if (isEnterKey(data)) {
-          _done(items[selectedIndex] ?? null);
+          const selected = items[selectedIndex];
+          if (!selected) {
+            _done(null);
+            return;
+          }
+
+          // ── ".." entry: navigate back to parent level ─────────────
+          if (selected.id === '..') {
+            const parentState = navStack.pop();
+            if (parentState) {
+              // Restore the parent-level items and selection
+              items.length = 0;
+              items.push(...parentState.items);
+              selectedIndex = parentState.selectedIndex;
+              lastSelectionId = parentState.lastSelectionId;
+
+              // Notify selection change handler
+              const restoredItem = items[selectedIndex];
+              if (restoredItem && restoredItem.id !== lastSelectionId) {
+                lastSelectionId = restoredItem.id;
+                onSelectionChange(restoredItem);
+              }
+
+              invalidateCache();
+              tui.requestRender();
+            }
+            return;
+          }
+
+          // ── Item with children: fetch children and navigate in ────
+          if (
+            selected.childCount !== undefined
+            && selected.childCount > 0
+            && fetchChildren
+            && !isLoadingChildren
+          ) {
+            // Save current state to navigation stack
+            navStack.push({
+              items: [...items],
+              selectedIndex,
+              lastSelectionId,
+            });
+
+            isLoadingChildren = true;
+
+            fetchChildren(selected.id)
+              .then(childItems => {
+                isLoadingChildren = false;
+
+                // Create synthetic ".." entry for back navigation
+                const parentEntry: WorklogBrowseItem = {
+                  id: '..',
+                  title: '..',
+                  status: 'open',
+                };
+
+                // Replace items with children (prepend ".." entry)
+                items.length = 0;
+                items.push(parentEntry, ...childItems);
+                selectedIndex = 0;
+                lastSelectionId = items[0]?.id;
+
+                // Notify selection change for the first child
+                if (items[0]) {
+                  onSelectionChange(items[0]);
+                }
+
+                invalidateCache();
+                tui.requestRender();
+              })
+              .catch(() => {
+                isLoadingChildren = false;
+                // On error, pop the navigation stack we just pushed
+                navStack.pop();
+                ctx.ui.notify('Failed to fetch children.', 'warning');
+                invalidateCache();
+                tui.requestRender();
+              });
+
+            return;
+          }
+
+          // ── No children: open detail view (existing behavior) ─────
+          _done(selected);
           return;
         }
 
         if (isEscapeKey(data)) {
-          if (pendingChordLeader === null) {
-            _done(null);
+          if (pendingChordLeader !== null) {
+            // Cancel chord leader
+            pendingChordLeader = null;
+            invalidateCache();
+            tui.requestRender();
+            return;
           }
+
+          // ── Navigate back one level if we're in child view ────────
+          if (navStack.length > 0) {
+            const parentState = navStack.pop()!;
+            items.length = 0;
+            items.push(...parentState.items);
+            selectedIndex = parentState.selectedIndex;
+            lastSelectionId = parentState.lastSelectionId;
+
+            const restoredItem = items[selectedIndex];
+            if (restoredItem && restoredItem.id !== lastSelectionId) {
+              lastSelectionId = restoredItem.id;
+              onSelectionChange(restoredItem);
+            }
+
+            invalidateCache();
+            tui.requestRender();
+            return;
+          }
+
+          // ── Root level: close the overlay ─────────────────────────
+          _done(null);
         }
       },
     };
@@ -1193,14 +1331,25 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
           ? () => listWorkItemsWithStage(stage).then(newItems => newItems.slice(0, itemCount))
           : () => listWorkItems().then(newItems => newItems.slice(0, itemCount));
 
+        // Create a fetchChildren function for hierarchical navigation.
+        // It calls `wl list --parent <id>` and parses the output using
+        // the same extractJsonObject+normalizeListPayload pipeline used
+        // for `wl next` output.
+        const fetchChildren = async (parentId: string): Promise<WorklogBrowseItem[]> => {
+          const output = await runWlImpl(['list', '--parent', parentId]);
+          const payload = extractJsonObject(output);
+          return normalizeListPayload(payload);
+        };
+
         // Call defaultChooseWorkItem directly to enable the auto-refresh
-        // feature. If a custom deps.chooseWorkItem was provided (e.g. in
-        // tests), use that instead (without auto-refresh).
+        // and hierarchical navigation features. If a custom
+        // deps.chooseWorkItem was provided (e.g. in tests), use that
+        // instead (without auto-refresh or hierarchical nav).
         let result: WorklogBrowseItem | ShortcutResult | undefined;
         if (deps.chooseWorkItem) {
           result = await deps.chooseWorkItem(items, ctx, announceSelection);
         } else {
-          result = await defaultChooseWorkItem(items, ctx, announceSelection, shortcutRegistry, reFetchItems);
+          result = await defaultChooseWorkItem(items, ctx, announceSelection, shortcutRegistry, reFetchItems, fetchChildren);
         }
         // Handle shortcut result - set editor text after browse list modal closes
         if (result && 'type' in result && result.type === 'shortcut') {
