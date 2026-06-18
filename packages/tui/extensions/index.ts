@@ -561,6 +561,7 @@ export async function defaultChooseWorkItem(
   ctx: BrowseContext,
   onSelectionChange: SelectionChangeHandler,
   shortcutRegistry?: ShortcutRegistry,
+  reFetchItems?: () => Promise<WorklogBrowseItem[]>,
 ): Promise<WorklogBrowseItem | ShortcutResult | undefined> {
   if (!ctx.ui.custom) {
     if (!ctx.ui.select) {
@@ -602,6 +603,68 @@ export async function defaultChooseWorkItem(
     const invalidateCache = () => {
       cachedWidth = undefined;
       cachedLines = undefined;
+    };
+
+    // ── Auto-refresh interval ────────────────────────────────────────
+    // Re-fetch the items list every 5 seconds while the browse overlay is
+    // open. The selected item index is preserved across refreshes by
+    // matching on item ID. Refresh is skipped while a chord shortcut
+    // sequence is pending (pendingChordLeader !== null) to avoid
+    // disrupting user input.
+    let refreshInterval: ReturnType<typeof setInterval> | undefined;
+
+    if (reFetchItems) {
+      refreshInterval = setInterval(async () => {
+        // Skip refresh while a chord leader is pending to avoid
+        // disrupting the user's input sequence.
+        if (pendingChordLeader !== null) return;
+
+        try {
+          const newItems = await reFetchItems();
+          if (newItems.length === 0) return;
+
+          // Preserve the currently selected item by ID
+          const currentId = items[selectedIndex]?.id;
+          let newIndex = currentId
+            ? newItems.findIndex(item => item.id === currentId)
+            : -1;
+          if (newIndex < 0) newIndex = 0;
+
+          // Mutate the items array in-place so all closures (render,
+          // handleInput, moveSelection) see the updated data without
+          // requiring a reassignment.
+          items.length = 0;
+          items.push(...newItems);
+          selectedIndex = newIndex;
+
+          // Notify the selection change handler if the active item changed
+          const item = items[selectedIndex];
+          if (item && item.id !== lastSelectionId) {
+            lastSelectionId = item.id;
+            onSelectionChange(item);
+          }
+
+          invalidateCache();
+          tui.requestRender();
+        } catch {
+          // Silently ignore refresh errors — no visual feedback to the
+          // user, the existing list remains unchanged.
+        }
+      }, 5000);
+    }
+
+    /**
+     * Wrap the done() callback to clear the auto-refresh interval when
+     * the overlay closes. This ensures the timer does not continue running
+     * after the user has selected an item, pressed Escape, or dispatched
+     * a shortcut.
+     */
+    const _done = (value: WorklogBrowseItem | ShortcutResult | null) => {
+      if (refreshInterval !== undefined) {
+        clearInterval(refreshInterval);
+        refreshInterval = undefined;
+      }
+      done(value);
     };
 
     const moveSelection = (nextIndex: number) => {
@@ -758,7 +821,7 @@ export async function defaultChooseWorkItem(
           );
           if (chordCommand) {
             pendingChordLeader = null;
-            done({
+            _done({
               type: 'shortcut' as const,
               command: chordCommand.replace('<id>', items[selectedIndex].id),
             });
@@ -778,7 +841,7 @@ export async function defaultChooseWorkItem(
           // 1) Try single-key shortcut first
           const command = shortcutRegistry.lookup(lookupKey, 'list', selectedStage);
           if (command) {
-            done({ type: 'shortcut' as const, command: command.replace('<id>', items[selectedIndex].id) });
+            _done({ type: 'shortcut' as const, command: command.replace('<id>', items[selectedIndex].id) });
             return;
           }
 
@@ -814,13 +877,13 @@ export async function defaultChooseWorkItem(
         }
 
         if (isEnterKey(data)) {
-          done(items[selectedIndex] ?? null);
+          _done(items[selectedIndex] ?? null);
           return;
         }
 
         if (isEscapeKey(data)) {
           if (pendingChordLeader === null) {
-            done(null);
+            _done(null);
           }
         }
       },
@@ -1122,7 +1185,23 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         // widget appears without requiring the user to press an arrow key.
         announceSelection(items[0]);
 
-        const result = await chooseWorkItem(items, ctx, announceSelection);
+        // Create a re-fetch function for the auto-refresh feature.
+        // It re-uses the same listWorkItems/listWorkItemsWithStage
+        // functions that were used for the initial fetch, ensuring
+        // the stage filter and item count are preserved.
+        const reFetchItems = stage
+          ? () => listWorkItemsWithStage(stage).then(newItems => newItems.slice(0, itemCount))
+          : () => listWorkItems().then(newItems => newItems.slice(0, itemCount));
+
+        // Call defaultChooseWorkItem directly to enable the auto-refresh
+        // feature. If a custom deps.chooseWorkItem was provided (e.g. in
+        // tests), use that instead (without auto-refresh).
+        let result: WorklogBrowseItem | ShortcutResult | undefined;
+        if (deps.chooseWorkItem) {
+          result = await deps.chooseWorkItem(items, ctx, announceSelection);
+        } else {
+          result = await defaultChooseWorkItem(items, ctx, announceSelection, shortcutRegistry, reFetchItems);
+        }
         // Handle shortcut result - set editor text after browse list modal closes
         if (result && 'type' in result && result.type === 'shortcut') {
           ctx.ui.setEditorText?.(result.command);

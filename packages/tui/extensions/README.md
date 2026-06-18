@@ -13,6 +13,28 @@ The extension has two user-configurable settings:
 
 Settings are persisted to `settings.json` in the extension directory (alongside `shortcuts.json`).
 
+### Auto-Refresh
+
+When the browse selection list overlay is open, the item list automatically
+refreshes every 5 seconds. This ensures that newly created, updated, or
+reassigned work items appear without requiring the user to close and re-open
+the browse dialog.
+
+**Behaviour:**
+- The list re-fetches from the database every 5 seconds using the same
+  `wl next` command and stage filter as the initial load.
+- The currently selected item remains selected after a refresh, matched by
+  work item ID. If the selected item no longer exists (e.g., was deleted or
+  filtered out), the selection falls back to the first item.
+- The refresh is deferred while a chord shortcut key sequence is in progress
+  (e.g., after pressing a chord leader like `u`). Once the chord is resolved
+  or cancelled, normal refresh resumes.
+- No visual flash, spinner, or notification is shown — the data updates
+  silently in-place.
+- Auto-refresh is a hardcoded feature (5-second interval) with no
+  configuration UI. It only applies to the browse list overlay, not to the
+  detail view.
+
 ### `/wl settings` Command
 
 Open the settings overlay by typing `/wl settings` in the Pi editor. This opens an interactive overlay where you can change settings using the arrow keys and Enter.
