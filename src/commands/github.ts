@@ -64,8 +64,6 @@ export default function register(ctx: PluginContext): void {
       const isVerbose = program.opts().verbose;
       // Enable verbose GitHub API logging (to stderr) when --verbose is used
       try { setVerboseLogger(isVerbose ? ((m: string) => console.error(m)) : null); } catch (_) {}
-      let lastProgress = '';
-      let lastProgressLength = 0;
       const BATCH_SIZE = 10;
       let pushTotalItems = 0;
       let pushTotalBatches = 1;
@@ -74,21 +72,6 @@ export default function register(ctx: PluginContext): void {
       const logLine = createLogFileWriter(getWorklogLogPath('github_sync.log'));
       logLine(`--- github push start ${new Date().toISOString()} ---`);
       logLine(`Options json=${isJsonMode} verbose=${isVerbose}`);
-
-      const writeProgressMessage = (message: string, complete = false) => {
-        if (message === lastProgress) {
-          return;
-        }
-        lastProgress = message;
-        const padded = `${message} `.padEnd(lastProgressLength, ' ');
-        lastProgressLength = padded.length;
-        process.stdout.write(`\r${padded}`);
-        if (complete) {
-          process.stdout.write('\n');
-          lastProgress = '';
-          lastProgressLength = 0;
-        }
-      };
 
       const progressMode = (options as any).progress as ProgressMode | undefined;
       const progressReporter = new ProgressReporter({
@@ -187,7 +170,7 @@ export default function register(ctx: PluginContext): void {
             // Read last-push using a repo-scoped key when available to avoid
             // cross-repo timestamp collisions in multi-repo runs.
             lastPush = preFilterMod.readLastPushTimestamp(dbForMetadata, githubConfig.repo);
-            const { filteredItems, filteredComments, totalCandidates, skippedCount, deletedWithoutIssueCount } = preFilterMod.filterItemsForPush(items, comments, lastPush);
+            const { filteredItems, filteredComments, skippedCount, deletedWithoutIssueCount } = preFilterMod.filterItemsForPush(items, comments, lastPush);
             itemsToProcess = filteredItems;
             commentsToProcess = filteredComments;
             preFilterSkippedCount = skippedCount;
@@ -590,8 +573,6 @@ export default function register(ctx: PluginContext): void {
       const isVerbose = program.opts().verbose;
       // Enable verbose GitHub API logging (to stderr) when --verbose is used
       try { setVerboseLogger(isVerbose ? ((m: string) => console.error(m)) : null); } catch (_) {}
-      let lastProgress = '';
-      let lastProgressLength = 0;
       const logLine = createLogFileWriter(getWorklogLogPath('github_sync.log'));
       logLine(`--- github import start ${new Date().toISOString()} ---`);
       logLine(`Options json=${isJsonMode} verbose=${isVerbose} createNew=${options.createNew ?? ''} since=${options.since || ''}`);

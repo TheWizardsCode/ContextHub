@@ -57,7 +57,7 @@ export function hasAcceptanceCriteria(description?: string): boolean {
   return /acceptance\s*criteria|acceptance_criteria|success\s*criteria|success_criteria|acceptance\s*:/i.test(description);
 }
 
-export function buildAuditEntry(auditText: string, author?: string, opts?: BuildAuditOptions): {
+export function buildAuditEntry(auditText: string, author?: string, _opts?: BuildAuditOptions): {
   time: string;
   author: string;
   text: string;

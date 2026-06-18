@@ -580,9 +580,6 @@ async function ensureWorkflowTemplateInstalled(options: { silent: boolean; agent
   const templatePath = locateWorkflowTemplate();
   if (!templatePath) return { installed: false, skipped: true, reason: 'workflow template not found', templatePath: null, destinationPath: null };
 
-  const projectRoot = resolveProjectRoot();
-  const repoWorkflowPath = path.join(projectRoot, WORKFLOW_DESTINATION_FILENAME);
-
   // If caller provided an agentDestinationPath, attempt to inline workflow
   // content into the agent file (prefer repo copy if present, otherwise packaged template).
   if (options.agentDestinationPath) {
@@ -817,7 +814,7 @@ async function ensureAgentTemplateInstalled(options: { silent: boolean; action?:
 function printAgentTemplateSummary(): void {
 }
 
-async function performInitSync(dataPath: string, prefix?: string, isJsonMode: boolean = false): Promise<void> {
+async function performInitSync(dataPath: string, prefix?: string, _isJsonMode: boolean = false): Promise<void> {
   const config = loadConfig();
   const defaults = getSyncDefaults(config || undefined);
   // Create DB to import items and comments separately.

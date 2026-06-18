@@ -3,12 +3,12 @@
  */
 
 import { theme } from '../theme.js';
-import { redactAuditText, parseReadinessLine } from '../audit.js';
+import { redactAuditText } from '../audit.js';
 import type { WorkItem, Comment } from '../types.js';
 import type { SyncResult } from '../sync.js';
 import type { WorklogDatabase } from '../database.js';
 import { loadConfig } from '../config.js';
-import { renderCliMarkdown, shouldUseFormattedOutput, isTty, resolveMarkdownEnabled } from '../cli-output.js';
+import { renderCliMarkdown, isTty, resolveMarkdownEnabled } from '../cli-output.js';
 import { getStageLabel, getStatusLabel, loadStatusStageRules } from '../status-stage-rules.js';
 import { priorityIcon, statusIcon, priorityFallback, statusFallback, iconsEnabled } from '../icons.js';
 import type { Command } from 'commander';

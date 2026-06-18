@@ -468,10 +468,6 @@ async function getRepoRoot(): Promise<string> {
   return stdout.trim();
 }
 
-async function fetchRemote(remote: string): Promise<void> {
-  await execAsync(`git fetch ${escapeShellArg(remote)}`);
-}
-
 function getRemoteTrackingRef(remote: string, branchOrRef: string): string {
   // For a named branch like "worklog-data", track it as refs/remotes/origin/worklog-data.
   // For an explicit ref like "refs/worklog/data", DO NOT track it under refs/remotes/...

@@ -6,7 +6,7 @@
  */
 
 import type { PluginContext } from '../plugin-types.js';
-import { formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText, resolveAuditAuthor } from '../audit.js';
+import { resolveAuditAuthor } from '../audit.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;

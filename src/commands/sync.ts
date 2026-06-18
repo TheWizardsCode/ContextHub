@@ -29,7 +29,7 @@ function getSyncDefaults(config?: ReturnType<typeof loadConfig>) {
 
 async function performSync(
   program: any,
-  dataPath: string,
+  _dataPath: string,
   getDatabase: (prefix?: string) => any,
   options: {
     file: string;

@@ -377,13 +377,6 @@ function computeFullJitterDelay(attempt: number) {
   return Math.floor(Math.random() * raw);
 }
 
-// Sync wrapper with retry/backoff for callers that need synchronous semantics.
-function runGhJsonWithRetries(command: string, input?: string, retries = 3): any {
-  const res = runGhJsonDetailed(command, input);
-  if (!res.ok) throw new Error(res.error || 'gh command failed');
-  return res.data;
-}
-
 function runGhSafeJson(command: string, input?: string): any | null {
   const output = runGhSafe(command, input);
   if (output === null || output.trim() === '') {
@@ -478,18 +471,6 @@ function labelColor(label: string): string {
  * `tag:` is intentionally excluded — multiple tags are valid and additive.
  */
 const SINGLE_VALUE_LABEL_CATEGORIES = ['status:', 'priority:', 'stage:', 'type:', 'risk:', 'effort:'] as const;
-
-function isStatusLabel(label: string, labelPrefix: string): boolean {
-  const normalizedPrefix = normalizeGithubLabelPrefix(labelPrefix);
-  if (!label.startsWith(normalizedPrefix)) {
-    return false;
-  }
-  const value = label.slice(normalizedPrefix.length);
-  if (value.startsWith('status:')) {
-    return true;
-  }
-  return value === 'open' || value === 'in-progress' || value === 'completed' || value === 'blocked' || value === 'deleted';
-}
 
 /**
  * Returns true when `label` is a worklog single-valued category label (e.g.

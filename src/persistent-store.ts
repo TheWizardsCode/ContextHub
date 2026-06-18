@@ -90,12 +90,10 @@ export function unescapeText(s: string): string {
 export class SqlitePersistentStore {
   private db: Database.Database;
   private dbPath: string;
-  private verbose: boolean;
   private _ftsAvailable: boolean = false;
 
-  constructor(dbPath: string, verbose: boolean = false) {
+  constructor(dbPath: string, _verbose: boolean = false) {
     this.dbPath = dbPath;
-    this.verbose = verbose;
     
     // Ensure directory exists
     const dir = path.dirname(dbPath);

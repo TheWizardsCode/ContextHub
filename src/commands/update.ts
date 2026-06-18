@@ -53,9 +53,7 @@ export default function register(ctx: PluginContext): void {
       const cliNoReSort = process.argv.includes('--no-re-sort') || process.argv.includes('--noReSort');
       const reSortNo = (((normalized.options as any)?.noReSort === true) || ((normalized.options as any)?.reSort === false) || cliNoReSort);
       const reSortSync = Boolean((normalized.options as any)?.reSortSync);
-      const knownOptionKeys = [
-        'title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','doNotDelegate','prefix','noReSort','reSortSync'
-      ];
+      // knownOptionKeys removed (unused)
       const argsHint = rawArgs.map(a => Array.isArray(a) ? `array(${a.length})` : `${typeof a}:${String(a).slice(0,100)}`);
       if (process.env.WL_DEBUG_UPDATE_ACTION) {
         try { console.error('WL_DEBUG_UPDATE_ACTION rawArgs:', JSON.stringify(argsHint)); } catch (_e) { /* ignore */ }

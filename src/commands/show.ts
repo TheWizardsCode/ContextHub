@@ -4,8 +4,8 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { ShowOptions } from '../cli-types.js';
-import type { WorkItem, Comment, ShowJsonOutput } from '../types.js';
-import { displayItemTree, displayItemTreeWithFormat, displayItemTreeWithFormatToString, humanFormatComment, resolveFormat, humanFormatWorkItem } from './helpers.js';
+import type { Comment, ShowJsonOutput } from '../types.js';
+import { displayItemTreeWithFormatToString, humanFormatComment, resolveFormat } from './helpers.js';
 import pageOutput from '../pager.js';
 import { createCliOutputFromCommand } from '../cli-output.js';
 

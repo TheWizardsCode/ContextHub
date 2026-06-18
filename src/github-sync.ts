@@ -21,9 +21,7 @@ import {
   getGithubIssueAsync,
   listGithubIssuesAsync,
   listGithubIssueCommentsAsync,
-  createGithubIssueComment,
   createGithubIssueCommentAsync,
-  updateGithubIssueComment,
   updateGithubIssueCommentAsync,
   normalizeGithubLabelPrefix,
   issueToWorkItemFields,
@@ -1098,7 +1096,7 @@ export async function importIssuesToWorkItems(
     if (remoteItem) {
       // Apply all resolved fields — this reverts fields to local values where
       // local is newer, and keeps remote values where remote is newer
-      for (const { field, category } of LABEL_FIELD_CATEGORIES) {
+      for (const { field } of LABEL_FIELD_CATEGORIES) {
         if (resolvedFields[field] !== undefined) {
           (remoteItem as any)[field] = resolvedFields[field];
         }

@@ -5,7 +5,7 @@
 import type { PluginContext } from '../plugin-types.js';
 import type { ListOptions } from '../cli-types.js';
 import type { WorkItemQuery, WorkItemStatus, WorkItemPriority } from '../types.js';
-import { displayItemTree, displayItemTreeWithFormat, humanFormatWorkItem, resolveFormat, sortByPriorityAndDate } from './helpers.js';
+import { displayItemTreeWithFormat, humanFormatWorkItem, resolveFormat, sortByPriorityAndDate } from './helpers.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;

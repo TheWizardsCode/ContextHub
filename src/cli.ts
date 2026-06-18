@@ -80,9 +80,6 @@ function parseWatchFlag(argv: string[]) {
 const _parsedWatch = parseWatchFlag(process.argv);
 if (_parsedWatch.enabled) {
   const freq = _parsedWatch.seconds;
-  // Use the cleaned argv (includes node and script) and spawn the same
-  // command (node <script> <args...>) but with the watch flag removed.
-  const spawnArgs = _parsedWatch.argvWithoutWatch.slice(1);
   const bannerCommand = _parsedWatch.argvWithoutWatch.slice(2).join(' ') || '(no command)';
 
   const formatWatchTimestamp = (date: Date) => {

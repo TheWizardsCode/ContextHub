@@ -17,7 +17,7 @@ function parseNeedsProducerReview(value: unknown): boolean | undefined {
   return undefined;
 }
 
-function normalizeCreateInputWithAudit(input: CreateWorkItemInput, db: WorklogDatabase): { input: CreateWorkItemInput; auditResult: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null } {
+function normalizeCreateInputWithAudit(input: CreateWorkItemInput, _db: WorklogDatabase): { input: CreateWorkItemInput; auditResult: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null } {
   const rawAudit = (input as any).audit;
   if (typeof rawAudit === 'string') {
     const entry = buildAuditEntry(rawAudit, undefined, { hasAcceptanceCriteria: hasAcceptanceCriteria(input.description) });
@@ -39,7 +39,7 @@ function normalizeCreateInputWithAudit(input: CreateWorkItemInput, db: WorklogDa
   return { input, auditResult: null };
 }
 
-function normalizeUpdateInputWithAudit(input: UpdateWorkItemInput, itemId: string, db: WorklogDatabase): { input: UpdateWorkItemInput; auditResult: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null } {
+function normalizeUpdateInputWithAudit(input: UpdateWorkItemInput, itemId: string, _db: WorklogDatabase): { input: UpdateWorkItemInput; auditResult: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null } {
   const rawAudit = (input as any).audit;
   if (typeof rawAudit === 'string') {
     const entry = buildAuditEntry(rawAudit, undefined, { hasAcceptanceCriteria: hasAcceptanceCriteria((input as any).description) });
@@ -88,14 +88,14 @@ export function createAPI(db: WorklogDatabase) {
   const auditWriteEnabled = config?.auditWriteEnabled !== false;
 
   // Middleware to set the database prefix based on the route
-  function setPrefixMiddleware(req: Request, res: Response, next: NextFunction) {
+  function setPrefixMiddleware(req: Request, _res: Response, next: NextFunction) {
     const prefix = req.params.prefix || defaultPrefix;
     db.setPrefix(prefix.toUpperCase());
     next();
   }
 
   // Health check
-  app.get('/health', (req: Request, res: Response) => {
+  app.get('/health', (_req: Request, res: Response) => {
     res.json({ status: 'ok', prefix: defaultPrefix });
   });
 
@@ -149,7 +149,6 @@ export function createAPI(db: WorklogDatabase) {
       let normalizedBody: any = req.body;
       // If the caller provided an `audit` field, route it to the audit_results table
       // instead of the legacy `workitems.audit` column.
-      const rawAudit = (req.body as any).audit;
       delete normalizedBody.audit;
       const { input: updateInput, auditResult: updateAuditResult } = normalizeUpdateInputWithAudit(normalizedBody, req.params.id, db);
       const item = db.update(req.params.id, updateInput);

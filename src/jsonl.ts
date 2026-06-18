@@ -26,10 +26,7 @@ function stableStringify(value: any): string {
   return JSON.stringify(normalizeForStableJson(value));
 }
 
-interface JsonlRecord {
-  type: 'workitem' | 'comment' | 'audit_result';
-  data: WorkItem | Comment | AuditResult;
-}
+
 
 function normalizeDependencies(input: WorkItemDependency[] | undefined): WorkItemDependency[] {
   if (!Array.isArray(input)) return [];

@@ -9,7 +9,6 @@ import { WorkItem, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comm
 import { SqlitePersistentStore, FtsSearchResult } from './persistent-store.js';
 import { importFromJsonl, importFromJsonlContent, exportToJsonlAsync, getDefaultDataPath } from './jsonl.js';
 import { mergeWorkItems, mergeComments, mergeAuditResults, getRemoteDataFileContent, GitTarget } from './sync.js';
-import { withFileLock, getLockPathForJsonl } from './file-lock.js';
 import * as searchMetrics from './search-metrics.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
 
@@ -63,7 +62,6 @@ export class WorklogDatabase {
   private silent: boolean;
   private autoSync: boolean;
   private syncProvider?: () => Promise<void>;
-  private lockPath!: string;
   private _lastIdTime: number = 0;
   private _idSequence: number = 0;
 
@@ -80,7 +78,6 @@ export class WorklogDatabase {
     this.silent = silent;
     this.autoSync = autoSync;
     this.syncProvider = syncProvider;
-    void getLockPathForJsonl(this.jsonlPath);
     
     // Use default DB path if not provided
     const defaultDbPath = path.join(path.dirname(this.jsonlPath), 'worklog.db');
@@ -143,7 +140,6 @@ export class WorklogDatabase {
       // Get local state
       const localItems = this.store.getAllWorkItems();
       const localComments = this.store.getAllComments();
-      const localEdges = this.store.getAllDependencyEdges();
       const localAudits = this.store.getAllAuditResults();
 
       // Merge data
