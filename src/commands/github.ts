@@ -9,7 +9,7 @@ import { resolveWorklogDir } from '../worklog-paths.js';
 import path from 'node:path';
 import { ProgressReporter, ProgressMode } from '../progress.js';
 import throttler from '../github-throttler.js';
-import { upsertIssuesFromWorkItems, importIssuesToWorkItems, GithubProgress, GithubSyncResult, SyncedItem, SyncErrorItem, FieldChange } from '../github-sync.js';
+import { upsertIssuesFromWorkItems, importIssuesToWorkItems, GithubProgress, GithubSyncResult } from '../github-sync.js';
 import { loadConfig } from '../config.js';
 import { displayConflictDetails } from './helpers.js';
 import { createLogFileWriter, getWorklogLogPath, logConflictDetails } from '../logging.js';

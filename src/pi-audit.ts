@@ -13,7 +13,6 @@
 import { spawn } from "child_process";
 
 const DEFAULT_TIMEOUT_MS = 180_000;
-const FORCE_KILL_AFTER_MS = 1_500;
 
 type SpawnFn = typeof spawn;
 

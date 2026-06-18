@@ -10,7 +10,6 @@ import * as readline from 'readline';
 import { resolveWorklogDir } from './worklog-paths.js';
 import { theme } from './theme.js';
 
-const CONFIG_DIR = '.worklog';
 const CONFIG_FILE = 'config.yaml';
 const CONFIG_DEFAULTS_FILE = 'config.defaults.yaml';
 const INIT_SEMAPHORE_FILE = 'initialized';

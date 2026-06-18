@@ -1,5 +1,4 @@
 import { spawn } from 'child_process';
-import * as os from 'os';
 
 export type SpawnLike = (...args: any[]) => any;
 

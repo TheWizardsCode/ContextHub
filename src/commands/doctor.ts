@@ -11,7 +11,7 @@ import { importFromJsonl } from '../jsonl.js';
 import { mergeWorkItems, mergeComments, mergeAuditResults } from '../sync.js';
 import * as fs from 'fs';
 import * as path from 'path';
-import { normalizePriority, isValidPriority, isMappablePriority, PRIORITY_MAP, CANONICAL_PRIORITIES } from '../validators/priority.js';
+import { normalizePriority, isValidPriority, isMappablePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
 
 interface DoctorOptions {
   prefix?: string;

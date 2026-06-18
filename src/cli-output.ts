@@ -5,7 +5,6 @@
  */
 
 import { renderMarkdownToTags, type RendererOptions } from './markdown-renderer.js';
-import chalk from 'chalk';
 
 /**
  * Telemetry event types for CLI rendering.
