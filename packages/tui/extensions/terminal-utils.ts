@@ -12,6 +12,77 @@ const EMOJI_RANGES = [
   [0x2600, 0x2B5F],   // Miscellaneous Symbols, Dingbats, and more
 ] as const;
 
+// Zero-width Unicode codepoints that occupy no terminal columns.
+// These include variation selectors, joiners, marks, and other invisible
+// formatting characters that affect presentation without adding width.
+// Source: https://unicode.org/reports/tr44/#General_Category_Values
+const ZERO_WIDTH_CODEPOINTS = new Set([
+  0x00AD,   // Soft Hyphen
+  0x0600,   // Arabic Number Sign
+  0x0601,   // Arabic Sign Sanah
+  0x0602,   // Arabic Footnote Marker
+  0x0603,   // Arabic Sign Safha
+  0x0604,   // Arabic Sign Samvat
+  0x0605,   // Arabic Number Mark Above
+  0x061C,   // Arabic Letter Mark
+  0x070F,   // Syriac Abbreviation Mark
+  0x115F,   // Hangul Choseong Filler
+  0x1160,   // Hangul Jungseong Filler
+  0x17B4,   // Khmer Vowel Inherent Aq
+  0x17B5,   // Khmer Vowel Inherent Aa
+  0x180B,   // Mongolian Free Variation Selector One
+  0x180C,   // Mongolian Free Variation Selector Two
+  0x180D,   // Mongolian Free Variation Selector Three
+  0x180E,   // Mongolian Vowel Separator
+  0x200B,   // Zero Width Space
+  0x200C,   // Zero Width Non-Joiner
+  0x200D,   // Zero Width Joiner
+  0x200E,   // Left-to-Right Mark
+  0x200F,   // Right-to-Left Mark
+  0x2028,   // Line Separator
+  0x2029,   // Paragraph Separator
+  0x202A,   // Left-to-Right Embedding
+  0x202B,   // Right-to-Left Embedding
+  0x202C,   // Pop Directional Formatting
+  0x202D,   // Left-to-Right Override
+  0x202E,   // Right-to-Left Override
+  0x2060,   // Word Joiner
+  0x2061,   // Function Application
+  0x2062,   // Invisible Times
+  0x2063,   // Invisible Separator
+  0x2064,   // Invisible Plus
+  0x2066,   // Left-to-Right Isolate
+  0x2067,   // Right-to-Left Isolate
+  0x2068,   // First Strong Isolate
+  0x2069,   // Pop Directional Isolate
+  0x206A,   // Inhibit Symmetric Swapping
+  0x206B,   // Activate Symmetric Swapping
+  0x206C,   // Inhibit Arabic Form Shaping
+  0x206D,   // Activate Arabic Form Shaping
+  0x206E,   // National Digit Shapes
+  0x206F,   // Nominal Digit Shapes
+  0xFE00,   // Variation Selector-1
+  0xFE01,   // Variation Selector-2
+  0xFE02,   // Variation Selector-3
+  0xFE03,   // Variation Selector-4
+  0xFE04,   // Variation Selector-5
+  0xFE05,   // Variation Selector-6
+  0xFE06,   // Variation Selector-7
+  0xFE07,   // Variation Selector-8
+  0xFE08,   // Variation Selector-9
+  0xFE09,   // Variation Selector-10
+  0xFE0A,   // Variation Selector-11
+  0xFE0B,   // Variation Selector-12
+  0xFE0C,   // Variation Selector-13
+  0xFE0D,   // Variation Selector-14
+  0xFE0E,   // Variation Selector-15 (text presentation)
+  0xFE0F,   // Variation Selector-16 (emoji presentation)
+  0xFEFF,   // BOM / Zero Width No-Break Space
+  0xFFF9,   // Interlinear Annotation Anchor
+  0xFFFA,   // Interlinear Annotation Separator
+  0xFFFB,   // Interlinear Annotation Terminator
+]);
+
 // Lazy-loaded references to Pi's built-in terminal utility functions.
 // When the extension runs inside Pi, these delegate to @earendil-works/pi-tui
 // which handles ANSI codes, emoji widths, and wrapping correctly.
@@ -37,12 +108,29 @@ export function isDoubleWidthEmoji(cp: number): boolean {
 }
 
 /**
+ * Check if a codepoint has zero visible width in the terminal.
+ *
+ * Zero-width characters include variation selectors (U+FE00–U+FE0F),
+ * zero-width joiners/spaces, bidirectional text control characters,
+ * and other invisible formatting codepoints.
+ *
+ * These characters affect the rendering of adjacent characters (e.g.
+ * emoji presentation via VS16, ligature formation via ZWJ) but do not
+ * themselves occupy a terminal column.
+ */
+export function isZeroWidthChar(cp: number): boolean {
+  return ZERO_WIDTH_CODEPOINTS.has(cp);
+}
+
+/**
  * Get the terminal column width for a character.
- * Emoji and special symbols take 2 columns, others take 1.
+ * Emoji and special symbols take 2 columns, zero-width characters take 0,
+ * and all other characters take 1.
  */
 export function getCharWidth(char: string): number {
   if (char.length === 0) return 0;
   const cp = char.codePointAt(0) || 0;
+  if (isZeroWidthChar(cp)) return 0;
   return isDoubleWidthEmoji(cp) ? 2 : 1;
 }
 

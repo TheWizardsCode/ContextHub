@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   isDoubleWidthEmoji,
+  isZeroWidthChar,
   getCharWidth,
   visibleWidth,
   truncateToTerminalWidth,
@@ -37,6 +38,61 @@ describe('terminal-utils', () => {
     });
   });
 
+  describe('isZeroWidthChar', () => {
+    it('returns true for Variation Selector-16 (U+FE0F)', () => {
+      expect(isZeroWidthChar(0xFE0F)).toBe(true);
+    });
+
+    it('returns true for Variation Selector-15 (U+FE0E)', () => {
+      expect(isZeroWidthChar(0xFE0E)).toBe(true);
+    });
+
+    it('returns true for Zero Width Joiner (U+200D)', () => {
+      expect(isZeroWidthChar(0x200D)).toBe(true);
+    });
+
+    it('returns true for Zero Width Space (U+200B)', () => {
+      expect(isZeroWidthChar(0x200B)).toBe(true);
+    });
+
+    it('returns true for Zero Width Non-Joiner (U+200C)', () => {
+      expect(isZeroWidthChar(0x200C)).toBe(true);
+    });
+
+    it('returns true for Word Joiner (U+2060)', () => {
+      expect(isZeroWidthChar(0x2060)).toBe(true);
+    });
+
+    it('returns true for BOM / ZWNBSP (U+FEFF)', () => {
+      expect(isZeroWidthChar(0xFEFF)).toBe(true);
+    });
+
+    it('returns true for Soft Hyphen (U+00AD)', () => {
+      expect(isZeroWidthChar(0x00AD)).toBe(true);
+    });
+
+    it('returns true for Left-to-Right Mark (U+200E)', () => {
+      expect(isZeroWidthChar(0x200E)).toBe(true);
+    });
+
+    it('returns true for Right-to-Left Mark (U+200F)', () => {
+      expect(isZeroWidthChar(0x200F)).toBe(true);
+    });
+
+    it('returns false for a regular emoji codepoint (U+1F504)', () => {
+      expect(isZeroWidthChar(0x1F504)).toBe(false); // 🔄
+    });
+
+    it('returns false for ASCII characters', () => {
+      expect(isZeroWidthChar(0x41)).toBe(false); // 'A'
+      expect(isZeroWidthChar(0x30)).toBe(false); // '0'
+    });
+
+    it('returns false for regular double-width emoji (U+26A0)', () => {
+      expect(isZeroWidthChar(0x26A0)).toBe(false); // ⚠
+    });
+  });
+
   describe('getCharWidth', () => {
     it('returns 2 for double-width emoji', () => {
       expect(getCharWidth('🚨')).toBe(2);
@@ -52,6 +108,26 @@ describe('terminal-utils', () => {
 
     it('returns 0 for empty string', () => {
       expect(getCharWidth('')).toBe(0);
+    });
+
+    it('returns 0 for Variation Selector-16 (U+FE0F)', () => {
+      expect(getCharWidth('\uFE0F')).toBe(0);
+    });
+
+    it('returns 0 for Zero Width Joiner (U+200D)', () => {
+      expect(getCharWidth('\u200D')).toBe(0);
+    });
+
+    it('returns 0 for Zero Width Space (U+200B)', () => {
+      expect(getCharWidth('\u200B')).toBe(0);
+    });
+
+    it('returns 0 for Soft Hyphen (U+00AD)', () => {
+      expect(getCharWidth('\u00AD')).toBe(0);
+    });
+
+    it('returns 2 for check mark emoji (U+2714) when not followed by VS16', () => {
+      expect(getCharWidth('\u2714')).toBe(2);
     });
   });
 
@@ -70,6 +146,41 @@ describe('terminal-utils', () => {
     it('ignores ANSI escape codes', () => {
       expect(visibleWidth('\x1b[32m🟢\x1b[0m')).toBe(2);
       expect(visibleWidth('\x1b[1mhello\x1b[0m')).toBe(5);
+    });
+
+    it('treats Variation Selector-16 as zero-width', () => {
+      // ✔️ = U+2714 (2 cols) + U+FE0F (0 cols) = 2 cols total
+      expect(visibleWidth('\u2714\uFE0F')).toBe(2);
+    });
+
+    it('treats warning sign with VS16 as 2 columns', () => {
+      // ⚠️ = U+26A0 (2 cols) + U+FE0F (0 cols) = 2 cols
+      expect(visibleWidth('\u26A0\uFE0F')).toBe(2);
+    });
+
+    it('treats hammer and wrench with VS16 as 2 columns', () => {
+      // 🛠️ = U+1F6E0 (2 cols) + U+FE0F (0 cols) = 2 cols
+      expect(visibleWidth('\u{1F6E0}\uFE0F')).toBe(2);
+    });
+
+    it('treats wastebasket with VS16 as 2 columns', () => {
+      // 🗑️ = U+1F5D1 (2 cols) + U+FE0F (0 cols) = 2 cols
+      expect(visibleWidth('\u{1F5D1}\uFE0F')).toBe(2);
+    });
+
+    it('handles mixed icons with VS16 sequences correctly', () => {
+      // 🔓 (2) + space (1) + 🛠️ (2) + space (1) + ❓ (2) = 8
+      expect(visibleWidth('\u{1F513} \u{1F6E0}\uFE0F \u{2753}')).toBe(8);
+    });
+
+    it('treats ZWJ sequences correctly counting only visible characters', () => {
+      // 👨‍👩‍👧‍👦 = U+1F468 (2) + U+200D (0) + U+1F469 (2) + U+200D (0) + U+1F467 (2) + U+200D (0) + U+1F466 (2) = 8
+      expect(visibleWidth('\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}')).toBe(8);
+    });
+
+    it('handles zero-width space character', () => {
+      // 'A' + ZWSP + 'B' = 'A' (1) + ZWSP (0) + 'B' (1) = 2
+      expect(visibleWidth('A\u200BB')).toBe(2);
     });
   });
 
@@ -128,6 +239,12 @@ describe('terminal-utils', () => {
     it('handles double-width emoji in wrapping (emoji counts as 2 columns)', () => {
       const result = wrapToTerminalWidth('🟢a🟢b', 4);
       expect(result).toEqual(['🟢a', '🟢b']);
+    });
+
+    it('handles emoji with VS16 correctly in wrapping (VS16 is zero-width)', () => {
+      // ✔️a = U+2714+U+FE0F (2 cols) + 'a' (1 col) = 3 cols, fits in 4
+      const result = wrapToTerminalWidth('\u2714\uFE0Fa\u2714\uFE0Fb', 4);
+      expect(result).toEqual(['\u2714\uFE0Fa', '\u2714\uFE0Fb']);
     });
 
     it('word-wraps text with emoji correctly', () => {
