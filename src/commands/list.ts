@@ -133,6 +133,11 @@ export default function register(ctx: PluginContext): void {
       const limited = limit ? sortedAll.slice(0, limit) : sortedAll;
 
       if (utils.isJsonMode()) {
+        // Pre-compute child counts for the full item set so we can enrich
+        // each work item with the number of direct children in O(1) per item
+        // instead of N+1 queries.
+        const childCounts = db.getChildCounts();
+
         // Enrich each work item with audit result data from the dedicated table.
         // This is needed so consumers (e.g. Pi TUI extension) can show the
         // correct audit icon (✅/❌/❓) without an extra round-trip per item.
@@ -145,6 +150,7 @@ export default function register(ctx: PluginContext): void {
         const enrichedItems = limited.map(item => ({
           ...item,
           auditResult: auditMap.has(item.id) ? auditMap.get(item.id) : null,
+          childCount: childCounts.get(item.id) ?? 0,
         }));
         output.json({ success: true, count: enrichedItems.length, workItems: enrichedItems });
       } else {
