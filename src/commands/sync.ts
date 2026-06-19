@@ -20,15 +20,14 @@ import { promisify } from 'util';
 
 const execAsync = promisify(childProcess.exec);
 
-function getSyncDefaults(config?: ReturnType<typeof loadConfig>) {
+export function getSyncDefaults(config?: ReturnType<typeof loadConfig>) {
   return {
     gitRemote: config?.syncRemote || DEFAULT_GIT_REMOTE,
     gitBranch: config?.syncBranch || DEFAULT_GIT_BRANCH,
   };
 }
 
-async function performSync(
-  program: any,
+export async function performSync(
   dataPath: string,
   getDatabase: (prefix?: string) => any,
   options: {
@@ -39,10 +38,12 @@ async function performSync(
     push: boolean;
     dryRun: boolean;
     silent?: boolean;
+    isJsonMode?: boolean;
+    isVerbose?: boolean;
   }
 ): Promise<SyncResult> {
-  const isJsonMode = program.opts().json;
-  const isVerbose = program.opts().verbose;
+  const isJsonMode = options.isJsonMode ?? false;
+  const isVerbose = options.isVerbose ?? false;
   const isSilent = options.silent || false;
   const logPath = getWorklogLogPath('sync.log');
   const logLine = createLogFileWriter(logPath);
@@ -342,15 +343,18 @@ export default function register(ctx: PluginContext): void {
 
       try {
         const lockPath = getLockPathForJsonl(options.file || dataPath);
+        const isVerbose = program.opts().verbose;
         await withFileLock(lockPath, () =>
-          performSync(program, dataPath, utils.getDatabase, {
+          performSync(dataPath, utils.getDatabase, {
             file: options.file || dataPath,
             prefix: options.prefix,
             gitRemote,
             gitBranch,
             push: options.push ?? true,
             dryRun: options.dryRun ?? false,
-            silent: false
+            silent: false,
+            isJsonMode,
+            isVerbose
           })
         );
       } catch (error) {
