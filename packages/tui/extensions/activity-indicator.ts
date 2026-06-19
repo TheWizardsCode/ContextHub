@@ -36,6 +36,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from '@earendil-works/pi-coding-agent';
+import { runWl } from './wl-integration.js';
 
 /**
  * Status key used for the activity indicator in the footer.
@@ -73,6 +74,31 @@ export const BUILTIN_COMMANDS = new Set([
   '/changelog',
   '/quit',
 ]);
+
+/**
+ * Regex to detect work item ID patterns in user input.
+ *
+ * Matches patterns like `WL-0MQL0T5TR0060AEH` (prefix + dash + 15+ alphanumeric chars).
+ * The prefix must be 2-3 uppercase letters followed by a dash and at least 15
+ * alphanumeric characters. This is intentionally conservative to avoid false
+ * positives on ordinary text while matching all known work item ID formats.
+ */
+export const WORK_ITEM_ID_REGEX = /\b[A-Z]{2,3}-[A-Z0-9]{15,}/;
+
+/**
+ * Extract the first work item ID from input text.
+ *
+ * Scans the text for a pattern matching a work item ID (e.g., `WL-0MQL0T5TR0060AEH`)
+ * and returns the first match. Returns `null` if no ID is found.
+ *
+ * @example
+ * detectWorkItemId('/intake WL-0MQL0T5TR0060AEH') // => 'WL-0MQL0T5TR0060AEH'
+ * detectWorkItemId('/wl list')                     // => null
+ */
+export function detectWorkItemId(text: string): string | null {
+  const match = text.match(WORK_ITEM_ID_REGEX);
+  return match ? match[0] : null;
+}
 
 /**
  * Interface for the subset of ExtensionUIContext used by the activity indicator.
@@ -154,6 +180,58 @@ export function showActivity(ctx: StatusContext, activity: string): void {
   // Apply theme accent color if available; otherwise use plain text
   const styled = ctx.ui.theme ? ctx.ui.theme.fg('accent', display) : display;
   ctx.ui.setStatus(ACTIVITY_STATUS_KEY, styled);
+}
+
+/**
+ * Resolve a work item ID to its title via `wl show <id> --json`.
+ *
+ * Uses `runWl` from the Worklog integration layer with a 2-second timeout.
+ * Returns the title string on success, or `null` if the lookup fails
+ * (invalid ID, not found, timeout, or any other error).
+ *
+ * Errors are silently swallowed so that callers can fall back gracefully
+ * without requiring try/catch boilerplate.
+ */
+async function resolveWorkItemTitle(id: string): Promise<string | null> {
+  try {
+    const result = await runWl('show', [id], { timeout: 2000 });
+    if (result && typeof result === 'object' && typeof result.title === 'string') {
+      return result.title;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Show activity text with optional async work item title resolution.
+ *
+ * First displays the raw input text immediately. If a work item ID is detected
+ * in the text, it then async-looks up the work item title via `wl show` and
+ * replaces the display with the format `⏵ <id> <title>` (truncated to fit).
+ *
+ * On lookup failure (invalid ID, not found, timeout), the raw text remains
+ * shown — no error is displayed to the user.
+ *
+ * @param ctx - Context with UI methods (ExtensionContext or mock)
+ * @param text - The full input text to display
+ */
+async function showActivityWithTitleLookup(ctx: StatusContext, text: string): Promise<void> {
+  // First, show the raw text immediately
+  showActivity(ctx, text);
+
+  // Check for a work item ID in the text
+  const id = detectWorkItemId(text);
+  if (!id) return;
+
+  // Async lookup the title
+  const title = await resolveWorkItemTitle(id);
+  if (!title) return;
+
+  // Replace with ID + title format, truncated to fit terminal width
+  const display = `${id} ${title}`;
+  showActivity(ctx, display);
 }
 
 /**
@@ -277,6 +355,23 @@ export function registerActivityIndicator(pi: ExtensionAPI): void {
     if (!text.startsWith('/')) {
       return { action: 'continue' };
     }
+
+    // Work item ID detection: if the input contains a work item ID pattern
+    // (e.g., WL-0MQL0T5TR0060AEH), resolve it to the item title and display
+    // the ID + title in the footer, replacing the raw command/skill text.
+    // This takes priority over command-specific display so that the footer
+    // always shows the most informative label.
+    //
+    // Per AC 1-5:
+    // - Shows raw text immediately, then async-resolves the title
+    // - Falls back to raw text on lookup failure
+    // - The first detected ID is used when multiple are present
+    if (detectWorkItemId(text)) {
+      await showActivityWithTitleLookup(ctx, text);
+      return { action: 'continue' };
+    }
+
+    // No work item ID detected — use existing behavior:
 
     // Skill command: show the skill name in the indicator (AC 2)
     if (text.startsWith('/skill:')) {

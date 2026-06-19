@@ -19,14 +19,25 @@ import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from '@earend
 // Since activity-indicator.ts exports functions that operate on ctx.ui,
 // we test the core logic by creating mock contexts and calling the exported functions.
 
+// Mock the wl-integration module before importing the module under test
+vi.mock('../extensions/wl-integration.js', () => ({
+  runWl: vi.fn(),
+  wlEvents: { on: vi.fn(), emit: vi.fn(), removeListener: vi.fn() },
+}));
+
 // Import the module under test
 import {
   registerActivityIndicator,
   showActivity,
   clearActivity,
+  detectWorkItemId,
   BUILTIN_COMMANDS,
   ACTIVITY_STATUS_KEY,
 } from '../extensions/activity-indicator.js';
+
+// Import the mocked module for controlling test behavior
+import { runWl } from '../extensions/wl-integration.js';
+const mockRunWl = runWl as ReturnType<typeof vi.fn>;
 
 // Re-import for type use
 import type { InputEvent, SessionStartEvent } from '@earendil-works/pi-coding-agent';
@@ -118,6 +129,51 @@ describe('clearActivity', () => {
   });
 });
 
+describe('detectWorkItemId', () => {
+  it('detects a standard WL- prefixed work item ID', () => {
+    const result = detectWorkItemId('/intake WL-0MQL0T5TR0060AEH');
+    expect(result).toBe('WL-0MQL0T5TR0060AEH');
+  });
+
+  it('detects a SA- prefixed work item ID', () => {
+    const result = detectWorkItemId('/implement SA-0MPYMFZXO0004ZU4');
+    expect(result).toBe('SA-0MPYMFZXO0004ZU4');
+  });
+
+  it('returns null for text without a work item ID', () => {
+    expect(detectWorkItemId('/wl list')).toBeNull();
+    expect(detectWorkItemId('/model')).toBeNull();
+    expect(detectWorkItemId('Hello world')).toBeNull();
+    expect(detectWorkItemId('')).toBeNull();
+  });
+
+  it('returns null for short ID-like patterns (under 15 chars after dash)', () => {
+    expect(detectWorkItemId('/intake WL-1234')).toBeNull();
+    expect(detectWorkItemId('WL-abc')).toBeNull();
+  });
+
+  it('returns the first ID when multiple IDs are present', () => {
+    const text = '/implement WL-0MQL0T5TR0060AEH and WL-0MQLG8PK80041FM3';
+    const result = detectWorkItemId(text);
+    expect(result).toBe('WL-0MQL0T5TR0060AEH');
+  });
+
+  it('detects an ID at the start of the text', () => {
+    expect(detectWorkItemId('WL-0MQL0T5TR0060AEH is the ID')).toBe('WL-0MQL0T5TR0060AEH');
+  });
+
+  it('detects an ID at the end of the text', () => {
+    expect(detectWorkItemId('Process item WL-0MQL0T5TR0060AEH')).toBe('WL-0MQL0T5TR0060AEH');
+  });
+
+  it('returns null for ID-like patterns that are part of longer words', () => {
+    // The regex uses \b word boundary to ensure the prefix starts on a
+    // word boundary, preventing false positives when text like
+    // "PREFIXWL-..." is encountered
+    expect(detectWorkItemId('PREFIXWL-0MQL0T5TR0060AEH')).toBeNull();
+  });
+});
+
 describe('registerActivityIndicator - input events', () => {
   let pi: Partial<ExtensionAPI>;
   let inputHandlers: Array<(event: InputEvent, ctx: ExtensionContext) => Promise<any>>;
@@ -140,6 +196,32 @@ describe('registerActivityIndicator - input events', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
+
+  function createMockContext(): ExtensionContext {
+    const setStatus = vi.fn();
+    const theme = { fg: vi.fn((_color: string, text: string) => text) };
+    return {
+      ui: { setStatus, theme } as unknown as ExtensionUIContext,
+      mode: 'tui',
+      hasUI: true,
+      cwd: '/test',
+      sessionManager: {
+        getBranch: vi.fn().mockReturnValue([]),
+        getEntries: vi.fn().mockReturnValue([]),
+      } as any,
+      model: undefined,
+      modelRegistry: {} as any,
+      isIdle: vi.fn().mockReturnValue(true),
+      isProjectTrusted: vi.fn().mockReturnValue(true),
+      signal: undefined,
+      abort: vi.fn(),
+      hasPendingMessages: vi.fn().mockReturnValue(false),
+      shutdown: vi.fn(),
+      getContextUsage: vi.fn(),
+      compact: vi.fn(),
+      getSystemPrompt: vi.fn().mockReturnValue(''),
+    };
+  }
 
   function createMockContext(): ExtensionContext {
     const setStatus = vi.fn();
@@ -337,6 +419,142 @@ describe('registerActivityIndicator - input events', () => {
 
     // Whitespace-only/free-form text should not clear the indicator
     expect(ctx.ui.setStatus).not.toHaveBeenCalled();
+  });
+
+  describe('work item ID resolution', () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it('shows raw text immediately, then resolves title for command with work item ID', async () => {
+      // Mock runWl to return a successful title lookup
+      mockRunWl.mockResolvedValueOnce({ title: 'Fix login bug that crashes on startup' });
+
+      registerActivityIndicator(pi as ExtensionAPI);
+      const ctx = createMockContext();
+      const event: InputEvent = {
+        type: 'input',
+        text: '/intake WL-0MQL0T5TR0060AEH',
+        source: 'interactive',
+      };
+
+      await inputHandlers[0](event, ctx);
+
+      // Should have shown raw text first, then replaced with ID + title
+      expect(ctx.ui.setStatus).toHaveBeenCalledWith(
+        ACTIVITY_STATUS_KEY,
+        expect.stringContaining('WL-0MQL0T5TR0060AEH')
+      );
+      // Should not contain the /intake command prefix; only ID + title
+      const lastCallArg = (ctx.ui.setStatus as ReturnType<typeof vi.fn>).mock.calls.slice(-1)[0][1] as string;
+      expect(lastCallArg).not.toContain('/intake');
+      expect(lastCallArg).toContain('Fix login bug');
+
+      // Verify runWl was called with the correct arguments
+      expect(mockRunWl).toHaveBeenCalledWith('show', ['WL-0MQL0T5TR0060AEH'], { timeout: 2000 });
+    });
+
+    it('falls back to raw text on work item ID lookup failure', async () => {
+      // Mock runWl to reject (lookup failure)
+      mockRunWl.mockRejectedValueOnce(new Error('Work item not found'));
+
+      registerActivityIndicator(pi as ExtensionAPI);
+      const ctx = createMockContext();
+      const event: InputEvent = {
+        type: 'input',
+        text: '/intake WL-0MQL0T5TR0060AEH',
+        source: 'interactive',
+      };
+
+      await inputHandlers[0](event, ctx);
+
+      // Should still show raw text (not cleared)
+      expect(ctx.ui.setStatus).toHaveBeenCalledWith(
+        ACTIVITY_STATUS_KEY,
+        expect.stringContaining('/intake WL-0MQL0T5TR0060AEH')
+      );
+    });
+
+    it('resolves title for /skill: command with work item ID', async () => {
+      mockRunWl.mockResolvedValueOnce({ title: 'Add user authentication' });
+
+      registerActivityIndicator(pi as ExtensionAPI);
+      const ctx = createMockContext();
+      const event: InputEvent = {
+        type: 'input',
+        text: '/skill:implement WL-0MP15TA8J009NZUU',
+        source: 'interactive',
+      };
+
+      await inputHandlers[0](event, ctx);
+
+      // Should show resolved title, not the /skill: prefix
+      const lastCallArg = (ctx.ui.setStatus as ReturnType<typeof vi.fn>).mock.calls.slice(-1)[0][1] as string;
+      expect(lastCallArg).not.toContain('/skill:');
+      expect(lastCallArg).toContain('Add user authentication');
+      expect(mockRunWl).toHaveBeenCalledWith('show', ['WL-0MP15TA8J009NZUU'], { timeout: 2000 });
+    });
+
+    it('preserves existing behavior for command without work item ID', async () => {
+      registerActivityIndicator(pi as ExtensionAPI);
+      const ctx = createMockContext();
+      const event: InputEvent = {
+        type: 'input',
+        text: '/intake some text without ID',
+        source: 'interactive',
+      };
+
+      await inputHandlers[0](event, ctx);
+
+      // Should show full raw text (existing behavior)
+      expect(ctx.ui.setStatus).toHaveBeenCalledWith(
+        ACTIVITY_STATUS_KEY,
+        expect.stringContaining('/intake some text')
+      );
+      // No wl show call should have been made
+      expect(mockRunWl).not.toHaveBeenCalled();
+    });
+
+    it('resolves title for unknown /-prefixed command with work item ID', async () => {
+      mockRunWl.mockResolvedValueOnce({ title: 'Resolve work item IDs to titles' });
+
+      registerActivityIndicator(pi as ExtensionAPI);
+      const ctx = createMockContext();
+      const event: InputEvent = {
+        type: 'input',
+        text: '/custom-command WL-0MQLG8PK80041FM3',
+        source: 'interactive',
+      };
+
+      await inputHandlers[0](event, ctx);
+
+      // Should show resolved title
+      const lastCallArg = (ctx.ui.setStatus as ReturnType<typeof vi.fn>).mock.calls.slice(-1)[0][1] as string;
+      expect(lastCallArg).toContain('Resolve work item IDs to titles');
+      expect(lastCallArg).toContain('WL-0MQLG8PK80041FM3');
+      expect(mockRunWl).toHaveBeenCalledWith('show', ['WL-0MQLG8PK80041FM3'], { timeout: 2000 });
+    });
+
+    it('uses the first work item ID when multiple IDs are present in input', async () => {
+      mockRunWl.mockResolvedValueOnce({ title: 'First work item title' });
+
+      registerActivityIndicator(pi as ExtensionAPI);
+      const ctx = createMockContext();
+      const event: InputEvent = {
+        type: 'input',
+        text: '/implement WL-0MQL0T5TR0060AEH and WL-0MQLG8PK80041FM3',
+        source: 'interactive',
+      };
+
+      await inputHandlers[0](event, ctx);
+
+      // Should look up only the first ID
+      expect(mockRunWl).toHaveBeenCalledTimes(1);
+      expect(mockRunWl).toHaveBeenCalledWith('show', ['WL-0MQL0T5TR0060AEH'], { timeout: 2000 });
+
+      const lastCallArg = (ctx.ui.setStatus as ReturnType<typeof vi.fn>).mock.calls.slice(-1)[0][1] as string;
+      expect(lastCallArg).toContain('First work item title');
+    });
   });
 });
 
