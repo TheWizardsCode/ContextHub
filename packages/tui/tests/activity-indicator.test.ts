@@ -187,7 +187,7 @@ describe('registerActivityIndicator - input events', () => {
     );
   });
 
-  it('sets indicator for /skill:name with arguments', async () => {
+  it('sets indicator for /skill:name with arguments (includes the ID)', async () => {
     registerActivityIndicator(pi as ExtensionAPI);
 
     const ctx = createMockContext();
@@ -199,13 +199,14 @@ describe('registerActivityIndicator - input events', () => {
 
     await inputHandlers[0](event, ctx);
 
+    // Should include the full input after /skill: prefix (skill name + ID)
     expect(ctx.ui.setStatus).toHaveBeenCalledWith(
       ACTIVITY_STATUS_KEY,
-      expect.stringContaining('skill:implement')
+      expect.stringContaining('implement WL-123')
     );
   });
 
-  it('clears indicator for free-form text (no / prefix)', async () => {
+  it('leaves indicator unchanged for free-form text (no / prefix)', async () => {
     registerActivityIndicator(pi as ExtensionAPI);
 
     const ctx = createMockContext();
@@ -217,10 +218,11 @@ describe('registerActivityIndicator - input events', () => {
 
     await inputHandlers[0](event, ctx);
 
-    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+    // Free-form text should NOT clear the indicator
+    expect(ctx.ui.setStatus).not.toHaveBeenCalled();
   });
 
-  it('clears indicator for built-in Pi commands', async () => {
+  it('leaves indicator unchanged for built-in Pi commands', async () => {
     registerActivityIndicator(pi as ExtensionAPI);
 
     const ctx = createMockContext();
@@ -232,10 +234,11 @@ describe('registerActivityIndicator - input events', () => {
 
     await inputHandlers[0](event, ctx);
 
-    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+    // Built-in commands should NOT clear the indicator
+    expect(ctx.ui.setStatus).not.toHaveBeenCalled();
   });
 
-  it('clears indicator for built-in Pi commands with arguments', async () => {
+  it('leaves indicator unchanged for built-in Pi commands with arguments', async () => {
     registerActivityIndicator(pi as ExtensionAPI);
 
     const ctx = createMockContext();
@@ -247,10 +250,11 @@ describe('registerActivityIndicator - input events', () => {
 
     await inputHandlers[0](event, ctx);
 
-    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+    // Built-in commands with arguments should NOT clear the indicator
+    expect(ctx.ui.setStatus).not.toHaveBeenCalled();
   });
 
-  it('clears indicator for /new command', async () => {
+  it('leaves indicator unchanged for /new command (session_start handles clearing)', async () => {
     registerActivityIndicator(pi as ExtensionAPI);
 
     const ctx = createMockContext();
@@ -262,25 +266,48 @@ describe('registerActivityIndicator - input events', () => {
 
     await inputHandlers[0](event, ctx);
 
-    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+    // /new is handled by session_start (reason: "new"), not the input handler
+    expect(ctx.ui.setStatus).not.toHaveBeenCalled();
   });
 
-  it('clears indicator for unknown /-prefixed text (not a command or skill)', async () => {
+  it('sets indicator showing full input for unknown /-prefixed text', async () => {
     registerActivityIndicator(pi as ExtensionAPI);
 
     const ctx = createMockContext();
     const event: InputEvent = {
       type: 'input',
-      text: '/something-random',
+      text: '/intake WL-123',
       source: 'interactive',
     };
 
     await inputHandlers[0](event, ctx);
 
-    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+    // Should show the full input including the ID, not just the first word
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(
+      ACTIVITY_STATUS_KEY,
+      expect.stringContaining('/intake WL-123')
+    );
   });
 
-  it('handles empty text gracefully', async () => {
+  it('sets indicator with full input for command with long arguments', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+
+    const ctx = createMockContext();
+    const event: InputEvent = {
+      type: 'input',
+      text: '/intake WL-0MQL0T5TR0060AEH',
+      source: 'interactive',
+    };
+
+    await inputHandlers[0](event, ctx);
+
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(
+      ACTIVITY_STATUS_KEY,
+      expect.stringContaining('/intake WL-0MQL0T5TR0060AEH')
+    );
+  });
+
+  it('handles empty text gracefully (leaves indicator unchanged)', async () => {
     registerActivityIndicator(pi as ExtensionAPI);
 
     const ctx = createMockContext();
@@ -292,10 +319,11 @@ describe('registerActivityIndicator - input events', () => {
 
     await inputHandlers[0](event, ctx);
 
-    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+    // Empty/free-form text should not clear the indicator
+    expect(ctx.ui.setStatus).not.toHaveBeenCalled();
   });
 
-  it('handles whitespace-only text as free-form (clears)', async () => {
+  it('handles whitespace-only text as free-form (leaves indicator unchanged)', async () => {
     registerActivityIndicator(pi as ExtensionAPI);
 
     const ctx = createMockContext();
@@ -307,7 +335,8 @@ describe('registerActivityIndicator - input events', () => {
 
     await inputHandlers[0](event, ctx);
 
-    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+    // Whitespace-only/free-form text should not clear the indicator
+    expect(ctx.ui.setStatus).not.toHaveBeenCalled();
   });
 });
 

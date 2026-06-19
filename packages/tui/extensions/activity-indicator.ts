@@ -257,18 +257,24 @@ export function registerActivityIndicator(pi: ExtensionAPI): void {
   //
   // So the input event fires for:
   //   - Skills (/skill:name) — we capture the skill name
-  //   - Built-in Pi commands (/model, /settings, etc.) — we clear
-  //   - Free-form text — we clear
-  //   - Templates (/templatename) — we clear (not a command or skill)
+  //   - Built-in Pi commands (/model, /settings, etc.) — we leave unchanged
+  //   - Free-form text — we leave unchanged
+  //   - Templates (/templatename) — we set to show the name
   //
   // It does NOT fire for extension commands (like /wl), which are handled
   // by their command handlers before the event fires.
+  //
+  // IMPORTANT: The input handler NEVER clears the indicator. Clearing is
+  // exclusively handled by session_start. This ensures that a free-form
+  // answer to a skill prompt (e.g., answering an intake question) does not
+  // wipe the indicator — it persists until /new or session shutdown.
   pi.on('input', async (event, ctx) => {
     const text = event.text.trim();
 
-    // Free-form text: clear the indicator (AC 5)
+    // Free-form text: leave the indicator unchanged.
+    // The indicator persists across turns so that a free-form answer to
+    // a skill (e.g., answering an intake question) does not clear it.
     if (!text.startsWith('/')) {
-      ctx.ui.setStatus(ACTIVITY_STATUS_KEY, undefined);
       return { action: 'continue' };
     }
 
@@ -280,16 +286,24 @@ export function registerActivityIndicator(pi: ExtensionAPI): void {
       return { action: 'continue' };
     }
 
-    // Built-in Pi command: clear the indicator (AC 4)
+    // Built-in Pi commands: leave the indicator unchanged.
+    // These include /model, /settings, /new, /resume, etc.
+    // /new and /resume are handled by the session_start handler below.
+    // Other built-in commands should not affect the indicator.
     const firstWord = extractCommand(text);
     if (BUILTIN_COMMANDS.has(firstWord)) {
-      ctx.ui.setStatus(ACTIVITY_STATUS_KEY, undefined);
       return { action: 'continue' };
     }
 
-    // Other /-prefixed input (template, unrecognized): clear the indicator.
-    // These are not extension commands or skills, per AC.
-    ctx.ui.setStatus(ACTIVITY_STATUS_KEY, undefined);
+    // Other /-prefixed input: set the indicator showing the full input.
+    // This includes:
+    //   - Extension commands from other extensions (e.g., /intake WL-123)
+    //   - Templates (/templatename)
+    //   - Unrecognized commands
+    // Per AC 1, extension-registered commands should show in the footer.
+    // We pass the full text so that arguments (like a work-item ID) are
+    // included; it is truncated by showActivity to fit the terminal width.
+    showActivity(ctx, text);
     return { action: 'continue' };
   });
 
