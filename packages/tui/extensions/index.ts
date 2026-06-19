@@ -99,7 +99,7 @@ export interface ShortcutResult {
 }
 
 type RunWlFn = (args: string[], includeJson?: boolean) => Promise<string>;
-type SelectionChangeHandler = (item: WorklogBrowseItem) => void;
+export type SelectionChangeHandler = (item: WorklogBrowseItem) => void;
 type ChooseWorkItemFn = (
   items: WorklogBrowseItem[],
   ctx: BrowseContext,
@@ -676,9 +676,13 @@ export async function defaultChooseWorkItem(
           items.push(...newItems);
           selectedIndex = newIndex;
 
-          // Notify the selection change handler if the active item changed
+          // Always notify the selection change handler after auto-refresh,
+          // even when the item ID is unchanged, so the preview widget
+          // receives updated data (e.g. status, stage, audit result).
+          // The widget's internal render cache prevents visual jitter when
+          // no data has actually changed.
           const item = items[selectedIndex];
-          if (item && item.id !== lastSelectionId) {
+          if (item) {
             lastSelectionId = item.id;
             onSelectionChange(item);
           }
@@ -1345,7 +1349,11 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         const announceSelection: SelectionChangeHandler = (
           item: WorklogBrowseItem,
         ) => {
-          if (item.id === lastAnnouncedId) return;
+          // Always set the widget so the preview is rebuilt with the latest
+          // data, even when the same item ID is re-announced (e.g. after
+          // auto-refresh fetches updated status/stage/audit/risk/effort).
+          // The widget's internal render cache prevents visual jitter when
+          // no data has actually changed.
           lastAnnouncedId = item.id;
           ctx.ui.setWidget?.('worklog-browse-selection', buildSelectionWidget(item, currentSettings), { placement: 'belowEditor' });
         };

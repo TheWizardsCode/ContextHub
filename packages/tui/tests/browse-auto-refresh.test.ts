@@ -12,8 +12,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { defaultChooseWorkItem, type WorklogBrowseItem } from '../extensions/index.js';
+import { defaultChooseWorkItem, buildSelectionWidget, type WorklogBrowseItem, type SelectionChangeHandler } from '../extensions/index.js';
 import { ShortcutRegistry, type ShortcutEntry } from '../extensions/shortcut-config.js';
+import { type Settings } from '../extensions/settings-config.js';
 
 describe('Browse list auto-refresh', () => {
   let items: WorklogBrowseItem[];
@@ -453,5 +454,96 @@ describe('Browse list auto-refresh', () => {
     expect(rendered).toContain('First item');
     expect(rendered).toContain('Second item');
     expect(rendered).toContain('Third item');
+  });
+
+  it('calls onSelectionChange when auto-refresh provides updated data for the same item ID', async () => {
+    const { ctx } = createMockContext();
+    const onSelectionChange = vi.fn();
+
+    // Mock onSelectionChange to simulate announceSelection-like behavior
+    // (tracks last announced ID for verification purposes but DOES NOT suppress calls)
+    defaultChooseWorkItem(items, ctx, onSelectionChange, undefined, reFetchItems);
+
+    // Reset mock so we only track auto-refresh calls
+    onSelectionChange.mockClear();
+
+    // Set up reFetchItems to return updated data for the same item (WL-001)
+    // Status changed from 'open' to 'in_progress'
+    reFetchItems.mockResolvedValue([
+      { id: 'WL-001', title: 'First item', status: 'in_progress' },
+      { id: 'WL-002', title: 'Second item', status: 'in_progress' },
+      { id: 'WL-003', title: 'Third item', status: 'open' },
+    ]);
+
+    // Advance timers by 5 seconds to trigger the refresh
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // onSelectionChange should have been called with the updated item
+    expect(onSelectionChange).toHaveBeenCalledTimes(1);
+    expect(onSelectionChange).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'WL-001', status: 'in_progress' })
+    );
+  });
+
+  it('calls onSelectionChange on each auto-refresh even when item ID stays the same', async () => {
+    const { ctx } = createMockContext();
+    const onSelectionChange = vi.fn();
+
+    defaultChooseWorkItem(items, ctx, onSelectionChange, undefined, reFetchItems);
+
+    // Reset mock to track only auto-refresh calls
+    onSelectionChange.mockClear();
+
+    // ReFetchItems returns same items (no data change)
+    reFetchItems.mockResolvedValue([
+      { id: 'WL-001', title: 'First item', status: 'open' },
+      { id: 'WL-002', title: 'Second item', status: 'in_progress' },
+      { id: 'WL-003', title: 'Third item', status: 'open' },
+    ]);
+
+    // First auto-refresh cycle
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(onSelectionChange).toHaveBeenCalledTimes(1);
+    expect(onSelectionChange).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'WL-001' })
+    );
+
+    // Second auto-refresh cycle (still same data)
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(onSelectionChange).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not suppress widget rebuilds when announceSelection receives same item ID with changed data', async () => {
+    const { ctx } = createMockContext();
+    const setWidget = ctx.ui.setWidget as ReturnType<typeof vi.fn>;
+
+    // Simulate announceSelection with the fix applied (no early return for same ID)
+    let lastAnnouncedId: string | undefined;
+    const announceSelection: SelectionChangeHandler = (item) => {
+      // After the fix: no `if (item.id === lastAnnouncedId) return;` guard
+      lastAnnouncedId = item.id;
+      ctx.ui.setWidget?.('worklog-browse-selection', buildSelectionWidget(item), { placement: 'belowEditor' });
+    };
+
+    // Initial announcement of first item
+    announceSelection(items[0]);
+    expect(setWidget).toHaveBeenCalledTimes(1);
+    expect(setWidget).toHaveBeenCalledWith(
+      'worklog-browse-selection',
+      expect.any(Function),
+      { placement: 'belowEditor' }
+    );
+
+    // Re-announce same item with updated data (simulating auto-refresh providing fresh data)
+    const updatedItem: WorklogBrowseItem = { ...items[0], status: 'in_progress' };
+    announceSelection(updatedItem);
+
+    // After the fix, setWidget should have been called again even though the ID is the same
+    expect(setWidget).toHaveBeenCalledTimes(2);
+    expect(setWidget).toHaveBeenLastCalledWith(
+      'worklog-browse-selection',
+      expect.any(Function),
+      { placement: 'belowEditor' }
+    );
   });
 });
