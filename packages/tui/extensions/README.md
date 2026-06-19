@@ -103,6 +103,51 @@ The settings file is a simple JSON object:
 
 If the file is missing or malformed, defaults are used (5 items, icons enabled).
 
+## Activity Indicator
+
+The extension displays a **persistent activity indicator** in the Pi footer,
+showing the currently executing command or skill. The indicator appears as a
+status line with a `⏵` prefix in the theme's accent color, positioned above
+the directory path and Git branch info.
+
+### What Triggers the Indicator
+
+| Input Type | Example | Indicator Behavior |
+|------------|---------|-------------------|
+| Extension commands (via `/wl` or `Ctrl+Shift+B` shortcut) | `/wl`, `/wl progress` | Shows `⏵ /wl` |
+| Skills | `/skill:audit WL-123` | Shows `⏵ skill:audit` |
+| Built-in Pi commands | `/model`, `/settings`, `/new` | Clears the indicator |
+| Free-form text | `Fix the login bug` | Clears the indicator |
+| Other extension commands | `/other-ext-cmd` | Not detectable (Pi limitation) |
+
+### Persistence
+
+- The indicator persists across turns within a session until new input is typed.
+- Creating a new session (`/new`) clears the indicator.
+- Resuming a session (`/resume`) attempts to recover the last-known command
+  from the session's history (best-effort).
+
+### Graceful Degradation
+
+The indicator gracefully degrades in non-TUI modes (print, JSON, RPC) where
+`setStatus` is a no-op. The feature has no effect and does not produce errors
+when used outside the Pi TUI.
+
+### Technical Notes
+
+- Uses Pi's `ctx.ui.setStatus()` API with the key `worklog-activity` to
+  display the indicator in the footer's status line area. This avoids
+  replacing the entire footer and does not conflict with existing widget
+  or status usage.
+- The indicator text is truncated to fit the terminal width with an ellipsis
+  (`…`) for overflow.
+- Extension commands registered by the Worklog extension itself (`/wl`,
+  `Ctrl+Shift+B`) set the indicator directly in their command handlers.
+- Skills (`/skill:name`) are captured via Pi's `input` event, which fires
+  before skill expansion.
+- Built-in Pi commands and free-form text clear the indicator via the same
+  `input` event handler.
+
 ## `/wl` Slash Command — Stage Filtering
 
 The `/wl` slash command browses work items recommended by the `wl next` algorithm. The number of items shown is controlled by the `browseItemCount` setting (default: 5). It also supports an optional stage filter argument.

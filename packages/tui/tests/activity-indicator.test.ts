@@ -1,0 +1,593 @@
+/**
+ * Unit tests for the activity-indicator module.
+ *
+ * Verifies that:
+ * - Built-in Pi commands are correctly identified and excluded
+ * - Skill commands are properly extracted
+ * - Input events correctly set/clear the indicator
+ * - Session lifecycle events (startup, new, resume) handle the indicator correctly
+ * - Terminal width truncation works
+ * - Command extraction from input text works
+ *
+ * Run: npx vitest run packages/tui/tests/activity-indicator.test.ts
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from '@earendil-works/pi-coding-agent';
+
+// We import the module but mock the dependencies for unit testing
+// Since activity-indicator.ts exports functions that operate on ctx.ui,
+// we test the core logic by creating mock contexts and calling the exported functions.
+
+// Import the module under test
+import {
+  registerActivityIndicator,
+  showActivity,
+  clearActivity,
+  BUILTIN_COMMANDS,
+  ACTIVITY_STATUS_KEY,
+} from '../extensions/activity-indicator.js';
+
+// Re-import for type use
+import type { InputEvent, SessionStartEvent } from '@earendil-works/pi-coding-agent';
+
+describe('BUILTIN_COMMANDS', () => {
+  it('contains all expected built-in Pi commands', () => {
+    const expectedCommands = [
+      '/login', '/logout', '/model', '/scoped-models', '/settings',
+      '/resume', '/new', '/name', '/session', '/tree', '/trust',
+      '/fork', '/clone', '/compact', '/copy', '/export', '/share',
+      '/reload', '/hotkeys', '/changelog', '/quit',
+    ];
+    for (const cmd of expectedCommands) {
+      expect(BUILTIN_COMMANDS.has(cmd)).toBe(true);
+    }
+  });
+
+  it('does NOT contain extension commands', () => {
+    expect(BUILTIN_COMMANDS.has('/wl')).toBe(false);
+    expect(BUILTIN_COMMANDS.has('/skill:audit')).toBe(false);
+    expect(BUILTIN_COMMANDS.has('/custom-cmd')).toBe(false);
+  });
+
+  it('does NOT contain skill commands', () => {
+    expect(BUILTIN_COMMANDS.has('/skill:implement')).toBe(false);
+    expect(BUILTIN_COMMANDS.has('/skill:audit')).toBe(false);
+  });
+});
+
+describe('ACTIVITY_STATUS_KEY', () => {
+  it('uses a descriptive key for the footer status', () => {
+    expect(ACTIVITY_STATUS_KEY).toBe('worklog-activity');
+  });
+});
+
+describe('showActivity', () => {
+  it('sets the activity status with a prefix indicator', () => {
+    const setStatus = vi.fn();
+    const theme = { fg: vi.fn((_color: string, text: string) => text) };
+    const ctx = { ui: { setStatus, theme } };
+
+    showActivity(ctx as any, '/wl');
+
+    expect(setStatus).toHaveBeenCalledWith(
+      ACTIVITY_STATUS_KEY,
+      expect.stringContaining('⏵')
+    );
+    expect(setStatus).toHaveBeenCalledWith(
+      ACTIVITY_STATUS_KEY,
+      expect.stringContaining('/wl')
+    );
+  });
+
+  it('truncates long activity text to fit terminal width', () => {
+    const setStatus = vi.fn();
+    const theme = { fg: vi.fn((_color: string, text: string) => text) };
+    const ctx = { ui: { setStatus, theme } };
+
+    const longText = '/wl ' + 'a'.repeat(500);
+    showActivity(ctx as any, longText);
+
+    expect(setStatus).toHaveBeenCalledOnce();
+    const calledWith = setStatus.mock.calls[0][1] as string;
+    // Should not include the full 500 'a's
+    expect(calledWith.length).toBeLessThan(500);
+    // Should have the prefix
+    expect(calledWith).toContain('⏵');
+  });
+
+  it('applies theme accent color to the activity text', () => {
+    const setStatus = vi.fn();
+    const theme = { fg: vi.fn((_color: string, text: string) => text) };
+    const ctx = { ui: { setStatus, theme } };
+
+    showActivity(ctx as any, '/wl list');
+
+    expect(theme.fg).toHaveBeenCalledWith('accent', expect.any(String));
+  });
+});
+
+describe('clearActivity', () => {
+  it('clears the activity status with undefined', () => {
+    const setStatus = vi.fn();
+    const ctx = { ui: { setStatus } };
+
+    clearActivity(ctx as any);
+
+    expect(setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+  });
+});
+
+describe('registerActivityIndicator - input events', () => {
+  let pi: Partial<ExtensionAPI>;
+  let inputHandlers: Array<(event: InputEvent, ctx: ExtensionContext) => Promise<any>>;
+  let sessionStartHandlers: Array<(event: SessionStartEvent, ctx: ExtensionContext) => Promise<any>>;
+
+  beforeEach(() => {
+    inputHandlers = [];
+    sessionStartHandlers = [];
+    pi = {
+      on: vi.fn((event: string, handler: any) => {
+        if (event === 'input') {
+          inputHandlers.push(handler);
+        } else if (event === 'session_start') {
+          sessionStartHandlers.push(handler);
+        }
+      }) as any,
+    };
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function createMockContext(): ExtensionContext {
+    const setStatus = vi.fn();
+    const theme = { fg: vi.fn((_color: string, text: string) => text) };
+    return {
+      ui: { setStatus, theme } as unknown as ExtensionUIContext,
+      mode: 'tui',
+      hasUI: true,
+      cwd: '/test',
+      sessionManager: {
+        getBranch: vi.fn().mockReturnValue([]),
+        getEntries: vi.fn().mockReturnValue([]),
+      } as any,
+      model: undefined,
+      modelRegistry: {} as any,
+      isIdle: vi.fn().mockReturnValue(true),
+      isProjectTrusted: vi.fn().mockReturnValue(true),
+      signal: undefined,
+      abort: vi.fn(),
+      hasPendingMessages: vi.fn().mockReturnValue(false),
+      shutdown: vi.fn(),
+      getContextUsage: vi.fn(),
+      compact: vi.fn(),
+      getSystemPrompt: vi.fn().mockReturnValue(''),
+    };
+  }
+
+  it('sets indicator for /skill:name commands', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+    expect(inputHandlers.length).toBe(1);
+
+    const ctx = createMockContext();
+    const event: InputEvent = {
+      type: 'input',
+      text: '/skill:audit',
+      source: 'interactive',
+    };
+
+    const result = await inputHandlers[0](event, ctx);
+
+    expect(result).toEqual({ action: 'continue' });
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(
+      ACTIVITY_STATUS_KEY,
+      expect.stringContaining('skill:audit')
+    );
+  });
+
+  it('sets indicator for /skill:name with arguments', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+
+    const ctx = createMockContext();
+    const event: InputEvent = {
+      type: 'input',
+      text: '/skill:implement WL-123',
+      source: 'interactive',
+    };
+
+    await inputHandlers[0](event, ctx);
+
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(
+      ACTIVITY_STATUS_KEY,
+      expect.stringContaining('skill:implement')
+    );
+  });
+
+  it('clears indicator for free-form text (no / prefix)', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+
+    const ctx = createMockContext();
+    const event: InputEvent = {
+      type: 'input',
+      text: 'Hello, how can I help?',
+      source: 'interactive',
+    };
+
+    await inputHandlers[0](event, ctx);
+
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+  });
+
+  it('clears indicator for built-in Pi commands', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+
+    const ctx = createMockContext();
+    const event: InputEvent = {
+      type: 'input',
+      text: '/model',
+      source: 'interactive',
+    };
+
+    await inputHandlers[0](event, ctx);
+
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+  });
+
+  it('clears indicator for built-in Pi commands with arguments', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+
+    const ctx = createMockContext();
+    const event: InputEvent = {
+      type: 'input',
+      text: '/settings thinking high',
+      source: 'interactive',
+    };
+
+    await inputHandlers[0](event, ctx);
+
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+  });
+
+  it('clears indicator for /new command', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+
+    const ctx = createMockContext();
+    const event: InputEvent = {
+      type: 'input',
+      text: '/new',
+      source: 'interactive',
+    };
+
+    await inputHandlers[0](event, ctx);
+
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+  });
+
+  it('clears indicator for unknown /-prefixed text (not a command or skill)', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+
+    const ctx = createMockContext();
+    const event: InputEvent = {
+      type: 'input',
+      text: '/something-random',
+      source: 'interactive',
+    };
+
+    await inputHandlers[0](event, ctx);
+
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+  });
+
+  it('handles empty text gracefully', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+
+    const ctx = createMockContext();
+    const event: InputEvent = {
+      type: 'input',
+      text: '',
+      source: 'interactive',
+    };
+
+    await inputHandlers[0](event, ctx);
+
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+  });
+
+  it('handles whitespace-only text as free-form (clears)', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+
+    const ctx = createMockContext();
+    const event: InputEvent = {
+      type: 'input',
+      text: '   ',
+      source: 'interactive',
+    };
+
+    await inputHandlers[0](event, ctx);
+
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+  });
+});
+
+describe('registerActivityIndicator - session_start events', () => {
+  let pi: Partial<ExtensionAPI>;
+  let sessionStartHandlers: Array<(event: SessionStartEvent, ctx: ExtensionContext) => Promise<any>>;
+
+  beforeEach(() => {
+    sessionStartHandlers = [];
+    pi = {
+      on: vi.fn((event: string, handler: any) => {
+        if (event === 'session_start') {
+          sessionStartHandlers.push(handler);
+        }
+      }) as any,
+    };
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function createMockContext(): ExtensionContext {
+    const setStatus = vi.fn();
+    const theme = { fg: vi.fn((_color: string, text: string) => text) };
+    return {
+      ui: { setStatus, theme } as unknown as ExtensionUIContext,
+      mode: 'tui',
+      hasUI: true,
+      cwd: '/test',
+      sessionManager: {
+        getBranch: vi.fn().mockReturnValue([]),
+      } as any,
+      model: undefined,
+      modelRegistry: {} as any,
+      isIdle: vi.fn().mockReturnValue(true),
+      isProjectTrusted: vi.fn().mockReturnValue(true),
+      signal: undefined,
+      abort: vi.fn(),
+      hasPendingMessages: vi.fn().mockReturnValue(false),
+      shutdown: vi.fn(),
+      getContextUsage: vi.fn(),
+      compact: vi.fn(),
+      getSystemPrompt: vi.fn().mockReturnValue(''),
+    };
+  }
+
+  it('clears indicator on new session (reason: "new")', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+    expect(sessionStartHandlers.length).toBe(1);
+
+    const ctx = createMockContext();
+    const event: SessionStartEvent = {
+      type: 'session_start',
+      reason: 'new',
+    };
+
+    await sessionStartHandlers[0](event, ctx);
+
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+  });
+
+  it('clears indicator on startup (reason: "startup")', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+
+    const ctx = createMockContext();
+    const event: SessionStartEvent = {
+      type: 'session_start',
+      reason: 'startup',
+    };
+
+    await sessionStartHandlers[0](event, ctx);
+
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+  });
+
+  it('clears indicator on reload (reason: "reload")', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+
+    const ctx = createMockContext();
+    const event: SessionStartEvent = {
+      type: 'session_start',
+      reason: 'reload',
+    };
+
+    await sessionStartHandlers[0](event, ctx);
+
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+  });
+
+  it('clears indicator on fork (reason: "fork")', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+
+    const ctx = createMockContext();
+    const event: SessionStartEvent = {
+      type: 'session_start',
+      reason: 'fork',
+    };
+
+    await sessionStartHandlers[0](event, ctx);
+
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+  });
+
+  it('attempts to recover last command on resume (reason: "resume")', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+
+    const setStatus = vi.fn();
+    const theme = { fg: vi.fn((_color: string, text: string) => text) };
+    const ctx = {
+      ui: { setStatus, theme } as unknown as ExtensionUIContext,
+      mode: 'tui',
+      hasUI: true,
+      cwd: '/test',
+      sessionManager: {
+        getBranch: vi.fn().mockReturnValue([
+          {
+            type: 'message',
+            message: {
+              role: 'user',
+              content: [{ type: 'text', text: '/wl list' }],
+            },
+          },
+        ]),
+      } as any,
+      model: undefined,
+      modelRegistry: {} as any,
+      isIdle: vi.fn().mockReturnValue(true),
+      isProjectTrusted: vi.fn().mockReturnValue(true),
+      signal: undefined,
+      abort: vi.fn(),
+      hasPendingMessages: vi.fn().mockReturnValue(false),
+      shutdown: vi.fn(),
+      getContextUsage: vi.fn(),
+      compact: vi.fn(),
+      getSystemPrompt: vi.fn().mockReturnValue(''),
+    };
+
+    const event: SessionStartEvent = {
+      type: 'session_start',
+      reason: 'resume',
+      previousSessionFile: '/path/to/session.jsonl',
+    };
+
+    await sessionStartHandlers[0](event, ctx);
+
+    // Should have recovered the /wl command
+    expect(setStatus).toHaveBeenCalledWith(
+      ACTIVITY_STATUS_KEY,
+      expect.stringContaining('/wl')
+    );
+  });
+
+  it('attempts to recover skill command on resume', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+
+    const setStatus = vi.fn();
+    const theme = { fg: vi.fn((_color: string, text: string) => text) };
+    const ctx = {
+      ui: { setStatus, theme } as unknown as ExtensionUIContext,
+      mode: 'tui',
+      hasUI: true,
+      cwd: '/test',
+      sessionManager: {
+        getBranch: vi.fn().mockReturnValue([
+          {
+            type: 'message',
+            message: {
+              role: 'user',
+              content: [{ type: 'text', text: '/skill:audit WL-123' }],
+            },
+          },
+        ]),
+      } as any,
+      model: undefined,
+      modelRegistry: {} as any,
+      isIdle: vi.fn().mockReturnValue(true),
+      isProjectTrusted: vi.fn().mockReturnValue(true),
+      signal: undefined,
+      abort: vi.fn(),
+      hasPendingMessages: vi.fn().mockReturnValue(false),
+      shutdown: vi.fn(),
+      getContextUsage: vi.fn(),
+      compact: vi.fn(),
+      getSystemPrompt: vi.fn().mockReturnValue(''),
+    };
+
+    const event: SessionStartEvent = {
+      type: 'session_start',
+      reason: 'resume',
+    };
+
+    await sessionStartHandlers[0](event, ctx);
+
+    // Should have recovered the skill command
+    expect(setStatus).toHaveBeenCalledWith(
+      ACTIVITY_STATUS_KEY,
+      expect.stringContaining('skill:audit')
+    );
+  });
+
+  it('clears indicator on resume if no recoverable command found', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+
+    const ctx = createMockContext();
+    const event: SessionStartEvent = {
+      type: 'session_start',
+      reason: 'resume',
+    };
+
+    await sessionStartHandlers[0](event, ctx);
+
+    // No user commands in history — should clear
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+  });
+
+  it('clears indicator on resume if last user entry is free-form text', async () => {
+    registerActivityIndicator(pi as ExtensionAPI);
+
+    const setStatus = vi.fn();
+    const theme = { fg: vi.fn((_color: string, text: string) => text) };
+    const ctx = {
+      ui: { setStatus, theme } as unknown as ExtensionUIContext,
+      mode: 'tui',
+      hasUI: true,
+      cwd: '/test',
+      sessionManager: {
+        getBranch: vi.fn().mockReturnValue([
+          {
+            type: 'message',
+            message: {
+              role: 'user',
+              content: [{ type: 'text', text: 'Please fix the bug' }],
+            },
+          },
+        ]),
+      } as any,
+      model: undefined,
+      modelRegistry: {} as any,
+      isIdle: vi.fn().mockReturnValue(true),
+      isProjectTrusted: vi.fn().mockReturnValue(true),
+      signal: undefined,
+      abort: vi.fn(),
+      hasPendingMessages: vi.fn().mockReturnValue(false),
+      shutdown: vi.fn(),
+      getContextUsage: vi.fn(),
+      compact: vi.fn(),
+      getSystemPrompt: vi.fn().mockReturnValue(''),
+    };
+
+    const event: SessionStartEvent = {
+      type: 'session_start',
+      reason: 'resume',
+    };
+
+    await sessionStartHandlers[0](event, ctx);
+
+    // Free-form text should not be recovered
+    expect(setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+  });
+});
+
+describe('registerActivityIndicator - wiring', () => {
+  it('registers input and session_start event handlers', () => {
+    const on = vi.fn();
+    const pi = { on } as unknown as ExtensionAPI;
+
+    registerActivityIndicator(pi);
+
+    expect(on).toHaveBeenCalledWith('input', expect.any(Function));
+    expect(on).toHaveBeenCalledWith('session_start', expect.any(Function));
+  });
+
+  it('handler registration order is preserved (input first, then session_start)', () => {
+    const on = vi.fn();
+    const pi = { on } as unknown as ExtensionAPI;
+
+    registerActivityIndicator(pi);
+
+    expect(on.mock.calls[0][0]).toBe('input');
+    expect(on.mock.calls[1][0]).toBe('session_start');
+  });
+});

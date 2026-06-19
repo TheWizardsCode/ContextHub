@@ -8,6 +8,7 @@ import { applyStageColour, type PiTheme } from './worklog-helpers.js';
 import { truncateToTerminalWidth, wrapToTerminalWidth, visibleWidth } from './terminal-utils.js';
 import { type ShortcutRegistry, loadShortcutConfig } from './shortcut-config.js';
 import { loadSettings, type Settings, DEFAULT_SETTINGS } from './settings-config.js';
+import { registerActivityIndicator, showActivity, clearActivity } from './activity-indicator.js';
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 
 const execFileAsync = promisify(execFile);
@@ -148,6 +149,14 @@ interface BrowseUi {
   onTerminalInput?: (handler: TerminalInputHandler) => () => void;
   /** Return the height of the usable rendering area (terminal rows minus header/footer). */
   getHeight?: () => number;
+  /** Set status text in the footer/status bar. Pass undefined to clear. */
+  setStatus?: (key: string, text: string | undefined) => void;
+  /** Access to the current theme for styling. */
+  readonly theme?: {
+    fg: (color: string, text: string) => string;
+    bg: (color: string, text: string) => string;
+    bold: (text: string) => string;
+  };
 }
 
 // Use the real Pi types for runtime, but declare a compatibility type for testing
@@ -1316,6 +1325,8 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     : (items: WorklogBrowseItem[], ctx: BrowseContext, onSelectionChange: SelectionChangeHandler) => defaultChooseWorkItem(items, ctx, onSelectionChange, shortcutRegistry);
 
   return function registerWorklogBrowseExtension(pi: PiLike): void {
+    // ── Register activity indicator for commands and skills ──────
+    registerActivityIndicator(pi);
     const runBrowseFlow = async (ctx: BrowseContext, stage?: string): Promise<void> => {
       try {
         const itemCount = currentSettings.browseItemCount;
@@ -1510,6 +1521,8 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     pi.registerCommand('wl', {
       description: `Browse next ${currentSettings.browseItemCount} work items, optionally filtered by stage and settings`,
       handler: async (_args: string, ctx: BrowseContext) => {
+        // Set the activity indicator for our own /wl command (AC 1)
+        showActivity(ctx as any, '/wl');
         const trimmed = _args?.trim() ?? '';
         if (trimmed.length === 0) {
           await runBrowseFlow(ctx);
@@ -1542,6 +1555,8 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     pi.registerShortcut('ctrl+shift+b', {
       description: `Browse next ${currentSettings.browseItemCount} recommended work items and preview selected title`,
       handler: async (ctx: BrowseContext) => {
+        // Set the activity indicator for our shortcut command (AC 1)
+        showActivity(ctx as any, '/wl');
         await runBrowseFlow(ctx);
       },
     });
