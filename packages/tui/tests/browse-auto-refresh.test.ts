@@ -306,8 +306,7 @@ describe('Browse list auto-refresh', () => {
     expect(reFetchItems).toHaveBeenCalledTimes(1);
   });
 
-  it('does not auto-refresh while navigating children (navStack non-empty)', async () => {
-    // Simulate items with children + a fetchChildren mock
+  it('refreshes children via fetchChildren while navigating children (navStack non-empty)', async () => {
     const rootItems = [
       { id: 'WL-001', title: 'Parent item', status: 'open', childCount: 2 },
       { id: 'WL-002', title: 'Standalone item', status: 'open' },
@@ -316,7 +315,14 @@ describe('Browse list auto-refresh', () => {
       { id: 'WL-010', title: 'Child one', status: 'open' },
       { id: 'WL-011', title: 'Child two', status: 'open' },
     ];
-    const fetchChildren = vi.fn().mockResolvedValue(childItems);
+    const updatedChildItems = [
+      { id: 'WL-011', title: 'Child two (updated)', status: 'open' },
+      { id: 'WL-012', title: 'New child', status: 'open' },
+    ];
+    const fetchChildren = vi.fn();
+    // First call returns initial children, subsequent calls return updated
+    fetchChildren.mockResolvedValueOnce(childItems);
+    fetchChildren.mockResolvedValue(updatedChildItems);
 
     const { ctx, getWidget } = createMockContext();
 
@@ -327,30 +333,41 @@ describe('Browse list auto-refresh', () => {
     defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, reFetchItems, fetchChildren);
     const widget = getWidget()!;
 
-    // Initial render shows root items
-    let lines = widget.render(80);
-    expect(lines.join('\n')).toContain('Parent item');
-
     // Navigate into children by pressing Enter on parent item (index 0)
     widget.handleInput!('\r');
     await vi.advanceTimersByTimeAsync(10);
 
     // Verify we're viewing children
-    lines = widget.render(80);
+    let lines = widget.render(80);
     expect(lines.join('\n')).toContain('Child one');
+    expect(lines.join('\n')).toContain('Child two');
 
-    // Advance timers by 5 seconds — auto-refresh should NOT fire (navStack is non-empty)
+    // Verify fetchChildren was called with the correct parent ID
+    expect(fetchChildren).toHaveBeenCalledWith('WL-001');
+    const firstCallCount = fetchChildren.mock.calls.length;
+
+    // Advance timers by 5 seconds — auto-refresh should fire and call fetchChildren
     await vi.advanceTimersByTimeAsync(5000);
 
-    // reFetchItems should NOT have been called while viewing children
+    // fetchChildren should have been called again with the same parent ID
+    expect(fetchChildren).toHaveBeenCalledTimes(firstCallCount + 1);
+    expect(fetchChildren).toHaveBeenLastCalledWith('WL-001');
+
+    // reFetchItems should NOT have been called (we are not at root level)
     expect(reFetchItems).not.toHaveBeenCalled();
 
-    // The children should still be visible
+    // The updated children should now be visible
     lines = widget.render(80);
-    expect(lines.join('\n')).toContain('Child one');
+    const rendered = lines.join('\n');
+    expect(rendered).toContain('Child two (updated)');
+    expect(rendered).toContain('New child');
+    // Original items that are no longer in the refreshed set should be gone
+    expect(rendered).not.toContain('Child one');
+    // The ".." entry should still be present
+    expect(rendered).toContain('..');
   });
 
-  it('resumes auto-refresh after navigating back from children to root level', async () => {
+  it('uses reFetchItems at root level but fetchChildren when viewing children', async () => {
     const rootItems = [
       { id: 'WL-001', title: 'Parent item', status: 'open', childCount: 2 },
       { id: 'WL-002', title: 'Standalone item', status: 'open' },
@@ -359,7 +376,8 @@ describe('Browse list auto-refresh', () => {
       { id: 'WL-010', title: 'Child one', status: 'open' },
       { id: 'WL-011', title: 'Child two', status: 'open' },
     ];
-    const fetchChildren = vi.fn().mockResolvedValue(childItems);
+    const fetchChildren = vi.fn();
+    fetchChildren.mockResolvedValue(childItems);
 
     const { ctx, getWidget } = createMockContext();
 
@@ -374,15 +392,18 @@ describe('Browse list auto-refresh', () => {
     widget.handleInput!('\r');
     await vi.advanceTimersByTimeAsync(10);
 
-    // Navigate back to root via Escape
-    widget.handleInput!('\u001b');
-
-    // Now advance timers by 5 seconds — auto-refresh SHOULD fire
+    // Advance timers — should use fetchChildren, not reFetchItems
     await vi.advanceTimersByTimeAsync(5000);
 
-    expect(reFetchItems).toHaveBeenCalledTimes(1);
+    expect(fetchChildren).toHaveBeenCalledWith('WL-001');
+    expect(reFetchItems).not.toHaveBeenCalled();
 
-    // The refreshed items should be reflected
+    // Navigate back to root via Escape, then advance timers
+    widget.handleInput!('\u001b');
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // Now at root level, reFetchItems SHOULD be called
+    expect(reFetchItems).toHaveBeenCalledTimes(1);
     const lines = widget.render(80);
     expect(lines.join('\n')).toContain('Refreshed after root');
   });

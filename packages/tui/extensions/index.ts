@@ -629,12 +629,28 @@ export async function defaultChooseWorkItem(
         // disrupting the user's input sequence.
         if (pendingChordLeader !== null) return;
 
-        // Skip refresh while viewing children (navStack is non-empty) to
-        // avoid overwriting child items with root-level results.
-        if (navStack.length > 0) return;
-
         try {
-          const newItems = await reFetchItems();
+          let newItems: WorklogBrowseItem[];
+
+          if (navStack.length > 0) {
+            // Viewing children — re-fetch children of the current parent
+            // so the child list stays up-to-date (new children appear,
+            // completed children disappear, re-sorted items reposition).
+            const parentEntry = navStack[navStack.length - 1];
+            const parentId = parentEntry.items[parentEntry.selectedIndex]?.id;
+            if (!parentId || !fetchChildren) return;
+
+            const childResults = await fetchChildren(parentId);
+            // Keep the synthetic ".." entry at the top
+            newItems = [
+              { id: '..', title: '..', status: 'open' },
+              ...childResults,
+            ];
+          } else {
+            // At root level — re-fetch from wl next (sorted results)
+            newItems = await reFetchItems();
+          }
+
           if (newItems.length === 0) return;
 
           // Preserve the currently selected item by ID
