@@ -229,9 +229,31 @@ async function showActivityWithTitleLookup(ctx: StatusContext, text: string): Pr
   const title = await resolveWorkItemTitle(id);
   if (!title) return;
 
-  // Replace with ID + title format, truncated to fit terminal width
-  const display = `${id} ${title}`;
+  // Replace with command + ID + title format, truncated to fit terminal width.
+  // The command is formatted via formatCommandContext (e.g., /skill:audit → audit).
+  const commandCtx = formatCommandContext(text);
+  const display = `${commandCtx} ${id} ${title}`;
   showActivity(ctx, display);
+}
+
+/**
+ * Format the command context from the input text for display.
+ *
+ * Extracts the first word (command) from the input text. If the command
+ * starts with `/skill:`, the prefix is stripped and only the skill name
+ * is returned. For all other commands, the command is returned as-is.
+ *
+ * @example
+ * formatCommandContext('/intake WL-123')       // => '/intake'
+ * formatCommandContext('/skill:audit WL-123')  // => 'audit'
+ * formatCommandContext('/implement WL-123')    // => '/implement'
+ */
+export function formatCommandContext(text: string): string {
+  const cmd = extractCommand(text);
+  if (cmd.startsWith('/skill:')) {
+    return cmd.slice(7); // strip "/skill:" prefix
+  }
+  return cmd;
 }
 
 /**
