@@ -305,4 +305,132 @@ describe('Browse list auto-refresh', () => {
     // reFetchItems should have been called after chord was cancelled
     expect(reFetchItems).toHaveBeenCalledTimes(1);
   });
+
+  it('does not auto-refresh while navigating children (navStack non-empty)', async () => {
+    // Simulate items with children + a fetchChildren mock
+    const rootItems = [
+      { id: 'WL-001', title: 'Parent item', status: 'open', childCount: 2 },
+      { id: 'WL-002', title: 'Standalone item', status: 'open' },
+    ];
+    const childItems = [
+      { id: 'WL-010', title: 'Child one', status: 'open' },
+      { id: 'WL-011', title: 'Child two', status: 'open' },
+    ];
+    const fetchChildren = vi.fn().mockResolvedValue(childItems);
+
+    const { ctx, getWidget } = createMockContext();
+
+    reFetchItems.mockResolvedValue([
+      { id: 'WL-099', title: 'Refreshed root items', status: 'open' },
+    ]);
+
+    defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, reFetchItems, fetchChildren);
+    const widget = getWidget()!;
+
+    // Initial render shows root items
+    let lines = widget.render(80);
+    expect(lines.join('\n')).toContain('Parent item');
+
+    // Navigate into children by pressing Enter on parent item (index 0)
+    widget.handleInput!('\r');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Verify we're viewing children
+    lines = widget.render(80);
+    expect(lines.join('\n')).toContain('Child one');
+
+    // Advance timers by 5 seconds — auto-refresh should NOT fire (navStack is non-empty)
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // reFetchItems should NOT have been called while viewing children
+    expect(reFetchItems).not.toHaveBeenCalled();
+
+    // The children should still be visible
+    lines = widget.render(80);
+    expect(lines.join('\n')).toContain('Child one');
+  });
+
+  it('resumes auto-refresh after navigating back from children to root level', async () => {
+    const rootItems = [
+      { id: 'WL-001', title: 'Parent item', status: 'open', childCount: 2 },
+      { id: 'WL-002', title: 'Standalone item', status: 'open' },
+    ];
+    const childItems = [
+      { id: 'WL-010', title: 'Child one', status: 'open' },
+      { id: 'WL-011', title: 'Child two', status: 'open' },
+    ];
+    const fetchChildren = vi.fn().mockResolvedValue(childItems);
+
+    const { ctx, getWidget } = createMockContext();
+
+    reFetchItems.mockResolvedValue([
+      { id: 'WL-099', title: 'Refreshed after root', status: 'open' },
+    ]);
+
+    defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, reFetchItems, fetchChildren);
+    const widget = getWidget()!;
+
+    // Navigate into children
+    widget.handleInput!('\r');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Navigate back to root via Escape
+    widget.handleInput!('\u001b');
+
+    // Now advance timers by 5 seconds — auto-refresh SHOULD fire
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(reFetchItems).toHaveBeenCalledTimes(1);
+
+    // The refreshed items should be reflected
+    const lines = widget.render(80);
+    expect(lines.join('\n')).toContain('Refreshed after root');
+  });
+
+  it('properly applies sorted order from wl next on auto-refresh', async () => {
+    const { ctx, getWidget } = createMockContext();
+
+    // Initial items in unsorted order (simulating how they might arrive)
+    // The auto-refresh should replace with correctly sorted items
+    defaultChooseWorkItem(items, ctx, vi.fn(), undefined, reFetchItems);
+    const widget = getWidget()!;
+
+    // Render initial items and capture display order
+    let lines = widget.render(80);
+    const initialRendered = lines.join('\n');
+    const initialOrder = [
+      initialRendered.indexOf('First item'),
+      initialRendered.indexOf('Second item'),
+      initialRendered.indexOf('Third item'),
+    ];
+
+    // Simulate wl next returning items in a different order (sorted)
+    reFetchItems.mockResolvedValue([
+      { id: 'WL-003', title: 'Third item', status: 'open' },  // was last, now first
+      { id: 'WL-001', title: 'First item', status: 'open' },
+      { id: 'WL-002', title: 'Second item', status: 'in_progress' },  // moved to end (in_progress, different priority)
+    ]);
+
+    // Advance timers by 5 seconds to trigger refresh
+    await vi.advanceTimersByTimeAsync(5000);
+
+    lines = widget.render(80);
+    const rendered = lines.join('\n');
+
+    // The order in the rendered list should match the new sorted order
+    const orderAfter = [
+      rendered.indexOf('Third item'),
+      rendered.indexOf('First item'),
+      rendered.indexOf('Second item'),
+    ];
+
+    // Each item should appear before the next one in the sorted order
+    expect(orderAfter[0]).toBeLessThan(orderAfter[1]);
+    expect(orderAfter[1]).toBeLessThan(orderAfter[2]);
+
+    // All three items should still be present
+    expect(rendered).toContain('First item');
+    expect(rendered).toContain('Second item');
+    expect(rendered).toContain('Third item');
+  });
 });

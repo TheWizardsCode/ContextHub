@@ -629,6 +629,10 @@ export async function defaultChooseWorkItem(
         // disrupting the user's input sequence.
         if (pendingChordLeader !== null) return;
 
+        // Skip refresh while viewing children (navStack is non-empty) to
+        // avoid overwriting child items with root-level results.
+        if (navStack.length > 0) return;
+
         try {
           const newItems = await reFetchItems();
           if (newItems.length === 0) return;
