@@ -74,9 +74,12 @@ work-item hierarchy without leaving the browse dialog.
 6. At root level, pressing Enter on a leaf item opens the detail view.
 7. Escape at root level closes the browse overlay.
 
-**Note:** The auto-refresh feature is automatically disabled while you
-are navigating within child items to prevent disrupting your current
-view. Refresh resumes when you return to the root level.
+**Note:** When navigating within child items, the auto-refresh feature
+calls `fetchChildren()` to re-fetch the child items of the current parent
+in-place, rather than refreshing the root-level list. This ensures new
+children appear, completed children disappear, and re-sorted items are
+repositioned — all while staying at the same navigation level. At the
+root level, the standard `wl next` refresh is used.
 
 ### `/wl settings` Command
 
