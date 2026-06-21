@@ -840,6 +840,94 @@ describe('Browse list auto-refresh', () => {
     expect(getDone()).not.toHaveBeenCalled();
   });
 
+  it('dispatches non-item single-key shortcut when items are empty', async () => {
+    // 'c' for create (no <id> in command) should work even when list is empty
+    const entries: ShortcutEntry[] = [
+      { key: 'c', command: '/intake', view: 'list' },
+      { key: 'i', command: '/skill:implement <id>', view: 'list' },
+    ];
+    const registry = new ShortcutRegistry(entries);
+    const { ctx, getWidget, getDone } = createMockContext();
+    const emptyItems: WorklogBrowseItem[] = [];
+
+    defaultChooseWorkItem(emptyItems, ctx, vi.fn(), registry, reFetchItems);
+    const widget = getWidget()!;
+
+    // Press 'c' (create — no <id>) — should dispatch
+    expect(() => widget.handleInput!('c')).not.toThrow();
+    expect(getDone()).toHaveBeenCalledWith({
+      type: 'shortcut',
+      command: '/intake',
+    });
+  });
+
+  it('enters chord leader pending state for non-item chords when items are empty', async () => {
+    // 'f' is a chord leader for filter chords (f-i, f-n, f-p, f-r)
+    // None of these chords contain <id>, so 'f' should enter pending state
+    const chordEntries: ShortcutEntry[] = [
+      { chord: ['f', 'i'], command: '/wl idea', view: 'list' },
+      { chord: ['u', 'p'], command: 'update-priority <id>', view: 'list' },
+    ];
+    const registry = new ShortcutRegistry(chordEntries);
+    const { ctx, getWidget, getDone } = createMockContext();
+    const emptyItems: WorklogBrowseItem[] = [];
+
+    defaultChooseWorkItem(emptyItems, ctx, vi.fn(), registry, reFetchItems);
+    const widget = getWidget()!;
+
+    // Press chord leader 'f' (filter — no <id> chords) — should enter pending
+    expect(() => widget.handleInput!('f')).not.toThrow();
+    expect(getDone()).not.toHaveBeenCalled();
+
+    // Complete the chord with 'i' — should dispatch /wl idea
+    expect(() => widget.handleInput!('i')).not.toThrow();
+    expect(getDone()).toHaveBeenCalledWith({
+      type: 'shortcut',
+      command: '/wl idea',
+    });
+  });
+
+  it('does NOT enter chord leader pending state for item-only chords when items are empty', async () => {
+    // 'u' is a chord leader whose ALL chords require <id> (u-p, u-s, u-t)
+    // When items is empty, 'u' should NOT enter pending state
+    const chordEntries: ShortcutEntry[] = [
+      { chord: ['u', 'p'], command: 'update-priority <id>', view: 'list' },
+      { chord: ['u', 's'], command: 'update-stage <id>', view: 'list' },
+    ];
+    const registry = new ShortcutRegistry(chordEntries);
+    const { ctx, getWidget, getDone } = createMockContext();
+    const emptyItems: WorklogBrowseItem[] = [];
+
+    defaultChooseWorkItem(emptyItems, ctx, vi.fn(), registry, reFetchItems);
+    const widget = getWidget()!;
+
+    // Press 'u' — should NOT enter pending (all u-* chords need <id>)
+    // Since not a registered single-key shortcut either, it should fall
+    // through to the navigation handler (no-op for empty list)
+    expect(() => widget.handleInput!('u')).not.toThrow();
+    expect(getDone()).not.toHaveBeenCalled();
+  });
+
+  it('shows non-item shortcuts in help text when items are empty', async () => {
+    const entries: ShortcutEntry[] = [
+      { key: 'c', command: '/intake', view: 'list', label: 'create' },
+      { key: 'i', command: '/skill:implement <id>', view: 'list', label: 'implement' },
+    ];
+    const registry = new ShortcutRegistry(entries);
+    const { ctx, getWidget, getDone } = createMockContext();
+    const emptyItems: WorklogBrowseItem[] = [];
+
+    defaultChooseWorkItem(emptyItems, ctx, vi.fn(), registry, reFetchItems);
+    const widget = getWidget()!;
+
+    const lines = widget.render(80);
+    const rendered = lines.join('\n');
+    // 'c' (create — no <id>) should appear in help text
+    expect(rendered).toContain('c:create');
+    // 'i' (implement — has <id>) should NOT appear
+    expect(rendered).not.toContain('i:implement');
+  });
+
   it('pressing Escape closes the overlay when items are empty', async () => {
     const { ctx, getWidget, getDone } = createMockContext();
     const emptyItems: WorklogBrowseItem[] = [];

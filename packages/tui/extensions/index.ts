@@ -821,10 +821,10 @@ export async function defaultChooseWorkItem(
 
         // Build help text: if a chord leader is pending, show chord
         // completions; otherwise show normal shortcut hints.
-        // When the list is empty no shortcuts can be dispatched so help
-        // text is suppressed.
+        // When the list is empty, only shortcuts that don't require a
+        // selected item (commands without <id>) are shown.
         let helpText = '';
-        if (!isEmpty && shortcutRegistry) {
+        if (shortcutRegistry) {
           const selectedStage = items[selectedIndex]?.stage;
 
           if (pendingChordLeader !== null) {
@@ -836,6 +836,9 @@ export async function defaultChooseWorkItem(
             if (chords.length > 0) {
               const hints = chords
                 .filter(c => {
+                  // When list is empty, only show chords that don't
+                  // need a selected item (commands without <id>)
+                  if (isEmpty && c.command.includes('<id>')) return false;
                   // Filter by stage as well
                   if (selectedStage !== undefined && c.stages !== undefined && c.stages.length > 0) {
                     return c.stages.includes(selectedStage);
@@ -870,7 +873,13 @@ export async function defaultChooseWorkItem(
             // so the line doesn't get cluttered with repeats.
             const relevantEntries = shortcutRegistry
               .getEntriesForStage(selectedStage)
-              .filter(e => e.view === 'list' || e.view === 'both');
+              .filter(e => e.view === 'list' || e.view === 'both')
+              .filter(e => {
+                // When list is empty, only show shortcuts that don't
+                // need a selected item (commands without <id>)
+                if (isEmpty && e.command.includes('<id>')) return false;
+                return true;
+              });
             if (relevantEntries.length > 0) {
               const seenChordLeaders = new Set<string>();
               helpText = relevantEntries
@@ -940,13 +949,18 @@ export async function defaultChooseWorkItem(
           );
           if (chordCommand) {
             pendingChordLeader = null;
-            // Guard against empty items — no item to dispatch shortcut on
-            const chordTarget = items[selectedIndex];
-            if (!chordTarget) return;
-            _done({
-              type: 'shortcut' as const,
-              command: chordCommand.replace('<id>', chordTarget.id),
-            });
+            if (chordCommand.includes('<id>')) {
+              // Item-specific chord — guard against empty items
+              const chordTarget = items[selectedIndex];
+              if (!chordTarget) return;
+              _done({
+                type: 'shortcut' as const,
+                command: chordCommand.replace('<id>', chordTarget.id),
+              });
+            } else {
+              // Non-item chord — dispatch directly (e.g. filter chords)
+              _done({ type: 'shortcut' as const, command: chordCommand });
+            }
             return;
           }
           // Unrecognised second key — cancel
@@ -963,10 +977,15 @@ export async function defaultChooseWorkItem(
           // 1) Try single-key shortcut first
           const command = shortcutRegistry.lookup(lookupKey, 'list', selectedStage);
           if (command) {
-            // Guard against empty items — no item to dispatch shortcut on
-            const shortcutTarget = items[selectedIndex];
-            if (!shortcutTarget) return;
-            _done({ type: 'shortcut' as const, command: command.replace('<id>', shortcutTarget.id) });
+            if (command.includes('<id>')) {
+              // Item-specific shortcut — guard against empty items
+              const shortcutTarget = items[selectedIndex];
+              if (!shortcutTarget) return;
+              _done({ type: 'shortcut' as const, command: command.replace('<id>', shortcutTarget.id) });
+            } else {
+              // Non-item shortcut — dispatch directly (e.g. create, search)
+              _done({ type: 'shortcut' as const, command });
+            }
             return;
           }
 
@@ -974,7 +993,9 @@ export async function defaultChooseWorkItem(
           const chords = shortcutRegistry.getChordByLeader(lookupKey, 'list');
           if (chords.length > 0) {
             // Only enter pending state if chords are applicable for this stage
+            // When list is empty, only allow chords that don't need an item
             const applicableChords = chords.filter(c => {
+              if (items.length === 0 && c.command.includes('<id>')) return false;
               if (selectedStage !== undefined && c.stages !== undefined && c.stages.length > 0) {
                 return c.stages.includes(selectedStage);
               }
