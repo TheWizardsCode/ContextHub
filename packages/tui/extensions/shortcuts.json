@@ -79,5 +79,33 @@
     "view": "both",
     "label": "Search",
     "description": "Search all workitems for keyword(s)."
+  },
+  {
+    "chord": ["f", "i"],
+    "command": "/wl idea",
+    "view": "both",
+    "label": "filter idea",
+    "description": "Filter browse list to items in the idea stage."
+  },
+  {
+    "chord": ["f", "n"],
+    "command": "/wl intake",
+    "view": "both",
+    "label": "filter intake",
+    "description": "Filter browse list to items in the intake_complete stage."
+  },
+  {
+    "chord": ["f", "p"],
+    "command": "/wl plan",
+    "view": "both",
+    "label": "filter plan",
+    "description": "Filter browse list to items in the plan_complete stage."
+  },
+  {
+    "chord": ["f", "r"],
+    "command": "/wl review",
+    "view": "both",
+    "label": "filter in_review",
+    "description": "Filter browse list to items in the in_review stage."
   }
 ]

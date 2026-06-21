@@ -1649,6 +1649,7 @@ describe('Worklog browse pi extension', () => {
       const completions = commandOpts.getArgumentCompletions('');
 
       expect(completions).toEqual([
+        { value: 'idea', label: 'idea' },
         { value: 'in_progress', label: 'in_progress' },
         { value: 'in_review', label: 'in_review' },
         { value: 'intake', label: 'intake' },

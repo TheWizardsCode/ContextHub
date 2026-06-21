@@ -65,6 +65,7 @@ export const STAGE_MAP: Record<string, string> = {
   progress: 'in_progress',
   review: 'in_review',
   // Canonical names mapped to themselves for validation
+  idea: 'idea',
   intake_complete: 'intake_complete',
   plan_complete: 'plan_complete',
   in_progress: 'in_progress',

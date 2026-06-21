@@ -157,6 +157,7 @@ The `/wl` slash command browses work items recommended by the `wl next` algorith
 ```
 /wl              # Show unfiltered work items (count from settings)
 /wl settings     # Open the settings overlay
+/wl idea         # Show items in idea stage
 /wl intake       # Show items in intake_complete stage
 /wl plan         # Show items in plan_complete stage
 /wl progress     # Show items in in_progress stage
@@ -174,7 +175,7 @@ The `/wl` slash command browses work items recommended by the `wl next` algorith
 | `progress`| `in_progress` |
 | `review`  | `in_review` |
 
-All canonical stage names (`in_progress`, `in_review`, `intake_complete`, `plan_complete`) are also recognised directly.
+All canonical stage names (`idea`, `in_progress`, `in_review`, `intake_complete`, `plan_complete`) are also recognised directly.
 
 ### Invalid Values
 
@@ -270,6 +271,10 @@ Chord shortcuts let you dispatch commands with a two-key sequence. Press the **l
 |-------|---------|-------------|
 | `u-p` | `!!wl update --priority <id>` | Update the priority of the selected work item |
 | `u-t` | `!!wl update --title <id>` | Update the title of the selected work item |
+| `f-i` | `/wl idea` | Filter browse list to items in the idea stage |
+| `f-n` | `/wl intake` | Filter browse list to items in the intake_complete stage |
+| `f-p` | `/wl plan` | Filter browse list to items in the plan_complete stage |
+| `f-r` | `/wl review` | Filter browse list to items in the in_review stage |
 
 #### Chord Help Text
 
@@ -308,6 +313,10 @@ The same reserved navigation keys (`g`, `G`, ` `) that cannot be used as shortcu
 | key | `a` | `audit <id>` | both | (always available) | audit | Run an audit on the selected work item |
 | chord | `u-p` | `!!wl update --priority <id>` | both | (always available) | update priority | Update the priority of the selected work item |
 | chord | `u-t` | `!!wl update --title <id>` | both | (always available) | update title | Update the title of the selected work item |
+| chord | `f-i` | `/wl idea` | both | (always available) | filter idea | Filter browse list to items in the idea stage |
+| chord | `f-n` | `/wl intake` | both | (always available) | filter intake | Filter browse list to items in the intake_complete stage |
+| chord | `f-p` | `/wl plan` | both | (always available) | filter plan | Filter browse list to items in the plan_complete stage |
+| chord | `f-r` | `/wl review` | both | (always available) | filter in_review | Filter browse list to items in the in_review stage |
 
 ### Help Text Filtering
 

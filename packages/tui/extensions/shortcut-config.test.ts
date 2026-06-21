@@ -206,7 +206,7 @@ describe('loadShortcutConfig', () => {
   it('loads valid entries from shortcuts.json', () => {
     const registry = loadShortcutConfig();
     const entries = registry.getEntries();
-    expect(entries).toHaveLength(11);
+    expect(entries).toHaveLength(15);
 
     const createEntry = entries.find(e => e.key === 'c');
     expect(createEntry).toBeDefined();
@@ -248,7 +248,7 @@ describe('loadShortcutConfig', () => {
     expect(auditEntry!.label).toBe('audit');
     expect(auditEntry!.description).toBe('Run an audit on the selected work item');
 
-    expect(entries.filter(e => e.key === '').length).toBe(5); // 5 chord entries have empty key
+    expect(entries.filter(e => e.key === '').length).toBe(9); // 9 chord entries have empty key
   });
 
   it('has no duplicate key+view or chord+view combinations in shortcuts.json', () => {
@@ -312,7 +312,7 @@ describe('loadShortcutConfig', () => {
     const entries = registry.getEntries();
 
     const upChords = registry.getChordEntries();
-    expect(upChords).toHaveLength(5);
+    expect(upChords).toHaveLength(9);
 
     const upEntry = upChords.find((e: any) =>
       Array.isArray((e as any).chord) && (e as any).chord[0] === 'u' && (e as any).chord[1] === 'p',
@@ -355,6 +355,43 @@ describe('loadShortcutConfig', () => {
     expect(xdEntry!.view).toBe('both');
     expect(xdEntry!.label).toBe('close deleted');
     expect(xdEntry!.description).toBe('Delete the work item.');
+
+    // New stage filter chord entries (f-i, f-n, f-p, f-r)
+    const fiEntry = upChords.find((e: any) =>
+      Array.isArray((e as any).chord) && (e as any).chord[0] === 'f' && (e as any).chord[1] === 'i',
+    );
+    expect(fiEntry).toBeDefined();
+    expect((fiEntry as any).chord).toEqual(['f', 'i']);
+    expect(fiEntry!.command).toBe('/wl idea');
+    expect(fiEntry!.view).toBe('both');
+    expect(fiEntry!.label).toBe('filter idea');
+
+    const fnEntry = upChords.find((e: any) =>
+      Array.isArray((e as any).chord) && (e as any).chord[0] === 'f' && (e as any).chord[1] === 'n',
+    );
+    expect(fnEntry).toBeDefined();
+    expect((fnEntry as any).chord).toEqual(['f', 'n']);
+    expect(fnEntry!.command).toBe('/wl intake');
+    expect(fnEntry!.view).toBe('both');
+    expect(fnEntry!.label).toBe('filter intake');
+
+    const fpEntry = upChords.find((e: any) =>
+      Array.isArray((e as any).chord) && (e as any).chord[0] === 'f' && (e as any).chord[1] === 'p',
+    );
+    expect(fpEntry).toBeDefined();
+    expect((fpEntry as any).chord).toEqual(['f', 'p']);
+    expect(fpEntry!.command).toBe('/wl plan');
+    expect(fpEntry!.view).toBe('both');
+    expect(fpEntry!.label).toBe('filter plan');
+
+    const frEntry = upChords.find((e: any) =>
+      Array.isArray((e as any).chord) && (e as any).chord[0] === 'f' && (e as any).chord[1] === 'r',
+    );
+    expect(frEntry).toBeDefined();
+    expect((frEntry as any).chord).toEqual(['f', 'r']);
+    expect(frEntry!.command).toBe('/wl review');
+    expect(frEntry!.view).toBe('both');
+    expect(frEntry!.label).toBe('filter in_review');
   });
 
   it('returns empty registry for unregistered key', () => {
