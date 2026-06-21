@@ -26,6 +26,7 @@ const mockWriteFileSync = vi.hoisted(() => vi.fn());
 vi.mock('node:fs', () => ({
   readFileSync: mockReadFileSync,
   writeFileSync: mockWriteFileSync,
+  realpathSync: vi.fn((p) => p),
 }));
 
 import {
