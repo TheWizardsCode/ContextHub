@@ -361,7 +361,7 @@ describe('Worklog browse pi extension', () => {
       'WL-1 | tags: —',
     ]);
   });
-  it('reports explicit empty state when no items exist', async () => {
+  it('opens browse overlay with empty list and auto-refresh instead of showing notification', async () => {
     const listWorkItems = vi.fn().mockResolvedValue([]);
     const chooseWorkItem = vi.fn();
 
@@ -374,10 +374,15 @@ describe('Worklog browse pi extension', () => {
 
     await commandHandler('', { ui: { notify, setWidget } });
 
-    expect(notify).toHaveBeenCalledWith('No work items available to browse.', 'info');
-    expect(chooseWorkItem).not.toHaveBeenCalled();
-    expect(sendMessage).not.toHaveBeenCalled();
+    // No notification — the overlay opens even with empty items array
+    expect(notify).not.toHaveBeenCalled();
+    // chooseWorkItem is called with the empty array (overlay opens with auto-refresh)
+    expect(chooseWorkItem).toHaveBeenCalledWith([], expect.any(Object), expect.any(Function));
+    // setWidget IS called with undefined AFTER chooseWorkItem completes
+    // (normal end-of-flow cleanup when chooseWorkItem returns undefined),
+    // NOT from an early return before the overlay opens.
     expect(setWidget).toHaveBeenCalledWith('worklog-browse-selection', undefined);
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   describe('createScrollableWidget.handleInput keyboard routing', () => {

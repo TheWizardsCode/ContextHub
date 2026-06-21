@@ -693,4 +693,199 @@ describe('Browse list auto-refresh', () => {
     expect(lineWithSecondAfter).toBeDefined();
     expect(lineWithSecondAfter).toContain('›');
   });
+
+  // ── Empty-list auto-refresh tests ───────────────────────────────────
+  //
+  // These tests verify that the browse overlay works correctly when opened
+  // with an empty items array. The overlay should remain open showing an
+  // appropriate empty state (title bar + help text visible, no item lines),
+  // the auto-refresh interval should start, and when items become available
+  // the list should transition from empty to populated automatically.
+  //
+  // The fix: remove the early return in runBrowseFlow() when items.length
+  // === 0, and guard shortcut/key dispatch in defaultChooseWorkItem()
+  // against accessing items[selectedIndex] when the array is empty.
+
+  it('handles empty items array without crashing (overlay opens)', async () => {
+    const { ctx, getWidget } = createMockContext();
+    const emptyItems: WorklogBrowseItem[] = [];
+
+    // Start the browse dialog with an empty array
+    defaultChooseWorkItem(emptyItems, ctx, vi.fn(), undefined, reFetchItems);
+
+    // The widget should be created (overlay opens) rather than exiting early
+    const widget = getWidget();
+    expect(widget).not.toBeNull();
+
+    // Render should not crash and should produce output
+    const lines = widget!.render(80);
+    expect(lines.length).toBeGreaterThan(0);
+    // Title bar should still be visible
+    expect(lines.join('\n')).toContain('Browse Worklog');
+  });
+
+  it('renders title and help text when items list is empty', async () => {
+    const { ctx, getWidget } = createMockContext();
+    const emptyItems: WorklogBrowseItem[] = [];
+
+    defaultChooseWorkItem(emptyItems, ctx, vi.fn(), undefined, reFetchItems);
+    const widget = getWidget()!;
+
+    const lines = widget.render(80);
+    const rendered = lines.join('\n');
+    // Title should be visible
+    expect(rendered).toContain('Browse Worklog');
+    // No item lines should appear
+    expect(rendered).not.toContain('WL-');
+  });
+
+  it('auto-refresh fires when items start empty (interval is started)', async () => {
+    const { ctx, getWidget } = createMockContext();
+    const emptyItems: WorklogBrowseItem[] = [];
+
+    reFetchItems.mockResolvedValue([]);
+
+    defaultChooseWorkItem(emptyItems, ctx, vi.fn(), undefined, reFetchItems);
+    const widget = getWidget()!;
+
+    // Advance timers by 5 seconds
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // reFetchItems should have been called (interval is active)
+    expect(reFetchItems).toHaveBeenCalled();
+
+    // Render should still work after refresh
+    const lines = widget.render(80);
+    expect(lines.join('\n')).toContain('Browse Worklog');
+  });
+
+  it('transitions from empty to populated on auto-refresh when items appear', async () => {
+    const { ctx, getWidget } = createMockContext();
+    const emptyItems: WorklogBrowseItem[] = [];
+
+    // First call returns empty, second call returns items
+    reFetchItems
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        { id: 'WL-010', title: 'New item 1', status: 'open' },
+        { id: 'WL-011', title: 'New item 2', status: 'open' },
+      ]);
+
+    defaultChooseWorkItem(emptyItems, ctx, vi.fn(), undefined, reFetchItems);
+    const widget = getWidget()!;
+
+    // First refresh: still empty, no mutation (guard: both empty → skip)
+    await vi.advanceTimersByTimeAsync(5000);
+
+    let lines = widget.render(80);
+    let rendered = lines.join('\n');
+    // No items should appear yet
+    expect(rendered).not.toContain('New item');
+
+    // Second refresh: items become available
+    await vi.advanceTimersByTimeAsync(5000);
+
+    lines = widget.render(80);
+    rendered = lines.join('\n');
+    // Items should now appear
+    expect(rendered).toContain('New item 1');
+    expect(rendered).toContain('New item 2');
+  });
+
+  it('does not crash when a single-key shortcut is pressed with empty items', async () => {
+    const entries: ShortcutEntry[] = [
+      { key: 'i', command: '/implement <id>', view: 'list' },
+    ];
+    const registry = new ShortcutRegistry(entries);
+    const { ctx, getWidget, getDone } = createMockContext();
+    const emptyItems: WorklogBrowseItem[] = [];
+
+    defaultChooseWorkItem(emptyItems, ctx, vi.fn(), registry, reFetchItems);
+    const widget = getWidget()!;
+
+    // Pressing 'i' should NOT crash and should NOT dispatch a shortcut
+    expect(() => widget.handleInput!('i')).not.toThrow();
+
+    // done should NOT have been called (no shortcut dispatched)
+    expect(getDone()).not.toHaveBeenCalled();
+  });
+
+  it('does not crash when a chord leader is entered with empty items', async () => {
+    const chordEntries: ShortcutEntry[] = [
+      { chord: ['u', 'p'], command: 'update-priority <id>', view: 'list' },
+    ];
+    const registry = new ShortcutRegistry(chordEntries);
+    const { ctx, getWidget, getDone } = createMockContext();
+    const emptyItems: WorklogBrowseItem[] = [];
+
+    defaultChooseWorkItem(emptyItems, ctx, vi.fn(), registry, reFetchItems);
+    const widget = getWidget()!;
+
+    // Press chord leader 'u' — should not crash
+    expect(() => widget.handleInput!('u')).not.toThrow();
+    expect(getDone()).not.toHaveBeenCalled();
+
+    // Press chord completer 'p' — should not crash (no item to dispatch on)
+    expect(() => widget.handleInput!('p')).not.toThrow();
+    expect(getDone()).not.toHaveBeenCalled();
+  });
+
+  it('pressing Escape closes the overlay when items are empty', async () => {
+    const { ctx, getWidget, getDone } = createMockContext();
+    const emptyItems: WorklogBrowseItem[] = [];
+
+    defaultChooseWorkItem(emptyItems, ctx, vi.fn(), undefined, reFetchItems);
+    const widget = getWidget()!;
+
+    // Press Escape — should close the overlay (done with null)
+    widget.handleInput!('\u001b');
+
+    expect(getDone()).toHaveBeenCalledWith(null);
+  });
+
+  it('pressing Enter closes the overlay when items are empty', async () => {
+    const { ctx, getWidget, getDone } = createMockContext();
+    const emptyItems: WorklogBrowseItem[] = [];
+
+    defaultChooseWorkItem(emptyItems, ctx, vi.fn(), undefined, reFetchItems);
+    const widget = getWidget()!;
+
+    // Press Enter — should close the overlay (done with null since no item is selected)
+    widget.handleInput!('\r');
+
+    expect(getDone()).toHaveBeenCalledWith(null);
+  });
+
+  it('arrow keys do not crash when items are empty', async () => {
+    const { ctx, getWidget } = createMockContext();
+    const emptyItems: WorklogBrowseItem[] = [];
+
+    defaultChooseWorkItem(emptyItems, ctx, vi.fn(), undefined, reFetchItems);
+    const widget = getWidget()!;
+
+    // Render before — should show empty list
+    let lines = widget.render(80);
+    expect(lines.join('\n')).toContain('Browse Worklog');
+
+    // Press Down arrow
+    expect(() => widget.handleInput!('\u001b[B')).not.toThrow();
+
+    // Press Up arrow
+    expect(() => widget.handleInput!('\u001b[A')).not.toThrow();
+
+    // Render after arrows — should still show empty list with title
+    lines = widget.render(80);
+    expect(lines.join('\n')).toContain('Browse Worklog');
+  });
+
+  it('announceSelection is not called when items is empty', async () => {
+    const { ctx } = createMockContext();
+    const emptyItems: WorklogBrowseItem[] = [];
+    const onSelectionChange = vi.fn();
+
+    defaultChooseWorkItem(emptyItems, ctx, onSelectionChange, undefined, reFetchItems);
+
+    // onSelectionChange should not have been called (no item to announce)
+    expect(onSelectionChange).not.toHaveBeenCalled();
+  });
 });

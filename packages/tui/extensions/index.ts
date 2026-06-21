@@ -925,9 +925,12 @@ export async function defaultChooseWorkItem(
           );
           if (chordCommand) {
             pendingChordLeader = null;
+            // Guard against empty items — no item to dispatch shortcut on
+            const chordTarget = items[selectedIndex];
+            if (!chordTarget) return;
             _done({
               type: 'shortcut' as const,
-              command: chordCommand.replace('<id>', items[selectedIndex].id),
+              command: chordCommand.replace('<id>', chordTarget.id),
             });
             return;
           }
@@ -945,7 +948,10 @@ export async function defaultChooseWorkItem(
           // 1) Try single-key shortcut first
           const command = shortcutRegistry.lookup(lookupKey, 'list', selectedStage);
           if (command) {
-            _done({ type: 'shortcut' as const, command: command.replace('<id>', items[selectedIndex].id) });
+            // Guard against empty items — no item to dispatch shortcut on
+            const shortcutTarget = items[selectedIndex];
+            if (!shortcutTarget) return;
+            _done({ type: 'shortcut' as const, command: command.replace('<id>', shortcutTarget.id) });
             return;
           }
 
@@ -1407,12 +1413,6 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         const items = stage
           ? (await listWorkItemsWithStage(stage)).slice(0, itemCount)
           : (await listWorkItems()).slice(0, itemCount);
-        if (items.length === 0) {
-          ctx.ui.notify('No work items available to browse.', 'info');
-          ctx.ui.setWidget?.('worklog-browse-selection', undefined);
-          return;
-        }
-
         let lastAnnouncedId: string | undefined;
         const announceSelection: SelectionChangeHandler = (
           item: WorklogBrowseItem,
@@ -1428,7 +1428,13 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
 
         // Announce the first item (index 0) immediately so the preview
         // widget appears without requiring the user to press an arrow key.
-        announceSelection(items[0]);
+        // Guard against empty items array — when items is empty the
+        // overlay still opens (with title/help text visible) and the
+        // auto-refresh interval starts, so new items are picked up when
+        // they become available.
+        if (items[0]) {
+          announceSelection(items[0]);
+        }
 
         // Create a re-fetch function for the auto-refresh feature.
         // It re-uses the same listWorkItems/listWorkItemsWithStage
