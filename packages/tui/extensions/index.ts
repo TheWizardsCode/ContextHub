@@ -695,7 +695,11 @@ export async function defaultChooseWorkItem(
             newItems = await reFetchItems();
           }
 
-          if (newItems.length === 0) return;
+          // Skip refresh only when both the new list AND the current list
+          // are empty. If the current list has items but the re-fetched list
+          // is empty (e.g. all items were closed by another instance), we
+          // MUST proceed so the stale items are removed.
+          if (newItems.length === 0 && items.length === 0) return;
 
           // Preserve the currently selected item by ID
           const currentId = items[selectedIndex]?.id;

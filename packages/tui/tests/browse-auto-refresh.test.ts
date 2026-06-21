@@ -564,4 +564,133 @@ describe('Browse list auto-refresh', () => {
       { placement: 'belowEditor' }
     );
   });
+
+  // ── Cross-instance synchronisation tests ────────────────────────────
+  //
+  // These tests verify that auto-refresh correctly picks up changes made
+  // by another browse instance (e.g. a separate Pi TUI session) to the
+  // underlying work-item data source.
+  //
+  // The key bug fixed: `if (newItems.length === 0) return;` in the
+  // auto-refresh guard unconditionally skipped empty results, even when
+  // the current list was non-empty (i.e. all items were closed by another
+  // instance). The fix changes the guard to:
+  //   `if (newItems.length === 0 && items.length === 0) return;`
+  // so that a transition from populated to empty is reflected.
+
+  it('updates the list when items are removed in another instance (cross-instance sync)', async () => {
+    const { ctx, getWidget } = createMockContext();
+
+    defaultChooseWorkItem(items, ctx, vi.fn(), undefined, reFetchItems);
+    const widget = getWidget()!;
+
+    // Verify initial state: three items visible
+    let lines = widget.render(80);
+    expect(lines.join('\n')).toContain('First item');
+    expect(lines.join('\n')).toContain('Second item');
+    expect(lines.join('\n')).toContain('Third item');
+
+    // Simulate another instance closing the second item
+    reFetchItems.mockResolvedValue([
+      { id: 'WL-001', title: 'First item', status: 'open' },
+      { id: 'WL-003', title: 'Third item', status: 'open' },
+    ]);
+
+    // Advance timers by 5 seconds to trigger the refresh
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // The list should no longer show the closed item
+    lines = widget.render(80);
+    const rendered = lines.join('\n');
+    expect(rendered).toContain('First item');
+    expect(rendered).toContain('Third item');
+    expect(rendered).not.toContain('Second item');
+  });
+
+  it('clears the list when all items are closed in another instance', async () => {
+    const { ctx, getWidget } = createMockContext();
+
+    defaultChooseWorkItem(items, ctx, vi.fn(), undefined, reFetchItems);
+    const widget = getWidget()!;
+
+    // Verify initial state: three items visible
+    let lines = widget.render(80);
+    expect(lines.join('\n')).toContain('First item');
+
+    // Simulate another instance closing ALL items
+    reFetchItems.mockResolvedValue([]);
+
+    // Advance timers by 5 seconds to trigger the refresh
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // The list should now be cleared (no item lines rendered)
+    lines = widget.render(80);
+    const rendered = lines.join('\n');
+    // Title should still be visible
+    expect(rendered).toContain('Browse Worklog');
+    // No item titles should remain
+    expect(rendered).not.toContain('First item');
+    expect(rendered).not.toContain('Second item');
+    expect(rendered).not.toContain('Third item');
+    // reFetchItems should have been called
+    expect(reFetchItems).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips mutation when both the new list and current list are empty', async () => {
+    const { ctx, getWidget } = createMockContext();
+
+    // Start with an empty list
+    const emptyInitial: WorklogBrowseItem[] = [];
+    reFetchItems.mockResolvedValue([]);
+
+    defaultChooseWorkItem(emptyInitial, ctx, vi.fn(), undefined, reFetchItems);
+    const widget = getWidget()!;
+
+    // Advance timers — the interval fires and calls reFetchItems which
+    // returns []. The guard `if (newItems.length === 0 && items.length === 0) return;`
+    // then triggers because both lists are empty, preventing unnecessary
+    // mutation. The key point: no crash, no spurious re-render.
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // reFetchItems WAS called (the interval fires regardless), but the
+    // items array should remain empty and render should still work
+    expect(reFetchItems).toHaveBeenCalled();
+    // Render should not crash and should show the title (empty list is fine)
+    const lines = widget.render(80);
+    expect(lines.join('\n')).toContain('Browse Worklog');
+  });
+
+  it('preserves selection after cross-instance item removal when the selected item still exists', async () => {
+    const { ctx, getWidget } = createMockContext();
+
+    defaultChooseWorkItem(items, ctx, vi.fn(), undefined, reFetchItems);
+    const widget = getWidget()!;
+
+    // Navigate to select the second item (index 1)
+    widget.handleInput!('\u001b[B'); // down key
+
+    // Render and verify second item is selected
+    let lines = widget.render(80);
+    const lineWithSecond = lines.find(l => l.includes('Second item'));
+    expect(lineWithSecond).toBeDefined();
+    expect(lineWithSecond).toContain('›');
+
+    // Simulate another instance closing the THIRD item (not our selected one)
+    reFetchItems.mockResolvedValue([
+      { id: 'WL-001', title: 'First item', status: 'open' },
+      { id: 'WL-002', title: 'Second item', status: 'in_progress' },
+    ]);
+
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // Our selected item (WL-002) should still be selected
+    lines = widget.render(80);
+    const rendered = lines.join('\n');
+    expect(rendered).toContain('Second item');
+    expect(rendered).not.toContain('Third item');
+    // The selected item marker should still be on Second item
+    const lineWithSecondAfter = lines.find(l => l.includes('Second item'));
+    expect(lineWithSecondAfter).toBeDefined();
+    expect(lineWithSecondAfter).toContain('›');
+  });
 });
