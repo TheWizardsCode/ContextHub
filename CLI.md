@@ -320,6 +320,20 @@ are closed deepest-first so that leaf items are completed before their parents.
 - For items that do not meet the recursive condition (not `in_review`, no audit, or
   `readyToClose` is `false`), only the specified item is closed (current behaviour).
 
+**Output format (recursive close):** When the audit-gated recursive close path is triggered:
+
+- **Human-readable output** reports the count of successfully closed descendants:
+  `Closed WL-PARENT (N children closed)`
+- If any descendant could not be closed, a per-child warning is printed on stderr:
+  ```
+  Closed WL-PARENT (N children closed)
+  Child WL-CHILD4: Failed to close descendant — this item remains unclosed at top level
+  ```
+- **JSON output** includes a `childrenClosed` integer field in each result object,
+  representing the number of successfully closed descendants. If any descendant
+  failed to close, the existing `childErrors` array is populated and `success` remains
+  `true` (backward-compatible).
+
 **Automatic unblocking:** When a work item is closed, any dependents that were blocked
 solely by this item are automatically unblocked (their status changes from `blocked` to
 `open`). If a dependent has multiple blockers and other blockers remain active, it stays
