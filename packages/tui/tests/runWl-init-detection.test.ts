@@ -499,7 +499,10 @@ describe('runBrowseFlow notification path (integration)', () => {
   });
 
   it('does not crash the TUI when the extension is run in an initialized checkout', async () => {
-    // Simulate successful CLI output
+    // First mock: fetchTotalActionableCount calls wl list --status open,in-progress,blocked
+    mockExecSuccess(JSON.stringify({ count: 10 }));
+
+    // Second mock: listWorkItems calls wl next
     const validOutput = JSON.stringify({
       results: [{ workItem: { id: 'WL-001', title: 'Test', status: 'open' } }],
     });

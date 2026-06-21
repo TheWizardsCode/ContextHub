@@ -436,6 +436,26 @@ async function defaultListWorkItemsWithStage(stage: string, run: RunWlFn = runWl
   return createListWorkItemsWithStage(run)(stage);
 }
 
+/**
+ * Fetch the total count of actionable work items (open + in-progress + blocked).
+ * Returns the count, or `undefined` if the fetch fails (graceful degradation).
+ *
+ * The count is fetched once at browse flow start and NOT refreshed during
+ * auto-refresh intervals to avoid redundant queries.
+ */
+async function fetchTotalActionableCount(run: RunWlFn = runWl): Promise<number | undefined> {
+  try {
+    const output = await run(['list', '--status', 'open,in-progress,blocked']);
+    const payload = JSON.parse(output);
+    if (payload && typeof payload === 'object' && typeof payload.count === 'number') {
+      return payload.count;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 
 /**
  * Create a selection widget factory that renders a compact single-line
@@ -594,6 +614,7 @@ export async function defaultChooseWorkItem(
   shortcutRegistry?: ShortcutRegistry,
   reFetchItems?: () => Promise<WorklogBrowseItem[]>,
   fetchChildren?: (parentId: string) => Promise<WorklogBrowseItem[]>,
+  totalCount?: number,
 ): Promise<WorklogBrowseItem | ShortcutResult | undefined> {
   if (!ctx.ui.custom) {
     if (!ctx.ui.select) {
@@ -608,7 +629,8 @@ export async function defaultChooseWorkItem(
     );
 
     const options = items.map(item => formatBrowseOption(item, undefined, undefined, currentSettings, maxPrefixWidth));
-    const selected = await ctx.ui.select(`Browse Worklog next items (top ${currentSettings.browseItemCount})`, options);
+    const titleSuffix = totalCount !== undefined ? ` (top ${currentSettings.browseItemCount} of ${totalCount})` : ` (top ${currentSettings.browseItemCount})`;
+    const selected = await ctx.ui.select(`Browse Worklog next items${titleSuffix}`, options);
     if (!selected) return undefined;
 
     const selectedIndex = options.indexOf(selected);
@@ -779,7 +801,8 @@ export async function defaultChooseWorkItem(
         }
 
         const browseCount = currentSettings.browseItemCount;
-        const title = truncateToWidth(theme.fg('accent', theme.bold(`Browse Worklog next items (top ${browseCount})`)), width);
+        const titleSuffix = totalCount !== undefined ? ` (top ${browseCount} of ${totalCount})` : ` (top ${browseCount})`;
+        const title = truncateToWidth(theme.fg('accent', theme.bold(`Browse Worklog next items${titleSuffix}`)), width);
 
         // Build help text: if a chord leader is pending, show chord
         // completions; otherwise show normal shortcut hints.
@@ -1421,6 +1444,11 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
           return normalizeListPayload(payload);
         };
 
+        // Fetch the total actionable item count once at browse flow start
+        // for display in the selection list title. Gracefully degrades to
+        // not showing the count if the fetch fails.
+        const totalActionableCount = await fetchTotalActionableCount(runWlImpl);
+
         // Call defaultChooseWorkItem directly to enable the auto-refresh
         // and hierarchical navigation features. If a custom
         // deps.chooseWorkItem was provided (e.g. in tests), use that
@@ -1429,7 +1457,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         if (deps.chooseWorkItem) {
           result = await deps.chooseWorkItem(items, ctx, announceSelection);
         } else {
-          result = await defaultChooseWorkItem(items, ctx, announceSelection, shortcutRegistry, reFetchItems, fetchChildren);
+          result = await defaultChooseWorkItem(items, ctx, announceSelection, shortcutRegistry, reFetchItems, fetchChildren, totalActionableCount);
         }
         // Handle shortcut result - set editor text after browse list modal closes
         if (result && 'type' in result && result.type === 'shortcut') {
