@@ -3,7 +3,13 @@
 // Provides a spawn wrapper, JSON parsing, timeout handling, and event emitter for UI consumers.
 
 import { EventEmitter } from "events";
-import { runWlCommand, wlEvents, WlError } from "../../../src/wl-integration/spawn.js";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+
+// Use createRequire with realpath-resolved path for symlink-safe imports.
+const _require = createRequire(realpathSync(fileURLToPath(import.meta.url)));
+const { runWlCommand, wlEvents, WlError } = _require("../../../dist/wl-integration/spawn.js");
 
 /**
  * Options for running a wl command.

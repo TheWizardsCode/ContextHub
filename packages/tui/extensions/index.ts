@@ -1,9 +1,17 @@
 import { execFile } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { realpathSync, writeFileSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, riskIcon, effortIcon } from '../../../src/icons.js';
+import { createRequire } from 'node:module';
+
+// Use createRequire with realpath-resolved path so the icons module can be
+// found even when this extension is loaded via a symlink (e.g., when Pi
+// loads it from ~/.pi/agent/extensions/worklog/). The realpath resolution
+// ensures ../../../dist/icons.js resolves from the real file location rather
+// than the symlink path.
+const _require = createRequire(realpathSync(fileURLToPath(import.meta.url)));
+const { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, riskIcon, effortIcon } = _require('../../../dist/icons.js');
 import { applyStageColour, type PiTheme } from './worklog-helpers.js';
 import { truncateToTerminalWidth, wrapToTerminalWidth, visibleWidth } from './terminal-utils.js';
 import { type ShortcutRegistry, loadShortcutConfig } from './shortcut-config.js';

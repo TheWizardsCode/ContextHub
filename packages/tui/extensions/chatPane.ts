@@ -3,8 +3,14 @@
 // delegates to wl CLI commands via the integration layer.
 
 import { EventEmitter } from "events";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { runWl, wlEvents } from "./wl-integration.js";
-import { WlError } from "../../../src/wl-integration/spawn.js";
+
+// Use createRequire with realpath-resolved path for symlink-safe imports.
+const _require = createRequire(realpathSync(fileURLToPath(import.meta.url)));
+const { WlError } = _require("../../../dist/wl-integration/spawn.js");
 
 /** A single message in the chat history */
 export interface ChatMessage {
