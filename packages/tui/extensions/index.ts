@@ -339,9 +339,14 @@ function normalizeListPayload(payload: unknown): WorklogBrowseItem[] {
  * hooks when Worklog is not initialized in the current checkout or worktree.
  *
  * Matches case-insensitively to handle minor formatting variations.
- * The pattern is derived from the post-pull hook template in src/commands/init.ts.
+ * The pattern is derived from:
+ * - post-pull hook template in src/commands/init.ts:
+ *   "worklog: not initialized in this checkout/worktree"
+ * - CLI's requireInitialized() in src/cli-utils.ts:
+ *   "Worklog system is not initialized. Run \"worklog init\" first." (JSON mode)
+ *   "Error: Worklog system is not initialized." (non-JSON mode)
  */
-const NOT_INITIALIZED_PATTERN = /worklog:\s*not initialized in this checkout\/worktree/i;
+const NOT_INITIALIZED_PATTERN = /worklog(?::\s*not initialized|\s+system\s+is\s+not\s+initialized)/i;
 
 /**
  * Friendly, actionable message shown to users instead of the raw stderr
@@ -366,13 +371,22 @@ async function runWl(args: string[], includeJson = true): Promise<string> {
       }
 
       const stderr = typeof error?.stderr === 'string' ? error.stderr.trim() : '';
-      const message = stderr || error?.message || String(error);
+      const stdout = typeof error?.stdout === 'string' ? error.stdout.trim() : '';
+      const message = stderr || stdout || error?.message || String(error);
 
       // Detect the known "not initialized" CLI error and surface a friendly message
-      // instead of the raw stderr. This prevents confusing users with generic error
+      // instead of the raw stderr or stdout. This prevents confusing users with generic error
       // text when they run `wl piman` in a new clone or worktree.
+      //
+      // Two output paths must be handled:
+      //   1. Non-JSON mode (hooks via stderr): "worklog: not initialized in this checkout/worktree"
+      //   2. JSON mode (requireInitialized via stdout): '{"success":false,...,"error":"Worklog system is not initialized..."}'
+      // The broadened pattern and stdout fallback (above) cover both paths.
       if (NOT_INITIALIZED_PATTERN.test(message)) {
-        throw new Error(NOT_INITIALIZED_FRIENDLY);
+        const friendlyError = new Error(NOT_INITIALIZED_FRIENDLY);
+        // Preserve the original CLI error for debugging (accessible via Error.cause)
+        friendlyError.cause = error;
+        throw friendlyError;
       }
 
       throw new Error(message);
