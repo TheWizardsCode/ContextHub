@@ -805,13 +805,26 @@ export async function defaultChooseWorkItem(
         }
 
         const browseCount = currentSettings.browseItemCount;
-        const titleSuffix = totalCount !== undefined ? ` (top ${browseCount} of ${totalCount})` : ` (top ${browseCount})`;
-        const title = truncateToWidth(theme.fg('accent', theme.bold(`Browse Worklog next items${titleSuffix}`)), width);
+
+        // When the list is empty, show a "no work items" notice instead of
+        // the browse title. The title switches back automatically when
+        // auto-refresh populates the list.
+        const isEmpty = items.length === 0;
+        const title = isEmpty
+          ? truncateToWidth(theme.fg('accent', theme.bold('No work items to browse')), width)
+          : (() => {
+              const titleSuffix = totalCount !== undefined
+                ? ` (top ${browseCount} of ${totalCount})`
+                : ` (top ${browseCount})`;
+              return truncateToWidth(theme.fg('accent', theme.bold(`Browse Worklog next items${titleSuffix}`)), width);
+            })();
 
         // Build help text: if a chord leader is pending, show chord
         // completions; otherwise show normal shortcut hints.
+        // When the list is empty no shortcuts can be dispatched so help
+        // text is suppressed.
         let helpText = '';
-        if (shortcutRegistry) {
+        if (!isEmpty && shortcutRegistry) {
           const selectedStage = items[selectedIndex]?.stage;
 
           if (pendingChordLeader !== null) {
@@ -886,16 +899,18 @@ export async function defaultChooseWorkItem(
           0,
         );
 
-        const options = items.map((item, index) => {
-          const prefix = index === selectedIndex ? theme.fg('accent', '› ') : '  ';
-          const contentWidth = Math.max(0, width - 2);
-          // The synthetic ".." entry should render without icon prefix
-          // to visually distinguish it from real work items
-          const optionLine = item.id === '..'
-            ? `${prefix}${item.title || '..'}`
-            : `${prefix}${formatBrowseOption(item, contentWidth, theme, currentSettings, maxPrefixWidth)}`;
-          return truncateToWidth(optionLine, width);
-        });
+        const options = items.length === 0
+          ? [theme.fg('dim', '  No items to display')]
+          : items.map((item, index) => {
+              const prefix = index === selectedIndex ? theme.fg('accent', '› ') : '  ';
+              const contentWidth = Math.max(0, width - 2);
+              // The synthetic ".." entry should render without icon prefix
+              // to visually distinguish it from real work items
+              const optionLine = item.id === '..'
+                ? `${prefix}${item.title || '..'}`
+                : `${prefix}${formatBrowseOption(item, contentWidth, theme, currentSettings, maxPrefixWidth)}`;
+              return truncateToWidth(optionLine, width);
+            });
 
         const lines = [title, '', ...options, '', help];
         cachedWidth = width;

@@ -626,8 +626,10 @@ describe('Browse list auto-refresh', () => {
     // The list should now be cleared (no item lines rendered)
     lines = widget.render(80);
     const rendered = lines.join('\n');
-    // Title should still be visible
-    expect(rendered).toContain('Browse Worklog');
+    // Title should show the empty-state notice
+    expect(rendered).toContain('No work items to browse');
+    // The empty-state placeholder should appear
+    expect(rendered).toContain('No items to display');
     // No item titles should remain
     expect(rendered).not.toContain('First item');
     expect(rendered).not.toContain('Second item');
@@ -655,9 +657,9 @@ describe('Browse list auto-refresh', () => {
     // reFetchItems WAS called (the interval fires regardless), but the
     // items array should remain empty and render should still work
     expect(reFetchItems).toHaveBeenCalled();
-    // Render should not crash and should show the title (empty list is fine)
+    // Render should not crash and should show the empty-state notice
     const lines = widget.render(80);
-    expect(lines.join('\n')).toContain('Browse Worklog');
+    expect(lines.join('\n')).toContain('No work items to browse');
   });
 
   it('preserves selection after cross-instance item removal when the selected item still exists', async () => {
@@ -720,8 +722,8 @@ describe('Browse list auto-refresh', () => {
     // Render should not crash and should produce output
     const lines = widget!.render(80);
     expect(lines.length).toBeGreaterThan(0);
-    // Title bar should still be visible
-    expect(lines.join('\n')).toContain('Browse Worklog');
+    // Empty-state notice should be visible
+    expect(lines.join('\n')).toContain('No work items to browse');
   });
 
   it('renders title and help text when items list is empty', async () => {
@@ -733,8 +735,11 @@ describe('Browse list auto-refresh', () => {
 
     const lines = widget.render(80);
     const rendered = lines.join('\n');
-    // Title should be visible
-    expect(rendered).toContain('Browse Worklog');
+    // Empty-state notice should be visible, not the browse title
+    expect(rendered).toContain('No work items to browse');
+    expect(rendered).not.toContain('Browse Worklog');
+    // Empty-state placeholder should appear
+    expect(rendered).toContain('No items to display');
     // No item lines should appear
     expect(rendered).not.toContain('WL-');
   });
@@ -754,9 +759,9 @@ describe('Browse list auto-refresh', () => {
     // reFetchItems should have been called (interval is active)
     expect(reFetchItems).toHaveBeenCalled();
 
-    // Render should still work after refresh
+    // Render should still work after refresh, showing empty-state notice
     const lines = widget.render(80);
-    expect(lines.join('\n')).toContain('Browse Worklog');
+    expect(lines.join('\n')).toContain('No work items to browse');
   });
 
   it('transitions from empty to populated on auto-refresh when items appear', async () => {
@@ -779,6 +784,8 @@ describe('Browse list auto-refresh', () => {
 
     let lines = widget.render(80);
     let rendered = lines.join('\n');
+    // Empty-state notice should be visible
+    expect(rendered).toContain('No work items to browse');
     // No items should appear yet
     expect(rendered).not.toContain('New item');
 
@@ -787,6 +794,9 @@ describe('Browse list auto-refresh', () => {
 
     lines = widget.render(80);
     rendered = lines.join('\n');
+    // Title should switch back to the browse title
+    expect(rendered).toContain('Browse Worklog');
+    expect(rendered).not.toContain('No work items to browse');
     // Items should now appear
     expect(rendered).toContain('New item 1');
     expect(rendered).toContain('New item 2');
@@ -863,9 +873,9 @@ describe('Browse list auto-refresh', () => {
     defaultChooseWorkItem(emptyItems, ctx, vi.fn(), undefined, reFetchItems);
     const widget = getWidget()!;
 
-    // Render before — should show empty list
+    // Render before — should show empty list with empty-state notice
     let lines = widget.render(80);
-    expect(lines.join('\n')).toContain('Browse Worklog');
+    expect(lines.join('\n')).toContain('No work items to browse');
 
     // Press Down arrow
     expect(() => widget.handleInput!('\u001b[B')).not.toThrow();
@@ -873,9 +883,9 @@ describe('Browse list auto-refresh', () => {
     // Press Up arrow
     expect(() => widget.handleInput!('\u001b[A')).not.toThrow();
 
-    // Render after arrows — should still show empty list with title
+    // Render after arrows — should still show empty list with notice
     lines = widget.render(80);
-    expect(lines.join('\n')).toContain('Browse Worklog');
+    expect(lines.join('\n')).toContain('No work items to browse');
   });
 
   it('announceSelection is not called when items is empty', async () => {
