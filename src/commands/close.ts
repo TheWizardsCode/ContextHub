@@ -6,6 +6,12 @@
  * (deepest-first) before closing the parent.  This ensures that an
  * approved/reviewed parent closes its entire subtree.
  *
+ * Recursive close output:
+ *   - Human: `Closed <id> (N children closed)`
+ *   - JSON:  `{ success: true, results: [{ id, success: true, childrenClosed: N }] }`
+ *   On child errors, per-child warnings are printed on stderr and the
+ *   JSON result includes `childErrors: [{ id, error }]`.
+ *
  * Backward-compatible: items not meeting the recursive conditions are
  * closed as before (single-item close only).
  */
@@ -74,19 +80,21 @@ function closeSingle(
  * Recursively close all descendants of a parent item, deepest first.
  * Collects errors per child but continues processing.
  *
- * @returns Array of { id, error } for children that could not be closed.
+ * @returns Object with:
+ *   - errors: Array of { id, error } for children that could not be closed.
+ *   - childrenClosed: Count of successfully closed descendants.
  */
 function closeDescendants(
   parentId: string,
   reason: string | undefined,
   author: string,
   db: any
-): Array<{ id: string; error: string }> {
+): { errors: Array<{ id: string; error: string }>; childrenClosed: number } {
   const errors: Array<{ id: string; error: string }> = [];
 
   // Get all descendants (DFS order: parents before children in each branch)
   const descendants = db.getDescendants(parentId);
-  if (!descendants || descendants.length === 0) return errors;
+  if (!descendants || descendants.length === 0) return { errors, childrenClosed: 0 };
 
   // Reverse to close deepest items first
   const deepestFirst = [...descendants].reverse();
@@ -98,7 +106,7 @@ function closeDescendants(
     }
   }
 
-  return errors;
+  return { errors, childrenClosed: descendants.length - errors.length };
 }
 
 export default function register(ctx: PluginContext): void {
@@ -121,7 +129,7 @@ export default function register(ctx: PluginContext): void {
       const reason = options.reason || '';
       const author = options.author || 'worklog';
 
-      const results: Array<{ id: string; success: boolean; error?: string; childErrors?: Array<{ id: string; error: string }> }> = [];
+      const results: Array<{ id: string; success: boolean; error?: string; childrenClosed?: number; childErrors?: Array<{ id: string; error: string }> }> = [];
 
       for (const rawId of ids) {
         const normalizedId = utils.normalizeCliId(rawId, options.prefix) || rawId;
@@ -135,7 +143,7 @@ export default function register(ctx: PluginContext): void {
         // Check if this item qualifies for recursive close
         if (shouldCloseRecursively(item, db)) {
           // Close descendants first (deepest first), collecting errors without aborting
-          const childErrors = closeDescendants(id, reason, author, db);
+          const { errors: childErrors, childrenClosed } = closeDescendants(id, reason, author, db);
 
           // Now close the parent itself
           const updated = closeSingle(id, reason, author, db);
@@ -144,13 +152,14 @@ export default function register(ctx: PluginContext): void {
               id,
               success: false,
               error: 'Failed to close parent item',
+              childrenClosed,
               childErrors: childErrors.length > 0 ? childErrors : undefined,
             });
             continue;
           }
 
           // Parent successfully closed
-          const result: any = { id, success: true };
+          const result: any = { id, success: true, childrenClosed };
           if (childErrors.length > 0) {
             result.childErrors = childErrors;
           }
@@ -191,17 +200,19 @@ export default function register(ctx: PluginContext): void {
       } else {
         for (const r of results) {
           if (r.success) {
-            const childMsg = r.childErrors
-              ? ` (${r.childErrors.length} child close error(s))`
-              : '';
-            console.log(`Closed ${r.id}${childMsg}`);
+            // Show children-closed count for recursive close results
+            if (r.childrenClosed !== undefined) {
+              console.log(`Closed ${r.id} (${r.childrenClosed} children closed)`);
+            } else {
+              console.log(`Closed ${r.id}`);
+            }
           } else {
             console.error(`Failed to close ${r.id}: ${r.error}`);
           }
-          // Report per-child errors in verbose mode
+          // Report per-child errors — recursive close path only
           if (r.childErrors && r.childErrors.length > 0) {
             for (const ce of r.childErrors) {
-              console.error(`  Child ${ce.id}: ${ce.error}`);
+              console.error(`  Child ${ce.id}: ${ce.error} — this item remains unclosed at top level`);
             }
           }
         }
