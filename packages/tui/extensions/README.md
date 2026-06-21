@@ -13,7 +13,23 @@ The extension has four user-configurable settings:
 | `showActivityIndicator` | `true` | Whether to show the activity indicator (⏵) in the footer |
 | `showHelpText` | `true` | Whether to show the shortcut help text line in the browse selection overlay |
 
-Settings are persisted to `settings.json` in the extension directory (alongside `shortcuts.json`).
+Settings are stored in Pi's canonical settings files under the `context-hub`
+namespace. Settings changed via `/wl settings` are persisted to the project's
+`.pi/settings.json`.
+
+### Resolution Order
+
+Settings are resolved from multiple locations, with later sources overriding
+earlier ones:
+
+| Order | Source | File |
+|-------|--------|------|
+| 1 | Built-in defaults | `DEFAULT_SETTINGS` (code) |
+| 2 | Global settings | `~/.pi/agent/settings.json` → `{ "context-hub": { ... } }` |
+| 3 | Project settings | `<project>/.pi/settings.json` → `{ "context-hub": { ... } }` |
+
+Project settings always win, allowing per-project overrides while individual
+team members can set personal defaults globally.
 
 ### Auto-Refresh
 
@@ -94,20 +110,25 @@ Open the settings overlay by typing `/wl settings` in the Pi editor. This opens 
 
 Press `Escape` to close the settings overlay.
 
-### settings.json
+### Settings File Format
 
-The settings file is a simple JSON object:
+Settings in Pi's settings files are stored under the `context-hub` namespace.
+Example `.pi/settings.json`:
 
 ```json
 {
-  "browseItemCount": 10,
-  "showIcons": false,
-  "showActivityIndicator": true,
-  "showHelpText": true
+  "context-hub": {
+    "browseItemCount": 10,
+    "showIcons": false,
+    "showActivityIndicator": true,
+    "showHelpText": true
+  }
 }
 ```
 
-If the file is missing or malformed, defaults are used (5 items, icons enabled, activity indicator enabled, help text enabled).
+When all settings files are missing or contain no `context-hub` section,
+built-in defaults are used (5 items, icons enabled, activity indicator
+enabled, help text enabled).
 
 ## Activity Indicator
 

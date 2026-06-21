@@ -1,17 +1,35 @@
+vi.mock('@earendil-works/pi-coding-agent', () => ({
+  getAgentDir: () => '/home/test-user/.pi/agent',
+}));
+
 /**
+
  * Tests for the auto-refresh feature in the browse selection list.
+
  *
+
  * Verifies that:
+
  * - The items list is re-fetched every 5 seconds when reFetchItems is provided
+
  * - The currently selected item remains selected after refresh if its ID exists
+
  * - Selection falls back to index 0 when the selected item no longer exists
+
  * - The interval is cleaned up when the overlay closes (done() is called)
+
  * - Auto-refresh does not cause errors during normal operation
+
  *
+
  * Run: npx vitest run packages/tui/tests/browse-auto-refresh.test.ts
+
  */
 
+
+
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
 import { defaultChooseWorkItem, buildSelectionWidget, type WorklogBrowseItem, type SelectionChangeHandler } from '../extensions/index.js';
 import { ShortcutRegistry, type ShortcutEntry } from '../extensions/shortcut-config.js';
 import { type Settings } from '../extensions/settings-config.js';

@@ -10,7 +10,13 @@
  * This test verifies that the extension module can be loaded and that icon
  * functions (used internally via the import chain) work correctly.
  */
-import { describe, it, expect } from 'vitest';
+
+import { describe, it, expect, vi } from 'vitest';
+
+vi.mock('@earendil-works/pi-coding-agent', () => ({
+  getAgentDir: () => '/home/test-user/.pi/agent',
+}));
+
 import { getIconPrefix, createWorklogBrowseExtension, STAGE_MAP } from '../extensions/index.js';
 
 describe('extension module loads with valid icons import (regression: WL-0MQMFMACS0059UUC)', () => {

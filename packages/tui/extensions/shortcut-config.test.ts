@@ -11,6 +11,10 @@ import {
   type ShortcutEntry,
 } from './shortcut-config.js';
 
+vi.mock('@earendil-works/pi-coding-agent', () => ({
+  getAgentDir: () => '/home/test-user/.pi/agent',
+}));
+
 describe('ShortcutRegistry', () => {
   let registry: ShortcutRegistry;
 

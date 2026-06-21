@@ -1,5 +1,5 @@
 /**
- * Unit tests for settings persistence across work-item action lifecycle.
+ * Unit tests for settings persistence to Pi's .pi/settings.json.
  *
  * Verifies that:
  * 1. createDefaultListWorkItems dynamically reads currentSettings.browseItemCount
@@ -7,6 +7,8 @@
  * 2. createListWorkItemsWithStage has the same dynamic behavior.
  * 3. updateSettings() correctly updates the module-level currentSettings,
  *    and factory functions pick up the new value on subsequent calls.
+ * 4. updateSettings() persists changes to .pi/settings.json under the
+ *    context-hub namespace, preserving other keys.
  *
  * Run: npx vitest run packages/tui/extensions/settings-persistence.test.ts
  */
@@ -14,19 +16,25 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 /**
- * Mock node:fs to prevent updateSettings() from writing to the real
- * settings.json on disk, which would leak state into other test files
+ * Mock node:fs to prevent updateSettings() from writing to real
+ * settings files on disk, which would leak state into other test files
  * (especially when tests run in parallel workers).
  */
 const mockReadFileSync = vi.hoisted(() =>
-  vi.fn().mockReturnValue(JSON.stringify({ browseItemCount: 5, showIcons: true })),
+  vi.fn(),
 );
 const mockWriteFileSync = vi.hoisted(() => vi.fn());
+const mockMkdirSync = vi.hoisted(() => vi.fn());
 
 vi.mock('node:fs', () => ({
   readFileSync: mockReadFileSync,
   writeFileSync: mockWriteFileSync,
+  mkdirSync: mockMkdirSync,
   realpathSync: vi.fn((p) => p),
+}));
+
+vi.mock('@earendil-works/pi-coding-agent', () => ({
+  getAgentDir: () => '/home/test-user/.pi/agent',
 }));
 
 import {
@@ -41,9 +49,20 @@ import {
  * mocked writeFileSync prevents filesystem side effects.
  */
 beforeEach(() => {
-  mockReadFileSync.mockReturnValue(JSON.stringify({ browseItemCount: 5, showIcons: true }));
+  // Default mock: global settings file doesn't exist, project settings file
+  // exists with basic settings.
+  mockReadFileSync.mockImplementation((path: string) => {
+    if (path.endsWith('.pi/settings.json')) {
+      return JSON.stringify({
+        'context-hub': { browseItemCount: 5, showIcons: true, showActivityIndicator: true, showHelpText: true },
+      });
+    }
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  });
   mockWriteFileSync.mockClear();
-  updateSettings({ browseItemCount: 5, showIcons: true });
+  mockMkdirSync.mockClear();
+  // Reset to known defaults via updateSettings
+  updateSettings({ browseItemCount: 5, showIcons: true, showActivityIndicator: true, showHelpText: true });
 });
 
 /**
@@ -69,7 +88,6 @@ describe('createDefaultListWorkItems', () => {
     const factory = createDefaultListWorkItems(mockRun);
     await factory();
 
-    // Default browseItemCount is 5 (from DEFAULT_SETTINGS)
     expect(mockRun).toHaveBeenCalledWith(
       expect.arrayContaining(['-n', '5']),
     );
@@ -85,16 +103,12 @@ describe('createDefaultListWorkItems', () => {
   });
 
   it('dynamically reads updated currentSettings after factory creation', async () => {
-    // Create factory when currentSettings.browseItemCount is default (5)
     const factory = createDefaultListWorkItems(mockRun);
 
-    // Update settings to a different value
     updateSettings({ browseItemCount: 10 });
 
-    // Call the factory (created before the update)
     await factory();
 
-    // Should use the updated value (10), not the original (5)
     expect(mockRun).toHaveBeenCalledWith(
       expect.arrayContaining(['-n', '10']),
     );
@@ -103,16 +117,13 @@ describe('createDefaultListWorkItems', () => {
   it('dynamically reads updated currentSettings on second call without recreation', async () => {
     const factory = createDefaultListWorkItems(mockRun);
 
-    // First call with default settings
     await factory();
     expect(mockRun).toHaveBeenNthCalledWith(1,
       expect.arrayContaining(['-n', '5']),
     );
 
-    // Update settings
     updateSettings({ browseItemCount: 15 });
 
-    // Second call with updated settings — no new factory needed
     await factory();
     expect(mockRun).toHaveBeenNthCalledWith(2,
       expect.arrayContaining(['-n', '15']),
@@ -161,7 +172,6 @@ describe('createListWorkItemsWithStage', () => {
   it('dynamically reads updated currentSettings after factory creation', async () => {
     const factory = createListWorkItemsWithStage(mockRun);
 
-    // Update settings after factory creation
     updateSettings({ browseItemCount: 20 });
 
     await factory('in_progress');
@@ -174,13 +184,11 @@ describe('createListWorkItemsWithStage', () => {
   it('dynamically reads updated currentSettings on second call without recreation', async () => {
     const factory = createListWorkItemsWithStage(mockRun);
 
-    // First call with default
     await factory('intake_complete');
     expect(mockRun).toHaveBeenNthCalledWith(1,
       expect.arrayContaining(['-n', '5']),
     );
 
-    // Update and call again
     updateSettings({ browseItemCount: 8 });
     await factory('in_review');
     expect(mockRun).toHaveBeenNthCalledWith(2,
@@ -201,7 +209,6 @@ describe('updateSettings', () => {
 
   it('preserves other settings fields when updating one field', () => {
     const result = updateSettings({ browseItemCount: 7 });
-    // showIcons should still have its default (true)
     expect(result.showIcons).toBe(true);
   });
 
@@ -209,5 +216,84 @@ describe('updateSettings', () => {
     const result = updateSettings({ browseItemCount: 12, showIcons: false });
     expect(result.browseItemCount).toBe(12);
     expect(result.showIcons).toBe(false);
+  });
+
+  it('writes to .pi/settings.json under context-hub namespace', () => {
+    mockReadFileSync.mockImplementation((path: string) => {
+      // Project settings file exists with some keys
+      if (path.endsWith('.pi/settings.json')) {
+        return JSON.stringify({
+          'llm-wiki': { notices: false },
+          'context-hub': { browseItemCount: 10, showIcons: false },
+        });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    mockWriteFileSync.mockClear();
+
+    updateSettings({ browseItemCount: 7, showActivityIndicator: false });
+
+    // First readFileSync call during updateSettings reads existing .pi/settings.json
+    // Then writeFileSync should be called with updated content
+    expect(mockWriteFileSync).toHaveBeenCalledTimes(1);
+
+    const writeCall = mockWriteFileSync.mock.calls[0];
+    const writtenPath = writeCall[0];
+    expect(writtenPath).toContain('.pi/settings.json');
+
+    const writtenContent = JSON.parse(writeCall[1]);
+    // llm-wiki key should be preserved
+    expect(writtenContent['llm-wiki']).toEqual({ notices: false });
+    // context-hub should have the merged settings
+    expect(writtenContent['context-hub'].browseItemCount).toBe(7);
+    expect(writtenContent['context-hub'].showIcons).toBe(false); // preserved from existing file
+    expect(writtenContent['context-hub'].showActivityIndicator).toBe(false); // newly set
+    // showHelpText was never set in existing config or partial, so it should not be present
+    expect(writtenContent['context-hub']).not.toHaveProperty('showHelpText');
+  });
+
+  it('preserves other top-level keys when writing to .pi/settings.json', () => {
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path.endsWith('.pi/settings.json')) {
+        return JSON.stringify({
+          'llm-wiki': { notices: false, trajectories: true },
+          'context-hub': { browseItemCount: 5, showIcons: true },
+        });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    mockWriteFileSync.mockClear();
+
+    updateSettings({ showHelpText: false });
+
+    const writeCall = mockWriteFileSync.mock.calls[0];
+    const writtenContent = JSON.parse(writeCall[1]);
+    // Other namespaces preserved
+    expect(writtenContent['llm-wiki']).toEqual({ notices: false, trajectories: true });
+    expect(writtenContent['context-hub'].showHelpText).toBe(false);
+  });
+
+  it('creates the .pi directory if it does not exist', () => {
+    mockReadFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    mockWriteFileSync.mockClear();
+    mockMkdirSync.mockClear();
+
+    updateSettings({ browseItemCount: 5 });
+
+    expect(mockMkdirSync).toHaveBeenCalled();
+    // Should be called with recursive: true
+    const mkdirCall = mockMkdirSync.mock.calls[0];
+    expect(mkdirCall[1]).toEqual({ recursive: true });
+  });
+
+  it('handles write errors gracefully (no crash)', () => {
+    mockWriteFileSync.mockImplementation(() => {
+      throw new Error('Permission denied');
+    });
+
+    // Should not throw
+    expect(() => updateSettings({ browseItemCount: 5 })).not.toThrow();
   });
 });

@@ -1,21 +1,43 @@
+vi.mock('@earendil-works/pi-coding-agent', () => ({
+  getAgentDir: () => '/home/test-user/.pi/agent',
+}));
+
 /**
+
  * Tests for hierarchical navigation in the browse selection list.
+
  *
+
  * Verifies that:
+
  * - Items with children show child count indicator regardless of issue type
+
  * - Enter on item with children fetches and displays children
+
  * - ".." entry is shown at the top of child lists
+
  * - Enter on ".." navigates back to the parent level
+
  * - Escape navigates back one level when viewing children
+
  * - Escape closes the overlay at root level
+
  * - Arbitrary depth navigation works (children of children)
+
  * - Selection position is restored when navigating back
+
  * - Enter on item without children opens detail view at root level
+
  *
+
  * Run: npx vitest run packages/tui/tests/browse-hierarchical-navigation.test.ts
+
  */
 
+
+
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
 import { defaultChooseWorkItem, getIconPrefix, type WorklogBrowseItem } from '../extensions/index.js';
 
 // ─── getIconPrefix tests ─────────────────────────────────────────────

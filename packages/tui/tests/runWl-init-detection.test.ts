@@ -1,23 +1,47 @@
+vi.mock('@earendil-works/pi-coding-agent', () => ({
+  getAgentDir: () => '/home/test-user/.pi/agent',
+}));
+
 /**
+
  * Unit and integration tests for runWl initialization error detection.
+
  *
+
  * These tests verify that:
+
  * 1. runWl detects the known "not initialized" pattern in CLI stderr and
+
  *    surfaces a friendly, actionable message
+
  * 2. Unrelated CLI errors pass through unchanged (no false positives)
+
  * 3. runBrowseFlow shows the friendly TUI notification when runWl encounters
+
  *    the initialization error
+
  *
+
  * 4. The detection also works when the init error arrives via stdout (JSON mode),
+
  *    not just stderr (non-JSON mode)
+
  * 5. The original error text is preserved for debugging (via Error.cause)
+
  *
+
  * Run: npx vitest run packages/tui/tests/runWl-init-detection.test.ts
+
  *
+
  * Run: npx vitest run packages/tui/tests/runWl-init-detection.test.ts
+
  */
 
+
+
 import { vi, describe, it, expect, beforeEach, type Mock } from 'vitest';
+
 
 // ── Module-level mocks ──────────────────────────────────────────────────
 // Mock child_process.execFile so we can simulate CLI error output without

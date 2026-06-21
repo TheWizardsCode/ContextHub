@@ -1,14 +1,29 @@
+vi.mock('@earendil-works/pi-coding-agent', () => ({
+  getAgentDir: () => '/home/test-user/.pi/agent',
+}));
+
 /**
+
  * Tests for shortcut keys display in browse list help text.
+
  *
+
  * Verifies that available shortcuts are dynamically shown in the help line
+
  * based on the ShortcutRegistry, and that the help text remains unchanged
+
  * when no registry or an empty registry is provided.
+
  *
+
  * Run: npx vitest run packages/tui/tests/browse-shortcut-help.test.ts
+
  */
 
+
+
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
 import { ShortcutRegistry, type ShortcutEntry } from '../extensions/shortcut-config.js';
 import { defaultChooseWorkItem, type WorklogBrowseItem } from '../extensions/index.js';
 

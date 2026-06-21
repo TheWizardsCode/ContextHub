@@ -11,7 +11,12 @@
  * Run: npx vitest run packages/tui/tests/build-selection-widget.test.ts
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+vi.mock('@earendil-works/pi-coding-agent', () => ({
+  getAgentDir: () => '/home/test-user/.pi/agent',
+}));
+
 import { buildSelectionWidget, type WorklogBrowseItem } from '../extensions/index.js';
 import { type PiTheme } from '../extensions/worklog-helpers.js';
 import { type Settings } from '../extensions/settings-config.js';

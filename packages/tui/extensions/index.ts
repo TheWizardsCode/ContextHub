@@ -1,7 +1,6 @@
 import { execFile } from 'node:child_process';
-import { realpathSync, writeFileSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import { promisify } from 'node:util';
-import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
@@ -15,7 +14,7 @@ const { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, 
 import { applyStageColour, type PiTheme } from './worklog-helpers.js';
 import { truncateToTerminalWidth, wrapToTerminalWidth, visibleWidth } from './terminal-utils.js';
 import { type ShortcutRegistry, loadShortcutConfig } from './shortcut-config.js';
-import { loadSettings, type Settings, DEFAULT_SETTINGS } from './settings-config.js';
+import { loadSettings, persistSettings, type Settings, DEFAULT_SETTINGS } from './settings-config.js';
 import { registerActivityIndicator, showActivity, clearActivity } from './activity-indicator.js';
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 
@@ -24,28 +23,19 @@ const execFileAsync = promisify(execFile);
 // ── Settings state ─────────────────────────────────────────────────────
 
 /**
- * Path to the settings.json file in the extension directory.
- */
-const SETTINGS_FILE_PATH = join(dirname(fileURLToPath(import.meta.url)), 'settings.json');
-
-/**
- * Current settings for the extension. Initialised from settings.json on
- * module load and updated by the /wl settings command.
+ * Current settings for the extension. Initialised from Pi's canonical
+ * settings files on module load and updated by the /wl settings command.
  */
 let currentSettings: Settings = loadSettings();
 
 /**
- * Update the current settings, persist to settings.json, and return the
- * new settings object.
+ * Update the current settings, persist to .pi/settings.json under the
+ * context-hub namespace, and return the new settings object.
  */
 export function updateSettings(partial: Partial<Settings>): Settings {
   currentSettings = { ...currentSettings, ...partial };
-  // Persist to settings.json
-  try {
-    writeFileSync(SETTINGS_FILE_PATH, JSON.stringify(currentSettings, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('[worklog-browse] Failed to persist settings:', err);
-  }
+  // Persist to .pi/settings.json under context-hub namespace
+  persistSettings(partial);
   return currentSettings;
 }
 
@@ -1231,7 +1221,7 @@ async function ensurePiComponents(): Promise<boolean> {
  *
  * Uses Pi's SettingsList component with browseItemCount and showIcons
  * settings. Changes are applied immediately via onChange callback and
- * persisted to settings.json.
+ * persisted to .pi/settings.json under the context-hub namespace.
  */
 function openSettingsOverlay(ctx: BrowseContext): void {
   // Build items array from current settings
@@ -1621,8 +1611,8 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     });
 
     // ── Session persistence ────────────────────────────────────────────
-    // Reload settings from file on session start and navigation so that any
-    // external changes to settings.json are picked up.
+    // Reload settings from Pi settings files on session start and navigation so
+    // that any external changes are picked up.
     const reloadSettings = () => {
       currentSettings = loadSettings();
     };
