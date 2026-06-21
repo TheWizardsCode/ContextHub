@@ -426,6 +426,37 @@ describe('registerActivityIndicator - input events', () => {
     );
   });
 
+  it('does not set indicator for /skill: command when isActivityEnabled returns false', async () => {
+    registerActivityIndicator(pi as ExtensionAPI, () => false);
+    expect(inputHandlers.length).toBe(1);
+
+    const ctx = createMockContext();
+    const event: InputEvent = {
+      type: 'input',
+      text: '/skill:audit',
+      source: 'interactive',
+    };
+
+    await inputHandlers[0](event, ctx);
+
+    expect(ctx.ui.setStatus).not.toHaveBeenCalled();
+  });
+
+  it('does not set indicator for unknown /-prefixed command when isActivityEnabled returns false', async () => {
+    registerActivityIndicator(pi as ExtensionAPI, () => false);
+
+    const ctx = createMockContext();
+    const event: InputEvent = {
+      type: 'input',
+      text: '/intake WL-0MQL0T5TR0060AEH',
+      source: 'interactive',
+    };
+
+    await inputHandlers[0](event, ctx);
+
+    expect(ctx.ui.setStatus).not.toHaveBeenCalled();
+  });
+
   it('handles empty text gracefully (leaves indicator unchanged)', async () => {
     registerActivityIndicator(pi as ExtensionAPI);
 
@@ -857,6 +888,23 @@ describe('registerActivityIndicator - session_start events', () => {
 
     // Free-form text should not be recovered
     expect(setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
+  });
+
+  it('clears indicator on resume when isActivityEnabled returns false', async () => {
+    registerActivityIndicator(pi as ExtensionAPI, () => false);
+    expect(sessionStartHandlers.length).toBe(1);
+
+    const ctx = createMockContext();
+    const event: SessionStartEvent = {
+      type: 'session_start',
+      reason: 'resume',
+      previousSessionFile: '/path/to/session.jsonl',
+    };
+
+    await sessionStartHandlers[0](event, ctx);
+
+    // Should clear indicator instead of attempting recovery
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(ACTIVITY_STATUS_KEY, undefined);
   });
 });
 
