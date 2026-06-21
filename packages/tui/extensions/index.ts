@@ -1305,6 +1305,12 @@ function openSettingsOverlay(ctx: BrowseContext): void {
             } else if (id === 'showActivityIndicator') {
               const show = newValue === 'on';
               updateSettings({ showActivityIndicator: show });
+              if (!show) {
+                // Clear any existing activity indicator immediately so the
+                // disabled state takes effect without requiring a session
+                // lifecycle event or next extension command invocation.
+                clearActivity(ctx as any);
+              }
               ctx.ui.notify(`Activity indicator ${show ? 'enabled' : 'disabled'}`, 'info');
             } else if (id === 'showHelpText') {
               const show = newValue === 'on';
