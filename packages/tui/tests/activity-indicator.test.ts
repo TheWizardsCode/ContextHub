@@ -116,6 +116,43 @@ describe('showActivity', () => {
 
     expect(theme.fg).toHaveBeenCalledWith('accent', expect.any(String));
   });
+
+  it('is a no-op when showIndicator is false', () => {
+    const setStatus = vi.fn();
+    const theme = { fg: vi.fn((_color: string, text: string) => text) };
+    const ctx = { ui: { setStatus, theme } };
+
+    showActivity(ctx as any, '/wl', false);
+
+    expect(setStatus).not.toHaveBeenCalled();
+    expect(theme.fg).not.toHaveBeenCalled();
+  });
+
+  it('sets the indicator when showIndicator is true (explicit)', () => {
+    const setStatus = vi.fn();
+    const theme = { fg: vi.fn((_color: string, text: string) => text) };
+    const ctx = { ui: { setStatus, theme } };
+
+    showActivity(ctx as any, '/wl', true);
+
+    expect(setStatus).toHaveBeenCalledWith(
+      ACTIVITY_STATUS_KEY,
+      expect.stringContaining('/wl')
+    );
+  });
+
+  it('defaults to enabled when showIndicator is not provided', () => {
+    const setStatus = vi.fn();
+    const theme = { fg: vi.fn((_color: string, text: string) => text) };
+    const ctx = { ui: { setStatus, theme } };
+
+    showActivity(ctx as any, '/wl');
+
+    expect(setStatus).toHaveBeenCalledWith(
+      ACTIVITY_STATUS_KEY,
+      expect.stringContaining('/wl')
+    );
+  });
 });
 
 describe('clearActivity', () => {

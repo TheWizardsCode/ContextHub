@@ -26,6 +26,10 @@ export interface Settings {
   browseItemCount: number;
   /** Whether to show emoji icons in the browse list and preview widget. */
   showIcons: boolean;
+  /** Whether to show the activity indicator in the footer (⏵ prefix). */
+  showActivityIndicator: boolean;
+  /** Whether to show the help text line in the browse selection overlay. */
+  showHelpText: boolean;
 }
 
 /**
@@ -34,6 +38,8 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   browseItemCount: 5,
   showIcons: true,
+  showActivityIndicator: true,
+  showHelpText: true,
 };
 
 /**
@@ -117,6 +123,14 @@ export function loadSettings(): Settings {
     showIcons: validateBoolean(
       parsed.showIcons,
       DEFAULT_SETTINGS.showIcons,
+    ),
+    showActivityIndicator: validateBoolean(
+      parsed.showActivityIndicator,
+      DEFAULT_SETTINGS.showActivityIndicator,
+    ),
+    showHelpText: validateBoolean(
+      parsed.showHelpText,
+      DEFAULT_SETTINGS.showHelpText,
     ),
   };
 }

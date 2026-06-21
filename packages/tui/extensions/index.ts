@@ -858,7 +858,9 @@ export async function defaultChooseWorkItem(
             }
           }
         }
-        const help = truncateToWidth(theme.fg('dim', helpText), width);
+        const help = currentSettings.showHelpText
+          ? truncateToWidth(theme.fg('dim', helpText), width)
+          : '';
 
         // Compute max icon prefix width across items for title alignment
         const noIcons = !(currentSettings?.showIcons ?? iconsEnabled());
@@ -1246,6 +1248,18 @@ function openSettingsOverlay(ctx: BrowseContext): void {
       currentValue: currentSettings.showIcons ? 'on' : 'off',
       values: ['on', 'off'],
     },
+    {
+      id: 'showActivityIndicator',
+      label: 'Activity indicator',
+      currentValue: currentSettings.showActivityIndicator ? 'on' : 'off',
+      values: ['on', 'off'],
+    },
+    {
+      id: 'showHelpText',
+      label: 'Help text',
+      currentValue: currentSettings.showHelpText ? 'on' : 'off',
+      values: ['on', 'off'],
+    },
   ];
 
   // Open the settings overlay
@@ -1288,6 +1302,14 @@ function openSettingsOverlay(ctx: BrowseContext): void {
               const show = newValue === 'on';
               updateSettings({ showIcons: show });
               ctx.ui.notify(`Icons ${show ? 'enabled' : 'disabled'}`, 'info');
+            } else if (id === 'showActivityIndicator') {
+              const show = newValue === 'on';
+              updateSettings({ showActivityIndicator: show });
+              ctx.ui.notify(`Activity indicator ${show ? 'enabled' : 'disabled'}`, 'info');
+            } else if (id === 'showHelpText') {
+              const show = newValue === 'on';
+              updateSettings({ showHelpText: show });
+              ctx.ui.notify(`Help text ${show ? 'enabled' : 'disabled'}`, 'info');
             }
           },
           () => {
@@ -1353,7 +1375,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
 
   return function registerWorklogBrowseExtension(pi: PiLike): void {
     // ── Register activity indicator for commands and skills ──────
-    registerActivityIndicator(pi);
+    registerActivityIndicator(pi, () => currentSettings.showActivityIndicator);
     const runBrowseFlow = async (ctx: BrowseContext, stage?: string): Promise<void> => {
       try {
         const itemCount = currentSettings.browseItemCount;
@@ -1553,7 +1575,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
       description: `Browse next ${currentSettings.browseItemCount} work items, optionally filtered by stage and settings`,
       handler: async (_args: string, ctx: BrowseContext) => {
         // Set the activity indicator for our own /wl command (AC 1)
-        showActivity(ctx as any, '/wl');
+        showActivity(ctx as any, '/wl', currentSettings.showActivityIndicator);
         const trimmed = _args?.trim() ?? '';
         if (trimmed.length === 0) {
           await runBrowseFlow(ctx);
@@ -1587,7 +1609,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
       description: `Browse next ${currentSettings.browseItemCount} recommended work items and preview selected title`,
       handler: async (ctx: BrowseContext) => {
         // Set the activity indicator for our shortcut command (AC 1)
-        showActivity(ctx as any, '/wl');
+        showActivity(ctx as any, '/wl', currentSettings.showActivityIndicator);
         await runBrowseFlow(ctx);
       },
     });

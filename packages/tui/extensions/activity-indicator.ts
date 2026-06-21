@@ -170,10 +170,16 @@ function truncateForFooter(text: string): string {
  *
  * @param ctx - Context with UI methods (ExtensionContext or mock)
  * @param activity - Activity text to display (e.g., '/wl', 'skill:audit')
+ * @param showIndicator - When explicitly false, the activity indicator is suppressed (no-op).
+ *   Defaults to true (enabled) when not provided, preserving backward compatibility.
  */
-export function showActivity(ctx: StatusContext, activity: string): void {
+export function showActivity(ctx: StatusContext, activity: string, showIndicator?: boolean): void {
   // Gracefully degrade if setStatus is unavailable (non-TUI modes, test mocks)
   if (typeof ctx.ui.setStatus !== 'function') return;
+  // When the activity indicator setting is disabled, suppress the indicator entirely.
+  // The showIndicator parameter is checked explicitly (=== false) so that undefined
+  // (not provided) means enabled by default.
+  if (showIndicator === false) return;
   const maxWidth = Math.max(20, getTerminalWidth() - 10);
   const truncated = truncateForFooter(activity);
   const display = `⏵ ${truncated}`;
@@ -216,10 +222,12 @@ async function resolveWorkItemTitle(id: string): Promise<string | null> {
  *
  * @param ctx - Context with UI methods (ExtensionContext or mock)
  * @param text - The full input text to display
+ * @param showIndicator - Passed through to showActivity(); when false the
+ *   indicator is suppressed entirely.
  */
-async function showActivityWithTitleLookup(ctx: StatusContext, text: string): Promise<void> {
+async function showActivityWithTitleLookup(ctx: StatusContext, text: string, showIndicator?: boolean): Promise<void> {
   // First, show the raw text immediately
-  showActivity(ctx, text);
+  showActivity(ctx, text, showIndicator);
 
   // Check for a work item ID in the text
   const id = detectWorkItemId(text);
@@ -233,7 +241,7 @@ async function showActivityWithTitleLookup(ctx: StatusContext, text: string): Pr
   // The command is formatted via formatCommandContext (e.g., /skill:audit → audit).
   const commandCtx = formatCommandContext(text);
   const display = `${commandCtx} ${id} ${title}`;
-  showActivity(ctx, display);
+  showActivity(ctx, display, showIndicator);
 }
 
 /**
@@ -278,8 +286,10 @@ export function clearActivity(ctx: { ui: { setStatus?: (key: string, text: strin
  * history is unavailable, the indicator is cleared.
  *
  * @param ctx - Extension context with session manager access
+ * @param showIndicator - Passed through to showActivity(); when false the
+ *   indicator is suppressed entirely.
  */
-async function recoverActivity(ctx: ExtensionContext): Promise<void> {
+async function recoverActivity(ctx: ExtensionContext, showIndicator?: boolean): Promise<void> {
   try {
     const entries = ctx.sessionManager.getBranch();
 
@@ -308,7 +318,7 @@ async function recoverActivity(ctx: ExtensionContext): Promise<void> {
           if (text.startsWith('/skill:')) {
             const skillName = text.slice(7).trim();
             if (skillName.length > 0) {
-              showActivity(ctx, `skill:${skillName}`);
+              showActivity(ctx, `skill:${skillName}`, showIndicator);
               return;
             }
           }
@@ -316,7 +326,7 @@ async function recoverActivity(ctx: ExtensionContext): Promise<void> {
           // Check it's not a built-in Pi command
           const firstWord = extractCommand(text);
           if (!BUILTIN_COMMANDS.has(firstWord)) {
-            showActivity(ctx, text);
+            showActivity(ctx, text, showIndicator);
             return;
           }
           // Built-in command — skip and continue looking
@@ -344,8 +354,12 @@ async function recoverActivity(ctx: ExtensionContext): Promise<void> {
  * command handlers, since the `input` event does not fire for them.
  *
  * @param pi - The ExtensionAPI instance
+ * @param isActivityEnabled - Optional getter that returns whether the activity
+ *   indicator should be shown. When omitted, the indicator is always enabled.
+ *   Called dynamically at each event handler invocation so that disabling the
+ *   setting takes effect immediately (no restart required).
  */
-export function registerActivityIndicator(pi: ExtensionAPI): void {
+export function registerActivityIndicator(pi: ExtensionAPI, isActivityEnabled?: () => boolean): void {
   // ── Handle input events ──────────────────────────────────────────
   //
   // Processing order (from Pi docs):
@@ -371,6 +385,11 @@ export function registerActivityIndicator(pi: ExtensionAPI): void {
   pi.on('input', async (event, ctx) => {
     const text = event.text.trim();
 
+    // Compute whether the activity indicator should be shown.
+    // The getter is called dynamically at each invocation so that disabling
+    // the setting takes effect immediately (no restart required).
+    const showAct = isActivityEnabled?.() ?? true;
+
     // Free-form text: leave the indicator unchanged.
     // The indicator persists across turns so that a free-form answer to
     // a skill (e.g., answering an intake question) does not clear it.
@@ -389,7 +408,7 @@ export function registerActivityIndicator(pi: ExtensionAPI): void {
     // - Falls back to raw text on lookup failure
     // - The first detected ID is used when multiple are present
     if (detectWorkItemId(text)) {
-      await showActivityWithTitleLookup(ctx, text);
+      await showActivityWithTitleLookup(ctx, text, showAct);
       return { action: 'continue' };
     }
 
@@ -399,7 +418,7 @@ export function registerActivityIndicator(pi: ExtensionAPI): void {
     if (text.startsWith('/skill:')) {
       const skillName = text.slice(7).trim();
       const display = skillName.length > 0 ? `skill:${skillName}` : '/skill:';
-      showActivity(ctx, display);
+      showActivity(ctx, display, showAct);
       return { action: 'continue' };
     }
 
@@ -420,7 +439,7 @@ export function registerActivityIndicator(pi: ExtensionAPI): void {
     // Per AC 1, extension-registered commands should show in the footer.
     // We pass the full text so that arguments (like a work-item ID) are
     // included; it is truncated by showActivity to fit the terminal width.
-    showActivity(ctx, text);
+    showActivity(ctx, text, showAct);
     return { action: 'continue' };
   });
 
@@ -444,8 +463,14 @@ export function registerActivityIndicator(pi: ExtensionAPI): void {
         break;
 
       case 'resume':
-        // Resumed session: best-effort recovery from history (AC 3)
-        await recoverActivity(ctx);
+        // Resumed session: best-effort recovery from history (AC 3).
+        // When the activity indicator is disabled, recovery is skipped and
+        // the indicator is cleared to prevent stale indicators showing.
+        if ((isActivityEnabled?.() ?? true)) {
+          await recoverActivity(ctx, true);
+        } else {
+          ctx.ui.setStatus(ACTIVITY_STATUS_KEY, undefined);
+        }
         break;
     }
   });

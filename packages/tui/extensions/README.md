@@ -4,12 +4,14 @@ Extension modules for the Worklog TUI and Pi agent integration.
 
 ## Settings
 
-The extension has two user-configurable settings:
+The extension has four user-configurable settings:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `browseItemCount` | `5` | Number of work items shown in the browse list (1–50) |
 | `showIcons` | `true` | Whether to show emoji icons in the browse list and preview widget |
+| `showActivityIndicator` | `true` | Whether to show the activity indicator (⏵) in the footer |
+| `showHelpText` | `true` | Whether to show the shortcut help text line in the browse selection overlay |
 
 Settings are persisted to `settings.json` in the extension directory (alongside `shortcuts.json`).
 
@@ -87,6 +89,8 @@ Open the settings overlay by typing `/wl settings` in the Pi editor. This opens 
 
 - **Number of items**: Cycle through presets (3, 5, 10, 15, 20). Changes take effect immediately — the next `/wl` browse will use the new count.
 - **Show icons**: Toggle between on/off. Changes are applied immediately — the preview widget and browse list reflect the change.
+- **Activity indicator**: Toggle the activity indicator (⏵) in the footer on/off. When disabled, the footer line is hidden and no new indicators are shown. Existing indicators are cleared.
+- **Help text**: Toggle the shortcut help text line in the browse selection overlay on/off. When disabled, the help line is hidden on the next browse overlay open.
 
 Press `Escape` to close the settings overlay.
 
@@ -97,11 +101,13 @@ The settings file is a simple JSON object:
 ```json
 {
   "browseItemCount": 10,
-  "showIcons": false
+  "showIcons": false,
+  "showActivityIndicator": true,
+  "showHelpText": true
 }
 ```
 
-If the file is missing or malformed, defaults are used (5 items, icons enabled).
+If the file is missing or malformed, defaults are used (5 items, icons enabled, activity indicator enabled, help text enabled).
 
 ## Activity Indicator
 

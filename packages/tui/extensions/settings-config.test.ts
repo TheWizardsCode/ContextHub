@@ -47,11 +47,15 @@ describe('loadSettings', () => {
     mockReadFileSync.mockReturnValue(JSON.stringify({
       browseItemCount: 10,
       showIcons: false,
+      showActivityIndicator: false,
+      showHelpText: false,
     }));
 
     const settings = loadSettings();
     expect(settings.browseItemCount).toBe(10);
     expect(settings.showIcons).toBe(false);
+    expect(settings.showActivityIndicator).toBe(false);
+    expect(settings.showHelpText).toBe(false);
   });
 
   it('fills in missing fields with defaults', () => {
@@ -62,6 +66,8 @@ describe('loadSettings', () => {
     const settings = loadSettings();
     expect(settings.browseItemCount).toBe(3);
     expect(settings.showIcons).toBe(true); // default
+    expect(settings.showActivityIndicator).toBe(true); // default
+    expect(settings.showHelpText).toBe(true); // default
   });
 
   it('clamps browseItemCount to valid range [1, 50]', () => {
@@ -94,6 +100,26 @@ describe('loadSettings', () => {
     expect(settings).toEqual(DEFAULT_SETTINGS);
   });
 
+  it('returns default showActivityIndicator when value is invalid', () => {
+    mockReadFileSync.mockReturnValue(JSON.stringify({ showActivityIndicator: 'maybe' }));
+    expect(loadSettings().showActivityIndicator).toBe(true);
+  });
+
+  it('returns default showHelpText when value is invalid', () => {
+    mockReadFileSync.mockReturnValue(JSON.stringify({ showHelpText: null }));
+    expect(loadSettings().showHelpText).toBe(true);
+  });
+
+  it('coerces string "true"/"false" for boolean settings', () => {
+    mockReadFileSync.mockReturnValue(JSON.stringify({
+      showActivityIndicator: 'false',
+      showHelpText: 'true',
+    }));
+    const settings = loadSettings();
+    expect(settings.showActivityIndicator).toBe(false);
+    expect(settings.showHelpText).toBe(true);
+  });
+
   it('handles null browseItemCount by using default', () => {
     mockReadFileSync.mockReturnValue(JSON.stringify({ browseItemCount: null }));
     expect(loadSettings().browseItemCount).toBe(5);
@@ -110,6 +136,8 @@ describe('Settings interface structure', () => {
     expect(DEFAULT_SETTINGS).toEqual({
       browseItemCount: 5,
       showIcons: true,
+      showActivityIndicator: true,
+      showHelpText: true,
     });
   });
 });
