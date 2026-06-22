@@ -9,7 +9,8 @@
     "wl": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc && node ./scripts/generate-version.cjs",
+    "build": "npm run build:shared && tsc && node ./scripts/generate-version.cjs",
+    "build:shared": "cd packages/shared && npm run build",
     "dev": "tsx watch src/index.ts",
     "prestart": "npm run build",
     "start": "node dist/index.js",
@@ -32,6 +33,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@worklog/shared": "file:./packages/shared",
     "better-sqlite3": "^12.6.2",
     "chalk": "^5.6.2",
     "commander": "^11.1.0",
