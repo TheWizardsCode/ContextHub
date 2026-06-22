@@ -12,6 +12,19 @@ import { currentSettings } from './settings.js';
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Lazily load getWorklogDb so that tests can mock wl-integration.js
+ * without being affected by this module's import side effects.
+ */
+async function getDb(): Promise<any | null> {
+  try {
+    const { getWorklogDb } = await import('../wl-integration.js');
+    return getWorklogDb();
+  } catch {
+    return null;
+  }
+}
+
 // ── Types ─────────────────────────────────────────────────────────────
 
 export type RunWlFn = (args: string[], includeJson?: boolean) => Promise<string>;
@@ -208,6 +221,95 @@ export async function fetchTotalActionableCount(run: RunWlFn = runWl): Promise<n
       return payload.count;
     }
     return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// ── Database-backed read operations (Phase 2) ────────────────────
+
+/**
+ * Create a cached "next work items" list function using direct SQLite access.
+ */
+export function createDefaultListWorkItemsDb(
+  count?: number,
+): () => Promise<WorklogBrowseItem[]> {
+  return async (): Promise<WorklogBrowseItem[]> => {
+    const itemCount = count ?? currentSettings.browseItemCount;
+    const db = await getDb();
+    if (!db) return defaultListWorkItems();
+    try {
+      const results = db.next(itemCount, true);
+      if (!Array.isArray(results)) return defaultListWorkItems();
+      return results
+        .filter((r: any) => r.workItem)
+        .map((r: any) => ({
+          id: r.workItem.id,
+          title: r.workItem.title,
+          status: r.workItem.status,
+          priority: r.workItem.priority,
+          stage: r.workItem.stage || undefined,
+          risk: r.workItem.risk || undefined,
+          effort: r.workItem.effort || undefined,
+          description: r.workItem.description,
+          issueType: r.workItem.issueType || undefined,
+          tags: r.workItem.tags?.length ? r.workItem.tags : undefined,
+          githubIssueNumber: r.workItem.githubIssueNumber,
+        }))
+        .slice(0, itemCount);
+    } catch {
+      return defaultListWorkItems();
+    }
+  };
+}
+
+/**
+ * Create a stage-filtered list function using direct SQLite access.
+ */
+export function createListWorkItemsWithStageDb(
+  count?: number,
+): (stage: string) => Promise<WorklogBrowseItem[]> {
+  return async (stage: string): Promise<WorklogBrowseItem[]> => {
+    const itemCount = count ?? currentSettings.browseItemCount;
+    const db = await getDb();
+    if (!db) return defaultListWorkItemsWithStage(stage);
+    try {
+      const items = db.list({ stage });
+      if (!Array.isArray(items)) return defaultListWorkItemsWithStage(stage);
+      return items
+        .sort((a: any, b: any) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))
+        .map((item: any) => ({
+          id: item.id,
+          title: item.title,
+          status: item.status,
+          priority: item.priority,
+          stage: item.stage || undefined,
+          risk: item.risk || undefined,
+          effort: item.effort || undefined,
+          description: item.description,
+          issueType: item.issueType || undefined,
+          tags: item.tags?.length ? item.tags : undefined,
+          githubIssueNumber: item.githubIssueNumber,
+        }))
+        .slice(0, itemCount);
+    } catch {
+      return defaultListWorkItemsWithStage(stage);
+    }
+  };
+}
+
+/**
+ * Fetch the total actionable count using direct SQLite access.
+ */
+export async function fetchTotalActionableCountDb(): Promise<number | undefined> {
+  const db = await getDb();
+  if (!db) return undefined;
+  try {
+    const all = db.getAll();
+    if (!Array.isArray(all)) return undefined;
+    return all.filter(
+      (i: any) => i.status === 'open' || i.status === 'in-progress' || i.status === 'blocked'
+    ).length;
   } catch {
     return undefined;
   }

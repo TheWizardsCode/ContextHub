@@ -13,7 +13,7 @@ import type { ShortcutRegistry } from './shortcut-config.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { registerActivityIndicator, showActivity, clearActivity } from './activity-indicator.js';
 import { reloadSettings, currentSettings, STAGE_MAP, VALID_STAGES, updateSettings, openSettingsOverlay } from './lib/settings.js';
-import { runWl, defaultListWorkItems, defaultListWorkItemsWithStage, createDefaultListWorkItems, createListWorkItemsWithStage } from './lib/tools.js';
+import { runWl, defaultListWorkItems, defaultListWorkItemsWithStage, createDefaultListWorkItems, createListWorkItemsWithStage, createDefaultListWorkItemsDb, createListWorkItemsWithStageDb, fetchTotalActionableCountDb } from './lib/tools.js';
 import { registerAutoInject } from './lib/auto-inject.js';
 import { INSTALL_GUARDRAILS } from './lib/guardrails.js';
 import {
@@ -54,8 +54,10 @@ const { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, 
 
 export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {}) {
   const runWlImpl = deps.runWl ?? runWl;
-  const listWorkItems = deps.listWorkItems ?? (() => defaultListWorkItems(runWlImpl));
-  const listWorkItemsWithStage = deps.listWorkItemsWithStage ?? ((stage: string) => defaultListWorkItemsWithStage(stage, runWlImpl));
+  // Phase 2: Use direct database access for list operations when available.
+  // Falls back to CLI-backed lists when the database cannot be opened.
+  const listWorkItems = deps.listWorkItems ?? createDefaultListWorkItemsDb();
+  const listWorkItemsWithStage = deps.listWorkItemsWithStage ?? createListWorkItemsWithStageDb();
   const shortcutRegistry = deps.shortcutRegistry ?? loadShortcutConfig();
   const chooseWorkItem = deps.chooseWorkItem
     ? (deps.chooseWorkItem as (items: WorklogBrowseItem[], ctx: BrowseContext, onSelectionChange: SelectionChangeHandler) => Promise<WorklogBrowseItem | ShortcutResult | undefined>)
@@ -67,6 +69,9 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     runWlImpl,
     shortcutRegistry,
     chooseWorkItem,
+    // Phase 2: Pre-fetched actionable count from direct DB access.
+    // When undefined (DB unavailable), browse falls back to CLI-based count.
+    totalActionableCount: undefined,
   };
 
   return function registerWorklogBrowseExtension(pi: ExtensionAPI): void {
