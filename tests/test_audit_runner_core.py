@@ -13,16 +13,16 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Ensure the pi agent skill module can be imported
-PI_SKILLS_ROOT = Path("/home/rgardler/.pi/agent/skills")
-if str(PI_SKILLS_ROOT) not in sys.path:
-    sys.path.insert(0, str(PI_SKILLS_ROOT))
-
 from audit.scripts.audit_runner import (
     _assemble_issue_report,
     _assemble_child_audit_report,
     _assemble_project_report,
 )
+
+# Ensure the pi agent skill module can be imported
+PI_SKILLS_ROOT = Path("/home/rgardler/.pi/agent/skills")
+if str(PI_SKILLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(PI_SKILLS_ROOT))
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -79,10 +79,10 @@ class TestAssembleIssueReportModelLine:
 
         lines = report.splitlines()
         # Find position of key markers
-        rtc_idx = next(i for i, l in enumerate(lines) if l.startswith("Ready to close:"))
-        summary_idx = next(i for i, l in enumerate(lines) if l.strip() == "## Summary")
+        rtc_idx = next(i for i, line in enumerate(lines) if line.startswith("Ready to close:"))
+        summary_idx = next(i for i, line in enumerate(lines) if line.strip() == "## Summary")
         model_idx = next(
-            (i for i, l in enumerate(lines) if l.startswith("Model:")),
+            (i for i, line in enumerate(lines) if line.startswith("Model:")),
             None,
         )
 
@@ -136,7 +136,7 @@ class TestAssembleIssueReportModelLine:
             SAMPLE_ISSUE, SAMPLE_AC_RESULTS, [],
         )
         lines = report.splitlines()
-        model_lines = [l for l in lines if l.startswith("Model:")]
+        model_lines = [line for line in lines if line.startswith("Model:")]
         assert len(model_lines) == 0, (
             "Model line should not appear when no model parameters provided"
         )
@@ -149,7 +149,7 @@ class TestAssembleIssueReportModelLine:
             model_source="remote",
         )
         model_idx = next(
-            (i for i, l in enumerate(report.splitlines()) if l.startswith("Model:")),
+            (i for i, line in enumerate(report.splitlines()) if line.startswith("Model:")),
             None,
         )
         assert model_idx is not None, "Model line missing when children present"
@@ -171,13 +171,13 @@ class TestAssembleChildAuditReportModelLine:
         )
 
         lines = report.splitlines()
-        rtc_idx = next(i for i, l in enumerate(lines) if l.startswith("Ready to close:"))
+        rtc_idx = next(i for i, line in enumerate(lines) if line.startswith("Ready to close:"))
         summary_idx = next(
-            (i for i, l in enumerate(lines) if l.strip() == "## Summary"),
+            (i for i, line in enumerate(lines) if line.strip() == "## Summary"),
             None,
         )
         model_idx = next(
-            (i for i, l in enumerate(lines) if l.startswith("Model:")),
+            (i for i, line in enumerate(lines) if line.startswith("Model:")),
             None,
         )
 
@@ -206,7 +206,7 @@ class TestAssembleChildAuditReportModelLine:
     def test_child_model_line_omitted_when_no_model_param(self):
         """Legacy: No model line when parameters not provided (backward compat)."""
         report = _assemble_child_audit_report(SAMPLE_CHILD, SAMPLE_AC_RESULTS)
-        model_lines = [l for l in report.splitlines() if l.startswith("Model:")]
+        model_lines = [line for line in report.splitlines() if line.startswith("Model:")]
         assert len(model_lines) == 0
 
 
@@ -222,7 +222,7 @@ class TestAssembleProjectReportModelLine:
             "Project summary text",
             "Recommendation text",
         )
-        model_lines = [l for l in report.splitlines() if l.startswith("Model:")]
+        model_lines = [line for line in report.splitlines() if line.startswith("Model:")]
         assert len(model_lines) == 0, "Project report should not contain a model line"
 
 
