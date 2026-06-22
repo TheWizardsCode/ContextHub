@@ -4,7 +4,7 @@ Extension modules for the Worklog TUI and Pi agent integration.
 
 ## Settings
 
-The extension has four user-configurable settings:
+The extension has five user-configurable settings:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -12,6 +12,7 @@ The extension has four user-configurable settings:
 | `showIcons` | `true` | Whether to show emoji icons in the browse list and preview widget |
 | `showActivityIndicator` | `true` | Whether to show the activity indicator (⏵) in the footer |
 | `showHelpText` | `true` | Whether to show the shortcut help text line in the browse selection overlay |
+| `autoInjectEnabled` | `true` | Whether to auto-inject relevant work items into the system prompt before each agent turn |
 
 Settings are stored in Pi's canonical settings files under the `context-hub`
 namespace. Settings changed via `/wl settings` are persisted to the project's
@@ -107,6 +108,7 @@ Open the settings overlay by typing `/wl settings` in the Pi editor. This opens 
 - **Show icons**: Toggle between on/off. Changes are applied immediately — the preview widget and browse list reflect the change.
 - **Activity indicator**: Toggle the activity indicator (⏵) in the footer on/off. When disabled, the footer line is hidden and no new indicators are shown. Existing indicators are cleared.
 - **Help text**: Toggle the shortcut help text line in the browse selection overlay on/off. When disabled, the help line is hidden on the next browse overlay open.
+- **Auto-inject items**: Toggle auto-injection of relevant work items before agent turns on/off. When enabled, the extension searches for related work items based on the prompt context and injects them into the system prompt automatically.
 
 Press `Escape` to close the settings overlay.
 
@@ -121,14 +123,15 @@ Example `.pi/settings.json`:
     "browseItemCount": 10,
     "showIcons": false,
     "showActivityIndicator": true,
-    "showHelpText": true
+    "showHelpText": true,
+    "autoInjectEnabled": true
   }
 }
 ```
 
 When all settings files are missing or contain no `context-hub` section,
 built-in defaults are used (5 items, icons enabled, activity indicator
-enabled, help text enabled).
+enabled, help text enabled, auto-inject enabled).
 
 ## Activity Indicator
 
@@ -174,6 +177,78 @@ when used outside the Pi TUI.
   before skill expansion.
 - Built-in Pi commands and free-form text clear the indicator via the same
   `input` event handler.
+
+## Auto-Injection
+
+The extension automatically injects relevant work items into the system
+prompt before each agent turn, providing context without requiring manual
+`wl next` or `wl list` calls.
+
+### How It Works
+
+When a new agent turn begins, the `before_agent_start` hook triggers the
+auto-injection pipeline:
+
+1. **ID Detection**: The user's prompt text is scanned for work item ID
+   patterns (e.g., `WL-0MQL0T5TR0060AEH`). All unique IDs are collected.
+2. **ID Lookup**: Explicitly referenced IDs are fetched via `wl show` to
+   retrieve their title, status, priority, and stage.
+3. **Context Search**: If the prompt contains meaningful text beyond IDs,
+   a `wl search` is performed to find related items by keyword matching
+   (up to 5 results).
+4. **Formatting**: Found items are formatted as markdown context:
+   - **Full-detail mode** (≤3 items): Shows ID, title, and inline tags
+     for priority, status, and stage.
+   - **Links-only mode** (>3 items): Compact ID + title list.
+5. **Injection**: The formatted context is appended to the system prompt
+   under a `## Relevant Work Items` heading.
+6. **Status Indicator**: A status bar notification (e.g., `📋 3 items
+   auto-injected`) is shown briefly in the footer.
+
+### What Gets Injected
+
+**Full-detail mode** (≤3 items):
+```markdown
+## Relevant Work Items
+
+- **WL-123**: Fix login bug `high` `open` `in_progress`
+- **WL-456**: Add tests `medium` `in_review`
+```
+
+**Links-only mode** (>3 items):
+```markdown
+## Relevant Work Items
+
+- WL-123: Fix login bug
+- WL-456: Add tests
+```
+
+### Configuration
+
+Auto-injection can be toggled via the `autoInjectEnabled` setting:
+- **`/wl settings`** — Toggle the "Auto-inject items" option on/off
+- **`.pi/settings.json`** — Set `{ "context-hub": { "autoInjectEnabled": false } }`
+
+Changes take effect immediately. When disabled, the `before_agent_start`
+handler returns without performing any search or injection.
+
+### Graceful Degradation
+
+- Missing or invalid work item IDs are silently skipped (no errors surfaced).
+- `wl search` failures are silently caught — the handler degrades gracefully
+  to only show explicitly referenced IDs.
+- When the prompt contains only IDs (no searchable text), only ID lookup
+  is performed.
+- When no related items are found, the system prompt is left unmodified.
+- In non-TUI modes (print, JSON, RPC), the status bar indicator is a no-op
+  with no errors.
+
+### Technical Notes
+
+- Implemented in `lib/auto-inject.ts` and registered in `index.ts`.
+- Uses Pi's `before_agent_start` hook — available in the pi ExtensionAPI.
+- The `AUTO_INJECT_STATUS_KEY` (`worklog-auto-inject`) is used for the
+  status bar indicator to avoid conflicts with other status entries.
 
 ## `/wl` Slash Command — Stage Filtering
 
