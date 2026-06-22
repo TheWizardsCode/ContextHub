@@ -8,6 +8,7 @@ import { createPluginContext, getVersion } from './cli-utils.js';
 import { loadPlugins } from './plugin-loader.js';
 import { renderCliMarkdown, resolveMarkdownEnabled } from './cli-output.js';
 import { loadConfig } from './config.js';
+import { initializeRuntime } from './lib/runtime.js';
 
 // Import built-in command modules
 import initCommand from './commands/init.js';
@@ -307,6 +308,11 @@ try {
 } catch (error) {
   // Silently continue with built-in commands only
 }
+
+// Initialize the background task runtime so that background operations
+// (e.g. auto-sync, metrics collection) can be launched during the session
+// and are awaited on shutdown.
+initializeRuntime();
 
 // Customize help output to group commands for readability and ensure global
 // options appear on subcommand help as well. Commander applies help
