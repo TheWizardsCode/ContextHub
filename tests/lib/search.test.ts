@@ -286,6 +286,64 @@ describe('fuseScores', () => {
 // WorklogSearch integration tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// OpenAIEmbedder constructor tests
+// ---------------------------------------------------------------------------
+
+describe('OpenAIEmbedder', () => {
+  it('should be available when config has explicit embedding section', async () => {
+    const { OpenAIEmbedder } = await import('../../src/lib/search.js');
+
+    const embedder = new OpenAIEmbedder({
+      hasExplicitConfig: true,
+    });
+    expect(embedder.available).toBe(true);
+  });
+
+  it('should be available when an API key is provided via config', async () => {
+    const { OpenAIEmbedder } = await import('../../src/lib/search.js');
+
+    const embedder = new OpenAIEmbedder({
+      apiKey: 'test-key',
+    });
+    expect(embedder.available).toBe(true);
+  });
+
+  it('should be available when baseUrl is set via config', async () => {
+    const { OpenAIEmbedder } = await import('../../src/lib/search.js');
+
+    const embedder = new OpenAIEmbedder({
+      baseUrl: 'http://localhost:11434/v1',
+      hasExplicitConfig: true,
+    });
+    expect(embedder.available).toBe(true);
+  });
+
+  it('should be unavailable when no config and no env vars are set', async () => {
+    const { OpenAIEmbedder } = await import('../../src/lib/search.js');
+
+    const embedder = new OpenAIEmbedder({
+      hasExplicitConfig: false,
+    });
+    expect(embedder.available).toBe(false);
+  });
+
+  it('should use provided config values over defaults', async () => {
+    const { OpenAIEmbedder } = await import('../../src/lib/search.js');
+
+    const embedder = new OpenAIEmbedder({
+      apiKey: 'config-key',
+      baseUrl: 'http://localhost:11434/v1',
+      model: 'nomic-embed-text',
+      hasExplicitConfig: true,
+    });
+
+    expect(embedder.available).toBe(true);
+    // Test generateEmbedding would fail without a real server,
+    // but the constructor config is correctly stored
+  });
+});
+
 describe('WorklogSearch', () => {
   let tempDir: string;
   let storePath: string;

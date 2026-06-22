@@ -20,7 +20,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { createHash } from 'crypto';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { getRuntime } from './runtime.js';
+import type { EmbeddingConfig, WorklogConfig } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -232,10 +235,20 @@ const DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-small';
 /**
  * OpenAI-compatible embedder.
  *
- * Reads configuration from environment variables:
- *   OPENAI_API_KEY           — API key (required for operation)
- *   OPENAI_BASE_URL          — API base URL (default: https://api.openai.com/v1)
- *   OPENAI_EMBEDDING_MODEL   — Model name (default: text-embedding-3-small)
+ * Configuration sources (highest priority first):
+ *   1. Worklog config file (`.worklog/config.yaml` → `embedding.*` fields)
+ *   2. Environment variables (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_EMBEDDING_MODEL`)
+ *   3. Built-in defaults
+ *
+ * The embedder is considered **available** when any of these conditions hold:
+ *   - An API key is set (config or env var)
+ *   - An explicit embedding config section exists in `.worklog/config.yaml`
+ *     (even without an API key — supports local providers like Ollama)
+ *   - `OPENAI_BASE_URL` is set in the environment
+ *   - `OPENAI_EMBEDDING_MODEL` is set in the environment
+ *
+ * When no API key is provided (e.g., local Ollama), the Authorization header
+ * is omitted from API requests.
  */
 export class OpenAIEmbedder implements Embedder {
   readonly available: boolean;
@@ -243,25 +256,46 @@ export class OpenAIEmbedder implements Embedder {
   private readonly baseUrl: string;
   private readonly model: string;
 
-  constructor() {
-    this.apiKey = process.env.OPENAI_API_KEY || '';
-    this.baseUrl = process.env.OPENAI_BASE_URL || DEFAULT_EMBEDDING_BASE_URL;
-    this.model = process.env.OPENAI_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
-    this.available = this.apiKey.length > 0;
+  constructor(config?: { apiKey?: string; baseUrl?: string; model?: string; hasExplicitConfig?: boolean }) {
+    // Priority: 1) constructor config, 2) env vars, 3) defaults
+    this.apiKey = config?.apiKey ?? process.env.OPENAI_API_KEY ?? '';
+    this.baseUrl = config?.baseUrl ?? process.env.OPENAI_BASE_URL ?? DEFAULT_EMBEDDING_BASE_URL;
+    this.model = config?.model ?? process.env.OPENAI_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL;
+
+    // Available when:
+    // - API key is set (cloud provider), OR
+    // - Any embedding config is present (local provider, explicit user intent), OR
+    // - OPENAI_BASE_URL or OPENAI_EMBEDDING_MODEL env vars are set (explicit choice)
+    this.available = Boolean(
+      this.apiKey ||
+      config?.hasExplicitConfig ||
+      process.env.OPENAI_BASE_URL ||
+      process.env.OPENAI_EMBEDDING_MODEL
+    );
   }
 
   async generateEmbedding(text: string): Promise<number[]> {
     if (!this.available) {
-      throw new Error('OpenAI embedder is not configured. Set OPENAI_API_KEY.');
+      throw new Error(
+        'Embedding provider is not configured. ' +
+        'Set OPENAI_API_KEY, configure embedding in .worklog/config.yaml, ' +
+        'or refer to CLI.md for local provider setup.'
+      );
     }
 
     const url = `${this.baseUrl.replace(/\/$/, '')}/embeddings`;
+
+    // Build headers conditionally — local providers (Ollama) don't need auth
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (this.apiKey) {
+      headers['Authorization'] = `Bearer ${this.apiKey}`;
+    }
+
     const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-      },
+      headers,
       body: JSON.stringify({
         input: text,
         model: this.model,
@@ -676,12 +710,48 @@ export class WorklogSearch {
 let _defaultEmbedder: Embedder | null = null;
 
 /**
+ * Try to load embedding config from the worklog config file.
+ *
+ * Uses a `createRequire`-based synchronous require to call `loadConfigRelaxed()`
+ * from `../config.js` without needing an async boundary. This is safe because
+ * `loadConfigRelaxed()` is purely synchronous (reads a YAML file).
+ */
+function loadEmbeddingConfig(): { apiKey?: string; baseUrl?: string; model?: string; hasExplicitConfig: boolean } | null {
+  try {
+    const _require = createRequire(fileURLToPath(import.meta.url));
+    const configModule = _require('../config.js') as { loadConfigRelaxed: () => WorklogConfig | null };
+    const config = configModule.loadConfigRelaxed();
+    if (config?.embedding) {
+      const ec = config.embedding;
+      return {
+        apiKey: ec.apiKey || undefined,
+        baseUrl: ec.baseUrl || undefined,
+        model: ec.model || undefined,
+        hasExplicitConfig: true,
+      };
+    }
+    return { hasExplicitConfig: false };
+  } catch {
+    return { hasExplicitConfig: false };
+  }
+}
+
+/**
  * Get or create the default embedder (OpenAI-compatible).
- * Returns a noop embedder that reports `available: false` when not configured.
+ *
+ * Configuration sources (highest priority first):
+ *   1. `.worklog/config.yaml` → `embedding.*` fields
+ *   2. Environment variables (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_EMBEDDING_MODEL`)
+ *   3. Built-in defaults
+ *
+ * Returns an embedder with `available: false` when no configuration is found,
+ * which causes all semantic search operations to gracefully fall back to
+ * FTS-only search.
  */
 export function getDefaultEmbedder(): Embedder {
   if (!_defaultEmbedder) {
-    _defaultEmbedder = new OpenAIEmbedder();
+    const config = loadEmbeddingConfig();
+    _defaultEmbedder = new OpenAIEmbedder(config ?? undefined);
   }
   return _defaultEmbedder;
 }

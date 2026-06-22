@@ -133,6 +133,24 @@ export interface WorkItemQuery {
 }
 
 /**
+ * Configuration for the embedding provider used by semantic search.
+ *
+ * Fields can be set in `.worklog/config.yaml` under the `embedding` key,
+ * or via environment variables as fallbacks. Config values take precedence
+ * over environment variables.
+ */
+export interface EmbeddingConfig {
+  /** Provider identifier: 'openai', 'ollama', or a custom base URL hostname */
+  provider?: string;
+  /** API base URL (default: https://api.openai.com/v1) */
+  baseUrl?: string;
+  /** Model name (default: text-embedding-3-small) */
+  model?: string;
+  /** API key (optional — local providers like Ollama don't need one) */
+  apiKey?: string;
+}
+
+/**
  * Configuration for a worklog project
  */
 export interface WorklogConfig {
@@ -158,6 +176,20 @@ export interface WorklogConfig {
   // a work item is marked as completed.  Requires the `ob` CLI to be available
   // on PATH (or WL_OB_BIN env var).  Defaults to false.
   openBrainEnabled?: boolean;
+  /**
+   * Embedding provider configuration for semantic search.
+   * When set in config, the embedder is considered available even without
+   * environment variables — useful for local providers like Ollama.
+   *
+   * Example:
+   * ```yaml
+   * embedding:
+   *   provider: ollama
+   *   baseUrl: http://localhost:11434/v1
+   *   model: nomic-embed-text
+   * ```
+   */
+  embedding?: EmbeddingConfig;
 }
 
 /**
