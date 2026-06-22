@@ -269,9 +269,10 @@ export class ActionPalette {
       execute: async () => {
         const description = "New work item";
         try {
-          const result = await runWl("create", ["-t", description, "--description", description]);
-          if (result && typeof result === "object") {
-            return `Created: ${(result as any).id}`;
+          // Phase 3: direct DB write
+          const id = await createWorkItemDb(description);
+          if (id) {
+            return `Created: ${id}`;
           }
           return "Work item created.";
         } catch (err) {
@@ -291,8 +292,9 @@ export class ActionPalette {
         const id = promptInput("Enter work item ID to close:");
         if (!id) return "Cancelled.";
         try {
-          const result = await runWl("close", [id]);
-          if (result && typeof result === "object") {
+          // Phase 3: direct DB write
+          const closed = await closeWorkItemDb(id);
+          if (closed) {
             return `Closed: ${id}`;
           }
           return `Closed: ${id}`;
@@ -390,7 +392,7 @@ export class ActionPalette {
           const next = await runWl("next");
           if (next && typeof next === "object" && "id" in next) {
             const id = (next as any).id;
-            await runWl("update", [id, "--assignee", "OpenAI-Agent"]);
+            await updateWorkItemDb(id, { assignee: "OpenAI-Agent" });
             return `Claimed: ${id}`;
           }
           return "No tasks available to claim.";
@@ -413,7 +415,7 @@ export class ActionPalette {
         const content = promptInput("Enter comment text:");
         if (!content) return "Cancelled.";
         try {
-          await runWl("comment", ["add", id, "--comment", content]);
+          await addCommentDb(id, "TUI User", content);
           return `Comment added to ${id}.`;
         } catch (err) {
           throw new Error(`Comment failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -434,7 +436,7 @@ export class ActionPalette {
         const status = promptInput("Enter new status (open/in-progress/closed):");
         if (!status) return "Cancelled.";
         try {
-          await runWl("update", [id, "--status", status]);
+          await updateWorkItemDb(id, { status });
           return `Updated status to ${status} for ${id}.`;
         } catch (err) {
           throw new Error(`Status change failed: ${err instanceof Error ? err.message : String(err)}`);

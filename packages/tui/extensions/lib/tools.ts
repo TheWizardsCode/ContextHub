@@ -314,3 +314,65 @@ export async function fetchTotalActionableCountDb(): Promise<number | undefined>
     return undefined;
   }
 }
+
+// ── Database-backed write operations (Phase 3) ───────────────────
+
+/**
+ * Create a work item using direct SQLite access.
+ * Returns the created item's ID, or null on failure.
+ */
+export async function createWorkItemDb(title: string, description?: string): Promise<string | null> {
+  const db = await getDb();
+  if (!db) return null;
+  try {
+    const created = db.create({ title: title || 'Untitled', description: description || title });
+    return created?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Update a work item using direct SQLite access.
+ * Returns true on success, false on failure.
+ */
+export async function updateWorkItemDb(id: string, updates: Record<string, unknown>): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+  try {
+    const result = db.update(id, updates);
+    return result !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Close a work item using direct SQLite access.
+ * Returns true on success, false on failure.
+ */
+export async function closeWorkItemDb(id: string, reason?: string): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+  try {
+    const result = db.update(id, { status: 'completed', description: reason });
+    return result !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Add a comment to a work item using direct SQLite access.
+ * Returns the comment ID on success, or null on failure.
+ */
+export async function addCommentDb(workItemId: string, author: string, comment: string): Promise<string | null> {
+  const db = await getDb();
+  if (!db) return null;
+  try {
+    const created = db.createComment({ workItemId, author, comment });
+    return created?.id ?? null;
+  } catch {
+    return null;
+  }
+}
