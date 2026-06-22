@@ -255,6 +255,27 @@ export function buildSelectionWidget(
 // ── Browse overlay (default choose work item) ─────────────────────────
 
 /**
+ * State snapshot used to preserve the selection list's navigation context
+ * across loop iterations in runBrowseFlow. Captured at the moment an item
+ * is selected (Enter), and restored when the loop restarts after returning
+ * from the detail view via Escape.
+ */
+export interface BrowseSelectionState {
+  /** Snapshot of the current items array at time of selection */
+  currentItems: WorklogBrowseItem[];
+  /** Index of the selected item */
+  selectedIndex: number;
+  /** Last announced item ID (for onSelectionChange dedup) */
+  lastSelectionId: string | undefined;
+  /** Hierarchical navigation stack (drill-down parents) */
+  navStack: Array<{
+    items: WorklogBrowseItem[];
+    selectedIndex: number;
+    lastSelectionId: string | undefined;
+  }>;
+}
+
+/**
  * Default work item chooser that renders a custom overlay with the browse list.
  */
 export async function defaultChooseWorkItem(
@@ -265,6 +286,14 @@ export async function defaultChooseWorkItem(
   reFetchItems?: () => Promise<WorklogBrowseItem[]>,
   fetchChildren?: (parentId: string) => Promise<WorklogBrowseItem[]>,
   totalCount?: number,
+  /**
+   * Optional mutable context for preserving navigation state across
+   * loop restarts. When provided with a non-empty snapshot, the
+   * selection list initializes from the restored state instead of
+   * starting fresh. The state is updated again when an item is
+   * selected (so the next iteration sees the correct hierarchy level).
+   */
+  selectionState?: BrowseSelectionState,
 ): Promise<WorklogBrowseItem | ShortcutResult | undefined> {
   if (!ctx.ui.custom) {
     if (!ctx.ui.select) {
@@ -362,6 +391,17 @@ export async function defaultChooseWorkItem(
         clearInterval(refreshInterval);
         refreshInterval = undefined;
       }
+      // Save current navigation state before resolving
+      if (selectionState) {
+        selectionState.currentItems = [...items];
+        selectionState.selectedIndex = selectedIndex;
+        selectionState.lastSelectionId = lastSelectionId;
+        selectionState.navStack = navStack.map(entry => ({
+          items: [...entry.items],
+          selectedIndex: entry.selectedIndex,
+          lastSelectionId: entry.lastSelectionId,
+        }));
+      }
       done(value);
     };
 
@@ -384,6 +424,26 @@ export async function defaultChooseWorkItem(
     }
     const navStack: NavStackEntry[] = [];
     let isLoadingChildren = false;
+
+    // ── Restore navigation state if available (from loop restart) ──
+    if (selectionState) {
+      if (selectionState.selectedIndex >= 0 && selectionState.selectedIndex < items.length) {
+        selectedIndex = selectionState.selectedIndex;
+      }
+      if (selectionState.lastSelectionId !== undefined) {
+        lastSelectionId = selectionState.lastSelectionId;
+      }
+      // Restore nav stack (deep copy of saved entries)
+      for (const entry of selectionState.navStack) {
+        navStack.push({
+          items: [...entry.items],
+          selectedIndex: entry.selectedIndex,
+          lastSelectionId: entry.lastSelectionId,
+        });
+      }
+      // Mark state as consumed
+      selectionState.currentItems = [];
+    }
 
     const formatEntryLabel = (e: ShortcutEntry): string => {
       const label = e.label ?? e.command
@@ -844,11 +904,32 @@ export async function runBrowseFlow(
 
     const totalActionableCount = await fetchTotalActionableCount(runWlImpl);
 
+    // ── Preserved selection state for hierarchy restoration ─────────
+    // When the user drills into children and opens a detail view, the
+    // selection state (items, navStack) is captured so the loop can
+    // restore the same hierarchy level when Escape closes the detail.
+    const selectionState: BrowseSelectionState = {
+      currentItems: [],
+      selectedIndex: 0,
+      lastSelectionId: undefined,
+      navStack: [],
+    };
+
     // ── Browse loop: selection list → detail → selection list → … ──
     while (true) {
-      const items = stage
-        ? (await listWorkItemsWithStage(stage)).slice(0, itemCount)
-        : (await listWorkItems()).slice(0, itemCount);
+      // Check if we have preserved items from a previous loop iteration
+      // (e.g. user was in a child hierarchy and pressed Escape in detail).
+      const hasPreservedItems = selectionState.currentItems.length > 0;
+
+      const items = hasPreservedItems
+        ? (() => {
+            const restored = selectionState.currentItems;
+            selectionState.currentItems = []; // Consume once
+            return restored;
+          })()
+        : stage
+          ? (await listWorkItemsWithStage(stage)).slice(0, itemCount)
+          : (await listWorkItems()).slice(0, itemCount);
 
       if (items[0]) {
         announceSelection(items[0]);
@@ -858,7 +939,7 @@ export async function runBrowseFlow(
       if (chooseWorkItem) {
         result = await chooseWorkItem(items, ctx, announceSelection);
       } else {
-        result = await defaultChooseWorkItem(items, ctx, announceSelection, shortcutRegistry, reFetchItems, fetchChildren, totalActionableCount);
+        result = await defaultChooseWorkItem(items, ctx, announceSelection, shortcutRegistry, reFetchItems, fetchChildren, totalActionableCount, selectionState);
       }
 
       if (result && 'type' in result && result.type === 'shortcut') {

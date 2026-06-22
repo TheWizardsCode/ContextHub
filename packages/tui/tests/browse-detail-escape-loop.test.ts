@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { runBrowseFlow, type BrowseFlowOptions, type WorklogBrowseItem, type ShortcutResult } from '../extensions/lib/browse.js';
+import { runBrowseFlow, defaultChooseWorkItem, type BrowseFlowOptions, type WorklogBrowseItem, type ShortcutResult } from '../extensions/lib/browse.js';
 import { ShortcutRegistry, type ShortcutEntry } from '../extensions/shortcut-config.js';
 
 vi.mock('@earendil-works/pi-coding-agent', () => ({
@@ -337,5 +337,132 @@ describe('Browse flow detail-view Escape loop', () => {
     // loop-around doesn't break it. No crash means hierarchy works.
     expect(mocks.chooseWorkItem).toHaveBeenCalledTimes(2);
     expect(mocks.mockUi.setWidget).toHaveBeenCalledWith('worklog-browse-selection', undefined);
+  });
+
+  // ── Selection state preservation (hierarchy restoration) ──────────
+
+  it('saves selection state with hierarchy context when item is selected', async () => {
+    let widgetHandleInput: ((data: string) => void) | null = null;
+
+    const mockUi = {
+      custom: vi.fn((factory: any) => {
+        return new Promise((resolve) => {
+          const tui = { requestRender: vi.fn() };
+          const theme = {
+            fg: vi.fn((_c: string, t: string) => t),
+            bold: vi.fn((t: string) => t),
+          };
+          const done = (value: any) => { resolve(value); };
+          const widget = factory(tui, theme, undefined, done);
+          widgetHandleInput = widget.handleInput ?? null;
+        });
+      }),
+      notify: vi.fn(),
+      setEditorText: vi.fn(),
+      setWidget: vi.fn(),
+    };
+
+    const selectionState = {
+      currentItems: [],
+      selectedIndex: 0,
+      lastSelectionId: undefined as string | undefined,
+      navStack: [] as Array<{ items: any[]; selectedIndex: number; lastSelectionId: string | undefined }>,
+    };
+
+    const childItems = [
+      { id: 'WL-010', title: 'Child item', status: 'open' as const },
+    ];
+
+    const promise = defaultChooseWorkItem(
+      childItems,
+      { ui: mockUi },
+      vi.fn(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      selectionState,
+    );
+
+    // Simulate pressing Enter on the selected item (index 0)
+    expect(widgetHandleInput).not.toBeNull();
+    widgetHandleInput!('\r');
+
+    const result = await promise;
+
+    // Selection state should now be populated
+    expect(selectionState.currentItems).toEqual(childItems);
+    expect(selectionState.selectedIndex).toBe(0);
+    expect(selectionState.lastSelectionId).toBe('WL-010');
+    expect(result).toEqual(childItems[0]);
+  });
+
+  it('restores selection state with navStack when re-entering', async () => {
+    let widgetHandleInput: ((data: string) => void) | null = null;
+
+    const mockUi = {
+      custom: vi.fn((factory: any) => {
+        return new Promise((resolve) => {
+          const tui = { requestRender: vi.fn() };
+          const theme = {
+            fg: vi.fn((_c: string, t: string) => t),
+            bold: vi.fn((t: string) => t),
+          };
+          const done = (value: any) => { resolve(value); };
+          const widget = factory(tui, theme, undefined, done);
+          widgetHandleInput = widget.handleInput ?? null;
+        });
+      }),
+      notify: vi.fn(),
+      setEditorText: vi.fn(),
+      setWidget: vi.fn(),
+    };
+
+    const parentItems = [
+      { id: 'WL-001', title: 'Parent', status: 'open' as const, childCount: 2 },
+    ];
+    const childItems = [
+      { id: '..', title: '..', status: 'open' as const },
+      { id: 'WL-010', title: 'Child one', status: 'open' as const },
+      { id: 'WL-011', title: 'Child two', status: 'in_progress' as const },
+    ];
+
+    const selectionState = {
+      currentItems: [...childItems],
+      selectedIndex: 1,
+      lastSelectionId: 'WL-010',
+      navStack: [
+        {
+          items: [...parentItems],
+          selectedIndex: 0,
+          lastSelectionId: 'WL-001',
+        },
+      ],
+    };
+
+    const promise = defaultChooseWorkItem(
+      childItems,
+      { ui: mockUi },
+      vi.fn(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      selectionState,
+    );
+
+    // The state should have been consumed (currentItems cleared)
+    expect(selectionState.currentItems).toEqual([]);
+
+    // Simulate pressing Enter on the selected item (index 1, 'Child one')
+    expect(widgetHandleInput).not.toBeNull();
+    widgetHandleInput!('\r');
+
+    const result = await promise;
+
+    // After _done, selection state should be re-populated
+    expect(selectionState.currentItems).toEqual(childItems);
+    expect(selectionState.navStack.length).toBe(1);
+    expect(result).toEqual(childItems[1]);
   });
 });
