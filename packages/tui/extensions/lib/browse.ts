@@ -823,9 +823,6 @@ export async function runBrowseFlow(
 
   try {
     const itemCount = currentSettings.browseItemCount;
-    const items = stage
-      ? (await listWorkItemsWithStage(stage)).slice(0, itemCount)
-      : (await listWorkItems()).slice(0, itemCount);
 
     let lastAnnouncedId: string | undefined;
     const announceSelection: SelectionChangeHandler = (
@@ -834,10 +831,6 @@ export async function runBrowseFlow(
       lastAnnouncedId = item.id;
       ctx.ui.setWidget?.('worklog-browse-selection', buildSelectionWidget(item, currentSettings), { placement: 'belowEditor' });
     };
-
-    if (items[0]) {
-      announceSelection(items[0]);
-    }
 
     const reFetchItems = stage
       ? () => listWorkItemsWithStage(stage).then(newItems => newItems.slice(0, itemCount))
@@ -851,121 +844,136 @@ export async function runBrowseFlow(
 
     const totalActionableCount = await fetchTotalActionableCount(runWlImpl);
 
-    let result: WorklogBrowseItem | ShortcutResult | undefined;
-    if (chooseWorkItem) {
-      result = await chooseWorkItem(items, ctx, announceSelection);
-    } else {
-      result = await defaultChooseWorkItem(items, ctx, announceSelection, shortcutRegistry, reFetchItems, fetchChildren, totalActionableCount);
-    }
+    // ── Browse loop: selection list → detail → selection list → … ──
+    while (true) {
+      const items = stage
+        ? (await listWorkItemsWithStage(stage)).slice(0, itemCount)
+        : (await listWorkItems()).slice(0, itemCount);
 
-    if (result && 'type' in result && result.type === 'shortcut') {
-      ctx.ui.setEditorText?.(result.command);
-      ctx.ui.setWidget?.('worklog-browse-selection', undefined);
-      return;
-    }
+      if (items[0]) {
+        announceSelection(items[0]);
+      }
 
-    const selectedItem = result as WorklogBrowseItem | undefined;
+      let result: WorklogBrowseItem | ShortcutResult | undefined;
+      if (chooseWorkItem) {
+        result = await chooseWorkItem(items, ctx, announceSelection);
+      } else {
+        result = await defaultChooseWorkItem(items, ctx, announceSelection, shortcutRegistry, reFetchItems, fetchChildren, totalActionableCount);
+      }
 
-    if (!selectedItem) {
-      ctx.ui.setWidget?.('worklog-browse-selection', undefined);
-      return;
-    }
+      if (result && 'type' in result && result.type === 'shortcut') {
+        ctx.ui.setEditorText?.(result.command);
+        ctx.ui.setWidget?.('worklog-browse-selection', undefined);
+        return;
+      }
 
-    announceSelection(selectedItem);
+      const selectedItem = result as WorklogBrowseItem | undefined;
 
-    if (!ctx.ui.custom) {
-      ctx.ui.notify('Scrollable detail view requires a TUI that supports custom overlays.', 'warning');
-      return;
-    }
+      if (!selectedItem) {
+        ctx.ui.setWidget?.('worklog-browse-selection', undefined);
+        return;
+      }
 
-    try {
-      const mdOutput = await runWlImpl(['show', selectedItem.id, '--format', 'markdown', '--no-icons'], false);
-      const cleanOutput = mdOutput.replace(/\{[^}]*\}/g, '');
-      const detailLines = cleanOutput.split(/\r?\n/);
+      announceSelection(selectedItem);
 
-      let detailPendingChordLeader: string | null = null;
-      const detailResult = await ctx.ui.custom<ShortcutResult | string | null>(
-        (tui, _theme, _keybindings, done) => {
-          const factory = createScrollableWidget(detailLines);
-          const widget = factory(tui, _theme);
+      if (!ctx.ui.custom) {
+        ctx.ui.notify('Scrollable detail view requires a TUI that supports custom overlays.', 'warning');
+        return;
+      }
 
-          return {
-            render: (width: number) => widget.render(width),
-            invalidate: () => widget.invalidate(),
-            handleInput: (data: string) => {
-              const lookupKey = data.length === 1 ? data : undefined;
+      try {
+        const mdOutput = await runWlImpl(['show', selectedItem.id, '--format', 'markdown', '--no-icons'], false);
+        const cleanOutput = mdOutput.replace(/\{[^}]*\}/g, '');
+        const detailLines = cleanOutput.split(/\r?\n/);
 
-              if (detailPendingChordLeader !== null && lookupKey) {
-                if (isEscapeKey(data)) {
+        let detailPendingChordLeader: string | null = null;
+        const detailResult = await ctx.ui.custom<ShortcutResult | string | null>(
+          (tui, _theme, _keybindings, done) => {
+            const factory = createScrollableWidget(detailLines);
+            const widget = factory(tui, _theme);
+
+            return {
+              render: (width: number) => widget.render(width),
+              invalidate: () => widget.invalidate(),
+              handleInput: (data: string) => {
+                const lookupKey = data.length === 1 ? data : undefined;
+
+                if (detailPendingChordLeader !== null && lookupKey) {
+                  if (isEscapeKey(data)) {
+                    detailPendingChordLeader = null;
+                    tui.requestRender();
+                    return;
+                  }
+                  const chordCommand = shortcutRegistry.lookupChord(
+                    [detailPendingChordLeader, lookupKey],
+                    'detail',
+                    selectedItem.stage,
+                  );
+                  if (chordCommand) {
+                    detailPendingChordLeader = null;
+                    done({
+                      type: 'shortcut' as const,
+                      command: chordCommand.replace('<id>', selectedItem.id),
+                    });
+                    return;
+                  }
                   detailPendingChordLeader = null;
                   tui.requestRender();
                   return;
                 }
-                const chordCommand = shortcutRegistry.lookupChord(
-                  [detailPendingChordLeader, lookupKey],
-                  'detail',
-                  selectedItem.stage,
-                );
-                if (chordCommand) {
-                  detailPendingChordLeader = null;
-                  done({
-                    type: 'shortcut' as const,
-                    command: chordCommand.replace('<id>', selectedItem.id),
-                  });
-                  return;
-                }
-                detailPendingChordLeader = null;
-                tui.requestRender();
-                return;
-              }
 
-              if (lookupKey && !RESERVED_NAVIGATION_KEYS.has(lookupKey)) {
-                const command = shortcutRegistry.lookup(lookupKey, 'detail', selectedItem.stage);
-                if (command) {
-                  done({ type: 'shortcut' as const, command: command.replace('<id>', selectedItem.id) });
-                  return;
-                }
-
-                const chords = shortcutRegistry.getChordByLeader(lookupKey, 'detail');
-                if (chords.length > 0) {
-                  const applicableChords = chords.filter(c => {
-                    if (selectedItem.stage !== undefined && c.stages !== undefined && c.stages.length > 0) {
-                      return c.stages.includes(selectedItem.stage);
-                    }
-                    return true;
-                  });
-                  if (applicableChords.length > 0) {
-                    detailPendingChordLeader = lookupKey;
-                    tui.requestRender();
+                if (lookupKey && !RESERVED_NAVIGATION_KEYS.has(lookupKey)) {
+                  const command = shortcutRegistry.lookup(lookupKey, 'detail', selectedItem.stage);
+                  if (command) {
+                    done({ type: 'shortcut' as const, command: command.replace('<id>', selectedItem.id) });
                     return;
                   }
-                }
-              }
 
-              if (isEscapeKey(data)) {
-                if (detailPendingChordLeader === null) {
-                  ctx.ui.setWidget?.('worklog-browse-selection', undefined);
-                  done(null);
+                  const chords = shortcutRegistry.getChordByLeader(lookupKey, 'detail');
+                  if (chords.length > 0) {
+                    const applicableChords = chords.filter(c => {
+                      if (selectedItem.stage !== undefined && c.stages !== undefined && c.stages.length > 0) {
+                        return c.stages.includes(selectedItem.stage);
+                      }
+                      return true;
+                    });
+                    if (applicableChords.length > 0) {
+                      detailPendingChordLeader = lookupKey;
+                      tui.requestRender();
+                      return;
+                    }
+                  }
+                }
+
+                if (isEscapeKey(data)) {
+                  if (detailPendingChordLeader === null) {
+                    ctx.ui.setWidget?.('worklog-browse-selection', undefined);
+                    done(null);
+                    return;
+                  }
+                  detailPendingChordLeader = null;
+                  tui.requestRender();
                   return;
                 }
-                detailPendingChordLeader = null;
+                widget.handleInput(data);
                 tui.requestRender();
-                return;
-              }
-              widget.handleInput(data);
-              tui.requestRender();
-            },
-          };
-        },
-      ).catch(() => null);
+              },
+            };
+          },
+        ).catch(() => null);
 
-      if (detailResult && typeof detailResult === 'object' && detailResult.type === 'shortcut') {
-        ctx.ui.setEditorText?.(detailResult.command);
-        ctx.ui.setWidget?.('worklog-browse-selection', undefined);
+        if (detailResult && typeof detailResult === 'object' && detailResult.type === 'shortcut') {
+          ctx.ui.setEditorText?.(detailResult.command);
+          ctx.ui.setWidget?.('worklog-browse-selection', undefined);
+          return;
+        }
+
+        // detailResult is null (Escape pressed) — loop back to selection list
+      } catch (innerErr) {
+        const message = innerErr instanceof Error ? innerErr.message : String(innerErr);
+        ctx.ui.notify(`Failed to render work item details: ${message}`, 'error');
+        // On error, also loop back to selection list
       }
-    } catch (innerErr) {
-      const message = innerErr instanceof Error ? innerErr.message : String(innerErr);
-      ctx.ui.notify(`Failed to render work item details: ${message}`, 'error');
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
