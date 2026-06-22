@@ -4,6 +4,7 @@
   },
   "context-hub": {
     "showActivityIndicator": true,
-    "showHelpText": true
+    "showHelpText": true,
+    "browseItemCount": 15
   }
 }

@@ -21,7 +21,6 @@ import {
   type ShortcutResult,
   type SelectionChangeHandler,
   type BrowseFlowOptions,
-  defaultChooseWorkItem,
   runBrowseFlow,
   buildSelectionWidget,
   formatBrowseOption,
@@ -34,6 +33,9 @@ export type { WorklogBrowseItem, SelectionChangeHandler };
 
 export {
   defaultChooseWorkItem,
+} from './lib/browse.js';
+
+export {
   buildSelectionWidget,
   getIconPrefix,
   formatBrowseOption,
@@ -55,7 +57,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
   const shortcutRegistry = deps.shortcutRegistry ?? loadShortcutConfig();
   const chooseWorkItem = deps.chooseWorkItem
     ? (deps.chooseWorkItem as (items: WorklogBrowseItem[], ctx: BrowseContext, onSelectionChange: SelectionChangeHandler) => Promise<WorklogBrowseItem | ShortcutResult | undefined>)
-    : (items: WorklogBrowseItem[], ctx: BrowseContext, onSelectionChange: SelectionChangeHandler) => defaultChooseWorkItem(items, ctx, onSelectionChange, shortcutRegistry);
+    : undefined;
 
   const browseOptions: BrowseFlowOptions = {
     listWorkItems,
