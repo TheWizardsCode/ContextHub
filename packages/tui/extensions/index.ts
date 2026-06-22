@@ -14,6 +14,7 @@ import { loadShortcutConfig } from './shortcut-config.js';
 import { registerActivityIndicator, showActivity, clearActivity } from './activity-indicator.js';
 import { reloadSettings, currentSettings, STAGE_MAP, VALID_STAGES, updateSettings, openSettingsOverlay } from './lib/settings.js';
 import { runWl, defaultListWorkItems, defaultListWorkItemsWithStage, createDefaultListWorkItems, createListWorkItemsWithStage } from './lib/tools.js';
+import { registerAutoInject } from './lib/auto-inject.js';
 import {
   type WorklogBrowseItem,
   type WorklogBrowseDependencies,
@@ -69,6 +70,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
 
   return function registerWorklogBrowseExtension(pi: ExtensionAPI): void {
     registerActivityIndicator(pi, () => currentSettings.showActivityIndicator);
+    registerAutoInject(pi);
 
     pi.registerCommand('wl', {
       description: `Browse next ${currentSettings.browseItemCount} work items, optionally filtered by stage and settings`,

@@ -289,6 +289,61 @@ describe('loadSettings', () => {
     expect(loadSettings(CWD, AGENT_DIR).browseItemCount).toBe(5);
   });
 
+  it('reads autoInjectEnabled from project settings', () => {
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === PROJECT_PI_PATH) {
+        return JSON.stringify({
+          'context-hub': { autoInjectEnabled: false },
+        });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    expect(loadSettings(CWD, AGENT_DIR).autoInjectEnabled).toBe(false);
+  });
+
+  it('autoInjectEnabled defaults to true when not set', () => {
+    mockReadFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    expect(loadSettings(CWD, AGENT_DIR).autoInjectEnabled).toBe(true);
+  });
+
+  it('coerces string "true"/"false" for autoInjectEnabled', () => {
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === PROJECT_PI_PATH) {
+        return JSON.stringify({
+          'context-hub': { autoInjectEnabled: 'false' },
+        });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    expect(loadSettings(CWD, AGENT_DIR).autoInjectEnabled).toBe(false);
+  });
+
+  it('handles invalid autoInjectEnabled by using default', () => {
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === PROJECT_PI_PATH) {
+        return JSON.stringify({
+          'context-hub': { autoInjectEnabled: 'maybe' },
+        });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    expect(loadSettings(CWD, AGENT_DIR).autoInjectEnabled).toBe(true);
+  });
+
+  it('handles null autoInjectEnabled by using default', () => {
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === PROJECT_PI_PATH) {
+        return JSON.stringify({
+          'context-hub': { autoInjectEnabled: null },
+        });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    expect(loadSettings(CWD, AGENT_DIR).autoInjectEnabled).toBe(true);
+  });
+
   it('ignores other namespace keys in Pi settings files', () => {
     mockReadFileSync.mockImplementation((path: string) => {
       if (path === PROJECT_PI_PATH) {
@@ -328,6 +383,7 @@ describe('Settings interface structure', () => {
       showIcons: true,
       showActivityIndicator: true,
       showHelpText: true,
+      autoInjectEnabled: true,
     });
   });
 });

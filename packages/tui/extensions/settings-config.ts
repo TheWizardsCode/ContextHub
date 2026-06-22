@@ -18,6 +18,7 @@
  * - showIcons (boolean): Whether to show emoji icons in the browse list (default: true)
  * - showActivityIndicator (boolean): Whether to show the activity indicator in the footer (default: true)
  * - showHelpText (boolean): Whether to show the help text line in the browse selection overlay (default: true)
+ * - autoInjectEnabled (boolean): Whether to auto-inject relevant work items before agent turns (default: true)
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -36,6 +37,8 @@ export interface Settings {
   showActivityIndicator: boolean;
   /** Whether to show the help text line in the browse selection overlay. */
   showHelpText: boolean;
+  /** Whether to auto-inject relevant work items into the system prompt before agent turns. */
+  autoInjectEnabled: boolean;
 }
 
 /**
@@ -46,6 +49,7 @@ export const DEFAULT_SETTINGS: Settings = {
   showIcons: true,
   showActivityIndicator: true,
   showHelpText: true,
+  autoInjectEnabled: true,
 };
 
 /** Namespace key used in Pi settings files for Worklog extension settings. */
@@ -138,6 +142,9 @@ function readNamespacedSettings(path: string): Partial<Settings> {
   if (ns.showHelpText !== undefined) {
     result.showHelpText = validateBoolean(ns.showHelpText, DEFAULT_SETTINGS.showHelpText);
   }
+  if (ns.autoInjectEnabled !== undefined) {
+    result.autoInjectEnabled = validateBoolean(ns.autoInjectEnabled, DEFAULT_SETTINGS.autoInjectEnabled);
+  }
 
   return result;
 }
@@ -210,6 +217,7 @@ export function persistSettings(partial: Partial<Settings>, cwd?: string): void 
     if (partial.showIcons !== undefined) section.showIcons = partial.showIcons;
     if (partial.showActivityIndicator !== undefined) section.showActivityIndicator = partial.showActivityIndicator;
     if (partial.showHelpText !== undefined) section.showHelpText = partial.showHelpText;
+    if (partial.autoInjectEnabled !== undefined) section.autoInjectEnabled = partial.autoInjectEnabled;
 
     raw[SETTINGS_NAMESPACE] = section;
 

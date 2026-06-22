@@ -147,6 +147,12 @@ export function openSettingsOverlay(ctx: BrowseContext): void {
       currentValue: currentSettings.showHelpText ? 'on' : 'off',
       values: ['on', 'off'],
     },
+    {
+      id: 'autoInjectEnabled',
+      label: 'Auto-inject items',
+      currentValue: currentSettings.autoInjectEnabled ? 'on' : 'off',
+      values: ['on', 'off'],
+    },
   ];
 
   // Open the settings overlay
@@ -197,6 +203,10 @@ export function openSettingsOverlay(ctx: BrowseContext): void {
               const show = newValue === 'on';
               updateSettings({ showHelpText: show });
               ctx.ui.notify(`Help text ${show ? 'enabled' : 'disabled'}`, 'info');
+            } else if (id === 'autoInjectEnabled') {
+              const show = newValue === 'on';
+              updateSettings({ autoInjectEnabled: show });
+              ctx.ui.notify(`Auto-inject ${show ? 'enabled' : 'disabled'}`, 'info');
             }
           },
           () => {
