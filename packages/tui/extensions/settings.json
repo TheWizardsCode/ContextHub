@@ -1,6 +1,6 @@
 {
-  "browseItemCount": 5,
+  "browseItemCount": 15,
   "showIcons": true,
-  "showActivityIndicator": false,
-  "showHelpText": false
+  "showActivityIndicator": true,
+  "showHelpText": true
 }
