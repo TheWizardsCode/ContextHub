@@ -12,6 +12,14 @@ import { mergeWorkItems, mergeComments, mergeAuditResults, getRemoteDataFileCont
 import { withFileLock, getLockPathForJsonl } from './file-lock.js';
 import * as searchMetrics from './search-metrics.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
+import { getRuntime } from './lib/runtime.js';
+import {
+  EmbeddingStore,
+  getDefaultEmbedder,
+  createSearch,
+  getEmbeddingStorePath,
+  type WorklogSearch,
+} from './lib/search.js';
 
 /**
  * Pre-loaded cache of dependency edges and work items to eliminate N+1 queries
@@ -66,6 +74,7 @@ export class WorklogDatabase {
   private lockPath: string;
   private _lastIdTime: number = 0;
   private _idSequence: number = 0;
+  private _semanticSearch: WorklogSearch | null = null;
 
   constructor(
     prefix: string = 'WI',
@@ -109,6 +118,61 @@ export class WorklogDatabase {
       return;
     }
     void this.syncProvider();
+  }
+
+  /**
+   * Get or lazily create a WorklogSearch instance for semantic indexing.
+   *
+   * Returns null when the embedder is not available (no OPENAI_API_KEY set),
+   * so callers can skip indexing gracefully.
+   */
+  private getOrCreateSearch(): WorklogSearch | null {
+    if (this._semanticSearch) return this._semanticSearch;
+
+    const embedder = getDefaultEmbedder();
+    if (!embedder.available) return null;
+
+    const worklogDir = path.dirname(this.jsonlPath);
+    const storePath = getEmbeddingStorePath(worklogDir);
+    const store = new EmbeddingStore(storePath);
+    this._semanticSearch = createSearch(store, embedder);
+    return this._semanticSearch;
+  }
+
+  /**
+   * Index a single work item for semantic search in the background.
+   * No-op when no embedder is configured.
+   */
+  private triggerSemanticIndex(item: WorkItem): void {
+    const search = this.getOrCreateSearch();
+    if (!search) return;
+
+    // Get comments for this item (needed for content hash)
+    const comments = this.store.getCommentsForWorkItem(item.id);
+    const commentText = comments.map(c => c.comment).join('\n');
+
+    // Launch as a background task so create/update is not blocked
+    getRuntime().launchTask(`semantic-index-${item.id}`, async () => {
+      await search.indexWorkItem(
+        {
+          title: item.title ?? '',
+          description: item.description ?? '',
+          tags: item.tags ?? [],
+          comments: commentText,
+        },
+        item.id,
+      );
+    });
+  }
+
+  /**
+   * Remove a work item from the semantic search index.
+   * No-op when no embedder is configured.
+   */
+  private removeFromSemanticIndex(itemId: string): void {
+    const search = this.getOrCreateSearch();
+    if (!search) return;
+    search.removeWorkItem(itemId);
   }
 
   /**
@@ -819,6 +883,7 @@ export class WorklogDatabase {
 
     this.store.saveWorkItem(item);
     this.store.upsertFtsEntry(item);
+    this.triggerSemanticIndex(item);
     this.triggerAutoSync();
     return item;
   }
@@ -917,6 +982,7 @@ export class WorklogDatabase {
 
     this.store.saveWorkItem(updated);
     this.store.upsertFtsEntry(updated);
+    this.triggerSemanticIndex(updated);
     this.triggerAutoSync();
 
     if (previousStatus !== updated.status || previousStage !== updated.stage) {
@@ -984,6 +1050,7 @@ export class WorklogDatabase {
 
     this.store.saveWorkItem(updated);
     this.store.deleteFtsEntry(id);
+    this.removeFromSemanticIndex(id);
     this.triggerAutoSync();
     if (this.listDependencyEdgesTo(id).length > 0) {
       this.reconcileDependentsForTarget(id);

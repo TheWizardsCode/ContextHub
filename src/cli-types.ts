@@ -182,6 +182,8 @@ export interface SearchOptions {
   issueType?: string;
   limit?: string;
   rebuildIndex?: boolean;
+  semantic?: boolean;
+  semanticOnly?: boolean;
   prefix?: string;
 }
 

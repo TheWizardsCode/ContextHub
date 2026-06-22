@@ -577,6 +577,12 @@ wl list --needs-producer-review
 
 Full-text search over work items using FTS5 (title, description, comments, tags). Returns ranked results with relevance snippets. Falls back to application-level search when FTS5 is unavailable.
 
+**Semantic search:** When the `--semantic` flag is used, results are blended with
+embedding-based similarity (cosine similarity) for conceptually related results
+beyond exact keyword matches. Requires an OpenAI-compatible embedding provider
+configured via the `OPENAI_API_KEY` environment variable. Semantic search
+enhancement degrades gracefully when no embedder is configured.
+
 **ID-aware search:** Queries that contain work item IDs (full, partial, or unprefixed) are detected automatically:
 
 - **Exact ID** — `wl search WL-0MM0AN2IT0OOC2TW` returns the matching item as the top result.
@@ -597,8 +603,13 @@ Options:
 `--issue-type <type>` (optional) — Filter by issue type
 `-l, --limit <n>` (optional) — Maximum number of results (default: 20)
 `--rebuild-index` (optional) — Rebuild the FTS index from scratch before searching
+`--semantic` (optional) — Enable hybrid lexical+semantic search. Blends FTS BM25
+scores with embedding cosine similarity using configurable weights (default 50/50).
+Query embeddings are cached in-memory to avoid redundant API calls.
+`--semantic-only` (optional) — Return only semantic (embedding-based) results.
+Requires an embedder; errors if OPENAI_API_KEY is not set.
 `--prefix <prefix>` (optional)
-`--json` (optional) — Output structured JSON with `id`, `title`, `status`, `priority`, `score`, `snippet`, `matchedField`
+`--json` (optional) — Output structured JSON with `id`, `title`, `status`, `priority`, `score`, `snippet`, `matchedField`. When `--semantic` is used, includes `semanticAvailable: true/false`.
 
 Examples:
 
@@ -612,6 +623,11 @@ wl search "feature" --issue-type epic
 wl search "review" --needs-producer-review
 wl --json search "cli refactor"
 wl search "rebuild" --rebuild-index
+
+# Semantic search
+wl search "performance optimization" --semantic
+wl search "authentication flow" --semantic-only
+wl --json search "data validation" --semantic
 
 # ID-aware search
 wl search WL-0MM0AN2IT0OOC2TW              # exact ID lookup
