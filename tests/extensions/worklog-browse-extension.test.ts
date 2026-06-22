@@ -3,6 +3,25 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('@earendil-works/pi-coding-agent', () => ({
   getAgentDir: () => '/home/test-user/.pi/agent',
 }));
+
+vi.mock('node:fs', () => ({
+  readFileSync: vi.fn((path) => {
+    // For shortcuts.json, provide the actual content so loadShortcutConfig works
+    if (String(path).endsWith('shortcuts.json')) {
+      return JSON.stringify([
+        { key: 'n', command: '/intake <id>', view: 'both', stages: ['idea'] },
+        { key: 'p', command: '/plan <id>', view: 'both', stages: ['intake_complete'] },
+        { key: 'i', command: '/skill:implement <id>', view: 'both', stages: ['intake_complete', 'plan_complete', 'in_progress'] },
+        { key: 'a', command: '/skill:audit <id>', view: 'both', stages: ['in_progress', 'in_review'] },
+        { key: 'c', command: '/intake', view: 'both', label: 'create new' },
+      ]);
+    }
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  }),
+  writeFileSync: vi.fn(),
+  mkdirSync: vi.fn(),
+  realpathSync: vi.fn((p) => p),
+}));
 import {
   createDefaultListWorkItems,
   createListWorkItemsWithStage,

@@ -2,6 +2,23 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
   getAgentDir: () => '/home/test-user/.pi/agent',
 }));
 
+vi.mock('node:fs', () => ({
+  readFileSync: vi.fn((path) => {
+    if (String(path).endsWith('shortcuts.json')) {
+      return JSON.stringify([
+        { key: 'n', command: '/intake <id>', view: 'both', stages: ['idea'] },
+        { key: 'p', command: '/plan <id>', view: 'both', stages: ['intake_complete'] },
+        { key: 'i', command: '/skill:implement <id>', view: 'both', stages: ['intake_complete', 'plan_complete', 'in_progress'] },
+        { key: 'a', command: '/skill:audit <id>', view: 'both', stages: ['in_progress', 'in_review'] },
+      ]);
+    }
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  }),
+  writeFileSync: vi.fn(),
+  mkdirSync: vi.fn(),
+  realpathSync: vi.fn((p) => p),
+}));
+
 /**
 
  * Tests for shortcut keys display in browse list help text.
