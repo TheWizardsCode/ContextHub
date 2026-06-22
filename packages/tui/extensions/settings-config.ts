@@ -19,6 +19,7 @@
  * - showActivityIndicator (boolean): Whether to show the activity indicator in the footer (default: true)
  * - showHelpText (boolean): Whether to show the help text line in the browse selection overlay (default: true)
  * - autoInjectEnabled (boolean): Whether to auto-inject relevant work items before agent turns (default: true)
+ * - guardrailsEnabled (boolean): Whether to enable guardrails that protect worklog data (default: true)
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -39,6 +40,8 @@ export interface Settings {
   showHelpText: boolean;
   /** Whether to auto-inject relevant work items into the system prompt before agent turns. */
   autoInjectEnabled: boolean;
+  /** Whether to enable guardrails that protect worklog database files from accidental modification. */
+  guardrailsEnabled: boolean;
 }
 
 /**
@@ -50,6 +53,7 @@ export const DEFAULT_SETTINGS: Settings = {
   showActivityIndicator: true,
   showHelpText: true,
   autoInjectEnabled: true,
+  guardrailsEnabled: true,
 };
 
 /** Namespace key used in Pi settings files for Worklog extension settings. */
@@ -145,6 +149,9 @@ function readNamespacedSettings(path: string): Partial<Settings> {
   if (ns.autoInjectEnabled !== undefined) {
     result.autoInjectEnabled = validateBoolean(ns.autoInjectEnabled, DEFAULT_SETTINGS.autoInjectEnabled);
   }
+  if (ns.guardrailsEnabled !== undefined) {
+    result.guardrailsEnabled = validateBoolean(ns.guardrailsEnabled, DEFAULT_SETTINGS.guardrailsEnabled);
+  }
 
   return result;
 }
@@ -218,6 +225,7 @@ export function persistSettings(partial: Partial<Settings>, cwd?: string): void 
     if (partial.showActivityIndicator !== undefined) section.showActivityIndicator = partial.showActivityIndicator;
     if (partial.showHelpText !== undefined) section.showHelpText = partial.showHelpText;
     if (partial.autoInjectEnabled !== undefined) section.autoInjectEnabled = partial.autoInjectEnabled;
+    if (partial.guardrailsEnabled !== undefined) section.guardrailsEnabled = partial.guardrailsEnabled;
 
     raw[SETTINGS_NAMESPACE] = section;
 

@@ -153,6 +153,12 @@ export function openSettingsOverlay(ctx: BrowseContext): void {
       currentValue: currentSettings.autoInjectEnabled ? 'on' : 'off',
       values: ['on', 'off'],
     },
+    {
+      id: 'guardrailsEnabled',
+      label: 'Data guardrails',
+      currentValue: currentSettings.guardrailsEnabled ? 'on' : 'off',
+      values: ['on', 'off'],
+    },
   ];
 
   // Open the settings overlay
@@ -207,6 +213,10 @@ export function openSettingsOverlay(ctx: BrowseContext): void {
               const show = newValue === 'on';
               updateSettings({ autoInjectEnabled: show });
               ctx.ui.notify(`Auto-inject ${show ? 'enabled' : 'disabled'}`, 'info');
+            } else if (id === 'guardrailsEnabled') {
+              const show = newValue === 'on';
+              updateSettings({ guardrailsEnabled: show });
+              ctx.ui.notify(`Data guardrails ${show ? 'enabled' : 'disabled'}`, 'info');
             }
           },
           () => {

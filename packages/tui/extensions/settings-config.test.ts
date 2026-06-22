@@ -384,6 +384,7 @@ describe('Settings interface structure', () => {
       showActivityIndicator: true,
       showHelpText: true,
       autoInjectEnabled: true,
+      guardrailsEnabled: true,
     });
   });
 });
