@@ -40,8 +40,6 @@ import {
   runWl,
   extractJsonObject,
   normalizeListPayload,
-  defaultListWorkItems,
-  defaultListWorkItemsWithStage,
   fetchTotalActionableCount,
 } from './tools.js';
 

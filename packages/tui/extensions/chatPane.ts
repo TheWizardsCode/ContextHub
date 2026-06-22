@@ -6,7 +6,8 @@ import { EventEmitter } from "events";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { runWl, wlEvents } from "./wl-integration.js";
+import { runWl, wlEvents, getWorklogDb } from "./wl-integration.js";
+import { createWorkItemDb, updateWorkItemDb, closeWorkItemDb, addCommentDb } from "./lib/tools.js";
 
 // Use createRequire with realpath-resolved path for symlink-safe imports.
 const _require = createRequire(realpathSync(fileURLToPath(import.meta.url)));
@@ -288,7 +289,9 @@ export class ChatPane {
     description = description.replace(/^called\s+/i, "").trim();
 
     try {
-      const result = await runWl("create", [
+      const id = await createWorkItemDb('')
+          if (false) { // keep formatting
+          const result = await runWl("create", [
         "-t", description,
         "--description", description,
       ]);
@@ -316,7 +319,9 @@ export class ChatPane {
    */
   private async handleWlUpdate(id: string, details: string, _message: string): Promise<ChatMessage> {
     try {
-      const result = await runWl("update", [id, "--description", details]);
+      const updated = await updateWorkItemDb(id, { description: details });
+          if (updated) { return `Updated ${id}: ${updated}`; }
+          const result = await runWl("update", [id, "--description", details]);
       if (result && typeof result === "object") {
         return this.createAgentMessage(
           `Updated work item **${id}**.\n\nNew description: ${details}`,
@@ -340,7 +345,9 @@ export class ChatPane {
    */
   private async handleWlClose(id: string, _message: string): Promise<ChatMessage> {
     try {
-      const result = await runWl("close", [id]);
+      const closed = await closeWorkItemDb(id);
+          if (closed) { return `Closed: ${id}`; }
+          const result = await runWl("close", [id]);
       if (result && typeof result === "object") {
         return this.createAgentMessage(
           `Closed work item **${id}**.`,
@@ -364,7 +371,14 @@ export class ChatPane {
    */
   private async handleWlSearch(query: string, _message: string): Promise<ChatMessage> {
     try {
-      const items = await runWl("search", [query]);
+      let items: any[] = [];
+          const db = getWorklogDb();
+          if (db) {
+            try { items = db.search(query, 10); } catch { /* fall through */ }
+          }
+          if (!Array.isArray(items) || items.length === 0) {
+            items = await runWl("search", [query]);
+          }
       const count = Array.isArray(items) ? items.length : 0;
       if (count > 0) {
         return this.createAgentMessage(
@@ -417,7 +431,9 @@ export class ChatPane {
    */
   private async handleWlComment(id: string, content: string, _message: string): Promise<ChatMessage> {
     try {
-      const result = await runWl("comment", ["add", id, "--comment", content]);
+      const result = await addCommentDb(id, "TUI User", content)
+          if (result) { return `Comment added: ${id}`; }
+          const dbResult = await runWl("comment", ["add", id, "--comment", content]);
       if (result && typeof result === "object") {
         return this.createAgentMessage(
           `Added comment to **${id}**: ${content}`
