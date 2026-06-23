@@ -289,14 +289,8 @@ export class ChatPane {
     description = description.replace(/^called\s+/i, "").trim();
 
     try {
-      const id = await createWorkItemDb('')
-          if (false) { // keep formatting
-          const result = await runWl("create", [
-        "-t", description,
-        "--description", description,
-      ]);
-      if (result && typeof result === "object") {
-        const id = (result as any).id;
+      const id = await createWorkItemDb(description);
+      if (id) {
         return this.createAgentMessage(
           `Created work item: **${id}**\n\nTitle: ${description}\n\nUse \`/worklog show ${id}\` to see details.`,
           {

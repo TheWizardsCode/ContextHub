@@ -47,6 +47,12 @@ export {
   STAGE_MAP,
 };
 
+// Re-export list work item factories for tests and external consumers
+export {
+  createDefaultListWorkItems,
+  createListWorkItemsWithStage,
+} from './lib/tools.js';
+
 // Icons — resolved via symlink-safe createRequire
 const _require = createRequire(realpathSync(fileURLToPath(import.meta.url)));
 const { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, riskIcon, effortIcon } = _require('../../../dist/icons.js');
