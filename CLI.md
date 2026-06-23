@@ -319,6 +319,15 @@ are closed deepest-first so that leaf items are completed before their parents.
   and reports the errors at the end without aborting the entire command.
 - For items that do not meet the recursive condition (not `in_review`, no audit, or
   `readyToClose` is `false`), only the specified item is closed (current behaviour).
+  **A warning is printed on stderr** when the item has children, alerting the user
+  that those children will be left behind:
+  ```
+  Warning: WL-PARENT has 3 open children that will not be closed.
+  Use `wl close --force WL-PARENT` to close them unconditionally.
+  ```
+- The `--force` flag unconditionally closes all descendants and then the parent,
+  bypassing the audit/stage checks. For items without children, `--force` behaves
+  identically to a standard close.
 
 **Output format (recursive close):** When the audit-gated recursive close path is triggered:
 
@@ -345,6 +354,8 @@ Options:
 `-r, --reason <reason>` — Reason text stored as a comment (optional).
 `-a, --author <author>` — Author for the close comment (optional; default: `worklog`).
 `--prefix <prefix>` — Operate within a specific prefix (optional).
+`--force` — Close the item and all its descendants unconditionally, bypassing the
+  audit/stage checks. For items without children, this is equivalent to a standard close.
 
 Examples:
 
@@ -354,6 +365,9 @@ wl close WL-ABC123 WL-DEF456 -r "Cleanup after release"
 
 # Close a parent and all its children (when parent is in_review with audit readyToClose=true)
 wl close WL-PARENT -r "All subtasks completed and audited OK"
+
+# Close a parent and all its children unconditionally (bypasses audit/stage checks)
+wl close --force WL-PARENT -r "Completed with all subtasks"
 ```
 
 ### `dep` (subcommands)

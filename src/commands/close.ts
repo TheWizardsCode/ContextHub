@@ -151,18 +151,24 @@ export default function register(ctx: PluginContext): void {
     .command('close')
     .description(
       'Close one or more work items and record a close reason as a comment. ' +
-      'Recursively closes children when the item is in_review and audit-ready.'
+      'Recursively closes children when the item is in_review and audit-ready. ' +
+      'Use --force to close a parent and all its children unconditionally, '
+      + 'bypassing the audit/stage checks.'
     )
     .argument('<ids...>', 'Work item id(s) to close')
     .option('-r, --reason <reason>', 'Reason for closing (stored as a comment)', '')
     .option('-a, --author <author>', 'Author name for the close comment', 'worklog')
     .option('--prefix <prefix>', 'Override the default prefix')
+    .option('--force', 'Close the item and all its descendants unconditionally, '
+      + 'bypassing the audit/stage checks. For items without children, '
+      + 'this is equivalent to a standard close.')
     .action((ids: string[], options: CloseOptions) => {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
       const isJsonMode = utils.isJsonMode();
       const reason = options.reason || '';
       const author = options.author || 'worklog';
+      const force = options.force === true;
 
       const results: Array<{ id: string; success: boolean; error?: string; childrenClosed?: number; recovered?: boolean; childErrors?: Array<{ id: string; error: string }> }> = [];
 
@@ -176,7 +182,59 @@ export default function register(ctx: PluginContext): void {
         }
 
         // Check if this item qualifies for recursive close
-        if (shouldCloseRecursively(item, db)) {
+        // ── Force path: unconditionally close descendants then parent ──
+        if (force) {
+          const children = db.getChildren(id);
+          if (children && children.length > 0) {
+            // Close all descendants first (deepest first), collecting errors
+            const { errors: childErrors, childrenClosed } = closeDescendants(id, reason, author, db);
+
+            // Now close the parent itself
+            const updated = closeSingle(id, reason, author, db);
+            if (!updated) {
+              results.push({
+                id,
+                success: false,
+                error: 'Failed to close parent item',
+                childrenClosed,
+                childErrors: childErrors.length > 0 ? childErrors : undefined,
+              });
+              continue;
+            }
+
+            const result: any = { id, success: true, childrenClosed };
+            if (childErrors.length > 0) {
+              result.childErrors = childErrors;
+            }
+            results.push(result);
+
+            // Fire-and-forget: submit a summary to OpenBrain if enabled.
+            const config = utils.getConfig();
+            if (config?.openBrainEnabled) {
+              submitToOpenBrain(updated).catch(() => {
+                // Errors are already logged inside submitToOpenBrain; swallow here
+                // so the close command is never blocked or aborted.
+              });
+            }
+          } else {
+            // No children — standard single-item close (flag is a no-op)
+            const updated = closeSingle(id, reason, author, db);
+            if (!updated) {
+              results.push({ id, success: false, error: 'Failed to close item' });
+              continue;
+            }
+            results.push({ id, success: true });
+
+            const config = utils.getConfig();
+            if (config?.openBrainEnabled) {
+              submitToOpenBrain(updated).catch(() => {
+                // Errors are already logged inside submitToOpenBrain; swallow here
+                // so the close command is never blocked or aborted.
+              });
+            }
+          }
+        // ── Audit-gated recursive close ──
+        } else if (shouldCloseRecursively(item, db)) {
           // Close descendants first (deepest first), collecting errors without aborting
           const { errors: childErrors, childrenClosed } = closeDescendants(id, reason, author, db);
 
@@ -208,6 +266,7 @@ export default function register(ctx: PluginContext): void {
               // so the close command is never blocked or aborted.
             });
           }
+        // ── Recovery path ──
         } else if (shouldRecoverOpenChildren(item, db)) {
           // Recovery path: parent is already completed/done but has open children.
           // Close descendants only — the parent itself is already closed.
@@ -236,6 +295,13 @@ export default function register(ctx: PluginContext): void {
             continue;
           }
           results.push({ id, success: true });
+
+          // Warning: parent has orphaned children
+          const children = db.getChildren(id);
+          if (children && children.length > 0) {
+            const warningMsg = 'Warning: ' + id + ' has ' + children.length + ' open children that will not be closed. Use `wl close --force ' + id + '` to close them unconditionally.';
+            console.error(warningMsg);
+          }
 
           // Fire-and-forget: submit a summary to OpenBrain if enabled.
           const config = utils.getConfig();

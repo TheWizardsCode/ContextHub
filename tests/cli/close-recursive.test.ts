@@ -541,4 +541,182 @@ describe('close command recursive close', () => {
       expect(childShown.workItem.status).toBe('completed');
     }
   });
+
+  // ── Warning on orphaned children (non-recursive close) ──────────────
+
+  it('prints warning to stderr when closing parent with children in non-recursive mode', async () => {
+    const { parentId, childIds } = await createParentWithChildren(2, false);
+
+    // Close parent (not in_review -> non-recursive)
+    const { stdout, stderr } = await runRaw(`close ${parentId} -r "done"`);
+
+    // Parent should be closed
+    const parentShown = await runJson(`show ${parentId}`);
+    expect(parentShown.workItem.status).toBe('completed');
+
+    // Children should NOT be closed
+    for (const childId of childIds) {
+      const childShown = await runJson(`show ${childId}`);
+      expect(childShown.workItem.status).not.toBe('completed');
+    }
+
+    // Stdout should show standard close message
+    expect(stdout).toContain(`Closed ${parentId}`);
+    // Stderr should contain the warning about orphaned children
+    expect(stderr).toContain(`Warning: ${parentId} has ${childIds.length} open children`);
+    expect(stderr).toContain('Use `wl close --force');
+  });
+
+  it('does NOT print warning when closing single item with no children', async () => {
+    const created = await runJson(`create -t "Single item"`);
+    const id = created.workItem.id;
+
+    const { stdout, stderr } = await runRaw(`close ${id} -r "done"`);
+
+    expect(stdout).toContain(`Closed ${id}`);
+    expect(stderr).toBe('');
+  });
+
+  it('does NOT print warning for audit-gated recursive close (children are closed)', async () => {
+    const { parentId, childIds } = await createParentWithChildren(2, true);
+    await runJson(`update ${parentId} --audit-text "Ready to close: Yes\nAll criteria met"`);
+
+    const { stdout, stderr } = await runRaw(`close ${parentId} -r "done"`);
+
+    // All items should be closed (recursive)
+    expect(stdout).toContain(`Closed ${parentId}`);
+    expect(stdout).toContain('(2 children closed)');
+    // No warning in stderr
+    expect(stderr).toBe('');
+  });
+
+  it('does NOT print warning for recovery close (children are being closed)', async () => {
+    const { parentId, childIds } = await createParentWithChildren(2, false);
+    await runJson(`update ${parentId} --status completed --stage done`);
+
+    const { stdout, stderr } = await runRaw(`close ${parentId} -r "closing children"`);
+
+    expect(stdout).toContain(`Recovery close for ${parentId}`);
+    expect(stderr).toBe('');
+  });
+
+  // ── --force flag ─────────────────────────────────────────────────────
+
+  it('closes parent and all children when --force is used (non-recursive path)', async () => {
+    const { parentId, childIds } = await createParentWithChildren(2, false);
+
+    // Close parent with --force
+    const result = await runJson(`close --force ${parentId} -r "done"`);
+    expect(result.success).toBe(true);
+    expect(result.results[0].childrenClosed).toBe(2);
+
+    // Parent should be closed
+    const parentShown = await runJson(`show ${parentId}`);
+    expect(parentShown.workItem.status).toBe('completed');
+
+    // Children should also be closed
+    for (const childId of childIds) {
+      const childShown = await runJson(`show ${childId}`);
+      expect(childShown.workItem.status).toBe('completed');
+    }
+  });
+
+  it('closes parent and all children when --force is used (in_review but no audit)', async () => {
+    const { parentId, childIds } = await createParentWithChildren(2, true);
+
+    // Close parent with --force (parent is in_review but has no audit)
+    const result = await runJson(`close --force ${parentId} -r "done"`);
+    expect(result.success).toBe(true);
+    expect(result.results[0].childrenClosed).toBe(2);
+
+    // All should be closed
+    const parentShown = await runJson(`show ${parentId}`);
+    expect(parentShown.workItem.status).toBe('completed');
+    for (const childId of childIds) {
+      const childShown = await runJson(`show ${childId}`);
+      expect(childShown.workItem.status).toBe('completed');
+    }
+  });
+
+  it('closes nested descendants (grandchildren) when --force is used', async () => {
+    const grandparent = await runJson(`create -t "Grandparent"`);
+    const gpId = grandparent.workItem.id;
+
+    const parent = await runJson(`create -t "Parent" --parent ${gpId}`);
+    const parentId = parent.workItem.id;
+
+    const child = await runJson(`create -t "Child" --parent ${parentId}`);
+    const childId = child.workItem.id;
+
+    // Close grandparent with --force (not in_review, no audit)
+    const result = await runJson(`close --force ${gpId} -r "done"`);
+    expect(result.success).toBe(true);
+    expect(result.results[0].childrenClosed).toBe(2); // parent + child
+
+    // All items should be closed
+    expect((await runJson(`show ${gpId}`)).workItem.status).toBe('completed');
+    expect((await runJson(`show ${parentId}`)).workItem.status).toBe('completed');
+    expect((await runJson(`show ${childId}`)).workItem.status).toBe('completed');
+  });
+
+  it('--force with no children behaves as standard close', async () => {
+    const created = await runJson(`create -t "Single item"`);
+    const id = created.workItem.id;
+
+    const result = await runJson(`close --force ${id} -r "done"`);
+    expect(result.success).toBe(true);
+    expect(result.results[0].childrenClosed).toBeUndefined();
+
+    const shown = await runJson(`show ${id}`);
+    expect(shown.workItem.status).toBe('completed');
+  });
+
+  it('--force does NOT print warning on stderr', async () => {
+    const { parentId, childIds } = await createParentWithChildren(2, false);
+
+    const { stdout, stderr } = await runRaw(`close --force ${parentId} -r "done"`);
+
+    // Should show recursive close message
+    expect(stdout).toContain(`Closed ${parentId}`);
+    expect(stdout).toContain('(2 children closed)');
+    // No warning in stderr
+    expect(stderr).toBe('');
+  });
+
+  it('--force human-readable output matches recursive close format', async () => {
+    const { parentId } = await createParentWithChildren(2, false);
+
+    const { stdout, stderr } = await runRaw(`close --force ${parentId} -r "done"`);
+
+    expect(stdout).toContain(`Closed ${parentId}`);
+    expect(stdout).toContain('(2 children closed)');
+    expect(stderr).toBe('');
+  });
+
+  it('--force in JSON mode returns childrenClosed in result', async () => {
+    const { parentId, childIds } = await createParentWithChildren(3, false);
+
+    const result = await runJson(`close --force ${parentId} -r "done"`);
+    expect(result.success).toBe(true);
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].id).toBe(parentId);
+    expect(result.results[0].success).toBe(true);
+    expect(result.results[0].childrenClosed).toBe(3);
+  });
+
+  it('JSON mode: warning on stderr does not corrupt stdout JSON', async () => {
+    const { parentId, childIds } = await createParentWithChildren(2, false);
+
+    // Run in JSON mode but capture stderr separately via raw execution
+    // The --json flag affects output format; the warning goes to stderr
+    const { stdout, stderr } = await execAsync(`tsx ${cliPath} --json close ${parentId} -r "done"`);
+
+    // Stdout should be valid JSON
+    const parsed = JSON.parse(stdout);
+    expect(parsed.success).toBe(true);
+    expect(parsed.results[0].success).toBe(true);
+
+    // Stderr should contain the warning
+    expect(stderr).toContain(`Warning: ${parentId} has ${childIds.length} open children`);
+  });
 });
