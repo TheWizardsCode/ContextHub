@@ -354,4 +354,191 @@ describe('close command recursive close', () => {
     // No childErrors on happy path
     expect(parentResult.childErrors).toBeUndefined();
   });
+
+  // ── Recovery path: done parent with open children ───────────────────
+
+  it('closes open children when parent is already in done stage (recovery path via update)', async () => {
+    // Create parent with children (default open/idea stage)
+    const { parentId, childIds } = await createParentWithChildren(2, false);
+
+    // Set parent to completed/done via update (simulating a workflow where
+    // the parent was marked done without closing children)
+    await runJson(`update ${parentId} --status completed --stage done`);
+
+    // Verify parent is done
+    let parentShown = await runJson(`show ${parentId}`);
+    expect(parentShown.workItem.status).toBe('completed');
+    expect(parentShown.workItem.stage).toBe('done');
+
+    // Children should NOT be closed
+    for (const childId of childIds) {
+      const childShown = await runJson(`show ${childId}`);
+      expect(childShown.workItem.status).not.toBe('completed');
+    }
+
+    // Call close again on the done parent — should trigger recovery
+    const result = await runJson(`close ${parentId} -r "closing children"`);
+    expect(result.success).toBe(true);
+
+    // Children should now be closed
+    for (const childId of childIds) {
+      const childShown = await runJson(`show ${childId}`);
+      expect(childShown.workItem.status).toBe('completed');
+      expect(childShown.workItem.stage).toBe('done');
+    }
+
+    // Parent should remain done (unchanged)
+    parentShown = await runJson(`show ${parentId}`);
+    expect(parentShown.workItem.status).toBe('completed');
+    expect(parentShown.workItem.stage).toBe('done');
+  });
+
+  it('closes open children when parent is already done via close (recovery path via close)', async () => {
+    // Create parent with children (default open/idea stage)
+    const { parentId, childIds } = await createParentWithChildren(2, false);
+
+    // Close parent (non-recursive — parent not in_review)
+    // This leaves children open, simulating real-world orphaned children
+    await runJson(`close ${parentId} -r "done"`);
+
+    // Verify parent is done but children are NOT
+    let parentShown = await runJson(`show ${parentId}`);
+    expect(parentShown.workItem.status).toBe('completed');
+    expect(parentShown.workItem.stage).toBe('done');
+
+    for (const childId of childIds) {
+      const childShown = await runJson(`show ${childId}`);
+      expect(childShown.workItem.status).not.toBe('completed');
+    }
+
+    // Call close again on the done parent — should trigger recovery
+    const result = await runJson(`close ${parentId} -r "closing children"`);
+    expect(result.success).toBe(true);
+
+    // Children should now be closed
+    for (const childId of childIds) {
+      const childShown = await runJson(`show ${childId}`);
+      expect(childShown.workItem.status).toBe('completed');
+    }
+
+    // Parent should remain done
+    parentShown = await runJson(`show ${parentId}`);
+    expect(parentShown.workItem.status).toBe('completed');
+  });
+
+  it('recovery path JSON output includes recovered: true', async () => {
+    const { parentId } = await createParentWithChildren(2, false);
+
+    // Set parent to completed/done
+    await runJson(`update ${parentId} --status completed --stage done`);
+
+    const result = await runJson(`close ${parentId} -r "closing children"`);
+    expect(result.success).toBe(true);
+    expect(result.results).toHaveLength(1);
+
+    const parentResult = result.results[0];
+    expect(parentResult.id).toBe(parentId);
+    expect(parentResult.success).toBe(true);
+    // Should have recovered: true and childrenClosed count
+    expect(parentResult.recovered).toBe(true);
+    expect(parentResult.childrenClosed).toBe(2);
+  });
+
+  it('recovery path human-readable output shows recovery message', async () => {
+    const { parentId } = await createParentWithChildren(2, false);
+
+    // Set parent to completed/done
+    await runJson(`update ${parentId} --status completed --stage done`);
+
+    // Run without --json to test human-readable output
+    const { stdout, stderr } = await runRaw(`close ${parentId} -r "closing children"`);
+
+    // Should show recovery message with children count
+    expect(stdout).toContain(`Recovery close for ${parentId}`);
+    expect(stdout).toContain('2 open children closed');
+    expect(stderr).toBe('');
+  });
+
+  it('does NOT trigger recovery path when parent is done and all children are already done', async () => {
+    const { parentId, childIds } = await createParentWithChildren(2, false);
+
+    // Close all children first
+    for (const childId of childIds) {
+      await runJson(`close ${childId} -r "done"`);
+    }
+
+    // Set parent to done
+    await runJson(`update ${parentId} --status completed --stage done`);
+
+    // Call close — should NOT trigger recovery (all children already done)
+    const result = await runJson(`close ${parentId} -r "done"`);
+    expect(result.success).toBe(true);
+    expect(result.results[0].recovered).toBeUndefined();
+
+    // Standard output: no recovery message
+    const { stdout } = await runRaw(`close ${parentId} -r "done"`);
+    expect(stdout).not.toContain('Recovery close');
+  });
+
+  it('does NOT trigger recovery path when parent is not done', async () => {
+    // Parent in open stage — standard behavior
+    const { parentId } = await createParentWithChildren(2, false);
+
+    const result = await runJson(`close ${parentId} -r "done"`);
+    expect(result.success).toBe(true);
+    expect(result.results[0].recovered).toBeUndefined();
+  });
+
+  it('recovery path closes nested descendants (grandchildren)', async () => {
+    // Create grandparent -> parent -> child chain
+    const grandparent = await runJson(`create -t "Grandparent"`);
+    const gpId = grandparent.workItem.id;
+
+    const parent = await runJson(`create -t "Parent" --parent ${gpId}`);
+    const parentId = parent.workItem.id;
+
+    const child = await runJson(`create -t "Child" --parent ${parentId}`);
+    const childId = child.workItem.id;
+
+    // Set grandparent to completed/done (simulating a workflow where
+    // the grandparent was closed without closing descendants)
+    await runJson(`update ${gpId} --status completed --stage done`);
+
+    // Call close on grandparent — should trigger recovery
+    const result = await runJson(`close ${gpId} -r "closing descendants"`);
+    expect(result.success).toBe(true);
+    expect(result.results[0].recovered).toBe(true);
+    expect(result.results[0].childrenClosed).toBe(2); // parent + child
+
+    // All items should be done
+    expect((await runJson(`show ${gpId}`)).workItem.stage).toBe('done');
+    expect((await runJson(`show ${parentId}`)).workItem.status).toBe('completed');
+    expect((await runJson(`show ${childId}`)).workItem.status).toBe('completed');
+  });
+
+  it('recovery path with mixed children (some already done, some open)', async () => {
+    const { parentId, childIds } = await createParentWithChildren(3, false);
+
+    // Close the first child only
+    await runJson(`close ${childIds[0]} -r "done"`);
+
+    // Set parent to completed/done
+    await runJson(`update ${parentId} --status completed --stage done`);
+
+    // Call close on parent — should recover the remaining open children.
+    // closeDescendants processes ALL descendants; childrenClosed includes
+    // the already-closed child since closeSingle handles it gracefully.
+    const result = await runJson(`close ${parentId} -r "closing open children"`);
+    expect(result.success).toBe(true);
+    expect(result.results[0].recovered).toBe(true);
+    // All 3 descendants were processed (1 was already done, 2 were open)
+    // closeDescendants counts descendants.length - errors.length = 3 - 0
+    expect(result.results[0].childrenClosed).toBe(3);
+
+    // All children should be done now
+    for (const childId of childIds) {
+      const childShown = await runJson(`show ${childId}`);
+      expect(childShown.workItem.status).toBe('completed');
+    }
+  });
 });

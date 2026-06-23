@@ -12,8 +12,17 @@
  *   On child errors, per-child warnings are printed on stderr and the
  *   JSON result includes `childErrors: [{ id, error }]`.
  *
- * Backward-compatible: items not meeting the recursive conditions are
- * closed as before (single-item close only).
+ * Recovery path: if the item is already in `done` stage (status: completed)
+ * but still has non-closed children, the command closes the open children
+ * without re-closing the parent.  This handles orphaned children created
+ * before recursive close was enabled or added after the parent was closed.
+ *
+ * Recovery close output:
+ *   - Human: `Recovery close for <id>: N open children closed (parent was already done)`
+ *   - JSON:  `{ success: true, results: [{ id, success: true, recovered: true, childrenClosed: N }] }`
+ *
+ * Backward-compatible: items not meeting the recursive or recovery
+ * conditions are closed as before (single-item close only).
  */
 
 import type { WorkItem } from '../types.js';
@@ -41,6 +50,32 @@ function shouldCloseRecursively(
   if (!auditResult) return false;
 
   return auditResult.readyToClose === true;
+}
+
+/**
+ * Determine whether a done parent needs recovery close for open children.
+ * This handles the case where a parent was previously closed
+ * (status: completed, stage: done) but still has non-closed children —
+ * e.g., when the parent was closed before recursive close was enabled,
+ * or children were added after the parent was closed.
+ *
+ * Conditions:
+ *   1. Item has at least one child
+ *   2. Item status is "completed" and stage is "done"
+ *   3. At least one child is NOT completed/done
+ */
+function shouldRecoverOpenChildren(
+  item: WorkItem,
+  db: any
+): boolean {
+  const children = db.getChildren(item.id);
+  if (!children || children.length === 0) return false;
+
+  if (item.status !== 'completed' || item.stage !== 'done') return false;
+
+  return children.some(
+    (child: WorkItem) => child.status !== 'completed' || child.stage !== 'done'
+  );
 }
 
 /**
@@ -129,7 +164,7 @@ export default function register(ctx: PluginContext): void {
       const reason = options.reason || '';
       const author = options.author || 'worklog';
 
-      const results: Array<{ id: string; success: boolean; error?: string; childrenClosed?: number; childErrors?: Array<{ id: string; error: string }> }> = [];
+      const results: Array<{ id: string; success: boolean; error?: string; childrenClosed?: number; recovered?: boolean; childErrors?: Array<{ id: string; error: string }> }> = [];
 
       for (const rawId of ids) {
         const normalizedId = utils.normalizeCliId(rawId, options.prefix) || rawId;
@@ -173,6 +208,26 @@ export default function register(ctx: PluginContext): void {
               // so the close command is never blocked or aborted.
             });
           }
+        } else if (shouldRecoverOpenChildren(item, db)) {
+          // Recovery path: parent is already completed/done but has open children.
+          // Close descendants only — the parent itself is already closed.
+          const { errors: childErrors, childrenClosed } = closeDescendants(id, reason, author, db);
+
+          const result: any = {
+            id,
+            success: true,
+            childrenClosed,
+            recovered: true,
+          };
+          if (childErrors.length > 0) {
+            result.childErrors = childErrors;
+          }
+          results.push(result);
+
+          // No OpenBrain submission for the recovery path: the parent was
+          // already done and presumably submitted to OpenBrain previously.
+          // Children were closed individually but each closeSingle does not
+          // trigger OpenBrain (consistent with the recursive close pattern).
         } else {
           // Standard (non-recursive) close — existing behaviour
           const updated = closeSingle(id, reason, author, db);
@@ -200,8 +255,15 @@ export default function register(ctx: PluginContext): void {
       } else {
         for (const r of results) {
           if (r.success) {
-            // Show children-closed count for recursive close results
-            if (r.childrenClosed !== undefined) {
+            if (r.recovered) {
+              // Recovery path: parent was already done, children were closed
+              if (r.childErrors && r.childErrors.length > 0) {
+                const closed = r.childrenClosed ?? 0;
+                console.log(`Recovery close for ${r.id}: ${closed}/${closed + r.childErrors.length} open children closed (parent was already done)`);
+              } else {
+                console.log(`Recovery close for ${r.id}: ${r.childrenClosed ?? 0} open children closed (parent was already done)`);
+              }
+            } else if (r.childrenClosed !== undefined) {
               console.log(`Closed ${r.id} (${r.childrenClosed} children closed)`);
             } else {
               console.log(`Closed ${r.id}`);
@@ -209,7 +271,7 @@ export default function register(ctx: PluginContext): void {
           } else {
             console.error(`Failed to close ${r.id}: ${r.error}`);
           }
-          // Report per-child errors — recursive close path only
+          // Report per-child errors — recursive / recovery close path only
           if (r.childErrors && r.childErrors.length > 0) {
             for (const ce of r.childErrors) {
               console.error(`  Child ${ce.id}: ${ce.error} — this item remains unclosed at top level`);
