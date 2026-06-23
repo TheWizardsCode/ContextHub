@@ -41,6 +41,7 @@
     "js-yaml": "^4.1.1"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.79.10",
     "@types/better-sqlite3": "^7.6.13",
     "@types/chalk": "^0.4.31",
     "@types/commander": "^2.12.0",

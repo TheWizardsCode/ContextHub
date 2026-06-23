@@ -373,7 +373,15 @@ describe('runBrowseFlow notification path (integration)', () => {
   });
 
   it('shows the friendly notification when runWl encounters the initialization error', async () => {
-    // Both binaries fail — wl with ENOENT, worklog with init error
+    // Both binaries fail for each runWl invocation.
+    // runBrowseFlow calls fetchTotalActionableCount first (2 calls),
+    // then listWorkItems in the while loop (2 more calls via fallback path).
+    mockExecFailure({ code: 'ENOENT' });
+    mockExecFailure({
+      stderr:
+        'worklog: not initialized in this checkout/worktree. Run "wl init" to set up this location.',
+    });
+    // Second invocation (listWorkItems in the while loop)
     mockExecFailure({ code: 'ENOENT' });
     mockExecFailure({
       stderr:
@@ -412,9 +420,10 @@ describe('runBrowseFlow notification path (integration)', () => {
   });
 
   it('shows raw error text for unrelated CLI errors (no false positive)', async () => {
-    mockExecFailure({
-      stderr: 'wl: unknown command',
-    });
+    // fetchTotalActionableCount consumes 1 mock (non-ENOENT error from 'wl', throws immediately)
+    mockExecFailure({ stderr: 'wl: unknown command' });
+    // listWorkItems (fallback path) needs its own mock
+    mockExecFailure({ stderr: 'wl: unknown command' });
 
     const notify = vi.fn();
     const registerCommand = vi.fn();
@@ -439,13 +448,20 @@ describe('runBrowseFlow notification path (integration)', () => {
   });
 
   it('shows the friendly notification when init error arrives via stdout (JSON mode)', async () => {
+    const initErrorPayload = {
+      success: false,
+      initialized: false,
+      error: 'Worklog system is not initialized. Run "worklog init" first.',
+    };
+    // fetchTotalActionableCount consumes 1 mock (non-ENOENT error containing init pattern)
     mockExecFailure({
       stderr: '',
-      stdout: JSON.stringify({
-        success: false,
-        initialized: false,
-        error: 'Worklog system is not initialized. Run "worklog init" first.',
-      }),
+      stdout: JSON.stringify(initErrorPayload),
+    });
+    // listWorkItems (fallback path) needs its own mock
+    mockExecFailure({
+      stderr: '',
+      stdout: JSON.stringify(initErrorPayload),
     });
 
     const notify = vi.fn();
@@ -471,6 +487,12 @@ describe('runBrowseFlow notification path (integration)', () => {
   });
 
   it('shows raw error text for unrelated JSON errors in stdout (no false positive)', async () => {
+    // fetchTotalActionableCount consumes 1 mock
+    mockExecFailure({
+      stderr: '',
+      stdout: JSON.stringify({ success: false, error: 'Unknown work item ID' }),
+    });
+    // listWorkItems (fallback path) needs its own mock
     mockExecFailure({
       stderr: '',
       stdout: JSON.stringify({ success: false, error: 'Unknown work item ID' }),
