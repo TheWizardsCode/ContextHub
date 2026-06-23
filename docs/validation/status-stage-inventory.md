@@ -92,6 +92,13 @@ The next-item selection logic treats in_review specially and filters statuses.
 - Status default and stage default are set during create/import, but no validation
   is applied on update or import beyond missing-field normalization.
 
+## Cross-references
+
+- [`docs/validation/stage-in-progress-usage-inventory.md`](./stage-in-progress-usage-inventory.md) —
+  Comprehensive inventory of every `--stage in_progress` usage across all skill files
+  under `~/.pi/agent/skills/`, with semantic analysis and recommendations.
+  Created by audit work-item WL-0MQQIK8OU0052YD0.
+
 ## Examples
 - Valid: status=open, stage=idea
 - Valid: status=in-progress, stage=in_progress
