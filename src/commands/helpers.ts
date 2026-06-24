@@ -500,13 +500,6 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push(item.description);
   }
 
-  if (item.stage) {
-    lines.push('');
-    lines.push('## Stage');
-    lines.push('');
-    lines.push(item.stage);
-  }
-
   if (db) {
       // Ensure comments are presented newest-first in human output as well.
       const comments = db.getCommentsForWorkItem(item.id);

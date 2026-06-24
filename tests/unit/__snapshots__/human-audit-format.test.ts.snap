@@ -25,10 +25,6 @@ Assignee : alice
 
 A test item for audit formatting
 
-## Stage
-
-in_progress
-
 ## Audit
 
 Ready to close: Yes
@@ -73,11 +69,7 @@ Assignee : alice
 
 ## Description
 
-A test item for audit formatting
-
-## Stage
-
-in_progress"
+A test item for audit formatting"
 `;
 
 exports[`humanFormatWorkItem audit formatting > renders concise/normal/full outputs without audit (snapshots) > normal-without-audit 1`] = `
