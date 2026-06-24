@@ -305,7 +305,7 @@ export async function defaultChooseWorkItem(
     );
 
     const options = items.map(item => formatBrowseOption(item, undefined, undefined, currentSettings, maxPrefixWidth));
-    const titleSuffix = totalCount !== undefined ? ` (top ${currentSettings.browseItemCount} of ${totalCount})` : ` (top ${currentSettings.browseItemCount})`;
+    const titleSuffix = totalCount !== undefined ? ` (top ${totalCount > 0 ? Math.min(currentSettings.browseItemCount, totalCount) : currentSettings.browseItemCount} of ${totalCount})` : ` (top ${currentSettings.browseItemCount})`;
     const selected = await ctx.ui.select(`Browse Worklog next items${titleSuffix}`, options);
     if (!selected) return undefined;
 
@@ -471,7 +471,7 @@ export async function defaultChooseWorkItem(
           ? truncateToWidth(theme.fg('accent', theme.bold('No work items to browse')), width)
           : (() => {
               const titleSuffix = totalCount !== undefined
-                ? ` (top ${browseCount} of ${totalCount})`
+                ? ` (top ${totalCount > 0 ? Math.min(browseCount, totalCount) : browseCount} of ${totalCount})`
                 : ` (top ${browseCount})`;
               return truncateToWidth(theme.fg('accent', theme.bold(`Browse Worklog next items${titleSuffix}`)), width);
             })();

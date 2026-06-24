@@ -28,6 +28,8 @@ vi.mock('node:fs', () => ({
  * - Both the ctx.ui.select() fallback path and custom overlay render() path
  *   display the total count correctly
  * - Graceful degradation when totalCount is 0
+ * - When browseItemCount > totalCount, the displayed count is capped to totalCount
+ * - When browseItemCount <= totalCount, the current behavior is unchanged
  *
  * Run: npx vitest run packages/tui/tests/browse-total-count.test.ts
  */
@@ -174,6 +176,31 @@ describe('Browse list total count in title', () => {
     expect(title).toContain('Browse Worklog next items (top 5 of 9999)');
   });
 
+  it('caps displayed count to totalCount when browseItemCount > totalCount in custom overlay title', async () => {
+    const { ctx, getTitle } = createMockCustomContext();
+
+    // browseItemCount defaults to 5, so with totalCount=2 it should cap to 2
+    defaultChooseWorkItem(items, ctx, vi.fn(), undefined, undefined, undefined, 2);
+    await new Promise(process.nextTick);
+
+    const title = getTitle();
+    expect(title).not.toBeNull();
+    // Should show "top 2 of 2", not "top 5 of 2"
+    expect(title).toContain('Browse Worklog next items (top 2 of 2)');
+  });
+
+  it('does not cap when browseItemCount <= totalCount in custom overlay title', async () => {
+    const { ctx, getTitle } = createMockCustomContext();
+
+    // browseItemCount defaults to 5, so with totalCount=10 the value is unchanged
+    defaultChooseWorkItem(items, ctx, vi.fn(), undefined, undefined, undefined, 10);
+    await new Promise(process.nextTick);
+
+    const title = getTitle();
+    expect(title).not.toBeNull();
+    expect(title).toContain('Browse Worklog next items (top 5 of 10)');
+  });
+
   // ── select() fallback path (non-TUI) tests ───────────────────────
 
   it('shows "top X of Y" in the select() fallback title when totalCount is provided', async () => {
@@ -209,6 +236,31 @@ describe('Browse list total count in title', () => {
     const title = getSelectTitle();
     expect(title).not.toBeNull();
     expect(title).toContain('Browse Worklog next items (top 5 of 0)');
+  });
+
+  it('caps displayed count to totalCount when browseItemCount > totalCount in select() fallback title', async () => {
+    const { ctx, getSelectTitle } = createMockSelectContext();
+
+    // browseItemCount defaults to 5, so with totalCount=2 it should cap to 2
+    defaultChooseWorkItem(items, ctx, vi.fn(), undefined, undefined, undefined, 2);
+    await new Promise(process.nextTick);
+
+    const title = getSelectTitle();
+    expect(title).not.toBeNull();
+    // Should show "top 2 of 2", not "top 5 of 2"
+    expect(title).toContain('Browse Worklog next items (top 2 of 2)');
+  });
+
+  it('does not cap when browseItemCount <= totalCount in select() fallback title', async () => {
+    const { ctx, getSelectTitle } = createMockSelectContext();
+
+    // browseItemCount defaults to 5, so with totalCount=10 the value is unchanged
+    defaultChooseWorkItem(items, ctx, vi.fn(), undefined, undefined, undefined, 10);
+    await new Promise(process.nextTick);
+
+    const title = getSelectTitle();
+    expect(title).not.toBeNull();
+    expect(title).toContain('Browse Worklog next items (top 5 of 10)');
   });
 
   // ── Regression: existing tests still pass ────────────────────────
