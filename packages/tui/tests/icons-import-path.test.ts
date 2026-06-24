@@ -2,7 +2,7 @@
  * Regression test for WL-0MQMFMACS0059UUC: Extension loads but cannot find icons.js.
  *
  * The Worklog Pi extension at ~/.pi/agent/extensions/worklog is a symlink to
- * packages/tui/extensions/. When Pi loads packages/tui/extensions/index.ts,
+ * packages/tui/extensions/. Pi loads Worklog/index.ts via the package.json manifest,
  * the import `../../../src/icons.js` resolves to <project>/src/icons.js which
  * does NOT exist (only src/icons.ts exists). The fix changes the import to
  * point to the compiled output at `../../../dist/icons.js`.
