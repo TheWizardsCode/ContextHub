@@ -2,6 +2,7 @@
  * Comment commands - Manage comments on work items
  */
 
+import * as fs from 'fs';
 import type { PluginContext } from '../plugin-types.js';
 import type { 
   CommentCreateOptions, 
@@ -27,6 +28,7 @@ export default function register(ctx: PluginContext): void {
     .requiredOption('-a, --author <author>', 'Author of the comment')
     .option('-c, --comment <comment>', 'Comment text (markdown supported)')
     .option('--body <body>', 'Comment text (markdown supported) — alias for --comment')
+    .option('--comment-file <path>', 'Read comment text from a file (mutually exclusive with --comment and --body)')
     .option('-r, --references <references>', 'Comma-separated list of references (work item IDs, file paths, or URLs)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .action((workItemId: string, options: CommentCreateOptions) => {
@@ -49,9 +51,26 @@ export default function register(ctx: PluginContext): void {
         process.exit(1);
       }
 
-      const commentText = options.comment ?? options.body;
+      // Support --comment-file as an alternative to --comment/--body.
+      // It is mutually exclusive with both inline options.
+      if (options.commentFile) {
+        if (options.comment || options.body) {
+          output.error('Cannot use --comment-file with --comment or --body.', { success: false, error: 'Cannot use --comment-file with --comment or --body.' });
+          process.exit(1);
+        }
+      }
+
+      let commentText = options.comment ?? options.body;
+      if (options.commentFile) {
+        try {
+          commentText = fs.readFileSync(options.commentFile, 'utf8');
+        } catch (err) {
+          console.error(`Failed to read comment file: ${options.commentFile}`);
+          process.exit(1);
+        }
+      }
       if (!commentText || commentText.trim() === '') {
-        output.error('Missing comment text. Provide --comment or --body with the comment text.', { success: false, error: 'Missing comment text. Provide --comment or --body with the comment text.' });
+        output.error('Missing comment text. Provide --comment, --body, or --comment-file with the comment text.', { success: false, error: 'Missing comment text. Provide --comment, --body, or --comment-file with the comment text.' });
         process.exit(1);
       }
 
@@ -147,6 +166,7 @@ export default function register(ctx: PluginContext): void {
     .description('Update a comment')
     .option('-a, --author <author>', 'New author')
     .option('-c, --comment <comment>', 'New comment text')
+    .option('--comment-file <path>', 'Read comment text from a file (mutually exclusive with --comment)')
     .option('-r, --references <references>', 'New references (comma-separated)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .action((commentId: string, options: CommentUpdateOptions) => {
@@ -155,7 +175,20 @@ export default function register(ctx: PluginContext): void {
       
       const updates: UpdateCommentInput = {};
       if (options.author) updates.author = options.author;
-      if (options.comment) updates.comment = options.comment;
+      if (options.comment && options.commentFile) {
+        output.error('Cannot use both --comment and --comment-file together.', { success: false, error: 'Cannot use both --comment and --comment-file together.' });
+        process.exit(1);
+      }
+      if (options.commentFile) {
+        try {
+          updates.comment = fs.readFileSync(options.commentFile, 'utf8');
+        } catch (err) {
+          console.error(`Failed to read comment file: ${options.commentFile}`);
+          process.exit(1);
+        }
+      } else if (options.comment) {
+        updates.comment = options.comment;
+      }
       if (options.references) updates.references = options.references.split(',').map((r: string) => {
         const t = r.trim();
         if (/^[A-Z0-9]+$/i.test(t) || /^[A-Z0-9]+-[A-Z0-9]+$/i.test(t)) {

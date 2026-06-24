@@ -149,10 +149,10 @@ export interface SyncDebugOptions {
   gitBranch?: string;
 }
 
-export interface CommentCreateOptions { author: string; comment?: string; body?: string; references?: string; prefix?: string }
+export interface CommentCreateOptions { author: string; comment?: string; body?: string; commentFile?: string; references?: string; prefix?: string }
 export interface CommentListOptions { prefix?: string }
 export interface CommentShowOptions { prefix?: string }
-export interface CommentUpdateOptions { author?: string; comment?: string; references?: string; prefix?: string }
+export interface CommentUpdateOptions { author?: string; comment?: string; commentFile?: string; references?: string; prefix?: string }
 export interface CommentDeleteOptions { prefix?: string }
 
 export interface RecentOptions { number?: string; children?: boolean; prefix?: string }
