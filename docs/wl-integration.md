@@ -64,12 +64,20 @@ wlEvents.on('command:error', ({ error, args }) => {
 
 ## JSON Recovery
 
-When `--json` output contains non-JSON noise (e.g. log lines before the JSON), the parser attempts three strategies:
+As of v1.0.0, all built-in `wl` commands emit pure JSON when invoked with
+`--json`: no preamble text, human-readable warnings, or other non-JSON noise
+appears on stdout. Stderr warnings are also suppressed in `--json` mode to
+prevent unintended capture by scripts that merge stdout/stderr.
+
+As a defensive fallback, the integration layer still attempts to recover
+from non-JSON output (e.g. unexpected log lines from third-party plugins,
+shell wrappers, or environment interference) using three strategies:
 1. Parse the full stdout as JSON.
 2. Extract and parse the last complete `{...}` object via regex.
 3. Parse the last non-empty line of output.
 
-If all strategies fail, a `JSON_PARSE` error is returned and the command is retried (if retries are configured).
+If all strategies fail, a `JSON_PARSE` error is returned and the command is
+retried (if retries are configured).
 
 ## Migration Notes for Existing TUI Code
 
