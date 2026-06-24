@@ -41,7 +41,7 @@ export default function register(ctx: PluginContext): void {
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--perf', 'Enable performance instrumentation')
     .action(async (options: PimanOptions) => {
-      const browseExt = resolveExtension('index.ts');
+      const browseExt = resolveExtension('Worklog/index.ts');
 
       const piArgs: string[] = [
         '-e', browseExt,
