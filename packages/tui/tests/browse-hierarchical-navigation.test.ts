@@ -55,7 +55,7 @@ vi.mock('node:fs', () => ({
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-import { defaultChooseWorkItem, getIconPrefix, type WorklogBrowseItem } from '../extensions/index.js';
+import { defaultChooseWorkItem, getIconPrefix, type WorklogBrowseItem } from '../extensions/Worklog/index.js';
 
 // ─── getIconPrefix tests ─────────────────────────────────────────────
 

@@ -16,9 +16,9 @@
  *
  * This test validates:
  * 1. The entry point exists at the expected path
- * 2. The path-derived label would be "Worklog"
- * 3. All canonical exports from the module resolve correctly
- *    through the backward-compatible re-export at the old location
+ * 2. The package.json manifest is correct
+ * 3. The path-derived label would be "Worklog"
+ * 4. All canonical exports from the module resolve correctly
  */
 
 import { describe, it, expect } from 'vitest';
@@ -30,7 +30,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '../../..');
 const EXTENSIONS_DIR = path.resolve(PROJECT_ROOT, 'packages/tui/extensions');
 const WORKLOG_ENTRY = path.resolve(EXTENSIONS_DIR, 'Worklog/index.ts');
-const LEGACY_ENTRY = path.resolve(EXTENSIONS_DIR, 'index.ts');
 const MANIFEST_PATH = path.resolve(EXTENSIONS_DIR, 'package.json');
 
 describe('Extension label derivation', () => {
@@ -70,8 +69,8 @@ describe('Extension label derivation', () => {
   });
 });
 
-describe('Backward-compatible exports', () => {
-  it('canonical exports resolve from Worklog/index.ts', async () => {
+describe('Canonical exports', () => {
+  it('all exports resolve from Worklog/index.ts', async () => {
     const mod = await import('../extensions/Worklog/index.ts');
     expect(mod.createWorklogBrowseExtension).toBeDefined();
     expect(mod.default).toBeDefined();
@@ -80,34 +79,16 @@ describe('Backward-compatible exports', () => {
     expect(mod.getIconPrefix).toBeDefined();
     expect(mod.formatBrowseOption).toBeDefined();
     expect(mod.createScrollableWidget).toBeDefined();
-    expect(typeof mod.createWorklogBrowseExtension).toBe('function');
-  });
-
-  it('exports still resolve from legacy extensions/index.ts path', async () => {
-    // The legacy path is kept as a backward-compatible re-export
-    const mod = await import('../extensions/index.ts');
-    expect(mod.createWorklogBrowseExtension).toBeDefined();
-    expect(mod.default).toBeDefined();
-    expect(mod.defaultChooseWorkItem).toBeDefined();
-    expect(mod.buildSelectionWidget).toBeDefined();
-    expect(mod.getIconPrefix).toBeDefined();
-    expect(mod.formatBrowseOption).toBeDefined();
     expect(mod.STAGE_MAP).toBeDefined();
     expect(mod.createDefaultListWorkItems).toBeDefined();
     expect(mod.createListWorkItemsWithStage).toBeDefined();
     expect(typeof mod.createWorklogBrowseExtension).toBe('function');
   });
 
-  it('legacy re-export provides identical exports to canonical entry', async () => {
-    const canonical = await import('../extensions/Worklog/index.ts');
-    const legacy = await import('../extensions/index.ts');
-
-    // Spot-check that key exports are the same reference (same module)
-    expect(legacy.createWorklogBrowseExtension).toBe(
-      canonical.createWorklogBrowseExtension
-    );
-    expect(legacy.defaultChooseWorkItem).toBe(
-      canonical.defaultChooseWorkItem
-    );
+  it('no index.ts exists at the legacy extensions path', () => {
+    // The re-export shim was removed to prevent Pi from auto-discovering
+    // it as a separate extension alongside Worklog/index.ts
+    const legacyPath = path.resolve(EXTENSIONS_DIR, 'index.ts');
+    expect(existsSync(legacyPath)).toBe(false);
   });
 });

@@ -47,7 +47,7 @@ vi.mock('node:fs', () => ({
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-import { defaultChooseWorkItem, buildSelectionWidget, type WorklogBrowseItem, type SelectionChangeHandler } from '../extensions/index.js';
+import { defaultChooseWorkItem, buildSelectionWidget, type WorklogBrowseItem, type SelectionChangeHandler } from '../extensions/Worklog/index.js';
 import { ShortcutRegistry, type ShortcutEntry } from '../extensions/shortcut-config.js';
 import { type Settings } from '../extensions/settings-config.js';
 

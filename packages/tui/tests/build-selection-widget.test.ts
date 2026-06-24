@@ -17,7 +17,7 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
   getAgentDir: () => '/home/test-user/.pi/agent',
 }));
 
-import { buildSelectionWidget, type WorklogBrowseItem } from '../extensions/index.js';
+import { buildSelectionWidget, type WorklogBrowseItem } from '../extensions/Worklog/index.js';
 import { type PiTheme } from '../extensions/worklog-helpers.js';
 import { type Settings } from '../extensions/settings-config.js';
 

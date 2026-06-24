@@ -932,7 +932,7 @@ describe('chord dispatch integration (browse view)', () => {
     const registry = new ShortcutRegistry(chordEntries);
 
     // Start the browse widget
-    const { defaultChooseWorkItem } = await import('./index.js');
+    const { defaultChooseWorkItem } = await import('./Worklog/index.js');
     defaultChooseWorkItem(items, ctx, vi.fn(), registry);
     await new Promise(process.nextTick);
 
@@ -964,7 +964,7 @@ describe('chord dispatch integration (browse view)', () => {
     ];
     const registry = new ShortcutRegistry(chordEntries);
 
-    const { defaultChooseWorkItem } = await import('./index.js');
+    const { defaultChooseWorkItem } = await import('./Worklog/index.js');
     defaultChooseWorkItem(items, ctx, vi.fn(), registry);
     await new Promise(process.nextTick);
 
@@ -1006,7 +1006,7 @@ describe('chord dispatch integration (browse view)', () => {
     ];
     const registry = new ShortcutRegistry(chordEntries);
 
-    const { defaultChooseWorkItem } = await import('./index.js');
+    const { defaultChooseWorkItem } = await import('./Worklog/index.js');
     defaultChooseWorkItem(items, ctx, vi.fn(), registry);
     await new Promise(process.nextTick);
 
@@ -1033,7 +1033,7 @@ describe('chord dispatch integration (browse view)', () => {
     ];
     const registry = new ShortcutRegistry(chordEntries);
 
-    const { defaultChooseWorkItem } = await import('./index.js');
+    const { defaultChooseWorkItem } = await import('./Worklog/index.js');
     defaultChooseWorkItem(items, ctx, vi.fn(), registry);
     await new Promise(process.nextTick);
 
@@ -1079,7 +1079,7 @@ describe('chord dispatch integration (browse view)', () => {
     ];
     const registry = new ShortcutRegistry(chordEntries);
 
-    const { defaultChooseWorkItem } = await import('./index.js');
+    const { defaultChooseWorkItem } = await import('./Worklog/index.js');
     defaultChooseWorkItem(items, ctx, vi.fn(), registry);
     await new Promise(process.nextTick);
 
@@ -1127,7 +1127,7 @@ describe('chord dispatch integration (browse view)', () => {
     ];
     const registry = new ShortcutRegistry(chordEntries);
 
-    const { defaultChooseWorkItem } = await import('./index.js');
+    const { defaultChooseWorkItem } = await import('./Worklog/index.js');
     defaultChooseWorkItem(items, ctx, vi.fn(), registry);
     await new Promise(process.nextTick);
 
@@ -1183,7 +1183,7 @@ describe('chord dispatch integration (browse view)', () => {
     ];
     const registry = new ShortcutRegistry(chordEntries);
 
-    const { defaultChooseWorkItem } = await import('./index.js');
+    const { defaultChooseWorkItem } = await import('./Worklog/index.js');
     defaultChooseWorkItem(items, ctx, vi.fn(), registry);
     await new Promise(process.nextTick);
 
@@ -1222,7 +1222,7 @@ describe('chord dispatch integration (browse view)', () => {
     ];
     const registry = new ShortcutRegistry(chordEntries);
 
-    const { defaultChooseWorkItem } = await import('./index.js');
+    const { defaultChooseWorkItem } = await import('./Worklog/index.js');
     defaultChooseWorkItem(items, ctx, vi.fn(), registry);
     await new Promise(process.nextTick);
 
@@ -1250,7 +1250,7 @@ describe('chord dispatch integration (browse view)', () => {
     ];
     const registry = new ShortcutRegistry(chordEntries);
 
-    const { defaultChooseWorkItem } = await import('./index.js');
+    const { defaultChooseWorkItem } = await import('./Worklog/index.js');
     defaultChooseWorkItem(items, ctx, vi.fn(), registry);
     await new Promise(process.nextTick);
 
@@ -1273,7 +1273,7 @@ describe('chord dispatch integration (browse view)', () => {
     ];
     const registry = new ShortcutRegistry(chordEntries);
 
-    const { defaultChooseWorkItem } = await import('./index.js');
+    const { defaultChooseWorkItem } = await import('./Worklog/index.js');
     defaultChooseWorkItem(items, ctx, vi.fn(), registry);
     await new Promise(process.nextTick);
 
@@ -1295,7 +1295,7 @@ describe('chord dispatch integration (browse view)', () => {
     ];
     const registry = new ShortcutRegistry(chordEntries);
 
-    const { defaultChooseWorkItem } = await import('./index.js');
+    const { defaultChooseWorkItem } = await import('./Worklog/index.js');
     defaultChooseWorkItem(items, ctx, vi.fn(), registry);
     await new Promise(process.nextTick);
 
@@ -1317,7 +1317,7 @@ describe('chord dispatch integration (browse view)', () => {
     ];
     const registry = new ShortcutRegistry(chordEntries);
 
-    const { defaultChooseWorkItem } = await import('./index.js');
+    const { defaultChooseWorkItem } = await import('./Worklog/index.js');
     defaultChooseWorkItem(items, ctx, vi.fn(), registry);
     await new Promise(process.nextTick);
 
@@ -1349,7 +1349,7 @@ describe('chord dispatch integration (browse view)', () => {
     ];
     const registry = new ShortcutRegistry(entries);
 
-    const { defaultChooseWorkItem } = await import('./index.js');
+    const { defaultChooseWorkItem } = await import('./Worklog/index.js');
     defaultChooseWorkItem(items, ctx, vi.fn(), registry);
     await new Promise(process.nextTick);
 
@@ -1380,7 +1380,7 @@ describe('chord dispatch integration (browse view)', () => {
     ];
     const registry = new ShortcutRegistry(chordEntries);
 
-    const { defaultChooseWorkItem } = await import('./index.js');
+    const { defaultChooseWorkItem } = await import('./Worklog/index.js');
     defaultChooseWorkItem(items, ctx, vi.fn(), registry);
     await new Promise(process.nextTick);
 

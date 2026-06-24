@@ -30,7 +30,7 @@ import {
   defaultChooseWorkItem,
   formatBrowseOption,
   getIconPrefix,
-} from '../../packages/tui/extensions/index.ts';
+} from '../../packages/tui/extensions/Worklog/index.ts';
 import { visibleWidth } from '../../packages/tui/extensions/terminal-utils.ts';
 import { ShortcutRegistry } from '../../packages/tui/extensions/shortcut-config.js';
 

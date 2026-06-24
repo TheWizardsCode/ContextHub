@@ -17,7 +17,7 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
   getAgentDir: () => '/home/test-user/.pi/agent',
 }));
 
-import { getIconPrefix, createWorklogBrowseExtension, STAGE_MAP } from '../extensions/index.js';
+import { getIconPrefix, createWorklogBrowseExtension, STAGE_MAP } from '../extensions/Worklog/index.js';
 
 describe('extension module loads with valid icons import (regression: WL-0MQMFMACS0059UUC)', () => {
   it('extension module exports expected symbols', () => {

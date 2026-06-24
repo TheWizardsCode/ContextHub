@@ -55,7 +55,7 @@ vi.mock('node:child_process', () => ({
 
 // ── Imports (resolved after mock is installed) ──────────────────────────
 
-import { createDefaultListWorkItems, createWorklogBrowseExtension } from '../extensions/index.js';
+import { createDefaultListWorkItems, createWorklogBrowseExtension } from '../extensions/Worklog/index.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
