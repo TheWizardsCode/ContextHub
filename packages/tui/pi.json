@@ -1,0 +1,35 @@
+{
+  "name": "tui",
+  "version": "0.2.0",
+  "description": "Pi-based TUI for the Worklog CLI with agent chat, action palette, and work item management",
+  "main": "../dist/index.js",
+  "bin": {
+    "wl-piman": "../dist/commands/piman.js"
+  },
+  "scripts": {
+    "build": "cd .. && npm run build",
+    "test": "cd .. && npm test",
+    "smoke": "node --import tsx -e \"import('../extensions/chatPane.js'); import('../extensions/actionPalette.js'); console.log('OK')\""
+  },
+  "keywords": [
+    "worklog",
+    "tui",
+    "agent",
+    "pi",
+    "cli"
+  ],
+  "author": "ContextHub Team",
+  "license": "MIT",
+  "peerDependencies": {
+    "worklog": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/chatPane.ts",
+      "./extensions/actionPalette.ts"
+    ],
+    "commands": [
+      "wl-piman"
+    ]
+  }
+}

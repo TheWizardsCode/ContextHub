@@ -1,0 +1,10 @@
+{
+  "llm-wiki": {
+    "notices": false
+  },
+  "context-hub": {
+    "showActivityIndicator": true,
+    "showHelpText": true,
+    "browseItemCount": 15
+  }
+}

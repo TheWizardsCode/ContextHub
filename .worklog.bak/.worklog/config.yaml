@@ -1,0 +1,4 @@
+projectName: Worklog
+prefix: WL
+autoExport: true
+autoSync: false
