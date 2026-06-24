@@ -116,6 +116,7 @@ export default function register(ctx: PluginContext): void {
           count: enrichedResults.length,
           requested: count,
           results: enrichedResults,
+          workItems: enrichedResults,
           ...(note ? { note } : {})
         });
         return;

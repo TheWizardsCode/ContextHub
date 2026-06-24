@@ -636,3 +636,56 @@ export function displayConflictDetails(
 
   console.log(theme.text.muted('━'.repeat(80)));
 }
+
+// ── JSON response shape helpers ──────────────────────────────────────
+// These helpers standardize the top-level JSON shape returned by all `wl`
+// commands when --json mode is active. The consistent shape reduces
+// fragility in consuming scripts and the TUI.
+
+/**
+ * Wrap any command output in a standard success/error envelope.
+ *
+ * All commands using --json should ensure their top-level JSON shape
+ * follows the pattern: `{ success: true/false, ...data }`.
+ */
+export function wrapJsonResponse<T extends Record<string, unknown> = Record<string, unknown>>(
+  data: T,
+  success: boolean = true
+): { success: boolean } & T {
+  return { success, ...data };
+}
+
+/**
+ * Convenience: wrap an array of work items for an array-returning command.
+ *
+ * Array-returning commands (list, search, in-progress, recent) should use
+ * the shape: `{ success: true, count, workItems: [...] }`.
+ */
+export function wrapWorkItemsResponse(
+  workItems: unknown[],
+  extraFields?: Record<string, unknown>
+): Record<string, unknown> {
+  return {
+    success: true,
+    count: workItems.length,
+    workItems,
+    ...extraFields,
+  };
+}
+
+/**
+ * Convenience: wrap a single work item for an object-returning command.
+ *
+ * Object-returning commands (show, create, update, next single) should use
+ * the shape: `{ success: true, workItem: {...}, ...extraFields }`.
+ */
+export function wrapWorkItemResponse(
+  workItem: unknown,
+  extraFields?: Record<string, unknown>
+): Record<string, unknown> {
+  return {
+    success: true,
+    workItem,
+    ...extraFields,
+  };
+}

@@ -226,6 +226,7 @@ export default function register(ctx: PluginContext): void {
           success: true,
           ftsAvailable: ftsUsed,
           count: jsonResults.length,
+          workItems: jsonResults,
           results: jsonResults,
         };
         if (options.semantic || options.semanticOnly) {
