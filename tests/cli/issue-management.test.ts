@@ -82,8 +82,8 @@ describe('CLI Issue Management Tests', () => {
       expect(result.success).toBe(true);
       expect(result.workItem.status).toBe('in-progress');
       expect(result.workItem.stage).toBe('in_progress');
-      expect(stderr).toContain('Warning: normalized status "in_progress" to "in-progress".');
-      expect(stderr).toContain('Warning: normalized stage "in-progress" to "in_progress".');
+      // In JSON mode, human-readable warnings are suppressed
+      expect(stderr).not.toContain('Warning: normalized status');
     });
   });
 
@@ -260,8 +260,8 @@ describe('CLI Issue Management Tests', () => {
       expect(result.success).toBe(true);
       expect(result.workItem.status).toBe('in-progress');
       expect(result.workItem.stage).toBe('in_progress');
-      expect(stderr).toContain('Warning: normalized status "in_progress" to "in-progress".');
-      expect(stderr).toContain('Warning: normalized stage "in-progress" to "in_progress".');
+      // In JSON mode, human-readable warnings are suppressed
+      expect(stderr).not.toContain('Warning: normalized status');
     });
 
     describe('batch processing (multiple ids)', () => {

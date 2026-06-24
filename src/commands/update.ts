@@ -278,7 +278,9 @@ export default function register(ctx: PluginContext): void {
             continue;
           }
           for (const warning of warnings) {
-            console.error(warning);
+            if (!utils.isJsonMode()) {
+              console.error(warning);
+            }
           }
           if (statusCandidate !== undefined) updates.status = normalizedStatus as WorkItemStatus;
           if (stageCandidate !== undefined) updates.stage = normalizedStage;

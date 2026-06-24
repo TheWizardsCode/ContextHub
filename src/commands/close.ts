@@ -299,8 +299,10 @@ export default function register(ctx: PluginContext): void {
           // Warning: parent has orphaned children
           const children = db.getChildren(id);
           if (children && children.length > 0) {
-            const warningMsg = 'Warning: ' + id + ' has ' + children.length + ' open children that will not be closed. Use `wl close --force ' + id + '` to close them unconditionally.';
-            console.error(warningMsg);
+            if (!isJsonMode) {
+              const warningMsg = 'Warning: ' + id + ' has ' + children.length + ' open children that will not be closed. Use `wl close --force ' + id + '` to close them unconditionally.';
+              console.error(warningMsg);
+            }
           }
 
           // Fire-and-forget: submit a summary to OpenBrain if enabled.

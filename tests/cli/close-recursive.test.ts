@@ -704,11 +704,10 @@ describe('close command recursive close', () => {
     expect(result.results[0].childrenClosed).toBe(3);
   });
 
-  it('JSON mode: warning on stderr does not corrupt stdout JSON', async () => {
+  it('JSON mode: human-readable warnings suppressed from stderr', async () => {
     const { parentId, childIds } = await createParentWithChildren(2, false);
 
     // Run in JSON mode but capture stderr separately via raw execution
-    // The --json flag affects output format; the warning goes to stderr
     const { stdout, stderr } = await execAsync(`tsx ${cliPath} --json close ${parentId} -r "done"`);
 
     // Stdout should be valid JSON
@@ -716,7 +715,8 @@ describe('close command recursive close', () => {
     expect(parsed.success).toBe(true);
     expect(parsed.results[0].success).toBe(true);
 
-    // Stderr should contain the warning
-    expect(stderr).toContain(`Warning: ${parentId} has ${childIds.length} open children`);
+    // Stderr should NOT contain the human-readable warning in JSON mode
+    // (JSON consumers should receive clean output)
+    expect(stderr).not.toContain(`Warning: ${parentId} has ${childIds.length} open children`);
   });
 });

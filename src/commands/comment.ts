@@ -65,7 +65,7 @@ export default function register(ctx: PluginContext): void {
         try {
           commentText = fs.readFileSync(options.commentFile, 'utf8');
         } catch (err) {
-          console.error(`Failed to read comment file: ${options.commentFile}`);
+          output.error(`Failed to read comment file: ${options.commentFile}`, { success: false, error: `Failed to read comment file: ${options.commentFile}` });
           process.exit(1);
         }
       }
@@ -183,7 +183,7 @@ export default function register(ctx: PluginContext): void {
         try {
           updates.comment = fs.readFileSync(options.commentFile, 'utf8');
         } catch (err) {
-          console.error(`Failed to read comment file: ${options.commentFile}`);
+          output.error(`Failed to read comment file: ${options.commentFile}`, { success: false, error: `Failed to read comment file: ${options.commentFile}` });
           process.exit(1);
         }
       } else if (options.comment) {
