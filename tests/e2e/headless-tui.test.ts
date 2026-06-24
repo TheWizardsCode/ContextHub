@@ -111,56 +111,30 @@ describe('E2E: Headless TUI - built executable', () => {
 
   describe('TUI module loading via built executable', () => {
     it('loads TUI modules without errors', async () => {
-      const { stdout } = await execa('node', [
-        '-e',
-        [
-          "const { ChatPane } = require('./dist/tui/chatPane.js');",
-          "const { ActionPalette } = require('./dist/tui/actionPalette.js');",
-          "const { runWl } = require('./dist/tui/wl-integration.js');",
-          "console.log('TUI modules loaded successfully');"
-        ].join('\n'),
-      ], {
-        cwd: path.join(__dirname, '..', '..'),
-        timeout: 10000,
-      });
-      expect(stdout).toContain('TUI modules loaded successfully');
+      const { ChatPane } = await import('../../packages/tui/extensions/chatPane.js');
+      const { ActionPalette } = await import('../../packages/tui/extensions/actionPalette.js');
+      const { runWl } = await import('../../packages/tui/extensions/wl-integration.js');
+      expect(ChatPane).toBeDefined();
+      expect(ActionPalette).toBeDefined();
+      expect(runWl).toBeDefined();
     });
 
     it('ChatPane can be instantiated and cleared', async () => {
-      const { stdout } = await execa('node', [
-        '-e',
-        [
-          "const { ChatPane } = require('./dist/tui/chatPane.js');",
-          "const pane = new ChatPane();",
-          "pane.clear();",
-          "console.log('ChatPane instantiated and cleared');"
-        ].join('\n'),
-      ], {
-        cwd: path.join(__dirname, '..', '..'),
-        timeout: 10000,
-      });
-      expect(stdout).toContain('ChatPane instantiated and cleared');
+      const { ChatPane } = await import('../../packages/tui/extensions/chatPane.js');
+      const pane = new ChatPane();
+      pane.clear();
+      expect(pane.getMessages()).toEqual([]);
+      expect(pane.getMessageCount()).toBe(0);
     });
 
     it('ActionPalette has at least 5 default actions', async () => {
-      const { stdout } = await execa('node', [
-        '-e',
-        [
-          "const { ChatPane } = require('./dist/tui/chatPane.js');",
-          "const { ActionPalette } = require('./dist/tui/actionPalette.js');",
-          "const chat = new ChatPane();",
-          "const palette = new ActionPalette(chat);",
-          "palette.open();",
-          "const actions = palette.getFilteredActions();",
-          "console.log('action-count:' + actions.length);"
-        ].join('\n'),
-      ], {
-        cwd: path.join(__dirname, '..', '..'),
-        timeout: 10000,
-      });
-      const match = stdout.match(/action-count:(\d+)/);
-      expect(match).not.toBeNull();
-      expect(parseInt(match![1])).toBeGreaterThanOrEqual(5);
+      const { ChatPane } = await import('../../packages/tui/extensions/chatPane.js');
+      const { ActionPalette } = await import('../../packages/tui/extensions/actionPalette.js');
+      const chat = new ChatPane();
+      const palette = new ActionPalette(chat);
+      palette.open();
+      const actions = palette.getFilteredActions();
+      expect(actions.length).toBeGreaterThanOrEqual(5);
     });
   });
 });
