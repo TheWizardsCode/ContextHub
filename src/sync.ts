@@ -669,6 +669,18 @@ export async function gitPushDataFileToBranch(
   commitMessage: string,
   target: GitTarget
 ): Promise<void> {
+  // SAFETY GUARD: reject pushes to regular branches or tags.
+  // Worklog data must only be stored on dedicated refs under refs/worklog/
+  // to prevent accidental corruption of the project working tree.
+  // See WL-0MQRBT8BS00355AB for the bug this prevents.
+  const branch = target.branch;
+  if (branch.startsWith('refs/heads/') || branch.startsWith('refs/tags/')) {
+    throw new Error(
+      `Refusing to push worklog data to '${branch}'. ` +
+      `Worklog data must be pushed to a dedicated ref under refs/worklog/ ` +
+      `(e.g. refs/worklog/data). Use WORKLOG_SKIP_PRE_PUSH=1 to bypass the pre-push hook.`
+    );
+  }
   // This pushes ONLY the data file by committing it on a dedicated branch
   // in a temporary worktree based on the remote branch tip.
   await execAsync('git rev-parse --git-dir');
