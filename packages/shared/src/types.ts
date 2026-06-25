@@ -157,6 +157,14 @@ export interface WorklogConfig {
   projectName: string;
   prefix: string;
   autoSync?: boolean;
+  /**
+   * Auto-sync interval in seconds for TUI background sync.
+   * Controls how often the Pi TUI browse widget triggers a background `wl sync`
+   * during auto-refresh.  Set to 0 to disable TUI auto-sync entirely.
+   * Default: 10 seconds.
+   * This is separate from `autoSync` which controls automatic sync after database writes.
+   */
+  autoSyncIntervalSeconds?: number;
   auditWriteEnabled?: boolean;
   syncRemote?: string;
   syncBranch?: string;
