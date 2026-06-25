@@ -20,6 +20,7 @@
  * - showHelpText (boolean): Whether to show the help text line in the browse selection overlay (default: true)
  * - autoInjectEnabled (boolean): Whether to auto-inject relevant work items before agent turns (default: true)
  * - guardrailsEnabled (boolean): Whether to enable guardrails that protect worklog data (default: true)
+ * - autoSyncIntervalSeconds (number): Auto-sync interval in seconds for TUI background sync (0–300, default: 10, 0 = disabled)
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -42,6 +43,12 @@ export interface Settings {
   autoInjectEnabled: boolean;
   /** Whether to enable guardrails that protect worklog database files from accidental modification. */
   guardrailsEnabled: boolean;
+  /**
+   * Auto-sync interval in seconds for TUI background sync.
+   * Controls how often the browse widget triggers a background `wl sync` during auto-refresh.
+   * Set to 0 to disable TUI auto-sync entirely. Range: 0–300. Default: 10.
+   */
+  autoSyncIntervalSeconds: number;
 }
 
 /**
@@ -54,6 +61,7 @@ export const DEFAULT_SETTINGS: Settings = {
   showHelpText: true,
   autoInjectEnabled: true,
   guardrailsEnabled: true,
+  autoSyncIntervalSeconds: 10,
 };
 
 /** Namespace key used in Pi settings files for Worklog extension settings. */
@@ -152,6 +160,9 @@ function readNamespacedSettings(path: string): Partial<Settings> {
   if (ns.guardrailsEnabled !== undefined) {
     result.guardrailsEnabled = validateBoolean(ns.guardrailsEnabled, DEFAULT_SETTINGS.guardrailsEnabled);
   }
+  if (ns.autoSyncIntervalSeconds !== undefined) {
+    result.autoSyncIntervalSeconds = validateNumber(ns.autoSyncIntervalSeconds, DEFAULT_SETTINGS.autoSyncIntervalSeconds, 0, 300);
+  }
 
   return result;
 }
@@ -226,6 +237,7 @@ export function persistSettings(partial: Partial<Settings>, cwd?: string): void 
     if (partial.showHelpText !== undefined) section.showHelpText = partial.showHelpText;
     if (partial.autoInjectEnabled !== undefined) section.autoInjectEnabled = partial.autoInjectEnabled;
     if (partial.guardrailsEnabled !== undefined) section.guardrailsEnabled = partial.guardrailsEnabled;
+    if (partial.autoSyncIntervalSeconds !== undefined) section.autoSyncIntervalSeconds = partial.autoSyncIntervalSeconds;
 
     raw[SETTINGS_NAMESPACE] = section;
 

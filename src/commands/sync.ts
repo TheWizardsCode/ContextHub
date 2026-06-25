@@ -16,6 +16,7 @@ import { createLogFileWriter, getWorklogLogPath, logConflictDetails } from '../l
 import { withFileLock, getLockPathForJsonl } from '../file-lock.js';
 import * as childProcess from 'child_process';
 import * as fs from 'fs';
+import * as path from 'path';
 import { promisify } from 'util';
 
 const execAsync = promisify(childProcess.exec);

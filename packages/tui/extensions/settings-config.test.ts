@@ -385,6 +385,7 @@ describe('Settings interface structure', () => {
       showHelpText: true,
       autoInjectEnabled: true,
       guardrailsEnabled: true,
+      autoSyncIntervalSeconds: 10,
     });
   });
 });

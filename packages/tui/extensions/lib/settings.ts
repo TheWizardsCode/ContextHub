@@ -159,6 +159,12 @@ export function openSettingsOverlay(ctx: BrowseContext): void {
       currentValue: currentSettings.guardrailsEnabled ? 'on' : 'off',
       values: ['on', 'off'],
     },
+    {
+      id: 'autoSyncIntervalSeconds',
+      label: 'Auto-sync interval (s)',
+      currentValue: String(currentSettings.autoSyncIntervalSeconds),
+      values: ['0', '5', '10', '30', '60', '120', '300'],
+    },
   ];
 
   // Open the settings overlay
@@ -217,6 +223,12 @@ export function openSettingsOverlay(ctx: BrowseContext): void {
               const show = newValue === 'on';
               updateSettings({ guardrailsEnabled: show });
               ctx.ui.notify(`Data guardrails ${show ? 'enabled' : 'disabled'}`, 'info');
+            } else if (id === 'autoSyncIntervalSeconds') {
+              const val = parseInt(newValue, 10);
+              if (!isNaN(val) && val >= 0 && val <= 300) {
+                updateSettings({ autoSyncIntervalSeconds: val });
+                ctx.ui.notify(`Auto-sync interval set to ${val}s`, 'info');
+              }
             }
           },
           () => {
