@@ -271,6 +271,17 @@ export async function performSync(
     console.log('\n✓ Sync completed successfully');
   }
 
+  // Record the last successful sync time
+  if (!options.dryRun) {
+    try {
+      const configDir = path.dirname(options.file);
+      const lastSyncTimePath = path.join(configDir, 'last-sync-time');
+      fs.writeFileSync(lastSyncTimePath, new Date().toISOString(), 'utf-8');
+    } catch {
+      // Silently ignore write errors - non-critical feature
+    }
+  }
+
   logConflictDetails(result, itemMergeResult.merged, logLine);
   finalizeLog();
   

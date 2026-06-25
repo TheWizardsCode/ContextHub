@@ -4,8 +4,10 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { StatusOptions } from '../cli-types.js';
-import { isInitialized, readInitSemaphore } from '../config.js';
+import { isInitialized, readInitSemaphore, getConfigDir } from '../config.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
+import * as fs from 'fs';
+import * as path from 'path';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -36,6 +38,17 @@ export default function register(ctx: PluginContext): void {
       const workItems = db.getAll();
       const comments = db.getAllComments();
       const config = utils.getConfig();
+
+      // Read last sync time if available
+      let lastSync: string | null = null;
+      const lastSyncPath = path.join(getConfigDir(), 'last-sync-time');
+      try {
+        if (fs.existsSync(lastSyncPath)) {
+          lastSync = fs.readFileSync(lastSyncPath, 'utf-8').trim();
+        }
+      } catch {
+        // Silently ignore read errors
+      }
       
       const closedCount = workItems.filter(i => i.status === 'completed').length;
       const deletedCount = workItems.filter(i => i.status === 'deleted').length;
@@ -47,6 +60,7 @@ export default function register(ctx: PluginContext): void {
           initialized: true,
           version: initInfo?.version || 'unknown',
           initializedAt: initInfo?.initializedAt || 'unknown',
+          lastSync: lastSync,
           config: {
             projectName: config?.projectName,
             prefix: config?.prefix,
@@ -83,6 +97,9 @@ export default function register(ctx: PluginContext): void {
           console.log(`  GitHub label prefix: ${config?.githubLabelPrefix || 'wl:'}`);
           console.log(`  GitHub import create: ${config?.githubImportCreateNew !== false ? 'enabled' : 'disabled'}`);
         }
+        console.log();
+        console.log('Sync:');
+        console.log(`  Last sync:  ${lastSync || 'Never'}`);
         console.log();
         console.log('Database Summary:');
         console.log(`  Work Items: ${workItems.length}`);
