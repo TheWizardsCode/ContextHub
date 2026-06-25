@@ -995,6 +995,10 @@ Options:
 - `--prefix <prefix>`
 - `--json`
 
+Human output includes a "Sync:" section with the last sync timestamp (ISO format) or "Never" if no sync has been performed.
+
+JSON output includes a `lastSync` field with the ISO timestamp string, or `null` if no sync has been performed.
+
 Example:
 
 ```sh
