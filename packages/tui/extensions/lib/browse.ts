@@ -6,8 +6,9 @@
  */
 
 import { createRequire } from 'node:module';
-import { realpathSync } from 'node:fs';
+import { realpathSync, readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { join, dirname } from 'node:path';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { applyStageColour, type PiTheme } from '../worklog-helpers.js';
 import { truncateToTerminalWidth, wrapToTerminalWidth, visibleWidth } from '../terminal-utils.js';
@@ -47,6 +48,74 @@ import {
 // found even when this extension is loaded via a symlink.
 const _require = createRequire(realpathSync(fileURLToPath(import.meta.url)));
 const { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, riskIcon, effortIcon } = _require('../../../../dist/icons.js');
+
+// ── Auto-sync state ────────────────────────────────────────────────
+
+/**
+ * In-flight guard flag for TUI background auto-sync.
+ * Prevents concurrent background syncs when multiple auto-refresh
+ * intervals fire before a previous sync completes.
+ */
+let _autoSyncInFlight = false;
+
+/**
+ * Find the .worklog directory by walking up from cwd.
+ */
+function _findWorklogDir(): string | null {
+  let dir = process.cwd();
+  while (dir !== dirname(dir)) {
+    const candidate = join(dir, '.worklog');
+    if (existsSync(candidate)) return candidate;
+    dir = dirname(dir);
+  }
+  const rootCandidate = join(dir, '.worklog');
+  return existsSync(rootCandidate) ? rootCandidate : null;
+}
+
+/**
+ * Read the last sync timestamp from .worklog/last-sync-time.
+ * Returns null when the file is missing or unreadable.
+ */
+function _readLastSyncTime(): string | null {
+  try {
+    const worklogDir = _findWorklogDir();
+    if (!worklogDir) return null;
+    const lastSyncPath = join(worklogDir, 'last-sync-time');
+    if (!existsSync(lastSyncPath)) return null;
+    return readFileSync(lastSyncPath, 'utf-8').trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Trigger a background `wl sync` if auto-sync conditions are met.
+ * Checks the in-flight guard and the configured interval threshold.
+ * This is fire-and-forget: errors are silently ignored.
+ */
+function _triggerAutoSync(): void {
+  if (_autoSyncInFlight) return;
+
+  const intervalSeconds = currentSettings.autoSyncIntervalSeconds;
+  if (intervalSeconds <= 0) return;
+
+  const lastSyncStr = _readLastSyncTime();
+  if (!lastSyncStr) {
+    // No sync ever performed - trigger one
+  } else {
+    const elapsed = Date.now() - new Date(lastSyncStr).getTime();
+    if (elapsed < intervalSeconds * 1000) return;
+  }
+
+  _autoSyncInFlight = true;
+
+  // Fire-and-forget: invoke wl sync in background, then clear the guard
+  runWl(['sync']).finally(() => {
+    _autoSyncInFlight = false;
+  }).catch(() => {
+    _autoSyncInFlight = false;
+  });
+}
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -340,6 +409,9 @@ export async function defaultChooseWorkItem(
     if (reFetchItems) {
       refreshInterval = setInterval(async () => {
         if (pendingChordLeader !== null) return;
+
+        // Trigger background auto-sync if interval has elapsed
+        _triggerAutoSync();
 
         try {
           let newItems: WorklogBrowseItem[];
