@@ -480,6 +480,7 @@ Options:
 `--stage <stage>` — Filter by stage: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` (optional).
 `--search <term>` (optional)
 `-n, --number <n>` — Number of items to return (optional; default: `1`).
+`-g, --groups <n>` — Number of parallel-safe groups to identify (optional; default: `3`). Only meaningful when `-n > 1`. Groups items by file-path conflicts extracted from their descriptions, placing items that affect different files in the same group and conflicting items in separate groups. Items without structured file paths are placed in singleton "conflict-unknown" groups. See "Parallel-safe grouping" below.
 `--include-blocked` — Include dependency-blocked items (excluded by default).
 `--no-re-sort` — Skip automatic re-sort before selection, preserving current `sort_index` order (optional).
 `--re-sort-sync` — Force a synchronous (blocking) re-sort when automatic re-sort is triggered. By default automatic re-sorts are run asynchronously to avoid blocking interactive commands.
@@ -497,19 +498,46 @@ When using `--json` mode with a single item result, the output contains:
   - `childCount` (integer) — number of direct children for this work item. Items with no children return `0`.
 - `reason` (string) — the selection reason.
 
+When requesting multiple items (`-n <count>`) with grouping enabled (the default when `-n > 1`), each result entry includes an additional `group` field:
+
+- `group` (integer) — the 1-indexed group number this item belongs to (only present when `-n > 1`).
+
 When requesting multiple items (`-n <count>`), the output wraps results in:
 
 - `success` (boolean)
 - `count` (integer) — number of results returned.
 - `requested` (integer) — the requested count.
-- `results` (array) — array of result objects, each with `workItem` (including `childCount`) and `reason`.
+- `results` (array) — array of result objects, each with `workItem` (including `childCount`), `reason`, and optionally `group`.
 - `note` (string, optional) — note about available vs requested counts.
+
+#### Parallel-safe grouping
+
+When `-n > 1`, `wl next` automatically groups items into parallel-safe groups based on file-path conflicts extracted from each item's description. The `--groups/-g` option controls the number of groups (default: `3`).
+
+The grouping algorithm uses a greedy first-fit strategy:
+
+1. Extract file paths from each item's description using a "**Key Files:**" section convention.
+2. Assign each item to the first group containing no item that touches the same files.
+3. Items without structured file paths are placed in singleton "conflict-unknown" groups.
+
+In JSON output (`--json` with `-n > 1`), each result entry includes a `group` field (integer, 1-indexed) indicating the group assignment.
+
+In human-readable output, group headings (e.g., `── Group 1 (parallel-safe) ──`) are displayed between groups.
+
+The Pi TUI selection list renders group separator lines between items in different groups, helping you quickly identify items you can work on in parallel.
+
+To specify a custom number of groups:
+
+```sh
+wl next -n 10 -g 5
+```
 
 Examples:
 
 ```sh
 wl next
 wl next -n 3
+wl next -n 10 -g 4
 wl next -a alice --search "bug"
 wl next --stage idea
 wl next --stage in_progress

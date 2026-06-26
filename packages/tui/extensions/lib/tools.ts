@@ -92,6 +92,7 @@ export interface WorklogBrowseItem {
   childCount?: number;
   tags?: string[];
   githubIssueNumber?: number;
+  group?: number;
 }
 
 export function normalizeListPayload(payload: unknown): WorklogBrowseItem[] {
@@ -102,7 +103,15 @@ export function normalizeListPayload(payload: unknown): WorklogBrowseItem[] {
       : []);
 
   const nextItems = payload && typeof payload === 'object' && Array.isArray((payload as any).results)
-    ? (payload as any).results.map((entry: any) => entry?.workItem).filter(Boolean)
+    ? (payload as any).results.map((entry: any) => {
+        const item = entry?.workItem;
+        if (!item) return null;
+        // Merge the `group` field from the result entry into the workItem
+        if (entry.group !== undefined) {
+          item.group = entry.group;
+        }
+        return item;
+      }).filter(Boolean)
     : [];
 
   const itemList = [...directItems, ...nextItems];
@@ -122,6 +131,7 @@ export function normalizeListPayload(payload: unknown): WorklogBrowseItem[] {
       childCount: item?.childCount !== undefined ? Number(item.childCount) : undefined,
       tags: Array.isArray(item?.tags) ? item.tags.map(String) : undefined,
       githubIssueNumber: item?.githubIssueNumber !== undefined ? Number(item.githubIssueNumber) : undefined,
+      group: item?.group !== undefined ? Number(item.group) : undefined,
     }))
     .filter(item => item.id.length > 0);
 }

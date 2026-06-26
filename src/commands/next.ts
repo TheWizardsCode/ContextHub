@@ -7,6 +7,7 @@ import { humanFormatWorkItem, resolveFormat, formatTitleAndId } from './helpers.
 import { theme } from '../theme.js';
 import { normalizeActionArgs } from './cli-utils.js';
 import { loadStatusStageRules } from '../status-stage-rules.js';
+import { extractFilePaths, groupItemsByFilePaths } from './grouping.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -26,6 +27,7 @@ export default function register(ctx: PluginContext): void {
     .option('--no-re-sort', 'Skip the automatic re-sort before selection (preserve current sortIndex order)')
     .option('--re-sort-sync', 'Force a synchronous re-sort when auto re-sort is run (blocks until complete)', false)
     .option('--recency-policy <policy>', 'Recency handling for score ordering during re-sort (prefer|avoid|ignore). Default: ignore', 'ignore')
+    .option('-g, --groups <n>', 'Number of parallel-safe groups to identify (default: 3, only meaningful when -n > 1)', '3')
     .action(async (...rawArgs: any[]) => {
       // Normalize incoming args: commander may pass a Command instance
       const normalized = normalizeActionArgs(rawArgs, ['assignee', 'stage', 'search', 'number', 'prefix', 'includeBlocked', 'includeInProgress', 'reSort', 'reSortSync', 'recencyPolicy']);
@@ -83,6 +85,23 @@ export default function register(ctx: PluginContext): void {
         ? `Only ${availableResults.length} of ${count} requested work item(s) available.`
         : '';
 
+      // ── Grouping logic (only when count > 1) ──────────────────────
+      let groupsEnabled = false;
+      let groupMap: Map<string, number> | null = null;
+      if (count > 1) {
+        const groupsOpt = parseInt(String(options.groups || '3'), 10);
+        const maxGroups = Number.isNaN(groupsOpt) || groupsOpt < 1 ? 3 : groupsOpt;
+        if (maxGroups > 0) {
+          groupsEnabled = true;
+          // Extract file paths from each work item's description
+          const groupableItems = availableResults.map((result: any) => ({
+            id: result.workItem.id,
+            filePaths: extractFilePaths(result.workItem.description || ''),
+          }));
+          groupMap = groupItemsByFilePaths(groupableItems, maxGroups);
+        }
+      }
+
       if (utils.isJsonMode()) {
         // Pre-compute child counts for the full item set so we can enrich
         // each work item with the number of direct children in O(1) per item
@@ -109,7 +128,17 @@ export default function register(ctx: PluginContext): void {
         const enrichedResults = availableResults.map((result: any) => ({
           ...result,
           workItem: result.workItem ? enrichWorkItem(result.workItem) : result.workItem,
+          ...(groupMap && groupsEnabled ? { group: groupMap.get(result.workItem.id) } : {}),
         }));
+
+        const sortByGroup = (a: any, b: any) => {
+          const ga = groupMap?.get(a.workItem?.id) ?? 0;
+          const gb = groupMap?.get(b.workItem?.id) ?? 0;
+          return ga - gb;
+        };
+        if (groupsEnabled && groupMap) {
+          enrichedResults.sort(sortByGroup);
+        }
 
         output.json({
           success: true,
@@ -155,13 +184,36 @@ export default function register(ctx: PluginContext): void {
       console.log(`\nNext ${availableResults.length} work item(s) to work on:`);
       if (note) console.log(theme.text.muted(`Note: ${note}`));
       console.log('===============================\n');
-      availableResults.forEach((res: any, idx: number) => {
+
+      // Sort by group for display (groups first, then within groups by original order)
+      const displayResults = [...availableResults];
+      if (groupsEnabled && groupMap) {
+        displayResults.sort((a: any, b: any) => {
+          const ga = groupMap.get(a.workItem?.id) ?? 0;
+          const gb = groupMap.get(b.workItem?.id) ?? 0;
+          return ga - gb;
+        });
+      }
+
+      let lastGroup: number | null = null;
+      displayResults.forEach((res: any, _idx: number) => {
         if (!res.workItem) {
-          console.log(`${idx + 1}. (no item) - ${res.reason}`);
           return;
         }
+
+        // Render group heading if this item is in a new group
+        if (groupsEnabled && groupMap) {
+          const currentGroup = groupMap.get(res.workItem.id) ?? 0;
+          if (currentGroup !== lastGroup) {
+            const parallelSafe = currentGroup <= 3 ? 'parallel-safe' : 'conflict-unknown';
+            console.log(theme.text.strong(`── Group ${currentGroup} (${parallelSafe}) ──`));
+            console.log('');
+            lastGroup = currentGroup;
+          }
+        }
+
         if (chosenFormat === 'concise') {
-          console.log(`${idx + 1}. ${formatTitleAndId(res.workItem)}`);
+          console.log(`${formatTitleAndId(res.workItem)}`);
           // Display stage even when it's an empty string (map to 'Undefined').
           const _stage = (res.workItem.stage as string | undefined);
           const stageLabel = _stage === undefined ? undefined : (_stage === '' ? 'Undefined' : _stage);
@@ -176,7 +228,6 @@ export default function register(ctx: PluginContext): void {
           console.log(`   Reason: ${theme.text.info(res.reason)}`);
           console.log('');
         } else {
-          console.log(`${idx + 1}.`);
           console.log(humanFormatWorkItem(res.workItem, db, chosenFormat));
           console.log(`Reason: ${theme.text.info(res.reason)}`);
           console.log('');

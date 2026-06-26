@@ -618,18 +618,35 @@ export async function defaultChooseWorkItem(
           0,
         );
 
-        const options = items.length === 0
-          ? [theme.fg('dim', '  No items to display')]
-          : items.map((item, index) => {
-              const prefix = index === selectedIndex ? theme.fg('accent', '\u203A ') : '  ';
-              const contentWidth = Math.max(0, width - 2);
-              const optionLine = item.id === '..'
-                ? `${prefix}${item.title || '..'}`
-                : `${prefix}${formatBrowseOption(item, contentWidth, theme, currentSettings, maxPrefixWidth)}`;
-              return truncateToWidth(optionLine, width);
-            });
+        // Build display rows, inserting group separator lines when the group changes
+        // between items. Group separators are non-selectable visual breaks.
+        const displayRows: string[] = [];
+        if (items.length > 0) {
+          let lastDisplayedGroup: number | undefined;
+          for (let index = 0; index < items.length; index++) {
+            const item = items[index];
 
-        const lines = [title, '', ...options, '', help];
+            // Insert group heading when the first item with a group is encountered,
+            // or when the group changes between consecutive items.
+            if (item.id !== '..' && item.group !== undefined) {
+              if (lastDisplayedGroup === undefined || item.group !== lastDisplayedGroup) {
+                displayRows.push(theme.fg('dim', theme.bold(`── Group ${item.group} ──`)));
+              }
+              lastDisplayedGroup = item.group;
+            }
+
+            const prefix = index === selectedIndex ? theme.fg('accent', '\u203A ') : '  ';
+            const contentWidth = Math.max(0, width - 2);
+            const optionLine = item.id === '..'
+              ? `${prefix}${item.title || '..'}`
+              : `${prefix}${formatBrowseOption(item, contentWidth, theme, currentSettings, maxPrefixWidth)}`;
+            displayRows.push(truncateToWidth(optionLine, width));
+          }
+        } else {
+          displayRows.push(theme.fg('dim', '  No items to display'));
+        }
+
+        const lines = [title, '', ...displayRows, '', help];
         cachedWidth = width;
         cachedLines = lines;
         return lines;
