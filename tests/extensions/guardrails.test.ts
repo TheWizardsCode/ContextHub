@@ -18,7 +18,7 @@ import {
   isWorklogProtectedPath,
   isDangerousWorklogCommand,
   INSTALL_GUARDRAILS,
-} from '../../packages/tui/extensions/lib/guardrails.ts';
+} from '../../packages/tui/extensions/Worklog/lib/guardrails.ts';
 
 // ── isWorklogProtectedPath Tests ──────────────────────────────────────
 

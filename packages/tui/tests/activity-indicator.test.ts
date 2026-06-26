@@ -33,7 +33,7 @@ import {
   detectWorkItemId,
   BUILTIN_COMMANDS,
   ACTIVITY_STATUS_KEY,
-} from '../extensions/activity-indicator.js';
+} from '../extensions/Worklog/activity-indicator.js';
 
 // Import the mocked module for controlling test behavior
 import { runWl } from '../extensions/wl-integration.js';

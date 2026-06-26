@@ -12,8 +12,8 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { runBrowseFlow, defaultChooseWorkItem, type BrowseFlowOptions, type WorklogBrowseItem, type ShortcutResult } from '../extensions/lib/browse.js';
-import { ShortcutRegistry, type ShortcutEntry } from '../extensions/shortcut-config.js';
+import { runBrowseFlow, defaultChooseWorkItem, type BrowseFlowOptions, type WorklogBrowseItem, type ShortcutResult } from '../extensions/Worklog/lib/browse.js';
+import { ShortcutRegistry, type ShortcutEntry } from '../extensions/Worklog/shortcut-config.js';
 
 vi.mock('@earendil-works/pi-coding-agent', () => ({
   getAgentDir: () => '/home/test-user/.pi/agent',

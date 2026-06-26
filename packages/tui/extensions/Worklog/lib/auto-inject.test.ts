@@ -19,7 +19,7 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
 // ── Mock the wl-integration runWl ─────────────────────────────────────
 
 const mockRunWl = vi.fn();
-vi.mock('../wl-integration.js', () => ({
+vi.mock('../../wl-integration.js', () => ({
   runWl: mockRunWl,
 }));
 

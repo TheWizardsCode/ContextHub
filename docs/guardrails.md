@@ -95,7 +95,7 @@ pi agent tool_call
 ```
 
 The guardrails module is implemented in
-`packages/tui/extensions/lib/guardrails.ts`. It exports:
+`packages/tui/extensions/Worklog/lib/guardrails.ts`. It exports:
 
 - `INSTALL_GUARDRAILS(pi, options?)` — Registers the guardrail handlers with
   a pi extension instance

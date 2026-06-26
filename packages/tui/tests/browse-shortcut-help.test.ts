@@ -41,7 +41,7 @@ vi.mock('node:fs', () => ({
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-import { ShortcutRegistry, type ShortcutEntry } from '../extensions/shortcut-config.js';
+import { ShortcutRegistry, type ShortcutEntry } from '../extensions/Worklog/shortcut-config.js';
 import { defaultChooseWorkItem, type WorklogBrowseItem } from '../extensions/Worklog/index.js';
 
 describe('Browse list help text with shortcuts', () => {

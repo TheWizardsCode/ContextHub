@@ -16,7 +16,7 @@ import {
   applyStageColour,
   type WorkItem,
   type PiTheme,
-} from '../extensions/worklog-helpers.js';
+} from '../extensions/Worklog/worklog-helpers.js';
 
 const mockItems = [
   {

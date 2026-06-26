@@ -491,7 +491,7 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
 
   it('preserves shortcut dispatch when viewing children', async () => {
     // Import ShortcutRegistry for testing
-    const { ShortcutRegistry } = await import('../extensions/shortcut-config.js');
+    const { ShortcutRegistry } = await import('../extensions/Worklog/shortcut-config.js');
     const entries = [
       { key: 'i', command: '/implement <id>', view: 'list' },
     ];

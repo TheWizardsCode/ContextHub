@@ -18,8 +18,8 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
 }));
 
 import { buildSelectionWidget, type WorklogBrowseItem } from '../extensions/Worklog/index.js';
-import { type PiTheme } from '../extensions/worklog-helpers.js';
-import { type Settings } from '../extensions/settings-config.js';
+import { type PiTheme } from '../extensions/Worklog/worklog-helpers.js';
+import { type Settings } from '../extensions/Worklog/settings-config.js';
 
 const mockTheme: PiTheme = {
   fg: (color, text) => `[${color}]${text}[/${color}]`,

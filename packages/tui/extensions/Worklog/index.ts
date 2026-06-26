@@ -12,13 +12,13 @@ import { createRequire } from 'node:module';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
-import type { ShortcutRegistry } from '../shortcut-config.js';
-import { loadShortcutConfig } from '../shortcut-config.js';
-import { registerActivityIndicator, showActivity, clearActivity } from '../activity-indicator.js';
-import { reloadSettings, currentSettings, STAGE_MAP, VALID_STAGES, updateSettings, openSettingsOverlay } from '../lib/settings.js';
-import { runWl, defaultListWorkItems, defaultListWorkItemsWithStage, createDefaultListWorkItems, createListWorkItemsWithStage, createDefaultListWorkItemsDb, createListWorkItemsWithStageDb, fetchTotalActionableCountDb } from '../lib/tools.js';
-import { registerAutoInject } from '../lib/auto-inject.js';
-import { INSTALL_GUARDRAILS } from '../lib/guardrails.js';
+import type { ShortcutRegistry } from './shortcut-config.js';
+import { loadShortcutConfig } from './shortcut-config.js';
+import { registerActivityIndicator, showActivity, clearActivity } from './activity-indicator.js';
+import { reloadSettings, currentSettings, STAGE_MAP, VALID_STAGES, updateSettings, openSettingsOverlay } from './lib/settings.js';
+import { runWl, defaultListWorkItems, defaultListWorkItemsWithStage, createDefaultListWorkItems, createListWorkItemsWithStage, createDefaultListWorkItemsDb, createListWorkItemsWithStageDb, fetchTotalActionableCountDb } from './lib/tools.js';
+import { registerAutoInject } from './lib/auto-inject.js';
+import { INSTALL_GUARDRAILS } from './lib/guardrails.js';
 import {
   type WorklogBrowseItem,
   type WorklogBrowseDependencies,
@@ -31,14 +31,14 @@ import {
   formatBrowseOption,
   createScrollableWidget,
   getIconPrefix,
-} from '../lib/browse.js';
+} from './lib/browse.js';
 
 // ── Backward-compatible re-exports ────────────────────────────────────
 export type { WorklogBrowseItem, SelectionChangeHandler };
 
 export {
   defaultChooseWorkItem,
-} from '../lib/browse.js';
+} from './lib/browse.js';
 
 export {
   buildSelectionWidget,
@@ -54,7 +54,7 @@ export {
 export {
   createDefaultListWorkItems,
   createListWorkItemsWithStage,
-} from '../lib/tools.js';
+} from './lib/tools.js';
 
 // Icons — resolved via symlink-safe createRequire
 const _require = createRequire(realpathSync(fileURLToPath(import.meta.url)));

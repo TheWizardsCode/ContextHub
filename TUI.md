@@ -44,8 +44,8 @@ The TUI is implemented as a Pi extension located in `packages/tui/`:
 - `packages/tui/extensions/chatPane.ts` — Chat pane for natural language work item management
 - `packages/tui/extensions/actionPalette.ts` — Keyboard-first action palette
 - `packages/tui/extensions/wl-integration.ts` — Integration layer for executing wl CLI commands
-- `packages/tui/extensions/shortcut-config.ts` — Config-driven keyboard shortcut system
-- `packages/tui/extensions/shortcuts.json` — Default shortcut definitions
+- `packages/tui/extensions/Worklog/shortcut-config.ts` — Config-driven keyboard shortcut system
+- `packages/tui/extensions/Worklog/shortcuts.json` — Default shortcut definitions
 
 ## Features
 

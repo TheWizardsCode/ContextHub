@@ -48,8 +48,8 @@ vi.mock('node:fs', () => ({
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 import { defaultChooseWorkItem, buildSelectionWidget, type WorklogBrowseItem, type SelectionChangeHandler } from '../extensions/Worklog/index.js';
-import { ShortcutRegistry, type ShortcutEntry } from '../extensions/shortcut-config.js';
-import { type Settings } from '../extensions/settings-config.js';
+import { ShortcutRegistry, type ShortcutEntry } from '../extensions/Worklog/shortcut-config.js';
+import { type Settings } from '../extensions/Worklog/settings-config.js';
 
 describe('Browse list auto-refresh', () => {
   let items: WorklogBrowseItem[];

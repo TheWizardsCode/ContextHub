@@ -245,7 +245,7 @@ handler returns without performing any search or injection.
 
 ### Technical Notes
 
-- Implemented in `lib/auto-inject.ts` and registered in `index.ts`.
+- Implemented in `Worklog/lib/auto-inject.ts` and registered in `Worklog/index.ts`.
 - Uses Pi's `before_agent_start` hook — available in the pi ExtensionAPI.
 - The `AUTO_INJECT_STATUS_KEY` (`worklog-auto-inject`) is used for the
   status bar indicator to avoid conflicts with other status entries.
@@ -437,7 +437,7 @@ When a chord leader key (e.g. `u`) is pressed, the help line temporarily updates
 
 ### How It Works
 
-1. **Config loading**: `shortcut-config.ts` loads `shortcuts.json` at extension initialization and builds a `ShortcutRegistry` in memory. Key-based and chord-based entries are indexed separately for efficient lookup.
+1. **Config loading**: `Worklog/shortcut-config.ts` loads `Worklog/shortcuts.json` at extension initialization and builds a `ShortcutRegistry` in memory. Key-based and chord-based entries are indexed separately for efficient lookup.
 2. **Graceful degradation**: If the config file is missing or contains malformed JSON, the registry is empty (no shortcuts) and a warning is logged. Invalid entries (including entries with both `key` and `chord`, or missing required fields) are silently skipped.
 3. **Dispatch**: Both the browse list dispatcher (`defaultChooseWorkItem`) and detail view dispatcher (`createScrollableWidget`) check a set of reserved navigation keys before attempting shortcut lookup. If the pressed key is reserved (see [Reserved Navigation Keys](#reserved-navigation-keys)), shortcut lookup is skipped and navigation takes precedence.
    - **Single-key shortcuts**: For non-reserved single-character keys, `shortcutRegistry.lookup(key, view)` is called. If a match is found, the command template is substituted (`<id>` → selected item ID) and inserted into the editor.

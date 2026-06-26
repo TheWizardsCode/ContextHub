@@ -23,7 +23,7 @@
  */
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { runWl } from '../wl-integration.js';
+import { runWl } from '../../wl-integration.js';
 import { currentSettings } from './settings.js';
 
 // ── Constants ─────────────────────────────────────────────────────────

@@ -41,7 +41,7 @@ import {
   createDefaultListWorkItems,
   createListWorkItemsWithStage,
   updateSettings,
-} from './Worklog/index.js';
+} from './index.js';
 
 /**
  * Reset module-level settings state to defaults before each test.

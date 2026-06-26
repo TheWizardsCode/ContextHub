@@ -36,7 +36,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from '@earendil-works/pi-coding-agent';
-import { runWl } from './wl-integration.js';
+import { runWl } from '../wl-integration.js';
 
 /**
  * Status key used for the activity indicator in the footer.

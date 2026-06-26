@@ -36,7 +36,7 @@ vi.mock('node:fs', () => ({
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { defaultChooseWorkItem, type WorklogBrowseItem } from '../extensions/Worklog/index.js';
-import { ShortcutRegistry } from '../extensions/shortcut-config.js';
+import { ShortcutRegistry } from '../extensions/Worklog/shortcut-config.js';
 
 describe('Browse list total count in title', () => {
   let items: WorklogBrowseItem[];

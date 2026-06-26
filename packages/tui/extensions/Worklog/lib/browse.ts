@@ -47,7 +47,7 @@ import {
 // Use createRequire with realpath-resolved path so the icons module can be
 // found even when this extension is loaded via a symlink.
 const _require = createRequire(realpathSync(fileURLToPath(import.meta.url)));
-const { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, riskIcon, effortIcon } = _require('../../../../dist/icons.js');
+const { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, riskIcon, effortIcon } = _require('../../../../../dist/icons.js');
 
 // ── Auto-sync state ────────────────────────────────────────────────
 
