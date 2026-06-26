@@ -659,6 +659,318 @@ describe('Sync Operations', () => {
       const item3 = result.merged.find(i => i.id === 'WI-003');
       expect(item3?.title).toBe('Remote only');
     });
+
+    it('should preserve close when local is newer (close-then-sync scenario)', () => {
+      const localAfterClose: WorkItem = {
+        id: 'WI-001',
+        title: 'Task to close',
+        description: 'Some description',
+        status: 'completed',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-06-01T12:00:00.000Z', // fresh close timestamp
+        tags: ['bug'],
+        assignee: 'alice',
+        stage: 'done',
+        issueType: 'bug',
+        createdBy: 'alice',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+
+      const remoteStale: WorkItem = {
+        id: 'WI-001',
+        title: 'Task to close',
+        description: 'Some description',
+        status: 'in-progress',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-01-01T00:00:00.000Z', // old timestamp before close
+        tags: ['bug'],
+        assignee: 'alice',
+        stage: 'plan_complete',
+        issueType: 'bug',
+        createdBy: 'alice',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+
+      // Merge: local (just closed) is newer than remote (stale)
+      const result = mergeWorkItems([localAfterClose], [remoteStale]);
+
+      expect(result.merged).toHaveLength(1);
+      const merged = result.merged[0];
+
+      // The close must survive: status remains completed, stage remains done
+      expect(merged.status).toBe('completed');
+      expect(merged.stage).toBe('done');
+      // updatedAt should be the local (newer) timestamp
+      expect(merged.updatedAt).toBe('2024-06-01T12:00:00.000Z');
+    });
+
+    it('should preserve close across multiple sync cycles (no drift)', () => {
+      // Simulate: close then first sync
+      const localAfterClose: WorkItem = {
+        id: 'WI-002',
+        title: 'Persistent close',
+        description: '',
+        status: 'completed',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-06-01T12:00:00.000Z',
+        tags: [],
+        assignee: '',
+        stage: 'done',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+
+      const remoteStale: WorkItem = {
+        id: 'WI-002',
+        title: 'Persistent close',
+        description: '',
+        status: 'in-progress',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-01-01T00:00:00.000Z',
+        tags: [],
+        assignee: '',
+        stage: 'plan_complete',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+
+      // First sync cycle
+      const firstSync = mergeWorkItems([localAfterClose], [remoteStale]);
+      expect(firstSync.merged[0].status).toBe('completed');
+      expect(firstSync.merged[0].stage).toBe('done');
+
+      // Simulate the merged result becoming the new "local"
+      const localAfterFirstSync = firstSync.merged[0];
+
+      // Remote after first sync also has the merged data (sync pushed it)
+      const remoteAfterFirstSync: WorkItem = { ...localAfterFirstSync };
+
+      // Second sync cycle: both local and remote have same data
+      const secondSync = mergeWorkItems([localAfterFirstSync], [remoteAfterFirstSync]);
+      expect(secondSync.merged).toHaveLength(1);
+      expect(secondSync.merged[0].status).toBe('completed');
+      expect(secondSync.merged[0].stage).toBe('done');
+
+      // Third sync cycle: still stable
+      const thirdSync = mergeWorkItems([secondSync.merged[0]], [{ ...secondSync.merged[0] }]);
+      expect(thirdSync.merged[0].status).toBe('completed');
+      expect(thirdSync.merged[0].stage).toBe('done');
+    });
+
+    it('should not revert close when remote has newer non-conflicting field changes', () => {
+      // Scenario: Local item was closed. Remote has a newer timestamp
+      // from a non-conflicting change (e.g., description edited on another machine).
+      // The close (status/stage change) must not be reverted even though remote is newer.
+
+      const localClosed: WorkItem = {
+        id: 'WI-003',
+        title: 'Closed item',
+        description: 'Original description',
+        status: 'completed',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-06-02T10:00:00.000Z', // close time
+        tags: [],
+        assignee: '',
+        stage: 'done',
+        issueType: 'bug',
+        createdBy: 'alice',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+
+      // Remote is newer but still has old status/stage
+      // Description was changed remotely after the close
+      const remoteNewer: WorkItem = {
+        id: 'WI-003',
+        title: 'Closed item',
+        description: 'Modified description remotely',
+        status: 'in-progress',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-06-02T12:00:00.000Z', // newer than close!
+        tags: [],
+        assignee: '',
+        stage: 'plan_complete',
+        issueType: 'bug',
+        createdBy: 'alice',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+
+      const result = mergeWorkItems([localClosed], [remoteNewer]);
+
+      expect(result.merged).toHaveLength(1);
+      const merged = result.merged[0];
+
+      // With the close-priority merge rule, the close state (completed/done)
+      // is preserved even though remote is newer. The description edit from
+      // remote is also preserved because it was the only field where remote
+      // intentionally made a change.
+      expect(merged.status).toBe('completed');
+      expect(merged.stage).toBe('done');
+      expect(merged.description).toBe('Modified description remotely');
+    });
+
+    it('should handle same-timestamp close conflict deterministically', () => {
+      // Edge case: local and remote have the same updatedAt timestamp
+      // but different status values (local: completed, remote: in-progress).
+      // The close priority rule ensures the close (completed/done) wins.
+
+      const sameTimestamp = '2024-06-01T12:00:00.000Z';
+
+      const localClosed: WorkItem = {
+        id: 'WI-004',
+        title: 'Same ts item',
+        description: '',
+        status: 'completed',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: sameTimestamp,
+        tags: [],
+        assignee: '',
+        stage: 'done',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+
+      const remoteInProgress: WorkItem = {
+        id: 'WI-004',
+        title: 'Same ts item',
+        description: '',
+        status: 'in-progress',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: sameTimestamp,
+        tags: [],
+        assignee: '',
+        stage: 'plan_complete',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+
+      const result = mergeWorkItems([localClosed], [remoteInProgress]);
+
+      expect(result.merged).toHaveLength(1);
+      const merged = result.merged[0];
+
+      // The close state (completed/done) takes priority regardless of
+      // the lexicographic tie-breaker. The close is preserved.
+      expect(merged.status).toBe('completed');
+      expect(merged.stage).toBe('done');
+      // The updatedAt should be bumped to break the tie for next sync
+      expect(merged.updatedAt).not.toBe(sameTimestamp);
+    });
+
+    it('should preserve close when remote is newer with non-close field change', () => {
+      // AC 3: When Client A closes an item and Client B modifies a different
+      // field (e.g., description), the close must NOT be reverted even though
+      // remote has a newer timestamp.
+
+      const localClosed: WorkItem = {
+        id: 'WI-005',
+        title: 'Close survives remote edit',
+        description: 'Original description',
+        status: 'completed',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-06-01T12:00:00.000Z', // close timestamp
+        tags: [],
+        assignee: '',
+        stage: 'done',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+
+      // Remote has a newer timestamp (description edited on another client)
+      // but the status is still in-progress (was never closed)
+      const remoteNewer: WorkItem = {
+        id: 'WI-005',
+        title: 'Close survives remote edit',
+        description: 'Edited by remote client',
+        status: 'in-progress',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-06-01T14:00:00.000Z', // newer than close!
+        tags: [],
+        assignee: '',
+        stage: 'plan_complete',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+
+      const result = mergeWorkItems([localClosed], [remoteNewer]);
+
+      expect(result.merged).toHaveLength(1);
+      const merged = result.merged[0];
+
+      // Close state (completed/done) is preserved because our close-priority
+      // rule detects that local has the close state and remote doesn't.
+      expect(merged.status).toBe('completed');
+      expect(merged.stage).toBe('done');
+
+      // The description edit from remote is also preserved (it was the only
+      // field where remote intentionally made a change)
+      expect(merged.description).toBe('Edited by remote client');
+    });
   });
 
   describe('merge utils', () => {

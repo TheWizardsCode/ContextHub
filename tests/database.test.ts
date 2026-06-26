@@ -1147,6 +1147,123 @@ describe('WorklogDatabase', () => {
       // if timestamps are identical (same ms), the test still passes because
       // data integrity is correct; accuracy at ms granularity is acceptable.
     });
+
+    it('should preserve close when import merges closed local item with stale remote', () => {
+      // Simulate: close then sync with stale remote data (item was in-progress)
+      // 1. Create an item
+      const original = db.create({ title: 'Close me', status: 'in-progress' as any, stage: 'plan_complete', priority: 'medium' });
+      const originalUpdatedAt = original.updatedAt;
+
+      // 2. Close the item (simulating wl close)
+      const closed = db.update(original.id, { status: 'completed', stage: 'done' })!;
+      expect(closed.status).toBe('completed');
+      expect(closed.stage).toBe('done');
+      // Close bumps the timestamp (or same ms; at least not older)
+      expect(new Date(closed.updatedAt).getTime()).toBeGreaterThanOrEqual(new Date(originalUpdatedAt).getTime());
+      const closeUpdatedAt = closed.updatedAt;
+
+      // 3. Simulate sync merge with stale remote data (item at in-progress)
+      const remoteStale = { ...original, updatedAt: originalUpdatedAt, status: 'in-progress' as const, stage: 'plan_complete' };
+      
+      // The merged item from mergeWorkItems (local is newer, so it wins)
+      const localFromDb = db.get(original.id)!;
+      expect(localFromDb.status).toBe('completed');
+      expect(localFromDb.stage).toBe('done');
+      expect(localFromDb.updatedAt).toBe(closeUpdatedAt);
+
+      // Build a merged item as mergeWorkItems would produce:
+      // local (newer) should win for all conflicting fields
+      const mergedItem = {
+        ...remoteStale,
+        status: 'completed' as const,
+        stage: 'done',
+        updatedAt: closeUpdatedAt,
+      };
+
+      // 4. Import the merged data (as sync does)
+      db.import([mergedItem]);
+
+      // 5. Verify close survived
+      const afterSync = db.get(original.id)!;
+      expect(afterSync.status).toBe('completed');
+      expect(afterSync.stage).toBe('done');
+      // updatedAt should be preserved since no semantic change
+      expect(afterSync.updatedAt).toBe(closeUpdatedAt);
+    });
+
+    it('should preserve close after multiple import cycles (multi-sync stability)', () => {
+      // Simulate multiple sync cycles after a close
+      const item = db.create({ title: 'Stable close', status: 'in-progress' as any, stage: 'plan_complete' });
+      const originalUpdatedAt = item.updatedAt;
+
+      // Close
+      const closed = db.update(item.id, { status: 'completed', stage: 'done' })!;
+      const closeUpdatedAt = closed.updatedAt;
+
+      for (let cycle = 0; cycle < 5; cycle++) {
+        // Simulate the merge result that sync would produce
+        const currentFromDb = db.get(item.id)!;
+        const mergedItem = {
+          ...item,
+          status: 'completed' as const,
+          stage: 'done',
+          updatedAt: currentFromDb.updatedAt,
+        };
+        db.import([mergedItem]);
+
+        const afterCycle = db.get(item.id)!;
+        expect(afterCycle.status).toBe('completed');
+        expect(afterCycle.stage).toBe('done');
+      }
+    });
+
+    it('should handle close then sync with concurrent remote field edit', () => {
+      // Simulate: Client A closes item. Client B edits description on the same item
+      // and pushes. The close must not be silently reverted.
+      
+      // Create the item
+      const original = db.create({ title: 'Concurrent edit', description: 'Original', status: 'in-progress' as any, stage: 'plan_complete' });
+
+      // Close it (Client A)
+      const closed = db.update(original.id, { status: 'completed', stage: 'done' })!;
+      const closeUpdatedAt = closed.updatedAt;
+
+      // Remote data (from Client B) still has in-progress (old value) with a
+      // description edit. The description edit bumped the timestamp.
+      const remoteNewerTimestamp = new Date(new Date(closeUpdatedAt).getTime() + 3600000).toISOString();
+      const remoteItem = {
+        ...original,
+        description: 'Edited by B',
+        updatedAt: remoteNewerTimestamp,
+        status: 'in-progress' as const,
+        stage: 'plan_complete',
+      };
+
+      // Build what mergeWorkItems would produce:
+      // Since local has status=completed,stage=done (close) and remote has
+      // in-progress/plan_complete, the close priority rule preserves the close.
+      // The description edit from remote is also preserved.
+      const mergedItem = {
+        ...remoteItem,
+        status: 'completed' as const,
+        stage: 'done',
+        updatedAt: remoteNewerTimestamp,
+      };
+
+      // Import and verify
+      db.import([mergedItem]);
+      const afterImport = db.get(original.id)!;
+      
+      // The close is preserved even though remote is newer,
+      // because the close state (completed/done) takes priority
+      // over old status values from unrelated field changes.
+      expect(afterImport.status).toBe('completed');
+      expect(afterImport.stage).toBe('done');
+      
+      // The description edit is also preserved (it was the only field
+      // where remote intentionally made a change)
+      expect(afterImport.description).toBe('Edited by B');
+    });
   });
 
   describe('findNextWorkItem', () => {
