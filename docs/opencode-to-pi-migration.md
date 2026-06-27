@@ -7,8 +7,8 @@ This guide documents the migration from the legacy OpenCode integration to the n
 The TUI previously relied on an OpenCode client for agent interactions (natural language chat, action palette, and agent-driven flows). This has been replaced with the Pi framework, which provides:
 
 - **PiAdapter** (`packages/tui/extensions/index.ts` (Pi extension)): The core abstraction replacing `OpencodeClient`. Provides a clean interface for agent backend communication.
-- **ChatPane** (`packages/tui/extensions/chatPane.ts`): A natural language chat interface with keyword-based routing for `wl` commands (list, next, show, create, update, close, search, claim).
-- **ActionPalette** (`packages/tui/extensions/actionPalette.ts`): A keyboard-first action palette with default actions mapping to `wl` CLI commands.
+- **ChatPane** (`packages/tui/extensions/Worklog/chatPane.ts`): A natural language chat interface with keyword-based routing for `wl` commands (list, next, show, create, update, close, search, claim).
+- **ActionPalette** (`packages/tui/extensions/Worklog/actionPalette.ts`): A keyboard-first action palette with default actions mapping to `wl` CLI commands.
 - **wl CLI Integration** (`packages/tui/extensions/wl-integration.ts`, `src/wl-integration/spawn.ts`): All work item reads/writes now go through the `wl` CLI via `child_process.spawn`, not direct database access.
 
 ## What Changed
@@ -33,8 +33,8 @@ The TUI previously relied on an OpenCode client for agent interactions (natural 
 - `src/tui/controller.ts` — replaced `OpencodeClient` with `PiAdapter`, updated key handlers
 - `src/tui/constants.ts` — updated key descriptions and references
 - `packages/tui/extensions/index.ts` (Pi extension) — new PiAdapter implementation
-- `packages/tui/extensions/chatPane.ts` — new ChatPane component
-- `packages/tui/extensions/actionPalette.ts` — new ActionPalette component
+- `packages/tui/extensions/Worklog/chatPane.ts` — new ChatPane component
+- `packages/tui/extensions/Worklog/actionPalette.ts` — new ActionPalette component
 - `README.md` — added references to Pi agent features
 - `docs/tutorials/04-using-the-tui.md` — updated tutorial with Pi agent chat and action palette
 

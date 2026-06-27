@@ -95,12 +95,12 @@ describe('Current baseline: relocated files', () => {
     expect(projectPathExists('packages/tui/extensions/wl-integration.ts')).toBe(true);
   });
 
-  it('packages/tui/extensions/chatPane.ts exists', () => {
-    expect(projectPathExists('packages/tui/extensions/chatPane.ts')).toBe(true);
+  it('packages/tui/extensions/Worklog/chatPane.ts exists', () => {
+    expect(projectPathExists('packages/tui/extensions/Worklog/chatPane.ts')).toBe(true);
   });
 
-  it('packages/tui/extensions/actionPalette.ts exists', () => {
-    expect(projectPathExists('packages/tui/extensions/actionPalette.ts')).toBe(true);
+  it('packages/tui/extensions/Worklog/actionPalette.ts exists', () => {
+    expect(projectPathExists('packages/tui/extensions/Worklog/actionPalette.ts')).toBe(true);
   });
 
   it('cli-output.ts imports from new markdown-renderer path', () => {
@@ -183,8 +183,8 @@ describe('Current baseline: pi.json paths updated', () => {
     const content = readProjectFile('packages/tui/pi.json');
     expect(content).not.toBeNull();
     const parsed = JSON.parse(content);
-    expect(parsed.pi.extensions).toContain('./extensions/chatPane.ts');
-    expect(parsed.pi.extensions).toContain('./extensions/actionPalette.ts');
+    expect(parsed.pi.extensions).toContain('./extensions/Worklog/chatPane.ts');
+    expect(parsed.pi.extensions).toContain('./extensions/Worklog/actionPalette.ts');
   });
 });
 

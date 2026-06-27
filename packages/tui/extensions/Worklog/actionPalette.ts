@@ -3,7 +3,7 @@
 // that map to wl CLI commands.
 
 import { EventEmitter } from "events";
-import { runWl, wlEvents } from "./wl-integration.js";
+import { runWl, wlEvents } from "../wl-integration.js";
 import { ChatPane } from "./chatPane.js";
 
 /**

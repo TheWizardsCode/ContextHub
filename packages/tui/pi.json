@@ -9,7 +9,7 @@
   "scripts": {
     "build": "cd .. && npm run build",
     "test": "cd .. && npm test",
-    "smoke": "node --import tsx -e \"import('../extensions/chatPane.js'); import('../extensions/actionPalette.js'); console.log('OK')\""
+    "smoke": "node --import tsx -e \"import('../extensions/Worklog/chatPane.js'); import('../extensions/Worklog/actionPalette.js'); console.log('OK')\""
   },
   "keywords": [
     "worklog",
@@ -25,8 +25,8 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/chatPane.ts",
-      "./extensions/actionPalette.ts"
+      "./extensions/Worklog/chatPane.ts",
+      "./extensions/Worklog/actionPalette.ts"
     ],
     "commands": [
       "wl-piman"

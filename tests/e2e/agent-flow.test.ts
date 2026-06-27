@@ -11,8 +11,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ChatPane } from '../../packages/tui/extensions/chatPane.js';
-import { ActionPalette } from '../../packages/tui/extensions/actionPalette.js';
+import { ChatPane } from '../../packages/tui/extensions/Worklog/chatPane.js';
+import { ActionPalette } from '../../packages/tui/extensions/Worklog/actionPalette.js';
 import { runWl } from '../../packages/tui/extensions/wl-integration.js';
 import { runWlCommand } from '../../src/wl-integration/spawn.js';
 

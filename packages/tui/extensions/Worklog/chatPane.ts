@@ -6,12 +6,12 @@ import { EventEmitter } from "events";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { runWl, wlEvents, getWorklogDb } from "./wl-integration.js";
+import { runWl, wlEvents, getWorklogDb } from "../wl-integration.js";
 import { createWorkItemDb, updateWorkItemDb, closeWorkItemDb, addCommentDb } from "./lib/tools.js";
 
 // Use createRequire with realpath-resolved path for symlink-safe imports.
 const _require = createRequire(realpathSync(fileURLToPath(import.meta.url)));
-const { WlError } = _require("../../../dist/wl-integration/spawn.js");
+const { WlError } = _require("../../../../dist/wl-integration/spawn.js");
 
 /** A single message in the chat history */
 export interface ChatMessage {

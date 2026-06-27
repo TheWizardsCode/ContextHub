@@ -111,8 +111,8 @@ describe('E2E: Headless TUI - built executable', () => {
 
   describe('TUI module loading via built executable', () => {
     it('loads TUI modules without errors', async () => {
-      const { ChatPane } = await import('../../packages/tui/extensions/chatPane.js');
-      const { ActionPalette } = await import('../../packages/tui/extensions/actionPalette.js');
+      const { ChatPane } = await import('../../packages/tui/extensions/Worklog/chatPane.js');
+      const { ActionPalette } = await import('../../packages/tui/extensions/Worklog/actionPalette.js');
       const { runWl } = await import('../../packages/tui/extensions/wl-integration.js');
       expect(ChatPane).toBeDefined();
       expect(ActionPalette).toBeDefined();
@@ -120,7 +120,7 @@ describe('E2E: Headless TUI - built executable', () => {
     });
 
     it('ChatPane can be instantiated and cleared', async () => {
-      const { ChatPane } = await import('../../packages/tui/extensions/chatPane.js');
+      const { ChatPane } = await import('../../packages/tui/extensions/Worklog/chatPane.js');
       const pane = new ChatPane();
       pane.clear();
       expect(pane.getMessages()).toEqual([]);
@@ -128,8 +128,8 @@ describe('E2E: Headless TUI - built executable', () => {
     });
 
     it('ActionPalette has at least 5 default actions', async () => {
-      const { ChatPane } = await import('../../packages/tui/extensions/chatPane.js');
-      const { ActionPalette } = await import('../../packages/tui/extensions/actionPalette.js');
+      const { ChatPane } = await import('../../packages/tui/extensions/Worklog/chatPane.js');
+      const { ActionPalette } = await import('../../packages/tui/extensions/Worklog/actionPalette.js');
       const chat = new ChatPane();
       const palette = new ActionPalette(chat);
       palette.open();
@@ -141,7 +141,7 @@ describe('E2E: Headless TUI - built executable', () => {
 
 describe('E2E: Conversational flows via ChatPane', () => {
   it('chat pane can process a "list" command via runWl', async () => {
-    const { ChatPane } = await import('../../packages/tui/extensions/chatPane.js');
+    const { ChatPane } = await import('../../packages/tui/extensions/Worklog/chatPane.js');
     const chatPane = new ChatPane();
     const response = await chatPane.sendMessage('list work items');
     expect(response.role).toBe('agent');
@@ -150,7 +150,7 @@ describe('E2E: Conversational flows via ChatPane', () => {
   });
 
   it('chat pane can process a "next" command via runWl', async () => {
-    const { ChatPane } = await import('../../packages/tui/extensions/chatPane.js');
+    const { ChatPane } = await import('../../packages/tui/extensions/Worklog/chatPane.js');
     const chatPane = new ChatPane();
     const response = await chatPane.sendMessage('what should I work on next');
     expect(response.role).toBe('agent');
@@ -158,7 +158,7 @@ describe('E2E: Conversational flows via ChatPane', () => {
   });
 
   it('chat pane can process a "show" command via runWl', async () => {
-    const { ChatPane } = await import('../../packages/tui/extensions/chatPane.js');
+    const { ChatPane } = await import('../../packages/tui/extensions/Worklog/chatPane.js');
     const chatPane = new ChatPane();
     const response = await chatPane.sendMessage('show SA-0MPFCUEKX006CF3U');
     expect(response.role).toBe('agent');
@@ -166,7 +166,7 @@ describe('E2E: Conversational flows via ChatPane', () => {
   });
 
   it('chat pane handles processing state correctly', async () => {
-    const { ChatPane } = await import('../../packages/tui/extensions/chatPane.js');
+    const { ChatPane } = await import('../../packages/tui/extensions/Worklog/chatPane.js');
     const chatPane = new ChatPane();
     const response1 = await chatPane.sendMessage('list');
     expect(response1.role).toBe('agent');
@@ -174,7 +174,7 @@ describe('E2E: Conversational flows via ChatPane', () => {
   });
 
   it('chat pane create flow triggers wl create via runWl', async () => {
-    const { ChatPane } = await import('../../packages/tui/extensions/chatPane.js');
+    const { ChatPane } = await import('../../packages/tui/extensions/Worklog/chatPane.js');
     const chatPane = new ChatPane();
     const response = await chatPane.sendMessage(
       'create work item: Test E2E item from agent pipeline'
@@ -185,7 +185,7 @@ describe('E2E: Conversational flows via ChatPane', () => {
   });
 
   it('chat pane handles unknown commands gracefully', async () => {
-    const { ChatPane } = await import('../../packages/tui/extensions/chatPane.js');
+    const { ChatPane } = await import('../../packages/tui/extensions/Worklog/chatPane.js');
     const chatPane = new ChatPane();
     const response = await chatPane.sendMessage('some completely random input xyz123');
     expect(response.role).toBe('agent');
@@ -195,8 +195,8 @@ describe('E2E: Conversational flows via ChatPane', () => {
 
 describe('E2E: Action palette integration', () => {
   it('action palette has default actions', async () => {
-    const { ChatPane } = await import('../../packages/tui/extensions/chatPane.js');
-    const { ActionPalette } = await import('../../packages/tui/extensions/actionPalette.js');
+    const { ChatPane } = await import('../../packages/tui/extensions/Worklog/chatPane.js');
+    const { ActionPalette } = await import('../../packages/tui/extensions/Worklog/actionPalette.js');
     const chatPane = new ChatPane();
     const palette = new ActionPalette(chatPane);
     palette.open();
@@ -205,8 +205,8 @@ describe('E2E: Action palette integration', () => {
   });
 
   it('action palette filters actions by text', async () => {
-    const { ChatPane } = await import('../../packages/tui/extensions/chatPane.js');
-    const { ActionPalette } = await import('../../packages/tui/extensions/actionPalette.js');
+    const { ChatPane } = await import('../../packages/tui/extensions/Worklog/chatPane.js');
+    const { ActionPalette } = await import('../../packages/tui/extensions/Worklog/actionPalette.js');
     const chatPane = new ChatPane();
     const palette = new ActionPalette(chatPane);
     palette.open();
@@ -217,8 +217,8 @@ describe('E2E: Action palette integration', () => {
   });
 
   it('action palette can execute wl list action', async () => {
-    const { ChatPane } = await import('../../packages/tui/extensions/chatPane.js');
-    const { ActionPalette } = await import('../../packages/tui/extensions/actionPalette.js');
+    const { ChatPane } = await import('../../packages/tui/extensions/Worklog/chatPane.js');
+    const { ActionPalette } = await import('../../packages/tui/extensions/Worklog/actionPalette.js');
     const chatPane = new ChatPane();
     const palette = new ActionPalette(chatPane);
     const listAction = palette.getFilteredActions().find(a =>
@@ -232,8 +232,8 @@ describe('E2E: Action palette integration', () => {
   });
 
   it('action palette can execute wl next action', async () => {
-    const { ChatPane } = await import('../../packages/tui/extensions/chatPane.js');
-    const { ActionPalette } = await import('../../packages/tui/extensions/actionPalette.js');
+    const { ChatPane } = await import('../../packages/tui/extensions/Worklog/chatPane.js');
+    const { ActionPalette } = await import('../../packages/tui/extensions/Worklog/actionPalette.js');
     const chatPane = new ChatPane();
     const palette = new ActionPalette(chatPane);
     const nextAction = palette.getFilteredActions().find(a =>
