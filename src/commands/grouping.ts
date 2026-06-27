@@ -210,13 +210,14 @@ export function groupItemsByFilePaths(
 /**
  * Assign items to groups based on stage and file-path conflicts.
  *
- * Grouping rules:
- * - Items with stage `idea` → all placed in one group labeled "Idea" (no conflict checking).
- * - Items with stage `intake_complete` → all placed in one group labeled "Intake Complete".
- * - Items with stage `in_review` → all placed in one group labeled "In Review".
+ * Grouping rules (display order — most actionable first):
+ * - Items with other/unknown stage → all placed in a single group labeled "Other"
+ *   (no file-overlap splitting, all such items share one group).
  * - Items with stage `plan_complete` → grouped by file-path conflicts using the
- *   greedy first-fit algorithm, labeled "Group N (parallel-safe)".
- * - Items with other/unknown stage → each placed in a singleton group labeled "Other".
+ *   greedy first-fit algorithm, labeled "Plan Complete Group N".
+ * - Items with stage `in_review` → all placed in one group labeled "In Review".
+ * - Items with stage `intake_complete` → all placed in one group labeled "Intake Complete".
+ * - Items with stage `idea` → all placed in one group labeled "Idea" (no conflict checking).
  *
  * @param items - Array of items with id, stage, and extracted file paths
  * @param maxFilePathGroups - Maximum number of file-path-based groups (default 3)
@@ -228,22 +229,15 @@ export function assignItemGroups(
 ): Map<string, GroupAssignment> {
   const result = new Map<string, GroupAssignment>();
 
-  // Stage-based groups in display order
-  const stageGroupOrder = ['idea', 'intake_complete', 'in_review'];
-  const stageGroupLabels: Record<string, string> = {
-    idea: 'Idea',
-    intake_complete: 'Intake Complete',
-    in_review: 'In Review',
-  };
+  const knownStages = new Set(['idea', 'intake_complete', 'in_review', 'plan_complete']);
 
   let nextGroup = 1;
 
-  // 1. Assign stage-based groups (all items in the same stage get the same group)
-  for (const stage of stageGroupOrder) {
-    const stageItems = items.filter(item => item.stage === stage);
-    if (stageItems.length === 0) continue;
-    for (const item of stageItems) {
-      result.set(item.id, { group: nextGroup, groupLabel: stageGroupLabels[stage] });
+  // 1. Other — single group for all items with unknown/other stages
+  const otherItems = items.filter(item => !item.stage || !knownStages.has(item.stage));
+  if (otherItems.length > 0) {
+    for (const item of otherItems) {
+      result.set(item.id, { group: nextGroup, groupLabel: 'Other' });
     }
     nextGroup++;
   }
@@ -252,7 +246,7 @@ export function assignItemGroups(
   const planCompleteItems = items.filter(item => item.stage === 'plan_complete');
   if (planCompleteItems.length > 0) {
     const planGroups = groupItemsByFilePaths(planCompleteItems, maxFilePathGroups);
-    // Map file-path group numbers to sequential group numbers after stage groups
+    // Map file-path group numbers to sequential group numbers after Other
     const uniqueGroups = [...new Set(planGroups.values())].sort((a, b) => a - b);
     const groupNumMap = new Map<number, number>();
     for (let i = 0; i < uniqueGroups.length; i++) {
@@ -268,11 +262,30 @@ export function assignItemGroups(
     nextGroup += uniqueGroups.length;
   }
 
-  // 3. Remaining items (other stages or unknown) → singleton "Other" groups
-  const assignedIds = new Set(result.keys());
-  for (const item of items) {
-    if (assignedIds.has(item.id)) continue;
-    result.set(item.id, { group: nextGroup, groupLabel: 'Other' });
+  // 3. In Review
+  const inReviewItems = items.filter(item => item.stage === 'in_review');
+  if (inReviewItems.length > 0) {
+    for (const item of inReviewItems) {
+      result.set(item.id, { group: nextGroup, groupLabel: 'In Review' });
+    }
+    nextGroup++;
+  }
+
+  // 4. Intake Complete
+  const intakeCompleteItems = items.filter(item => item.stage === 'intake_complete');
+  if (intakeCompleteItems.length > 0) {
+    for (const item of intakeCompleteItems) {
+      result.set(item.id, { group: nextGroup, groupLabel: 'Intake Complete' });
+    }
+    nextGroup++;
+  }
+
+  // 5. Idea
+  const ideaItems = items.filter(item => item.stage === 'idea');
+  if (ideaItems.length > 0) {
+    for (const item of ideaItems) {
+      result.set(item.id, { group: nextGroup, groupLabel: 'Idea' });
+    }
     nextGroup++;
   }
 

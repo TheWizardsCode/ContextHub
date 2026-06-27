@@ -277,16 +277,16 @@ describe('assignItemGroups', () => {
     expect(groups.get('WL-2')!.groupLabel).toBe('In Review');
   });
 
-  it('groups stages in order: idea, intake_complete, in_review', () => {
+  it('groups stages in reversed order: in_review, intake_complete, idea', () => {
     const items = [
       { id: 'WL-idea', stage: 'idea', filePaths: [] },
       { id: 'WL-intake', stage: 'intake_complete', filePaths: [] },
       { id: 'WL-review', stage: 'in_review', filePaths: [] },
     ];
     const groups = assignItemGroups(items, 3);
-    expect(groups.get('WL-idea')!.group).toBe(1);
+    expect(groups.get('WL-review')!.group).toBe(1);
     expect(groups.get('WL-intake')!.group).toBe(2);
-    expect(groups.get('WL-review')!.group).toBe(3);
+    expect(groups.get('WL-idea')!.group).toBe(3);
   });
 
   it('groups plan_complete items by file-path conflicts', () => {
@@ -304,17 +304,17 @@ describe('assignItemGroups', () => {
     expect(groups.get('WL-3')!.group).toBe(2);  // conflicts with WL-1
   });
 
-  it('places plan_complete groups after stage-based groups', () => {
+  it('places plan_complete groups before stage-based groups', () => {
     const items = [
       { id: 'WL-idea', stage: 'idea', filePaths: [] },
       { id: 'WL-plan', stage: 'plan_complete', filePaths: ['src/foo.ts'] },
     ];
     const groups = assignItemGroups(items, 3);
-    expect(groups.get('WL-idea')!.group).toBe(1);
-    expect(groups.get('WL-plan')!.group).toBe(2);  // after idea
+    expect(groups.get('WL-plan')!.group).toBe(1);  // plan_complete before idea
+    expect(groups.get('WL-idea')!.group).toBe(2);
   });
 
-  it('places items with unknown stage into singleton "Other" groups', () => {
+  it('places items with unknown stage into a single "Other" group', () => {
     const items = [
       { id: 'WL-1', stage: undefined, filePaths: [] },
       { id: 'WL-2', stage: undefined, filePaths: ['src/bar.ts'] },
@@ -322,8 +322,8 @@ describe('assignItemGroups', () => {
     const groups = assignItemGroups(items, 3);
     expect(groups.get('WL-1')!.groupLabel).toBe('Other');
     expect(groups.get('WL-2')!.groupLabel).toBe('Other');
-    // Each unknown item gets its own group
-    expect(groups.get('WL-1')!.group).not.toBe(groups.get('WL-2')!.group);
+    // All unknown items share the same group (no singletons)
+    expect(groups.get('WL-1')!.group).toBe(groups.get('WL-2')!.group);
   });
 
   it('handles empty items array', () => {
