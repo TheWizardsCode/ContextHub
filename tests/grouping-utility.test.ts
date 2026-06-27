@@ -299,7 +299,7 @@ describe('assignItemGroups', () => {
     // plan_complete groups come after stage groups, so start at group 4 (no stage groups in this test)
     // Actually, with no idea/intake/in_review, plan_complete starts at group 1
     expect(groups.get('WL-1')!.group).toBe(1);
-    expect(groups.get('WL-1')!.groupLabel).toContain('parallel-safe');
+    expect(groups.get('WL-1')!.groupLabel).toContain('Plan Complete Group');
     expect(groups.get('WL-2')!.group).toBe(1);  // no conflict with WL-1
     expect(groups.get('WL-3')!.group).toBe(2);  // conflicts with WL-1
   });

@@ -262,7 +262,7 @@ export function assignItemGroups(
       const newGroupNum = groupNumMap.get(g)!;
       result.set(id, {
         group: newGroupNum,
-        groupLabel: `Group ${newGroupNum} (parallel-safe)`,
+        groupLabel: `Plan Complete Group ${newGroupNum}`,
       });
     }
     nextGroup += uniqueGroups.length;
