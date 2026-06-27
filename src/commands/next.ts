@@ -30,7 +30,7 @@ export default function register(ctx: PluginContext): void {
     .option('-g, --groups <n>', 'Number of parallel-safe groups to identify (default: 3, only meaningful when -n > 1)', '3')
     .action(async (...rawArgs: any[]) => {
       // Normalize incoming args: commander may pass a Command instance
-      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'stage', 'search', 'number', 'prefix', 'includeBlocked', 'includeInProgress', 'reSort', 'reSortSync', 'recencyPolicy']);
+      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'stage', 'search', 'number', 'prefix', 'includeBlocked', 'includeInProgress', 'reSort', 'reSortSync', 'recencyPolicy', 'groups']);
       let options: any = normalized.options || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
