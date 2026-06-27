@@ -31,6 +31,72 @@ vi.mock('./settings.js', () => ({
   },
 }));
 
+// ── Helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Default mock fixture for a work item returned by `wl show`.
+ * Includes description so ID-scanning code has text to scan.
+ */
+function defaultShowResult(id = 'WL-0MQL0T5TR0060AEH', title = 'Test Work Item', description = ''): object {
+  return { id, title, status: 'open', priority: 'high', stage: 'in_progress', description };
+}
+
+/**
+ * Default mock fixture for empty `wl comment list` output.
+ */
+function emptyCommentResult(): object {
+  return { success: true, count: 0, workItemId: '', comments: [] };
+}
+
+/**
+ * Default mock fixture for empty `wl list --parent` output.
+ */
+function emptyChildrenResult(): object {
+  return { success: true, count: 0, workItems: [] };
+}
+
+/**
+ * Set up mockRunWl to handle the common ID-based mode calls.
+ * The mock intercepts:
+ *   - 'show' → returns the primary work item
+ *   - 'comment' with args ['list', ...] → returns comments
+ *   - 'list' with args ['--parent', ...] → returns children
+ *   - 'search' → returns search results (for fallback tests)
+ *   - any other call → throws (test should fail if unexpected calls occur)
+ *
+ * @param showResult - What to return for `wl show <id>`
+ * @param commentResult - What to return for `wl comment list <id>`
+ * @param childrenResult - What to return for `wl list --parent <id>`
+ * @param searchResult - What to return for `wl search ...`
+ */
+function mockWlCalls(
+  showResult: any = defaultShowResult(),
+  commentResult: any = emptyCommentResult(),
+  childrenResult: any = emptyChildrenResult(),
+  searchResult: any = undefined,
+): void {
+  mockRunWl.mockImplementation((command: string, args: string[]) => {
+    if (command === 'show') {
+      return Promise.resolve(showResult);
+    }
+    if (command === 'comment' && args[0] === 'list') {
+      return Promise.resolve(commentResult);
+    }
+    if (command === 'list' && args[0] === '--parent') {
+      return Promise.resolve(childrenResult);
+    }
+    if (command === 'search') {
+      if (searchResult !== undefined) {
+        return Promise.resolve(searchResult);
+      }
+    }
+    // Default: reject with error to catch unexpected calls
+    return Promise.reject(new Error(`Unexpected wl command: ${command} ${args?.join(' ')}`));
+  });
+}
+
+// ── Extraction ────────────────────────────────────────────────────────
+
 describe('extractWorkItemIds', () => {
   it('should extract a single work item ID from text', async () => {
     const { extractWorkItemIds } = await import('./auto-inject.js');
@@ -80,25 +146,17 @@ describe('extractWorkItemIds', () => {
   });
 });
 
-describe('searchRelatedWorkItems', () => {
+// ── ID-based mode (new behavior) ──────────────────────────────────────
+
+describe('searchRelatedWorkItems — ID-based mode', () => {
   beforeEach(() => {
     mockRunWl.mockReset();
   });
 
   it('should fetch explicitly referenced IDs via wl show', async () => {
     const { searchRelatedWorkItems } = await import('./auto-inject.js');
-    mockRunWl.mockImplementation((command: string, args: string[]) => {
-      if (command === 'show' && args[0] === 'WL-0MQL0T5TR0060AEH') {
-        return {
-          id: 'WL-0MQL0T5TR0060AEH',
-          title: 'Test Work Item',
-          status: 'open',
-          priority: 'high',
-          stage: 'in_progress',
-        };
-      }
-      return { results: [] };
-    });
+
+    mockWlCalls(defaultShowResult('WL-0MQL0T5TR0060AEH', 'Test Work Item'));
 
     const results = await searchRelatedWorkItems(
       'Work on WL-0MQL0T5TR0060AEH',
@@ -109,67 +167,200 @@ describe('searchRelatedWorkItems', () => {
     expect(results[0].title).toBe('Test Work Item');
   });
 
-  it('should search by prompt context when no IDs are found', async () => {
+  it('should scan description for embedded related work item IDs', async () => {
     const { searchRelatedWorkItems } = await import('./auto-inject.js');
 
-    // Mock the search call
+    // The primary work item description mentions a related item
+    const desc = 'See WL-0MP15X5HW001WXZR for more details';
     mockRunWl.mockImplementation((command: string, args: string[]) => {
-      if (command === 'search') {
-        return {
-          results: [
-            {
-              id: 'WL-0MP15X5HW001WXZR',
-              title: 'Found Item',
-              status: 'open',
-              priority: 'medium',
-            },
-          ],
-        };
+      if (command === 'show') {
+        if (args[0] === 'WL-0MP15X5HW001WXZR') {
+          return Promise.resolve(defaultShowResult('WL-0MP15X5HW001WXZR', 'Related Item'));
+        }
+        return Promise.resolve(defaultShowResult('WL-0MQL0T5TR0060AEH', 'Test Work Item', desc));
       }
-      return {};
-    });
-
-    const results = await searchRelatedWorkItems('implementation task', []);
-    expect(results).toHaveLength(1);
-    expect(results[0].id).toBe('WL-0MP15X5HW001WXZR');
-    expect(results[0].title).toBe('Found Item');
-  });
-
-  it('should deduplicate results from ID lookup and search', async () => {
-    const { searchRelatedWorkItems } = await import('./auto-inject.js');
-
-    mockRunWl.mockImplementation((command: string, args: string[]) => {
-      if (command === 'show' && args[0] === 'WL-0MQL0T5TR0060AEH') {
-        return {
-          id: 'WL-0MQL0T5TR0060AEH',
-          title: 'Explicit Item',
-          status: 'open',
-        };
+      if (command === 'comment' && args[0] === 'list') {
+        return Promise.resolve(emptyCommentResult());
       }
-      if (command === 'search') {
-        return {
-          results: [
-            {
-              id: 'WL-0MQL0T5TR0060AEH',
-              title: 'Explicit Item',
-              status: 'open',
-            },
-            {
-              id: 'WL-0MP15X5HW001WXZR',
-              title: 'Search Result',
-              status: 'open',
-            },
-          ],
-        };
+      if (command === 'list' && args[0] === '--parent') {
+        return Promise.resolve(emptyChildrenResult());
       }
-      return {};
+      return Promise.reject(new Error(`Unexpected: ${command} ${args?.join(' ')}`));
     });
 
     const results = await searchRelatedWorkItems(
-      'WL-0MQL0T5TR0060AEH and more',
+      'Work on WL-0MQL0T5TR0060AEH',
+      ['WL-0MQL0T5TR0060AEH'],
+    );
+    // Should have: primary ID + related ID from description
+    expect(results).toHaveLength(2);
+    const ids = results.map(r => r.id).sort();
+    // WL-0MP... (P=80) sorts before WL-0MQ... (Q=81)
+    expect(ids).toEqual(['WL-0MP15X5HW001WXZR', 'WL-0MQL0T5TR0060AEH']);
+  });
+
+  it('should scan comments for embedded related work item IDs', async () => {
+    const { searchRelatedWorkItems } = await import('./auto-inject.js');
+
+    // Comments contain a reference to another work item
+    const commentPayload = {
+      success: true,
+      count: 1,
+      workItemId: 'WL-0MQL0T5TR0060AEH',
+      comments: [
+        {
+          id: 'WL-C1',
+          workItemId: 'WL-0MQL0T5TR0060AEH',
+          author: 'test',
+          comment: 'See also WL-0MP15X5HW001WXZR for more context',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          references: [],
+        },
+      ],
+    };
+
+    mockRunWl.mockImplementation((command: string, args: string[]) => {
+      if (command === 'show') {
+        // When fetching the related ID found in comments, return it with proper ID
+        if (args[0] === 'WL-0MP15X5HW001WXZR') {
+          return Promise.resolve(defaultShowResult('WL-0MP15X5HW001WXZR', 'Related Item'));
+        }
+        return Promise.resolve(defaultShowResult('WL-0MQL0T5TR0060AEH', 'Test Work Item'));
+      }
+      if (command === 'comment' && args[0] === 'list') {
+        return Promise.resolve(commentPayload);
+      }
+      if (command === 'list' && args[0] === '--parent') {
+        return Promise.resolve(emptyChildrenResult());
+      }
+      return Promise.reject(new Error(`Unexpected: ${command} ${args?.join(' ')}`));
+    });
+
+    const results = await searchRelatedWorkItems(
+      'Work on WL-0MQL0T5TR0060AEH',
       ['WL-0MQL0T5TR0060AEH'],
     );
     expect(results).toHaveLength(2);
+    const ids = results.map(r => r.id).sort();
+    // WL-0MP... (P=80) sorts before WL-0MQ... (Q=81)
+    expect(ids).toEqual(['WL-0MP15X5HW001WXZR', 'WL-0MQL0T5TR0060AEH']);
+  });
+
+  it('should include child items as related items', async () => {
+    const { searchRelatedWorkItems } = await import('./auto-inject.js');
+
+    // Children returned by wl list --parent
+    const childrenPayload = {
+      success: true,
+      count: 2,
+      workItems: [
+        { id: 'WL-CHILD1', title: 'Child One', status: 'open', priority: 'medium', stage: 'in_progress' },
+        { id: 'WL-CHILD2', title: 'Child Two', status: 'in-progress', priority: 'low', stage: 'plan_complete' },
+      ],
+    };
+
+    mockRunWl.mockImplementation((command: string, args: string[]) => {
+      if (command === 'show') {
+        return Promise.resolve(defaultShowResult());
+      }
+      if (command === 'comment' && args[0] === 'list') {
+        return Promise.resolve(emptyCommentResult());
+      }
+      if (command === 'list' && args[0] === '--parent') {
+        return Promise.resolve(childrenPayload);
+      }
+      return Promise.reject(new Error(`Unexpected: ${command} ${args?.join(' ')}`));
+    });
+
+    const results = await searchRelatedWorkItems(
+      'Work on WL-0MQL0T5TR0060AEH',
+      ['WL-0MQL0T5TR0060AEH'],
+    );
+    // Should have: primary + two children
+    expect(results).toHaveLength(3);
+    const ids = results.map(r => r.id).sort();
+    expect(ids).toEqual(['WL-0MQL0T5TR0060AEH', 'WL-CHILD1', 'WL-CHILD2']);
+    // Child items should have their titles preserved
+    const child1 = results.find(r => r.id === 'WL-CHILD1');
+    expect(child1?.title).toBe('Child One');
+    const child2 = results.find(r => r.id === 'WL-CHILD2');
+    expect(child2?.title).toBe('Child Two');
+  });
+
+  it('should deduplicate discovered IDs excluding the primary ID', async () => {
+    const { searchRelatedWorkItems } = await import('./auto-inject.js');
+
+    // Description mentions only the primary ID (no related IDs), comments contain a related
+    const desc = 'Main task WL-0MQL0T5TR0060AEH';  // only primary, no related
+    const commentPayload = {
+      success: true,
+      count: 1,
+      workItemId: 'WL-0MQL0T5TR0060AEH',
+      comments: [
+        {
+          id: 'WL-C1',
+          workItemId: 'WL-0MQL0T5TR0060AEH',
+          author: 'test',
+          comment: 'Related WL-0MP15X5HW001WXZR',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          references: [],
+        },
+      ],
+    };
+
+    mockRunWl.mockImplementation((command: string, args: string[]) => {
+      if (command === 'show') {
+        if (args[0] === 'WL-0MP15X5HW001WXZR') {
+          return Promise.resolve(defaultShowResult('WL-0MP15X5HW001WXZR', 'Related Item'));
+        }
+        return Promise.resolve(defaultShowResult('WL-0MQL0T5TR0060AEH', 'Test Work Item', desc));
+      }
+      if (command === 'comment' && args[0] === 'list') {
+        return Promise.resolve(commentPayload);
+      }
+      if (command === 'list' && args[0] === '--parent') {
+        return Promise.resolve(emptyChildrenResult());
+      }
+      return Promise.reject(new Error(`Unexpected: ${command} ${args?.join(' ')}`));
+    });
+
+    const results = await searchRelatedWorkItems(
+      'WL-0MQL0T5TR0060AEH',
+      ['WL-0MQL0T5TR0060AEH'],
+    );
+    // Should have: primary + related (not duplicated, primary not re-discovered)
+    expect(results).toHaveLength(2);
+    const ids = results.map(r => r.id).sort();
+    // WL-0MP... (P=80) sorts before WL-0MQ... (Q=81)
+    expect(ids).toEqual(['WL-0MP15X5HW001WXZR', 'WL-0MQL0T5TR0060AEH']);
+  });
+
+  it('should skip wl search when work item IDs are present', async () => {
+    const { searchRelatedWorkItems } = await import('./auto-inject.js');
+
+    // Search call should NOT be made — mock rejects if called
+    mockRunWl.mockImplementation((command: string, args: string[]) => {
+      if (command === 'show') {
+        return Promise.resolve(defaultShowResult());
+      }
+      if (command === 'comment' && args[0] === 'list') {
+        return Promise.resolve(emptyCommentResult());
+      }
+      if (command === 'list' && args[0] === '--parent') {
+        return Promise.resolve(emptyChildrenResult());
+      }
+      if (command === 'search') {
+        return Promise.reject(new Error('Search should not be called in ID-based mode'));
+      }
+      return Promise.reject(new Error(`Unexpected: ${command} ${args?.join(' ')}`));
+    });
+
+    const results = await searchRelatedWorkItems(
+      'Work on WL-0MQL0T5TR0060AEH',
+      ['WL-0MQL0T5TR0060AEH'],
+    );
+    expect(results).toHaveLength(1);
+    expect(results[0].id).toBe('WL-0MQL0T5TR0060AEH');
   });
 
   it('should handle failed ID lookups gracefully', async () => {
@@ -178,39 +369,50 @@ describe('searchRelatedWorkItems', () => {
     // Show throws (modeled by mock rejecting)
     mockRunWl.mockImplementation((command: string) => {
       if (command === 'show') {
-        throw new Error('Not found');
+        return Promise.reject(new Error('Not found'));
       }
-      return { results: [] };
+      if (command === 'comment') {
+        return Promise.resolve(emptyCommentResult());
+      }
+      if (command === 'list') {
+        return Promise.resolve(emptyChildrenResult());
+      }
+      return Promise.reject(new Error(`Unexpected: ${command}`));
     });
 
     const results = await searchRelatedWorkItems('WL-0BADID0000000000', ['WL-0BADID0000000000']);
     expect(results).toEqual([]);
   });
 
-  it('should skip search when prompt is too short', async () => {
+  it('should handle comment and child scanning errors gracefully', async () => {
     const { searchRelatedWorkItems } = await import('./auto-inject.js');
 
-    mockRunWl.mockImplementation(() => {
-      throw new Error('Should not be called');
+    mockRunWl.mockImplementation((command: string, args: string[]) => {
+      if (command === 'show') {
+        return Promise.resolve(defaultShowResult());
+      }
+      if (command === 'comment') {
+        return Promise.reject(new Error('Comment listing failed'));
+      }
+      if (command === 'list') {
+        return Promise.reject(new Error('Child listing failed'));
+      }
+      return Promise.reject(new Error(`Unexpected: ${command} ${args?.join(' ')}`));
     });
 
-    const results = await searchRelatedWorkItems('ab', []);
-    expect(results).toEqual([]);
+    // Even if comment/child scanning fails, the primary ID should still be returned
+    const results = await searchRelatedWorkItems(
+      'Work on WL-0MQL0T5TR0060AEH',
+      ['WL-0MQL0T5TR0060AEH'],
+    );
+    expect(results).toHaveLength(1);
+    expect(results[0].id).toBe('WL-0MQL0T5TR0060AEH');
   });
 
   it('should skip search when prompt only contains IDs', async () => {
     const { searchRelatedWorkItems } = await import('./auto-inject.js');
 
-    mockRunWl.mockImplementation((command: string) => {
-      if (command === 'show') {
-        return {
-          id: 'WL-0MQL0T5TR0060AEH',
-          title: 'Explicit Item',
-          status: 'open',
-        };
-      }
-      throw new Error('Search should not be called');
-    });
+    mockWlCalls(defaultShowResult());
 
     const results = await searchRelatedWorkItems(
       'WL-0MQL0T5TR0060AEH',
@@ -219,21 +421,67 @@ describe('searchRelatedWorkItems', () => {
     expect(results).toHaveLength(1);
     expect(results[0].id).toBe('WL-0MQL0T5TR0060AEH');
   });
+});
+
+// ── Search-based mode (fallback) ──────────────────────────────────────
+
+describe('searchRelatedWorkItems — Search-based mode (fallback)', () => {
+  beforeEach(() => {
+    mockRunWl.mockReset();
+  });
+
+  it('should search by prompt context when no IDs are found', async () => {
+    const { searchRelatedWorkItems } = await import('./auto-inject.js');
+
+    mockRunWl.mockImplementation((command: string, args: string[]) => {
+      if (command === 'search') {
+        return Promise.resolve({
+          results: [
+            {
+              id: 'WL-0MP15X5HW001WXZR',
+              title: 'Found Item',
+              status: 'open',
+              priority: 'medium',
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected: ${command} ${args?.join(' ')}`));
+    });
+
+    const results = await searchRelatedWorkItems('implementation task', []);
+    expect(results).toHaveLength(1);
+    expect(results[0].id).toBe('WL-0MP15X5HW001WXZR');
+    expect(results[0].title).toBe('Found Item');
+  });
 
   it('should handle search errors gracefully', async () => {
     const { searchRelatedWorkItems } = await import('./auto-inject.js');
 
     mockRunWl.mockImplementation((command: string) => {
       if (command === 'search') {
-        throw new Error('Search failed');
+        return Promise.reject(new Error('Search failed'));
       }
-      return {};
+      return Promise.resolve({ results: [] });
     });
 
     const results = await searchRelatedWorkItems('some search text', []);
     expect(results).toEqual([]);
   });
+
+  it('should skip search when prompt is too short', async () => {
+    const { searchRelatedWorkItems } = await import('./auto-inject.js');
+
+    mockRunWl.mockImplementation(() => {
+      return Promise.reject(new Error('Should not be called'));
+    });
+
+    const results = await searchRelatedWorkItems('ab', []);
+    expect(results).toEqual([]);
+  });
 });
+
+// ── Formatting ────────────────────────────────────────────────────────
 
 describe('formatWorkItemContext', () => {
   it('should format items in full-detail mode when under threshold', async () => {
@@ -281,6 +529,8 @@ describe('formatWorkItemContext', () => {
   });
 });
 
+// ── Registration ──────────────────────────────────────────────────────
+
 describe('registerAutoInject', () => {
   beforeEach(() => {
     mockRunWl.mockReset();
@@ -319,18 +569,18 @@ describe('registerAutoInject', () => {
     currentSettings.autoInjectEnabled = original;
   });
 
-  it('should inject context when related items are found', async () => {
+  it('should inject context when related items are found via search', async () => {
     const { registerAutoInject } = await import('./auto-inject.js');
 
     mockRunWl.mockImplementation((command: string, args: string[]) => {
       if (command === 'search') {
-        return {
+        return Promise.resolve({
           results: [
             { id: 'WL-RELATED1', title: 'Related Task', status: 'open', priority: 'high' },
           ],
-        };
+        });
       }
-      return {};
+      return Promise.resolve({});
     });
 
     const onMock = vi.fn();
@@ -357,10 +607,57 @@ describe('registerAutoInject', () => {
     expect(setStatusMock).toHaveBeenCalled();
   });
 
+  it('should inject context when related items are found via ID scanning', async () => {
+    const { registerAutoInject } = await import('./auto-inject.js');
+
+    // Prompt has a work item ID, so ID-based mode is used
+    // The description references a related item (must be 15+ chars to match regex)
+    const desc = 'See WL-0MP15X5HW001WXZR for more details';
+    mockRunWl.mockImplementation((command: string, args: string[]) => {
+      if (command === 'show') {
+        if (args[0] === 'WL-0MP15X5HW001WXZR') {
+          return Promise.resolve({ id: 'WL-0MP15X5HW001WXZR', title: 'Related Task', status: 'open', priority: 'high' });
+        }
+        return Promise.resolve(defaultShowResult('WL-0MQL0T5TR0060AEH', 'Primary Task', desc));
+      }
+      if (command === 'comment' && args[0] === 'list') {
+        return Promise.resolve(emptyCommentResult());
+      }
+      if (command === 'list' && args[0] === '--parent') {
+        return Promise.resolve(emptyChildrenResult());
+      }
+      return Promise.resolve({ results: [] });
+    });
+
+    const onMock = vi.fn();
+    const setStatusMock = vi.fn();
+    let registeredHandler: Function = async () => {};
+
+    registerAutoInject({
+      on: (_event: string, fn: any) => { registeredHandler = fn; },
+    } as any);
+
+    const event = {
+      prompt: 'working on WL-0MQL0T5TR0060AEH',
+      systemPrompt: 'You are an AI assistant.',
+    };
+    const ctx = { ui: { setStatus: setStatusMock } };
+
+    const result = await registeredHandler(event, ctx);
+
+    expect(result).toBeDefined();
+    expect(result!.systemPrompt).toContain('## Relevant Work Items');
+    expect(result!.systemPrompt).toContain('WL-0MQL0T5TR0060AEH');
+    expect(result!.systemPrompt).toContain('WL-0MP15X5HW001WXZR');
+    expect(result!.systemPrompt).toContain('Primary Task');
+    expect(result!.systemPrompt).toContain(event.systemPrompt);
+    expect(setStatusMock).toHaveBeenCalled();
+  });
+
   it('should not inject context when no items are found', async () => {
     const { registerAutoInject } = await import('./auto-inject.js');
 
-    mockRunWl.mockImplementation(() => ({ results: [] }));
+    mockRunWl.mockImplementation(() => Promise.resolve({ results: [] }));
 
     const onMock = vi.fn();
     let registeredHandler: Function = async () => {};

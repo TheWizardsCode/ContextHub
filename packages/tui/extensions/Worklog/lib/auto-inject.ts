@@ -3,7 +3,9 @@
  *
  * Registers a `before_agent_start` handler that:
  * 1. Extracts work item IDs from the user's prompt
- * 2. Searches for related work items via `wl search`
+ * 2. Scans the referenced work item's description, comments, and children for
+ *    related work item IDs (when IDs are detected), OR searches by prompt
+ *    context keywords via `wl search` (fallback when no IDs are detected)
  * 3. Formats matching items as context
  * 4. Injects the formatted context into the system prompt
  * 5. Sets a status bar indicator when items are injected
@@ -14,7 +16,10 @@
  *
  * Features:
  * - **ID Detection**: Auto-detect work item IDs in prompts (e.g., WL-0MQL0T5TR0060AEH)
- * - **Context Search**: Find related items by title/description/keyword matching
+ * - **Related-Item Scanning**: Scan the referenced work item's description,
+ *   comments, and children for embedded work item IDs (when an ID is present)
+ * - **Keyword Search Fallback**: Find related items by prompt keywords when no
+ *   work item ID is detected
  * - **Smart Injection**: Only inject when relevant items are found
  * - **Full-Detail Mode**: Shows ID, title, status, priority, and stage (up to `MAX_FULL_DETAIL` items)
  * - **Links-Only Mode**: Compact ID + title list for larger result sets
@@ -120,9 +125,16 @@ export interface WlRunner {
 /**
  * Search for related work items based on the prompt context.
  *
+ * When work item IDs are detected in the prompt (ID-based mode):
  * 1. Fetches explicitly referenced IDs via `wl show`
- * 2. Searches by prompt context keywords via `wl search`
- * 3. Deduplicates results
+ * 2. Scans the primary work item's description, comments, and children for
+ *    embedded work item IDs
+ * 3. Fetches discovered related IDs via `wl show`
+ * 4. Deduplicates and returns all results
+ *
+ * When no work item IDs are detected (search-based mode / fallback):
+ * 1. Strips any ID-like patterns from the prompt
+ * 2. Searches by remaining text via `wl search --limit <n>`
  *
  * @param prompt - The user's prompt text
  * @param existingIds - Work item IDs already extracted from the prompt
@@ -137,41 +149,124 @@ export async function searchRelatedWorkItems(
 ): Promise<WorkItemSummary[]> {
   const results: Map<string, WorkItemSummary> = new Map();
 
-  // 1. Fetch explicitly referenced IDs via wl show
-  for (const id of existingIds) {
-    try {
-      const payload = await runWlFn('show', [id]);
-      if (payload && typeof payload === 'object') {
-        const item = normalizeWorkItem(payload);
-        if (item) {
-          results.set(item.id, item);
-        }
-      }
-    } catch {
-      // Silently skip invalid/missing IDs — the ID may be stale or from
-      // a different session. No error is surfaced to the user.
-    }
-  }
+  if (existingIds.length > 0) {
+    // ── ID-based mode ──────────────────────────────────────────────
+    // Fetch the referenced work item(s) and scan the primary work item's
+    // description, comments, and children for embedded related item IDs.
 
-  // 2. Search by prompt context — only if there's meaningful text beyond IDs
-  // Strip out any work item IDs so we search by the actual semantic content.
-  const cleanedPrompt = prompt.replace(/\b[A-Z]{2,3}-[A-Z0-9]{15,}/g, '').trim();
-  if (cleanedPrompt.length >= 3) {
-    try {
-      const payload = await runWlFn('search', [cleanedPrompt, '--limit', String(MAX_SEARCH_RESULTS)]);
-      if (payload && typeof payload === 'object') {
-        const payloadObj = payload as Record<string, unknown>;
-        const searchResults = Array.isArray(payloadObj.results) ? payloadObj.results : [];
-        for (const entry of searchResults) {
-          const item = normalizeWorkItem(entry);
-          if (item && !results.has(item.id)) {
+    const primaryId = existingIds[0];
+    let primaryPayload: unknown = null;
+
+    // 1. Fetch explicitly referenced IDs via wl show
+    for (const id of existingIds) {
+      try {
+        const payload = await runWlFn('show', [id]);
+        if (id === primaryId) primaryPayload = payload;
+        if (payload && typeof payload === 'object') {
+          const item = normalizeWorkItem(payload);
+          if (item) {
             results.set(item.id, item);
+          }
+        }
+      } catch {
+        // Silently skip invalid/missing IDs — the ID may be stale or from
+        // a different session. No error is surfaced to the user.
+      }
+    }
+
+    // 2. Scan the primary work item for embedded related IDs
+    const discoveredIds: string[] = [];
+
+    // a. Scan description for embedded work item IDs
+    if (primaryPayload && typeof primaryPayload === 'object') {
+      const desc = (primaryPayload as Record<string, unknown>).description;
+      if (typeof desc === 'string') {
+        discoveredIds.push(...extractWorkItemIds(desc));
+      }
+    }
+
+    // b. Scan comments for embedded work item IDs
+    try {
+      const commentPayload = await runWlFn('comment', ['list', primaryId]);
+      if (commentPayload && typeof commentPayload === 'object') {
+        const payloadObj = commentPayload as Record<string, unknown>;
+        const comments = Array.isArray(payloadObj.comments) ? payloadObj.comments : [];
+        for (const comment of comments) {
+          if (comment && typeof comment === 'object') {
+            const text = (comment as Record<string, unknown>).comment;
+            if (typeof text === 'string') {
+              discoveredIds.push(...extractWorkItemIds(text));
+            }
           }
         }
       }
     } catch {
-      // Silently skip search errors — the wl CLI may not be available or
-      // the search index may not be built. Graceful degradation.
+      // Silently skip comment scanning errors — the wl CLI may not support
+      // comment listing or the item may have no comments.
+    }
+
+    // c. Scan children — fetch via wl list --parent
+    try {
+      const childrenPayload = await runWlFn('list', ['--parent', primaryId]);
+      if (childrenPayload && typeof childrenPayload === 'object') {
+        const payloadObj = childrenPayload as Record<string, unknown>;
+        const workItems = Array.isArray(payloadObj.workItems) ? payloadObj.workItems : [];
+        for (const child of workItems) {
+          if (child && typeof child === 'object') {
+            const childId = (child as Record<string, unknown>).id;
+            if (typeof childId === 'string') {
+              discoveredIds.push(childId);
+              // Add child directly from the list response (saves a wl show call)
+              const item = normalizeWorkItem(child);
+              if (item && !results.has(item.id)) {
+                results.set(item.id, item);
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      // Silently skip child-item fetching errors.
+    }
+
+    // 3. Fetch discovered related IDs (deduplicated, excluding the primary ID)
+    const uniqueDiscovered = [...new Set(discoveredIds)]
+      .filter(id => id !== primaryId);
+    for (const relatedId of uniqueDiscovered) {
+      if (results.has(relatedId)) continue; // Already fetched (e.g., child items)
+      try {
+        const payload = await runWlFn('show', [relatedId]);
+        if (payload && typeof payload === 'object') {
+          const item = normalizeWorkItem(payload);
+          if (item) {
+            results.set(item.id, item);
+          }
+        }
+      } catch {
+        // Silently skip invalid/missing IDs
+      }
+    }
+  } else {
+    // ── Search-based mode (fallback) ──────────────────────────────
+    // Strip out any work item IDs so we search by the actual semantic content.
+    const cleanedPrompt = prompt.replace(/\b[A-Z]{2,3}-[A-Z0-9]{15,}/g, '').trim();
+    if (cleanedPrompt.length >= 3) {
+      try {
+        const payload = await runWlFn('search', [cleanedPrompt, '--limit', String(MAX_SEARCH_RESULTS)]);
+        if (payload && typeof payload === 'object') {
+          const payloadObj = payload as Record<string, unknown>;
+          const searchResults = Array.isArray(payloadObj.results) ? payloadObj.results : [];
+          for (const entry of searchResults) {
+            const item = normalizeWorkItem(entry);
+            if (item && !results.has(item.id)) {
+              results.set(item.id, item);
+            }
+          }
+        }
+      } catch {
+        // Silently skip search errors — the wl CLI may not be available or
+        // the search index may not be built. Graceful degradation.
+      }
     }
   }
 
@@ -238,7 +333,7 @@ export function formatWorkItemContext(items: WorkItemSummary[]): string {
  * Sets up a `before_agent_start` handler that:
  * 1. Checks if auto-injection is enabled in settings
  * 2. Extracts work item IDs from the prompt text
- * 3. Searches for related work items via `wl search`
+ * 3. Searches for related work items (by ID-based scanning or keyword fallback)
  * 4. Formats matching items as markdown context
  * 5. Appends the context to the system prompt
  * 6. Sets a status bar indicator showing how many items were injected
