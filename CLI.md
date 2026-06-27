@@ -860,6 +860,17 @@ wl doctor upgrade --dry-run       # Preview pending schema migrations
 wl doctor upgrade --confirm       # Apply pending schema migrations
 wl doctor prune --days 30         # Prune items deleted more than 30 days ago
 wl doctor prune --dry-run         # Preview which items would be pruned
+wl doctor stage-sync              # Detect stale status/stage combinations (dry-run)
+wl doctor stage-sync --apply      # Fix stale status/stage combinations
+
+Known stale combinations detected by `stage-sync`:
+
+| Current | Fix |
+|---|---|
+| `completed` + `idea` | `completed` + `done` |
+| `completed` + `intake_complete` | `completed` + `done` |
+| `completed` + `plan_complete` | `completed` + `done` |
+| `in-progress` + `idea` | `open` + `idea` |
 
 Notes:
 
