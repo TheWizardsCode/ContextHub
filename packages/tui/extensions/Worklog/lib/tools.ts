@@ -251,9 +251,7 @@ export function createDefaultListWorkItemsDb(
     try {
       const results = db.next(itemCount, true);
       if (!Array.isArray(results)) return defaultListWorkItems();
-
-      // Compute groups from file paths if we have multiple items
-      const browseItems: WorklogBrowseItem[] = results
+      return results
         .filter((r: any) => r.workItem)
         .map((r: any) => ({
           id: r.workItem.id,
@@ -269,28 +267,6 @@ export function createDefaultListWorkItemsDb(
           githubIssueNumber: r.workItem.githubIssueNumber,
         }))
         .slice(0, itemCount);
-
-      // Group items by file-path conflicts (only when we have 2+ items)
-      if (browseItems.length > 1) {
-        try {
-          const { extractFilePaths, groupItemsByFilePaths } = await import('../../../../../dist/commands/grouping.js');
-          const groupableItems = browseItems.map(item => ({
-            id: item.id,
-            filePaths: extractFilePaths(item.description || ''),
-          }));
-          const groupMap = groupItemsByFilePaths(groupableItems, 3);
-          for (const item of browseItems) {
-            const g = groupMap.get(item.id);
-            if (g !== undefined) {
-              item.group = g;
-            }
-          }
-        } catch {
-          // Grouping module unavailable — proceed without group data
-        }
-      }
-
-      return browseItems;
     } catch {
       return defaultListWorkItems();
     }
@@ -310,7 +286,7 @@ export function createListWorkItemsWithStageDb(
     try {
       const items = db.list({ stage });
       if (!Array.isArray(items)) return defaultListWorkItemsWithStage(stage);
-      const browseItems: WorklogBrowseItem[] = items
+      return items
         .sort((a: any, b: any) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))
         .map((item: any) => ({
           id: item.id,
@@ -326,28 +302,6 @@ export function createListWorkItemsWithStageDb(
           githubIssueNumber: item.githubIssueNumber,
         }))
         .slice(0, itemCount);
-
-      // Group items by file-path conflicts (only when we have 2+ items)
-      if (browseItems.length > 1) {
-        try {
-          const { extractFilePaths, groupItemsByFilePaths } = await import('../../../../../dist/commands/grouping.js');
-          const groupableItems = browseItems.map(item => ({
-            id: item.id,
-            filePaths: extractFilePaths(item.description || ''),
-          }));
-          const groupMap = groupItemsByFilePaths(groupableItems, 3);
-          for (const item of browseItems) {
-            const g = groupMap.get(item.id);
-            if (g !== undefined) {
-              item.group = g;
-            }
-          }
-        } catch {
-          // Grouping module unavailable — proceed without group data
-        }
-      }
-
-      return browseItems;
     } catch {
       return defaultListWorkItemsWithStage(stage);
     }

@@ -62,10 +62,10 @@ const { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, 
 
 export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {}) {
   const runWlImpl = deps.runWl ?? runWl;
-  // Phase 2: Use direct database access for list operations when available.
-  // Falls back to CLI-backed lists when the database cannot be opened.
-  const listWorkItems = deps.listWorkItems ?? createDefaultListWorkItemsDb();
-  const listWorkItemsWithStage = deps.listWorkItemsWithStage ?? createListWorkItemsWithStageDb();
+  // Use CLI-backed list operations (wl next) so grouping, sorting, and
+  // other CLI-side logic is always applied.
+  const listWorkItems = deps.listWorkItems ?? createDefaultListWorkItems();
+  const listWorkItemsWithStage = deps.listWorkItemsWithStage ?? createListWorkItemsWithStage();
   const shortcutRegistry = deps.shortcutRegistry ?? loadShortcutConfig();
   const chooseWorkItem = deps.chooseWorkItem
     ? (deps.chooseWorkItem as (items: WorklogBrowseItem[], ctx: BrowseContext, onSelectionChange: SelectionChangeHandler) => Promise<WorklogBrowseItem | ShortcutResult | undefined>)
