@@ -108,15 +108,26 @@ function isFilePath(candidate: string): boolean {
 // ── Grouping algorithm ────────────────────────────────────────────────
 
 /**
- * Input item for grouping — must have an `id` and a list of `filePaths`.
+ * Input item for grouping — must have an `id`, `stage`, and a list of `filePaths`.
  */
 export interface GroupableItem {
   id: string;
+  stage?: string;
   filePaths: string[];
 }
 
 /**
- * Greedy first-fit grouping algorithm.
+ * Result of assigning an item to a group.
+ * `group` is a 1-indexed integer for ordering.
+ * `groupLabel` is a human-readable label for display.
+ */
+export interface GroupAssignment {
+  group: number;
+  groupLabel: string;
+}
+
+/**
+ * Greedy first-fit grouping algorithm for file-path-based conflict detection.
  *
  * Assigns each item to the first group (1-indexed) that contains no item
  * sharing any file path with it. If no existing group works, starts a new
@@ -194,4 +205,76 @@ export function groupItemsByFilePaths(
   }
 
   return itemGroup;
+}
+
+/**
+ * Assign items to groups based on stage and file-path conflicts.
+ *
+ * Grouping rules:
+ * - Items with stage `idea` → all placed in one group labeled "Idea" (no conflict checking).
+ * - Items with stage `intake_complete` → all placed in one group labeled "Intake Complete".
+ * - Items with stage `in_review` → all placed in one group labeled "In Review".
+ * - Items with stage `plan_complete` → grouped by file-path conflicts using the
+ *   greedy first-fit algorithm, labeled "Group N (parallel-safe)".
+ * - Items with other/unknown stage → each placed in a singleton group labeled "Other".
+ *
+ * @param items - Array of items with id, stage, and extracted file paths
+ * @param maxFilePathGroups - Maximum number of file-path-based groups (default 3)
+ * @returns Map of item id → GroupAssignment
+ */
+export function assignItemGroups(
+  items: GroupableItem[],
+  maxFilePathGroups: number = 3,
+): Map<string, GroupAssignment> {
+  const result = new Map<string, GroupAssignment>();
+
+  // Stage-based groups in display order
+  const stageGroupOrder = ['idea', 'intake_complete', 'in_review'];
+  const stageGroupLabels: Record<string, string> = {
+    idea: 'Idea',
+    intake_complete: 'Intake Complete',
+    in_review: 'In Review',
+  };
+
+  let nextGroup = 1;
+
+  // 1. Assign stage-based groups (all items in the same stage get the same group)
+  for (const stage of stageGroupOrder) {
+    const stageItems = items.filter(item => item.stage === stage);
+    if (stageItems.length === 0) continue;
+    for (const item of stageItems) {
+      result.set(item.id, { group: nextGroup, groupLabel: stageGroupLabels[stage] });
+    }
+    nextGroup++;
+  }
+
+  // 2. Group plan_complete items by file-path conflicts
+  const planCompleteItems = items.filter(item => item.stage === 'plan_complete');
+  if (planCompleteItems.length > 0) {
+    const planGroups = groupItemsByFilePaths(planCompleteItems, maxFilePathGroups);
+    // Map file-path group numbers to sequential group numbers after stage groups
+    const uniqueGroups = [...new Set(planGroups.values())].sort((a, b) => a - b);
+    const groupNumMap = new Map<number, number>();
+    for (let i = 0; i < uniqueGroups.length; i++) {
+      groupNumMap.set(uniqueGroups[i], nextGroup + i);
+    }
+    for (const [id, g] of planGroups) {
+      const newGroupNum = groupNumMap.get(g)!;
+      result.set(id, {
+        group: newGroupNum,
+        groupLabel: `Group ${newGroupNum} (parallel-safe)`,
+      });
+    }
+    nextGroup += uniqueGroups.length;
+  }
+
+  // 3. Remaining items (other stages or unknown) → singleton "Other" groups
+  const assignedIds = new Set(result.keys());
+  for (const item of items) {
+    if (assignedIds.has(item.id)) continue;
+    result.set(item.id, { group: nextGroup, groupLabel: 'Other' });
+    nextGroup++;
+  }
+
+  return result;
 }

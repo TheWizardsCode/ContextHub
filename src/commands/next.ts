@@ -7,7 +7,7 @@ import { humanFormatWorkItem, resolveFormat, formatTitleAndId } from './helpers.
 import { theme } from '../theme.js';
 import { normalizeActionArgs } from './cli-utils.js';
 import { loadStatusStageRules } from '../status-stage-rules.js';
-import { extractFilePaths, groupItemsByFilePaths } from './grouping.js';
+import { extractFilePaths, assignItemGroups, type GroupAssignment } from './grouping.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -87,7 +87,7 @@ export default function register(ctx: PluginContext): void {
 
       // ── Grouping logic (only when count > 1) ──────────────────────
       let groupsEnabled = false;
-      let groupMap: Map<string, number> | null = null;
+      let groupMap: Map<string, GroupAssignment> | null = null;
       if (count > 1) {
         const groupsOpt = parseInt(String(options.groups || '3'), 10);
         const maxGroups = Number.isNaN(groupsOpt) || groupsOpt < 1 ? 3 : groupsOpt;
@@ -96,9 +96,10 @@ export default function register(ctx: PluginContext): void {
           // Extract file paths from each work item's description
           const groupableItems = availableResults.map((result: any) => ({
             id: result.workItem.id,
+            stage: result.workItem.stage,
             filePaths: extractFilePaths(result.workItem.description || ''),
           }));
-          groupMap = groupItemsByFilePaths(groupableItems, maxGroups);
+          groupMap = assignItemGroups(groupableItems, maxGroups);
         }
       }
 
@@ -125,15 +126,18 @@ export default function register(ctx: PluginContext): void {
           return;
         }
 
-        const enrichedResults = availableResults.map((result: any) => ({
-          ...result,
-          workItem: result.workItem ? enrichWorkItem(result.workItem) : result.workItem,
-          ...(groupMap && groupsEnabled ? { group: groupMap.get(result.workItem.id) } : {}),
-        }));
+        const enrichedResults = availableResults.map((result: any) => {
+          const assignment = groupMap?.get(result.workItem.id);
+          return {
+            ...result,
+            workItem: result.workItem ? enrichWorkItem(result.workItem) : result.workItem,
+            ...(assignment ? { group: assignment.group, groupLabel: assignment.groupLabel } : {}),
+          };
+        });
 
         const sortByGroup = (a: any, b: any) => {
-          const ga = groupMap?.get(a.workItem?.id) ?? 0;
-          const gb = groupMap?.get(b.workItem?.id) ?? 0;
+          const ga = groupMap?.get(a.workItem?.id)?.group ?? 0;
+          const gb = groupMap?.get(b.workItem?.id)?.group ?? 0;
           return ga - gb;
         };
         if (groupsEnabled && groupMap) {
@@ -189,9 +193,9 @@ export default function register(ctx: PluginContext): void {
       const displayResults = [...availableResults];
       if (groupsEnabled && groupMap) {
         displayResults.sort((a: any, b: any) => {
-          const ga = groupMap.get(a.workItem?.id) ?? 0;
-          const gb = groupMap.get(b.workItem?.id) ?? 0;
-          return ga - gb;
+          const assignmentA = groupMap.get(a.workItem?.id);
+          const assignmentB = groupMap.get(b.workItem?.id);
+          return (assignmentA?.group ?? 0) - (assignmentB?.group ?? 0);
         });
       }
 
@@ -203,10 +207,10 @@ export default function register(ctx: PluginContext): void {
 
         // Render group heading if this item is in a new group
         if (groupsEnabled && groupMap) {
-          const currentGroup = groupMap.get(res.workItem.id) ?? 0;
+          const assignment = groupMap.get(res.workItem.id);
+          const currentGroup = assignment?.group ?? 0;
           if (currentGroup !== lastGroup) {
-            const parallelSafe = currentGroup <= 3 ? 'parallel-safe' : 'conflict-unknown';
-            console.log(theme.text.strong(`── Group ${currentGroup} (${parallelSafe}) ──`));
+            console.log(theme.text.strong(`── ${assignment?.groupLabel ?? `Group ${currentGroup}`} ──`));
             console.log('');
             lastGroup = currentGroup;
           }

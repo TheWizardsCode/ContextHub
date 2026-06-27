@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { extractFilePaths, groupItemsByFilePaths } from '../src/commands/grouping.js';
+import { extractFilePaths, groupItemsByFilePaths, assignItemGroups } from '../src/commands/grouping.js';
 
 // ── File path extraction ──────────────────────────────────────────────
 
@@ -235,5 +235,108 @@ describe('groupItemsByFilePaths', () => {
     const groups = groupItemsByFilePaths(items, 1);
     expect(groups.get('WL-1')).toBe(1);
     expect(groups.get('WL-2')).toBe(1);  // all in group 1 since no conflict
+  });
+});
+
+// ── assignItemGroups ──────────────────────────────────────────────────
+
+describe('assignItemGroups', () => {
+  it('groups all idea items together with label "Idea"', () => {
+    const items = [
+      { id: 'WL-1', stage: 'idea', filePaths: [] },
+      { id: 'WL-2', stage: 'idea', filePaths: ['src/foo.ts'] },
+    ];
+    const groups = assignItemGroups(items, 3);
+    expect(groups.get('WL-1')!.group).toBe(1);
+    expect(groups.get('WL-1')!.groupLabel).toBe('Idea');
+    expect(groups.get('WL-2')!.group).toBe(1);
+    expect(groups.get('WL-2')!.groupLabel).toBe('Idea');
+  });
+
+  it('groups all intake_complete items together with label "Intake Complete"', () => {
+    const items = [
+      { id: 'WL-1', stage: 'intake_complete', filePaths: ['src/foo.ts'] },
+      { id: 'WL-2', stage: 'intake_complete', filePaths: ['src/bar.ts'] },
+    ];
+    const groups = assignItemGroups(items, 3);
+    expect(groups.get('WL-1')!.group).toBe(1);
+    expect(groups.get('WL-1')!.groupLabel).toBe('Intake Complete');
+    expect(groups.get('WL-2')!.group).toBe(1);
+    expect(groups.get('WL-2')!.groupLabel).toBe('Intake Complete');
+  });
+
+  it('groups all in_review items together with label "In Review"', () => {
+    const items = [
+      { id: 'WL-1', stage: 'in_review', filePaths: ['src/foo.ts'] },
+      { id: 'WL-2', stage: 'in_review', filePaths: ['src/bar.ts'] },
+    ];
+    const groups = assignItemGroups(items, 3);
+    expect(groups.get('WL-1')!.group).toBe(1);
+    expect(groups.get('WL-1')!.groupLabel).toBe('In Review');
+    expect(groups.get('WL-2')!.group).toBe(1);
+    expect(groups.get('WL-2')!.groupLabel).toBe('In Review');
+  });
+
+  it('groups stages in order: idea, intake_complete, in_review', () => {
+    const items = [
+      { id: 'WL-idea', stage: 'idea', filePaths: [] },
+      { id: 'WL-intake', stage: 'intake_complete', filePaths: [] },
+      { id: 'WL-review', stage: 'in_review', filePaths: [] },
+    ];
+    const groups = assignItemGroups(items, 3);
+    expect(groups.get('WL-idea')!.group).toBe(1);
+    expect(groups.get('WL-intake')!.group).toBe(2);
+    expect(groups.get('WL-review')!.group).toBe(3);
+  });
+
+  it('groups plan_complete items by file-path conflicts', () => {
+    const items = [
+      { id: 'WL-1', stage: 'plan_complete', filePaths: ['src/foo.ts'] },
+      { id: 'WL-2', stage: 'plan_complete', filePaths: ['src/bar.ts'] },  // no conflict
+      { id: 'WL-3', stage: 'plan_complete', filePaths: ['src/foo.ts'] },  // conflicts with WL-1
+    ];
+    const groups = assignItemGroups(items, 3);
+    // plan_complete groups come after stage groups, so start at group 4 (no stage groups in this test)
+    // Actually, with no idea/intake/in_review, plan_complete starts at group 1
+    expect(groups.get('WL-1')!.group).toBe(1);
+    expect(groups.get('WL-1')!.groupLabel).toContain('parallel-safe');
+    expect(groups.get('WL-2')!.group).toBe(1);  // no conflict with WL-1
+    expect(groups.get('WL-3')!.group).toBe(2);  // conflicts with WL-1
+  });
+
+  it('places plan_complete groups after stage-based groups', () => {
+    const items = [
+      { id: 'WL-idea', stage: 'idea', filePaths: [] },
+      { id: 'WL-plan', stage: 'plan_complete', filePaths: ['src/foo.ts'] },
+    ];
+    const groups = assignItemGroups(items, 3);
+    expect(groups.get('WL-idea')!.group).toBe(1);
+    expect(groups.get('WL-plan')!.group).toBe(2);  // after idea
+  });
+
+  it('places items with unknown stage into singleton "Other" groups', () => {
+    const items = [
+      { id: 'WL-1', stage: undefined, filePaths: [] },
+      { id: 'WL-2', stage: undefined, filePaths: ['src/bar.ts'] },
+    ];
+    const groups = assignItemGroups(items, 3);
+    expect(groups.get('WL-1')!.groupLabel).toBe('Other');
+    expect(groups.get('WL-2')!.groupLabel).toBe('Other');
+    // Each unknown item gets its own group
+    expect(groups.get('WL-1')!.group).not.toBe(groups.get('WL-2')!.group);
+  });
+
+  it('handles empty items array', () => {
+    const groups = assignItemGroups([], 3);
+    expect(groups.size).toBe(0);
+  });
+
+  it('handles single item in a stage group', () => {
+    const items = [
+      { id: 'WL-1', stage: 'idea', filePaths: [] },
+    ];
+    const groups = assignItemGroups(items, 3);
+    expect(groups.get('WL-1')!.group).toBe(1);
+    expect(groups.get('WL-1')!.groupLabel).toBe('Idea');
   });
 });

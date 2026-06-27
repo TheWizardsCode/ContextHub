@@ -93,6 +93,7 @@ export interface WorklogBrowseItem {
   tags?: string[];
   githubIssueNumber?: number;
   group?: number;
+  groupLabel?: string;
 }
 
 export function normalizeListPayload(payload: unknown): WorklogBrowseItem[] {
@@ -106,9 +107,12 @@ export function normalizeListPayload(payload: unknown): WorklogBrowseItem[] {
     ? (payload as any).results.map((entry: any) => {
         const item = entry?.workItem;
         if (!item) return null;
-        // Merge the `group` field from the result entry into the workItem
+        // Merge the `group` and `groupLabel` fields from the result entry into the workItem
         if (entry.group !== undefined) {
           item.group = entry.group;
+        }
+        if (entry.groupLabel !== undefined) {
+          item.groupLabel = entry.groupLabel;
         }
         return item;
       }).filter(Boolean)
@@ -132,6 +136,7 @@ export function normalizeListPayload(payload: unknown): WorklogBrowseItem[] {
       tags: Array.isArray(item?.tags) ? item.tags.map(String) : undefined,
       githubIssueNumber: item?.githubIssueNumber !== undefined ? Number(item.githubIssueNumber) : undefined,
       group: item?.group !== undefined ? Number(item.group) : undefined,
+      groupLabel: item?.groupLabel !== undefined ? String(item.groupLabel) : undefined,
     }))
     .filter(item => item.id.length > 0);
 }

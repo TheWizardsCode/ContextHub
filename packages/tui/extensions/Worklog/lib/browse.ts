@@ -630,7 +630,8 @@ export async function defaultChooseWorkItem(
             // or when the group changes between consecutive items.
             if (item.id !== '..' && item.group !== undefined) {
               if (lastDisplayedGroup === undefined || item.group !== lastDisplayedGroup) {
-                displayRows.push(theme.fg('dim', theme.bold(`── Group ${item.group} ──`)));
+                const label = item.groupLabel ?? `Group ${item.group}`;
+                displayRows.push(theme.fg('dim', theme.bold(`── ${label} ──`)));
               }
               lastDisplayedGroup = item.group;
             }
