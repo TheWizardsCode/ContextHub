@@ -49,7 +49,7 @@ export const isStatusStageCompatible = (
   const statusNorm = status;
   const stageNorm = stage;
   if ((statusNorm === 'in-progress' || statusNorm === 'in_progress') &&
-      (stageNorm === 'in_review' || stageNorm === 'in-review' || stageNorm === 'idea' || stageNorm === 'in_progress' || stageNorm === 'in-progress')) {
+      (stageNorm === 'in_review' || stageNorm === 'in-review' || stageNorm === 'idea' || stageNorm === 'in_progress' || stageNorm === 'in-progress' || stageNorm === 'intake_complete' || stageNorm === 'plan_complete')) {
     return true;
   }
   const allowedStages = getAllowedStagesForStatus(status, rules);
