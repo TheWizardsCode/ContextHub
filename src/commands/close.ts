@@ -296,11 +296,25 @@ export default function register(ctx: PluginContext): void {
           }
           results.push({ id, success: true });
 
-          // Warning: parent has orphaned children
+          // Warning: parent has orphaned children — determine reason
           const children = db.getChildren(id);
           if (children && children.length > 0) {
             if (!isJsonMode) {
-              const warningMsg = 'Warning: ' + id + ' has ' + children.length + ' open children that will not be closed. Use `wl close --force ' + id + '` to close them unconditionally.';
+              // Determine why children are not being closed, matching the
+              // order of conditions in shouldCloseRecursively() so only the
+              // first blocking reason is reported.
+              let reason: string;
+              if (item.stage !== 'in_review') {
+                reason = "the parent is not in the 'in_review' stage";
+              } else {
+                const auditResult = db.getAuditResult(item.id);
+                if (!auditResult) {
+                  reason = 'the parent has no audit result';
+                } else {
+                  reason = 'the audit result is not ready to close';
+                }
+              }
+              const warningMsg = 'Warning: ' + id + ' has ' + children.length + ' open children that will not be closed because ' + reason + '. Use `wl close --force ' + id + '` to close them unconditionally.';
               console.error(warningMsg);
             }
           }

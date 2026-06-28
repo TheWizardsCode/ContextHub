@@ -320,11 +320,14 @@ are closed deepest-first so that leaf items are completed before their parents.
 - For items that do not meet the recursive condition (not `in_review`, no audit, or
   `readyToClose` is `false`), only the specified item is closed (current behaviour).
   **A warning is printed on stderr** when the item has children, alerting the user
-  that those children will be left behind:
+  that those children will be left behind and explaining why:
   ```
-  Warning: WL-PARENT has 3 open children that will not be closed.
-  Use `wl close --force WL-PARENT` to close them unconditionally.
+  Warning: WL-PARENT has 3 open children that will not be closed because the parent is not in the 'in_review' stage. Use `wl close --force WL-PARENT` to close them unconditionally.
   ```
+  The reason reflects the first blocking condition encountered (in priority order):
+  - "the parent is not in the 'in_review' stage"
+  - "the parent has no audit result"
+  - "the audit result is not ready to close"
 - The `--force` flag unconditionally closes all descendants and then the parent,
   bypassing the audit/stage checks. For items without children, `--force` behaves
   identically to a standard close.

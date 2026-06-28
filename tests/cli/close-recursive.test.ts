@@ -704,6 +704,67 @@ describe('close command recursive close', () => {
     expect(result.results[0].childrenClosed).toBe(3);
   });
 
+  // ── Warning reason variants (enriched orphan message) ──────────────
+
+  it('warning includes reason: parent is not in_review stage', async () => {
+    const { parentId, childIds } = await createParentWithChildren(2, false);
+
+    // Close parent (not in_review -> non-recursive)
+    const { stderr } = await runRaw(`close ${parentId} -r "done"`);
+
+    // Warning should include the specific reason about stage
+    expect(stderr).toContain(`Warning: ${parentId} has ${childIds.length} open children`);
+    expect(stderr).toContain("because the parent is not in the 'in_review' stage");
+    expect(stderr).toContain('Use `wl close --force');
+  });
+
+  it('warning includes reason: parent has no audit result', async () => {
+    const { parentId, childIds } = await createParentWithChildren(2, true);
+
+    // Parent is in_review but has no audit result
+    const { stderr } = await runRaw(`close ${parentId} -r "done"`);
+
+    // Warning should include the specific reason about audit
+    expect(stderr).toContain(`Warning: ${parentId} has ${childIds.length} open children`);
+    expect(stderr).toContain('because the parent has no audit result');
+    expect(stderr).toContain('Use `wl close --force');
+  });
+
+  it('warning includes reason: audit result is not ready to close', async () => {
+    const { parentId, childIds } = await createParentWithChildren(2, true);
+
+    // Set audit result with readyToClose=false
+    await runJson(`update ${parentId} --audit-text "Ready to close: No\nNot ready yet"`);
+
+    const { stderr } = await runRaw(`close ${parentId} -r "done"`);
+
+    // Warning should include the specific reason about readyToClose
+    expect(stderr).toContain(`Warning: ${parentId} has ${childIds.length} open children`);
+    expect(stderr).toContain('because the audit result is not ready to close');
+    expect(stderr).toContain('Use `wl close --force');
+  });
+
+  it('existing warning test still passes with enriched message', async () => {
+    const { parentId, childIds } = await createParentWithChildren(2, false);
+
+    const { stdout, stderr } = await runRaw(`close ${parentId} -r "done"`);
+
+    // Parent should be closed
+    const parentShown = await runJson(`show ${parentId}`);
+    expect(parentShown.workItem.status).toBe('completed');
+
+    // Children should NOT be closed
+    for (const childId of childIds) {
+      const childShown = await runJson(`show ${childId}`);
+      expect(childShown.workItem.status).not.toBe('completed');
+    }
+
+    expect(stdout).toContain(`Closed ${parentId}`);
+    // toContain still matches because the enriched message contains the same base text
+    expect(stderr).toContain(`Warning: ${parentId} has ${childIds.length} open children`);
+    expect(stderr).toContain('Use `wl close --force');
+  });
+
   it('JSON mode: human-readable warnings suppressed from stderr', async () => {
     const { parentId, childIds } = await createParentWithChildren(2, false);
 
