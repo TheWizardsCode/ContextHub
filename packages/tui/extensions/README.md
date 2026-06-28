@@ -191,11 +191,22 @@ auto-injection pipeline:
 
 1. **ID Detection**: The user's prompt text is scanned for work item ID
    patterns (e.g., `WL-0MQL0T5TR0060AEH`). All unique IDs are collected.
-2. **ID Lookup**: Explicitly referenced IDs are fetched via `wl show` to
-   retrieve their title, status, priority, and stage.
-3. **Context Search**: If the prompt contains meaningful text beyond IDs,
-   a `wl search` is performed to find related items by keyword matching
-   (up to 5 results).
+
+2. **ID-Based Scanning** (when IDs are detected in the prompt):
+   - The referenced work item is fetched via `wl show`.
+   - Its **description** is scanned for embedded work item IDs.
+   - Its **comments** are fetched via `wl comment list` and scanned for IDs.
+   - Its **children** are fetched via `wl list --parent` and included directly.
+   - Each discovered related work item is fetched via `wl show` and added to
+     the result set, deduplicated against already-known IDs.
+   - The originally referenced ID is excluded from the related-items list.
+
+3. **Keyword Fallback** (only when NO work item ID is detected in the prompt):
+   A `wl search` is performed using the prompt keywords to find related
+   items (up to 5 results). This preserves backward compatibility for
+   prompts like "working on implementation task" that don't reference a
+   specific work item.
+
 4. **Formatting**: Found items are formatted as markdown context:
    - **Full-detail mode** (≤3 items): Shows ID, title, and inline tags
      for priority, status, and stage.
@@ -235,10 +246,14 @@ handler returns without performing any search or injection.
 ### Graceful Degradation
 
 - Missing or invalid work item IDs are silently skipped (no errors surfaced).
-- `wl search` failures are silently caught — the handler degrades gracefully
-  to only show explicitly referenced IDs.
-- When the prompt contains only IDs (no searchable text), only ID lookup
-  is performed.
+- Comment listing or child fetching failures are silently caught — the
+  handler degrades gracefully to still return the explicitly referenced IDs
+  and any successfully scanned sources.
+- `wl search` keyword fallback failures are silently caught — the handler
+  returns only the explicitly referenced and discovered related IDs.
+- When the prompt contains only IDs (no searchable text), ID-based scanning
+  still runs — description, comments, and children are scanned for related
+  work items.
 - When no related items are found, the system prompt is left unmodified.
 - In non-TUI modes (print, JSON, RPC), the status bar indicator is a no-op
   with no errors.
