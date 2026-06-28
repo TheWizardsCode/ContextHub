@@ -15,6 +15,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-c
 import type { ShortcutRegistry } from './shortcut-config.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { registerActivityIndicator, showActivity, clearActivity } from './activity-indicator.js';
+import { worklogConfig } from './config.js';
 import { reloadSettings, currentSettings, STAGE_MAP, VALID_STAGES, updateSettings, openSettingsOverlay } from './lib/settings.js';
 import { runWl, defaultListWorkItems, defaultListWorkItemsWithStage, createDefaultListWorkItems, createListWorkItemsWithStage, createDefaultListWorkItemsDb, createListWorkItemsWithStageDb, fetchTotalActionableCountDb } from './lib/tools.js';
 import { registerAutoInject } from './lib/auto-inject.js';
@@ -86,6 +87,15 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     registerActivityIndicator(pi, () => currentSettings.showActivityIndicator);
     registerAutoInject(pi);
     INSTALL_GUARDRAILS(pi, { enabled: currentSettings.guardrailsEnabled });
+
+    // Subscribe to config changes for hot-reload notifications
+    // When settings change via /wl settings or file edit, all onChange
+    // subscribers are notified immediately without requiring /reload.
+    worklogConfig.onChange(() => {
+      // currentSettings is already updated; components that read it
+      // dynamically (e.g., activity indicator getter) pick up changes.
+      // Future: re-install guardrails when guardrailsEnabled changes.
+    });
 
     pi.registerCommand('wl', {
       description: `Browse next ${currentSettings.browseItemCount} work items, optionally filtered by stage and settings`,

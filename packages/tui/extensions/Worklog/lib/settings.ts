@@ -5,33 +5,42 @@
  * mappings, and the settings overlay UI component.
  */
 
-import { loadSettings, persistSettings, type Settings } from '../settings-config.js';
+import { type Settings } from '../settings-config.js';
+import { worklogConfig } from '../config.js';
 
 // ── Settings state ─────────────────────────────────────────────────────
 
 /**
  * Current settings for the extension. Initialised from Pi's canonical
  * settings files on module load and updated by the /wl settings command.
+ *
+ * Uses the shared WorklogConfig singleton for hot-reload support.
+ * This is a live binding; it is reassigned on every update/reload so that
+ * importing modules see the latest values.
  */
-export let currentSettings: Settings = loadSettings();
+export let currentSettings: Settings = worklogConfig.get();
 
 /**
  * Update the current settings, persist to .pi/settings.json under the
  * context-hub namespace, and return the new settings object.
+ *
+ * Changes propagate immediately to all onChange subscribers via the
+ * WorklogConfig singleton, without requiring /reload.
  */
 export function updateSettings(partial: Partial<Settings>): Settings {
-  currentSettings = { ...currentSettings, ...partial };
-  // Persist to .pi/settings.json under context-hub namespace
-  persistSettings(partial);
+  worklogConfig.update(partial);
+  currentSettings = worklogConfig.get();
   return currentSettings;
 }
 
 /**
- * Reload settings from Pi settings files. Delegates to loadSettings
- * and updates the module-level currentSettings.
+ * Reload settings from Pi settings files. Delegates to WorklogConfig.load()
+ * which refreshes from disk and notifies onChange subscribers if values
+ * actually changed.
  */
 export function reloadSettings(): void {
-  currentSettings = loadSettings();
+  worklogConfig.load();
+  currentSettings = worklogConfig.get();
 }
 
 // ── Stage mapping ─────────────────────────────────────────────────────

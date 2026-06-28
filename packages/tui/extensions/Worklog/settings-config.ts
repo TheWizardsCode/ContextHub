@@ -49,11 +49,19 @@ export interface Settings {
    * Set to 0 to disable TUI auto-sync entirely. Range: 0–300. Default: 10.
    */
   autoSyncIntervalSeconds: number;
+  /**
+   * Config format version. Used for migration support when config structure
+   * changes between releases. Default: 1 (current version).
+   */
+  version?: number;
 }
 
 /**
  * Default settings used when settings files are missing or values are not set.
  */
+/** Current config format version. Increment when backward-incompatible changes are made. */
+export const CONFIG_VERSION = 1;
+
 export const DEFAULT_SETTINGS: Settings = {
   browseItemCount: 5,
   showIcons: true,
@@ -62,6 +70,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autoInjectEnabled: true,
   guardrailsEnabled: true,
   autoSyncIntervalSeconds: 10,
+  version: CONFIG_VERSION,
 };
 
 /** Namespace key used in Pi settings files for Worklog extension settings. */
@@ -73,7 +82,7 @@ const SETTINGS_NAMESPACE = 'context-hub';
  * Returns the clamped number if valid, or `defaultValue` if the input is
  * not a valid finite number (including strings like "abc", null, undefined).
  */
-function validateNumber(
+export function validateNumber(
   value: unknown,
   defaultValue: number,
   min: number,
@@ -97,7 +106,7 @@ function validateNumber(
  * Accepts actual `true`/`false`, or the strings `"true"`/`"false"`.
  * Returns `defaultValue` for any other value.
  */
-function validateBoolean(value: unknown, defaultValue: boolean): boolean {
+export function validateBoolean(value: unknown, defaultValue: boolean): boolean {
   if (value === true || value === false) return value;
   if (value === 'true') return true;
   if (value === 'false') return false;
