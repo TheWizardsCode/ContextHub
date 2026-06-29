@@ -90,7 +90,9 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     INSTALL_GUARDRAILS(pi, { enabled: currentSettings.guardrailsEnabled });
 
     // ── Skill path discovery tool ─────────────────────────────────
-    pi.registerTool(registerSkillPathTool());
+    if (typeof pi.registerTool === 'function') {
+      pi.registerTool(registerSkillPathTool());
+    }
 
     // Subscribe to config changes for hot-reload notifications
     // When settings change via /wl settings or file edit, all onChange
