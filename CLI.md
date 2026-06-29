@@ -483,7 +483,7 @@ Options:
 `--stage <stage>` — Filter by stage: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` (optional).
 `--search <term>` (optional)
 `-n, --number <n>` — Number of items to return (optional; default: `1`).
-`-g, --groups <n>` — Number of parallel-safe groups to identify (optional; default: `3`). Only meaningful when `-n > 1`. Groups items by file-path conflicts extracted from their descriptions, placing items that affect different files in the same group and conflicting items in separate groups. Items without structured file paths are placed in singleton "conflict-unknown" groups. See "Parallel-safe grouping" below.
+`-g, --groups <n>` — Number of parallel-safe groups to identify (optional; default: `3`). Only meaningful when `-n > 1`. Groups items by stage and file-path conflicts extracted from their descriptions, placing items that affect different files in the same group and conflicting items in separate groups. Items with unknown/other stages are grouped together in a single "Other" group. See "Parallel-safe grouping" below.
 `--include-blocked` — Include dependency-blocked items (excluded by default).
 `--no-re-sort` — Skip automatic re-sort before selection, preserving current `sort_index` order (optional).
 `--re-sort-sync` — Force a synchronous (blocking) re-sort when automatic re-sort is triggered. By default automatic re-sorts are run asynchronously to avoid blocking interactive commands.
@@ -521,11 +521,11 @@ The grouping algorithm uses a greedy first-fit strategy:
 
 1. Extract file paths from each item's description using a "**Key Files:**" section convention.
 2. Assign each item to the first group containing no item that touches the same files.
-3. Items without structured file paths are placed in singleton "conflict-unknown" groups.
+3. Items with unknown/other stages are placed together in a single "Other" group (no file-overlap splitting).
 
 In JSON output (`--json` with `-n > 1`), each result entry includes a `group` field (integer, 1-indexed) indicating the group assignment.
 
-In human-readable output, group headings (e.g., `── Group 1 (parallel-safe) ──`) are displayed between groups.
+In human-readable output, group headings (e.g., `── Other ──`, `── Plan Complete Group 1 ──`, `── In Review ──`) are displayed between groups.
 
 The Pi TUI selection list renders group separator lines between items in different groups, helping you quickly identify items you can work on in parallel.
 
