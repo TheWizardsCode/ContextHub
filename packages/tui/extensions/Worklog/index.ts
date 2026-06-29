@@ -20,6 +20,7 @@ import { reloadSettings, currentSettings, STAGE_MAP, VALID_STAGES, updateSetting
 import { runWl, defaultListWorkItems, defaultListWorkItemsWithStage, createDefaultListWorkItems, createListWorkItemsWithStage, createDefaultListWorkItemsDb, createListWorkItemsWithStageDb, fetchTotalActionableCountDb } from './lib/tools.js';
 import { registerAutoInject } from './lib/auto-inject.js';
 import { INSTALL_GUARDRAILS } from './lib/guardrails.js';
+import { registerSkillPathTool } from './lib/skill-path.js';
 import {
   type WorklogBrowseItem,
   type WorklogBrowseDependencies,
@@ -87,6 +88,9 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     registerActivityIndicator(pi, () => currentSettings.showActivityIndicator);
     registerAutoInject(pi);
     INSTALL_GUARDRAILS(pi, { enabled: currentSettings.guardrailsEnabled });
+
+    // ── Skill path discovery tool ─────────────────────────────────
+    pi.registerTool(registerSkillPathTool());
 
     // Subscribe to config changes for hot-reload notifications
     // When settings change via /wl settings or file edit, all onChange
