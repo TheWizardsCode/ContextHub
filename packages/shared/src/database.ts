@@ -6,7 +6,7 @@ import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { WorkItem, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult } from './types.js';
-import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices } from './persistent-store.js';
+import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions } from './persistent-store.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
 
 // ── Injectable service types ────────────────────────────────────────────
@@ -79,6 +79,9 @@ export interface WorklogDatabaseServices {
 
   /** Persistent store services (migration list, etc.) */
   persistentStoreServices?: PersistentStoreServices;
+
+  /** Optional cache configuration for SqlitePersistentStore (Phase 5) */
+  cacheOptions?: PersistentStoreCacheOptions;
 }
 
 // ── Pre-loaded cache types for wl next pipeline ─────────────────────────
@@ -160,7 +163,7 @@ export class WorklogDatabase {
     const defaultDbPath = path.join(path.dirname(this.jsonlPath), 'worklog.db');
     const actualDbPath = dbPath || defaultDbPath;
     
-    this.store = new SqlitePersistentStore(actualDbPath, !silent, this.services.persistentStoreServices);
+    this.store = new SqlitePersistentStore(actualDbPath, !silent, this.services.persistentStoreServices, this.services.cacheOptions);
     
     // Refresh from JSONL only if SQLite is empty (ephemeral JSONL pattern)
     // In the ephemeral pattern, SQLite is the sole runtime source of truth.

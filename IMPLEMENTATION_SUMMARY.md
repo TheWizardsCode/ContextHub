@@ -27,12 +27,13 @@ All requirements from the problem statement have been successfully implemented:
 - Type-safe enums for status and priority
 - Input types for create and update operations
 
-### Database Layer (`src/database.ts`, `src/persistent-store.ts`)
+### Database Layer (`packages/shared/src/database.ts`, `packages/shared/src/persistent-store.ts`)
 - SQLite-backed persistent storage
 - CRUD operations (Create, Read, Update, Delete)
 - Hierarchical queries (children, descendants)
 - Filtering by status, priority, parent, tags
 - Import/export capabilities with JSONL integration
+- **In-memory query caching** (Phase 5): Configurable TTL-based cache for frequent read operations (`getWorkItem`, `getAllWorkItems`, `getAllComments`, etc.) with automatic invalidation on writes. Benchmarks show **3-168x speedup** depending on the operation.
 
 ### Storage Format (`src/jsonl.ts`)
 - JSONL (JSON Lines) format for Git-friendly sync

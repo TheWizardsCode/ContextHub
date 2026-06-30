@@ -2697,4 +2697,84 @@ describe('WorklogDatabase', () => {
       expect(lines.length).toBeGreaterThan(0);
     });
   });
+
+  // ── Caching (Phase 5) ─────────────────────────────────────────────
+
+  describe('caching', () => {
+    it('getAll returns cached results and invalidates on write', () => {
+      expect(db.getAll()).toEqual([]);
+
+      const item = db.create({ title: 'Cache test item' });
+
+      const all = db.getAll();
+      expect(all.length).toBe(1);
+      expect(all[0].id).toBe(item.id);
+
+      db.create({ title: 'Second item' });
+      expect(db.getAll().length).toBe(2);
+    });
+
+    it('get returns correct item after create and update', () => {
+      const item = db.create({ title: 'Get cache test' });
+
+      expect(db.get(item.id)?.title).toBe('Get cache test');
+
+      db.update(item.id, { title: 'Updated title' });
+
+      expect(db.get(item.id)?.title).toBe('Updated title');
+    });
+
+    it('get returns deleted item status after delete', () => {
+      const item = db.create({ title: 'Delete from cache' });
+
+      expect(db.get(item.id)).not.toBeNull();
+
+      db.delete(item.id);
+
+      const deletedItem = db.get(item.id);
+      expect(deletedItem).not.toBeNull();
+      expect(deletedItem?.status).toBe('deleted');
+    });
+
+    it('comment creation invalidates comment caches', () => {
+      const item = db.create({ title: 'Comment cache test' });
+
+      expect(db.getCommentsForWorkItem(item.id)).toEqual([]);
+
+      db.createComment({
+        workItemId: item.id,
+        author: 'tester',
+        comment: 'A test comment',
+      });
+
+      const comments = db.getCommentsForWorkItem(item.id);
+      expect(comments.length).toBe(1);
+      expect(comments[0].comment).toBe('A test comment');
+    });
+
+    it('dependency edge creation invalidates edge caches', () => {
+      const item1 = db.create({ title: 'Dep source' });
+      const item2 = db.create({ title: 'Dep target' });
+
+      expect(db.listDependencyEdgesFrom(item1.id)).toEqual([]);
+      expect(db.listDependencyEdgesTo(item2.id)).toEqual([]);
+
+      db.addDependencyEdge(item1.id, item2.id);
+
+      expect(db.listDependencyEdgesFrom(item1.id).length).toBe(1);
+      expect(db.listDependencyEdgesTo(item2.id).length).toBe(1);
+    });
+
+    it('getChildCounts is correct after adding children', () => {
+      const parent = db.create({ title: 'Parent' });
+
+      const counts1 = db.getChildCounts();
+      expect(counts1.get(parent.id)).toBeUndefined();
+
+      db.create({ title: 'Child', parentId: parent.id });
+
+      const counts2 = db.getChildCounts();
+      expect(counts2.get(parent.id)).toBe(1);
+    });
+  });
 });

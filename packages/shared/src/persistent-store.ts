@@ -50,6 +50,38 @@ interface DbMetadata {
 
 const SCHEMA_VERSION = 8;
 
+// ── In-memory cache types (Phase 5) ────────────────────────────────
+
+/**
+ * A single entry in the in-memory query cache.
+ */
+interface CacheEntry {
+  value: unknown;
+  expiresAt: number;
+}
+
+/**
+ * Optional caching configuration for SqlitePersistentStore.
+ * When not provided, caching defaults are used.
+ */
+export interface PersistentStoreCacheOptions {
+  /**
+   * Enable/disable the in-memory query cache.
+   * Default: true (enabled).
+   */
+  enabled?: boolean;
+  /**
+   * Time-to-live for cached entries in milliseconds.
+   * Default: 5000 (5 seconds). Set to 0 to disable caching.
+   */
+  ttlMs?: number;
+  /**
+   * Maximum number of cache entries.
+   * Default: 500. Oldest entries are evicted when the limit is exceeded.
+   */
+  maxEntries?: number;
+}
+
 /**
  * Normalize a single value for use as a better-sqlite3 binding parameter.
  * better-sqlite3 only accepts: number, string, bigint, Buffer, or null.
@@ -113,10 +145,23 @@ export class SqlitePersistentStore {
   private _ftsAvailable: boolean = false;
   private _listPendingMigrations?: (dbPath: string) => MigrationInfo[];
 
-  constructor(dbPath: string, verbose: boolean = false, services?: PersistentStoreServices) {
+  // ── In-memory cache state (Phase 5) ──────────────────────────────────
+  private _cacheEnabled: boolean;
+  private _cacheTtlMs: number;
+  private _cacheMaxEntries: number;
+  private _cache = new Map<string, CacheEntry>();
+
+  constructor(dbPath: string, verbose: boolean = false, services?: PersistentStoreServices, cacheOptions?: PersistentStoreCacheOptions) {
     this._listPendingMigrations = services?.listPendingMigrations;
     this.dbPath = dbPath;
     this.verbose = verbose;
+
+    // Initialize cache settings (Phase 5)
+    const envCache = process.env.WL_CACHE_ENABLED !== '0';
+    this._cacheEnabled = cacheOptions?.enabled ?? envCache;
+    const envTtl = parseInt(process.env.WL_CACHE_TTL_MS ?? '', 10);
+    this._cacheTtlMs = cacheOptions?.ttlMs ?? (Number.isFinite(envTtl) ? envTtl : 5000);
+    this._cacheMaxEntries = cacheOptions?.maxEntries ?? 500;
     
     // Ensure directory exists
     const dir = path.dirname(dbPath);
@@ -489,28 +534,41 @@ export class SqlitePersistentStore {
     }
 
     stmt.run(...normalized);
+    this.invalidateWorkItemCaches();
+    this.cacheInvalidate(`workitem_${item.id}`);
   }
 
   /**
    * Get a work item by ID
    */
   getWorkItem(id: string): WorkItem | null {
+    const cacheKey = `workitem_${id}`;
+    const cached = this.cacheGet<WorkItem | null>(cacheKey);
+    if (cached !== undefined) return cached;
+
     const stmt = this.db.prepare('SELECT * FROM workitems WHERE id = ?');
     const row = stmt.get(id) as any;
     
     if (!row) {
+      this.cacheSet(cacheKey, null);
       return null;
     }
 
-    return this.rowToWorkItem(row);
+    const result = this.rowToWorkItem(row);
+    this.cacheSet(cacheKey, result);
+    return result;
   }
 
   /**
    * Count work items
    */
   countWorkItems(): number {
+    const cached = this.cacheGet<number>('countWorkItems');
+    if (cached !== undefined) return cached;
+
     const stmt = this.db.prepare('SELECT COUNT(*) as count FROM workitems');
     const row = stmt.get() as { count: number };
+    this.cacheSet('countWorkItems', row.count);
     return row.count;
   }
 
@@ -518,9 +576,14 @@ export class SqlitePersistentStore {
    * Get all work items
    */
   getAllWorkItems(): WorkItem[] {
+    const cached = this.cacheGet<WorkItem[]>('allWorkItems');
+    if (cached !== undefined) return cached;
+
     const stmt = this.db.prepare('SELECT * FROM workitems');
     const rows = stmt.all() as any[];
-    return rows.map(row => this.rowToWorkItem(row));
+    const result = rows.map(row => this.rowToWorkItem(row));
+    this.cacheSet('allWorkItems', result);
+    return result;
   }
 
   /**
@@ -740,7 +803,12 @@ export class SqlitePersistentStore {
       this.db.prepare('DELETE FROM comments WHERE workItemId = ?').run(id);
       return true;
     });
-    return deleteTransaction();
+    const result = deleteTransaction();
+    this.invalidateWorkItemCaches();
+    this.invalidateCommentCaches();
+    this.invalidateDependencyEdgeCaches();
+    this.cacheInvalidate(`workitem_${id}`);
+    return result;
   }
 
   /**
@@ -748,6 +816,9 @@ export class SqlitePersistentStore {
    */
   clearWorkItems(): void {
     this.db.prepare('DELETE FROM workitems').run();
+    this.invalidateWorkItemCaches();
+    this.invalidateCommentCaches();
+    this.invalidateDependencyEdgeCaches();
   }
 
   /**
@@ -779,6 +850,7 @@ export class SqlitePersistentStore {
 
     const normalized = normalizeSqliteBindings(values);
     stmt.run(...normalized);
+    this.invalidateCommentCaches();
   }
 
   /**
@@ -799,20 +871,31 @@ export class SqlitePersistentStore {
    * Get all comments
    */
   getAllComments(): Comment[] {
+    const cached = this.cacheGet<Comment[]>('allComments');
+    if (cached !== undefined) return cached;
+
     const stmt = this.db.prepare('SELECT * FROM comments');
     const rows = stmt.all() as any[];
-    return rows.map(row => this.rowToComment(row));
+    const result = rows.map(row => this.rowToComment(row));
+    this.cacheSet('allComments', result);
+    return result;
   }
 
   /**
    * Get comments for a work item
    */
   getCommentsForWorkItem(workItemId: string): Comment[] {
+    const cacheKey = `commentsForItem_${workItemId}`;
+    const cached = this.cacheGet<Comment[]>(cacheKey);
+    if (cached !== undefined) return cached;
+
     // Return comments newest-first (reverse chronological order) so clients
     // and CLI can display the most recent discussion first.
     const stmt = this.db.prepare('SELECT * FROM comments WHERE workItemId = ? ORDER BY createdAt DESC');
     const rows = stmt.all(workItemId) as any[];
-    return rows.map(row => this.rowToComment(row));
+    const result = rows.map(row => this.rowToComment(row));
+    this.cacheSet(cacheKey, result);
+    return result;
   }
 
   /**
@@ -821,6 +904,9 @@ export class SqlitePersistentStore {
   deleteComment(id: string): boolean {
     const stmt = this.db.prepare('DELETE FROM comments WHERE id = ?');
     const result = stmt.run(id);
+    if (result.changes > 0) {
+      this.invalidateCommentCaches();
+    }
     return result.changes > 0;
   }
 
@@ -829,6 +915,7 @@ export class SqlitePersistentStore {
    */
   clearComments(): void {
     this.db.prepare('DELETE FROM comments').run();
+    this.invalidateCommentCaches();
   }
 
   /**
@@ -836,6 +923,7 @@ export class SqlitePersistentStore {
    */
   clearDependencyEdges(): void {
     this.db.prepare('DELETE FROM dependency_edges').run();
+    this.invalidateDependencyEdgeCaches();
   }
 
   /**
@@ -873,6 +961,7 @@ export class SqlitePersistentStore {
 
     const normalized = normalizeSqliteBindings([edge.fromId, edge.toId, edge.createdAt]);
     stmt.run(...normalized);
+    this.invalidateDependencyEdgeCaches();
   }
 
   /**
@@ -881,6 +970,9 @@ export class SqlitePersistentStore {
   deleteDependencyEdge(fromId: string, toId: string): boolean {
     const stmt = this.db.prepare('DELETE FROM dependency_edges WHERE fromId = ? AND toId = ?');
     const result = stmt.run(fromId, toId);
+    if (result.changes > 0) {
+      this.invalidateDependencyEdgeCaches();
+    }
     return result.changes > 0;
   }
 
@@ -888,27 +980,44 @@ export class SqlitePersistentStore {
    * List all dependency edges
    */
   getAllDependencyEdges(): DependencyEdge[] {
+    const cached = this.cacheGet<DependencyEdge[]>('allDependencyEdges');
+    if (cached !== undefined) return cached;
+
     const stmt = this.db.prepare('SELECT * FROM dependency_edges');
     const rows = stmt.all() as any[];
-    return rows.map(row => this.rowToDependencyEdge(row));
+    const result = rows.map(row => this.rowToDependencyEdge(row));
+    this.cacheSet('allDependencyEdges', result);
+    return result;
   }
 
   /**
    * List outbound dependency edges (fromId depends on toId)
    */
   getDependencyEdgesFrom(fromId: string): DependencyEdge[] {
+    const cacheKey = `depEdgesFrom_${fromId}`;
+    const cached = this.cacheGet<DependencyEdge[]>(cacheKey);
+    if (cached !== undefined) return cached;
+
     const stmt = this.db.prepare('SELECT * FROM dependency_edges WHERE fromId = ?');
     const rows = stmt.all(fromId) as any[];
-    return rows.map(row => this.rowToDependencyEdge(row));
+    const result = rows.map(row => this.rowToDependencyEdge(row));
+    this.cacheSet(cacheKey, result);
+    return result;
   }
 
   /**
    * List inbound dependency edges (items that depend on toId)
    */
   getDependencyEdgesTo(toId: string): DependencyEdge[] {
+    const cacheKey = `depEdgesTo_${toId}`;
+    const cached = this.cacheGet<DependencyEdge[]>(cacheKey);
+    if (cached !== undefined) return cached;
+
     const stmt = this.db.prepare('SELECT * FROM dependency_edges WHERE toId = ?');
     const rows = stmt.all(toId) as any[];
-    return rows.map(row => this.rowToDependencyEdge(row));
+    const result = rows.map(row => this.rowToDependencyEdge(row));
+    this.cacheSet(cacheKey, result);
+    return result;
   }
 
   /**
@@ -917,6 +1026,9 @@ export class SqlitePersistentStore {
   deleteDependencyEdgesForItem(itemId: string): number {
     const stmt = this.db.prepare('DELETE FROM dependency_edges WHERE fromId = ? OR toId = ?');
     const result = stmt.run(itemId, itemId);
+    if (result.changes > 0) {
+      this.invalidateDependencyEdgeCaches();
+    }
     return result.changes;
   }
 
@@ -1497,8 +1609,94 @@ export class SqlitePersistentStore {
   /**
    * Close database connection
    */
+  // ── In-memory cache helpers (Phase 5) ────────────────────────────
+
+  /**
+   * Get a value from the in-memory cache.
+   * Returns undefined if the key is not cached or the entry has expired.
+   */
+  private cacheGet<T>(key: string): T | undefined {
+    if (!this._cacheEnabled || this._cacheTtlMs <= 0) return undefined;
+    const entry = this._cache.get(key);
+    if (!entry) return undefined;
+    if (Date.now() > entry.expiresAt) {
+      this._cache.delete(key);
+      return undefined;
+    }
+    return entry.value as T;
+  }
+
+  /**
+   * Set a value in the in-memory cache with the configured TTL.
+   * Evicts the oldest entry if the cache exceeds maxEntries.
+   */
+  private cacheSet(key: string, value: unknown): void {
+    if (!this._cacheEnabled || this._cacheTtlMs <= 0) return;
+    if (this._cache.size >= this._cacheMaxEntries) {
+      // Evict oldest entry (first inserted)
+      const oldestKey = this._cache.keys().next().value;
+      if (oldestKey !== undefined) this._cache.delete(oldestKey);
+    }
+    this._cache.set(key, { value, expiresAt: Date.now() + this._cacheTtlMs });
+  }
+
+  /**
+   * Invalidate a specific cache key.
+   */
+  private cacheInvalidate(key: string): void {
+    this._cache.delete(key);
+  }
+
+  /**
+   * Invalidate all cached entries that match a prefix.
+   */
+  private cacheInvalidatePrefix(prefix: string): void {
+    for (const key of this._cache.keys()) {
+      if (key.startsWith(prefix)) {
+        this._cache.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Clear the entire in-memory cache.
+   */
+  private cacheClear(): void {
+    this._cache.clear();
+  }
+
+  /**
+   * Invalidate all caches that are affected by work item mutations.
+   */
+  private invalidateWorkItemCaches(): void {
+    this.cacheInvalidatePrefix('workitem_');
+    this.cacheInvalidate('allWorkItems');
+    this.cacheInvalidate('countWorkItems');
+    this.cacheInvalidate('allChildren');
+    this.cacheInvalidate('allComments');
+    this.cacheInvalidate('allDependencyEdges');
+  }
+
+  /**
+   * Invalidate all caches that are affected by comment mutations.
+   */
+  private invalidateCommentCaches(): void {
+    this.cacheInvalidatePrefix('commentsForItem_');
+    this.cacheInvalidate('allComments');
+  }
+
+  /**
+   * Invalidate all caches that are affected by dependency edge mutations.
+   */
+  private invalidateDependencyEdgeCaches(): void {
+    this.cacheInvalidatePrefix('depEdgesFrom_');
+    this.cacheInvalidatePrefix('depEdgesTo_');
+    this.cacheInvalidate('allDependencyEdges');
+  }
+
   close(): void {
     this.db.close();
+    this.cacheClear();
   }
 
   /**
