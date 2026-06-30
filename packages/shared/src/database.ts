@@ -2284,6 +2284,13 @@ export class WorklogDatabase {
    * is supplied it also calls `clearDependencyEdges()` first. Any items or
    * edges NOT included in the arguments will be permanently deleted.
    *
+   * **Atomic**: The clear-and-re-insert cycle is wrapped in a SQLite
+   * transaction so that concurrent readers always see either the old
+   * complete state or the new complete state — never an empty or
+   * partially-populated database. This prevents the race condition where
+   * another Pi TUI instance's selection list appears empty or stale during
+   * a sync operation.
+   *
    * Only call this method with a **complete** item set (e.g. the result of
    * merging local + remote data). For partial / incremental updates — such as
    * syncing a subset of items back from GitHub — use {@link upsertItems}
@@ -2311,31 +2318,37 @@ export class WorklogDatabase {
       existingItems.set(existing.id, existing);
     }
 
-    this.store.clearWorkItems();
-    for (const item of items) {
-      const existing = existingItems.get(item.id);
-      if (existing && !this.hasWorkItemChanged(existing, item)) {
-        // No semantic change — preserve the existing updatedAt
-        this.store.saveWorkItem({ ...item, updatedAt: existing.updatedAt });
-      } else if (existing) {
-        // Semantic change detected — bump the timestamp
-        this.store.saveWorkItem({ ...item, updatedAt: new Date().toISOString() });
-      } else {
-        // New item — use the incoming updatedAt as-is
-        this.store.saveWorkItem(item);
-      }
-    }
-    if (dependencyEdges) {
-      this.store.clearDependencyEdges();
-      for (const edge of dependencyEdges) {
-        if (this.store.getWorkItem(edge.fromId) && this.store.getWorkItem(edge.toId)) {
-          this.store.saveDependencyEdge(edge);
+    // Wrap the clear-and-re-insert in a transaction so that concurrent
+    // readers never see an empty or partially-populated database during sync.
+    // This matches the pattern used by SqlitePersistentStore.importData().
+    this.store.transaction(() => {
+      this.store.clearWorkItems();
+      for (const item of items) {
+        const existing = existingItems.get(item.id);
+        if (existing && !this.hasWorkItemChanged(existing, item)) {
+          // No semantic change — preserve the existing updatedAt
+          this.store.saveWorkItem({ ...item, updatedAt: existing.updatedAt });
+        } else if (existing) {
+          // Semantic change detected — bump the timestamp
+          this.store.saveWorkItem({ ...item, updatedAt: new Date().toISOString() });
+        } else {
+          // New item — use the incoming updatedAt as-is
+          this.store.saveWorkItem(item);
         }
       }
-    }
-    if (auditResults) {
-      this.store.saveAuditResults(auditResults);
-    }
+      if (dependencyEdges) {
+        this.store.clearDependencyEdges();
+        for (const edge of dependencyEdges) {
+          if (this.store.getWorkItem(edge.fromId) && this.store.getWorkItem(edge.toId)) {
+            this.store.saveDependencyEdge(edge);
+          }
+        }
+      }
+      if (auditResults) {
+        this.store.saveAuditResults(auditResults);
+      }
+    });
+
     this.triggerAutoSync();
   }
 

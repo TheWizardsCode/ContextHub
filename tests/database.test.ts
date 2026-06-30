@@ -2,7 +2,7 @@
  * Tests for WorklogDatabase
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import { WorklogDatabase } from '../src/database.js';
@@ -1263,6 +1263,193 @@ describe('WorklogDatabase', () => {
       // The description edit is also preserved (it was the only field
       // where remote intentionally made a change)
       expect(afterImport.description).toBe('Edited by B');
+    });
+  });
+
+  describe('transactional import', () => {
+    /**
+     * Helper: create an item with a known past timestamp.
+     * The past time is used so that if import() overwrites updatedAt
+     * with the current time, we can detect the change.
+     */
+    function makeItem(
+      id: string,
+      title: string,
+      overrides: Partial<import('../src/types.js').WorkItem> = {}
+    ): import('../src/types.js').WorkItem {
+      const pastTimestamp = '2025-01-01T00:00:00.000Z';
+      return {
+        id,
+        title,
+        description: '',
+        status: 'open' as const,
+        priority: 'medium' as const,
+        sortIndex: 0,
+        parentId: null,
+        createdAt: pastTimestamp,
+        updatedAt: pastTimestamp,
+        tags: [],
+        assignee: '',
+        stage: '',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+        needsProducerReview: false,
+        ...overrides,
+      };
+    }
+
+    it('should perform import atomically, storing all items within the same transaction', () => {
+      const itemA = makeItem('TEST-TXN-001', 'Item A');
+      const itemB = makeItem('TEST-TXN-002', 'Item B');
+
+      db.import([itemA, itemB]);
+
+      const allItems = db.getAll();
+      expect(allItems).toHaveLength(2);
+      expect(allItems.find(i => i.id === 'TEST-TXN-001')!.title).toBe('Item A');
+      expect(allItems.find(i => i.id === 'TEST-TXN-002')!.title).toBe('Item B');
+    });
+
+    it('should atomically replace items and dependency edges during import', () => {
+      const dbLocal = new WorklogDatabase('TEST', createTempDbPath(tempDir), createTempJsonlPath(tempDir), true, true);
+
+      const parent = makeItem('TEST-TXN-011', 'Parent');
+      const child = makeItem('TEST-TXN-012', 'Child');
+      dbLocal.import([parent, child]);
+
+      // Add a dependency edge outside import
+      dbLocal.addDependencyEdge('TEST-TXN-012', 'TEST-TXN-011');
+      expect(dbLocal.listDependencyEdgesTo('TEST-TXN-011')).toHaveLength(1);
+
+      // Re-import with explicit dependency edges
+      const edge: import('../src/types.js').DependencyEdge = {
+        fromId: 'TEST-TXN-012',
+        toId: 'TEST-TXN-011',
+        createdAt: '2025-01-01T00:00:00.000Z',
+      };
+      dbLocal.import([parent, child], [edge]);
+
+      const edges = dbLocal.listDependencyEdgesTo('TEST-TXN-011');
+      expect(edges).toHaveLength(1);
+      expect(edges[0].fromId).toBe('TEST-TXN-012');
+      expect(edges[0].toId).toBe('TEST-TXN-011');
+
+      dbLocal.close();
+    });
+
+    it('should atomically replace items and audit results during import', () => {
+      const dbLocal = new WorklogDatabase('TEST', createTempDbPath(tempDir), createTempJsonlPath(tempDir), true, true);
+
+      const item = makeItem('TEST-TXN-021', 'Audited item', {
+        description: 'Needs audit',
+        status: 'completed' as const,
+        stage: 'done',
+      });
+      dbLocal.import([item]);
+
+      // Import with audit results
+      const audit: import('../src/types.js').AuditResult = {
+        workItemId: 'TEST-TXN-021',
+        readyToClose: true,
+        auditedAt: '2025-01-01T00:00:00.000Z',
+        summary: 'All criteria met',
+        rawOutput: null,
+        author: 'tester',
+      };
+      dbLocal.import([item], undefined, [audit]);
+
+      // Verify audit result is stored
+      const audits = dbLocal.getAllAuditResults();
+      expect(audits).toHaveLength(1);
+      expect(audits[0].workItemId).toBe('TEST-TXN-021');
+      expect(audits[0].readyToClose).toBe(true);
+      expect(audits[0].author).toBe('tester');
+
+      dbLocal.close();
+    });
+
+    it('should import items, dependency edges, and audit results together atomically', () => {
+      const dbLocal = new WorklogDatabase('TEST', createTempDbPath(tempDir), createTempJsonlPath(tempDir), true, true);
+
+      const item1 = makeItem('TEST-TXN-031', 'First');
+      const item2 = makeItem('TEST-TXN-032', 'Second');
+      const edge: import('../src/types.js').DependencyEdge = {
+        fromId: 'TEST-TXN-032',
+        toId: 'TEST-TXN-031',
+        createdAt: '2025-01-01T00:00:00.000Z',
+      };
+      const audit: import('../src/types.js').AuditResult = {
+        workItemId: 'TEST-TXN-032',
+        readyToClose: false,
+        auditedAt: '2025-01-01T00:00:00.000Z',
+        summary: 'Pending review',
+        rawOutput: null,
+        author: 'reviewer',
+      };
+
+      dbLocal.import([item1, item2], [edge], [audit]);
+
+      // All three data types should be stored
+      const items = dbLocal.getAll();
+      expect(items).toHaveLength(2);
+
+      const edges = dbLocal.listDependencyEdgesTo('TEST-TXN-031');
+      expect(edges).toHaveLength(1);
+
+      const audits = dbLocal.getAllAuditResults();
+      expect(audits).toHaveLength(1);
+
+      dbLocal.close();
+    });
+
+    it('should trigger autoSync once after transactional import', () => {
+      // autoSync is called after the transaction completes
+      const spy = vi.spyOn(db as any, 'triggerAutoSync');
+
+      const item = makeItem('TEST-TXN-041', 'Sync test');
+      db.import([item]);
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      spy.mockRestore();
+    });
+
+    it('should handle empty items array', () => {
+      db.import([]);
+      const allItems = db.getAll();
+      expect(allItems).toHaveLength(0);
+    });
+
+    it('should preserve updatedAt for unchanged items after transactional import', () => {
+      const item = makeItem('TEST-TXN-051', 'Stable item');
+      db.import([item]);
+
+      const original = db.get('TEST-TXN-051')!;
+      expect(original.updatedAt).toBe('2025-01-01T00:00:00.000Z');
+
+      // Re-import identical item
+      db.import([item]);
+
+      const after = db.get('TEST-TXN-051')!;
+      expect(after.updatedAt).toBe('2025-01-01T00:00:00.000Z');
+    });
+
+    it('should update updatedAt for changed items after transactional import', () => {
+      const item = makeItem('TEST-TXN-061', 'Original title');
+      db.import([item]);
+
+      const changed = makeItem('TEST-TXN-061', 'Updated title');
+      db.import([changed]);
+
+      const after = db.get('TEST-TXN-061')!;
+      expect(after.title).toBe('Updated title');
+      // Timestamp should have been updated
+      expect(new Date(after.updatedAt).getTime()).toBeGreaterThan(
+        new Date('2025-01-01T00:00:00.000Z').getTime()
+      );
     });
   });
 

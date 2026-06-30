@@ -949,6 +949,22 @@ export class SqlitePersistentStore {
   }
 
   /**
+   * Execute a function inside a database transaction.
+   *
+   * All write operations inside `fn` are committed atomically. If `fn`
+   * throws, all changes are rolled back.  Nested transactions are
+   * supported via SQLite savepoints (better-sqlite3 handles this
+   * automatically when `this.db.transaction()` is called inside another
+   * transaction).
+   *
+   * This is the same underlying transaction API used by {@link importData}.
+   */
+  transaction<T>(fn: () => T): T {
+    const tx = this.db.transaction(fn);
+    return tx();
+  }
+
+  /**
    * Create or update a dependency edge
    */
   saveDependencyEdge(edge: DependencyEdge): void {
