@@ -7,7 +7,8 @@ import { humanFormatWorkItem, resolveFormat, formatTitleAndId } from './helpers.
 import { theme } from '../theme.js';
 import { normalizeActionArgs } from './cli-utils.js';
 import { loadStatusStageRules } from '../status-stage-rules.js';
-import { extractFilePaths, assignItemGroups, type GroupAssignment } from './grouping.js';
+import { extractFilePaths, type GroupAssignment } from './helpers.js';
+import { assignItemGroups } from './grouping.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;

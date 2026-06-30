@@ -2,9 +2,9 @@
  * Grouping utility for `wl next --groups/-g`.
  *
  * Provides:
- * - File path extraction from work item descriptions (targeting a "Key Files:" section)
  * - Greedy first-fit grouping algorithm for partitioning items into parallel-safe groups
  *
+ * File-path extraction is provided by `extractFilePaths` in `helpers.ts`.
  * The file-path convention targets a structured "**Key Files:**" section in the work item
  * description, where paths are listed as bullet points with or without backticks:
  *
@@ -13,118 +13,13 @@
  * - `src/commands/next.ts`
  * - `packages/tui/extensions/lib/browse.ts`
  * ```
+ *
+ * See docs/FILE_PATH_CONVENTION.md for the full specification.
  */
 
-// ── File path extraction ──────────────────────────────────────────────
-
-/**
- * Extract file paths from a work item description.
- *
- * Looks for a "Key Files:" section (case-insensitive, with or without bold markers)
- * and extracts path-like strings from subsequent bullet list items.
- *
- * A path is considered valid if it:
- * - Contains at least one `/` (indicating a file in a directory)
- * - Ends with a file extension after a `.` (e.g., `.ts`, `.md`, `.json`)
- *
- * Items can be listed with or without backtick formatting.
- *
- * @param description - The work item description text
- * @returns Array of extracted file paths
- */
-export function extractFilePaths(description: string): string[] {
-  if (!description || description.trim().length === 0) {
-    return [];
-  }
-
-  const paths: string[] = [];
-
-  // Match the "Key Files:" header (case-insensitive, optional bold markers)
-  // Capture everything after the header line until the next section header or end of string
-  const keyFilesRegex = /^#{0,3}\s*\*{0,2}key files:\*{0,2}\s*$/im;
-  const match = description.match(keyFilesRegex);
-
-  if (!match) {
-    return [];
-  }
-
-  const headerIndex = match.index!;
-  const afterHeader = description.slice(headerIndex + match[0].length);
-
-  // Split into lines and process each line until we hit another section header
-  // or a bold section header (e.g., **Some Section:**)
-  const lines = afterHeader.split('\n');
-  for (const line of lines) {
-    const trimmed = line.trim();
-
-    // Stop if we hit another Markdown heading
-    if (/^#{1,3}\s/.test(trimmed)) {
-      break;
-    }
-
-    // Stop if we hit another bold section header (e.g., **Some Section:**)
-    if (/^\*{1,2}\w.*:\*{0,2}\s*$/.test(trimmed) && !/^[-*]\s/.test(trimmed)) {
-      break;
-    }
-
-    // Stop if we hit another "Key Files:" header (case-insensitive)
-    if (/\*{0,2}key files:\*{0,2}\s*$/i.test(trimmed) && !/^[-*]\s/.test(trimmed)) {
-      break;
-    }
-
-    // Match bullet items: `- ` or `* ` prefix, optionally wrapping path in backticks
-    // The path can be inside backticks or just plain text after the bullet marker
-    const bulletMatch = trimmed.match(/^[-*]\s+`?([^`]+)`?\s*$/);
-    if (!bulletMatch) continue;
-
-    const pathCandidate = bulletMatch[1].trim();
-
-    // Validate that it looks like a file path
-    if (isFilePath(pathCandidate)) {
-      paths.push(pathCandidate);
-    }
-  }
-
-  return paths;
-}
-
-/**
- * Check if a string looks like a valid file path.
- *
- * A valid path contains at least one `/` and has a file extension.
- * Rejects URLs (http://, https://) and known non-path patterns.
- */
-function isFilePath(candidate: string): boolean {
-  // Reject URLs
-  if (/^https?:\/\//i.test(candidate)) return false;
-  if (!candidate.includes('/')) return false;
-  // Must have a file extension (dot followed by alphanumeric chars at the end)
-  const extMatch = candidate.match(/\.([a-zA-Z0-9]+)$/);
-  if (!extMatch) return false;
-  // Ensure the extension is at least 1 character
-  return extMatch[1].length >= 1;
-}
+import { extractFilePaths, type GroupableItem, type GroupAssignment } from './helpers.js';
 
 // ── Grouping algorithm ────────────────────────────────────────────────
-
-/**
- * Input item for grouping — must have an `id`, `stage`, and a list of `filePaths`.
- */
-export interface GroupableItem {
-  id: string;
-  stage?: string;
-  filePaths: string[];
-}
-
-/**
- * Result of assigning an item to a group.
- * `group` is a 1-indexed integer for ordering.
- * `groupLabel` is a human-readable label for display.
- */
-export interface GroupAssignment {
-  group: number;
-  groupLabel: string;
-}
 
 /**
  * Greedy first-fit grouping algorithm for file-path-based conflict detection.

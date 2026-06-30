@@ -519,7 +519,7 @@ When `-n > 1`, `wl next` automatically groups items into parallel-safe groups ba
 
 The grouping algorithm uses a greedy first-fit strategy:
 
-1. Extract file paths from each item's description using a "**Key Files:**" section convention.
+1. Extract file paths from each item's description using a `**Key Files:**` section convention (see [docs/FILE_PATH_CONVENTION.md](docs/FILE_PATH_CONVENTION.md) for the full specification).
 2. Assign each item to the first group containing no item that touches the same files.
 3. Items with unknown/other stages are placed together in a single "Other" group (no file-overlap splitting).
 
@@ -852,6 +852,7 @@ Subcommands:
 
 - `upgrade [options]` — Preview or apply pending database schema migrations. Options: `--dry-run` (preview without applying), `--confirm` (apply non-interactively).
 - `prune [options]` — Prune soft-deleted work items older than a specified age. Options: `--days <n>` (age threshold in days), `--dry-run` (show what would be pruned).
+- `file-paths [options]` — Check intake-stage items for missing or incorrect `**Key Files:**` sections. Options: `--add-placeholder` (add a placeholder section).
 
 Examples:
 
@@ -865,6 +866,8 @@ wl doctor prune --days 30         # Prune items deleted more than 30 days ago
 wl doctor prune --dry-run         # Preview which items would be pruned
 wl doctor stage-sync              # Detect stale status/stage combinations (dry-run)
 wl doctor stage-sync --apply      # Fix stale status/stage combinations
+wl doctor file-paths                    # Check intake-stage items for **Key Files:** sections
+wl doctor file-paths --add-placeholder   # Add placeholder **Key Files:** section to missing items
 
 Known stale combinations detected by `stage-sync`:
 

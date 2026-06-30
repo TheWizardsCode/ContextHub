@@ -6,7 +6,7 @@ import type { PluginContext } from '../plugin-types.js';
 import type { UpdateOptions } from '../cli-types.js';
 import type { UpdateWorkItemInput, WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel } from '../types.js';
 import { promises as fs } from 'fs';
-import { humanFormatWorkItem, resolveFormat } from './helpers.js';
+import { humanFormatWorkItem, resolveFormat, extractFilePaths } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { normalizeActionArgs } from './cli-utils.js';
 import { buildAuditEntry, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
@@ -284,6 +284,27 @@ export default function register(ctx: PluginContext): void {
           }
           if (statusCandidate !== undefined) updates.status = normalizedStatus as WorkItemStatus;
           if (stageCandidate !== undefined) updates.stage = normalizedStage;
+
+          // Advisory file-paths check: when transitioning to an intake stage
+          // (intake_complete or prd_complete), warn if the description lacks
+          // a valid **Key Files:** section. This is advisory only — it does
+          // not block the transition.
+          const intakeStages = ['intake_complete', 'prd_complete'];
+          if (intakeStages.includes(normalizedStage)) {
+            const desc = current.description || '';
+            const paths = extractFilePaths(desc);
+            if (paths.length === 0) {
+              const filePathsWarning =
+                `Warning: Work item ${normalizedId} is being moved to ${normalizedStage} ` +
+                `but its description does not contain a valid "**Key Files:**" section ` +
+                `with file paths. Adding file paths helps the grouping algorithm ` +
+                `determine parallel-work safety. See docs/FILE_PATH_CONVENTION.md ` +
+                `for the convention specification.`;
+              if (!utils.isJsonMode()) {
+                console.error(filePathsWarning);
+              }
+            }
+          }
         }
 
         // Handle do-not-delegate per-id

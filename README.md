@@ -120,6 +120,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | [LOCAL_LLM.md](LOCAL_LLM.md) | Configure local LLM providers (Ollama, Foundry) |
 | [MULTI_PROJECT_GUIDE.md](MULTI_PROJECT_GUIDE.md) | Multi-project setup with custom prefixes |
 | [API.md](API.md) | REST API endpoints and usage |
+| [docs/FILE_PATH_CONVENTION.md](docs/FILE_PATH_CONVENTION.md) | File path convention for work item descriptions |
 
 ### Reference
 

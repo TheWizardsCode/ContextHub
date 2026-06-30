@@ -8,7 +8,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { extractFilePaths, groupItemsByFilePaths, assignItemGroups } from '../src/commands/grouping.js';
+import { extractFilePaths } from '../src/commands/helpers.js';
+import { groupItemsByFilePaths, assignItemGroups } from '../src/commands/grouping.js';
 
 // ── File path extraction ──────────────────────────────────────────────
 
