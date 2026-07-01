@@ -8,7 +8,7 @@
  */
 
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { ContinuationState } from './retry-logic.js';
+import { ContinuationState, RetryState } from './retry-logic.js';
 import { DEFAULT_RECOVERY_CONFIG, type RecoveryConfig } from './error-patterns.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -43,6 +43,107 @@ export function hasContextLengthStop(message: AgentMessage | unknown): boolean {
   }
 
   return false;
+}
+
+// ── Terminal error categories ─────────────────────────────────────────
+
+/**
+ * Error categories that should terminate with a checkpoint (no retry).
+ */
+export const TERMINAL_CATEGORIES = ['authError', 'quotaExhausted', 'terminated'] as const;
+
+export type TerminalCategory = typeof TERMINAL_CATEGORIES[number];
+
+// ── Terminal error handler ────────────────────────────────────────────
+
+/**
+ * Result of a checkpoint-and-terminate operation.
+ */
+export interface CheckpointTerminateResult {
+  /** Whether the checkpoint was saved successfully */
+  success: boolean;
+  /** The error message that was displayed */
+  errorMessage: string;
+  /** User-friendly title for the error */
+  title: string;
+}
+
+/**
+ * Get a user-friendly title for a terminal error category.
+ */
+export function getTerminalErrorTitle(category: TerminalCategory): string {
+  switch (category) {
+    case 'authError':
+      return 'Authentication Error';
+    case 'quotaExhausted':
+      return 'Quota Exhausted';
+    case 'terminated':
+      return 'Response Terminated';
+  }
+}
+
+/**
+ * Execute the checkpoint-and-terminate flow for unrecoverable errors.
+ *
+ * 1. Saves a checkpoint (captures current session state)
+ * 2. Displays an informative error message
+ * 3. Does NOT attempt retry — the caller's retry state is reset
+ *
+ * This is a pure-logic harness — it takes the functions it needs as
+ * parameters so it can be tested without a live agent.
+ *
+ * @param category - The terminal error category
+ * @param errorDetail - The detailed error message from the provider
+ * @param options.saveCheckpoint - Function that saves a checkpoint
+ * @param options.notify - Function that displays a notification
+ * @returns The result of the operation
+ */
+export async function executeCheckpointAndTerminate(
+  category: TerminalCategory,
+  errorDetail: string,
+  options: {
+    saveCheckpoint: () => Promise<{ success: boolean; error?: string }>;
+    notify: (message: string, level?: 'info' | 'warning' | 'error') => void;
+  },
+): Promise<CheckpointTerminateResult> {
+  const title = getTerminalErrorTitle(category);
+  const userMessage = `${title}: ${errorDetail.substring(0, 200)}`;
+
+  try {
+    // Step 1: Save checkpoint
+    const checkpointResult = await options.saveCheckpoint();
+
+    // Step 2: Display informative error message
+    if (checkpointResult.success) {
+      options.notify(
+        `Checkpoint saved. ${title}: ${errorDetail.substring(0, 100)}`,
+        'error',
+      );
+      return {
+        success: true,
+        errorMessage: errorDetail,
+        title,
+      };
+    } else {
+      options.notify(
+        `${title} (checkpoint failed): ${errorDetail.substring(0, 100)}`,
+        'error',
+      );
+      return {
+        success: false,
+        errorMessage: errorDetail,
+        title,
+      };
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown error during checkpoint';
+    options.notify(`${title}: ${errorDetail.substring(0, 100)}`, 'error');
+    return {
+      success: false,
+      errorMessage: errorDetail,
+      title,
+    };
+  }
 }
 
 // ── Compact-and-Continue handler ──────────────────────────────────────
