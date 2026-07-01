@@ -21,8 +21,22 @@ import {
   type RetryCommandContext,
   type RetryCommandOptions,
 } from './retry-command.js';
+import { calculateDelay, formatDuration } from './retry-logic.js';
 
 let _recoveryRegistered = false;
+
+// ── Agent reference (captured via monkey-patched subscribe) ───────────
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _agent: any = null;
+
+// Mutex: only one retry loop may run at a time.
+let _continueInProgress = false;
+
+// Notify function, captured from the most recent handler ctx.
+let _notifyFn: ((message: string, level: 'info' | 'warning' | 'error') => void) | null = null;
+
+// Timestamp of the last completed triggerInvisibleContinue call.
+let _lastInvisibleContinueTime = 0;
 
 /**
  * Register the recovery module with the extension API.
@@ -39,6 +53,17 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
   // retry mechanism when our recovery module is active. This prevents
   // the built-in retry from racing with our retry loop.
   suppressBuiltinRetry();
+  captureAgentInstance();
+
+  // Refresh the notify function on every handler that carries a ctx.
+  pi.on('agent_end', async (_event, ctx) => {
+    _notifyFn = (message, level) => ctx.ui.notify(message, level);
+  });
+  pi.on('turn_end', async (_event, ctx) => {
+    if (!_notifyFn) {
+      _notifyFn = (message, level) => ctx.ui.notify(message, level);
+    }
+  });
 
   // ── agent_end: detect errors and dispatch ──────────────────────
   pi.on('agent_end', async (event, ctx) => {
@@ -73,16 +98,18 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
 
       case ErrorCategory.SERVER_ERROR:
       case ErrorCategory.TIMEOUT: {
-        // Retryable errors: trigger retry loop
+        // Retryable errors: trigger retry loop with exponential backoff
         const errorMsg = lastAssistant.errorMessage || 'Unknown error';
         const state = retryStates[category as string];
         if (state && !state.getIsRetrying()) {
           state.startRetry(errorMsg);
-          state.endRetry();
+          // Don't endRetry here — the retry loop owns the state
           ctx.ui.notify(
             `Retrying after ${category}: ${errorMsg.substring(0, 100)}...`,
             'info',
           );
+          // Fire the retry loop (returns immediately; loops in background)
+          void triggerInvisibleContinue();
         }
         break;
       }
@@ -129,11 +156,14 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
       }
       if (msg.stopReason !== 'length') {
         // Normal completion — reset everything
-        for (const state of Object.values(retryStates)) {
-          state.succeed();
+        // Don't reset if the retry loop is running (it will handle its own state)
+        if (!_continueInProgress) {
+          for (const state of Object.values(retryStates)) {
+            state.succeed();
+          }
+          continuationState.complete();
+          interruptibleState.userAborted = false;
         }
-        continuationState.complete();
-        interruptibleState.userAborted = false;
       }
     }
   });
@@ -172,6 +202,168 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
       await executeRetryCommand(args, retryCtx, retryOptions);
     },
   });
+}
+
+// ── Agent instance capture ────────────────────────────────────────────
+
+/**
+ * Monkey-patch Agent.prototype.subscribe to capture the live Agent instance.
+ * subscribe() is called during AgentSession construction — fires on both
+ * fresh sessions and session resumes.
+ */
+function captureAgentInstance(): void {
+  try {
+    const { Agent } = require('@earendil-works/pi-agent-core') as any;
+    if (typeof Agent !== 'function' || !Agent.prototype) return;
+
+    const origSubscribe = Agent.prototype.subscribe;
+    if (typeof origSubscribe !== 'function') return;
+
+    Agent.prototype.subscribe = function (this: any, ...args: any[]) {
+      _agent = this;
+      return origSubscribe.apply(this, args);
+    };
+  } catch {
+    // Agent not available in this environment.
+  }
+}
+
+// ── Retry loop driver ────────────────────────────────────────────────
+
+/**
+ * Interruptible sleep that polls abort and session-change flags every 100ms.
+ * Returns true if interrupted, false if the full delay elapsed.
+ */
+function interruptibleRetrySleep(ms: number): Promise<boolean> {
+  if (ms <= 0) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const checkInterval = 100;
+    let elapsed = 0;
+    const timer = setInterval(() => {
+      elapsed += checkInterval;
+      if (interruptibleState.userAborted || interruptibleState.sessionGeneration !== _sessionGenerationAtStart) {
+        clearInterval(timer);
+        resolve(true);
+      } else if (elapsed >= ms) {
+        clearInterval(timer);
+        resolve(false);
+      }
+    }, checkInterval);
+  });
+}
+
+let _sessionGenerationAtStart = 0;
+
+/**
+ * The core retry loop — ported from pi-retry/retry.ts triggerInvisibleContinue().
+ *
+ * After an error is detected in agent_end, this function:
+ * 1. Waits for the agent to become idle
+ * 2. Removes the error message from agent state
+ * 3. Sleeps with exponential backoff
+ * 4. Calls agent.prompt([]) to restart the agent loop invisibly
+ * 5. Checks the result — if still an error, loops; if success, exits
+ *
+ * Respects user abort (ESC) and session switches (/new, /resume).
+ */
+async function triggerInvisibleContinue(): Promise<void> {
+  if (!_agent) return;
+
+  // Guard: if user aborted, don't start
+  if (interruptibleState.userAborted) return;
+
+  // Guard: mutex — only one retry loop at a time
+  if (_continueInProgress) return;
+  _continueInProgress = true;
+
+  // Capture the current session generation
+  _sessionGenerationAtStart = interruptibleState.sessionGeneration;
+
+  try {
+    // Wait for the current run to finish
+    if (typeof _agent.waitForIdle === 'function') {
+      await _agent.waitForIdle();
+    }
+
+    // Re-check after waitForIdle
+    if (interruptibleState.userAborted || interruptibleState.sessionGeneration !== _sessionGenerationAtStart) return;
+
+    let attempt = 0;
+
+    // Loop until success, abort, or session change
+    while (true) {
+      if (interruptibleState.userAborted || interruptibleState.sessionGeneration !== _sessionGenerationAtStart) return;
+
+      // Remove the error assistant message from agent state
+      removeErrorFromAgentState();
+
+      attempt++;
+      const delay = calculateDelay(attempt);
+
+      // Notify user
+      const duration = formatDuration(delay);
+      _notifyRetryAttempt(attempt, duration);
+
+      // Interruptible sleep with backoff before the retry
+      const interrupted = await interruptibleRetrySleep(delay);
+      if (interrupted) return;
+
+      try {
+        await _agent.prompt([]);
+      } catch {
+        // Agent is already processing or other transient error
+        return;
+      }
+
+      // Re-check after prompt
+      if (interruptibleState.userAborted || interruptibleState.sessionGeneration !== _sessionGenerationAtStart) return;
+
+      // Check result — if no longer an error, exit loop
+      if (!lastMessageIsRetryableError()) {
+        // Success or non-error terminal state — reset retry state
+        for (const state of Object.values(retryStates)) {
+          state.succeed();
+        }
+        continuationState.complete();
+        return;
+      }
+
+      // Error again — loop back for another attempt
+    }
+  } finally {
+    // Only reset mutex if session hasn't changed
+    if (interruptibleState.sessionGeneration === _sessionGenerationAtStart) {
+      _continueInProgress = false;
+    }
+    _lastInvisibleContinueTime = Date.now();
+  }
+}
+
+/** Notify user about a retry attempt */
+function _notifyRetryAttempt(attempt: number, duration: string): void {
+  if (_notifyFn) {
+    _notifyFn(`Retry attempt ${attempt} (backoff ${duration})...`, 'info');
+  }
+}
+
+/** Remove the last error assistant message from agent state */
+function removeErrorFromAgentState(): void {
+  if (!_agent) return;
+  const messages = _agent.state?.messages;
+  if (!messages || !Array.isArray(messages)) return;
+  const lastMsg = messages[messages.length - 1];
+  if (lastMsg?.role === 'assistant' && lastMsg.stopReason === 'error') {
+    _agent.state.messages = messages.slice(0, -1);
+  }
+}
+
+/** Check if agent's last message is a retryable error */
+function lastMessageIsRetryableError(): boolean {
+  if (!_agent) return false;
+  const messages = _agent.state?.messages;
+  if (!messages || !Array.isArray(messages)) return false;
+  const lastMsg = messages[messages.length - 1];
+  return lastMsg?.role === 'assistant' && lastMsg.stopReason === 'error';
 }
 
 // ── Built-in retry suppression ────────────────────────────────────────
