@@ -21,6 +21,7 @@ import { runWl, defaultListWorkItems, defaultListWorkItemsWithStage, createDefau
 import { registerAutoInject } from './lib/auto-inject.js';
 import { INSTALL_GUARDRAILS } from './lib/guardrails.js';
 import { registerSkillPathTool } from './lib/skill-path.js';
+import { registerRecoveryModule } from './lib/recovery/register-recovery.js';
 import {
   type WorklogBrowseItem,
   type WorklogBrowseDependencies,
@@ -94,6 +95,9 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
       pi.registerTool(registerSkillPathTool());
     }
 
+    // ── Recovery module (automatic error recovery) ────────────────
+    registerRecoveryModule(pi);
+
     // Subscribe to config changes for hot-reload notifications
     // When settings change via /wl settings or file edit, all onChange
     // subscribers are notified immediately without requiring /reload.
@@ -101,6 +105,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
       // currentSettings is already updated; components that read it
       // dynamically (e.g., activity indicator getter) pick up changes.
       // Future: re-install guardrails when guardrailsEnabled changes.
+      // Future: re-register recovery module when recovery settings change.
     });
 
     pi.registerCommand('wl', {
