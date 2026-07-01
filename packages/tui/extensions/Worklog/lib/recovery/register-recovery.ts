@@ -57,8 +57,13 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
       case ErrorCategory.AUTH_ERROR:
       case ErrorCategory.QUOTA_EXHAUSTED:
       case ErrorCategory.TERMINATED: {
-        // Terminal errors: show message but don't retry
+        // Terminal errors: record in retry state for diagnostics, then show message and stop
         const errorMsg = lastAssistant.errorMessage || 'Unknown error';
+        const state = retryStates[category as string];
+        if (state) {
+          state.startRetry(errorMsg);
+          state.endRetry();
+        }
         ctx.ui.notify(
           `Non-retryable error: ${errorMsg.substring(0, 200)}`,
           'error',
