@@ -159,6 +159,34 @@ Step-by-step guides for learning Worklog:
 
 See [docs/tutorials/README.md](docs/tutorials/README.md) for the full tutorial index.
 
+## Shell Completion
+
+Worklog ships with shell completion scripts for **bash** and **zsh**. The `wl completion` command generates a completion script that provides tab-completion for all subcommands, options, and dynamic work-item IDs.
+
+### Bash
+
+```bash
+# Source directly (current shell only)
+source <(wl completion bash)
+
+# Permanent installation
+wl completion bash > ~/.wl-completion.bash
+echo "source ~/.wl-completion.bash" >> ~/.bashrc
+```
+
+### Zsh
+
+```zsh
+# Source directly (current shell only)
+source <(wl completion zsh)
+
+# Permanent installation
+wl completion zsh > ~/.wl-completion.zsh
+echo "source ~/.wl-completion.zsh" >> ~/.zshrc
+```
+
+> **Note:** Dynamic work-item ID completion (e.g., `wl show <TAB>`) calls `wl list --json` in the background to fetch open work items. This may add a slight delay on first tab press in large repositories.
+
 ## Development
 
 ```bash

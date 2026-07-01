@@ -1066,6 +1066,38 @@ Example:
 wl help create
 ```
 
+### `completion` [shell]
+
+Generate shell completion scripts for bash and zsh. Outputs a completion
+script to stdout that provides tab-completion for all `wl` subcommands,
+options, and dynamic work-item IDs.
+
+Arguments:
+
+- `shell` — Target shell: `bash` or `zsh`.
+
+Examples:
+
+```sh
+# Source directly (current shell only)
+source <(wl completion bash)
+source <(wl completion zsh)
+
+# Write to file for permanent installation
+wl completion bash > ~/.wl-completion.bash
+echo "source ~/.wl-completion.bash" >> ~/.bashrc
+
+# JSON output
+wl --json completion bash
+```
+
+Features:
+- Static completions for all subcommands and their options
+- Dynamic work-item ID completion for commands like `show`, `update`, `delete`, `close`, etc.
+- Shell name completion for the `completion` subcommand itself (bash, zsh)
+- The bash script uses `_init_completion` and registers via `complete -F`
+- The zsh script uses `compdef` and `_arguments` with a dynamic `_wl_ids` helper
+
 ---
 
 ## Examples and scripting tips

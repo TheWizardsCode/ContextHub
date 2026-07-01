@@ -39,6 +39,7 @@ import searchCommand from './commands/search.js';
 import unlockCommand from './commands/unlock.js';
 import auditCommand from './commands/audit.js';
 import auditResultCommand from './commands/audit-result.js';
+import completionCommand from './commands/completion.js';
 
 // Watch flag parsing - supports -w, -wN, --watch, --watch=N
 function parseWatchFlag(argv: string[]) {
@@ -256,6 +257,7 @@ const builtInCommands = [
   unlockCommand,
   auditCommand,
   auditResultCommand,
+  completionCommand,
   // onboard command removed
 ];
 
@@ -289,6 +291,7 @@ const builtInCommandNames = new Set([
   'audit',
   'audit-show',
   'audit-set',
+  'completion',
   // 'onboard' removed
 ]);
 
