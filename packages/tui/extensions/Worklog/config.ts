@@ -140,6 +140,12 @@ export class WorklogConfig {
         300,
       );
     }
+    if (partial.recovery !== undefined) {
+      // Recovery config is passed through as-is; individual category validation
+      // is handled by the recovery module at usage time. Invalid values in the
+      // recovery config degrade gracefully (fall back to defaults per category).
+      validated.recovery = partial.recovery;
+    }
 
     this._config = { ...this._config, ...validated };
     persistSettings(validated, this._projectDir || undefined);

@@ -26,6 +26,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
+import { DEFAULT_RECOVERY_CONFIG, type RecoveryConfig } from './lib/recovery/error-patterns.js';
 
 /**
  * Settings interface for the Worklog Pi extension.
@@ -50,6 +51,12 @@ export interface Settings {
    */
   autoSyncIntervalSeconds: number;
   /**
+   * Per-category recovery configuration for automatic error recovery.
+   * Maps each error category to its recovery behavior (retry, terminate, compact+continue).
+   * When not set, DEFAULT_RECOVERY_CONFIG from error-patterns.ts is used.
+   */
+  recovery?: Partial<RecoveryConfig>;
+  /**
    * Config format version. Used for migration support when config structure
    * changes between releases. Default: 1 (current version).
    */
@@ -70,6 +77,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autoInjectEnabled: true,
   guardrailsEnabled: true,
   autoSyncIntervalSeconds: 10,
+  recovery: undefined,
   version: CONFIG_VERSION,
 };
 
@@ -172,6 +180,9 @@ function readNamespacedSettings(path: string): Partial<Settings> {
   if (ns.autoSyncIntervalSeconds !== undefined) {
     result.autoSyncIntervalSeconds = validateNumber(ns.autoSyncIntervalSeconds, DEFAULT_SETTINGS.autoSyncIntervalSeconds, 0, 300);
   }
+  if (ns.recovery !== undefined && ns.recovery !== null && typeof ns.recovery === 'object') {
+    result.recovery = ns.recovery as Partial<RecoveryConfig>;
+  }
 
   return result;
 }
@@ -247,6 +258,7 @@ export function persistSettings(partial: Partial<Settings>, cwd?: string): void 
     if (partial.autoInjectEnabled !== undefined) section.autoInjectEnabled = partial.autoInjectEnabled;
     if (partial.guardrailsEnabled !== undefined) section.guardrailsEnabled = partial.guardrailsEnabled;
     if (partial.autoSyncIntervalSeconds !== undefined) section.autoSyncIntervalSeconds = partial.autoSyncIntervalSeconds;
+    if (partial.recovery !== undefined) section.recovery = partial.recovery;
 
     raw[SETTINGS_NAMESPACE] = section;
 
