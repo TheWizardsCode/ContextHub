@@ -178,6 +178,76 @@ when used outside the Pi TUI.
 - Built-in Pi commands and free-form text clear the indicator via the same
   `input` event handler.
 
+## Error Recovery Module
+
+The extension includes a built-in automatic error recovery module that replaces the
+standalone `pi-retry` extension. When the recovery module is active, pi's built-in
+retry mechanism is suppressed and errors are handled according to per-category
+configuration.
+
+### Error Categories
+
+| Category | Default Action | Description |
+|----------|---------------|-------------|
+| `rateLimit` (429) | NOT retried | Informative error shown to the user |
+| `serverError` (5xx) | Retried | Exponential backoff with configurable delay |
+| `authError` (401/403) | NOT retried | Checkpoint saved + terminal error displayed |
+| `contextLength` | Compact + Continue | `/compact` triggered, then auto-continue |
+| `quotaExhausted` | NOT retried | Checkpoint saved + terminal error displayed |
+| `timeout` | Retried | Exponential backoff with configurable delay |
+| `terminated` | NOT retried | Checkpoint saved + terminal error displayed |
+
+### Configuration
+
+Recovery settings are stored under `context-hub.recovery.*` in Pi's settings files.
+Each category can be configured individually:
+
+```json
+{
+  "context-hub": {
+    "recovery": {
+      "serverError": {
+        "enabled": true,
+        "baseDelayMs": 2000,
+        "maxDelayMs": 60000
+      },
+      "timeout": {
+        "enabled": true,
+        "baseDelayMs": 2000,
+        "maxDelayMs": 60000
+      },
+      "rateLimit": {
+        "enabled": false
+      }
+    }
+  }
+}
+```
+
+### `/retry` Command
+
+The module registers a `/retry` command with the following subcommands:
+
+- `/retry` — Manual trigger: auto-detects the last error and applies the correct
+  recovery strategy (retry, compact+continue, or warning)
+- `/retry status` — Displays diagnostics: per-category attempt counts, last
+  error messages, is-retrying flags, continuation count
+- `/retry reset` — Resets all retry counters and state
+
+### Architecture
+
+The recovery module is implemented in `Worklog/lib/recovery/` and consists of:
+
+| File | Purpose |
+|------|---------|
+| `error-patterns.ts` | Error classification patterns for all 7 categories |
+| `retry-logic.ts` | Exponential backoff, state managers, interruptible sleep |
+| `recovery.ts` | Compact-and-continue and checkpoint-and-terminate handlers |
+| `retry-command.ts` | `/retry` command interface (status, reset, manual-trigger) |
+| `register-recovery.ts` | Extension lifecycle wiring (agent_end, turn_end, session_start) |
+
+The module is auto-registered during extension initialization in `index.ts`.
+
 ## Auto-Injection
 
 The extension automatically injects relevant work items into the system
