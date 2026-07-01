@@ -8,7 +8,7 @@
  */
 
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { classifyError, ErrorCategory } from './error-patterns.js';
+import { classifyError, ErrorCategory, DEFAULT_RECOVERY_CONFIG } from './error-patterns.js';
 import {
   RetryState,
   ContinuationState,
@@ -71,9 +71,13 @@ export function formatRetryStatus(
   lines.push('=== Retry Status ===\n');
 
   for (const [category, state] of Object.entries(retryStates)) {
+    const willRetry = (DEFAULT_RECOVERY_CONFIG as any)[category]?.enabled === true;
     lines.push(`${category}:`);
-    lines.push(`  Current attempt: ${state.getAttempt()}`);
-    lines.push(`  Is retrying: ${state.getIsRetrying()}`);
+    lines.push(`  Will retry: ${willRetry}`);
+    if (willRetry) {
+      lines.push(`  Current attempt: ${state.getAttempt()}`);
+      lines.push(`  Is retrying: ${state.getIsRetrying()}`);
+    }
     const lastErr = state.getLastErrorMessage();
     lines.push(`  Last error: ${lastErr ? lastErr.substring(0, 100) : 'None'}`);
     lines.push('');

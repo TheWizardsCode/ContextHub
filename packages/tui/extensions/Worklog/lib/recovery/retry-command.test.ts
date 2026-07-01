@@ -37,9 +37,49 @@ describe('formatRetryStatus', () => {
     expect(status).toContain('Continuation');
   });
 
-  it('shows attempt 0 for all categories when no retries', () => {
+  it('shows Will retry: true for retryable categories and false for terminal ones', () => {
     const status = formatRetryStatus(retryStates, continuationState);
-    expect(status).toContain('Current attempt: 0');
+    // Retryable categories (enabled: true by default)
+    expect(status).toContain('serverError');
+    expect(status).toContain('Will retry: true');
+    expect(status).toContain('timeout');
+    expect(status).toContain('Will retry: true');
+    // Non-retryable categories (enabled: false by default)
+    expect(status).toContain('rateLimit');
+    expect(status).toContain('Will retry: false');
+    expect(status).toContain('authError');
+    expect(status).toContain('Will retry: false');
+    expect(status).toContain('quotaExhausted');
+    expect(status).toContain('Will retry: false');
+    expect(status).toContain('terminated');
+    expect(status).toContain('Will retry: false');
+  });
+
+  it('omits attempt/isRetrying details for terminal categories', () => {
+    const testStates: Record<string, RetryState> = {
+      rateLimit: new RetryState(),
+      serverError: new RetryState(),
+      authError: new RetryState(),
+      contextLength: new RetryState(),
+      quotaExhausted: new RetryState(),
+      timeout: new RetryState(),
+      terminated: new RetryState(),
+    };
+    testStates.serverError.startRetry('500 error');
+
+    const status = formatRetryStatus(testStates, continuationState);
+    
+    // serverError is retryable — shows attempt
+    expect(status).toContain('Current attempt: 1');
+    expect(status).toContain('Is retrying');
+    
+    // Terminal categories show Will retry: false but no attempt/isRetrying
+    expect(status).toContain('Will retry: false');
+    // Count how many times 'Current attempt' appears — should be only for retryable categories
+    const attemptMatches = status.match(/Current attempt/g);
+    expect(attemptMatches).not.toBeNull();
+    // serverError and timeout are retryable (2) + contextLength (1) = 3
+    expect(attemptMatches!.length).toBe(3);
   });
 
   it('shows attempt count after a retry', () => {
