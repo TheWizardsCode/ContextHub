@@ -340,4 +340,139 @@ describe('assignItemGroups', () => {
     expect(groups.get('WL-1')!.group).toBe(1);
     expect(groups.get('WL-1')!.groupLabel).toBe('Idea');
   });
+
+  // ── Critical group tests ────────────────────────────────────────────
+
+  it('places all critical items in a single "Critical" group as group 1', () => {
+    const items = [
+      { id: 'WL-1', stage: 'idea', filePaths: [], priority: 'critical' },
+      { id: 'WL-2', stage: 'plan_complete', filePaths: ['src/foo.ts'], priority: 'critical' },
+    ];
+    const groups = assignItemGroups(items, 3);
+    expect(groups.get('WL-1')!.group).toBe(1);
+    expect(groups.get('WL-1')!.groupLabel).toBe('Critical');
+    expect(groups.get('WL-2')!.group).toBe(1);
+    expect(groups.get('WL-2')!.groupLabel).toBe('Critical');
+  });
+
+  it('places critical items before all other groups', () => {
+    const items = [
+      { id: 'WL-idea', stage: 'idea', filePaths: [] },
+      { id: 'WL-critical', stage: 'idea', filePaths: [], priority: 'critical' },
+      { id: 'WL-review', stage: 'in_review', filePaths: [] },
+    ];
+    const groups = assignItemGroups(items, 3);
+    // Critical is group 1
+    expect(groups.get('WL-critical')!.group).toBe(1);
+    expect(groups.get('WL-critical')!.groupLabel).toBe('Critical');
+    // in_review is group 2 (next after Critical)
+    expect(groups.get('WL-review')!.group).toBe(2);
+    expect(groups.get('WL-review')!.groupLabel).toBe('In Review');
+    // idea is group 3 (after in_review)
+    expect(groups.get('WL-idea')!.group).toBe(3);
+    expect(groups.get('WL-idea')!.groupLabel).toBe('Idea');
+  });
+
+  it('excludes critical items from their stage groups', () => {
+    // A critical item with stage 'idea' should appear ONLY in Critical group,
+    // NOT also in the Idea group with other idea items.
+    const items = [
+      { id: 'WL-critical', stage: 'idea', filePaths: [], priority: 'critical' },
+      { id: 'WL-idea', stage: 'idea', filePaths: [] },
+    ];
+    const groups = assignItemGroups(items, 3);
+    // Critical item gets group 1 (Critical)
+    expect(groups.get('WL-critical')!.group).toBe(1);
+    expect(groups.get('WL-critical')!.groupLabel).toBe('Critical');
+    // Non-critical idea item gets a different group (2)
+    expect(groups.get('WL-idea')!.group).toBe(2);
+    expect(groups.get('WL-idea')!.groupLabel).toBe('Idea');
+  });
+
+  it('does not show critical group when no critical items exist', () => {
+    const items = [
+      { id: 'WL-1', stage: 'idea', filePaths: [] },
+      { id: 'WL-2', stage: 'in_review', filePaths: [] },
+    ];
+    const groups = assignItemGroups(items, 3);
+    // No group label should be 'Critical'
+    for (const [, assignment] of groups) {
+      expect(assignment.groupLabel).not.toBe('Critical');
+    }
+    // in_review is group 1, idea is group 2
+    expect(groups.get('WL-2')!.group).toBe(1);
+    expect(groups.get('WL-2')!.groupLabel).toBe('In Review');
+    expect(groups.get('WL-1')!.group).toBe(2);
+    expect(groups.get('WL-1')!.groupLabel).toBe('Idea');
+  });
+
+  it('places all critical items in one Critical group regardless of file-path conflicts', () => {
+    // Even with conflicting file paths, critical items should be in one group
+    const items = [
+      { id: 'WL-1', stage: 'plan_complete', filePaths: ['src/foo.ts'], priority: 'critical' },
+      { id: 'WL-2', stage: 'plan_complete', filePaths: ['src/foo.ts'], priority: 'critical' },
+    ];
+    const groups = assignItemGroups(items, 3);
+    expect(groups.get('WL-1')!.group).toBe(1);
+    expect(groups.get('WL-1')!.groupLabel).toBe('Critical');
+    expect(groups.get('WL-2')!.group).toBe(1);
+    expect(groups.get('WL-2')!.groupLabel).toBe('Critical');
+  });
+
+  it('preserves existing non-critical grouping when critical items are present', () => {
+    const items = [
+      { id: 'WL-critical', stage: 'idea', filePaths: [], priority: 'critical' },
+      { id: 'WL-idea', stage: 'idea', filePaths: [] },
+      { id: 'WL-review', stage: 'in_review', filePaths: [] },
+    ];
+    const groups = assignItemGroups(items, 3);
+    // Critical group
+    expect(groups.get('WL-critical')!.group).toBe(1);
+    expect(groups.get('WL-critical')!.groupLabel).toBe('Critical');
+    // Non-critical: in_review before idea
+    expect(groups.get('WL-review')!.group).toBe(2);
+    expect(groups.get('WL-review')!.groupLabel).toBe('In Review');
+    expect(groups.get('WL-idea')!.group).toBe(3);
+    expect(groups.get('WL-idea')!.groupLabel).toBe('Idea');
+  });
+
+  it('handles mixed critical and non-critical plan_complete items', () => {
+    const items = [
+      { id: 'WL-critical', stage: 'plan_complete', filePaths: ['src/foo.ts'], priority: 'critical' },
+      { id: 'WL-plan1', stage: 'plan_complete', filePaths: ['src/bar.ts'] },
+      { id: 'WL-plan2', stage: 'plan_complete', filePaths: ['src/baz.ts'] },
+    ];
+    const groups = assignItemGroups(items, 3);
+    // Critical item gets group 1
+    expect(groups.get('WL-critical')!.group).toBe(1);
+    expect(groups.get('WL-critical')!.groupLabel).toBe('Critical');
+    // Non-critical plan_complete items start at group 2
+    expect(groups.get('WL-plan1')!.group).toBe(2);
+    expect(groups.get('WL-plan2')!.group).toBe(2);
+    expect(groups.get('WL-plan1')!.groupLabel).toContain('Plan Complete Group');
+  });
+
+  it('handles critical items with and without stage', () => {
+    const items = [
+      { id: 'WL-C1', stage: 'idea', filePaths: [], priority: 'critical' },
+      { id: 'WL-C2', stage: undefined, filePaths: [], priority: 'critical' },
+    ];
+    const groups = assignItemGroups(items, 3);
+    // Both critical items in the same Critical group
+    expect(groups.get('WL-C1')!.group).toBe(1);
+    expect(groups.get('WL-C1')!.groupLabel).toBe('Critical');
+    expect(groups.get('WL-C2')!.group).toBe(1);
+    expect(groups.get('WL-C2')!.groupLabel).toBe('Critical');
+  });
+
+  it('handles critical items with priority undefined like non-critical', () => {
+    const items = [
+      { id: 'WL-1', stage: 'idea', filePaths: [], priority: undefined },
+      { id: 'WL-2', stage: 'idea', filePaths: [] },  // no priority field
+    ];
+    const groups = assignItemGroups(items, 3);
+    // Both go to Idea group (no Critical group shown)
+    expect(groups.get('WL-1')!.groupLabel).toBe('Idea');
+    expect(groups.get('WL-2')!.groupLabel).toBe('Idea');
+  });
 });

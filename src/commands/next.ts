@@ -94,11 +94,12 @@ export default function register(ctx: PluginContext): void {
         const maxGroups = Number.isNaN(groupsOpt) || groupsOpt < 1 ? 3 : groupsOpt;
         if (maxGroups > 0) {
           groupsEnabled = true;
-          // Extract file paths from each work item's description
+          // Extract file paths and priority from each work item's description
           const groupableItems = availableResults.map((result: any) => ({
             id: result.workItem.id,
             stage: result.workItem.stage,
             filePaths: extractFilePaths(result.workItem.description || ''),
+            priority: result.workItem.priority,
           }));
           groupMap = assignItemGroups(groupableItems, maxGroups);
         }

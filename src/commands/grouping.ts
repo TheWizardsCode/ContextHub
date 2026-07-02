@@ -103,9 +103,11 @@ export function groupItemsByFilePaths(
 }
 
 /**
- * Assign items to groups based on stage and file-path conflicts.
+ * Assign items to groups based on priority, stage and file-path conflicts.
  *
  * Grouping rules (display order — most actionable first):
+ * - Items with priority `critical` → all placed in a single group labeled "Critical"
+ *   at the very top, regardless of stage or file-path conflicts.
  * - Items with other/unknown stage → all placed in a single group labeled "Other"
  *   (no file-overlap splitting, all such items share one group).
  * - Items with stage `plan_complete` → grouped by file-path conflicts using the
@@ -114,7 +116,7 @@ export function groupItemsByFilePaths(
  * - Items with stage `intake_complete` → all placed in one group labeled "Intake Complete".
  * - Items with stage `idea` → all placed in one group labeled "Idea" (no conflict checking).
  *
- * @param items - Array of items with id, stage, and extracted file paths
+ * @param items - Array of items with id, priority, stage, and extracted file paths
  * @param maxFilePathGroups - Maximum number of file-path-based groups (default 3)
  * @returns Map of item id → GroupAssignment
  */
@@ -128,8 +130,19 @@ export function assignItemGroups(
 
   let nextGroup = 1;
 
-  // 1. Other — single group for all items with unknown/other stages
-  const otherItems = items.filter(item => !item.stage || !knownStages.has(item.stage));
+  // 0. Critical — single group for all items with priority 'critical', regardless of stage
+  const criticalIds = new Set<string>();
+  const criticalItems = items.filter(item => item.priority === 'critical');
+  if (criticalItems.length > 0) {
+    for (const item of criticalItems) {
+      criticalIds.add(item.id);
+      result.set(item.id, { group: nextGroup, groupLabel: 'Critical' });
+    }
+    nextGroup++;
+  }
+
+  // 1. Other — single group for all items with unknown/other stages (excluding critical)
+  const otherItems = items.filter(item => !criticalIds.has(item.id) && (!item.stage || !knownStages.has(item.stage)));
   if (otherItems.length > 0) {
     for (const item of otherItems) {
       result.set(item.id, { group: nextGroup, groupLabel: 'Other' });
@@ -137,8 +150,8 @@ export function assignItemGroups(
     nextGroup++;
   }
 
-  // 2. Group plan_complete items by file-path conflicts
-  const planCompleteItems = items.filter(item => item.stage === 'plan_complete');
+  // 2. Group plan_complete items by file-path conflicts (excluding critical)
+  const planCompleteItems = items.filter(item => !criticalIds.has(item.id) && item.stage === 'plan_complete');
   if (planCompleteItems.length > 0) {
     const planGroups = groupItemsByFilePaths(planCompleteItems, maxFilePathGroups);
     // Map file-path group numbers to sequential group numbers after Other
@@ -157,8 +170,8 @@ export function assignItemGroups(
     nextGroup += uniqueGroups.length;
   }
 
-  // 3. In Review
-  const inReviewItems = items.filter(item => item.stage === 'in_review');
+  // 3. In Review (excluding critical)
+  const inReviewItems = items.filter(item => !criticalIds.has(item.id) && item.stage === 'in_review');
   if (inReviewItems.length > 0) {
     for (const item of inReviewItems) {
       result.set(item.id, { group: nextGroup, groupLabel: 'In Review' });
@@ -166,8 +179,8 @@ export function assignItemGroups(
     nextGroup++;
   }
 
-  // 4. Intake Complete
-  const intakeCompleteItems = items.filter(item => item.stage === 'intake_complete');
+  // 4. Intake Complete (excluding critical)
+  const intakeCompleteItems = items.filter(item => !criticalIds.has(item.id) && item.stage === 'intake_complete');
   if (intakeCompleteItems.length > 0) {
     for (const item of intakeCompleteItems) {
       result.set(item.id, { group: nextGroup, groupLabel: 'Intake Complete' });
@@ -175,8 +188,8 @@ export function assignItemGroups(
     nextGroup++;
   }
 
-  // 5. Idea
-  const ideaItems = items.filter(item => item.stage === 'idea');
+  // 5. Idea (excluding critical)
+  const ideaItems = items.filter(item => !criticalIds.has(item.id) && item.stage === 'idea');
   if (ideaItems.length > 0) {
     for (const item of ideaItems) {
       result.set(item.id, { group: nextGroup, groupLabel: 'Idea' });

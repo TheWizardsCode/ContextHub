@@ -782,6 +782,7 @@ export interface GroupableItem {
   id: string;
   stage?: string;
   filePaths: string[];
+  priority?: string;
 }
 
 /**
