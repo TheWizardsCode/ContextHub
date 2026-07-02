@@ -14,11 +14,12 @@ import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import type { ShortcutRegistry } from './shortcut-config.js';
 import { loadShortcutConfig } from './shortcut-config.js';
-import { registerActivityIndicator, showActivity, clearActivity } from './activity-indicator.js';
+import { registerActivityIndicator, showActivity, clearActivity, detectWorkItemId } from './activity-indicator.js';
 import { worklogConfig } from './config.js';
 import { reloadSettings, currentSettings, STAGE_MAP, VALID_STAGES, updateSettings, openSettingsOverlay } from './lib/settings.js';
 import { runWl, defaultListWorkItems, defaultListWorkItemsWithStage, createDefaultListWorkItems, createListWorkItemsWithStage, createDefaultListWorkItemsDb, createListWorkItemsWithStageDb, fetchTotalActionableCountDb } from './lib/tools.js';
 import { registerAutoInject } from './lib/auto-inject.js';
+import { CurrentItemTracker, ShortcutModeManager, registerEditorShortcutMode } from './editor-shortcuts.js';
 import { INSTALL_GUARDRAILS } from './lib/guardrails.js';
 import { registerSkillPathTool } from './lib/skill-path.js';
 import { registerRecoveryModule } from './lib/recovery/register-recovery.js';
@@ -74,6 +75,13 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     ? (deps.chooseWorkItem as (items: WorklogBrowseItem[], ctx: BrowseContext, onSelectionChange: SelectionChangeHandler) => Promise<WorklogBrowseItem | ShortcutResult | undefined>)
     : undefined;
 
+  // ── Editor shortcut mode ───────────────────────────────────────────
+  const currentItemTracker = new CurrentItemTracker();
+  const shortcutModeManager = new ShortcutModeManager(
+    () => currentItemTracker.getCurrentId(),
+    () => shortcutRegistry,
+  );
+
   const browseOptions: BrowseFlowOptions = {
     listWorkItems,
     listWorkItemsWithStage,
@@ -83,6 +91,8 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     // Phase 2: Pre-fetched actionable count from direct DB access.
     // When undefined (DB unavailable), browse falls back to CLI-based count.
     totalActionableCount: undefined,
+    // Track selected items as the current work item context
+    onItemSelected: (item) => currentItemTracker.setCurrentId(item.id),
   };
 
   return function registerWorklogBrowseExtension(pi: ExtensionAPI): void {
@@ -94,6 +104,21 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     if (typeof pi.registerTool === 'function') {
       pi.registerTool(registerSkillPathTool());
     }
+
+    // ── Editor shortcut mode ───────────────────────────────────────
+    registerEditorShortcutMode(pi, shortcutModeManager);
+
+    // ── Current item tracking from user input ─────────────────────
+    // Detect work item IDs in typed commands and track them as the
+    // current work item context for editor shortcut mode.
+    pi.on('input', async (event, _ctx) => {
+      const text = event.text.trim();
+      const id = detectWorkItemId(text);
+      if (id) {
+        currentItemTracker.setCurrentId(id);
+      }
+      return { action: 'continue' };
+    });
 
     // ── Recovery module (automatic error recovery) ────────────────
     registerRecoveryModule(pi);

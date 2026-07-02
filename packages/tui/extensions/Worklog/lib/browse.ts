@@ -955,6 +955,12 @@ export interface BrowseFlowOptions {
   shortcutRegistry: ShortcutRegistry;
   /** Optional injected chooseWorkItem (for tests). Falls back to defaultChooseWorkItem. */
   chooseWorkItem?: ChooseWorkItemFn;
+  /**
+   * Optional callback invoked when a work item is selected (user presses Enter).
+   * Called with the selected item before the detail view opens.
+   * Useful for tracking the current work item context (e.g., for editor shortcuts).
+   */
+  onItemSelected?: (item: WorklogBrowseItem) => void;
 }
 
 /**
@@ -1044,6 +1050,7 @@ export async function runBrowseFlow(
       }
 
       announceSelection(selectedItem);
+      options.onItemSelected?.(selectedItem);
 
       if (!ctx.ui.custom) {
         ctx.ui.notify('Scrollable detail view requires a TUI that supports custom overlays.', 'warning');
