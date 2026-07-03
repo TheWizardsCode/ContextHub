@@ -80,10 +80,13 @@ export function isEnterKey(data: string): boolean {
 
 export function isCtrlEnterKey(data: string): boolean {
   if (_matchesKey) return _matchesKey(data, 'ctrl+enter');
-  // Fallback: Kitty protocol CSI-u sequences for Ctrl+Enter
+  // Fallback: Kitty protocol CSI-u sequences for Ctrl+Enter (codepoint 13, modifier 5 = ctrl)
+  //   Basic: \x1b[13;5u
+  //   With alternate keys: \x1b[13:13;5u, \x1b[13:13:13;5u, \x1b[13::13;5u
+  //   With event type: \x1b[13;5:1u, \x1b[13;5:2u, \x1b[13;5:3u
   // Also support raw ANSI with modifyOtherKeys (CSI 27;5;13~)
   return (
-    data === '\u001b[13;5u'
+    /^\u001b\[13(?:\u003a\d*)*(?:;5(?:\u003a\d+)?)u$/.test(data)
     || data === '\u001b[27;5;13~'
     || data === 'ctrl+enter'
     || data === 'ctrl+return'
@@ -92,10 +95,13 @@ export function isCtrlEnterKey(data: string): boolean {
 
 export function isShiftEnterKey(data: string): boolean {
   if (_matchesKey) return _matchesKey(data, 'shift+enter');
-  // Fallback: Kitty protocol CSI-u sequences for Shift+Enter
+  // Fallback: Kitty protocol CSI-u sequences for Shift+Enter (codepoint 13, modifier 2 = shift)
+  //   Basic: \x1b[13;2u
+  //   With alternate keys: \x1b[13:13;2u, \x1b[13:13:13;2u, \x1b[13::13;2u
+  //   With event type: \x1b[13;2:1u, \x1b[13;2:2u, \x1b[13;2:3u
   // Also support raw ANSI with modifyOtherKeys (CSI 27;2;13~)
   return (
-    data === '\u001b[13;2u'
+    /^\u001b\[13(?:\u003a\d*)*(?:;2(?:\u003a\d+)?)u$/.test(data)
     || data === '\u001b[27;2;13~'
     || data === 'shift+enter'
     || data === 'shift+return'

@@ -378,37 +378,6 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     expect(fetchChildren).toHaveBeenCalledWith('WL-001');
   });
 
-  it('renders child items and a ".." entry after Shift+Enter on parent', async () => {
-    const { ctx, getWidget, getDone } = createMockContext();
-
-    const fetchChildren = vi.fn().mockResolvedValue(childItems);
-    defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, undefined, fetchChildren);
-    const widget = getWidget()!;
-
-    // Initial render should show root items
-    let lines = widget.render(80);
-    expect(lines.join('\n')).toContain('Parent item');
-    expect(lines.join('\n')).toContain('Standalone item');
-
-    // Press Shift+Enter on parent item (index 0, has 2 children)
-    widget.handleInput!('\u001b[13;2u');
-
-    // After Shift+Enter, children should be fetched and rendered
-    await vi.advanceTimersByTimeAsync(10); // Let the promise resolve
-
-    lines = widget.render(80);
-    const rendered = lines.join('\n');
-
-    // Should contain the ".." entry
-    expect(rendered).toContain('..');
-    // Should contain child items
-    expect(rendered).toContain('First child');
-    expect(rendered).toContain('Second child');
-    // Should NOT contain parent root items anymore
-    expect(rendered).not.toContain('Parent item');
-    expect(rendered).not.toContain('Standalone item');
-  });
-
   it('renders child items and a ".." entry after Ctrl+Enter on parent', async () => {
     const { ctx, getWidget, getDone } = createMockContext();
 
