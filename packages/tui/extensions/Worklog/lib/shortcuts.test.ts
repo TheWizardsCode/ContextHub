@@ -20,6 +20,7 @@ describe('lib/shortcuts exports', () => {
     expect(typeof mod.isEscapeKey).toBe('function');
     expect(typeof mod.isCtrlEnterKey).toBe('function');
     expect(typeof mod.isShiftEnterKey).toBe('function');
+    expect(typeof mod.isTabKey).toBe('function');
   });
 });
 
@@ -184,5 +185,24 @@ describe('isShiftEnterKey', () => {
     const { isShiftEnterKey } = await import('./shortcuts.js');
     expect(isShiftEnterKey('a')).toBe(false);
     expect(isShiftEnterKey('\u001b')).toBe(false);
+  });
+});
+
+describe('isTabKey', () => {
+  it('should detect Tab character', async () => {
+    const { isTabKey } = await import('./shortcuts.js');
+    expect(isTabKey('\t')).toBe(true);
+  });
+
+  it('should detect the string "tab"', async () => {
+    const { isTabKey } = await import('./shortcuts.js');
+    expect(isTabKey('tab')).toBe(true);
+  });
+
+  it('should return false for non-tab keys', async () => {
+    const { isTabKey } = await import('./shortcuts.js');
+    expect(isTabKey('a')).toBe(false);
+    expect(isTabKey('\r')).toBe(false);
+    expect(isTabKey('\u001b')).toBe(false);
   });
 });

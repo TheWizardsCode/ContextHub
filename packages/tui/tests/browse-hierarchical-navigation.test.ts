@@ -285,6 +285,50 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     expect(fetchChildren).toHaveBeenCalledWith('WL-001');
   });
 
+  it('navigates into children when Tab is pressed on a parent item', async () => {
+    const { ctx, getWidget, getDone } = createMockContext();
+
+    const fetchChildren = vi.fn().mockResolvedValue(childItems);
+    defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, undefined, fetchChildren);
+    const widget = getWidget()!;
+    const done = getDone()!;
+
+    // Press Tab on parent item (index 0, childCount=2)
+    widget.handleInput!('\t');
+
+    // done should NOT have been called (Tab navigates into children)
+    expect(done).not.toHaveBeenCalled();
+    // fetchChildren should have been called with the parent ID
+    expect(fetchChildren).toHaveBeenCalledWith('WL-001');
+  });
+
+  it('renders child items and a ".." entry after Tab on parent', async () => {
+    const { ctx, getWidget } = createMockContext();
+
+    const fetchChildren = vi.fn().mockResolvedValue(childItems);
+    defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, undefined, fetchChildren);
+    const widget = getWidget()!;
+
+    // Initial render should show root items
+    let lines = widget.render(80);
+    expect(lines.join('\n')).toContain('Parent item');
+
+    // Press Tab on parent item
+    widget.handleInput!('\t');
+
+    // After Tab, children should be fetched and rendered
+    await vi.advanceTimersByTimeAsync(10);
+
+    lines = widget.render(80);
+    const rendered = lines.join('\n');
+
+    // Should contain the ".." entry
+    expect(rendered).toContain('..');
+    // Should contain child items
+    expect(rendered).toContain('First child');
+    expect(rendered).toContain('Second child');
+  });
+
   it('renders child items and a ".." entry after Shift+Enter on parent', async () => {
     const { ctx, getWidget } = createMockContext();
 
@@ -332,6 +376,37 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     expect(done).not.toHaveBeenCalled();
     // fetchChildren should have been called with the parent ID
     expect(fetchChildren).toHaveBeenCalledWith('WL-001');
+  });
+
+  it('renders child items and a ".." entry after Shift+Enter on parent', async () => {
+    const { ctx, getWidget, getDone } = createMockContext();
+
+    const fetchChildren = vi.fn().mockResolvedValue(childItems);
+    defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, undefined, fetchChildren);
+    const widget = getWidget()!;
+
+    // Initial render should show root items
+    let lines = widget.render(80);
+    expect(lines.join('\n')).toContain('Parent item');
+    expect(lines.join('\n')).toContain('Standalone item');
+
+    // Press Shift+Enter on parent item (index 0, has 2 children)
+    widget.handleInput!('\u001b[13;2u');
+
+    // After Shift+Enter, children should be fetched and rendered
+    await vi.advanceTimersByTimeAsync(10); // Let the promise resolve
+
+    lines = widget.render(80);
+    const rendered = lines.join('\n');
+
+    // Should contain the ".." entry
+    expect(rendered).toContain('..');
+    // Should contain child items
+    expect(rendered).toContain('First child');
+    expect(rendered).toContain('Second child');
+    // Should NOT contain parent root items anymore
+    expect(rendered).not.toContain('Parent item');
+    expect(rendered).not.toContain('Standalone item');
   });
 
   it('renders child items and a ".." entry after Ctrl+Enter on parent', async () => {
@@ -424,6 +499,50 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     widget.handleInput!('\u001b');
 
     expect(done).toHaveBeenCalledWith(null);
+  });
+
+  it('supports arbitrary depth navigation with both Ctrl+Enter and Shift+Enter', async () => {
+    const { ctx, getWidget, getDone } = createMockContext();
+
+    // First level: children have child items
+    const deepChildItems: WorklogBrowseItem[] = [
+      { id: 'WL-003', title: 'First child', status: 'open', childCount: 1 },
+      { id: 'WL-004', title: 'Second child', status: 'open' },
+    ];
+
+    const fetchChildren = vi.fn((id: string) => {
+      if (id === 'WL-001') return Promise.resolve(deepChildItems);
+      if (id === 'WL-003') return Promise.resolve(grandchildItems);
+      return Promise.resolve([]);
+    });
+
+    defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, undefined, fetchChildren);
+    const widget = getWidget()!;
+
+    // Navigate into WL-001's children using Shift+Enter
+    widget.handleInput!('\u001b[13;2u');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Navigate down to "First child" (WL-003, has childCount=1)
+    widget.handleInput!('\u001b[B'); // move to child item (index 1, after "..")
+    widget.handleInput!('\u001b[13;5u'); // Ctrl+Enter on First child
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Should now be viewing grandchildren
+    let lines = widget.render(80);
+    expect(lines.join('\n')).toContain('Grandchild');
+
+    // Press Escape to go back
+    widget.handleInput!('\u001b');
+    lines = widget.render(80);
+    expect(lines.join('\n')).toContain('First child');
+    expect(lines.join('\n')).toContain('Second child');
+
+    // Press Escape again to go to root
+    widget.handleInput!('\u001b');
+    lines = widget.render(80);
+    expect(lines.join('\n')).toContain('Parent item');
+    expect(lines.join('\n')).toContain('Standalone item');
   });
 
   it('supports arbitrary depth navigation (children of children)', async () => {

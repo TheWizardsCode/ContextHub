@@ -106,3 +106,9 @@ export function isEscapeKey(data: string): boolean {
   if (_matchesKey) return _matchesKey(data, 'escape');
   return data === '\u001b' || data === 'escape';
 }
+
+export function isTabKey(data: string): boolean {
+  if (_matchesKey) return _matchesKey(data, 'tab');
+  // Fallback: Tab character (ASCII 9)
+  return data === '\t' || data === 'tab';
+}
