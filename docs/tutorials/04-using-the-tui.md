@@ -182,6 +182,8 @@ The command text is inserted into the Pi editor (without a trailing newline), al
 
 In the detail scrollable view (when viewing a single work item), the same shortcuts work identically: press `i`, `p`, `n`, or `a` to insert the corresponding command for the currently displayed work item. The detail view also clears its preview widget before closing the modal, giving you a clean editor to work in.
 
+When viewing details, a shortcut hint line appears at the bottom of the rendered content showing available keys for the current work item's stage (same formatting and filtering as the selection list hints). When a chord leader key (e.g., `u`) is pressed, the hint line updates to show available chord completions. The hint line respects the `showHelpText` setting and can be hidden via `/wl settings`.
+
 ### How It Works
 
 Each shortcut is defined as a JSON object with:

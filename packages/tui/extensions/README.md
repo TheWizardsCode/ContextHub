@@ -529,6 +529,15 @@ When a chord leader key (e.g. `u`) is pressed, the help line temporarily updates
    - **Chord shortcuts**: If no single-key match is found, the registry checks if the key is a chord leader via `shortcutRegistry.getChordByLeader(key, view)`. If chords exist for that leader, the system enters a **pending-chord state** and updates the help line. Pressing a valid completion key triggers `shortcutRegistry.lookupChord([leader, completion], view)`, which dispatches the matching command.
 4. **No trailing newline**: The inserted text has no trailing newline, allowing the user to review or edit the command before pressing Enter to submit.
 
+### Detail View Shortcut Hints
+
+The detail view overlay displays a shortcut hint line at the bottom of the rendered content (below the work item details). This hint line follows the same formatting and stage-filtering logic as the selection list hints:
+
+- Available shortcuts whose `view` includes `detail` or `both` are shown, filtered by the selected item's stage.
+- When a chord leader key is pressed, the hint line temporarily updates to show available chord completions (same `🔗` prefix as the selection list).
+- The hint line respects the `showHelpText` setting — hidden when disabled.
+- The hint line is rendered as dim text, truncated to the terminal width, and is not part of the scrollable content.
+
 ### Reserved Navigation Keys
 
 The following single-character keys are reserved for navigation and **cannot** be used as shortcut keys. Any shortcut entry in `shortcuts.json` with one of these keys will be silently ignored (navigation takes precedence):
