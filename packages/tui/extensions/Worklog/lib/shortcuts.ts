@@ -90,6 +90,18 @@ export function isCtrlEnterKey(data: string): boolean {
   );
 }
 
+export function isShiftEnterKey(data: string): boolean {
+  if (_matchesKey) return _matchesKey(data, 'shift+enter');
+  // Fallback: Kitty protocol CSI-u sequences for Shift+Enter
+  // Also support raw ANSI with modifyOtherKeys (CSI 27;2;13~)
+  return (
+    data === '\u001b[13;2u'
+    || data === '\u001b[27;2;13~'
+    || data === 'shift+enter'
+    || data === 'shift+return'
+  );
+}
+
 export function isEscapeKey(data: string): boolean {
   if (_matchesKey) return _matchesKey(data, 'escape');
   return data === '\u001b' || data === 'escape';

@@ -19,6 +19,7 @@ describe('lib/shortcuts exports', () => {
     expect(typeof mod.isEnterKey).toBe('function');
     expect(typeof mod.isEscapeKey).toBe('function');
     expect(typeof mod.isCtrlEnterKey).toBe('function');
+    expect(typeof mod.isShiftEnterKey).toBe('function');
   });
 });
 
@@ -143,5 +144,45 @@ describe('isCtrlEnterKey', () => {
     const { isCtrlEnterKey } = await import('./shortcuts.js');
     expect(isCtrlEnterKey('a')).toBe(false);
     expect(isCtrlEnterKey('\u001b')).toBe(false);
+  });
+});
+
+describe('isShiftEnterKey', () => {
+  it('should detect Kitty protocol Shift+Enter sequence', async () => {
+    const { isShiftEnterKey } = await import('./shortcuts.js');
+    expect(isShiftEnterKey('\u001b[13;2u')).toBe(true);
+  });
+
+  it('should detect ANSI modifyOtherKeys Shift+Enter sequence', async () => {
+    const { isShiftEnterKey } = await import('./shortcuts.js');
+    expect(isShiftEnterKey('\u001b[27;2;13~')).toBe(true);
+  });
+
+  it('should detect the string "shift+enter"', async () => {
+    const { isShiftEnterKey } = await import('./shortcuts.js');
+    expect(isShiftEnterKey('shift+enter')).toBe(true);
+  });
+
+  it('should detect the string "shift+return"', async () => {
+    const { isShiftEnterKey } = await import('./shortcuts.js');
+    expect(isShiftEnterKey('shift+return')).toBe(true);
+  });
+
+  it('should return false for regular Enter', async () => {
+    const { isShiftEnterKey } = await import('./shortcuts.js');
+    expect(isShiftEnterKey('\r')).toBe(false);
+    expect(isShiftEnterKey('\n')).toBe(false);
+    expect(isShiftEnterKey('enter')).toBe(false);
+  });
+
+  it('should return false for Ctrl+Enter', async () => {
+    const { isShiftEnterKey } = await import('./shortcuts.js');
+    expect(isShiftEnterKey('\u001b[13;5u')).toBe(false);
+  });
+
+  it('should return false for non-enter keys', async () => {
+    const { isShiftEnterKey } = await import('./shortcuts.js');
+    expect(isShiftEnterKey('a')).toBe(false);
+    expect(isShiftEnterKey('\u001b')).toBe(false);
   });
 });

@@ -267,6 +267,55 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     expect(fetchChildren).not.toHaveBeenCalled();
   });
 
+  it('navigates into children when Shift+Enter is pressed on a parent item', async () => {
+    const { ctx, getWidget, getDone } = createMockContext();
+
+    const fetchChildren = vi.fn().mockResolvedValue(childItems);
+    defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, undefined, fetchChildren);
+    const widget = getWidget()!;
+    const done = getDone()!;
+
+    // Press Shift+Enter on parent item (index 0, childCount=2)
+    // Use Kitty protocol escape sequence for Shift+Enter
+    widget.handleInput!('\u001b[13;2u');
+
+    // done should NOT have been called (Shift+Enter navigates into children)
+    expect(done).not.toHaveBeenCalled();
+    // fetchChildren should have been called with the parent ID
+    expect(fetchChildren).toHaveBeenCalledWith('WL-001');
+  });
+
+  it('renders child items and a ".." entry after Shift+Enter on parent', async () => {
+    const { ctx, getWidget } = createMockContext();
+
+    const fetchChildren = vi.fn().mockResolvedValue(childItems);
+    defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, undefined, fetchChildren);
+    const widget = getWidget()!;
+
+    // Initial render should show root items
+    let lines = widget.render(80);
+    expect(lines.join('\n')).toContain('Parent item');
+    expect(lines.join('\n')).toContain('Standalone item');
+
+    // Press Shift+Enter on parent item (index 0, has 2 children)
+    widget.handleInput!('\u001b[13;2u');
+
+    // After Shift+Enter, children should be fetched and rendered
+    await vi.advanceTimersByTimeAsync(10); // Let the promise resolve
+
+    lines = widget.render(80);
+    const rendered = lines.join('\n');
+
+    // Should contain the ".." entry
+    expect(rendered).toContain('..');
+    // Should contain child items
+    expect(rendered).toContain('First child');
+    expect(rendered).toContain('Second child');
+    // Should NOT contain parent root items anymore
+    expect(rendered).not.toContain('Parent item');
+    expect(rendered).not.toContain('Standalone item');
+  });
+
   it('navigates into children when Ctrl+Enter is pressed on a parent item', async () => {
     const { ctx, getWidget, getDone } = createMockContext();
 
@@ -518,6 +567,34 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     );
   });
 
+  it('preserves shortcut dispatch when viewing children (via Shift+Enter navigation)', async () => {
+    // Import ShortcutRegistry for testing
+    const { ShortcutRegistry } = await import('../extensions/Worklog/shortcut-config.js');
+    const entries = [
+      { key: 'i', command: '/implement <id>', view: 'list' },
+    ];
+    const registry = new ShortcutRegistry(entries);
+
+    const { ctx, getWidget, getDone } = createMockContext();
+
+    const fetchChildren = vi.fn().mockResolvedValue(childItems);
+    defaultChooseWorkItem(rootItems, ctx, vi.fn(), registry, undefined, fetchChildren);
+    const widget = getWidget()!;
+    const done = getDone()!;
+
+    // Navigate into children using Shift+Enter
+    widget.handleInput!('\u001b[13;2u');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Press shortcut key 'i' while viewing children
+    widget.handleInput!('i');
+
+    // Should dispatch the shortcut with the correct child item ID
+    expect(done).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'shortcut' as const })
+    );
+  });
+
   it('handles fetchChildren errors gracefully without crashing', async () => {
     const { ctx, getWidget, getDone } = createMockContext();
 
@@ -527,6 +604,10 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
 
     // Press Ctrl+Enter on parent item
     widget.handleInput!('\u001b[13;5u');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Press Shift+Enter on parent item
+    widget.handleInput!('\u001b[13;2u');
     await vi.advanceTimersByTimeAsync(10);
 
     // Should not crash - should remain at root level
