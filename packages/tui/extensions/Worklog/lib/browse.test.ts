@@ -36,6 +36,7 @@ describe('lib/browse exports', () => {
     expect(typeof mod.isPageUpKey).toBe('function');
     expect(typeof mod.isPageDownKey).toBe('function');
     expect(typeof mod.isEnterKey).toBe('function');
+    expect(typeof mod.isCtrlEnterKey).toBe('function');
     expect(typeof mod.isEscapeKey).toBe('function');
   });
 });

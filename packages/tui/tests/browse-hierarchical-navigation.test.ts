@@ -20,41 +20,24 @@ vi.mock('node:fs', () => ({
 }));
 
 /**
-
  * Tests for hierarchical navigation in the browse selection list.
-
  *
-
  * Verifies that:
-
  * - Items with children show child count indicator regardless of issue type
-
- * - Enter on item with children fetches and displays children
-
+ * - Enter on item with children opens the detail view (calls done)
+ * - Ctrl+Enter on item with children fetches and displays children
  * - ".." entry is shown at the top of child lists
-
  * - Enter on ".." navigates back to the parent level
-
  * - Escape navigates back one level when viewing children
-
  * - Escape closes the overlay at root level
-
  * - Arbitrary depth navigation works (children of children)
-
  * - Selection position is restored when navigating back
-
  * - Enter on item without children opens detail view at root level
-
  *
-
  * Run: npx vitest run packages/tui/tests/browse-hierarchical-navigation.test.ts
-
  */
 
-
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-
 import { defaultChooseWorkItem, getIconPrefix, type WorklogBrowseItem } from '../extensions/Worklog/index.js';
 
 // ─── getIconPrefix tests ─────────────────────────────────────────────
@@ -266,7 +249,7 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     expect(done).toHaveBeenCalledWith(rootItems[1]);
   });
 
-  it('does NOT call done when Enter is pressed on an item with children (uses fetchChildren instead)', () => {
+  it('calls done when Enter is pressed on an item with children (opens detail view)', () => {
     const { ctx, getWidget, getDone } = createMockContext();
 
     // Provide a fetchChildren mock
@@ -278,13 +261,31 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     // Press Enter on parent item (index 0, childCount=2)
     widget.handleInput!('\r');
 
-    // done should NOT have been called (we're navigating into children, not selecting)
+    // done SHOULD have been called (Enter now shows detail view for parents too)
+    expect(done).toHaveBeenCalledWith(rootItems[0]);
+    // fetchChildren should NOT have been called (Enter does not navigate into children anymore)
+    expect(fetchChildren).not.toHaveBeenCalled();
+  });
+
+  it('navigates into children when Ctrl+Enter is pressed on a parent item', async () => {
+    const { ctx, getWidget, getDone } = createMockContext();
+
+    const fetchChildren = vi.fn().mockResolvedValue(childItems);
+    defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, undefined, fetchChildren);
+    const widget = getWidget()!;
+    const done = getDone()!;
+
+    // Press Ctrl+Enter on parent item (index 0, childCount=2)
+    // Use Kitty protocol escape sequence for Ctrl+Enter
+    widget.handleInput!('\u001b[13;5u');
+
+    // done should NOT have been called (Ctrl+Enter navigates into children)
     expect(done).not.toHaveBeenCalled();
     // fetchChildren should have been called with the parent ID
     expect(fetchChildren).toHaveBeenCalledWith('WL-001');
   });
 
-  it('renders child items and a ".." entry after Enter on parent', async () => {
+  it('renders child items and a ".." entry after Ctrl+Enter on parent', async () => {
     const { ctx, getWidget, getDone } = createMockContext();
 
     const fetchChildren = vi.fn().mockResolvedValue(childItems);
@@ -296,10 +297,10 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     expect(lines.join('\n')).toContain('Parent item');
     expect(lines.join('\n')).toContain('Standalone item');
 
-    // Press Enter on parent item (index 0, has 2 children)
-    widget.handleInput!('\r');
+    // Press Ctrl+Enter on parent item (index 0, has 2 children)
+    widget.handleInput!('\u001b[13;5u');
 
-    // After Enter, children should be fetched and rendered
+    // After Ctrl+Enter, children should be fetched and rendered
     await vi.advanceTimersByTimeAsync(10); // Let the promise resolve
 
     lines = widget.render(80);
@@ -322,8 +323,8 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, undefined, fetchChildren);
     const widget = getWidget()!;
 
-    // Navigate into parent's children
-    widget.handleInput!('\r');
+    // Navigate into parent's children using Ctrl+Enter
+    widget.handleInput!('\u001b[13;5u');
     await vi.advanceTimersByTimeAsync(10);
 
     // Now we should be viewing children. Press Enter on ".." (index 0)
@@ -344,8 +345,8 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, undefined, fetchChildren);
     const widget = getWidget()!;
 
-    // Navigate into children
-    widget.handleInput!('\r');
+    // Navigate into children using Ctrl+Enter
+    widget.handleInput!('\u001b[13;5u');
     await vi.advanceTimersByTimeAsync(10);
 
     // Verify we're in children view
@@ -394,13 +395,13 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, undefined, fetchChildren);
     const widget = getWidget()!;
 
-    // Navigate into WL-001's children
-    widget.handleInput!('\r');
+    // Navigate into WL-001's children using Ctrl+Enter
+    widget.handleInput!('\u001b[13;5u');
     await vi.advanceTimersByTimeAsync(10);
 
     // Navigate down to "First child" (WL-003, has childCount=1)
     widget.handleInput!('\u001b[B'); // move to child item (index 1, after "..")
-    widget.handleInput!('\r'); // Enter on First child
+    widget.handleInput!('\u001b[13;5u'); // Ctrl+Enter on First child
     await vi.advanceTimersByTimeAsync(10);
 
     // Should now be viewing grandchildren
@@ -432,9 +433,9 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     let lines = widget.render(80);
     expect(getSelectionMarker(lines, 'Standalone item')).toContain('›');
 
-    // Navigate UP back to parent (index 0) and press Enter to see children
+    // Navigate UP back to parent (index 0) and press Ctrl+Enter to see children
     widget.handleInput!('\u001b[A');
-    widget.handleInput!('\r');
+    widget.handleInput!('\u001b[13;5u');
     await vi.advanceTimersByTimeAsync(10);
 
     // Verify we're viewing children now
@@ -451,7 +452,7 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     expect(rendered).toContain('Standalone item');
     expect(rendered).not.toContain('First child');
 
-    // Selection should be restored to the item that was selected when Enter
+    // Selection should be restored to the item that was selected when Ctrl+Enter
     // was pressed to navigate into children — that is "Parent item" (index 0)
     expect(getSelectionMarker(lines, 'Parent item')).toContain('›');
   });
@@ -504,8 +505,8 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     const widget = getWidget()!;
     const done = getDone()!;
 
-    // Navigate into children
-    widget.handleInput!('\r');
+    // Navigate into children using Ctrl+Enter
+    widget.handleInput!('\u001b[13;5u');
     await vi.advanceTimersByTimeAsync(10);
 
     // Press shortcut key 'i' while viewing children
@@ -524,8 +525,8 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, undefined, fetchChildren);
     const widget = getWidget()!;
 
-    // Press Enter on parent item
-    widget.handleInput!('\r');
+    // Press Ctrl+Enter on parent item
+    widget.handleInput!('\u001b[13;5u');
     await vi.advanceTimersByTimeAsync(10);
 
     // Should not crash - should remain at root level
@@ -542,8 +543,8 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, undefined, fetchChildren);
     const widget = getWidget()!;
 
-    // Navigate into children
-    widget.handleInput!('\r');
+    // Navigate into children using Ctrl+Enter
+    widget.handleInput!('\u001b[13;5u');
     await vi.advanceTimersByTimeAsync(10);
 
     const lines = widget.render(80);

@@ -18,6 +18,7 @@ describe('lib/shortcuts exports', () => {
     expect(typeof mod.isPageDownKey).toBe('function');
     expect(typeof mod.isEnterKey).toBe('function');
     expect(typeof mod.isEscapeKey).toBe('function');
+    expect(typeof mod.isCtrlEnterKey).toBe('function');
   });
 });
 
@@ -107,5 +108,40 @@ describe('isPageDownKey', () => {
   it('should detect space as page down', async () => {
     const { isPageDownKey } = await import('./shortcuts.js');
     expect(isPageDownKey(' ')).toBe(true);
+  });
+});
+
+describe('isCtrlEnterKey', () => {
+  it('should detect Kitty protocol Ctrl+Enter sequence', async () => {
+    const { isCtrlEnterKey } = await import('./shortcuts.js');
+    expect(isCtrlEnterKey('\u001b[13;5u')).toBe(true);
+  });
+
+  it('should detect ANSI modifyOtherKeys Ctrl+Enter sequence', async () => {
+    const { isCtrlEnterKey } = await import('./shortcuts.js');
+    expect(isCtrlEnterKey('\u001b[27;5;13~')).toBe(true);
+  });
+
+  it('should detect the string "ctrl+enter"', async () => {
+    const { isCtrlEnterKey } = await import('./shortcuts.js');
+    expect(isCtrlEnterKey('ctrl+enter')).toBe(true);
+  });
+
+  it('should detect the string "ctrl+return"', async () => {
+    const { isCtrlEnterKey } = await import('./shortcuts.js');
+    expect(isCtrlEnterKey('ctrl+return')).toBe(true);
+  });
+
+  it('should return false for regular Enter', async () => {
+    const { isCtrlEnterKey } = await import('./shortcuts.js');
+    expect(isCtrlEnterKey('\r')).toBe(false);
+    expect(isCtrlEnterKey('\n')).toBe(false);
+    expect(isCtrlEnterKey('enter')).toBe(false);
+  });
+
+  it('should return false for non-enter keys', async () => {
+    const { isCtrlEnterKey } = await import('./shortcuts.js');
+    expect(isCtrlEnterKey('a')).toBe(false);
+    expect(isCtrlEnterKey('\u001b')).toBe(false);
   });
 });

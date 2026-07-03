@@ -21,6 +21,7 @@ import {
   isPageUpKey,
   isPageDownKey,
   isEnterKey,
+  isCtrlEnterKey,
   isEscapeKey,
 } from './shortcuts.js';
 
@@ -33,6 +34,7 @@ export {
   isPageUpKey,
   isPageDownKey,
   isEnterKey,
+  isCtrlEnterKey,
   isEscapeKey,
 };
 import {
@@ -608,6 +610,11 @@ export async function defaultChooseWorkItem(
             }
           }
         }
+        // Append Ctrl+Enter hint when the selected item has children
+        if (items[selectedIndex] && items[selectedIndex].childCount !== undefined && items[selectedIndex].childCount > 0) {
+          const ctrlEnterHint = 'Ctrl+Enter:children';
+          helpText = helpText ? `${helpText} ${ctrlEnterHint}` : ctrlEnterHint;
+        }
         const help = currentSettings.showHelpText
           ? truncateToWidth(theme.fg('dim', helpText), width)
           : '';
@@ -738,7 +745,7 @@ export async function defaultChooseWorkItem(
           return;
         }
 
-        if (isEnterKey(data)) {
+        if (isEnterKey(data) || isCtrlEnterKey(data)) {
           const selected = items[selectedIndex];
           if (!selected) {
             _done(null);
@@ -765,8 +772,11 @@ export async function defaultChooseWorkItem(
             return;
           }
 
+          // Ctrl+Enter on a parent item → navigate into children
+          // Enter on any item (including parents) → open detail view
           if (
-            selected.childCount !== undefined
+            isCtrlEnterKey(data)
+            && selected.childCount !== undefined
             && selected.childCount > 0
             && fetchChildren
             && !isLoadingChildren

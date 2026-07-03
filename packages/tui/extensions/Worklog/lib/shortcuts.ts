@@ -78,6 +78,18 @@ export function isEnterKey(data: string): boolean {
   return data === '\r' || data === '\n' || data === 'enter' || data === 'return';
 }
 
+export function isCtrlEnterKey(data: string): boolean {
+  if (_matchesKey) return _matchesKey(data, 'ctrl+enter');
+  // Fallback: Kitty protocol CSI-u sequences for Ctrl+Enter
+  // Also support raw ANSI with modifyOtherKeys (CSI 27;5;13~)
+  return (
+    data === '\u001b[13;5u'
+    || data === '\u001b[27;5;13~'
+    || data === 'ctrl+enter'
+    || data === 'ctrl+return'
+  );
+}
+
 export function isEscapeKey(data: string): boolean {
   if (_matchesKey) return _matchesKey(data, 'escape');
   return data === '\u001b' || data === 'escape';

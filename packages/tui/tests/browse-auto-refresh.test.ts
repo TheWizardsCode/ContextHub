@@ -369,8 +369,8 @@ describe('Browse list auto-refresh', () => {
     defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, reFetchItems, fetchChildren);
     const widget = getWidget()!;
 
-    // Navigate into children by pressing Enter on parent item (index 0)
-    widget.handleInput!('\r');
+    // Navigate into children by pressing Ctrl+Enter on parent item (index 0)
+    widget.handleInput!('\u001b[13;5u');
     await vi.advanceTimersByTimeAsync(10);
 
     // Verify we're viewing children
@@ -424,8 +424,8 @@ describe('Browse list auto-refresh', () => {
     defaultChooseWorkItem(rootItems, ctx, vi.fn(), undefined, reFetchItems, fetchChildren);
     const widget = getWidget()!;
 
-    // Navigate into children
-    widget.handleInput!('\r');
+    // Navigate into children using Ctrl+Enter
+    widget.handleInput!('\u001b[13;5u');
     await vi.advanceTimersByTimeAsync(10);
 
     // Advance timers — should use fetchChildren, not reFetchItems
