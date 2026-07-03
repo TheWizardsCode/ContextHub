@@ -955,12 +955,6 @@ export interface BrowseFlowOptions {
   shortcutRegistry: ShortcutRegistry;
   /** Optional injected chooseWorkItem (for tests). Falls back to defaultChooseWorkItem. */
   chooseWorkItem?: ChooseWorkItemFn;
-  /**
-   * Optional callback invoked when a work item is selected (user presses Enter).
-   * Called with the selected item before the detail view opens.
-   * Useful for tracking the current work item context (e.g., for editor shortcuts).
-   */
-  onItemSelected?: (item: WorklogBrowseItem) => void;
 }
 
 /**
@@ -1050,7 +1044,6 @@ export async function runBrowseFlow(
       }
 
       announceSelection(selectedItem);
-      options.onItemSelected?.(selectedItem);
 
       if (!ctx.ui.custom) {
         ctx.ui.notify('Scrollable detail view requires a TUI that supports custom overlays.', 'warning');
@@ -1069,7 +1062,83 @@ export async function runBrowseFlow(
             const widget = factory(tui, _theme);
 
             return {
-              render: (width: number) => widget.render(width),
+              render: (width: number) => {
+                const lines = widget.render(width);
+
+                // ── Shortcut hints ──────────────────────────────────────────
+                if (currentSettings.showHelpText) {
+                  let helpText = '';
+                  const formatHint = (e: ShortcutEntry): string => {
+                    const label = e.label ?? e.command
+                      .replace(/<[^>]+>/g, '')
+                      .split(/\r?\n/)[0]
+                      .trim()
+                      .replace(/^\/(skill:)?/, '');
+                    const chord = (e as Record<string, unknown>).chord;
+                    if (Array.isArray(chord) && chord.length >= 2) {
+                      const leaderKey = (chord as string[])[0];
+                      const firstWord = label.split(/\s+/)[0];
+                      return `${leaderKey}:${firstWord}...`;
+                    }
+                    return `${e.key}:${label}`;
+                  };
+
+                  if (detailPendingChordLeader !== null) {
+                    const chords = shortcutRegistry.getChordByLeader(detailPendingChordLeader, 'detail');
+                    if (chords.length > 0) {
+                      const hints = chords
+                        .filter(c => {
+                          if (selectedItem.stage !== undefined && c.stages !== undefined && c.stages.length > 0) {
+                            return c.stages.includes(selectedItem.stage);
+                          }
+                          return true;
+                        })
+                        .map(e => {
+                          const chord = (e as Record<string, unknown>).chord;
+                          if (Array.isArray(chord) && chord.length >= 2) {
+                            const secondKey = (chord as string[])[1];
+                            const label = e.label ?? e.command
+                              .replace(/<[^>]+>/g, '')
+                              .split(/\r?\n/)[0]
+                              .trim()
+                              .replace(/^\/(skill:)?/, '');
+                            const rest = label.split(/\s+/).slice(1).join(' ');
+                            return rest.length > 0 ? `${secondKey}:${rest}` : secondKey;
+                          }
+                          return formatHint(e);
+                        })
+                        .join(' ');
+                      if (hints.length > 0) {
+                        helpText = `\uD83D\uDD17 ${hints}`;
+                      }
+                    }
+                  } else {
+                    const relevantEntries = shortcutRegistry
+                      .getEntriesForStage(selectedItem.stage)
+                      .filter(e => e.view === 'detail' || e.view === 'both');
+                    if (relevantEntries.length > 0) {
+                      const seenChordLeaders = new Set<string>();
+                      helpText = relevantEntries
+                        .filter(e => {
+                          const chord = (e as Record<string, unknown>).chord;
+                          if (Array.isArray(chord) && chord.length >= 2) {
+                            const leader = (chord as string[])[0];
+                            if (seenChordLeaders.has(leader)) return false;
+                            seenChordLeaders.add(leader);
+                          }
+                          return true;
+                        })
+                        .map(e => formatHint(e))
+                        .join(' ');
+                    }
+                  }
+                  if (helpText) {
+                    return [...lines, '', _theme.fg('dim', truncateToWidth(helpText, width))];
+                  }
+                }
+
+                return lines;
+              },
               invalidate: () => widget.invalidate(),
               handleInput: (data: string) => {
                 const lookupKey = data.length === 1 ? data : undefined;
