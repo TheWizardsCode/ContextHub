@@ -724,4 +724,204 @@ describe('Hierarchical navigation in defaultChooseWorkItem', () => {
     expect(parentIdx).toBeGreaterThanOrEqual(0);
     expect(firstChildIdx).toBeGreaterThan(parentIdx);
   });
+
+  // ─── Wrap-around navigation tests ────────────────────────────────
+
+  it('wraps from first item to last item when Up arrow is pressed at index 0', () => {
+    const { ctx, getWidget } = createMockContext();
+
+    // Use 3 items to clearly demonstrate wrap-around
+    const threeItems: WorklogBrowseItem[] = [
+      { id: 'WL-001', title: 'First item', status: 'open' },
+      { id: 'WL-002', title: 'Middle item', status: 'open' },
+      { id: 'WL-003', title: 'Last item', status: 'open' },
+    ];
+
+    defaultChooseWorkItem(threeItems, ctx, vi.fn());
+    const widget = getWidget()!;
+
+    // Initial selection is at index 0 (First item)
+    let lines = widget.render(80);
+    const firstLine = lines.find(l => l.includes('First item'));
+    expect(firstLine).toBeDefined();
+    expect(firstLine).toContain('\u203A'); // selected marker
+
+    // Press Up arrow — should wrap to last item
+    widget.handleInput!('\u001b[A');
+    lines = widget.render(80);
+
+    // First item should no longer be selected
+    const firstLine2 = lines.find(l => l.includes('First item'));
+    expect(firstLine2).toBeDefined();
+    expect(firstLine2).not.toContain('\u203A');
+
+    // Last item should now be selected
+    const lastLine = lines.find(l => l.includes('Last item'));
+    expect(lastLine).toBeDefined();
+    expect(lastLine).toContain('\u203A');
+  });
+
+  it('wraps from last item to first item when Down arrow is pressed at last index', () => {
+    const { ctx, getWidget } = createMockContext();
+
+    const threeItems: WorklogBrowseItem[] = [
+      { id: 'WL-001', title: 'First item', status: 'open' },
+      { id: 'WL-002', title: 'Middle item', status: 'open' },
+      { id: 'WL-003', title: 'Last item', status: 'open' },
+    ];
+
+    defaultChooseWorkItem(threeItems, ctx, vi.fn());
+    const widget = getWidget()!;
+
+    // Navigate down to last item (index 2)
+    widget.handleInput!('\u001b[B');
+    widget.handleInput!('\u001b[B');
+
+    let lines = widget.render(80);
+    let lastLine = lines.find(l => l.includes('Last item'));
+    expect(lastLine).toContain('\u203A');
+
+    // Press Down arrow — should wrap to first item
+    widget.handleInput!('\u001b[B');
+    lines = widget.render(80);
+
+    // Last item should no longer be selected
+    lastLine = lines.find(l => l.includes('Last item'));
+    expect(lastLine).toBeDefined();
+    expect(lastLine).not.toContain('\u203A');
+
+    // First item should now be selected
+    const firstLine = lines.find(l => l.includes('First item'));
+    expect(firstLine).toBeDefined();
+    expect(firstLine).toContain('\u203A');
+  });
+
+  it('does not affect normal up/down movement within the list', () => {
+    const { ctx, getWidget } = createMockContext();
+
+    const threeItems: WorklogBrowseItem[] = [
+      { id: 'WL-001', title: 'First item', status: 'open' },
+      { id: 'WL-002', title: 'Middle item', status: 'open' },
+      { id: 'WL-003', title: 'Last item', status: 'open' },
+    ];
+
+    defaultChooseWorkItem(threeItems, ctx, vi.fn());
+    const widget = getWidget()!;
+
+    // Press Down — should go to middle item
+    widget.handleInput!('\u001b[B');
+    let lines = widget.render(80);
+    let middleLine = lines.find(l => l.includes('Middle item'));
+    expect(middleLine).toContain('\u203A');
+
+    // Press Down again — should go to last item
+    widget.handleInput!('\u001b[B');
+    lines = widget.render(80);
+    let lastLine = lines.find(l => l.includes('Last item'));
+    expect(lastLine).toContain('\u203A');
+
+    // Press Up — should go back to middle item
+    widget.handleInput!('\u001b[A');
+    lines = widget.render(80);
+    middleLine = lines.find(l => l.includes('Middle item'));
+    expect(middleLine).toContain('\u203A');
+  });
+
+  it('handles empty item list gracefully (no crash on Up/Down)', () => {
+    const { ctx, getWidget, getDone } = createMockContext();
+
+    defaultChooseWorkItem([], ctx, vi.fn());
+    const widget = getWidget()!;
+
+    // Should not crash when pressing Up or Down on empty list
+    expect(() => {
+      widget.handleInput!('\u001b[A');
+      widget.handleInput!('\u001b[B');
+    }).not.toThrow();
+
+    const lines = widget.render(80);
+    const rendered = lines.join('\n');
+    // Should show the empty state message
+    expect(rendered).toContain('No items to display');
+  });
+
+  it('wraps from first to last and last to first at child hierarchy level', async () => {
+    const { ctx, getWidget } = createMockContext();
+
+    // Root items: one parent with children
+    const rootItems2: WorklogBrowseItem[] = [
+      { id: 'WL-001', title: 'Parent with kids', status: 'open', childCount: 3 },
+    ];
+
+    // Child items: 3 items — wrap should work in child lists too
+    const wrapChildItems: WorklogBrowseItem[] = [
+      { id: 'WL-004', title: 'Child A', status: 'open' },
+      { id: 'WL-005', title: 'Child B', status: 'open' },
+      { id: 'WL-006', title: 'Child C', status: 'open' },
+    ];
+
+    const fetchChildren = vi.fn().mockResolvedValue(wrapChildItems);
+
+    defaultChooseWorkItem(rootItems2, ctx, vi.fn(), undefined, undefined, fetchChildren);
+    const widget = getWidget()!;
+
+    // Navigate into children using Ctrl+Enter
+    widget.handleInput!('\u001b[13;5u');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // We are now in child view; items are ["..", Child A, Child B, Child C]
+    // Selection is at index 0 (".." entry). Navigate down to Child C (last real item)
+    widget.handleInput!('\u001b[B'); // Child A (index 1)
+    widget.handleInput!('\u001b[B'); // Child B (index 2)
+    widget.handleInput!('\u001b[B'); // Child C (index 3)
+
+    let lines = widget.render(80);
+    let childCLine = lines.find(l => l.includes('Child C'));
+    expect(childCLine).toContain('\u203A');
+
+    // Press Down at last item — should wrap to ".." (index 0)
+    widget.handleInput!('\u001b[B');
+    lines = widget.render(80);
+    const dotDotLine = lines.find(l => l.includes('..'));
+    childCLine = lines.find(l => l.includes('Child C'));
+    expect(dotDotLine).toContain('\u203A');
+    expect(childCLine).not.toContain('\u203A');
+
+    // Press Up at first item ("..") — should wrap to Child C (index 3, last)
+    widget.handleInput!('\u001b[A');
+    lines = widget.render(80);
+    childCLine = lines.find(l => l.includes('Child C'));
+    const dotDotLine2 = lines.find(l => l.includes('..'));
+    expect(childCLine).toContain('\u203A');
+    expect(dotDotLine2).not.toContain('\u203A');
+  });
+
+  it('supports two-direction wrap with single-item list (selects same item)', () => {
+    const { ctx, getWidget } = createMockContext();
+
+    const singleItem: WorklogBrowseItem[] = [
+      { id: 'WL-001', title: 'Solo item', status: 'open' },
+    ];
+
+    defaultChooseWorkItem(singleItem, ctx, vi.fn());
+    const widget = getWidget()!;
+
+    // Initial selection should be at index 0
+    let lines = widget.render(80);
+    let soloLine = lines.find(l => l.includes('Solo item'));
+    expect(soloLine).toContain('\u203A');
+
+    // Press Up — wraps to same item (items.length - 1 = 0)
+    widget.handleInput!('\u001b[A');
+    lines = widget.render(80);
+    soloLine = lines.find(l => l.includes('Solo item'));
+    // Should still be selected
+    expect(soloLine).toContain('\u203A');
+
+    // Press Down — wraps to same item
+    widget.handleInput!('\u001b[B');
+    lines = widget.render(80);
+    soloLine = lines.find(l => l.includes('Solo item'));
+    expect(soloLine).toContain('\u203A');
+  });
 });

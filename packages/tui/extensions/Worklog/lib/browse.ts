@@ -482,7 +482,13 @@ export async function defaultChooseWorkItem(
     };
 
     const moveSelection = (nextIndex: number) => {
-      if (nextIndex < 0 || nextIndex >= items.length || nextIndex === selectedIndex) return;
+      if (items.length === 0) return;
+      if (nextIndex < 0) {
+        nextIndex = items.length - 1;
+      } else if (nextIndex >= items.length) {
+        nextIndex = 0;
+      }
+      if (nextIndex === selectedIndex) return;
       selectedIndex = nextIndex;
       invalidateCache();
       const item = items[selectedIndex];
