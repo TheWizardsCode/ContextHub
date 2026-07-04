@@ -1023,6 +1023,10 @@ export async function runBrowseFlow(
       navStack: [],
     };
 
+    // When Tab is pressed in the detail view on a parent item, store the
+    // parent id here so the loop can navigate to children on restart.
+    let detailTabNavigationParentId: string | null = null;
+
     // ── Browse loop: selection list → detail → selection list → … ──
     while (true) {
       // Check if we have preserved items from a previous loop iteration
@@ -1152,6 +1156,11 @@ export async function runBrowseFlow(
                         .join(' ');
                     }
                   }
+                  // Append Tab:children hint when the item has children
+                  if (selectedItem.childCount !== undefined && selectedItem.childCount > 0) {
+                    const tabHint = 'Tab:children';
+                    helpText = helpText ? `${helpText} ${tabHint}` : tabHint;
+                  }
                   if (helpText) {
                     return [...lines, '', _theme.fg('dim', truncateToWidth(helpText, width))];
                   }
@@ -1210,6 +1219,14 @@ export async function runBrowseFlow(
                   }
                 }
 
+                if (isTabKey(data) && selectedItem.childCount !== undefined && selectedItem.childCount > 0) {
+                  // Tab on a parent item → navigate to children
+                  detailTabNavigationParentId = selectedItem.id;
+                  ctx.ui.setWidget?.('worklog-browse-selection', undefined);
+                  done(null);
+                  return;
+                }
+
                 if (isEscapeKey(data)) {
                   if (detailPendingChordLeader === null) {
                     ctx.ui.setWidget?.('worklog-browse-selection', undefined);
@@ -1233,7 +1250,26 @@ export async function runBrowseFlow(
           return;
         }
 
-        // detailResult is null (Escape pressed) — loop back to selection list
+        // detailResult is null — loop back to selection list
+        // Check if Tab was pressed in detail view to navigate into children
+        if (detailTabNavigationParentId !== null && fetchChildren && selectedItem.childCount !== undefined && selectedItem.childCount > 0) {
+          const parentId = detailTabNavigationParentId;
+          detailTabNavigationParentId = null;
+          try {
+            const childItems = await fetchChildren(parentId);
+            const parentEntry: WorklogBrowseItem = { id: '..', title: '..', status: 'open' };
+            selectionState.currentItems = [parentEntry, ...childItems];
+            selectionState.selectedIndex = 0;
+            selectionState.lastSelectionId = undefined;
+            selectionState.navStack = [{
+              items: items,
+              selectedIndex: items.findIndex(i => i.id === parentId),
+              lastSelectionId: parentId,
+            }];
+          } catch {
+            ctx.ui.notify('Failed to fetch children from detail view.', 'warning');
+          }
+        }
       } catch (innerErr) {
         const message = innerErr instanceof Error ? innerErr.message : String(innerErr);
         ctx.ui.notify(`Failed to render work item details: ${message}`, 'error');
