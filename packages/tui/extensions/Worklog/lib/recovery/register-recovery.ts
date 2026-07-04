@@ -115,8 +115,9 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
       }
 
       case ErrorCategory.CONTEXT_LENGTH: {
-        // Context-length: handled by compact-and-continue
-        // (notification shown by the compact handler)
+        // Context-length: compact and auto-continue via the retry loop.
+        // The retry loop handles: wait-for-idle -> remove error from agent
+        // state -> prompt([]) to resume generation.
         if (!continuationState.getIsContinuing()) {
           continuationState.startContinuation();
           ctx.ui.notify(
@@ -124,6 +125,12 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
             'info',
           );
           continuationState.endContinuation();
+          // Fire the retry loop to auto-continue after compaction.
+          // prompt([]) with the truncated message still in context lets
+          // the LLM continue from where it left off. If the continuation
+          // also hits max tokens, the next agent_end fires a new
+          // continuation (the loop exits because 'length' is not 'error').
+          void triggerInvisibleContinue();
         }
         break;
       }
