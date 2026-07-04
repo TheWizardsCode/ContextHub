@@ -620,9 +620,9 @@ export async function defaultChooseWorkItem(
             }
           }
         }
-        // Append Tab/Ctrl+Enter/Shift+Enter hint when the selected item has children
+        // Append Tab hint when the selected item has children
         if (items[selectedIndex] && items[selectedIndex].childCount !== undefined && items[selectedIndex].childCount > 0) {
-          const childrenHint = 'Tab/Ctrl+Enter/Shift+Enter:children';
+          const childrenHint = 'Tab:children';
           helpText = helpText ? `${helpText} ${childrenHint}` : childrenHint;
         }
         const help = currentSettings.showHelpText
@@ -755,7 +755,7 @@ export async function defaultChooseWorkItem(
           return;
         }
 
-        if (isEnterKey(data) || isCtrlEnterKey(data) || isShiftEnterKey(data) || isTabKey(data)) {
+        if (isEnterKey(data) || isTabKey(data)) {
           const selected = items[selectedIndex];
           if (!selected) {
             _done(null);
@@ -782,10 +782,10 @@ export async function defaultChooseWorkItem(
             return;
           }
 
-          // Tab, Ctrl+Enter, or Shift+Enter on a parent item → navigate into children
+          // Tab on a parent item → navigate into children
           // Enter on any item (including parents) → open detail view
           if (
-            (isTabKey(data) || isCtrlEnterKey(data) || isShiftEnterKey(data))
+            isTabKey(data)
             && selected.childCount !== undefined
             && selected.childCount > 0
             && fetchChildren
