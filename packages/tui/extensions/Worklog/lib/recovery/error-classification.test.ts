@@ -178,6 +178,13 @@ describe('isTimeout', () => {
     expect(isTimeout(makeErrorMsg('The request timed out after 30 seconds'))).toBe(true);
   });
 
+  it('detects stream ended without finish_reason pattern', () => {
+    expect(isTimeout(makeErrorMsg('Stream ended without finish_reason'))).toBe(true);
+    expect(isTimeout(makeErrorMsg('stream ended without finish_reason'))).toBe(true);
+    expect(isTimeout(makeErrorMsg('Stream ended without finish (connection dropped)'))).toBe(true);
+    expect(isTimeout(makeErrorMsg('stream ended without finish - stream dropped'))).toBe(true);
+  });
+
   it('detects network/connection failure patterns', () => {
     expect(isTimeout(makeErrorMsg('Network error: socket hang up'))).toBe(true);
     expect(isTimeout(makeErrorMsg('Fetch failed: ENOTFOUND'))).toBe(true);
@@ -248,6 +255,7 @@ describe('classifyError', () => {
   it('classifies timeout errors', () => {
     expect(classifyError(makeErrorMsg('Request timed out'))).toBe(ErrorCategory.TIMEOUT);
     expect(classifyError(makeErrorMsg('Connection error: ETIMEDOUT'))).toBe(ErrorCategory.TIMEOUT);
+    expect(classifyError(makeErrorMsg('Stream ended without finish_reason'))).toBe(ErrorCategory.TIMEOUT);
   });
 
   it('classifies terminated errors', () => {

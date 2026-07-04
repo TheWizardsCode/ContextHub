@@ -136,6 +136,7 @@ const DEFAULT_TIMEOUT_PATTERNS: RegExp[] = [
   /upstream\s*connect/i,
   /broken\s*pipe/i,
   /request\s*(timeout|ended\s*without)/i,
+  /stream\s+ended\s+without\s+finish/i, // stream dropped mid-generation (e.g., "Stream ended without finish_reason")
   /max\s*outbound\s*streams/i,
   /streams?\s*(exhausted|limit)/i,
 ];
