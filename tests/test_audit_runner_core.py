@@ -17,6 +17,9 @@ from audit.scripts.audit_runner import (
     _assemble_issue_report,
     _assemble_child_audit_report,
     _assemble_project_report,
+    _get_closing_sentence,
+    _CLOSING_READY,
+    _CLOSING_NOT_READY,
 )
 
 # Ensure the pi agent skill module can be imported
@@ -249,3 +252,80 @@ class TestModelLineFormat:
             model_source="remote",
         )
         assert "Model: claude-sonnet-4-20250514 (provider: remote)" in report
+
+
+# ===================================================================
+# _get_closing_sentence tests
+# ===================================================================
+
+class TestGetClosingSentence:
+    """Tests for the closing sentence appended to issue-level audit stdout."""
+
+    def test_ready_to_close_returns_ready_sentence(self):
+        """AC1: 'Ready to close: Yes' returns the ready closing sentence."""
+        report = _assemble_issue_report(
+            SAMPLE_ISSUE, SAMPLE_AC_RESULTS, _default_child_results(),
+            model="test-model", model_source="local",
+        )
+        result = _get_closing_sentence(report)
+        assert result == _CLOSING_READY, f"Expected ready sentence, got: {result}"
+
+    def test_not_ready_to_close_returns_not_ready_sentence(self):
+        """AC2: 'Ready to close: No' returns the not-ready closing sentence."""
+        partial_ac = [{"text": "AC 1 broken", "verdict": "unmet", "evidence": "test"}]
+        report = _assemble_issue_report(
+            SAMPLE_ISSUE, partial_ac, [],
+            model="test-model", model_source="local",
+        )
+        result = _get_closing_sentence(report)
+        assert result == _CLOSING_NOT_READY, f"Expected not-ready sentence, got: {result}"
+
+    def test_sentence_not_in_report_body(self):
+        """AC4: The closing sentence is NOT part of the report itself."""
+        report = _assemble_issue_report(
+            SAMPLE_ISSUE, SAMPLE_AC_RESULTS, _default_child_results(),
+            model="test-model", model_source="local",
+        )
+        assert _CLOSING_READY not in report, (
+            "Closing sentence should NOT be embedded in the report text"
+        )
+        assert _CLOSING_NOT_READY not in report, (
+            "Closing sentence should NOT be embedded in the report text"
+        )
+
+    def test_parses_with_wrapped_failure_notice(self):
+        """Handles report wrapped by a FailureNotice (first/last lines not 'Ready to close:')."""
+        report_body = _assemble_issue_report(
+            SAMPLE_ISSUE, SAMPLE_AC_RESULTS, _default_child_results(),
+            model="test-model", model_source="local",
+        )
+        # Simulate a failure notice wrap
+        from skill.scripts.failure_notice import FailureNotice
+        notice = FailureNotice(
+            script_name="test-script",
+            reason="Simulated failure",
+            stderr_context="something broke",
+        )
+        wrapped = notice.wrap(report_body)
+        result = _get_closing_sentence(wrapped)
+        assert result == _CLOSING_READY, (
+            f"Should find 'Ready to close: Yes' inside wrapped report, got: {result}"
+        )
+
+    def test_default_to_not_ready_when_no_rtc_line(self):
+        """Defaults to 'not ready' when 'Ready to close:' line is absent."""
+        result = _get_closing_sentence("## Summary\n\nNo verdict available.")
+        assert result == _CLOSING_NOT_READY, (
+            f"Should default to not-ready sentence, got: {result}"
+        )
+
+    def test_project_report_parsed_returns_not_ready(self):
+        """AC3: Project-level report (always 'Ready to close: No') yields not-ready sentence."""
+        report = _assemble_project_report(
+            "Project summary text",
+            "Recommendation text",
+        )
+        result = _get_closing_sentence(report)
+        assert result == _CLOSING_NOT_READY, (
+            f"Expected not-ready sentence for project report, got: {result}"
+        )
