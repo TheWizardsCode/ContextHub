@@ -198,7 +198,23 @@ npm run test:coverage # Tests with coverage report
 npm run test:tui      # TUI tests only (CI/headless)
 ```
 
+### Vitest Configuration
+
+The project uses [Vitest](https://vitest.dev/) with the following settings in `vitest.config.ts`:
+
+- **Pool:** `'forks'` (child processes) — supports tests that use `process.chdir()` for temp directory setup
+- **maxWorkers:** `4` — limits concurrent worker count to prevent unbounded memory growth during test execution
+- **Exclusions:** Worktree directories (`.worklog/worktrees/**`) are excluded to prevent duplicate test file discovery
+
 See [tests/README.md](tests/README.md) for detailed testing documentation.
+
+### Test Mock Patterns
+
+The `tests/extensions/worklog-browse-extension.test.ts` file (1700+ lines, 68 tests) demonstrates key mock patterns used by this project:
+
+- **Comprehensive `node:fs` mock:** Rather than stubbing only the 4 fs functions used directly by the code under test, the mock covers ~12 functions (`existsSync`, `statSync`, `lstatSync`, `readdirSync`, `accessSync`, `watch`, `promises`, `constants`, `readFileSync`, `writeFileSync`, `mkdirSync`, `realpathSync`) that may be called during module initialization. This prevents cascading errors and heap OOM during import.
+- **`icons.js` mock:** The dynamic `require('dist/icons.js')` in the browse module is mocked with stub implementations for all 8 exported functions (`priorityIcon`, `statusIcon`, `stageIcon`, `auditIcon`, `epicIcon`, `iconsEnabled`, `riskIcon`, `effortIcon`), preventing uncontrolled file resolution during import.
+- **Infinite loop guard:** `custom()` mocks return `{ type: 'shortcut', command: '/test-exit' }` instead of `null` to break the `runBrowseFlow` while(true) loop, preventing infinite-loop-based OOM in test mocks.
 
 ## License
 
