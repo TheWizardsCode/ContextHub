@@ -13,7 +13,9 @@ export default defineConfig({
     // significant memory during module initialization.  These settings
     // prevent unbounded memory growth and ensure OOM failures are caught
     // early rather than hanging the test runner.
-    pool: 'threads',
+    // Use 'forks' pool (child_process) instead of 'threads' (worker_threads)
+    // because many tests use process.chdir() which is not supported in workers.
+    pool: 'forks',
     maxWorkers: 4,
     // Exclude worktree test files from discovery — worktrees share the
     // same git objects but have separate working directories, so vitest
