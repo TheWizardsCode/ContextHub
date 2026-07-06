@@ -4,14 +4,14 @@
 
 The `wl next --groups/-g` grouping feature determines parallel-work safety by
 extracting file paths from work item descriptions. To make this work reliably,
-all `intake_complete` work items **should** include a `**Key Files:**` section
+all `intake_complete` work items **should** include a `**Key Files:**` or `## Key Files` section
 listing the files the work item will touch.
 
 ## Convention Specification
 
 ### Format
 
-Add a `**Key Files:**` section near the **end** of the work item description
+Add a `**Key Files:**` or `## Key Files` section near the **end** of the work item description
 with bullet-pointed file paths:
 
 ```markdown
@@ -21,11 +21,22 @@ with bullet-pointed file paths:
 - `docs/guide.md`
 ```
 
+A Markdown heading (without a trailing colon) is also accepted:
+
+```markdown
+## Key Files
+- `path/to/file.ext`
+- `another/file.ts`
+- `docs/guide.md`
+```
+
 ### Rules
 
-1. **Section header**: Use `**Key Files:**` (with bold markers). The header is
-   case-insensitive (`key files:`, `Key Files:`, `KEY FILES:`) — any casing
-   works. Bold markers are optional but recommended.
+1. **Section header**: Use `**Key Files:**` (bold with colon) or `## Key Files`
+   (Markdown heading without colon). The header is case-insensitive
+   (`key files:`, `Key Files:`, `KEY FILES:`) — any casing works.
+   Bold markers are optional but recommended. A trailing colon after `key files`
+   is also optional — the parser accepts both `Key Files:` and `Key Files`.
 
 2. **Bullet items**: List paths as Markdown bullet items using `- ` or `* `.
    Each line starting with `- ` or `* ` after the header is processed as a
@@ -35,15 +46,22 @@ with bullet-pointed file paths:
    - `` - `src/commands/next.ts` `` (recommended, visually distinct)
    - `- src/commands/next.ts` (also valid)
 
-4. **Valid path criteria**: Each extracted path must:
+4. **Trailing description**: Paths with backticks may have descriptive text
+   after the closing backtick. The parser extracts only the text between
+   backticks as the path:
+   - `` - `src/commands/next.ts` — New file for next command ``
+   - `` - `src/commands/helpers.ts`: Shared helpers ``
+   - `` - `src/foo.ts` (some context) ``
+
+5. **Valid path criteria**: Each extracted path must:
    - Contain at least one `/` (indicating a file in a directory)
    - End with a file extension (e.g., `.ts`, `.md`, `.json`)
    - Not be a URL (`http://...`, `https://...`)
 
-5. **Single section**: Only the first `**Key Files:**` section in the
+6. **Single section**: Only the first `**Key Files:**` section in the
    description is processed. Any subsequent sections are ignored.
 
-6. **Section termination**: The parser stops at the next Markdown heading
+7. **Section termination**: The parser stops at the next Markdown heading
    (`#`, `##`, `###`) or the next bold section header (e.g., `**Risks:**`).
 
 ### Examples

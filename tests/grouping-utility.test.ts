@@ -90,9 +90,44 @@ describe('extractFilePaths', () => {
     const paths = extractFilePaths(description);
     expect(paths).toEqual(['src/a.ts']);
   });
+
+  it('extracts backtick-wrapped paths with trailing description text', () => {
+    // Many work items add a description after the path, e.g.:
+    // - `path/to/file.ts` — New: some description
+    const description = `**Key Files:**\n- \`src/commands/helpers.ts\` — Shared helper functions\n- \`src/commands/grouping.ts\`: Grouping algorithm\n- \`docs/CLI.md\` (CLI reference)\n- \`src/foo.ts\``;
+    const paths = extractFilePaths(description);
+    expect(paths).toEqual([
+      'src/commands/helpers.ts',
+      'src/commands/grouping.ts',
+      'docs/CLI.md',
+      'src/foo.ts',
+    ]);
+  });
+
+  it('extracts paths from ## Key Files heading (no colon, heading style)', () => {
+    // Work items often use a Markdown heading `## Key Files` without a trailing colon
+    const description = `## Key Files\n- \`src/commands/next.ts\`\n- \`src/commands/helpers.ts\`\n- \`docs/CLI.md\``;
+    const paths = extractFilePaths(description);
+    expect(paths).toEqual([
+      'src/commands/next.ts',
+      'src/commands/helpers.ts',
+      'docs/CLI.md',
+    ]);
+  });
+
+  it('extracts paths from ## Key Files heading with trailing description text', () => {
+    // Combined: heading style header + paths with trailing descriptions
+    const description = `## Key Files\n- \`src/commands/helpers.ts\` — Shared helper functions\n- \`src/commands/grouping.ts\`: Grouping algorithm\n- \`docs/CLI.md\` (CLI reference)`;
+    const paths = extractFilePaths(description);
+    expect(paths).toEqual([
+      'src/commands/helpers.ts',
+      'src/commands/grouping.ts',
+      'docs/CLI.md',
+    ]);
+  });
 });
 
-// ── Grouping algorithm ────────────────────────────────────────────────
+// ── Grouping algorithm ────────────────────────────────────────
 
 describe('groupItemsByFilePaths', () => {
   it('places conflicting items in different groups', () => {

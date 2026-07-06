@@ -688,7 +688,8 @@ export function wrapWorkItemResponse(
 /**
  * Extract file paths from a work item description.
  *
- * Looks for a "Key Files:" section (case-insensitive, with or without bold markers)
+ * Looks for a "Key Files" or "Key Files:" section (case-insensitive, with or without bold markers,
+ * and with or without a trailing colon, e.g. `**Key Files:**`, `## Key Files`, `key files:`, `Key Files`)
  * and extracts path-like strings from subsequent bullet list items.
  *
  * A path is considered valid if it:
@@ -709,7 +710,7 @@ export function extractFilePaths(description: string): string[] {
 
   // Match the "Key Files:" header (case-insensitive, optional bold markers)
   // Capture everything after the header line until the next section header or end of string
-  const keyFilesRegex = /^#{0,3}\s*\*{0,2}key files:\*{0,2}\s*$/im;
+  const keyFilesRegex = /^#{0,3}\s*\*{0,2}key files:?\*{0,2}\s*$/im;
   const match = description.match(keyFilesRegex);
 
   if (!match) {
@@ -736,16 +737,32 @@ export function extractFilePaths(description: string): string[] {
     }
 
     // Stop if we hit another "Key Files:" header (case-insensitive)
-    if (/\*{0,2}key files:\*{0,2}\s*$/i.test(trimmed) && !/^[-*]\s/.test(trimmed)) {
+    if (/\*{0,2}key files:?\*{0,2}\s*$/i.test(trimmed) && !/^[-*]\s/.test(trimmed)) {
       break;
     }
 
-    // Match bullet items: `- ` or `* ` prefix, optionally wrapping path in backticks
-    // The path can be inside backticks or just plain text after the bullet marker
-    const bulletMatch = trimmed.match(/^[-*]\s+`?([^`]+)`?\s*$/);
-    if (!bulletMatch) continue;
+    // Match bullet items: `- ` or `* ` prefix, with two extraction strategies:
+    //
+    // 1. Backtick-wrapped path: extract text between backticks (allowing trailing
+    //    description after the closing backtick, e.g. `path.ts` — some context).
+    // 2. Plain path (no backticks): extract the first space-delimited word as a
+    //    path candidate.
+    //
+    // Note: We try backtick first because a line like `- \`path.ts\` — desc` could
+    // have a false-positive plain match on the trailing desc.
+    let pathCandidate: string | null = null;
+    const backtickMatch = trimmed.match(/^[-*]\s+`([^`]+)`/);
+    if (backtickMatch) {
+      pathCandidate = backtickMatch[1].trim();
+    } else {
+      // No backticks — try to extract the first word after the bullet marker
+      const plainMatch = trimmed.match(/^[-*]\s+([^\s]+)/);
+      if (plainMatch) {
+        pathCandidate = plainMatch[1].trim();
+      }
+    }
 
-    const pathCandidate = bulletMatch[1].trim();
+    if (!pathCandidate) continue;
 
     // Validate that it looks like a file path
     if (isFilePath(pathCandidate)) {
