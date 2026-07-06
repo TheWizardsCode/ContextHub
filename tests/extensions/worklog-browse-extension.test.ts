@@ -31,7 +31,24 @@ vi.mock('node:fs', () => {
     promises: {},
     constants: {},
   };
-})
+});
+
+// Mock dist/icons.js so the Worklog extension doesn't need to resolve
+// the real icons module during import.  The Worklog index.ts loads it via
+// createRequire('../../../../dist/icons.js'); we intercept that so the
+// test can run without a pre-built dist/ and without the icon loading
+// path contributing to import-time memory pressure.
+vi.mock('../../dist/icons.js', () => ({
+  priorityIcon: vi.fn((_p, _opts) => ''),
+  statusIcon: vi.fn((_s, _opts) => ''),
+  stageIcon: vi.fn((_s, _opts) => ''),
+  auditIcon: vi.fn((_r, _opts) => ''),
+  epicIcon: vi.fn((_opts) => ''),
+  iconsEnabled: vi.fn(() => true),
+  riskIcon: vi.fn((_r, _opts) => ''),
+  effortIcon: vi.fn((_e, _opts) => ''),
+}));
+
 import {
   createDefaultListWorkItems,
   createListWorkItemsWithStage,
