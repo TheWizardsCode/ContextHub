@@ -1,7 +1,7 @@
 import type { WorkItem } from '../types.js';
 import type { StatusStageRules } from '../status-stage-rules.js';
 import { normalizeStageValue, normalizeStatusValue } from '../status-stage-rules.js';
-import { getAllowedStagesForStatus, getAllowedStatusesForStage, isStatusStageCompatible } from '../tui/status-stage-validation.js';
+import { getAllowedStagesForStatus, getAllowedStatusesForStage, isStatusStageCompatible } from '../status-stage-validation.js';
 
 export type DoctorSeverity = 'info' | 'warning' | 'error';
 

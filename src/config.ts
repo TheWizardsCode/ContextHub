@@ -177,7 +177,7 @@ export function loadConfig(): WorklogConfig | null {
   if (!config.statusStageCompatibility) {
     config.statusStageCompatibility = {
       'open': ['idea', 'intake_complete', 'plan_complete', 'in_progress'],
-      'in-progress': ['in_progress'],
+      'in-progress': ['intake_complete', 'plan_complete', 'in_progress'],
       // Allow 'input_needed' in early stages where intake questions are asked
       'input_needed': ['idea', 'intake_complete', 'plan_complete', 'in_progress'],
       'blocked': ['idea', 'intake_complete', 'plan_complete'],

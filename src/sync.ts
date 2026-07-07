@@ -193,6 +193,70 @@ function mergeSameTimestampItems(
     const localIsDefault = isDefaultValue(localValue, field, options);
     const remoteIsDefault = isDefaultValue(remoteValue, field, options);
 
+    // Special handling for close state (status=completed + stage=done):
+    // When one version has a close and the other has a different non-close status/stage,
+    // prefer the close values. This prevents an unrelated field change on a different
+    // client from silently reverting a close operation.
+    if (field === 'status') {
+      const localIsClose = localValue === 'completed' && (localItem.stage === 'done' || remoteItem.stage === 'done');
+      const remoteIsClose = remoteValue === 'completed' && (remoteItem.stage === 'done' || localItem.stage === 'done');
+      if (localIsClose && !remoteIsClose) {
+        (merged as any)[field] = localValue;
+        mergedFields.push(`${field} (close preserved from local)`);
+        fieldDetails.push({
+          field,
+          localValue,
+          remoteValue,
+          chosenValue: localValue,
+          chosenSource: 'local',
+          reason: 'local has completed status (close)'
+        });
+        continue;
+      }
+      if (remoteIsClose && !localIsClose) {
+        (merged as any)[field] = remoteValue;
+        mergedFields.push(`${field} (close preserved from remote)`);
+        fieldDetails.push({
+          field,
+          localValue,
+          remoteValue,
+          chosenValue: remoteValue,
+          chosenSource: 'remote',
+          reason: 'remote has completed status (close)'
+        });
+        continue;
+      }
+    }
+    if (field === 'stage') {
+      const localIsCloseStage = localValue === 'done' && (localItem.status === 'completed' || remoteItem.status === 'completed');
+      const remoteIsCloseStage = remoteValue === 'done' && (remoteItem.status === 'completed' || localItem.status === 'completed');
+      if (localIsCloseStage && !remoteIsCloseStage) {
+        (merged as any)[field] = localValue;
+        mergedFields.push(`${field} (close preserved from local)`);
+        fieldDetails.push({
+          field,
+          localValue,
+          remoteValue,
+          chosenValue: localValue,
+          chosenSource: 'local',
+          reason: 'local has done stage (close)'
+        });
+        continue;
+      }
+      if (remoteIsCloseStage && !localIsCloseStage) {
+        (merged as any)[field] = remoteValue;
+        mergedFields.push(`${field} (close preserved from remote)`);
+        fieldDetails.push({
+          field,
+          localValue,
+          remoteValue,
+          chosenValue: remoteValue,
+          chosenSource: 'remote',
+          reason: 'remote has done stage (close)'
+        });
+        continue;
+      }
+    }
     if (localIsDefault && !remoteIsDefault) {
       (merged as any)[field] = remoteValue;
       mergedFields.push(`${field} (from remote)`);
@@ -316,6 +380,70 @@ function mergeDifferentTimestampItems(
         continue;
       }
 
+      // Special handling for close state (status=completed + stage=done):
+      // When one version has a close and the other has a different non-close status/stage,
+      // prefer the close values. This prevents an unrelated field change on a different
+      // client from silently reverting a close operation.
+      if (field === 'status') {
+        const localIsClose = localValue === 'completed' && (localItem.stage === 'done' || remoteItem.stage === 'done');
+        const remoteIsClose = remoteValue === 'completed' && (remoteItem.stage === 'done' || localItem.stage === 'done');
+        if (localIsClose && !remoteIsClose) {
+          (merged as any)[field] = localValue;
+          mergedFields.push(`${field} (close preserved from local)`);
+          fieldDetails.push({
+            field,
+            localValue,
+            remoteValue,
+            chosenValue: localValue,
+            chosenSource: 'local',
+            reason: 'local has completed status (close)'
+          });
+          continue;
+        }
+        if (remoteIsClose && !localIsClose) {
+          (merged as any)[field] = remoteValue;
+          mergedFields.push(`${field} (close preserved from remote)`);
+          fieldDetails.push({
+            field,
+            localValue,
+            remoteValue,
+            chosenValue: remoteValue,
+            chosenSource: 'remote',
+            reason: 'remote has completed status (close)'
+          });
+          continue;
+        }
+      }
+      if (field === 'stage') {
+        const localIsCloseStage = localValue === 'done' && (localItem.status === 'completed' || remoteItem.status === 'completed');
+        const remoteIsCloseStage = remoteValue === 'done' && (remoteItem.status === 'completed' || localItem.status === 'completed');
+        if (localIsCloseStage && !remoteIsCloseStage) {
+          (merged as any)[field] = localValue;
+          mergedFields.push(`${field} (close preserved from local)`);
+          fieldDetails.push({
+            field,
+            localValue,
+            remoteValue,
+            chosenValue: localValue,
+            chosenSource: 'local',
+            reason: 'local has done stage (close)'
+          });
+          continue;
+        }
+        if (remoteIsCloseStage && !localIsCloseStage) {
+          (merged as any)[field] = remoteValue;
+          mergedFields.push(`${field} (close preserved from remote)`);
+          fieldDetails.push({
+            field,
+            localValue,
+            remoteValue,
+            chosenValue: remoteValue,
+            chosenSource: 'remote',
+            reason: 'remote has done stage (close)'
+          });
+          continue;
+        }
+      }
       if (localIsDefault && !remoteIsDefault) {
         (merged as any)[field] = remoteValue;
         mergedFields.push(`${field} (from remote)`);
@@ -669,6 +797,18 @@ export async function gitPushDataFileToBranch(
   commitMessage: string,
   target: GitTarget
 ): Promise<void> {
+  // SAFETY GUARD: reject pushes to regular branches or tags.
+  // Worklog data must only be stored on dedicated refs under refs/worklog/
+  // to prevent accidental corruption of the project working tree.
+  // See WL-0MQRBT8BS00355AB for the bug this prevents.
+  const branch = target.branch;
+  if (branch.startsWith('refs/heads/') || branch.startsWith('refs/tags/')) {
+    throw new Error(
+      `Refusing to push worklog data to '${branch}'. ` +
+      `Worklog data must be pushed to a dedicated ref under refs/worklog/ ` +
+      `(e.g. refs/worklog/data). Use WORKLOG_SKIP_PRE_PUSH=1 to bypass the pre-push hook.`
+    );
+  }
   // This pushes ONLY the data file by committing it on a dedicated branch
   // in a temporary worktree based on the remote branch tip.
   await execAsync('git rev-parse --git-dir');

@@ -8,8 +8,9 @@ import type { WorkItem, Comment } from '../types.js';
 import type { SyncResult } from '../sync.js';
 import type { WorklogDatabase } from '../database.js';
 import { loadConfig } from '../config.js';
-import { renderCliMarkdown, stripBlessedTags, shouldUseFormattedOutput, isTty, resolveMarkdownEnabled } from '../cli-output.js';
+import { renderCliMarkdown, shouldUseFormattedOutput, isTty, resolveMarkdownEnabled } from '../cli-output.js';
 import { getStageLabel, getStatusLabel, loadStatusStageRules } from '../status-stage-rules.js';
+import { priorityIcon, statusIcon, priorityFallback, statusFallback, iconsEnabled } from '../icons.js';
 import type { Command } from 'commander';
 
 // Priority ordering for sorting work items (higher number = higher priority)
@@ -60,11 +61,6 @@ export function formatTitleOnly(item: WorkItem): string {
   return renderTitle(item);
 }
 
-// Format only the title with TUI colors (blessed markup) for use in TUI tree view
-export function formatTitleOnlyTUI(item: WorkItem): string {
-  return renderTitleTUI(item);
-}
-
 // Return chalk function appropriate for a given stage (for console output)
 // Stage progression: gray → blue → cyan → yellow → green → white
 function titleColorForStage(stage?: string): (text: string) => string {
@@ -87,29 +83,7 @@ function titleColorForStage(stage?: string): (text: string) => string {
   }
 }
 
-// Return blessed markup tags appropriate for a given stage (for TUI output)
-// Stage progression: gray-fg → blue-fg → cyan-fg → yellow-fg → green-fg → white-fg
-function titleColorForStageTUI(stage?: string): (text: string) => string {
-  const s = (stage || '').toLowerCase().trim();
-  switch (s) {
-    case 'idea':
-      return theme.tui.stage.idea;
-    case 'intake_complete':
-      return theme.tui.stage.intakeComplete;
-    case 'plan_complete':
-      return theme.tui.stage.planComplete;
-    case 'in_progress':
-      return theme.tui.stage.inProgress;
-    case 'in_review':
-      return theme.tui.stage.inReview;
-    case 'done':
-      return theme.tui.stage.done;
-    default:
-      return theme.tui.stage.idea; // default to idea/gray-fg colour
-  }
-}
-
-// Render a work item title with the color appropriate to its status or stage (console output)
+// Render a work item title with the color appropriate to its status or stage
 // Blocked items always appear red, regardless of stage. Otherwise, stage-based colours apply.
 function renderTitle(item: WorkItem, prefix: string = ''): string {
   // Blocked status overrides everything
@@ -118,18 +92,6 @@ function renderTitle(item: WorkItem, prefix: string = ''): string {
   }
   // Use stage-based colour; fallback to idea/gray when stage is undefined or empty
   const colorFn = titleColorForStage(item.stage || undefined);
-  return colorFn(prefix + item.title);
-}
-
-// Render a work item title with blessed markup colors for TUI output
-// Blocked items always appear red, regardless of stage. Otherwise, stage-based colours apply.
-function renderTitleTUI(item: WorkItem, prefix: string = ''): string {
-  // Blocked status overrides everything
-  if (item.status === 'blocked') {
-    return theme.tui.blocked(prefix + item.title);
-  }
-  // Use stage-based colour; fallback to idea/gray when stage is undefined or empty
-  const colorFn = titleColorForStageTUI(item.stage || undefined);
   return colorFn(prefix + item.title);
 }
 
@@ -313,17 +275,16 @@ function walkItemTree(items: WorkItem[], options: TreeRenderOptions): void {
 
 // Helper to apply color to audit excerpt based on readiness status
 // Redaction must happen BEFORE applying color
-function colorizeAuditExcerpt(auditText: string, tui?: boolean): string {
+function colorizeAuditExcerpt(auditText: string): string {
   const firstLine = auditText.split(/\r?\n/, 1)[0];
-  const isTui = Boolean(tui);
   if (firstLine.includes('Ready to close: Yes')) {
-    return isTui ? theme.tui.text.readyYes(firstLine) : theme.text.readyYes(firstLine);
+    return theme.text.readyYes(firstLine);
   }
-  return isTui ? theme.tui.text.readyNo(firstLine) : theme.text.readyNo(firstLine);
+  return theme.text.readyNo(firstLine);
 }
 
 // Standard human formatter: supports 'summary' | 'concise' | 'normal' | 'full' | 'raw' | 'markdown' | 'auto'
-export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, format: string | undefined, tui?: boolean): string {
+export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, format: string | undefined): string {
   // Load config once and reuse for both humanDisplay and cliFormatMarkdown
   const config = loadConfig();
 
@@ -372,20 +333,45 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     }
   }
 
-  const isTui = Boolean(tui);
+  
   const sortIndexLabel = `SortIndex: ${item.sortIndex}`;
   const rules = loadStatusStageRules();
 
+  // Helper to format status line with icon
+  const formatStatusWithIcon = (status: string): string => {
+    const icon = statusIcon(status, { noIcons: !iconsEnabled() });
+    const fallback = statusFallback(status);
+    const label = getStatusLabel(status, rules) || status;
+    // If noIcons mode, icon already returned the fallback text - just show label + fallback
+    // Otherwise show icon + label + fallback (icon for visual, fallback for copy/paste)
+    if (icon === fallback) {
+      return `${label} ${fallback}`;
+    }
+    return icon ? `${icon} ${label} ${fallback}` : label;
+  };
+
+  // Helper to format priority line with icon
+  const formatPriorityWithIcon = (priority: string): string => {
+    const icon = priorityIcon(priority, { noIcons: !iconsEnabled() });
+    const fallback = priorityFallback(priority);
+    // If noIcons mode, icon already returned the fallback text - just show priority + fallback
+    // Otherwise show icon + priority + fallback (icon for visual, fallback for copy/paste)
+    if (icon === fallback) {
+      return `${priority} ${fallback}`;
+    }
+    return icon ? `${icon} ${priority} ${fallback}` : priority;
+  };
+
   const lines: string[] = [];
-  const titleLine = `Title: ${isTui ? formatTitleOnlyTUI(item) : formatTitleOnly(item)}`;
-  const idLine = `ID:    ${isTui ? theme.tui.text.muted(item.id) : theme.text.muted(item.id)}`;
+  const titleLine = `Title: ${formatTitleOnly(item)}`;
+  const idLine = `ID:    ${theme.text.muted(item.id)}`;
 
   // summary: truly minimal - just title, status, priority
   if (fmt === 'summary') {
     const lines: string[] = [];
-    lines.push(`${isTui ? formatTitleOnlyTUI(item) : formatTitleOnly(item)} ${isTui ? theme.tui.text.muted(item.id) : theme.text.muted(item.id)}`);
-    const statusLabel = getStatusLabel(item.status, rules) || item.status;
-    lines.push(`Status: ${statusLabel} | Priority: ${item.priority || '—'}`);
+    lines.push(`${formatTitleOnly(item)} ${theme.text.muted(item.id)}`);
+    const sLine = formatStatusWithIcon(item.status);
+    lines.push(`Status: ${sLine} | Priority: ${formatPriorityWithIcon(item.priority)}`);
     return lines.join('\n');
   }
 
@@ -396,15 +382,13 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     if (fmt === 'concise') {
       const lines: string[] = [];
       // First line: title + id (compact)
-      lines.push(`${isTui ? formatTitleOnlyTUI(item) : formatTitleOnly(item)} ${isTui ? theme.tui.text.muted(item.id) : theme.text.muted(item.id)}`);
+      lines.push(`${formatTitleOnly(item)} ${theme.text.muted(item.id)}`);
     // Second line: status, stage (if present) and priority (core metadata shown previously by list)
     if (item.stage !== undefined) {
       const stageLabel = item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage;
-      const statusLabel = getStatusLabel(item.status, rules) || item.status;
-      lines.push(`Status: ${statusLabel} · Stage: ${stageLabel} | Priority: ${item.priority}`);
+      lines.push(`Status: ${formatStatusWithIcon(item.status)} · Stage: ${stageLabel} | Priority: ${formatPriorityWithIcon(item.priority)}`);
     } else {
-      const statusLabel = getStatusLabel(item.status, rules) || item.status;
-      lines.push(`Status: ${statusLabel} | Priority: ${item.priority}`);
+      lines.push(`Status: ${formatStatusWithIcon(item.status)} | Priority: ${formatPriorityWithIcon(item.priority)}`);
     }
     lines.push(sortIndexLabel);
     lines.push(`Risk: ${item.risk || '—'}`);
@@ -415,7 +399,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
       // Do not include the author in concise output to keep it compact.
         const raw = String(auditResult.summary || '');
         const redacted = redactAuditText(raw);
-        const colorized = colorizeAuditExcerpt(redacted, isTui);
+        const colorized = colorizeAuditExcerpt(redacted);
         lines.push(`Audit: ${colorized}`);
       // Non-blocking warning: if the audit was downgraded to Missing Criteria
       // because the item lacks acceptance criteria, surface a subtle warning
@@ -436,11 +420,9 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push(titleLine);
     if (item.stage !== undefined) {
       const stageLabel = item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage;
-      const statusLabel = getStatusLabel(item.status, rules) || item.status;
-      lines.push(`Status: ${statusLabel} · Stage: ${stageLabel} | Priority: ${item.priority}`);
+      lines.push(`Status: ${formatStatusWithIcon(item.status)} · Stage: ${stageLabel} | Priority: ${formatPriorityWithIcon(item.priority)}`);
     } else {
-      const statusLabel = getStatusLabel(item.status, rules) || item.status;
-      lines.push(`Status: ${statusLabel} | Priority: ${item.priority}`);
+      lines.push(`Status: ${formatStatusWithIcon(item.status)} | Priority: ${formatPriorityWithIcon(item.priority)}`);
     }
     lines.push(sortIndexLabel);
     lines.push(`Risk: ${item.risk || '—'}`);
@@ -449,7 +431,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
       if (auditResult) {
         const raw = String(auditResult.summary || '');
         const redacted = redactAuditText(raw);
-        const colorized = colorizeAuditExcerpt(redacted, isTui);
+        const colorized = colorizeAuditExcerpt(redacted);
         // Keep concise audit excerpt in normal output as well (author omitted).
         lines.push(`Audit: ${colorized}`);
       }
@@ -460,7 +442,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
 
   // detail-pane: title + description + comments only (metadata is in the metadata pane)
   if (fmt === 'detail-pane') {
-    lines.push(isTui ? renderTitleTUI(item, '# ') : renderTitle(item, '# '));
+    lines.push(renderTitle(item, '# '));
 
     if (item.description) {
       lines.push('');
@@ -486,12 +468,16 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   }
 
   // full output
-  lines.push(isTui ? renderTitleTUI(item, '# ') : renderTitle(item, '# '));
+  lines.push(renderTitle(item, '# '));
   lines.push('');
   const issueTypeLabel = item.issueType && item.issueType.trim() !== '' ? item.issueType : 'unknown';
+  // Build status/priority line with icons
+  const statusPriorityValue = item.stage !== undefined
+    ? `${formatStatusWithIcon(item.status)} · Stage: ${item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage} | Priority: ${formatPriorityWithIcon(item.priority)}`
+    : `${formatStatusWithIcon(item.status)} | Priority: ${formatPriorityWithIcon(item.priority)}`;
   const frontmatter: Array<[string, string]> = [
-    ['ID', isTui ? theme.tui.text.muted(item.id) : theme.text.muted(item.id)],
-    ['Status', item.stage !== undefined ? `${getStatusLabel(item.status, rules) || item.status} · Stage: ${item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage} | Priority: ${item.priority}` : `${getStatusLabel(item.status, rules) || item.status} | Priority: ${item.priority}`],
+    ['ID', theme.text.muted(item.id)],
+    ['Status', statusPriorityValue],
     ['Type', issueTypeLabel],
     ['SortIndex', String(item.sortIndex)]
   ];
@@ -512,13 +498,6 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     lines.push('## Description');
     lines.push('');
     lines.push(item.description);
-  }
-
-  if (item.stage) {
-    lines.push('');
-    lines.push('## Stage');
-    lines.push('');
-    lines.push(item.stage);
   }
 
   if (db) {
@@ -545,7 +524,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     if (auditResult.author) lines.push(`Author: ${auditResult.author}`);
     if (auditResult.summary) {
       const redacted = redactAuditText(auditResult.summary);
-      const colorizedFirstLine = colorizeAuditExcerpt(redacted, isTui);
+      const colorizedFirstLine = colorizeAuditExcerpt(redacted);
       const remainingLines = redacted.split(/\r?\n/).slice(1).join('\n');
       const coloredText = remainingLines ? `${colorizedFirstLine}\n${remainingLines}` : colorizedFirstLine;
       lines.push('');
@@ -556,7 +535,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   const result = lines.join('\n');
 
   // If markdown rendering is enabled, render the full output through the CLI renderer
-  if (markdownEnabled && !isTui) {
+  if (markdownEnabled) {
     return renderCliMarkdown(result, { formatAsMarkdown: true });
   }
 
@@ -649,4 +628,186 @@ export function displayConflictDetails(
   });
 
   console.log(theme.text.muted('━'.repeat(80)));
+}
+
+// ── JSON response shape helpers ──────────────────────────────────────
+// These helpers standardize the top-level JSON shape returned by all `wl`
+// commands when --json mode is active. The consistent shape reduces
+// fragility in consuming scripts and the TUI.
+
+/**
+ * Wrap any command output in a standard success/error envelope.
+ *
+ * All commands using --json should ensure their top-level JSON shape
+ * follows the pattern: `{ success: true/false, ...data }`.
+ */
+export function wrapJsonResponse<T extends Record<string, unknown> = Record<string, unknown>>(
+  data: T,
+  success: boolean = true
+): { success: boolean } & T {
+  return { success, ...data };
+}
+
+/**
+ * Convenience: wrap an array of work items for an array-returning command.
+ *
+ * Array-returning commands (list, search, in-progress, recent) should use
+ * the shape: `{ success: true, count, workItems: [...] }`.
+ */
+export function wrapWorkItemsResponse(
+  workItems: unknown[],
+  extraFields?: Record<string, unknown>
+): Record<string, unknown> {
+  return {
+    success: true,
+    count: workItems.length,
+    workItems,
+    ...extraFields,
+  };
+}
+
+/**
+ * Convenience: wrap a single work item for an object-returning command.
+ *
+ * Object-returning commands (show, create, update, next single) should use
+ * the shape: `{ success: true, workItem: {...}, ...extraFields }`.
+ */
+export function wrapWorkItemResponse(
+  workItem: unknown,
+  extraFields?: Record<string, unknown>
+): Record<string, unknown> {
+  return {
+    success: true,
+    workItem,
+    ...extraFields,
+  };
+}
+
+// ── File path extraction ──────────────────────────────────────────────
+
+/**
+ * Extract file paths from a work item description.
+ *
+ * Looks for a "Key Files" or "Key Files:" section (case-insensitive, with or without bold markers,
+ * and with or without a trailing colon, e.g. `**Key Files:**`, `## Key Files`, `key files:`, `Key Files`)
+ * and extracts path-like strings from subsequent bullet list items.
+ *
+ * A path is considered valid if it:
+ * - Contains at least one `/` (indicating a file in a directory)
+ * - Ends with a file extension after a `.` (e.g., `.ts`, `.md`, `.json`)
+ *
+ * Items can be listed with or without backtick formatting.
+ *
+ * @param description - The work item description text
+ * @returns Array of extracted file paths
+ */
+export function extractFilePaths(description: string): string[] {
+  if (!description || description.trim().length === 0) {
+    return [];
+  }
+
+  const paths: string[] = [];
+
+  // Match the "Key Files:" header (case-insensitive, optional bold markers)
+  // Capture everything after the header line until the next section header or end of string
+  const keyFilesRegex = /^#{0,3}\s*\*{0,2}key files:?\*{0,2}\s*$/im;
+  const match = description.match(keyFilesRegex);
+
+  if (!match) {
+    return [];
+  }
+
+  const headerIndex = match.index!;
+  const afterHeader = description.slice(headerIndex + match[0].length);
+
+  // Split into lines and process each line until we hit another section header
+  // or a bold section header (e.g., **Some Section:**)
+  const lines = afterHeader.split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    // Stop if we hit another Markdown heading
+    if (/^#{1,3}\s/.test(trimmed)) {
+      break;
+    }
+
+    // Stop if we hit another bold section header (e.g., **Some Section:**)
+    if (/^\*{1,2}\w.*:\*{0,2}\s*$/.test(trimmed) && !/^[-*]\s/.test(trimmed)) {
+      break;
+    }
+
+    // Stop if we hit another "Key Files:" header (case-insensitive)
+    if (/\*{0,2}key files:?\*{0,2}\s*$/i.test(trimmed) && !/^[-*]\s/.test(trimmed)) {
+      break;
+    }
+
+    // Match bullet items: `- ` or `* ` prefix, with two extraction strategies:
+    //
+    // 1. Backtick-wrapped path: extract text between backticks (allowing trailing
+    //    description after the closing backtick, e.g. `path.ts` — some context).
+    // 2. Plain path (no backticks): extract the first space-delimited word as a
+    //    path candidate.
+    //
+    // Note: We try backtick first because a line like `- \`path.ts\` — desc` could
+    // have a false-positive plain match on the trailing desc.
+    let pathCandidate: string | null = null;
+    const backtickMatch = trimmed.match(/^[-*]\s+`([^`]+)`/);
+    if (backtickMatch) {
+      pathCandidate = backtickMatch[1].trim();
+    } else {
+      // No backticks — try to extract the first word after the bullet marker
+      const plainMatch = trimmed.match(/^[-*]\s+([^\s]+)/);
+      if (plainMatch) {
+        pathCandidate = plainMatch[1].trim();
+      }
+    }
+
+    if (!pathCandidate) continue;
+
+    // Validate that it looks like a file path
+    if (isFilePath(pathCandidate)) {
+      paths.push(pathCandidate);
+    }
+  }
+
+  return paths;
+}
+
+/**
+ * Check if a string looks like a valid file path.
+ *
+ * A valid path contains at least one `/` and has a file extension.
+ * Rejects URLs (http://, https://) and known non-path patterns.
+ */
+function isFilePath(candidate: string): boolean {
+  // Reject URLs
+  if (/^https?:\/\//i.test(candidate)) return false;
+  if (!candidate.includes('/')) return false;
+  // Must have a file extension (dot followed by alphanumeric chars at the end)
+  const extMatch = candidate.match(/\.([a-zA-Z0-9]+)$/);
+  if (!extMatch) return false;
+  // Ensure the extension is at least 1 character
+  return extMatch[1].length >= 1;
+}
+
+// ── Grouping types ────────────────────────────────────────────────────
+
+/**
+ * Input item for grouping — must have an `id`, `stage`, and a list of `filePaths`.
+ */
+export interface GroupableItem {
+  id: string;
+  stage?: string;
+  filePaths: string[];
+  priority?: string;
+}
+
+/**
+ * Result of assigning an item to a group.
+ * `group` is a 1-indexed integer for ordering.
+ * `groupLabel` is a human-readable label for display.
+ */
+export interface GroupAssignment {
+  group: number;
+  groupLabel: string;
 }

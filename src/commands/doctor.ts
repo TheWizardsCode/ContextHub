@@ -7,6 +7,7 @@ import { loadStatusStageRules } from '../status-stage-rules.js';
 import { validateStatusStageItems } from '../doctor/status-stage-check.js';
 import { validateDependencyEdges } from '../doctor/dependency-check.js';
 import { listPendingMigrations, runMigrations } from '../migrations/index.js';
+import { validateFilePaths, applyFilePathsFix, DEFAULT_INTAKE_STAGES } from '../doctor/file-paths-check.js';
 import { importFromJsonl } from '../jsonl.js';
 import { mergeWorkItems, mergeComments, mergeAuditResults } from '../sync.js';
 import * as fs from 'fs';
@@ -131,6 +132,135 @@ export default function register(ctx: PluginContext): void {
         if (utils.isJsonMode()) output.json({ success: false, error: message });
         else console.error(`Doctor upgrade failed: ${message}`);
       }
+    });
+
+  doctor
+    .command('stage-sync')
+    .description('Detect and fix stale status/stage combinations')
+    .option('--apply', 'Apply fixes for stale stage/status combinations')
+    .option('--prefix <prefix>', 'Override the default prefix')
+    .action(async (opts: { apply?: boolean; prefix?: string }) => {
+      utils.requireInitialized();
+      const db = utils.getDatabase(opts.prefix);
+      const allItems = db.getAll();
+
+      // Known stale combinations and their fixes
+      const staleRules: Array<{
+        status: string;
+        stage: string;
+        fixStatus?: string;
+        fixStage: string;
+      }> = [
+        { status: 'completed', stage: 'idea', fixStage: 'done' },
+        { status: 'completed', stage: 'intake_complete', fixStage: 'done' },
+        { status: 'completed', stage: 'plan_complete', fixStage: 'done' },
+        { status: 'in-progress', stage: 'idea', fixStatus: 'open', fixStage: 'idea' },
+      ];
+
+      const staleItems: Array<{
+        id: string;
+        title: string;
+        current: { status: string; stage: string };
+        proposed: { status: string; stage: string };
+      }> = [];
+
+      for (const item of allItems) {
+        for (const rule of staleRules) {
+          if (item.status === rule.status && item.stage === rule.stage) {
+            staleItems.push({
+              id: item.id,
+              title: item.title,
+              current: { status: item.status, stage: item.stage },
+              proposed: {
+                status: rule.fixStatus ?? item.status,
+                stage: rule.fixStage,
+              },
+            });
+            break;
+          }
+        }
+      }
+
+      if (opts.apply) {
+        // Apply fixes
+        const fixed: Array<{ id: string; title: string; from: { status: string; stage: string }; to: { status: string; stage: string } }> = [];
+        const errors: Array<{ id: string; error: string }> = [];
+
+        for (const stale of staleItems) {
+          try {
+            const update: any = {};
+            if (stale.proposed.status !== stale.current.status) {
+              update.status = stale.proposed.status;
+            }
+            update.stage = stale.proposed.stage;
+
+            db.update(stale.id, update);
+            fixed.push({
+              id: stale.id,
+              title: stale.title,
+              from: stale.current,
+              to: stale.proposed,
+            });
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            errors.push({ id: stale.id, error: message });
+          }
+        }
+
+        if (utils.isJsonMode()) {
+          output.json({
+            fixApplied: true,
+            totalItems: allItems.length,
+            staleCount: staleItems.length,
+            fixedCount: fixed.length,
+            fixed,
+            skippedCount: staleItems.length - fixed.length,
+            errors,
+          });
+          return;
+        }
+
+        console.log(`Doctor stage-sync: scanned ${allItems.length} item(s), found ${staleItems.length} stale combination(s).`);
+        if (fixed.length > 0) {
+          console.log(`Fixed ${fixed.length} item(s):`);
+          for (const f of fixed) {
+            console.log(`  - ${f.id}: ${f.title} (${f.from.status}/${f.from.stage} -> ${f.to.status}/${f.to.stage})`);
+          }
+        }
+        if (errors.length > 0) {
+          console.log(`\n${errors.length} error(s):`);
+          for (const e of errors) {
+            console.log(`  - ${e.id}: ${e.error}`);
+          }
+        }
+        return;
+      }
+
+      // Dry-run mode (default)
+      if (utils.isJsonMode()) {
+        output.json({
+          dryRun: true,
+          totalItems: allItems.length,
+          staleCount: staleItems.length,
+          staleItems,
+        });
+        return;
+      }
+
+      if (staleItems.length === 0) {
+        console.log(`Doctor stage-sync: no stale status/stage combinations found. (scanned ${allItems.length} item(s))`);
+        return;
+      }
+
+      console.log(`Doctor stage-sync: found ${staleItems.length} stale status/stage combination(s) out of ${allItems.length} item(s).`);
+      console.log('');
+      for (const s of staleItems) {
+        console.log(`  ${s.id}: ${s.title}`);
+        console.log(`    current: ${s.current.status}/${s.current.stage}`);
+        console.log(`    propose: ${s.proposed.status}/${s.proposed.stage}`);
+      }
+      console.log('');
+      console.log('Use --apply to fix stale items automatically.');
     });
 
   doctor
@@ -315,6 +445,118 @@ export default function register(ctx: PluginContext): void {
           console.log(` - ${u.id}: "${u.current}"`);
         }
       }
+    });
+
+  doctor
+    .command('file-paths')
+    .description('Check intake stage work items for missing or incorrect **Key Files:** sections')
+    .option('--add-placeholder', 'Add placeholder **Key Files:** section to items that are missing one')
+    .option('--prefix <prefix>', 'Override the default prefix')
+    .action(async (opts: { addPlaceholder?: boolean; prefix?: string }) => {
+      utils.requireInitialized();
+      const db = utils.getDatabase(opts.prefix);
+      const allItems = db.getAll();
+
+      const findings = validateFilePaths(allItems);
+
+      // Helper to apply a fix for a finding
+      const doFix = (finding: typeof findings[0]): boolean => {
+        if (!applyFilePathsFix(finding, (_id: string, _updates: { description: string }) => true)) {
+          return false;
+        }
+        // applyFilePathsFix only returns true for TYPE_MISSING findings
+        // We need to update the actual item
+        const item = db.get(finding.itemId);
+        if (!item) return false;
+        const appendText = (finding.proposedFix as Record<string, string> | null)?.appendDescription;
+        if (!appendText) return false;
+        const newDescription = (item.description || '') + appendText;
+        try {
+          db.update(finding.itemId, { description: newDescription });
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      const missing = findings.filter(f => f.type === 'missing-key-files');
+      const withIncorrect = findings.filter(f => f.type === 'incorrect-key-files');
+
+      const intakeItemCount = allItems.filter(
+        i => DEFAULT_INTAKE_STAGES.includes(i.stage) && i.status !== 'deleted'
+      ).length;
+
+      if (opts.addPlaceholder) {
+        const fixed: string[] = [];
+        for (const finding of findings) {
+          if (doFix(finding)) {
+            fixed.push(finding.itemId);
+          }
+        }
+        if (utils.isJsonMode()) {
+          output.json({
+            success: true,
+            total: intakeItemCount,
+            missing: missing.map(f => ({ itemId: f.itemId, title: (f.context as any)?.itemTitle })),
+            withIncorrect: withIncorrect.map(f => ({ itemId: f.itemId, title: (f.context as any)?.itemTitle })),
+            fixed: fixed.length,
+            fixedItems: fixed,
+          });
+          return;
+        }
+        if (fixed.length > 0) {
+          console.log(`Added placeholder **Key Files:** section to ${fixed.length} item(s):`);
+          for (const id of fixed) {
+            console.log(`  - ${id}`);
+          }
+        } else {
+          console.log('No items needed fixing.');
+        }
+        return;
+      }
+
+      if (utils.isJsonMode()) {
+        output.json({
+          success: true,
+          total: intakeItemCount,
+          missing: missing.map(f => ({ itemId: f.itemId, title: (f.context as any)?.itemTitle, message: f.message })),
+          withIncorrect: withIncorrect.map(f => ({ itemId: f.itemId, title: (f.context as any)?.itemTitle, message: f.message })),
+        });
+        return;
+      }
+
+      if (intakeItemCount === 0) {
+        console.log('Doctor file-paths: no intake stage items found.');
+        return;
+      }
+
+      console.log(`Doctor file-paths: scanned ${intakeItemCount} intake stage item(s).`);
+      if (missing.length === 0 && withIncorrect.length === 0) {
+        console.log('All intake stage items have valid **Key Files:** sections.');
+        return;
+      }
+
+      if (missing.length > 0) {
+        console.log(`
+${missing.length} item(s) missing **Key Files:** section:`);
+        for (const f of missing) {
+          console.log(`  - ${f.itemId}: ${(f.context as any)?.itemTitle || f.itemId}`);
+        }
+      }
+
+      if (withIncorrect.length > 0) {
+        console.log(`
+${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
+        for (const f of withIncorrect) {
+          console.log(`  - ${f.itemId}: ${(f.context as any)?.itemTitle || f.itemId}`);
+        }
+      }
+
+      if (missing.length > 0) {
+        console.log('');
+        console.log('Use --fix to add a placeholder **Key Files:** section to missing items.');
+      }
+      console.log('See docs/FILE_PATH_CONVENTION.md for the file-path convention specification.');
     });
 
   doctor

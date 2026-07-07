@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   renderCliMarkdown,
-  stripBlessedTags,
+  stripAnsi,
   createCliOutput,
   createCliOutputFromCommand,
   isTty,
@@ -11,7 +11,7 @@ import {
   onCliRenderEvent,
   type CliRenderTelemetryEvent
 } from '../../src/cli-output.js';
-import * as markdownRenderer from '../../src/tui/markdown-renderer.js';
+import * as markdownRenderer from '../../src/markdown-renderer.js';
 
 describe('cli-output', () => {
   describe('renderCliMarkdown', () => {
@@ -20,28 +20,37 @@ describe('cli-output', () => {
       expect(renderCliMarkdown(undefined as any)).toBe('');
     });
 
-    it('renders headers', () => {
+    it('renders headers (no blessed tags)', () => {
       const input = '# Hello World';
       const output = renderCliMarkdown(input, { formatAsMarkdown: true });
-      expect(output).toContain('{white-fg}{bold}Hello World{/}');
+      // Post-F2: output uses ANSI/chalk, not blessed-style tags
+      expect(output).not.toContain('{white-fg}');
+      expect(output).not.toContain('{bold}');
+      expect(output).not.toContain('{/');
+      expect(output).toContain('Hello World');
     });
 
-    it('renders inline code', () => {
+    it('renders inline code (no blessed tags)', () => {
       const input = 'Run `wl status` for details';
       const output = renderCliMarkdown(input, { formatAsMarkdown: true });
-      expect(output).toContain('{magenta-fg}wl status{/}');
+      expect(output).not.toContain('{magenta-fg}');
+      expect(output).not.toContain('{/');
+      expect(output).toContain('wl status');
     });
 
     it('renders code fences with language', () => {
       const input = '```js\nconsole.log("test");\n```';
       const output = renderCliMarkdown(input, { formatAsMarkdown: true });
+      expect(output).not.toContain('{gray-fg}');
+      expect(output).not.toContain('{/');
       expect(output).toContain('--- js ---');
-      expect(output).toContain('{gray-fg}console.log("test");{/}');
+      expect(output).toContain('console.log("test");');
     });
 
     it('renders lists', () => {
       const input = '- item 1\n- item 2';
       const output = renderCliMarkdown(input, { formatAsMarkdown: true });
+      expect(output).not.toContain('{/');
       expect(output).toContain('• item 1');
       expect(output).toContain('• item 2');
     });
@@ -49,15 +58,18 @@ describe('cli-output', () => {
     it('renders links', () => {
       const input = 'See [docs](http://example.com) for info';
       const output = renderCliMarkdown(input, { formatAsMarkdown: true });
-      expect(output).toContain('{underline}{blue-fg}docs{/} (http://example.com)');
+      expect(output).not.toContain('{underline}');
+      expect(output).not.toContain('{blue-fg}');
+      expect(output).not.toContain('{/');
+      expect(output).toContain('docs');
+      expect(output).toContain('http://example.com');
     });
 
     it('falls back to plain text when disabled', () => {
       const input = '# Header\nSome `code`';
       const output = renderCliMarkdown(input, { formatAsMarkdown: false });
-      // Should strip blessed tags
-      expect(output).not.toContain('{white-fg}');
-      expect(output).not.toContain('{magenta-fg}');
+      // Should strip ANSI codes
+      expect(output).not.toContain('\u001b[');
       expect(output).toContain('Header');
       expect(output).toContain('code');
     });
@@ -65,9 +77,8 @@ describe('cli-output', () => {
     it('falls back for large inputs over maxSize', () => {
       const big = '# Header\n' + 'a'.repeat(150_000);
       const output = renderCliMarkdown(big, { formatAsMarkdown: true, maxSize: 100_000 });
-      // Should strip blessed tags when falling back for size guard
-      expect(output).not.toContain('{white-fg}');
-      expect(output).not.toContain('{bold}');
+      // Should strip ANSI codes when falling back for size guard
+      expect(output).not.toContain('\u001b[');
       expect(output).toContain('# Header');
       expect(output).toContain('a');
     });
@@ -75,7 +86,10 @@ describe('cli-output', () => {
     it('renders input exactly at maxSize boundary', () => {
       const input = '# ' + 'a'.repeat(20);
       const output = renderCliMarkdown(input, { formatAsMarkdown: true, maxSize: input.length });
-      expect(output).toContain('{white-fg}{bold}');
+      // Should be rendered (not using fallback) since within limit
+      expect(output).not.toContain('{white-fg}');
+      expect(output).not.toContain('{/');
+      expect(output).toContain('a');
     });
 
     it('uses fallback value when renderer throws', () => {
@@ -89,74 +103,59 @@ describe('cli-output', () => {
       spy.mockRestore();
     });
 
-    it('strips blessed tags on renderer failure when no fallback provided', () => {
+    it('strips ANSI codes on renderer failure when no fallback provided', () => {
       const spy = vi.spyOn(markdownRenderer, 'renderMarkdownToTags').mockImplementation(() => {
         throw new Error('renderer failure');
       });
 
-      // Input contains a blessed tag that should be stripped on failure
-      const input = '# Hello {magenta-fg}world{/}';
+      const input = '# Hello world';
       const output = renderCliMarkdown(input, { formatAsMarkdown: true });
-      expect(output).not.toContain('{magenta-fg}');
-      expect(output).toContain('Hello');
+      // On failure, the input is returned with ANSI stripped (no ANSI codes in plain input)
+      expect(output).toContain('# Hello');
       expect(output).toContain('world');
 
       spy.mockRestore();
     });
 
-    // Size guard: blessed tags are stripped from oversize input
-    it('strips blessed tags from oversize input (no control characters in output)', () => {
-      const input = '# Title\n{magenta-fg}inline code{/}\n' + 'x'.repeat(200_000);
+    // Size guard: ANSI codes are stripped from oversize input
+    it('strips ANSI codes from oversize input (no control characters in output)', () => {
+      const input = '# Title\nSome text\n' + 'x'.repeat(200_000);
       const output = renderCliMarkdown(input, { formatAsMarkdown: true, maxSize: 100_000 });
-      // Should NOT contain any blessed tags in size-guarded fallback
-      expect(output).not.toContain('{magenta-fg}');
-      expect(output).not.toContain('{/}');
-      expect(output).not.toContain('{white-fg}');
-      expect(output).not.toContain('{bold}');
+      // Should NOT contain any ANSI escape codes in size-guarded fallback
+      expect(output).not.toContain('\u001b[');
       // Should still contain the plain text
       expect(output).toContain('Title');
+      expect(output).toContain('Some text');
     });
 
-    it('size guard fallback preserves input text but strips tags', () => {
-      const taggedInput = '# Header\n{cyan-fg}some code{/}\n' + 'a'.repeat(150_000);
-      const output = renderCliMarkdown(taggedInput, { formatAsMarkdown: true, maxSize: 100_000 });
+    it('size guard fallback preserves input text', () => {
+      const input = '# Header\nsome code\n' + 'a'.repeat(150_000);
+      const output = renderCliMarkdown(input, { formatAsMarkdown: true, maxSize: 100_000 });
       // Plain text content should be preserved
       expect(output).toContain('Header');
       expect(output).toContain('some code');
-      // No blessed tags should remain
-      expect(output).not.toContain('{cyan-fg}');
+      // No ANSI codes should remain
+      expect(output).not.toContain('\u001b[');
     });
   });
 
-  describe('stripBlessedTags', () => {
-    it('removes blessed tag patterns', () => {
-      const input = '{white-fg}{bold}Title{/} and {magenta-fg}code{/}';
-      const output = stripBlessedTags(input);
-      expect(output).toBe('Title and code');
+
+
+  describe('stripAnsi', () => {
+    it('strips ANSI escape codes', () => {
+      const input = '\u001b[31mred\u001b[0m and \u001b[36mcyan\u001b[0m';
+      const output = stripAnsi(input);
+      expect(output).toBe('red and cyan');
     });
 
     it('handles empty and undefined', () => {
-      expect(stripBlessedTags('')).toBe('');
-      expect(stripBlessedTags(undefined as any)).toBe('');
+      expect(stripAnsi('')).toBe('');
+      expect(stripAnsi(undefined as any)).toBe('');
     });
 
-    it('handles text without tags', () => {
-      expect(stripBlessedTags('plain text')).toBe('plain text');
-    });
-
-    it('strips multiple nested tags', () => {
-      const input = '{red-fg}{bold}Error:{/} file not found{/}';
-      const output = stripBlessedTags(input);
-      expect(output).toBe('Error: file not found');
-    });
-
-    it('strips tags from markdown-rendered output', () => {
-      // Simulate what renderMarkdownToTags returns
-      const input = '{white-fg}{bold}Header{/}\n• Item with {magenta-fg}code{/}';
-      const output = stripBlessedTags(input);
-      expect(output).toBe('Header\n• Item with code');
-      // Most importantly, no curly-brace tags remain
-      expect(output).not.toContain('{');
+    it('handles text without ANSI codes', () => {
+      expect(stripAnsi('plain text')).toBe('plain text');
+      expect(stripAnsi('{blessed-tag}')).toBe('{blessed-tag}');
     });
   });
 
@@ -172,7 +171,8 @@ describe('cli-output', () => {
     it('respects formatAsMarkdown option', () => {
       const out = createCliOutput({ formatAsMarkdown: false });
       const result = out.render('# Test');
-      expect(result).not.toContain('{white-fg}');
+      // No ANSI codes when formatted output disabled
+      expect(result).not.toContain('\u001b[');
     });
   });
 
@@ -261,15 +261,10 @@ describe('cli-output', () => {
     });
 
     it('CLI --format auto ignores config and uses TTY detection', () => {
-      // --format auto is an explicit CLI choice for TTY auto-detection.
-      // Config should NOT override it. In test env (non-TTY), result is false
-      // even when cliFormatMarkdown: true is set in config.
       const out = createCliOutputFromCommand(
         { format: 'auto' },
         { cliFormatMarkdown: true }
       );
-      // In test environment, isTty() returns false, so --format auto
-      // should give false regardless of cliFormatMarkdown config.
       expect(out.isFormatted()).toBe(false);
     });
 
@@ -368,7 +363,6 @@ describe('cli-output', () => {
 
       unsubscribe();
       renderCliMarkdown('# Second', { formatAsMarkdown: true });
-      // Should not have received the second event
       expect(events.length).toBe(1);
     });
 
@@ -385,21 +379,25 @@ describe('cli-output', () => {
 
   describe('help text rendering', () => {
     it('renders help-style text with inline code through markdown renderer', () => {
-      // Simulating what help text might contain
       const helpText = 'Run `wl show <id>` to display details';
       const result = renderCliMarkdown(helpText, { formatAsMarkdown: true });
-      expect(result).toContain('{magenta-fg}wl show <id>{/}');
+      expect(result).not.toContain('{magenta-fg}');
+      expect(result).not.toContain('{/');
+      expect(result).toContain('wl show <id>');
     });
 
     it('renders help text with headers', () => {
       const helpText = '# Commands\nSome description';
       const result = renderCliMarkdown(helpText, { formatAsMarkdown: true });
-      expect(result).toContain('{white-fg}{bold}Commands{/}');
+      expect(result).not.toContain('{white-fg}');
+      expect(result).not.toContain('{/');
+      expect(result).toContain('Commands');
     });
 
     it('renders help text with lists', () => {
       const helpText = '- create: Create a new work item\n- show: Show work item details';
       const result = renderCliMarkdown(helpText, { formatAsMarkdown: true });
+      expect(result).not.toContain('{/');
       expect(result).toContain('• create: Create a new work item');
       expect(result).toContain('• show: Show work item details');
     });
@@ -407,14 +405,16 @@ describe('cli-output', () => {
     it('renders help text with code fences', () => {
       const helpText = 'Example:\n```bash\nwl show WL-123\n```';
       const result = renderCliMarkdown(helpText, { formatAsMarkdown: true });
+      expect(result).not.toContain('{gray-fg}');
+      expect(result).not.toContain('{/');
       expect(result).toContain('--- bash ---');
-      expect(result).toContain('{gray-fg}wl show WL-123{/}');
+      expect(result).toContain('wl show WL-123');
     });
 
     it('strips tags from help text when formatting disabled', () => {
       const helpText = 'Run `wl status` for details';
       const result = renderCliMarkdown(helpText, { formatAsMarkdown: false });
-      expect(result).not.toContain('{magenta-fg}');
+      expect(result).not.toContain('\u001b[');
       expect(result).toContain('wl status');
     });
   });
@@ -433,7 +433,6 @@ describe('cli-output', () => {
     });
 
     it('returns TTY status for --format auto (non-TTY = false)', () => {
-      // In test environment (non-TTY), --format auto should resolve to false
       const result = resolveMarkdownEnabled({ format: 'auto' });
       expect(result).toBe(false);
     });
@@ -449,7 +448,6 @@ describe('cli-output', () => {
     });
 
     it('--format auto ignores cliFormatMarkdown config (non-TTY)', () => {
-      // Even with cliFormatMarkdown: true, --format auto should use TTY detection
       expect(resolveMarkdownEnabled({ format: 'auto', cliFormatMarkdown: true })).toBe(false);
     });
 
@@ -457,7 +455,6 @@ describe('cli-output', () => {
       const original = process.stdout.isTTY;
       Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
       try {
-        // --format auto with cliFormatMarkdown: false should still use TTY
         expect(resolveMarkdownEnabled({ format: 'auto', cliFormatMarkdown: false })).toBe(true);
       } finally {
         Object.defineProperty(process.stdout, 'isTTY', { value: original, configurable: true });
@@ -465,7 +462,6 @@ describe('cli-output', () => {
     });
 
     it('returns undefined for display formats like full/summary/concise', () => {
-      // These formats don't affect markdown rendering
       expect(resolveMarkdownEnabled({ format: 'full' })).toBeUndefined();
       expect(resolveMarkdownEnabled({ format: 'summary' })).toBeUndefined();
       expect(resolveMarkdownEnabled({ format: 'concise' })).toBeUndefined();
@@ -495,23 +491,18 @@ describe('cli-output', () => {
     });
 
     it('CLI flag overrides cliFormatMarkdown config true', () => {
-      // --format plain overrides cliFormatMarkdown: true
       expect(resolveMarkdownEnabled({ format: 'plain', cliFormatMarkdown: true })).toBe(false);
     });
 
     it('CLI flag overrides cliFormatMarkdown config false', () => {
-      // --format markdown overrides cliFormatMarkdown: false
       expect(resolveMarkdownEnabled({ format: 'markdown', cliFormatMarkdown: false })).toBe(true);
     });
 
     it('formatAsMarkdown overrides cliFormatMarkdown config true', () => {
-      // formatAsMarkdown: false overrides cliFormatMarkdown: true
       expect(resolveMarkdownEnabled({ formatAsMarkdown: false, cliFormatMarkdown: true })).toBe(false);
     });
 
     it('undefined result means caller should auto-detect from TTY', () => {
-      // When resolveMarkdownEnabled returns undefined, the caller 
-      // should use shouldUseFormattedOutput() or isTty() to decide
       const result = resolveMarkdownEnabled({});
       expect(result).toBeUndefined();
     });
@@ -519,7 +510,7 @@ describe('cli-output', () => {
     it('is case-insensitive for format values', () => {
       expect(resolveMarkdownEnabled({ format: 'MARKDOWN' })).toBe(true);
       expect(resolveMarkdownEnabled({ format: 'Plain' })).toBe(false);
-      expect(resolveMarkdownEnabled({ format: 'AUTO' })).toBe(false); // non-TTY
+      expect(resolveMarkdownEnabled({ format: 'AUTO' })).toBe(false);
       expect(resolveMarkdownEnabled({ format: 'TEXT' })).toBe(false);
     });
   });

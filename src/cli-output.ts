@@ -4,7 +4,7 @@
  * markdown renderer, with TTY awareness and safety for CI/TTY environments.
  */
 
-import { renderMarkdownToTags, type RendererOptions } from './tui/markdown-renderer.js';
+import { renderMarkdownToTags, type RendererOptions } from './markdown-renderer.js';
 import chalk from 'chalk';
 
 /**
@@ -116,13 +116,13 @@ export function resolveFormatToMarkdown(formatValue?: string): boolean | undefin
  * - Detects TTY environment and falls back to plain text in non-TTY
  * - Respects explicit formatAsMarkdown flag
  * - Has a size guard to avoid expensive rendering on large content
- * - Strips blessed tags when falling back for CI safety
+ * - Strips ANSI codes when falling back for CI safety
  * - Emits telemetry events for rendering, size fallback, and errors
  * - Returns safe output for CI logs (no control characters outside TTY)
  * 
  * @param input - The markdown text to render
  * @param opts - Rendering options
- * @returns Rendered output with blessed tags if in TTY, plain text otherwise
+ * @returns Rendered output with ANSI if in TTY, plain text otherwise
  */
 export function renderCliMarkdown(input: string, opts?: CliOutputOptions): string {
   if (!input) return opts?.fallback ?? '';
@@ -132,8 +132,8 @@ export function renderCliMarkdown(input: string, opts?: CliOutputOptions): strin
 
   // Check if we should use formatted output
   if (!shouldUseFormattedOutput(formatAsMarkdown)) {
-    // Strip any blessed tags for plain text output (CI-safe)
-    return stripBlessedTags(input);
+    // Strip ANSI codes for plain text output (CI-safe)
+    return stripAnsi(input);
   }
 
   // Use the existing renderer with CLI options
@@ -142,7 +142,7 @@ export function renderCliMarkdown(input: string, opts?: CliOutputOptions): strin
   };
 
   // Check size guard before rendering — if input exceeds maxSize,
-  // strip blessed tags to ensure no control characters remain in output.
+  // strip ANSI sequences to ensure no control characters remain in output.
   if (input.length > maxSize) {
     emitTelemetryEvent({
       event: 'cli_render_fallback_size',
@@ -151,7 +151,7 @@ export function renderCliMarkdown(input: string, opts?: CliOutputOptions): strin
       isTty: isTty()
     });
     debugLog(`Size guard: input ${input.length} chars exceeds max ${maxSize}, falling back to plain text`);
-    return stripBlessedTags(input);
+    return stripAnsi(input);
   }
 
   try {
@@ -162,12 +162,11 @@ export function renderCliMarkdown(input: string, opts?: CliOutputOptions): strin
       isTty: isTty()
     });
 
-    // Preserve blessed-format tags for callers; printing functions will
-    // convert to ANSI when writing to an interactive TTY so tests that
-    // assert on blessed tags continue to pass.
+    // The result is already ANSI/chalk output. Return as-is; the calling
+    // print functions will output it directly (no conversion needed).
     return result;
   } catch (_error) {
-    // On rendering failure, prefer explicit fallback, then strip blessed tags from plain input
+    // On rendering failure, prefer explicit fallback, then strip ANSI sequences from plain input
     // to ensure no control characters remain
     emitTelemetryEvent({
       event: 'cli_render_error',
@@ -176,67 +175,21 @@ export function renderCliMarkdown(input: string, opts?: CliOutputOptions): strin
       isTty: isTty()
     });
     debugLog(`Rendering failed, falling back to plain text`);
-    return opts?.fallback ?? stripBlessedTags(input);
+    return opts?.fallback ?? stripAnsi(input);
   }
 }
 
 /**
- * Strip blessed tags from text for plain output (CI-safe).
- * Removes {tag} patterns used by blessed.
+ * Strip ANSI escape codes from text for plain output (CI-safe).
+ * Removes sequences like \u001b[31m used by chalk and other ANSI formatters.
  */
-export function stripBlessedTags(input: string): string {
+export function stripAnsi(input: string): string {
   if (!input) return '';
-  return input.replace(/\{[^}]+\}/g, '');
+  // eslint-disable-next-line no-control-regex
+  return input.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
 }
 
-/**
- * Convert a string containing blessed-style tags (e.g. {cyan-fg}{bold}text{/})
- * into an ANSI-colored string using chalk. This is a best-effort converter
- * intended for CLI output only; it recognizes common tags used by the TUI
- * renderer and falls back to leaving text unchanged for unknown tags.
- */
-function convertBlessedTagsToAnsi(input: string): string {
-  if (!input) return '';
-  // Matches one-or-more opening tags followed by content and a single closing tag {/}
-  // Example: "{cyan-fg}{bold}Hello{/}" -> opens="{cyan-fg}{bold}", content="Hello"
-  const TAG_CONTENT_RE = /((?:\{[^}]+\})+)([\s\S]*?)\{\/\}/g;
 
-  return input.replace(TAG_CONTENT_RE, (_match: string, opens: string, content: string) => {
-    // Extract tag names from the opens string
-    const tagMatches = Array.from(opens.matchAll(/\{([^}]+)\}/g)).map(m => m[1]);
-    if (!tagMatches || tagMatches.length === 0) return content;
-
-    // Build a chain of chalk style functions for the tags
-    let styled = content;
-    for (const tag of tagMatches) {
-      const fn = tagToChalkFn(tag);
-      if (fn) styled = fn(styled);
-    }
-    return styled;
-  });
-}
-
-function tagToChalkFn(tag: string): ((text: string) => string) | null {
-  const t = (tag || '').toLowerCase().trim();
-  // Common color tags
-  if (t === 'bold') return (s: string) => chalk.bold(s);
-  if (t === 'underline') return (s: string) => chalk.underline(s);
-  if (t === 'gray-fg' || t === 'muted') return (s: string) => chalk.gray(s);
-  if (t === 'white-fg' || t === 'white') return (s: string) => chalk.white(s);
-  if (t === 'cyan-fg' || t === 'cyan') return (s: string) => chalk.cyan(s);
-  if (t === 'magenta-fg' || t === 'magenta') return (s: string) => chalk.magenta(s);
-  if (t === 'yellow-fg' || t === 'yellow') return (s: string) => chalk.yellow(s);
-  if (t === 'green-fg' || t === 'green') return (s: string) => chalk.green(s);
-  if (t === 'red-fg' || t === 'red') return (s: string) => chalk.red(s);
-  // Fallback for numeric '214-fg' like tags (approximate mapping)
-  const numMatch = t.match(/^(\d+)-fg$/);
-  if (numMatch) {
-    // Map to a reasonable hex fallback; 214 is a warm yellow in many palettes
-    if (numMatch[1] === '214') return (s: string) => chalk.hex('#DDBB55')(s);
-    return null;
-  }
-  return null;
-}
 
 /**
  * Output wrapper for commands that emit formatted text.
@@ -258,9 +211,9 @@ export function createCliOutput(opts?: CliOutputOptions) {
     print: (text: string): void => {
       const rendered = renderCliMarkdown(text, opts);
       if (isTty()) {
-        console.log(convertBlessedTagsToAnsi(rendered));
+        console.log(rendered);
       } else {
-        console.log(stripBlessedTags(rendered));
+        console.log(stripAnsi(rendered));
       }
     },
 
@@ -270,9 +223,9 @@ export function createCliOutput(opts?: CliOutputOptions) {
     printError: (text: string): void => {
       const rendered = renderCliMarkdown(text, opts);
       if (isTty()) {
-        console.error(convertBlessedTagsToAnsi(rendered));
+        console.error(rendered);
       } else {
-        console.error(stripBlessedTags(rendered));
+        console.error(stripAnsi(rendered));
       }
     },
 

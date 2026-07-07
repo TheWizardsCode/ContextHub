@@ -56,9 +56,11 @@ export interface ListOptions {
   deleted?: boolean;
   prefix?: string;
   number?: string;
+  /** Disable icon rendering for scripting/copy-paste */
+  icons?: boolean;
 }
 
-export interface ShowOptions { children?: boolean; prefix?: string; noPager?: boolean }
+export interface ShowOptions { children?: boolean; prefix?: string; noPager?: boolean; icons?: boolean }
 
 export interface AuditOptions { prefix?: string }
 
@@ -103,7 +105,6 @@ export interface NextOptions {
   search?: string;
   number?: string;
   prefix?: string;
-  includeInReview?: boolean;
   includeBlocked?: boolean;
   /** Skip automatic re-sort before selection */
   noReSort?: boolean;
@@ -148,16 +149,16 @@ export interface SyncDebugOptions {
   gitBranch?: string;
 }
 
-export interface CommentCreateOptions { author: string; comment?: string; body?: string; references?: string; prefix?: string }
+export interface CommentCreateOptions { author: string; comment?: string; body?: string; commentFile?: string; references?: string; prefix?: string }
 export interface CommentListOptions { prefix?: string }
 export interface CommentShowOptions { prefix?: string }
-export interface CommentUpdateOptions { author?: string; comment?: string; references?: string; prefix?: string }
+export interface CommentUpdateOptions { author?: string; comment?: string; commentFile?: string; references?: string; prefix?: string }
 export interface CommentDeleteOptions { prefix?: string }
 
 export interface RecentOptions { number?: string; children?: boolean; prefix?: string }
-export interface CloseOptions { reason?: string; author?: string; prefix?: string }
+export interface CloseOptions { reason?: string; author?: string; prefix?: string; force?: boolean }
 
-export interface DeleteOptions { prefix?: string }
+export interface DeleteOptions { prefix?: string; recursive?: boolean; sync?: boolean }
 
 export interface ReviewedOptions { prefix?: string }
 
@@ -181,6 +182,8 @@ export interface SearchOptions {
   issueType?: string;
   limit?: string;
   rebuildIndex?: boolean;
+  semantic?: boolean;
+  semanticOnly?: boolean;
   prefix?: string;
 }
 

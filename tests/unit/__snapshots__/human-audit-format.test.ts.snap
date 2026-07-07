@@ -2,7 +2,7 @@
 
 exports[`humanFormatWorkItem audit formatting > renders concise/normal/full outputs with audit present (snapshots) > concise-with-audit 1`] = `
 "Audit formatting test TEST-1
-Status: Open · Stage: In Progress | Priority: medium
+Status: 🔓 Open [OPEN] · Stage: In Progress | Priority: 📋 medium [MED ]
 SortIndex: 100
 Risk: —
 Effort: —
@@ -14,7 +14,7 @@ exports[`humanFormatWorkItem audit formatting > renders concise/normal/full outp
 "# Audit formatting test
 
 ID       : TEST-1
-Status   : Open · Stage: In Progress | Priority: medium
+Status   : 🔓 Open [OPEN] · Stage: In Progress | Priority: 📋 medium [MED ]
 Type     : task
 SortIndex: 100
 Risk     : —
@@ -24,10 +24,6 @@ Assignee : alice
 ## Description
 
 A test item for audit formatting
-
-## Stage
-
-in_progress
 
 ## Audit
 
@@ -42,7 +38,7 @@ Extra details"
 exports[`humanFormatWorkItem audit formatting > renders concise/normal/full outputs with audit present (snapshots) > normal-with-audit 1`] = `
 "ID:    TEST-1
 Title: Audit formatting test
-Status: Open · Stage: In Progress | Priority: medium
+Status: 🔓 Open [OPEN] · Stage: In Progress | Priority: 📋 medium [MED ]
 SortIndex: 100
 Risk: —
 Effort: —
@@ -53,7 +49,7 @@ Description: A test item for audit formatting"
 
 exports[`humanFormatWorkItem audit formatting > renders concise/normal/full outputs without audit (snapshots) > concise-without-audit 1`] = `
 "Audit formatting test TEST-1
-Status: Open · Stage: In Progress | Priority: medium
+Status: 🔓 Open [OPEN] · Stage: In Progress | Priority: 📋 medium [MED ]
 SortIndex: 100
 Risk: —
 Effort: —
@@ -64,7 +60,7 @@ exports[`humanFormatWorkItem audit formatting > renders concise/normal/full outp
 "# Audit formatting test
 
 ID       : TEST-1
-Status   : Open · Stage: In Progress | Priority: medium
+Status   : 🔓 Open [OPEN] · Stage: In Progress | Priority: 📋 medium [MED ]
 Type     : task
 SortIndex: 100
 Risk     : —
@@ -73,17 +69,13 @@ Assignee : alice
 
 ## Description
 
-A test item for audit formatting
-
-## Stage
-
-in_progress"
+A test item for audit formatting"
 `;
 
 exports[`humanFormatWorkItem audit formatting > renders concise/normal/full outputs without audit (snapshots) > normal-without-audit 1`] = `
 "ID:    TEST-1
 Title: Audit formatting test
-Status: Open · Stage: In Progress | Priority: medium
+Status: 🔓 Open [OPEN] · Stage: In Progress | Priority: 📋 medium [MED ]
 SortIndex: 100
 Risk: —
 Effort: —

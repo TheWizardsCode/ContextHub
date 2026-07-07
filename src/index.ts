@@ -8,6 +8,7 @@ import { loadConfig } from './config.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from './sync-defaults.js';
 import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, mergeAuditResults, GitTarget } from './sync.js';
 import { importFromJsonlContent, exportToJsonlAsync, getDefaultDataPath } from './jsonl.js';
+import { initializeRuntime, shutdownRuntime } from './lib/runtime.js';
 
 const PORT = process.env.PORT || 3000;
 
@@ -142,6 +143,10 @@ if (config) {
 
 console.log(`Database ready with ${db.getAll().length} work items and ${db.getAllComments().length} comments`);
 
+// Initialize the background task runtime so background operations
+// can be launched during the server session.
+initializeRuntime();
+
 // Create and start the API server
 const app = createAPI(db);
 const server = app.listen(PORT, () => {
@@ -169,6 +174,14 @@ async function shutdownServer(signal: NodeJS.Signals): Promise<void> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`Failed to flush pending exports: ${message}`);
+  }
+
+  // Await any background runtime tasks before exiting
+  try {
+    await shutdownRuntime();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Failed to await runtime tasks: ${message}`);
   }
 
   process.exit(0);

@@ -310,6 +310,42 @@ wl comment delete CMT-0001
 
 Close one or more work items and optionally record a close reason as a comment.
 
+**Recursive close (audit-gated):** If the item is in the `in_review` stage and has an
+associated audit result with `readyToClose: true`, the command recursively closes all
+descendants (children, grandchildren, etc.) before closing the parent. The descendants
+are closed deepest-first so that leaf items are completed before their parents.
+
+- If a child cannot be closed, the operation continues processing remaining children
+  and reports the errors at the end without aborting the entire command.
+- For items that do not meet the recursive condition (not `in_review`, no audit, or
+  `readyToClose` is `false`), only the specified item is closed (current behaviour).
+  **A warning is printed on stderr** when the item has children, alerting the user
+  that those children will be left behind and explaining why:
+  ```
+  Warning: WL-PARENT has 3 open children that will not be closed because the parent is not in the 'in_review' stage. Use `wl close --force WL-PARENT` to close them unconditionally.
+  ```
+  The reason reflects the first blocking condition encountered (in priority order):
+  - "the parent is not in the 'in_review' stage"
+  - "the parent has no audit result"
+  - "the audit result is not ready to close"
+- The `--force` flag unconditionally closes all descendants and then the parent,
+  bypassing the audit/stage checks. For items without children, `--force` behaves
+  identically to a standard close.
+
+**Output format (recursive close):** When the audit-gated recursive close path is triggered:
+
+- **Human-readable output** reports the count of successfully closed descendants:
+  `Closed WL-PARENT (N children closed)`
+- If any descendant could not be closed, a per-child warning is printed on stderr:
+  ```
+  Closed WL-PARENT (N children closed)
+  Child WL-CHILD4: Failed to close descendant — this item remains unclosed at top level
+  ```
+- **JSON output** includes a `childrenClosed` integer field in each result object,
+  representing the number of successfully closed descendants. If any descendant
+  failed to close, the existing `childErrors` array is populated and `success` remains
+  `true` (backward-compatible).
+
 **Automatic unblocking:** When a work item is closed, any dependents that were blocked
 solely by this item are automatically unblocked (their status changes from `blocked` to
 `open`). If a dependent has multiple blockers and other blockers remain active, it stays
@@ -321,12 +357,20 @@ Options:
 `-r, --reason <reason>` — Reason text stored as a comment (optional).
 `-a, --author <author>` — Author for the close comment (optional; default: `worklog`).
 `--prefix <prefix>` — Operate within a specific prefix (optional).
+`--force` — Close the item and all its descendants unconditionally, bypassing the
+  audit/stage checks. For items without children, this is equivalent to a standard close.
 
 Examples:
 
 ```sh
 wl close WL-ABC123 -r "Resolved by PR #42" -a alice
 wl close WL-ABC123 WL-DEF456 -r "Cleanup after release"
+
+# Close a parent and all its children (when parent is in_review with audit readyToClose=true)
+wl close WL-PARENT -r "All subtasks completed and audited OK"
+
+# Close a parent and all its children unconditionally (bypasses audit/stage checks)
+wl close --force WL-PARENT -r "Completed with all subtasks"
 ```
 
 ### `dep` (subcommands)
@@ -382,6 +426,7 @@ Options:
 
 `-c, --children` — Also display descendants in a tree layout (optional).
 `--prefix <prefix>` (optional)
+`--no-icons` — Disable icon rendering for clean text output. When icons are disabled, priority and status display as plain text (e.g., `[CRIT]`, `[OPEN]`) instead of emoji. This is useful for scripting or copy-paste operations.
 
 The output always includes `Risk` and `Effort` fields. When a field has no value a placeholder `—` is shown so the field is consistently visible for triage and prioritization.
 
@@ -396,6 +441,16 @@ wl show WL-ABC123 -c
 ### `next` [options]
 
 Suggest the next work item(s) to work on. Non-actionable items (deleted, completed, in-review, in-progress, dependency-blocked) are excluded by default.
+
+#### Hierarchy-aware selection
+
+`wl next` is hierarchy-aware: it returns **parent items** instead of descending into their children. For example, if an epic has open child tasks, `wl next` returns the epic itself — not one of its children. This surfaces the high-level unit of work for you to claim, after which you can work on its sub-tasks.
+
+Leaf items (items without children, or whose children are all completed) continue to be returned normally. Items whose parent is completed, deleted, or otherwise absent from the candidate pool are promoted to root level (orphan promotion) and compete on their own merit.
+
+Items whose parent (or ancestor) has status `in-progress` are **not** promoted — the entire in-progress subtree is skipped from `wl next` recommendations. This includes critical-priority children: they are only surfaced when their parent is not a valid (open, non-completed, non-deleted, non-in-progress) candidate.
+
+In batch mode (`-n <count>`), children of returned parents are also excluded from subsequent results, ensuring the batch never contains items from the same subtree.
 
 #### Automatic re-sort
 
@@ -412,13 +467,15 @@ When multiple candidate items exist, `wl next` ranks them using the following cr
 1. **Priority** — higher-priority items always rank above lower-priority items.
 2. **Blocks high-priority work** — among equal-priority candidates, an item that is a prerequisite for a `high` or `critical` downstream item is preferred. This ensures that unblocking high-value work takes precedence over unrelated tasks at the same priority.
 3. **Blocked penalty** — items with active dependency blockers are excluded by default (see `--include-blocked`).
-4. **Tie-breakers** — sort_index hierarchy position, then age (older items first) break remaining ties.
+4. **Tie-breakers** — sort_index, then age (older items first) break remaining ties.
 
-Items with `status: 'blocked'` that have `critical` priority trigger a special escalation path: their direct blockers are surfaced immediately, bypassing the general ranking logic.
+Items with `status: 'blocked'` that have `critical` priority trigger a special escalation path: their direct blockers are surfaced immediately, bypassing the general ranking logic. Blocked `critical` items that are children of an open parent are still escalated — the parent item's blockers will be surfaced if the critical child is in its tree.
 
 #### Backward compatibility
 
 The `--include-blocked` flag behavior is unchanged. The ranking boost only affects ordering among candidates that are already considered (i.e., unblocked items by default).
+
+The JSON output schema is unchanged — only the selection behavior differs: parent items are now returned instead of children.
 
 Options:
 
@@ -426,18 +483,73 @@ Options:
 `--stage <stage>` — Filter by stage: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` (optional).
 `--search <term>` (optional)
 `-n, --number <n>` — Number of items to return (optional; default: `1`).
-`--include-in-review` — Include items with status `blocked` and stage `in_review` (optional).
+`-g, --groups <n>` — Number of parallel-safe groups to identify (optional; default: `3`). Only meaningful when `-n > 1`. Groups items by priority, stage and file-path conflicts extracted from their descriptions, placing items that affect different files in the same group and conflicting items in separate groups. Items with priority `critical` are placed in a single "Critical" group at the top. Items with unknown/other stages are grouped together in a single "Other" group. See "Parallel-safe grouping" below.
 `--include-blocked` — Include dependency-blocked items (excluded by default).
 `--no-re-sort` — Skip automatic re-sort before selection, preserving current `sort_index` order (optional).
 `--re-sort-sync` — Force a synchronous (blocking) re-sort when automatic re-sort is triggered. By default automatic re-sorts are run asynchronously to avoid blocking interactive commands.
 `--recency-policy <policy>` — Recency handling for the re-sort step: `prefer`, `avoid`, or `ignore` (optional; default: `ignore`).
 `--prefix <prefix>` (optional)
 
+#### JSON output (`--json`)
+
+When using `--json` mode with a single item result, the output contains:
+
+- `success` (boolean)
+- `workItem` (object) — the work item fields including:
+  - Standard fields: `id`, `title`, `description`, `status`, `priority`, `sortIndex`, `createdAt`, `updatedAt`, `tags`, `assignee`, `stage`, `parentId`, etc.
+  - `auditResult` — the audit readiness value (`true`, `false`, or `null`).
+  - `childCount` (integer) — number of direct children for this work item. Items with no children return `0`.
+- `reason` (string) — the selection reason.
+
+When requesting multiple items (`-n <count>`) with grouping enabled (the default when `-n > 1`), each result entry includes an additional `group` field:
+
+- `group` (integer) — the 1-indexed group number this item belongs to (only present when `-n > 1`).
+
+When requesting multiple items (`-n <count>`), the output wraps results in:
+
+- `success` (boolean)
+- `count` (integer) — number of results returned.
+- `requested` (integer) — the requested count.
+- `results` (array) — array of result objects, each with `workItem` (including `childCount`), `reason`, and optionally `group`.
+- `note` (string, optional) — note about available vs requested counts.
+
+#### Parallel-safe grouping
+
+When `-n > 1`, `wl next` automatically groups items into parallel-safe groups based on priority, stage, and file-path conflicts extracted from each item's description. The `--groups/-g` option controls the number of file-path-based groups (default: `3`).
+
+The grouping algorithm uses a greedy first-fit strategy:
+
+1. Extract file paths from each item's description using a `**Key Files:**` section convention (see [docs/FILE_PATH_CONVENTION.md](docs/FILE_PATH_CONVENTION.md) for the full specification).
+2. **Critical priority items** are grouped first into a single "Critical" group at the very top, regardless of stage or file-path conflicts.
+3. Assign each remaining item to the first group containing no item that touches the same files.
+4. Items with unknown/other stages (and not critical) are placed together in a single "Other" group (no file-overlap splitting).
+
+The group display order is:
+1. **Critical** — single group for all `critical` priority items (if any).
+2. **Other** — single group for items with unknown/other stages.
+3. **Plan Complete Group N** — grouped by file-path conflicts.
+4. **In Review** — single group.
+5. **Intake Complete** — single group.
+6. **Idea** — single group.
+
+In JSON output (`--json` with `-n > 1`), each result entry includes a `group` field (integer, 1-indexed) indicating the group assignment.
+
+In human-readable output, group headings (e.g., `── Critical ──`, `── Other ──`, `── Plan Complete Group 1 ──`, `── In Review ──`) are displayed between groups.
+
+The Pi TUI selection list renders group separator lines between items in different groups, helping you quickly identify items you can work on in parallel.
+
+To specify a custom number of groups:
+
+```sh
+wl next -n 10 -g 5
+```
+
 Examples:
 
 ```sh
 wl next
 wl next -n 3
+wl next -n 10 -g 4
 wl next -a alice --search "bug"
 wl next --stage idea
 wl next --stage in_progress
@@ -496,6 +608,7 @@ Options:
 `--deleted` (optional) — Include items with `deleted` status in the output (hidden by default).
 `--needs-producer-review [value]` (optional; defaults to `true` when omitted; accepts true|false|yes|no)
 `--prefix <prefix>` (optional)
+`--no-icons` (optional) — Disable icon rendering for clean text output. When icons are disabled, priority and status display as plain text (e.g., `[CRIT]`, `[OPEN]`) instead of emoji. This is useful for scripting or copy-paste operations.
 `--json` (optional)
 
 Examples:
@@ -518,6 +631,12 @@ wl list --needs-producer-review
 
 Full-text search over work items using FTS5 (title, description, comments, tags). Returns ranked results with relevance snippets. Falls back to application-level search when FTS5 is unavailable.
 
+**Semantic search:** When the `--semantic` flag is used, results are blended with
+embedding-based similarity (cosine similarity) for conceptually related results
+beyond exact keyword matches. Requires an OpenAI-compatible embedding provider
+configured via the `OPENAI_API_KEY` environment variable. Semantic search
+enhancement degrades gracefully when no embedder is configured.
+
 **ID-aware search:** Queries that contain work item IDs (full, partial, or unprefixed) are detected automatically:
 
 - **Exact ID** — `wl search WL-0MM0AN2IT0OOC2TW` returns the matching item as the top result.
@@ -538,8 +657,13 @@ Options:
 `--issue-type <type>` (optional) — Filter by issue type
 `-l, --limit <n>` (optional) — Maximum number of results (default: 20)
 `--rebuild-index` (optional) — Rebuild the FTS index from scratch before searching
+`--semantic` (optional) — Enable hybrid lexical+semantic search. Blends FTS BM25
+scores with embedding cosine similarity using configurable weights (default 50/50).
+Query embeddings are cached in-memory to avoid redundant API calls.
+`--semantic-only` (optional) — Return only semantic (embedding-based) results.
+Requires an embedder; errors if OPENAI_API_KEY is not set.
 `--prefix <prefix>` (optional)
-`--json` (optional) — Output structured JSON with `id`, `title`, `status`, `priority`, `score`, `snippet`, `matchedField`
+`--json` (optional) — Output structured JSON with `id`, `title`, `status`, `priority`, `score`, `snippet`, `matchedField`. When `--semantic` is used, includes `semanticAvailable: true/false`.
 
 Examples:
 
@@ -553,6 +677,11 @@ wl search "feature" --issue-type epic
 wl search "review" --needs-producer-review
 wl --json search "cli refactor"
 wl search "rebuild" --rebuild-index
+
+# Semantic search
+wl search "performance optimization" --semantic
+wl search "authentication flow" --semantic-only
+wl --json search "data validation" --semantic
 
 # ID-aware search
 wl search WL-0MM0AN2IT0OOC2TW              # exact ID lookup
@@ -732,6 +861,7 @@ Subcommands:
 
 - `upgrade [options]` — Preview or apply pending database schema migrations. Options: `--dry-run` (preview without applying), `--confirm` (apply non-interactively).
 - `prune [options]` — Prune soft-deleted work items older than a specified age. Options: `--days <n>` (age threshold in days), `--dry-run` (show what would be pruned).
+- `file-paths [options]` — Check intake-stage items for missing or incorrect `**Key Files:**` sections. Options: `--add-placeholder` (add a placeholder section).
 
 Examples:
 
@@ -743,6 +873,19 @@ wl doctor upgrade --dry-run       # Preview pending schema migrations
 wl doctor upgrade --confirm       # Apply pending schema migrations
 wl doctor prune --days 30         # Prune items deleted more than 30 days ago
 wl doctor prune --dry-run         # Preview which items would be pruned
+wl doctor stage-sync              # Detect stale status/stage combinations (dry-run)
+wl doctor stage-sync --apply      # Fix stale status/stage combinations
+wl doctor file-paths                    # Check intake-stage items for **Key Files:** sections
+wl doctor file-paths --add-placeholder   # Add placeholder **Key Files:** section to missing items
+
+Known stale combinations detected by `stage-sync`:
+
+| Current | Fix |
+|---|---|
+| `completed` + `idea` | `completed` + `done` |
+| `completed` + `intake_complete` | `completed` + `done` |
+| `completed` + `plan_complete` | `completed` + `done` |
+| `in-progress` + `idea` | `open` + `idea` |
 
 Notes:
 
@@ -906,6 +1049,10 @@ Options:
 - `--prefix <prefix>`
 - `--json`
 
+Human output includes a "Sync:" section with the last sync timestamp (ISO format) or "Never" if no sync has been performed.
+
+JSON output includes a `lastSync` field with the ISO timestamp string, or `null` if no sync has been performed.
+
 Example:
 
 ```sh
@@ -927,6 +1074,38 @@ Example:
 ```sh
 wl help create
 ```
+
+### `completion` [shell]
+
+Generate shell completion scripts for bash and zsh. Outputs a completion
+script to stdout that provides tab-completion for all `wl` subcommands,
+options, and dynamic work-item IDs.
+
+Arguments:
+
+- `shell` — Target shell: `bash` or `zsh`.
+
+Examples:
+
+```sh
+# Source directly (current shell only)
+source <(wl completion bash)
+source <(wl completion zsh)
+
+# Write to file for permanent installation
+wl completion bash > ~/.wl-completion.bash
+echo "source ~/.wl-completion.bash" >> ~/.bashrc
+
+# JSON output
+wl --json completion bash
+```
+
+Features:
+- Static completions for all subcommands and their options
+- Dynamic work-item ID completion for commands like `show`, `update`, `delete`, `close`, etc.
+- Shell name completion for the `completion` subcommand itself (bash, zsh)
+- The bash script uses `_init_completion` and registers via `complete -F`
+- The zsh script uses `compdef` and `_arguments` with a dynamic `_wl_ids` helper
 
 ---
 

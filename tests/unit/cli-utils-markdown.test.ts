@@ -183,10 +183,13 @@ describe('createMarkdownOutputHelpers', () => {
       const helpers = createMarkdownOutputHelpers(program);
       // isFormatted should be true
       expect(helpers.isFormatted()).toBe(true);
-      // render should produce blessed tags
+      // render should produce ANSI/chalk output (no blessed tags)
       const result = helpers.render('# Header\nSome `code`');
-      expect(result).toContain('{white-fg}{bold}Header{/}');
-      expect(result).toContain('{magenta-fg}code{/}');
+      expect(result).not.toContain('{white-fg}');
+      expect(result).not.toContain('{magenta-fg}');
+      expect(result).not.toContain('{/');
+      expect(result).toContain('Header');
+      expect(result).toContain('code');
     });
 
     it('render returns plain text when markdown disabled', async () => {

@@ -1,6 +1,6 @@
 {
   "name": "worklog",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A simple experimental issue tracker for AI agents",
   "main": "dist/index.js",
   "type": "module",
@@ -9,7 +9,8 @@
     "wl": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc && node ./scripts/generate-version.cjs",
+    "build": "npm run build:shared && tsc && node ./scripts/generate-version.cjs",
+    "build:shared": "cd packages/shared && npm run build",
     "dev": "tsx watch src/index.ts",
     "prestart": "npm run build",
     "start": "node dist/index.js",
@@ -20,6 +21,8 @@
     "test:tui": "bash ./tests/tui-ci-run.sh",
     "test:timings": "node ./scripts/test-timings.cjs",
     "benchmark:sort-index": "tsx scripts/benchmark-sort-index.ts",
+    "benchmark:wl-next": "tsx bench/wl-next-perf.ts",
+    "benchmark:wl-next:json": "tsx bench/wl-next-perf.ts --json",
     "install:pi-extension": "bash ./scripts/install-pi-extension.sh"
   },
   "keywords": [
@@ -30,15 +33,15 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@worklog/shared": "file:./packages/shared",
     "better-sqlite3": "^12.6.2",
     "chalk": "^5.6.2",
-    "blessed": "^0.1.81",
     "commander": "^11.1.0",
     "express": "^4.18.2",
     "js-yaml": "^4.1.1"
   },
   "devDependencies": {
-    "@types/blessed": "^0.1.7",
+    "@earendil-works/pi-coding-agent": "^0.79.10",
     "@types/better-sqlite3": "^7.6.13",
     "@types/chalk": "^0.4.31",
     "@types/commander": "^2.12.0",

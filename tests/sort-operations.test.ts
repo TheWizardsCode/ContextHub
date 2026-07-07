@@ -277,14 +277,14 @@ describe('Sort Operations', () => {
       expect(result.workItem?.id).toBe(item3.id);
     });
 
-    it('should respect parent-child relationships in next item', () => {
+    it('should return parent instead of descending into children', () => {
       const parent = db.create({ title: 'Parent', status: 'open', sortIndex: 100 });
       const child = db.create({ title: 'Child', parentId: parent.id, status: 'open', sortIndex: 200 });
 
       const result = db.findNextWorkItem();
 
-      // Child should be returned since parent has open children to work on
-      expect(result.workItem?.id).toBe(child.id);
+      // Parent is the only root candidate; returned directly (no descent into children)
+      expect(result.workItem?.id).toBe(parent.id);
     });
   });
 

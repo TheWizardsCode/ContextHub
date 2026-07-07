@@ -1,7 +1,7 @@
 import type { WorklogConfig } from '../types.js';
 import type { StatusStageRules } from '../status-stage-rules.js';
 import { loadStatusStageRules, normalizeStageValue, normalizeStatusValue } from '../status-stage-rules.js';
-import { getAllowedStagesForStatus, getAllowedStatusesForStage, isStatusStageCompatible } from '../tui/status-stage-validation.js';
+import { getAllowedStagesForStatus, getAllowedStatusesForStage, isStatusStageCompatible } from '../status-stage-validation.js';
 
 type Resolution = {
   value: string;
