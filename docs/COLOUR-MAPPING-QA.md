@@ -7,7 +7,6 @@
 | Test Case | Expected Result | Status |
 |-----------|-----------------|--------|
 | CLI output with FORCE_COLOR=0 | Plain text, no ANSI codes | ✅ PASS |
-| TUI output with blessed tags | Blessed tags still present (TUI handles rendering) | ✅ PASS |
 | Title text preserved | All text readable without colours | ✅ PASS |
 
 ### 2. Terminal Emulators Tested
@@ -43,7 +42,6 @@
 
 | Test Case | Expected Result | Status |
 |-----------|-----------------|--------|
-| TUI snapshot tests | Consistent blessed markup | ✅ PASS |
 | CLI tests | Deterministic output | ✅ PASS |
 
 ## Issues Discovered
@@ -56,7 +54,6 @@ No issues were discovered during QA. The implementation:
 2. ✅ Preserves text labels for screen readers
 3. ✅ Does not inject non-text characters that break SRs
 4. ✅ Uses standard ANSI escape sequences supported by most terminals
-5. ✅ Uses blessed markup tags for TUI (handled by blessed renderer)
 
 ## Recommendations
 

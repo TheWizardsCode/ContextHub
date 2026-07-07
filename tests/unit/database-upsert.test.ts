@@ -77,28 +77,6 @@ describe('WorklogDatabase.upsertItems', () => {
     expect(all.find(i => i.id === itemB.id)).toBeDefined();
   });
 
-  // SKIPPED: This test relies on autoExport functionality which was removed in Phase 1.
-  // The autoExport feature that automatically wrote to JSONL after each database operation
-  // has been removed to eliminate TUI freezing. JSONL export will be handled explicitly
-  // in Phase 2 (sync operations).
-  it.skip('should not trigger export/sync when upserting an empty array', () => {
-    // Arrange: create an item so JSONL has content, then record mtime
-    db.create({ title: 'Existing item' });
-    const statBefore = fs.statSync(jsonlPath);
-    const mtimeBefore = statBefore.mtimeMs;
-
-    // Small delay to ensure mtime difference is detectable
-    const until = Date.now() + 50;
-    while (Date.now() < until) { /* wait */ }
-
-    // Act: upsert empty array
-    db.upsertItems([]);
-
-    // Assert: JSONL file was not re-written
-    const statAfter = fs.statSync(jsonlPath);
-    expect(statAfter.mtimeMs).toBe(mtimeBefore);
-  });
-
   it('should preserve existing items when upserting a subset', () => {
     // Arrange: create three items
     const itemA = db.create({ title: 'Item A' });
@@ -220,41 +198,6 @@ describe('WorklogDatabase.upsertItems', () => {
     const edgesFromB = db.listDependencyEdgesFrom(itemB.id);
     expect(edgesFromB.length).toBe(1);
     expect(edgesFromB[0].toId).toBe(itemC.id);
-  });
-
-  // SKIPPED: This test relies on autoExport functionality which was removed in Phase 1.
-  // The autoExport feature that automatically wrote to JSONL after each database operation
-  // has been removed to eliminate TUI freezing. JSONL export will be handled explicitly
-  // in Phase 2 (sync operations).
-  it.skip('should export to JSONL after upserting non-empty items', () => {
-    // Arrange: create an item so JSONL exists
-    db.create({ title: 'Existing item' });
-    const statBefore = fs.statSync(jsonlPath);
-    const mtimeBefore = statBefore.mtimeMs;
-
-    // Small delay to ensure mtime difference is detectable
-    const until = Date.now() + 50;
-    while (Date.now() < until) { /* wait */ }
-
-    // Act: upsert a new item
-    const item = db.create({ title: 'Placeholder' });
-    db.delete(item.id);
-
-    // Wait again after delete export
-    const until2 = Date.now() + 50;
-    while (Date.now() < until2) { /* wait */ }
-    const statAfterDelete = fs.statSync(jsonlPath);
-    const mtimeAfterDelete = statAfterDelete.mtimeMs;
-
-    // Wait to detect next mtime change
-    const until3 = Date.now() + 50;
-    while (Date.now() < until3) { /* wait */ }
-
-    db.upsertItems([{ ...item, title: 'Upserted' }]);
-
-    // Assert: JSONL file was re-written
-    const statAfter = fs.statSync(jsonlPath);
-    expect(statAfter.mtimeMs).toBeGreaterThan(mtimeAfterDelete);
   });
 
   it('should handle upserting multiple items at once', () => {

@@ -11,9 +11,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ChatPane } from '../../src/tui/chatPane.js';
-import { ActionPalette } from '../../src/tui/actionPalette.js';
-import { runWl } from '../../src/tui/wl-integration.js';
+import { ChatPane } from '../../packages/tui/extensions/Worklog/chatPane.js';
+import { ActionPalette } from '../../packages/tui/extensions/Worklog/actionPalette.js';
+import { runWl } from '../../packages/tui/extensions/wl-integration.js';
 import { runWlCommand } from '../../src/wl-integration/spawn.js';
 
 describe('E2E: Agent-driven create flow', () => {

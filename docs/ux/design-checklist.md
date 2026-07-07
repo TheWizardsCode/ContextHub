@@ -14,8 +14,6 @@ Implementors and reviewers should validate against these items before merging ch
 ## 2. Keyboard Navigation
 
 - [ ] **Shortcuts**: Standard keyboard shortcuts must work:
-  - `Ctrl+1` through `Ctrl+9` for work-item selection
-  - `Ctrl+Up` / `Ctrl+Down` for cycling selection
   - `Ctrl+/` or `Ctrl+Shift+P` for action palette
   - `Esc` to close modals/panels
 - [ ] **Tab Order**: Logical tab order across interactive elements.
@@ -56,7 +54,7 @@ Implementors and reviewers should validate against these items before merging ch
 - [ ] **Persistence**: Widgets remain visible until explicitly hidden.
 - [ ] **Refresh**: Widgets auto-refresh after wl CLI operations.
 - [ ] **Details**: Selected item details update when selection changes.
-- [ ] **Commands**: `/worklog show`, `/worklog hide`, `/worklog-select` all functional.
+- [ ] **Commands**: `/wl` (worklog browse) is functional.
 
 ## 7. Error Handling
 

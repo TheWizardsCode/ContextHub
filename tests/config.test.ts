@@ -684,5 +684,40 @@ describe('Configuration', () => {
       expect(config).not.toBeNull();
       expect(config?.cliFormatMarkdown).toBe(false);
     });
+
+    it('should load autoSyncIntervalSeconds from config file', () => {
+      const configDir = getConfigDir();
+      fs.mkdirSync(configDir, { recursive: true });
+      fs.writeFileSync(
+        getConfigPath(),
+        [
+          'projectName: Test Project',
+          'prefix: TEST',
+          'autoSyncIntervalSeconds: 30',
+        ].join('\n'),
+        'utf-8'
+      );
+
+      const config = loadConfig();
+      expect(config).toBeDefined();
+      expect(config?.autoSyncIntervalSeconds).toBe(30);
+    });
+
+    it('should default autoSyncIntervalSeconds to undefined when not set', () => {
+      const configDir = getConfigDir();
+      fs.mkdirSync(configDir, { recursive: true });
+      fs.writeFileSync(
+        getConfigPath(),
+        [
+          'projectName: Test',
+          'prefix: TST',
+        ].join('\n'),
+        'utf-8'
+      );
+
+      const config = loadConfig();
+      expect(config).toBeDefined();
+      expect(config?.autoSyncIntervalSeconds).toBeUndefined();
+    });
   });
 });

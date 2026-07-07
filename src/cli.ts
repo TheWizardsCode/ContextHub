@@ -8,6 +8,7 @@ import { createPluginContext, getVersion } from './cli-utils.js';
 import { loadPlugins } from './plugin-loader.js';
 import { renderCliMarkdown, resolveMarkdownEnabled } from './cli-output.js';
 import { loadConfig } from './config.js';
+import { initializeRuntime } from './lib/runtime.js';
 
 // Import built-in command modules
 import initCommand from './commands/init.js';
@@ -38,6 +39,7 @@ import searchCommand from './commands/search.js';
 import unlockCommand from './commands/unlock.js';
 import auditCommand from './commands/audit.js';
 import auditResultCommand from './commands/audit-result.js';
+import completionCommand from './commands/completion.js';
 
 // Watch flag parsing - supports -w, -wN, --watch, --watch=N
 function parseWatchFlag(argv: string[]) {
@@ -255,6 +257,7 @@ const builtInCommands = [
   unlockCommand,
   auditCommand,
   auditResultCommand,
+  completionCommand,
   // onboard command removed
 ];
 
@@ -288,6 +291,7 @@ const builtInCommandNames = new Set([
   'audit',
   'audit-show',
   'audit-set',
+  'completion',
   // 'onboard' removed
 ]);
 
@@ -307,6 +311,11 @@ try {
 } catch (error) {
   // Silently continue with built-in commands only
 }
+
+// Initialize the background task runtime so that background operations
+// (e.g. auto-sync, metrics collection) can be launched during the session
+// and are awaited on shutdown.
+initializeRuntime();
 
 // Customize help output to group commands for readability and ensure global
 // options appear on subcommand help as well. Commander applies help

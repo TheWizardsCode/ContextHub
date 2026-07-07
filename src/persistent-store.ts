@@ -502,6 +502,37 @@ export class SqlitePersistentStore {
     return rows.map(row => this.rowToWorkItem(row));
   }
 
+  /**
+   * Batch-update sortIndex values for a list of work items.
+   * Uses a single transaction to reduce write overhead.
+   * Each item at index i gets sortIndex = (i + 1) * gap.
+   * Only updates items whose sortIndex actually changes.
+   *
+   * @returns The number of items whose sortIndex was changed.
+   */
+  batchUpdateSortIndices(orderedItems: WorkItem[], gap: number): number {
+    const updateStmt = this.db.prepare(`
+      UPDATE workitems SET sortIndex = ?, updatedAt = ? WHERE id = ?
+    `);
+
+    const now = new Date().toISOString();
+    let updated = 0;
+
+    const doUpdates = this.db.transaction(() => {
+      for (let index = 0; index < orderedItems.length; index += 1) {
+        const item = orderedItems[index];
+        const nextSortIndex = (index + 1) * gap;
+        if (item.sortIndex !== nextSortIndex) {
+          updateStmt.run(nextSortIndex, now, item.id);
+          updated += 1;
+        }
+      }
+    });
+
+    doUpdates();
+    return updated;
+  }
+
   getAllWorkItemsOrderedByHierarchySortIndex(): WorkItem[] {
     const items = this.getAllWorkItems();
     const childrenByParent = new Map<string | null, WorkItem[]>();
@@ -601,6 +632,70 @@ export class SqlitePersistentStore {
       for (const child of sorted) {
         ordered.push(child);
         // Don't descend into completed/deleted items' subtrees
+        if (child.status !== 'completed' && child.status !== 'deleted') {
+          traverse(child.id);
+        }
+      }
+    };
+
+    traverse(null);
+    return ordered;
+  }
+
+  /**
+   * Like getAllWorkItemsOrderedByHierarchySortIndexSkipCompleted(), but operates
+   * on a pre-loaded items array instead of loading from the database.
+   * This avoids redundant full-table scans when the caller already has items.
+   */
+  orderItemsByHierarchySortIndexSkipCompleted(items: WorkItem[]): WorkItem[] {
+    const itemMap = new Map<string, WorkItem>();
+    const childrenByParent = new Map<string | null, WorkItem[]>();
+
+    for (const item of items) {
+      itemMap.set(item.id, item);
+    }
+
+    for (const item of items) {
+      let effectiveParent: string | null = item.parentId ?? null;
+
+      if (effectiveParent) {
+        let cursor: string | null = effectiveParent;
+        while (cursor) {
+          const parent = itemMap.get(cursor);
+          if (!parent) break;
+          if (parent.status === 'completed' || parent.status === 'deleted') {
+            effectiveParent = null;
+            break;
+          }
+          cursor = parent.parentId ?? null;
+        }
+      }
+
+      const list = childrenByParent.get(effectiveParent);
+      if (list) {
+        list.push(item);
+      } else {
+        childrenByParent.set(effectiveParent, [item]);
+      }
+    }
+
+    const sortSiblings = (list: WorkItem[]): WorkItem[] => {
+      return list.slice().sort((a, b) => {
+        if (a.sortIndex !== b.sortIndex) {
+          return a.sortIndex - b.sortIndex;
+        }
+        const createdDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        if (createdDiff !== 0) return createdDiff;
+        return a.id.localeCompare(b.id);
+      });
+    };
+
+    const ordered: WorkItem[] = [];
+    const traverse = (parentId: string | null) => {
+      const children = childrenByParent.get(parentId) || [];
+      const sorted = sortSiblings(children);
+      for (const child of sorted) {
+        ordered.push(child);
         if (child.status !== 'completed' && child.status !== 'deleted') {
           traverse(child.id);
         }

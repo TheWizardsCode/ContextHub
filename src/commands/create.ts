@@ -52,7 +52,7 @@ export default function register(ctx: PluginContext): void {
           description = await fs.readFile(options.descriptionFile, 'utf8');
         } catch (err) {
           // Print a helpful error and exit with failure
-          console.error(`Failed to read description file: ${options.descriptionFile}`);
+          output.error(`Failed to read description file: ${options.descriptionFile}`, { success: false, error: `Failed to read description file: ${options.descriptionFile}` });
           process.exit(1);
         }
       }
@@ -83,7 +83,9 @@ export default function register(ctx: PluginContext): void {
         }
 
         for (const warning of warnings) {
-          console.error(warning);
+          if (!utils.isJsonMode()) {
+            console.error(warning);
+          }
         }
       }
 
@@ -103,7 +105,7 @@ export default function register(ctx: PluginContext): void {
         try {
           auditTextInput = await fs.readFile(options.auditFile, 'utf8');
         } catch (err) {
-          console.error(`Failed to read audit file: ${options.auditFile}`);
+          output.error(`Failed to read audit file: ${options.auditFile}`, { success: false, error: `Failed to read audit file: ${options.auditFile}` });
           process.exit(1);
         }
       }

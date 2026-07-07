@@ -46,8 +46,8 @@ Derived at runtime from the compatibility mapping.
 
 ### Update Dialog Validation
 TUI update dialog rejects invalid status/stage combinations.
-- Source: src/tui/update-dialog-submit.ts (buildUpdateDialogUpdates)
-- Tests: tests/tui/tui-update-dialog.test.ts
+- Source: src/tui/update-dialog-submit.ts (removed — file was part of the deprecated Blessed TUI)
+- Tests: tests/tui/tui-update-dialog.test.ts (removed — file was part of the deprecated Blessed TUI)
   - Rejects invalid status/stage combinations.
   - Accepts compatible updates and applies changes.
   - Note: The validation logic permits common transitional combinations by default, e.g. `status=in-progress` (or `in_progress`) while `stage` is `idea`, `in_progress`, or `in_review`. This mirrors TUI/agent workflows that may set an item as in-progress before advancing its stage.
@@ -58,7 +58,7 @@ Close dialog sets status/stage pairs as follows:
 - Close (done) -> status=completed, stage=done
 - Close (deleted) -> status=deleted, stage=''
 - Source: src/status-stage-rules.ts (STATUS_STAGE_RULE_NOTES)
-- UI options: src/tui/components/dialogs.ts
+- UI options: src/tui/components/dialogs.ts (removed — file was part of the deprecated Blessed TUI)
 
 ## Dependency Rules (Implied)
 Adding/removing dependency edges affects status based on the dependency stage.
@@ -69,7 +69,7 @@ Adding/removing dependency edges affects status based on the dependency stage.
 
 ## Selection/Filtering Rules (Implied)
 The next-item selection logic treats in_review specially and filters statuses.
-- Exclude status=blocked and stage=in_review by default (unless --include-in-review)
+- Include all stage=in_review items (in_review items are now surfaced by default)
   - Source: src/commands/next.ts (option), src/database.ts (findNextWorkItemFromItems)
 - Filter out status=deleted in next-item selection
   - Source: src/database.ts (findNextWorkItemFromItems)
@@ -91,6 +91,13 @@ The next-item selection logic treats in_review specially and filters statuses.
   - Not present in .worklog/config.defaults.yaml stages list.
 - Status default and stage default are set during create/import, but no validation
   is applied on update or import beyond missing-field normalization.
+
+## Cross-references
+
+- [`docs/validation/stage-in-progress-usage-inventory.md`](./stage-in-progress-usage-inventory.md) —
+  Comprehensive inventory of every `--stage in_progress` usage across all skill files
+  under `~/.pi/agent/skills/`, with semantic analysis and recommendations.
+  Created by audit work-item WL-0MQQIK8OU0052YD0.
 
 ## Examples
 - Valid: status=open, stage=idea

@@ -68,7 +68,6 @@ Tests are spread across two top-level directories:
 - **`sort-operations.test.ts`** — Sort index operations and rebalancing
 - **`grouping.test.ts`** — Work item grouping logic
 - **`file-lock.test.ts`** — File locking and concurrent access
-- **`lockless-reads.test.ts`** — Lock-free read path correctness
 - **`normalize-sqlite-bindings.test.ts`** — SQLite binding normalization
 - **`plugin-loader.test.ts`** / **`plugin-integration.test.ts`** — Plugin discovery and loading
 - **`github-*.test.ts`** — GitHub sync, push state, pre-filter, comments, deleted items, self-link, output

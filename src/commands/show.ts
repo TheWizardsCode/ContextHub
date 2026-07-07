@@ -18,7 +18,12 @@ export default function register(ctx: PluginContext): void {
     .option('-c, --children', 'Also show children')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--no-pager', 'Disable interactive paging even in a TTY')
+    .option('--no-icons', 'Disable icon rendering for clean text output')
     .action((id: string, options: ShowOptions) => {
+      // Apply --no-icons flag by setting env var before any icon functions are called
+      if (options.icons === false) {
+        process.env.WL_NO_ICONS = '1';
+      }
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
       

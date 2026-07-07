@@ -127,33 +127,5 @@ describe('CLI Status Tests', () => {
     expect(output).not.toContain('Refreshing database from');
   });
 
-  // SKIPPED: This test relies on autoExport functionality which was removed in Phase 1.
-  // The autoExport feature that automatically wrote to JSONL after each database operation
-  // has been removed to eliminate TUI freezing. JSONL export will be handled explicitly
-  // in Phase 2 (sync operations).
-  it.skip('should show debug messages when --verbose is specified', async () => {
-    await execAsync(`tsx ${cliPath} --json create -t "Initial task"`);
 
-    const dbPath = path.join('.worklog', 'worklog.db');
-    if (fs.existsSync(dbPath)) {
-      try {
-        fs.unlinkSync(dbPath);
-      } catch (err: any) {
-        // On Windows, SQLite may still hold a lock; rename instead
-        if (err.code === 'EBUSY' || err.code === 'EPERM') {
-          try { fs.renameSync(dbPath, dbPath + '.old'); } catch (_) { /* ignore */ }
-        } else {
-          throw err;
-        }
-      }
-    }
-
-    const { stdout, stderr } = await execAsync(
-      `tsx ${cliPath} --verbose create -t "Test task verbose"`
-    );
-
-    const output = stdout + stderr;
-    const hasDebugMessage = output.includes('Refreshing database from') || output.includes('Loaded');
-    expect(hasDebugMessage).toBe(true);
-  });
 });

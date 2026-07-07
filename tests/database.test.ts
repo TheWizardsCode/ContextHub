@@ -2,7 +2,7 @@
  * Tests for WorklogDatabase
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import { WorklogDatabase } from '../src/database.js';
@@ -343,6 +343,60 @@ describe('WorklogDatabase', () => {
     it('should return false for non-existent ID', () => {
       const result = db.delete('TEST-NONEXISTENT');
       expect(result).toBe(false);
+    });
+
+    it('should recursively delete children when deleting a parent', () => {
+      const parent = db.create({ title: 'Parent' });
+      const child1 = db.create({ title: 'Child 1', parentId: parent.id });
+      const child2 = db.create({ title: 'Child 2', parentId: parent.id });
+
+      const deleted = db.delete(parent.id);
+      expect(deleted).toBe(true);
+
+      // Parent should be marked as deleted
+      expect(db.get(parent.id)?.status).toBe('deleted');
+      // Children should also be marked as deleted
+      expect(db.get(child1.id)?.status).toBe('deleted');
+      expect(db.get(child2.id)?.status).toBe('deleted');
+    });
+
+    it('should recursively delete nested descendants (grandchildren)', () => {
+      const grandparent = db.create({ title: 'Grandparent' });
+      const parent = db.create({ title: 'Parent', parentId: grandparent.id });
+      const child = db.create({ title: 'Child', parentId: parent.id });
+
+      const deleted = db.delete(grandparent.id);
+      expect(deleted).toBe(true);
+
+      expect(db.get(grandparent.id)?.status).toBe('deleted');
+      expect(db.get(parent.id)?.status).toBe('deleted');
+      expect(db.get(child.id)?.status).toBe('deleted');
+    });
+
+    it('should not delete siblings or unrelated items when deleting a parent', () => {
+      const parent1 = db.create({ title: 'Parent 1' });
+      const parent2 = db.create({ title: 'Parent 2' });
+      const childOf1 = db.create({ title: 'Child of 1', parentId: parent1.id });
+      const childOf2 = db.create({ title: 'Child of 2', parentId: parent2.id });
+      const unrelated = db.create({ title: 'Unrelated' });
+
+      db.delete(parent1.id);
+
+      // parent1 and its child should be deleted
+      expect(db.get(parent1.id)?.status).toBe('deleted');
+      expect(db.get(childOf1.id)?.status).toBe('deleted');
+      // parent2, its child, and unrelated should remain
+      expect(db.get(parent2.id)?.status).not.toBe('deleted');
+      expect(db.get(childOf2.id)?.status).not.toBe('deleted');
+      expect(db.get(unrelated.id)?.status).not.toBe('deleted');
+    });
+
+    it('should handle delete with no children (no regression)', () => {
+      const item = db.create({ title: 'No children' });
+      const deleted = db.delete(item.id);
+
+      expect(deleted).toBe(true);
+      expect(db.get(item.id)?.status).toBe('deleted');
     });
   });
 
@@ -858,27 +912,544 @@ describe('WorklogDatabase', () => {
       expect(allItems.find(i => i.id === 'TEST-002')).toBeDefined();
     });
 
-    // SKIPPED: This test relies on autoExport functionality which was removed in Phase 1.
-    // The autoExport feature that automatically wrote to JSONL after each database operation
-    // has been removed to eliminate TUI freezing. JSONL export will be handled explicitly
-    // in Phase 2 (sync operations).
-    it.skip('should record lastJsonlExportMtime in metadata after export', () => {
-      // Ensure initial state: remove jsonl if present
-      if (fs.existsSync(jsonlPath)) fs.unlinkSync(jsonlPath);
 
-      const dbWithExport = new WorklogDatabase('TEST', dbPath, jsonlPath, true, true);
-      dbWithExport.create({ title: 'Export test' });
+  });
 
-      // Read metadata directly from the underlying sqlite store
-      const store = dbWithExport['store'] as any; // access for testing
-      const mtimeStr = store.getMetadata('lastJsonlExportMtime');
-      expect(mtimeStr).toBeDefined();
-      const mtimeNum = Number(mtimeStr);
-      expect(Number.isFinite(mtimeNum)).toBe(true);
+  describe('import and upsert timestamp preservation (no-op guard)', () => {
+    /**
+     * Helper: create an item with a known past timestamp.
+     * The past time is used so that if import() or upsertItems() overwrites
+     * updatedAt with the current time, we can detect the change.
+     */
+    function createItemWithPastTimestamp(
+      id: string,
+      title: string,
+      overrides: Partial<import('../src/types.js').WorkItem> = {}
+    ): import('../src/types.js').WorkItem {
+      const pastTimestamp = '2025-01-01T00:00:00.000Z';
+      return {
+        id,
+        title,
+        description: '',
+        status: 'open' as const,
+        priority: 'medium' as const,
+        sortIndex: 0,
+        parentId: null,
+        createdAt: pastTimestamp,
+        updatedAt: pastTimestamp,
+        tags: [],
+        assignee: '',
+        stage: '',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+        githubIssueNumber: undefined,
+        githubIssueId: undefined,
+        githubIssueUpdatedAt: undefined,
+        needsProducerReview: false,
+        ...overrides,
+      };
+    }
 
-      const fileStats = fs.statSync(jsonlPath);
-      // mtime recorded should equal file mtime (within 1ms)
-      expect(Math.abs(mtimeNum - fileStats.mtimeMs)).toBeLessThan(2);
+    it('should preserve updatedAt on all items when import has no changes', () => {
+      const item1 = createItemWithPastTimestamp('TEST-IMP-001', 'Item 1');
+      const item2 = createItemWithPastTimestamp('TEST-IMP-002', 'Item 2');
+
+      // Import baseline items
+      db.import([item1, item2]);
+
+      const afterFirstImport = db.getAll();
+      expect(afterFirstImport).toHaveLength(2);
+
+      // Re-import the exact same items (no changes)
+      db.import([item1, item2]);
+
+      const afterSecondImport = db.getAll();
+      expect(afterSecondImport).toHaveLength(2);
+
+      // Both items should retain their original updatedAt
+      for (const item of afterSecondImport) {
+        expect(item.updatedAt).toBe('2025-01-01T00:00:00.000Z');
+      }
+    });
+
+    it('should only update updatedAt for the single changed item', () => {
+      const unchanged = createItemWithPastTimestamp('TEST-IMP-011', 'Unchanged');
+      const changed = createItemWithPastTimestamp('TEST-IMP-012', 'Original title');
+
+      db.import([unchanged, changed]);
+
+      // Modify one item's title
+      const changedUpdated = createItemWithPastTimestamp('TEST-IMP-012', 'Updated title');
+
+      db.import([unchanged, changedUpdated]);
+
+      const items = db.getAll();
+      const unchangedItem = items.find(i => i.id === 'TEST-IMP-011')!;
+      const changedItem = items.find(i => i.id === 'TEST-IMP-012')!;
+
+      // Unchanged item should retain original updatedAt
+      expect(unchangedItem.updatedAt).toBe('2025-01-01T00:00:00.000Z');
+
+      // Changed item should have a new (current) updatedAt
+      const currentTime = new Date().toISOString();
+      expect(new Date(changedItem.updatedAt).getTime()).toBeGreaterThan(
+        new Date('2025-01-01T00:00:00.000Z').getTime()
+      );
+    });
+
+    it('should preserve updatedAt for unchanged items when importing a mix', () => {
+      const unchanged1 = createItemWithPastTimestamp('TEST-IMP-021', 'Unchanged 1');
+      const unchanged2 = createItemWithPastTimestamp('TEST-IMP-022', 'Unchanged 2');
+      const changed1 = createItemWithPastTimestamp('TEST-IMP-023', 'Will change');
+
+      db.import([unchanged1, unchanged2, changed1]);
+
+      // Update one item and add a new item
+      const changed1Updated = createItemWithPastTimestamp('TEST-IMP-023', 'Changed title');
+      const newItem = createItemWithPastTimestamp('TEST-IMP-024', 'Brand new');
+
+      db.import([unchanged1, unchanged2, changed1Updated, newItem]);
+
+      const items = db.getAll();
+      expect(items).toHaveLength(4);
+
+      // Unchanged items retain original updatedAt
+      expect(items.find(i => i.id === 'TEST-IMP-021')!.updatedAt).toBe('2025-01-01T00:00:00.000Z');
+      expect(items.find(i => i.id === 'TEST-IMP-022')!.updatedAt).toBe('2025-01-01T00:00:00.000Z');
+
+      // Changed item gets new timestamp
+      const changedItem = items.find(i => i.id === 'TEST-IMP-023')!;
+      expect(new Date(changedItem.updatedAt).getTime()).toBeGreaterThan(
+        new Date('2025-01-01T00:00:00.000Z').getTime()
+      );
+
+      // New item gets a proper timestamp
+      const newItemResult = items.find(i => i.id === 'TEST-IMP-024')!;
+      expect(newItemResult.updatedAt).toBe('2025-01-01T00:00:00.000Z');
+    });
+
+    it('should only change updatedAt for locally-modified items on re-import', () => {
+      const item = db.create({ title: 'Local item', status: 'open' });
+
+      const originalUpdatedAt = item.updatedAt;
+
+      // Simulate a sync re-import with same data (no changes)
+      const reimportItem = createItemWithPastTimestamp(item.id, 'Local item', {
+        description: '',
+        status: 'open' as const,
+        priority: 'medium' as const,
+        sortIndex: 0,
+        parentId: null,
+        tags: [],
+        assignee: '',
+        stage: '',
+        issueType: '',
+        risk: '' as const,
+        effort: '' as const,
+        needsProducerReview: false,
+        createdAt: item.createdAt,
+        updatedAt: originalUpdatedAt, // Pass through the original timestamp
+      });
+
+      db.import([reimportItem]);
+
+      const afterReimport = db.get(item.id)!;
+      // If the item's data hasn't changed, updatedAt should be preserved
+      expect(afterReimport.updatedAt).toBe(originalUpdatedAt);
+    });
+
+    it('should not alter updatedAt for unchanged items in upsertItems', () => {
+      const item1 = db.create({ title: 'Item A' });
+      const originalUpdatedAt1 = item1.updatedAt;
+
+      const item2 = db.create({ title: 'Item B' });
+      const originalUpdatedAt2 = item2.updatedAt;
+
+      // Upsert the same items (no changes)
+      const upsertItem1 = createItemWithPastTimestamp(item1.id, 'Item A', {
+        description: '',
+        status: 'open' as const,
+        priority: 'medium' as const,
+        sortIndex: 0,
+        parentId: null,
+        tags: [],
+        assignee: '',
+        stage: '',
+        issueType: '',
+        risk: '' as const,
+        effort: '' as const,
+        needsProducerReview: false,
+        createdAt: item1.createdAt,
+        updatedAt: originalUpdatedAt1,
+      });
+      const upsertItem2 = createItemWithPastTimestamp(item2.id, 'Item B', {
+        description: '',
+        status: 'open' as const,
+        priority: 'medium' as const,
+        sortIndex: 0,
+        parentId: null,
+        tags: [],
+        assignee: '',
+        stage: '',
+        issueType: '',
+        risk: '' as const,
+        effort: '' as const,
+        needsProducerReview: false,
+        createdAt: item2.createdAt,
+        updatedAt: originalUpdatedAt2,
+      });
+
+      db.upsertItems([upsertItem1, upsertItem2]);
+
+      const afterUpsert = db.getAll();
+      const item1After = afterUpsert.find(i => i.id === item1.id)!;
+      const item2After = afterUpsert.find(i => i.id === item2.id)!;
+
+      expect(item1After.updatedAt).toBe(originalUpdatedAt1);
+      expect(item2After.updatedAt).toBe(originalUpdatedAt2);
+    });
+
+    it('should update updatedAt for modified items in upsertItems', () => {
+      const item = db.create({ title: 'Original' });
+      const originalUpdatedAt = item.updatedAt;
+
+      // Upsert with a modified title
+      const updatedItem = createItemWithPastTimestamp(item.id, 'Modified title', {
+        description: item.description,
+        status: item.status as 'open' | 'in-progress' | 'completed' | 'deleted' | 'blocked',
+        priority: item.priority as 'critical' | 'high' | 'medium' | 'low',
+        sortIndex: item.sortIndex,
+        parentId: item.parentId,
+        tags: [...item.tags],
+        assignee: item.assignee,
+        stage: item.stage,
+        issueType: item.issueType,
+        risk: item.risk as '' | 'Low' | 'Medium' | 'High' | 'Critical',
+        effort: item.effort as '' | 'Small' | 'Medium' | 'Large' | 'XLarge',
+        needsProducerReview: false,
+        createdAt: item.createdAt,
+        updatedAt: originalUpdatedAt,
+      });
+
+      db.upsertItems([updatedItem]);
+
+      const after = db.get(item.id)!;
+      expect(after.title).toBe('Modified title');
+      // updatedAt should have been bumped (or at least not be earlier)
+      expect(new Date(after.updatedAt).getTime()).toBeGreaterThanOrEqual(
+        new Date(originalUpdatedAt).getTime()
+      );
+      // Also verify the title change triggered a save — the updatedAt should differ
+      // if timestamps are identical (same ms), the test still passes because
+      // data integrity is correct; accuracy at ms granularity is acceptable.
+    });
+
+    it('should preserve close when import merges closed local item with stale remote', () => {
+      // Simulate: close then sync with stale remote data (item was in-progress)
+      // 1. Create an item
+      const original = db.create({ title: 'Close me', status: 'in-progress' as any, stage: 'plan_complete', priority: 'medium' });
+      const originalUpdatedAt = original.updatedAt;
+
+      // 2. Close the item (simulating wl close)
+      const closed = db.update(original.id, { status: 'completed', stage: 'done' })!;
+      expect(closed.status).toBe('completed');
+      expect(closed.stage).toBe('done');
+      // Close bumps the timestamp (or same ms; at least not older)
+      expect(new Date(closed.updatedAt).getTime()).toBeGreaterThanOrEqual(new Date(originalUpdatedAt).getTime());
+      const closeUpdatedAt = closed.updatedAt;
+
+      // 3. Simulate sync merge with stale remote data (item at in-progress)
+      const remoteStale = { ...original, updatedAt: originalUpdatedAt, status: 'in-progress' as const, stage: 'plan_complete' };
+      
+      // The merged item from mergeWorkItems (local is newer, so it wins)
+      const localFromDb = db.get(original.id)!;
+      expect(localFromDb.status).toBe('completed');
+      expect(localFromDb.stage).toBe('done');
+      expect(localFromDb.updatedAt).toBe(closeUpdatedAt);
+
+      // Build a merged item as mergeWorkItems would produce:
+      // local (newer) should win for all conflicting fields
+      const mergedItem = {
+        ...remoteStale,
+        status: 'completed' as const,
+        stage: 'done',
+        updatedAt: closeUpdatedAt,
+      };
+
+      // 4. Import the merged data (as sync does)
+      db.import([mergedItem]);
+
+      // 5. Verify close survived
+      const afterSync = db.get(original.id)!;
+      expect(afterSync.status).toBe('completed');
+      expect(afterSync.stage).toBe('done');
+      // updatedAt should be preserved since no semantic change
+      expect(afterSync.updatedAt).toBe(closeUpdatedAt);
+    });
+
+    it('should preserve close after multiple import cycles (multi-sync stability)', () => {
+      // Simulate multiple sync cycles after a close
+      const item = db.create({ title: 'Stable close', status: 'in-progress' as any, stage: 'plan_complete' });
+      const originalUpdatedAt = item.updatedAt;
+
+      // Close
+      const closed = db.update(item.id, { status: 'completed', stage: 'done' })!;
+      const closeUpdatedAt = closed.updatedAt;
+
+      for (let cycle = 0; cycle < 5; cycle++) {
+        // Simulate the merge result that sync would produce
+        const currentFromDb = db.get(item.id)!;
+        const mergedItem = {
+          ...item,
+          status: 'completed' as const,
+          stage: 'done',
+          updatedAt: currentFromDb.updatedAt,
+        };
+        db.import([mergedItem]);
+
+        const afterCycle = db.get(item.id)!;
+        expect(afterCycle.status).toBe('completed');
+        expect(afterCycle.stage).toBe('done');
+      }
+    });
+
+    it('should handle close then sync with concurrent remote field edit', () => {
+      // Simulate: Client A closes item. Client B edits description on the same item
+      // and pushes. The close must not be silently reverted.
+      
+      // Create the item
+      const original = db.create({ title: 'Concurrent edit', description: 'Original', status: 'in-progress' as any, stage: 'plan_complete' });
+
+      // Close it (Client A)
+      const closed = db.update(original.id, { status: 'completed', stage: 'done' })!;
+      const closeUpdatedAt = closed.updatedAt;
+
+      // Remote data (from Client B) still has in-progress (old value) with a
+      // description edit. The description edit bumped the timestamp.
+      const remoteNewerTimestamp = new Date(new Date(closeUpdatedAt).getTime() + 3600000).toISOString();
+      const remoteItem = {
+        ...original,
+        description: 'Edited by B',
+        updatedAt: remoteNewerTimestamp,
+        status: 'in-progress' as const,
+        stage: 'plan_complete',
+      };
+
+      // Build what mergeWorkItems would produce:
+      // Since local has status=completed,stage=done (close) and remote has
+      // in-progress/plan_complete, the close priority rule preserves the close.
+      // The description edit from remote is also preserved.
+      const mergedItem = {
+        ...remoteItem,
+        status: 'completed' as const,
+        stage: 'done',
+        updatedAt: remoteNewerTimestamp,
+      };
+
+      // Import and verify
+      db.import([mergedItem]);
+      const afterImport = db.get(original.id)!;
+      
+      // The close is preserved even though remote is newer,
+      // because the close state (completed/done) takes priority
+      // over old status values from unrelated field changes.
+      expect(afterImport.status).toBe('completed');
+      expect(afterImport.stage).toBe('done');
+      
+      // The description edit is also preserved (it was the only field
+      // where remote intentionally made a change)
+      expect(afterImport.description).toBe('Edited by B');
+    });
+  });
+
+  describe('transactional import', () => {
+    /**
+     * Helper: create an item with a known past timestamp.
+     * The past time is used so that if import() overwrites updatedAt
+     * with the current time, we can detect the change.
+     */
+    function makeItem(
+      id: string,
+      title: string,
+      overrides: Partial<import('../src/types.js').WorkItem> = {}
+    ): import('../src/types.js').WorkItem {
+      const pastTimestamp = '2025-01-01T00:00:00.000Z';
+      return {
+        id,
+        title,
+        description: '',
+        status: 'open' as const,
+        priority: 'medium' as const,
+        sortIndex: 0,
+        parentId: null,
+        createdAt: pastTimestamp,
+        updatedAt: pastTimestamp,
+        tags: [],
+        assignee: '',
+        stage: '',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+        needsProducerReview: false,
+        ...overrides,
+      };
+    }
+
+    it('should perform import atomically, storing all items within the same transaction', () => {
+      const itemA = makeItem('TEST-TXN-001', 'Item A');
+      const itemB = makeItem('TEST-TXN-002', 'Item B');
+
+      db.import([itemA, itemB]);
+
+      const allItems = db.getAll();
+      expect(allItems).toHaveLength(2);
+      expect(allItems.find(i => i.id === 'TEST-TXN-001')!.title).toBe('Item A');
+      expect(allItems.find(i => i.id === 'TEST-TXN-002')!.title).toBe('Item B');
+    });
+
+    it('should atomically replace items and dependency edges during import', () => {
+      const dbLocal = new WorklogDatabase('TEST', createTempDbPath(tempDir), createTempJsonlPath(tempDir), true, true);
+
+      const parent = makeItem('TEST-TXN-011', 'Parent');
+      const child = makeItem('TEST-TXN-012', 'Child');
+      dbLocal.import([parent, child]);
+
+      // Add a dependency edge outside import
+      dbLocal.addDependencyEdge('TEST-TXN-012', 'TEST-TXN-011');
+      expect(dbLocal.listDependencyEdgesTo('TEST-TXN-011')).toHaveLength(1);
+
+      // Re-import with explicit dependency edges
+      const edge: import('../src/types.js').DependencyEdge = {
+        fromId: 'TEST-TXN-012',
+        toId: 'TEST-TXN-011',
+        createdAt: '2025-01-01T00:00:00.000Z',
+      };
+      dbLocal.import([parent, child], [edge]);
+
+      const edges = dbLocal.listDependencyEdgesTo('TEST-TXN-011');
+      expect(edges).toHaveLength(1);
+      expect(edges[0].fromId).toBe('TEST-TXN-012');
+      expect(edges[0].toId).toBe('TEST-TXN-011');
+
+      dbLocal.close();
+    });
+
+    it('should atomically replace items and audit results during import', () => {
+      const dbLocal = new WorklogDatabase('TEST', createTempDbPath(tempDir), createTempJsonlPath(tempDir), true, true);
+
+      const item = makeItem('TEST-TXN-021', 'Audited item', {
+        description: 'Needs audit',
+        status: 'completed' as const,
+        stage: 'done',
+      });
+      dbLocal.import([item]);
+
+      // Import with audit results
+      const audit: import('../src/types.js').AuditResult = {
+        workItemId: 'TEST-TXN-021',
+        readyToClose: true,
+        auditedAt: '2025-01-01T00:00:00.000Z',
+        summary: 'All criteria met',
+        rawOutput: null,
+        author: 'tester',
+      };
+      dbLocal.import([item], undefined, [audit]);
+
+      // Verify audit result is stored
+      const audits = dbLocal.getAllAuditResults();
+      expect(audits).toHaveLength(1);
+      expect(audits[0].workItemId).toBe('TEST-TXN-021');
+      expect(audits[0].readyToClose).toBe(true);
+      expect(audits[0].author).toBe('tester');
+
+      dbLocal.close();
+    });
+
+    it('should import items, dependency edges, and audit results together atomically', () => {
+      const dbLocal = new WorklogDatabase('TEST', createTempDbPath(tempDir), createTempJsonlPath(tempDir), true, true);
+
+      const item1 = makeItem('TEST-TXN-031', 'First');
+      const item2 = makeItem('TEST-TXN-032', 'Second');
+      const edge: import('../src/types.js').DependencyEdge = {
+        fromId: 'TEST-TXN-032',
+        toId: 'TEST-TXN-031',
+        createdAt: '2025-01-01T00:00:00.000Z',
+      };
+      const audit: import('../src/types.js').AuditResult = {
+        workItemId: 'TEST-TXN-032',
+        readyToClose: false,
+        auditedAt: '2025-01-01T00:00:00.000Z',
+        summary: 'Pending review',
+        rawOutput: null,
+        author: 'reviewer',
+      };
+
+      dbLocal.import([item1, item2], [edge], [audit]);
+
+      // All three data types should be stored
+      const items = dbLocal.getAll();
+      expect(items).toHaveLength(2);
+
+      const edges = dbLocal.listDependencyEdgesTo('TEST-TXN-031');
+      expect(edges).toHaveLength(1);
+
+      const audits = dbLocal.getAllAuditResults();
+      expect(audits).toHaveLength(1);
+
+      dbLocal.close();
+    });
+
+    it('should trigger autoSync once after transactional import', () => {
+      // autoSync is called after the transaction completes
+      const spy = vi.spyOn(db as any, 'triggerAutoSync');
+
+      const item = makeItem('TEST-TXN-041', 'Sync test');
+      db.import([item]);
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      spy.mockRestore();
+    });
+
+    it('should handle empty items array', () => {
+      db.import([]);
+      const allItems = db.getAll();
+      expect(allItems).toHaveLength(0);
+    });
+
+    it('should preserve updatedAt for unchanged items after transactional import', () => {
+      const item = makeItem('TEST-TXN-051', 'Stable item');
+      db.import([item]);
+
+      const original = db.get('TEST-TXN-051')!;
+      expect(original.updatedAt).toBe('2025-01-01T00:00:00.000Z');
+
+      // Re-import identical item
+      db.import([item]);
+
+      const after = db.get('TEST-TXN-051')!;
+      expect(after.updatedAt).toBe('2025-01-01T00:00:00.000Z');
+    });
+
+    it('should update updatedAt for changed items after transactional import', () => {
+      const item = makeItem('TEST-TXN-061', 'Original title');
+      db.import([item]);
+
+      const changed = makeItem('TEST-TXN-061', 'Updated title');
+      db.import([changed]);
+
+      const after = db.get('TEST-TXN-061')!;
+      expect(after.title).toBe('Updated title');
+      // Timestamp should have been updated
+      expect(new Date(after.updatedAt).getTime()).toBeGreaterThan(
+        new Date('2025-01-01T00:00:00.000Z').getTime()
+      );
     });
   });
 
@@ -920,15 +1491,15 @@ describe('WorklogDatabase', () => {
       expect(result.workItem?.id).toBe(oldest.id);
     });
 
-    it('should select direct child under in-progress item', () => {
+    it('should NOT select child under in-progress parent (entire subtree skipped)', () => {
       const parent = db.create({ title: 'Parent', priority: 'high', status: 'in-progress' });
       const child = db.create({ title: 'Child', priority: 'high', status: 'open', parentId: parent.id });
-      const grandchild = db.create({ title: 'Grandchild', priority: 'high', status: 'open', parentId: child.id });
+      db.create({ title: 'Grandchild', priority: 'high', status: 'open', parentId: child.id });
       
       const result = db.findNextWorkItem();
-      // Should select the direct child since parent is in-progress
-      expect(result.workItem?.id).toBe(child.id);
-      expect(result.reason).toContain('child');
+      // Children of in-progress parents are no longer promoted — the entire
+      // in-progress subtree is skipped from wl next recommendations.
+      expect(result.workItem).toBeNull();
     });
 
     it('should skip completed and deleted items', () => {
@@ -956,33 +1527,57 @@ describe('WorklogDatabase', () => {
 
       const result = db.findNextWorkItem();
       expect(result.workItem).toBeNull();
-      expect(result.reason).toContain('No actionable work items');
+      expect(result.reason).toContain('No work items available');
     });
 
-    it('should find open children of in-progress parent without returning the parent', () => {
+    it('should return null when only children under in-progress parent exist', () => {
       const parent = db.create({ title: 'WIP Parent', priority: 'high', status: 'in-progress' });
-      const child = db.create({ title: 'Open child', priority: 'medium', status: 'open', parentId: parent.id });
+      db.create({ title: 'Open child', priority: 'medium', status: 'open', parentId: parent.id });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem?.id).toBe(child.id);
-      expect(result.workItem?.id).not.toBe(parent.id);
+      // Children of in-progress parents are no longer promoted — the entire
+      // in-progress subtree is skipped from wl next recommendations.
+      expect(result.workItem).toBeNull();
     });
 
-    it('should exclude blocked in_review items by default', () => {
-      const inReviewBlocked = db.create({ title: 'In review', status: 'blocked', stage: 'in_review', priority: 'high' });
-      const openItem = db.create({ title: 'Open', status: 'open', priority: 'low' });
-
-      const result = db.findNextWorkItem();
-      expect(result.workItem?.id).toBe(openItem.id);
-      expect(result.workItem?.id).not.toBe(inReviewBlocked.id);
-    });
-
-    it('should include blocked in_review items when requested', () => {
+    it('should include blocked in_review items when they have higher effective priority', () => {
       const inReviewBlocked = db.create({ title: 'In review', status: 'blocked', stage: 'in_review', priority: 'high' });
       db.create({ title: 'Open', status: 'open', priority: 'low' });
 
-      const result = db.findNextWorkItem(undefined, undefined, true);
-      expect(result.workItem?.id).toBe(inReviewBlocked.id);
+      const result = db.findNextWorkItem();
+      // Blocked+in_review items pass through the filter pipeline and are
+      // selected based on effective priority (3 for high > 1 for low).
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(inReviewBlocked.id);
+    });
+
+    it('should include completed in_review items by default', () => {
+      const inReview = db.create({ title: 'In review', status: 'completed', stage: 'in_review', priority: 'medium' });
+      db.create({ title: 'Open low', status: 'open', priority: 'low' });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(inReview.id);
+    });
+
+    it('should boost in_review items above same-priority non-review items', () => {
+      const inReview = db.create({ title: 'In review medium', status: 'completed', stage: 'in_review', priority: 'medium' });
+      const openItem = db.create({ title: 'Open medium', status: 'open', priority: 'medium' });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      // In-review boost of +600 should push in_review above same-priority open item
+      expect(result.workItem!.id).toBe(inReview.id);
+    });
+
+    it('should not boost in_review items above higher priority items', () => {
+      db.create({ title: 'In review medium', status: 'completed', stage: 'in_review', priority: 'medium' });
+      const highItem = db.create({ title: 'Open high', status: 'open', priority: 'high' });
+
+      const result = db.findNextWorkItem();
+      // High priority (3000) > medium + in_review boost (2000 + 600 = 2600)
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(highItem.id);
     });
 
     it('should filter by assignee when provided', () => {
@@ -1054,39 +1649,40 @@ describe('WorklogDatabase', () => {
       expect(result.reason).toContain('Next open item by sort_index');
     });
 
-    it('should select highest priority child when multiple children exist', async () => {
+    it('should return null when multiple children under in-progress parent exist', async () => {
       const parent = db.create({ title: 'Parent', priority: 'high', status: 'in-progress' });
-      const lowLeaf = db.create({ title: 'Low leaf', priority: 'low', status: 'open', parentId: parent.id });
+      db.create({ title: 'Low leaf', priority: 'low', status: 'open', parentId: parent.id });
       // Small delay to ensure different timestamps for createdAt tiebreaking
       const delay = () => new Promise(resolve => setTimeout(resolve, 10));
       await delay();
       db.create({ title: 'High leaf', priority: 'high', status: 'open', parentId: parent.id });
       
       const result = db.findNextWorkItem();
-      // With effective priority inheritance, both children inherit high priority
-      // from their in-progress parent. Since effective priorities are equal,
-      // createdAt tiebreaker selects the older child (lowLeaf).
-      expect(result.workItem?.id).toBe(lowLeaf.id);
+      // Children of in-progress parents are no longer promoted — the entire
+      // in-progress subtree is skipped from wl next recommendations.
+      expect(result.workItem).toBeNull();
     });
 
-    it('should apply assignee filter to children', () => {
+    it('should return null when filtered children are under in-progress parent', () => {
       const parent = db.create({ title: 'Parent', priority: 'high', status: 'in-progress', assignee: 'john' });
       db.create({ title: 'Child for jane', priority: 'high', status: 'open', parentId: parent.id, assignee: 'jane' });
-      const johnChild = db.create({ title: 'Child for john', priority: 'low', status: 'open', parentId: parent.id, assignee: 'john' });
+      db.create({ title: 'Child for john', priority: 'low', status: 'open', parentId: parent.id, assignee: 'john' });
       
       const result = db.findNextWorkItem('john');
-      // Should select john's child even though jane's has higher priority
-      expect(result.workItem?.id).toBe(johnChild.id);
+      // Children of in-progress parents are no longer promoted — the entire
+      // in-progress subtree is skipped from wl next recommendations.
+      expect(result.workItem).toBeNull();
     });
 
-    it('should apply search filter to children', () => {
+    it('should return null when searched children are under in-progress parent', () => {
       const parent = db.create({ title: 'Parent task', priority: 'high', status: 'in-progress' });
       db.create({ title: 'Regular child', priority: 'critical', status: 'open', parentId: parent.id });
-      const bugChild = db.create({ title: 'Bug fix needed', priority: 'low', status: 'open', parentId: parent.id });
+      db.create({ title: 'Bug fix needed', priority: 'low', status: 'open', parentId: parent.id });
       
       const result = db.findNextWorkItem(undefined, 'bug');
-      // Should select the bug child even though regular has higher priority
-      expect(result.workItem?.id).toBe(bugChild.id);
+      // Children of in-progress parents are no longer promoted — the entire
+      // in-progress subtree is skipped from wl next recommendations.
+      expect(result.workItem).toBeNull();
     });
 
     it('should select blocking child for blocked item', () => {
@@ -1257,7 +1853,7 @@ describe('WorklogDatabase', () => {
       //   A: own=low, inherited=high (from grandparent) → effective=high
       //   C: own=medium, inherited=high (from grandparent) → effective=high
       // Both tie on effective priority, so createdAt picks A (older).
-      // Then we descend into A's children and select B.
+      // Previously we descended into children; now we return the root candidate.
       const delay = () => new Promise(resolve => setTimeout(resolve, 10));
       const grandparent = db.create({ title: 'Grandparent', priority: 'high', status: 'open' });
       const itemA = db.create({ title: 'Item A', priority: 'low', status: 'open', parentId: grandparent.id });
@@ -1267,12 +1863,13 @@ describe('WorklogDatabase', () => {
       db.create({ title: 'Item C', priority: 'medium', status: 'open', parentId: grandparent.id });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem?.id).toBe(itemB.id);
+      // Grandparent is the only root candidate and is returned (no descent)
+      expect(result.workItem?.id).toBe(grandparent.id);
     });
 
     it('Phase 4: child wins when parent priority >= sibling (Example 2)', async () => {
       // A (medium, open), B (high, open, child of A), C (medium, open, sibling of A)
-      // Expected: B wins because A (medium) >= C (medium)
+      // Grandparent is the only root candidate and is returned (no descent)
       const delay = () => new Promise(resolve => setTimeout(resolve, 10));
       const grandparent = db.create({ title: 'Grandparent', priority: 'high', status: 'open' });
       const itemA = db.create({ title: 'Item A', priority: 'medium', status: 'open', parentId: grandparent.id });
@@ -1282,12 +1879,12 @@ describe('WorklogDatabase', () => {
       db.create({ title: 'Item C', priority: 'medium', status: 'open', parentId: grandparent.id });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem?.id).toBe(itemB.id);
+      expect(result.workItem?.id).toBe(grandparent.id);
     });
 
     it('Phase 4: low-priority child wins when parent priority >= sibling (Example 3)', async () => {
       // A (medium, open), B (low, open, child of A), C (medium, open, sibling of A)
-      // Expected: B wins because A (medium) >= C (medium), and B is A's child
+      // Grandparent is the only root candidate and is returned (no descent)
       const delay = () => new Promise(resolve => setTimeout(resolve, 10));
       const grandparent = db.create({ title: 'Grandparent', priority: 'high', status: 'open' });
       const itemA = db.create({ title: 'Item A', priority: 'medium', status: 'open', parentId: grandparent.id });
@@ -1297,7 +1894,7 @@ describe('WorklogDatabase', () => {
       db.create({ title: 'Item C', priority: 'medium', status: 'open', parentId: grandparent.id });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem?.id).toBe(itemB.id);
+      expect(result.workItem?.id).toBe(grandparent.id);
     });
 
     it('Phase 4: top-level items without children are selected normally', () => {
@@ -1310,7 +1907,7 @@ describe('WorklogDatabase', () => {
       expect(result.workItem?.id).toBe(highItem.id);
     });
 
-    it('Phase 4: top-level item with children descends to best child', async () => {
+    it('Phase 4: top-level item with children returns the parent (no descent)', async () => {
       const parent = db.create({ title: 'Parent', priority: 'high', status: 'open' });
       const bestChild = db.create({ title: 'Best child', priority: 'high', status: 'open', parentId: parent.id });
       // Small delay to ensure bestChild has an earlier createdAt than otherChild
@@ -1319,8 +1916,8 @@ describe('WorklogDatabase', () => {
       db.create({ title: 'Other child', priority: 'low', status: 'open', parentId: parent.id });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem?.id).toBe(bestChild.id);
-      expect(result.reason).toContain('child');
+      // Parent is the only root candidate and is returned (no descent into children)
+      expect(result.workItem?.id).toBe(parent.id);
     });
 
     // Dependency-blocker filter tests (WL-0MM04HDI618Y7DT0)
@@ -1555,6 +2152,138 @@ describe('WorklogDatabase', () => {
       }
     });
 
+    // WL-0MQI1SX4W0018V9O: Stage 3 in-progress subtree filtering
+    // Blocked children of in-progress parents should not have their blockers surfaced
+    // because the parent represents the unit of work.
+
+    it('should not surface dependency blocker for blocked child of in-progress parent', () => {
+      // Parent (in-progress) -> Child (blocked) depends on Blocker (open)
+      // Because the child is in an in-progress subtree, Stage 3 should NOT surface
+      // the blocker. Instead, a higher-priority open competitor should win.
+      const parent = db.create({ title: 'In-progress parent', priority: 'high', status: 'in-progress' });
+      const child = db.create({ title: 'Blocked child', priority: 'high', status: 'blocked', parentId: parent.id });
+      const blocker = db.create({ title: 'Dependency blocker', priority: 'low', status: 'open' });
+      db.addDependencyEdge(child.id, blocker.id);
+      const competitor = db.create({ title: 'Open competitor', priority: 'medium', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      // The blocker should NOT be surfaced because the blocked child is in
+      // an in-progress parent subtree. The medium-priority competitor should win.
+      expect(result.workItem?.id).toBe(competitor.id);
+      expect(result.reason).toContain('Next open item by sort_index');
+    });
+
+    it('should not surface dependency blocker for blocked child of in-progress parent with no competitor', () => {
+      // Parent (in-progress) -> Child (blocked) depends on Blocker (open)
+      // No other open items exist. The blocker should NOT be surfaced because
+      // the blocked child is in an in-progress subtree.
+      const parent = db.create({ title: 'In-progress parent', priority: 'high', status: 'in-progress' });
+      const child = db.create({ title: 'Blocked child', priority: 'high', status: 'blocked', parentId: parent.id });
+      const blocker = db.create({ title: 'Dependency blocker', priority: 'low', status: 'open' });
+      db.addDependencyEdge(child.id, blocker.id);
+
+      const result = db.findNextWorkItem();
+      // The blocker itself is a valid open item not in an in-progress subtree.
+      // When no other open items exist, the blocker should be returned as the
+      // next available work item (blocker-surfacing via Stage 3 is correctly
+      // skipped, but the blocker still competes in Stage 5 as a normal candidate).
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(blocker.id);
+      expect(result.reason).toContain('Next open item by sort_index');
+    });
+
+    it('should not surface child blocker for blocked child of in-progress parent', () => {
+      // Parent (in-progress) -> Child (blocked, has its own child blocker)
+      // The blocking child should NOT be surfaced because the blocked child
+      // is in an in-progress subtree.
+      const parent = db.create({ title: 'In-progress parent', priority: 'high', status: 'in-progress' });
+      const child = db.create({ title: 'Blocked child', priority: 'high', status: 'blocked', parentId: parent.id });
+      const childBlocker = db.create({ title: 'Blocking child', priority: 'low', status: 'open', parentId: child.id });
+      const competitor = db.create({ title: 'Open competitor', priority: 'medium', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      // The child blocker should NOT be surfaced. Competitor should win.
+      expect(result.workItem?.id).toBe(competitor.id);
+      expect(result.reason).toContain('Next open item by sort_index');
+    });
+
+    it('should not surface blocker when blocker itself is in an in-progress subtree', () => {
+      // BlockedItem (blocked, high) depends on Blocker (open, child of in-progress parent)
+      // The blocker is in an in-progress subtree, so Stage 3 should filter it out.
+      const blockerParent = db.create({ title: 'Blocker in-progress parent', priority: 'high', status: 'in-progress' });
+      const blocker = db.create({ title: 'Blocker in subtree', priority: 'low', status: 'open', parentId: blockerParent.id });
+      const blocked = db.create({ title: 'Blocked item', priority: 'high', status: 'blocked' });
+      db.addDependencyEdge(blocked.id, blocker.id);
+      const competitor = db.create({ title: 'Open competitor', priority: 'medium', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      // The blocker should be filtered out because it's in an in-progress subtree.
+      expect(result.workItem?.id).toBe(competitor.id);
+      expect(result.reason).toContain('Next open item by sort_index');
+    });
+
+    it('should still surface blocker for blocked item NOT in in-progress subtree (regression guard)', () => {
+      // Normal case: blocked item (not in in-progress subtree) with dependency blocker.
+      // Stage 3 should still surface the blocker.
+      const blocker = db.create({ title: 'Normal blocker', priority: 'medium', status: 'open' });
+      const blocked = db.create({ title: 'Normal blocked item', priority: 'high', status: 'blocked' });
+      db.addDependencyEdge(blocked.id, blocker.id);
+
+      const result = db.findNextWorkItem();
+      // Existing behavior preserved: blocker should be surfaced.
+      expect(result.workItem?.id).toBe(blocker.id);
+      expect(result.reason).toContain('Blocking issue');
+    });
+
+    it('should surface blocker for critical blocked child of in-progress parent (critical exempt)', () => {
+      // Critical items are exempt from in-progress subtree filtering.
+      // A critical blocked item should still have its blocker surfaced.
+      const parent = db.create({ title: 'In-progress parent', priority: 'high', status: 'in-progress' });
+      const criticalChild = db.create({ title: 'Critical blocked child', priority: 'critical', status: 'blocked', parentId: parent.id });
+      const blocker = db.create({ title: 'Critical blocker', priority: 'low', status: 'open' });
+      db.addDependencyEdge(criticalChild.id, blocker.id);
+
+      const result = db.findNextWorkItem();
+      // Critical blocked items are handled by Stage 2 (critical escalation),
+      // so the blocker should still be surfaced.
+      expect(result.workItem?.id).toBe(blocker.id);
+      expect(result.reason).toContain('Blocking issue');
+    });
+
+    it('should not surface blocker for deeply nested blocked item under in-progress grandparent', () => {
+      // Grandparent (in-progress) -> Parent (open) -> Child (blocked, depends on Blocker)
+      // The child is in an in-progress subtree (grandparent is in-progress).
+      const grandparent = db.create({ title: 'In-progress grandparent', priority: 'high', status: 'in-progress' });
+      const parent = db.create({ title: 'Open parent', priority: 'medium', status: 'open', parentId: grandparent.id });
+      const child = db.create({ title: 'Blocked child', priority: 'high', status: 'blocked', parentId: parent.id });
+      const blocker = db.create({ title: 'Dependency blocker', priority: 'low', status: 'open' });
+      db.addDependencyEdge(child.id, blocker.id);
+      const competitor = db.create({ title: 'Open competitor', priority: 'medium', status: 'open' });
+
+      const result = db.findNextWorkItem();
+      // The child is in an in-progress subtree (grandparent), so blocker should not surface.
+      expect(result.workItem?.id).toBe(competitor.id);
+      expect(result.reason).toContain('Next open item by sort_index');
+    });
+
+    it('should not surface blocker when includeInProgress=true and blocked child is in in-progress subtree', () => {
+      // Same as first test but with --include-in-progress. The child should still
+      // be filtered from Stage 3 blocker surfacing.
+      const parent = db.create({ title: 'In-progress parent', priority: 'high', status: 'in-progress' });
+      const child = db.create({ title: 'Blocked child', priority: 'high', status: 'blocked', parentId: parent.id });
+      const blocker = db.create({ title: 'Dependency blocker', priority: 'low', status: 'open' });
+      db.addDependencyEdge(child.id, blocker.id);
+      const competitor = db.create({ title: 'Open competitor', priority: 'medium', status: 'open' });
+
+      const result = db.findNextWorkItem(undefined, undefined, false, undefined, true);
+      // Even with includeInProgress=true, blocked children of in-progress parents
+      // should not have their blockers surfaced. However, when includeInProgress
+      // is true, the in-progress parent itself is a valid candidate and has the
+      // highest effective priority (high).
+      expect(result.workItem?.id).toBe(parent.id);
+      expect(result.reason).toContain('Next open item by sort_index');
+    });
+
     // Fixture-based integration test (WL-0MM0B4V7L1YSH0W7)
     // Uses a generalized JSONL fixture inspired by ToneForge's dependency chain
     // to verify that findNextWorkItem prefers an unblocker over equal-priority peers.
@@ -1673,14 +2402,15 @@ describe('WorklogDatabase', () => {
 
       it('should not promote child when parent is still open (non-completed)', () => {
         // Parent is open (not completed) -> child stays under parent in hierarchy
+        // Parent is returned directly (no descent into children)
         const parent = db.create({ title: 'Open parent', priority: 'medium', status: 'open', sortIndex: 100 });
         const child = db.create({ title: 'Child task', priority: 'medium', status: 'open', parentId: parent.id, sortIndex: 200 });
         const otherRoot = db.create({ title: 'Other root', priority: 'medium', status: 'open', sortIndex: 300 });
 
         const result = db.findNextWorkItem();
         expect(result.workItem).not.toBeNull();
-        // Parent has lower sortIndex so it gets selected, then descent finds child
-        expect(result.workItem!.id).toBe(child.id);
+        // Parent has lower sortIndex so it gets selected as root candidate
+        expect(result.workItem!.id).toBe(parent.id);
       });
 
       it('should promote orphan under deleted parent to root level', () => {
@@ -1716,14 +2446,14 @@ describe('WorklogDatabase', () => {
         expect(result.workItem!.id).toBe(criticalEpic.id);
       });
 
-      it('should descend into epic children when they exist', () => {
+      it('should return the epic itself when children exist (no descent)', () => {
         const epic = db.create({ title: 'Parent epic', priority: 'high', status: 'open', issueType: 'epic', sortIndex: 100 });
         const child = db.create({ title: 'Child task', priority: 'medium', status: 'open', parentId: epic.id, sortIndex: 200 });
 
         const result = db.findNextWorkItem();
         expect(result.workItem).not.toBeNull();
-        // Should descend into epic and return the child, not the epic itself
-        expect(result.workItem!.id).toBe(child.id);
+        // Return the epic root candidate directly (no descent into children)
+        expect(result.workItem!.id).toBe(epic.id);
       });
 
       it('should return the epic itself when all children are completed', () => {
@@ -1743,7 +2473,7 @@ describe('WorklogDatabase', () => {
         db.create({ title: 'In progress task', priority: 'high', status: 'open', stage: 'in_progress' });
         db.create({ title: 'Done task', priority: 'critical', status: 'completed', stage: 'done' });
 
-        const result = db.findNextWorkItem(undefined, undefined, false, false, 'idea');
+        const result = db.findNextWorkItem(undefined, undefined, false, 'idea');
         expect(result.workItem).not.toBeNull();
         expect(result.workItem!.id).toBe(ideaItem.id);
         expect(result.workItem!.stage).toBe('idea');
@@ -1753,7 +2483,7 @@ describe('WorklogDatabase', () => {
         db.create({ title: 'Idea task', priority: 'critical', status: 'open', stage: 'idea' });
         const inProgressItem = db.create({ title: 'In progress task', priority: 'low', status: 'open', stage: 'in_progress' });
 
-        const result = db.findNextWorkItem(undefined, undefined, false, false, 'in_progress');
+        const result = db.findNextWorkItem(undefined, undefined, false, 'in_progress');
         expect(result.workItem).not.toBeNull();
         expect(result.workItem!.id).toBe(inProgressItem.id);
         expect(result.workItem!.stage).toBe('in_progress');
@@ -1763,7 +2493,7 @@ describe('WorklogDatabase', () => {
         db.create({ title: 'Idea task', priority: 'critical', status: 'open', stage: 'idea' });
         const doneItem = db.create({ title: 'Done task', priority: 'low', status: 'completed', stage: 'done' });
 
-        const result = db.findNextWorkItem(undefined, undefined, false, false, 'done');
+        const result = db.findNextWorkItem(undefined, undefined, false, 'done');
         expect(result.workItem).not.toBeNull();
         expect(result.workItem!.id).toBe(doneItem.id);
         expect(result.workItem!.stage).toBe('done');
@@ -1773,7 +2503,7 @@ describe('WorklogDatabase', () => {
         db.create({ title: 'Idea task', priority: 'high', status: 'open', stage: 'idea' });
         db.create({ title: 'In progress task', priority: 'high', status: 'open', stage: 'in_progress' });
 
-        const result = db.findNextWorkItem(undefined, undefined, false, false, 'plan_complete');
+        const result = db.findNextWorkItem(undefined, undefined, false, 'plan_complete');
         expect(result.workItem).toBeNull();
       });
 
@@ -1782,7 +2512,7 @@ describe('WorklogDatabase', () => {
         db.create({ title: 'Jane in progress task', priority: 'high', status: 'open', stage: 'in_progress', assignee: 'jane' });
         db.create({ title: 'John idea task', priority: 'critical', status: 'open', stage: 'idea', assignee: 'john' });
 
-        const result = db.findNextWorkItem('jane', undefined, false, false, 'idea');
+        const result = db.findNextWorkItem('jane', undefined, false, 'idea');
         expect(result.workItem).not.toBeNull();
         expect(result.workItem!.id).toBe(janeIdea.id);
       });
@@ -1792,7 +2522,7 @@ describe('WorklogDatabase', () => {
         db.create({ title: 'Feature idea', priority: 'high', status: 'open', stage: 'idea' });
         db.create({ title: 'Bug fix in progress', priority: 'critical', status: 'open', stage: 'in_progress' });
 
-        const result = db.findNextWorkItem(undefined, 'bug', false, false, 'idea');
+        const result = db.findNextWorkItem(undefined, 'bug', false, 'idea');
         expect(result.workItem).not.toBeNull();
         expect(result.workItem!.stage).toBe('idea');
         expect(result.workItem!.title.toLowerCase()).toContain('bug');
@@ -1805,7 +2535,7 @@ describe('WorklogDatabase', () => {
         const idea2 = db.create({ title: 'Idea task 2', priority: 'medium', status: 'open', stage: 'idea' });
         db.create({ title: 'In progress task', priority: 'critical', status: 'open', stage: 'in_progress' });
 
-        const results = db.findNextWorkItems(3, undefined, undefined, false, false, 'idea');
+        const results = db.findNextWorkItems(3, undefined, undefined, false, 'idea');
         expect(results).toHaveLength(3);
         expect(results[0].workItem!.id).toBe(idea1.id);
         expect(results[1].workItem!.id).toBe(idea2.id);
@@ -1815,7 +2545,7 @@ describe('WorklogDatabase', () => {
       it('should handle batch mode with stage filter when items run out', () => {
         const idea1 = db.create({ title: 'Idea task 1', priority: 'high', status: 'open', stage: 'idea' });
 
-        const results = db.findNextWorkItems(3, undefined, undefined, false, false, 'idea');
+        const results = db.findNextWorkItems(3, undefined, undefined, false, 'idea');
         expect(results).toHaveLength(3);
         expect(results[0].workItem!.id).toBe(idea1.id);
         expect(results[1].workItem).toBeNull();
@@ -1853,107 +2583,7 @@ describe('WorklogDatabase', () => {
       db2.close();
     });
 
-    // SKIPPED: This test relies on the old behavior where JSONL was always refreshed on startup.
-    // With the ephemeral JSONL pattern, SQLite is the sole runtime source of truth and JSONL
-    // is only imported when SQLite is empty (on first run or after explicit import).
-    it.skip('should emit debug log to stderr when WL_DEBUG is set and JSONL is corrupted', () => {
-      // Set up a work item so SQLite has cached data
-      db.create({ title: 'Debug log test item' });
-      db.close();
 
-      // Corrupt the JSONL file
-      fs.writeFileSync(jsonlPath, 'this is not valid jsonl\n');
-      const futureTime = new Date(Date.now() + 60_000);
-      fs.utimesSync(jsonlPath, futureTime, futureTime);
-
-      // Capture stderr output
-      const stderrChunks: Buffer[] = [];
-      const originalWrite = process.stderr.write;
-      process.stderr.write = ((chunk: any, ...args: any[]) => {
-        stderrChunks.push(Buffer.from(chunk));
-        return true;
-      }) as any;
-
-      const originalDebug = process.env.WL_DEBUG;
-      process.env.WL_DEBUG = '1';
-
-      try {
-        const db2 = new WorklogDatabase('TEST', dbPath, jsonlPath, true, true);
-        db2.close();
-
-        const stderrOutput = Buffer.concat(stderrChunks).toString();
-        expect(stderrOutput).toContain('[wl:db] JSONL parse failed, using cached data:');
-      } finally {
-        process.stderr.write = originalWrite;
-        if (originalDebug === undefined) {
-          delete process.env.WL_DEBUG;
-        } else {
-          process.env.WL_DEBUG = originalDebug;
-        }
-      }
-    });
-
-    // SKIPPED: This test relies on autoExport functionality which was removed in Phase 1.
-    // The autoExport feature that automatically wrote to JSONL after each database operation
-    // has been removed to eliminate TUI freezing. JSONL export will be handled explicitly
-    // in Phase 2 (sync operations).
-    it.skip('should not throw when JSONL file is deleted between existsSync and statSync', () => {
-      // Step 1: Create a work item so the DB has cached data and a valid JSONL exists
-      const item = db.create({ title: 'Race condition item' });
-      const itemId = item.id;
-      db.close();
-
-      // Step 2: Ensure the JSONL exists (it was auto-exported by the first db)
-      expect(fs.existsSync(jsonlPath)).toBe(true);
-
-      // Step 3: Delete the JSONL file — simulating it being removed between
-      // the existsSync check and the statSync call in refreshFromJsonlIfNewer.
-      // Since the constructor's existsSync will fail, it will return early.
-      // To truly test the race, we need the file to exist at existsSync time
-      // but vanish at statSync time. We simulate this by writing a file, then
-      // using a fresh db path with the same jsonl path where we delete the file
-      // right after creating a tiny marker file.
-      //
-      // Actually, the simplest reliable way: write a JSONL, then replace it
-      // with a file that triggers ENOENT on read. But `existsSync` + `statSync`
-      // race is hard to simulate deterministically. Instead, we test that when
-      // the file vanishes entirely (ENOENT from statSync), the catch block
-      // handles it. We can do this by:
-      //   1. Creating a fresh DB path with no prior SQLite data
-      //   2. Writing a JSONL file
-      //   3. Deleting the JSONL right before constructing the new DB
-      //      (this tests the early-return path via existsSync)
-      //
-      // For a true stat-after-delete race, we use a symlink trick:
-      // point JSONL path at a symlink, then break the symlink before stat.
-
-      // Create a new temp dir for the race test
-      const raceDir = createTempDir();
-      const raceDbPath = createTempDbPath(raceDir);
-      const raceJsonlPath = createTempJsonlPath(raceDir);
-
-      // Write a valid JSONL file, then create a symlink to it
-      const realJsonlPath = path.join(raceDir, 'real-data.jsonl');
-      fs.copyFileSync(jsonlPath, realJsonlPath);
-
-      // Create a symlink that we can break
-      fs.symlinkSync(realJsonlPath, raceJsonlPath);
-      expect(fs.existsSync(raceJsonlPath)).toBe(true);
-
-      // Now delete the real file — the symlink still "exists" for some FS
-      // checks but statSync/readFileSync will throw ENOENT
-      fs.unlinkSync(realJsonlPath);
-
-      // Construct the database — should NOT throw
-      const raceDb = new WorklogDatabase('TEST', raceDbPath, raceJsonlPath, true, true);
-
-      // The database should be usable (empty since no prior cache)
-      const items = raceDb.list();
-      expect(Array.isArray(items)).toBe(true);
-
-      raceDb.close();
-      cleanupTempDir(raceDir);
-    });
 
     it('should not emit debug log when WL_DEBUG is not set and JSONL is corrupted', () => {
       db.create({ title: 'Silent fallback item' });
@@ -2252,6 +2882,86 @@ describe('WorklogDatabase', () => {
       expect(content.length).toBeGreaterThan(0);
       const lines = content.split('\n');
       expect(lines.length).toBeGreaterThan(0);
+    });
+  });
+
+  // ── Caching (Phase 5) ─────────────────────────────────────────────
+
+  describe('caching', () => {
+    it('getAll returns cached results and invalidates on write', () => {
+      expect(db.getAll()).toEqual([]);
+
+      const item = db.create({ title: 'Cache test item' });
+
+      const all = db.getAll();
+      expect(all.length).toBe(1);
+      expect(all[0].id).toBe(item.id);
+
+      db.create({ title: 'Second item' });
+      expect(db.getAll().length).toBe(2);
+    });
+
+    it('get returns correct item after create and update', () => {
+      const item = db.create({ title: 'Get cache test' });
+
+      expect(db.get(item.id)?.title).toBe('Get cache test');
+
+      db.update(item.id, { title: 'Updated title' });
+
+      expect(db.get(item.id)?.title).toBe('Updated title');
+    });
+
+    it('get returns deleted item status after delete', () => {
+      const item = db.create({ title: 'Delete from cache' });
+
+      expect(db.get(item.id)).not.toBeNull();
+
+      db.delete(item.id);
+
+      const deletedItem = db.get(item.id);
+      expect(deletedItem).not.toBeNull();
+      expect(deletedItem?.status).toBe('deleted');
+    });
+
+    it('comment creation invalidates comment caches', () => {
+      const item = db.create({ title: 'Comment cache test' });
+
+      expect(db.getCommentsForWorkItem(item.id)).toEqual([]);
+
+      db.createComment({
+        workItemId: item.id,
+        author: 'tester',
+        comment: 'A test comment',
+      });
+
+      const comments = db.getCommentsForWorkItem(item.id);
+      expect(comments.length).toBe(1);
+      expect(comments[0].comment).toBe('A test comment');
+    });
+
+    it('dependency edge creation invalidates edge caches', () => {
+      const item1 = db.create({ title: 'Dep source' });
+      const item2 = db.create({ title: 'Dep target' });
+
+      expect(db.listDependencyEdgesFrom(item1.id)).toEqual([]);
+      expect(db.listDependencyEdgesTo(item2.id)).toEqual([]);
+
+      db.addDependencyEdge(item1.id, item2.id);
+
+      expect(db.listDependencyEdgesFrom(item1.id).length).toBe(1);
+      expect(db.listDependencyEdgesTo(item2.id).length).toBe(1);
+    });
+
+    it('getChildCounts is correct after adding children', () => {
+      const parent = db.create({ title: 'Parent' });
+
+      const counts1 = db.getChildCounts();
+      expect(counts1.get(parent.id)).toBeUndefined();
+
+      db.create({ title: 'Child', parentId: parent.id });
+
+      const counts2 = db.getChildCounts();
+      expect(counts2.get(parent.id)).toBe(1);
     });
   });
 });

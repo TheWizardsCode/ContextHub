@@ -17,12 +17,14 @@ By the end of this tutorial you will be able to:
 
 ```bash
 wl tui
+wl piman
 ```
 
-The TUI opens with two panes:
+The TUI launches the Pi coding agent with Worklog extensions pre-loaded.
+It shows a browse list of recommended next work items.
 
-- **Left pane**: A tree view of all work items, showing parent/child hierarchy
-- **Right pane**: Details of the currently selected item (same format as `wl show --format full`)
+> **Note:** The TUI is now Pi-based. Both `wl tui` and `wl piman` launch
+> the same interactive browse interface.
 
 ### Filter to in-progress items only
 
@@ -158,6 +160,39 @@ When OpenCode is active, the response appears in a bottom pane:
 | Ctrl+W, j | Focus the input pane |
 | q or click [x] | Close the response pane |
 
+## Step 6a: Pi Extension Browse Shortcuts
+
+When using the Pi agent with the Worklog browse extension (launched via `piman`), you can quickly insert commands into the editor using keyboard shortcuts. These shortcuts are **config-driven** — defined in `packages/tui/extensions/shortcuts.json` and dispatched dynamically by the shortcut registry, so they can be extended or customized without editing source code.
+
+### Browse List View Shortcuts
+
+In the browse selection list (when you see a list of work items), press one of the following keys to insert a command for the selected item:
+
+| Key | Command Inserted |
+|-----|------------------|
+| `i` | `implement <selected-id>` |
+| `p` | `plan <selected-id>` |
+| `n` | `intake <selected-id>` |
+| `c` | `create <description>` |
+| `a` | `audit <selected-id>` |
+
+The command text is inserted into the Pi editor (without a trailing newline), allowing you to review or edit it before pressing Enter to submit.
+
+### Detail View Shortcuts
+
+In the detail scrollable view (when viewing a single work item), the same shortcuts work identically: press `i`, `p`, `n`, or `a` to insert the corresponding command for the currently displayed work item. The detail view also clears its preview widget before closing the modal, giving you a clean editor to work in.
+
+When viewing details, a shortcut hint line appears at the bottom of the rendered content showing available keys for the current work item's stage (same formatting and filtering as the selection list hints). When a chord leader key (e.g., `u`) is pressed, the hint line updates to show available chord completions. The hint line respects the `showHelpText` setting and can be hidden via `/wl settings`.
+
+### How It Works
+
+Each shortcut is defined as a JSON object with:
+- `key`: The single-character key (e.g., `"i"`)
+- `command`: The template string to insert (e.g., `"implement <id>"`)
+- `view`: Which view(s) the shortcut applies to (`"list"`, `"detail"`, or `"both"`)
+
+The `shortcutRegistry` loads `shortcuts.json` at extension init time and dispatches matched shortcuts in both the browse list and detail view handlers. Navigation keys (`Up`, `Down`, `Enter`, `Escape`, `PageUp`, `PageDown`, `G`) remain functional in both views.
+
 ## Step 7: Exit the TUI
 
 Press `q`, `Esc`, or `Ctrl+C` to quit the TUI. All changes made during the session are saved to the local database.
@@ -178,6 +213,11 @@ Press `q`, `Esc`, or `Ctrl+C` to quit the TUI. All changes made during the sessi
 | Switch panes | Ctrl+W, Ctrl+W |
 | Help | h |
 | Quit | q / Esc / Ctrl+C |
+| Pi extension: implement | `i` (browse view) |
+| Pi extension: plan | `p` (browse view) |
+| Pi extension: intake | `n` (browse view) |
+| Pi extension: create | `c` (browse view) |
+| Pi extension: audit | `a` (browse view) |
 
 ## Next steps
 

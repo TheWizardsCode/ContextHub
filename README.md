@@ -61,10 +61,10 @@ wl github import
 ### Using the TUI
 
 ```bash
-wl tui                # Interactive tree view of all items
-wl tui --in-progress  # Show only in-progress items
+wl tui                # Launch Pi-based TUI (interactive browse + agent chat)
+wl tui --in-progress  # Launch Pi-based TUI, show only in-progress items
 wl tui --perf         # Enable performance instrumentation and write diagnostics artifacts under .worklog/
-TUI_PROFILE=1 wl tui  # Enable profiling via environment variable
+wl tui --perf         # Launch Pi-based TUI with performance instrumentation
 ```
 
 Press `O` in the TUI to access the Pi agent chat pane. The Pi-based TUI provides natural language chat, an action palette with agent-driven flows, and all work item operations through the `wl` CLI. See [TUI.md](TUI.md) for controls, including quick stage filters (`Alt+T` for `intake_complete`, `Alt+P` for `plan_complete`) that exclude closed items.
@@ -120,6 +120,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | [LOCAL_LLM.md](LOCAL_LLM.md) | Configure local LLM providers (Ollama, Foundry) |
 | [MULTI_PROJECT_GUIDE.md](MULTI_PROJECT_GUIDE.md) | Multi-project setup with custom prefixes |
 | [API.md](API.md) | REST API endpoints and usage |
+| [docs/FILE_PATH_CONVENTION.md](docs/FILE_PATH_CONVENTION.md) | File path convention for work item descriptions |
 
 ### Reference
 
@@ -142,6 +143,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | [docs/migrations.md](docs/migrations.md) | Database migration system |
 | [docs/prd/sort_order_PRD.md](docs/prd/sort_order_PRD.md) | Sort order product requirements |
 | [docs/validation/status-stage-inventory.md](docs/validation/status-stage-inventory.md) | Status/stage validation rules |
+| [docs/SKILL_AUTHORING.md](docs/SKILL_AUTHORING.md) | Skill authoring guide with script best practices |
 
 ## Tutorials
 
@@ -157,6 +159,34 @@ Step-by-step guides for learning Worklog:
 
 See [docs/tutorials/README.md](docs/tutorials/README.md) for the full tutorial index.
 
+## Shell Completion
+
+Worklog ships with shell completion scripts for **bash** and **zsh**. The `wl completion` command generates a completion script that provides tab-completion for all subcommands, options, and dynamic work-item IDs.
+
+### Bash
+
+```bash
+# Source directly (current shell only)
+source <(wl completion bash)
+
+# Permanent installation
+wl completion bash > ~/.wl-completion.bash
+echo "source ~/.wl-completion.bash" >> ~/.bashrc
+```
+
+### Zsh
+
+```zsh
+# Source directly (current shell only)
+source <(wl completion zsh)
+
+# Permanent installation
+wl completion zsh > ~/.wl-completion.zsh
+echo "source ~/.wl-completion.zsh" >> ~/.zshrc
+```
+
+> **Note:** Dynamic work-item ID completion (e.g., `wl show <TAB>`) calls `wl list --json` in the background to fetch open work items. This may add a slight delay on first tab press in large repositories.
+
 ## Development
 
 ```bash
@@ -168,7 +198,23 @@ npm run test:coverage # Tests with coverage report
 npm run test:tui      # TUI tests only (CI/headless)
 ```
 
+### Vitest Configuration
+
+The project uses [Vitest](https://vitest.dev/) with the following settings in `vitest.config.ts`:
+
+- **Pool:** `'forks'` (child processes) — supports tests that use `process.chdir()` for temp directory setup
+- **maxWorkers:** `4` — limits concurrent worker count to prevent unbounded memory growth during test execution
+- **Exclusions:** Worktree directories (`.worklog/worktrees/**`) are excluded to prevent duplicate test file discovery
+
 See [tests/README.md](tests/README.md) for detailed testing documentation.
+
+### Test Mock Patterns
+
+The `tests/extensions/worklog-browse-extension.test.ts` file (1700+ lines, 68 tests) demonstrates key mock patterns used by this project:
+
+- **Comprehensive `node:fs` mock:** Rather than stubbing only the 4 fs functions used directly by the code under test, the mock covers ~12 functions (`existsSync`, `statSync`, `lstatSync`, `readdirSync`, `accessSync`, `watch`, `promises`, `constants`, `readFileSync`, `writeFileSync`, `mkdirSync`, `realpathSync`) that may be called during module initialization. This prevents cascading errors and heap OOM during import.
+- **`icons.js` mock:** The dynamic `require('dist/icons.js')` in the browse module is mocked with stub implementations for all 8 exported functions (`priorityIcon`, `statusIcon`, `stageIcon`, `auditIcon`, `epicIcon`, `iconsEnabled`, `riskIcon`, `effortIcon`), preventing uncontrolled file resolution during import.
+- **Infinite loop guard:** `custom()` mocks return `{ type: 'shortcut', command: '/test-exit' }` instead of `null` to break the `runBrowseFlow` while(true) loop, preventing infinite-loop-based OOM in test mocks.
 
 ## License
 

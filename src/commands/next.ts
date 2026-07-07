@@ -7,6 +7,8 @@ import { humanFormatWorkItem, resolveFormat, formatTitleAndId } from './helpers.
 import { theme } from '../theme.js';
 import { normalizeActionArgs } from './cli-utils.js';
 import { loadStatusStageRules } from '../status-stage-rules.js';
+import { extractFilePaths, type GroupAssignment } from './helpers.js';
+import { assignItemGroups } from './grouping.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -21,22 +23,23 @@ export default function register(ctx: PluginContext): void {
     .option('--search <term>', 'Search term for fuzzy matching against title, description, and comments')
     .option('-n, --number <n>', 'Number of items to return (default: 1)', '1')
     .option('--prefix <prefix>', 'Override the default prefix')
-    .option('--include-in-review', 'Include items with status blocked and stage in_review (default: excluded)')
     .option('--include-blocked', 'Include dependency-blocked items (excluded by default)')
+    .option('--include-in-progress', 'Include in-progress items alongside open items')
     .option('--no-re-sort', 'Skip the automatic re-sort before selection (preserve current sortIndex order)')
     .option('--re-sort-sync', 'Force a synchronous re-sort when auto re-sort is run (blocks until complete)', false)
     .option('--recency-policy <policy>', 'Recency handling for score ordering during re-sort (prefer|avoid|ignore). Default: ignore', 'ignore')
+    .option('-g, --groups <n>', 'Number of parallel-safe groups to identify (default: 3, only meaningful when -n > 1)', '3')
     .action(async (...rawArgs: any[]) => {
       // Normalize incoming args: commander may pass a Command instance
-      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'stage', 'search', 'number', 'prefix', 'includeInReview', 'includeBlocked', 'reSort', 'reSortSync', 'recencyPolicy']);
+      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'stage', 'search', 'number', 'prefix', 'includeBlocked', 'includeInProgress', 'reSort', 'reSortSync', 'recencyPolicy', 'groups']);
       let options: any = normalized.options || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
        const numRequested = parseInt(options.number || '1', 10);
       const count = Number.isNaN(numRequested) || numRequested < 1 ? 1 : numRequested;
 
-      const includeInReview = Boolean(options.includeInReview);
       const includeBlocked = Boolean(options.includeBlocked);
+      const includeInProgress = Boolean(options.includeInProgress);
 
       // Validate stage if provided
       if (options.stage) {
@@ -74,8 +77,8 @@ export default function register(ctx: PluginContext): void {
       }
 
       const results = (db as any).findNextWorkItems 
-        ? (db as any).findNextWorkItems(count, options.assignee, options.search, includeInReview, includeBlocked, options.stage) 
-        : [db.findNextWorkItem(options.assignee, options.search, includeInReview, includeBlocked, options.stage)];
+        ? (db as any).findNextWorkItems(count, options.assignee, options.search, includeBlocked, options.stage, includeInProgress) 
+        : [db.findNextWorkItem(options.assignee, options.search, includeBlocked, options.stage, includeInProgress)];
 
       const availableResults = results.filter((result: any) => Boolean(result.workItem));
       const missingCount = Math.max(0, count - availableResults.length);
@@ -83,18 +86,72 @@ export default function register(ctx: PluginContext): void {
         ? `Only ${availableResults.length} of ${count} requested work item(s) available.`
         : '';
 
+      // ── Grouping logic (only when count > 1) ──────────────────────
+      let groupsEnabled = false;
+      let groupMap: Map<string, GroupAssignment> | null = null;
+      if (count > 1) {
+        const groupsOpt = parseInt(String(options.groups || '3'), 10);
+        const maxGroups = Number.isNaN(groupsOpt) || groupsOpt < 1 ? 3 : groupsOpt;
+        if (maxGroups > 0) {
+          groupsEnabled = true;
+          // Extract file paths and priority from each work item's description
+          const groupableItems = availableResults.map((result: any) => ({
+            id: result.workItem.id,
+            stage: result.workItem.stage,
+            filePaths: extractFilePaths(result.workItem.description || ''),
+            priority: result.workItem.priority,
+          }));
+          groupMap = assignItemGroups(groupableItems, maxGroups);
+        }
+      }
+
       if (utils.isJsonMode()) {
+        // Pre-compute child counts for the full item set so we can enrich
+        // each work item with the number of direct children in O(1) per item
+        // instead of N+1 queries.
+        const childCounts = db.getChildCounts();
+
+        // Enrich each work item with audit result data from the dedicated table.
+        // This is needed so consumers (e.g. Pi TUI extension) can show the
+        // correct audit icon (✅/❌/❓) without an extra round-trip per item.
+        const enrichWorkItem = (wi: any) => {
+          if (!wi) return wi;
+          const auditResult = db.getAuditResult(wi.id);
+          const childCount = childCounts.get(wi.id) ?? 0;
+          return { ...wi, auditResult: auditResult?.readyToClose ?? null, childCount };
+        };
+
         if (count === 1) {
           const single = results[0];
-          output.json({ success: true, workItem: single.workItem, reason: single.reason });
+          const enrichedItem = single.workItem ? enrichWorkItem(single.workItem) : single.workItem;
+          output.json({ success: true, workItem: enrichedItem, reason: single.reason });
           return;
+        }
+
+        const enrichedResults = availableResults.map((result: any) => {
+          const assignment = groupMap?.get(result.workItem.id);
+          return {
+            ...result,
+            workItem: result.workItem ? enrichWorkItem(result.workItem) : result.workItem,
+            ...(assignment ? { group: assignment.group, groupLabel: assignment.groupLabel } : {}),
+          };
+        });
+
+        const sortByGroup = (a: any, b: any) => {
+          const ga = groupMap?.get(a.workItem?.id)?.group ?? 0;
+          const gb = groupMap?.get(b.workItem?.id)?.group ?? 0;
+          return ga - gb;
+        };
+        if (groupsEnabled && groupMap) {
+          enrichedResults.sort(sortByGroup);
         }
 
         output.json({
           success: true,
-          count: availableResults.length,
+          count: enrichedResults.length,
           requested: count,
-          results: availableResults,
+          results: enrichedResults,
+          workItems: enrichedResults,
           ...(note ? { note } : {})
         });
         return;
@@ -133,13 +190,36 @@ export default function register(ctx: PluginContext): void {
       console.log(`\nNext ${availableResults.length} work item(s) to work on:`);
       if (note) console.log(theme.text.muted(`Note: ${note}`));
       console.log('===============================\n');
-      availableResults.forEach((res: any, idx: number) => {
+
+      // Sort by group for display (groups first, then within groups by original order)
+      const displayResults = [...availableResults];
+      if (groupsEnabled && groupMap) {
+        displayResults.sort((a: any, b: any) => {
+          const assignmentA = groupMap.get(a.workItem?.id);
+          const assignmentB = groupMap.get(b.workItem?.id);
+          return (assignmentA?.group ?? 0) - (assignmentB?.group ?? 0);
+        });
+      }
+
+      let lastGroup: number | null = null;
+      displayResults.forEach((res: any, _idx: number) => {
         if (!res.workItem) {
-          console.log(`${idx + 1}. (no item) - ${res.reason}`);
           return;
         }
+
+        // Render group heading if this item is in a new group
+        if (groupsEnabled && groupMap) {
+          const assignment = groupMap.get(res.workItem.id);
+          const currentGroup = assignment?.group ?? 0;
+          if (currentGroup !== lastGroup) {
+            console.log(theme.text.strong(`── ${assignment?.groupLabel ?? `Group ${currentGroup}`} ──`));
+            console.log('');
+            lastGroup = currentGroup;
+          }
+        }
+
         if (chosenFormat === 'concise') {
-          console.log(`${idx + 1}. ${formatTitleAndId(res.workItem)}`);
+          console.log(`${formatTitleAndId(res.workItem)}`);
           // Display stage even when it's an empty string (map to 'Undefined').
           const _stage = (res.workItem.stage as string | undefined);
           const stageLabel = _stage === undefined ? undefined : (_stage === '' ? 'Undefined' : _stage);
@@ -154,7 +234,6 @@ export default function register(ctx: PluginContext): void {
           console.log(`   Reason: ${theme.text.info(res.reason)}`);
           console.log('');
         } else {
-          console.log(`${idx + 1}.`);
           console.log(humanFormatWorkItem(res.workItem, db, chosenFormat));
           console.log(`Reason: ${theme.text.info(res.reason)}`);
           console.log('');

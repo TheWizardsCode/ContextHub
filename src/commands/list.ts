@@ -25,7 +25,12 @@ export default function register(ctx: PluginContext): void {
     .option('--stage <stage>', 'Filter by stage')
     .option('--needs-producer-review [value]', 'Filter by needsProducerReview flag (true|false|yes|no; default true when omitted)')
     .option('--prefix <prefix>', 'Override the default prefix')
+    .option('--no-icons', 'Disable icon rendering for clean text output')
     .action((search: string | undefined, options: ListOptions) => {
+      // Apply --no-icons flag by setting env var before any icon functions are called
+      if (options.icons === false) {
+        process.env.WL_NO_ICONS = '1';
+      }
       utils.requireInitialized();
       const db = utils.getDatabase(options?.prefix);
       
@@ -128,7 +133,26 @@ export default function register(ctx: PluginContext): void {
       const limited = limit ? sortedAll.slice(0, limit) : sortedAll;
 
       if (utils.isJsonMode()) {
-        output.json({ success: true, count: limited.length, workItems: limited });
+        // Pre-compute child counts for the full item set so we can enrich
+        // each work item with the number of direct children in O(1) per item
+        // instead of N+1 queries.
+        const childCounts = db.getChildCounts();
+
+        // Enrich each work item with audit result data from the dedicated table.
+        // This is needed so consumers (e.g. Pi TUI extension) can show the
+        // correct audit icon (✅/❌/❓) without an extra round-trip per item.
+        // Build a lookup map from all audit results for efficiency with large lists.
+        const auditMap = new Map<string, boolean>();
+        const allAudits = db.getAllAuditResults();
+        for (const ar of allAudits) {
+          auditMap.set(ar.workItemId, ar.readyToClose);
+        }
+        const enrichedItems = limited.map(item => ({
+          ...item,
+          auditResult: auditMap.has(item.id) ? auditMap.get(item.id) : null,
+          childCount: childCounts.get(item.id) ?? 0,
+        }));
+        output.json({ success: true, count: enrichedItems.length, workItems: enrichedItems });
       } else {
         if (items.length === 0) {
           console.log('No work items found');
