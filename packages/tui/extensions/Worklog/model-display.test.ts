@@ -8,7 +8,8 @@
  * 3. after_provider_response updates the status bar with the resolved
  *    provider/model from X-Resolved-Model header.
  * 4. When no proxy response has been received yet, the status bar shows (pending).
- * 5. The status bar key is "worklog-model" (not "model-display").
+ * 5. The status bar key is "worklog-0model" (not "model-display"),
+ *    with the `0` prefix ensuring it sorts first in the extension status line.
  * 6. The module exports the MODEL_DISPLAY_STATUS_KEY constant.
  *
  * Run: npx vitest run packages/tui/extensions/Worklog/model-display.test.ts
@@ -61,7 +62,7 @@ describe('model-display', () => {
   // ── Exports ───────────────────────────────────────────────────────
 
   it('exports MODEL_DISPLAY_STATUS_KEY', () => {
-    expect(MODEL_DISPLAY_STATUS_KEY).toBe('worklog-model');
+    expect(MODEL_DISPLAY_STATUS_KEY).toBe('worklog-0model');
   });
 
   it('exports registerModelDisplay as a function', () => {
@@ -91,7 +92,7 @@ describe('model-display', () => {
     handler({ model: { id: 'plan', provider: 'openai' } }, mockCtx);
 
     expect(mockCtx.ui.setStatus).toHaveBeenCalledWith(
-      'worklog-model',
+      'worklog-0model',
       '(pending)',
     );
   });
@@ -114,14 +115,14 @@ describe('model-display', () => {
     // First, receive a provider response
     responseHandler({ headers: { 'x-resolved-model': 'openai/gpt-4' } }, mockCtx);
     expect(mockCtx.ui.setStatus).toHaveBeenLastCalledWith(
-      'worklog-model',
+      'worklog-0model',
       'openai/gpt-4',
     );
 
     // Then, select a model — should still show provider/model only (no model alias)
     modelHandler({ model: { id: 'plan' } }, mockCtx);
     expect(mockCtx.ui.setStatus).toHaveBeenLastCalledWith(
-      'worklog-model',
+      'worklog-0model',
       'openai/gpt-4',
     );
   });
@@ -135,7 +136,7 @@ describe('model-display', () => {
     handler({ headers: { 'x-resolved-model': 'openai/gpt-4' } }, mockCtx);
 
     expect(mockCtx.ui.setStatus).toHaveBeenCalledWith(
-      'worklog-model',
+      'worklog-0model',
       'openai/gpt-4',
     );
   });
@@ -147,7 +148,7 @@ describe('model-display', () => {
     handler({ headers: { 'X-Resolved-Model': 'anthropic/claude-3' } }, mockCtx);
 
     expect(mockCtx.ui.setStatus).toHaveBeenCalledWith(
-      'worklog-model',
+      'worklog-0model',
       'anthropic/claude-3',
     );
   });
@@ -174,14 +175,14 @@ describe('model-display', () => {
     responseHandler({ headers: { 'x-resolved-model': 'anthropic/claude-sonnet-4' } }, mockCtx);
 
     expect(mockCtx.ui.setStatus).toHaveBeenLastCalledWith(
-      'worklog-model',
+      'worklog-0model',
       'anthropic/claude-sonnet-4',
     );
   });
 
   // ── Status key verification ───────────────────────────────────────
 
-  it('uses status key "worklog-model" not "model-display"', () => {
+  it('uses status key "worklog-0model" (sorts first) not "model-display"', () => {
     registerModelDisplay(mockPi);
     const handler = registeredListeners['model_select'];
 
@@ -190,7 +191,7 @@ describe('model-display', () => {
     // Verify the old key is NOT used
     expect(statusCalls['model-display']).toBeUndefined();
     // Verify the new key IS used
-    expect(statusCalls['worklog-model']).toBeDefined();
+    expect(statusCalls['worklog-0model']).toBeDefined();
   });
 
   // ── Edge cases ───────────────────────────────────────────────────
@@ -203,7 +204,7 @@ describe('model-display', () => {
     handler({ model: { id: 'code' } }, mockCtx);
 
     expect(mockCtx.ui.setStatus).toHaveBeenLastCalledWith(
-      'worklog-model',
+      'worklog-0model',
       '(pending)',
     );
   });
@@ -218,7 +219,7 @@ describe('model-display', () => {
     responseHandler({ headers: { 'x-resolved-model': 'anthropic/claude-sonnet-4' } }, mockCtx);
 
     expect(mockCtx.ui.setStatus).toHaveBeenLastCalledWith(
-      'worklog-model',
+      'worklog-0model',
       'anthropic/claude-sonnet-4',
     );
   });
@@ -231,7 +232,7 @@ describe('model-display', () => {
     handler({ headers: { 'x-resolved-model': 'openai/gpt-4' } }, mockCtx);
 
     expect(mockCtx.ui.setStatus).toHaveBeenCalledWith(
-      'worklog-model',
+      'worklog-0model',
       'openai/gpt-4',
     );
   });

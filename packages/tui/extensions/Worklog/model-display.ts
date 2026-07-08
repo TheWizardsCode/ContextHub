@@ -23,10 +23,12 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 /**
  * Status key used for the model/provider display in the footer.
+ * The `0` prefix ensures this status sorts first in the extension status
+ * line (localeCompare order), placing the provider/model at the start.
  * Changed from "model-display" when this module was integrated into the
  * Worklog extension, to avoid conflicts with other status entries.
  */
-export const MODEL_DISPLAY_STATUS_KEY = 'worklog-model';
+export const MODEL_DISPLAY_STATUS_KEY = 'worklog-0model';
 
 /**
  * Register model-display event handlers with a Pi extension instance.
