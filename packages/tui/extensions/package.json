@@ -6,8 +6,7 @@
   "description": "Worklog Pi TUI extension — Work item browser for Pi coding agent",
   "pi": {
     "extensions": [
-      "./Worklog/index.ts",
-      "./model-display.ts"
+      "./Worklog/index.ts"
     ]
   }
 }
