@@ -4,11 +4,11 @@
  * Verifies that:
  * 1. registerModelDisplay() sets up event listeners for model_select and
  *    after_provider_response.
- * 2. model_select updates the status bar with the selected model alias.
+ * 2. The status display shows only the resolved provider/model (no model alias).
  * 3. after_provider_response updates the status bar with the resolved
  *    provider/model from X-Resolved-Model header.
- * 4. The status bar key is "worklog-model" (not "model-display").
- * 5. Fallback display states work correctly (pending model, no model).
+ * 4. When no proxy response has been received yet, the status bar shows (pending).
+ * 5. The status bar key is "worklog-model" (not "model-display").
  * 6. The module exports the MODEL_DISPLAY_STATUS_KEY constant.
  *
  * Run: npx vitest run packages/tui/extensions/Worklog/model-display.test.ts
@@ -84,7 +84,7 @@ describe('model-display', () => {
 
   // ── model_select behavior ────────────────────────────────────────
 
-  it('model_select sets status with selected model id and pending provider', () => {
+  it('model_select sets status to (pending) when no response yet', () => {
     registerModelDisplay(mockPi);
     const handler = registeredListeners['model_select'];
 
@@ -92,21 +92,21 @@ describe('model-display', () => {
 
     expect(mockCtx.ui.setStatus).toHaveBeenCalledWith(
       'worklog-model',
-      'plan → (pending)',
+      '(pending)',
     );
   });
 
-  it('model_select without model id does not crash', () => {
+  it('model_select without model id does not crash and does not set status', () => {
     registerModelDisplay(mockPi);
     const handler = registeredListeners['model_select'];
 
     handler({ model: null }, mockCtx);
 
-    // No status call expected because there's no model to display
+    // No status call expected because there's nothing to display
     expect(mockCtx.ui.setStatus).not.toHaveBeenCalled();
   });
 
-  it('model_select updates status when after_provider_response was previously received', () => {
+  it('model_select no longer shows model alias when after_provider_response was previously received', () => {
     registerModelDisplay(mockPi);
     const modelHandler = registeredListeners['model_select'];
     const responseHandler = registeredListeners['after_provider_response'];
@@ -115,20 +115,20 @@ describe('model-display', () => {
     responseHandler({ headers: { 'x-resolved-model': 'openai/gpt-4' } }, mockCtx);
     expect(mockCtx.ui.setStatus).toHaveBeenLastCalledWith(
       'worklog-model',
-      '→ openai/gpt-4',
+      'openai/gpt-4',
     );
 
-    // Then, select a model — should show model → provider
+    // Then, select a model — should still show provider/model only (no model alias)
     modelHandler({ model: { id: 'plan' } }, mockCtx);
     expect(mockCtx.ui.setStatus).toHaveBeenLastCalledWith(
       'worklog-model',
-      'plan → openai/gpt-4',
+      'openai/gpt-4',
     );
   });
 
   // ── after_provider_response behavior ──────────────────────────────
 
-  it('after_provider_response extracts X-Resolved-Model from headers', () => {
+  it('after_provider_response extracts X-Resolved-Model from headers (no arrow prefix)', () => {
     registerModelDisplay(mockPi);
     const handler = registeredListeners['after_provider_response'];
 
@@ -136,7 +136,7 @@ describe('model-display', () => {
 
     expect(mockCtx.ui.setStatus).toHaveBeenCalledWith(
       'worklog-model',
-      '→ openai/gpt-4',
+      'openai/gpt-4',
     );
   });
 
@@ -148,7 +148,7 @@ describe('model-display', () => {
 
     expect(mockCtx.ui.setStatus).toHaveBeenCalledWith(
       'worklog-model',
-      '→ anthropic/claude-3',
+      'anthropic/claude-3',
     );
   });
 
@@ -158,11 +158,11 @@ describe('model-display', () => {
 
     handler({ headers: {} }, mockCtx);
 
-    // No call expected because nothing to update if no context is set
+    // No call expected because nothing to update
     expect(mockCtx.ui.setStatus).not.toHaveBeenCalled();
   });
 
-  it('after_provider_response shows model → provider when model was previously selected', () => {
+  it('after_provider_response shows provider/model (no model alias) when model was previously selected', () => {
     registerModelDisplay(mockPi);
     const modelHandler = registeredListeners['model_select'];
     const responseHandler = registeredListeners['after_provider_response'];
@@ -175,7 +175,7 @@ describe('model-display', () => {
 
     expect(mockCtx.ui.setStatus).toHaveBeenLastCalledWith(
       'worklog-model',
-      'code → anthropic/claude-sonnet-4',
+      'anthropic/claude-sonnet-4',
     );
   });
 
@@ -195,7 +195,7 @@ describe('model-display', () => {
 
   // ── Edge cases ───────────────────────────────────────────────────
 
-  it('handles multiple model_select calls, overwriting previous model', () => {
+  it('handles multiple model_select calls, staying in pending state', () => {
     registerModelDisplay(mockPi);
     const handler = registeredListeners['model_select'];
 
@@ -204,7 +204,7 @@ describe('model-display', () => {
 
     expect(mockCtx.ui.setStatus).toHaveBeenLastCalledWith(
       'worklog-model',
-      'code → (pending)',
+      '(pending)',
     );
   });
 
@@ -219,11 +219,11 @@ describe('model-display', () => {
 
     expect(mockCtx.ui.setStatus).toHaveBeenLastCalledWith(
       'worklog-model',
-      'code → anthropic/claude-sonnet-4',
+      'anthropic/claude-sonnet-4',
     );
   });
 
-  it('after_provider_response with selectedModel=null shows → provider only', () => {
+  it('after_provider_response with no prior model_select shows provider/model only', () => {
     registerModelDisplay(mockPi);
     const handler = registeredListeners['after_provider_response'];
 
@@ -232,7 +232,7 @@ describe('model-display', () => {
 
     expect(mockCtx.ui.setStatus).toHaveBeenCalledWith(
       'worklog-model',
-      '→ openai/gpt-4',
+      'openai/gpt-4',
     );
   });
 });
