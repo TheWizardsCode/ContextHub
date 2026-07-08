@@ -34,7 +34,16 @@ All acceptance criteria verified."
 
 # Set audit via the new dedicated command
 wl audit-set SA-123 --ready-to-close --summary "All acceptance criteria verified." --author agent
+
+# Mark an audit as approved by manual review
+wl audit-set SA-123 --ready-to-close yes --summary "Manual review approved." --author "reviewer-name"
+
+# Mark an audit as not yet ready (e.g., after a failed review)
+wl audit-set SA-123 --ready-to-close no --summary "Manual review failed: criteria X not met."
 ```
+
+> **Note:** `--ready-to-close` accepts both a bare flag (`--ready-to-close`) which defaults to `yes`,
+> and an explicit value (`--ready-to-close yes` or `--ready-to-close no`).
 
 ### Viewing audit results
 
