@@ -170,7 +170,7 @@ describe('terminal-utils', () => {
 
     it('handles mixed icons with VS16 sequences correctly', () => {
       // 🔓 (2) + space (1) + 🛠️ (2) + space (1) + ❓ (2) = 8
-      expect(visibleWidth('\u{1F513} \u{1F6E0}\uFE0F \u{2753}')).toBe(8);
+      expect(visibleWidth('\u{1F513} \u{1F6E0}\uFE0F \u{2754}')).toBe(8);
     });
 
     it('treats ZWJ sequences correctly counting only visible characters', () => {

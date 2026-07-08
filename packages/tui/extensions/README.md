@@ -382,6 +382,9 @@ The `/wl` command registers `getArgumentCompletions`, so Pi's editor shows autoc
 
 ## Shortcuts
 
+Source config file: `packages/tui/extensions/Worklog/shortcuts.json`
+(installed to `~/.pi/agent/extensions/worklog/Worklog/shortcuts.json`).
+
 The `shortcuts.json` config file defines a **config-driven shortcut system** that allows keyboard shortcuts in the Pi extension's worklog browse views (list and detail) to be expressed declaratively rather than hardcoded.
 
 ### Schema

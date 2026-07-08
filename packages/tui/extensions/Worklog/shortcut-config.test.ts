@@ -210,7 +210,7 @@ describe('loadShortcutConfig', () => {
   it('loads valid entries from shortcuts.json', () => {
     const registry = loadShortcutConfig();
     const entries = registry.getEntries();
-    expect(entries).toHaveLength(15);
+    expect(entries).toHaveLength(17);
 
     const createEntry = entries.find(e => e.key === 'c');
     expect(createEntry).toBeDefined();
@@ -244,15 +244,7 @@ describe('loadShortcutConfig', () => {
     expect(intakeEntry!.label).toBe('intake');
     expect(intakeEntry!.description).toBe('Ensure that the selected item is reasonably well defined in terms of objectives.');
 
-    const auditEntry = entries.find(e => e.key === 'a');
-    expect(auditEntry).toBeDefined();
-    expect(auditEntry!.command).toBe('/skill:audit <id>');
-    expect(auditEntry!.view).toBe('both');
-    expect(auditEntry!.stages).toEqual(['in_progress', 'in_review']);
-    expect(auditEntry!.label).toBe('audit');
-    expect(auditEntry!.description).toBe('Run an audit on the selected work item');
-
-    expect(entries.filter(e => e.key === '').length).toBe(9); // 9 chord entries have empty key
+    expect(entries.filter(e => e.key === '').length).toBe(12); // 12 chord entries have empty key
   });
 
   it('has no duplicate key+view or chord+view combinations in shortcuts.json', () => {
@@ -297,18 +289,17 @@ describe('loadShortcutConfig', () => {
     expect(registry.lookup('n', 'detail', 'idea')).toBe('/intake <id>');
     expect(registry.lookup('n', 'detail', 'intake_complete')).toBeUndefined();
 
-    // 'a' (audit) has stages: ['in_progress', 'in_review']
-    expect(registry.lookup('a', 'list', 'in_review')).toBe('/skill:audit <id>');
-    expect(registry.lookup('a', 'detail', 'in_review')).toBe('/skill:audit <id>');
-    expect(registry.lookup('a', 'list', 'in_progress')).toBe('/skill:audit <id>');
-    expect(registry.lookup('a', 'list', 'idea')).toBeUndefined();
+    // 'a' is now a chord leader (a,a for audit, a+y for approve, a+r for reject),
+    // so single-key lookup for 'a' returns undefined
+    expect(registry.lookup('a', 'list', 'in_review')).toBeUndefined();
+    expect(registry.lookup('a', 'detail', 'in_review')).toBeUndefined();
+    expect(registry.lookup('a', 'list', 'in_progress')).toBeUndefined();
 
     // Without stage parameter, entries with stages constraint still work
     // (backward compatible when calling without stage)
     expect(registry.lookup('n', 'detail')).toBe('/intake <id>');
     expect(registry.lookup('i', 'list')).toBe('/skill:implement <id>');
     expect(registry.lookup('p', 'list')).toBe('/plan <id>');
-    expect(registry.lookup('a', 'list')).toBe('/skill:audit <id>');
   });
 
   it('loads chord entries from shortcuts.json', () => {
@@ -316,7 +307,7 @@ describe('loadShortcutConfig', () => {
     const entries = registry.getEntries();
 
     const upChords = registry.getChordEntries();
-    expect(upChords).toHaveLength(9);
+    expect(upChords).toHaveLength(12);
 
     const upEntry = upChords.find((e: any) =>
       Array.isArray((e as any).chord) && (e as any).chord[0] === 'u' && (e as any).chord[1] === 'p',
