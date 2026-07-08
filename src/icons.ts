@@ -287,7 +287,7 @@ function auditKey(result: boolean | null | undefined): string {
 const AUDIT_ICON: Record<string, string> = {
   yes:     '\u{2705}',  // ✅
   no:      '\u{274C}',  // ❌
-  unknown: '\u{2753}',  // ❓
+  unknown: '\u{2754}',  // ❔
 };
 
 const AUDIT_FALLBACK: Record<string, string> = {

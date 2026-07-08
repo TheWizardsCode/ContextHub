@@ -443,11 +443,11 @@ describe('auditIcon', () => {
   });
 
   it('returns emoji for unknown (null)', () => {
-    expect(auditIcon(null)).toBe('\u{2753}'); // ❓
+    expect(auditIcon(null)).toBe('\u{2754}'); // ❔
   });
 
   it('returns emoji for unknown (undefined)', () => {
-    expect(auditIcon(undefined)).toBe('\u{2753}'); // ❓
+    expect(auditIcon(undefined)).toBe('\u{2754}'); // ❔
   });
 
   describe('with noIcons option', () => {
