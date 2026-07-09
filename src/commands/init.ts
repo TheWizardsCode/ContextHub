@@ -198,7 +198,7 @@ function installPrePushHook(options: { silent: boolean }): { installed: boolean;
     `  exit 0\n` +
     `fi\n` +
     `\n` +
-    `\"$WL\" sync\n` +
+    `$WL sync --git-branch refs/worklog/data\n` +
     `\n` +
     `exit 0\n`;
 
@@ -270,7 +270,7 @@ function installPostPullHooks(options: { silent: boolean }): { installed: boolea
      `  exit 0\n` +
      `fi\n` +
      `# Run sync but do not fail the checkout/merge if sync is not available or fails\n` +
-     `if \"$WL\" sync >/dev/null 2>&1; then\n` +
+     `if \"$WL\" sync --git-branch refs/worklog/data >/dev/null 2>&1; then\n` +
      `  :\n` +
      `else\n` +
      `  # Check if this is a new checkout/worktree (no .worklog directory)\n` +
@@ -363,7 +363,7 @@ function installCommittedHooks(options: { silent: boolean }): { installed: boole
     `  echo \"worklog: wl/worklog not found; skipping post-pull sync\" >&2\n` +
     `  exit 0\n` +
     `fi\n` +
-    `if \"$WL\" sync >/dev/null 2>&1; then\n` +
+    `if \"$WL\" sync --git-branch refs/worklog/data >/dev/null 2>&1; then\n` +
     `  :\n` +
     `else\n` +
     `  if [ ! -d \".worklog\" ]; then\n` +
@@ -407,7 +407,7 @@ function installCommittedHooks(options: { silent: boolean }): { installed: boole
      `  echo \"worklog: wl/worklog not found; skipping pre-push sync\" >&2\n` +
      `  exit 0\n` +
      `fi\n` +
-     `\"$WL\" sync\n` +
+     `$WL sync --git-branch refs/worklog/data\n` +
      `exit 0\n`;
 
     const postCheckoutContent =
@@ -427,7 +427,7 @@ function installCommittedHooks(options: { silent: boolean }): { installed: boole
       `  echo \"worklog: wl/worklog not found; skipping post-checkout sync\" >&2\n` +
       `  exit 0\n` +
       `fi\n` +
-      `if \"$WL\" sync >/dev/null 2>&1; then\n` +
+      `if \"$WL\" sync --git-branch refs/worklog/data >/dev/null 2>&1; then\n` +
       `  :\n` +
       `else\n` +
       `  if [ ! -d \".worklog\" ]; then\n` +

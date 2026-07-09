@@ -14,7 +14,7 @@ else
   echo "worklog: wl/worklog not found; skipping post-checkout sync" >&2
   exit 0
 fi
-if "$WL" sync >/dev/null 2>&1; then
+if "$WL" sync --git-branch refs/worklog/data >/dev/null 2>&1; then
   :
 else
   echo "worklog: sync failed or not initialized; continuing" >&2
