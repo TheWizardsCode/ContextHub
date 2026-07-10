@@ -17,8 +17,10 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
+import { detectWorkItemId } from './activity-indicator.js';
 import { truncateToTerminalWidth, visibleWidth } from './terminal-utils.js';
 import { getResolvedModel, getSelectedModel, onModelChange } from './model-display.js';
+import { runWl } from '../wl-integration.js';
 
 // ── Status constants ──────────────────────────────────────────────────────
 
@@ -479,6 +481,29 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
         // on the very first tick after session_start)
         if (!state.initialPrompt) {
           state.initialPrompt = extractInitialPrompt(entries);
+
+          // Fire-and-forget: resolve any work item ID to its title
+          // so the footer shows "WL-123 Title" instead of just "WL-123"
+          if (state.initialPrompt) {
+            const wlId = detectWorkItemId(state.initialPrompt);
+            if (wlId) {
+              runWl('show', [wlId], { timeout: 2000 })
+                .then(result => {
+                  if (result?.title && state.initialPrompt) {
+                    const enriched = `${wlId} ${result.title}`;
+                    state.initialPrompt = state.initialPrompt.replace(
+                      wlId,
+                      enriched,
+                    );
+                    requestRender?.();
+                  }
+                })
+                .catch(() => {
+                  // Silently ignore — raw ID is already shown
+                });
+            }
+          }
+
           requestRender?.();
         }
       } catch {
@@ -565,13 +590,20 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
             modelPart = '—';
           }
 
-          // Build initial prompt portion (quoted preview)
+          // Build initial prompt portion — unquoted preview with generous
+          // space allocation. The line is ultimately truncated to `width` by
+          // truncateToTerminalWidth, so we use a dynamic limit.
           let promptPart: string | null = null;
           if (initialPrompt) {
-            // Limit to ~40 chars for a reasonable preview
+            // Reserve space for model part (up to ~30 chars), separator (4),
+            // and a small buffer. Then clip at the end.
+            const reserved = 38;
+            const maxLen = Math.max(15, width - reserved);
             const preview =
-              initialPrompt.length > 40 ? `${initialPrompt.slice(0, 37)}...` : initialPrompt;
-            promptPart = `"${preview}"`;
+              initialPrompt.length > maxLen
+                ? `${initialPrompt.slice(0, maxLen - 3)}...`
+                : initialPrompt;
+            promptPart = preview;
           }
 
           const label = promptPart ? `${modelPart}  │  ${promptPart}` : modelPart;

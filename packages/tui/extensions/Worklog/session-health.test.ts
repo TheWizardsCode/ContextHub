@@ -944,7 +944,7 @@ describe('session-health', () => {
      * @param initialPrompt - Optional initial user message to inject into
      *   the session entries so the ticker's refreshState populates it.
      */
-    function fabricateFooterLines(ctx: any, initialPrompt?: string | null): string[] {
+    function fabricateFooterLines(ctx: any, initialPrompt?: string | null, width: number = 500): string[] {
       registerSessionHealth(mockPi);
 
       // Override getBranch to return entries with the initial prompt
@@ -977,7 +977,7 @@ describe('session-health', () => {
         },
       );
 
-      return footerObj.render(500);
+      return footerObj.render(width);
     }
 
     beforeEach(() => {
@@ -1037,9 +1037,10 @@ describe('session-health', () => {
       );
 
       expect(lines.length).toBe(2);
-      // Format: "<alias> → <provider/model>  │  \"<preview>\""
+      // Format: "<alias> → <provider/model>  │  <preview>" (no quotes)
       expect(lines[1]).toContain('code → openai/gpt-4');
-      expect(lines[1]).toContain('"Fix the bug by adding validation"');
+      expect(lines[1]).toContain('Fix the bug by adding validation');
+      expect(lines[1]).not.toContain('"');
       expect(lines[1]).toContain('[dim');
     });
 
@@ -1048,9 +1049,12 @@ describe('session-health', () => {
       mocks.mockGetSelectedModel.mockReturnValue('code');
 
       const longPrompt = 'Write a comprehensive test suite for the authentication module including all edge cases like token expiry and refresh';
+      // Use a narrow terminal width (120) to trigger truncation
+      // With width=120, reserved=38, available=max(15, 120-38)=82, prompt length=151 > 82
       const lines = fabricateFooterLines(
         { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } },
         longPrompt,
+        120,
       );
 
       expect(lines.length).toBe(2);
