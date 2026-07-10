@@ -467,15 +467,18 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
           // Line 3: Provider/model display (grey/dim text)
           // Shows the Pi model alias (e.g. "code", "plan") and, when available,
           // the provider/model resolved by the router (e.g. "openai/gpt-4").
-          // Format: "<alias> -> <provider/model>" when both are known,
-          // or just "<alias>" if not yet resolved.
+          // Always visible — shows "<alias> → <provider/model>" when both are
+          // known, just "<alias>" if not yet resolved, or "—" when nothing
+          // is available.
           const selectedModel = getSelectedModel();
           const resolvedModel = getResolvedModel();
           if (selectedModel) {
-            const label = resolvedModel ? `${selectedModel} -> ${resolvedModel}` : selectedModel;
+            const label = resolvedModel ? `${selectedModel} → ${resolvedModel}` : selectedModel;
             lines.push(truncateToTerminalWidth(theme.fg('dim', label), width));
           } else if (resolvedModel) {
             lines.push(truncateToTerminalWidth(theme.fg('dim', resolvedModel), width));
+          } else {
+            lines.push(truncateToTerminalWidth(theme.fg('dim', '—'), width));
           }
 
           return lines;

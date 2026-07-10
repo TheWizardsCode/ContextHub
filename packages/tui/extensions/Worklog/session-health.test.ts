@@ -807,8 +807,8 @@ describe('session-health', () => {
 
       // With no extension statuses: lines[0]=session health, lines[1]=model info
       expect(lines.length).toBe(2);
-      // Format: "<alias> -> <provider/model>"
-      expect(lines[1]).toContain('code -> openai/gpt-4');
+      // Format: "<alias> → <provider/model>"
+      expect(lines[1]).toContain('code → openai/gpt-4');
       expect(lines[1]).toContain('[dim');
     });
 
@@ -824,14 +824,16 @@ describe('session-health', () => {
       expect(lines[1]).toContain('[dim');
     });
 
-    it('omits line 3 when no model selected and no resolved model', () => {
+    it('shows a grey dash when no model selected and no resolved model', () => {
       mocks.mockGetResolvedModel.mockReturnValue(null);
       mocks.mockGetSelectedModel.mockReturnValue(null);
 
       const lines = fabricateFooterLines({ ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } });
 
-      // With no extension statuses and no model: only session health line
-      expect(lines.length).toBe(1);
+      // With no extension statuses: lines[0]=session health, lines[1]=dash
+      expect(lines.length).toBe(2);
+      expect(lines[1]).toContain('—');
+      expect(lines[1]).toContain('[dim');
     });
 
     it('updates when after_provider_response fires (requestRender triggered)', () => {
