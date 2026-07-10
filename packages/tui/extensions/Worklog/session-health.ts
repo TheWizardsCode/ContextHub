@@ -272,8 +272,26 @@ export function extractInitialPrompt(
   for (const entry of entries) {
     if (entry.type === 'message' && entry.message?.role === 'user') {
       const content = entry.message.content;
-      if (typeof content === 'string' && content.trim()) {
-        return content.split('\n')[0].trim();
+      // Handle string content (legacy/test format, also used by some providers)
+      if (typeof content === 'string') {
+        if (content.trim()) {
+          return content.split('\n')[0].trim();
+        }
+        continue;
+      }
+      // Handle array content (Pi's default format: [{ type: "text", text: "..." }, ...])
+      // See agent-session.js:788-795 where user messages are always created as arrays
+      if (Array.isArray(content)) {
+        const textParts: string[] = [];
+        for (const part of content) {
+          if (part.type === 'text' && typeof part.text === 'string') {
+            textParts.push(part.text);
+          }
+        }
+        const combined = textParts.join('\n').trim();
+        if (combined) {
+          return combined.split('\n')[0].trim();
+        }
       }
     }
   }

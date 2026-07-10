@@ -386,6 +386,57 @@ describe('session-health', () => {
       const result = extractInitialPrompt(entries);
       expect(result).toBeNull();
     });
+
+    // ── Array content format tests (Pi's actual format) ──────────────
+
+    it('extracts first user message from array content format (Pi default)', () => {
+      const entries = [
+        { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'Fix the bug by adding validation' }] } },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBe('Fix the bug by adding validation');
+    });
+
+    it('returns first line of multi-line message in array format', () => {
+      const entries = [
+        { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'First line\nSecond line\nThird line' }] } },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBe('First line');
+    });
+
+    it('combines multiple text parts in array format', () => {
+      const entries = [
+        { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'First part' }, { type: 'text', text: 'Second part' }] } },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBe('First part');
+    });
+
+    it('returns null for empty array content', () => {
+      const entries = [
+        { type: 'message', message: { role: 'user', content: [] } },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBeNull();
+    });
+
+    it('ignores non-text parts in array content', () => {
+      const entries = [
+        { type: 'message', message: { role: 'user', content: [{ type: 'image', data: 'base64...', mimeType: 'image/png' }] } },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBeNull();
+    });
+
+    it('extracts first user message when content is in array format but earlier messages are assistant', () => {
+      const entries = [
+        { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'How can I help?' }] } },
+        { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'Fix the bug' }] } },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBe('Fix the bug');
+    });
   });
 
   // ── Token extraction ────────────────────────────────────────────────
