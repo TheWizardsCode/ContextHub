@@ -33,6 +33,25 @@ vi.mock('@earendil-works/pi-tui', () => ({
   visibleWidth: (text: string) => text.length,
 }));
 
+// ── Mock ./model-display.js ────────────────────────────────────────────
+// Used by the footer factory to read the current resolved/selected model.
+// Tests for the model line control the return values to verify correct
+// rendering of the third footer line.
+
+const mocks = vi.hoisted(() => ({
+  mockGetResolvedModel: vi.fn(() => null),
+  mockGetSelectedModel: vi.fn(() => null),
+  mockOnModelChange: vi.fn(() => () => {}),
+}));
+
+vi.mock('./model-display.js', () => ({
+  getResolvedModel: mocks.mockGetResolvedModel,
+  getSelectedModel: mocks.mockGetSelectedModel,
+  onModelChange: mocks.mockOnModelChange,
+  _resetModelDisplayState: vi.fn(),
+  MODEL_DISPLAY_STATUS_KEY: 'worklog-0model',
+}));
+
 // ── Module under test ─────────────────────────────────────────────────
 
 import {
@@ -384,9 +403,7 @@ describe('session-health', () => {
       const result = renderFooter(state, mockCtx, mockTheme as any, 500);
 
       expect(result).toContain('[dim○ Idle]');
-      expect(result).toContain('gpt-4');
       expect(result).toContain('[dim#1]');
-      // Center section: elapsed time
       expect(result).toContain('[success2s]');
     });
 
@@ -402,12 +419,11 @@ describe('session-health', () => {
         contextUsage: { tokens: null, contextWindow: 128000, percent: null },
       };
 
-      const result = renderFooter(state, mockCtx, mockTheme as any, 120);
+      const result = renderFooter(state, mockCtx, mockTheme as any, 200);
 
       expect(result).toContain('[dim● Streaming]');
-      expect(result).toContain('(Last Chunk:');
+      expect(result).toContain('s ago');
       expect(result).toContain('[dim—/128.0k]');
-      // Center section: elapsed time
       expect(result).toContain('[success3s]');
     });
 
@@ -442,8 +458,7 @@ describe('session-health', () => {
 
       const result = renderFooter(state, { model: null } as any, mockTheme as any, 500);
 
-      expect(result).toContain('—');
-      // Verify three-section layout still works
+      // Verify three-section layout still works without model context
       expect(result).toContain('[dim○ Idle]');
       expect(result).toContain('[dim#1]');
       expect(result).toContain('[success2s]');
@@ -621,7 +636,7 @@ describe('session-health', () => {
       model: { id: 'gpt-4' },
     };
 
-    it('shows (Last Chunk: Xs) only during streaming', () => {
+    it('shows elapsed time since last chunk only during streaming', () => {
       // Streaming state — should include last chunk info
       const streamingState: SessionHealthState = {
         status: 'streaming',
@@ -636,10 +651,10 @@ describe('session-health', () => {
 
       const result = renderFooter(streamingState, mockCtx, mockTheme as any, 120);
 
-      expect(result).toContain('(Last Chunk:');
+      expect(result).toContain('s ago');
     });
 
-    it('does NOT show (Last Chunk: Xs) when idle', () => {
+    it('does NOT show elapsed time since last chunk when idle', () => {
       const idleState: SessionHealthState = {
         status: 'idle',
         toolName: null,
@@ -653,10 +668,10 @@ describe('session-health', () => {
 
       const result = renderFooter(idleState, mockCtx, mockTheme as any, 120);
 
-      expect(result).not.toContain('(Last Chunk:');
+      expect(result).not.toContain('s ago');
     });
 
-    it('does NOT show (Last Chunk: Xs) when tool executing', () => {
+    it('does NOT show elapsed time since last chunk when tool executing', () => {
       const toolState: SessionHealthState = {
         status: 'tool',
         toolName: 'read',
@@ -670,7 +685,7 @@ describe('session-health', () => {
 
       const result = renderFooter(toolState, mockCtx, mockTheme as any, 120);
 
-      expect(result).not.toContain('(Last Chunk:');
+      expect(result).not.toContain('s ago');
     });
 
     it('shows elapsed time in center section', () => {
@@ -706,18 +721,17 @@ describe('session-health', () => {
 
       const result = renderFooter(state, mockCtx, mockTheme as any, 500);
 
-      // Left section: marker + turn count + last chunk
+      // Left section: marker + turn count + last chunk elapsed time
       expect(result).toContain('[dim● Streaming]');
       expect(result).toContain('[dim#2]');
-      expect(result).toContain('(Last Chunk:');
+      expect(result).toContain('s ago');
       // Center section: elapsed time
       expect(result).toContain('[warning10s]');
       // Right section: tokens
       expect(result).toContain('[muted↑500 ↓1.0k]');
       // Right section: context
       expect(result).toContain('[dim19.5%/128.0k]');
-      // Right section: model
-      expect(result).toContain('gpt-4');
+      // Right section: context (model is now on its own footer line)
     });
 
     it('renders footer with wide terminal (no truncation)', () => {
@@ -732,13 +746,127 @@ describe('session-health', () => {
         contextUsage: { tokens: 64000, contextWindow: 128000, percent: 50.0 },
       };
 
-      const result = renderFooter(state, mockCtx, mockTheme as any, 300);
+      const result = renderFooter(state, mockCtx, mockTheme as any, 400);
 
-      expect(result).toContain('(Last Chunk:');
+      expect(result).toContain('s ago');
       // 65s = 1m 5s, and > 30s so error color
       expect(result).toContain('[error1m 5s]');
       expect(result).toContain('[muted↑50.0k ↓100.0k]');
       expect(result).toContain('[dim50.0%/128.0k]');
+    });
+  });
+
+  // ── Model line in footer (Line 3) ──────────────────────────────────────
+
+  describe('model line in footer', () => {
+    /**
+     * Helper: invoke the footer factory and return its render(…) result.
+     * Simulates what Pi TUI does: calls setFooter(factory), then calls
+     * factory(tui, theme, footerData) → { render(width) } → render(lines).
+     */
+    function fabricateFooterLines(ctx: any): string[] {
+      registerSessionHealth(mockPi);
+
+      // Start a session to trigger footer setup
+      const sessionStartHandler = getHandler('session_start');
+      sessionStartHandler({}, ctx);
+
+      // Capture the factory passed to setFooter
+      expect(footerCalls.length).toBeGreaterThanOrEqual(1);
+      const factory = footerCalls[footerCalls.length - 1].factory;
+
+      // Call the factory to get the footer object
+      const footerObj = factory(
+        { requestRender: vi.fn() },
+        { fg: (color: string, text: string) => `[${color}${text}]` },
+        {
+          getExtensionStatuses: () => [],
+          onBranchChange: () => () => {},
+          requestRender: vi.fn(),
+        },
+      );
+
+      return footerObj.render(500);
+    }
+
+    beforeEach(() => {
+      // Reset mock return values before each test
+      mocks.mockGetResolvedModel.mockReturnValue(null);
+      mocks.mockGetSelectedModel.mockReturnValue(null);
+      mocks.mockOnModelChange.mockReturnValue(() => {});
+
+      // Clear footer calls before each test
+      footerCalls.length = 0;
+    });
+
+    it('shows resolved model in grey on line 3 when available', () => {
+      mocks.mockGetResolvedModel.mockReturnValue('openai/gpt-4');
+      mocks.mockGetSelectedModel.mockReturnValue('code');
+
+      const lines = fabricateFooterLines({ ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } });
+
+      // With no extension statuses: lines[0]=session health, lines[1]=model info
+      expect(lines.length).toBe(2);
+      expect(lines[1]).toContain('openai/gpt-4');
+      expect(lines[1]).toContain('[dim');
+    });
+
+    it('shows (pending) on line 3 when model selected but not yet resolved', () => {
+      mocks.mockGetResolvedModel.mockReturnValue(null);
+      mocks.mockGetSelectedModel.mockReturnValue('code');
+
+      const lines = fabricateFooterLines({ ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } });
+
+      // With no extension statuses: lines[0]=session health, lines[1]=(pending)
+      expect(lines.length).toBe(2);
+      expect(lines[1]).toContain('(pending)');
+      expect(lines[1]).toContain('[dim');
+    });
+
+    it('omits line 3 when no model selected and no resolved model', () => {
+      mocks.mockGetResolvedModel.mockReturnValue(null);
+      mocks.mockGetSelectedModel.mockReturnValue(null);
+
+      const lines = fabricateFooterLines({ ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } });
+
+      // With no extension statuses and no model: only session health line
+      expect(lines.length).toBe(1);
+    });
+
+    it('updates when after_provider_response fires (requestRender triggered)', () => {
+      const requestRender = vi.fn();
+      registerSessionHealth(mockPi);
+
+      // Fire all needed events to set up footer
+      const sessionStartHandler = getHandler('session_start');
+      sessionStartHandler({}, {
+        ...mockCtx,
+        mode: 'tui',
+        ui: {
+          ...mockCtx.ui,
+          theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) },
+          setFooter: vi.fn((factory: Function) => {
+            // Call factory to get dispose/invalidate/render
+            const result = factory(
+              { requestRender },
+              { fg: (c: string, t: string) => `[${c}${t}]` },
+              {
+                getExtensionStatuses: () => [],
+                onBranchChange: () => () => {},
+              },
+            );
+            expect(typeof result.render).toBe('function');
+          }),
+        },
+      });
+
+      // Fire after_provider_response - the listener should call requestRender
+      const aprHandler = getHandler('after_provider_response');
+      expect(aprHandler).toBeDefined();
+      aprHandler({ headers: { 'x-resolved-model': 'anthropic/claude-sonnet-4' } }, {});
+
+      // requestRender should have been called by the after_provider_response handler
+      expect(requestRender).toHaveBeenCalled();
     });
   });
 

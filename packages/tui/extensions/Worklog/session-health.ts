@@ -6,7 +6,8 @@
  * - Elapsed time since last response (colour-coded)
  * - Token usage (input/output)
  * - Context window usage percentage
- * - Current model ID and turn count
+ * - Provider/model on a dedicated line
+ * - Turn count
  *
  * Uses `ctx.ui.setFooter()` to replace the default footer with a custom
  * health display. Gracefully degrades in non-TUI modes.
@@ -17,6 +18,7 @@ import type {
   ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
 import { truncateToTerminalWidth, visibleWidth } from './terminal-utils.js';
+import { getResolvedModel, getSelectedModel, onModelChange } from './model-display.js';
 
 // ── Status constants ──────────────────────────────────────────────────────
 
@@ -165,11 +167,14 @@ export function formatContextUsage(usage: SessionHealthState['contextUsage']): s
  * Build the footer render string.
  *
  * Layout (three-section):
- *   Left:  [marker] [#turn] (Last Chunk: Xs)
+ *   Left:  [marker] [#turn] Xs ago
  *   Center: [elapsed since stage start]
- *   Right: ↑input ↓output [context%/window] [model]
+ *   Right: ↑input ↓output [context%/window]
  *
- * The (Last Chunk: Xs) indicator appears only when `status === 'streaming'`.
+ * The model/provider is displayed on a dedicated line below the session
+ * health line (see the `render()` function in `registerSessionHealth`).
+ * The elapsed time since last chunk (e.g. "4s ago") appears only when
+ * `status === 'streaming'`.
  *
  * @param state - Session health state
  * @param ctx - Extension context with UI and model access
@@ -207,7 +212,7 @@ export function renderFooter(
   if (state.status === 'streaming' && state.lastChunkTime !== null) {
     const chunkElapsed = getElapsedTime(state.lastChunkTime);
     const lastChunkElapsed = formatShortElapsedTime(chunkElapsed);
-    lastChunkStr = theme.fg('dim', `(Last Chunk: ${lastChunkElapsed})`);
+    lastChunkStr = theme.fg('dim', lastChunkElapsed);
   }
 
   const left = `${markerStr} ${turnStr} ${lastChunkStr}`;
@@ -229,18 +234,17 @@ export function renderFooter(
   const contextStr = formatContextUsage(state.contextUsage);
   const contextStrStyled = theme.fg('dim', contextStr);
 
-  // Model ID
-  const modelId = ctx.model?.id ?? '—';
-  const modelStr = theme.fg('dim', modelId);
-
-  let right = `${tokensStrStyled} ${contextStrStyled} ${modelStr}`;
+  // Model ID is now displayed on its own line below the session health line
+  let right = `${tokensStrStyled} ${contextStrStyled}`;
 
   // ── Layout ──────────────────────────────────────────────────────────
   // Calculate visible widths and pad
   const leftWidth = visibleWidth(left);
   const centerWidth = visibleWidth(timeStrStyled);
   const rightWidth = visibleWidth(right);
-  const totalContentWidth = leftWidth + centerWidth + rightWidth;
+  // Account for the space between center and right sections
+  const hasSeparatorSpace = rightWidth > 0 ? 1 : 0;
+  const totalContentWidth = leftWidth + centerWidth + rightWidth + hasSeparatorSpace;
 
   if (totalContentWidth >= width) {
     // Not enough space: truncate right
@@ -368,6 +372,11 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
     startTicker(ctx);
   });
 
+  // Listen for model/provider changes and trigger a footer re-render
+  pi.on('after_provider_response', (_event) => {
+    if (requestRender) requestRender();
+  });
+
   // Session shutdown — clean up ticker
   pi.on('session_shutdown', () => {
     if (tickerInterval) {
@@ -415,11 +424,17 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
       requestRender = () => tui.requestRender();
 
       const disposeBranchChange = footerData.onBranchChange(() => tui.requestRender());
+      // Subscribe to model state changes for reactive footer updates
+      let disposeModelChange: (() => void) | null = null;
       return {
         dispose() {
           if (tickerInterval) {
             clearInterval(tickerInterval);
             tickerInterval = null;
+          }
+          if (disposeModelChange) {
+            disposeModelChange();
+            disposeModelChange = null;
           }
           disposeBranchChange();
         },
@@ -429,10 +444,17 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
         render(width: number): string[] {
           const lines: string[] = [];
 
-          // Line 1: Extension statuses (model-display, activity-indicator, etc.)
+          // Subscribe to model changes on first render
+          if (!disposeModelChange) {
+            disposeModelChange = onModelChange(() => tui.requestRender());
+          }
+
+          // Line 1: Extension statuses (activity-indicator, etc.)
           // These are set via ctx.ui.setStatus() and would be hidden when a
           // custom footer is active. We include them here so that status
-          // entries (e.g., provider/model from model-display) remain visible.
+          // entries remain visible.
+          // Note: The provider/model is no longer shown as a status entry;
+          // it is displayed on Line 3 below.
           const statuses = footerData.getExtensionStatuses();
           if (statuses && statuses.length > 0) {
             const statusLine = statuses.join('  ');
@@ -441,6 +463,14 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
 
           // Line 2: Session health
           lines.push(renderFooter(state, ctx, theme, width));
+
+          // Line 3: Provider/model display (grey/dim text)
+          const resolvedModel = getResolvedModel();
+          if (resolvedModel) {
+            lines.push(truncateToTerminalWidth(theme.fg('dim', resolvedModel), width));
+          } else if (getSelectedModel()) {
+            lines.push(truncateToTerminalWidth(theme.fg('dim', '(pending)'), width));
+          }
 
           return lines;
         },
