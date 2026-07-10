@@ -799,7 +799,7 @@ describe('session-health', () => {
       footerCalls.length = 0;
     });
 
-    it('shows resolved model in grey on line 3 when available', () => {
+    it('shows selected alias and resolved model in grey on line 3 when both available', () => {
       mocks.mockGetResolvedModel.mockReturnValue('openai/gpt-4');
       mocks.mockGetSelectedModel.mockReturnValue('code');
 
@@ -807,19 +807,20 @@ describe('session-health', () => {
 
       // With no extension statuses: lines[0]=session health, lines[1]=model info
       expect(lines.length).toBe(2);
-      expect(lines[1]).toContain('openai/gpt-4');
+      // Format: "<alias> -> <provider/model>"
+      expect(lines[1]).toContain('code -> openai/gpt-4');
       expect(lines[1]).toContain('[dim');
     });
 
-    it('shows (pending) on line 3 when model selected but not yet resolved', () => {
+    it('shows just the selected alias when model selected but not yet resolved', () => {
       mocks.mockGetResolvedModel.mockReturnValue(null);
       mocks.mockGetSelectedModel.mockReturnValue('code');
 
       const lines = fabricateFooterLines({ ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } });
 
-      // With no extension statuses: lines[0]=session health, lines[1]=(pending)
+      // With no extension statuses: lines[0]=session health, lines[1]=alias only
       expect(lines.length).toBe(2);
-      expect(lines[1]).toContain('(pending)');
+      expect(lines[1]).toContain('code');
       expect(lines[1]).toContain('[dim');
     });
 
