@@ -180,8 +180,11 @@ export function renderFooter(
   const tokensStr = `↑${formatTokens(state.inputTokens)} ↓${formatTokens(state.outputTokens)}`;
   const tokensStrStyled = theme.fg('muted', tokensStr);
 
-  // Left section
-  const left = `${markerStr} ${timeStrStyled} ${tokensStrStyled}`;
+  // Turn count (shown before timer per user feedback)
+  const turnStr = theme.fg('dim', `#${state.turnCount}`);
+
+  // Left section: marker, turn count, elapsed time, token counts
+  const left = `${markerStr} ${turnStr} ${timeStrStyled} ${tokensStrStyled}`;
 
   // ── Build right section ─────────────────────────────────────────────
   // Context usage
@@ -192,10 +195,7 @@ export function renderFooter(
   const modelId = ctx.model?.id ?? '—';
   const modelStr = theme.fg('dim', modelId);
 
-  // Turn count
-  const turnStr = theme.fg('dim', `#${state.turnCount}`);
-
-  let right = `${contextStrStyled} ${modelStr} ${turnStr}`;
+  let right = `${contextStrStyled} ${modelStr}`;
 
   // ── Layout ──────────────────────────────────────────────────────────
   // Calculate visible widths and pad
@@ -382,8 +382,22 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
           // Theme changed — nothing special to do
         },
         render(width: number): string[] {
-          const line = renderFooter(state, ctx, theme, width);
-          return [line];
+          const lines: string[] = [];
+
+          // Line 1: Extension statuses (model-display, activity-indicator, etc.)
+          // These are set via ctx.ui.setStatus() and would be hidden when a
+          // custom footer is active. We include them here so that status
+          // entries (e.g., provider/model from model-display) remain visible.
+          const statuses = footerData.getExtensionStatuses();
+          if (statuses && statuses.length > 0) {
+            const statusLine = statuses.join('  ');
+            lines.push(truncateToTerminalWidth(theme.fg('muted', statusLine), width));
+          }
+
+          // Line 2: Session health
+          lines.push(renderFooter(state, ctx, theme, width));
+
+          return lines;
         },
       };
     });

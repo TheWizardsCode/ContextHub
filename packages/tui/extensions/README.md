@@ -206,16 +206,20 @@ The response age indicator uses colour coding to provide at-a-glance health:
 
 ### Layout
 
-The footer follows this layout:
+The footer spans two lines. The first line shows extension status entries
+(e.g., resolved provider/model, activity indicator). The second line shows
+session health metrics:
 
 ```
-○ 3s ↑1.2k ↓4.5k 39.1%/128k gpt-4 #3
-│   │   │       │            │       └─ Turn count
-│   │   │       │            └───────── Model ID
-│   │   │       └────────────────────── Context usage
-│   │   └────────────────────────────── Output tokens
-│   └────────────────────────────────── Input tokens
-└────────────────────────────────────── Status marker
+openai/gpt-4  ⏵ /wl                          ← Extension statuses
+○ #3 3s ↑1.2k ↓4.5k 39.1%/128k gpt-4          ← Session health
+│  │   │   │       │            │
+│  │   │   │       │            └──────────── Model ID
+│  │   │   │       └────────────────────────── Context usage
+│  │   │   └────────────────────────────────── Output tokens
+│  │   └────────────────────────────────────── Input tokens
+│  └────────────────────────────────────────── Response age
+└───────────────────────────────────────────── Turn count + Status marker
 ```
 
 ### Event Tracking
@@ -252,6 +256,11 @@ produce errors when used outside the Pi TUI.
   `@earendil-works/pi-tui` for safe ANSI-aware truncation.
 - Only one `setFooter()` can be active at a time. This module's footer
   replaces Pi's default footer (git branch, cwd path, etc.).
+- The footer includes extension status entries (set via `ctx.ui.setStatus()`)
+  from `footerData.getExtensionStatuses()` as the first line. This ensures
+  that status entries from other modules — such as the resolved
+  provider/model (`worklog-0model`) and the activity indicator
+  (`worklog-activity`) — remain visible alongside the session health metrics.
 - Token counts are calculated from session entries by summing
   `usage.input` and `usage.output` from assistant messages.
 - Context usage is obtained from `ctx.getContextUsage()` which returns
