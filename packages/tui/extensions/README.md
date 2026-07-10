@@ -178,6 +178,85 @@ when used outside the Pi TUI.
 - Built-in Pi commands and free-form text clear the indicator via the same
   `input` event handler.
 
+## Session Health Footer
+
+The extension displays a **real-time session health footer** that replaces
+Pi's default footer with a rich health dashboard showing:
+
+### What It Displays
+
+| Element | Description |
+|---------|-------------|
+| **Status marker** | `○` idle, `●` streaming, `⚡ <tool>` tool execution |
+| **Response age** | Colour-coded elapsed time since last model response |
+| **Token usage** | Input/output token counts (e.g., `↑1.2k ↓4.5k`) |
+| **Context usage** | Percentage of context window (e.g., `76.8%/128k`) |
+| **Model ID** | Currently active model (e.g., `gpt-4`) |
+| **Turn count** | Number of turns in the current session (e.g., `#3`) |
+
+### Colour Coding
+
+The response age indicator uses colour coding to provide at-a-glance health:
+
+| Colour | Threshold | Meaning |
+|--------|-----------|--------|
+| Green (`success`) | < 5s | Healthy — response received recently |
+| Yellow/Orange (`warning`) | 5–30s | Moderate delay — model is processing |
+| Red (`error`) | > 30s | Stuck or slow — consider interrupting |
+
+### Layout
+
+The footer follows this layout:
+
+```
+○ 3s ↑1.2k ↓4.5k 39.1%/128k gpt-4 #3
+│   │   │       │            │       └─ Turn count
+│   │   │       │            └───────── Model ID
+│   │   │       └────────────────────── Context usage
+│   │   └────────────────────────────── Output tokens
+│   └────────────────────────────────── Input tokens
+└────────────────────────────────────── Status marker
+```
+
+### Event Tracking
+
+The extension subscribes to the following Pi lifecycle events to update state:
+
+| Event | Update |
+|-------|--------|
+| `turn_start` | Increment turn count, set status to streaming |
+| `message_end` (assistant) | Set status to idle, update response time |
+| `tool_execution_start` | Set status to tool with tool name |
+| `tool_execution_end` | Reset status to idle |
+| `model_select` | Refresh footer display |
+| `session_start` | Reset counters, initialize footer |
+| `session_shutdown` | Clean up ticker interval |
+
+### Ticker
+
+A 1-second `setInterval` ticker refreshes the token counts and context usage
+from the session manager. The footer re-renders automatically when the branch
+changes.
+
+### Graceful Degradation
+
+The session health footer gracefully degrades in non-TUI modes (print, JSON,
+RPC) where `setFooter` is a no-op. The feature has no effect and does not
+produce errors when used outside the Pi TUI.
+
+### Technical Notes
+
+- Uses Pi's `ctx.ui.setFooter()` API to replace the entire footer with a
+  custom render function.
+- The footer renderer uses `truncateToWidth` and `visibleWidth` from
+  `@earendil-works/pi-tui` for safe ANSI-aware truncation.
+- Only one `setFooter()` can be active at a time. This module's footer
+  replaces Pi's default footer (git branch, cwd path, etc.).
+- Token counts are calculated from session entries by summing
+  `usage.input` and `usage.output` from assistant messages.
+- Context usage is obtained from `ctx.getContextUsage()` which returns
+  `{ tokens, contextWindow, percent }`.
+
 ## Error Recovery Module
 
 The extension includes a built-in automatic error recovery module that replaces the

@@ -20,6 +20,7 @@ import { reloadSettings, currentSettings, STAGE_MAP, VALID_STAGES, updateSetting
 import { runWl, defaultListWorkItems, defaultListWorkItemsWithStage, createDefaultListWorkItems, createListWorkItemsWithStage, createDefaultListWorkItemsDb, createListWorkItemsWithStageDb, fetchTotalActionableCountDb } from './lib/tools.js';
 import { registerAutoInject } from './lib/auto-inject.js';
 import { registerModelDisplay } from './model-display.js';
+import { registerSessionHealth } from './session-health.js';
 import { INSTALL_GUARDRAILS } from './lib/guardrails.js';
 import { registerSkillPathTool } from './lib/skill-path.js';
 import { registerRecoveryModule } from './lib/recovery/register-recovery.js';
@@ -90,6 +91,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     registerActivityIndicator(pi, () => currentSettings.showActivityIndicator);
     registerAutoInject(pi);
     registerModelDisplay(pi);
+    registerSessionHealth(pi);
     INSTALL_GUARDRAILS(pi, { enabled: currentSettings.guardrailsEnabled });
 
     // ── Skill path discovery tool ─────────────────────────────────
