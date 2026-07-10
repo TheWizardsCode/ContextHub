@@ -249,7 +249,8 @@ export function extractTokenUsage(
  * - Model selection changes
  * - Tool execution lifecycle
  *
- * The footer renderer updates every second via setInterval.
+ * The footer renderer updates every second via setInterval and on state
+ * changes via tui.requestRender().
  *
  * @param pi - The ExtensionAPI instance
  */
@@ -257,66 +258,69 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
   // ── State ───────────────────────────────────────────────────────────
   let state: SessionHealthState = { ...DEFAULT_STATE };
   let tickerInterval: ReturnType<typeof setInterval> | null = null;
+  let requestRender: (() => void) | null = null;
 
-  // ── Update functions ────────────────────────────────────────────────
+  /**
+   * Update state and request a footer re-render.
+   */
   function updateState(
     _event: any,
-    ctx: ExtensionContext,
     updates: Partial<SessionHealthState>,
   ): void {
     state = { ...state, ...updates };
-    // Force a footer re-render by calling setFooter again (this triggers
-    // the TUI to re-render the footer)
-    ctx.ui.setFooter(undefined);
-    // Re-register the footer to refresh it
-    registerSessionHealth(pi);
+    if (requestRender) {
+      requestRender();
+    }
   }
 
   // ── Event handlers ──────────────────────────────────────────────────
 
   // Track turns
-  pi.on('turn_start', (_event, ctx) => {
+  pi.on('turn_start', (_event) => {
     state.turnCount += 1;
     state.status = 'streaming';
     state.lastResponseTime = Date.now();
-    // Refresh footer
-    updateState(_event, ctx, {});
+    updateState(_event, {});
   });
 
-  pi.on('message_end', (event, ctx) => {
+  pi.on('message_end', (event) => {
     if (event.message?.role === 'assistant') {
       // Reset to idle after assistant message ends
       state.status = 'idle';
       state.lastResponseTime = Date.now();
-      updateState(event, ctx, {});
+      updateState(event, {});
     }
   });
 
   // Tool execution lifecycle
-  pi.on('tool_execution_start', (event, ctx) => {
+  pi.on('tool_execution_start', (event) => {
     state.status = 'tool';
     state.toolName = event.toolName ?? null;
-    updateState(event, ctx, {});
+    updateState(event, {});
   });
 
-  pi.on('tool_execution_end', (event, ctx) => {
+  pi.on('tool_execution_end', (event) => {
     // Only reset to idle if we're not currently streaming
     if (state.status === 'tool') {
       state.status = 'idle';
       state.toolName = null;
-      updateState(event, ctx, {});
+      updateState(event, {});
     }
   });
 
   // Model selection
-  pi.on('model_select', (event, ctx) => {
-    updateState(event, ctx, {});
+  pi.on('model_select', (event) => {
+    updateState(event, {});
   });
 
   // Session start — reset counters
   pi.on('session_start', (_event, ctx) => {
     state = { ...DEFAULT_STATE, contextUsage: state.contextUsage };
-    updateState(_event, ctx, {});
+    updateState(_event, {});
+
+    // Set the footer and start the ticker on first session start
+    setFooter(ctx);
+    startTicker(ctx);
   });
 
   // Session shutdown — clean up ticker
@@ -361,24 +365,27 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
     const theme = ctx.ui.theme;
     if (!theme?.fg) return;
 
-    ctx.ui.setFooter((tui, _theme, footerData) => ({
-      dispose: footerData.onBranchChange(() => tui.requestRender()),
-      invalidate() {
-        // Theme changed — nothing special to do
-      },
-      render(width: number): string[] {
-        const line = renderFooter(state, ctx, theme, width);
-        return [line];
-      },
-    }));
+    ctx.ui.setFooter((tui, _theme, footerData) => {
+      // Store requestRender for use in event handlers
+      requestRender = () => tui.requestRender();
+
+      const disposeBranchChange = footerData.onBranchChange(() => tui.requestRender());
+      return {
+        dispose() {
+          if (tickerInterval) {
+            clearInterval(tickerInterval);
+            tickerInterval = null;
+          }
+          disposeBranchChange();
+        },
+        invalidate() {
+          // Theme changed — nothing special to do
+        },
+        render(width: number): string[] {
+          const line = renderFooter(state, ctx, theme, width);
+          return [line];
+        },
+      };
+    });
   }
-
-  // ── Initialize ──────────────────────────────────────────────────────
-  pi.on('session_start', (_event, ctx) => {
-    // Set the footer
-    setFooter(ctx);
-
-    // Start the ticker
-    startTicker(ctx);
-  });
 }
