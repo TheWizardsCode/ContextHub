@@ -98,7 +98,8 @@ export function onModelChange(cb: () => void): () => void {
  * Register model-display event handlers with a Pi extension instance.
  *
  * Sets up listeners for:
- * - `model_select` — tracks whether a model is selected (for `(pending)` state)
+ * - `session_start` — captures the current Pi model alias from context
+ * - `model_select` — tracks model selection changes
  * - `after_provider_response` — reads the `X-Resolved-Model` header from
  *   llama-proxy responses
  *
@@ -110,6 +111,17 @@ export function onModelChange(cb: () => void): () => void {
  * @param pi - The ExtensionAPI instance
  */
 export function registerModelDisplay(pi: ExtensionAPI): void {
+  // Capture initial Pi model alias from session context.
+  // This runs before the footer is set up, ensuring getSelectedModel()
+  // returns the alias even when no model_select event has fired yet.
+  // Only populates if model_select hasn't already set the value.
+  pi.on('session_start', (_event, ctx) => {
+    if (ctx.model?.id && !_selectedModel) {
+      _selectedModel = ctx.model.id;
+      _onModelChange?.();
+    }
+  });
+
   // Track model selection changes
   pi.on('model_select', (_event, _ctx) => {
     // event.model has provider and id fields

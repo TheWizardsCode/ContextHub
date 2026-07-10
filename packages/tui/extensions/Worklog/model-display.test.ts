@@ -2,8 +2,8 @@
  * Unit tests for model-display.ts — Model/provider display state management.
  *
  * Verifies that:
- * 1. registerModelDisplay() sets up event listeners for model_select and
- *    after_provider_response.
+ * 1. registerModelDisplay() sets up event listeners for session_start,
+ *    model_select, and after_provider_response.
  * 2. The getters return the correct values after events fire.
  * 3. after_provider_response updates the resolved model from X-Resolved-Model header.
  * 4. When no proxy response has been received yet, getResolvedModel() returns null.
@@ -96,6 +96,12 @@ describe('model-display', () => {
 
   // ── Event registration ───────────────────────────────────────────
 
+  it('registers session_start listener', () => {
+    registerModelDisplay(mockPi);
+    expect(mockPi.on).toHaveBeenCalledWith('session_start', expect.any(Function));
+    expect(registeredListeners['session_start']).toBeDefined();
+  });
+
   it('registers model_select listener', () => {
     registerModelDisplay(mockPi);
     expect(mockPi.on).toHaveBeenCalledWith('model_select', expect.any(Function));
@@ -106,6 +112,34 @@ describe('model-display', () => {
     registerModelDisplay(mockPi);
     expect(mockPi.on).toHaveBeenCalledWith('after_provider_response', expect.any(Function));
     expect(registeredListeners['after_provider_response']).toBeDefined();
+  });
+
+  // ── session_start behavior ──────────────────────────────────────
+
+  it('session_start captures Pi model alias from context', () => {
+    registerModelDisplay(mockPi);
+    const handler = registeredListeners['session_start'];
+
+    handler({}, { model: { id: 'code' } });
+
+    expect(getSelectedModel()).toBe('code');
+    expect(getResolvedModel()).toBeNull();
+  });
+
+  it('session_start does not overwrite an already-set selectedModel', () => {
+    registerModelDisplay(mockPi);
+    const modelHandler = registeredListeners['model_select'];
+    const sessionHandler = registeredListeners['session_start'];
+
+    // Model already selected
+    modelHandler({ model: { id: 'plan' } }, mockCtx);
+    expect(getSelectedModel()).toBe('plan');
+
+    // session_start with a different model context
+    sessionHandler({}, { model: { id: 'code' } });
+
+    // Should NOT overwrite — model_select is the authoritative source
+    expect(getSelectedModel()).toBe('plan');
   });
 
   // ── model_select behavior ────────────────────────────────────────
@@ -200,6 +234,17 @@ describe('model-display', () => {
   });
 
   // ── onModelChange behavior ────────────────────────────────────────
+
+  it('onModelChange fires on session_start when model is available', () => {
+    registerModelDisplay(mockPi);
+    const changeCb = vi.fn();
+    onModelChange(changeCb);
+
+    const handler = registeredListeners['session_start'];
+    handler({}, { model: { id: 'code' } });
+
+    expect(changeCb).toHaveBeenCalledOnce();
+  });
 
   it('onModelChange fires on model_select', () => {
     registerModelDisplay(mockPi);
