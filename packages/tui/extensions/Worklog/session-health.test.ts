@@ -67,6 +67,7 @@ import {
   formatTokens,
   formatContextUsage,
   extractTokenUsage,
+  extractInitialPrompt,
   renderFooter,
   type SessionHealthState,
 } from './session-health.js';
@@ -326,6 +327,64 @@ describe('session-health', () => {
         percent: 10.0,
       });
       expect(result).toBe('10.0%/10.0M');
+    });
+  });
+
+  // ── Initial prompt extraction ───────────────────────────────────────
+
+  describe('extractInitialPrompt', () => {
+    it('extracts first user message content', () => {
+      const entries = [
+        { type: 'message', message: { role: 'user', content: 'Fix the bug by adding validation' } },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBe('Fix the bug by adding validation');
+    });
+
+    it('returns first line of multi-line message', () => {
+      const entries = [
+        { type: 'message', message: { role: 'user', content: 'First line\nSecond line\nThird line' } },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBe('First line');
+    });
+
+    it('returns null when no user message found', () => {
+      const entries = [
+        { type: 'message', message: { role: 'assistant', content: 'Hello!' } },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBeNull();
+    });
+
+    it('returns null for empty entries', () => {
+      const result = extractInitialPrompt([]);
+      expect(result).toBeNull();
+    });
+
+    it('ignores non-message entries', () => {
+      const entries = [
+        { type: 'something_else', data: {} },
+        { type: 'message', message: { role: 'user', content: 'Actual prompt' } },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBe('Actual prompt');
+    });
+
+    it('returns null for empty content', () => {
+      const entries = [
+        { type: 'message', message: { role: 'user', content: '' } },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBeNull();
+    });
+
+    it('returns null for whitespace-only content', () => {
+      const entries = [
+        { type: 'message', message: { role: 'user', content: '   ' } },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBeNull();
     });
   });
 
@@ -763,13 +822,28 @@ describe('session-health', () => {
      * Helper: invoke the footer factory and return its render(…) result.
      * Simulates what Pi TUI does: calls setFooter(factory), then calls
      * factory(tui, theme, footerData) → { render(width) } → render(lines).
+     *
+     * @param ctx - Extension context
+     * @param initialPrompt - Optional initial user message to inject into
+     *   the session entries so the ticker's refreshState populates it.
      */
-    function fabricateFooterLines(ctx: any): string[] {
+    function fabricateFooterLines(ctx: any, initialPrompt?: string | null): string[] {
       registerSessionHealth(mockPi);
+
+      // Override getBranch to return entries with the initial prompt
+      const sessionBranch = initialPrompt
+        ? [{ type: 'message', message: { role: 'user', content: initialPrompt } }]
+        : [];
+      const ctxWithPrompt = {
+        ...ctx,
+        sessionManager: {
+          getBranch: () => sessionBranch,
+        },
+      };
 
       // Start a session to trigger footer setup
       const sessionStartHandler = getHandler('session_start');
-      sessionStartHandler({}, ctx);
+      sessionStartHandler({}, ctxWithPrompt);
 
       // Capture the factory passed to setFooter
       expect(footerCalls.length).toBeGreaterThanOrEqual(1);
@@ -834,6 +908,54 @@ describe('session-health', () => {
       expect(lines.length).toBe(2);
       expect(lines[1]).toContain('—');
       expect(lines[1]).toContain('[dim');
+    });
+
+    it('shows initial prompt preview alongside model info on line 3', () => {
+      mocks.mockGetResolvedModel.mockReturnValue('openai/gpt-4');
+      mocks.mockGetSelectedModel.mockReturnValue('code');
+
+      const lines = fabricateFooterLines(
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } },
+        'Fix the bug by adding validation',
+      );
+
+      expect(lines.length).toBe(2);
+      // Format: "<alias> → <provider/model>  │  \"<preview>\""
+      expect(lines[1]).toContain('code → openai/gpt-4');
+      expect(lines[1]).toContain('"Fix the bug by adding validation"');
+      expect(lines[1]).toContain('[dim');
+    });
+
+    it('truncates long initial prompt preview', () => {
+      mocks.mockGetResolvedModel.mockReturnValue(null);
+      mocks.mockGetSelectedModel.mockReturnValue('code');
+
+      const longPrompt = 'Write a comprehensive test suite for the authentication module including all edge cases like token expiry and refresh';
+      const lines = fabricateFooterLines(
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } },
+        longPrompt,
+      );
+
+      expect(lines.length).toBe(2);
+      // Should show alias + truncated prompt with ...
+      expect(lines[1]).toContain('code');
+      expect(lines[1]).toContain('...');
+      expect(lines[1]).toContain('[dim');
+    });
+
+    it('shows just model info when no initial prompt available', () => {
+      mocks.mockGetResolvedModel.mockReturnValue('openai/gpt-4');
+      mocks.mockGetSelectedModel.mockReturnValue('code');
+
+      const lines = fabricateFooterLines(
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } },
+        null, // no initial prompt
+      );
+
+      expect(lines.length).toBe(2);
+      expect(lines[1]).toContain('code → openai/gpt-4');
+      // Should NOT contain a quoted prompt
+      expect(lines[1]).not.toContain('"');
     });
 
     it('updates when after_provider_response fires (requestRender triggered)', () => {

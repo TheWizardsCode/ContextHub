@@ -58,6 +58,8 @@ export interface SessionHealthState {
   inputTokens: number;
   outputTokens: number;
   contextUsage: { tokens: number | null; contextWindow: number; percent: number | null };
+  /** First few characters of the session's initial user message. */
+  initialPrompt: string | null;
 }
 
 /** Default initial state. */
@@ -70,6 +72,7 @@ const DEFAULT_STATE: SessionHealthState = {
   inputTokens: 0,
   outputTokens: 0,
   contextUsage: { tokens: null, contextWindow: 128000, percent: null },
+  initialPrompt: null,
 };
 
 /** Ticker interval in milliseconds (1 second). */
@@ -257,6 +260,27 @@ export function renderFooter(
 }
 
 /**
+ * Extract the first user message content from session entries.
+ * Returns the first line of the initial user message, or null if none found.
+ *
+ * @param entries - Session entries from ctx.sessionManager.getBranch()
+ * @returns Initial user prompt text, or null
+ */
+export function extractInitialPrompt(
+  entries: Array<{ type: string; message?: any }>,
+): string | null {
+  for (const entry of entries) {
+    if (entry.type === 'message' && entry.message?.role === 'user') {
+      const content = entry.message.content;
+      if (typeof content === 'string' && content.trim()) {
+        return content.split('\n')[0].trim();
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Extract token usage from session entries.
  *
  * Iterates through session entries to sum up input/output tokens
@@ -401,6 +425,11 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
           contextWindow: 128000,
           percent: null,
         };
+        // Capture the initial prompt on first encounter (it may be set
+        // on the very first tick after session_start)
+        if (!state.initialPrompt) {
+          state.initialPrompt = extractInitialPrompt(entries);
+        }
       } catch {
         // Best-effort: if session manager unavailable, keep current state
       }
@@ -464,22 +493,38 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
           // Line 2: Session health
           lines.push(renderFooter(state, ctx, theme, width));
 
-          // Line 3: Provider/model display (grey/dim text)
+          // Line 3: Provider/model + initial prompt preview (grey/dim text)
           // Shows the Pi model alias (e.g. "code", "plan") and, when available,
           // the provider/model resolved by the router (e.g. "openai/gpt-4").
-          // Always visible — shows "<alias> → <provider/model>" when both are
-          // known, just "<alias>" if not yet resolved, or "—" when nothing
-          // is available.
+          // Also shows a preview of the first user message that started the
+          // session when available. Always visible.
           const selectedModel = getSelectedModel();
           const resolvedModel = getResolvedModel();
-          if (selectedModel) {
-            const label = resolvedModel ? `${selectedModel} → ${resolvedModel}` : selectedModel;
-            lines.push(truncateToTerminalWidth(theme.fg('dim', label), width));
+          const initialPrompt = state.initialPrompt;
+
+          // Build model portion
+          let modelPart: string;
+          if (selectedModel && resolvedModel) {
+            modelPart = `${selectedModel} → ${resolvedModel}`;
+          } else if (selectedModel) {
+            modelPart = selectedModel;
           } else if (resolvedModel) {
-            lines.push(truncateToTerminalWidth(theme.fg('dim', resolvedModel), width));
+            modelPart = resolvedModel;
           } else {
-            lines.push(truncateToTerminalWidth(theme.fg('dim', '—'), width));
+            modelPart = '—';
           }
+
+          // Build initial prompt portion (quoted preview)
+          let promptPart: string | null = null;
+          if (initialPrompt) {
+            // Limit to ~40 chars for a reasonable preview
+            const preview =
+              initialPrompt.length > 40 ? `${initialPrompt.slice(0, 37)}...` : initialPrompt;
+            promptPart = `"${preview}"`;
+          }
+
+          const label = promptPart ? `${modelPart}  │  ${promptPart}` : modelPart;
+          lines.push(truncateToTerminalWidth(theme.fg('dim', label), width));
 
           return lines;
         },
