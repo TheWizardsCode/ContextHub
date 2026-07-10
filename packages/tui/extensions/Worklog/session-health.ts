@@ -429,6 +429,7 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
         // on the very first tick after session_start)
         if (!state.initialPrompt) {
           state.initialPrompt = extractInitialPrompt(entries);
+          requestRender?.();
         }
       } catch {
         // Best-effort: if session manager unavailable, keep current state
