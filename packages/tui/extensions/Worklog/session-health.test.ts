@@ -437,6 +437,72 @@ describe('session-health', () => {
       const result = extractInitialPrompt(entries);
       expect(result).toBe('Fix the bug');
     });
+
+    // ── Skill block tests ───────────────────────────────────────────
+
+    it('extracts skill name from expanded skill block', () => {
+      const entries = [
+        {
+          type: 'message',
+          message: {
+            role: 'user',
+            content: [{ type: 'text', text: '<skill name="audit" location="/home/user/.pi/agent/skills/audit/SKILL.md">\nReferences are relative to /home/user/.pi/agent/skills/audit/.\n\n# SKILL FILE CONTENT\n\n</skill>' }],
+          },
+        },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBe('[skill:audit]');
+    });
+
+    it('extracts skill name and args from expanded skill block with args', () => {
+      const entries = [
+        {
+          type: 'message',
+          message: {
+            role: 'user',
+            content: [{ type: 'text', text: '<skill name="audit" location="/home/user/.pi/agent/skills/audit/SKILL.md">\nReferences are relative to /home/user/.pi/agent/skills/audit/.\n\n# SKILL FILE CONTENT\n\n</skill>\n\nWL-123' }],
+          },
+        },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBe('[skill:audit] WL-123');
+    });
+
+    it('extracts skill name and multi-word args from expanded skill block', () => {
+      const entries = [
+        {
+          type: 'message',
+          message: {
+            role: 'user',
+            content: [{ type: 'text', text: '<skill name="implement" location="/home/user/.pi/agent/skills/implement/SKILL.md">\nReferences are relative to /home/user/.pi/agent/skills/implement/.\n\n[SKILL CONTENT]\n\n</skill>\n\nWL-123 implement the feature' }],
+          },
+        },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBe('[skill:implement] WL-123 implement the feature');
+    });
+
+    it('handles skill block in string format content (backward compat)', () => {
+      const entries = [
+        {
+          type: 'message',
+          message: {
+            role: 'user',
+            content: '<skill name="audit" location="/path/to/skill.md">\n</skill>\n\nWL-456',
+          },
+        },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBe('[skill:audit] WL-456');
+    });
+
+    it('returns regular first line for non-skill content in array format', () => {
+      const entries = [
+        { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'Fix the bug' }] } },
+      ];
+      const result = extractInitialPrompt(entries);
+      expect(result).toBe('Fix the bug');
+    });
   });
 
   // ── Token extraction ────────────────────────────────────────────────

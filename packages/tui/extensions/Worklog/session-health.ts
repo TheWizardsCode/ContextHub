@@ -263,6 +263,15 @@ export function renderFooter(
  * Extract the first user message content from session entries.
  * Returns the first line of the initial user message, or null if none found.
  *
+ * Handles:
+ * - String content (legacy format)
+ * - Array content (Pi's default format: [{ type: "text", text: "..." }, ...])
+ * - Skill expansion blocks (<skill name="...">...</skill>) — returns a compact
+ *   representation like "[skill:audit] WL-123" instead of the raw XML first line
+ *
+ * Text extraction matches the approach used by Pi's own `extractTextContent`
+ * in session-manager.js and `_getUserMessageText` in agent-session.js.
+ *
  * @param entries - Session entries from ctx.sessionManager.getBranch()
  * @returns Initial user prompt text, or null
  */
@@ -272,28 +281,51 @@ export function extractInitialPrompt(
   for (const entry of entries) {
     if (entry.type === 'message' && entry.message?.role === 'user') {
       const content = entry.message.content;
-      // Handle string content (legacy/test format, also used by some providers)
-      if (typeof content === 'string') {
-        if (content.trim()) {
-          return content.split('\n')[0].trim();
-        }
-        continue;
+      const text = extractMessageText(content);
+      if (!text) continue;
+
+      // Check for skill expansion block: <skill name="...">...</skill>
+      // Pi expands /skill:name into a wrapping XML block before storing
+      const skillBlockMatch = text.match(/^<skill\s+name="([^"]*)"/);
+      if (skillBlockMatch) {
+        const skillName = skillBlockMatch[1];
+        // Extract args after the closing </skill> tag
+        const afterSkill = text.match(/<\/skill>\s*\n?\s*([\s\S]*)$/);
+        const args = afterSkill ? afterSkill[1].trim() : '';
+        return args ? `[skill:${skillName}] ${args}` : `[skill:${skillName}]`;
       }
-      // Handle array content (Pi's default format: [{ type: "text", text: "..." }, ...])
-      // See agent-session.js:788-795 where user messages are always created as arrays
-      if (Array.isArray(content)) {
-        const textParts: string[] = [];
-        for (const part of content) {
-          if (part.type === 'text' && typeof part.text === 'string') {
-            textParts.push(part.text);
-          }
-        }
-        const combined = textParts.join('\n').trim();
-        if (combined) {
-          return combined.split('\n')[0].trim();
-        }
+
+      // Regular content: return first line
+      return text.split('\n')[0].trim();
+    }
+  }
+  return null;
+}
+
+/**
+ * Extract text content from a message content field, which may be either
+ * a string (legacy format) or an array of TextContent/ImageContent parts
+ * (Pi's default format).
+ *
+ * Matches the approach used by Pi's own `extractTextContent` in
+ * session-manager.js and `_getUserMessageText` in agent-session.js.
+ *
+ * @param content - The message.content field (string or content part array)
+ * @returns The extracted text, or null if the content is empty or non-text
+ */
+function extractMessageText(content: any): string | null {
+  if (typeof content === 'string') {
+    return content.trim() || null;
+  }
+  if (Array.isArray(content)) {
+    const textParts: string[] = [];
+    for (const part of content) {
+      if (part.type === 'text' && typeof part.text === 'string') {
+        textParts.push(part.text);
       }
     }
+    const combined = textParts.join('\n').trim();
+    return combined || null;
   }
   return null;
 }
