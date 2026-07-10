@@ -37,7 +37,11 @@ export const STATUS_TOOL = '⚡';
  *
  * - `status`: Current session status (idle, streaming, or tool execution)
  * - `toolName`: Name of the currently executing tool (when status === 'tool')
- * - `lastResponseTime`: Timestamp of the last model response
+ * - `lastResponseTime`: Timestamp of the last model response (updated at
+ *   `turn_start` and `message_end`; used for the center elapsed timer)
+ * - `lastChunkTime`: Timestamp of the last `message_update` event (updated
+ *   only during active streaming; used for the "last chunk" timer in the
+ *   left section)
  * - `turnCount`: Number of turns in the current session
  * - `inputTokens`: Cumulative input tokens
  * - `outputTokens`: Cumulative output tokens
@@ -47,6 +51,7 @@ export interface SessionHealthState {
   status: 'idle' | 'streaming' | 'tool';
   toolName: string | null;
   lastResponseTime: number | null;
+  lastChunkTime: number | null;
   turnCount: number;
   inputTokens: number;
   outputTokens: number;
@@ -58,6 +63,7 @@ const DEFAULT_STATE: SessionHealthState = {
   status: 'idle',
   toolName: null,
   lastResponseTime: null,
+  lastChunkTime: null,
   turnCount: 0,
   inputTokens: 0,
   outputTokens: 0,
@@ -91,6 +97,24 @@ export function formatElapsedTime(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = Math.round(seconds % 60);
   return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+}
+
+/**
+ * Format a short "Xs ago" string for the last-chunk indicator.
+ *
+ * Used only during active streaming to show how long it has been since the
+ * last streaming chunk arrived.
+ *
+ * @param seconds - Elapsed time in seconds
+ * @returns Formatted string (e.g., "2s ago", "1m 5s ago")
+ */
+export function formatShortElapsedTime(seconds: number): string {
+  if (seconds === Infinity || seconds < 0) return '—';
+  if (seconds < 10) return `${Math.round(seconds)}s ago`;
+  if (seconds < 60) return `${Math.round(seconds)}s ago`;
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60);
+  return secs > 0 ? `${mins}m ${secs}s ago` : `${mins}m ago`;
 }
 
 /**
@@ -140,7 +164,12 @@ export function formatContextUsage(usage: SessionHealthState['contextUsage']): s
 /**
  * Build the footer render string.
  *
- * Layout: [marker] [age] ↑input ↓output [context%/window] [model] #[turn]
+ * Layout (three-section):
+ *   Left:  [marker] [#turn] (Last Chunk: Xs)
+ *   Center: [elapsed since stage start]
+ *   Right: ↑input ↓output [context%/window] [model]
+ *
+ * The (Last Chunk: Xs) indicator appears only when `status === 'streaming'`.
  *
  * @param state - Session health state
  * @param ctx - Extension context with UI and model access
@@ -154,39 +183,48 @@ export function renderFooter(
   theme: { fg: (color: string, text: string) => string },
   width: number,
 ): string {
-  // ── Build left section ──────────────────────────────────────────────
-  // Status marker
+  // ── Left section ────────────────────────────────────────────────────
+  // Status marker with label
   let marker = '';
   switch (state.status) {
     case 'idle':
-      marker = STATUS_IDLE;
+      marker = `${STATUS_IDLE} Idle`;
       break;
     case 'streaming':
-      marker = STATUS_STREAMING;
+      marker = `${STATUS_STREAMING} Streaming`;
       break;
     case 'tool':
-      marker = STATUS_TOOL + (state.toolName ? ` ${state.toolName}` : '');
+      marker = `${STATUS_TOOL}${state.toolName ? ` Tool: ${state.toolName}` : ' Tool'}`;
       break;
   }
   const markerStr = theme.fg('dim', marker);
 
-  // Elapsed time
+  // Turn count
+  const turnStr = theme.fg('dim', `#${state.turnCount}`);
+
+  // Last chunk indicator (streaming only)
+  let lastChunkStr = '';
+  if (state.status === 'streaming' && state.lastChunkTime !== null) {
+    const chunkElapsed = getElapsedTime(state.lastChunkTime);
+    const lastChunkElapsed = formatShortElapsedTime(chunkElapsed);
+    lastChunkStr = theme.fg('dim', `(Last Chunk: ${lastChunkElapsed})`);
+  }
+
+  const left = `${markerStr} ${turnStr} ${lastChunkStr}`;
+
+  // ── Center section ──────────────────────────────────────────────────
+  // Elapsed time since the stage started (lastResponseTime updated at
+  // turn_start and message_end)
   const elapsed = getElapsedTime(state.lastResponseTime);
   const timeStr = formatElapsedTime(elapsed);
   const timeColor = getTimeColor(elapsed);
   const timeStrStyled = theme.fg(timeColor, timeStr);
 
+  // ── Right section ───────────────────────────────────────────────────
   // Token counts
   const tokensStr = `↑${formatTokens(state.inputTokens)} ↓${formatTokens(state.outputTokens)}`;
   const tokensStrStyled = theme.fg('muted', tokensStr);
 
-  // Turn count (shown before timer per user feedback)
-  const turnStr = theme.fg('dim', `#${state.turnCount}`);
-
-  // Left section: marker, turn count, elapsed time, token counts
-  const left = `${markerStr} ${turnStr} ${timeStrStyled} ${tokensStrStyled}`;
-
-  // ── Build right section ─────────────────────────────────────────────
   // Context usage
   const contextStr = formatContextUsage(state.contextUsage);
   const contextStrStyled = theme.fg('dim', contextStr);
@@ -195,22 +233,23 @@ export function renderFooter(
   const modelId = ctx.model?.id ?? '—';
   const modelStr = theme.fg('dim', modelId);
 
-  let right = `${contextStrStyled} ${modelStr}`;
+  let right = `${tokensStrStyled} ${contextStrStyled} ${modelStr}`;
 
   // ── Layout ──────────────────────────────────────────────────────────
   // Calculate visible widths and pad
   const leftWidth = visibleWidth(left);
+  const centerWidth = visibleWidth(timeStrStyled);
   const rightWidth = visibleWidth(right);
-  const totalContentWidth = leftWidth + rightWidth;
+  const totalContentWidth = leftWidth + centerWidth + rightWidth;
 
   if (totalContentWidth >= width) {
     // Not enough space: truncate right
-    const maxRight = Math.max(0, width - leftWidth - 1);
+    const maxRight = Math.max(0, width - leftWidth - centerWidth - 1);
     right = truncateToTerminalWidth(right, maxRight, { ellipsis: '…' });
   }
 
   const padding = ' '.repeat(Math.max(0, width - totalContentWidth));
-  return truncateToTerminalWidth(left + padding + right, width);
+  return truncateToTerminalWidth(left + padding + timeStrStyled + ' ' + right, width);
 }
 
 /**
@@ -280,6 +319,12 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
     state.turnCount += 1;
     state.status = 'streaming';
     state.lastResponseTime = Date.now();
+    updateState(_event, {});
+  });
+
+  // Track streaming chunks — updates lastChunkTime only on message_update
+  pi.on('message_update', (_event) => {
+    state.lastChunkTime = Date.now();
     updateState(_event, {});
   });
 
