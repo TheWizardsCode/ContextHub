@@ -185,14 +185,15 @@ Pi's default footer with a rich health dashboard showing:
 
 ### What It Displays
 
-The footer uses a **three-section layout**: **left** (status + turn count + last-chunk timer), **center** (elapsed time since stage start), and **right** (token usage + context + model).
+The footer uses a **three-section layout**: **left** (status + elapsed time since last response + turn count + last-chunk timer), **center** (total wall-clock session duration), and **right** (token usage + context + model).
 
 | Element | Description |
 |---------|-------------|
 | **Status marker** | `○` idle, `●` streaming, `⚡ <tool>` tool execution |
 | **Last chunk time** | Elapsed time since the last streaming chunk (e.g., `(Last Chunk: 3s ago)`) — shown only during active streaming |
 | **Turn count** | Number of turns in the current session (e.g., `#3`) |
-| **Stage elapsed** | Colour-coded elapsed time since the current stage/turn started |
+| **Response elapsed** | Colour-coded elapsed time since the last model response (shown after the state marker in the left section) |
+| **Total session time** | Total wall-clock session duration (e.g., `Total: 5m 42s`) — shown in the center section |
 | **Token usage** | Input/output token counts (e.g., `↑1.2k ↓4.5k`) |
 | **Context usage** | Percentage of context window (e.g., `76.8%/128k`) |
 | **Model ID** | Currently active model (e.g., `gpt-4`) |
@@ -214,17 +215,17 @@ The footer spans two lines. The first line shows extension status entries
 session health metrics in a **three-section layout**:
 
 ```
-openai/gpt-4  ⏵ /wl                                      ← Extension statuses
-● Streaming #5 (Last Chunk: 3s ago)  45s ↑1.2k ↓4.5k 39.1%/128k gpt-4  ← Session health
-│  │          │  │            │        │    │       │      │           │
-│  │          │  │            │        │    │       │      └─────────── Model ID
-│  │          │  │            │        │    │       └─────────────────── Context usage
-│  │          │  │            │        │    └─────────────────────────── Output tokens
-│  │          │  │            │        └───────────────────────────────── Input tokens
-│  │          │  │            └────────────────────────────────────────── Stage elapsed time
-│  │          │  └─────────────────────────────────────────────────────── Last chunk timer (streaming only)
-│  │          └────────────────────────────────────────────────────────── Turn count
-└─────────────────────────────────────────────────────────────────────── Status marker
+openai/gpt-4  ⏵ /wl                                                         ← Extension statuses
+● Streaming 45s #5 (3s ago)  Total: 5m 42s  ↑1.2k ↓4.5k 39.1%/128k        ← Session health
+│  │          │   │  │             │           │    │       │              │
+│  │          │   │  │             │           │    │       └────────────── Context usage
+│  │          │   │  │             │           │    └────────────────────── Output tokens
+│  │          │   │  │             │           └─────────────────────────── Input tokens
+│  │          │   │  │             └─────────────────────────────────────── Total session time
+│  │          │   │  └───────────────────────────────────────────────────── Last chunk timer (streaming only)
+│  │          │   └──────────────────────────────────────────────────────── Turn count
+│  │          └──────────────────────────────────────────────────────────── Elapsed time since last response
+└────────────────────────────────────────────────────────────────────────── Status marker
 ```
 
 During **idle** or **tool execution**, the last-chunk timer is not shown.
@@ -235,7 +236,7 @@ The extension subscribes to the following Pi lifecycle events to update state:
 
 | Event | Update |
 |-------|--------|
-| `turn_start` | Increment turn count, set status to streaming, set stage-start timer |
+| `turn_start` | Increment turn count, set status to streaming, set last-response timer |
 | `message_update` | Update last-chunk timer (shown during active streaming) |
 | `message_end` (assistant) | Set status to idle, update response time |
 | `tool_execution_start` | Set status to tool with tool name |
@@ -269,9 +270,9 @@ produce errors when used outside the Pi TUI.
   that status entries from other modules — such as the resolved
   provider/model (`worklog-0model`) and the activity indicator
   (`worklog-activity`) — remain visible alongside the session health metrics.
-- The footer uses a **three-section layout**: left (status marker + turn
-  count + last-chunk timer), center (stage elapsed time), and right (token
-  counts + context usage + model ID).
+- The footer uses a **three-section layout**: left (status marker + elapsed
+  time since last response + turn count + last-chunk timer), center (total
+  session duration), and right (token counts + context usage + model ID).
 - A `lastChunkTime` property tracks the timestamp of the last `message_update`
   event. The **last-chunk timer** `(Last Chunk: Xs ago)` is displayed in the
   left section only when `status === 'streaming'`.
