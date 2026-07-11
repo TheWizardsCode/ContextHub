@@ -108,7 +108,7 @@ describe('CLI Status Tests', () => {
 
     expect(stdout).toContain('Worklog System Status');
     expect(stdout).toContain('Initialized: Yes');
-    expect(stdout).toContain('Version: 1.0.1');
+    expect(stdout).toContain('Version: 1.0.2');
     expect(stdout).toContain('Configuration:');
     expect(stdout).toContain('Database Summary:');
     expect(stdout).toContain('Work Items:');

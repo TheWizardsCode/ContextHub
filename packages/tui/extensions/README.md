@@ -178,6 +178,109 @@ when used outside the Pi TUI.
 - Built-in Pi commands and free-form text clear the indicator via the same
   `input` event handler.
 
+## Session Health Footer
+
+The extension displays a **real-time session health footer** that replaces
+Pi's default footer with a rich health dashboard showing:
+
+### What It Displays
+
+The footer uses a **three-section layout**: **left** (status + elapsed time since last response + turn count + last-chunk timer), **center** (total wall-clock session duration), and **right** (token usage + context + model).
+
+| Element | Description |
+|---------|-------------|
+| **Status marker** | `○` idle, `●` streaming, `⚡ <tool>` tool execution |
+| **Last chunk time** | Elapsed time since the last streaming chunk (e.g., `(Last Chunk: 3s ago)`) — shown only during active streaming |
+| **Turn count** | Number of turns in the current session (e.g., `#3`) |
+| **Response elapsed** | Colour-coded elapsed time since the last model response (shown after the state marker in the left section) |
+| **Total session time** | Total wall-clock session duration (e.g., `Total: 5m 42s`) — shown in the center section |
+| **Token usage** | Input/output token counts (e.g., `↑1.2k ↓4.5k`) |
+| **Context usage** | Percentage of context window (e.g., `76.8%/128k`) |
+| **Model ID** | Currently active model (e.g., `gpt-4`) |
+
+### Colour Coding
+
+The response age indicator uses colour coding to provide at-a-glance health:
+
+| Colour | Threshold | Meaning |
+|--------|-----------|--------|
+| Green (`success`) | < 5s | Healthy — response received recently |
+| Yellow/Orange (`warning`) | 5–30s | Moderate delay — model is processing |
+| Red (`error`) | > 30s | Stuck or slow — consider interrupting |
+
+### Layout
+
+The footer spans two lines. The first line shows extension status entries
+(e.g., resolved provider/model, activity indicator). The second line shows
+session health metrics in a **three-section layout**:
+
+```
+openai/gpt-4  ⏵ /wl                                                         ← Extension statuses
+● Streaming 45s #5 (3s ago)  Total: 5m 42s  ↑1.2k ↓4.5k 39.1%/128k        ← Session health
+│  │          │   │  │             │           │    │       │              │
+│  │          │   │  │             │           │    │       └────────────── Context usage
+│  │          │   │  │             │           │    └────────────────────── Output tokens
+│  │          │   │  │             │           └─────────────────────────── Input tokens
+│  │          │   │  │             └─────────────────────────────────────── Total session time
+│  │          │   │  └───────────────────────────────────────────────────── Last chunk timer (streaming only)
+│  │          │   └──────────────────────────────────────────────────────── Turn count
+│  │          └──────────────────────────────────────────────────────────── Elapsed time since last response
+└────────────────────────────────────────────────────────────────────────── Status marker
+```
+
+During **idle** or **tool execution**, the last-chunk timer is not shown.
+
+### Event Tracking
+
+The extension subscribes to the following Pi lifecycle events to update state:
+
+| Event | Update |
+|-------|--------|
+| `turn_start` | Increment turn count, set status to streaming, set last-response timer |
+| `message_update` | Update last-chunk timer (shown during active streaming) |
+| `message_end` (assistant) | Set status to idle, update response time |
+| `tool_execution_start` | Set status to tool with tool name |
+| `tool_execution_end` | Reset status to idle |
+| `model_select` | Refresh footer display |
+| `session_start` | Reset counters, initialize footer |
+| `session_shutdown` | Clean up ticker interval |
+
+### Ticker
+
+A 1-second `setInterval` ticker refreshes the token counts and context usage
+from the session manager. The footer re-renders automatically when the branch
+changes.
+
+### Graceful Degradation
+
+The session health footer gracefully degrades in non-TUI modes (print, JSON,
+RPC) where `setFooter` is a no-op. The feature has no effect and does not
+produce errors when used outside the Pi TUI.
+
+### Technical Notes
+
+- Uses Pi's `ctx.ui.setFooter()` API to replace the entire footer with a
+  custom render function.
+- The footer renderer uses `truncateToWidth` and `visibleWidth` from
+  `@earendil-works/pi-tui` for safe ANSI-aware truncation.
+- Only one `setFooter()` can be active at a time. This module's footer
+  replaces Pi's default footer (git branch, cwd path, etc.).
+- The footer includes extension status entries (set via `ctx.ui.setStatus()`)
+  from `footerData.getExtensionStatuses()` as the first line. This ensures
+  that status entries from other modules — such as the resolved
+  provider/model (`worklog-0model`) and the activity indicator
+  (`worklog-activity`) — remain visible alongside the session health metrics.
+- The footer uses a **three-section layout**: left (status marker + elapsed
+  time since last response + turn count + last-chunk timer), center (total
+  session duration), and right (token counts + context usage + model ID).
+- A `lastChunkTime` property tracks the timestamp of the last `message_update`
+  event. The **last-chunk timer** `(Last Chunk: Xs ago)` is displayed in the
+  left section only when `status === 'streaming'`.
+- Token counts are calculated from session entries by summing
+  `usage.input` and `usage.output` from assistant messages.
+- Context usage is obtained from `ctx.getContextUsage()` which returns
+  `{ tokens, contextWindow, percent }`.
+
 ## Error Recovery Module
 
 The extension includes a built-in automatic error recovery module that replaces the
@@ -589,4 +692,40 @@ Example:
   "description": "Update the priority of the selected work item"
 }
 ```
+
+## Lease Release
+
+The extension includes a **proactive lease release** module that automatically
+releases the previous session's model lease when a new Pi session is created
+(via `/new`). This speeds up model reclamation on the Local Proxy provider.
+
+### How It Works
+
+1. When Pi fires a `session_start` event with reason `"new"` (indicating a
+   session replacement), the module reads `~/.pi/agent/models.json` to locate
+   the `"Local Proxy"` provider's `baseUrl`.
+2. It sends a best-effort `POST {baseUrl}/leases/release` with a JSON body
+   containing the previous session's identifier (`previousSessionFile`).
+3. The call is **fire-and-forget**: it does not block session startup.
+   Failures (network errors, non-2xx responses) are silently logged at
+   debug level only — no user-visible errors.
+4. If the `"Local Proxy"` provider is not configured, no request is sent.
+
+### When It Fires
+
+| Session Start Reason | Lease Release Triggered |
+|----------------------|------------------------|
+| `"startup"` (initial Pi launch) | No |
+| `"new"` (session via `/new`) | Yes |
+| `"resume"` (session resumed) | No |
+| `"fork"` (session forked) | No |
+| `"reload"` (extensions reloaded) | No |
+
+### Technical Notes
+
+- Implemented in `Worklog/lease-release.ts`.
+- The proxy configuration is read at runtime from `~/.pi/agent/models.json`.
+- Results are cached per-extension-lifecycle to avoid repeated filesystem reads.
+- Registered in `Worklog/index.ts` via `registerLeaseRelease(pi)`.
+- Tests are in `Worklog/lease-release.test.ts`.
 ```
