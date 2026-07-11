@@ -614,6 +614,7 @@ export class SqlitePersistentStore {
     });
 
     doUpdates();
+    this.invalidateWorkItemCaches();
     return updated;
   }
 
@@ -1686,6 +1687,7 @@ export class SqlitePersistentStore {
    */
   private invalidateWorkItemCaches(): void {
     this.cacheInvalidatePrefix('workitem_');
+    this.cacheInvalidatePrefix('commentsForItem_');
     this.cacheInvalidate('allWorkItems');
     this.cacheInvalidate('countWorkItems');
     this.cacheInvalidate('allChildren');
@@ -1708,6 +1710,13 @@ export class SqlitePersistentStore {
     this.cacheInvalidatePrefix('depEdgesFrom_');
     this.cacheInvalidatePrefix('depEdgesTo_');
     this.cacheInvalidate('allDependencyEdges');
+  }
+
+  /**
+   * Public wrapper to clear comment-related caches.
+   */
+  clearCommentCaches(): void {
+    this.invalidateCommentCaches();
   }
 
   close(): void {

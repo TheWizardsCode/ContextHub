@@ -90,7 +90,7 @@ function makeListCustomMock() {
 describe('Worklog browse pi extension', () => {
   it('formats browse options with status, stage, and audit icons before the title (no ID)', () => {
     expect(formatBrowseOption({ id: 'WL-42', title: 'Implement thing', status: 'open' })).toBe(
-      '🔓 ❓ Implement thing',
+      '🔓 ❔ Implement thing',
     );
   });
 
@@ -100,24 +100,24 @@ describe('Worklog browse pi extension', () => {
         { id: 'WL-123456', title: 'A very long work item title that will not fit', status: 'open' },
         24,
       ),
-    ).toBe('🔓 ❓ A very long work …');
+    ).toBe('🔓 ❔ A very long work …');
   });
 
   it('formats epic items with epic icon and no child count when childCount is 0', () => {
     expect(formatBrowseOption({ id: 'WL-99', title: 'Epic feature', status: 'open', issueType: 'epic', childCount: 0 })).toBe(
-      '🔓 ❓ 🏰 Epic feature',
+      '🔓 ❔ 🏰 Epic feature',
     );
   });
 
   it('formats epic items with epic icon and child count when childCount > 0', () => {
     expect(formatBrowseOption({ id: 'WL-99', title: 'Epic feature', status: 'open', issueType: 'epic', childCount: 5 })).toBe(
-      '🔓 ❓ 🏰(5) Epic feature',
+      '🔓 ❔ 🏰(5) Epic feature',
     );
   });
 
   it('does not add epic icon for non-epic items', () => {
     expect(formatBrowseOption({ id: 'WL-42', title: 'Regular task', status: 'open', issueType: 'feature' })).toBe(
-      '🔓 ❓ Regular task',
+      '🔓 ❔ Regular task',
     );
   });
 
@@ -143,7 +143,7 @@ describe('Worklog browse pi extension', () => {
         { id: 'WL-1', title: 'Test', status: 'open' },
         false, // noIcons=false = use emoji
       );
-      expect(prefix).toBe('🔓 ❓');
+      expect(prefix).toBe('🔓 ❔');
     });
 
     it('includes stage icon when stage is defined', () => {
@@ -151,7 +151,7 @@ describe('Worklog browse pi extension', () => {
         { id: 'WL-2', title: 'Test', status: 'open', stage: 'in_progress' },
         false,
       );
-      expect(prefix).toBe('🔓 🛠️ ❓');
+      expect(prefix).toBe('🔓 🛠️ ❔');
     });
 
     it('includes epic icon for epic items without child count', () => {
@@ -159,7 +159,7 @@ describe('Worklog browse pi extension', () => {
         { id: 'WL-3', title: 'Test', status: 'open', issueType: 'epic', childCount: 0 },
         false,
       );
-      expect(prefix).toBe('🔓 ❓ 🏰');
+      expect(prefix).toBe('🔓 ❔ 🏰');
     });
 
     it('includes epic icon with child count for epic items with children', () => {
@@ -167,7 +167,7 @@ describe('Worklog browse pi extension', () => {
         { id: 'WL-4', title: 'Test', status: 'open', issueType: 'epic', childCount: 5 },
         false,
       );
-      expect(prefix).toBe('🔓 ❓ 🏰(5)');
+      expect(prefix).toBe('🔓 ❔ 🏰(5)');
     });
 
     it('returns text-fallback icons when noIcons=true', () => {
@@ -184,26 +184,26 @@ describe('Worklog browse pi extension', () => {
       const item = { id: 'WL-1', title: 'Simple task', status: 'open' };
       // Default (no prefixWidth): no padding (backward compatible)
       const noPad = formatBrowseOption(item);
-      expect(noPad).toBe('🔓 ❓ Simple task');
+      expect(noPad).toBe('🔓 ❔ Simple task');
 
       // With prefixWidth larger than natural icon width: pads with spaces
-      // natural visibleWidth of '🔓 ❓' = 5, prefixWidth = 6 → pad(6-5)=1 → repeat(1+1)=2 spaces
+      // natural visibleWidth of '🔓 ❔' = 5, prefixWidth = 6 → pad(6-5)=1 → repeat(1+1)=2 spaces
       const padded = formatBrowseOption(item, undefined, undefined, undefined, 6);
-      expect(padded).toBe('🔓 ❓  Simple task');
+      expect(padded).toBe('🔓 ❔  Simple task');
     });
 
     it('does not add extra padding when prefixWidth equals natural width', () => {
       const item = { id: 'WL-1', title: 'Task', status: 'open' };
-      // natural visibleWidth of '🔓 ❓' = 5
+      // natural visibleWidth of '🔓 ❔' = 5
       const result = formatBrowseOption(item, undefined, undefined, undefined, 5);
-      expect(result).toBe('🔓 ❓ Task');
+      expect(result).toBe('🔓 ❔ Task');
     });
 
     it('does not add extra padding when prefixWidth is less than natural width', () => {
       const item = { id: 'WL-1', title: 'Task', status: 'open', stage: 'in_progress' };
-      // natural visibleWidth of '🔓 🛠️ ❓' = 8
+      // natural visibleWidth of '🔓 🛠️ ❔' = 8
       const result = formatBrowseOption(item, undefined, undefined, undefined, 3);
-      expect(result).toBe('🔓 🛠️ ❓ Task');
+      expect(result).toBe('🔓 🛠️ ❔ Task');
     });
 
     it('aligns titles at the same column for different icon combinations', () => {

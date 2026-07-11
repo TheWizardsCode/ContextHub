@@ -969,6 +969,9 @@ export class WorklogDatabase {
     this.store.saveWorkItem(item);
     this.store.upsertFtsEntry(item);
     this.triggerSemanticIndex(item);
+    // Clear comment caches that triggerSemanticIndex may have populated
+    // with stale (empty) data, so subsequent reads see fresh results.
+    this.store.clearCommentCaches();
     this.triggerAutoSync();
     return item;
   }
