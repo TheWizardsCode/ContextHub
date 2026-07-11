@@ -37,6 +37,7 @@
 
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import { runWl } from '../wl-integration.js';
+import { truncateWorkItemId } from './terminal-utils.js';
 
 /**
  * Status key used for the activity indicator in the footer.
@@ -237,10 +238,10 @@ async function showActivityWithTitleLookup(ctx: StatusContext, text: string, sho
   const title = await resolveWorkItemTitle(id);
   if (!title) return;
 
-  // Replace with command + ID + title format, truncated to fit terminal width.
+  // Replace with command + truncated ID + title format, truncated to fit terminal width.
   // The command is formatted via formatCommandContext (e.g., /skill:audit → audit).
   const commandCtx = formatCommandContext(text);
-  const display = `${commandCtx} ${id} ${title}`;
+  const display = `${commandCtx} ${truncateWorkItemId(id)} ${title}`;
   showActivity(ctx, display, showIndicator);
 }
 

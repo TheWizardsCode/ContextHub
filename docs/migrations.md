@@ -89,3 +89,46 @@ Audit field migration note
 - Use `wl update --audit-text <text>` to set audit via the existing CLI interface (writes to `audit_results` table).
 - Redaction/safety rules for audit text are tracked separately in `Redaction and Safety Rules for Audit Text (WL-0MMNCOIYS15A1YSI)`.
 - See `docs/AUDIT_STATUS.md` for full documentation on audit status semantics.
+
+Hook upgrades
+-------------
+The `wl doctor upgrade` command also checks and upgrades outdated git hooks installed in
+`.git/hooks/` from the committed safe versions in `.githooks/`. This ensures existing
+installations automatically get the safe hook patterns (using `--git-branch refs/worklog/data`)
+without manual re-installation.
+
+A hook is considered outdated when it:
+- Lacks the safe `--git-branch refs/worklog/data` guard, or
+- Contains hardcoded paths like `/tmp/Worklog/...` or absolute paths to `.git/hooks/` for
+  the central post-pull script (should use `$(dirname "$0")`), or
+- Differs in any way from the committed `.githooks/` version.
+
+Only hooks that contain a Worklog marker (`worklog:pre-push-hook:`, `worklog:post-pull-hook:`,
+or `worklog:post-checkout-hook:`) are considered for upgrade. Non-Worklog hooks are skipped.
+
+Examples:
+
+- Preview outdated hooks alongside migrations (dry-run):
+
+  `wl doctor upgrade --dry-run`
+
+- Preview outdated hooks with JSON output:
+
+  `wl doctor upgrade --dry-run --json`
+
+- Apply outdated hooks alongside migrations (non-interactively):
+
+  `wl doctor upgrade --confirm`
+
+- Apply outdated hooks alongside migrations (interactive prompt):
+
+  `wl doctor upgrade`
+
+The committed hook scripts live in `.githooks/` and include:
+- `pre-push` — auto-syncs Worklog data before pushing, uses `--git-branch refs/worklog/data`
+- `post-checkout` — auto-syncs after branch checkout
+- `post-merge` — wrapper that delegates to `worklog-post-pull`
+- `post-rewrite` — wrapper that delegates to `worklog-post-pull`
+- `worklog-post-pull` — central sync script
+
+See `src/doctor/hook-upgrade.ts` for the implementation.
