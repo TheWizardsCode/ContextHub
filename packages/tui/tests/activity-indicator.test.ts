@@ -513,10 +513,12 @@ describe('registerActivityIndicator - input events', () => {
         ACTIVITY_STATUS_KEY,
         expect.stringContaining('WL-0MQL0T5TR0060AEH')
       );
-      // Final display should include the command context alongside ID + title
+      // Final display should include the command context alongside ID + title.
+      // Work item IDs are truncated to PREFIX...LAST4 format for display.
       const lastCallArg = (ctx.ui.setStatus as ReturnType<typeof vi.fn>).mock.calls.slice(-1)[0][1] as string;
       expect(lastCallArg).toContain('/intake');
-      expect(lastCallArg).toContain('WL-0MQL0T5TR0060AEH');
+      expect(lastCallArg).toContain('WL...0AEH');
+      expect(lastCallArg).not.toContain('WL-0MQL0T5TR0060AEH');
       expect(lastCallArg).toContain('Fix login bug');
 
       // Verify runWl was called with the correct arguments
@@ -557,11 +559,12 @@ describe('registerActivityIndicator - input events', () => {
 
       await inputHandlers[0](event, ctx);
 
-      // Should show skill name (with /skill: prefix stripped) + ID + title
+      // Should show skill name (with /skill: prefix stripped) + truncated ID + title
       const lastCallArg = (ctx.ui.setStatus as ReturnType<typeof vi.fn>).mock.calls.slice(-1)[0][1] as string;
       expect(lastCallArg).not.toContain('/skill:');
       expect(lastCallArg).toContain('implement');
-      expect(lastCallArg).toContain('WL-0MP15TA8J009NZUU');
+      expect(lastCallArg).toContain('WL...NZUU');
+      expect(lastCallArg).not.toContain('WL-0MP15TA8J009NZUU');
       expect(lastCallArg).toContain('Add user authentication');
       expect(mockRunWl).toHaveBeenCalledWith('show', ['WL-0MP15TA8J009NZUU'], { timeout: 2000 });
     });
@@ -599,10 +602,11 @@ describe('registerActivityIndicator - input events', () => {
 
       await inputHandlers[0](event, ctx);
 
-      // Should show command + ID + title
+      // Should show command + truncated ID + title
       const lastCallArg = (ctx.ui.setStatus as ReturnType<typeof vi.fn>).mock.calls.slice(-1)[0][1] as string;
       expect(lastCallArg).toContain('/custom-command');
-      expect(lastCallArg).toContain('WL-0MQLG8PK80041FM3');
+      expect(lastCallArg).toContain('WL...1FM3');
+      expect(lastCallArg).not.toContain('WL-0MQLG8PK80041FM3');
       expect(lastCallArg).toContain('Resolve work item IDs to titles');
       expect(mockRunWl).toHaveBeenCalledWith('show', ['WL-0MQLG8PK80041FM3'], { timeout: 2000 });
     });
@@ -626,7 +630,8 @@ describe('registerActivityIndicator - input events', () => {
 
       const lastCallArg = (ctx.ui.setStatus as ReturnType<typeof vi.fn>).mock.calls.slice(-1)[0][1] as string;
       expect(lastCallArg).toContain('/implement');
-      expect(lastCallArg).toContain('WL-0MQL0T5TR0060AEH');
+      expect(lastCallArg).toContain('WL...0AEH');
+      expect(lastCallArg).not.toContain('WL-0MQL0T5TR0060AEH');
       expect(lastCallArg).toContain('First work item title');
     });
   });

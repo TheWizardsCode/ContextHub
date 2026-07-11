@@ -11,6 +11,7 @@ import {
   getCharWidth,
   visibleWidth,
   truncateToTerminalWidth,
+  truncateWorkItemId,
   wrapToTerminalWidth,
 } from './terminal-utils.js';
 
@@ -329,6 +330,69 @@ describe('terminal-utils', () => {
     it('supports custom ellipsis', () => {
       const result = truncateToTerminalWidth('hello world', 8, { ellipsis: '...' });
       expect(result).toContain('...');
+    });
+  });
+
+  // ── truncateWorkItemId ──────────────────────────────────────────────
+
+  describe('truncateWorkItemId', () => {
+    it('truncates a standard WL- prefixed work item ID', () => {
+      const result = truncateWorkItemId('WL-0MQL0T5TR0060AEH');
+      expect(result).toBe('WL...0AEH');
+    });
+
+    it('truncates a SA- prefixed work item ID', () => {
+      const result = truncateWorkItemId('SA-0MPYMFZXO0004ZU4');
+      expect(result).toBe('SA...4ZU4');
+    });
+
+    it('truncates a CG- prefixed work item ID', () => {
+      const result = truncateWorkItemId('CG-0MQK0OM6I00168HD');
+      expect(result).toBe('CG...68HD');
+    });
+
+    it('does not truncate short IDs (fewer than 15 chars after dash)', () => {
+      expect(truncateWorkItemId('WL-123')).toBe('WL-123');
+      expect(truncateWorkItemId('WL-abc123')).toBe('WL-abc123');
+      expect(truncateWorkItemId('WL-0MQL0T5TR')).toBe('WL-0MQL0T5TR');
+    });
+
+    it('truncates all occurrences in a string with multiple IDs', () => {
+      const result = truncateWorkItemId(
+        'WL-0MQL0T5TR0060AEH and CG-0MQK0OM6I00168HD'
+      );
+      expect(result).toBe('WL...0AEH and CG...68HD');
+    });
+
+    it('does not truncate IDs that appear at the start of a string', () => {
+      const result = truncateWorkItemId('WL-0MQL0T5TR0060AEH is the ID');
+      expect(result).toBe('WL...0AEH is the ID');
+    });
+
+    it('does not truncate IDs that appear at the end of a string', () => {
+      const result = truncateWorkItemId('Process item WL-0MQL0T5TR0060AEH');
+      expect(result).toBe('Process item WL...0AEH');
+    });
+
+    it('returns original text when no work item IDs are present', () => {
+      expect(truncateWorkItemId('Hello world')).toBe('Hello world');
+      expect(truncateWorkItemId('')).toBe('');
+      expect(truncateWorkItemId('No IDs here at all')).toBe('No IDs here at all');
+    });
+
+    it('works with IDs embedded in longer text with spaces', () => {
+      const result = truncateWorkItemId('implement WL-0MQL0T5TR0060AEH the feature');
+      expect(result).toBe('implement WL...0AEH the feature');
+    });
+
+    it('handles IDs with ANSI escape sequences (passes through)', () => {
+      const result = truncateWorkItemId('\x1b[31mWL-0MQL0T5TR0060AEH\x1b[0m');
+      expect(result).toBe('\x1b[31mWL...0AEH\x1b[0m');
+    });
+
+    it('handles multiple IDs separated by various delimiters', () => {
+      const result = truncateWorkItemId('WL-0MQL0T5TR0060AEH,WL-0MQLG8PK80041FM3');
+      expect(result).toBe('WL...0AEH,WL...1FM3');
     });
   });
 });

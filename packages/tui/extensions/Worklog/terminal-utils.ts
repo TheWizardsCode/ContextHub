@@ -200,6 +200,62 @@ export function truncateToTerminalWidth(
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Work item ID truncation
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Regex to match work item ID patterns for truncation.
+ *
+ * Matches patterns like `WL-0MQL0T5TR0060AEH` (prefix + dash + 15+ alphanumeric chars).
+ * The prefix must be 2-3 uppercase letters followed by a dash and at least 15
+ * alphanumeric characters. Shorter IDs are intentionally excluded.
+ */
+const WORK_ITEM_ID_TRUNCATION_REGEX = /\b([A-Z]{2,3})-([A-Z0-9]{15,})/g;
+
+/**
+ * Regex to strip ANSI escape sequences for clean matching.
+ */
+const ANSI_ESCAPE_RE = /\x1b\[[;0-9]*m/g;
+
+/**
+ * Truncate a work item ID to `PREFIX...LAST4` format.
+ *
+ * Replaces full-length work item IDs (2-3 uppercase letter prefix, dash, 15+
+ * alphanumeric chars) with a compact form that preserves the prefix and last
+ * 4 characters, separated by `...` and no dash.
+ *
+ * Shorter IDs are left unchanged.
+ *
+ * @param text - Input string that may contain work item IDs
+ * @returns String with work item IDs truncated
+ *
+ * @example
+ * truncateWorkItemId('WL-0MQL0T5TR0060AEH')    // => 'WL...0AEH'
+ * truncateWorkItemId('WL-123')                  // => 'WL-123' (unchanged)
+ * truncateWorkItemId('CG-0MQK0OM6I00168HD')     // => 'CG...68HD'
+ */
+export function truncateWorkItemId(text: string): string {
+  // Use a placeholder approach to handle ANSI codes: replace each ANSI
+  // escape sequence with a unique non-word-character placeholder,
+  // apply ID truncation, then restore the codes.
+  // The placeholder is a null character which is not a word character,
+  // so \b word boundaries work correctly around it.
+  const ansiCodes: string[] = [];
+  const prepared = text.replace(ANSI_ESCAPE_RE, (match) => {
+    ansiCodes.push(match);
+    return '\x00'; // null char (not a word char, works with \b)
+  });
+
+  const truncated = prepared.replace(WORK_ITEM_ID_TRUNCATION_REGEX, (_match, prefix, code) => {
+    return `${prefix}...${code.slice(-4)}`;
+  });
+
+  // Restore ANSI codes from placeholder positions
+  let ai = 0;
+  return truncated.replace(/\x00/g, () => ansiCodes[ai++]);
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Utility functions for wrapToTerminalWidth
 // ─────────────────────────────────────────────────────────────────────
 

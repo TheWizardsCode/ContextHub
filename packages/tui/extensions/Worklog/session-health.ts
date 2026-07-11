@@ -18,7 +18,7 @@ import type {
   ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
 import { detectWorkItemId } from './activity-indicator.js';
-import { truncateToTerminalWidth, visibleWidth } from './terminal-utils.js';
+import { truncateToTerminalWidth, truncateWorkItemId, visibleWidth } from './terminal-utils.js';
 import { getResolvedModel, getSelectedModel, onModelChange } from './model-display.js';
 import { runWl } from '../wl-integration.js';
 
@@ -320,7 +320,7 @@ export function extractInitialPrompt(
         // Extract args after the closing </skill> tag
         const afterSkill = text.match(/<\/skill>\s*\n?\s*([\s\S]*)$/);
         const args = afterSkill ? afterSkill[1].trim() : '';
-        return args ? `[skill:${skillName}] ${args}` : `[skill:${skillName}]`;
+        return args ? `${skillName}: ${args}` : `${skillName}:`;
       }
 
       // Regular content: return first line
@@ -621,14 +621,17 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
           // truncateToTerminalWidth, so we use a dynamic limit.
           let promptPart: string | null = null;
           if (initialPrompt) {
+            // Truncate work item IDs to compact form (e.g., WL-0MQL0T5TR0060AEH
+            // → WL...68HD) before applying length truncation.
+            const compacted = truncateWorkItemId(initialPrompt);
             // Reserve space for model part (up to ~30 chars), separator (4),
             // and a small buffer. Then clip at the end.
             const reserved = 38;
             const maxLen = Math.max(15, width - reserved);
             const preview =
-              initialPrompt.length > maxLen
-                ? `${initialPrompt.slice(0, maxLen - 3)}...`
-                : initialPrompt;
+              compacted.length > maxLen
+                ? `${compacted.slice(0, maxLen - 3)}...`
+                : compacted;
             promptPart = preview;
           }
 

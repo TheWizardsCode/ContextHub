@@ -456,7 +456,7 @@ describe('session-health', () => {
         },
       ];
       const result = extractInitialPrompt(entries);
-      expect(result).toBe('[skill:audit]');
+      expect(result).toBe('audit:');
     });
 
     it('extracts skill name and args from expanded skill block with args', () => {
@@ -470,7 +470,7 @@ describe('session-health', () => {
         },
       ];
       const result = extractInitialPrompt(entries);
-      expect(result).toBe('[skill:audit] WL-123');
+      expect(result).toBe('audit: WL-123');
     });
 
     it('extracts skill name and multi-word args from expanded skill block', () => {
@@ -484,7 +484,7 @@ describe('session-health', () => {
         },
       ];
       const result = extractInitialPrompt(entries);
-      expect(result).toBe('[skill:implement] WL-123 implement the feature');
+      expect(result).toBe('implement: WL-123 implement the feature');
     });
 
     it('handles skill block in string format content (backward compat)', () => {
@@ -498,7 +498,7 @@ describe('session-health', () => {
         },
       ];
       const result = extractInitialPrompt(entries);
-      expect(result).toBe('[skill:audit] WL-456');
+      expect(result).toBe('audit: WL-456');
     });
 
     it('returns regular first line for non-skill content in array format', () => {
