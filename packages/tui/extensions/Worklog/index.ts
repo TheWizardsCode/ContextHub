@@ -24,6 +24,7 @@ import { registerSessionHealth } from './session-health.js';
 import { INSTALL_GUARDRAILS } from './lib/guardrails.js';
 import { registerSkillPathTool } from './lib/skill-path.js';
 import { registerRecoveryModule } from './lib/recovery/register-recovery.js';
+import { registerLeaseRelease } from './lease-release.js';
 import {
   type WorklogBrowseItem,
   type WorklogBrowseDependencies,
@@ -101,6 +102,9 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
 
     // ── Recovery module (automatic error recovery) ────────────────
     registerRecoveryModule(pi);
+
+    // ── Lease release (proactive proxy model lease release on /new) ──
+    registerLeaseRelease(pi);
 
     // Subscribe to config changes for hot-reload notifications
     // When settings change via /wl settings or file edit, all onChange

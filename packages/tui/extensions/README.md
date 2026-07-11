@@ -691,4 +691,40 @@ Example:
   "description": "Update the priority of the selected work item"
 }
 ```
+
+## Lease Release
+
+The extension includes a **proactive lease release** module that automatically
+releases the previous session's model lease when a new Pi session is created
+(via `/new`). This speeds up model reclamation on the Local Proxy provider.
+
+### How It Works
+
+1. When Pi fires a `session_start` event with reason `"new"` (indicating a
+   session replacement), the module reads `~/.pi/agent/models.json` to locate
+   the `"Local Proxy"` provider's `baseUrl`.
+2. It sends a best-effort `POST {baseUrl}/leases/release` with a JSON body
+   containing the previous session's identifier (`previousSessionFile`).
+3. The call is **fire-and-forget**: it does not block session startup.
+   Failures (network errors, non-2xx responses) are silently logged at
+   debug level only — no user-visible errors.
+4. If the `"Local Proxy"` provider is not configured, no request is sent.
+
+### When It Fires
+
+| Session Start Reason | Lease Release Triggered |
+|----------------------|------------------------|
+| `"startup"` (initial Pi launch) | No |
+| `"new"` (session via `/new`) | Yes |
+| `"resume"` (session resumed) | No |
+| `"fork"` (session forked) | No |
+| `"reload"` (extensions reloaded) | No |
+
+### Technical Notes
+
+- Implemented in `Worklog/lease-release.ts`.
+- The proxy configuration is read at runtime from `~/.pi/agent/models.json`.
+- Results are cached per-extension-lifecycle to avoid repeated filesystem reads.
+- Registered in `Worklog/index.ts` via `registerLeaseRelease(pi)`.
+- Tests are in `Worklog/lease-release.test.ts`.
 ```
