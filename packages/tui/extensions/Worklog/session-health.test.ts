@@ -14,6 +14,10 @@
  * 5. Context usage is formatted correctly.
  * 6. The module exports the SESSION_HEALTH_STATUS_KEY constant.
  * 7. Token extraction from session entries works correctly.
+ * 8. Total session time is displayed in the center section via
+ *    formatTotalSessionTime().
+ * 9. Elapsed time since last response is displayed in the left section,
+ *    after the state marker.
  *
  * Run: npx vitest run packages/tui/extensions/Worklog/session-health.test.ts
  */
@@ -66,6 +70,7 @@ import {
   getTimeColor,
   formatTokens,
   formatContextUsage,
+  formatTotalSessionTime,
   extractTokenUsage,
   extractInitialPrompt,
   renderFooter,
@@ -556,6 +561,39 @@ describe('session-health', () => {
 
   // ── Footer rendering ────────────────────────────────────────────────
 
+  // ── Total session time formatting ─────────────────────────────────
+
+  describe('formatTotalSessionTime', () => {
+    it('returns "Total: —" for Infinity', () => {
+      expect(formatTotalSessionTime(Infinity)).toBe('Total: —');
+    });
+
+    it('returns "Total: —" for negative', () => {
+      expect(formatTotalSessionTime(-1)).toBe('Total: —');
+    });
+
+    it('returns "Total: —" for 0', () => {
+      expect(formatTotalSessionTime(0)).toBe('Total: —');
+    });
+
+    it('formats seconds-only duration', () => {
+      expect(formatTotalSessionTime(5)).toBe('Total: 5s');
+      expect(formatTotalSessionTime(42)).toBe('Total: 42s');
+    });
+
+    it('formats minutes and seconds', () => {
+      expect(formatTotalSessionTime(65)).toBe('Total: 1m 5s');
+      expect(formatTotalSessionTime(90)).toBe('Total: 1m 30s');
+      expect(formatTotalSessionTime(125)).toBe('Total: 2m 5s');
+    });
+
+    it('formats whole minutes', () => {
+      expect(formatTotalSessionTime(60)).toBe('Total: 1m');
+      expect(formatTotalSessionTime(120)).toBe('Total: 2m');
+      expect(formatTotalSessionTime(3600)).toBe('Total: 60m');
+    });
+  });
+
   describe('renderFooter', () => {
     const mockTheme = {
       fg: vi.fn((color: string, text: string) => `[${color}${text}]`),
@@ -564,7 +602,7 @@ describe('session-health', () => {
       model: { id: 'gpt-4' },
     };
 
-    it('renders idle status with ○ Idle', () => {
+    it('renders idle status with elapsed time in left section and total in center', () => {
       const state: SessionHealthState = {
         status: 'idle',
         toolName: null,
@@ -574,13 +612,18 @@ describe('session-health', () => {
         inputTokens: 1000,
         outputTokens: 2000,
         contextUsage: { tokens: 50000, contextWindow: 128000, percent: 39.1 },
+        sessionStartTime: Date.now() - 120000, // 2 minutes ago
       };
 
       const result = renderFooter(state, mockCtx, mockTheme as any, 500);
 
+      // Left section: marker + elapsed time + turn count
       expect(result).toContain('[dim○ Idle]');
-      expect(result).toContain('[dim#1]');
       expect(result).toContain('[success2s]');
+      expect(result).toContain('[dim#1]');
+
+      // Center section: total session time
+      expect(result).toContain('[mutedTotal: 2m]');
     });
 
     it('renders streaming status with ● Streaming', () => {
@@ -593,14 +636,22 @@ describe('session-health', () => {
         inputTokens: 1000,
         outputTokens: 0,
         contextUsage: { tokens: null, contextWindow: 128000, percent: null },
+        sessionStartTime: Date.now() - 300000, // 5 minutes ago
       };
 
       const result = renderFooter(state, mockCtx, mockTheme as any, 200);
 
+      // Left section: marker + elapsed time + turn count + last chunk
       expect(result).toContain('[dim● Streaming]');
-      expect(result).toContain('s ago');
-      expect(result).toContain('[dim—/128.0k]');
       expect(result).toContain('[success3s]');
+      expect(result).toContain('s ago');
+
+      // Right section: context (no tokens)
+      expect(result).toContain('[dim—/128.0k]');
+
+      // Center section: total session time
+      expect(result).toContain('[mutedTotal:');
+      expect(result).toContain('5m]');
     });
 
     it('renders tool status with ⚡ Tool: read', () => {
@@ -613,14 +664,16 @@ describe('session-health', () => {
         inputTokens: 1000,
         outputTokens: 0,
         contextUsage: { tokens: null, contextWindow: 128000, percent: null },
+        sessionStartTime: Date.now() - 60000, // 1 minute ago
       };
 
       const result = renderFooter(state, mockCtx, mockTheme as any, 120);
 
       expect(result).toContain('[dim⚡ Tool: read]');
+      expect(result).toContain('[success1s]');
     });
 
-    it('handles missing model ID gracefully', () => {
+    it('handles missing sessionStartTime (no active session)', () => {
       const state: SessionHealthState = {
         status: 'idle',
         toolName: null,
@@ -630,14 +683,18 @@ describe('session-health', () => {
         inputTokens: 1000,
         outputTokens: 2000,
         contextUsage: { tokens: 50000, contextWindow: 128000, percent: 39.1 },
+        sessionStartTime: null,
       };
 
       const result = renderFooter(state, { model: null } as any, mockTheme as any, 500);
 
-      // Verify three-section layout still works without model context
+      // Left section: marker + elapsed time + turn count
       expect(result).toContain('[dim○ Idle]');
-      expect(result).toContain('[dim#1]');
       expect(result).toContain('[success2s]');
+      expect(result).toContain('[dim#1]');
+
+      // Center section: Total: — when no session start time
+      expect(result).toContain('[mutedTotal: —]');
     });
 
     it('truncates content for narrow terminals', () => {
@@ -649,6 +706,7 @@ describe('session-health', () => {
         inputTokens: 1000000,
         outputTokens: 2000000,
         contextUsage: { tokens: 500000, contextWindow: 10000000, percent: 5.0 },
+        sessionStartTime: Date.now() - 600000, // 10 minutes ago
       };
 
       const result = renderFooter(state, mockCtx, mockTheme as any, 20);
@@ -804,7 +862,7 @@ describe('session-health', () => {
 
   // ── Three-section footer layout ───────────────────────────────────────
 
-  describe('renderFooter — three-section layout', () => {
+  describe('renderFooter — three-section layout (restructured)', () => {
     const mockTheme = {
       fg: vi.fn((color: string, text: string) => `[${color}${text}]`),
     };
@@ -823,6 +881,7 @@ describe('session-health', () => {
         inputTokens: 1000,
         outputTokens: 500,
         contextUsage: { tokens: 50000, contextWindow: 128000, percent: 39.1 },
+        sessionStartTime: Date.now() - 300000, // 5 minutes ago
       };
 
       const result = renderFooter(streamingState, mockCtx, mockTheme as any, 120);
@@ -840,6 +899,7 @@ describe('session-health', () => {
         inputTokens: 1000,
         outputTokens: 2000,
         contextUsage: { tokens: 50000, contextWindow: 128000, percent: 39.1 },
+        sessionStartTime: Date.now() - 120000, // 2 minutes ago
       };
 
       const result = renderFooter(idleState, mockCtx, mockTheme as any, 120);
@@ -857,6 +917,7 @@ describe('session-health', () => {
         inputTokens: 1000,
         outputTokens: 0,
         contextUsage: { tokens: null, contextWindow: 128000, percent: null },
+        sessionStartTime: Date.now() - 60000, // 1 minute ago
       };
 
       const result = renderFooter(toolState, mockCtx, mockTheme as any, 120);
@@ -864,7 +925,7 @@ describe('session-health', () => {
       expect(result).not.toContain('s ago');
     });
 
-    it('shows elapsed time in center section', () => {
+    it('shows total session time in center section', () => {
       const state: SessionHealthState = {
         status: 'streaming',
         toolName: null,
@@ -874,12 +935,14 @@ describe('session-health', () => {
         inputTokens: 1000,
         outputTokens: 2000,
         contextUsage: { tokens: 50000, contextWindow: 128000, percent: 39.1 },
+        sessionStartTime: Date.now() - 600000, // 10 minutes ago
       };
 
       const result = renderFooter(state, mockCtx, mockTheme as any, 200);
 
-      // Should contain the elapsed time formatted as "45s"
-      // 45s > 30s so getTimeColor returns 'error'
+      // Center section should show total session time
+      expect(result).toContain('[mutedTotal: 10m]');
+      // Left section should show elapsed time since last response (color-coded)
       expect(result).toContain('[error45s]');
     });
 
@@ -893,21 +956,23 @@ describe('session-health', () => {
         inputTokens: 500,
         outputTokens: 1000,
         contextUsage: { tokens: 25000, contextWindow: 128000, percent: 19.5 },
+        sessionStartTime: Date.now() - 600000, // 10 minutes ago
       };
 
       const result = renderFooter(state, mockCtx, mockTheme as any, 500);
 
-      // Left section: marker + turn count + last chunk elapsed time
+      // Left section: marker + elapsed time + turn count + last chunk elapsed time
       expect(result).toContain('[dim● Streaming]');
+      expect(result).toContain('[warning10s]');
       expect(result).toContain('[dim#2]');
       expect(result).toContain('s ago');
-      // Center section: elapsed time
-      expect(result).toContain('[warning10s]');
+      // Center section: total session time (not elapsed time)
+      expect(result).toContain('[mutedTotal:');
+      expect(result).toContain('[mutedTotal: 10m]');
       // Right section: tokens
       expect(result).toContain('[muted↑500 ↓1.0k]');
       // Right section: context
       expect(result).toContain('[dim19.5%/128.0k]');
-      // Right section: context (model is now on its own footer line)
     });
 
     it('renders footer with wide terminal (no truncation)', () => {
@@ -920,13 +985,17 @@ describe('session-health', () => {
         inputTokens: 50000,
         outputTokens: 100000,
         contextUsage: { tokens: 64000, contextWindow: 128000, percent: 50.0 },
+        sessionStartTime: Date.now() - 7200000, // 2 hours ago
       };
 
       const result = renderFooter(state, mockCtx, mockTheme as any, 400);
 
       expect(result).toContain('s ago');
-      // 65s = 1m 5s, and > 30s so error color
+      // 65s = 1m 5s, and > 30s so error color — now in LEFT section
       expect(result).toContain('[error1m 5s]');
+      // Center section: total session time
+      expect(result).toContain('[mutedTotal:');
+      expect(result).toContain('Total: 120m');
       expect(result).toContain('[muted↑50.0k ↓100.0k]');
       expect(result).toContain('[dim50.0%/128.0k]');
     });

@@ -62,6 +62,8 @@ export interface SessionHealthState {
   contextUsage: { tokens: number | null; contextWindow: number; percent: number | null };
   /** First few characters of the session's initial user message. */
   initialPrompt: string | null;
+  /** Wall-clock timestamp of when the current session started (Date.now()). */
+  sessionStartTime: number | null;
 }
 
 /** Default initial state. */
@@ -75,6 +77,7 @@ const DEFAULT_STATE: SessionHealthState = {
   outputTokens: 0,
   contextUsage: { tokens: null, contextWindow: 128000, percent: null },
   initialPrompt: null,
+  sessionStartTime: null,
 };
 
 /** Ticker interval in milliseconds (1 second). */
@@ -104,6 +107,23 @@ export function formatElapsedTime(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = Math.round(seconds % 60);
   return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+}
+
+/**
+ * Format total session duration for display in the center section.
+ *
+ * Produces "Total: 5m 42s" or "Total: —" when no session has started.
+ *
+ * @param seconds - Total session duration in seconds (pass 0 or Infinity for no session)
+ * @returns Formatted string (e.g., "Total: 5m 42s", "Total: —")
+ */
+export function formatTotalSessionTime(seconds: number): string {
+  if (seconds === Infinity || seconds < 0 || seconds === 0) return 'Total: —';
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60);
+  if (mins > 0 && secs > 0) return `Total: ${mins}m ${secs}s`;
+  if (mins > 0) return `Total: ${mins}m`;
+  return `Total: ${Math.round(seconds)}s`;
 }
 
 /**
@@ -172,8 +192,8 @@ export function formatContextUsage(usage: SessionHealthState['contextUsage']): s
  * Build the footer render string.
  *
  * Layout (three-section):
- *   Left:  [marker] [#turn] Xs ago
- *   Center: [elapsed since stage start]
+ *   Left:  [marker] [elapsed since last response] [#turn] Xs ago
+ *   Center: Total: [total session wall-clock duration]
  *   Right: ↑input ↓output [context%/window]
  *
  * The model/provider is displayed on a dedicated line below the session
@@ -194,7 +214,7 @@ export function renderFooter(
   width: number,
 ): string {
   // ── Left section ────────────────────────────────────────────────────
-  // Status marker with label
+  // Status marker with label followed by elapsed time since last response
   let marker = '';
   switch (state.status) {
     case 'idle':
@@ -209,6 +229,12 @@ export function renderFooter(
   }
   const markerStr = theme.fg('dim', marker);
 
+  // Elapsed time since last response (color-coded, placed after state marker)
+  const elapsed = getElapsedTime(state.lastResponseTime);
+  const timeStr = formatElapsedTime(elapsed);
+  const timeColor = getTimeColor(elapsed);
+  const timeStrStyled = theme.fg(timeColor, timeStr);
+
   // Turn count
   const turnStr = theme.fg('dim', `#${state.turnCount}`);
 
@@ -220,15 +246,15 @@ export function renderFooter(
     lastChunkStr = theme.fg('dim', lastChunkElapsed);
   }
 
-  const left = `${markerStr} ${turnStr} ${lastChunkStr}`;
+  const left = `${markerStr} ${timeStrStyled} ${turnStr} ${lastChunkStr}`;
 
   // ── Center section ──────────────────────────────────────────────────
-  // Elapsed time since the stage started (lastResponseTime updated at
-  // turn_start and message_end)
-  const elapsed = getElapsedTime(state.lastResponseTime);
-  const timeStr = formatElapsedTime(elapsed);
-  const timeColor = getTimeColor(elapsed);
-  const timeStrStyled = theme.fg(timeColor, timeStr);
+  // Total session wall-clock duration (computed from sessionStartTime)
+  const totalSeconds = state.sessionStartTime
+    ? Math.max(0, (Date.now() - state.sessionStartTime) / 1000)
+    : Infinity;
+  const totalStr = formatTotalSessionTime(totalSeconds);
+  const totalStrStyled = theme.fg('muted', totalStr);
 
   // ── Right section ───────────────────────────────────────────────────
   // Token counts
@@ -245,7 +271,7 @@ export function renderFooter(
   // ── Layout ──────────────────────────────────────────────────────────
   // Calculate visible widths and pad
   const leftWidth = visibleWidth(left);
-  const centerWidth = visibleWidth(timeStrStyled);
+  const centerWidth = visibleWidth(totalStrStyled);
   const rightWidth = visibleWidth(right);
   // Account for the space between center and right sections
   const hasSeparatorSpace = rightWidth > 0 ? 1 : 0;
@@ -258,7 +284,7 @@ export function renderFooter(
   }
 
   const padding = ' '.repeat(Math.max(0, width - totalContentWidth));
-  return truncateToTerminalWidth(left + padding + timeStrStyled + ' ' + right, width);
+  return truncateToTerminalWidth(left + padding + totalStrStyled + ' ' + right, width);
 }
 
 /**
@@ -438,9 +464,9 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
     updateState(event, {});
   });
 
-  // Session start — reset counters
+  // Session start — reset counters and record start time
   pi.on('session_start', (_event, ctx) => {
-    state = { ...DEFAULT_STATE, contextUsage: state.contextUsage };
+    state = { ...DEFAULT_STATE, contextUsage: state.contextUsage, sessionStartTime: Date.now() };
     updateState(_event, {});
 
     // Set the footer and start the ticker on first session start
