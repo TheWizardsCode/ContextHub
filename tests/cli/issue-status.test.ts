@@ -1,0 +1,703 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import {
+  cliPath,
+  execAsync,
+  enterTempDir,
+  leaveTempDir,
+  seedWorkItems,
+  writeConfig,
+  writeInitSemaphore
+} from './cli-helpers.js';
+
+describe('CLI Issue Status Tests', () => {
+  let tempState: { tempDir: string; originalCwd: string };
+
+  beforeEach(() => {
+    tempState = enterTempDir();
+    writeConfig(tempState.tempDir, 'Test Project', 'TEST');
+    writeInitSemaphore(tempState.tempDir);
+  });
+
+  afterEach(() => {
+    leaveTempDir(tempState);
+  });
+
+  describe('list command', () => {
+    beforeEach(() => {
+      seedWorkItems(tempState.tempDir, [
+        { title: 'Task 1', status: 'open', priority: 'high', needsProducerReview: true },
+        { title: 'Task 2', status: 'in-progress', priority: 'medium' },
+        { title: 'Task 3', status: 'completed', priority: 'low', needsProducerReview: true },
+      ]);
+    });
+
+    it('should list all work items', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(3);
+    });
+
+    it('should filter by status', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list -s open`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(1);
+      expect(result.workItems[0].status).toBe('open');
+    });
+
+    it('should filter by priority', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list -p high`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(1);
+      expect(result.workItems[0].priority).toBe('high');
+    });
+
+    it('should filter by multiple criteria', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list -s open -p high`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(1);
+      expect(result.workItems[0].status).toBe('open');
+      expect(result.workItems[0].priority).toBe('high');
+    });
+
+    it('should filter by id search term', async () => {
+      const { stdout: createStdout } = await execAsync(`tsx ${cliPath} --json create -t "Searchable"`);
+      const created = JSON.parse(createStdout).workItem;
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list ${created.id}`);
+      const result = JSON.parse(stdout);
+
+      const ids = result.workItems.map((item: any) => item.id);
+      expect(result.success).toBe(true);
+      expect(ids).toContain(created.id);
+    });
+
+    it('should filter by parent id', async () => {
+      const parentResult = await execAsync(`tsx ${cliPath} --json create -t "Parent"`);
+      const parent = JSON.parse(parentResult.stdout).workItem;
+
+      const child1 = await execAsync(`tsx ${cliPath} --json create -t "Child 1" -P ${parent.id}`);
+      const child2 = await execAsync(`tsx ${cliPath} --json create -t "Child 2" -P ${parent.id}`);
+      const unrelated = await execAsync(`tsx ${cliPath} --json create -t "Other"`);
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list --parent ${parent.id}`);
+      const result = JSON.parse(stdout);
+
+      const child1Id = JSON.parse(child1.stdout).workItem.id;
+      const child2Id = JSON.parse(child2.stdout).workItem.id;
+      const unrelatedId = JSON.parse(unrelated.stdout).workItem.id;
+
+      const listedIds = result.workItems.map((item: any) => item.id);
+      expect(result.success).toBe(true);
+      expect(listedIds).toContain(child1Id);
+      expect(listedIds).toContain(child2Id);
+      expect(listedIds).not.toContain(parent.id);
+      expect(listedIds).not.toContain(unrelatedId);
+    });
+
+    it('should filter by needs-producer-review true', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list --needs-producer-review true`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(2);
+      result.workItems.forEach((item: any) => expect(item.needsProducerReview).toBe(true));
+    });
+
+    it('should default needs-producer-review to true when value omitted', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list --needs-producer-review`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(2);
+      result.workItems.forEach((item: any) => expect(item.needsProducerReview).toBe(true));
+    });
+
+    it('should filter by needs-producer-review false', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list --needs-producer-review false`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(1);
+      result.workItems.forEach((item: any) => expect(item.needsProducerReview).not.toBe(true));
+    });
+
+    it('should accept "yes" as true for needs-producer-review', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list --needs-producer-review yes`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(2);
+      result.workItems.forEach((item: any) => expect(item.needsProducerReview).toBe(true));
+    });
+
+    it('should accept "no" as false for needs-producer-review', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list --needs-producer-review no`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(1);
+      result.workItems.forEach((item: any) => expect(item.needsProducerReview).not.toBe(true));
+    });
+
+    it('should error for invalid needs-producer-review value', async () => {
+      try {
+        await execAsync(`tsx ${cliPath} --json list --needs-producer-review maybe`);
+        expect.fail('Should have thrown an error');
+      } catch (error: any) {
+        const result = JSON.parse(error.stderr || '{}');
+        expect(result.success).toBe(false);
+      }
+    });
+
+    it('should include completed items when --stage filter matches them', async () => {
+      // Seed items where a completed item has a specific stage
+      seedWorkItems(tempState.tempDir, [
+        { title: 'Open Task', status: 'open', priority: 'high', stage: 'in_progress' },
+        { title: 'Completed Review Task', status: 'completed', priority: 'medium', stage: 'in_review' },
+        { title: 'Another Completed', status: 'completed', priority: 'low', stage: 'done' },
+      ]);
+
+      // JSON mode should return the completed item at stage in_review
+      const { stdout: jsonStdout } = await execAsync(`tsx ${cliPath} --json list --stage in_review`);
+      const jsonResult = JSON.parse(jsonStdout);
+      expect(jsonResult.success).toBe(true);
+      expect(jsonResult.workItems).toHaveLength(1);
+      expect(jsonResult.workItems[0].title).toBe('Completed Review Task');
+
+      // Human-readable mode should also return the same item (bug: previously excluded completed items)
+      const { stdout: humanStdout } = await execAsync(`tsx ${cliPath} list --stage in_review`);
+      expect(humanStdout).toContain('Completed Review Task');
+      expect(humanStdout).toContain('Found 1 work item');
+    });
+
+    it('should filter by multiple comma-separated statuses', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list -s open,in-progress`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(2);
+      const statuses = result.workItems.map((item: any) => item.status);
+      expect(statuses).toContain('open');
+      expect(statuses).toContain('in-progress');
+    });
+
+    it('should filter by multiple statuses with --status open,completed', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list --status open,completed`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(2);
+      const statuses = result.workItems.map((item: any) => item.status);
+      expect(statuses).toContain('open');
+      expect(statuses).toContain('completed');
+    });
+
+    it('should combine comma-separated --status with --stage', async () => {
+      seedWorkItems(tempState.tempDir, [
+        { title: 'Open In Progress', status: 'open', stage: 'in_progress' },
+        { title: 'In Progress Review', status: 'in-progress', stage: 'in_review' },
+        { title: 'Completed Done', status: 'completed', stage: 'done' },
+      ]);
+
+      // --status open,in-progress AND --stage in_review should return only items matching both
+      const { stdout } = await execAsync(`tsx ${cliPath} --json list --status open,in-progress --stage in_review`);
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItems).toHaveLength(1);
+      expect(result.workItems[0].title).toBe('In Progress Review');
+    });
+
+    it('should return error for invalid status value', async () => {
+      try {
+        await execAsync(`tsx ${cliPath} --json list -s invalid_status`);
+        expect.fail('Should have thrown an error');
+      } catch (error: any) {
+        const result = JSON.parse(error.stderr || '{}');
+        expect(result.success).toBe(false);
+      }
+    });
+
+    it('should return error when any status in comma-separated list is invalid', async () => {
+      try {
+        await execAsync(`tsx ${cliPath} --json list -s open,invalid_status`);
+        expect.fail('Should have thrown an error');
+      } catch (error: any) {
+        const result = JSON.parse(error.stderr || '{}');
+        expect(result.success).toBe(false);
+      }
+    });
+
+    it('should still hide completed items in human mode when no stage filter is set', async () => {
+      // The default behavior (no --stage, no --status) should still hide completed items in human mode
+      const { stdout: humanStdout } = await execAsync(`tsx ${cliPath} list`);
+      // Task 3 is completed and should be hidden
+      expect(humanStdout).not.toContain('Task 3');
+      expect(humanStdout).toContain('Task 1');
+      expect(humanStdout).toContain('Task 2');
+    });
+
+    it('should error for invalid parent id', async () => {
+      try {
+        await execAsync(`tsx ${cliPath} --json list --parent TEST-NOTFOUND`);
+        expect.fail('Should have thrown an error');
+      } catch (error: any) {
+        const result = JSON.parse(error.stderr || '{}');
+        expect(result.success).toBe(false);
+      }
+    });
+  });
+
+  describe('show command', () => {
+    let workItemId: string;
+
+    beforeEach(async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json create -t "Test task"`);
+      const result = JSON.parse(stdout);
+      workItemId = result.workItem.id;
+    });
+
+    it('should show a work item by ID', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json show ${workItemId}`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItem.id).toBe(workItemId);
+      expect(result.workItem.title).toBe('Test task');
+    });
+
+    it('should include audit in show json output', async () => {
+      await execAsync(`tsx ${cliPath} --json update ${workItemId} --audit-text "Ready to close: Yes"`);
+      const { stdout } = await execAsync(`tsx ${cliPath} --json show ${workItemId}`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItem.audit).toBeDefined();
+      expect(result.workItem.audit.text).toBe('Ready to close: Yes');
+      expect(result.workItem.audit.status).toBe('Complete');
+    });
+
+    it('should show children when -c flag is used', async () => {
+      await execAsync(`tsx ${cliPath} create -t "Child task" -P ${workItemId}`);
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json show ${workItemId} -c`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.children).toBeDefined();
+      expect(result.children).toHaveLength(1);
+      expect(result.children[0].title).toBe('Child task');
+    });
+
+    it('should return error for non-existent ID', async () => {
+      try {
+        await execAsync(`tsx ${cliPath} --json show TEST-NONEXISTENT`);
+        expect.fail('Should have thrown an error');
+      } catch (error: any) {
+        const result = JSON.parse(error.stderr || '{}');
+        expect(result.success).toBe(false);
+      }
+    });
+
+    it('should display work item in tree format in non-JSON mode', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} show ${workItemId}`);
+
+      expect(stdout).toContain('Test task');
+      expect(stdout).toContain(workItemId);
+      expect(stdout).toContain('└──');
+    });
+
+    it('should display work item with children in tree format in non-JSON mode', async () => {
+      const { stdout: child1Stdout } = await execAsync(`tsx ${cliPath} --json create -t "Child 1" -P ${workItemId} -p high`);
+      const child1 = JSON.parse(child1Stdout);
+      await execAsync(`tsx ${cliPath} create -t "Child 2" -P ${workItemId} -p low`);
+
+      await execAsync(`tsx ${cliPath} create -t "Grandchild" -P ${child1.workItem.id}`);
+
+      const { stdout } = await execAsync(`tsx ${cliPath} show ${workItemId} --children`);
+
+      expect(stdout).toContain('Test task');
+      expect(stdout).toContain('Child 1');
+      expect(stdout).toContain('Child 2');
+      expect(stdout).toContain('Grandchild');
+      expect(stdout).toContain('├──');
+      expect(stdout).toContain('│');
+    });
+  });
+
+  describe('next command', () => {
+    it('should find the next work item when items exist', async () => {
+      await execAsync(`tsx ${cliPath} create -t "Task 1" -s open -p low`);
+      await execAsync(`tsx ${cliPath} create -t "Task 2" -s open -p high`);
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json next`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItem).toBeDefined();
+      // Auto re-sort runs before selection, so high-priority Task 2 wins
+      expect(result.workItem.title).toBe('Task 2');
+    });
+
+    it('should return null when no work items exist', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json next`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItem).toBeNull();
+    });
+
+    it('should filter by assignee', async () => {
+      await execAsync(`tsx ${cliPath} create -t "John task" -p high -a "john"`);
+      await execAsync(`tsx ${cliPath} create -t "Jane task" -p critical -a "jane"`);
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json next -a john`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItem.title).toBe('John task');
+      expect(result.workItem.assignee).toBe('john');
+    });
+
+    it('should filter by search term in title', async () => {
+      await execAsync(`tsx ${cliPath} create -t "Regular task" -p critical`);
+      await execAsync(`tsx ${cliPath} create -t "Bug fix needed" -p low`);
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json next --search bug`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItem.title).toBe('Bug fix needed');
+    });
+
+    it('should filter by search term in description', async () => {
+      await execAsync(`tsx ${cliPath} create -t "Task 1" -d "Some work" -p critical`);
+      await execAsync(`tsx ${cliPath} create -t "Task 2" -d "Authentication issue" -p low`);
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json next --search authentication`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItem.title).toBe('Task 2');
+    });
+
+    it('should prioritize critical open items over lower-priority in-progress items', async () => {
+      const { stdout: openStdout } = await execAsync(`tsx ${cliPath} --json create -t "Open task" -s open -p critical`);
+      const openResult = JSON.parse(openStdout);
+      const openId = openResult.workItem.id;
+
+      const { stdout: inProgressStdout } = await execAsync(
+        `tsx ${cliPath} --json create -t "In progress task" -s in-progress --stage in_progress -p low`
+      );
+      const inProgressResult = JSON.parse(inProgressStdout);
+      const inProgressId = inProgressResult.workItem.id;
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json next`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      // New selection logic favors the critical open item over a lower-priority in-progress item
+      expect(result.workItem.id).toBe(openId);
+    });
+
+    it('should skip completed items', async () => {
+      await execAsync(`tsx ${cliPath} create -t "Completed task" -s completed --stage done -p critical`);
+      const { stdout: openStdout } = await execAsync(`tsx ${cliPath} --json create -t "Open task" -s open -p low`);
+      const openResult = JSON.parse(openStdout);
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json next`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItem.title).toBe(openResult.workItem.title);
+    });
+
+    it('should include a reason in the result', async () => {
+      await execAsync(`tsx ${cliPath} create -t "Task 1" -s open -p high`);
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json next`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.reason).toBeDefined();
+      expect(typeof result.reason).toBe('string');
+    });
+
+    it('should return unique items and note when fewer are available', async () => {
+      await execAsync(`tsx ${cliPath} create -t "Only task" -s open -p high`);
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json next -n 3`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.requested).toBe(3);
+      expect(result.count).toBe(1);
+      expect(result.note).toContain('Only 1 of 3 requested work item');
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].workItem).toBeTruthy();
+    });
+
+    it('should preserve stale sortIndex order with --no-re-sort flag', async () => {
+      // Create low-priority item first (gets sortIndex 100 via createWithNextSortIndex)
+      await execAsync(`tsx ${cliPath} create -t "Low priority first" -s open -p low`);
+      // Create high-priority item second (gets sortIndex 200 via createWithNextSortIndex)
+      await execAsync(`tsx ${cliPath} create -t "High priority second" -s open -p high`);
+
+      // The new behavior runs an automatic re-sort after create by default,
+      // so the high-priority item will be selected regardless of the
+      // --no-re-sort flag passed to `next` (the flag controls the re-sort
+      // that `next` would run itself; it does not undo earlier re-sorts).
+      const { stdout: withoutReSort } = await execAsync(`tsx ${cliPath} --json next --no-re-sort`);
+      const resultWithoutReSort = JSON.parse(withoutReSort);
+      expect(resultWithoutReSort.workItem.title).toBe('High priority second');
+
+      // With default behavior (auto re-sort), high-priority item also wins
+      const { stdout: withReSort } = await execAsync(`tsx ${cliPath} --json next`);
+      const resultWithReSort = JSON.parse(withReSort);
+      expect(resultWithReSort.workItem.title).toBe('High priority second');
+    });
+  });
+
+  describe('in-progress command', () => {
+    it('should list in-progress work items in JSON mode', async () => {
+      await execAsync(`tsx ${cliPath} create -t "Open task" -s open`);
+      const { stdout: ip1Stdout } = await execAsync(
+        `tsx ${cliPath} --json create -t "In progress 1" -s in-progress --stage in_progress -p high`
+      );
+      const { stdout: ip2Stdout } = await execAsync(
+        `tsx ${cliPath} --json create -t "In progress 2" -s in-progress --stage in_progress -p medium`
+      );
+      await execAsync(`tsx ${cliPath} create -t "Completed task" -s completed --stage done`);
+
+      const ip1 = JSON.parse(ip1Stdout);
+      const ip2 = JSON.parse(ip2Stdout);
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json in-progress`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.count).toBe(2);
+      expect(result.workItems).toHaveLength(2);
+
+      const ids = result.workItems.map((item: any) => item.id);
+      expect(ids).toContain(ip1.workItem.id);
+      expect(ids).toContain(ip2.workItem.id);
+    });
+
+    it('should return empty list when no in-progress items exist', async () => {
+      await execAsync(`tsx ${cliPath} create -t "Open task" -s open`);
+      await execAsync(`tsx ${cliPath} create -t "Completed task" -s completed --stage done`);
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json in-progress`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.count).toBe(0);
+      expect(result.workItems).toHaveLength(0);
+    });
+
+    it('should display in-progress items with parent-child relationships', async () => {
+      const { stdout: parentStdout } = await execAsync(
+        `tsx ${cliPath} --json create -t "Parent task" -s in-progress --stage in_progress -p high`
+      );
+      const parent = JSON.parse(parentStdout);
+
+      await execAsync(
+        `tsx ${cliPath} --json create -t "Child task" -s in-progress --stage in_progress -p medium -P ${parent.workItem.id}`
+      );
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json in-progress`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.count).toBe(2);
+
+      const childItem = result.workItems.find((item: any) => item.title === 'Child task');
+      expect(childItem).toBeDefined();
+      expect(childItem.parentId).toBe(parent.workItem.id);
+    });
+
+    it('should display human-readable output in non-JSON mode', async () => {
+      await execAsync(`tsx ${cliPath} create -t "In progress task" -s in-progress --stage in_progress -p high`);
+
+      const { stdout } = await execAsync(`tsx ${cliPath} in-progress`);
+
+      expect(stdout).toContain('Found 1 in-progress work item');
+      expect(stdout).toContain('In progress task');
+    });
+
+    it('should show no items message when list is empty in non-JSON mode', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} in-progress`);
+
+      expect(stdout).toContain('No in-progress work items found');
+    });
+
+    it('should filter by assignee', async () => {
+      await execAsync(`tsx ${cliPath} --json create -t "Alice task" -s in-progress --stage in_progress -a "alice"`);
+      await execAsync(`tsx ${cliPath} --json create -t "Bob task" -s in-progress --stage in_progress -a "bob"`);
+      await execAsync(`tsx ${cliPath} --json create -t "Unassigned task" -s in-progress --stage in_progress`);
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json in-progress --assignee alice`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.count).toBe(1);
+      expect(result.workItems[0].title).toBe('Alice task');
+      expect(result.workItems[0].assignee).toBe('alice');
+    });
+
+    it('should show output in new format Title - ID', async () => {
+      const { stdout: createStdout } = await execAsync(
+        `tsx ${cliPath} --json create -t "Test Task" -s in-progress --stage in_progress`
+      );
+      const created = JSON.parse(createStdout);
+      const itemId = created.workItem.id;
+
+      // Default is now full format, use --format concise for old behavior
+      const { stdout } = await execAsync(`tsx ${cliPath} in-progress --format concise`);
+
+      expect(stdout).toContain('Test Task');
+      expect(stdout).toContain(`- ${itemId}`);
+      expect(stdout).not.toContain(`(${itemId})`);
+    });
+  });
+
+  describe('search command with new filter flags', () => {
+    beforeEach(async () => {
+      await execAsync(`tsx ${cliPath} create -t "Search high alice bug" -p high --assignee alice --issue-type bug --stage in_progress`);
+      await execAsync(`tsx ${cliPath} create -t "Search low bob feature" -p low --assignee bob --issue-type feature --stage idea`);
+      await execAsync(`tsx ${cliPath} create -t "Search high bob task" -p high --assignee bob --issue-type task --stage in_progress`);
+    });
+
+    it('should filter search results by --priority', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json search "search" --priority high`);
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.results.length).toBe(2);
+    });
+
+    it('should filter search results by --assignee', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json search "search" --assignee alice`);
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.results.length).toBe(1);
+    });
+
+    it('should filter search results by --issue-type', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json search "search" --issue-type bug`);
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.results.length).toBe(1);
+    });
+
+    it('should filter search results by --stage', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json search "search" --stage in_progress`);
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.results.length).toBe(2);
+    });
+
+    it('should combine --priority and --assignee', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json search "search" --priority high --assignee bob`);
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.results.length).toBe(1);
+    });
+
+    it('should output human-readable format without --json', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} search "search" --priority high`);
+      // Human-readable output should contain the search query echo
+      expect(stdout).toContain('search');
+    });
+  });
+
+  describe('search --needs-producer-review parsing', () => {
+    let reviewItem1Id: string;
+    let reviewItem2Id: string;
+    let nonReviewItemId: string;
+
+    beforeEach(async () => {
+      // Create items via CLI so they're in the SQLite database for search
+      const r1 = JSON.parse((await execAsync(`tsx ${cliPath} --json create -t "Review item 1" -p high`)).stdout);
+      const r2 = JSON.parse((await execAsync(`tsx ${cliPath} --json create -t "Review item 2" -p medium`)).stdout);
+      const r3 = JSON.parse((await execAsync(`tsx ${cliPath} --json create -t "Non-review item" -p low`)).stdout);
+
+      reviewItem1Id = r1.workItem.id;
+      reviewItem2Id = r2.workItem.id;
+      nonReviewItemId = r3.workItem.id;
+
+      // Set needsProducerReview flags
+      await execAsync(`tsx ${cliPath} --json update ${reviewItem1Id} --needs-producer-review true`);
+      await execAsync(`tsx ${cliPath} --json update ${reviewItem2Id} --needs-producer-review true`);
+      await execAsync(`tsx ${cliPath} --json update ${nonReviewItemId} --needs-producer-review false`);
+    });
+
+    it('should filter search results by --needs-producer-review true', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json search "item" --needs-producer-review true`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.results).toHaveLength(2);
+      const ids = result.results.map((r: any) => r.id);
+      expect(ids).toContain(reviewItem1Id);
+      expect(ids).toContain(reviewItem2Id);
+    });
+
+    it('should default --needs-producer-review to true when value omitted', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json search "item" --needs-producer-review`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.results).toHaveLength(2);
+      const ids = result.results.map((r: any) => r.id);
+      expect(ids).toContain(reviewItem1Id);
+      expect(ids).toContain(reviewItem2Id);
+    });
+
+    it('should filter search results by --needs-producer-review false', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json search "item" --needs-producer-review false`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].id).toBe(nonReviewItemId);
+    });
+
+    it('should accept "yes" as true for --needs-producer-review', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json search "item" --needs-producer-review yes`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.results).toHaveLength(2);
+      const ids = result.results.map((r: any) => r.id);
+      expect(ids).toContain(reviewItem1Id);
+      expect(ids).toContain(reviewItem2Id);
+    });
+
+    it('should accept "no" as false for --needs-producer-review', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json search "item" --needs-producer-review no`);
+
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].id).toBe(nonReviewItemId);
+    });
+
+    it('should error for invalid --needs-producer-review value', async () => {
+      try {
+        await execAsync(`tsx ${cliPath} --json search "item" --needs-producer-review maybe`);
+        expect.fail('Should have thrown an error');
+      } catch (error: any) {
+        const result = JSON.parse(error.stderr || '{}');
+        expect(result.success).toBe(false);
+      }
+    });
+  });
+});

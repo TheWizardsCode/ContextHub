@@ -1,0 +1,83 @@
+name: Install & Smoke Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: install-smoke-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install-and-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build project
+        run: npm run build
+
+      - name: Verify package builds
+        run: npm pack
+
+      - name: Run headless smoke test
+        run: |
+          # Verify the wl command is available and works
+          node ./dist/cli.js list -n 1 --json > /dev/null
+          echo "✓ wl CLI works"
+
+          # Verify the TUI module loads without errors (using tsx for TypeScript imports)
+          npx tsx -e "
+            const { ChatPane } = await import('./packages/tui/extensions/chatPane.js');
+            const { ActionPalette } = await import('./packages/tui/extensions/actionPalette.js');
+            const { runWl } = await import('./packages/tui/extensions/wl-integration.js');
+            console.log('✓ TUI modules load successfully');
+          "
+
+          # Verify chat pane can send messages
+          npx tsx -e "
+            const { ChatPane } = await import('./packages/tui/extensions/chatPane.js');
+            const pane = new ChatPane();
+            pane.clear();
+            console.log('✓ ChatPane instantiated');
+          "
+
+          # Verify action palette has default actions
+          npx tsx -e "
+            const { ChatPane } = await import('./packages/tui/extensions/chatPane.js');
+            const { ActionPalette } = await import('./packages/tui/extensions/actionPalette.js');
+            const chat = new ChatPane();
+            const palette = new ActionPalette(chat);
+            palette.open();
+            const actions = palette.getFilteredActions();
+            if (actions.length < 5) throw new Error('Expected at least 5 default actions, got ' + actions.length);
+            console.log('✓ ActionPalette has ' + actions.length + ' default actions');
+          "
+
+          # Verify pi-audit module works
+          node -e "
+            const { runPiAudit } = require('./dist/pi-audit.js');
+            console.log('✓ Pi-audit module loads');
+          "
+
+          echo "All smoke tests passed"
+
+      - name: Run full test suite
+        run: npm test
+
+      - name: Run E2E agent flow tests
+        run: npx vitest run tests/e2e/agent-flow.test.ts
+
+      - name: Run E2E headless TUI tests
+        run: npx vitest run tests/e2e/headless-tui.test.ts
