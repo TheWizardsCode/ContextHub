@@ -384,6 +384,10 @@ function mergeDifferentTimestampItems(
       // When one version has a close and the other has a different non-close status/stage,
       // prefer the close values. This prevents an unrelated field change on a different
       // client from silently reverting a close operation.
+      //
+      // In mergeDifferentTimestampItems, close-preservation for the REMOTE side is
+      // only applied when isRemoteNewer is true. If local is newer, the local intent
+      // (e.g., reopening a closed item) is respected rather than the remote close.
       if (field === 'status') {
         const localIsClose = localValue === 'completed' && (localItem.stage === 'done' || remoteItem.stage === 'done');
         const remoteIsClose = remoteValue === 'completed' && (remoteItem.stage === 'done' || localItem.stage === 'done');
@@ -401,17 +405,23 @@ function mergeDifferentTimestampItems(
           continue;
         }
         if (remoteIsClose && !localIsClose) {
-          (merged as any)[field] = remoteValue;
-          mergedFields.push(`${field} (close preserved from remote)`);
-          fieldDetails.push({
-            field,
-            localValue,
-            remoteValue,
-            chosenValue: remoteValue,
-            chosenSource: 'remote',
-            reason: 'remote has completed status (close)'
-          });
-          continue;
+          // Only preserve remote close when remote is newer.
+          // If local is newer, the local intent (e.g., reopening) is respected
+          // and we fall through to normal timestamp-based resolution below.
+          if (isRemoteNewer) {
+            (merged as any)[field] = remoteValue;
+            mergedFields.push(`${field} (close preserved from remote)`);
+            fieldDetails.push({
+              field,
+              localValue,
+              remoteValue,
+              chosenValue: remoteValue,
+              chosenSource: 'remote',
+              reason: 'remote has completed status (close)'
+            });
+            continue;
+          }
+          // Fall through to normal resolution when local is newer
         }
       }
       if (field === 'stage') {
@@ -431,17 +441,23 @@ function mergeDifferentTimestampItems(
           continue;
         }
         if (remoteIsCloseStage && !localIsCloseStage) {
-          (merged as any)[field] = remoteValue;
-          mergedFields.push(`${field} (close preserved from remote)`);
-          fieldDetails.push({
-            field,
-            localValue,
-            remoteValue,
-            chosenValue: remoteValue,
-            chosenSource: 'remote',
-            reason: 'remote has done stage (close)'
-          });
-          continue;
+          // Only preserve remote close stage when remote is newer.
+          // If local is newer, the local intent (e.g., reopening) is respected
+          // and we fall through to normal timestamp-based resolution below.
+          if (isRemoteNewer) {
+            (merged as any)[field] = remoteValue;
+            mergedFields.push(`${field} (close preserved from remote)`);
+            fieldDetails.push({
+              field,
+              localValue,
+              remoteValue,
+              chosenValue: remoteValue,
+              chosenSource: 'remote',
+              reason: 'remote has done stage (close)'
+            });
+            continue;
+          }
+          // Fall through to normal resolution when local is newer
         }
       }
       if (localIsDefault && !remoteIsDefault) {
