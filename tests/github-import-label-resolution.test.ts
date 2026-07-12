@@ -1,0 +1,1192 @@
+/**
+ * Integration tests for import label resolution (Feature 5).
+ *
+ * Validates that importIssuesToWorkItems() correctly resolves label-derived
+ * fields (stage, priority, issueType) using event timestamps when label
+ * values differ from local values.
+ *
+ * Scenarios covered:
+ * - Remote-newer: GitHub label changed more recently than local updatedAt → remote wins
+ * - Local-newer: Local updatedAt is more recent than label event → local preserved
+ * - Multi-label: Two wl:stage:* labels on same issue, newer event wins
+ * - Fallback: Events API returns empty → uses issue updated_at as event timestamp
+ * - No-diff: All label fields match local → no event fetch, no field changes
+ * - Audit output: fieldChanges array contains correct FieldChange records
+ * - No events fetched for matching issues (no unnecessary API calls)
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { WorkItem, WorkItemStatus, WorkItemPriority } from '../src/types.js';
+import type { LabelEvent, GithubConfig, GithubIssueRecord } from '../src/github.js';
+
+// Hoist mock function references so vi.mock factory can access them
+const {
+  mockFetchLabelEventsAsync,
+  mockListGithubIssuesAsync,
+  mockGetGithubIssueAsync,
+  mockListGithubIssuesSync,
+  mockGetGithubIssueSync,
+} = vi.hoisted(() => ({
+  mockFetchLabelEventsAsync: vi.fn(),
+  mockListGithubIssuesAsync: vi.fn(),
+  mockGetGithubIssueAsync: vi.fn(),
+  mockListGithubIssuesSync: vi.fn(() => { throw new Error('sync listGithubIssues should not be called in import tests'); }),
+  mockGetGithubIssueSync: vi.fn(() => { throw new Error('sync getGithubIssue should not be called in import tests'); }),
+}));
+
+const mockListGithubIssues = mockListGithubIssuesAsync;
+const mockGetGithubIssue = mockGetGithubIssueAsync;
+
+vi.mock('../src/github.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/github.js')>();
+  return {
+    ...actual,
+    // Override only the functions that make real API calls
+    listGithubIssues: mockListGithubIssuesSync,
+    listGithubIssuesAsync: mockListGithubIssuesAsync,
+    getGithubIssue: mockGetGithubIssueSync,
+    getIssueHierarchy: vi.fn(() => ({ parentIssueNumber: null, childIssueNumbers: [] })),
+    getIssueHierarchyAsync: vi.fn(async () => ({ parentIssueNumber: null, childIssueNumbers: [] })),
+    createGithubIssue: vi.fn(),
+    createGithubIssueAsync: vi.fn(),
+    updateGithubIssue: vi.fn(),
+    updateGithubIssueAsync: vi.fn(),
+    getGithubIssueAsync: mockGetGithubIssueAsync,
+    listGithubIssueComments: vi.fn(() => []),
+    listGithubIssueCommentsAsync: vi.fn(async () => []),
+    createGithubIssueComment: vi.fn(),
+    createGithubIssueCommentAsync: vi.fn(),
+    updateGithubIssueComment: vi.fn(),
+    updateGithubIssueCommentAsync: vi.fn(),
+    addSubIssueLink: vi.fn(),
+    addSubIssueLinkResult: vi.fn(() => ({ ok: true })),
+    addSubIssueLinkResultAsync: vi.fn(async () => ({ ok: true })),
+    buildWorklogCommentMarker: vi.fn(),
+    // Keep real implementations for label parsing and event helpers:
+    // issueToWorkItemFields, labelFieldsDiffer, getLatestLabelEventTimestamp,
+    // normalizeGithubLabelPrefix, LabelEventCache, stripWorklogMarkers,
+    // extractWorklogId, extractParentId, extractChildIds,
+    // extractParentIssueNumber, extractChildIssueNumbers
+    // Override fetchLabelEventsAsync with our mock
+    fetchLabelEventsAsync: mockFetchLabelEventsAsync,
+  };
+});
+
+vi.mock('../src/github-metrics.js', () => ({
+  increment: vi.fn(),
+  snapshot: vi.fn(() => ({})),
+  diff: vi.fn(() => ({})),
+}));
+
+import { importIssuesToWorkItems, FieldChange } from '../src/github-sync.js';
+import { issueToWorkItemFields } from '../src/github.js';
+
+const T_BASE = '2026-01-01T00:00:00.000Z';
+const T_LOCAL_UPDATE = '2026-01-10T00:00:00.000Z';
+const T_LABEL_OLDER = '2026-01-05T00:00:00.000Z';
+const T_LABEL_NEWER = '2026-01-15T00:00:00.000Z';
+const T_ISSUE_UPDATE = '2026-01-12T00:00:00.000Z';
+
+function makeLocalItem(overrides: Partial<WorkItem> & { id: string }): WorkItem {
+  return {
+    title: overrides.id,
+    description: '',
+    status: 'open' as WorkItemStatus,
+    priority: 'medium' as WorkItemPriority,
+    sortIndex: 0,
+    parentId: null,
+    createdAt: T_BASE,
+    updatedAt: T_LOCAL_UPDATE,
+    tags: [],
+    assignee: '',
+    stage: 'idea',
+    issueType: '',
+    createdBy: '',
+    deletedBy: '',
+    deleteReason: '',
+    risk: '',
+    effort: '',
+    ...overrides,
+  } as WorkItem;
+}
+
+function makeGithubIssue(overrides: {
+  number: number;
+  labels?: string[];
+  body?: string;
+  title?: string;
+  state?: 'open' | 'closed';
+  updatedAt?: string;
+}): GithubIssueRecord {
+  return {
+    number: overrides.number,
+    id: overrides.number * 1000,
+    title: overrides.title || `Issue #${overrides.number}`,
+    body: overrides.body !== undefined ? overrides.body : `<!-- worklog:id=${overrides.number === 1 ? 'WL-001' : overrides.number === 2 ? 'WL-002' : overrides.number === 3 ? 'WL-003' : `WL-${overrides.number}`} -->`,
+    state: overrides.state || 'open',
+    labels: overrides.labels || [],
+    updatedAt: overrides.updatedAt || T_ISSUE_UPDATE,
+    subIssuesSummary: { total: 0, completed: 0 },
+  };
+}
+
+const dummyConfig: GithubConfig = {
+  repo: 'test/repo',
+  labelPrefix: 'wl:',
+};
+
+describe('importIssuesToWorkItems label resolution integration', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockListGithubIssuesAsync.mockResolvedValue([]);
+    // Default: fetchLabelEventsAsync returns empty (will be overridden per test)
+    mockFetchLabelEventsAsync.mockResolvedValue([]);
+    // Default: getGithubIssueAsync rejects (Phase 2 tests will override)
+    mockGetGithubIssueAsync.mockRejectedValue(new Error('not found'));
+  });
+
+  it('updates local stage to remote when GitHub label event is newer', async () => {
+    // Local item has stage=idea, updated at T_LOCAL_UPDATE
+    const localItem = makeLocalItem({ id: 'WL-001', stage: 'idea' });
+
+    // GitHub issue has wl:stage:done label, updated at T_ISSUE_UPDATE
+    const issue = makeGithubIssue({
+      number: 1,
+      labels: ['wl:stage:done'],
+      updatedAt: T_ISSUE_UPDATE,
+    });
+
+    mockListGithubIssues.mockReturnValue([issue]);
+
+    // Label event: wl:stage:done was added AFTER local updatedAt
+    mockFetchLabelEventsAsync.mockResolvedValue([
+      { label: 'wl:stage:done', action: 'labeled', createdAt: T_LABEL_NEWER },
+    ] as LabelEvent[]);
+
+    const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+      generateId: () => 'WL-GEN',
+    });
+
+    expect(mockListGithubIssuesAsync).toHaveBeenCalledTimes(1);
+    expect(mockListGithubIssuesSync).not.toHaveBeenCalled();
+
+    // The merged item should have stage=done (remote won)
+    const merged = result.mergedItems.find(item => item.id === 'WL-001');
+    expect(merged).toBeDefined();
+    expect(merged!.stage).toBe('done');
+
+    // fieldChanges should include the stage change
+    expect(result.fieldChanges.length).toBeGreaterThanOrEqual(1);
+    const stageChange = result.fieldChanges.find(fc => fc.field === 'stage' && fc.workItemId === 'WL-001');
+    expect(stageChange).toBeDefined();
+    expect(stageChange!.oldValue).toBe('idea');
+    expect(stageChange!.newValue).toBe('done');
+    expect(stageChange!.source).toBe('github-label');
+    expect(stageChange!.timestamp).toBe(T_LABEL_NEWER);
+  });
+
+  it('preserves local stage when local updatedAt is newer than label event', async () => {
+    // Local item has stage=review, updated at T_LABEL_NEWER (very recent)
+    const localItem = makeLocalItem({
+      id: 'WL-001',
+      stage: 'review',
+      updatedAt: T_LABEL_NEWER,
+    });
+
+    // GitHub issue has wl:stage:done label
+    const issue = makeGithubIssue({
+      number: 1,
+      labels: ['wl:stage:done'],
+      updatedAt: T_ISSUE_UPDATE,
+    });
+
+    mockListGithubIssues.mockReturnValue([issue]);
+
+    // Label event is OLDER than local updatedAt
+    mockFetchLabelEventsAsync.mockResolvedValue([
+      { label: 'wl:stage:done', action: 'labeled', createdAt: T_LOCAL_UPDATE },
+    ] as LabelEvent[]);
+
+    const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+      generateId: () => 'WL-GEN',
+    });
+
+    const merged = result.mergedItems.find(item => item.id === 'WL-001');
+    expect(merged).toBeDefined();
+    // Local stage should be preserved since local is newer
+    expect(merged!.stage).toBe('review');
+
+    // No stage fieldChange should be present (no actual change)
+    const stageChange = result.fieldChanges.find(fc => fc.field === 'stage' && fc.workItemId === 'WL-001');
+    expect(stageChange).toBeUndefined();
+  });
+
+  it('selects the most recently added label when multiple wl:stage:* labels exist', async () => {
+    // Local item has stage=idea
+    const localItem = makeLocalItem({ id: 'WL-001', stage: 'idea' });
+
+    // GitHub issue has TWO stage labels
+    const issue = makeGithubIssue({
+      number: 1,
+      labels: ['wl:stage:review', 'wl:stage:done'],
+      updatedAt: T_ISSUE_UPDATE,
+    });
+
+    mockListGithubIssues.mockReturnValue([issue]);
+
+    // Events: review added first, done added later (both newer than local)
+    const olderEventTime = '2026-01-14T00:00:00.000Z';
+    const newerEventTime = '2026-01-16T00:00:00.000Z';
+
+    mockFetchLabelEventsAsync.mockResolvedValue([
+      { label: 'wl:stage:review', action: 'labeled', createdAt: olderEventTime },
+      { label: 'wl:stage:done', action: 'labeled', createdAt: newerEventTime },
+    ] as LabelEvent[]);
+
+    const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+      generateId: () => 'WL-GEN',
+    });
+
+    const merged = result.mergedItems.find(item => item.id === 'WL-001');
+    expect(merged).toBeDefined();
+    // The most recently added label (done) should win
+    expect(merged!.stage).toBe('done');
+
+    const stageChange = result.fieldChanges.find(fc => fc.field === 'stage');
+    expect(stageChange).toBeDefined();
+    expect(stageChange!.newValue).toBe('done');
+  });
+
+  it('falls back to issue updated_at when events API returns empty', async () => {
+    // Local item has stage=idea, updated at T_LOCAL_UPDATE (Jan 10)
+    const localItem = makeLocalItem({ id: 'WL-001', stage: 'idea' });
+
+    // GitHub issue with wl:stage:done, updated at T_ISSUE_UPDATE (Jan 12, newer than local)
+    const issue = makeGithubIssue({
+      number: 1,
+      labels: ['wl:stage:done'],
+      updatedAt: T_ISSUE_UPDATE,
+    });
+
+    mockListGithubIssues.mockReturnValue([issue]);
+
+    // Events API returns empty — resolution should fall back to issueUpdatedAt
+    mockFetchLabelEventsAsync.mockResolvedValue([]);
+
+    const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+      generateId: () => 'WL-GEN',
+    });
+
+    const merged = result.mergedItems.find(item => item.id === 'WL-001');
+    expect(merged).toBeDefined();
+    // With empty events, fallback uses issueUpdatedAt (Jan 12) vs local (Jan 10)
+    // Remote is newer so remote value should apply
+    expect(merged!.stage).toBe('done');
+
+    const stageChange = result.fieldChanges.find(fc => fc.field === 'stage');
+    expect(stageChange).toBeDefined();
+    expect(stageChange!.newValue).toBe('done');
+    // Timestamp should be the issue updated_at (fallback)
+    expect(stageChange!.timestamp).toBe(T_ISSUE_UPDATE);
+  });
+
+  it('does not fetch events when all label fields match local values', async () => {
+    // Local item already has stage=done matching the GitHub label
+    const localItem = makeLocalItem({
+      id: 'WL-001',
+      stage: 'done',
+      priority: 'high',
+    });
+
+    // GitHub issue with matching labels
+    const issue = makeGithubIssue({
+      number: 1,
+      labels: ['wl:stage:done', 'wl:priority:high'],
+      updatedAt: T_ISSUE_UPDATE,
+    });
+
+    mockListGithubIssues.mockReturnValue([issue]);
+
+    const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+      generateId: () => 'WL-GEN',
+    });
+
+    // fetchLabelEventsAsync should NOT have been called (no diff detected)
+    expect(mockFetchLabelEventsAsync).not.toHaveBeenCalled();
+
+    // No field changes
+    expect(result.fieldChanges).toEqual([]);
+  });
+
+  it('resolves multiple fields independently with mixed outcomes', async () => {
+    // Local item: stage=idea (old), priority=high (very recent)
+    const localItem = makeLocalItem({
+      id: 'WL-001',
+      stage: 'idea',
+      priority: 'high' as WorkItemPriority,
+      updatedAt: T_LOCAL_UPDATE, // Jan 10
+    });
+
+    // GitHub issue with different stage AND different priority
+    const issue = makeGithubIssue({
+      number: 1,
+      labels: ['wl:stage:done', 'wl:priority:critical'],
+      updatedAt: T_ISSUE_UPDATE,
+    });
+
+    mockListGithubIssues.mockReturnValue([issue]);
+
+    // Stage label changed AFTER local update → remote wins for stage
+    // Priority label changed BEFORE local update → local wins for priority
+    mockFetchLabelEventsAsync.mockResolvedValue([
+      { label: 'wl:stage:done', action: 'labeled', createdAt: T_LABEL_NEWER },
+      { label: 'wl:priority:critical', action: 'labeled', createdAt: T_LABEL_OLDER },
+    ] as LabelEvent[]);
+
+    const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+      generateId: () => 'WL-GEN',
+    });
+
+    const merged = result.mergedItems.find(item => item.id === 'WL-001');
+    expect(merged).toBeDefined();
+    // Stage: remote wins (label newer)
+    expect(merged!.stage).toBe('done');
+    // Priority: local wins (label older)
+    expect(merged!.priority).toBe('high');
+
+    // Only stage should appear in fieldChanges (priority didn't change)
+    const stageChange = result.fieldChanges.find(fc => fc.field === 'stage');
+    expect(stageChange).toBeDefined();
+    expect(stageChange!.newValue).toBe('done');
+
+    const priorityChange = result.fieldChanges.find(fc => fc.field === 'priority');
+    expect(priorityChange).toBeUndefined();
+  });
+
+  it('returns empty fieldChanges array when no label-derived fields differ', async () => {
+    // Local item with no label-relevant differences
+    const localItem = makeLocalItem({
+      id: 'WL-001',
+      stage: '',
+      priority: 'medium',
+    });
+
+    // GitHub issue with no wl: labels — issueToWorkItemFields returns defaults
+    const issue = makeGithubIssue({
+      number: 1,
+      labels: [],
+      updatedAt: T_ISSUE_UPDATE,
+    });
+
+    mockListGithubIssues.mockReturnValue([issue]);
+
+    const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+      generateId: () => 'WL-GEN',
+    });
+
+    // fieldChanges should be an empty array, not undefined or null
+    expect(result.fieldChanges).toEqual([]);
+    expect(Array.isArray(result.fieldChanges)).toBe(true);
+  });
+
+  it('produces FieldChange records with correct structure for audit output', async () => {
+    const localItem = makeLocalItem({
+      id: 'WL-001',
+      stage: 'idea',
+      issueType: 'task',
+    });
+
+    const issue = makeGithubIssue({
+      number: 1,
+      labels: ['wl:stage:done', 'wl:type:feature'],
+      updatedAt: T_ISSUE_UPDATE,
+    });
+
+    mockListGithubIssues.mockReturnValue([issue]);
+
+    mockFetchLabelEventsAsync.mockResolvedValue([
+      { label: 'wl:stage:done', action: 'labeled', createdAt: T_LABEL_NEWER },
+      { label: 'wl:type:feature', action: 'labeled', createdAt: T_LABEL_NEWER },
+    ] as LabelEvent[]);
+
+    const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+      generateId: () => 'WL-GEN',
+    });
+
+    // Verify structure of each FieldChange
+    for (const fc of result.fieldChanges) {
+      expect(fc).toHaveProperty('workItemId');
+      expect(fc).toHaveProperty('field');
+      expect(fc).toHaveProperty('oldValue');
+      expect(fc).toHaveProperty('newValue');
+      expect(fc).toHaveProperty('source', 'github-label');
+      expect(fc).toHaveProperty('timestamp');
+      expect(typeof fc.workItemId).toBe('string');
+      expect(typeof fc.field).toBe('string');
+      expect(typeof fc.timestamp).toBe('string');
+    }
+
+    // Should have changes for both stage and issueType
+    const fields = result.fieldChanges.map(fc => fc.field);
+    expect(fields).toContain('stage');
+    expect(fields).toContain('issueType');
+
+    // Verify specific values
+    const stageChange = result.fieldChanges.find(fc => fc.field === 'stage')!;
+    expect(stageChange.workItemId).toBe('WL-001');
+    expect(stageChange.oldValue).toBe('idea');
+    expect(stageChange.newValue).toBe('done');
+
+    const typeChange = result.fieldChanges.find(fc => fc.field === 'issueType')!;
+    expect(typeChange.workItemId).toBe('WL-001');
+    expect(typeChange.oldValue).toBe('task');
+    expect(typeChange.newValue).toBe('feature');
+  });
+
+  it('handles multiple issues with only some needing event resolution', async () => {
+    // Item 1: stage differs → needs event fetch
+    const item1 = makeLocalItem({ id: 'WL-001', stage: 'idea' });
+    // Item 2: stage matches → no event fetch needed
+    const item2 = makeLocalItem({ id: 'WL-002', stage: 'done', priority: 'medium' });
+
+    const issue1 = makeGithubIssue({
+      number: 1,
+      labels: ['wl:stage:done'],
+      updatedAt: T_ISSUE_UPDATE,
+    });
+    const issue2 = makeGithubIssue({
+      number: 2,
+      labels: ['wl:stage:done'],
+      updatedAt: T_ISSUE_UPDATE,
+    });
+
+    mockListGithubIssues.mockReturnValue([issue1, issue2]);
+
+    mockFetchLabelEventsAsync.mockResolvedValue([
+      { label: 'wl:stage:done', action: 'labeled', createdAt: T_LABEL_NEWER },
+    ] as LabelEvent[]);
+
+    const result = await importIssuesToWorkItems([item1, item2], dummyConfig, {
+      generateId: () => 'WL-GEN',
+    });
+
+    // Events should only be fetched for issue 1 (issue 2 matches local)
+    expect(mockFetchLabelEventsAsync).toHaveBeenCalledTimes(1);
+    expect(mockFetchLabelEventsAsync).toHaveBeenCalledWith(
+      expect.anything(),
+      1, // issue number 1 only
+      expect.anything()
+    );
+
+    // Item 1 should have updated stage
+    const merged1 = result.mergedItems.find(item => item.id === 'WL-001');
+    expect(merged1!.stage).toBe('done');
+
+    // Item 2 should retain its stage
+    const merged2 = result.mergedItems.find(item => item.id === 'WL-002');
+    expect(merged2!.stage).toBe('done');
+  });
+
+  it('handles new issues (no local match) without event resolution', async () => {
+    // No local items — issue is brand new
+    const issue = makeGithubIssue({
+      number: 1,
+      labels: ['wl:stage:done', 'wl:priority:high'],
+      body: '', // no worklog marker
+      updatedAt: T_ISSUE_UPDATE,
+    });
+
+    mockListGithubIssues.mockReturnValue([issue]);
+
+    let genCounter = 1;
+    const result = await importIssuesToWorkItems([], dummyConfig, {
+      createNew: true,
+      generateId: () => `WL-NEW-${genCounter++}`,
+    });
+
+    // New items should NOT trigger event fetching (no local to compare against)
+    expect(mockFetchLabelEventsAsync).not.toHaveBeenCalled();
+
+    // The created item should have label values applied directly
+    expect(result.createdItems.length).toBe(1);
+    const created = result.mergedItems.find(item => item.id === 'WL-NEW-1');
+    expect(created).toBeDefined();
+    expect(created!.stage).toBe('done');
+    expect(created!.priority).toBe('high');
+
+    // No field changes (resolution only applies to existing items)
+    expect(result.fieldChanges).toEqual([]);
+  });
+
+  it('propagates status change when issue is reopened even if local updatedAt is newer than issue updatedAt', async () => {
+    // Scenario: item was completed locally, then someone reopened the GitHub issue
+    // Local updatedAt (Jan 10) > issue updatedAt (Jan 12 is used here but local was edited later)
+    const T_LOCAL_VERY_RECENT = '2026-01-20T00:00:00.000Z';
+    const T_REOPEN_EVENT = '2026-01-25T00:00:00.000Z';
+
+    const localItem = makeLocalItem({
+      id: 'WL-001',
+      status: 'completed' as WorkItemStatus,
+      stage: 'in_review',
+      updatedAt: T_LOCAL_VERY_RECENT,
+    });
+
+    // GitHub issue is open (was reopened), with status label
+    const issue = makeGithubIssue({
+      number: 1,
+      labels: ['wl:status:open', 'wl:stage:idea'],
+      state: 'open',
+      updatedAt: T_ISSUE_UPDATE, // Jan 12 — older than local
+    });
+
+    mockListGithubIssues.mockReturnValue([issue]);
+
+    // The label events show the status/stage labels were added AFTER local updatedAt
+    mockFetchLabelEventsAsync.mockResolvedValue([
+      { label: 'wl:status:open', action: 'labeled', createdAt: T_REOPEN_EVENT },
+      { label: 'wl:stage:idea', action: 'labeled', createdAt: T_REOPEN_EVENT },
+    ] as LabelEvent[]);
+
+    const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+      generateId: () => 'WL-GEN',
+    });
+
+    const merged = result.mergedItems.find(item => item.id === 'WL-001');
+    expect(merged).toBeDefined();
+    // Even though local updatedAt > issue updatedAt, the label event is newer
+    // than local updatedAt, so label resolution should win
+    expect(merged!.status).toBe('open');
+    expect(merged!.stage).toBe('idea');
+
+    // fieldChanges should include both status and stage changes
+    const statusChange = result.fieldChanges.find(fc => fc.field === 'status' && fc.workItemId === 'WL-001');
+    expect(statusChange).toBeDefined();
+    expect(statusChange!.oldValue).toBe('completed');
+    expect(statusChange!.newValue).toBe('open');
+
+    const stageChange = result.fieldChanges.find(fc => fc.field === 'stage' && fc.workItemId === 'WL-001');
+    expect(stageChange).toBeDefined();
+    expect(stageChange!.oldValue).toBe('in_review');
+    expect(stageChange!.newValue).toBe('idea');
+  });
+
+  it('propagates stage change when label event is newer even if same item-level timestamps', async () => {
+    // Scenario: after a sync cycle both local and remote have the same updatedAt.
+    // Then someone changes a label on GitHub. The label event is newer,
+    // but the issue updatedAt might match local updatedAt.
+    const T_SYNCED = '2026-01-10T00:00:00.000Z';
+    const T_LABEL_CHANGE = '2026-01-15T00:00:00.000Z';
+
+    const localItem = makeLocalItem({
+      id: 'WL-001',
+      stage: 'done',
+      status: 'completed' as WorkItemStatus,
+      updatedAt: T_SYNCED,
+    });
+
+    // GitHub issue updatedAt matches local (same sync cycle),
+    // but now has a different stage label
+    const issue = makeGithubIssue({
+      number: 1,
+      labels: ['wl:stage:review', 'wl:status:open'],
+      state: 'open',
+      updatedAt: T_SYNCED, // Same as local
+    });
+
+    mockListGithubIssues.mockReturnValue([issue]);
+
+    // Label event is newer than the synced timestamp
+    mockFetchLabelEventsAsync.mockResolvedValue([
+      { label: 'wl:stage:review', action: 'labeled', createdAt: T_LABEL_CHANGE },
+      { label: 'wl:status:open', action: 'labeled', createdAt: T_LABEL_CHANGE },
+    ] as LabelEvent[]);
+
+    const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+      generateId: () => 'WL-GEN',
+    });
+
+    const merged = result.mergedItems.find(item => item.id === 'WL-001');
+    expect(merged).toBeDefined();
+    // Label resolution determined remote wins; this should survive mergeWorkItems
+    expect(merged!.stage).toBe('review');
+    expect(merged!.status).toBe('open');
+
+    const stageChange = result.fieldChanges.find(fc => fc.field === 'stage');
+    expect(stageChange).toBeDefined();
+    expect(stageChange!.newValue).toBe('review');
+  });
+
+  it('propagates status from completed to open when GitHub issue is reopened with newer label event', async () => {
+    // The exact scenario from the bug report: item is completed/in_review,
+    // GitHub issue is reopened with stage changed, wl gh import should update both
+    const T_COMPLETED = '2026-01-10T00:00:00.000Z';
+    const T_REOPEN = '2026-01-12T00:00:00.000Z';
+
+    const localItem = makeLocalItem({
+      id: 'WL-001',
+      status: 'completed' as WorkItemStatus,
+      stage: 'in_review',
+      updatedAt: T_COMPLETED,
+    });
+
+    const issue = makeGithubIssue({
+      number: 1,
+      labels: ['wl:status:open', 'wl:stage:idea'],
+      state: 'open',
+      updatedAt: T_REOPEN,
+    });
+
+    mockListGithubIssues.mockReturnValue([issue]);
+
+    mockFetchLabelEventsAsync.mockResolvedValue([
+      { label: 'wl:status:open', action: 'labeled', createdAt: T_REOPEN },
+      { label: 'wl:stage:idea', action: 'labeled', createdAt: T_REOPEN },
+    ] as LabelEvent[]);
+
+    const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+      generateId: () => 'WL-GEN',
+    });
+
+    const merged = result.mergedItems.find(item => item.id === 'WL-001');
+    expect(merged).toBeDefined();
+    expect(merged!.status).toBe('open');
+    expect(merged!.stage).toBe('idea');
+  });
+
+  describe('issueToWorkItemFields: GitHub issue state is authoritative over stale labels', () => {
+    it('returns status=open when issue is open but has stale wl:status:completed label', () => {
+      // Scenario: someone reopened the GitHub issue but forgot to remove the completed label
+      const issue = makeGithubIssue({
+        number: 1,
+        labels: ['wl:status:completed', 'wl:stage:done'],
+        state: 'open',
+      });
+
+      const fields = issueToWorkItemFields(issue, 'wl:');
+      // GitHub issue state (open) must override the stale label
+      expect(fields.status).toBe('open');
+      // stage is unrelated to issue state — label value should be preserved
+      expect(fields.stage).toBe('done');
+    });
+
+    it('returns status=completed when issue is closed but has stale wl:status:open label', () => {
+      // Scenario: issue was closed on GitHub but the open label was never removed
+      const issue = makeGithubIssue({
+        number: 1,
+        labels: ['wl:status:open', 'wl:stage:review'],
+        state: 'closed',
+      });
+
+      const fields = issueToWorkItemFields(issue, 'wl:');
+      // GitHub issue state (closed) must override the stale label
+      expect(fields.status).toBe('completed');
+      // stage is unrelated to issue state — label value should be preserved
+      expect(fields.stage).toBe('review');
+    });
+
+    it('returns status=open when issue is open with no status label at all', () => {
+      const issue = makeGithubIssue({
+        number: 1,
+        labels: ['wl:stage:idea'],
+        state: 'open',
+      });
+
+      const fields = issueToWorkItemFields(issue, 'wl:');
+      expect(fields.status).toBe('open');
+    });
+
+    it('returns status=completed when issue is closed with no status label at all', () => {
+      const issue = makeGithubIssue({
+        number: 1,
+        labels: ['wl:stage:idea'],
+        state: 'closed',
+      });
+
+      const fields = issueToWorkItemFields(issue, 'wl:');
+      expect(fields.status).toBe('completed');
+    });
+  });
+
+  describe('Phase 2 close-check: reopened issues propagate status changes', () => {
+    it('updates completed local item to open when GitHub issue is reopened', async () => {
+      // Scenario: local item is completed, GitHub issue was reopened.
+      // Phase 1 does NOT return this issue (it was not recently changed via listGithubIssues).
+      // Phase 2 fetches it via getGithubIssue and should detect the state mismatch.
+      const T_COMPLETED = '2026-01-10T00:00:00.000Z';
+      const T_REOPEN = '2026-01-12T00:00:00.000Z';
+
+      const localItem = makeLocalItem({
+        id: 'WL-001',
+        status: 'completed' as WorkItemStatus,
+        stage: 'in_review',
+        updatedAt: T_COMPLETED,
+        githubIssueNumber: 42,
+        githubIssueUpdatedAt: T_COMPLETED,
+      } as any);
+
+      // Phase 1: no issues returned (this issue was not in the "since" window)
+      mockListGithubIssues.mockReturnValue([]);
+
+      // Phase 2: getGithubIssue returns the reopened issue
+      mockGetGithubIssue.mockReturnValue(
+        makeGithubIssue({
+          number: 42,
+          labels: ['wl:status:open', 'wl:stage:idea'],
+          state: 'open',
+          updatedAt: T_REOPEN,
+        })
+      );
+
+      // Label events show the status/stage labels were added at reopen time
+      mockFetchLabelEventsAsync.mockResolvedValue([
+        { label: 'wl:status:open', action: 'labeled', createdAt: T_REOPEN },
+        { label: 'wl:stage:idea', action: 'labeled', createdAt: T_REOPEN },
+      ] as LabelEvent[]);
+
+      const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+        generateId: () => 'WL-GEN',
+      });
+
+      expect(mockGetGithubIssueAsync).toHaveBeenCalledWith(expect.anything(), 42);
+      expect(mockGetGithubIssueSync).not.toHaveBeenCalled();
+
+      const merged = result.mergedItems.find(item => item.id === 'WL-001');
+      expect(merged).toBeDefined();
+      expect(merged!.status).toBe('open');
+      expect(merged!.stage).toBe('idea');
+    });
+
+    it('updates completed local item to open even when stale wl:status:completed label exists', async () => {
+      // Scenario: local item completed, GitHub issue reopened, but
+      // wl:status:completed label was NOT removed. The issue state (open)
+      // must be authoritative — our Fix A in issueToWorkItemFields handles this.
+      const T_COMPLETED = '2026-01-10T00:00:00.000Z';
+      const T_REOPEN = '2026-01-12T00:00:00.000Z';
+
+      const localItem = makeLocalItem({
+        id: 'WL-001',
+        status: 'completed' as WorkItemStatus,
+        stage: 'in_review',
+        updatedAt: T_COMPLETED,
+        githubIssueNumber: 42,
+        githubIssueUpdatedAt: T_COMPLETED,
+      } as any);
+
+      // Phase 1: empty
+      mockListGithubIssues.mockReturnValue([]);
+
+      // Phase 2: issue is open but has STALE wl:status:completed label
+      mockGetGithubIssue.mockReturnValue(
+        makeGithubIssue({
+          number: 42,
+          labels: ['wl:status:completed', 'wl:stage:in_review'],
+          state: 'open',
+          updatedAt: T_REOPEN,
+        })
+      );
+
+      // No label events (the labels weren't changed — only the issue was reopened)
+      mockFetchLabelEventsAsync.mockResolvedValue([]);
+
+      const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+        generateId: () => 'WL-GEN',
+      });
+
+      const merged = result.mergedItems.find(item => item.id === 'WL-001');
+      expect(merged).toBeDefined();
+      // issueToWorkItemFields overrides stale completed label → status=open
+      expect(merged!.status).toBe('open');
+    });
+
+    it('does not regress: closed GitHub issue still sets local item to completed', async () => {
+      // Ensure the Phase 2 changes did not break the normal close path
+      const T_OPEN = '2026-01-10T00:00:00.000Z';
+      const T_CLOSE = '2026-01-12T00:00:00.000Z';
+
+      const localItem = makeLocalItem({
+        id: 'WL-001',
+        status: 'open' as WorkItemStatus,
+        stage: 'idea',
+        updatedAt: T_OPEN,
+        githubIssueNumber: 42,
+        githubIssueUpdatedAt: T_OPEN,
+      } as any);
+
+      // Phase 1: empty
+      mockListGithubIssues.mockReturnValue([]);
+
+      // Phase 2: issue was closed
+      mockGetGithubIssue.mockReturnValue(
+        makeGithubIssue({
+          number: 42,
+          labels: ['wl:status:completed', 'wl:stage:done'],
+          state: 'closed',
+          updatedAt: T_CLOSE,
+        })
+      );
+
+      mockFetchLabelEventsAsync.mockResolvedValue([
+        { label: 'wl:status:completed', action: 'labeled', createdAt: T_CLOSE },
+        { label: 'wl:stage:done', action: 'labeled', createdAt: T_CLOSE },
+      ] as LabelEvent[]);
+
+      const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+        generateId: () => 'WL-GEN',
+      });
+
+      const merged = result.mergedItems.find(item => item.id === 'WL-001');
+      expect(merged).toBeDefined();
+      expect(merged!.status).toBe('completed');
+      expect(merged!.stage).toBe('done');
+    });
+
+    it('skips Phase 2 processing for open issues where local item is also open', async () => {
+      // When both the GitHub issue and local item are open/non-completed,
+      // Phase 2 should skip processing (no state change to propagate)
+      const T_RECENT = '2026-01-10T00:00:00.000Z';
+
+      const localItem = makeLocalItem({
+        id: 'WL-001',
+        status: 'open' as WorkItemStatus,
+        stage: 'idea',
+        updatedAt: T_RECENT,
+        githubIssueNumber: 42,
+        githubIssueUpdatedAt: T_RECENT,
+      } as any);
+
+      // Phase 1: empty
+      mockListGithubIssues.mockReturnValue([]);
+
+      // Phase 2 fetches the issue, but it's open and local is also open
+      mockGetGithubIssue.mockReturnValue(
+        makeGithubIssue({
+          number: 42,
+          labels: ['wl:stage:idea'],
+          state: 'open',
+          updatedAt: T_RECENT,
+        })
+      );
+
+      const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+        generateId: () => 'WL-GEN',
+      });
+
+      const merged = result.mergedItems.find(item => item.id === 'WL-001');
+      expect(merged).toBeDefined();
+      // Item should remain unchanged — Phase 2 skipped it
+      expect(merged!.status).toBe('open');
+      expect(merged!.stage).toBe('idea');
+
+      // No label events should have been fetched (item was skipped before resolution)
+      expect(mockFetchLabelEventsAsync).not.toHaveBeenCalled();
+    });
+
+    it('skips Phase 2 close-check entirely when since is provided', async () => {
+      const T_PRIOR_SYNC = '2026-01-10T00:00:00.000Z';
+
+      const localItem = makeLocalItem({
+        id: 'WL-001',
+        status: 'completed' as WorkItemStatus,
+        stage: 'in_review',
+        updatedAt: T_PRIOR_SYNC,
+        githubIssueNumber: 42,
+        githubIssueUpdatedAt: T_PRIOR_SYNC,
+      } as any);
+
+      // Incremental import window returned no updated issues
+      mockListGithubIssues.mockReturnValue([]);
+
+      const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+        since: '2026-01-20T00:00:00.000Z',
+        generateId: () => 'WL-GEN',
+      });
+
+      // Optimization: no per-item getGithubIssueAsync calls during incremental imports
+      expect(mockGetGithubIssueAsync).not.toHaveBeenCalled();
+
+      const merged = result.mergedItems.find(item => item.id === 'WL-001');
+      expect(merged).toBeDefined();
+      expect(merged!.status).toBe('completed');
+      expect(merged!.stage).toBe('in_review');
+    });
+  });
+
+  describe('Bug reproduction: completed item not updated when GitHub issue is reopened', () => {
+    // This reproduces the exact scenario from WL-0MM77L16U0VXR5W3:
+    //
+    //   1. A work item was previously synced with GitHub. It is now
+    //      status=completed, stage=in_review in the worklog. The local item
+    //      has githubIssueNumber and githubIssueUpdatedAt set from a prior sync.
+    //
+    //   2. Someone reopens the GitHub issue and changes its stage label to
+    //      wl:stage:open. A review comment is also added (but that is handled
+    //      separately via comment import — not relevant to this test).
+    //
+    //   3. Running `wl gh import` should update the worklog item so that
+    //      status changes from completed → open and stage from in_review → open.
+    //
+    // The issue can appear in Phase 1 (via listGithubIssues) or Phase 2
+    // (close-check for items not returned by listGithubIssues). Both paths
+    // must be tested.
+
+    it('Phase 1: reopened issue returned by listGithubIssues updates completed item', async () => {
+      // The issue appears in the listGithubIssues results (e.g. because it
+      // was updated after the `since` cutoff or no `since` was given).
+      const T_PRIOR_SYNC = '2026-01-10T00:00:00.000Z';
+      const T_REOPEN = '2026-01-15T00:00:00.000Z';
+
+      const localItem = makeLocalItem({
+        id: 'WL-001',
+        status: 'completed' as WorkItemStatus,
+        stage: 'in_review',
+        updatedAt: T_PRIOR_SYNC,
+        githubIssueNumber: 709,
+        githubIssueId: 709000,
+        githubIssueUpdatedAt: T_PRIOR_SYNC,
+      } as any);
+
+      // The GitHub issue was reopened (state=open) and the stage label was
+      // changed from wl:stage:in_review to wl:stage:open.
+      // No explicit wl:status label exists — status is derived from issue.state.
+      const issue = makeGithubIssue({
+        number: 709,
+        labels: ['wl:stage:open'],
+        state: 'open',
+        updatedAt: T_REOPEN,
+        body: '<!-- worklog:id=WL-001 -->',
+      });
+
+      mockListGithubIssues.mockReturnValue([issue]);
+
+      // No label events available (events API can be empty)
+      mockFetchLabelEventsAsync.mockResolvedValue([]);
+
+      const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+        generateId: () => 'WL-GEN',
+      });
+
+      const merged = result.mergedItems.find(item => item.id === 'WL-001');
+      expect(merged).toBeDefined();
+      expect(merged!.status).toBe('open');
+      expect(merged!.stage).toBe('open');
+    });
+
+    it('Phase 1: reopened issue with stale wl:status:completed label updates completed item', async () => {
+      // Same as above, but the wl:status:completed label was NOT removed.
+      // Fix A in issueToWorkItemFields should override the stale label.
+      const T_PRIOR_SYNC = '2026-01-10T00:00:00.000Z';
+      const T_REOPEN = '2026-01-15T00:00:00.000Z';
+
+      const localItem = makeLocalItem({
+        id: 'WL-001',
+        status: 'completed' as WorkItemStatus,
+        stage: 'in_review',
+        updatedAt: T_PRIOR_SYNC,
+        githubIssueNumber: 709,
+        githubIssueId: 709000,
+        githubIssueUpdatedAt: T_PRIOR_SYNC,
+      } as any);
+
+      const issue = makeGithubIssue({
+        number: 709,
+        labels: ['wl:status:completed', 'wl:stage:open'],
+        state: 'open',
+        updatedAt: T_REOPEN,
+        body: '<!-- worklog:id=WL-001 -->',
+      });
+
+      mockListGithubIssues.mockReturnValue([issue]);
+      mockFetchLabelEventsAsync.mockResolvedValue([]);
+
+      const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+        generateId: () => 'WL-GEN',
+      });
+
+      const merged = result.mergedItems.find(item => item.id === 'WL-001');
+      expect(merged).toBeDefined();
+      expect(merged!.status).toBe('open');
+      expect(merged!.stage).toBe('open');
+    });
+
+    it('Phase 2: reopened issue fetched via getGithubIssue updates completed item', async () => {
+      // The issue does NOT appear in listGithubIssues results (e.g. because
+      // the `since` cutoff is after the reopen, or pagination missed it).
+      // Phase 2 fetches it individually because the local item has a
+      // githubIssueNumber.
+      const T_PRIOR_SYNC = '2026-01-10T00:00:00.000Z';
+      const T_REOPEN = '2026-01-15T00:00:00.000Z';
+
+      const localItem = makeLocalItem({
+        id: 'WL-001',
+        status: 'completed' as WorkItemStatus,
+        stage: 'in_review',
+        updatedAt: T_PRIOR_SYNC,
+        githubIssueNumber: 709,
+        githubIssueId: 709000,
+        githubIssueUpdatedAt: T_PRIOR_SYNC,
+      } as any);
+
+      // Phase 1: empty — the issue is not in the listGithubIssues result
+      mockListGithubIssues.mockReturnValue([]);
+
+      // Phase 2 fetches the issue individually
+      mockGetGithubIssue.mockReturnValue(
+        makeGithubIssue({
+          number: 709,
+          labels: ['wl:stage:open'],
+          state: 'open',
+          updatedAt: T_REOPEN,
+          body: '<!-- worklog:id=WL-001 -->',
+        })
+      );
+
+      mockFetchLabelEventsAsync.mockResolvedValue([]);
+
+      const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+        generateId: () => 'WL-GEN',
+      });
+
+      const merged = result.mergedItems.find(item => item.id === 'WL-001');
+      expect(merged).toBeDefined();
+      expect(merged!.status).toBe('open');
+      expect(merged!.stage).toBe('open');
+    });
+
+    it('Phase 2: reopened issue with stale wl:status:completed label updates completed item', async () => {
+      const T_PRIOR_SYNC = '2026-01-10T00:00:00.000Z';
+      const T_REOPEN = '2026-01-15T00:00:00.000Z';
+
+      const localItem = makeLocalItem({
+        id: 'WL-001',
+        status: 'completed' as WorkItemStatus,
+        stage: 'in_review',
+        updatedAt: T_PRIOR_SYNC,
+        githubIssueNumber: 709,
+        githubIssueId: 709000,
+        githubIssueUpdatedAt: T_PRIOR_SYNC,
+      } as any);
+
+      mockListGithubIssues.mockReturnValue([]);
+
+      mockGetGithubIssue.mockReturnValue(
+        makeGithubIssue({
+          number: 709,
+          labels: ['wl:status:completed', 'wl:stage:open'],
+          state: 'open',
+          updatedAt: T_REOPEN,
+          body: '<!-- worklog:id=WL-001 -->',
+        })
+      );
+
+      mockFetchLabelEventsAsync.mockResolvedValue([]);
+
+      const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+        generateId: () => 'WL-GEN',
+      });
+
+      const merged = result.mergedItems.find(item => item.id === 'WL-001');
+      expect(merged).toBeDefined();
+      expect(merged!.status).toBe('open');
+      expect(merged!.stage).toBe('open');
+    });
+
+    it('Phase 1: local updatedAt is NEWER than issue updatedAt but label events are newer still', async () => {
+      // Edge case: the local item was updated more recently than the
+      // issue.updatedAt (e.g. a local edit happened after the sync that
+      // marked it completed). However, the label events on GitHub are
+      // even more recent than the local updatedAt.
+      const T_PRIOR_SYNC = '2026-01-10T00:00:00.000Z';
+      const T_LOCAL_EDIT = '2026-01-20T00:00:00.000Z';
+      const T_ISSUE_REOPEN = '2026-01-15T00:00:00.000Z';
+      const T_LABEL_EVENT = '2026-01-25T00:00:00.000Z';
+
+      const localItem = makeLocalItem({
+        id: 'WL-001',
+        status: 'completed' as WorkItemStatus,
+        stage: 'in_review',
+        updatedAt: T_LOCAL_EDIT,
+        githubIssueNumber: 709,
+        githubIssueId: 709000,
+        githubIssueUpdatedAt: T_PRIOR_SYNC,
+      } as any);
+
+      const issue = makeGithubIssue({
+        number: 709,
+        labels: ['wl:stage:open'],
+        state: 'open',
+        updatedAt: T_ISSUE_REOPEN,
+        body: '<!-- worklog:id=WL-001 -->',
+      });
+
+      mockListGithubIssues.mockReturnValue([issue]);
+
+      mockFetchLabelEventsAsync.mockResolvedValue([
+        { label: 'wl:stage:open', action: 'labeled', createdAt: T_LABEL_EVENT },
+      ] as LabelEvent[]);
+
+      const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+        generateId: () => 'WL-GEN',
+      });
+
+      const merged = result.mergedItems.find(item => item.id === 'WL-001');
+      expect(merged).toBeDefined();
+      // status: issue is open → issueToWorkItemFields returns 'open'
+      // But local updatedAt > issue updatedAt, so mergeWorkItems prefers local
+      // However, the label event for stage is newer than local updatedAt
+      expect(merged!.status).toBe('open');
+      expect(merged!.stage).toBe('open');
+    });
+
+    it('Phase 1: local updatedAt is NEWER than issue updatedAt and NO label events', async () => {
+      // Critical edge case: local updatedAt > issue updatedAt, and the
+      // label events API returns empty. In this case mergeWorkItems will
+      // prefer local values (local is newer). The label resolution fallback
+      // (issueUpdatedAt) is also older than local. Status should STILL
+      // change to open because the issue is open on GitHub — this is a
+      // state-level change that must propagate regardless of timestamps.
+      const T_PRIOR_SYNC = '2026-01-10T00:00:00.000Z';
+      const T_LOCAL_EDIT = '2026-01-20T00:00:00.000Z';
+      const T_ISSUE_REOPEN = '2026-01-15T00:00:00.000Z';
+
+      const localItem = makeLocalItem({
+        id: 'WL-001',
+        status: 'completed' as WorkItemStatus,
+        stage: 'in_review',
+        updatedAt: T_LOCAL_EDIT,
+        githubIssueNumber: 709,
+        githubIssueId: 709000,
+        githubIssueUpdatedAt: T_PRIOR_SYNC,
+      } as any);
+
+      const issue = makeGithubIssue({
+        number: 709,
+        labels: ['wl:stage:open'],
+        state: 'open',
+        updatedAt: T_ISSUE_REOPEN,
+        body: '<!-- worklog:id=WL-001 -->',
+      });
+
+      mockListGithubIssues.mockReturnValue([issue]);
+
+      // No label events — fallback to issue updatedAt which is OLDER than local
+      mockFetchLabelEventsAsync.mockResolvedValue([]);
+
+      const result = await importIssuesToWorkItems([localItem], dummyConfig, {
+        generateId: () => 'WL-GEN',
+      });
+
+      const merged = result.mergedItems.find(item => item.id === 'WL-001');
+      expect(merged).toBeDefined();
+      // The issue is OPEN on GitHub. Even though local timestamp is newer,
+      // the status should reflect the authoritative GitHub issue state.
+      expect(merged!.status).toBe('open');
+      // Stage: remote has 'open', local has 'in_review'. With empty events,
+      // fallback timestamp is issue updatedAt (Jan 15) < local (Jan 20),
+      // so label resolution prefers local. mergeWorkItems also prefers local
+      // (local is newer). So stage remains 'in_review'.
+      // This is the expected behaviour — stage is label-derived, not
+      // state-derived, so timestamps govern.
+      expect(merged!.stage).toBe('in_review');
+    });
+  });
+});

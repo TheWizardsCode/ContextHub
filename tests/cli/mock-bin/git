@@ -1,0 +1,532 @@
+#!/usr/bin/env bash
+# Minimal git mock used in tests to avoid running the real git binary.
+# This mock supports a few commands used by tests: rev-parse, init, clone, add, commit, remote, push
+
+# Normalize args: handle any `-C <dir>` occurrences anywhere in the arg list
+# by changing directory to the provided dir and removing those tokens so the
+# remaining positional parameters start with the actual git subcommand.
+if [ "$#" -gt 0 ]; then
+  normalized_args=""
+  i=1
+  while [ $i -le $# ]; do
+    eval "arg=\"\$$i\""
+    if [ "$arg" = "-C" ]; then
+      i=$((i + 1))
+      eval "dir=\"\$$i\""
+      cd "$dir" 2>/dev/null || true
+      i=$((i + 1))
+      continue
+    fi
+    # append quoted arg
+    normalized_args="$normalized_args \"$arg\""
+    i=$((i + 1))
+  done
+  # reset positional params to normalized args
+  if [ -n "$normalized_args" ]; then
+    eval set -- $normalized_args
+  fi
+fi
+
+# Minimal logging: enabled when WORKLOG_GIT_MOCK_DEBUG=1. Default is quiet.
+# Set WORKLOG_GIT_MOCK_DEBUG=1 in your environment to produce /tmp/worklog-mock.log entries.
+DEBUG=${WORKLOG_GIT_MOCK_DEBUG:-0}
+log() { if [ "$DEBUG" = "1" ]; then echo "[mock-git] $*" >> /tmp/worklog-mock.log 2>/dev/null || true; fi }
+log "INVOKE: $PWD -- $*"
+
+case "$1" in
+  rev-parse)
+    if [ "$2" = "--show-toplevel" ]; then
+      # Find nearest parent directory that contains .git (dir or file)
+      dir=$(pwd)
+      while [ "$dir" != "/" ]; do
+        if [ -d "$dir/.git" ] || [ -f "$dir/.git" ]; then
+          echo "$dir"
+          exit 0
+        fi
+        dir=$(dirname "$dir")
+      done
+      # fallback to current dir
+      pwd
+      exit 0
+    fi
+    if [ "$2" = "--is-inside-work-tree" ]; then
+      # Return success to indicate we're inside a git repo
+      exit 0
+    fi
+    if [ "$2" = "--git-dir" ]; then
+      # Find nearest parent directory that contains .git (dir or file)
+      dir=$(pwd)
+      while [ "$dir" != "/" ]; do
+        if [ -d "$dir/.git" ]; then
+          echo "$dir/.git"
+          exit 0
+        fi
+        if [ -f "$dir/.git" ]; then
+          echo "$dir/.git"
+          exit 0
+        fi
+        dir=$(dirname "$dir")
+      done
+      echo "fatal: not a git repository (or any of the parent directories): .git" >&2
+      exit 128
+    fi
+    if [ "$2" = "--git-path" ]; then
+      echo "hooks"
+      exit 0
+    fi
+    ;;
+  init)
+    # support --bare flag
+    echo "$@" | grep -q "--bare" >/dev/null 2>&1
+    if [ $? -eq 0 ]; then
+      # create a marker for bare repo; no working tree needed
+      mkdir -p .
+      echo "initialized bare mock repo" > .git_bare 2>/dev/null || true
+      exit 0
+    fi
+    mkdir -p .git
+    echo "Initialized mock git repo"
+    exit 0
+    ;;
+  clone)
+    # simulate clone by copying directory
+    src="$2"
+    dest="$3"
+    if [ -z "$dest" ]; then
+      dest="$2"
+    fi
+    cp -r "$src" "$dest" 2>/dev/null || mkdir -p "$dest"
+    # Record remote origin for the cloned repo so later git show can resolve
+    # Always create a .git/remote_origin mapping so clones know where to read
+    # remote files (tests rely on git show origin/... reading from the remote).
+    mkdir -p "$dest/.git" 2>/dev/null || true
+    echo "$src" > "$dest/.git/remote_origin" 2>/dev/null || true
+    exit 0
+    ;;
+  worktree)
+    # support `git worktree add [--detach] <path> [<ref>]`: create the worktree dir by copying
+    # the current repo contents. This is minimal but sufficient for sync operations.
+    if [ "$2" = "add" ]; then
+      # find the destination argument: first arg after 'add' that does not start with '-'
+      dest=""
+      i=3
+      while [ $i -le $# ]; do
+        eval "a=\$$i"
+        case "$a" in
+          -*) i=$((i+1)); continue ;;
+          *) dest="$a"; break ;;
+        esac
+      done
+      if [ -z "$dest" ]; then
+        echo ""; exit 1
+      fi
+      mkdir -p "$dest"
+      # copy repository files (excluding .git to simulate separate worktree)
+      for f in *; do
+        if [ "$f" != ".git" ]; then
+          cp -r "$f" "$dest/" 2>/dev/null || true
+        fi
+      done
+      # If the source repo has remote mappings recorded under .git/remote_*,
+      # copy those into the worktree's .git so git commands inside the worktree
+      # (like push) can resolve the remote path.
+      mkdir -p "$dest/.git" 2>/dev/null || true
+      for mapping in .git/remote_*; do
+        if [ -f "$mapping" ]; then
+          cp "$mapping" "$dest/.git/" 2>/dev/null || true
+        fi
+      done
+      exit 0
+    fi
+    ;;
+  remote)
+    # support `git remote add <name> <url>` by recording mapping in .git
+    if [ "$2" = "add" ]; then
+      name="$3"
+      url="$4"
+      mkdir -p .git
+      echo "$url" > .git/remote_$name 2>/dev/null || true
+      exit 0
+    fi
+    # default no-op
+    exit 0
+    ;;
+  add)
+    # no-op
+    exit 0
+    ;;
+  commit)
+    # create a fake commit file to simulate history
+    echo "commit $RANDOM" > .git/last-commit 2>/dev/null || true
+    exit 0
+    ;;
+  show)
+    # git show <ref>:<path> -> output file contents if present
+    arg="$2"
+    # handle form: refs/...:path or <ref>:<path>
+    # split at first ':'
+    refpart="${arg%%:*}"
+    pathpart="${arg#*:}"
+    if [ -z "$pathpart" ]; then
+      # maybe args separated (rare), try $3
+      pathpart="$3"
+    fi
+    if [ -z "$pathpart" ]; then
+      echo ""; exit 0
+    fi
+    # If path looks like .worklog/... relative to a repo, try to find it
+    # direct local file
+    if [ -f "$pathpart" ]; then
+      cat "$pathpart"
+      exit 0
+    fi
+    # try to resolve under current dir
+    if [ -f "./$pathpart" ]; then
+      cat "./$pathpart"
+      exit 0
+    fi
+    # If the ref is a remote (e.g. origin or origin/branch), try to read the
+    # remote repo path recorded in .git/remote_origin and cat the file from
+    # there.
+    # If the ref mentions the remote 'origin' in any form (origin, refs/remotes/origin, etc)
+    # try to resolve the remote directory recorded in .git/remote_origin and cat the file from there.
+    if echo "$refpart" | grep -q "origin" >/dev/null 2>&1 && [ -f .git/remote_origin ]; then
+      remoteDir=$(cat .git/remote_origin 2>/dev/null || true)
+      log "SHOW requested ref=$refpart path=$pathpart cwd=$(pwd) remoteDir=$remoteDir"
+      if [ -n "$remoteDir" ]; then
+        # try direct path
+        if [ -f "$remoteDir/$pathpart" ]; then
+          cat "$remoteDir/$pathpart"
+          exit 0
+        fi
+        # try without leading ./
+        if [ -f "$remoteDir/${pathpart#./}" ]; then
+          cat "$remoteDir/${pathpart#./}"
+          exit 0
+        fi
+        # Fallback: search for a file with the same basename anywhere under the remote
+        base=$(basename "$pathpart")
+        found=$(find "$remoteDir" -type f -name "$base" 2>/dev/null | head -n1 || true)
+        if [ -n "$found" ]; then
+          cat "$found"
+          exit 0
+        fi
+      fi
+    fi
+    # If the ref is an explicit refs/... path, try to read from the fetch store
+    # created during `git fetch` (we populate .git/fetch_store/<ref>/... when fetching).
+    if echo "$refpart" | grep -q "^refs/" >/dev/null 2>&1; then
+      fetchdir=".git/fetch_store/${refpart}"
+      log "SHOW refs requested ref=$refpart path=$pathpart fetchdir=$fetchdir cwd=$(pwd)"
+      if [ -n "$pathpart" ] && [ -f "$fetchdir/$pathpart" ]; then
+        cat "$fetchdir/$pathpart"
+        exit 0
+      fi
+      # try without leading ./
+      if [ -n "$pathpart" ] && [ -f "$fetchdir/${pathpart#./}" ]; then
+        cat "$fetchdir/${pathpart#./}"
+        exit 0
+      fi
+      # try basename search in fetchdir
+      base=$(basename "$pathpart")
+      found=$(find "$fetchdir" -type f -name "$base" 2>/dev/null | head -n1 || true)
+      if [ -n "$found" ]; then
+        cat "$found"
+        exit 0
+      fi
+    fi
+    # try to locate refs encoded as directories under .git
+    # fallback: exit non-zero
+    exit 1
+    ;;
+  ls-files)
+    # git ls-files [-z]
+    zflag=0
+    for a in "$@"; do
+      if [ "$a" = "-z" ]; then zflag=1; fi
+    done
+    # List files in current tree excluding .git and .git_bare
+    # Use simple globbing to avoid external dependencies
+    out=""
+    for f in * .*; do
+      # skip current and parent
+      if [ "$f" = "." ] || [ "$f" = ".." ]; then continue; fi
+      # skip .git and .git_bare
+      if [ "$f" = ".git" ] || [ "$f" = ".git_bare" ]; then continue; fi
+      # ensure it exists
+      if [ -e "$f" ]; then
+        # If directory, list contained files recursively (simple)
+        if [ -d "$f" ]; then
+          # find under directory
+          find "$f" -type f 2>/dev/null | while read p; do
+            if [ $zflag -eq 1 ]; then printf "%s\0" "$p"; else printf "%s\n" "$p"; fi
+          done
+        else
+          if [ $zflag -eq 1 ]; then printf "%s\0" "$f"; else printf "%s\n" "$f"; fi
+        fi
+      fi
+    done
+    exit 0
+    ;;
+  ls-remote)
+    # git ls-remote [--exit-code] <remote> [refs...]
+    # Find remote and optional ref pattern from args
+    remote=""
+    refPattern=""
+    for a in "$@"; do
+      case "$a" in
+        --* ) continue ;;
+        * )
+          if [ -z "$remote" ]; then
+            remote="$a"
+          elif [ -z "$refPattern" ]; then
+            refPattern="$a"
+          fi
+          ;;
+      esac
+    done
+    # If remote is a name configured in this repo, map it
+    if [ -f .git/remote_$remote ]; then
+      remote=$(cat .git/remote_$remote 2>/dev/null || true)
+    fi
+    if [ -n "$remote" ] && [ -d "$remote/.worklog" ]; then
+      # If caller requested a specific ref pattern, and it matches our data ref,
+      # advertise that ref. Otherwise, advertise refs/heads/main as a placeholder.
+      if [ -n "$refPattern" ]; then
+        # normalize pattern by stripping quotes
+        pat=$(echo "$refPattern" | sed "s/^'//;s/'$//")
+        if echo "$pat" | grep -q "worklog" >/dev/null 2>&1; then
+          printf "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\trefs/worklog/data\n"
+          exit 0
+        fi
+      fi
+      printf "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\trefs/heads/main\n"
+      exit 0
+    fi
+    # default: no refs
+    exit 2
+    ;;
+  fetch)
+    log "FETCH invoked cwd=$(pwd) args=${@:2}"
+    # Support fetch with explicit refspecs. Examples:
+    # git fetch origin +refs/worklog/data:refs/worklog/remotes/origin/worklog/data
+    # We will create the destination ref file under .git/refs/... so show-ref
+    # and later `git show` semantics that rely on the remote mapping can succeed.
+    # determine remote name (first non-option arg). Skip the command name ($1)
+    remoteName=""
+    for a in "${@:2}"; do
+      case "$a" in
+        --* ) continue ;;
+        * )
+          if [ -z "$remoteName" ]; then
+            remoteName="$a"
+            # continue parsing other args for refspecs
+          fi
+          ;; 
+      esac
+    done
+
+    # Map remoteName to configured URL/path if available. Prefer explicit .git/remote_origin if present.
+    remotePath=""
+    if [ -f .git/remote_origin ]; then
+      remotePath=$(cat .git/remote_origin 2>/dev/null || true)
+    fi
+    if [ -z "$remotePath" ]; then
+      # default to using the provided remoteName as a path/url
+      remotePath="$remoteName"
+      if [ -f .git/remote_$remoteName ]; then
+        remotePath=$(cat .git/remote_$remoteName 2>/dev/null || true)
+      fi
+    fi
+    # If remotePath is a plain name but corresponds to a local directory, prefer the dir
+    if [ -n "$remotePath" ] && [ -d "$remotePath" ]; then
+      # good
+      :
+    else
+      # try to resolve a local path relative to cwd
+      if [ -d "./$remotePath" ]; then
+        remotePath="./$remotePath"
+      fi
+    fi
+
+    # Fail if the resolved remote path does not exist as a directory.
+    # This mirrors real git's behavior when the remote is unreachable.
+    if [ -n "$remotePath" ] && ! [ -d "$remotePath" ]; then
+      log "FETCH failed: remote path '$remotePath' does not exist"
+      echo "fatal: '$remotePath' does not appear to be a git repository" >&2
+      exit 128
+    fi
+
+    for a in "${@:2}"; do
+      # detect refspecs containing ':'
+      case "$a" in
+        *:* )
+          # strip leading '+' if present
+          spec=$(echo "$a" | sed 's/^+//')
+          src=${spec%%:*}
+          dst=${spec#*:}
+          # create .git/refs/<dst>
+          dstpath=.git/${dst}
+          dstdir=$(dirname "$dstpath")
+          mkdir -p "$dstdir" 2>/dev/null || true
+           # write dummy sha
+           echo "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" > "$dstpath" 2>/dev/null || true
+           log "fetch created dstpath=$dstpath (remotePath=$remotePath)"
+            # If we have a mapped remotePath and it contains a .worklog entry,
+           # copy the remote file(s) referenced by src into a local fetch store
+           # so that subsequent `git show <dst>:<path>` can read from it.
+           fetchStoreDir=.git/fetch_store/${dst}
+           mkdir -p "$fetchStoreDir" 2>/dev/null || true
+           if [ -n "$remotePath" ]; then
+             # prefer remotePath/.worklog but also try remotePath itself
+             if [ -d "$remotePath/.worklog" ]; then
+                cp -r "$remotePath/.worklog/"* "$fetchStoreDir/" 2>/dev/null || true
+                log "copied remote .worklog into $fetchStoreDir from $remotePath/.worklog"
+             elif [ -d "$remotePath" ] && [ -d "$remotePath/.worklog" ]; then
+                cp -r "$remotePath/.worklog/"* "$fetchStoreDir/" 2>/dev/null || true
+                log "copied remote .worklog into $fetchStoreDir from $remotePath"
+             else
+               # As a fallback, if remotePath is a file repo root, attempt to find any .worklog under it
+               if [ -d "$remotePath" ]; then
+                 found=$(find "$remotePath" -type d -name ".worklog" 2>/dev/null | head -n1 || true)
+                 if [ -n "$found" ]; then
+                    cp -r "$found/"* "$fetchStoreDir/" 2>/dev/null || true
+                    log "copied remote .worklog from discovered $found into $fetchStoreDir"
+                 fi
+               fi
+             fi
+           fi
+          ;;
+      esac
+    done
+    # Heuristic: if the remote path contains a .worklog directory, also populate
+    # a likely remote-tracking fetch_store key that the application expects.
+    # This helps when refspec parsing above doesn't match the exact dst string used
+    # by the application when calling `git show` later.
+    if [ -n "$remotePath" ] && [ -d "$remotePath/.worklog" ]; then
+      # create the conventional tracking ref used for explicit refs/* branches
+      likelyDst="refs/worklog/remotes/${remoteName}/worklog/data"
+      fetchStoreDirLikely=.git/fetch_store/${likelyDst}
+      mkdir -p "$fetchStoreDirLikely" 2>/dev/null || true
+       cp -r "$remotePath/.worklog/"* "$fetchStoreDirLikely/" 2>/dev/null || true
+       log "heuristic copied remote .worklog into $fetchStoreDirLikely"
+    fi
+    # For simple fetch <remote> <branch>, create refs/remotes/<remote>/<branch>
+    if [ $# -ge 2 ]; then
+      # find last arg as branch if it looks like refs/ or a branch name
+      branch=${!#}
+      # strip quotes
+      branch=$(echo "$branch" | sed "s/^'//;s/'$//")
+      # Skip if the last arg looks like a refspec (contains ':') or is a forced
+      # refspec (starts with '+'). Those are handled above in the refspec loop.
+      if [ -n "$branch" ] && ! echo "$branch" | grep -q ':' >/dev/null 2>&1 && ! echo "$branch" | grep -q '^+' >/dev/null 2>&1; then
+        dst=.git/refs/remotes/origin/${branch#refs/}
+        dstdir=$(dirname "$dst")
+        mkdir -p "$dstdir" 2>/dev/null || true
+        echo "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" > "$dst" 2>/dev/null || true
+        # Also populate a fetch_store entry keyed by the remote-tracking ref so
+        # later `git show refs/remotes/origin/<branch>:path` can read the remote files.
+        fetchStoreDirBranch=.git/fetch_store/refs/remotes/origin/${branch#refs/}
+        mkdir -p "$fetchStoreDirBranch" 2>/dev/null || true
+        if [ -n "$remotePath" ]; then
+          if [ -d "$remotePath/.worklog" ]; then
+            cp -r "$remotePath/.worklog/"* "$fetchStoreDirBranch/" 2>/dev/null || true
+          else
+            found=$(find "$remotePath" -type d -name ".worklog" 2>/dev/null | head -n1 || true)
+            if [ -n "$found" ]; then
+              cp -r "$found/"* "$fetchStoreDirBranch/" 2>/dev/null || true
+            fi
+          fi
+        fi
+      else
+        log "skipping branch-tracking creation for branch-like-arg=$branch (likely a refspec)"
+      fi
+    fi
+    exit 0
+    ;;
+  show-ref)
+    # Support: git show-ref --verify --quiet <ref>
+    # Find the ref argument (last arg)
+    refArg="${!#}"
+    # strip surrounding quotes
+    refClean=$(echo "$refArg" | sed "s/^'//;s/'$//")
+    # Convert ref to path under .git/refs/
+    refPath=.git/${refClean}
+    if [ -f "$refPath" ]; then
+      exit 0
+    fi
+    # If .git is a file pointing to gitdir: <gitdir: path>, try to resolve
+    if [ -f .git ]; then
+      first=$(head -n1 .git 2>/dev/null || true)
+      case "$first" in
+        gitdir:* )
+          gitdirpath=$(echo "$first" | cut -d: -f2- | sed 's/^ //')
+          if [ -f "$gitdirpath/${refClean#refs/}" ]; then
+            exit 0
+          fi
+          ;;
+      esac
+    fi
+    exit 1
+    ;;
+  push)
+    # Simulate push by copying relevant files (especially .worklog) to the
+    # remote repository directory recorded by `git remote add origin <url>`.
+    # Attempt to read remote from .git/remote_origin; otherwise use last arg.
+    remote=""
+    if [ -f .git/remote_origin ]; then
+      remote=$(cat .git/remote_origin 2>/dev/null || true)
+    fi
+    if [ -z "$remote" ]; then
+      # fallback: use last argument as remote path
+      for arg in "$@"; do remote="$arg"; done
+    fi
+    if [ -n "$remote" ]; then
+      # debug log for pushes (gated by WORKLOG_GIT_MOCK_DEBUG)
+      log "PUSH from $(pwd) to $remote"
+      # ensure remote directory exists
+      mkdir -p "$remote"
+      # copy .worklog if present
+      if [ -d ".worklog" ]; then
+        log "copying .worklog to $remote/.worklog"
+        mkdir -p "$remote/.worklog"
+        cp -r .worklog/* "$remote/.worklog/" 2>/dev/null || true
+      fi
+      # copy top-level files (non-dot) such as README.md
+      for f in *; do
+        if [ "$f" != ".git" ] && [ "$f" != ".worklog" ]; then
+          cp -r "$f" "$remote/" 2>/dev/null || true
+        fi
+      done
+    fi
+    exit 0
+    ;;
+  branch)
+    # support `git branch -D <name>`: delete the local branch ref
+    if [ "$2" = "-D" ] && [ -n "$3" ]; then
+      branchName="$3"
+      # strip surrounding quotes
+      branchName=$(echo "$branchName" | sed "s/^'//;s/'$//")
+      refFile=".git/refs/heads/$branchName"
+      if [ -f "$refFile" ]; then
+        rm -f "$refFile"
+        log "branch -D deleted $refFile"
+        exit 0
+      else
+        echo "error: branch '$branchName' not found." >&2
+        exit 1
+      fi
+    fi
+    # default no-op for other branch commands
+    exit 0
+    ;;
+  config)
+    # accept config commands silently
+    exit 0
+    ;;
+  *)
+    # fallback: print arguments for debugging
+    echo "git (mock): $@"
+    exit 0
+    ;;
+esac

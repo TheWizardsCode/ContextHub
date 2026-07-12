@@ -1,0 +1,48 @@
+#!/bin/sh
+# worklog:pre-push-hook:v1
+#
+# Auto-sync Worklog data before pushing.
+#
+# This hook runs `wl sync` before any push to ensure worklog data is
+# committed and pushed to the dedicated refs/worklog/data branch.
+# It uses a temporary worktree to avoid corrupting the project working tree
+# (see WL-0MQRBT8BS00355AB for the bug this prevents).
+#
+# BYPASS: Set WORKLOG_SKIP_PRE_PUSH=1 to skip the sync entirely.
+#   export WORKLOG_SKIP_PRE_PUSH=1
+#   git push origin HEAD:refs/heads/dev
+#
+set -e
+
+if [ "$WORKLOG_SKIP_PRE_PUSH" = "1" ]; then
+  echo "worklog: pre-push sync skipped (WORKLOG_SKIP_PRE_PUSH=1)"
+  exit 0
+fi
+
+# Read stdin to check which refs are being pushed.
+# If pushing to refs/worklog/data, skip the sync to avoid infinite loops.
+skip=0
+while read local_ref local_sha remote_ref remote_sha; do
+  if [ "$remote_ref" = "refs/worklog/data" ]; then
+    skip=1
+  fi
+done
+
+if [ "$skip" = "1" ]; then
+  exit 0
+fi
+
+if command -v wl >/dev/null 2>&1; then
+  WL=wl
+elif command -v worklog >/dev/null 2>&1; then
+  WL=worklog
+else
+  echo "worklog: wl/worklog not found; skipping pre-push sync" >&2
+  exit 0
+fi
+
+# Force the data branch to refs/worklog/data regardless of config.
+# This prevents the sync from accidentally pushing to a standard branch
+# if the user has overridden syncBranch in their worklog config.
+"$WL" sync --git-branch refs/worklog/data
+exit 0

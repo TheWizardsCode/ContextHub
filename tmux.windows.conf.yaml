@@ -1,0 +1,14 @@
+session_name: Dev
+windows:
+  - name: "ContextHub"
+    cwd: "~/projects/ContextHub"
+    panes:
+      - cmd: "pi --continue"
+      - cmd: "wl tui"
+        split:
+          dir: vertical
+          size_pct: 50
+      - cmd: "clear"
+        split:
+          dir: horizontal
+          size_pct: 30
