@@ -7,7 +7,7 @@ import { loadStatusStageRules } from '../status-stage-rules.js';
 import { validateStatusStageItems } from '../doctor/status-stage-check.js';
 import { validateDependencyEdges } from '../doctor/dependency-check.js';
 import { listPendingMigrations, runMigrations } from '../migrations/index.js';
-import { dryRunHooks, upgradeHooks, type HookDryRunResult, type HookUpgradeResult } from '../doctor/hook-upgrade.js';
+import { dryRunHooks, upgradeHooks, detectHooksTargetDir, type HookDryRunResult, type HookUpgradeResult } from '../doctor/hook-upgrade.js';
 import { validateFilePaths, applyFilePathsFix, DEFAULT_INTAKE_STAGES } from '../doctor/file-paths-check.js';
 import { importFromJsonl } from '../jsonl.js';
 import { mergeWorkItems, mergeComments, mergeAuditResults } from '../sync.js';
@@ -39,7 +39,8 @@ export default function register(ctx: PluginContext): void {
       utils.requireInitialized();
       try {
         const pending = listPendingMigrations();
-        const hooksResult = dryRunHooks();
+        const hooksTargetDir = detectHooksTargetDir();
+        const hooksResult = dryRunHooks('.githooks', hooksTargetDir);
 
         const hasPendingMigrations = pending && pending.length > 0;
         const hasOutdatedHooks = hooksResult.outdatedCount > 0;
@@ -106,7 +107,7 @@ export default function register(ctx: PluginContext): void {
           let hookError: string | undefined;
 
           if (hasOutdatedHooks) {
-            const hookResult = upgradeHooks();
+            const hookResult = upgradeHooks('.githooks', hooksTargetDir);
             if (hookResult.success) {
               hooksApplied = hookResult.upgraded;
               hooksSkipped = hookResult.skipped;
@@ -183,7 +184,7 @@ export default function register(ctx: PluginContext): void {
         let hooksApplied: string[] = [];
         let hookError: string | undefined;
         if (hasOutdatedHooks) {
-          const hookResult = upgradeHooks();
+          const hookResult = upgradeHooks('.githooks', hooksTargetDir);
           if (hookResult.success) {
             hooksApplied = hookResult.upgraded;
           } else {

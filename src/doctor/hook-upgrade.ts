@@ -5,6 +5,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { execSync } from 'child_process';
 
 // Markers used by Worklog to identify its own hooks.
 const WORKLOG_MARKERS = [
@@ -55,6 +56,148 @@ function isHookOutdated(installed: string, committed: string): boolean {
   return true;
 }
 
+/**
+ * Detect the git hooks target directory based on `core.hooksPath` config.
+ * If `core.hooksPath` is set, git uses that directory for hooks.
+ * Otherwise, the default `.git/hooks/` is used.
+ */
+export function detectHooksTargetDir(): string {
+  try {
+    const result = execSync('git config core.hooksPath', {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+    if (result) return result;
+  } catch {
+    // git not available or not a git repo — fall through
+  }
+  return '.git/hooks';
+}
+
+/**
+ * Generate the canonical hook content for a given hook name, matching what
+ * `installCommittedHooks()` in `src/commands/init.ts` generates.
+ *
+ * Used when `core.hooksPath = .githooks` to compare committed hooks against
+ * the latest template from the installed ContextHub package.
+ *
+ * Returns `null` for unknown hook names.
+ */
+export function generateCanonicalHookContent(hookName: string): string | null {
+  switch (hookName) {
+    case 'pre-push': {
+      return [
+        '#!/bin/sh',
+        '# worklog:pre-push-hook:v1',
+        '# Auto-sync Worklog data before pushing (committed hooks).',
+        '# Set WORKLOG_SKIP_PRE_PUSH=1 to bypass.',
+        'set -e',
+        'if [ "$WORKLOG_SKIP_PRE_PUSH" = "1" ]; then',
+        '  exit 0',
+        'fi',
+        'skip=0',
+        'while read local_ref local_sha remote_ref remote_sha; do',
+        '  if [ "$remote_ref" = "refs/worklog/data" ]; then',
+        '    skip=1',
+        '  fi',
+        'done',
+        'if [ "$skip" = "1" ]; then',
+        '  exit 0',
+        'fi',
+        'if command -v wl >/dev/null 2>&1; then',
+        '  WL=wl',
+        'elif command -v worklog >/dev/null 2>&1; then',
+        '  WL=worklog',
+        'else',
+        '  echo "worklog: wl/worklog not found; skipping pre-push sync" >&2',
+        '  exit 0',
+        'fi',
+        '$WL sync --git-branch refs/worklog/data',
+        'exit 0',
+        '',
+      ].join('\n');
+    }
+    case 'post-checkout': {
+      return [
+        '#!/bin/sh',
+        '# worklog:post-checkout-hook:v1',
+        '# Auto-sync Worklog data after branch checkout (committed hooks).',
+        '# Set WORKLOG_SKIP_POST_CHECKOUT=1 to bypass.',
+        'set -e',
+        'if [ "$WORKLOG_SKIP_POST_CHECKOUT" = "1" ]; then',
+        '  exit 0',
+        'fi',
+        'if command -v wl >/dev/null 2>&1; then',
+        '  WL=wl',
+        'elif command -v worklog >/dev/null 2>&1; then',
+        '  WL=worklog',
+        'else',
+        '  echo "worklog: wl/worklog not found; skipping post-checkout sync" >&2',
+        '  exit 0',
+        'fi',
+        'if "$WL" sync --git-branch refs/worklog/data >/dev/null 2>&1; then',
+        '  :',
+        'else',
+        '  if [ ! -d ".worklog" ]; then',
+        '    echo "worklog: not initialized in this checkout/worktree. Run \"wl init\" to set up this location." >&2',
+        '  else',
+        '    echo "worklog: sync failed; continuing" >&2',
+        '  fi',
+        'fi',
+        'exit 0',
+        '',
+      ].join('\n');
+    }
+    case 'post-merge':
+    case 'post-rewrite': {
+      return [
+        '#!/bin/sh',
+        '# worklog:post-pull-hook:v1',
+        '# Wrapper that delegates to central Worklog post-pull script (committed hooks).',
+        'exec "$(dirname "$0")/worklog-post-pull" "$@"',
+        '',
+      ].join('\n');
+    }
+    case 'worklog-post-pull': {
+      return [
+        '#!/bin/sh',
+        '# worklog:post-pull-hook:v1',
+        '# Central Worklog post-pull sync script (committed hooks).',
+        '# Set WORKLOG_SKIP_POST_PULL=1 to bypass.',
+        'set -e',
+        'if [ "$WORKLOG_SKIP_POST_PULL" = "1" ]; then',
+        '  exit 0',
+        'fi',
+        'if command -v wl >/dev/null 2>&1; then',
+        '  WL=wl',
+        'elif command -v worklog >/dev/null 2>&1; then',
+        '  WL=worklog',
+        'else',
+        '  echo "worklog: wl/worklog not found; skipping post-pull sync" >&2',
+        '  exit 0',
+        'fi',
+        'if "$WL" sync --git-branch refs/worklog/data >/dev/null 2>&1; then',
+        '  :',
+        'else',
+        '  if [ ! -d ".worklog" ]; then',
+        '    echo "worklog: not initialized in this checkout/worktree. Run \"wl init\" to set up this location." >&2',
+        '  else',
+        '    echo "worklog: sync failed; continuing" >&2',
+        '  fi',
+        'fi',
+        'exit 0',
+        '',
+      ].join('\n');
+    }
+    default:
+      return null;
+  }
+}
+
+// Reference: generateCanonicalHookContent() content matches the template
+// strings in src/commands/init.ts -> installCommittedHooks(). Any updates
+// to the hook templates in init.ts should be mirrored here.
+
 export interface HookInfo {
   name: string;
   hookPath: string;
@@ -98,6 +241,11 @@ export interface HookUpgradeResult {
 /**
  * Scan the repository for git hooks and classify each as up-to-date, outdated,
  * or not-installed.
+ *
+ * When `hooksDir` resolves to the same directory as `githooksDir` (e.g.
+ * `core.hooksPath = .githooks`), the installed hooks ARE the committed hooks.
+ * In this case, canonical hook content (generated from latest templates) is
+ * used as the "committed" reference instead of reading from the same file.
  */
 export function listOutdatedHooks(
   githooksDir: string = '.githooks',
@@ -111,37 +259,48 @@ export function listOutdatedHooks(
   }
 
   const gitHooksPath = path.isAbsolute(hooksDir) ? hooksDir : path.resolve(hooksDir);
+  const resolvedGithooks = path.resolve(githooksDir);
+
+  // When githooksDir === hooksDir, we're doing a self-check (e.g.,
+  // core.hooksPath = .githooks). Use canonical generated content as the
+  // "committed" reference instead of reading from the same file.
+  const isSelfCheck = resolvedGithooks === gitHooksPath;
+
   if (!fs.existsSync(gitHooksPath)) {
     // No hooks directory at all — all hooks are "not-installed"
     for (const name of HOOK_NAMES) {
       const committedPath = path.join(githooksDir, name);
-      if (fs.existsSync(committedPath)) {
-        info.push({
-          name,
-          hookPath: path.join(gitHooksPath, name),
-          committedPath,
-          committedContent: fs.readFileSync(committedPath, 'utf-8'),
-          status: 'not-installed',
-        });
-      }
+      const committedContent = isSelfCheck
+        ? generateCanonicalHookContent(name) || ''
+        : (fs.existsSync(committedPath) ? fs.readFileSync(committedPath, 'utf-8') : '');
+      if (!committedContent) continue;
+      info.push({
+        name,
+        hookPath: path.join(gitHooksPath, name),
+        committedPath: isSelfCheck ? path.join(gitHooksPath, name) : committedPath,
+        committedContent,
+        status: 'not-installed',
+      });
     }
     return info;
   }
 
   for (const name of HOOK_NAMES) {
     const committedPath = path.join(githooksDir, name);
-    if (!fs.existsSync(committedPath)) {
-      continue;
-    }
-
-    const committedContent = fs.readFileSync(committedPath, 'utf-8');
     const hookPath = path.join(gitHooksPath, name);
+
+    // Generate or read committed content
+    const committedContent = isSelfCheck
+      ? generateCanonicalHookContent(name) || ''
+      : (fs.existsSync(committedPath) ? fs.readFileSync(committedPath, 'utf-8') : '');
+
+    if (!committedContent) continue;
 
     if (!fs.existsSync(hookPath)) {
       info.push({
         name,
         hookPath,
-        committedPath,
+        committedPath: isSelfCheck ? hookPath : committedPath,
         committedContent,
         status: 'not-installed',
       });
@@ -160,17 +319,19 @@ export function listOutdatedHooks(
       info.push({
         name,
         hookPath,
-        committedPath,
+        committedPath: isSelfCheck ? hookPath : committedPath,
         committedContent,
         currentContent,
         status: 'outdated',
-        reason: `Hook '${name}' is outdated and would be upgraded from .githooks/${name}`,
+        reason: isSelfCheck
+          ? `Hook '${name}' is outdated and would be upgraded to the latest template`
+          : `Hook '${name}' is outdated and would be upgraded from .githooks/${name}`,
       });
     } else {
       info.push({
         name,
         hookPath,
-        committedPath,
+        committedPath: isSelfCheck ? hookPath : committedPath,
         committedContent,
         currentContent,
         status: 'up-to-date',
