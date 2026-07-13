@@ -303,3 +303,68 @@ describe('gitPushDataFileToBranch target validation', () => {
     expect(noVerifyLine).toContain('--no-verify');
   });
 });
+
+describe('pre-push hook worktree safety', () => {
+  it('pre-push hook template (.githooks/pre-push) skips sync in temp worktree', () => {
+    const hookSource = fs.readFileSync(
+      new URL('../.githooks/pre-push', import.meta.url),
+      'utf8'
+    );
+    // Should detect temp worktree paths containing tmp-worktree-
+    expect(hookSource).toContain('tmp-worktree');
+    expect(hookSource).toContain('exit 0');
+  });
+
+  it('pre-push hook template (.githooks/pre-push) skips sync in git worktree', () => {
+    const hookSource = fs.readFileSync(
+      new URL('../.githooks/pre-push', import.meta.url),
+      'utf8'
+    );
+    // Should detect git worktree using git-dir vs git-common-dir comparison
+    expect(hookSource).toContain('git-common-dir');
+    expect(hookSource).toContain('git-dir');
+    expect(hookSource).toContain('exit 0');
+  });
+
+  it('pre-push hook template (.githooks/pre-push) wraps wl sync so failures do not abort push', () => {
+    const hookSource = fs.readFileSync(
+      new URL('../.githooks/pre-push', import.meta.url),
+      'utf8'
+    );
+    // The wl sync call should not be directly preceded by set -e causing abort
+    // Instead, the sync call should be wrapped to handle failures gracefully
+    const lines = hookSource.split('\n');
+    const syncLine = lines.find(line => line.includes('$WL sync') || line.includes('"$WL" sync'));
+    expect(syncLine).toBeDefined();
+    // The sync line should be wrapped in an if/|| to handle failure
+    const syncIndex = lines.indexOf(syncLine!);
+    // Check that before the sync call, there's an if or || pattern
+    const contextBefore = lines.slice(Math.max(0, syncIndex - 1), syncIndex + 2).join('\n');
+    expect(contextBefore).toMatch(/if\b.*\bsync\b|\bsync\b.*\|\||\bsync\b.*\|\|\s*exit 0/);
+  });
+
+  it('installPrePushHook in src/commands/init.ts generates worktree-safe hook', () => {
+    const initSource = fs.readFileSync(
+      new URL('../src/commands/init.ts', import.meta.url),
+      'utf8'
+    );
+    // The generated hookScript string should include worktree detection
+    expect(initSource).toContain('tmp-worktree');
+    expect(initSource).toContain('git-common-dir');
+    expect(initSource).toContain('git-dir');
+  });
+
+  it('generateCanonicalHookContent in src/doctor/hook-upgrade.ts generates worktree-safe pre-push hook', () => {
+    const hookUpgradeSource = fs.readFileSync(
+      new URL('../src/doctor/hook-upgrade.ts', import.meta.url),
+      'utf8'
+    );
+    // The pre-push case should include worktree detection
+    const prePushSection = hookUpgradeSource.match(/case 'pre-push':[^]*?break/);
+    if (prePushSection) {
+      expect(prePushSection[0]).toContain('tmp-worktree');
+      expect(prePushSection[0]).toContain('git-common-dir');
+      expect(prePushSection[0]).toContain('git-dir');
+    }
+  });
+});

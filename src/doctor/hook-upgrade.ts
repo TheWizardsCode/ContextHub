@@ -85,7 +85,7 @@ export function detectHooksTargetDir(): string {
  */
 export function generateCanonicalHookContent(hookName: string): string | null {
   switch (hookName) {
-    case 'pre-push': {
+        case 'pre-push': {
       return [
         '#!/bin/sh',
         '# worklog:pre-push-hook:v1',
@@ -93,6 +93,16 @@ export function generateCanonicalHookContent(hookName: string): string | null {
         '# Set WORKLOG_SKIP_PRE_PUSH=1 to bypass.',
         'set -e',
         'if [ "$WORKLOG_SKIP_PRE_PUSH" = "1" ]; then',
+        '  exit 0',
+        'fi',
+        '# Skip when inside a temp worktree created by withTempWorktree.',
+        'case "$PWD" in',
+        '  *tmp-worktree-*)',
+        '    exit 0',
+        '    ;;',
+        'esac',
+        '# Skip when inside a git worktree (not the main checkout).',
+        'if [ "$(git rev-parse --git-dir 2>/dev/null)" != "$(git rev-parse --git-common-dir 2>/dev/null)" ]; then',
         '  exit 0',
         'fi',
         'skip=0',
@@ -112,12 +122,15 @@ export function generateCanonicalHookContent(hookName: string): string | null {
         '  echo "worklog: wl/worklog not found; skipping pre-push sync" >&2',
         '  exit 0',
         'fi',
-        '$WL sync --git-branch refs/worklog/data',
+        '$WL sync --git-branch refs/worklog/data || {',
+        '  echo "worklog: pre-push sync failed (pushing anyway)" >&2',
+        '  exit 0',
+        '}',
         'exit 0',
         '',
       ].join('\n');
     }
-    case 'post-checkout': {
+case 'post-checkout': {
       return [
         '#!/bin/sh',
         '# worklog:post-checkout-hook:v1',
