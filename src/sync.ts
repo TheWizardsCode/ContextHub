@@ -876,7 +876,7 @@ export async function gitPushDataFileToBranch(
     // Push only this commit to the dedicated ref.
     const pushTarget = target.branch.startsWith('refs/') ? target.branch : `refs/heads/${target.branch}`;
     await execAsync(
-      `git -C ${escapeShellArg(worktreePath)} push ${escapeShellArg(target.remote)} HEAD:${escapeShellArg(pushTarget)}`
+      `git -C ${escapeShellArg(worktreePath)} push --no-verify ${escapeShellArg(target.remote)} HEAD:${escapeShellArg(pushTarget)}`
     );
   });
 }

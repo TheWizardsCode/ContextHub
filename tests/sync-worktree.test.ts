@@ -281,4 +281,25 @@ describe('gitPushDataFileToBranch target validation', () => {
     const worklogDir = path.join(localRepo, '.worklog');
     expect(fs.existsSync(worklogDir)).toBe(true);
   });
+
+  it('push command uses --no-verify to avoid recursive pre-push hook', async () => {
+    // Verify the source code contains --no-verify in the push command.
+    // This prevents the pre-push hook from running recursively inside the temp worktree.
+    const syncSource = fs.readFileSync(
+      new URL('../src/sync.ts', import.meta.url),
+      'utf8'
+    );
+    const pushLine = syncSource
+      .split('\n')
+      .find(line => line.includes('git -C') && line.includes('push') && !line.includes('no-verify'));
+    // There should be no push command without --no-verify
+    expect(pushLine).toBeUndefined();
+
+    // The correct push command should have --no-verify
+    const noVerifyLine = syncSource
+      .split('\n')
+      .find(line => line.includes('git -C') && line.includes('push --no-verify'));
+    expect(noVerifyLine).toBeDefined();
+    expect(noVerifyLine).toContain('--no-verify');
+  });
 });
