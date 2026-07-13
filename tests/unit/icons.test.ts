@@ -22,6 +22,9 @@ import {
   effortFallback,
   effortLabel,
   iconsEnabled,
+  needsProducerReviewIcon,
+  needsProducerReviewLabel,
+  needsProducerReviewFallback,
 } from '../../src/icons.js';
 
 describe('priorityIcon', () => {
@@ -502,6 +505,80 @@ describe('auditLabel', () => {
 
   it('returns label for unknown (undefined)', () => {
     expect(auditLabel(undefined)).toBe('Audit: Not run');
+  });
+});
+
+// ─── Producer Review Icons ───────────────────────────────────────────────
+
+describe('needsProducerReviewIcon', () => {
+  it('returns ❌ for true (needs review)', () => {
+    expect(needsProducerReviewIcon(true)).toBe('\u{274C}'); // ❌
+  });
+
+  it('returns ✅ for false (review complete)', () => {
+    expect(needsProducerReviewIcon(false)).toBe('\u{2705}'); // ✅
+  });
+
+  it('returns ✅ for null (defaults to not needed)', () => {
+    expect(needsProducerReviewIcon(null)).toBe('\u{2705}'); // ✅
+  });
+
+  it('returns ✅ for undefined (defaults to not needed)', () => {
+    expect(needsProducerReviewIcon(undefined)).toBe('\u{2705}'); // ✅
+  });
+
+  describe('with noIcons option', () => {
+    it('returns text fallback for true', () => {
+      expect(needsProducerReviewIcon(true, { noIcons: true })).toBe('[NEEDS_PRODUCER]');
+    });
+
+    it('returns text fallback for false', () => {
+      expect(needsProducerReviewIcon(false, { noIcons: true })).toBe('[PRODUCER_OK]');
+    });
+
+    it('returns text fallback for null', () => {
+      expect(needsProducerReviewIcon(null, { noIcons: true })).toBe('[PRODUCER_OK]');
+    });
+
+    it('returns text fallback for undefined', () => {
+      expect(needsProducerReviewIcon(undefined, { noIcons: true })).toBe('[PRODUCER_OK]');
+    });
+  });
+});
+
+describe('needsProducerReviewFallback', () => {
+  it('returns bracketed text for true', () => {
+    expect(needsProducerReviewFallback(true)).toBe('[NEEDS_PRODUCER]');
+  });
+
+  it('returns bracketed text for false', () => {
+    expect(needsProducerReviewFallback(false)).toBe('[PRODUCER_OK]');
+  });
+
+  it('returns bracketed text for null', () => {
+    expect(needsProducerReviewFallback(null)).toBe('[PRODUCER_OK]');
+  });
+
+  it('returns bracketed text for undefined', () => {
+    expect(needsProducerReviewFallback(undefined)).toBe('[PRODUCER_OK]');
+  });
+});
+
+describe('needsProducerReviewLabel', () => {
+  it('returns label for true', () => {
+    expect(needsProducerReviewLabel(true)).toBe('Needs producer review');
+  });
+
+  it('returns label for false', () => {
+    expect(needsProducerReviewLabel(false)).toBe('Producer review complete');
+  });
+
+  it('returns label for null', () => {
+    expect(needsProducerReviewLabel(null)).toBe('Producer review complete');
+  });
+
+  it('returns label for undefined', () => {
+    expect(needsProducerReviewLabel(undefined)).toBe('Producer review complete');
   });
 });
 

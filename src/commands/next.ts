@@ -118,7 +118,7 @@ export default function register(ctx: PluginContext): void {
           if (!wi) return wi;
           const auditResult = db.getAuditResult(wi.id);
           const childCount = childCounts.get(wi.id) ?? 0;
-          return { ...wi, auditResult: auditResult?.readyToClose ?? null, childCount };
+          return { ...wi, auditResult: auditResult?.readyToClose ?? null, auditedAt: auditResult?.auditedAt ?? null, childCount };
         };
 
         if (count === 1) {

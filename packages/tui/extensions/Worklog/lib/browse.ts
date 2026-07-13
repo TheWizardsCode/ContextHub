@@ -53,7 +53,7 @@ import {
 // Use createRequire with realpath-resolved path so the icons module can be
 // found even when this extension is loaded via a symlink.
 const _require = createRequire(realpathSync(fileURLToPath(import.meta.url)));
-const { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, riskIcon, effortIcon } = _require('../../../../../dist/icons.js');
+const { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, riskIcon, effortIcon, needsProducerReviewIcon } = _require('../../../../../dist/icons.js');
 
 // ── Auto-sync state ────────────────────────────────────────────────
 
@@ -197,14 +197,65 @@ export function truncateToWidth(text: string, maxWidth: number, ellipsis = '…'
 }
 
 /**
+ * Determine whether an audit result is fresh (not stale) based on the
+ * 60-second staleness buffer.
+ *
+ * An audit is considered fresh when:
+ *   auditedAt > updatedAt - 60000 (milliseconds)
+ *
+ * If auditedAt or updatedAt is missing, the audit is considered stale.
+ */
+function isAuditFresh(auditedAt: string | null | undefined, updatedAt: string | undefined): boolean {
+  if (!auditedAt || !updatedAt) return false;
+  const auditTime = new Date(auditedAt).getTime();
+  const updateTime = new Date(updatedAt).getTime();
+  if (isNaN(auditTime) || isNaN(updateTime)) return false;
+  return auditTime > updateTime - 60000;
+}
+
+/**
  * Compute the icon prefix string for a work item (just icon characters, no trailing space).
+ *
+ * Column layout (left to right):
+ *   1. Status icon
+ *   2. Stage icon (for `in_review` items, shows audit-aware icon instead)
+ *   3. Producer review flag icon (replaces audit icon for all stages)
+ *   4. Optional epic icon + child count
+ *
+ * For `in_review` items, column 2 shows:
+ *   - 🔍 (stage icon) if no audit exists or audit is stale
+ *   - ✅ if a fresh audit says readyToClose=true
+ *   - ❌ if a fresh audit says readyToClose=false
+ *
+ * For all other stages, column 2 shows the normal stage icon.
+ *
+ * Column 3 always shows the producer review flag:
+ *   - ❌ when needsProducerReview === true
+ *   - ✅ when needsProducerReview === false
  */
 export function getIconPrefix(item: WorklogBrowseItem, noIcons: boolean): string {
   const normalizedStatus = (item.status || '').replace(/_/g, '-');
   const sIcon = statusIcon(normalizedStatus, { noIcons });
-  const stIcon = stageIcon(item.stage, { noIcons });
-  const aIcon = auditIcon(item.auditResult, { noIcons });
-  const coreIcons = [sIcon, stIcon, aIcon].filter(Boolean).join(' ');
+
+  // Column 2: stage or audit-aware icon for in_review
+  let secondIcon: string;
+  if (item.stage === 'in_review') {
+    const fresh = isAuditFresh(item.auditedAt, item.updatedAt);
+    if (fresh) {
+      // Fresh audit: show based on readyToClose
+      secondIcon = auditIcon(item.auditResult, { noIcons });
+    } else {
+      // No audit or stale audit: show stage icon
+      secondIcon = stageIcon(item.stage, { noIcons });
+    }
+  } else {
+    secondIcon = stageIcon(item.stage, { noIcons });
+  }
+
+  // Column 3: producer review flag (replaces audit icon for all stages)
+  const prIcon = needsProducerReviewIcon(item.needsProducerReview, { noIcons });
+
+  const coreIcons = [sIcon, secondIcon, prIcon].filter(Boolean).join(' ');
 
   let childSuffix = '';
   if (item.childCount !== undefined && item.childCount > 0) {
