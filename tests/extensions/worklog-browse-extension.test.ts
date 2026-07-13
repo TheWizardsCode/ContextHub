@@ -1844,6 +1844,7 @@ describe('Worklog browse pi extension', () => {
         { value: 'plan_complete', label: 'plan_complete' },
         { value: 'progress', label: 'progress' },
         { value: 'review', label: 'review' },
+        { value: 'schedule', label: 'schedule' },
         { value: 'settings', label: 'settings' },
       ]);
     });
