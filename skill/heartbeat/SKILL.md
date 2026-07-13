@@ -5,6 +5,32 @@ description: "Automated work item monitoring — inspects the completed/in_revie
 
 # Heartbeat Skill
 
+## Completion-Detection Gate
+
+Before running, the heartbeat checks whether the previous work has completed.
+This prevents the heartbeat from interrupting work in progress.
+
+1. Review the conversation history and find the **last assistant message**
+   (the most recent message from the Pi agent, not the user).
+2. If that message **clearly states that a process has completed**
+   (e.g., "Work committed to dev", "Task complete", "All tests pass",
+   a work-item summary with "Work committed to dev", or any message that
+   unambiguously signals the end of a task), **proceed** to the heartbeat
+   logic below.
+3. If the last assistant message **does not clearly indicate completion**
+   (e.g., it asks a question, reports an error, or is mid-process),
+   print the following and exit **without** taking any heartbeat action:
+
+   ```
+   No completed process detected — heartbeat taking no action.
+   ```
+
+   Do NOT run `./scripts/heartbeat.py` in this case.
+
+4. **Manual invocation override:** If the heartbeat was invoked manually
+   by a user (not by a scheduler), the user's explicit request is sufficient
+   evidence of intent — proceed directly to the heartbeat logic.
+
 ## Overview
 
 The heartbeat skill automates work item queue monitoring. It inspects the
@@ -15,7 +41,7 @@ state:
   and flags it for producer review (`needsProducerReview: true`).
 - **Full queue (>= 10 items):** Finds the first item (by `sortIndex`) that
   does **not** have a valid audit result ("Ready to close: Yes") and runs
-  `/skill:audit <id>` on it.
+  the audit runner on it.
 - **All items ready:** Reports "Project is ready for producer review prior to
   a new release".
 
@@ -31,25 +57,36 @@ Invoke via the Pi chat interface. Output is displayed directly in the chat.
 
 ## Behavior
 
-1. Query `wl list --status completed --stage in_review --json` to count items.
-2. **If count < 10 (sparse queue):**
+After passing the completion-detection gate above:
+
+1. Run `python3 ./scripts/heartbeat.py` (or `python3 [--force]` for
+   standalone/automated use).
+2. The script queries `wl list --status completed --stage in_review --json`
+   to count items.
+3. **If count < 10 (sparse queue):**
    - Call `wl next --json` to find the next ready work item.
    - If found, set `needsProducerReview: true` via `wl update <id> --needs-producer-review true`.
    - Report which item was flagged.
    - If no item returned by `wl next`, report gracefully.
-3. **If count >= 10 (full queue):**
+4. **If count >= 10 (full queue):**
    - Sort items by `sortIndex` ascending.
    - For each item, check for a valid audit result via `wl audit-show <id> --json`.
    - An item is considered "ready" if its `rawOutput` starts with "Ready to close: Yes".
-   - Find the first non-ready item and run the audit skill's runner script
-     (`python3 /home/rgardler/.pi/agent/skills/audit/scripts/audit_runner.py issue <id>`).
+   - Find the first non-ready item and run the audit skill's runner script.
    - Only one item is audited per invocation.
-4. **If all items have "Ready to close: Yes":**
+5. **If all items have "Ready to close: Yes":**
    - Report "Project is ready for producer review prior to a new release".
 
 ## Inputs
 
-None. The skill operates on the current state of the Worklog database.
+None (when invoked via `/skill:heartbeat`). The skill operates on the current
+state of the Worklog database.
+
+The underlying script accepts:
+
+- `--force` — Bypass the completion-detection gate. Use when running the
+  script standalone (e.g., from CI, cron, or a scheduler that already
+  performs its own idle/completion checks).
 
 ## Outputs
 
@@ -79,3 +116,4 @@ Human-readable text printed to stdout (displayed in the Pi chat interface).
 - WL-0MR6XG7RX008AF2W — Closing question in audit skill output
 - WL-0MLYTKTI20V31KYW — Structured audit report format
 - WL-0MM347F9D1EGKLSQ — sortIndex selection with batch mode
+- WL-0MRJATQJ900832IT — Completion-detection gate

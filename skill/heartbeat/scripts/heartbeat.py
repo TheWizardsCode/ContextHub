@@ -4,6 +4,15 @@ Heartbeat skill for automated work item monitoring.
 
 Invocation: /skill:heartbeat
 
+The Pi-agent-level gate check is documented in SKILL.md. This script is the
+backend that runs after the gate passes. For standalone/automated use:
+
+    python3 scripts/heartbeat.py [--force]
+
+    --force  Bypass the Pi-agent completion-detection gate.
+             Use when running from CI, cron, or a scheduler that already
+             performs its own idle checks.
+
 Behavior:
 1. Get count of completed/in_review work items
 2. If count < 10: call wl next, flag next item for producer review
@@ -11,6 +20,7 @@ Behavior:
 4. If all items have "Ready to close: Yes", report ready
 """
 
+import argparse
 import json
 import subprocess
 import sys
@@ -148,8 +158,28 @@ def check_queue():
         return f"Heartbeat error: Invalid JSON from wl command: {e}"
 
 
+def parse_args():
+    """Parse command-line arguments.
+
+    Returns:
+        Parsed arguments namespace.
+    """
+    parser = argparse.ArgumentParser(
+        description='Heartbeat skill for automated work item monitoring',
+    )
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Bypass the Pi-agent completion-detection gate. Use when running '
+             'standalone (e.g., from CI, cron, or a scheduler that already '
+             'performs its own idle checks).',
+    )
+    return parser.parse_args()
+
+
 def main():
     """Entry point for command-line invocation."""
+    args = parse_args()
     result = check_queue()
     print(result)
     if result.startswith('Heartbeat error'):

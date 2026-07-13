@@ -323,6 +323,30 @@ class TestClientErrorHandling(unittest.TestCase):
         self.assertIn('error', result.lower())
 
 
+class TestForceFlag(unittest.TestCase):
+    """Test the --force flag for standalone/automated use."""
+
+    def test_parse_args_default(self):
+        """Without --force, args.force should be False."""
+        with patch.object(sys, 'argv', ['heartbeat.py']):
+            args = heartbeat.parse_args()
+        self.assertFalse(args.force)
+
+    def test_parse_args_force(self):
+        """With --force, args.force should be True."""
+        with patch.object(sys, 'argv', ['heartbeat.py', '--force']):
+            args = heartbeat.parse_args()
+        self.assertTrue(args.force)
+
+    def test_main_calls_parse_args(self):
+        """main() should call parse_args and check_queue."""
+        with patch.object(sys, 'argv', ['heartbeat.py']):
+            with patch('heartbeat.check_queue', return_value='All good'):
+                with patch('heartbeat.print') as mock_print:
+                    heartbeat.main()
+                    mock_print.assert_called_once_with('All good')
+
+
 class TestMonkeypatchedEntrypoint(unittest.TestCase):
     """Test that the module can be imported and functions are defined."""
 
@@ -332,6 +356,7 @@ class TestMonkeypatchedEntrypoint(unittest.TestCase):
         self.assertTrue(hasattr(heartbeat, 'is_ready_to_close'))
         self.assertTrue(hasattr(heartbeat, 'run_wl'))
         self.assertTrue(hasattr(heartbeat, 'main'))
+        self.assertTrue(hasattr(heartbeat, 'parse_args'))
 
 
 if __name__ == '__main__':
