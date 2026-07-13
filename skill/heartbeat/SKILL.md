@@ -7,11 +7,12 @@ description: "Automated work item monitoring — inspects the completed/in_revie
 
 ## Completion-Detection Gate
 
-Before running, the heartbeat checks whether the previous work has completed.
-This prevents the heartbeat from interrupting work in progress.
+Before running the heartbeat logic, check whether the previous work has
+completed. This prevents the heartbeat from interrupting work in progress.
 
-1. Review the conversation history and find the **last assistant message**
-   (the most recent message from the Pi agent, not the user).
+1. Review the conversation history up to (but not including) this
+   `/skill:heartbeat` invocation. Find the **last assistant message**
+   (the most recent message from the Pi agent before this turn).
 2. If that message **clearly states that a process has completed**
    (e.g., "Work committed to dev", "Task complete", "All tests pass",
    a work-item summary with "Work committed to dev", or any message that
@@ -27,9 +28,17 @@ This prevents the heartbeat from interrupting work in progress.
 
    Do NOT run `./scripts/heartbeat.py` in this case.
 
-4. **Manual invocation override:** If the heartbeat was invoked manually
-   by a user (not by a scheduler), the user's explicit request is sufficient
-   evidence of intent — proceed directly to the heartbeat logic.
+4. **Direct script invocation bypass:** When the script is run directly
+   (outside Pi, e.g., from CI or a terminal), there is no agent to perform
+   the gate check. In that case, pass `--force` to the script to bypass:
+
+   ```bash
+   python3 skill/heartbeat/scripts/heartbeat.py --force
+   ```
+
+   The `--force` flag has no effect inside the script (the gate is an
+   agent-level concern); it is a documentation/handshake flag indicating
+   that the caller takes responsibility for the gate check.
 
 ## Overview
 
