@@ -302,11 +302,22 @@ describe('valid-json-output', () => {
   // ──────────────────────────────────────────────
 
   describe('management commands', () => {
-    it.skip('reviewed --json — skipped: not registered in in-process harness', () => {
-      // The `reviewed` command is registered in the main CLI but is not
-      // imported in tests/cli/cli-inproc.ts. Until that gap is fixed,
-      // this test must be skipped in the in-process harness.
-      // When run via the real CLI (spawn), it emits valid JSON.
+    it('reviewed --json outputs valid JSON with no preamble', async () => {
+      // reviewed toggles needsProducerReview, then back
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json reviewed ${itemId}`,
+      );
+      let result = expectValidJson(stdout);
+      expect(result.success).toBe(true);
+      expect(result.workItem).toBeDefined();
+      expect(result.workItem.id).toBe(itemId);
+
+      // Toggle back to original state
+      const { stdout: stdout2 } = await execAsync(
+        `tsx ${cliPath} --json reviewed ${itemId}`,
+      );
+      result = expectValidJson(stdout2);
+      expect(result.success).toBe(true);
     });
 
     it('re-sort --json outputs valid JSON with no preamble', async () => {
@@ -360,6 +371,15 @@ describe('valid-json-output', () => {
       expect(result).toBeDefined();
     });
 
+    it('audit-set --json outputs valid JSON with no preamble', async () => {
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json audit-set ${itemId} --ready-to-close yes --summary "Audit test" --raw-output "Test output"`,
+      );
+      const result = expectValidJson(stdout);
+      expect(result.success).toBe(true);
+      expect(result.audit).toBeDefined();
+    });
+
     it('completion --json outputs valid JSON with no preamble (no args)', async () => {
       // completion without args lists available shells
       const { stdout } = await execAsync(`tsx ${cliPath} --json completion`);
@@ -386,24 +406,17 @@ describe('valid-json-output', () => {
         `tsx ${cliPath} --json show NONEXISTENT-ID`,
       ).catch((e: any) => ({ stdout: e.stdout || '', stderr: e.stderr || '' }));
 
-      // Error output may appear on stderr (via output.error) or stdout
+      // Error output should appear on stderr (via output.error)
       const output = stderr || stdout;
       const trimmed = output.trim();
       expect(trimmed.length).toBeGreaterThan(0);
 
-      // Handle case where there's a stack trace on stderr before the JSON
-      // Try to find JSON object in the output
-      const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const result = JSON.parse(jsonMatch[0]);
-        expect(result.success).toBe(false);
-        expect(result.error).toBeDefined();
-      } else {
-        // If no JSON found, check stdout for JSON
-        const stdoutTrimmed = stdout.trim();
-        const result = JSON.parse(stdoutTrimmed);
-        expect(result.success).toBe(false);
-      }
+      // Error output with --json should be pure JSON on stderr
+      expect(['{', '[']).toContain(trimmed[0]);
+      expect(['}', ']']).toContain(trimmed[trimmed.length - 1]);
+      const result = JSON.parse(trimmed);
+      expect(result.success).toBe(false);
+      expect(result.error).toBeDefined();
     });
 
     it('update NONEXISTENT --json outputs valid JSON with no preamble', async () => {
@@ -416,16 +429,15 @@ describe('valid-json-output', () => {
       const trimmed = output.trim();
       expect(trimmed.length).toBeGreaterThan(0);
 
-      // Try to find JSON object
-      const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        expect(parsed.success !== undefined).toBe(true);
-      } else {
-        // Fallback to stdout
-        const parsed = JSON.parse(stdout.trim());
-        expect(parsed.success !== undefined).toBe(true);
-      }
+      // Error output should be valid JSON with no preamble
+      expect(['{', '[']).toContain(trimmed[0]);
+      expect(['}', ']']).toContain(trimmed[trimmed.length - 1]);
+      const parsed = JSON.parse(trimmed);
+      expect(parsed.success).toBe(false);
+      // Error may be at top level (output.error) or in results[0].error (output.json)
+      const hasError = parsed.error !== undefined ||
+        (Array.isArray(parsed.results) && parsed.results[0]?.error !== undefined);
+      expect(hasError).toBe(true);
     });
 
     it('delete NONEXISTENT --json outputs valid JSON with no preamble', async () => {
@@ -438,14 +450,15 @@ describe('valid-json-output', () => {
       const trimmed = output.trim();
       expect(trimmed.length).toBeGreaterThan(0);
 
-      const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        expect(parsed.success !== undefined).toBe(true);
-      } else {
-        const parsed = JSON.parse(stdout.trim());
-        expect(parsed.success !== undefined).toBe(true);
-      }
+      // Error output should be valid JSON with no preamble
+      expect(['{', '[']).toContain(trimmed[0]);
+      expect(['}', ']']).toContain(trimmed[trimmed.length - 1]);
+      const parsed = JSON.parse(trimmed);
+      expect(parsed.success).toBe(false);
+      // Error may be at top level (output.error) or in results[0].error (output.json)
+      const hasError = parsed.error !== undefined ||
+        (Array.isArray(parsed.results) && parsed.results[0]?.error !== undefined);
+      expect(hasError).toBe(true);
     });
 
     it('close NONEXISTENT --json outputs valid JSON with no preamble', async () => {
@@ -458,14 +471,15 @@ describe('valid-json-output', () => {
       const trimmed = output.trim();
       expect(trimmed.length).toBeGreaterThan(0);
 
-      const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        expect(parsed.success !== undefined).toBe(true);
-      } else {
-        const parsed = JSON.parse(stdout.trim());
-        expect(parsed.success !== undefined).toBe(true);
-      }
+      // Error output should be valid JSON with no preamble
+      expect(['{', '[']).toContain(trimmed[0]);
+      expect(['}', ']']).toContain(trimmed[trimmed.length - 1]);
+      const parsed = JSON.parse(trimmed);
+      expect(parsed.success).toBe(false);
+      // Error may be at top level (output.error) or in results[0].error (output.json)
+      const hasError = parsed.error !== undefined ||
+        (Array.isArray(parsed.results) && parsed.results[0]?.error !== undefined);
+      expect(hasError).toBe(true);
     });
   });
 
@@ -480,10 +494,44 @@ describe('valid-json-output', () => {
       // doctor check returns various shapes depending on findings
       expect(result).toBeDefined();
     });
+
+    it('doctor migrate --json outputs valid JSON with no preamble', async () => {
+      // doctor migrate handles JSONL → SQLite migration.
+      // In a fresh SQLite-only setup with no JSONL file, it reports success
+      // (nothing to migrate) with valid JSON output.
+      const { stdout } = await execAsync(`tsx ${cliPath} --json doctor migrate`);
+      const result = expectValidJson(stdout);
+      expect(result).toBeDefined();
+    });
+
+    it('doctor stage-sync --json outputs valid JSON with no preamble', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json doctor stage-sync`);
+      const result = expectValidJson(stdout);
+      expect(result).toBeDefined();
+    });
   });
 
   // ──────────────────────────────────────────────
-  // Group 7: Hard-to-test commands (documented skips)
+  // Group 7: Migrate command
+  // ──────────────────────────────────────────────
+
+  describe('migrate command', () => {
+    it('migrate sort-index --dry-run --json outputs valid JSON with no preamble', async () => {
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json migrate sort-index --dry-run`,
+      );
+      const result = expectValidJson(stdout);
+      expect(result.success).toBe(true);
+      expect(result.dryRun).toBe(true);
+      expect(result.count).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  // ──────────────────────────────────────────────
+  // Group 8: Hard-to-test commands (documented skips)
+
+  // ──────────────────────────────────────────────
+  // Group 8: Hard-to-test commands (documented skips)
   // ──────────────────────────────────────────────
 
   describe('commands requiring special setup (skipped with reasons)', () => {
@@ -506,26 +554,11 @@ describe('valid-json-output', () => {
       // (tests/cli/github-*.test.ts).
     });
 
-    it.skip('migrate --json — skipped: requires JSONL file to migrate from', () => {
-      // `wl migrate` migrates data from JSONL to SQLite.
-      // It requires a pre-existing JSONL file in the data directory.
-      // Testing it here would conflict with the SQLite-based setup used by
-      // other tests in this file.
-    });
-
     it.skip('audit --json — skipped: requires Pi agent infrastructure', () => {
       // `wl audit` runs an audit via the Pi agent (runPiAudit).
       // This requires a running Pi agent which is not available in the
       // standard test environment. The JSON output from the audit command
       // is tested in the existing audit-specific test files.
-    });
-
-    it.skip('reviewed --json — skipped: not registered in in-process harness', () => {
-      // The `reviewed` command is registered in the main CLI (src/cli.ts)
-      // but is not imported in the in-process test harness
-      // (tests/cli/cli-inproc.ts). To test it properly, the import would
-      // need to be added to the harness. When run via the real CLI spawn,
-      // the reviewed command emits valid JSON with --json.
     });
   });
 });
