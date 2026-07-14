@@ -369,9 +369,8 @@ export class Scheduler {
       this._agentBusy = true;
     });
 
-    pi.on('tool_execution_end', () => {
-      this._agentBusy = false;
-    });
+    // Note: tool_execution_end deliberately omitted — a turn may use
+    // multiple tools, so the busy flag must stay true until message_end.
   }
 
   /**
