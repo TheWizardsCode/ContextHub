@@ -447,7 +447,7 @@ export async function defaultChooseWorkItem(
   }
 
   // ── Chord state ──────────────────────────────────────────────────
-  let pendingChordLeader: string | null = null;
+  let pendingChord: string[] = [];
 
   const result = await ctx.ui.custom<WorklogBrowseItem | ShortcutResult | null>((tui, theme, _keybindings, done) => {
     let selectedIndex = 0;
@@ -465,7 +465,7 @@ export async function defaultChooseWorkItem(
 
     if (reFetchItems) {
       refreshInterval = setInterval(async () => {
-        if (pendingChordLeader !== null) return;
+        if (pendingChord.length > 0) return;
 
         // Trigger background auto-sync if interval has elapsed
         _triggerAutoSync();
@@ -615,15 +615,12 @@ export async function defaultChooseWorkItem(
         if (shortcutRegistry) {
           const selectedStage = items[selectedIndex]?.stage;
 
-          if (pendingChordLeader !== null) {
-            const chords = shortcutRegistry.getChordByLeader(pendingChordLeader, 'list');
+          if (pendingChord.length > 0) {
+            const chords = shortcutRegistry.getChordByPrefix(pendingChord, 'list', selectedStage);
             if (chords.length > 0) {
               const hints = chords
                 .filter(c => {
                   if (isEmpty && c.command.includes('<id>')) return false;
-                  if (selectedStage !== undefined && c.stages !== undefined && c.stages.length > 0) {
-                    return c.stages.includes(selectedStage);
-                  }
                   return true;
                 })
                 .map(e => {
@@ -633,10 +630,10 @@ export async function defaultChooseWorkItem(
                     .trim()
                     .replace(/^\/(skill:)?/, '');
                   const chord = (e as Record<string, unknown>).chord;
-                  if (Array.isArray(chord) && chord.length >= 2) {
-                    const secondKey = (chord as string[])[1];
+                  if (Array.isArray(chord) && chord.length > pendingChord.length) {
+                    const nextKey = (chord as string[])[pendingChord.length];
                     const rest = label.split(/\s+/).slice(1).join(' ');
-                    const hint = rest.length > 0 ? `${secondKey}:${rest}` : secondKey;
+                    const hint = rest.length > 0 ? `${nextKey}:${rest}` : nextKey;
                     return hint;
                   }
                   return formatEntryLabel(e);
@@ -727,21 +724,22 @@ export async function defaultChooseWorkItem(
         const lookupKey = data.length === 1 ? data : undefined;
 
         // ── Pending chord state ────────────────────────────────────
-        if (pendingChordLeader !== null && lookupKey) {
+        if (pendingChord.length > 0 && lookupKey) {
           if (isEscapeKey(data)) {
-            pendingChordLeader = null;
+            pendingChord = [];
             invalidateCache();
             tui.requestRender();
             return;
           }
           const selectedStage = items[selectedIndex]?.stage;
+          const fullChord = [...pendingChord, lookupKey];
           const chordCommand = shortcutRegistry!.lookupChord(
-            [pendingChordLeader, lookupKey],
+            fullChord,
             'list',
             selectedStage,
           );
           if (chordCommand) {
-            pendingChordLeader = null;
+            pendingChord = [];
             if (chordCommand.includes('<id>')) {
               const chordTarget = items[selectedIndex];
               if (!chordTarget) return;
@@ -754,7 +752,15 @@ export async function defaultChooseWorkItem(
             }
             return;
           }
-          pendingChordLeader = null;
+          // Check if the extended chord is a valid prefix for deeper chords
+          const prefixMatches = shortcutRegistry!.getChordByPrefix(fullChord, 'list', selectedStage);
+          if (prefixMatches.length > 0) {
+            pendingChord = fullChord;
+            invalidateCache();
+            tui.requestRender();
+            return;
+          }
+          pendingChord = [];
           invalidateCache();
           tui.requestRender();
           return;
@@ -776,21 +782,13 @@ export async function defaultChooseWorkItem(
             return;
           }
 
-          const chords = shortcutRegistry.getChordByLeader(lookupKey, 'list');
-          if (chords.length > 0) {
-            const applicableChords = chords.filter(c => {
-              if (items.length === 0 && c.command.includes('<id>')) return false;
-              if (selectedStage !== undefined && c.stages !== undefined && c.stages.length > 0) {
-                return c.stages.includes(selectedStage);
-              }
-              return true;
-            });
-            if (applicableChords.length > 0) {
-              pendingChordLeader = lookupKey;
-              invalidateCache();
-              tui.requestRender();
-              return;
-            }
+          const chordPrefixMatches = shortcutRegistry.getChordByPrefix([lookupKey], 'list', selectedStage)
+            .filter(c => !(items.length === 0 && c.command.includes('<id>')));
+          if (chordPrefixMatches.length > 0) {
+            pendingChord = [lookupKey];
+            invalidateCache();
+            tui.requestRender();
+            return;
           }
         }
 
@@ -888,8 +886,8 @@ export async function defaultChooseWorkItem(
         }
 
         if (isEscapeKey(data)) {
-          if (pendingChordLeader !== null) {
-            pendingChordLeader = null;
+          if (pendingChord.length > 0) {
+            pendingChord = [];
             invalidateCache();
             tui.requestRender();
             return;
@@ -1130,7 +1128,7 @@ export async function runBrowseFlow(
         const cleanOutput = mdOutput.replace(/\{[^}]*\}/g, '');
         const detailLines = cleanOutput.split(/\r?\n/);
 
-        let detailPendingChordLeader: string | null = null;
+        let detailPendingChord: string[] = [];
         const detailResult = await ctx.ui.custom<ShortcutResult | string | null>(
           (tui, _theme, _keybindings, done) => {
             const factory = createScrollableWidget(detailLines);
@@ -1158,27 +1156,21 @@ export async function runBrowseFlow(
                     return `${e.key}:${label}`;
                   };
 
-                  if (detailPendingChordLeader !== null) {
-                    const chords = shortcutRegistry.getChordByLeader(detailPendingChordLeader, 'detail');
+                  if (detailPendingChord.length > 0) {
+                    const chords = shortcutRegistry.getChordByPrefix(detailPendingChord, 'detail', selectedItem.stage);
                     if (chords.length > 0) {
                       const hints = chords
-                        .filter(c => {
-                          if (selectedItem.stage !== undefined && c.stages !== undefined && c.stages.length > 0) {
-                            return c.stages.includes(selectedItem.stage);
-                          }
-                          return true;
-                        })
                         .map(e => {
                           const chord = (e as Record<string, unknown>).chord;
-                          if (Array.isArray(chord) && chord.length >= 2) {
-                            const secondKey = (chord as string[])[1];
+                          if (Array.isArray(chord) && chord.length > detailPendingChord.length) {
+                            const nextKey = (chord as string[])[detailPendingChord.length];
                             const label = e.label ?? e.command
                               .replace(/<[^>]+>/g, '')
                               .split(/\r?\n/)[0]
                               .trim()
                               .replace(/^\/(skill:)?/, '');
                             const rest = label.split(/\s+/).slice(1).join(' ');
-                            return rest.length > 0 ? `${secondKey}:${rest}` : secondKey;
+                            return rest.length > 0 ? `${nextKey}:${rest}` : nextKey;
                           }
                           return formatHint(e);
                         })
@@ -1223,26 +1215,34 @@ export async function runBrowseFlow(
               handleInput: (data: string) => {
                 const lookupKey = data.length === 1 ? data : undefined;
 
-                if (detailPendingChordLeader !== null && lookupKey) {
+                if (detailPendingChord.length > 0 && lookupKey) {
                   if (isEscapeKey(data)) {
-                    detailPendingChordLeader = null;
+                    detailPendingChord = [];
                     tui.requestRender();
                     return;
                   }
+                  const fullChord = [...detailPendingChord, lookupKey];
                   const chordCommand = shortcutRegistry.lookupChord(
-                    [detailPendingChordLeader, lookupKey],
+                    fullChord,
                     'detail',
                     selectedItem.stage,
                   );
                   if (chordCommand) {
-                    detailPendingChordLeader = null;
+                    detailPendingChord = [];
                     done({
                       type: 'shortcut' as const,
                       command: chordCommand.replace('<id>', selectedItem.id),
                     });
                     return;
                   }
-                  detailPendingChordLeader = null;
+                  // Check if the extended chord is a valid prefix for deeper chords
+                  const prefixMatches = shortcutRegistry.getChordByPrefix(fullChord, 'detail', selectedItem.stage);
+                  if (prefixMatches.length > 0) {
+                    detailPendingChord = fullChord;
+                    tui.requestRender();
+                    return;
+                  }
+                  detailPendingChord = [];
                   tui.requestRender();
                   return;
                 }
@@ -1254,19 +1254,11 @@ export async function runBrowseFlow(
                     return;
                   }
 
-                  const chords = shortcutRegistry.getChordByLeader(lookupKey, 'detail');
-                  if (chords.length > 0) {
-                    const applicableChords = chords.filter(c => {
-                      if (selectedItem.stage !== undefined && c.stages !== undefined && c.stages.length > 0) {
-                        return c.stages.includes(selectedItem.stage);
-                      }
-                      return true;
-                    });
-                    if (applicableChords.length > 0) {
-                      detailPendingChordLeader = lookupKey;
-                      tui.requestRender();
-                      return;
-                    }
+                  const chordPrefixMatches = shortcutRegistry.getChordByPrefix([lookupKey], 'detail', selectedItem.stage);
+                  if (chordPrefixMatches.length > 0) {
+                    detailPendingChord = [lookupKey];
+                    tui.requestRender();
+                    return;
                   }
                 }
 
@@ -1279,12 +1271,12 @@ export async function runBrowseFlow(
                 }
 
                 if (isEscapeKey(data)) {
-                  if (detailPendingChordLeader === null) {
+                  if (detailPendingChord.length === 0) {
                     ctx.ui.setWidget?.('worklog-browse-selection', undefined);
                     done(null);
                     return;
                   }
-                  detailPendingChordLeader = null;
+                  detailPendingChord = [];
                   tui.requestRender();
                   return;
                 }

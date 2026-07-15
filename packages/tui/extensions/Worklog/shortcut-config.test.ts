@@ -210,7 +210,7 @@ describe('loadShortcutConfig', () => {
   it('loads valid entries from shortcuts.json', () => {
     const registry = loadShortcutConfig();
     const entries = registry.getEntries();
-    expect(entries).toHaveLength(17);
+    expect(entries).toHaveLength(18);
 
     const createEntry = entries.find(e => e.key === 'c');
     expect(createEntry).toBeDefined();
@@ -244,7 +244,7 @@ describe('loadShortcutConfig', () => {
     expect(intakeEntry!.label).toBe('intake');
     expect(intakeEntry!.description).toBe('Ensure that the selected item is reasonably well defined in terms of objectives.');
 
-    expect(entries.filter(e => e.key === '').length).toBe(12); // 12 chord entries have empty key
+    expect(entries.filter(e => e.key === '').length).toBe(13); // 13 chord entries have empty key
   });
 
   it('has no duplicate key+view or chord+view combinations in shortcuts.json', () => {
@@ -307,18 +307,35 @@ describe('loadShortcutConfig', () => {
     const entries = registry.getEntries();
 
     const upChords = registry.getChordEntries();
-    expect(upChords).toHaveLength(12);
+    expect(upChords).toHaveLength(13);
 
-    const upEntry = upChords.find((e: any) =>
-      Array.isArray((e as any).chord) && (e as any).chord[0] === 'u' && (e as any).chord[1] === 'p',
+    const upcEntry = upChords.find((e: any) =>
+      Array.isArray((e as any).chord) &&
+      (e as any).chord[0] === 'u' &&
+      (e as any).chord[1] === 'p' &&
+      (e as any).chord[2] === 'c',
     );
-    expect(upEntry).toBeDefined();
-    expect((upEntry as any).chord).toEqual(['u', 'p']);
-    expect(upEntry!.command).toBe('!!wl update <id> --priority ');
-    expect(upEntry!.view).toBe('both');
-    expect(upEntry!.label).toBe('update priority');
-    expect(upEntry!.description).toBe('Update the priority of the selected work item');
-    expect(upEntry!.stages).toBeUndefined();
+    expect(upcEntry).toBeDefined();
+    expect((upcEntry as any).chord).toEqual(['u', 'p', 'c']);
+    expect(upcEntry!.command).toBe('!!wl update <id> --priority critical');
+    expect(upcEntry!.view).toBe('both');
+    expect(upcEntry!.label).toBe('update priority');
+    expect(upcEntry!.description).toBe('Update the priority of the selected work item');
+    expect(upcEntry!.stages).toBeUndefined();
+
+    const uphEntry = upChords.find((e: any) =>
+      Array.isArray((e as any).chord) &&
+      (e as any).chord[0] === 'u' &&
+      (e as any).chord[1] === 'p' &&
+      (e as any).chord[2] === 'h',
+    );
+    expect(uphEntry).toBeDefined();
+    expect((uphEntry as any).chord).toEqual(['u', 'p', 'h']);
+    expect(uphEntry!.command).toBe('!!wl update <id> --priority high');
+    expect(uphEntry!.view).toBe('both');
+    expect(uphEntry!.label).toBe('update priority');
+    expect(uphEntry!.description).toBe('Update the priority of the selected work item');
+    expect(uphEntry!.stages).toBeUndefined();
 
     const utEntry = upChords.find((e: any) =>
       Array.isArray((e as any).chord) && (e as any).chord[0] === 'u' && (e as any).chord[1] === 't',
@@ -741,6 +758,112 @@ describe('lookupChord', () => {
     expect(
       (registry as any).lookupChord(['u', 'p'], 'detail', 'idea'),
     ).toBeUndefined();
+  });
+});
+
+describe('getChordByPrefix', () => {
+  it('returns chord entries whose chord array starts with the given prefix', () => {
+    const entries: any[] = [
+      { chord: ['u', 'p', 'c'], command: 'priority-critical <id>', view: 'both' },
+      { chord: ['u', 'p', 'h'], command: 'priority-high <id>', view: 'both' },
+      { chord: ['u', 's'], command: 'status <id>', view: 'both' },
+      { chord: ['u', 't'], command: 'title <id>', view: 'both' },
+    ];
+    const registry = new ShortcutRegistry(entries);
+
+    const upPrefix = (registry as any).getChordByPrefix(['u', 'p']);
+    expect(upPrefix).toHaveLength(2);
+    expect(upPrefix[0].chord).toEqual(['u', 'p', 'c']);
+    expect(upPrefix[1].chord).toEqual(['u', 'p', 'h']);
+
+    const uPrefix = (registry as any).getChordByPrefix(['u']);
+    expect(uPrefix).toHaveLength(4);
+
+    const upcExact = (registry as any).getChordByPrefix(['u', 'p', 'c']);
+    expect(upcExact).toHaveLength(1);
+    expect(upcExact[0].chord).toEqual(['u', 'p', 'c']);
+  });
+
+  it('returns empty array when no chord entries start with the given prefix', () => {
+    const entries: any[] = [
+      { chord: ['u', 'p'], command: 'update-priority <id>', view: 'both' },
+    ];
+    const registry = new ShortcutRegistry(entries);
+
+    expect((registry as any).getChordByPrefix(['x'])).toEqual([]);
+    expect((registry as any).getChordByPrefix(['u', 'x'])).toEqual([]);
+    expect((registry as any).getChordByPrefix(['a', 'b', 'c'])).toEqual([]);
+  });
+
+  it('returns empty array when no chord entries exist', () => {
+    const registry = new ShortcutRegistry([
+      { key: 'i', command: 'implement <id>', view: 'both' },
+    ]);
+
+    expect((registry as any).getChordByPrefix(['u'])).toEqual([]);
+  });
+
+  it('returns empty array on empty registry', () => {
+    const registry = new ShortcutRegistry([]);
+    expect((registry as any).getChordByPrefix([])).toEqual([]);
+  });
+
+  it('filters by view when view argument is provided', () => {
+    const entries: any[] = [
+      { chord: ['u', 'p', 'c'], command: 'priority-critical <id>', view: 'list' },
+      { chord: ['u', 'p', 'h'], command: 'priority-high <id>', view: 'detail' },
+      { chord: ['u', 'p', 'm'], command: 'priority-medium <id>', view: 'both' },
+    ];
+    const registry = new ShortcutRegistry(entries);
+
+    const listChords = (registry as any).getChordByPrefix(['u', 'p'], 'list');
+    expect(listChords).toHaveLength(2);
+    expect(listChords[0].chord).toEqual(['u', 'p', 'c']);
+    expect(listChords[1].chord).toEqual(['u', 'p', 'm']);
+
+    const detailChords = (registry as any).getChordByPrefix(['u', 'p'], 'detail');
+    expect(detailChords).toHaveLength(2);
+    expect(detailChords[0].chord).toEqual(['u', 'p', 'h']);
+    expect(detailChords[1].chord).toEqual(['u', 'p', 'm']);
+  });
+
+  it('getChordByPrefix without view argument returns all matches regardless of view', () => {
+    const entries: any[] = [
+      { chord: ['u', 'p', 'c'], command: 'priority-critical <id>', view: 'list' },
+      { chord: ['u', 'p', 'h'], command: 'priority-high <id>', view: 'detail' },
+    ];
+    const registry = new ShortcutRegistry(entries);
+
+    const allChords = (registry as any).getChordByPrefix(['u', 'p']);
+    expect(allChords).toHaveLength(2);
+  });
+
+  it('respects stage filter', () => {
+    const entries: any[] = [
+      {
+        chord: ['u', 'p', 'c'],
+        command: 'priority-critical <id>',
+        view: 'both',
+        stages: ['intake_complete', 'plan_complete'],
+      },
+      {
+        chord: ['u', 'p', 'h'],
+        command: 'priority-high <id>',
+        view: 'both',
+        stages: ['intake_complete'],
+      },
+    ];
+    const registry = new ShortcutRegistry(entries);
+
+    const allForPrefix = (registry as any).getChordByPrefix(['u', 'p']);
+    expect(allForPrefix).toHaveLength(2);
+
+    const filtered = (registry as any).getChordByPrefix(['u', 'p'], undefined, 'intake_complete');
+    expect(filtered).toHaveLength(2);
+
+    const planFiltered = (registry as any).getChordByPrefix(['u', 'p'], undefined, 'plan_complete');
+    expect(planFiltered).toHaveLength(1);
+    expect(planFiltered[0].chord).toEqual(['u', 'p', 'c']);
   });
 });
 
