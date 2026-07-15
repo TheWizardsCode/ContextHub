@@ -236,16 +236,28 @@ export default function register(ctx: PluginContext): void {
 
           // Write to the audit_results table (sole source of truth for audit state)
           const auditEntry = buildAuditEntry(String(auditCandidate));
-          db.saveAuditResult({
-            workItemId: normalizedId,
-            readyToClose: auditEntry.status === 'Complete',
-            auditedAt: auditEntry.time,
-            summary: auditEntry.text,
-            rawOutput: null,
-            author: auditEntry.author,
-          });
-          auditWritten = true;
-          auditEntryForOutput = auditEntry;
+          try {
+            db.saveAuditResult({
+              workItemId: normalizedId,
+              readyToClose: auditEntry.status === 'Complete',
+              auditedAt: auditEntry.time,
+              summary: auditEntry.text,
+              rawOutput: null,
+              author: auditEntry.author,
+            });
+            auditWritten = true;
+            auditEntryForOutput = auditEntry;
+          } catch (err: any) {
+            auditWritten = false;
+            results.push({
+              id: normalizedId,
+              success: false,
+              error: err.message || 'audit-persistence-failed',
+              message: `Audit result could not be persisted: ${err.message}`,
+            });
+            // Skip remaining validation and success push for this item
+            continue;
+          }
         }
 
         // Validate status/stage per-id if needed.

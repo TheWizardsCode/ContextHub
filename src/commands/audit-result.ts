@@ -140,14 +140,29 @@ export default function register(ctx: PluginContext): void {
       const summary = options.summary || null;
       const rawOutput = options.rawOutput || null;
 
-      db.saveAuditResult({
-        workItemId: normalizedId,
-        readyToClose,
-        auditedAt,
-        summary,
-        rawOutput,
-        author,
-      });
+      try {
+        db.saveAuditResult({
+          workItemId: normalizedId,
+          readyToClose,
+          auditedAt,
+          summary,
+          rawOutput,
+          author,
+        });
+      } catch (err: any) {
+        if (options.json || utils.isJsonMode()) {
+          output.json({
+            success: false,
+            error: err.message || 'Failed to persist audit result',
+            workItemId: normalizedId,
+          });
+          process.exitCode = 1;
+          return;
+        }
+        console.error(`Error: Failed to persist audit result for ${normalizedId}`);
+        console.error(`  ${err.message || 'Unknown error'}`);
+        process.exit(1);
+      }
 
       if (options.json || utils.isJsonMode()) {
         output.json({

@@ -63,6 +63,32 @@ describe('wl audit-set command', () => {
       expect(err.exitCode).not.toBe(0);
     }
   });
+
+  it('returns error when database write fails (read-only db)', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+
+    // Set an audit successfully first (to ensure DB is initialized)
+    await execAsync(`tsx ${cliPath} --json audit-set ${targetId} --ready-to-close yes --summary "Initial audit"`);
+
+    // Make the database read-only
+    const dbPath = path.join(state.tempDir, '.worklog', 'worklog.db');
+    fs.chmodSync(dbPath, 0o444);
+
+    // Now try to set another audit - should fail
+    try {
+      await execAsync(`tsx ${cliPath} --json audit-set ${targetId} --ready-to-close no --summary "Should fail"`);
+      expect(true).toBe(false); // Should not reach here
+    } catch (err: any) {
+      const result = JSON.parse(err.stdout || '{}');
+      expect(result.success).toBe(false);
+      expect(result.error).toBeTruthy();
+      expect(err.exitCode).not.toBe(0);
+    }
+
+    // Restore permissions for cleanup
+    fs.chmodSync(dbPath, 0o644);
+  });
 });
 
 describe('wl audit-show command', () => {
@@ -192,5 +218,27 @@ describe('wl update --audit-text writes to audit_results', () => {
     const result = JSON.parse(stdout);
     expect(result.success).toBe(true);
     expect(result.auditResult).toBeNull();
+  });
+
+  it('returns error on write failure via --audit-text', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+
+    // Make the database read-only before writing audit
+    const dbPath = path.join(state.tempDir, '.worklog', 'worklog.db');
+    fs.chmodSync(dbPath, 0o444);
+
+    // Attempt to write audit via --audit-text - should fail
+    try {
+      await execAsync(`tsx ${cliPath} --json update ${targetId} --audit-text "Ready to close: Yes\nShould fail"`);
+      expect(true).toBe(false); // Should not reach here
+    } catch (err: any) {
+      const result = JSON.parse(err.stdout || '{}');
+      expect(result.success).toBe(false);
+      expect(result.error).toBeTruthy();
+      expect(err.exitCode).not.toBe(0);
+    }
+
+    fs.chmodSync(dbPath, 0o644);
   });
 });
