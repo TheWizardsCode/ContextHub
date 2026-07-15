@@ -55,18 +55,32 @@
     "description": "Run an audit on the selected work item"
   },
   {
-    "chord": ["u", "p", "c"],
-    "command": "!!wl update <id> --priority critical",
+    "chord": ["u", "p", "l"],
+    "command": "!!wl update <id> --priority low",
     "view": "both",
-    "label": "update priority",
-    "description": "Update the priority of the selected work item"
+    "label": "update priority low",
+    "description": "Update the priority of the selected work item to low."
+  },
+  {
+    "chord": ["u", "p", "m"],
+    "command": "!!wl update <id> --priority medium",
+    "view": "both",
+    "label": "update priority medium",
+    "description": "Update the priority of the selected work item to medium."
   },
   {
     "chord": ["u", "p", "h"],
     "command": "!!wl update <id> --priority high",
     "view": "both",
-    "label": "update priority",
-    "description": "Update the priority of the selected work item"
+    "label": "update priority high",
+    "description": "Update the priority of the selected work item to high."
+  },
+  {
+    "chord": ["u", "p", "c"],
+    "command": "!!wl update <id> --priority critical",
+    "view": "both",
+    "label": "update priority critical",
+    "description": "Update the priority of the selected work item to critical."
   },
   {
     "chord": ["u", "s"],
