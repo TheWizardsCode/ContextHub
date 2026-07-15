@@ -30,7 +30,14 @@
     "label": "implement",
     "description": "Run the implement workflow on the selected work item"
   },
-    {
+  {
+    "chord": ["a", "a"],
+    "command": "/skill:audit <id>",
+    "view": "both",
+    "stages": ["in_review"],
+    "label": "audit automatic",
+  },
+  {
     "chord": ["a", "y"],
     "command": "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
     "view": "both",
