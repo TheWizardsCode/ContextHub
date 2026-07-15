@@ -197,6 +197,99 @@ export function truncateToWidth(text: string, maxWidth: number, ellipsis = '…'
 }
 
 /**
+ * Format chord shortcut hints for the help line, collapsing multiple chords
+ * that share the same nextKey into a single entry, and stripping consumed
+ * words from labels based on pending chord depth.
+ *
+ * At intermediate levels (pendingChord.length >= 1), chords with the same
+ * nextKey are collapsed to `<nextKey>:<firstWord>...` matching the first-layer
+ * pattern. At deeper levels, the label strips all words consumed by the
+ * traversed chord keys (not just 1 word).
+ *
+ * @param chords - Chord entries to format (already filtered by prefix/view/stage)
+ * @param pendingChord - Current pending chord prefix
+ * @param options - Optional settings (isEmpty: filter out commands with `<id>`)
+ * @returns Space-joined hint string, or empty string if no hints remain
+ */
+export function formatChordHints(
+  chords: ShortcutEntry[],
+  pendingChord: string[],
+  options?: { isEmpty?: boolean },
+): string {
+  // Filter out chords referencing <id> when there are no items to operate on
+  const filtered = options?.isEmpty
+    ? chords.filter(c => !c.command.includes('<id>'))
+    : chords;
+
+  if (filtered.length === 0) return '';
+
+  // Extract display label from an entry (same logic as formatEntryLabel/formatHint)
+  const extractLabel = (e: ShortcutEntry): string => {
+    return e.label ?? e.command
+      .replace(/<[^>]+>/g, '')
+      .split(/\r?\n/)[0]
+      .trim()
+      .replace(/^\/(skill:)?/, '');
+  };
+
+  // Build hint entries with nextKey and computed rest
+  // For each entry, store the first word after stripping consumed words
+  // so that collapsed hints can use the correct word (e.g., 'priority'
+  // instead of 'update' for u-p-* chords at the 'u' layer).
+  type HintEntry = { nextKey: string; hint: string; firstRestWord: string };
+  const hints: HintEntry[] = [];
+
+  for (const e of filtered) {
+    const chord = (e as Record<string, unknown>).chord;
+    const label = extractLabel(e);
+
+    if (Array.isArray(chord) && chord.length > pendingChord.length) {
+      // Pending chord has remaining keys — compute nextKey and stripped rest
+      const nextKey = (chord as string[])[pendingChord.length];
+      const words = label.split(/\s+/);
+      // Safety check: don't strip more words than exist minus one
+      const stripCount = Math.min(pendingChord.length, Math.max(0, words.length - 1));
+      const rest = words.slice(stripCount);
+      const firstRestWord = rest.length > 0 ? rest[0] : (words.length > 0 ? words[words.length - 1] : '');
+      const hint = rest.length > 0 ? `${nextKey}:${rest.join(' ')}` : nextKey;
+      hints.push({ nextKey, hint, firstRestWord });
+    } else {
+      // Fallback: entry is not a chord or chord is fully consumed
+      // Format like the first layer: leaderKey:firstWord... or key:label
+      if (Array.isArray(chord) && chord.length >= 2) {
+        const leaderKey = (chord as string[])[0];
+        const firstWord = label.split(/\s+/)[0];
+        hints.push({ nextKey: leaderKey, hint: `${leaderKey}:${firstWord}...`, firstRestWord: firstWord });
+      } else if (e.key) {
+        hints.push({ nextKey: e.key, hint: `${e.key}:${label}`, firstRestWord: label.split(/\s+/)[0] });
+      }
+    }
+  }
+
+  // Group by nextKey
+  const byKey = new Map<string, HintEntry[]>();
+  for (const h of hints) {
+    const group = byKey.get(h.nextKey) ?? [];
+    group.push(h);
+    byKey.set(h.nextKey, group);
+  }
+
+  // Build result: collapse groups with multiple entries
+  const result: string[] = [];
+  for (const [, group] of byKey) {
+    if (group.length > 1) {
+      // Multiple entries for the same nextKey — collapse to nextKey:firstWord...
+      result.push(`${group[0].nextKey}:${group[0].firstRestWord}...`);
+    } else {
+      // Single entry — show full hint as computed
+      result.push(group[0].hint);
+    }
+  }
+
+  return result.join(' ');
+}
+
+/**
  * Determine whether an audit result is fresh (not stale) based on the
  * 60-second staleness buffer.
  *
@@ -618,27 +711,7 @@ export async function defaultChooseWorkItem(
           if (pendingChord.length > 0) {
             const chords = shortcutRegistry.getChordByPrefix(pendingChord, 'list', selectedStage);
             if (chords.length > 0) {
-              const hints = chords
-                .filter(c => {
-                  if (isEmpty && c.command.includes('<id>')) return false;
-                  return true;
-                })
-                .map(e => {
-                  const label = e.label ?? e.command
-                    .replace(/<[^>]+>/g, '')
-                    .split(/\r?\n/)[0]
-                    .trim()
-                    .replace(/^\/(skill:)?/, '');
-                  const chord = (e as Record<string, unknown>).chord;
-                  if (Array.isArray(chord) && chord.length > pendingChord.length) {
-                    const nextKey = (chord as string[])[pendingChord.length];
-                    const rest = label.split(/\s+/).slice(1).join(' ');
-                    const hint = rest.length > 0 ? `${nextKey}:${rest}` : nextKey;
-                    return hint;
-                  }
-                  return formatEntryLabel(e);
-                })
-                .join(' ');
+              const hints = formatChordHints(chords, pendingChord, { isEmpty });
               if (hints.length > 0) {
                 helpText = `\uD83D\uDD17 ${hints}`;
               }
@@ -1159,22 +1232,7 @@ export async function runBrowseFlow(
                   if (detailPendingChord.length > 0) {
                     const chords = shortcutRegistry.getChordByPrefix(detailPendingChord, 'detail', selectedItem.stage);
                     if (chords.length > 0) {
-                      const hints = chords
-                        .map(e => {
-                          const chord = (e as Record<string, unknown>).chord;
-                          if (Array.isArray(chord) && chord.length > detailPendingChord.length) {
-                            const nextKey = (chord as string[])[detailPendingChord.length];
-                            const label = e.label ?? e.command
-                              .replace(/<[^>]+>/g, '')
-                              .split(/\r?\n/)[0]
-                              .trim()
-                              .replace(/^\/(skill:)?/, '');
-                            const rest = label.split(/\s+/).slice(1).join(' ');
-                            return rest.length > 0 ? `${nextKey}:${rest}` : nextKey;
-                          }
-                          return formatHint(e);
-                        })
-                        .join(' ');
+                      const hints = formatChordHints(chords, detailPendingChord);
                       if (hints.length > 0) {
                         helpText = `\uD83D\uDD17 ${hints}`;
                       }
