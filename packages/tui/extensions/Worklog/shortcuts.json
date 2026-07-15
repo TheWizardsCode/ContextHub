@@ -35,7 +35,7 @@
     "command": "/skill:audit <id>",
     "view": "both",
     "stages": ["in_review"],
-    "label": "audit automatic",
+    "label": "audit automatic"
   },
   {
     "chord": ["a", "y"],
