@@ -32,7 +32,7 @@
   },
     {
     "chord": ["a", "y"],
-    "command": "!!wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
+    "command": "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
     "view": "both",
     "stages": ["in_review"],
     "label": "audit approve",
@@ -40,19 +40,18 @@
   },
   {
     "chord": ["a", "r"],
-    "command": "!!wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
+    "command": "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
     "view": "both",
     "stages": ["in_review"],
     "label": "audit reject",
     "description": "Reject the in_review item by manual audit."
   },
   {
-    "chord": ["a", "a"],
-    "command": "/skill:audit <id>",
+    "key": ["r"],
+    "command": "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>'",
     "view": "both",
-    "stages": ["in_progress", "in_review"],
-    "label": "audit automatic",
-    "description": "Run an audit on the selected work item"
+    "label": "Producer Review",
+    "description": "Toggle the 'Needs Producer Review' flag."
   },
   {
     "chord": ["u", "p", "l"],
