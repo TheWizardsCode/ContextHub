@@ -232,4 +232,172 @@ describe('formatChordHints', () => {
     // Strip 1 word: 'approve', 'reject', 'automatic'
     expect(result).toBe('y:approve r:reject a:automatic');
   });
+
+  describe('multi-<id> token replacement in list view shortcut dispatch', () => {
+    let capturedHandler: ((data: string) => void) | undefined;
+    let doneResolve: ((value: unknown) => void) | undefined;
+
+    function createMockCtx(): any {
+      capturedHandler = undefined;
+      doneResolve = undefined;
+
+      return {
+        ui: {
+          custom: vi.fn().mockImplementation((factory: Function) => {
+            return new Promise((resolve) => {
+              doneResolve = resolve;
+              const widget = factory(
+                { requestRender: vi.fn() },
+                { fg: vi.fn((c: string, t: string) => t), bold: vi.fn((t: string) => t) },
+                {},
+                (value: unknown) => resolve(value),
+              );
+              capturedHandler = widget.handleInput;
+            });
+          }),
+          notify: vi.fn(),
+          setEditorText: vi.fn(),
+          setWidget: vi.fn(),
+          onTerminalInput: vi.fn(),
+        },
+      };
+    }
+
+    function createMockItems() {
+      return [
+        {
+          id: 'WL-TEST001',
+          title: 'Test Item 1',
+          status: 'open',
+          stage: 'in_review' as const,
+          priority: 'high',
+          issueType: 'bug',
+        },
+        {
+          id: 'WL-TEST002',
+          title: 'Test Item 2',
+          status: 'open',
+          stage: 'in_progress' as const,
+          priority: 'medium',
+          issueType: 'feature',
+        },
+      ];
+    }
+
+    function createMockRegistry(commands: Record<string, { command: string; isChord?: boolean }>) {
+      return {
+        lookup: vi.fn((key: string, _view: string, _stage?: string) => {
+          const entry = commands[key];
+          if (entry && !entry.isChord) return entry.command;
+          return undefined;
+        }),
+        lookupChord: vi.fn((chordKeys: string[], _view: string, _stage?: string) => {
+          const key = chordKeys.join(' ');
+          const entry = commands[key];
+          if (entry && entry.isChord) return entry.command;
+          return undefined;
+        }),
+        getChordByPrefix: vi.fn().mockReturnValue([]),
+        getEntriesForStage: vi.fn().mockReturnValue([]),
+        getEntries: vi.fn().mockReturnValue([]),
+      };
+    }
+
+    it('replaces all <id> tokens in single-key dispatch', async () => {
+      const { defaultChooseWorkItem } = await import('./browse.js');
+      const items = createMockItems();
+      const ctx: any = createMockCtx();
+      const mockRegistry = createMockRegistry({
+        r: { command: '!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes' },
+      });
+
+      const promise = defaultChooseWorkItem(items, ctx, vi.fn(), mockRegistry as any);
+
+      expect(capturedHandler).toBeDefined();
+      capturedHandler!('r');
+
+      const result = await promise;
+      expect(result).toBeDefined();
+      expect(result!.type).toBe('shortcut');
+      expect((result! as any).command).toBe(
+        '!!wl reviewed WL-TEST001 false && wl audit-set WL-TEST001 --ready-to-close yes',
+      );
+    });
+
+    it('replaces all <id> tokens in chord dispatch', async () => {
+      const { defaultChooseWorkItem } = await import('./browse.js');
+      const items = createMockItems();
+      const ctx: any = createMockCtx();
+
+      // For chord dispatch, the first keypress triggers chord prefix lookup
+      // which sets pendingChord. The second keypress resolves the chord.
+      const mockRegistry = createMockRegistry({
+        a: { command: '' }, // triggers chord prefix
+        'a a': { command: '!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes', isChord: true },
+      });
+
+      // Override getChordByPrefix to return a match on first 'a' press
+      mockRegistry.getChordByPrefix = vi.fn((prefix: string[]) => {
+        if (prefix.length === 1 && prefix[0] === 'a') {
+          return [{ key: '', command: '!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes', view: 'both', chord: ['a', 'a'] }];
+        }
+        return [];
+      });
+
+      const promise = defaultChooseWorkItem(items, ctx, vi.fn(), mockRegistry as any);
+
+      expect(capturedHandler).toBeDefined();
+      // First press sets up chord prefix
+      capturedHandler!('a');
+      // Second press resolves chord
+      capturedHandler!('a');
+
+      const result = await promise;
+      expect(result).toBeDefined();
+      expect(result!.type).toBe('shortcut');
+      expect((result! as any).command).toBe(
+        '!!wl reviewed WL-TEST001 false && wl audit-set WL-TEST001 --ready-to-close yes',
+      );
+    });
+
+    it('preserves backward compatibility with single <id> token', async () => {
+      const { defaultChooseWorkItem } = await import('./browse.js');
+      const items = createMockItems();
+      const ctx: any = createMockCtx();
+      const mockRegistry = createMockRegistry({
+        i: { command: 'implement <id>' },
+      });
+
+      const promise = defaultChooseWorkItem(items, ctx, vi.fn(), mockRegistry as any);
+
+      expect(capturedHandler).toBeDefined();
+      capturedHandler!('i');
+
+      const result = await promise;
+      expect(result).toBeDefined();
+      expect(result!.type).toBe('shortcut');
+      expect((result! as any).command).toBe('implement WL-TEST001');
+    });
+
+    it('replaces three <id> tokens in a single command', async () => {
+      const { defaultChooseWorkItem } = await import('./browse.js');
+      const items = createMockItems();
+      const ctx: any = createMockCtx();
+      const mockRegistry = createMockRegistry({
+        x: { command: '!!wl update <id> --status done && wl close <id> --reason "fixed" && wl comment add <id> --body "done"' },
+      });
+
+      const promise = defaultChooseWorkItem(items, ctx, vi.fn(), mockRegistry as any);
+
+      expect(capturedHandler).toBeDefined();
+      capturedHandler!('x');
+
+      const result = await promise;
+      expect(result).toBeDefined();
+      expect(result!.type).toBe('shortcut');
+      expect((result! as any).command).toBe(
+        '!!wl update WL-TEST001 --status done && wl close WL-TEST001 --reason "fixed" && wl comment add WL-TEST001 --body "done"',
+      );
+    });
+  });
 });

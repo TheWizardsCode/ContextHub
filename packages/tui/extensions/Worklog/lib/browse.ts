@@ -818,7 +818,7 @@ export async function defaultChooseWorkItem(
               if (!chordTarget) return;
               _done({
                 type: 'shortcut' as const,
-                command: chordCommand.replace('<id>', chordTarget.id),
+                command: chordCommand.replace(/<id>/g, chordTarget.id),
               });
             } else {
               _done({ type: 'shortcut' as const, command: chordCommand });
@@ -848,7 +848,7 @@ export async function defaultChooseWorkItem(
             if (command.includes('<id>')) {
               const shortcutTarget = items[selectedIndex];
               if (!shortcutTarget) return;
-              _done({ type: 'shortcut' as const, command: command.replace('<id>', shortcutTarget.id) });
+              _done({ type: 'shortcut' as const, command: command.replace(/<id>/g, shortcutTarget.id) });
             } else {
               _done({ type: 'shortcut' as const, command });
             }
@@ -1289,7 +1289,7 @@ export async function runBrowseFlow(
                     detailPendingChord = [];
                     done({
                       type: 'shortcut' as const,
-                      command: chordCommand.replace('<id>', selectedItem.id),
+                      command: chordCommand.replace(/<id>/g, selectedItem.id),
                     });
                     return;
                   }
@@ -1308,7 +1308,7 @@ export async function runBrowseFlow(
                 if (lookupKey && !RESERVED_NAVIGATION_KEYS.has(lookupKey)) {
                   const command = shortcutRegistry.lookup(lookupKey, 'detail', selectedItem.stage);
                   if (command) {
-                    done({ type: 'shortcut' as const, command: command.replace('<id>', selectedItem.id) });
+                    done({ type: 'shortcut' as const, command: command.replace(/<id>/g, selectedItem.id) });
                     return;
                   }
 
