@@ -314,8 +314,11 @@ try {
 
 // Initialize the background task runtime so that background operations
 // (e.g. auto-sync, metrics collection) can be launched during the session
-// and are awaited on shutdown.
-initializeRuntime();
+// and are awaited on shutdown.  We pass silent:true because the default
+// beforeExit handler writes debug-level messages ("[runtime] Received
+// beforeExit…") to stderr, which pollutes JSON output consumed by scripts
+// and agents (see WL-0MRJ2R8LJ003LA8V).
+initializeRuntime({ silent: true });
 
 // Customize help output to group commands for readability and ensure global
 // options appear on subcommand help as well. Commander applies help

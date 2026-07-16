@@ -14,6 +14,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { exec as execCallback } from 'child_process';
+import { promisify } from 'util';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
 import {
   cliPath,
   execAsync,
@@ -23,6 +27,17 @@ import {
   writeInitSemaphore,
   seedWorkItems,
 } from './cli-helpers.js';
+
+const _exec = promisify(execCallback);
+
+/**
+ * Derive the mock-bin directory from the known project structure.
+ * cliPath is <projectRoot>/src/cli.ts, so projectRoot = dirname(dirname(cliPath)).
+ */
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const projectRoot = path.resolve(__dirname, '../..');
+const mockBinDir = path.join(projectRoot, 'tests', 'cli', 'mock-bin');
 
 /**
  * Validate that the given stdout string:
@@ -402,12 +417,28 @@ describe('valid-json-output', () => {
 
   describe('error paths', () => {
     it('show NONEXISTENT --json outputs valid JSON (via stderr) with no preamble', async () => {
-      const { stderr, stdout } = await execAsync(
-        `tsx ${cliPath} --json show NONEXISTENT-ID`,
-      ).catch((e: any) => ({ stdout: e.stdout || '', stderr: e.stderr || '' }));
+      // Use a real subprocess because the in-process test harness restores
+      // console.error before the beforeExit handler fires, masking runtime
+      // messages that real consumers would see on stderr.  Subprocess capture
+      // includes everything up to process exit, including beforeExit handlers.
+      const env = { ...process.env, PATH: `${mockBinDir}:${process.env.PATH || ''}` };
+      let childStdout = '';
+      let childStderr = '';
+      try {
+        const res = await _exec(`tsx ${cliPath} --json show NONEXISTENT-ID`, {
+          cwd: state.tempDir,
+          env,
+          timeout: 15000,
+        } as any);
+        childStdout = (res as any).stdout ?? '';
+        childStderr = (res as any).stderr ?? '';
+      } catch (e: any) {
+        childStdout = e.stdout ?? '';
+        childStderr = e.stderr ?? '';
+      }
 
       // Error output should appear on stderr (via output.error)
-      const output = stderr || stdout;
+      const output = childStderr || childStdout;
       const trimmed = output.trim();
       expect(trimmed.length).toBeGreaterThan(0);
 
@@ -417,15 +448,32 @@ describe('valid-json-output', () => {
       const result = JSON.parse(trimmed);
       expect(result.success).toBe(false);
       expect(result.error).toBeDefined();
+
+      // Crucially, stderr must not contain any [runtime] messages from the
+      // beforeExit handler — those are debug-level noise that break
+      // interoperability for scripts consuming --json output.
+      expect(childStderr).not.toContain('[runtime]');
     });
 
     it('update NONEXISTENT --json outputs valid JSON with no preamble', async () => {
-      const result = await execAsync(
-        `tsx ${cliPath} --json update NONEXISTENT-ID --priority high`,
-      ).catch((e: any) => ({ stdout: e.stdout || '', stderr: e.stderr || '' }));
+      // Use subprocess to catch beforeExit messages (same rationale as show)
+      const env = { ...process.env, PATH: `${mockBinDir}:${process.env.PATH || ''}` };
+      let childStdout = '';
+      let childStderr = '';
+      try {
+        const res = await _exec(`tsx ${cliPath} --json update NONEXISTENT-ID --priority high`, {
+          cwd: state.tempDir,
+          env,
+          timeout: 15000,
+        } as any);
+        childStdout = (res as any).stdout ?? '';
+        childStderr = (res as any).stderr ?? '';
+      } catch (e: any) {
+        childStdout = e.stdout ?? '';
+        childStderr = e.stderr ?? '';
+      }
 
-      const { stderr, stdout } = result;
-      const output = stderr || stdout;
+      const output = childStderr || childStdout;
       const trimmed = output.trim();
       expect(trimmed.length).toBeGreaterThan(0);
 
@@ -438,15 +486,30 @@ describe('valid-json-output', () => {
       const hasError = parsed.error !== undefined ||
         (Array.isArray(parsed.results) && parsed.results[0]?.error !== undefined);
       expect(hasError).toBe(true);
+
+      // Verify no [runtime] messages on stderr
+      expect(childStderr).not.toContain('[runtime]');
     });
 
     it('delete NONEXISTENT --json outputs valid JSON with no preamble', async () => {
-      const result = await execAsync(
-        `tsx ${cliPath} --json delete NONEXISTENT-ID --no-sync`,
-      ).catch((e: any) => ({ stdout: e.stdout || '', stderr: e.stderr || '' }));
+      // Use subprocess to catch beforeExit messages (same rationale as show)
+      const env = { ...process.env, PATH: `${mockBinDir}:${process.env.PATH || ''}` };
+      let childStdout = '';
+      let childStderr = '';
+      try {
+        const res = await _exec(`tsx ${cliPath} --json delete NONEXISTENT-ID --no-sync`, {
+          cwd: state.tempDir,
+          env,
+          timeout: 15000,
+        } as any);
+        childStdout = (res as any).stdout ?? '';
+        childStderr = (res as any).stderr ?? '';
+      } catch (e: any) {
+        childStdout = e.stdout ?? '';
+        childStderr = e.stderr ?? '';
+      }
 
-      const { stderr, stdout } = result;
-      const output = stderr || stdout;
+      const output = childStderr || childStdout;
       const trimmed = output.trim();
       expect(trimmed.length).toBeGreaterThan(0);
 
@@ -459,15 +522,30 @@ describe('valid-json-output', () => {
       const hasError = parsed.error !== undefined ||
         (Array.isArray(parsed.results) && parsed.results[0]?.error !== undefined);
       expect(hasError).toBe(true);
+
+      // Verify no [runtime] messages on stderr
+      expect(childStderr).not.toContain('[runtime]');
     });
 
     it('close NONEXISTENT --json outputs valid JSON with no preamble', async () => {
-      const result = await execAsync(
-        `tsx ${cliPath} --json close NONEXISTENT-ID -r "test"`,
-      ).catch((e: any) => ({ stdout: e.stdout || '', stderr: e.stderr || '' }));
+      // Use subprocess to catch beforeExit messages (same rationale as show)
+      const env = { ...process.env, PATH: `${mockBinDir}:${process.env.PATH || ''}` };
+      let childStdout = '';
+      let childStderr = '';
+      try {
+        const res = await _exec(`tsx ${cliPath} --json close NONEXISTENT-ID -r "test"`, {
+          cwd: state.tempDir,
+          env,
+          timeout: 15000,
+        } as any);
+        childStdout = (res as any).stdout ?? '';
+        childStderr = (res as any).stderr ?? '';
+      } catch (e: any) {
+        childStdout = e.stdout ?? '';
+        childStderr = e.stderr ?? '';
+      }
 
-      const { stderr, stdout } = result;
-      const output = stderr || stdout;
+      const output = childStderr || childStdout;
       const trimmed = output.trim();
       expect(trimmed.length).toBeGreaterThan(0);
 
@@ -480,6 +558,9 @@ describe('valid-json-output', () => {
       const hasError = parsed.error !== undefined ||
         (Array.isArray(parsed.results) && parsed.results[0]?.error !== undefined);
       expect(hasError).toBe(true);
+
+      // Verify no [runtime] messages on stderr
+      expect(childStderr).not.toContain('[runtime]');
     });
   });
 
