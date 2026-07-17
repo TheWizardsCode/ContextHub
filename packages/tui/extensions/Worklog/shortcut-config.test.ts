@@ -210,7 +210,7 @@ describe('loadShortcutConfig', () => {
   it('loads valid entries from shortcuts.json', () => {
     const registry = loadShortcutConfig();
     const entries = registry.getEntries();
-    expect(entries).toHaveLength(18);
+    expect(entries).toHaveLength(20);
 
     const createEntry = entries.find(e => e.key === 'c');
     expect(createEntry).toBeDefined();
@@ -244,7 +244,7 @@ describe('loadShortcutConfig', () => {
     expect(intakeEntry!.label).toBe('intake');
     expect(intakeEntry!.description).toBe('Ensure that the selected item is reasonably well defined in terms of objectives.');
 
-    expect(entries.filter(e => e.key === '').length).toBe(13); // 13 chord entries have empty key
+    expect(entries.filter(e => e.key === '').length).toBe(15); // 15 chord entries have empty key
   });
 
   it('has no duplicate key+view or chord+view combinations in shortcuts.json', () => {
@@ -307,7 +307,7 @@ describe('loadShortcutConfig', () => {
     const entries = registry.getEntries();
 
     const upChords = registry.getChordEntries();
-    expect(upChords).toHaveLength(13);
+    expect(upChords).toHaveLength(15);
 
     const upcEntry = upChords.find((e: any) =>
       Array.isArray((e as any).chord) &&
@@ -319,8 +319,8 @@ describe('loadShortcutConfig', () => {
     expect((upcEntry as any).chord).toEqual(['u', 'p', 'c']);
     expect(upcEntry!.command).toBe('!!wl update <id> --priority critical');
     expect(upcEntry!.view).toBe('both');
-    expect(upcEntry!.label).toBe('update priority');
-    expect(upcEntry!.description).toBe('Update the priority of the selected work item');
+    expect(upcEntry!.label).toBe('update priority critical');
+    expect(upcEntry!.description).toBe('Update the priority of the selected work item to critical.');
     expect(upcEntry!.stages).toBeUndefined();
 
     const uphEntry = upChords.find((e: any) =>
@@ -333,8 +333,8 @@ describe('loadShortcutConfig', () => {
     expect((uphEntry as any).chord).toEqual(['u', 'p', 'h']);
     expect(uphEntry!.command).toBe('!!wl update <id> --priority high');
     expect(uphEntry!.view).toBe('both');
-    expect(uphEntry!.label).toBe('update priority');
-    expect(uphEntry!.description).toBe('Update the priority of the selected work item');
+    expect(uphEntry!.label).toBe('update priority high');
+    expect(uphEntry!.description).toBe('Update the priority of the selected work item to high.');
     expect(uphEntry!.stages).toBeUndefined();
 
     const utEntry = upChords.find((e: any) =>
