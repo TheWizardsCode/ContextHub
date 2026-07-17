@@ -54,7 +54,7 @@
     "description": "Reject the in_review item by manual audit."
   },
   {
-    "key": ["r"],
+    "key": "r",
     "command": "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>'",
     "view": "both",
     "label": "Producer Review",

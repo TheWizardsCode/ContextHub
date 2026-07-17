@@ -210,7 +210,7 @@ describe('loadShortcutConfig', () => {
   it('loads valid entries from shortcuts.json', () => {
     const registry = loadShortcutConfig();
     const entries = registry.getEntries();
-    expect(entries).toHaveLength(20);
+    expect(entries).toHaveLength(21);
 
     const createEntry = entries.find(e => e.key === 'c');
     expect(createEntry).toBeDefined();
@@ -269,6 +269,19 @@ describe('loadShortcutConfig', () => {
 
     expect(duplicates).toEqual([]);
   });
+
+
+  it('resolves Producer Review shortcut from file with key r', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.getEntries().find(e => e.key === 'r');
+    expect(entry).toBeDefined();
+    expect(entry!.command).toBe("!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>'");
+    expect(entry!.view).toBe('both');
+    expect(entry!.label).toBe('Producer Review');
+    expect(registry.lookup('r', 'list')).toBe("!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>'");
+    expect(registry.lookup('r', 'detail')).toBe("!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>'");
+  });
+
 
   it('lookup resolves shortcuts loaded from file with stage parameter', () => {
     const registry = loadShortcutConfig();
