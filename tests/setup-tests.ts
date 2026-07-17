@@ -15,3 +15,21 @@ try {
 } catch (e) {
   // ignore failures during setup
 }
+
+// Install graceful shutdown handlers that clean up orphaned mock processes.
+// These complement the handlers already installed by cli-helpers.ts.
+// Using lazy import to avoid circular dependency at module load time;
+// the actual handlers run only when signals fire or process exits.
+import('./cli/cli-helpers.js').then(({ killTrackedProcesses, pidTrackingSet }) => {
+  const cleanup = () => {
+    if (pidTrackingSet.size > 0) {
+      killTrackedProcesses()
+    }
+  }
+  process.on('SIGTERM', cleanup)
+  process.on('SIGINT', cleanup)
+  process.on('SIGHUP', cleanup)
+  process.on('beforeExit', cleanup)
+}).catch(() => {
+  // If cli-helpers can't be loaded (e.g., non-test context), skip handlers
+})

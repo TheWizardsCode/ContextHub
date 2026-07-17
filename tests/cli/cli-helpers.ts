@@ -8,11 +8,97 @@ import { exportToJsonl } from '../../src/jsonl.js';
 import type { WorkItem, Comment, WorkItemPriority, WorkItemStatus } from '../../src/types.js';
 import { runInProcess } from './cli-inproc.js';
 
+// ── Process lifecycle tracking ──────────────────────────────────────────
+// Track spawned child process PIDs so they can be cleaned up on shutdown.
+// Disable tracking per-invocation by setting WORKLOG_MOCK_PROCESS_TRACKING=0.
+
+/** Set of tracked child process PIDs */
+export const pidTrackingSet: Set<number> = new Set();
+
+/**
+ * Send SIGTERM to all tracked process PIDs and clear the tracking set.
+ * Safe to call multiple times; already-exited PIDs are silently ignored.
+ */
+export function killTrackedProcesses(): void {
+  for (const pid of pidTrackingSet) {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      // Process may already have exited; ignore
+    }
+  }
+  pidTrackingSet.clear();
+}
+
+// ── Signal handlers for graceful shutdown ───────────────────────────────
+// Install handlers once at module load time so that test infrastructure
+// cleans up orphaned mock processes on premature exit (SIGTERM, SIGINT,
+// SIGHUP) or normal process termination (beforeExit).
+
+let _signalHandlersInstalled = false;
+function _installSignalHandlers(): void {
+  if (_signalHandlersInstalled) return;
+  _signalHandlersInstalled = true;
+
+  const cleanup = () => {
+    if (pidTrackingSet.size > 0) {
+      killTrackedProcesses();
+    }
+  };
+
+  process.on('SIGTERM', cleanup);
+  process.on('SIGINT', cleanup);
+  process.on('SIGHUP', cleanup);
+  process.on('beforeExit', cleanup);
+}
+
+_installSignalHandlers();
+
+/**
+ * Track a child process PID unless tracking is disabled for this invocation
+ * via process.env.WORKLOG_MOCK_PROCESS_TRACKING=0.
+ */
+function _trackChild(proc: childProcess.ChildProcess): void {
+  const trackingDisabled = process.env.WORKLOG_MOCK_PROCESS_TRACKING === '0';
+  if (trackingDisabled) return;
+  if (typeof proc.pid === 'number') {
+    pidTrackingSet.add(proc.pid);
+    // Remove from tracking set when the process exits
+    proc.on('exit', () => {
+      pidTrackingSet.delete(proc.pid!);
+    });
+  }
+}
+
+/**
+ * Wrapper around child_process.exec that tracks the child PID and injects
+ * the test-local mock-bin directory into PATH.
+ */
+function _execTracked(
+  command: string,
+  options?: childProcess.ExecOptions
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = childProcess.exec(command, options as any, (error, stdout, stderr) => {
+      if (error) {
+        (error as any).stdout = stdout ?? '';
+        (error as any).stderr = stderr ?? '';
+        reject(error);
+      } else {
+        resolve({
+          stdout: typeof stdout === 'string' ? stdout : stdout?.toString('utf-8') ?? '',
+          stderr: typeof stderr === 'string' ? stderr : stderr?.toString('utf-8') ?? '',
+        });
+      }
+    });
+    _trackChild(child);
+  });
+}
+
 // Wrapper around child_process.exec that injects a test-local mock `git`
 // binary found at `tests/cli/mock-bin` by prefixing PATH. This allows tests
 // to run fast without invoking the real `git` executable while preserving
 // the same `exec` behaviour (returns { stdout, stderr }).
-const _exec = promisify(childProcess.exec);
 export async function execAsync(command: string, options?: childProcess.ExecOptions & { timeout?: number }): Promise<{ stdout: string; stderr: string }> {
   const env = { ...process.env } as Record<string, string | undefined>;
   try {
@@ -34,10 +120,8 @@ export async function execAsync(command: string, options?: childProcess.ExecOpti
   if (isLocalCli) {
     // Avoid in-process for init to preserve interactive behavior in tests.
     if (isInitCommand) {
-      const result = await _exec(command, execOptions as any);
-      const stdout = typeof (result as any).stdout === 'string' ? (result as any).stdout : (result as any).stdout?.toString('utf-8') ?? '';
-      const stderr = typeof (result as any).stderr === 'string' ? (result as any).stderr : (result as any).stderr?.toString('utf-8') ?? '';
-      return { stdout, stderr };
+      const result = await _execTracked(command, execOptions as any);
+      return result;
     }
     const originalCwd = process.cwd();
     try {
@@ -58,11 +142,7 @@ export async function execAsync(command: string, options?: childProcess.ExecOpti
   }
 
   // reuse promisified exec for other commands
-  // child_process.exec may return Buffer for stdout/stderr; normalize to string
-  const result = await _exec(command, execOptions as any);
-  const stdout = typeof (result as any).stdout === 'string' ? (result as any).stdout : (result as any).stdout?.toString('utf-8') ?? '';
-  const stderr = typeof (result as any).stderr === 'string' ? (result as any).stderr : (result as any).stderr?.toString('utf-8') ?? '';
-  return { stdout, stderr };
+  return await _execTracked(command, execOptions as any);
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -96,6 +176,7 @@ export async function execWithInput(
       env,
       stdio: ['pipe', 'pipe', 'pipe']
     });
+    _trackChild(child);
 
     let stdout = '';
     let stderr = '';

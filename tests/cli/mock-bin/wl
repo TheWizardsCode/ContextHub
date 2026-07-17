@@ -2,6 +2,22 @@
 // Mock wl command for TUI tests
 // Returns predefined test data for the most common wl commands used by the TUI.
 
+// Timeout guard: self-terminate after WORKLOG_MOCK_TIMEOUT seconds (default 5s).
+// This prevents orphaned processes from running indefinitely.
+const mockTimeout = parseInt(process.env.WORKLOG_MOCK_TIMEOUT || '5', 10);
+if (!isNaN(mockTimeout) && mockTimeout > 0) {
+  const timeoutId = setTimeout(() => {
+    process.exit(124);
+  }, mockTimeout * 1000);
+  // Cancel the timeout on normal exit
+  const origExit = process.exit.bind(process);
+  process.exit = (function(code) {
+    clearTimeout(timeoutId);
+    origExit(code);
+  });
+  process.on('beforeExit', function() { clearTimeout(timeoutId); });
+}
+
 const args = process.argv.slice(2);
 const isJson = args.includes('--json');
 const command = args[0] || '';
