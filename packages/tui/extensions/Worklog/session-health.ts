@@ -609,7 +609,7 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
           if (selectedModel && resolvedModel) {
             modelPart = `${selectedModel} → ${resolvedModel}`;
           } else if (selectedModel) {
-            modelPart = selectedModel;
+            modelPart = `${selectedModel} → (resolving)`;
           } else if (resolvedModel) {
             modelPart = resolvedModel;
           } else {
