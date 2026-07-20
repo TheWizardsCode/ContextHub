@@ -925,7 +925,10 @@ export class SqlitePersistentStore {
       audit.author ?? null,
     ];
     const normalized = normalizeSqliteBindings(values);
-    stmt.run(...normalized);
+    const result = stmt.run(...normalized);
+    if (result.changes === 0) {
+      throw new Error(`Audit result could not be persisted for work item ${audit.workItemId}`);
+    }
   }
 
   /**
@@ -996,11 +999,18 @@ export class SqlitePersistentStore {
       ];
       return normalizeSqliteBindings(values);
     });
+    const failed: string[] = [];
     this.db.transaction(() => {
       for (const values of normalized) {
-        stmt.run(...values);
+        const result = stmt.run(...values);
+        if (result.changes === 0) {
+          failed.push(values[0] as string);
+        }
       }
     })();
+    if (failed.length > 0) {
+      throw new Error(`Audit results could not be persisted for work items: ${failed.join(', ')}`);
+    }
   }
 
   // ── FTS5 Full-Text Search ──────────────────────────────────────────
