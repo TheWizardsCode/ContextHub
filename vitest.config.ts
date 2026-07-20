@@ -16,6 +16,14 @@ export default defineConfig({
     // Use 'forks' pool (child_process) instead of 'threads' (worker_threads)
     // because many tests use process.chdir() which is not supported in workers.
     pool: 'forks',
+    // File-level isolation — each test file gets its own worker process.
+    // Prevents module cache leaking across test files. Multiple test files
+    // mock `child_process` with different factories; without isolation,
+    // vitest reuses workers and cached mock state from one file can break
+    // another (flaky failures in github-*.test.ts).
+    isolate: true,
+    // Force per-file isolation by limiting to 1 active worker per file sequence.
+    singleFork: true,
     maxWorkers: 4,
     // Exclude worktree test files from discovery — worktrees share the
     // same git objects but have separate working directories, so vitest

@@ -15,16 +15,32 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'events';
 import { Readable, Writable } from 'stream';
 
-// Mock child_process.spawn (async) and child_process.execSync (sync) for
-// the underlying runGhDetailedAsync / runGhDetailed wrappers.
-const { mockSpawn, mockExecSync } = vi.hoisted(() => {
-  return { mockSpawn: vi.fn(), mockExecSync: vi.fn() };
+// Shared child_process mock (stored on globalThis by setup-tests.ts).
+// Per-file vi.mock ensures the mock applies to THIS file's imports.
+// The factory reads from the global store (creating it defensively if needed)
+// to stay consistent even when vitest reuses cached module factories.
+vi.mock('child_process', () => {
+  // Use global store (initialized in setup-tests.ts). Defensive fallback
+  // creates the store on-the-fly — relevant if vi.mock factory runs before
+  // setup-tests.ts in some vitest worker lifecycles.
+  const g = globalThis as any;
+  let store = g.__sharedChildProcessMocks
+  if (!store) {
+    store = g.__sharedChildProcessMocks = {
+      mockSpawn: vi.fn(),
+      mockExecSync: vi.fn(),
+      mockSpawnSync: vi.fn(),
+    }
+  }
+  return {
+    spawn: store.mockSpawn,
+    execSync: store.mockExecSync,
+    spawnSync: store.mockSpawnSync,
+  };
 });
 
-vi.mock('child_process', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('child_process')>();
-  return { ...actual, spawn: mockSpawn, execSync: mockExecSync };
-});
+import { initChildProcessMocks } from './child-process-mocks.js';
+const { mockSpawn, mockExecSync } = initChildProcessMocks();
 
 import {
   assignGithubIssueAsync,

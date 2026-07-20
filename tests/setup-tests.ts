@@ -1,5 +1,27 @@
+import { vi } from 'vitest'
 import * as path from 'path'
 import * as fs from 'fs'
+
+// ── Global child_process mock ──
+// A single vi.mock registration prevents module cache conflicts. The factory
+// uses importOriginal() to preserve all real exports and creates mock
+// functions that delegate to the real implementations by default.
+// Test files that need to override spawn/execSync/spawnSync can call
+// mockSpawn.mockImplementation(...) on the shared mocks.
+import { initChildProcessMocks } from './child-process-mocks.js'
+const { mockSpawn, mockExecSync, mockSpawnSync } = initChildProcessMocks()
+
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // By default delegate to real implementation so CLI tests work.
+    // Test files that need to mock call mockSpawn.mockImplementation(...).
+    spawn: mockSpawn.mockImplementation(actual.spawn),
+    execSync: mockExecSync.mockImplementation(actual.execSync),
+    spawnSync: mockSpawnSync.mockImplementation(actual.spawnSync),
+  }
+})
 
 // Prepend tests/cli/mock-bin to PATH so child_process.spawn/exec pick up the
 // test-local git mock. This runs once before the test suite (configured in

@@ -1,19 +1,24 @@
 // tests/unit/wl-integration.test.ts
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { EventEmitter } from "events";
-import * as cp from "child_process";
-import { runWlCommand, wlEvents, WlError } from "../../src/wl-integration/spawn";
 
-// Mock child_process.spawn
-vi.mock("child_process", async () => {
-  const actual = await vi.importActual("child_process");
+// Shared child_process mock (stored on globalThis by setup-tests.ts).
+// The factory reads from the global store directly — no vi.hoisted needed.
+// Only test files that need the mock register it here.
+vi.mock("child_process", () => {
+  const store = (globalThis as any).__sharedChildProcessMocks;
   return {
-    ...actual,
-    spawn: vi.fn(),
+    spawn: store?.mockSpawn ?? vi.fn(),
+    spawnSync: store?.mockSpawnSync ?? vi.fn(),
+    execSync: store?.mockExecSync ?? vi.fn(),
   };
 });
 
-const mockedSpawn = cp.spawn as unknown as vi.Mock;
+// Import shared mock instances for use in test bodies.
+import { initChildProcessMocks } from "../child-process-mocks.js";
+const { mockSpawn: mockedSpawn } = initChildProcessMocks();
+
+import { runWlCommand, wlEvents, WlError } from "../../src/wl-integration/spawn";
 
 function mockProcess({ exitCode = 0, stdout = "", stderr = "", delay = 0 } = {}) {
   const proc = new EventEmitter() as any;
