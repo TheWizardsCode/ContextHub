@@ -8,7 +8,7 @@ import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
-import { contextExec, withinWorktreeContext } from './process-lifecycle.js';
+import { contextExec, withinWorktreeContext, killProcessesForWorktree } from './process-lifecycle.js';
 
 const execAsync = contextExec;
 
@@ -804,6 +804,13 @@ async function withTempWorktree<T>(
       restore();
     }
   } finally {
+    // Kill any tracked processes spawned inside the worktree BEFORE
+    // removing it, to prevent orphaned processes.
+    try {
+      killProcessesForWorktree(worktreePath);
+    } catch {
+      // ignore — best-effort cleanup
+    }
     try {
       await execAsync(`git worktree remove --force ${escapeShellArg(worktreePath)}`);
     } catch {
