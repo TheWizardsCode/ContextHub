@@ -6,6 +6,7 @@
  */
 
 import type { PluginContext } from '../plugin-types.js';
+import { promises as fs } from 'fs';
 import { formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText, resolveAuditAuthor } from '../audit.js';
 
 export default function register(ctx: PluginContext): void {
@@ -92,13 +93,15 @@ export default function register(ctx: PluginContext): void {
     .option('--ready-to-close <yes|no>', 'Whether the work item is ready to close (yes/no)')
     .option('--summary <text>', 'Human-readable summary of the audit')
     .option('--raw-output <text>', 'Machine-readable raw output from the audit tool')
+    .option('--audit-file <file>', 'Read audit raw output from a file')
     .option('--author <author>', 'Author of the audit (defaults to current user)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--json', 'Output in JSON format')
-    .action((id: string, options: {
+    .action(async (id: string, options: {
       readyToClose?: string;
       summary?: string;
       rawOutput?: string;
+      auditFile?: string;
       author?: string;
       prefix?: string;
       json?: boolean;
@@ -134,11 +137,24 @@ export default function register(ctx: PluginContext): void {
         process.exit(1);
       }
 
+      // Resolve rawOutput: --audit-file takes precedence over --raw-output
+      let rawOutput: string | null = options.rawOutput || null;
+      if (options.auditFile) {
+        try {
+          rawOutput = await fs.readFile(options.auditFile, 'utf8');
+        } catch (err) {
+          output.error(`Failed to read audit file: ${options.auditFile}`, {
+            success: false,
+            error: `Failed to read audit file: ${options.auditFile}`,
+          });
+          process.exit(1);
+        }
+      }
+
       const readyToClose = rtc === 'yes';
       const author = options.author?.trim() || resolveAuditAuthor();
       const auditedAt = new Date().toISOString();
       const summary = options.summary || null;
-      const rawOutput = options.rawOutput || null;
 
       try {
         db.saveAuditResult({

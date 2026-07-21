@@ -64,6 +64,54 @@ describe('wl audit-set command', () => {
     }
   });
 
+  it('sets rawOutput from --audit-file', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const auditFile = path.join(state.tempDir, 'audit-output.txt');
+    fs.writeFileSync(auditFile, '{"lint": "passed", "tests": 42}');
+
+    const { stdout } = await execAsync(`tsx ${cliPath} --json audit-set ${targetId} --ready-to-close yes --summary "All checks passed" --audit-file "${auditFile}"`);
+    const result = JSON.parse(stdout);
+    expect(result.success).toBe(true);
+    expect(result.audit.rawOutput).toBe('{"lint": "passed", "tests": 42}');
+    expect(result.audit.summary).toBe('All checks passed');
+  });
+
+  it('--audit-file takes precedence over --raw-output', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const auditFile = path.join(state.tempDir, 'audit-precedence.txt');
+    fs.writeFileSync(auditFile, 'File-based output content');
+
+    const { stdout } = await execAsync(`tsx ${cliPath} --json audit-set ${targetId} --ready-to-close yes --raw-output "Inline output" --audit-file "${auditFile}"`);
+    const result = JSON.parse(stdout);
+    expect(result.success).toBe(true);
+    expect(result.audit.rawOutput).toBe('File-based output content');
+  });
+
+  it('--audit-file fails with clear error when file does not exist', async () => {
+    try {
+      await execAsync(`tsx ${cliPath} --json audit-set ${targetId} --ready-to-close yes --audit-file "nonexistent-file.txt"`);
+      expect(true).toBe(false);
+    } catch (err: any) {
+      expect(err.stderr || err.stdout || '').toContain('Failed to read audit file');
+      expect(err.exitCode).not.toBe(0);
+    }
+  });
+
+  it('--audit-file works with --author flag', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const auditFile = path.join(state.tempDir, 'audit-author.txt');
+    fs.writeFileSync(auditFile, 'Raw output with author');
+
+    const { stdout } = await execAsync(`tsx ${cliPath} --json audit-set ${targetId} --ready-to-close no --audit-file "${auditFile}" --author "ci-bot"`);
+    const result = JSON.parse(stdout);
+    expect(result.success).toBe(true);
+    expect(result.audit.rawOutput).toBe('Raw output with author');
+    expect(result.audit.author).toBe('ci-bot');
+  });
+
   it('returns error when database write fails (read-only db)', async () => {
     const fs = await import('fs');
     const path = await import('path');
