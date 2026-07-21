@@ -40,6 +40,7 @@ import unlockCommand from './commands/unlock.js';
 import auditCommand from './commands/audit.js';
 import auditResultCommand from './commands/audit-result.js';
 import completionCommand from './commands/completion.js';
+import cleanupWorktreeCommand from './commands/cleanup-worktree.js';
 import { detectWorktreeFromCwd, registerCurrentProcess } from './process-lifecycle.js';
 
 // Watch flag parsing - supports -w, -wN, --watch, --watch=N
@@ -258,6 +259,7 @@ const builtInCommands = [
   unlockCommand,
   auditCommand,
   auditResultCommand,
+  cleanupWorktreeCommand,
   completionCommand,
   // onboard command removed
 ];
@@ -293,6 +295,7 @@ const builtInCommandNames = new Set([
   'audit-show',
   'audit-set',
   'completion',
+  'cleanup-worktree',
   // 'onboard' removed
 ]);
 
