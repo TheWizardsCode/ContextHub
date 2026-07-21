@@ -20,6 +20,8 @@
 
 // ── Types ───────────────────────────────────────────────────────────
 
+import { exec as cpExec } from 'child_process';
+
 /** Metadata stored for each registered PID */
 export interface ProcessMeta {
   readonly pid: number;
@@ -321,6 +323,155 @@ export function shutdown(): void {
   // Clear tracking data
   registry.clear();
   pidMeta.clear();
+}
+
+// ── Auto-registration ───────────────────────────────────────────────
+
+/**
+ * Detect whether the given directory (or CWD) is inside a git worktree
+ * managed by ContextHub (i.e., under `.worklog/worktrees/`).
+ *
+ * @param cwd - The directory to check (default: process.cwd())
+ * @returns The worktree root path if inside one, or `null` otherwise
+ */
+export function detectWorktreeFromCwd(cwd?: string): string | null {
+  const dir = cwd ?? process.cwd();
+  const idx = dir.indexOf('.worklog/worktrees/');
+  if (idx === -1) return null;
+
+  const prefix = dir.slice(0, idx);
+  const rest = dir.slice(idx + '.worklog/worktrees/'.length);
+  const slashIdx = rest.indexOf('/');
+  const worktreeName = slashIdx === -1 ? rest : rest.slice(0, slashIdx);
+
+  return prefix + '.worklog/worktrees/' + worktreeName;
+}
+
+/** Result of a tracked exec call */
+export interface TrackedExecResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+/**
+ * Create a tracked version of `child_process.exec` (promisified) that
+ * automatically registers the spawned child PID with the lifecycle module.
+ *
+ * The returned function has the same signature as a promisified exec:
+ * `(command: string, options?: ExecOptions) => Promise<TrackedExecResult>`
+ *
+ * @param worktreePath - The worktree path to associate spawned PIDs with.
+ *                       Pass `null` to skip registration (safe default).
+ * @returns A tracked exec function
+ */
+export function createTrackedExec(
+  worktreePath: string | null
+): (command: string, options?: any) => Promise<TrackedExecResult> {
+  return function trackedExec(
+    command: string,
+    options?: any
+  ): Promise<TrackedExecResult> {
+    return new Promise((resolve, reject) => {
+      const child = cpExec(command, options || {});
+
+      // Register the child PID if we have a worktree path
+      if (child.pid && worktreePath) {
+        registerProcess(child.pid, worktreePath);
+      }
+
+      let stdout = '';
+      let stderr = '';
+
+      if (child.stdout) {
+        child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+      }
+      if (child.stderr) {
+        child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+      }
+
+      child.on('close', (code: number | null) => {
+        const result: TrackedExecResult = {
+          stdout,
+          stderr,
+          exitCode: code ?? -1,
+        };
+        if (code === 0) {
+          resolve(result);
+        } else {
+          const err = new Error(
+            `Command failed with exit code ${code}: ${command}\n${stderr}`
+          ) as any;
+          err.stdout = stdout;
+          err.stderr = stderr;
+          err.code = code;
+          reject(err);
+        }
+      });
+
+      child.on('error', (err: Error) => {
+        reject(err);
+      });
+    });
+  };
+}
+
+/**
+ * Register the current Node.js process PID with the lifecycle module.
+ * Intended for use by CLI entry points to self-register.
+ *
+ * @param worktreePath - The worktree path this process is operating in
+ */
+export function registerCurrentProcess(worktreePath: string): void {
+  registerProcess(process.pid, worktreePath);
+}
+
+// ── Context-based exec ─────────────────────────────────────────────
+
+/**
+ * Stack of worktree contexts. When a context is active, `contextExec`
+ * uses the innermost context to register PIDs automatically.
+ */
+const contextStack: string[] = [];
+
+/**
+ * Set the current worktree context for subsequent `contextExec` calls.
+ *
+ * Returns a restore function that reverts to the previous context
+ * (or clears it if no prior context).
+ *
+ * @param worktreePath - The worktree path to set as current context
+ * @returns A function to restore the previous context
+ */
+export function withinWorktreeContext(worktreePath: string): () => void {
+  contextStack.push(worktreePath);
+  return function restore(): void {
+    if (contextStack.length > 0) {
+      contextStack.pop();
+    }
+  };
+}
+
+/**
+ * Execute a command using the current worktree context (set via
+ * `withinWorktreeContext`). The spawned PID is automatically
+ * registered with the lifecycle module.
+ *
+ * If no context is active, the command runs without PID registration.
+ *
+ * @param command - The shell command to execute
+ * @param options - Optional exec options
+ */
+export async function contextExec(
+  command: string,
+  options?: any
+): Promise<TrackedExecResult> {
+  const worktreePath =
+    contextStack.length > 0
+      ? contextStack[contextStack.length - 1]
+      : null;
+  const trackedExec = createTrackedExec(worktreePath);
+  return trackedExec(command, options);
 }
 
 // ── Auto-start watchdog ─────────────────────────────────────────────

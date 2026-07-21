@@ -40,6 +40,7 @@ import unlockCommand from './commands/unlock.js';
 import auditCommand from './commands/audit.js';
 import auditResultCommand from './commands/audit-result.js';
 import completionCommand from './commands/completion.js';
+import { detectWorktreeFromCwd, registerCurrentProcess } from './process-lifecycle.js';
 
 // Watch flag parsing - supports -w, -wN, --watch, --watch=N
 function parseWatchFlag(argv: string[]) {
@@ -442,6 +443,14 @@ function applyHelpFormatting(cmd: any) {
 }
 
 applyHelpFormatting(program);
+
+// If the CLI is running inside a ContextHub-managed worktree, register our
+// PID with the process lifecycle module so it can be cleaned up when the
+// worktree is removed.
+const worktreePath = detectWorktreeFromCwd();
+if (worktreePath) {
+  registerCurrentProcess(worktreePath);
+}
 
 // Parse command line arguments
 program.parse();

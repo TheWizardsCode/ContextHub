@@ -8,8 +8,9 @@ import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
+import { contextExec, withinWorktreeContext } from './process-lifecycle.js';
 
-const execAsync = promisify(childProcess.exec);
+const execAsync = contextExec;
 
 // git show of large JSONL can exceed Node's exec() maxBuffer.
 // Use spawn to stream the output when reading remote content.
@@ -793,7 +794,15 @@ async function withTempWorktree<T>(
       }
     }
 
-    return await run(worktreePath);
+    // Set worktree context so that any child processes spawned inside
+    // `run()` are automatically registered with the process lifecycle
+    // module for cleanup.
+    const restore = withinWorktreeContext(worktreePath);
+    try {
+      return await run(worktreePath);
+    } finally {
+      restore();
+    }
   } finally {
     try {
       await execAsync(`git worktree remove --force ${escapeShellArg(worktreePath)}`);
