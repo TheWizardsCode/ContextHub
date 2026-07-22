@@ -528,10 +528,15 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
                   // Silently ignore — raw ID is already shown
                 });
             }
-          }
 
-          requestRender?.();
+            requestRender?.();
+          }
         }
+
+        // Always request a re-render on each tick so that the footer
+        // displays the latest model state, token counts, and context
+        // usage promptly — even when no other event triggers a render.
+        requestRender?.();
       } catch {
         // Best-effort: if session manager unavailable, keep current state
       }
