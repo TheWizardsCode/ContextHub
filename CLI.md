@@ -255,6 +255,7 @@ Options:
 - `--ready-to-close <yes|no>` — Whether the work item is ready to close (required).
 - `--summary <text>` — Human-readable summary of the audit.
 - `--raw-output <text>` — Machine-readable raw output from the audit tool.
+- `--audit-file <file>` — Read audit raw output from a file (takes precedence over `--raw-output`).
 - `--author <author>` — Author of the audit (defaults to current user).
 - `--prefix <prefix>` — Override default ID prefix (optional).
 - `--json` — Output in JSON format.
@@ -265,6 +266,7 @@ Examples:
 wl audit-set WL-ABC123 --ready-to-close yes --summary "All criteria met"
 wl audit-set WL-ABC123 --ready-to-close no --summary "Outstanding work items" --json
 wl audit-set WL-ABC123 --ready-to-close yes --author "bot" --raw-output "..."
+wl audit-set WL-ABC123 --ready-to-close yes --audit-file report.md --summary "From file"
 ```
 
 ### `delete` [options] <id>
