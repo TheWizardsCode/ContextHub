@@ -196,7 +196,7 @@ The footer uses a **three-section layout**: **left** (status + elapsed time sinc
 | **Total session time** | Total wall-clock session duration (e.g., `Total: 5m 42s`) — shown in the center section |
 | **Token usage** | Input/output token counts (e.g., `↑1.2k ↓4.5k`) |
 | **Context usage** | Percentage of context window (e.g., `76.8%/128k`) |
-| **Model ID** | Currently active model (e.g., `gpt-4`) |
+| **Model ID** | Currently active model (e.g., `gpt-4`). While a model alias is selected but no resolved provider/model has been received yet, shows `{alias} → (resolving)` (e.g., `code → (resolving)`). |
 
 ### Colour Coding
 
@@ -210,13 +210,15 @@ The response age indicator uses colour coding to provide at-a-glance health:
 
 ### Layout
 
-The footer spans two lines. The first line shows extension status entries
-(e.g., resolved provider/model, activity indicator). The second line shows
-session health metrics in a **three-section layout**:
+The footer spans three lines. The first line shows extension status entries
+(e.g., activity indicator). The second line shows session health metrics in
+a **three-section layout**. The third line shows the model/provider info and
+(optionally) an initial prompt preview:
 
 ```
-openai/gpt-4  ⏵ /wl                                                         ← Extension statuses
-● Streaming 45s #5 (3s ago)  Total: 5m 42s  ↑1.2k ↓4.5k 39.1%/128k        ← Session health
+⏵ /wl                                                                        ← Extension statuses
+● Streaming 45s #5   Total: 5m 42s  ↑1.2k ↓4.5k 39.1%/128k                  ← Session health
+code → openai/gpt-4  │  Fix the bug                                          ← Model + prompt
 │  │          │   │  │             │           │    │       │              │
 │  │          │   │  │             │           │    │       └────────────── Context usage
 │  │          │   │  │             │           │    └────────────────────── Output tokens
@@ -227,6 +229,21 @@ openai/gpt-4  ⏵ /wl                                                         �
 │  │          └──────────────────────────────────────────────────────────── Elapsed time since last response
 └────────────────────────────────────────────────────────────────────────── Status marker
 ```
+
+### Model/Provider Display (Line 3)
+
+The third footer line shows the model alias and resolved provider/model in
+dimmed text. The display varies depending on available state:
+
+| State | Example |
+|-------|---------|
+| Model alias selected, resolved provider/model received | `code → openai/gpt-4` |
+| Model alias selected, waiting for resolution | `code → (resolving)` |
+| No model alias, resolved provider/model available | `openai/gpt-4` |
+| No model info at all | `—` |
+
+When an initial prompt preview is available, it is shown after the model
+info separated by a vertical bar (e.g., `code → openai/gpt-4  │  Fix the bug`).
 
 During **idle** or **tool execution**, the last-chunk timer is not shown.
 
