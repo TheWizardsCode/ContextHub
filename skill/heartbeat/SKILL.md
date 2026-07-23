@@ -7,11 +7,26 @@ description: "Automated work item monitoring — inspects the completed/in_revie
 
 ## Completion-Detection Gate
 
-Before running the heartbeat logic, check whether the previous work has
-completed. This prevents the heartbeat from interrupting work in progress.
+The purpose of this gate is to prevent the heartbeat from interrupting work
+in progress. However, the gate logic differs depending on **who** is invoking
+the skill.
+
+### User invocation (`/skill:heartbeat`)
+
+When the skill is invoked by a **user** via `/skill:heartbeat`, **proceed
+immediately**. The user is taking explicit control and does not need the gate.
+
+This is equivalent to passing `--force` to the script — no conversation-history
+check is performed.
+
+### Agent-initiated invocation
+
+When the agent invokes the heartbeat **autonomously** (e.g., in an idle loop,
+cron-like context, or without an explicit user request), check whether the
+previous work has completed to avoid interrupting mid-process tasks:
 
 1. Review the conversation history up to (but not including) this
-   `/skill:heartbeat` invocation. Find the **last assistant message**
+   invocation. Find the **last assistant message**
    (the most recent message from the Pi agent before this turn).
 2. If that message **clearly states that a process has completed**
    (e.g., "Work committed to dev", "Task complete", "All tests pass",
