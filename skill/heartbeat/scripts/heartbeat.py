@@ -50,20 +50,29 @@ def run_wl(args):
 
 
 def get_audit_result(item_id):
-    """Get the audit raw output for a work item.
+    """Get the audit result text for a work item.
+
+    Checks rawOutput first, then falls back to summary (in case rawOutput
+    was stored as null but summary contains the audit content).
 
     Args:
         item_id: The work item ID.
 
     Returns:
-        The rawOutput string from the audit, or None if no audit exists
+        The audit text (rawOutput or summary), or None if no audit exists
         or the audit-show call fails.
     """
     try:
         data = run_wl(['audit-show', item_id, '--json'])
         audit = data.get('audit')
-        if audit and audit.get('rawOutput'):
-            return audit['rawOutput']
+        if audit:
+            raw = audit.get('rawOutput')
+            if raw:
+                return raw
+            # Fallback: some audits store content in summary instead
+            summary = audit.get('summary')
+            if summary:
+                return summary
     except (RuntimeError, json.JSONDecodeError):
         pass
     return None
