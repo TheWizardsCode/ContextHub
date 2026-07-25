@@ -236,13 +236,17 @@ export default function register(ctx: PluginContext): void {
 
           // Write to the audit_results table (sole source of truth for audit state)
           const auditEntry = buildAuditEntry(String(auditCandidate));
+          // Preserve any existing rawOutput (e.g. from wl audit-set) so that
+          // --audit-text doesn't clobber the machine-readable audit payload.
+          const existingAudit = db.getAuditResult(normalizedId);
+          const prevRawOutput = existingAudit?.rawOutput ?? null;
           try {
             db.saveAuditResult({
               workItemId: normalizedId,
               readyToClose: auditEntry.status === 'Complete',
               auditedAt: auditEntry.time,
               summary: auditEntry.text,
-              rawOutput: null,
+              rawOutput: prevRawOutput,
               author: auditEntry.author,
             });
             auditWritten = true;
