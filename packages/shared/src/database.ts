@@ -1074,6 +1074,11 @@ export class WorklogDatabase {
     this.triggerAutoSync();
 
     if (previousStatus !== updated.status || previousStage !== updated.stage) {
+      // Reconcile the item itself (e.g., re-block when reopened while
+      // active blockers still exist, or unblock when all blockers completed
+      // if the item was previously manually blocked without blockers).
+      this.reconcileDependentStatus(id);
+      // Reconcile all items that depend on this item
       if (this.listDependencyEdgesTo(id).length > 0) {
         this.reconcileDependentsForTarget(id);
       }

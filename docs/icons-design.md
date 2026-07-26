@@ -56,6 +56,40 @@ across the CLI (chalk) and TUI rendering paths. It covers:
 | no      | `❌`   | `[NO]`        | "Audit: Failed"       |
 | unknown | `❓`   | `[UNKN]`      | "Audit: Not run"      |
 
+## 3a. Stale Audit Result Icons
+
+| State                         | Icon   | Text Fallback   | Accessible Label              |
+|-------------------------------|--------|-----------------|-------------------------------|
+| Audit passed (stale)          | `🟩`   | `[YES_STALE]`   | "Audit: Passed (stale)"      |
+
+When an audit result is `readyToClose: true` but the audit timestamp is stale
+(more than 60 seconds before `updatedAt`), the stale-passed icon is displayed
+in column 2 instead of the stage icon. This preserves the information that
+audit passed even after subsequent minor updates made the audit appear stale.
+
+The stale-passed icon only applies to `in_review` items. The regular audit
+icons (✅ / ❌ / ❔) are used for fresh audits, and the stage icon (🔍) is
+used when no audit exists or when the audit is stale with `readyToClose: false`.
+
+The stale-passed icon was chosen to be visually distinct from:
+- ✅ (fresh audit passed, green check mark)
+- ❌ (fresh audit failed, red cross)
+- 🔍 (stage icon, when no audit or stale without pass)
+- ❔ (unknown/not run)
+
+🟩 (green square button, U+1F7E9) has a distinct shape from all of these,
+and its green colour still conveys a positive (passed) result even when the
+check mark is not shown.
+
+## 3b. Producer Review Flag Icons
+
+| State                    | Icon   | Text Fallback       | Accessible Label              |
+|--------------------------|--------|---------------------|-------------------------------|
+| Needs producer review    | `❌`   | `[NEEDS_PRODUCER]`  | "Needs producer review"       |
+| Producer review complete | `✅`   | `[PRODUCER_OK]`     | "Producer review complete"    |
+
+The producer review flag is always shown in the third icon column of the TUI selection list, replacing the audit result icon for all stages.
+
 ## 4. Epic Icons
 
 | Type    | Icon   | Text Fallback | Accessible Label        | Visual Meaning                            |
@@ -259,23 +293,57 @@ export function iconsEnabled(opts?: { noIcons?: boolean }): boolean;
 
 ### 13.1 Pi TUI List Rendering (`packages/tui/extensions/index.ts`)
 
-The Pi TUI browse selection list renders status, stage, and audit result icons
-before the title in each row. For epic items (`issueType === 'epic'`), an epic
-icon and child count are also displayed:
+The Pi TUI browse selection list renders status, stage (or audit-aware icon
+for `in_review`), and producer review flag icons before the title in each row.
+The third column (previously audit result) now shows the producer review flag
+for all stages. The layout is:
+
+- **Column 1**: Status icon (🔓 open, 🔄 in-progress, ✔️ completed, etc.)
+- **Column 2**: Stage icon (💡 idea, 📥 intake, 📋 plan, 🛠️ progress, 🏁 done)
+  For `in_review` stage, this column becomes audit-aware:
+  - 🟩 (stale-passed icon) — if the audit is stale but readyToClose === true
+    (auditedAt <= updatedAt - 60 seconds, but auditResult === true)
+  - 🔍 (stage icon) — if no audit exists, or the audit is stale
+    with readyToClose !== true
+  - ✅ — if a fresh audit exists and readyToClose === true
+  - ❌ — if a fresh audit exists and readyToClose === false
+- **Column 3**: Producer review flag (❌ needs review, ✅ review complete)
+  Replaces the audit result icon for all stages.
+- **Column 4 (optional)**: Epic icon + child count for epic items
+
+Examples:
 
 ```
 🔄 🛠️ ✅ 🏰(5) Epic feature name     ← when icons enabled
-[INPR][PROG][YES][EPIC](5) Epic feature name  ← when fallback
+[INPR][PROG][PRODUCER_OK][EPIC](5) Epic feature name  ← when fallback
+
+🔄 🔍 ✅ 🏰 Epic feature name       ← in_review, no audit
+[INPR][REVIEW][PRODUCER_OK][EPIC] Epic feature name  ← when fallback
+
+🔄 🟩 ✅ 🏰 Epic feature name       ← in_review, stale audit but passed
+[INPR][YES_STALE][PRODUCER_OK][EPIC] Epic feature name  ← when fallback
+
+🔄 ✅ ❌ Regular task               ← in_review, fresh audit pass, needs producer review
+[INPR][YES][NEEDS_PRODUCER] Regular task  ← when fallback
 ```
 
-When the child count is 0 or undefined, the epic icon is shown without a count:
+### Audit Staleness
+
+The staleness check uses a 60-second buffer to prevent the audit's own
+timestamp from falsely appearing as "fresh":
 
 ```
-🔄 🛠️ ✅ 🏰 Epic feature name     ← epic with no children
+audit is fresh when: auditedAt > updatedAt - 60000 (milliseconds)
+audit is stale when:  auditedAt <= updatedAt - 60000
 ```
+
+When no audit exists or the audit is stale without a pass result
+(`auditResult !== true`), column 2 shows the normal `in_review` stage icon
+(🔍 / `[REVIEW]`). When the audit is stale but `readyToClose === true`,
+column 2 shows the stale-passed icon (🟩 / `[YES_STALE]`).
 
 The `formatBrowseOption` function prepends the icons before the title.
-The icon prefix (status + stage + audit + optional epic icon/child count)
+The icon prefix (status + stage/producer + optional epic icon/child count)
 is padded to a fixed visible width via per-list dynamic padding so that
 titles start at the same column position across all rows. The padding is
 computed as the maximum icon prefix width across all items in the current

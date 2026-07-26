@@ -1,16 +1,22 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Mock child_process.spawnSync so we can assert whether the pager was invoked.
-vi.mock('child_process', async () => {
-  const actual = await vi.importActual('child_process');
+// Shared child_process mock (stored on globalThis by setup-tests.ts).
+// The factory reads from the global store directly — no vi.hoisted needed.
+// Only test files that need the mock register it here.
+vi.mock('child_process', () => {
+  const store = (globalThis as any).__sharedChildProcessMocks;
   return {
-    ...actual,
-    spawnSync: vi.fn()
+    spawn: vi.fn(),
+    spawnSync: store?.mockSpawnSync ?? vi.fn(),
+    execSync: vi.fn(),
   };
 });
 
+// Import shared mock instances for use in test bodies.
+import { initChildProcessMocks } from '../child-process-mocks.js';
+const { mockSpawnSync } = initChildProcessMocks();
+
 import pageOutput from '../../src/pager.js';
-import * as child from 'child_process';
 
 describe('pager', () => {
   let origIsTTY: any;
@@ -21,17 +27,16 @@ describe('pager', () => {
     origIsTTY = process.stdout.isTTY;
     origRows = (process.stdout as any).rows;
     writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true as any);
+    // Reset and set default implementation for the shared mock.
+    // Each test can override this via mockSpawnSync.mockImplementationOnce etc.
+    mockSpawnSync.mockReset();
+    mockSpawnSync.mockImplementation(() => ({ status: 0 } as any));
   });
 
   afterEach(() => {
     process.stdout.isTTY = origIsTTY;
     (process.stdout as any).rows = origRows;
     writeSpy.mockRestore();
-    // Clear mocked spawnSync call history if present
-    try {
-      const s: any = (child as any).spawnSync;
-      if (s && typeof s.mockClear === 'function') s.mockClear();
-    } catch (_e) {}
     vi.restoreAllMocks();
   });
 
@@ -44,26 +49,23 @@ describe('pager', () => {
   it('does not spawn pager when content fits terminal', () => {
     process.stdout.isTTY = true as any;
     (process.stdout as any).rows = 10;
-    const spawnSpy = vi.spyOn(child, 'spawnSync');
     pageOutput('line1\nline2\n');
-    expect(spawnSpy).not.toHaveBeenCalled();
+    expect(mockSpawnSync).not.toHaveBeenCalled();
     expect(writeSpy).toHaveBeenCalled();
   });
 
   it('spawns pager when content exceeds terminal rows', () => {
     process.stdout.isTTY = true as any;
     (process.stdout as any).rows = 1;
-    const spawnSpy = vi.spyOn(child, 'spawnSync').mockImplementation(() => ({ status: 0 } as any));
     pageOutput('line1\nline2\nline3\n');
-    expect(spawnSpy).toHaveBeenCalled();
+    expect(mockSpawnSync).toHaveBeenCalled();
   });
 
   it('respects noPager flag', () => {
     process.stdout.isTTY = true as any;
     (process.stdout as any).rows = 1;
-    const spawnSpy = vi.spyOn(child, 'spawnSync');
     pageOutput('line1\nline2\n', { noPager: true });
-    expect(spawnSpy).not.toHaveBeenCalled();
+    expect(mockSpawnSync).not.toHaveBeenCalled();
     expect(writeSpy).toHaveBeenCalled();
   });
 });

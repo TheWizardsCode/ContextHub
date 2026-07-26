@@ -28,15 +28,19 @@ export default function register(ctx: PluginContext): void {
       
       if (utils.isJsonMode()) {
         // Enrich each work item with audit result data from the dedicated table.
-        const auditMap = new Map<string, boolean>();
+        const auditMap = new Map<string, { readyToClose: boolean; auditedAt: string | null }>();
         const allAudits = db.getAllAuditResults();
         for (const ar of allAudits) {
-          auditMap.set(ar.workItemId, ar.readyToClose);
+          auditMap.set(ar.workItemId, { readyToClose: ar.readyToClose, auditedAt: ar.auditedAt ?? null });
         }
-        const enrichedItems = items.map(item => ({
-          ...item,
-          auditResult: auditMap.has(item.id) ? auditMap.get(item.id) : null,
-        }));
+        const enrichedItems = items.map(item => {
+          const audit = auditMap.get(item.id);
+          return {
+            ...item,
+            auditResult: audit ? audit.readyToClose : null,
+            auditedAt: audit ? audit.auditedAt : null,
+          };
+        });
         output.json({ success: true, count: enrichedItems.length, workItems: enrichedItems });
       } else {
         if (items.length === 0) {

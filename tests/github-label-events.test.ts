@@ -19,18 +19,23 @@ import throttler from '../src/github-throttler.js';
 import type { LabelEvent, GithubConfig } from '../src/github.js';
 import type { WorkItemStatus, WorkItemPriority } from '../src/types.js';
 
-// Mock child_process.spawn to control GitHub API responses
+// Shared child_process mock (stored on globalThis by setup-tests.ts).
+// The factory reads from the global store directly — no vi.hoisted needed.
+// Only test files that need the mock register it here.
+vi.mock('child_process', () => {
+  const store = (globalThis as any).__sharedChildProcessMocks;
+  return {
+    spawn: store?.mockSpawn ?? vi.fn(),
+    execSync: vi.fn(),
+    spawnSync: vi.fn(),
+  };
+});
+
+// Import shared mock instances for use in test bodies.
+import { initChildProcessMocks } from './child-process-mocks.js';
+const { mockSpawn } = initChildProcessMocks();
 import { EventEmitter } from 'events';
 import { Readable, Writable } from 'stream';
-
-const { mockSpawn } = vi.hoisted(() => {
-  return { mockSpawn: vi.fn() };
-});
-
-vi.mock('child_process', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('child_process')>();
-  return { ...actual, spawn: mockSpawn };
-});
 
 function createMockSpawnImpl(
   stdout: string,

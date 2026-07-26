@@ -19,6 +19,22 @@ if [ "$WORKLOG_SKIP_PRE_PUSH" = "1" ]; then
   exit 0
 fi
 
+# Skip when running inside a temp worktree created by withTempWorktree
+# for internal sync operations. These worktrees don't have worklog
+# initialized and the push is already done with --no-verify as defense.
+case "$PWD" in
+  *tmp-worktree-*)
+    exit 0
+    ;;
+esac
+
+# Skip when inside a git worktree (not the main checkout).
+# Worktrees are for feature development and typically don't have worklog
+# initialized. The sync should run from the main checkout.
+if [ "$(git rev-parse --git-dir 2>/dev/null)" != "$(git rev-parse --git-common-dir 2>/dev/null)" ]; then
+  exit 0
+fi
+
 # Read stdin to check which refs are being pushed.
 # If pushing to refs/worklog/data, skip the sync to avoid infinite loops.
 skip=0
@@ -44,5 +60,8 @@ fi
 # Force the data branch to refs/worklog/data regardless of config.
 # This prevents the sync from accidentally pushing to a standard branch
 # if the user has overridden syncBranch in their worklog config.
-"$WL" sync --git-branch refs/worklog/data
+"$WL" sync --git-branch refs/worklog/data || {
+  echo "worklog: pre-push sync failed (pushing anyway)" >&2
+  exit 0
+}
 exit 0

@@ -25,6 +25,7 @@ import { INSTALL_GUARDRAILS } from './lib/guardrails.js';
 import { registerSkillPathTool } from './lib/skill-path.js';
 import { registerRecoveryModule } from './lib/recovery/register-recovery.js';
 import { registerLeaseRelease } from './lease-release.js';
+import { registerScheduler, scheduleCliCommand, setSchedulePersister } from './lib/scheduler.js';
 import {
   type WorklogBrowseItem,
   type WorklogBrowseDependencies,
@@ -106,6 +107,15 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     // ── Lease release (proactive proxy model lease release on /new) ──
     registerLeaseRelease(pi);
 
+    // ── Periodic request scheduler ──────────────────────────────────
+    // Wire the schedule persister to the config system so changes are persisted
+    setSchedulePersister((schedules) => {
+      worklogConfig.update({ schedules });
+    });
+    // Register lifecycle hooks (start/stop on session_start/session_shutdown)
+    // The Scheduler tracks agent idle state internally via pi event listeners.
+    registerScheduler(pi);
+
     // Subscribe to config changes for hot-reload notifications
     // When settings change via /wl settings or file edit, all onChange
     // subscribers are notified immediately without requiring /reload.
@@ -129,6 +139,12 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
           await openSettingsOverlay(ctx as unknown as BrowseContext);
           return;
         }
+        if (trimmed.startsWith('schedule')) {
+          const subcommandArgs = trimmed.slice(8).trim(); // Remove 'schedule' prefix
+          const result = scheduleCliCommand(subcommandArgs);
+          ctx.ui.notify(result, 'info');
+          return;
+        }
         const canonical = STAGE_MAP[trimmed];
         if (canonical) {
           await runBrowseFlow(ctx as unknown as BrowseContext, browseOptions, canonical);
@@ -138,7 +154,8 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
         await runBrowseFlow(ctx as unknown as BrowseContext, browseOptions);
       },
       getArgumentCompletions: (prefix: string) => {
-        const allCompletions = ['settings', ...Object.keys(STAGE_MAP)].sort();
+        // Add 'schedule' to command completions when prefix matches
+        const allCompletions = ['settings', 'schedule', ...Object.keys(STAGE_MAP)].sort();
         const filtered = allCompletions.filter(s => s.startsWith(prefix));
         return filtered.length > 0
           ? filtered.map(s => ({ value: s, label: s }))

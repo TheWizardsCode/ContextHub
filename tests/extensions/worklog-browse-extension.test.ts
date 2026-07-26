@@ -47,6 +47,7 @@ vi.mock('../../dist/icons.js', () => ({
   iconsEnabled: vi.fn(() => true),
   riskIcon: vi.fn((_r, _opts) => ''),
   effortIcon: vi.fn((_e, _opts) => ''),
+  needsProducerReviewIcon: vi.fn((_n, _opts) => ''),
 }));
 
 import {
@@ -88,9 +89,9 @@ function makeListCustomMock() {
 }
 
 describe('Worklog browse pi extension', () => {
-  it('formats browse options with status, stage, and audit icons before the title (no ID)', () => {
+  it('formats browse options with status and producer review icons before the title (no ID)', () => {
     expect(formatBrowseOption({ id: 'WL-42', title: 'Implement thing', status: 'open' })).toBe(
-      '🔓 ❔ Implement thing',
+      '🔓 ✅ Implement thing',
     );
   });
 
@@ -100,24 +101,24 @@ describe('Worklog browse pi extension', () => {
         { id: 'WL-123456', title: 'A very long work item title that will not fit', status: 'open' },
         24,
       ),
-    ).toBe('🔓 ❔ A very long work …');
+    ).toBe('🔓 ✅ A very long work …');
   });
 
   it('formats epic items with epic icon and no child count when childCount is 0', () => {
     expect(formatBrowseOption({ id: 'WL-99', title: 'Epic feature', status: 'open', issueType: 'epic', childCount: 0 })).toBe(
-      '🔓 ❔ 🏰 Epic feature',
+      '🔓 ✅ 🏰 Epic feature',
     );
   });
 
   it('formats epic items with epic icon and child count when childCount > 0', () => {
     expect(formatBrowseOption({ id: 'WL-99', title: 'Epic feature', status: 'open', issueType: 'epic', childCount: 5 })).toBe(
-      '🔓 ❔ 🏰(5) Epic feature',
+      '🔓 ✅ 🏰(5) Epic feature',
     );
   });
 
   it('does not add epic icon for non-epic items', () => {
     expect(formatBrowseOption({ id: 'WL-42', title: 'Regular task', status: 'open', issueType: 'feature' })).toBe(
-      '🔓 ❔ Regular task',
+      '🔓 ✅ Regular task',
     );
   });
 
@@ -126,7 +127,7 @@ describe('Worklog browse pi extension', () => {
     process.env.WL_NO_ICONS = '1';
     try {
       expect(formatBrowseOption({ id: 'WL-99', title: 'Epic feature', status: 'open', issueType: 'epic', childCount: 3 })).toBe(
-        '[OPEN] [UNKN] [EPIC](3) Epic feature',
+        '[OPEN] [PRODUCER_OK] [EPIC](3) Epic feature',
       );
     } finally {
       if (origEnv === undefined) {
@@ -138,12 +139,12 @@ describe('Worklog browse pi extension', () => {
   });
 
   describe('getIconPrefix', () => {
-    it('returns icon prefix with status and audit for basic item', () => {
+    it('returns icon prefix with status and producer review for basic item', () => {
       const prefix = getIconPrefix(
         { id: 'WL-1', title: 'Test', status: 'open' },
         false, // noIcons=false = use emoji
       );
-      expect(prefix).toBe('🔓 ❔');
+      expect(prefix).toBe('🔓 ✅');
     });
 
     it('includes stage icon when stage is defined', () => {
@@ -151,7 +152,7 @@ describe('Worklog browse pi extension', () => {
         { id: 'WL-2', title: 'Test', status: 'open', stage: 'in_progress' },
         false,
       );
-      expect(prefix).toBe('🔓 🛠️ ❔');
+      expect(prefix).toBe('🔓 🛠️ ✅');
     });
 
     it('includes epic icon for epic items without child count', () => {
@@ -159,7 +160,7 @@ describe('Worklog browse pi extension', () => {
         { id: 'WL-3', title: 'Test', status: 'open', issueType: 'epic', childCount: 0 },
         false,
       );
-      expect(prefix).toBe('🔓 ❔ 🏰');
+      expect(prefix).toBe('🔓 ✅ 🏰');
     });
 
     it('includes epic icon with child count for epic items with children', () => {
@@ -167,7 +168,7 @@ describe('Worklog browse pi extension', () => {
         { id: 'WL-4', title: 'Test', status: 'open', issueType: 'epic', childCount: 5 },
         false,
       );
-      expect(prefix).toBe('🔓 ❔ 🏰(5)');
+      expect(prefix).toBe('🔓 ✅ 🏰(5)');
     });
 
     it('returns text-fallback icons when noIcons=true', () => {
@@ -175,7 +176,106 @@ describe('Worklog browse pi extension', () => {
         { id: 'WL-5', title: 'Test', status: 'open', stage: 'plan_complete' },
         true, // noIcons=true = text fallback
       );
-      expect(prefix).toBe('[OPEN] [PLAN] [UNKN]');
+      expect(prefix).toBe('[OPEN] [PLAN] [PRODUCER_OK]');
+    });
+
+    it('shows in_review icon based on fresh audit pass', () => {
+      const prefix = getIconPrefix(
+        { id: 'WL-6', title: 'Test', status: 'open', stage: 'in_review', auditResult: true, auditedAt: new Date().toISOString(), updatedAt: new Date(Date.now() - 1000).toISOString() },
+        false,
+      );
+      expect(prefix).toBe('🔓 ✅ ✅');
+    });
+
+    it('shows in_review icon based on fresh audit fail', () => {
+      const prefix = getIconPrefix(
+        { id: 'WL-7', title: 'Test', status: 'open', stage: 'in_review', auditResult: false, auditedAt: new Date().toISOString(), updatedAt: new Date(Date.now() - 1000).toISOString() },
+        false,
+      );
+      expect(prefix).toBe('🔓 ❌ ✅');
+    });
+
+    it('shows in_review stage icon when no audit exists', () => {
+      const prefix = getIconPrefix(
+        { id: 'WL-8', title: 'Test', status: 'open', stage: 'in_review' },
+        false,
+      );
+      expect(prefix).toBe('🔓 🔍 ✅');
+    });
+
+    it('shows stale-passed icon when audit is stale but readyToClose=true', () => {
+      const prefix = getIconPrefix(
+        { id: 'WL-9', title: 'Test', status: 'open', stage: 'in_review', auditResult: true, auditedAt: new Date(Date.now() - 120000).toISOString(), updatedAt: new Date(Date.now() - 1000).toISOString() },
+        false,
+      );
+      expect(prefix).toBe('🔓 🟩 ✅');
+    });
+
+    it('shows stale-passed icon when audit is stale but readyToClose=true (2nd test)', () => {
+      // audit happened more than 60 seconds before updatedAt → stale
+      // auditedAt = updatedAt - 90000ms (90 seconds old) > 60s buffer → stale
+      const now = Date.now();
+      const prefix = getIconPrefix(
+        { id: 'WL-10', title: 'Test', status: 'open', stage: 'in_review', auditResult: true, auditedAt: new Date(now - 90000).toISOString(), updatedAt: new Date(now - 1000).toISOString() },
+        false,
+      );
+      expect(prefix).toBe('🔓 🟩 ✅');
+    });
+
+    it('shows in_review audit pass and producer review needed together', () => {
+      const prefix = getIconPrefix(
+        { id: 'WL-11', title: 'Test', status: 'open', stage: 'in_review', auditResult: true, auditedAt: new Date().toISOString(), updatedAt: new Date(Date.now() - 1000).toISOString(), needsProducerReview: true },
+        false,
+      );
+      // Column 2 shows ✅ (audit pass), Column 3 shows ❌ (producer review needed)
+      expect(prefix).toBe('🔓 ✅ ❌');
+    });
+
+    it('shows non-in_review stage with producer review needed', () => {
+      const prefix = getIconPrefix(
+        { id: 'WL-12', title: 'Test', status: 'open', stage: 'plan_complete', needsProducerReview: true },
+        false,
+      );
+      // Column 2 shows stage icon 📋, Column 3 shows ❌ (producer review needed)
+      expect(prefix).toBe('🔓 📋 ❌');
+    });
+
+    it('shows non-in_review stage with producer review complete', () => {
+      const prefix = getIconPrefix(
+        { id: 'WL-13', title: 'Test', status: 'open', stage: 'in_progress', needsProducerReview: false },
+        false,
+      );
+      // Column 2 shows stage icon 🛠️, Column 3 shows ✅ (producer review complete)
+      expect(prefix).toBe('🔓 🛠️ ✅');
+    });
+
+    it('shows text-fallback for in_review with audit pass and producer review needed', () => {
+      const origEnv = process.env.WL_NO_ICONS;
+      process.env.WL_NO_ICONS = '1';
+      try {
+        const prefix = getIconPrefix(
+          { id: 'WL-14', title: 'Test', status: 'open', stage: 'in_review', auditResult: true, auditedAt: new Date().toISOString(), updatedAt: new Date(Date.now() - 1000).toISOString(), needsProducerReview: true },
+          true,
+        );
+        expect(prefix).toBe('[OPEN] [YES] [NEEDS_PRODUCER]');
+      } finally {
+        delete process.env.WL_NO_ICONS;
+      }
+    });
+
+    it('shows text-fallback for in_review with stale audit but readyToClose=true', () => {
+      const origEnv = process.env.WL_NO_ICONS;
+      process.env.WL_NO_ICONS = '1';
+      try {
+        const prefix = getIconPrefix(
+          { id: 'WL-15', title: 'Test', status: 'open', stage: 'in_review', auditResult: true, auditedAt: new Date(Date.now() - 120000).toISOString(), updatedAt: new Date(Date.now() - 1000).toISOString() },
+          true,
+        );
+        // Stale audit + passed → show stale-passed fallback [YES_STALE], producer review not needed → [PRODUCER_OK]
+        expect(prefix).toBe('[OPEN] [YES_STALE] [PRODUCER_OK]');
+      } finally {
+        delete process.env.WL_NO_ICONS;
+      }
     });
   });
 
@@ -184,26 +284,26 @@ describe('Worklog browse pi extension', () => {
       const item = { id: 'WL-1', title: 'Simple task', status: 'open' };
       // Default (no prefixWidth): no padding (backward compatible)
       const noPad = formatBrowseOption(item);
-      expect(noPad).toBe('🔓 ❔ Simple task');
+      expect(noPad).toBe('🔓 ✅ Simple task');
 
       // With prefixWidth larger than natural icon width: pads with spaces
-      // natural visibleWidth of '🔓 ❔' = 5, prefixWidth = 6 → pad(6-5)=1 → repeat(1+1)=2 spaces
+      // natural visibleWidth of '🔓 ✅' = 5 (🔓=2, space=1, ✅=2), prefixWidth = 6 → pad(6-5)=1 → repeat(1+1)=2 spaces
       const padded = formatBrowseOption(item, undefined, undefined, undefined, 6);
-      expect(padded).toBe('🔓 ❔  Simple task');
+      expect(padded).toBe('🔓 ✅  Simple task');
     });
 
     it('does not add extra padding when prefixWidth equals natural width', () => {
       const item = { id: 'WL-1', title: 'Task', status: 'open' };
-      // natural visibleWidth of '🔓 ❔' = 5
+      // natural visibleWidth of '🔓 ✅' = 5
       const result = formatBrowseOption(item, undefined, undefined, undefined, 5);
-      expect(result).toBe('🔓 ❔ Task');
+      expect(result).toBe('🔓 ✅ Task');
     });
 
     it('does not add extra padding when prefixWidth is less than natural width', () => {
       const item = { id: 'WL-1', title: 'Task', status: 'open', stage: 'in_progress' };
-      // natural visibleWidth of '🔓 🛠️ ❔' = 8
+      // natural visibleWidth of '🔓 🛠️ ✅' = 8 (🔓=2, space=1, 🛠️=2, space=1, ✅=2)
       const result = formatBrowseOption(item, undefined, undefined, undefined, 3);
-      expect(result).toBe('🔓 🛠️ ❔ Task');
+      expect(result).toBe('🔓 🛠️ ✅ Task');
     });
 
     it('aligns titles at the same column for different icon combinations', () => {
@@ -241,12 +341,12 @@ describe('Worklog browse pi extension', () => {
       try {
         // Verify default (no prefixWidth): no padding
         const natural = formatBrowseOption(item);
-        expect(natural).toBe('[OPEN] [PLAN] [UNKN] Task');
+        expect(natural).toBe('[OPEN] [PLAN] [PRODUCER_OK] Task');
 
-        // Pad to wider width: visibleWidth of '[OPEN] [PLAN] [UNKN]' = 20
-        // prefixWidth 24 → pad(24-20)=4 → repeat(4+1)=5 spaces
-        const padded = formatBrowseOption(item, undefined, undefined, undefined, 24);
-        expect(padded).toBe('[OPEN] [PLAN] [UNKN]     Task');
+        // Pad to wider width: visibleWidth of '[OPEN] [PLAN] [PRODUCER_OK]' = 27
+        // prefixWidth 30 → pad(30-27)=3 → repeat(3+1)=4 spaces
+        const padded = formatBrowseOption(item, undefined, undefined, undefined, 30);
+        expect(padded).toBe('[OPEN] [PLAN] [PRODUCER_OK]    Task');
       } finally {
         if (origEnv === undefined) {
           delete process.env.WL_NO_ICONS;
@@ -1744,6 +1844,7 @@ describe('Worklog browse pi extension', () => {
         { value: 'plan_complete', label: 'plan_complete' },
         { value: 'progress', label: 'progress' },
         { value: 'review', label: 'review' },
+        { value: 'schedule', label: 'schedule' },
         { value: 'settings', label: 'settings' },
       ]);
     });

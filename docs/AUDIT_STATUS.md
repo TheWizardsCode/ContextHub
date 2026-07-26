@@ -149,3 +149,12 @@ Fields:
 - Storage: audit data is stored in the `audit_results` table with foreign key constraints and CASCADE DELETE semantics.
 - Migration: Use `wl doctor upgrade --confirm` to apply schema migrations on existing databases.
 - Tests: Unit and integration tests cover valid first-line parsing, invalid first-line errors, redaction, whitespace handling, CRUD operations on the `audit_results` table, migration backfill, and legacy column removal.
+
+### Error Behavior
+
+Both `wl audit-set` and `wl update --audit-text/--audit-file` now detect write failures (e.g., permissions issues, disk errors, database corruption) and return an error rather than silently succeeding:
+
+- In **JSON mode** (`--json`): outputs `{ "success": false, "error": "<message>" }` with a non-zero exit code.
+- In **human mode**: prints an error message to stderr and exits with code 1.
+
+Previously, these commands always returned `success: true` regardless of whether the data was actually persisted.

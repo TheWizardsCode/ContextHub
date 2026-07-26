@@ -9,6 +9,20 @@
 
 set -euo pipefail
 
+# Timeout guard: self-terminate after WORKLOG_MOCK_TIMEOUT seconds (default 5s).
+# This prevents orphaned processes from running indefinitely.
+MAX_DURATION=${WORKLOG_MOCK_TIMEOUT:-5}
+case "$MAX_DURATION" in
+  ''|*[!0-9]*) MAX_DURATION=5 ;;
+esac
+__TIMEOUT_START=$SECONDS
+_check_timeout() {
+  if [ $((SECONDS - __TIMEOUT_START)) -ge "$MAX_DURATION" ] 2>/dev/null; then
+    exit 124
+  fi
+}
+_check_timeout
+
 SEED_FILE="${WORKLOG_SEED_GH_ISSUES:-}"
 ISSUE_STORE_FILE="${WORKLOG_GH_ISSUE_STORE:-/tmp/gh-issue-store.jsonl}"
 

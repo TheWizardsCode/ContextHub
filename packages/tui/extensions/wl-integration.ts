@@ -160,7 +160,7 @@ function withCache(db: any): any {
       if (key === 'create' || key === 'update' || key === 'delete'
           || key === 'createComment' || key === 'close'
           || key === 'importData' || key === 'upsertItems'
-          || key === 'saveDependencyEdge' || key === 'saveAuditResults') {
+          || key === 'saveDependencyEdge' || key === 'saveAuditResults' || key === 'saveAuditResult') {
         return (...args: any[]) => {
           clearQueryCache();
           return Reflect.apply((target as any)[key], target, args);

@@ -57,6 +57,17 @@ export interface Settings {
    */
   recovery?: Partial<RecoveryConfig>;
   /**
+   * Periodic request schedules. Each entry maps a cron expression to a pi request
+   * that is automatically submitted when the agent is idle.
+   */
+  schedules?: Array<{
+    id?: string;
+    cron: string;
+    request: string;
+    label?: string;
+    enabled?: boolean;
+  }>;
+  /**
    * Config format version. Used for migration support when config structure
    * changes between releases. Default: 1 (current version).
    */
@@ -78,6 +89,7 @@ export const DEFAULT_SETTINGS: Settings = {
   guardrailsEnabled: true,
   autoSyncIntervalSeconds: 10,
   recovery: undefined,
+  schedules: undefined,
   version: CONFIG_VERSION,
 };
 
@@ -183,6 +195,10 @@ function readNamespacedSettings(path: string): Partial<Settings> {
   if (ns.recovery !== undefined && ns.recovery !== null && typeof ns.recovery === 'object') {
     result.recovery = ns.recovery as Partial<RecoveryConfig>;
   }
+  if (ns.schedules !== undefined && Array.isArray(ns.schedules)) {
+    // Pass through schedule entries as-is; validation happens in the scheduler module
+    result.schedules = ns.schedules as Settings['schedules'];
+  }
 
   return result;
 }
@@ -259,6 +275,7 @@ export function persistSettings(partial: Partial<Settings>, cwd?: string): void 
     if (partial.guardrailsEnabled !== undefined) section.guardrailsEnabled = partial.guardrailsEnabled;
     if (partial.autoSyncIntervalSeconds !== undefined) section.autoSyncIntervalSeconds = partial.autoSyncIntervalSeconds;
     if (partial.recovery !== undefined) section.recovery = partial.recovery;
+    if (partial.schedules !== undefined) section.schedules = partial.schedules;
 
     raw[SETTINGS_NAMESPACE] = section;
 

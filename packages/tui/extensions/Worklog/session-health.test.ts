@@ -1072,15 +1072,15 @@ describe('session-health', () => {
       expect(lines[1]).toContain('[dim');
     });
 
-    it('shows just the selected alias when model selected but not yet resolved', () => {
+    it('shows "alias → (resolving)" when model selected but not yet resolved', () => {
       mocks.mockGetResolvedModel.mockReturnValue(null);
       mocks.mockGetSelectedModel.mockReturnValue('code');
 
       const lines = fabricateFooterLines({ ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } });
 
-      // With no extension statuses: lines[0]=session health, lines[1]=alias only
+      // With no extension statuses: lines[0]=session health, lines[1]=alias → (resolving)
       expect(lines.length).toBe(2);
-      expect(lines[1]).toContain('code');
+      expect(lines[1]).toContain('code → (resolving)');
       expect(lines[1]).toContain('[dim');
     });
 
@@ -1093,6 +1093,19 @@ describe('session-health', () => {
       // With no extension statuses: lines[0]=session health, lines[1]=dash
       expect(lines.length).toBe(2);
       expect(lines[1]).toContain('—');
+      expect(lines[1]).toContain('[dim');
+    });
+
+    it('shows just the resolved model when no model alias is selected', () => {
+      mocks.mockGetResolvedModel.mockReturnValue('openai/gpt-4');
+      mocks.mockGetSelectedModel.mockReturnValue(null);
+
+      const lines = fabricateFooterLines({ ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } });
+
+      // With no extension statuses: lines[0]=session health, lines[1]=resolved model only
+      expect(lines.length).toBe(2);
+      expect(lines[1]).toContain('openai/gpt-4');
+      expect(lines[1]).not.toContain('→');
       expect(lines[1]).toContain('[dim');
     });
 

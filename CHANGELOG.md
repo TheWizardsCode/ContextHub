@@ -53,6 +53,7 @@
 
 ## v1.0.3 (2026-07-11)
 ### Features
+- Add periodic request scheduling with cron expressions to Worklog pi extension (WL-0MRHYQU1S009DJ9B)
 - Extend doctor upgrade to refresh installed hooks from .githooks (WL-0MRDEM7OO005UB1H)
 - Session Health Extension for Pi Footer (WL-0MRDRZ32L00404D0)
 - proactively release leases (WL-0MRE6JDT3004OSTF)

@@ -53,7 +53,7 @@ import {
 // Use createRequire with realpath-resolved path so the icons module can be
 // found even when this extension is loaded via a symlink.
 const _require = createRequire(realpathSync(fileURLToPath(import.meta.url)));
-const { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, riskIcon, effortIcon } = _require('../../../../../dist/icons.js');
+const { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, riskIcon, effortIcon, needsProducerReviewIcon, auditStaleIcon } = _require('../../../../../dist/icons.js');
 
 // ── Auto-sync state ────────────────────────────────────────────────
 
@@ -197,14 +197,162 @@ export function truncateToWidth(text: string, maxWidth: number, ellipsis = '…'
 }
 
 /**
+ * Format chord shortcut hints for the help line, collapsing multiple chords
+ * that share the same nextKey into a single entry, and stripping consumed
+ * words from labels based on pending chord depth.
+ *
+ * At intermediate levels (pendingChord.length >= 1), chords with the same
+ * nextKey are collapsed to `<nextKey>:<firstWord>...` matching the first-layer
+ * pattern. At deeper levels, the label strips all words consumed by the
+ * traversed chord keys (not just 1 word).
+ *
+ * @param chords - Chord entries to format (already filtered by prefix/view/stage)
+ * @param pendingChord - Current pending chord prefix
+ * @param options - Optional settings (isEmpty: filter out commands with `<id>`)
+ * @returns Space-joined hint string, or empty string if no hints remain
+ */
+export function formatChordHints(
+  chords: ShortcutEntry[],
+  pendingChord: string[],
+  options?: { isEmpty?: boolean },
+): string {
+  // Filter out chords referencing <id> when there are no items to operate on
+  const filtered = options?.isEmpty
+    ? chords.filter(c => !c.command.includes('<id>'))
+    : chords;
+
+  if (filtered.length === 0) return '';
+
+  // Extract display label from an entry (same logic as formatEntryLabel/formatHint)
+  const extractLabel = (e: ShortcutEntry): string => {
+    return e.label ?? e.command
+      .replace(/<[^>]+>/g, '')
+      .split(/\r?\n/)[0]
+      .trim()
+      .replace(/^\/(skill:)?/, '');
+  };
+
+  // Build hint entries with nextKey and computed rest
+  // For each entry, store the first word after stripping consumed words
+  // so that collapsed hints can use the correct word (e.g., 'priority'
+  // instead of 'update' for u-p-* chords at the 'u' layer).
+  type HintEntry = { nextKey: string; hint: string; firstRestWord: string };
+  const hints: HintEntry[] = [];
+
+  for (const e of filtered) {
+    const chord = (e as Record<string, unknown>).chord;
+    const label = extractLabel(e);
+
+    if (Array.isArray(chord) && chord.length > pendingChord.length) {
+      // Pending chord has remaining keys — compute nextKey and stripped rest
+      const nextKey = (chord as string[])[pendingChord.length];
+      const words = label.split(/\s+/);
+      // Safety check: don't strip more words than exist minus one
+      const stripCount = Math.min(pendingChord.length, Math.max(0, words.length - 1));
+      const rest = words.slice(stripCount);
+      const firstRestWord = rest.length > 0 ? rest[0] : (words.length > 0 ? words[words.length - 1] : '');
+      const hint = rest.length > 0 ? `${nextKey}:${rest.join(' ')}` : nextKey;
+      hints.push({ nextKey, hint, firstRestWord });
+    } else {
+      // Fallback: entry is not a chord or chord is fully consumed
+      // Format like the first layer: leaderKey:firstWord... or key:label
+      if (Array.isArray(chord) && chord.length >= 2) {
+        const leaderKey = (chord as string[])[0];
+        const firstWord = label.split(/\s+/)[0];
+        hints.push({ nextKey: leaderKey, hint: `${leaderKey}:${firstWord}...`, firstRestWord: firstWord });
+      } else if (e.key) {
+        hints.push({ nextKey: e.key, hint: `${e.key}:${label}`, firstRestWord: label.split(/\s+/)[0] });
+      }
+    }
+  }
+
+  // Group by nextKey
+  const byKey = new Map<string, HintEntry[]>();
+  for (const h of hints) {
+    const group = byKey.get(h.nextKey) ?? [];
+    group.push(h);
+    byKey.set(h.nextKey, group);
+  }
+
+  // Build result: collapse groups with multiple entries
+  const result: string[] = [];
+  for (const [, group] of byKey) {
+    if (group.length > 1) {
+      // Multiple entries for the same nextKey — collapse to nextKey:firstWord...
+      result.push(`${group[0].nextKey}:${group[0].firstRestWord}...`);
+    } else {
+      // Single entry — show full hint as computed
+      result.push(group[0].hint);
+    }
+  }
+
+  return result.join(' ');
+}
+
+/**
+ * Determine whether an audit result is fresh (not stale) based on the
+ * 60-second staleness buffer.
+ *
+ * An audit is considered fresh when:
+ *   auditedAt > updatedAt - 60000 (milliseconds)
+ *
+ * If auditedAt or updatedAt is missing, the audit is considered stale.
+ */
+function isAuditFresh(auditedAt: string | null | undefined, updatedAt: string | undefined): boolean {
+  if (!auditedAt || !updatedAt) return false;
+  const auditTime = new Date(auditedAt).getTime();
+  const updateTime = new Date(updatedAt).getTime();
+  if (isNaN(auditTime) || isNaN(updateTime)) return false;
+  return auditTime > updateTime - 60000;
+}
+
+/**
  * Compute the icon prefix string for a work item (just icon characters, no trailing space).
+ *
+ * Column layout (left to right):
+ *   1. Status icon
+ *   2. Stage icon (for `in_review` items, shows audit-aware icon instead)
+ *   3. Producer review flag icon (replaces audit icon for all stages)
+ *   4. Optional epic icon + child count
+ *
+ * For `in_review` items, column 2 shows:
+ *   - 🔍 (stage icon) if no audit exists or audit is stale
+ *   - ✅ if a fresh audit says readyToClose=true
+ *   - ❌ if a fresh audit says readyToClose=false
+ *
+ * For all other stages, column 2 shows the normal stage icon.
+ *
+ * Column 3 always shows the producer review flag:
+ *   - ❌ when needsProducerReview === true
+ *   - ✅ when needsProducerReview === false
  */
 export function getIconPrefix(item: WorklogBrowseItem, noIcons: boolean): string {
   const normalizedStatus = (item.status || '').replace(/_/g, '-');
   const sIcon = statusIcon(normalizedStatus, { noIcons });
-  const stIcon = stageIcon(item.stage, { noIcons });
-  const aIcon = auditIcon(item.auditResult, { noIcons });
-  const coreIcons = [sIcon, stIcon, aIcon].filter(Boolean).join(' ');
+
+  // Column 2: stage or audit-aware icon for in_review
+  let secondIcon: string;
+  if (item.stage === 'in_review') {
+    const fresh = isAuditFresh(item.auditedAt, item.updatedAt);
+    if (fresh) {
+      // Fresh audit: show based on readyToClose
+      secondIcon = auditIcon(item.auditResult, { noIcons });
+    } else {
+      // No audit or stale audit: show stale-passed icon if passed, else stage icon
+      if (item.auditResult === true) {
+        secondIcon = auditStaleIcon(item.auditResult, { noIcons });
+      } else {
+        secondIcon = stageIcon(item.stage, { noIcons });
+      }
+    }
+  } else {
+    secondIcon = stageIcon(item.stage, { noIcons });
+  }
+
+  // Column 3: producer review flag (replaces audit icon for all stages)
+  const prIcon = needsProducerReviewIcon(item.needsProducerReview, { noIcons });
+
+  const coreIcons = [sIcon, secondIcon, prIcon].filter(Boolean).join(' ');
 
   let childSuffix = '';
   if (item.childCount !== undefined && item.childCount > 0) {
@@ -396,7 +544,7 @@ export async function defaultChooseWorkItem(
   }
 
   // ── Chord state ──────────────────────────────────────────────────
-  let pendingChordLeader: string | null = null;
+  let pendingChord: string[] = [];
 
   const result = await ctx.ui.custom<WorklogBrowseItem | ShortcutResult | null>((tui, theme, _keybindings, done) => {
     let selectedIndex = 0;
@@ -414,7 +562,7 @@ export async function defaultChooseWorkItem(
 
     if (reFetchItems) {
       refreshInterval = setInterval(async () => {
-        if (pendingChordLeader !== null) return;
+        if (pendingChord.length > 0) return;
 
         // Trigger background auto-sync if interval has elapsed
         _triggerAutoSync();
@@ -564,33 +712,10 @@ export async function defaultChooseWorkItem(
         if (shortcutRegistry) {
           const selectedStage = items[selectedIndex]?.stage;
 
-          if (pendingChordLeader !== null) {
-            const chords = shortcutRegistry.getChordByLeader(pendingChordLeader, 'list');
+          if (pendingChord.length > 0) {
+            const chords = shortcutRegistry.getChordByPrefix(pendingChord, 'list', selectedStage);
             if (chords.length > 0) {
-              const hints = chords
-                .filter(c => {
-                  if (isEmpty && c.command.includes('<id>')) return false;
-                  if (selectedStage !== undefined && c.stages !== undefined && c.stages.length > 0) {
-                    return c.stages.includes(selectedStage);
-                  }
-                  return true;
-                })
-                .map(e => {
-                  const label = e.label ?? e.command
-                    .replace(/<[^>]+>/g, '')
-                    .split(/\r?\n/)[0]
-                    .trim()
-                    .replace(/^\/(skill:)?/, '');
-                  const chord = (e as Record<string, unknown>).chord;
-                  if (Array.isArray(chord) && chord.length >= 2) {
-                    const secondKey = (chord as string[])[1];
-                    const rest = label.split(/\s+/).slice(1).join(' ');
-                    const hint = rest.length > 0 ? `${secondKey}:${rest}` : secondKey;
-                    return hint;
-                  }
-                  return formatEntryLabel(e);
-                })
-                .join(' ');
+              const hints = formatChordHints(chords, pendingChord, { isEmpty });
               if (hints.length > 0) {
                 helpText = `\uD83D\uDD17 ${hints}`;
               }
@@ -676,34 +801,43 @@ export async function defaultChooseWorkItem(
         const lookupKey = data.length === 1 ? data : undefined;
 
         // ── Pending chord state ────────────────────────────────────
-        if (pendingChordLeader !== null && lookupKey) {
+        if (pendingChord.length > 0 && lookupKey) {
           if (isEscapeKey(data)) {
-            pendingChordLeader = null;
+            pendingChord = [];
             invalidateCache();
             tui.requestRender();
             return;
           }
           const selectedStage = items[selectedIndex]?.stage;
+          const fullChord = [...pendingChord, lookupKey];
           const chordCommand = shortcutRegistry!.lookupChord(
-            [pendingChordLeader, lookupKey],
+            fullChord,
             'list',
             selectedStage,
           );
           if (chordCommand) {
-            pendingChordLeader = null;
+            pendingChord = [];
             if (chordCommand.includes('<id>')) {
               const chordTarget = items[selectedIndex];
               if (!chordTarget) return;
               _done({
                 type: 'shortcut' as const,
-                command: chordCommand.replace('<id>', chordTarget.id),
+                command: chordCommand.replace(/<id>/g, chordTarget.id),
               });
             } else {
               _done({ type: 'shortcut' as const, command: chordCommand });
             }
             return;
           }
-          pendingChordLeader = null;
+          // Check if the extended chord is a valid prefix for deeper chords
+          const prefixMatches = shortcutRegistry!.getChordByPrefix(fullChord, 'list', selectedStage);
+          if (prefixMatches.length > 0) {
+            pendingChord = fullChord;
+            invalidateCache();
+            tui.requestRender();
+            return;
+          }
+          pendingChord = [];
           invalidateCache();
           tui.requestRender();
           return;
@@ -718,28 +852,20 @@ export async function defaultChooseWorkItem(
             if (command.includes('<id>')) {
               const shortcutTarget = items[selectedIndex];
               if (!shortcutTarget) return;
-              _done({ type: 'shortcut' as const, command: command.replace('<id>', shortcutTarget.id) });
+              _done({ type: 'shortcut' as const, command: command.replace(/<id>/g, shortcutTarget.id) });
             } else {
               _done({ type: 'shortcut' as const, command });
             }
             return;
           }
 
-          const chords = shortcutRegistry.getChordByLeader(lookupKey, 'list');
-          if (chords.length > 0) {
-            const applicableChords = chords.filter(c => {
-              if (items.length === 0 && c.command.includes('<id>')) return false;
-              if (selectedStage !== undefined && c.stages !== undefined && c.stages.length > 0) {
-                return c.stages.includes(selectedStage);
-              }
-              return true;
-            });
-            if (applicableChords.length > 0) {
-              pendingChordLeader = lookupKey;
-              invalidateCache();
-              tui.requestRender();
-              return;
-            }
+          const chordPrefixMatches = shortcutRegistry.getChordByPrefix([lookupKey], 'list', selectedStage)
+            .filter(c => !(items.length === 0 && c.command.includes('<id>')));
+          if (chordPrefixMatches.length > 0) {
+            pendingChord = [lookupKey];
+            invalidateCache();
+            tui.requestRender();
+            return;
           }
         }
 
@@ -837,8 +963,8 @@ export async function defaultChooseWorkItem(
         }
 
         if (isEscapeKey(data)) {
-          if (pendingChordLeader !== null) {
-            pendingChordLeader = null;
+          if (pendingChord.length > 0) {
+            pendingChord = [];
             invalidateCache();
             tui.requestRender();
             return;
@@ -1079,7 +1205,7 @@ export async function runBrowseFlow(
         const cleanOutput = mdOutput.replace(/\{[^}]*\}/g, '');
         const detailLines = cleanOutput.split(/\r?\n/);
 
-        let detailPendingChordLeader: string | null = null;
+        let detailPendingChord: string[] = [];
         const detailResult = await ctx.ui.custom<ShortcutResult | string | null>(
           (tui, _theme, _keybindings, done) => {
             const factory = createScrollableWidget(detailLines);
@@ -1107,31 +1233,10 @@ export async function runBrowseFlow(
                     return `${e.key}:${label}`;
                   };
 
-                  if (detailPendingChordLeader !== null) {
-                    const chords = shortcutRegistry.getChordByLeader(detailPendingChordLeader, 'detail');
+                  if (detailPendingChord.length > 0) {
+                    const chords = shortcutRegistry.getChordByPrefix(detailPendingChord, 'detail', selectedItem.stage);
                     if (chords.length > 0) {
-                      const hints = chords
-                        .filter(c => {
-                          if (selectedItem.stage !== undefined && c.stages !== undefined && c.stages.length > 0) {
-                            return c.stages.includes(selectedItem.stage);
-                          }
-                          return true;
-                        })
-                        .map(e => {
-                          const chord = (e as Record<string, unknown>).chord;
-                          if (Array.isArray(chord) && chord.length >= 2) {
-                            const secondKey = (chord as string[])[1];
-                            const label = e.label ?? e.command
-                              .replace(/<[^>]+>/g, '')
-                              .split(/\r?\n/)[0]
-                              .trim()
-                              .replace(/^\/(skill:)?/, '');
-                            const rest = label.split(/\s+/).slice(1).join(' ');
-                            return rest.length > 0 ? `${secondKey}:${rest}` : secondKey;
-                          }
-                          return formatHint(e);
-                        })
-                        .join(' ');
+                      const hints = formatChordHints(chords, detailPendingChord);
                       if (hints.length > 0) {
                         helpText = `\uD83D\uDD17 ${hints}`;
                       }
@@ -1172,26 +1277,34 @@ export async function runBrowseFlow(
               handleInput: (data: string) => {
                 const lookupKey = data.length === 1 ? data : undefined;
 
-                if (detailPendingChordLeader !== null && lookupKey) {
+                if (detailPendingChord.length > 0 && lookupKey) {
                   if (isEscapeKey(data)) {
-                    detailPendingChordLeader = null;
+                    detailPendingChord = [];
                     tui.requestRender();
                     return;
                   }
+                  const fullChord = [...detailPendingChord, lookupKey];
                   const chordCommand = shortcutRegistry.lookupChord(
-                    [detailPendingChordLeader, lookupKey],
+                    fullChord,
                     'detail',
                     selectedItem.stage,
                   );
                   if (chordCommand) {
-                    detailPendingChordLeader = null;
+                    detailPendingChord = [];
                     done({
                       type: 'shortcut' as const,
-                      command: chordCommand.replace('<id>', selectedItem.id),
+                      command: chordCommand.replace(/<id>/g, selectedItem.id),
                     });
                     return;
                   }
-                  detailPendingChordLeader = null;
+                  // Check if the extended chord is a valid prefix for deeper chords
+                  const prefixMatches = shortcutRegistry.getChordByPrefix(fullChord, 'detail', selectedItem.stage);
+                  if (prefixMatches.length > 0) {
+                    detailPendingChord = fullChord;
+                    tui.requestRender();
+                    return;
+                  }
+                  detailPendingChord = [];
                   tui.requestRender();
                   return;
                 }
@@ -1199,23 +1312,15 @@ export async function runBrowseFlow(
                 if (lookupKey && !RESERVED_NAVIGATION_KEYS.has(lookupKey)) {
                   const command = shortcutRegistry.lookup(lookupKey, 'detail', selectedItem.stage);
                   if (command) {
-                    done({ type: 'shortcut' as const, command: command.replace('<id>', selectedItem.id) });
+                    done({ type: 'shortcut' as const, command: command.replace(/<id>/g, selectedItem.id) });
                     return;
                   }
 
-                  const chords = shortcutRegistry.getChordByLeader(lookupKey, 'detail');
-                  if (chords.length > 0) {
-                    const applicableChords = chords.filter(c => {
-                      if (selectedItem.stage !== undefined && c.stages !== undefined && c.stages.length > 0) {
-                        return c.stages.includes(selectedItem.stage);
-                      }
-                      return true;
-                    });
-                    if (applicableChords.length > 0) {
-                      detailPendingChordLeader = lookupKey;
-                      tui.requestRender();
-                      return;
-                    }
+                  const chordPrefixMatches = shortcutRegistry.getChordByPrefix([lookupKey], 'detail', selectedItem.stage);
+                  if (chordPrefixMatches.length > 0) {
+                    detailPendingChord = [lookupKey];
+                    tui.requestRender();
+                    return;
                   }
                 }
 
@@ -1228,12 +1333,12 @@ export async function runBrowseFlow(
                 }
 
                 if (isEscapeKey(data)) {
-                  if (detailPendingChordLeader === null) {
+                  if (detailPendingChord.length === 0) {
                     ctx.ui.setWidget?.('worklog-browse-selection', undefined);
                     done(null);
                     return;
                   }
-                  detailPendingChordLeader = null;
+                  detailPendingChord = [];
                   tui.requestRender();
                   return;
                 }

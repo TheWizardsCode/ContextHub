@@ -22,6 +22,12 @@ import {
   effortFallback,
   effortLabel,
   iconsEnabled,
+  needsProducerReviewIcon,
+  needsProducerReviewLabel,
+  needsProducerReviewFallback,
+  auditStaleIcon,
+  auditStaleLabel,
+  auditStaleFallback,
 } from '../../src/icons.js';
 
 describe('priorityIcon', () => {
@@ -505,6 +511,80 @@ describe('auditLabel', () => {
   });
 });
 
+// ─── Producer Review Icons ───────────────────────────────────────────────
+
+describe('needsProducerReviewIcon', () => {
+  it('returns ❌ for true (needs review)', () => {
+    expect(needsProducerReviewIcon(true)).toBe('\u{274C}'); // ❌
+  });
+
+  it('returns ✅ for false (review complete)', () => {
+    expect(needsProducerReviewIcon(false)).toBe('\u{2705}'); // ✅
+  });
+
+  it('returns ✅ for null (defaults to not needed)', () => {
+    expect(needsProducerReviewIcon(null)).toBe('\u{2705}'); // ✅
+  });
+
+  it('returns ✅ for undefined (defaults to not needed)', () => {
+    expect(needsProducerReviewIcon(undefined)).toBe('\u{2705}'); // ✅
+  });
+
+  describe('with noIcons option', () => {
+    it('returns text fallback for true', () => {
+      expect(needsProducerReviewIcon(true, { noIcons: true })).toBe('[NEEDS_PRODUCER]');
+    });
+
+    it('returns text fallback for false', () => {
+      expect(needsProducerReviewIcon(false, { noIcons: true })).toBe('[PRODUCER_OK]');
+    });
+
+    it('returns text fallback for null', () => {
+      expect(needsProducerReviewIcon(null, { noIcons: true })).toBe('[PRODUCER_OK]');
+    });
+
+    it('returns text fallback for undefined', () => {
+      expect(needsProducerReviewIcon(undefined, { noIcons: true })).toBe('[PRODUCER_OK]');
+    });
+  });
+});
+
+describe('needsProducerReviewFallback', () => {
+  it('returns bracketed text for true', () => {
+    expect(needsProducerReviewFallback(true)).toBe('[NEEDS_PRODUCER]');
+  });
+
+  it('returns bracketed text for false', () => {
+    expect(needsProducerReviewFallback(false)).toBe('[PRODUCER_OK]');
+  });
+
+  it('returns bracketed text for null', () => {
+    expect(needsProducerReviewFallback(null)).toBe('[PRODUCER_OK]');
+  });
+
+  it('returns bracketed text for undefined', () => {
+    expect(needsProducerReviewFallback(undefined)).toBe('[PRODUCER_OK]');
+  });
+});
+
+describe('needsProducerReviewLabel', () => {
+  it('returns label for true', () => {
+    expect(needsProducerReviewLabel(true)).toBe('Needs producer review');
+  });
+
+  it('returns label for false', () => {
+    expect(needsProducerReviewLabel(false)).toBe('Producer review complete');
+  });
+
+  it('returns label for null', () => {
+    expect(needsProducerReviewLabel(null)).toBe('Producer review complete');
+  });
+
+  it('returns label for undefined', () => {
+    expect(needsProducerReviewLabel(undefined)).toBe('Producer review complete');
+  });
+});
+
 describe('epicIcon', () => {
   it('returns castle emoji for epic', () => {
     expect(epicIcon()).toBe('\u{1F3F0}'); // 🏰
@@ -526,6 +606,76 @@ describe('epicLabel', () => {
 describe('epicFallback', () => {
   it('returns bracketed text for epic', () => {
     expect(epicFallback()).toBe('[EPIC]');
+  });
+});
+
+// ─── Stale Audit Result Icons ─────────────────────────────────────────────
+
+describe('auditStaleIcon', () => {
+  it('returns 🟩 for yes (true) — stale passed', () => {
+    expect(auditStaleIcon(true)).toBe('\u{1F7E9}'); // 🟩
+  });
+
+  it('returns ❌ for no (false) — falls back to audit icon', () => {
+    expect(auditStaleIcon(false)).toBe('\u{274C}'); // ❌
+  });
+
+  it('returns ❔ for unknown (null) — falls back to audit icon', () => {
+    expect(auditStaleIcon(null)).toBe('\u{2754}'); // ❔
+  });
+
+  it('returns ❔ for unknown (undefined) — falls back to audit icon', () => {
+    expect(auditStaleIcon(undefined)).toBe('\u{2754}'); // ❔
+  });
+
+  describe('with noIcons option', () => {
+    it('returns text fallback for yes (true)', () => {
+      expect(auditStaleIcon(true, { noIcons: true })).toBe('[YES_STALE]');
+    });
+
+    it('returns text fallback for no (false) — falls back', () => {
+      expect(auditStaleIcon(false, { noIcons: true })).toBe('[NO]');
+    });
+
+    it('returns text fallback for unknown (null) — falls back', () => {
+      expect(auditStaleIcon(null, { noIcons: true })).toBe('[UNKN]');
+    });
+  });
+});
+
+describe('auditStaleLabel', () => {
+  it('returns label for yes (true)', () => {
+    expect(auditStaleLabel(true)).toBe('Audit: Passed (stale)');
+  });
+
+  it('returns label for no (false) — falls back to audit label', () => {
+    expect(auditStaleLabel(false)).toBe('Audit: Failed');
+  });
+
+  it('returns label for unknown (null) — falls back to audit label', () => {
+    expect(auditStaleLabel(null)).toBe('Audit: Not run');
+  });
+
+  it('returns label for unknown (undefined) — falls back to audit label', () => {
+    expect(auditStaleLabel(undefined)).toBe('Audit: Not run');
+  });
+});
+
+describe('auditStaleFallback', () => {
+  it('returns bracketed text for yes', () => {
+    expect(auditStaleFallback(true)).toBe('[YES_STALE]');
+  });
+
+  it('returns bracketed text for no (false) — falls back to audit fallback', () => {
+    expect(auditStaleFallback(false)).toBe('[NO]');
+  });
+
+  it('returns bracketed text for unknown (null) — falls back to audit fallback', () => {
+    expect(auditStaleFallback(null)).toBe('[UNKN]');
+  });
+
+  it('returns bracketed text for unknown (undefined) — falls back to audit fallback', () => {
+    expect(auditStaleFallback(undefined)).toBe('[UNKN]');
   });
 });
 

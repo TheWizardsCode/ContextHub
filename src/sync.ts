@@ -8,8 +8,9 @@ import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
+import { contextExec, withinWorktreeContext, killProcessesForWorktree } from './process-lifecycle.js';
 
-const execAsync = promisify(childProcess.exec);
+const execAsync = contextExec;
 
 // git show of large JSONL can exceed Node's exec() maxBuffer.
 // Use spawn to stream the output when reading remote content.
@@ -384,6 +385,10 @@ function mergeDifferentTimestampItems(
       // When one version has a close and the other has a different non-close status/stage,
       // prefer the close values. This prevents an unrelated field change on a different
       // client from silently reverting a close operation.
+      //
+      // In mergeDifferentTimestampItems, close-preservation for the REMOTE side is
+      // only applied when isRemoteNewer is true. If local is newer, the local intent
+      // (e.g., reopening a closed item) is respected rather than the remote close.
       if (field === 'status') {
         const localIsClose = localValue === 'completed' && (localItem.stage === 'done' || remoteItem.stage === 'done');
         const remoteIsClose = remoteValue === 'completed' && (remoteItem.stage === 'done' || localItem.stage === 'done');
@@ -401,17 +406,23 @@ function mergeDifferentTimestampItems(
           continue;
         }
         if (remoteIsClose && !localIsClose) {
-          (merged as any)[field] = remoteValue;
-          mergedFields.push(`${field} (close preserved from remote)`);
-          fieldDetails.push({
-            field,
-            localValue,
-            remoteValue,
-            chosenValue: remoteValue,
-            chosenSource: 'remote',
-            reason: 'remote has completed status (close)'
-          });
-          continue;
+          // Only preserve remote close when remote is newer.
+          // If local is newer, the local intent (e.g., reopening) is respected
+          // and we fall through to normal timestamp-based resolution below.
+          if (isRemoteNewer) {
+            (merged as any)[field] = remoteValue;
+            mergedFields.push(`${field} (close preserved from remote)`);
+            fieldDetails.push({
+              field,
+              localValue,
+              remoteValue,
+              chosenValue: remoteValue,
+              chosenSource: 'remote',
+              reason: 'remote has completed status (close)'
+            });
+            continue;
+          }
+          // Fall through to normal resolution when local is newer
         }
       }
       if (field === 'stage') {
@@ -431,17 +442,23 @@ function mergeDifferentTimestampItems(
           continue;
         }
         if (remoteIsCloseStage && !localIsCloseStage) {
-          (merged as any)[field] = remoteValue;
-          mergedFields.push(`${field} (close preserved from remote)`);
-          fieldDetails.push({
-            field,
-            localValue,
-            remoteValue,
-            chosenValue: remoteValue,
-            chosenSource: 'remote',
-            reason: 'remote has done stage (close)'
-          });
-          continue;
+          // Only preserve remote close stage when remote is newer.
+          // If local is newer, the local intent (e.g., reopening) is respected
+          // and we fall through to normal timestamp-based resolution below.
+          if (isRemoteNewer) {
+            (merged as any)[field] = remoteValue;
+            mergedFields.push(`${field} (close preserved from remote)`);
+            fieldDetails.push({
+              field,
+              localValue,
+              remoteValue,
+              chosenValue: remoteValue,
+              chosenSource: 'remote',
+              reason: 'remote has done stage (close)'
+            });
+            continue;
+          }
+          // Fall through to normal resolution when local is newer
         }
       }
       if (localIsDefault && !remoteIsDefault) {
@@ -777,8 +794,23 @@ async function withTempWorktree<T>(
       }
     }
 
-    return await run(worktreePath);
+    // Set worktree context so that any child processes spawned inside
+    // `run()` are automatically registered with the process lifecycle
+    // module for cleanup.
+    const restore = withinWorktreeContext(worktreePath);
+    try {
+      return await run(worktreePath);
+    } finally {
+      restore();
+    }
   } finally {
+    // Kill any tracked processes spawned inside the worktree BEFORE
+    // removing it, to prevent orphaned processes.
+    try {
+      killProcessesForWorktree(worktreePath);
+    } catch {
+      // ignore — best-effort cleanup
+    }
     try {
       await execAsync(`git worktree remove --force ${escapeShellArg(worktreePath)}`);
     } catch {
@@ -860,7 +892,7 @@ export async function gitPushDataFileToBranch(
     // Push only this commit to the dedicated ref.
     const pushTarget = target.branch.startsWith('refs/') ? target.branch : `refs/heads/${target.branch}`;
     await execAsync(
-      `git -C ${escapeShellArg(worktreePath)} push ${escapeShellArg(target.remote)} HEAD:${escapeShellArg(pushTarget)}`
+      `git -C ${escapeShellArg(worktreePath)} push --no-verify ${escapeShellArg(target.remote)} HEAD:${escapeShellArg(pushTarget)}`
     );
   });
 }

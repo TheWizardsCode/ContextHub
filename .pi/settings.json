@@ -5,6 +5,7 @@
   "context-hub": {
     "showActivityIndicator": true,
     "showHelpText": true,
-    "browseItemCount": 15
+    "browseItemCount": 15,
+    "schedules": []
   }
 }

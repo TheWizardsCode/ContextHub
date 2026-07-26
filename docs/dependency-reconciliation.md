@@ -8,29 +8,31 @@ When a work item's status or stage changes, the database layer automatically rec
 
 ## Key Functions
 
-All reconciliation logic lives in `src/database.ts`:
+All reconciliation logic lives in `packages/shared/src/database.ts`:
 
 | Function | Line | Purpose |
 |---|---|---|
-| `reconcileDependentsForTarget(targetId)` | ~1811 | Entry point: finds all dependents of `targetId` and reconciles each one |
-| `reconcileDependentStatus(dependentId)` | ~1772 | Determines whether a dependent should be blocked or unblocked |
-| `reconcileBlockedStatus(itemId)` | ~1749 | Sets or clears `blocked` status based on active blockers |
-| `isDependencyActive(item)` | ~1701 | Returns `true` if an item is an active blocker (not completed, not deleted, not in `in_review` or `done` stage) |
-| `hasActiveBlockers(itemId)` | ~1738 | Returns `true` if any inbound dependency edges point to active items |
-| `getInboundDependents(targetId)` | ~1726 | Returns IDs of items that depend on `targetId` |
-| `listDependencyEdgesTo(targetId)` | ~1696 | Returns all dependency edges where `targetId` is the prerequisite |
+| `reconcileDependentsForTarget(targetId)` | ~2587 | Entry point: finds all dependents of `targetId` and reconciles each one |
+| `reconcileDependentStatus(dependentId)` | ~2544 | Determines whether a dependent should be blocked or unblocked |
+| `reconcileBlockedStatus(itemId)` | ~2522 | Sets or clears `blocked` status based on active blockers |
+| `isDependencyActive(item)` | ~2455 | Returns `true` if an item is an active blocker (not completed, not deleted, not in `in_review` or `done` stage) |
+| `hasActiveBlockers(itemId)` | ~2511 | Returns `true` if any inbound dependency edges point to active items |
+| `getInboundDependents(targetId)` | ~2499 | Returns IDs of items that depend on `targetId` |
+| `listDependencyEdgesTo(targetId)` | ~2451 | Returns all dependency edges where `targetId` is the prerequisite |
 
 ## How It Works
 
-1. **Trigger**: `db.update()` (line ~655) and `db.delete()` (line ~688) check whether the status or stage changed. If so, they call `reconcileDependentsForTarget(itemId)`.
+1. **Trigger**: `db.update()` (line ~1076) and `db.deleteSingle()` (line ~1143) check whether the status or stage changed. If so, they call `reconcileDependentStatus(id)` to reconcile the item itself, then `reconcileDependentsForTarget(itemId)` to reconcile the item's dependents.
 
-2. **Fan-out**: `reconcileDependentsForTarget()` finds all items that depend on the changed item using `getInboundDependents()`.
+2. **Self-reconciliation**: `reconcileDependentStatus(id)` checks if the item itself should be blocked or unblocked based on its own dependency edges. For example, when a completed item is reopened and its prerequisite is still active, it gets re-blocked.
 
-3. **Per-dependent check**: For each dependent, `reconcileDependentStatus()` calls `hasActiveBlockers()` to determine if any remaining blockers are still active.
+3. **Fan-out**: `reconcileDependentsForTarget()` finds all items that depend on the changed item using `getInboundDependents()`.
 
-4. **Status update**: If no active blockers remain and the dependent is currently `blocked`, its status is set to `open`. If active blockers exist and the dependent is not already `blocked`, its status is set to `blocked`.
+4. **Per-dependent check**: For each dependent, `reconcileDependentStatus()` calls `hasActiveBlockers()` to determine if any remaining blockers are still active.
 
-5. **Cascade**: The status update on the dependent itself triggers another round of reconciliation, so chain dependencies (A blocks B blocks C) resolve transitively.
+5. **Status update**: If no active blockers remain and the dependent is currently `blocked`, its status is set to `open`. If active blockers exist and the dependent is not already `blocked`, its status is set to `blocked`.
+
+6. **Cascade**: The status update on the dependent itself triggers another round of reconciliation via `saveWorkItem()`, so chain dependencies (A blocks B blocks C) resolve transitively.
 
 ## Behaviour Summary
 
