@@ -87,11 +87,29 @@ describe('E2E: Headless TUI - built executable', () => {
 
   describe('wl show command via built CLI', () => {
     it('executes wl show with a real work item ID', async () => {
-      // Use a real work item from ContextHub
-      const { stdout } = await runWlCli('show', 'WL-0MKYOAM4Q10TGWND', '--json');
+      // Create a work item first, then verify we can show it
+      const { stdout: createOut } = await runWlCli('create', '-t', 'Test item for show', '-d', 'Testing wl show command');
+      // Parse the create response to get the new item ID
+      // create output format: Created <prefix>-<number> (<title>)
+      const idMatch = createOut.match(/Created (\S+) \(/);
+      if (!idMatch) {
+        // Fallback: try JSON output
+        const { stdout: createJson } = await runWlCli('create', '-t', 'Test item for show JSON', '-d', 'Testing wl show', '--json');
+        const createParsed = JSON.parse(createJson);
+        expect(createParsed.success).toBe(true);
+        const itemId = createParsed.workItem?.id || createParsed.id;
+        expect(itemId).toBeDefined();
+        const { stdout } = await runWlCli('show', itemId, '--json');
+        const parsed = JSON.parse(stdout);
+        expect(parsed.success).toBe(true);
+        expect(parsed.workItem.id).toBe(itemId);
+        return;
+      }
+      const itemId = idMatch[1];
+      const { stdout } = await runWlCli('show', itemId, '--json');
       const parsed = JSON.parse(stdout);
       expect(parsed.success).toBe(true);
-      expect(parsed.workItem.id).toBe('WL-0MKYOAM4Q10TGWND');
+      expect(parsed.workItem.id).toBe(itemId);
     });
   });
 
