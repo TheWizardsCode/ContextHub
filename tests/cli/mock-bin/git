@@ -2,6 +2,20 @@
 # Minimal git mock used in tests to avoid running the real git binary.
 # This mock supports a few commands used by tests: rev-parse, init, clone, add, commit, remote, push
 
+# Timeout guard: self-terminate after WORKLOG_MOCK_TIMEOUT seconds (default 5s).
+# This prevents orphaned processes from running indefinitely.
+MAX_DURATION=${WORKLOG_MOCK_TIMEOUT:-5}
+# Validate as positive integer
+case "$MAX_DURATION" in
+  ''|*[!0-9]*) MAX_DURATION=5 ;;
+esac
+__TIMEOUT_START=$SECONDS
+_check_timeout() {
+  if [ $((SECONDS - __TIMEOUT_START)) -ge "$MAX_DURATION" ] 2>/dev/null; then
+    exit 124
+  fi
+}
+
 # Normalize args: handle any `-C <dir>` occurrences anywhere in the arg list
 # by changing directory to the provided dir and removing those tokens so the
 # remaining positional parameters start with the actual git subcommand.
@@ -33,12 +47,22 @@ DEBUG=${WORKLOG_GIT_MOCK_DEBUG:-0}
 log() { if [ "$DEBUG" = "1" ]; then echo "[mock-git] $*" >> /tmp/worklog-mock.log 2>/dev/null || true; fi }
 log "INVOKE: $PWD -- $*"
 
+# Timeout safety net check at dispatch
+_check_timeout
+
 case "$1" in
   rev-parse)
     if [ "$2" = "--show-toplevel" ]; then
       # Find nearest parent directory that contains .git (dir or file)
       dir=$(pwd)
+      _iter=0
       while [ "$dir" != "/" ]; do
+        _iter=$((_iter + 1))
+        # Guard against infinite loop (max 100 iterations)
+        if [ $_iter -gt 100 ]; then
+          exit 124
+        fi
+        _check_timeout
         if [ -d "$dir/.git" ] || [ -f "$dir/.git" ]; then
           echo "$dir"
           exit 0
@@ -56,7 +80,14 @@ case "$1" in
     if [ "$2" = "--git-dir" ]; then
       # Find nearest parent directory that contains .git (dir or file)
       dir=$(pwd)
+      _iter=0
       while [ "$dir" != "/" ]; do
+        _iter=$((_iter + 1))
+        # Guard against infinite loop (max 100 iterations)
+        if [ $_iter -gt 100 ]; then
+          exit 124
+        fi
+        _check_timeout
         if [ -d "$dir/.git" ]; then
           echo "$dir/.git"
           exit 0
@@ -71,6 +102,7 @@ case "$1" in
       exit 128
     fi
     if [ "$2" = "--git-path" ]; then
+      _check_timeout
       echo "hooks"
       exit 0
     fi

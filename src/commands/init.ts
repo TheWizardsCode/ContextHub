@@ -177,6 +177,18 @@ function installPrePushHook(options: { silent: boolean }): { installed: boolean;
     `  exit 0\n` +
     `fi\n` +
     `\n` +
+    `# Skip when inside a temp worktree created by withTempWorktree.\n` +
+    `case \"$PWD\" in\n` +
+    `  *tmp-worktree-*)\n` +
+    `    exit 0\n` +
+    `    ;;\n` +
+    `esac\n` +
+    `\n` +
+    `# Skip when inside a git worktree (not the main checkout).\n` +
+    `if [ \"$(git rev-parse --git-dir 2>/dev/null)\" != \"$(git rev-parse --git-common-dir 2>/dev/null)\" ]; then\n` +
+    `  exit 0\n` +
+    `fi\n` +
+    `\n` +
     `# Avoid recursion when worklog sync pushes refs/worklog/data.\n` +
     `skip=0\n` +
     `while read local_ref local_sha remote_ref remote_sha; do\n` +
@@ -198,7 +210,10 @@ function installPrePushHook(options: { silent: boolean }): { installed: boolean;
     `  exit 0\n` +
     `fi\n` +
     `\n` +
-    `$WL sync --git-branch refs/worklog/data\n` +
+    `$WL sync --git-branch refs/worklog/data || {\n` +
+    `  echo \"worklog: pre-push sync failed (pushing anyway)\" >&2\n` +
+    `  exit 0\n` +
+    `}\n` +
     `\n` +
     `exit 0\n`;
 

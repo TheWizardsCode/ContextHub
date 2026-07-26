@@ -172,6 +172,55 @@ export class ShortcutRegistry {
   }
 
   /**
+   * Return all chord entries whose chord array starts with the given prefix.
+   *
+   * For example, given chords `["u", "p", "c"]` and `["u", "p", "h"]`,
+   * `getChordByPrefix(["u", "p"])` returns both entries.
+   *
+   * When `view` is provided, only chord entries visible in that view
+   * (view === "both" or view === the provided view) are returned.
+   * When `stage` is provided, only chord entries whose stages allow-list
+   * includes the given stage (or entries without a stages constraint)
+   * are returned.
+   *
+   * @param prefix - The prefix key sequence to match (e.g. ["u", "p"])
+   * @param view - Optional view filter ("list" | "detail")
+   * @param stage - Optional item stage to filter by
+   * @returns Array of matching chord ShortcutEntry objects (may be empty)
+   */
+  getChordByPrefix(prefix: string[], view?: string, stage?: string): ShortcutEntry[] {
+    const result: ShortcutEntry[] = [];
+
+    for (const entry of this.entries) {
+      const chord = (entry as Record<string, unknown>).chord;
+      if (!Array.isArray(chord)) continue;
+      if (chord.length < prefix.length) continue;
+
+      // Check if chord starts with the given prefix
+      let matches = true;
+      for (let i = 0; i < prefix.length; i++) {
+        if (chord[i] !== prefix[i]) {
+          matches = false;
+          break;
+        }
+      }
+      if (!matches) continue;
+
+      // View filter
+      if (view !== undefined && entry.view !== 'both' && entry.view !== view) continue;
+
+      // Stage filter
+      if (stage !== undefined && entry.stages !== undefined && entry.stages.length > 0) {
+        if (!entry.stages.includes(stage)) continue;
+      }
+
+      result.push(entry);
+    }
+
+    return result;
+  }
+
+  /**
    * Look up a chord by its full key sequence, view, and optional stage.
    *
    * Returns the command string for the first matching entry, or `undefined`

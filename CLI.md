@@ -255,6 +255,7 @@ Options:
 - `--ready-to-close <yes|no>` — Whether the work item is ready to close (required).
 - `--summary <text>` — Human-readable summary of the audit.
 - `--raw-output <text>` — Machine-readable raw output from the audit tool.
+- `--audit-file <file>` — Read audit raw output from a file (takes precedence over `--raw-output`).
 - `--author <author>` — Author of the audit (defaults to current user).
 - `--prefix <prefix>` — Override default ID prefix (optional).
 - `--json` — Output in JSON format.
@@ -265,6 +266,7 @@ Examples:
 wl audit-set WL-ABC123 --ready-to-close yes --summary "All criteria met"
 wl audit-set WL-ABC123 --ready-to-close no --summary "Outstanding work items" --json
 wl audit-set WL-ABC123 --ready-to-close yes --author "bot" --raw-output "..."
+wl audit-set WL-ABC123 --ready-to-close yes --audit-file report.md --summary "From file"
 ```
 
 ### `delete` [options] <id>
@@ -939,6 +941,35 @@ Notes:
 - If no lock file exists, the command prints "No lock file found" and exits 0.
 - If the lock file is corrupted (unparseable metadata), `--force` is required to remove it.
 - If the lock is held by a still-running process, the command warns but still allows removal with confirmation or `--force`.
+
+### `cleanup-worktree` [path] [options]
+
+Kill tracked processes for a worktree path. Used to clean up orphaned processes
+that were spawned during worktree operations.
+
+Arguments:
+
+- `path` — Path to the worktree to clean up (required unless `--all` is used).
+
+Options:
+
+- `--all` — Kill tracked processes for all worktrees.
+- `--force` — Use `SIGKILL` instead of `SIGTERM`.
+- `--json` — Output machine-readable JSON.
+
+Examples:
+
+```sh
+wl cleanup-worktree /path/to/worktree
+wl cleanup-worktree --all
+wl cleanup-worktree /path/to/worktree --force
+wl --json cleanup-worktree /path/to/worktree
+```
+
+Notes:
+
+- Safe to run when no processes are tracked (no-op, exit 0).
+- If neither a path nor `--all` is provided, the command prints an error and exits non-zero.
 
 ---
 

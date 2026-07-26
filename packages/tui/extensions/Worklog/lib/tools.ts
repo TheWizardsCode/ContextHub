@@ -88,6 +88,9 @@ export interface WorklogBrowseItem {
   effort?: string;
   description?: string;
   auditResult?: boolean | null;
+  auditedAt?: string | null;
+  needsProducerReview?: boolean;
+  updatedAt?: string;
   issueType?: string;
   childCount?: number;
   tags?: string[];
@@ -131,6 +134,9 @@ export function normalizeListPayload(payload: unknown): WorklogBrowseItem[] {
       effort: item?.effort ? String(item.effort) : undefined,
       description: item?.description ? String(item.description) : undefined,
       auditResult: item?.auditResult !== undefined ? item.auditResult : undefined,
+      auditedAt: item?.auditedAt !== undefined && item?.auditedAt !== null ? String(item.auditedAt) : undefined,
+      needsProducerReview: item?.needsProducerReview !== undefined ? Boolean(item.needsProducerReview) : undefined,
+      updatedAt: item?.updatedAt ? String(item.updatedAt) : undefined,
       issueType: item?.issueType ? String(item.issueType) : undefined,
       childCount: item?.childCount !== undefined ? Number(item.childCount) : undefined,
       tags: Array.isArray(item?.tags) ? item.tags.map(String) : undefined,
@@ -267,6 +273,10 @@ export function createDefaultListWorkItemsDb(
           risk: r.workItem.risk || undefined,
           effort: r.workItem.effort || undefined,
           description: r.workItem.description,
+          auditResult: r.auditResult !== undefined ? r.auditResult : undefined,
+          auditedAt: r.auditedAt !== undefined && r.auditedAt !== null ? String(r.auditedAt) : undefined,
+          needsProducerReview: r.workItem.needsProducerReview !== undefined ? Boolean(r.workItem.needsProducerReview) : undefined,
+          updatedAt: r.workItem.updatedAt ? String(r.workItem.updatedAt) : undefined,
           issueType: r.workItem.issueType || undefined,
           tags: r.workItem.tags?.length ? r.workItem.tags : undefined,
           githubIssueNumber: r.workItem.githubIssueNumber,
@@ -302,6 +312,10 @@ export function createListWorkItemsWithStageDb(
           risk: item.risk || undefined,
           effort: item.effort || undefined,
           description: item.description,
+          auditResult: item.auditResult !== undefined ? item.auditResult : undefined,
+          auditedAt: item.auditedAt !== undefined && item.auditedAt !== null ? String(item.auditedAt) : undefined,
+          needsProducerReview: item.needsProducerReview !== undefined ? Boolean(item.needsProducerReview) : undefined,
+          updatedAt: item.updatedAt ? String(item.updatedAt) : undefined,
           issueType: item.issueType || undefined,
           tags: item.tags?.length ? item.tags : undefined,
           githubIssueNumber: item.githubIssueNumber,

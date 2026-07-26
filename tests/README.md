@@ -89,6 +89,7 @@ Tests are spread across two top-level directories:
 - **`action-opts-normalization.test.ts`** — Option normalization
 - **`inproc-harness.test.ts`** / **`debug-inproc.test.ts`** — In-process test harness
 - **`initialization-check.test.ts`** — Pre-init guard
+- **`valid-json-output.test.ts`** — Comprehensive validation that every `--json` command emits pure, parseable JSON with no preamble text
 - **`unlock.test.ts`** — Lock file removal
 - **`git-mock-roundtrip.test.ts`** — Git mock for sync tests
 - **`github-*.test.ts`** — GitHub push/filter CLI tests

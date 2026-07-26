@@ -40,6 +40,8 @@ import unlockCommand from './commands/unlock.js';
 import auditCommand from './commands/audit.js';
 import auditResultCommand from './commands/audit-result.js';
 import completionCommand from './commands/completion.js';
+import cleanupWorktreeCommand from './commands/cleanup-worktree.js';
+import { detectWorktreeFromCwd, registerCurrentProcess } from './process-lifecycle.js';
 
 // Watch flag parsing - supports -w, -wN, --watch, --watch=N
 function parseWatchFlag(argv: string[]) {
@@ -257,6 +259,7 @@ const builtInCommands = [
   unlockCommand,
   auditCommand,
   auditResultCommand,
+  cleanupWorktreeCommand,
   completionCommand,
   // onboard command removed
 ];
@@ -292,6 +295,7 @@ const builtInCommandNames = new Set([
   'audit-show',
   'audit-set',
   'completion',
+  'cleanup-worktree',
   // 'onboard' removed
 ]);
 
@@ -314,8 +318,11 @@ try {
 
 // Initialize the background task runtime so that background operations
 // (e.g. auto-sync, metrics collection) can be launched during the session
-// and are awaited on shutdown.
-initializeRuntime();
+// and are awaited on shutdown.  We pass silent:true because the default
+// beforeExit handler writes debug-level messages ("[runtime] Received
+// beforeExit…") to stderr, which pollutes JSON output consumed by scripts
+// and agents (see WL-0MRJ2R8LJ003LA8V).
+initializeRuntime({ silent: true });
 
 // Customize help output to group commands for readability and ensure global
 // options appear on subcommand help as well. Commander applies help
@@ -439,6 +446,14 @@ function applyHelpFormatting(cmd: any) {
 }
 
 applyHelpFormatting(program);
+
+// If the CLI is running inside a ContextHub-managed worktree, register our
+// PID with the process lifecycle module so it can be cleaned up when the
+// worktree is removed.
+const worktreePath = detectWorktreeFromCwd();
+if (worktreePath) {
+  registerCurrentProcess(worktreePath);
+}
 
 // Parse command line arguments
 program.parse();

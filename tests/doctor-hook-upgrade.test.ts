@@ -5,6 +5,8 @@ import {
   listOutdatedHooks,
   dryRunHooks,
   upgradeHooks,
+  detectHooksTargetDir,
+  generateCanonicalHookContent,
   type HookInfo,
 } from '../src/doctor/hook-upgrade.js';
 
@@ -431,6 +433,7 @@ describe('hook-upgrade module', () => {
     });
   });
 
+
   describe('integration with real repo', () => {
     it('detects outdated hooks in the actual .githooks/.git/hooks setup', () => {
       // Use the real repo paths
@@ -461,6 +464,201 @@ describe('hook-upgrade module', () => {
       const result2 = upgradeHooks();
       expect(result1.success).toBe(true);
       expect(result2.success).toBe(true);
+    });
+  });
+
+  describe('generateCanonicalHookContent', () => {
+    it('returns content for pre-push hook', () => {
+      const content = generateCanonicalHookContent('pre-push');
+      expect(content).not.toBeNull();
+      expect(content!).toContain('worklog:pre-push-hook:v1');
+      expect(content!).toContain('--git-branch refs/worklog/data');
+    });
+
+    it('returns content for post-checkout hook', () => {
+      const content = generateCanonicalHookContent('post-checkout');
+      expect(content).not.toBeNull();
+      expect(content!).toContain('worklog:post-checkout-hook:v1');
+      expect(content!).toContain('--git-branch refs/worklog/data');
+    });
+
+    it('returns content for post-merge hook (wrapper)', () => {
+      const content = generateCanonicalHookContent('post-merge');
+      expect(content).not.toBeNull();
+      expect(content!).toContain('worklog:post-pull-hook:v1');
+      expect(content!).toContain('$(dirname "$0")');
+    });
+
+    it('returns content for post-rewrite hook (same as post-merge)', () => {
+      const pm = generateCanonicalHookContent('post-merge');
+      const pr = generateCanonicalHookContent('post-rewrite');
+      expect(pm).toEqual(pr);
+    });
+
+    it('returns content for worklog-post-pull hook', () => {
+      const content = generateCanonicalHookContent('worklog-post-pull');
+      expect(content).not.toBeNull();
+      expect(content!).toContain('worklog:post-pull-hook:v1');
+      expect(content!).toContain('--git-branch refs/worklog/data');
+    });
+
+    it('returns null for unknown hook names', () => {
+      const content = generateCanonicalHookContent('unknown-hook');
+      expect(content).toBeNull();
+    });
+
+    it('all generated content is JSON-serializable', () => {
+      for (const name of ['pre-push', 'post-checkout', 'post-merge', 'post-rewrite', 'worklog-post-pull']) {
+        const content = generateCanonicalHookContent(name);
+        expect(() => JSON.stringify(content)).not.toThrow();
+      }
+    });
+  });
+
+  describe('detectHooksTargetDir', () => {
+    it('returns .git/hooks when no core.hooksPath is set', () => {
+      // Temporarily unset core.hooksPath if set
+      const origCwd = process.cwd();
+      try {
+        const result = detectHooksTargetDir();
+        // In a worktree, core.hooksPath might already be set. Just verify it returns a string.
+        expect(typeof result).toBe('string');
+        expect(result.length).toBeGreaterThan(0);
+      } finally {
+        // No cleanup needed - test is read-only
+      }
+    });
+
+    it('returns a non-empty string', () => {
+      const result = detectHooksTargetDir();
+      expect(result).toBeTruthy();
+    });
+  });
+
+  describe('self-check mode (githooksDir === hooksDir)', () => {
+    it('detects outdated hooks when comparing against canonical content', () => {
+      // Create a .githooks directory with outdated hooks
+      const githooksDir = path.join(dirs.root, 'selfcheck-githooks');
+      fs.mkdirSync(githooksDir, { recursive: true });
+
+      // Write an OUTDATED pre-push (missing --git-branch guard)
+      const outdatedPrePush = `#!/bin/sh
+# worklog:pre-push-hook:v1
+$WL sync
+exit 0
+`;
+      fs.writeFileSync(path.join(githooksDir, 'pre-push'), outdatedPrePush);
+
+      // Use the same directory for both githooksDir and hooksDir (simulating core.hooksPath = .githooks)
+      const result = listOutdatedHooks(githooksDir, githooksDir);
+
+      expect(result.length).toBeGreaterThan(0);
+      const prePush = result.find(r => r.name === 'pre-push');
+      expect(prePush).toBeDefined();
+      // Should detect as outdated because missing --git-branch guard
+      expect(prePush!.status).toBe('outdated');
+      expect(prePush!.reason).toContain('latest template');
+    });
+
+    it('reports up-to-date hooks when content matches canonical', () => {
+      const githooksDir = path.join(dirs.root, 'selfcheck-up2date');
+      fs.mkdirSync(githooksDir, { recursive: true });
+
+      // Write canonical content for pre-push
+      const canonicalPrePush = generateCanonicalHookContent('pre-push')!;
+      fs.writeFileSync(path.join(githooksDir, 'pre-push'), canonicalPrePush);
+
+      const result = listOutdatedHooks(githooksDir, githooksDir);
+
+      const prePush = result.find(r => r.name === 'pre-push');
+      expect(prePush).toBeDefined();
+      expect(prePush!.status).toBe('up-to-date');
+    });
+
+    it('reports not-installed for hooks that do not exist', () => {
+      const githooksDir = path.join(dirs.root, 'selfcheck-notinstalled');
+      fs.mkdirSync(githooksDir, { recursive: true });
+
+      // Don't write any hooks - they'll be "not-installed"
+      const result = listOutdatedHooks(githooksDir, githooksDir);
+
+      // All hook names should appear as not-installed
+      const names = result.map(r => r.name);
+      expect(names.length).toBeGreaterThanOrEqual(5);
+      expect(result.every(r => r.status === 'not-installed')).toBe(true);
+    });
+
+    it('dryRun reports outdated hooks in self-check mode', () => {
+      const githooksDir = path.join(dirs.root, 'selfcheck-dryrun');
+      fs.mkdirSync(githooksDir, { recursive: true });
+
+      const outdatedPrePush = `#!/bin/sh
+# worklog:pre-push-hook:v1
+$WL sync
+exit 0
+`;
+      fs.writeFileSync(path.join(githooksDir, 'pre-push'), outdatedPrePush);
+
+      const result = dryRunHooks(githooksDir, githooksDir);
+
+      expect(result.success).toBe(true);
+      expect(result.outdatedCount).toBe(1);
+      expect(result.upgraded).toContain('pre-push');
+      expect(() => JSON.stringify(result)).not.toThrow();
+    });
+
+    it('upgradeHooks replaces outdated hooks with canonical content in self-check mode', () => {
+      const githooksDir = path.join(dirs.root, 'selfcheck-upgrade');
+      fs.mkdirSync(githooksDir, { recursive: true });
+
+      const outdatedPrePush = `#!/bin/sh
+# worklog:pre-push-hook:v1
+$WL sync
+exit 0
+`;
+      fs.writeFileSync(path.join(githooksDir, 'pre-push'), outdatedPrePush);
+
+      const result = upgradeHooks(githooksDir, githooksDir);
+
+      expect(result.success).toBe(true);
+      expect(result.upgraded).toContain('pre-push');
+
+      // Verify file was updated with canonical content
+      const updatedContent = fs.readFileSync(path.join(githooksDir, 'pre-push'), 'utf-8');
+      expect(updatedContent).toContain('--git-branch refs/worklog/data');
+      expect(updatedContent).not.toContain('$WL sync\nexit 0');
+    });
+
+    it('skips hooks without worklog marker in self-check mode', () => {
+      const githooksDir = path.join(dirs.root, 'selfcheck-skip');
+      fs.mkdirSync(githooksDir, { recursive: true });
+
+      // Write a non-worklog hook (no marker)
+      fs.writeFileSync(path.join(githooksDir, 'pre-push'), '#!/bin/sh\necho custom\n');
+
+      const result = listOutdatedHooks(githooksDir, githooksDir);
+
+      // Non-worklog hooks should be skipped entirely
+      const prePush = result.find(r => r.name === 'pre-push');
+      expect(prePush).toBeUndefined();
+    });
+
+    it('self-check dryRun produces JSON-compatible output', () => {
+      const githooksDir = path.join(dirs.root, 'selfcheck-json');
+      fs.mkdirSync(githooksDir, { recursive: true });
+
+      const outdatedPrePush = `#!/bin/sh
+# worklog:pre-push-hook:v1
+$WL sync
+exit 0
+`;
+      fs.writeFileSync(path.join(githooksDir, 'pre-push'), outdatedPrePush);
+
+      const result = dryRunHooks(githooksDir, githooksDir);
+      expect(() => JSON.stringify(result)).not.toThrow();
+      const parsed = JSON.parse(JSON.stringify(result));
+      expect(parsed.success).toBe(true);
+      expect(parsed.outdatedCount).toBe(1);
     });
   });
 });

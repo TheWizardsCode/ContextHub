@@ -18,8 +18,9 @@ import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
+import { contextExec } from '../process-lifecycle.js';
 
-const execAsync = promisify(childProcess.exec);
+const execAsync = contextExec;
 
 export function getSyncDefaults(config?: ReturnType<typeof loadConfig>) {
   return {

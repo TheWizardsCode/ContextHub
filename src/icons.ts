@@ -450,6 +450,132 @@ export function auditFallback(result: boolean | null | undefined): string {
   return AUDIT_FALLBACK[auditKey(result)] ?? '';
 }
 
+// ─── Stale Audit Result Icons ───────────────────────────────────────────
+
+const STALE_AUDIT_ICON: Record<string, string> = {
+  yes: '\u{1F7E9}',  // 🟩 Green square button
+};
+
+const STALE_AUDIT_FALLBACK: Record<string, string> = {
+  yes: '[YES_STALE]',
+};
+
+const STALE_AUDIT_LABEL: Record<string, string> = {
+  yes: 'Audit: Passed (stale)',
+};
+
+// ─── Stale Audit Result Public API ────────────────────────────────────
+
+/**
+ * Get the icon string for a stale audit result.
+ *
+ * For stale-but-passed audits (result === true), returns the stale-passed
+ * icon (\u{1F7E9}). For all other results, falls back to the regular
+ * audit icon for backward compatibility.
+ *
+ * @param result - The audit result.
+ * @param opts - Options controlling fallback behaviour.
+ * @returns The icon string (emoji or bracketed text).
+ */
+export function auditStaleIcon(result: boolean | null | undefined, opts?: IconOptions): string {
+  if (result === true) {
+    if (opts?.noIcons === true) {
+      return STALE_AUDIT_FALLBACK.yes;
+    }
+    return STALE_AUDIT_ICON.yes;
+  }
+  return auditIcon(result, opts);
+}
+
+/**
+ * Get the accessible label for a stale audit result icon.
+ *
+ * @param result - The audit result value.
+ * @returns A human-readable label (e.g. "Audit: Passed (stale)").
+ */
+export function auditStaleLabel(result: boolean | null | undefined): string {
+  if (result === true) {
+    return STALE_AUDIT_LABEL.yes;
+  }
+  return auditLabel(result);
+}
+
+/**
+ * Get the text fallback for a stale audit result icon.
+ *
+ * @param result - The audit result value.
+ * @returns The bracketed text label (e.g. "[YES_STALE]").
+ */
+export function auditStaleFallback(result: boolean | null | undefined): string {
+  if (result === true) {
+    return STALE_AUDIT_FALLBACK.yes;
+  }
+  return auditFallback(result);
+}
+
+// ─── Producer Review Flag Icons ────────────────────────────────────────
+
+/**
+ * Producer review key for icon lookup.
+ * true → 'needed', false → 'not_needed', null/undefined → 'not_needed' (default to ok)
+ */
+function producerReviewKey(needsProducerReview: boolean | null | undefined): string {
+  if (needsProducerReview === true) return 'needed';
+  return 'not_needed';
+}
+
+const PRODUCER_REVIEW_ICON: Record<string, string> = {
+  needed:    '\u{274C}',  // ❌
+  not_needed: '\u{2705}',  // ✅
+};
+
+const PRODUCER_REVIEW_FALLBACK: Record<string, string> = {
+  needed:    '[NEEDS_PRODUCER]',
+  not_needed: '[PRODUCER_OK]',
+};
+
+const PRODUCER_REVIEW_LABEL: Record<string, string> = {
+  needed:     'Needs producer review',
+  not_needed: 'Producer review complete',
+};
+
+// ─── Producer Review Public API ───────────────────────────────────────
+
+/**
+ * Get the icon string (emoji or text fallback) for the needsProducerReview flag.
+ *
+ * @param needsProducerReview - Whether the work item needs producer review.
+ * @param opts - Options controlling fallback behaviour.
+ * @returns The icon string (emoji or bracketed text).
+ */
+export function needsProducerReviewIcon(needsProducerReview: boolean | null | undefined, opts?: IconOptions): string {
+  const key = producerReviewKey(needsProducerReview);
+  if (opts?.noIcons === true) {
+    return PRODUCER_REVIEW_FALLBACK[key] ?? '';
+  }
+  return PRODUCER_REVIEW_ICON[key] ?? '';
+}
+
+/**
+ * Get the accessible label for a producer review icon.
+ *
+ * @param needsProducerReview - Whether the work item needs producer review.
+ * @returns A human-readable label (e.g. "Needs producer review").
+ */
+export function needsProducerReviewLabel(needsProducerReview: boolean | null | undefined): string {
+  return PRODUCER_REVIEW_LABEL[producerReviewKey(needsProducerReview)] ?? '';
+}
+
+/**
+ * Get the text fallback for a producer review icon.
+ *
+ * @param needsProducerReview - Whether the work item needs producer review.
+ * @returns The bracketed text label (e.g. "[NEEDS_PRODUCER]").
+ */
+export function needsProducerReviewFallback(needsProducerReview: boolean | null | undefined): string {
+  return PRODUCER_REVIEW_FALLBACK[producerReviewKey(needsProducerReview)] ?? '';
+}
+
 // ─── Epic Public API ────────────────────────────────────────────────────
 
 /**

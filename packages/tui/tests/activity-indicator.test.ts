@@ -260,32 +260,6 @@ describe('registerActivityIndicator - input events', () => {
     };
   }
 
-  function createMockContext(): ExtensionContext {
-    const setStatus = vi.fn();
-    const theme = { fg: vi.fn((_color: string, text: string) => text) };
-    return {
-      ui: { setStatus, theme } as unknown as ExtensionUIContext,
-      mode: 'tui',
-      hasUI: true,
-      cwd: '/test',
-      sessionManager: {
-        getBranch: vi.fn().mockReturnValue([]),
-        getEntries: vi.fn().mockReturnValue([]),
-      } as any,
-      model: undefined,
-      modelRegistry: {} as any,
-      isIdle: vi.fn().mockReturnValue(true),
-      isProjectTrusted: vi.fn().mockReturnValue(true),
-      signal: undefined,
-      abort: vi.fn(),
-      hasPendingMessages: vi.fn().mockReturnValue(false),
-      shutdown: vi.fn(),
-      getContextUsage: vi.fn(),
-      compact: vi.fn(),
-      getSystemPrompt: vi.fn().mockReturnValue(''),
-    };
-  }
-
   it('sets indicator for /skill:name commands', async () => {
     registerActivityIndicator(pi as ExtensionAPI);
     expect(inputHandlers.length).toBe(1);
@@ -491,7 +465,7 @@ describe('registerActivityIndicator - input events', () => {
 
   describe('work item ID resolution', () => {
     beforeEach(() => {
-      vi.clearAllMocks();
+      vi.resetAllMocks();
     });
 
     it('shows raw text immediately, then resolves title for command with work item ID', async () => {

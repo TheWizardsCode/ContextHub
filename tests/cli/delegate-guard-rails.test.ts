@@ -7,12 +7,21 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Mock child_process to prevent real gh CLI calls
-const mockSpawn = vi.hoisted(() => vi.fn());
-vi.mock('child_process', () => ({
-  spawn: mockSpawn,
-  execSync: vi.fn(() => ''),
-}));
+// Shared child_process mock (stored on globalThis by setup-tests.ts).
+// The factory reads from the global store directly — no vi.hoisted needed.
+// Only test files that need the mock register it here.
+vi.mock('child_process', () => {
+  const store = (globalThis as any).__sharedChildProcessMocks;
+  return {
+    spawn: store?.mockSpawn ?? vi.fn(),
+    execSync: vi.fn(() => ''),
+    spawnSync: vi.fn(),
+  };
+});
+
+// Import shared mock instances for use in test bodies.
+import { initChildProcessMocks } from '../child-process-mocks.js';
+const { mockSpawn } = initChildProcessMocks();
 
 // Mock the github-sync module to prevent real GitHub API calls
 vi.mock('../../src/github-sync.js', () => ({
@@ -29,14 +38,26 @@ vi.mock('../../src/config.js', () => ({
   loadConfig: () => ({ githubRepo: 'test-owner/test-repo', githubLabelPrefix: 'wl:' }),
 }));
 
-vi.mock('../../src/github.js', async (importOriginal) => {
-  const original = await importOriginal() as any;
-  return {
-    ...original,
-    getRepoFromGitRemote: () => 'test-owner/test-repo',
-    assignGithubIssueAsync: vi.fn(async () => ({ ok: true })),
-  };
-});
+// Mock github.js without importOriginal() to prevent loading the real module
+// into vitest's cache (which would bring real child_process bindings and break
+// the shared child_process mock in other test files).
+vi.mock('../../src/github.js', () => ({
+  getRepoFromGitRemote: () => 'test-owner/test-repo',
+  assignGithubIssueAsync: vi.fn(async () => ({ ok: true })),
+  normalizeGithubLabelPrefix: (prefix?: string) => prefix || 'wl:',
+  SecondaryRateLimitError: class extends Error {
+    name = 'SecondaryRateLimitError';
+    constructor(msg: string, info?: any) { super(msg); }
+  },
+  setVerboseLogger: vi.fn(),
+  runGhDetailed: vi.fn(),
+  fetchLabelEventsAsync: vi.fn(),
+  LabelEventCache: class { get = vi.fn(); set = vi.fn() },
+  labelFieldsDiffer: vi.fn(() => false),
+  getLatestLabelEventTimestamp: vi.fn(),
+  createGithubIssueCommentAsync: vi.fn(),
+  runGhDetailedAsync: vi.fn(),
+}));
 
 import registerGithub from '../../src/commands/github.js';
 

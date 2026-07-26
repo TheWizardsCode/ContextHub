@@ -971,6 +971,122 @@ describe('Sync Operations', () => {
       // field where remote intentionally made a change)
       expect(merged.description).toBe('Edited by remote client');
     });
+
+    it('should respect local reopen when local is newer than remote close', () => {
+      // Scenario: User intentionally reopens a closed item.
+      // Local has open/in_progress with a newer timestamp.
+      // Remote has completed/done with an older timestamp.
+      // The reopen must be respected.
+
+      const localReopened: WorkItem = {
+        id: 'WI-006',
+        title: 'Reopened item',
+        description: 'This was reopened',
+        status: 'open',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-06-02T12:00:00.000Z', // local reopen timestamp (newer)
+        tags: ['bug'],
+        assignee: 'alice',
+        stage: 'in_progress',
+        issueType: 'bug',
+        createdBy: 'alice',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+
+      const remoteClosed: WorkItem = {
+        id: 'WI-006',
+        title: 'Reopened item',
+        description: 'This was reopened',
+        status: 'completed',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-06-01T12:00:00.000Z', // remote close timestamp (older)
+        tags: ['bug'],
+        assignee: 'alice',
+        stage: 'done',
+        issueType: 'bug',
+        createdBy: 'alice',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+
+      const result = mergeWorkItems([localReopened], [remoteClosed]);
+
+      expect(result.merged).toHaveLength(1);
+      const merged = result.merged[0];
+
+      // Local is newer, so the reopen must be preserved
+      expect(merged.status).toBe('open');
+      expect(merged.stage).toBe('in_progress');
+      expect(merged.updatedAt).toBe('2024-06-02T12:00:00.000Z');
+    });
+
+    it('should preserve remote close when remote is newer than local reopen attempt', () => {
+      // Scenario: User tries to reopen a closed item but the close
+      // happened later (remote is newer). The close must be preserved.
+
+      const localReopened: WorkItem = {
+        id: 'WI-007',
+        title: 'Item',
+        description: 'Attempted reopen',
+        status: 'open',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-06-01T12:00:00.000Z', // local reopen (older)
+        tags: [],
+        assignee: '',
+        stage: 'in_progress',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+
+      const remoteClosed: WorkItem = {
+        id: 'WI-007',
+        title: 'Item',
+        description: 'Attempted reopen',
+        status: 'completed',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-06-02T12:00:00.000Z', // remote close timestamp (newer)
+        tags: [],
+        assignee: '',
+        stage: 'done',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+
+      const result = mergeWorkItems([localReopened], [remoteClosed]);
+
+      expect(result.merged).toHaveLength(1);
+      const merged = result.merged[0];
+
+      // Remote is newer, so close must be preserved
+      expect(merged.status).toBe('completed');
+      expect(merged.stage).toBe('done');
+      expect(merged.updatedAt).toBe('2024-06-02T12:00:00.000Z');
+    });
   });
 
   describe('merge utils', () => {

@@ -9,6 +9,7 @@ A lightweight, Git-friendly issue tracker designed for AI agents and development
 - **Hierarchical Work Items**: Parent-child relationships for organizing epics, features, and tasks
 - **Plugin System**: Extend the CLI with custom commands (see [Plugin Guide](PLUGIN_GUIDE.md))
 - **AI Agent Integration**: Built-in Pi agent with real-time streaming, interactive agent chat pane, and agent-driven action palette.
+- **Heartbeat Skill**: Automated work item monitoring via the Pi agent — run `/skill:heartbeat` to flag items needing producer review or to audit completed items for closure readiness (see [skill/heartbeat/SKILL.md](skill/heartbeat/SKILL.md)).
 - **Multi-Project Support**: Custom prefixes for issue IDs per project
 
 ## Installation
@@ -115,6 +116,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 
 | Document | Description |
 |----------|-------------|
+| [Heartbeat Skill](skill/heartbeat/SKILL.md) | Automated work item monitoring and audit orchestration for the Pi agent |
 | [TUI.md](TUI.md) | Interactive terminal UI controls and features |
 | [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) | Plugin development guide and API reference |
 | [LOCAL_LLM.md](LOCAL_LLM.md) | Configure local LLM providers (Ollama, Foundry) |

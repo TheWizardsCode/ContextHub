@@ -126,6 +126,28 @@ describe('model-display', () => {
     expect(getResolvedModel()).toBeNull();
   });
 
+  it('session_start resets resolvedModel from previous session', () => {
+    registerModelDisplay(mockPi);
+    const sessionHandler = registeredListeners['session_start'];
+    const responseHandler = registeredListeners['after_provider_response'];
+
+    // Simulate a previous session that resolved a model
+    responseHandler({ headers: { 'x-resolved-model': 'openai/gpt-4' } }, mockCtx);
+    expect(getResolvedModel()).toBe('openai/gpt-4');
+
+    // Track onModelChange
+    const changeCb = vi.fn();
+    onModelChange(changeCb);
+
+    // New session starts — should reset the resolved model
+    sessionHandler({}, { model: { id: 'code' } });
+
+    expect(getResolvedModel()).toBeNull();
+    expect(getSelectedModel()).toBe('code');
+    // onModelChange should have been called for the resolved model reset
+    expect(changeCb).toHaveBeenCalled();
+  });
+
   it('session_start does not overwrite an already-set selectedModel', () => {
     registerModelDisplay(mockPi);
     const modelHandler = registeredListeners['model_select'];

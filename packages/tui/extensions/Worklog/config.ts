@@ -146,6 +146,10 @@ export class WorklogConfig {
       // recovery config degrade gracefully (fall back to defaults per category).
       validated.recovery = partial.recovery;
     }
+    if (partial.schedules !== undefined) {
+      // Schedules are passed through as-is; validation happens in the scheduler module
+      validated.schedules = partial.schedules;
+    }
 
     this._config = { ...this._config, ...validated };
     persistSettings(validated, this._projectDir || undefined);

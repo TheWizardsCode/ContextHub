@@ -116,6 +116,14 @@ export function registerModelDisplay(pi: ExtensionAPI): void {
   // returns the alias even when no model_select event has fired yet.
   // Only populates if model_select hasn't already set the value.
   pi.on('session_start', (_event, ctx) => {
+    // Reset the resolved model for the new session — the new session
+    // may resolve to a different provider/model than the previous one.
+    // Without this, the old resolved model from the previous session
+    // would show in the footer until the new proxy response arrives.
+    if (_resolvedModel !== null) {
+      _resolvedModel = null;
+      _onModelChange?.();
+    }
     if (ctx.model?.id && !_selectedModel) {
       _selectedModel = ctx.model.id;
       _onModelChange?.();

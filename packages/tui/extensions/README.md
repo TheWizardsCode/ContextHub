@@ -196,7 +196,7 @@ The footer uses a **three-section layout**: **left** (status + elapsed time sinc
 | **Total session time** | Total wall-clock session duration (e.g., `Total: 5m 42s`) — shown in the center section |
 | **Token usage** | Input/output token counts (e.g., `↑1.2k ↓4.5k`) |
 | **Context usage** | Percentage of context window (e.g., `76.8%/128k`) |
-| **Model ID** | Currently active model (e.g., `gpt-4`) |
+| **Model ID** | Currently active model (e.g., `gpt-4`). While a model alias is selected but no resolved provider/model has been received yet, shows `{alias} → (resolving)` (e.g., `code → (resolving)`). |
 
 ### Colour Coding
 
@@ -210,13 +210,15 @@ The response age indicator uses colour coding to provide at-a-glance health:
 
 ### Layout
 
-The footer spans two lines. The first line shows extension status entries
-(e.g., resolved provider/model, activity indicator). The second line shows
-session health metrics in a **three-section layout**:
+The footer spans three lines. The first line shows extension status entries
+(e.g., activity indicator). The second line shows session health metrics in
+a **three-section layout**. The third line shows the model/provider info and
+(optionally) an initial prompt preview:
 
 ```
-openai/gpt-4  ⏵ /wl                                                         ← Extension statuses
-● Streaming 45s #5 (3s ago)  Total: 5m 42s  ↑1.2k ↓4.5k 39.1%/128k        ← Session health
+⏵ /wl                                                                        ← Extension statuses
+● Streaming 45s #5   Total: 5m 42s  ↑1.2k ↓4.5k 39.1%/128k                  ← Session health
+code → openai/gpt-4  │  Fix the bug                                          ← Model + prompt
 │  │          │   │  │             │           │    │       │              │
 │  │          │   │  │             │           │    │       └────────────── Context usage
 │  │          │   │  │             │           │    └────────────────────── Output tokens
@@ -227,6 +229,21 @@ openai/gpt-4  ⏵ /wl                                                         �
 │  │          └──────────────────────────────────────────────────────────── Elapsed time since last response
 └────────────────────────────────────────────────────────────────────────── Status marker
 ```
+
+### Model/Provider Display (Line 3)
+
+The third footer line shows the model alias and resolved provider/model in
+dimmed text. The display varies depending on available state:
+
+| State | Example |
+|-------|---------|
+| Model alias selected, resolved provider/model received | `code → openai/gpt-4` |
+| Model alias selected, waiting for resolution | `code → (resolving)` |
+| No model alias, resolved provider/model available | `openai/gpt-4` |
+| No model info at all | `—` |
+
+When an initial prompt preview is available, it is shown after the model
+info separated by a vertical bar (e.g., `code → openai/gpt-4  │  Fix the bug`).
 
 During **idle** or **tool execution**, the last-chunk timer is not shown.
 
@@ -447,6 +464,7 @@ The `/wl` slash command browses work items recommended by the `wl next` algorith
 ```
 /wl              # Show unfiltered work items (count from settings)
 /wl settings     # Open the settings overlay
+/wl schedule     # Manage periodic request schedules (see Periodic Request Scheduler)
 /wl idea         # Show items in idea stage
 /wl intake       # Show items in intake_complete stage
 /wl plan         # Show items in plan_complete stage
@@ -473,13 +491,15 @@ Typing an unrecognised stage value produces an error notification and falls back
 
 ### Autocomplete
 
-The `/wl` command registers `getArgumentCompletions`, so Pi's editor shows autocomplete suggestions for valid stage values (both shorthand and canonical) when typing arguments.
+The `/wl` command registers `getArgumentCompletions`, so Pi's editor shows autocomplete suggestions for valid stage values (both shorthand and canonical) and the `settings`/`schedule` commands when typing arguments.
 
 ### Example
 
 - `/wl progress` — filters to items in `in_progress` stage
 - `/wl in_review` — filters to items in `in_review` stage
 - `/wl settings` — opens the settings overlay
+- `/wl schedule list` — lists all configured periodic request schedules
+- `/wl schedule add "0 1 * * *" "Daily audit"` — adds a daily audit schedule
 - `/wl` — shows the default unfiltered items (count from settings)
 - `/wl   ` — whitespace-only arguments are treated as "no arguments" and show unfiltered items
 
@@ -728,4 +748,111 @@ releases the previous session's model lease when a new Pi session is created
 - Results are cached per-extension-lifecycle to avoid repeated filesystem reads.
 - Registered in `Worklog/index.ts` via `registerLeaseRelease(pi)`.
 - Tests are in `Worklog/lease-release.test.ts`.
+
+## Periodic Request Scheduler
+
+The extension includes a **periodic request scheduler** that automatically submits pi requests on a recurring schedule using cron expressions. This is useful for automating recurring tasks such as hourly audits, daily intake checks, or nightly cleanup while the pi session is running.
+
+Requests are submitted through pi's normal message flow via `pi.sendUserMessage()`, making both the request and its response fully visible in the session history.
+
+### How It Works
+
+1. **Background ticker**: The scheduler runs a background interval (every 30 seconds by default) that checks all configured schedules.
+2. **Cron matching**: For each enabled schedule, the current time is checked against the cron expression. If the expression matches the current minute, the request is a candidate for submission.
+3. **Idle check**: Before submitting, the scheduler verifies that the pi agent is idle (no active streaming or tool execution) to avoid interrupting active work. If the agent is busy, the scheduled run is skipped for that minute.
+4. **Duplicate prevention**: Once a schedule fires, it will not fire again within the same minute, preventing duplicate submissions.
+5. **Visibility**: The request is submitted via `pi.sendUserMessage()`, so it appears as a user message in the session log alongside any pi responses.
+
+### The `/wl schedule` Command
+
+Manage configured schedules via the `/wl schedule` command. Autocomplete for `schedule` is available when typing `/wl ` in Pi's editor.
+
+#### Subcommands
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | List all configured schedules with their ID, cron expression, request text, label, and enabled status |
+| `add <cron> <request>` | Add a new schedule with a cron expression and pi request text. Optionally add `--label <label>` for display |
+| `remove <id>` | Remove a schedule by its unique ID |
+| `toggle <id>` | Enable or disable a schedule by its ID without removing it |
+| `help` | Show help text with usage and examples |
+
+#### Examples
+
+```
+/wl schedule add "0 1 * * *" "/skill:audit WL-123" --label "Daily audit"
+/wl schedule add "*/15 * * * *" "Check for new work items"
+/wl schedule list
+/wl schedule toggle sched-abc123-1
+/wl schedule remove sched-abc123-1
+```
+
+### Cron Expression Format
+
+The scheduler supports standard 5-field cron expressions:
+
+```
+ ┌────────── minute (0-59)
+ │ ┌───────── hour (0-23)
+ │ │ ┌──────── day of month (1-31)
+ │ │ │ ┌────── month (1-12)
+ │ │ │ │ ┌──── day of week (0-7, 0 and 7 are Sunday)
+ │ │ │ │ │
+ * * * * *
+```
+
+Supported syntax:
+
+| Syntax | Description | Example |
+|--------|-------------|---------|
+| `*` | Wildcard — matches every value | `*` in minute field = every minute |
+| `N` | Exact value | `0` in hour field = midnight only |
+| `N,M` | List of values | `1,15` in minute field = at minutes 1 and 15 |
+| `N-M` | Range of values (inclusive) | `9-17` in hour field = every hour from 9am to 5pm |
+| `*/N` | Step with wildcard | `*/15` in minute field = every 15 minutes |
+| `N-M/N` | Step with range | `1-30/10` in minute field = at 1, 11, 21 minutes past the hour |
+
+#### Common Examples
+
+| Cron Expression | Description |
+|----------------|-------------|
+| `0 * * * *` | Every hour at minute 0 |
+| `*/15 * * * *` | Every 15 minutes |
+| `0 1 * * *` | Daily at 1:00 AM |
+| `0 9,17 * * 1-5` | Weekdays at 9:00 AM and 5:00 PM |
+| `0 0 * * 0` | Midnight every Sunday |
+
+### Configuration Persistence
+
+Schedule configuration is persisted to the project's `.pi/settings.json` under the `context-hub` namespace and survives pi restarts. When a new session starts (`session_start`), the scheduler reloads schedules from disk and resumes.
+
+Example `.pi/settings.json`:
+
+```json
+{
+  "context-hub": {
+    "schedules": [
+      {
+        "id": "sched-abc123-1",
+        "cron": "0 1 * * *",
+        "request": "/skill:audit WL-123",
+        "label": "Daily audit",
+        "enabled": true
+      }
+    ]
+  }
+}
+```
+
+Schedules can be added and removed via `/wl schedule add` and `/wl schedule remove`, or by editing the settings file directly.
+
+### Technical Notes
+
+- Implemented in `Worklog/lib/scheduler.ts`.
+- Uses a minimal bundled cron expression parser with zero external dependencies.
+- Agent idle state is tracked via pi lifecycle events (`turn_start`, `message_end`, `tool_execution_start`).
+- The background ticker runs at 30-second intervals (not configurable via settings, but adjustable in code).
+- The scheduler is registered in `Worklog/index.ts` via `registerScheduler(pi)`.
+- Lifecycle: starts on `session_start`, stops on `session_shutdown`.
+- Tests are in `Worklog/lib/scheduler.test.ts` (48 tests).
 ```

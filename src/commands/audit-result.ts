@@ -6,6 +6,7 @@
  */
 
 import type { PluginContext } from '../plugin-types.js';
+import { promises as fs } from 'fs';
 import { formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText, resolveAuditAuthor } from '../audit.js';
 
 export default function register(ctx: PluginContext): void {
@@ -92,13 +93,15 @@ export default function register(ctx: PluginContext): void {
     .option('--ready-to-close <yes|no>', 'Whether the work item is ready to close (yes/no)')
     .option('--summary <text>', 'Human-readable summary of the audit')
     .option('--raw-output <text>', 'Machine-readable raw output from the audit tool')
+    .option('--audit-file <file>', 'Read audit raw output from a file')
     .option('--author <author>', 'Author of the audit (defaults to current user)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--json', 'Output in JSON format')
-    .action((id: string, options: {
+    .action(async (id: string, options: {
       readyToClose?: string;
       summary?: string;
       rawOutput?: string;
+      auditFile?: string;
       author?: string;
       prefix?: string;
       json?: boolean;
@@ -134,20 +137,48 @@ export default function register(ctx: PluginContext): void {
         process.exit(1);
       }
 
+      // Resolve rawOutput: --audit-file takes precedence over --raw-output
+      let rawOutput: string | null = options.rawOutput || null;
+      if (options.auditFile) {
+        try {
+          rawOutput = await fs.readFile(options.auditFile, 'utf8');
+        } catch (err) {
+          output.error(`Failed to read audit file: ${options.auditFile}`, {
+            success: false,
+            error: `Failed to read audit file: ${options.auditFile}`,
+          });
+          process.exit(1);
+        }
+      }
+
       const readyToClose = rtc === 'yes';
       const author = options.author?.trim() || resolveAuditAuthor();
       const auditedAt = new Date().toISOString();
       const summary = options.summary || null;
-      const rawOutput = options.rawOutput || null;
 
-      db.saveAuditResult({
-        workItemId: normalizedId,
-        readyToClose,
-        auditedAt,
-        summary,
-        rawOutput,
-        author,
-      });
+      try {
+        db.saveAuditResult({
+          workItemId: normalizedId,
+          readyToClose,
+          auditedAt,
+          summary,
+          rawOutput,
+          author,
+        });
+      } catch (err: any) {
+        if (options.json || utils.isJsonMode()) {
+          output.json({
+            success: false,
+            error: err.message || 'Failed to persist audit result',
+            workItemId: normalizedId,
+          });
+          process.exitCode = 1;
+          return;
+        }
+        console.error(`Error: Failed to persist audit result for ${normalizedId}`);
+        console.error(`  ${err.message || 'Unknown error'}`);
+        process.exit(1);
+      }
 
       if (options.json || utils.isJsonMode()) {
         output.json({
