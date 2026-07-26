@@ -401,3 +401,101 @@ describe('formatChordHints', () => {
     });
   });
 });
+
+describe('getIconPrefix — stale audit but passed', () => {
+  it('returns stale-passed icon for in_review with stale audit and readyToClose=true', async () => {
+    const { getIconPrefix } = await import('./browse.js');
+    // Stale audit: auditedAt older than (updatedAt - 60000)
+    const result = getIconPrefix(
+      {
+        id: 'WL-TEST002',
+        title: 'Test Item',
+        status: 'open',
+        stage: 'in_review',
+        auditedAt: '2024-01-01T00:00:00Z',
+        updatedAt: '2024-06-01T00:00:00Z',
+        auditResult: true,
+      },
+      false,
+    );
+    // Result format: status (🔓) + stale-passed (🟩) + producer-review (✅) = "🔓 🟩 ✅"
+    expect(result).toContain('\u{1F7E9}'); // 🟩 stale-passed
+    expect(result).not.toContain('\u{1F50D}'); // Not 🔍 stage icon (would be stale fallback)
+    // ✅ appears as producer review flag (column 3), not as fresh audit icon (column 2)
+  });
+
+  it('returns stage icon for in_review with stale audit and no audit result', async () => {
+    const { getIconPrefix } = await import('./browse.js');
+    const result = getIconPrefix(
+      {
+        id: 'WL-TEST003',
+        title: 'Test Item',
+        status: 'open',
+        stage: 'in_review',
+        auditedAt: '2024-01-01T00:00:00Z',
+        updatedAt: '2024-06-01T00:00:00Z',
+        auditResult: undefined,
+      },
+      false,
+    );
+    // Should have stage icon (🔍) not stale-passed icon
+    expect(result).toContain('\u{1F50D}'); // 🔍 stage icon
+    expect(result).not.toContain('\u{1F7E9}'); // 🟩 stale-passed
+  });
+
+  it('returns ✅ for in_review with fresh audit and readyToClose=true', async () => {
+    const { getIconPrefix } = await import('./browse.js');
+    // Fresh audit: now - 1 second (within the 60-second buffer)
+    const now = new Date();
+    const result = getIconPrefix(
+      {
+        id: 'WL-TEST004',
+        title: 'Test Item',
+        status: 'open',
+        stage: 'in_review',
+        auditedAt: new Date(now.getTime() - 1000).toISOString(),
+        updatedAt: now.toISOString(),
+        auditResult: true,
+      },
+      false,
+    );
+    expect(result).toContain('\u{2705}'); // ✅ fresh passed
+  });
+
+  it('returns ❌ for in_review with fresh audit and readyToClose=false', async () => {
+    const { getIconPrefix } = await import('./browse.js');
+    const now = new Date();
+    const result = getIconPrefix(
+      {
+        id: 'WL-TEST005',
+        title: 'Test Item',
+        status: 'open',
+        stage: 'in_review',
+        auditedAt: new Date(now.getTime() - 1000).toISOString(),
+        updatedAt: now.toISOString(),
+        auditResult: false,
+      },
+      false,
+    );
+    expect(result).toContain('\u{274C}'); // ❌ fresh failed
+  });
+
+  it('returns stale-passed icon with noIcons=true for in_review stale passed', async () => {
+    const { getIconPrefix } = await import('./browse.js');
+    const result = getIconPrefix(
+      {
+        id: 'WL-TEST006',
+        title: 'Test Item',
+        status: 'open',
+        stage: 'in_review',
+        auditedAt: '2024-01-01T00:00:00Z',
+        updatedAt: '2024-06-01T00:00:00Z',
+        auditResult: true,
+      },
+      true,
+    );
+    expect(result).toContain('[YES_STALE]');
+    expect(result).not.toContain('[YES]'); // Not fresh passed
+    expect(result).not.toContain('[REVIEW]'); // Not stage fallback
+  });
+});

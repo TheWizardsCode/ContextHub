@@ -53,7 +53,7 @@ import {
 // Use createRequire with realpath-resolved path so the icons module can be
 // found even when this extension is loaded via a symlink.
 const _require = createRequire(realpathSync(fileURLToPath(import.meta.url)));
-const { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, riskIcon, effortIcon, needsProducerReviewIcon } = _require('../../../../../dist/icons.js');
+const { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, riskIcon, effortIcon, needsProducerReviewIcon, auditStaleIcon } = _require('../../../../../dist/icons.js');
 
 // ── Auto-sync state ────────────────────────────────────────────────
 
@@ -338,8 +338,12 @@ export function getIconPrefix(item: WorklogBrowseItem, noIcons: boolean): string
       // Fresh audit: show based on readyToClose
       secondIcon = auditIcon(item.auditResult, { noIcons });
     } else {
-      // No audit or stale audit: show stage icon
-      secondIcon = stageIcon(item.stage, { noIcons });
+      // No audit or stale audit: show stale-passed icon if passed, else stage icon
+      if (item.auditResult === true) {
+        secondIcon = auditStaleIcon(item.auditResult, { noIcons });
+      } else {
+        secondIcon = stageIcon(item.stage, { noIcons });
+      }
     }
   } else {
     secondIcon = stageIcon(item.stage, { noIcons });

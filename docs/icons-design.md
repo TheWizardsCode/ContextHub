@@ -56,7 +56,32 @@ across the CLI (chalk) and TUI rendering paths. It covers:
 | no      | `❌`   | `[NO]`        | "Audit: Failed"       |
 | unknown | `❓`   | `[UNKN]`      | "Audit: Not run"      |
 
-## 3a. Producer Review Flag Icons
+## 3a. Stale Audit Result Icons
+
+| State                         | Icon   | Text Fallback   | Accessible Label              |
+|-------------------------------|--------|-----------------|-------------------------------|
+| Audit passed (stale)          | `🟩`   | `[YES_STALE]`   | "Audit: Passed (stale)"      |
+
+When an audit result is `readyToClose: true` but the audit timestamp is stale
+(more than 60 seconds before `updatedAt`), the stale-passed icon is displayed
+in column 2 instead of the stage icon. This preserves the information that
+audit passed even after subsequent minor updates made the audit appear stale.
+
+The stale-passed icon only applies to `in_review` items. The regular audit
+icons (✅ / ❌ / ❔) are used for fresh audits, and the stage icon (🔍) is
+used when no audit exists or when the audit is stale with `readyToClose: false`.
+
+The stale-passed icon was chosen to be visually distinct from:
+- ✅ (fresh audit passed, green check mark)
+- ❌ (fresh audit failed, red cross)
+- 🔍 (stage icon, when no audit or stale without pass)
+- ❔ (unknown/not run)
+
+🟩 (green square button, U+1F7E9) has a distinct shape from all of these,
+and its green colour still conveys a positive (passed) result even when the
+check mark is not shown.
+
+## 3b. Producer Review Flag Icons
 
 | State                    | Icon   | Text Fallback       | Accessible Label              |
 |--------------------------|--------|---------------------|-------------------------------|
@@ -276,8 +301,10 @@ for all stages. The layout is:
 - **Column 1**: Status icon (🔓 open, 🔄 in-progress, ✔️ completed, etc.)
 - **Column 2**: Stage icon (💡 idea, 📥 intake, 📋 plan, 🛠️ progress, 🏁 done)
   For `in_review` stage, this column becomes audit-aware:
+  - 🟩 (stale-passed icon) — if the audit is stale but readyToClose === true
+    (auditedAt <= updatedAt - 60 seconds, but auditResult === true)
   - 🔍 (stage icon) — if no audit exists, or the audit is stale
-    (auditedAt <= updatedAt - 60 seconds)
+    with readyToClose !== true
   - ✅ — if a fresh audit exists and readyToClose === true
   - ❌ — if a fresh audit exists and readyToClose === false
 - **Column 3**: Producer review flag (❌ needs review, ✅ review complete)
@@ -293,6 +320,9 @@ Examples:
 🔄 🔍 ✅ 🏰 Epic feature name       ← in_review, no audit
 [INPR][REVIEW][PRODUCER_OK][EPIC] Epic feature name  ← when fallback
 
+🔄 🟩 ✅ 🏰 Epic feature name       ← in_review, stale audit but passed
+[INPR][YES_STALE][PRODUCER_OK][EPIC] Epic feature name  ← when fallback
+
 🔄 ✅ ❌ Regular task               ← in_review, fresh audit pass, needs producer review
 [INPR][YES][NEEDS_PRODUCER] Regular task  ← when fallback
 ```
@@ -307,8 +337,10 @@ audit is fresh when: auditedAt > updatedAt - 60000 (milliseconds)
 audit is stale when:  auditedAt <= updatedAt - 60000
 ```
 
-When no audit exists or the audit is stale, the column 2 falls back to
-showing the normal `in_review` stage icon (🔍 / `[REVIEW]`).
+When no audit exists or the audit is stale without a pass result
+(`auditResult !== true`), column 2 shows the normal `in_review` stage icon
+(🔍 / `[REVIEW]`). When the audit is stale but `readyToClose === true`,
+column 2 shows the stale-passed icon (🟩 / `[YES_STALE]`).
 
 The `formatBrowseOption` function prepends the icons before the title.
 The icon prefix (status + stage/producer + optional epic icon/child count)

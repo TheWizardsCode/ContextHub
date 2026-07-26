@@ -203,15 +203,15 @@ describe('Worklog browse pi extension', () => {
       expect(prefix).toBe('🔓 🔍 ✅');
     });
 
-    it('shows in_review stage icon when audit is stale (auditedAt <= updatedAt - 60s)', () => {
+    it('shows stale-passed icon when audit is stale but readyToClose=true', () => {
       const prefix = getIconPrefix(
         { id: 'WL-9', title: 'Test', status: 'open', stage: 'in_review', auditResult: true, auditedAt: new Date(Date.now() - 120000).toISOString(), updatedAt: new Date(Date.now() - 1000).toISOString() },
         false,
       );
-      expect(prefix).toBe('🔓 🔍 ✅');
+      expect(prefix).toBe('🔓 🟩 ✅');
     });
 
-    it('shows in_review stage icon when audit is stale (auditedAt <= updatedAt - 60s)', () => {
+    it('shows stale-passed icon when audit is stale but readyToClose=true (2nd test)', () => {
       // audit happened more than 60 seconds before updatedAt → stale
       // auditedAt = updatedAt - 90000ms (90 seconds old) > 60s buffer → stale
       const now = Date.now();
@@ -219,7 +219,7 @@ describe('Worklog browse pi extension', () => {
         { id: 'WL-10', title: 'Test', status: 'open', stage: 'in_review', auditResult: true, auditedAt: new Date(now - 90000).toISOString(), updatedAt: new Date(now - 1000).toISOString() },
         false,
       );
-      expect(prefix).toBe('🔓 🔍 ✅');
+      expect(prefix).toBe('🔓 🟩 ✅');
     });
 
     it('shows in_review audit pass and producer review needed together', () => {
@@ -263,7 +263,7 @@ describe('Worklog browse pi extension', () => {
       }
     });
 
-    it('shows text-fallback for in_review with stale audit', () => {
+    it('shows text-fallback for in_review with stale audit but readyToClose=true', () => {
       const origEnv = process.env.WL_NO_ICONS;
       process.env.WL_NO_ICONS = '1';
       try {
@@ -271,8 +271,8 @@ describe('Worklog browse pi extension', () => {
           { id: 'WL-15', title: 'Test', status: 'open', stage: 'in_review', auditResult: true, auditedAt: new Date(Date.now() - 120000).toISOString(), updatedAt: new Date(Date.now() - 1000).toISOString() },
           true,
         );
-        // Stale audit → show stage fallback [REVIEW], producer review not needed → [PRODUCER_OK]
-        expect(prefix).toBe('[OPEN] [REVIEW] [PRODUCER_OK]');
+        // Stale audit + passed → show stale-passed fallback [YES_STALE], producer review not needed → [PRODUCER_OK]
+        expect(prefix).toBe('[OPEN] [YES_STALE] [PRODUCER_OK]');
       } finally {
         delete process.env.WL_NO_ICONS;
       }
