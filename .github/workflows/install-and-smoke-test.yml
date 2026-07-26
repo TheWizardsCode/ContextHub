@@ -19,7 +19,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       - name: Install dependencies
@@ -45,9 +45,9 @@ jobs:
           # Verify the TUI module loads without errors (using tsx for TypeScript imports)
           npx tsx -e "
           (async () => {
-            const { ChatPane } = await import('./packages/tui/extensions/chatPane.js');
-            const { ActionPalette } = await import('./packages/tui/extensions/actionPalette.js');
-            const { runWl } = await import('./packages/tui/extensions/wl-integration.js');
+            const { ChatPane } = await import('./packages/tui/extensions/Worklog/chatPane.ts');
+            const { ActionPalette } = await import('./packages/tui/extensions/Worklog/actionPalette.ts');
+            const { runWl } = await import('./packages/tui/extensions/wl-integration.ts');
             console.log('✓ TUI modules load successfully');
           })();
           "
@@ -55,7 +55,7 @@ jobs:
           # Verify chat pane can send messages
           npx tsx -e "
           (async () => {
-            const { ChatPane } = await import('./packages/tui/extensions/chatPane.js');
+            const { ChatPane } = await import('./packages/tui/extensions/Worklog/chatPane.ts');
             const pane = new ChatPane();
             pane.clear();
             console.log('✓ ChatPane instantiated');
@@ -65,8 +65,8 @@ jobs:
           # Verify action palette has default actions
           npx tsx -e "
           (async () => {
-            const { ChatPane } = await import('./packages/tui/extensions/chatPane.js');
-            const { ActionPalette } = await import('./packages/tui/extensions/actionPalette.js');
+            const { ChatPane } = await import('./packages/tui/extensions/Worklog/chatPane.ts');
+            const { ActionPalette } = await import('./packages/tui/extensions/Worklog/actionPalette.ts');
             const chat = new ChatPane();
             const palette = new ActionPalette(chat);
             palette.open();
