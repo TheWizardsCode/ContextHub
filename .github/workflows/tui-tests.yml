@@ -80,6 +80,11 @@ jobs:
       - name: Build CLI
         run: npm run build
 
+      - name: Initialize Worklog
+        run: |
+          node ./dist/cli.js init --project-name "ContextHub" --prefix WL --agents-template skip --json > /dev/null
+          echo "✓ Worklog initialized"
+
       - name: Run CLI tests
         run: npm test
 
@@ -99,6 +104,11 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Initialize Worklog
+        run: |
+          node ./dist/cli.js init --project-name "ContextHub" --prefix WL --agents-template skip --json > /dev/null
+          echo "✓ Worklog initialized"
 
       - name: Run headless TUI tests
         run: bash ./tests/tui-ci-run.sh

@@ -31,10 +31,17 @@ jobs:
       - name: Verify package builds
         run: npm pack
 
+      - name: Initialize Worklog
+        run: |
+          node ./dist/cli.js init --project-name "ContextHub" --prefix WL --agents-template skip --json > /dev/null
+          echo "✓ Worklog initialized"
+
       - name: Run headless smoke test
         run: |
           # Verify the wl command is available and works
           node ./dist/cli.js list -n 1 --json > /dev/null
+          echo "✓ wl CLI works"
+
           echo "✓ wl CLI works"
 
           # Verify the TUI module loads without errors (using tsx for TypeScript imports)
