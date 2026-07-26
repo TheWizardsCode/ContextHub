@@ -1,0 +1,765 @@
+/**
+ * packages/herdr/src/worklist.ts — Core work item list UI logic
+ *
+ * Provides the state model, rendering, and keyboard handling for the
+ * Herdr work item selection list. This module is platform-independent
+ * and has NO direct Herdr socket API dependency — it operates purely
+ * on in-memory data and produces formatted string output.
+ *
+ * The design is inspired by the Pi TUI browse.ts but simplified for
+ * Herdr's pane-based model.
+ */
+
+import type { WorkItem } from './fetcher.js';
+
+// ── Constants ─────────────────────────────────────────────────────────
+
+export const STAGES = [
+  'idea',
+  'intake_complete',
+  'plan_complete',
+  'in_progress',
+  'in_review',
+  'completed',
+] as const;
+
+export type Stage = (typeof STAGES)[number];
+
+/**
+ * Map stage to a display color (ANSI 256-color code).
+ */
+export const STAGE_COLORS: Record<string, number> = {
+  idea: 241,            // grey
+  intake_complete: 68,  // blue-ish
+  plan_complete: 172,   // orange-ish
+  in_progress: 76,      // green-ish
+  in_review: 220,       // yellow-ish
+  completed: 33,        // cyan-ish
+};
+
+/**
+ * Priority display characters.
+ */
+export const PRIORITY_ICONS: Record<string, string> = {
+  critical: '🔴',
+  high: '🟡',
+  medium: '🟢',
+  low: '⚪',
+};
+
+/**
+ * Status display characters.
+ */
+export const STATUS_ICONS: Record<string, string> = {
+  open: '○',
+  'in-progress': '◉',
+  completed: '✓',
+  blocked: '⊘',
+};
+
+// ── Terminal helpers ─────────────────────────────────────────────────
+
+export interface TermSize {
+  rows: number;
+  cols: number;
+}
+
+/**
+ * Get current terminal size. Falls back to defaults.
+ */
+export function getTermSize(): TermSize {
+  try {
+    const rows = parseInt(process.env.LINES || '', 10) || 24;
+    const cols = parseInt(process.env.COLUMNS || '', 10) || 80;
+    return { rows, cols };
+  } catch {
+    return { rows: 24, cols: 80 };
+  }
+}
+
+/**
+ * ANSI escape code helpers.
+ */
+export const ANSI = {
+  reset: '\x1b[0m',
+  bold: '\x1b[1m',
+  dim: '\x1b[2m',
+  reverse: '\x1b[7m',
+  underline: '\x1b[4m',
+  clear: '\x1b[2J',
+  clearLine: '\x1b[2K',
+  cursorHome: '\x1b[H',
+  cursorUp: (n: number) => `\x1b[${n}A`,
+  cursorDown: (n: number) => `\x1b[${n}B`,
+  cursorCol: (n: number) => `\x1b[${n}G`,
+  fg: (code: number) => `\x1b[38;5;${code}m`,
+  bg: (code: number) => `\x1b[48;5;${code}m`,
+  hideCursor: '\x1b[?25l',
+  showCursor: '\x1b[?25h',
+  scrollRegion: (top: number, bottom: number) => `\x1b[${top};${bottom}r`,
+};
+
+// ── State ─────────────────────────────────────────────────────────────
+
+export type ViewMode = 'list' | 'detail' | 'filter';
+
+/**
+ * Mutable state for the work item list UI.
+ */
+export class WorkItemListState {
+  /** All loaded work items (unfiltered). */
+  private _allItems: WorkItem[];
+
+  /** Currently visible items (after filtering). */
+  items: WorkItem[];
+
+  /** Currently selected index within `items`. */
+  selectedIndex = 0;
+
+  /**
+   * Set selected index with clamping and scroll adjustment.
+   */
+  setSelectedIndex(index: number): void {
+    this.selectedIndex = index;
+    this._clampSelection();
+    this._adjustScroll();
+  }
+
+  /** Vertical scroll offset for the list display. */
+  scrollOffset = 0;
+
+  /** Current view mode. */
+  mode: ViewMode = 'list';
+
+  /** Currently displayed detail item (when mode === 'detail'). */
+  detailItem: WorkItem | null = null;
+
+  /** Active stage filter (null = no filter). */
+  activeFilter: string | null = null;
+
+  /** Terminal size for layout calculations. */
+  termSize: TermSize;
+
+  constructor(items: WorkItem[], termSize: TermSize) {
+    this._allItems = [...items];
+    this.items = [...items];
+    this.termSize = termSize;
+    this._clampSelection();
+  }
+
+  // ── Navigation ──────────────────────────────────────────────────
+
+  moveUp(): void {
+    if (this.selectedIndex > 0) {
+      this.selectedIndex -= 1;
+      this._adjustScroll();
+    }
+  }
+
+  moveDown(): void {
+    if (this.selectedIndex < this.items.length - 1) {
+      this.selectedIndex += 1;
+      this._adjustScroll();
+    }
+  }
+
+  pageUp(): void {
+    const pageSize = this._listHeight();
+    this.selectedIndex = Math.max(0, this.selectedIndex - pageSize);
+    this._adjustScroll();
+  }
+
+  pageDown(): void {
+    const pageSize = this._listHeight();
+    this.selectedIndex = Math.min(this.items.length - 1, this.selectedIndex + pageSize);
+    this._adjustScroll();
+  }
+
+  goToFirst(): void {
+    this.selectedIndex = 0;
+    this.scrollOffset = 0;
+  }
+
+  goToLast(): void {
+    this.selectedIndex = this.items.length - 1;
+    this._adjustScroll();
+  }
+
+  selectItem(): void {
+    if (this.items.length === 0) return;
+    this.detailItem = this.items[this.selectedIndex];
+    this.mode = 'detail';
+  }
+
+  back(): void {
+    if (this.mode === 'detail') {
+      this.mode = 'list';
+      this.detailItem = null;
+    } else if (this.mode === 'filter') {
+      this.mode = 'list';
+    }
+  }
+
+  // ── Filtering ───────────────────────────────────────────────────
+
+  activateFilter(): void {
+    this.mode = 'filter';
+  }
+
+  applyFilter(stage: string): void {
+    this.activeFilter = stage;
+    this._applyFilters();
+    this.selectedIndex = 0;
+    this.scrollOffset = 0;
+    this.mode = 'list';
+  }
+
+  clearFilter(): void {
+    this.activeFilter = null;
+    this._applyFilters();
+    this.selectedIndex = 0;
+    this.scrollOffset = 0;
+  }
+
+  // ── Refresh ─────────────────────────────────────────────────────
+
+  refreshItems(newItems: WorkItem[]): void {
+    this._allItems = [...newItems];
+    this._applyFilters();
+    this._clampSelection();
+    this._adjustScroll();
+  }
+
+  // ── Internal ────────────────────────────────────────────────────
+
+  private _applyFilters(): void {
+    let filtered = [...this._allItems];
+    if (this.activeFilter) {
+      filtered = filtered.filter((item) => item.stage === this.activeFilter);
+    }
+    this.items = filtered;
+  }
+
+  private _clampSelection(): void {
+    if (this.items.length === 0) {
+      this.selectedIndex = 0;
+    } else if (this.selectedIndex >= this.items.length) {
+      this.selectedIndex = this.items.length - 1;
+    } else if (this.selectedIndex < 0) {
+      this.selectedIndex = 0;
+    }
+  }
+
+  /** Number of visible list rows. */
+  _listHeight(): number {
+    // Reserve 3 rows for header, 1 for filter bar, 1 for footer, 1 for status
+    return Math.max(3, this.termSize.rows - 6);
+  }
+
+  _adjustScroll(): void {
+    const listHeight = this._listHeight();
+    if (this.selectedIndex < this.scrollOffset) {
+      this.scrollOffset = this.selectedIndex;
+    } else if (this.selectedIndex >= this.scrollOffset + listHeight) {
+      this.scrollOffset = this.selectedIndex - listHeight + 1;
+    }
+    // Clamp scroll offset
+    const maxOffset = Math.max(0, this.items.length - listHeight);
+    if (this.scrollOffset > maxOffset) {
+      this.scrollOffset = maxOffset;
+    }
+  }
+
+  /** Returns the currently visible slice of items. */
+  getVisibleItems(): WorkItem[] {
+    const listHeight = this._listHeight();
+    return this.items.slice(this.scrollOffset, this.scrollOffset + listHeight);
+  }
+}
+
+// ── Stage filter helper ───────────────────────────────────────────────
+
+export class StageFilter {
+  private _current: string | null = null;
+  private _index = -1;
+
+  get current(): string | null {
+    return this._current;
+  }
+
+  set(stage: string | null): void {
+    this._current = stage;
+    if (stage === null) {
+      this._index = -1;
+    } else {
+      this._index = STAGES.indexOf(stage as Stage);
+    }
+  }
+
+  /** Cycle to the next stage. Wraps around (including null/off). */
+  cycle(): void {
+    this._index += 1;
+    if (this._index >= STAGES.length) {
+      this._index = -1;
+      this._current = null;
+    } else {
+      this._current = STAGES[this._index];
+    }
+  }
+}
+
+// ── Formatting functions ──────────────────────────────────────────────
+
+/**
+ * Format a single item line for the list display.
+ */
+export function formatItemLine(
+  item: WorkItem,
+  maxCols: number,
+  isSelected = false,
+): string {
+  const prefix = isSelected ? '▸ ' : '  ';
+  const statusIcon = STATUS_ICONS[item.status] || '?';
+  const stageTag = item.stage && item.stage !== 'in_progress' ? ` [${item.stage}]` : '';
+  const priorityTag = item.priority ? ` ${item.priority}` : '';
+
+  // Format: "▸ ○ WL-TEST001 First item [stage] high"
+  const idPart = `${statusIcon} ${item.id}`;
+  const titlePart = item.title;
+
+  let line = `${prefix}${idPart} ${titlePart}${stageTag}${priorityTag}`;
+
+  // Truncate to fit terminal width
+  if (line.length > maxCols - 1) {
+    line = line.slice(0, maxCols - 4) + '...';
+  }
+
+  return line;
+}
+
+/**
+ * Format the detail view for a single work item.
+ */
+export function formatDetailView(item: WorkItem, maxCols: number): string {
+  const lines: string[] = [];
+  const separator = '─'.repeat(Math.min(maxCols, 72));
+
+  // Header
+  lines.push('');
+  lines.push(` ${item.id}`);
+  lines.push(` ${ANSI.bold}${item.title}${ANSI.reset}`);
+  lines.push(separator);
+
+  // Metadata
+  lines.push(`  Status:     ${item.status}`);
+  if (item.priority) lines.push(`  Priority:   ${item.priority}`);
+  if (item.stage) lines.push(`  Stage:      ${item.stage}`);
+  if (item.issueType) lines.push(`  Type:       ${item.issueType}`);
+  if (item.risk) lines.push(`  Risk:       ${item.risk}`);
+  if (item.effort) lines.push(`  Effort:     ${item.effort}`);
+  if (item.childCount !== undefined) lines.push(`  Children:   ${item.childCount}`);
+  if (item.tags && item.tags.length > 0) lines.push(`  Tags:       ${item.tags.join(', ')}`);
+  if (item.createdAt) lines.push(`  Created:    ${item.createdAt}`);
+  if (item.updatedAt) lines.push(`  Updated:    ${item.updatedAt}`);
+
+  lines.push(separator);
+
+  // Description
+  if (item.description) {
+    lines.push('');
+    lines.push(` ${ANSI.underline}Description${ANSI.reset}`);
+    lines.push('');
+    const descLines = item.description.split('\n');
+    for (const dl of descLines) {
+      // Truncate very long lines
+      const truncated = dl.length > maxCols - 4 ? dl.slice(0, maxCols - 7) + '...' : dl;
+      lines.push(`  ${truncated}`);
+      // Limit total description lines to avoid overflow
+      if (lines.length > 200) {
+        lines.push(`  ... (truncated, ${descLines.length} total lines)`);
+        break;
+      }
+    }
+  }
+
+  lines.push('');
+  lines.push(separator);
+  lines.push(` ${ANSI.dim}[esc] back  [r] refresh  [q] quit${ANSI.reset}`);
+
+  return lines.join('\n');
+}
+
+/**
+ * Format the filter status bar.
+ */
+export function formatFilterBar(filter: string | null, maxCols: number): string {
+  if (filter) {
+    const stageColor = STAGE_COLORS[filter] || 241;
+    const bar = ` ${ANSI.bg(stageColor)}${ANSI.fg(16)} Filter: ${filter} ${ANSI.reset}`;
+    return bar.padEnd(maxCols, '─');
+  }
+  return ` ${ANSI.dim}No filter — press [/] to filter by stage${ANSI.reset}`.padEnd(maxCols, ' ');
+}
+
+/**
+ * Format the filter selection prompt.
+ */
+export function formatFilterPrompt(maxCols: number): string {
+  const options = STAGES.map((s, i) => {
+    const color = STAGE_COLORS[s] || 241;
+    return `${ANSI.fg(color)}[${i}] ${s}${ANSI.reset}`;
+  }).join('  ');
+
+  const lines = [
+    '',
+    ` ${ANSI.bold}Filter by stage:${ANSI.reset}`,
+    ` ${options}`,
+    '',
+    ` ${ANSI.dim}[0-5] select stage  [esc] cancel${ANSI.reset}`,
+  ];
+  return lines.join('\n');
+}
+
+// ── Keyboard handling ─────────────────────────────────────────────────
+
+export type KeyAction = 'up' | 'down' | 'pageup' | 'pagedown' | 'select'
+  | 'back' | 'filter' | 'refresh' | 'quit' | 'first' | 'last' | null;
+
+/**
+ * Map special key sequences to action names.
+ */
+export function keyToAction(key: string): KeyAction {
+  switch (key) {
+    case '\x1b[A':
+    case 'k':
+      return 'up';
+    case '\x1b[B':
+    case 'j':
+      return 'down';
+    case '\x1b[5~':
+    case '\x1b[V': // Some terminals send this for page up
+      return 'pageup';
+    case '\x1b[6~':
+    case '\x1b[U': // Some terminals send this for page down
+      return 'pagedown';
+    case '\r':
+    case '\n':
+      return 'select';
+    case '\x1b':
+      return 'back';
+    case '/':
+      return 'filter';
+    case 'r':
+      return 'refresh';
+    case 'q':
+      return 'quit';
+    case 'g':
+      return 'first';
+    case 'G':
+      return 'last';
+    default:
+      return null;
+  }
+}
+
+/**
+ * Handle a keypress in the current state. Returns the action performed
+ * (or null if unrecognized).
+ *
+ * @param state - The current list state (mutated in place)
+ * @param key - The raw keypress string
+ * @param termSize - Current terminal dimensions
+ * @returns The action string, or null if unhandled
+ */
+export function handleKeypress(
+  state: WorkItemListState,
+  key: string,
+  termSize: TermSize,
+): KeyAction {
+  if (state.mode === 'detail') {
+    if (key === '\x1b' || key === 'q') {
+      state.back();
+      return 'back';
+    }
+    if (key === 'r') return 'refresh';
+    return null;
+  }
+
+  if (state.mode === 'filter') {
+    if (key === '\x1b') {
+      state.back();
+      return 'back';
+    }
+    // Digit keys select a stage by index
+    const digit = parseInt(key, 10);
+    if (!isNaN(digit) && digit >= 0 && digit < STAGES.length) {
+      state.applyFilter(STAGES[digit]);
+      return 'filter';
+    }
+    return null;
+  }
+
+  // List mode
+  const action = keyToAction(key);
+  switch (action) {
+    case 'up':
+      state.moveUp();
+      break;
+    case 'down':
+      state.moveDown();
+      break;
+    case 'pageup':
+      state.pageUp();
+      break;
+    case 'pagedown':
+      state.pageDown();
+      break;
+    case 'select':
+      state.selectItem();
+      return 'select';
+    case 'back':
+      state.back();
+      break;
+    case 'filter':
+      state.activateFilter();
+      return 'filter';
+    case 'refresh':
+      return 'refresh';
+    case 'quit':
+      return 'quit';
+    case 'first':
+      state.goToFirst();
+      break;
+    case 'last':
+      state.goToLast();
+      break;
+  }
+  return action;
+}
+
+// ── Renderer ──────────────────────────────────────────────────────────
+
+/**
+ * Create a list renderer function.
+ *
+ * Returns a function that produces the full screen content for the
+ * current state. The caller should write this to stdout and handle
+ * terminal setup/teardown.
+ */
+export function createListRenderer(): (
+  items: WorkItem[],
+  selectedIndex: number,
+  scrollOffset: number,
+  termSize: TermSize,
+  activeFilter: string | null,
+  mode: ViewMode,
+  detailItem: WorkItem | null,
+) => string {
+  return (
+    items: WorkItem[],
+    selectedIndex: number,
+    scrollOffset: number,
+    termSize: TermSize,
+    activeFilter: string | null,
+    mode: ViewMode,
+    detailItem: WorkItem | null,
+  ): string => {
+    const { rows, cols } = termSize;
+    const output: string[] = [];
+    const listHeight = Math.max(3, rows - 6);
+
+    if (mode === 'detail' && detailItem) {
+      return formatDetailView(detailItem, cols);
+    }
+
+    if (mode === 'filter') {
+      // Show filter prompt
+      const filterPrompt = formatFilterPrompt(cols);
+      output.push(filterPrompt);
+      // Pad remaining lines
+      const remaining = rows - filterPrompt.split('\n').length;
+      for (let i = 0; i < remaining; i++) {
+        output.push('');
+      }
+      return output.join('\n');
+    }
+
+    // ── Render list mode ──────────────────────────────────────────
+
+    // Header
+    const totalItems = items.length;
+    const filterLabel = activeFilter ? ` (filtered: ${activeFilter})` : '';
+    output.push(` ${ANSI.bold}Work Items${ANSI.reset} — ${totalItems} item(s)${filterLabel}`);
+    output.push('');
+
+    // Filter bar
+    output.push(formatFilterBar(activeFilter, cols));
+
+    // Items
+    const visible = items.slice(scrollOffset, scrollOffset + listHeight);
+    for (let i = 0; i < visible.length; i++) {
+      const isSelected = scrollOffset + i === selectedIndex;
+      const line = formatItemLine(visible[i], cols, isSelected);
+      if (isSelected) {
+        output.push(`${ANSI.reverse}${line}${ANSI.reset}`);
+      } else {
+        output.push(line);
+      }
+    }
+
+    // Fill remaining rows
+    const used = 3 + 1 + visible.length; // header + blank + filterbar + items
+    for (let i = used; i < rows - 1; i++) {
+      output.push('');
+    }
+
+    // Footer with keyboard hints
+    const footerLine = ` ${ANSI.dim}[↑↓/j:k] nav  [enter] select  [/] filter  [r] refresh  [q] quit${ANSI.reset}`;
+    output.push(footerLine);
+
+    return output.join('\n');
+  };
+}
+
+// ── Main TUI loop ─────────────────────────────────────────────────────
+
+/**
+ * Default renderer instance.
+ */
+const defaultRenderer = createListRenderer();
+
+/**
+ * Run the main selection list TUI. This function:
+ * 1. Sets up raw terminal mode
+ * 2. Enters an event loop reading keypresses
+ * 3. Calls the fetcher to load/refresh items
+ * 4. Renders the current state
+ * 5. Exits when the user presses 'q'
+ *
+ * @param fetcher - Async function that returns the work items to display
+ * @param initialItems - Pre-loaded items (optional, for testing)
+ * @returns The selected WorkItem when the user presses enter, or undefined
+ */
+export async function runWorklistTui(
+  fetcher: () => Promise<WorkItem[]>,
+  initialItems?: WorkItem[],
+): Promise<WorkItem | undefined> {
+  let termSize = getTermSize();
+
+  // Load items
+  let items: WorkItem[];
+  try {
+    items = initialItems ?? await fetcher();
+  } catch {
+    items = [];
+  }
+
+  const state = new WorkItemListState(items, termSize);
+  const renderer = defaultRenderer;
+
+  // Check if we're in raw mode (stdin is a TTY)
+  const isInteractive = process.stdin.isTTY;
+  let rawMode = false;
+
+  if (isInteractive) {
+    try {
+      process.stdin.setRawMode?.(true);
+      process.stdin.resume();
+      rawMode = true;
+    } catch {
+      // Not a TTY, use line-buffered mode
+    }
+  }
+
+  // Setup cleanup
+  const cleanup = (): void => {
+    if (rawMode) {
+      try {
+        process.stdin.setRawMode?.(false);
+      } catch {
+        // ignore
+      }
+    }
+    process.stdin.pause();
+    process.stdout.write(ANSI.showCursor);
+    process.stdout.write(ANSI.reset);
+  };
+
+  // Data reading callback
+  const onData = async (chunk: Buffer): Promise<void> => {
+    const key = chunk.toString();
+
+    if (key === 'q' && state.mode !== 'filter') {
+      cleanup();
+      resolve(undefined);
+      return;
+    }
+
+    const action = handleKeypress(state, key, termSize);
+
+    if (action === 'refresh') {
+      try {
+        const newItems = await fetcher();
+        state.refreshItems(newItems);
+      } catch {
+        // Keep existing items on refresh failure
+      }
+    }
+
+    if (action === 'select' && state.mode === 'detail') {
+      cleanup();
+      resolve(state.detailItem ?? undefined);
+      return;
+    }
+
+    // Re-render
+    render();
+  };
+
+  let resolve: (value: WorkItem | undefined) => void;
+  const promise = new Promise<WorkItem | undefined>((res) => {
+    resolve = res;
+  });
+
+  const render = (): void => {
+    termSize = getTermSize();
+    state.termSize = termSize;
+
+    const output = renderer(
+      state.items,
+      state.selectedIndex,
+      state.scrollOffset,
+      termSize,
+      state.activeFilter,
+      state.mode,
+      state.detailItem,
+    );
+
+    process.stdout.write(ANSI.cursorHome);
+    process.stdout.write(output);
+  };
+
+  // Initial render
+  render();
+
+  // Handle resize events
+  const onResize = (): void => {
+    termSize = getTermSize();
+    state.termSize = termSize;
+    render();
+  };
+
+  process.stdout.on('resize', onResize);
+
+  // Read keypresses
+  process.stdin.on('data', onData);
+
+  // Cleanup on promise resolution
+  promise.finally(() => {
+    cleanup();
+    process.stdout.removeListener('resize', onResize);
+    process.stdin.removeListener('data', onData);
+  });
+
+  return promise;
+}

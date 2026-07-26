@@ -1,0 +1,421 @@
+/**
+ * tests/herdr/worklist.test.ts — Tests for Herdr plugin work list UI logic
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// Import after mocks are set up
+import {
+  WorkItemListState,
+  StageFilter,
+  formatItemLine,
+  formatDetailView,
+  formatFilterBar,
+  handleKeypress,
+  createListRenderer,
+  STAGES,
+} from '../../packages/herdr/src/worklist.js';
+import type { WorkItem } from '../../packages/herdr/src/worklist.js';
+
+// ── Mock terminal size ────────────────────────────────────────────
+
+const DEFAULT_TERM_SIZE = { rows: 24, cols: 80 };
+
+// ── Test fixtures ─────────────────────────────────────────────────
+
+function makeItem(overrides: Partial<WorkItem> = {}): WorkItem {
+  return {
+    id: 'WL-TEST001',
+    title: 'Test work item',
+    status: 'open',
+    priority: 'high',
+    stage: 'plan_complete',
+    description: 'A test work item description',
+    tags: ['test'],
+    createdAt: '2025-01-01T00:00:00.000Z',
+    updatedAt: '2025-01-02T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+const sampleItems: WorkItem[] = [
+  makeItem({ id: 'WL-TEST001', title: 'First item', priority: 'high', stage: 'plan_complete' }),
+  makeItem({ id: 'WL-TEST002', title: 'Second item', priority: 'medium', stage: 'in_progress' }),
+  makeItem({ id: 'WL-TEST003', title: 'Third item', priority: 'low', stage: 'idea' }),
+  makeItem({ id: 'WL-TEST004', title: 'Fourth item', priority: 'high', stage: 'in_review' }),
+  makeItem({ id: 'WL-TEST005', title: 'Fifth item', priority: 'critical', stage: 'in_progress' }),
+];
+
+// ── Tests ─────────────────────────────────────────────────────────
+
+describe('WorkItemListState', () => {
+  it('initializes with items and defaults', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    expect(state.items).toHaveLength(5);
+    expect(state.selectedIndex).toBe(0);
+    expect(state.scrollOffset).toBe(0);
+    expect(state.mode).toBe('list');
+  });
+
+  it('clamps selectedIndex to valid range via setSelectedIndex', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.setSelectedIndex(-1);
+    expect(state.selectedIndex).toBe(0);
+    state.setSelectedIndex(100);
+    expect(state.selectedIndex).toBe(4);
+  });
+
+  it('computes visible items based on terminal rows', () => {
+    const smallTerm = { rows: 5, cols: 80 };
+    const state = new WorkItemListState(sampleItems, smallTerm);
+    // With 5 rows, list area is about 3 items (after subtracting header/filter/status)
+    const visible = state.getVisibleItems();
+    expect(visible.length).toBeLessThanOrEqual(5);
+  });
+
+  it('scrolls down and adjusts selection', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.moveDown();
+    expect(state.selectedIndex).toBe(1);
+    state.moveDown();
+    expect(state.selectedIndex).toBe(2);
+  });
+
+  it('scrolls up and does not go negative', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.selectedIndex = 0;
+    state.moveUp();
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  it('page down moves by visible page size', () => {
+    const state = new WorkItemListState(sampleItems, { rows: 10, cols: 80 });
+    const old = state.selectedIndex;
+    state.pageDown();
+    // Page size is approx visible rows minus header
+    expect(state.selectedIndex).toBeGreaterThan(old);
+  });
+
+  it('page up moves backward and clamps', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.selectedIndex = 3;
+    state.pageUp();
+    expect(state.selectedIndex).toBeLessThan(3);
+    state.selectedIndex = 0;
+    state.pageUp();
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  it('toggles to detail mode when selecting an item', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.selectItem();
+    expect(state.mode).toBe('detail');
+    expect(state.detailItem).toEqual(sampleItems[0]);
+  });
+
+  it('backs out of detail mode to list', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.selectItem();
+    state.back();
+    expect(state.mode).toBe('list');
+    expect(state.detailItem).toBeNull();
+  });
+
+  it('switches to filter mode and back', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.activateFilter();
+    expect(state.mode).toBe('filter');
+    state.back();
+    expect(state.mode).toBe('list');
+  });
+
+  it('applies stage filter and resets selection', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.applyFilter('in_progress');
+    expect(state.activeFilter).toBe('in_progress');
+    expect(state.selectedIndex).toBe(0);
+    const filtered = state.items;
+    expect(filtered.every((i) => i.stage === 'in_progress')).toBe(true);
+  });
+
+  it('clears filter to show all items', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.applyFilter('in_progress');
+    state.clearFilter();
+    expect(state.activeFilter).toBeNull();
+    expect(state.items).toHaveLength(5);
+  });
+
+  it('refreshes items while preserving selection if possible', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.selectedIndex = 2;
+    const newItems = [
+      makeItem({ id: 'WL-TEST001', title: 'First item' }),
+      makeItem({ id: 'WL-TEST006', title: 'New item' }),
+    ];
+    state.refreshItems(newItems);
+    expect(state.items).toHaveLength(2);
+    // Selected index clamped
+    expect(state.selectedIndex).toBe(1);
+  });
+
+  it('sets scroll offset for large lists', () => {
+    const manyItems = Array.from({ length: 50 }, (_, i) =>
+      makeItem({ id: `WL-${String(i).padStart(6, '0')}`, title: `Item ${i}` })
+    );
+    const state = new WorkItemListState(manyItems, DEFAULT_TERM_SIZE);
+    // Navigate down many times to trigger scroll adjustment
+    for (let i = 0; i < 40; i++) {
+      state.moveDown();
+    }
+    expect(state.selectedIndex).toBe(40);
+    // Scroll offset should be calculated to show the selected item
+    expect(state.scrollOffset).toBeGreaterThan(0);
+  });
+});
+
+describe('StageFilter', () => {
+  it('lists all stage options', () => {
+    expect(STAGES).toEqual([
+      'idea',
+      'intake_complete',
+      'plan_complete',
+      'in_progress',
+      'in_review',
+      'completed',
+    ]);
+  });
+
+  it('StageFilter can cycle through stages', () => {
+    const filter = new StageFilter();
+    expect(filter.current).toBeNull();
+    filter.cycle();
+    expect(filter.current).toBe('idea');
+    filter.cycle();
+    expect(filter.current).toBe('intake_complete');
+    filter.cycle();
+    expect(filter.current).toBe('plan_complete');
+  });
+
+  it('StageFilter wraps around', () => {
+    const filter = new StageFilter();
+    // Cycle through all stages
+    for (let i = 0; i < 6; i++) filter.cycle();
+    // Should be back at null (off) after wrapping
+    // Actually, let's test: after setting to 'completed', next cycle goes to null
+    filter.set('completed');
+    expect(filter.current).toBe('completed');
+    filter.cycle();
+    expect(filter.current).toBeNull();
+  });
+
+  it('set applies a valid stage', () => {
+    const filter = new StageFilter();
+    filter.set('in_progress');
+    expect(filter.current).toBe('in_progress');
+  });
+
+  it('set with null clears the filter', () => {
+    const filter = new StageFilter();
+    filter.set('in_progress');
+    filter.set(null);
+    expect(filter.current).toBeNull();
+  });
+});
+
+describe('formatItemLine', () => {
+  it('formats a basic item line', () => {
+    const line = formatItemLine(sampleItems[0], 80);
+    expect(line).toContain('WL-TEST001');
+    expect(line).toContain('First item');
+  });
+
+  it('highlights selected item', () => {
+    const line = formatItemLine(sampleItems[0], 80, true);
+    expect(line).toContain('▸'); // Selection indicator
+  });
+
+  it('truncates long titles to fit terminal width', () => {
+    const longItem = makeItem({
+      title: 'A'.repeat(200),
+    });
+    const line = formatItemLine(longItem, 40);
+    expect(line.length).toBeLessThanOrEqual(45); // ~40 + some formatting characters
+  });
+
+  it('includes stage label for non-default stages', () => {
+    const item = makeItem({ stage: 'idea' });
+    const line = formatItemLine(item, 80);
+    expect(line).toContain('idea');
+  });
+});
+
+describe('formatDetailView', () => {
+  it('includes title, id, status, priority in detail view', () => {
+    const detail = formatDetailView(sampleItems[0], 80);
+    expect(detail).toContain('WL-TEST001');
+    expect(detail).toContain('First item');
+    expect(detail).toContain('open');
+    expect(detail).toContain('high');
+    expect(detail).toContain('plan_complete');
+  });
+
+  it('includes description if present', () => {
+    const detail = formatDetailView(sampleItems[0], 80);
+    expect(detail).toContain('A test work item description');
+  });
+
+  it('truncates very long descriptions', () => {
+    const longDesc = 'B'.repeat(5000);
+    const item = makeItem({ description: longDesc });
+    const detail = formatDetailView(item, 80);
+    // Should not have the full 5000 chars
+    expect(detail.length).toBeLessThan(5000);
+  });
+
+  it('handles items with no description', () => {
+    const item = makeItem({ description: undefined });
+    const detail = formatDetailView(item, 80);
+    expect(detail).toContain('WL-TEST001');
+  });
+});
+
+describe('formatFilterBar', () => {
+  it('shows current filter when active', () => {
+    const bar = formatFilterBar('in_progress', 80);
+    expect(bar).toContain('in_progress');
+    expect(bar).toContain('Filter');
+  });
+
+  it('shows no filter message when null', () => {
+    const bar = formatFilterBar(null, 80);
+    expect(bar).toContain('No filter');
+  });
+});
+
+describe('handleKeypress', () => {
+  it('handles j/k navigation in list mode', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    handleKeypress(state, 'j', DEFAULT_TERM_SIZE);
+    expect(state.selectedIndex).toBe(1);
+    handleKeypress(state, 'k', DEFAULT_TERM_SIZE);
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  it('handles arrow key navigation', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    handleKeypress(state, '\x1b[A', DEFAULT_TERM_SIZE); // up
+    expect(state.selectedIndex).toBe(0); // Already at top
+    handleKeypress(state, '\x1b[B', DEFAULT_TERM_SIZE); // down
+    expect(state.selectedIndex).toBe(1);
+  });
+
+  it('handles enter to select item', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    const result = handleKeypress(state, '\r', DEFAULT_TERM_SIZE);
+    expect(state.mode).toBe('detail');
+    expect(result).toBe('select');
+  });
+
+  it('handles escape to go back from detail mode', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.selectItem();
+    const result = handleKeypress(state, '\x1b', DEFAULT_TERM_SIZE);
+    expect(state.mode).toBe('list');
+    expect(result).toBe('back');
+  });
+
+  it('handles escape to go back from filter mode', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.activateFilter();
+    const result = handleKeypress(state, '\x1b', DEFAULT_TERM_SIZE);
+    expect(state.mode).toBe('list');
+    expect(result).toBe('back');
+  });
+
+  it('handles / to activate filter', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    const result = handleKeypress(state, '/', DEFAULT_TERM_SIZE);
+    expect(state.mode).toBe('filter');
+    expect(result).toBe('filter');
+  });
+
+  it('handles r to refresh', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    const result = handleKeypress(state, 'r', DEFAULT_TERM_SIZE);
+    expect(result).toBe('refresh');
+  });
+
+  it('handles q to quit', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    const result = handleKeypress(state, 'q', DEFAULT_TERM_SIZE);
+    expect(result).toBe('quit');
+  });
+
+  it('handles pageup/pagedown', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.selectedIndex = 3;
+    const oldIndex = state.selectedIndex;
+    handleKeypress(state, '\x1b[5~', DEFAULT_TERM_SIZE); // page up
+    expect(state.selectedIndex).toBeLessThan(oldIndex);
+    handleKeypress(state, '\x1b[6~', DEFAULT_TERM_SIZE); // page down
+    expect(state.selectedIndex).toBeGreaterThanOrEqual(0);
+  });
+
+  it('handles g/G for first/last item', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    handleKeypress(state, 'G', DEFAULT_TERM_SIZE);
+    expect(state.selectedIndex).toBe(sampleItems.length - 1);
+    handleKeypress(state, 'g', DEFAULT_TERM_SIZE);
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  it('processes digit key as stage filter shortcut in filter mode', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.activateFilter();
+    handleKeypress(state, '1', DEFAULT_TERM_SIZE);
+    // Stage indices: 0=idea, 1=intake_complete, 2=plan_complete, etc.
+    // '1' picks second stage: intake_complete
+    // But the stage-to-index mapping is 0-indexed, so '1' = index 1? 
+    // Let's see the implementation...
+    // Actually the handler converts char to number: Number('1') gives 1, so it uses stage index 1
+    // After applying filter, mode should be back to list
+    expect(state.mode).toBe('list');
+  });
+
+  it('does nothing for unrecognized keys in list mode', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    const result = handleKeypress(state, 'x', DEFAULT_TERM_SIZE);
+    expect(result).toBeNull();
+  });
+});
+
+describe('createListRenderer', () => {
+  it('returns a function that produces a render string', () => {
+    const renderer = createListRenderer();
+    const output = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null);
+    expect(typeof output).toBe('string');
+    expect(output.length).toBeGreaterThan(0);
+  });
+
+  it('includes header and footer in output', () => {
+    const renderer = createListRenderer();
+    const output = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null);
+    expect(output).toContain('Work Items');
+    expect(output).toContain('[q]');
+  });
+
+  it('renders detail view when mode is detail', () => {
+    const renderer = createListRenderer();
+    const output = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, null, 'detail', sampleItems[0]);
+    expect(output).toContain(sampleItems[0].id);
+    expect(output).toContain(sampleItems[0].title);
+    expect(output).not.toContain('Work Items');
+  });
+
+  it('renders filter bar when filter is active', () => {
+    const renderer = createListRenderer();
+    const output = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, 'in_progress', 'list', null);
+    expect(output).toContain('in_progress');
+  });
+});

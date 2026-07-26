@@ -1,0 +1,36 @@
+# Manifest for worklog-selection-list — Worklog work item browser for Herdr
+#
+# Provides a keyboard-navigable work item selection list pane that lets
+# users browse, filter, and select Worklog work items from within Herdr.
+# Uses the `wl` CLI as the backend data source.
+
+id = "worklog-selection-list"
+name = "Worklog Selection List"
+version = "0.1.0"
+description = "Browse, filter, and select Worklog work items from a Herdr pane. Keyboard-navigable list with stage filtering and detail view."
+min_herdr_version = "0.7.0"
+platforms = ["linux", "macos", "windows"]
+
+[[build]]
+command = ["npm", "run", "build"]
+
+# Pane: work item selection list
+[[panes]]
+id = "worklist"
+title = "Work Items"
+placement = "split"
+command = ["npx", "tsx", "packages/herdr/src/index.ts"]
+
+# Main action: toggle the worklist pane
+[[actions]]
+id = "toggle-worklist"
+title = "Toggle worklist"
+description = "Open the Worklog work item selection pane (focus it if open; close it if focused)."
+command = ["bash", "packages/herdr/scripts/toggle.sh"]
+
+# Action: open worklist pane directly
+[[actions]]
+id = "open-worklist"
+title = "Open worklist"
+description = "Open the Worklog work item selection pane."
+command = ["bash", "packages/herdr/scripts/open.sh"]
