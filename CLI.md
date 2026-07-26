@@ -942,6 +942,35 @@ Notes:
 - If the lock file is corrupted (unparseable metadata), `--force` is required to remove it.
 - If the lock is held by a still-running process, the command warns but still allows removal with confirmation or `--force`.
 
+### `cleanup-worktree` [path] [options]
+
+Kill tracked processes for a worktree path. Used to clean up orphaned processes
+that were spawned during worktree operations.
+
+Arguments:
+
+- `path` — Path to the worktree to clean up (required unless `--all` is used).
+
+Options:
+
+- `--all` — Kill tracked processes for all worktrees.
+- `--force` — Use `SIGKILL` instead of `SIGTERM`.
+- `--json` — Output machine-readable JSON.
+
+Examples:
+
+```sh
+wl cleanup-worktree /path/to/worktree
+wl cleanup-worktree --all
+wl cleanup-worktree /path/to/worktree --force
+wl --json cleanup-worktree /path/to/worktree
+```
+
+Notes:
+
+- Safe to run when no processes are tracked (no-op, exit 0).
+- If neither a path nor `--all` is provided, the command prints an error and exits non-zero.
+
 ---
 
 ## Plugins
