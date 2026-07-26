@@ -42,26 +42,29 @@ jobs:
           node ./dist/cli.js list -n 1 --json > /dev/null
           echo "✓ wl CLI works"
 
-          echo "✓ wl CLI works"
-
           # Verify the TUI module loads without errors (using tsx for TypeScript imports)
           npx tsx -e "
+          (async () => {
             const { ChatPane } = await import('./packages/tui/extensions/chatPane.js');
             const { ActionPalette } = await import('./packages/tui/extensions/actionPalette.js');
             const { runWl } = await import('./packages/tui/extensions/wl-integration.js');
             console.log('✓ TUI modules load successfully');
+          })();
           "
 
           # Verify chat pane can send messages
           npx tsx -e "
+          (async () => {
             const { ChatPane } = await import('./packages/tui/extensions/chatPane.js');
             const pane = new ChatPane();
             pane.clear();
             console.log('✓ ChatPane instantiated');
+          })();
           "
 
           # Verify action palette has default actions
           npx tsx -e "
+          (async () => {
             const { ChatPane } = await import('./packages/tui/extensions/chatPane.js');
             const { ActionPalette } = await import('./packages/tui/extensions/actionPalette.js');
             const chat = new ChatPane();
@@ -70,6 +73,7 @@ jobs:
             const actions = palette.getFilteredActions();
             if (actions.length < 5) throw new Error('Expected at least 5 default actions, got ' + actions.length);
             console.log('✓ ActionPalette has ' + actions.length + ' default actions');
+          })();
           "
 
           # Verify pi-audit module works
