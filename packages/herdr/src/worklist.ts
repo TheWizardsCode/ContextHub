@@ -11,6 +11,16 @@
  */
 
 import type { WorkItem } from './fetcher.js';
+import {
+  statusIcon,
+  stageIcon,
+  priorityIcon,
+  getIconPrefix,
+  applyStageColour,
+  iconsEnabled,
+  stageColor,
+  type IconOptions,
+} from './icons.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -25,36 +35,14 @@ export const STAGES = [
 
 export type Stage = (typeof STAGES)[number];
 
-/**
- * Map stage to a display color (ANSI 256-color code).
- */
+// Re-export stage colors from icons for backward compatibility
 export const STAGE_COLORS: Record<string, number> = {
-  idea: 241,            // grey
-  intake_complete: 68,  // blue-ish
-  plan_complete: 172,   // orange-ish
-  in_progress: 76,      // green-ish
-  in_review: 220,       // yellow-ish
-  completed: 33,        // cyan-ish
-};
-
-/**
- * Priority display characters.
- */
-export const PRIORITY_ICONS: Record<string, string> = {
-  critical: '🔴',
-  high: '🟡',
-  medium: '🟢',
-  low: '⚪',
-};
-
-/**
- * Status display characters.
- */
-export const STATUS_ICONS: Record<string, string> = {
-  open: '○',
-  'in-progress': '◉',
-  completed: '✓',
-  blocked: '⊘',
+  idea: 241,
+  intake_complete: 68,
+  plan_complete: 172,
+  in_progress: 76,
+  in_review: 220,
+  completed: 33,
 };
 
 // ── Terminal helpers ─────────────────────────────────────────────────
@@ -312,26 +300,58 @@ export class StageFilter {
 
 /**
  * Format a single item line for the list display.
+ *
+ * Includes icon prefix, stage colouring, and group markers.
  */
 export function formatItemLine(
   item: WorkItem,
   maxCols: number,
   isSelected = false,
+  noIcons = false,
 ): string {
   const prefix = isSelected ? '▸ ' : '  ';
-  const statusIcon = STATUS_ICONS[item.status] || '?';
-  const stageTag = item.stage && item.stage !== 'in_progress' ? ` [${item.stage}]` : '';
-  const priorityTag = item.priority ? ` ${item.priority}` : '';
+  const iconPrefix = getIconPrefix(item, { noIcons });
+  const iconStr = iconPrefix.length > 0 ? `${iconPrefix} ` : '';
 
-  // Format: "▸ ○ WL-TEST001 First item [stage] high"
-  const idPart = `${statusIcon} ${item.id}`;
-  const titlePart = item.title;
+  // Apply stage colouring to the title
+  const colouredTitle = item.stage
+    ? applyStageColour(item.title, item.stage)
+    : item.title;
 
-  let line = `${prefix}${idPart} ${titlePart}${stageTag}${priorityTag}`;
+  const priorityStr = item.priority
+    ? ` ${priorityIcon(item.priority, { noIcons })} ${item.priority}`
+    : '';
 
-  // Truncate to fit terminal width
-  if (line.length > maxCols - 1) {
-    line = line.slice(0, maxCols - 4) + '...';
+  const stageTag = item.stage && item.stage !== 'in_progress'
+    ? ` [${item.stage}]`
+    : '';
+
+  let line = `${prefix}${iconStr}${item.id} ${colouredTitle}${stageTag}${priorityStr}`;
+
+  // Truncate to fit terminal width, accounting for ANSI codes
+  const visibleLength = line.replace(/\x1b\[[0-9;]*m/g, '').length;
+  if (visibleLength > maxCols - 1) {
+    // Truncate before ANSI codes, preserving them
+    let truncated = '';
+    let visLen = 0;
+    let i = 0;
+    while (visLen < maxCols - 4 && i < line.length) {
+      if (line[i] === '\x1b' && line[i + 1] === '[') {
+        // Copy ANSI escape sequence
+        const end = line.indexOf('m', i);
+        if (end >= 0) {
+          truncated += line.slice(i, end + 1);
+          i = end + 1;
+          continue;
+        }
+      }
+      truncated += line[i];
+      visLen += 1;
+      i += 1;
+    }
+    // Close any open ANSI codes before ellipsis
+    truncated += `${ANSI.reset}…`;
+    line = truncated;
   }
 
   return line;
@@ -394,8 +414,8 @@ export function formatDetailView(item: WorkItem, maxCols: number): string {
  */
 export function formatFilterBar(filter: string | null, maxCols: number): string {
   if (filter) {
-    const stageColor = STAGE_COLORS[filter] || 241;
-    const bar = ` ${ANSI.bg(stageColor)}${ANSI.fg(16)} Filter: ${filter} ${ANSI.reset}`;
+    const color = STAGE_COLORS[filter] || 241;
+    const bar = ` ${ANSI.bg(color)}${ANSI.fg(16)} Filter: ${filter} ${ANSI.reset}`;
     return bar.padEnd(maxCols, '─');
   }
   return ` ${ANSI.dim}No filter — press [/] to filter by stage${ANSI.reset}`.padEnd(maxCols, ' ');
@@ -554,6 +574,7 @@ export function createListRenderer(): (
   activeFilter: string | null,
   mode: ViewMode,
   detailItem: WorkItem | null,
+  totalCount?: number,
 ) => string {
   return (
     items: WorkItem[],
@@ -563,6 +584,7 @@ export function createListRenderer(): (
     activeFilter: string | null,
     mode: ViewMode,
     detailItem: WorkItem | null,
+    totalCount?: number,
   ): string => {
     const { rows, cols } = termSize;
     const output: string[] = [];
@@ -586,20 +608,39 @@ export function createListRenderer(): (
 
     // ── Render list mode ──────────────────────────────────────────
 
-    // Header
+    // Header with total count
     const totalItems = items.length;
     const filterLabel = activeFilter ? ` (filtered: ${activeFilter})` : '';
-    output.push(` ${ANSI.bold}Work Items${ANSI.reset} — ${totalItems} item(s)${filterLabel}`);
+    let header = ` ${ANSI.bold}Work Items${ANSI.reset} — ${totalItems} item(s)${filterLabel}`;
+    if (totalCount !== undefined && totalCount > totalItems) {
+      header += ` (top ${totalItems} of ${totalCount})`;
+    }
+    output.push(header);
     output.push('');
 
     // Filter bar
     output.push(formatFilterBar(activeFilter, cols));
 
-    // Items
+    // Items with group separators
     const visible = items.slice(scrollOffset, scrollOffset + listHeight);
+    let lastDisplayedGroup: number | undefined;
     for (let i = 0; i < visible.length; i++) {
-      const isSelected = scrollOffset + i === selectedIndex;
-      const line = formatItemLine(visible[i], cols, isSelected);
+      const actualIndex = scrollOffset + i;
+      const item = visible[i];
+
+      // Insert group separator when group changes
+      if (item.group !== undefined && item.id !== '..') {
+        if (lastDisplayedGroup === undefined || item.group !== lastDisplayedGroup) {
+          const label = item.groupLabel ?? `Group ${item.group}`;
+          const sepColor = stageColor(item.stage);
+          output.push(` ${ANSI.fg(sepColor)}${ANSI.bold}── ${label} ──${ANSI.reset}`);
+        }
+        lastDisplayedGroup = item.group;
+      }
+
+      const isSelected = actualIndex === selectedIndex;
+      const noIcons = !iconsEnabled();
+      const line = formatItemLine(item, cols, isSelected, noIcons);
       if (isSelected) {
         output.push(`${ANSI.reverse}${line}${ANSI.reset}`);
       } else {

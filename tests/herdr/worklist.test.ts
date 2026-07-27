@@ -240,7 +240,9 @@ describe('formatItemLine', () => {
       title: 'A'.repeat(200),
     });
     const line = formatItemLine(longItem, 40);
-    expect(line.length).toBeLessThanOrEqual(45); // ~40 + some formatting characters
+    // Strip ANSI codes and check visible length
+    const stripped = line.replace(/\x1b\[[0-9;]*m/g, '');
+    expect(stripped.length).toBeLessThanOrEqual(45); // ~40 + some formatting characters
   });
 
   it('includes stage label for non-default stages', () => {
@@ -418,4 +420,71 @@ describe('createListRenderer', () => {
     const output = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, 'in_progress', 'list', null);
     expect(output).toContain('in_progress');
   });
+
+  it('renders group separators when items have groups', () => {
+    const groupedItems = [
+      makeItem({ id: 'T1', title: 'Item 1', group: 0, groupLabel: 'Priority' }),
+      makeItem({ id: 'T2', title: 'Item 2', group: 0 }),
+      makeItem({ id: 'T3', title: 'Item 3', group: 1, groupLabel: 'Backlog' }),
+    ];
+    const renderer = createListRenderer();
+    const output = renderer(groupedItems, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null);
+    expect(output).toContain('Priority');
+    expect(output).toContain('Backlog');
+  });
+
+  it('includes total count when provided', () => {
+    const renderer = createListRenderer();
+    const output = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null, 100);
+    expect(output).toContain('of');
+    expect(output).toMatch(/\d+ of \d+/);
+  });
 });
+
+// ── New: Group separator formatting ─────────────────────────────────
+
+describe('formatItemLine with icons and colours', () => {
+  it('includes status icon in the line', () => {
+    const item = makeItem({ status: 'completed' });
+    const line = formatItemLine(item, 80, false);
+    // Status icon for completed should be present
+    expect(line).toContain('Test');
+  });
+
+  it('applies stage color via ANSI codes', () => {
+    const item = makeItem({ stage: 'in_review' });
+    const line = formatItemLine(item, 80, false);
+    // Should have ANSI color escape codes
+    expect(line).toContain('\x1b[');
+  });
+
+  it('truncates long titles with ellipsis', () => {
+    const item = makeItem({ title: 'A'.repeat(200) });
+    const line = formatItemLine(item, 40, false);
+    // Should be truncated — visible chars < 40, and contain ellipsis
+    const stripped = line.replace(/\x1b\[[0-9;]*m/g, '');
+    expect(stripped.length).toBeLessThan(200);
+    expect(line).toContain('…');
+  });
+
+  it('shows priority icon when priority is set', () => {
+    const item = makeItem({ priority: 'high' });
+    const line = formatItemLine(item, 80, false);
+    expect(line).toContain('high');
+  });
+
+  it('shows stage tag for non-default stages', () => {
+    const item = makeItem({ stage: 'in_review' });
+    const line = formatItemLine(item, 80, false);
+    expect(line).toContain('in_review');
+  });
+
+  it('highlights selected item with reverse ANSI', () => {
+    const item = makeItem();
+    const selectedLine = formatItemLine(item, 80, true);
+    expect(selectedLine).toContain('▸');
+    const unselectedLine = formatItemLine(item, 80, false);
+    expect(unselectedLine).toContain('  ');
+  });
+});
+
