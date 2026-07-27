@@ -126,6 +126,9 @@ export class WorkItemListState {
   /** Active stage filter (null = no filter). */
   activeFilter: string | null = null;
 
+  /** Scroll offset within the detail view. */
+  detailScrollOffset = 0;
+
   /** Terminal size for layout calculations. */
   termSize: TermSize;
 
@@ -165,28 +168,52 @@ export class WorkItemListState {
   }
 
   goToFirst(): void {
-    this.selectedIndex = 0;
-    this.scrollOffset = 0;
+    if (this.mode === 'detail') {
+      this.detailScrollOffset = 0;
+    } else {
+      this.selectedIndex = 0;
+      this.scrollOffset = 0;
+    }
   }
 
   goToLast(): void {
-    this.selectedIndex = this.items.length - 1;
-    this._adjustScroll();
+    if (this.mode === 'detail') {
+      this.detailScrollOffset = 999999; // Will be clamped
+    } else {
+      this.selectedIndex = this.items.length - 1;
+      this._adjustScroll();
+    }
   }
 
   selectItem(): void {
     if (this.items.length === 0) return;
     this.detailItem = this.items[this.selectedIndex];
     this.mode = 'detail';
+    this.detailScrollOffset = 0;
   }
 
   back(): void {
     if (this.mode === 'detail') {
       this.mode = 'list';
       this.detailItem = null;
+      this.detailScrollOffset = 0;
     } else if (this.mode === 'filter') {
       this.mode = 'list';
     }
+  }
+
+  // ── Detail scroll ──────────────────────────────────────────────
+
+  detailScrollUp(amount = 1): void {
+    this.detailScrollOffset = Math.max(0, this.detailScrollOffset - amount);
+  }
+
+  detailScrollDown(amount = 1): void {
+    const maxCols = this.termSize.cols;
+    const viewportHeight = Math.max(10, this.termSize.rows - 4);
+    const allLines = formatDetailContent(this.detailItem, maxCols);
+    const maxScroll = Math.max(0, allLines.length - viewportHeight);
+    this.detailScrollOffset = Math.min(maxScroll, this.detailScrollOffset + amount);
   }
 
   // ── Filtering ───────────────────────────────────────────────────
@@ -359,9 +386,15 @@ export function formatItemLine(
 }
 
 /**
- * Format the detail view for a single work item.
+ * Build the full content lines for a detail view (without scrolling).
+ * Returns an array of lines ready for viewport rendering.
  */
-export function formatDetailView(item: WorkItem, maxCols: number): string {
+export function formatDetailContent(
+  item: WorkItem | null,
+  maxCols: number,
+): string[] {
+  if (!item) return [];
+
   const lines: string[] = [];
   const separator = '─'.repeat(Math.min(maxCols, 72));
 
@@ -372,16 +405,23 @@ export function formatDetailView(item: WorkItem, maxCols: number): string {
   lines.push(separator);
 
   // Metadata
-  lines.push(`  Status:     ${item.status}`);
-  if (item.priority) lines.push(`  Priority:   ${item.priority}`);
-  if (item.stage) lines.push(`  Stage:      ${item.stage}`);
-  if (item.issueType) lines.push(`  Type:       ${item.issueType}`);
-  if (item.risk) lines.push(`  Risk:       ${item.risk}`);
-  if (item.effort) lines.push(`  Effort:     ${item.effort}`);
-  if (item.childCount !== undefined) lines.push(`  Children:   ${item.childCount}`);
-  if (item.tags && item.tags.length > 0) lines.push(`  Tags:       ${item.tags.join(', ')}`);
-  if (item.createdAt) lines.push(`  Created:    ${item.createdAt}`);
-  if (item.updatedAt) lines.push(`  Updated:    ${item.updatedAt}`);
+  const pushMeta = (label: string, value: string | undefined | null): void => {
+    if (value != null && value !== '') {
+      lines.push(`  ${label}:     ${value}`);
+    }
+  };
+  pushMeta('Status', item.status);
+  pushMeta('Priority', item.priority);
+  pushMeta('Stage', item.stage);
+  pushMeta('Type', item.issueType);
+  pushMeta('Risk', item.risk);
+  pushMeta('Effort', item.effort);
+  pushMeta('Children', item.childCount !== undefined ? String(item.childCount) : undefined);
+  if (item.tags && item.tags.length > 0) {
+    lines.push(`  Tags:       ${item.tags.join(', ')}`);
+  }
+  pushMeta('Created', item.createdAt);
+  pushMeta('Updated', item.updatedAt);
 
   lines.push(separator);
 
@@ -392,12 +432,22 @@ export function formatDetailView(item: WorkItem, maxCols: number): string {
     lines.push('');
     const descLines = item.description.split('\n');
     for (const dl of descLines) {
-      // Truncate very long lines
-      const truncated = dl.length > maxCols - 4 ? dl.slice(0, maxCols - 7) + '...' : dl;
-      lines.push(`  ${truncated}`);
-      // Limit total description lines to avoid overflow
-      if (lines.length > 200) {
-        lines.push(`  ... (truncated, ${descLines.length} total lines)`);
+      // Wrap long lines to fit width
+      const indent = 2;
+      const wrapWidth = maxCols - indent - 2;
+      if (dl.length > wrapWidth && wrapWidth > 10) {
+        let remaining = dl;
+        while (remaining.length > 0) {
+          const seg = remaining.slice(0, wrapWidth);
+          remaining = remaining.slice(wrapWidth);
+          lines.push(`  ${seg}`);
+        }
+      } else {
+        lines.push(`  ${dl}`);
+      }
+      // Limit total lines
+      if (lines.length > 500) {
+        lines.push(`  ... (truncated, ${descLines.length} total description lines)`);
         break;
       }
     }
@@ -405,9 +455,51 @@ export function formatDetailView(item: WorkItem, maxCols: number): string {
 
   lines.push('');
   lines.push(separator);
-  lines.push(` ${ANSI.dim}[esc] back  [r] refresh  [q] quit${ANSI.reset}`);
+  lines.push(` ${ANSI.dim}[↑↓/j:k] scroll  [g/G] top/bot  [esc] back  [r] refresh  [q] quit${ANSI.reset}`);
 
-  return lines.join('\n');
+  return lines;
+}
+
+/**
+ * Format the detail view for a single work item, with scrolling support.
+ *
+ * @param item - The work item to display
+ * @param maxCols - Terminal width
+ * @param scrollOffset - Line offset to scroll the content
+ * @param viewportHeight - Number of visible lines (default: terminal rows - 4)
+ * @returns The rendered detail view string
+ */
+export function formatDetailView(
+  item: WorkItem | null,
+  maxCols: number,
+  scrollOffset = 0,
+  viewportHeight = 20,
+): string {
+  const allLines = formatDetailContent(item, maxCols);
+  if (allLines.length === 0) return '';
+
+  const totalLines = allLines.length;
+  const maxScroll = Math.max(0, totalLines - viewportHeight);
+  const safeOffset = Math.min(scrollOffset, maxScroll);
+
+  const visible = allLines.slice(safeOffset, safeOffset + viewportHeight);
+
+  // Add scroll indicator if content is long
+  if (totalLines > viewportHeight && safeOffset <= maxScroll) {
+    const percent = totalLines > 0
+      ? Math.round(((safeOffset + viewportHeight) / totalLines) * 100)
+      : 0;
+    const scrollInfo = ` ${ANSI.dim}Lines ${safeOffset + 1}-${Math.min(safeOffset + viewportHeight, totalLines)} of ${totalLines} (${percent}%)  ` +
+      `[↑↓/j:k scroll  g/G top/bot]${ANSI.reset}`;
+    visible[visible.length - 1] = scrollInfo;
+  }
+
+  // Pad to fill viewport if less content
+  while (visible.length < viewportHeight) {
+    visible.push('');
+  }
+
+  return visible.join('\n');
 }
 
 /**
@@ -621,6 +713,35 @@ export function handleKeypress(
       return 'back';
     }
     if (key === 'r') return 'refresh';
+    // Detail scrolling
+    if (key === 'j' || key === '\x1b[B') {
+      state.detailScrollDown(1);
+      return null;
+    }
+    if (key === 'k' || key === '\x1b[A') {
+      state.detailScrollUp(1);
+      return null;
+    }
+    if (key === '\x1b[6~') {
+      // Page down
+      const pageSize = Math.max(5, termSize.rows - 4);
+      state.detailScrollDown(pageSize);
+      return null;
+    }
+    if (key === '\x1b[5~') {
+      // Page up
+      const pageSize = Math.max(5, termSize.rows - 4);
+      state.detailScrollUp(pageSize);
+      return null;
+    }
+    if (key === 'g') {
+      state.detailScrollOffset = 0;
+      return null;
+    }
+    if (key === 'G') {
+      state.detailScrollOffset = 999999;
+      return null;
+    }
     return null;
   }
 
@@ -695,6 +816,7 @@ export function createListRenderer(): (
   detailItem: WorkItem | null,
   totalCount?: number,
   chordState?: ChordState | null,
+  detailScrollOffset?: number,
 ) => string {
   return (
     items: WorkItem[],
@@ -706,13 +828,16 @@ export function createListRenderer(): (
     detailItem: WorkItem | null,
     totalCount?: number,
     chordState?: ChordState | null,
+    detailScrollOffset?: number,
   ): string => {
     const { rows, cols } = termSize;
     const output: string[] = [];
     const listHeight = Math.max(3, rows - 6);
 
     if (mode === 'detail' && detailItem) {
-      return formatDetailView(detailItem, cols);
+      const viewportHeight = Math.max(10, rows - 1);
+      const offset = detailScrollOffset ?? 0;
+      return formatDetailView(detailItem, cols, offset, viewportHeight);
     }
 
     if (mode === 'filter') {
@@ -960,6 +1085,7 @@ export async function runWorklistTui(
       state.detailItem,
       undefined,
       chordState,
+      state.detailScrollOffset,
     );
 
     process.stdout.write(ANSI.cursorHome);
