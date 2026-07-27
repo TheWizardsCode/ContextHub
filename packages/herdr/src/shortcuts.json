@@ -1,0 +1,64 @@
+[
+  {
+    "key": "c",
+    "command": "/intake",
+    "view": "both",
+    "label": "create new",
+    "description": "Create a new work item"
+  },
+  {
+    "key": "n",
+    "command": "/intake <id>",
+    "view": "both",
+    "label": "intake",
+    "description": "Intake/claim the selected work item",
+    "stages": ["idea"]
+  },
+  {
+    "key": "p",
+    "command": "/plan <id>",
+    "view": "both",
+    "label": "plan",
+    "description": "Plan the selected work item",
+    "stages": ["intake_complete"]
+  },
+  {
+    "key": "s",
+    "command": "!!wl search ",
+    "view": "both",
+    "label": "Search",
+    "description": "Search work items"
+  },
+  {
+    "key": "",
+    "command": "/wl idea",
+    "view": "both",
+    "chord": ["f", "i"],
+    "label": "filter idea",
+    "description": "Filter to show only idea-stage items"
+  },
+  {
+    "key": "",
+    "command": "/wl intake",
+    "view": "both",
+    "chord": ["f", "n"],
+    "label": "filter intake",
+    "description": "Filter to show only intake items"
+  },
+  {
+    "key": "",
+    "command": "/wl plan",
+    "view": "both",
+    "chord": ["f", "p"],
+    "label": "filter plan",
+    "description": "Filter to show only plan items"
+  },
+  {
+    "key": "",
+    "command": "/wl review",
+    "view": "both",
+    "chord": ["f", "r"],
+    "label": "filter in_review",
+    "description": "Filter to show only in-review items"
+  }
+]

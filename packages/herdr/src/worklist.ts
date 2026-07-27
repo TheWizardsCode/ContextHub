@@ -11,6 +11,7 @@
  */
 
 import type { WorkItem } from './fetcher.js';
+import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
   statusIcon,
   stageIcon,
@@ -440,10 +441,128 @@ export function formatFilterPrompt(maxCols: number): string {
   return lines.join('\n');
 }
 
+// ── Chord state helpers ───────────────────────────────────────────────
+
+/**
+ * Create an initial (empty) ChordState.
+ */
+export function createChordState(): ChordState {
+  return {
+    pendingKeys: [],
+    hints: '',
+    resolvedCommand: null,
+  };
+}
+
+/**
+ * Check if a key matches any chord leader in the registry.
+ */
+export function isChordLeader(key: string, registry: ShortcutRegistry): boolean {
+  const chords = registry.getChordEntries();
+  return chords.some(c => {
+    const chord = c.chord;
+    return chord !== undefined && chord.length >= 2 && chord[0] === key;
+  });
+}
+
+/**
+ * Process a keypress when in chord mode.
+ *
+ * Returns 'chord-complete' if the chord resolved, 'chord-cancel' if the
+ * key is invalid and the chord should be cancelled, or null if still
+ * collecting keys.
+ */
+export function processChordInput(
+  chordState: ChordState,
+  key: string,
+  registry: ShortcutRegistry,
+  view: string,
+  stage?: string,
+): 'chord-complete' | 'chord-cancel' | null {
+  const pending = [...chordState.pendingKeys, key];
+
+  // Check if this completes a chord
+  const command = registry.lookupChord(pending, view, stage);
+  if (command) {
+    chordState.pendingKeys = [];
+    chordState.hints = '';
+    chordState.resolvedCommand = command;
+    return 'chord-complete';
+  }
+
+  // Check if this is a valid prefix for more chords
+  const nextChords = registry.getChordByPrefix(pending, view, stage);
+  if (nextChords.length > 0) {
+    chordState.pendingKeys = pending;
+    // Update hints
+    chordState.hints = formatChordHintsForHelp(nextChords, pending);
+    return null; // Still collecting
+  }
+
+  // Invalid — cancel chord
+  chordState.pendingKeys = [];
+  chordState.hints = '';
+  return 'chord-cancel';
+}
+
+/**
+ * Build hint string for chord-mode display.
+ */
+export function formatChordHintsForHelp(
+  chords: ShortcutEntry[],
+  pendingKeys: string[],
+): string {
+  const hints: string[] = [];
+  for (const c of chords) {
+    const chord = c.chord;
+    if (!chord) continue;
+    const nextIdx = pendingKeys.length;
+    // Build display for remaining keys in this chord
+    if (chord.length > nextIdx) {
+      const remaining = chord.slice(nextIdx).join(' ');
+      const label = c.label ?? c.command.replace(/<[^>]+>/g, '').split(/\r?\n/)[0].trim();
+      hints.push(`${remaining}:${label}`);
+    }
+  }
+  return hints.join('  ');
+}
+
+/**
+ * Get chord hints for showing in the help bar when in list mode.
+ * Shows leader keys and abbreviated labels for all chords.
+ */
+export function getChordHelpHints(registry: ShortcutRegistry | undefined): string {
+  if (!registry) return '';
+  const chords = registry.getChordEntries();
+  // Group by leader key
+  const byLeader = new Map<string, string[]>();
+  for (const c of chords) {
+    const chord = c.chord;
+    if (!chord || chord.length < 2) continue;
+    const [leader] = chord;
+    const label = c.label ?? c.command.replace(/<[^>]+>/g, '').split(/\r?\n/)[0].trim();
+    const group = byLeader.get(leader) ?? [];
+    group.push(`${leader}→${label.split(/\s+/)[0]}`);
+    byLeader.set(leader, group);
+  }
+  if (byLeader.size === 0) return '';
+  return ` [${[...byLeader.keys()].join('/')}] chords`;
+}
+
 // ── Keyboard handling ─────────────────────────────────────────────────
 
 export type KeyAction = 'up' | 'down' | 'pageup' | 'pagedown' | 'select'
-  | 'back' | 'filter' | 'refresh' | 'quit' | 'first' | 'last' | null;
+  | 'back' | 'filter' | 'refresh' | 'quit' | 'first' | 'last'
+  | 'chord-start' | 'chord-complete' | 'chord-cancel' | null;
+
+export interface ChordState {
+  /** Keys pressed so far in the current chord sequence */
+  pendingKeys: string[];
+  /** Hints for next-expected keys and their commands */
+  hints: string;
+  /** The resolved command if chord was completed (cleared after execution) */
+  resolvedCommand: string | null;
+}
 
 /**
  * Map special key sequences to action names.
@@ -575,6 +694,7 @@ export function createListRenderer(): (
   mode: ViewMode,
   detailItem: WorkItem | null,
   totalCount?: number,
+  chordState?: ChordState | null,
 ) => string {
   return (
     items: WorkItem[],
@@ -585,6 +705,7 @@ export function createListRenderer(): (
     mode: ViewMode,
     detailItem: WorkItem | null,
     totalCount?: number,
+    chordState?: ChordState | null,
   ): string => {
     const { rows, cols } = termSize;
     const output: string[] = [];
@@ -654,9 +775,20 @@ export function createListRenderer(): (
       output.push('');
     }
 
-    // Footer with keyboard hints
-    const footerLine = ` ${ANSI.dim}[↑↓/j:k] nav  [enter] select  [/] filter  [r] refresh  [q] quit${ANSI.reset}`;
-    output.push(footerLine);
+    // Footer with keyboard hints (dynamic — includes chord hints if available)
+    const isChordActive = chordState && chordState.pendingKeys.length > 0;
+    if (isChordActive) {
+      const pendingStr = chordState!.pendingKeys.join(' ');
+      const hintStr = chordState!.hints
+        ? `  ${ANSI.dim}${chordState!.hints}${ANSI.reset}`
+        : '';
+      const footerLine = ` ${ANSI.reverse} chord: ${pendingStr} _ ${ANSI.reset}${hintStr}`;
+      output.push(footerLine);
+    } else {
+      const chordHint = chordState && chordState.hints ? `  ${chordState.hints}` : '';
+      const footerLine = ` ${ANSI.dim}[↑↓/j:k] nav  [enter] select  [/] filter  [r] refresh  [q] quit${chordHint}${ANSI.reset}`;
+      output.push(footerLine);
+    }
 
     return output.join('\n');
   };
@@ -679,11 +811,13 @@ const defaultRenderer = createListRenderer();
  *
  * @param fetcher - Async function that returns the work items to display
  * @param initialItems - Pre-loaded items (optional, for testing)
+ * @param shortcutRegistry - Optional shortcut registry for chord handling
  * @returns The selected WorkItem when the user presses enter, or undefined
  */
 export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
+  shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
 ): Promise<WorkItem | undefined> {
   let termSize = getTermSize();
 
@@ -697,6 +831,10 @@ export async function runWorklistTui(
 
   const state = new WorkItemListState(items, termSize);
   const renderer = defaultRenderer;
+  const chordState: ChordState = createChordState();
+
+  // Build chord help hints for the footer
+  const chordHelpHints = shortcutRegistry ? getChordHelpHints(shortcutRegistry as ShortcutRegistry) : '';
 
   // Check if we're in raw mode (stdin is a TTY)
   const isInteractive = process.stdin.isTTY;
@@ -736,7 +874,53 @@ export async function runWorklistTui(
       return;
     }
 
+    // ── Chord mode handling ────────────────────────────────────
+    if (chordState.pendingKeys.length > 0) {
+      // We're in chord mode — process the next key
+      const chordResult = processChordInput(
+        chordState,
+        key,
+        shortcutRegistry as ShortcutRegistry,
+        state.mode === 'detail' ? 'detail' : 'list',
+        state.activeFilter ?? undefined,
+      );
+
+      if (chordResult === 'chord-complete') {
+        // Chord resolved — output command and exit
+        cleanup();
+        resolve(undefined);
+        return;
+      }
+
+      if (chordResult === 'chord-cancel') {
+        // Cancel chord, continue in normal mode
+        render();
+        return;
+      }
+
+      // Still collecting chord keys
+      render();
+      return;
+    }
+
+    // ── Normal key handling ────────────────────────────────────
     const action = handleKeypress(state, key, termSize);
+
+    // If key wasn't handled as navigation and chord registry exists,
+    // check if it starts a chord
+    if (action === null && shortcutRegistry) {
+      if (isChordLeader(key, shortcutRegistry as ShortcutRegistry)) {
+        // Start chord mode
+        const nextChords = (shortcutRegistry as ShortcutRegistry).getChordByPrefix([key],
+          state.mode === 'detail' ? 'detail' : 'list',
+          state.activeFilter ?? undefined);
+        chordState.pendingKeys = [key];
+        chordState.hints = formatChordHintsForHelp(nextChords, [key]);
+        chordState.resolvedCommand = null;
+        render();
+        return;
+      }
+    }
 
     if (action === 'refresh') {
       try {
@@ -774,6 +958,8 @@ export async function runWorklistTui(
       state.activeFilter,
       state.mode,
       state.detailItem,
+      undefined,
+      chordState,
     );
 
     process.stdout.write(ANSI.cursorHome);

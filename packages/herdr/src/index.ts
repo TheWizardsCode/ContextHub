@@ -20,6 +20,7 @@
 
 import { checkWlAvailable, fetchNextItems, fetchItemsByStage } from './fetcher.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
+import { loadShortcutConfig } from './shortcut-config.js';
 
 const WL_COUNT = parseInt(process.env.WL_COUNT || '20', 10);
 
@@ -39,6 +40,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Load shortcut config
+  const shortcutRegistry = loadShortcutConfig();
+
   // Create a fetcher that loads items
   const fetcher = async () => {
     try {
@@ -49,7 +53,7 @@ async function main(): Promise<void> {
   };
 
   // Run the TUI
-  const selectedItem = await runWorklistTui(fetcher);
+  const selectedItem = await runWorklistTui(fetcher, undefined, shortcutRegistry);
 
   if (selectedItem) {
     // Print the selected item ID to stdout for use by scripts/actions
