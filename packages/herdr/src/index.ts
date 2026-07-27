@@ -52,8 +52,13 @@ async function main(): Promise<void> {
     }
   };
 
-  // Run the TUI
-  const selectedItem = await runWorklistTui(fetcher, undefined, shortcutRegistry);
+  // Run the TUI with auto-refresh
+  const selectedItem = await runWorklistTui(
+    fetcher,
+    undefined,
+    shortcutRegistry,
+    { autoRefresh: true, refreshIntervalMs: 30000 },
+  );
 
   if (selectedItem) {
     // Print the selected item ID to stdout for use by scripts/actions

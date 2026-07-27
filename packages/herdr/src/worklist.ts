@@ -817,6 +817,7 @@ export function createListRenderer(): (
   totalCount?: number,
   chordState?: ChordState | null,
   detailScrollOffset?: number,
+  autoRefresh?: boolean,
 ) => string {
   return (
     items: WorkItem[],
@@ -829,6 +830,7 @@ export function createListRenderer(): (
     totalCount?: number,
     chordState?: ChordState | null,
     detailScrollOffset?: number,
+    autoRefresh?: boolean,
   ): string => {
     const { rows, cols } = termSize;
     const output: string[] = [];
@@ -854,12 +856,15 @@ export function createListRenderer(): (
 
     // ── Render list mode ──────────────────────────────────────────
 
-    // Header with total count
+    // Header with total count and auto-refresh indicator
     const totalItems = items.length;
     const filterLabel = activeFilter ? ` (filtered: ${activeFilter})` : '';
     let header = ` ${ANSI.bold}Work Items${ANSI.reset} — ${totalItems} item(s)${filterLabel}`;
     if (totalCount !== undefined && totalCount > totalItems) {
       header += ` (top ${totalItems} of ${totalCount})`;
+    }
+    if (autoRefresh) {
+      header += ` ${ANSI.dim}[auto-refresh on]${ANSI.reset}`;
     }
     output.push(header);
     output.push('');
@@ -943,7 +948,13 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number },
 ): Promise<WorkItem | undefined> {
+  const opts = {
+    autoRefresh: options?.autoRefresh ?? true,
+    refreshIntervalMs: options?.refreshIntervalMs ?? 30000,
+  };
+
   let termSize = getTermSize();
 
   // Load items
@@ -957,6 +968,7 @@ export async function runWorklistTui(
   const state = new WorkItemListState(items, termSize);
   const renderer = defaultRenderer;
   const chordState: ChordState = createChordState();
+  let refreshNotification = '';
 
   // Build chord help hints for the footer
   const chordHelpHints = shortcutRegistry ? getChordHelpHints(shortcutRegistry as ShortcutRegistry) : '';
@@ -990,6 +1002,32 @@ export async function runWorklistTui(
   };
 
   // Data reading callback
+  /**
+   * Fetch and apply updated items, with optional notification.
+   */
+  const doRefresh = async (showNotification = false): Promise<void> => {
+    try {
+      const newItems = await fetcher();
+      const oldLen = state.items.length;
+      state.refreshItems(newItems);
+      if (showNotification && newItems.length !== oldLen) {
+        const diff = newItems.length - oldLen;
+        const msg = diff > 0 ? `+${diff} new` : `${diff} removed`;
+        refreshNotification = ` ${ANSI.dim}[Refreshed: ${msg}]${ANSI.reset}`;
+      } else if (showNotification) {
+        refreshNotification = ` ${ANSI.dim}[Refreshed]${ANSI.reset}`;
+      }
+    } catch {
+      refreshNotification = ` ${ANSI.dim}[Refresh failed]${ANSI.reset}`;
+    }
+    // Clear notification after brief display
+    setTimeout(() => {
+      refreshNotification = '';
+      render();
+    }, 3000);
+    render();
+  };
+
   const onData = async (chunk: Buffer): Promise<void> => {
     const key = chunk.toString();
 
@@ -1048,12 +1086,8 @@ export async function runWorklistTui(
     }
 
     if (action === 'refresh') {
-      try {
-        const newItems = await fetcher();
-        state.refreshItems(newItems);
-      } catch {
-        // Keep existing items on refresh failure
-      }
+      await doRefresh(true);
+      return;
     }
 
     if (action === 'select' && state.mode === 'detail') {
@@ -1065,6 +1099,9 @@ export async function runWorklistTui(
     // Re-render
     render();
   };
+
+  // Reset refresh notification on any keypress
+  const originalOnData = onData;
 
   let resolve: (value: WorkItem | undefined) => void;
   const promise = new Promise<WorkItem | undefined>((res) => {
@@ -1086,10 +1123,16 @@ export async function runWorklistTui(
       undefined,
       chordState,
       state.detailScrollOffset,
+      opts.autoRefresh,
     );
 
+    // Append refresh notification if present
+    const rendered = refreshNotification
+      ? output + '\n' + refreshNotification
+      : output;
+
     process.stdout.write(ANSI.cursorHome);
-    process.stdout.write(output);
+    process.stdout.write(rendered);
   };
 
   // Initial render
@@ -1107,8 +1150,19 @@ export async function runWorklistTui(
   // Read keypresses
   process.stdin.on('data', onData);
 
+  // Auto-refresh timer
+  let refreshTimer: ReturnType<typeof setInterval> | undefined;
+  if (opts.autoRefresh) {
+    refreshTimer = setInterval(() => {
+      doRefresh(false);
+    }, opts.refreshIntervalMs);
+  }
+
   // Cleanup on promise resolution
   promise.finally(() => {
+    if (refreshTimer !== undefined) {
+      clearInterval(refreshTimer);
+    }
     cleanup();
     process.stdout.removeListener('resize', onResize);
     process.stdin.removeListener('data', onData);
