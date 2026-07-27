@@ -10,6 +10,30 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
+// ── Types ────────────────────────────────────────────────────────────
+
+/**
+ * Error response from the wl CLI.
+ */
+export interface WlError {
+  success: false;
+  initialized?: boolean;
+  error?: string;
+}
+
+/**
+ * Format a wl error into a user-facing message.
+ */
+export function formatWlError(err: WlError): string {
+  if (err.initialized === false) {
+    return 'Worklog not initialized. Run "worklog init" first.';
+  }
+  if (err.error) {
+    return `Worklog error: ${err.error}`;
+  }
+  return 'Unknown worklog error';
+}
+
 /**
  * Injectable exec function for testing. Tests can replace this with
  * a mock to avoid calling the real wl CLI. See setExecFileAsync().

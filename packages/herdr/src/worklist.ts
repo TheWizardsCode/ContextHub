@@ -203,7 +203,7 @@ export class WorkItemListState {
   goToLast(): void {
     if (this.mode === 'detail') {
       this.detailScrollOffset = 999999; // Will be clamped
-    } else {
+    } else if (this.items.length > 0) {
       this.selectedIndex = this.items.length - 1;
       this._adjustScroll();
     }
