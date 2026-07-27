@@ -135,10 +135,11 @@ function extractItems(payload: unknown): WorkItem[] {
 
   if (payload && typeof payload === 'object') {
     const obj = payload as Record<string, unknown>;
-    if (Array.isArray(obj.workItems)) {
-      return (obj.workItems as any[]).map(normalizeItem);
-    }
-    if (Array.isArray(obj.results)) {
+
+    // Check `results` FIRST — when wl next is called with -n (count) the
+    // response includes both an empty `workItems: []` AND a populated
+    // `results` array. Order matters here.
+    if (Array.isArray(obj.results) && obj.results.length > 0) {
       return (obj.results as any[])
         .map((entry: any) => {
           const item = entry?.workItem;
@@ -149,8 +150,28 @@ function extractItems(payload: unknown): WorkItem[] {
         })
         .filter(Boolean) as WorkItem[];
     }
+
+    // Check `workItems` next — from wl list
+    if (Array.isArray(obj.workItems) && obj.workItems.length > 0) {
+      return (obj.workItems as any[]).map(normalizeItem);
+    }
+
+    // Single item under { workItem: {...} } — from wl next (no -n) or wl show
+    if (obj && typeof obj === 'object' && obj.workItem && typeof obj.workItem === 'object') {
+      return [normalizeItem(obj.workItem)];
+    }
+
+    // Direct single item: { id: "...", title: "..." }
     if (obj.id) {
       return [normalizeItem(obj)];
+    }
+
+    // Fallback: results might be empty but still present
+    if (Array.isArray(obj.results)) {
+      return [];
+    }
+    if (Array.isArray(obj.workItems)) {
+      return [];
     }
   }
 
