@@ -162,6 +162,15 @@ describe('handleKeypress edge cases', () => {
     handleKeypress(state, '\r', defaultTermSize);
     expect(state.mode).toBe('list');
   });
+
+  it('enters detail mode on enter for items without children', () => {
+    const items = [makeItem('WL-001')];
+    const state = new WorkItemListState(items, defaultTermSize);
+    handleKeypress(state, '\r', defaultTermSize);
+    // Should go to detail view, not exit the TUI
+    expect(state.mode).toBe('detail');
+    expect(state.detailItem?.id).toBe('WL-001');
+  });
 });
 
 describe('footer key hints', () => {

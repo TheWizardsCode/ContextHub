@@ -1171,6 +1171,9 @@ export async function runWorklistTui(
     }
 
     // ── Normal key handling ────────────────────────────────────
+    // Save mode before processing — selectItem() changes mode to 'detail',
+    // but we need to distinguish "just entered detail" from "confirm in detail".
+    const prevMode = state.mode;
     const action = handleKeypress(state, key, termSize);
 
     // If key wasn't handled as navigation and chord registry exists,
@@ -1194,7 +1197,7 @@ export async function runWorklistTui(
       return;
     }
 
-    if (action === 'select' && state.mode === 'detail') {
+    if (action === 'select' && prevMode === 'detail') {
       cleanup();
       resolve(state.detailItem ?? undefined);
       return;
