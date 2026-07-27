@@ -21,8 +21,11 @@
 import { checkWlAvailable, fetchNextItems, fetchItemsByStage } from './fetcher.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
+import { loadSettings, getDefaultSettingsPath } from './settings.js';
 
-const WL_COUNT = parseInt(process.env.WL_COUNT || '20', 10);
+// Load settings (env var takes precedence)
+const settings = loadSettings();
+const WL_COUNT = parseInt(process.env.WL_COUNT || String(settings.wlCount), 10);
 
 async function main(): Promise<void> {
   // Check if wl is available
@@ -52,12 +55,12 @@ async function main(): Promise<void> {
     }
   };
 
-  // Run the TUI with auto-refresh
+  // Run the TUI with settings
   const selectedItem = await runWorklistTui(
     fetcher,
     undefined,
     shortcutRegistry,
-    { autoRefresh: true, refreshIntervalMs: 30000 },
+    { autoRefresh: settings.autoRefresh, refreshIntervalMs: settings.refreshIntervalMs },
   );
 
   if (selectedItem) {
