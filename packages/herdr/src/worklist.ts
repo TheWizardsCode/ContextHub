@@ -849,8 +849,8 @@ export function handleKeypress(
         const flat = state.getFlattenedItems();
         if (state.selectedIndex < flat.length) {
           const selected = flat[state.selectedIndex];
-          // Toggle expand/collapse for items with children
-          if (selected.childCount !== undefined && selected.childCount > 0 && selected.depth === undefined) {
+          // Toggle expand/collapse for items with actual children data
+          if (selected.children && selected.children.length > 0 && selected.depth === undefined) {
             state.toggleExpand(selected.id);
             return 'toggle-expand';
           }
