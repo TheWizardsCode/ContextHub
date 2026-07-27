@@ -58,6 +58,11 @@ export interface TermSize {
  */
 export function getTermSize(): TermSize {
   try {
+    // Prefer process.stdout.columns/rows (reflects actual terminal size dynamically)
+    if (process.stdout.columns && process.stdout.rows) {
+      return { rows: process.stdout.rows, cols: process.stdout.columns };
+    }
+    // Fallback to env vars
     const rows = parseInt(process.env.LINES || '', 10) || 24;
     const cols = parseInt(process.env.COLUMNS || '', 10) || 80;
     return { rows, cols };
@@ -455,6 +460,35 @@ export function formatItemLine(
 }
 
 /**
+ * Ensure a line (possibly with ANSI codes) fits within the given width
+ * by truncating and appending an ellipsis if necessary.
+ */
+function truncateLine(line: string, maxWidth: number): string {
+  const visibleLen = line.replace(/\x1b\[[0-9;]*m/g, '').length;
+  if (visibleLen <= maxWidth) return line;
+
+  let result = '';
+  let visLen = 0;
+  let i = 0;
+  while (visLen < maxWidth - 1 && i < line.length) {
+    if (line[i] === '\x1b' && line[i + 1] === '[') {
+      const end = line.indexOf('m', i);
+      if (end >= 0) {
+        result += line.slice(i, end + 1);
+        i = end + 1;
+        continue;
+      }
+    }
+    result += line[i];
+    visLen += 1;
+    i += 1;
+  }
+  // Close open ANSI and append ellipsis
+  result += `${ANSI.reset}…`;
+  return result;
+}
+
+/**
  * Build the full content lines for a detail view (without scrolling).
  * Returns an array of lines ready for viewport rendering.
  */
@@ -465,7 +499,8 @@ export function formatDetailContent(
   if (!item) return [];
 
   const lines: string[] = [];
-  const separator = '─'.repeat(Math.min(maxCols, 72));
+  const contentWidth = maxCols - 2;
+  const separator = '─'.repeat(Math.min(contentWidth, 72));
 
   // Header
   lines.push('');
@@ -503,7 +538,7 @@ export function formatDetailContent(
     for (const dl of descLines) {
       // Wrap long lines to fit width
       const indent = 2;
-      const wrapWidth = maxCols - indent - 2;
+      const wrapWidth = contentWidth - indent - 2;
       if (dl.length > wrapWidth && wrapWidth > 10) {
         let remaining = dl;
         while (remaining.length > 0) {
@@ -522,7 +557,13 @@ export function formatDetailContent(
     }
   }
 
-  lines.push('');
+  // Ensure every line fits within the terminal width
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].length > 0) {
+      lines[i] = truncateLine(lines[i], maxCols);
+    }
+  }
+
   lines.push(separator);
   lines.push(` ${ANSI.dim}[↑↓/j:k] scroll  [g/G] top/bot  [esc] back  [r] refresh  [q] quit${ANSI.reset}`);
 
