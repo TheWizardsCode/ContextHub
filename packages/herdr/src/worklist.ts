@@ -107,11 +107,32 @@ export class WorkItemListState {
 
   /**
    * Set selected index with clamping and scroll adjustment.
+   * Uses flattened item count for clamping when hierarchy active.
    */
   setSelectedIndex(index: number): void {
     this.selectedIndex = index;
     this._clampSelection();
     this._adjustScroll();
+  }
+
+  /** Number of items in the flattened (display) list. */
+  get flatCount(): number {
+    return this.getFlattenedItems().length;
+  }
+
+  /**
+   * Clamp using the flattened item count when a filter/hierarchy is active
+   * (called automatically from navigation methods).
+   */
+  private _clampFlat(): void {
+    const total = this.flatCount;
+    if (total === 0) {
+      this.selectedIndex = 0;
+    } else if (this.selectedIndex >= total) {
+      this.selectedIndex = total - 1;
+    } else if (this.selectedIndex < 0) {
+      this.selectedIndex = 0;
+    }
   }
 
   /** Vertical scroll offset for the list display. */
@@ -128,6 +149,9 @@ export class WorkItemListState {
 
   /** Scroll offset within the detail view. */
   detailScrollOffset = 0;
+
+  /** Set of expanded item IDs (for hierarchical display). */
+  expandedItems: Set<string> = new Set();
 
   /** Terminal size for layout calculations. */
   termSize: TermSize;
@@ -185,9 +209,45 @@ export class WorkItemListState {
     }
   }
 
+  /**
+   * Check if an item ID is currently expanded.
+   */
+  isExpanded(id: string): boolean {
+    return this.expandedItems.has(id);
+  }
+
+  /**
+   * Toggle expand/collapse for an item.
+   */
+  toggleExpand(id: string): void {
+    if (this.expandedItems.has(id)) {
+      this.expandedItems.delete(id);
+    } else {
+      this.expandedItems.add(id);
+    }
+  }
+
+  /**
+   * Get the flattened item list, inserting children of expanded parents.
+   */
+  getFlattenedItems(): WorkItem[] {
+    const result: WorkItem[] = [];
+    for (const item of this.items) {
+      result.push(item);
+      if (item.childCount && item.children && item.children.length > 0 && this.expandedItems.has(item.id)) {
+        for (const child of item.children) {
+          result.push({ ...child, depth: child.depth ?? 1 });
+        }
+      }
+    }
+    return result;
+  }
+
   selectItem(): void {
     if (this.items.length === 0) return;
-    this.detailItem = this.items[this.selectedIndex];
+    const flat = this.getFlattenedItems();
+    const item = flat[this.selectedIndex] ?? this.items[this.selectedIndex];
+    this.detailItem = item;
     this.mode = 'detail';
     this.detailScrollOffset = 0;
   }
@@ -337,6 +397,15 @@ export function formatItemLine(
   isSelected = false,
   noIcons = false,
 ): string {
+  // Depth indentation for hierarchical display
+  const depth = item.depth ?? 0;
+  const depthIndent = depth > 0 ? '  '.repeat(depth) : '';
+
+  // Expand/collapse icon
+  const expandIcon = item.childCount && item.childCount > 0
+    ? (item._expanded ? '▼ ' : '▶ ')
+    : '';
+
   const prefix = isSelected ? '▸ ' : '  ';
   const iconPrefix = getIconPrefix(item, { noIcons });
   const iconStr = iconPrefix.length > 0 ? `${iconPrefix} ` : '';
@@ -354,7 +423,7 @@ export function formatItemLine(
     ? ` [${item.stage}]`
     : '';
 
-  let line = `${prefix}${iconStr}${item.id} ${colouredTitle}${stageTag}${priorityStr}`;
+  let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${item.id} ${colouredTitle}${stageTag}${priorityStr}`;
 
   // Truncate to fit terminal width, accounting for ANSI codes
   const visibleLength = line.replace(/\x1b\[[0-9;]*m/g, '').length;
@@ -645,7 +714,8 @@ export function getChordHelpHints(registry: ShortcutRegistry | undefined): strin
 
 export type KeyAction = 'up' | 'down' | 'pageup' | 'pagedown' | 'select'
   | 'back' | 'filter' | 'refresh' | 'quit' | 'first' | 'last'
-  | 'chord-start' | 'chord-complete' | 'chord-cancel' | null;
+  | 'chord-start' | 'chord-complete' | 'chord-cancel'
+  | 'toggle-expand' | null;
 
 export interface ChordState {
   /** Keys pressed so far in the current chord sequence */
@@ -775,6 +845,17 @@ export function handleKeypress(
       state.pageDown();
       break;
     case 'select':
+      if (state.mode === 'list' && state.selectedIndex >= 0) {
+        const flat = state.getFlattenedItems();
+        if (state.selectedIndex < flat.length) {
+          const selected = flat[state.selectedIndex];
+          // Toggle expand/collapse for items with children
+          if (selected.childCount !== undefined && selected.childCount > 0 && selected.depth === undefined) {
+            state.toggleExpand(selected.id);
+            return 'toggle-expand';
+          }
+        }
+      }
       state.selectItem();
       return 'select';
     case 'back':
@@ -818,6 +899,7 @@ export function createListRenderer(): (
   chordState?: ChordState | null,
   detailScrollOffset?: number,
   autoRefresh?: boolean,
+  expandedItems?: Set<string>,
 ) => string {
   return (
     items: WorkItem[],
@@ -831,6 +913,7 @@ export function createListRenderer(): (
     chordState?: ChordState | null,
     detailScrollOffset?: number,
     autoRefresh?: boolean,
+    expandedItems?: Set<string>,
   ): string => {
     const { rows, cols } = termSize;
     const output: string[] = [];
@@ -872,8 +955,24 @@ export function createListRenderer(): (
     // Filter bar
     output.push(formatFilterBar(activeFilter, cols));
 
+    // Flatten items for hierarchy display
+    const flatItems = expandedItems && expandedItems.size > 0
+      ? (() => {
+          const flattened: WorkItem[] = [];
+          for (const item of items) {
+            flattened.push(item);
+            if (item.childCount && item.children && item.children.length > 0 && expandedItems.has(item.id)) {
+              for (const child of item.children) {
+                flattened.push({ ...child, depth: child.depth ?? 1, _expanded: false });
+              }
+            }
+          }
+          return flattened;
+        })()
+      : items;
+
     // Items with group separators
-    const visible = items.slice(scrollOffset, scrollOffset + listHeight);
+    const visible = flatItems.slice(scrollOffset, scrollOffset + listHeight);
     let lastDisplayedGroup: number | undefined;
     for (let i = 0; i < visible.length; i++) {
       const actualIndex = scrollOffset + i;
@@ -889,9 +988,14 @@ export function createListRenderer(): (
         lastDisplayedGroup = item.group;
       }
 
+      // For hierarchy: apply _expanded flag for icon rendering
+      const hasChildCount = item.childCount !== undefined && item.childCount > 0;
+      const isExpanded = expandedItems?.has(item.id) ?? false;
+      const expandedItem = { ...item, _expanded: hasChildCount && isExpanded };
+
       const isSelected = actualIndex === selectedIndex;
       const noIcons = !iconsEnabled();
-      const line = formatItemLine(item, cols, isSelected, noIcons);
+      const line = formatItemLine(expandedItem, cols, isSelected, noIcons);
       if (isSelected) {
         output.push(`${ANSI.reverse}${line}${ANSI.reset}`);
       } else {
@@ -1112,8 +1216,11 @@ export async function runWorklistTui(
     termSize = getTermSize();
     state.termSize = termSize;
 
+    // Use flattened items for hierarchy display
+    const displayItems = state.mode === 'list' ? state.getFlattenedItems() : state.items;
+
     const output = renderer(
-      state.items,
+      displayItems,
       state.selectedIndex,
       state.scrollOffset,
       termSize,
@@ -1124,6 +1231,7 @@ export async function runWorklistTui(
       chordState,
       state.detailScrollOffset,
       opts.autoRefresh,
+      state.expandedItems,
     );
 
     // Append refresh notification if present

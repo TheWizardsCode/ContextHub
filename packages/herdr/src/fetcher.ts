@@ -51,6 +51,12 @@ export interface WorkItem {
   groupLabel?: string;
   needsProducerReview?: boolean;
   auditResult?: boolean | null;
+  /** Child work items (populated on expand). */
+  children?: WorkItem[];
+  /** Depth in hierarchy (0 = top-level, 1 = child, etc.). Used by renderer. */
+  depth?: number;
+  /** Internal: whether the expand icon should show collapsed state. */
+  _expanded?: boolean;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
