@@ -1283,6 +1283,9 @@ export async function runWorklistTui(
       ? output + '\n' + refreshNotification
       : output;
 
+    // Clear from cursor to end of screen to remove leftover content
+    // from previous renders of different heights
+    process.stdout.write(ANSI.clear);
     process.stdout.write(ANSI.cursorHome);
     process.stdout.write(rendered);
   };
