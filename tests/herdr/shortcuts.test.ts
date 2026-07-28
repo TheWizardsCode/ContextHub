@@ -307,6 +307,73 @@ describe('executeResolvedCommand', () => {
     const result = executeResolvedCommand('!!wl search test', state);
     expect(result).toBe('callback');
   });
+
+  it('routes !!wl close <id> to callback with ID substitution', () => {
+    const items = [makeWorkItem('WL-099')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl close <id>', state, callback);
+    expect(result).toBe('callback');
+    expect(commands).toEqual(['!!wl close WL-099']);
+  });
+
+  it('routes !!wl delete <id> to callback with ID substitution', () => {
+    const items = [makeWorkItem('WL-077')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl delete <id>', state, callback);
+    expect(result).toBe('callback');
+    expect(commands).toEqual(['!!wl delete WL-077']);
+  });
+
+  it('routes !!wl search [query] to callback', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl search my query', state, callback);
+    expect(result).toBe('callback');
+    expect(commands).toEqual(['!!wl search my query']);
+  });
+
+  it('returns "noop" for !!wl close when no items selected', () => {
+    const state = makeState([]);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl close <id>', state, callback);
+    expect(result).toBe('noop');
+    expect(commands).toEqual([]);
+  });
+
+  it('returns "noop" for !!wl delete when no items selected', () => {
+    const state = makeState([]);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl delete <id>', state, callback);
+    expect(result).toBe('noop');
+    expect(commands).toEqual([]);
+  });
+
+  it('routes !!wl close without callback (backward compatible)', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const result = executeResolvedCommand('!!wl close <id>', state);
+    expect(result).toBe('callback');
+  });
+
+  it('routes !!wl delete without callback (backward compatible)', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const result = executeResolvedCommand('!!wl delete <id>', state);
+    expect(result).toBe('callback');
+  });
 });
 
 // ── dispatchChordCommand tests ────────────────────────────────────────
@@ -457,6 +524,55 @@ describe('dispatchChordCommand', () => {
     const result = dispatchChordCommand('/skill:implement <id>', state);
     expect(result).toBe(true);
   });
+
+  // ── !!wl text-insertion template commands ───────────────────────
+
+  it('returns false for !!wl update command (falls through to executeResolvedCommand)', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    expect(dispatchChordCommand('!!wl update <id> --priority high', state)).toBe(false);
+  });
+
+  it('returns false for !!wl close command (falls through to executeResolvedCommand)', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    expect(dispatchChordCommand('!!wl close <id>', state)).toBe(false);
+  });
+
+  it('returns false for !!wl delete command (falls through to executeResolvedCommand)', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    expect(dispatchChordCommand('!!wl delete <id>', state)).toBe(false);
+  });
+
+  it('returns false for !!wl search command (falls through to executeResolvedCommand)', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    expect(dispatchChordCommand('!!wl search test', state)).toBe(false);
+  });
+
+  it('returns false for !!wl update without callback (backward compatible)', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    // When no callback provided, !!wl commands still fall through
+    expect(dispatchChordCommand('!!wl update <id> --priority low', state)).toBe(false);
+  });
+
+  it('does not invoke onCommand for !!wl update in dispatchChordCommand (always falls through)', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    dispatchChordCommand('!!wl update <id> --priority high', state, callback);
+    // dispatchChordCommand returns false for !!wl, so onCommand should NOT be called here
+    expect(commands).toEqual([]);
+  });
+
+  it('returns false for !!wl close with no items (does not attempt id substitution)', () => {
+    const state = makeState([]);
+    expect(dispatchChordCommand('!!wl close <id>', state)).toBe(false);
+  });
 });
 
 // ── executeResolvedCommand with dispatchChordCommand routing integration tests ─
@@ -569,6 +685,67 @@ describe('executeResolvedCommand with routing', () => {
     const result = executeResolvedCommand('!!wl update <id> --priority high', state, callback);
     expect(result).toBe('callback');
     expect(commands).toEqual(['!!wl update WL-001 --priority high']);
+  });
+
+  it('routes !!wl close <id> to callback with ID substitution', () => {
+    const items = [makeWorkItem('WL-099')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl close <id>', state, callback);
+    expect(result).toBe('callback');
+    expect(commands).toEqual(['!!wl close WL-099']);
+  });
+
+  it('routes !!wl delete <id> to callback with ID substitution', () => {
+    const items = [makeWorkItem('WL-077')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl delete <id>', state, callback);
+    expect(result).toBe('callback');
+    expect(commands).toEqual(['!!wl delete WL-077']);
+  });
+
+  it('returns "noop" for !!wl close <id> when no item selected', () => {
+    const state = makeState([]);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl close <id>', state, callback);
+    expect(result).toBe('noop');
+    expect(commands).toEqual([]);
+  });
+
+  it('returns "noop" for !!wl delete <id> when no item selected', () => {
+    const state = makeState([]);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl delete <id>', state, callback);
+    expect(result).toBe('noop');
+    expect(commands).toEqual([]);
+  });
+
+  it('routes !!wl update <id> --status done --stage in_review to callback with ID', () => {
+    const items = [makeWorkItem('WL-042')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl update <id> --status completed --stage in_review', state, callback);
+    expect(result).toBe('callback');
+    expect(commands).toEqual(['!!wl update WL-042 --status completed --stage in_review']);
+  });
+
+  it('routes !!wl close <id> without callback (backward compatible)', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    // Should not throw even without a callback
+    const result = executeResolvedCommand('!!wl close <id>', state);
+    expect(result).toBe('callback');
   });
 });
 
