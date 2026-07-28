@@ -404,7 +404,9 @@ describe('createListRenderer', () => {
     const renderer = createListRenderer();
     const output = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null);
     expect(output).toContain('Work Items');
-    expect(output).toContain('[q]');
+    // Nav hints removed from footer; header + items + blank lines present
+    expect(output.split('\n').length).toBeGreaterThan(10);
+    expect(output).not.toContain('[q]');
   });
 
   it('renders detail view when mode is detail', () => {

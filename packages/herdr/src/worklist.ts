@@ -1061,9 +1061,8 @@ export function createListRenderer(): (
       const footerLine = ` ${ANSI.reverse} chord: ${pendingStr} _ ${ANSI.reset}${hintStr}`;
       output.push(footerLine);
     } else {
-      const chordHint = chordState && chordState.hints ? `  ${chordState.hints}` : '';
-      const chordHelpSuffix = chordHelpHints ? `  ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}` : '';
-      const footerLine = ` ${ANSI.dim}[↑↓/j:k] nav  [enter] select  [r] refresh  [q] quit${chordHint}${chordHelpSuffix}${ANSI.reset}`;
+      const chordHelpSuffix = chordHelpHints ? ` ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}` : '';
+      const footerLine = chordHelpSuffix || ' ';
       output.push(footerLine);
     }
 

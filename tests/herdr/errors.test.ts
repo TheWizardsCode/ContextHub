@@ -174,14 +174,14 @@ describe('handleKeypress edge cases', () => {
 });
 
 describe('footer key hints', () => {
-  it('shows navigation hints in footer', () => {
+  it('shows no navigation hints in footer (removed for auto-refresh)', () => {
     const renderer = createListRenderer();
     const items = [makeItem('WL-001')];
     const result = renderer(items, 0, 0, defaultTermSize, null, 'list', null);
-    expect(result).toContain('nav');
-    expect(result).toContain('filter');
-    expect(result).toContain('refresh');
-    expect(result).toContain('quit');
+    // Nav hints removed — auto-refresh is on, chords cover filtering
+    expect(result).not.toContain('[q]');
+    expect(result).not.toContain('[r]');
+    expect(result).not.toContain('nav');
   });
 
   it('shows chord hints in footer when available', () => {
