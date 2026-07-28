@@ -34,12 +34,12 @@ const STATUS_FALLBACK: Record<string, string> = {
 };
 
 const STAGE_ICONS: Record<string, string> = {
-  idea:             '\u{1F50D}',   // 🔍
-  intake_complete:  '\u{1F4CB}',  // 📋
-  plan_complete:    '\u{1F4DD}',  // 📝
-  in_progress:      '\u{25D0}',   // ◐
-  in_review:        '\u{1F50E}',  // 🔎
-  completed:        '\u{2714}\u{FE0F}', // ✔️
+  idea:             '\u{1F4A1}',           // 💡
+  intake_complete:  '\u{1F4E5}',           // 📥
+  plan_complete:    '\u{1F4CB}',           // 📋
+  in_progress:      '\u{1F6E0}\u{FE0F}',  // 🛠️
+  in_review:        '\u{1F50D}',           // 🔍
+  completed:        '\u{2714}\u{FE0F}',   // ✔️
 };
 
 const STAGE_FALLBACK: Record<string, string> = {
