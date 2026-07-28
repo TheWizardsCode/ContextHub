@@ -1,5 +1,21 @@
 [
   {
+    "key": "i",
+    "command": "/skill:implement <id>",
+    "view": "both",
+    "label": "implement",
+    "description": "Implement the selected work item",
+    "stages": ["intake_complete", "plan_complete", "in_progress"]
+  },
+  {
+    "key": "a",
+    "command": "/skill:audit <id>",
+    "view": "both",
+    "label": "audit",
+    "description": "Audit the selected work item",
+    "stages": ["in_review"]
+  },
+  {
     "key": "c",
     "command": "/intake",
     "view": "both",
@@ -60,5 +76,32 @@
     "chord": ["f", "r"],
     "label": "filter in_review",
     "description": "Filter to show only in-review items"
+  },
+  {
+    "key": "",
+    "command": "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>'",
+    "view": "both",
+    "chord": ["r", "v"],
+    "label": "review",
+    "description": "Toggle reviewed status and add producer comment",
+    "stages": ["in_review"]
+  },
+  {
+    "key": "",
+    "command": "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
+    "view": "both",
+    "chord": ["r", "a"],
+    "label": "audit approve",
+    "description": "Approve audit — mark as ready to close",
+    "stages": ["in_review"]
+  },
+  {
+    "key": "",
+    "command": "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
+    "view": "both",
+    "chord": ["r", "r"],
+    "label": "audit reject",
+    "description": "Reject audit — mark as not ready to close",
+    "stages": ["in_review"]
   }
 ]

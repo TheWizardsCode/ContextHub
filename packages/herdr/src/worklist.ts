@@ -1083,14 +1083,59 @@ export function createListRenderer(): (
 const defaultRenderer = createListRenderer();
 
 /**
- * Dispatch a chord command by mapping it to the appropriate TUI action.
- * Returns true if the command was handled, false otherwise.
+ * Resolve `<id>` placeholders in a command and route it through the
+ * output mechanism. Used by {@link dispatchChordCommand} for agent
+ * workflow and audit command families.
+ *
+ * @returns true if the command was resolved and routed, false if
+ *          `<id>` was required but no item is selected (no-op)
+ */
+function resolveAndRouteCommand(
+  command: string,
+  state: WorkItemListState,
+  onCommand?: (command: string) => void,
+): boolean {
+  let resolvedCommand = command;
+
+  if (resolvedCommand.includes('<id>')) {
+    const flat = state.getFlattenedItems();
+    const idx = state.selectedIndex;
+    if (idx >= 0 && idx < flat.length) {
+      resolvedCommand = resolvedCommand.replace(/<id>/g, flat[idx].id);
+    } else {
+      // No item selected and command requires <id> — graceful no-op
+      return false;
+    }
+  }
+
+  if (onCommand) {
+    onCommand(resolvedCommand);
+  }
+  return true;
+}
+
+/**
+ * Dispatch a chord command by mapping it to the appropriate TUI action
+ * or routing it through the stdout command output mechanism.
+ *
+ * Recognised command families:
+ * - `/wl <stage>` — stage filter actions (applied internally)
+ * - `/skill:implement`, `/skill:audit` — agent skill invocations
+ * - `/intake`, `/plan` — agent workflow commands
+ * - `!!wl reviewed` — producer review toggle
+ * - Compound audit commands containing `&& wl audit-set`
+ *
+ * @param command - The resolved command string (may contain `<id>` placeholders)
+ * @param state - Current work item list state (for selected item lookup)
+ * @param onCommand - Optional callback to route non-/wl commands to the output mechanism
+ * @returns true if the command was handled, false otherwise
  */
 export function dispatchChordCommand(
   command: string,
   state: WorkItemListState,
+  onCommand?: (command: string) => void,
 ): boolean {
-  // Map /wl <stage> commands to stage filter actions
+  // ── /wl <stage> commands (internal dispatch) ──────────────
   const wlStageMatch = command.match(/^\/wl\s+(\S+)$/);
   if (wlStageMatch) {
     const wlStage = wlStageMatch[1];
@@ -1108,6 +1153,30 @@ export function dispatchChordCommand(
     }
   }
 
+  // ── Agent skill invocations ─────────────────────────────
+  if (command.startsWith('/skill:implement')) {
+    return resolveAndRouteCommand(command, state, onCommand);
+  }
+  if (command.startsWith('/skill:audit')) {
+    return resolveAndRouteCommand(command, state, onCommand);
+  }
+
+  // ── Agent workflow commands ─────────────────────────────
+  if (command.startsWith('/intake')) {
+    return resolveAndRouteCommand(command, state, onCommand);
+  }
+  if (command.startsWith('/plan')) {
+    return resolveAndRouteCommand(command, state, onCommand);
+  }
+
+  // ── Producer review / audit compound commands ───────────
+  if (command.startsWith('!!wl reviewed')) {
+    return resolveAndRouteCommand(command, state, onCommand);
+  }
+  if (command.includes('&& wl audit-set')) {
+    return resolveAndRouteCommand(command, state, onCommand);
+  }
+
   // Unknown command — not handled
   return false;
 }
@@ -1115,16 +1184,20 @@ export function dispatchChordCommand(
 /**
  * Execute a resolved chord command.
  *
- * - `/wl <stage>` commands are dispatched via {@link dispatchChordCommand} (returns 'dispatched')
- * - Other commands have `<id>` placeholders resolved to the selected item's ID
- *   and are passed to the optional `onCommand` callback (returns 'callback')
- * - If the command contains `<id>` but no item is selected, the command is
- *   silently dropped (returns 'noop')
+ * Routing priority:
+ * 1. {@link dispatchChordCommand} — handles `/wl <stage>` (internal filter),
+ *    `/skill:implement`, `/skill:audit`, `/intake`, `/plan`, `!!wl reviewed`,
+ *    and compound `&& wl audit-set` commands (resolves `<id>` and routes to
+ *    `onCommand`). Returns 'dispatched'.
+ * 2. For unrecognised command families, resolves `<id>` placeholders and
+ *    passes to the optional `onCommand` callback. Returns 'callback'.
+ * 3. If the command contains `<id>` but no item is selected, silently
+ *    drops with 'noop'.
  *
  * @param command - The resolved command string (may contain `<id>` placeholders)
  * @param state - Current work item list state (for selected item lookup)
- * @param onCommand - Optional callback to receive resolved non-/wl commands
- * @returns 'dispatched' if handled as a /wl filter command,
+ * @param onCommand - Optional callback to receive resolved commands
+ * @returns 'dispatched' if handled by dispatchChordCommand,
  *          'callback' if passed to onCommand,
  *          'noop' if skipped (no item + <id> requirement)
  */
@@ -1133,12 +1206,13 @@ export function executeResolvedCommand(
   state: WorkItemListState,
   onCommand?: (command: string) => void,
 ): 'dispatched' | 'callback' | 'noop' {
-  // Try /wl dispatch first
-  if (dispatchChordCommand(command, state)) {
+  // Try dispatchChordCommand first — handles /wl, /skill:, /intake, /plan,
+  // !!wl reviewed, and compound audit commands
+  if (dispatchChordCommand(command, state, onCommand)) {
     return 'dispatched';
   }
 
-  // Not a /wl command — resolve <id> placeholders and call onCommand
+  // Not a recognised command family — resolve <id> placeholders and call onCommand
   let resolvedCommand = command;
 
   if (resolvedCommand.includes('<id>')) {

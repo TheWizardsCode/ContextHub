@@ -4,7 +4,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ShortcutRegistry, type ShortcutEntry } from '../../packages/herdr/src/shortcut-config.js';
-import { executeResolvedCommand, WorkItemListState } from '../../packages/herdr/src/worklist.js';
+import { dispatchChordCommand, executeResolvedCommand, WorkItemListState } from '../../packages/herdr/src/worklist.js';
 import { getTermSize } from '../../packages/herdr/src/worklist.js';
 import type { WorkItem } from '../../packages/herdr/src/fetcher.js';
 
@@ -294,9 +294,9 @@ describe('executeResolvedCommand', () => {
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
 
-    const result = executeResolvedCommand('/skill:implement <id> && echo <id>', state, callback);
+    const result = executeResolvedCommand('/custom:tool <id> && echo <id>', state, callback);
     expect(result).toBe('callback');
-    expect(commands).toEqual(['/skill:implement WL-001 && echo WL-001']);
+    expect(commands).toEqual(['/custom:tool WL-001 && echo WL-001']);
   });
 
   it('does not call onCommand when onCommand is undefined', () => {
@@ -309,7 +309,268 @@ describe('executeResolvedCommand', () => {
   });
 });
 
-// ── RunWorklistTuiOptions onCommand integration tests ─────────────────
+// ── dispatchChordCommand tests ────────────────────────────────────────
+
+describe('dispatchChordCommand', () => {
+  it('returns false for unrecognized commands', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    expect(dispatchChordCommand('!!unknown command', state)).toBe(false);
+  });
+
+  it('recognizes /skill:implement and routes to onCommand', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = dispatchChordCommand('/skill:implement <id>', state, callback);
+    expect(result).toBe(true);
+    expect(commands).toEqual(['/skill:implement WL-001']);
+  });
+
+  it('recognizes /skill:audit and routes to onCommand', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = dispatchChordCommand('/skill:audit <id>', state, callback);
+    expect(result).toBe(true);
+    expect(commands).toEqual(['/skill:audit WL-001']);
+  });
+
+  it('recognizes /intake <id> and routes to onCommand', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = dispatchChordCommand('/intake <id>', state, callback);
+    expect(result).toBe(true);
+    expect(commands).toEqual(['/intake WL-001']);
+  });
+
+  it('recognizes /intake (without id) and routes to onCommand', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = dispatchChordCommand('/intake', state, callback);
+    expect(result).toBe(true);
+    expect(commands).toEqual(['/intake']);
+  });
+
+  it('recognizes /plan <id> and routes to onCommand', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = dispatchChordCommand('/plan <id>', state, callback);
+    expect(result).toBe(true);
+    expect(commands).toEqual(['/plan WL-001']);
+  });
+
+  it('recognizes !!wl reviewed prefix and routes to onCommand', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = dispatchChordCommand('!!wl reviewed <id> && wl comment add <id> --body "Looks good"', state, callback);
+    expect(result).toBe(true);
+    expect(commands).toEqual(['!!wl reviewed WL-001 && wl comment add WL-001 --body "Looks good"']);
+  });
+
+  it('recognizes compound audit commands with && wl audit-set', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = dispatchChordCommand('!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary "Approved"', state, callback);
+    expect(result).toBe(true);
+    expect(commands).toEqual(['!!wl reviewed WL-001 false && wl audit-set WL-001 --ready-to-close yes --summary "Approved"']);
+  });
+
+  it('returns the no-op for /skill:implement when no item selected and command requires <id>', () => {
+    const state = makeState([]);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = dispatchChordCommand('/skill:implement <id>', state, callback);
+    expect(result).toBe(false);
+    expect(commands).toEqual([]);
+  });
+
+  it('returns true for /wl <stage> filter commands (existing behavior)', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = dispatchChordCommand('/wl idea', state, callback);
+    expect(result).toBe(true);
+    // Filter should have been applied, not callback — 'idea' maps to 'idea'
+    expect(state.activeFilter).toBe('idea');
+    expect(commands).toEqual([]);
+  });
+
+  it('handles compound /skill:implement with &&', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = dispatchChordCommand('/skill:implement <id> && echo done', state, callback);
+    expect(result).toBe(true);
+    expect(commands).toEqual(['/skill:implement WL-001 && echo done']);
+  });
+
+  it('does not call onCommand for /wl stage commands', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = dispatchChordCommand('/wl idea', state, callback);
+    // /wl commands are handled internally, not routed to onCommand
+    expect(result).toBe(true);
+    expect(commands).toEqual([]);
+  });
+
+  it('still applies /wl filter dispatch when onCommand is undefined', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+
+    const result = dispatchChordCommand('/wl idea', state);
+    expect(result).toBe(true);
+    expect(state.activeFilter).toBe('idea');
+  });
+
+  it('handles /skill:implement when onCommand is undefined', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+
+    const result = dispatchChordCommand('/skill:implement <id>', state);
+    expect(result).toBe(true);
+  });
+});
+
+// ── executeResolvedCommand with dispatchChordCommand routing integration tests ─
+
+describe('executeResolvedCommand with routing', () => {
+  it('returns "dispatched" for /skill:implement commands', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('/skill:implement <id>', state, callback);
+    expect(result).toBe('dispatched');
+    expect(commands).toEqual(['/skill:implement WL-001']);
+  });
+
+  it('returns "dispatched" for /skill:audit <id>', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('/skill:audit <id>', state, callback);
+    expect(result).toBe('dispatched');
+    expect(commands).toEqual(['/skill:audit WL-001']);
+  });
+
+  it('returns "dispatched" for /intake <id>', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('/intake <id>', state, callback);
+    expect(result).toBe('dispatched');
+    expect(commands).toEqual(['/intake WL-001']);
+  });
+
+  it('returns "dispatched" for /intake (without id)', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('/intake', state, callback);
+    expect(result).toBe('dispatched');
+    expect(commands).toEqual(['/intake']);
+  });
+
+  it('returns "dispatched" for /plan <id>', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('/plan <id>', state, callback);
+    expect(result).toBe('dispatched');
+    expect(commands).toEqual(['/plan WL-001']);
+  });
+
+  it('returns "dispatched" for !!wl reviewed commands', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl reviewed <id> && wl comment add <id> --body "Looks good"', state, callback);
+    expect(result).toBe('dispatched');
+    expect(commands).toEqual(['!!wl reviewed WL-001 && wl comment add WL-001 --body "Looks good"']);
+  });
+
+  it('returns "dispatched" for compound audit commands', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary "Approved"', state, callback);
+    expect(result).toBe('dispatched');
+    expect(commands).toEqual(['!!wl reviewed WL-001 false && wl audit-set WL-001 --ready-to-close yes --summary "Approved"']);
+  });
+
+  it('returns "noop" for /skill:implement when no item selected', () => {
+    const state = makeState([]);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('/skill:implement <id>', state, callback);
+    expect(result).toBe('noop');
+    expect(commands).toEqual([]);
+  });
+
+  it('still returns "callback" for unrecognized non-/wl commands', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl search test', state, callback);
+    expect(result).toBe('callback');
+    expect(commands).toEqual(['!!wl search test']);
+  });
+
+  it('still returns "callback" for !!wl update commands', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl update <id> --priority high', state, callback);
+    expect(result).toBe('callback');
+    expect(commands).toEqual(['!!wl update WL-001 --priority high']);
+  });
+});
 
 describe('runWorklistTui options (type-level)', () => {
   it('accepts onCommand in options parameter', async () => {
