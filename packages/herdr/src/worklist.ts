@@ -1412,6 +1412,7 @@ export async function runWorklistTui(
         const command = chordState.resolvedCommand;
         chordState.resolvedCommand = null;
         if (command) {
+          cleanup();
           executeResolvedCommand(command, state, opts.onCommand);
           render();
           return;
@@ -1447,6 +1448,7 @@ export async function runWorklistTui(
       );
       if (singleCmd) {
         // Single-key shortcut — execute immediately
+        cleanup();
         executeResolvedCommand(singleCmd, state, opts.onCommand);
         render();
         return;
