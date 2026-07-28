@@ -1378,7 +1378,7 @@ export async function runWorklistTui(
 
     // If key wasn't handled as navigation and chord registry exists,
     // check if it starts a chord
-    if (action === null && shortcutRegistry) {
+    if (shortcutRegistry && (action === null || isChordLeader(key, shortcutRegistry as ShortcutRegistry))) {
       if (isChordLeader(key, shortcutRegistry as ShortcutRegistry)) {
         // Start chord mode
         const nextChords = (shortcutRegistry as ShortcutRegistry).getChordByPrefix([key],
