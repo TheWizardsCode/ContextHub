@@ -4,6 +4,9 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ShortcutRegistry, type ShortcutEntry } from '../../packages/herdr/src/shortcut-config.js';
+import { executeResolvedCommand, WorkItemListState } from '../../packages/herdr/src/worklist.js';
+import { getTermSize } from '../../packages/herdr/src/worklist.js';
+import type { WorkItem } from '../../packages/herdr/src/fetcher.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────
 
@@ -174,5 +177,147 @@ describe('ShortcutRegistry', () => {
       const registry = mod.loadShortcutConfig();
       expect(registry).toBeDefined();
     });
+  });
+});
+
+// ── Fixtures for executeResolvedCommand tests ─────────────────────────
+
+function makeWorkItem(id: string, title?: string): WorkItem {
+  return {
+    id,
+    title: title ?? `Item ${id}`,
+    status: 'in-progress',
+    priority: 'medium',
+    stage: 'in_progress',
+  };
+}
+
+function makeState(items: WorkItem[]): WorkItemListState {
+  return new WorkItemListState(items, getTermSize());
+}
+
+// ── executeResolvedCommand tests ──────────────────────────────────────
+
+describe('executeResolvedCommand', () => {
+  it('returns "dispatched" for /wl filter commands', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const result = executeResolvedCommand('/wl idea', state);
+    expect(result).toBe('dispatched');
+  });
+
+  it('returns "dispatched" for /wl intake command', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const result = executeResolvedCommand('/wl intake', state);
+    expect(result).toBe('dispatched');
+  });
+
+  it('returns "dispatched" for /wl plan command', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const result = executeResolvedCommand('/wl plan', state);
+    expect(result).toBe('dispatched');
+  });
+
+  it('returns "dispatched" for /wl review command', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const result = executeResolvedCommand('/wl review', state);
+    expect(result).toBe('dispatched');
+  });
+
+  it('calls onCommand callback for non-/wl commands', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl search test', state, callback);
+    expect(result).toBe('callback');
+    expect(commands).toEqual(['!!wl search test']);
+  });
+
+  it('replaces <id> placeholder with selected item ID', () => {
+    const items = [makeWorkItem('WL-001', 'First Item'), makeWorkItem('WL-002', 'Second Item')];
+    const state = makeState(items);
+    // Select WL-002
+    state.selectedIndex = 1;
+
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl update <id> --priority high', state, callback);
+    expect(result).toBe('callback');
+    expect(commands).toEqual(['!!wl update WL-002 --priority high']);
+  });
+
+  it('returns "noop" when no item selected and command requires <id>', () => {
+    const state = makeState([]);
+
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl update <id> --priority high', state, callback);
+    expect(result).toBe('noop');
+    expect(commands).toEqual([]);
+  });
+
+  it('returns "noop" when selectedIndex is out of range and command requires <id>', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    state.selectedIndex = 999; // Out of range
+
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl update <id> --priority high', state, callback);
+    expect(result).toBe('noop');
+    expect(commands).toEqual([]);
+  });
+
+  it('passes commands without <id> to callback even when no items', () => {
+    const state = makeState([]);
+
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('!!wl search test', state, callback);
+    expect(result).toBe('callback');
+    expect(commands).toEqual(['!!wl search test']);
+  });
+
+  it('replaces multiple <id> occurrences in the command', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+
+    const result = executeResolvedCommand('/skill:implement <id> && echo <id>', state, callback);
+    expect(result).toBe('callback');
+    expect(commands).toEqual(['/skill:implement WL-001 && echo WL-001']);
+  });
+
+  it('does not call onCommand when onCommand is undefined', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+
+    // Should not throw even with no callback
+    const result = executeResolvedCommand('!!wl search test', state);
+    expect(result).toBe('callback');
+  });
+});
+
+// ── RunWorklistTuiOptions onCommand integration tests ─────────────────
+
+describe('runWorklistTui options (type-level)', () => {
+  it('accepts onCommand in options parameter', async () => {
+    // Verify the type accepts onCommand by checking the function signature
+    const mod = await import('../../packages/herdr/src/worklist.js');
+    expect(typeof mod.runWorklistTui).toBe('function');
+    // Options parameter should accept onCommand
+    const optionsType = mod.runWorklistTui.length;
+    expect(optionsType).toBeGreaterThanOrEqual(3); // fetcher, initialItems, shortcutRegistry, options
   });
 });

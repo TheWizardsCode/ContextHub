@@ -1086,7 +1086,7 @@ const defaultRenderer = createListRenderer();
  * Dispatch a chord command by mapping it to the appropriate TUI action.
  * Returns true if the command was handled, false otherwise.
  */
-function dispatchChordCommand(
+export function dispatchChordCommand(
   command: string,
   state: WorkItemListState,
 ): boolean {
@@ -1113,6 +1113,52 @@ function dispatchChordCommand(
 }
 
 /**
+ * Execute a resolved chord command.
+ *
+ * - `/wl <stage>` commands are dispatched via {@link dispatchChordCommand} (returns 'dispatched')
+ * - Other commands have `<id>` placeholders resolved to the selected item's ID
+ *   and are passed to the optional `onCommand` callback (returns 'callback')
+ * - If the command contains `<id>` but no item is selected, the command is
+ *   silently dropped (returns 'noop')
+ *
+ * @param command - The resolved command string (may contain `<id>` placeholders)
+ * @param state - Current work item list state (for selected item lookup)
+ * @param onCommand - Optional callback to receive resolved non-/wl commands
+ * @returns 'dispatched' if handled as a /wl filter command,
+ *          'callback' if passed to onCommand,
+ *          'noop' if skipped (no item + <id> requirement)
+ */
+export function executeResolvedCommand(
+  command: string,
+  state: WorkItemListState,
+  onCommand?: (command: string) => void,
+): 'dispatched' | 'callback' | 'noop' {
+  // Try /wl dispatch first
+  if (dispatchChordCommand(command, state)) {
+    return 'dispatched';
+  }
+
+  // Not a /wl command — resolve <id> placeholders and call onCommand
+  let resolvedCommand = command;
+
+  if (resolvedCommand.includes('<id>')) {
+    const flat = state.getFlattenedItems();
+    const idx = state.selectedIndex;
+    if (idx >= 0 && idx < flat.length) {
+      resolvedCommand = resolvedCommand.replace(/<id>/g, flat[idx].id);
+    } else {
+      // No item selected and command requires <id> — graceful no-op
+      return 'noop';
+    }
+  }
+
+  if (onCommand) {
+    onCommand(resolvedCommand);
+  }
+  return 'callback';
+}
+
+/**
  * Run the main selection list TUI. This function:
  * 1. Sets up raw terminal mode
  * 2. Enters an event loop reading keypresses
@@ -1129,11 +1175,12 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; onCommand?: (command: string) => void },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
     refreshIntervalMs: options?.refreshIntervalMs ?? 30000,
+    onCommand: options?.onCommand,
   };
 
   let termSize = getTermSize();
@@ -1230,11 +1277,12 @@ export async function runWorklistTui(
         // Chord resolved — execute the command
         const command = chordState.resolvedCommand;
         chordState.resolvedCommand = null;
-        if (command && dispatchChordCommand(command, state)) {
+        if (command) {
+          executeResolvedCommand(command, state, opts.onCommand);
           render();
           return;
         }
-        // Unknown command — fall through to normal handling
+        // No command — fall through to normal handling
       }
 
       if (chordResult === 'chord-cancel') {

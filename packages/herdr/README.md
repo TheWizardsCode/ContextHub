@@ -5,8 +5,10 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 ## Features
 
 - **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list
-- **Filter by stage** — Press `/` to activate filter mode, then select a stage by number (0-5)
+- **Filter by stage** — Press `f` followed by a chord key (`i`=idea, `n`=intake, `p`=plan, `r`=review) to filter items by stage
 - **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority)
+- **Chord shortcuts** — Multi-key chord sequences provide quick actions like filtering, updating priorities, and more (configurable via `shortcuts.json`)
+- **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is output to stdout with a `CMD:` prefix for the calling framework to execute
 - **Keyboard navigation** — Arrow keys or j/k to navigate, Page Up/Down, g/G for first/last, Enter to select, Escape to go back
 - **Refresh** — Press `r` to reload the work item list from the Worklog
 - **Quit** — Press `q` to exit
@@ -51,21 +53,19 @@ The plugin pane will then be available via the Herdr plugin system.
    - `Enter` — View item details
    - `Escape` — Go back (from detail or filter mode)
 
-3. Filter by stage:
-   - Press `/` to enter filter mode
-   - Press a digit key (0-5) to select a stage:
-     - `0` — idea
-     - `1` — intake_complete
-     - `2` — plan_complete
-     - `3` — in_progress
-     - `4` — in_review
-     - `5` — completed
-   - Press `Escape` to cancel filtering
+3. Filter by stage using chord shortcuts:
+   - Press `f` then `i` — Filter to idea-stage items
+   - Press `f` then `n` — Filter to intake_complete items
+   - Press `f` then `p` — Filter to plan_complete items
+   - Press `f` then `r` — Filter to in_review items
+   - Press `Escape` to cancel an incomplete chord
 
-4. Refresh the list:
+4. For other chord shortcuts (displayed in the footer), press the chord leader key followed by the remaining keys to execute actions like updating item priorities or closing items.
+
+5. Refresh the list:
    - Press `r` to reload
 
-5. Quit:
+6. Quit:
    - Press `q` to close the worklist pane
 
 ### From the command line
@@ -93,10 +93,15 @@ packages/herdr/
 ├── src/
 │   ├── index.ts            # Entry point — TUI main loop
 │   ├── fetcher.ts          # Worklog data fetching via wl CLI
-│   └── worklist.ts         # List state, rendering, and keyboard handling
-└── scripts/
-    ├── open.sh             # Open the worklist pane
-    └── toggle.sh           # Toggle the worklist pane
+│   ├── shortcut-config.ts  # Chord shortcut registry and config loader
+│   ├── shortcuts.json      # Shortcut/chord definitions
+│   ├── icons.ts            # Icon and colour helpers
+│   ├── settings.ts         # User settings management
+│   └── worklist.ts         # List state, rendering, keyboard handling, command output
+├── scripts/
+│   ├── open.sh             # Open the worklist pane
+│   └── toggle.sh           # Toggle the worklist pane
+└── tests/herdr/            # Test files
 ```
 
 ### Design decisions
@@ -104,6 +109,9 @@ packages/herdr/
 - **No direct database access** — The plugin uses the `wl` CLI as the backend data source, ensuring compatibility without duplicating data-access logic.
 - **Terminal UI via raw mode** — The TUI uses raw stdin mode and ANSI escape codes for rendering, making it compatible with any Herdr pane without additional dependencies.
 - **Testable core** — All state management, formatting, and keyboard handling is pure logic in `worklist.ts`, fully testable without a terminal.
+- **Command output via callback** — When a chord resolves to a non-`/wl` command, it is passed to an `onCommand` callback (set by the entry point) which writes the resolved command to stdout with a `CMD:` prefix. The calling framework (Herdr) reads this output to execute arbitrary commands.
+- **`<id>` placeholder resolution** — Before output, any `<id>` placeholders in the resolved command are replaced with the currently selected work item's ID. If no item is selected and the command requires `<id>`, the command is silently dropped (graceful no-op).
+- **Chord shortcut system** — Multi-key chord sequences are defined in `shortcuts.json` and resolved via `ShortcutRegistry`. Chords can be filtered by view (list/detail) and stage.
 - **No agent launch commands** — Per scope constraints, the plugin only handles listing, filtering, browsing, and selection — not agent execution.
 
 ## Development

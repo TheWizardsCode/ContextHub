@@ -56,11 +56,23 @@ async function main(): Promise<void> {
   };
 
   // Run the TUI with settings
+  // onCommand is invoked when a chord resolves to a non-/wl command,
+  // with <id> placeholders replaced by the selected item's ID.
+  // The command is written to stdout so the calling framework (Herdr)
+  // can execute it. After outputting, the process exits cleanly.
   const selectedItem = await runWorklistTui(
     fetcher,
     undefined,
     shortcutRegistry,
-    { autoRefresh: settings.autoRefresh, refreshIntervalMs: settings.refreshIntervalMs },
+    {
+      autoRefresh: settings.autoRefresh,
+      refreshIntervalMs: settings.refreshIntervalMs,
+      onCommand: (command: string) => {
+        // Write the resolved command to stdout with a distinguishable prefix
+        process.stdout.write(`CMD:${command}\n`);
+        process.exit(0);
+      },
+    },
   );
 
   if (selectedItem) {
