@@ -111,6 +111,84 @@ describe('formatDetailContent', () => {
   it('returns empty array for null item', () => {
     expect(formatDetailContent(null, 80)).toEqual([]);
   });
+
+  // ── Audit fields ──────────────────────────────────────────────
+
+  it('displays auditResult=true with ready indicator', () => {
+    const item = makeItem({ auditResult: true });
+    const lines = formatDetailContent(item, 80);
+    const joined = lines.join('\n');
+    expect(joined).toContain('Audit');
+    expect(joined).toContain('\u2705'); // AUDIT_READY (✅)
+  });
+
+  it('displays auditResult=false with failed indicator', () => {
+    const item = makeItem({ auditResult: false });
+    const lines = formatDetailContent(item, 80);
+    const joined = lines.join('\n');
+    expect(joined).toContain('Audit');
+    expect(joined).toContain('\u274C'); // AUDIT_NOT_READY (❌)
+  });
+
+  it('displays auditResult=null with unknown indicator', () => {
+    const item = makeItem({ auditResult: null });
+    const lines = formatDetailContent(item, 80);
+    const joined = lines.join('\n');
+    expect(joined).toContain('Audit');
+    expect(joined).toContain('\u2753'); // AUDIT_UNKNOWN (❓)
+  });
+
+  it('displays auditedAt when present', () => {
+    const item = makeItem({ auditedAt: '2025-06-15T10:30:00Z' });
+    const lines = formatDetailContent(item, 80);
+    const joined = lines.join('\n');
+    expect(joined).toContain('Audited At');
+    expect(joined).toContain('2025-06-15T10:30:00Z');
+  });
+
+  it('omits auditedAt when absent', () => {
+    const item = makeItem({ auditedAt: undefined });
+    const lines = formatDetailContent(item, 80);
+    const joined = lines.join('\n');
+    expect(joined).not.toContain('Audited At');
+  });
+
+  it('displays needsProducerReview=true with review-needed indicator', () => {
+    const item = makeItem({ needsProducerReview: true });
+    const lines = formatDetailContent(item, 80);
+    const joined = lines.join('\n');
+    expect(joined).toContain('Reviewed');
+    expect(joined).toContain('\u274C'); // NEEDS_REVIEW_ICON (❌)
+  });
+
+  it('displays needsProducerReview=false with reviewed indicator', () => {
+    const item = makeItem({ needsProducerReview: false });
+    const lines = formatDetailContent(item, 80);
+    const joined = lines.join('\n');
+    expect(joined).toContain('Reviewed');
+    expect(joined).toContain('\u2705'); // REVIEW_DONE_ICON (✅)
+  });
+
+  it('omits needsProducerReview when undefined', () => {
+    const item = makeItem({ needsProducerReview: undefined });
+    const lines = formatDetailContent(item, 80);
+    const joined = lines.join('\n');
+    expect(joined).not.toContain('Reviewed');
+  });
+
+  it('includes all audit fields in metadata section', () => {
+    const item = makeItem({
+      auditResult: true,
+      auditedAt: '2025-06-15T10:30:00Z',
+      needsProducerReview: false,
+    });
+    const lines = formatDetailContent(item, 80);
+    const joined = lines.join('\n');
+    // All three audit labels should be present
+    expect(joined).toContain('Audit');
+    expect(joined).toContain('Audited At');
+    expect(joined).toContain('Reviewed');
+  });
 });
 
 describe('formatDetailView (scrollable)', () => {

@@ -75,6 +75,7 @@ export interface WorkItem {
   groupLabel?: string;
   needsProducerReview?: boolean;
   auditResult?: boolean | null;
+  auditedAt?: string | null;
   /** Child work items (populated on expand). */
   children?: WorkItem[];
   /** Depth in hierarchy (0 = top-level, 1 = child, etc.). Used by renderer. */
@@ -151,6 +152,7 @@ function normalizeItem(raw: any): WorkItem {
     groupLabel: raw?.groupLabel ? String(raw.groupLabel) : undefined,
     needsProducerReview: raw?.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
     auditResult: raw?.auditResult !== undefined ? raw.auditResult : null,
+    auditedAt: raw?.auditedAt !== undefined ? String(raw.auditedAt) : undefined,
   };
 }
 

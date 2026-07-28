@@ -16,6 +16,8 @@ import {
   statusIcon,
   stageIcon,
   priorityIcon,
+  auditIcon,
+  needsProducerReviewIcon,
   getIconPrefix,
   applyStageColour,
   iconsEnabled,
@@ -526,6 +528,9 @@ export function formatDetailContent(
   }
   pushMeta('Created', item.createdAt);
   pushMeta('Updated', item.updatedAt);
+  pushMeta('Audit', auditIcon(item.auditResult));
+  pushMeta('Reviewed', needsProducerReviewIcon(item.needsProducerReview));
+  pushMeta('Audited At', item.auditedAt);
 
   lines.push(separator);
 
