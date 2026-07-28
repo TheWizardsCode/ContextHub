@@ -335,11 +335,11 @@ describe('handleKeypress', () => {
     expect(result).toBe('back');
   });
 
-  it('handles / to activate filter', () => {
+  it('handles / as unhandled key (filter via chords now)', () => {
     const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
     const result = handleKeypress(state, '/', DEFAULT_TERM_SIZE);
-    expect(state.mode).toBe('filter');
-    expect(result).toBe('filter');
+    expect(state.mode).toBe('list');
+    expect(result).toBeNull();
   });
 
   it('handles r to refresh', () => {

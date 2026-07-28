@@ -5,7 +5,7 @@
   "description": "Worklog work item selection list for Herdr",
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/shortcuts.json dist/shortcuts.json",
     "dev": "tsx src/index.ts"
   }
 }

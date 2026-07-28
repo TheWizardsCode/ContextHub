@@ -621,7 +621,7 @@ export function formatFilterBar(filter: string | null, maxCols: number): string 
     const bar = ` ${ANSI.bg(color)}${ANSI.fg(16)} Filter: ${filter} ${ANSI.reset}`;
     return bar.padEnd(maxCols, '─');
   }
-  return ` ${ANSI.dim}No filter — press [/] to filter by stage${ANSI.reset}`.padEnd(maxCols, ' ');
+  return ` ${ANSI.dim}No filter — press [f] then [i/n/p/r] to filter by stage${ANSI.reset}`.padEnd(maxCols, ' ');
 }
 
 /**
@@ -789,8 +789,7 @@ export function keyToAction(key: string): KeyAction {
       return 'select';
     case '\x1b':
       return 'back';
-    case '/':
-      return 'filter';
+    // '/' filter prompt removed — use f-* chords instead
     case 'r':
       return 'refresh';
     case 'q':
@@ -1064,7 +1063,7 @@ export function createListRenderer(): (
     } else {
       const chordHint = chordState && chordState.hints ? `  ${chordState.hints}` : '';
       const chordHelpSuffix = chordHelpHints ? `  ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}` : '';
-      const footerLine = ` ${ANSI.dim}[↑↓/j:k] nav  [enter] select  [/] filter  [r] refresh  [q] quit${chordHint}${chordHelpSuffix}${ANSI.reset}`;
+      const footerLine = ` ${ANSI.dim}[↑↓/j:k] nav  [enter] select  [r] refresh  [q] quit${chordHint}${chordHelpSuffix}${ANSI.reset}`;
       output.push(footerLine);
     }
 
