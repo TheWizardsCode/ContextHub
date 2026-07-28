@@ -1080,6 +1080,36 @@ export function createListRenderer(): (
 const defaultRenderer = createListRenderer();
 
 /**
+ * Dispatch a chord command by mapping it to the appropriate TUI action.
+ * Returns true if the command was handled, false otherwise.
+ */
+function dispatchChordCommand(
+  command: string,
+  state: WorkItemListState,
+): boolean {
+  // Map /wl <stage> commands to stage filter actions
+  const wlStageMatch = command.match(/^\/wl\s+(\S+)$/);
+  if (wlStageMatch) {
+    const wlStage = wlStageMatch[1];
+    // Map wl stage names to internal stage names
+    const stageMap: Record<string, string> = {
+      idea: 'idea',
+      intake: 'intake_complete',
+      plan: 'plan_complete',
+      review: 'in_review',
+    };
+    const internalStage = stageMap[wlStage];
+    if (internalStage) {
+      state.applyFilter(internalStage);
+      return true;
+    }
+  }
+
+  // Unknown command — not handled
+  return false;
+}
+
+/**
  * Run the main selection list TUI. This function:
  * 1. Sets up raw terminal mode
  * 2. Enters an event loop reading keypresses
@@ -1197,10 +1227,14 @@ export async function runWorklistTui(
       );
 
       if (chordResult === 'chord-complete') {
-        // Chord resolved — output command and exit
-        cleanup();
-        resolve(undefined);
-        return;
+        // Chord resolved — execute the command
+        const command = chordState.resolvedCommand;
+        chordState.resolvedCommand = null;
+        if (command && dispatchChordCommand(command, state)) {
+          render();
+          return;
+        }
+        // Unknown command — fall through to normal handling
       }
 
       if (chordResult === 'chord-cancel') {
