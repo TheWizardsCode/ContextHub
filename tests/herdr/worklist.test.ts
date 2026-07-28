@@ -342,10 +342,12 @@ describe('handleKeypress', () => {
     expect(result).toBeNull();
   });
 
-  it('handles r to refresh', () => {
+  it('handles r as chord leader in list mode (no longer direct refresh)', () => {
     const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    // In list mode 'r' returns null — it's handled as a chord leader (review/view/audit)
+    // by the onData flow, not as a direct action
     const result = handleKeypress(state, 'r', DEFAULT_TERM_SIZE);
-    expect(result).toBe('refresh');
+    expect(result).toBeNull();
   });
 
   it('handles q to quit', () => {

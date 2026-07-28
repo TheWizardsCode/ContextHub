@@ -570,7 +570,7 @@ export function formatDetailContent(
   }
 
   lines.push(separator);
-  lines.push(` ${ANSI.dim}[↑↓/j:k] scroll  [g/G] top/bot  [esc] back  [r] refresh  [q] quit${ANSI.reset}`);
+  lines.push(` ${ANSI.dim}[↑↓/j:k] scroll  [g/G] top/bot  [esc] back  [q] quit${ANSI.reset}`);
 
   return lines;
 }
@@ -795,8 +795,7 @@ export function keyToAction(key: string): KeyAction {
     case '\x1b':
       return 'back';
     // '/' filter prompt removed — use f-* chords instead
-    case 'r':
-      return 'refresh';
+    // 'r' is handled as a chord leader (review/view/audit) — no longer a direct action
     case 'q':
       return 'quit';
     case 'g':
