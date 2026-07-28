@@ -726,24 +726,67 @@ export function processChordInput(
 
 /**
  * Build hint string for chord-mode display.
+ *
+ * Groups chords by next expected key and collapses multiple entries sharing
+ * the same nextKey into a single `<key>:<firstWord>...` entry. Strips
+ * consumed words from labels based on pending chord depth.
+ *
+ * @param chords - Chord entries to format (already filtered by prefix/view/stage)
+ * @param pendingKeys - Current pending chord prefix
+ * @returns Space-joined hint string, or empty string if no hints remain
  */
 export function formatChordHintsForHelp(
   chords: ShortcutEntry[],
   pendingKeys: string[],
 ): string {
-  const hints: string[] = [];
+  const nextIdx = pendingKeys.length;
+
+  type HintEntry = { nextKey: string; hint: string; firstRestWord: string };
+  const hints: HintEntry[] = [];
+
+  const extractLabel = (e: ShortcutEntry): string => {
+    return e.label ?? e.command
+      .replace(/<[^>]+>/g, '')
+      .split(/\r?\n/)[0]
+      .trim()
+      .replace(/^\/(skill:)?/, '');
+  };
+
   for (const c of chords) {
     const chord = c.chord;
-    if (!chord) continue;
-    const nextIdx = pendingKeys.length;
-    // Build display for remaining keys in this chord
-    if (chord.length > nextIdx) {
-      const remaining = chord.slice(nextIdx).join(' ');
-      const label = c.label ?? c.command.replace(/<[^>]+>/g, '').split(/\r?\n/)[0].trim();
-      hints.push(`${remaining}:${label}`);
+    if (!chord || chord.length <= nextIdx) continue;
+
+    const nextKey = chord[nextIdx];
+    const label = extractLabel(c);
+    const words = label.split(/\s+/);
+    // Strip consumed words equal to pending chord depth
+    const stripCount = Math.min(pendingKeys.length, Math.max(0, words.length - 1));
+    const rest = words.slice(stripCount);
+    const firstRestWord = rest.length > 0 ? rest[0] : (words.length > 0 ? words[words.length - 1] : '');
+    const hint = rest.length > 0 ? `${nextKey}:${rest.join(' ')}` : nextKey;
+
+    hints.push({ nextKey, hint, firstRestWord });
+  }
+
+  // Group by nextKey and collapse
+  const byKey = new Map<string, HintEntry[]>();
+  for (const h of hints) {
+    const group = byKey.get(h.nextKey) ?? [];
+    group.push(h);
+    byKey.set(h.nextKey, group);
+  }
+
+  const result: string[] = [];
+  for (const [, group] of byKey) {
+    if (group.length > 1) {
+      // Collapse: show first word with ellipsis
+      result.push(`${group[0].nextKey}:${group[0].firstRestWord}...`);
+    } else {
+      result.push(group[0].hint);
     }
   }
-  return hints.join('  ');
+
+  return result.join('  ');
 }
 
 /**
@@ -809,7 +852,7 @@ export function keyToAction(key: string): KeyAction {
     case '\x1b':
       return 'back';
     // '/' filter prompt removed — use f-* chords instead
-    // 'r' is handled as a chord leader (review/view/audit) — no longer a direct action
+    // 'r' is a single-key Producer Review shortcut — resolved via ShortcutRegistry
     case 'q':
       return 'quit';
     case 'g':
@@ -840,7 +883,6 @@ export function handleKeypress(
       state.back();
       return 'back';
     }
-    if (key === 'r') return 'refresh';
     // Detail scrolling
     if (key === 'j' || key === '\x1b[B') {
       state.detailScrollDown(1);
@@ -1395,18 +1437,33 @@ export async function runWorklistTui(
     const action = handleKeypress(state, key, termSize);
 
     // If key wasn't handled as navigation and chord registry exists,
-    // check if it starts a chord
+    // check if it's a shortcut or part of a chord sequence
     if (shortcutRegistry && (action === null || isChordLeader(key, shortcutRegistry as ShortcutRegistry))) {
+      // First: check if this key is a complete single-key shortcut
+      const singleCmd = (shortcutRegistry as ShortcutRegistry).lookupChord(
+        [key],
+        state.mode === 'detail' ? 'detail' : 'list',
+        state.activeFilter ?? undefined,
+      );
+      if (singleCmd) {
+        // Single-key shortcut — execute immediately
+        executeResolvedCommand(singleCmd, state, opts.onCommand);
+        render();
+        return;
+      }
+
+      // Second: check if this key starts a multi-key chord sequence
       if (isChordLeader(key, shortcutRegistry as ShortcutRegistry)) {
-        // Start chord mode
         const nextChords = (shortcutRegistry as ShortcutRegistry).getChordByPrefix([key],
           state.mode === 'detail' ? 'detail' : 'list',
           state.activeFilter ?? undefined);
-        chordState.pendingKeys = [key];
-        chordState.hints = formatChordHintsForHelp(nextChords, [key]);
-        chordState.resolvedCommand = null;
-        render();
-        return;
+        if (nextChords.length > 0) {
+          chordState.pendingKeys = [key];
+          chordState.hints = formatChordHintsForHelp(nextChords, [key]);
+          chordState.resolvedCommand = null;
+          render();
+          return;
+        }
       }
     }
 

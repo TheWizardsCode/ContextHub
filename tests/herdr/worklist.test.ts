@@ -455,10 +455,20 @@ describe('handleKeypress', () => {
     expect(result).toBeNull();
   });
 
-  it('handles r as chord leader in list mode (no longer direct refresh)', () => {
+  it('handles r as keyboard neutral in list mode (resolved via ShortcutRegistry)', () => {
     const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
-    // In list mode 'r' returns null — it's handled as a chord leader (review/view/audit)
-    // by the onData flow, not as a direct action
+    // In list mode 'r' returns null — it's a single-key Producer Review shortcut
+    // resolved by lookupChord in the onData flow, not as a direct handleKeypress action
+    const result = handleKeypress(state, 'r', DEFAULT_TERM_SIZE);
+    expect(result).toBeNull();
+  });
+
+  it('handles r as keyboard neutral in detail mode (resolved via ShortcutRegistry)', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.selectItem();
+    expect(state.mode).toBe('detail');
+    // In detail mode 'r' no longer returns 'refresh' — it's resolved as a
+    // single-key Producer Review shortcut by lookupChord in the onData flow
     const result = handleKeypress(state, 'r', DEFAULT_TERM_SIZE);
     expect(result).toBeNull();
   });
