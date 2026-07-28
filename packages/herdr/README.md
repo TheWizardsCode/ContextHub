@@ -8,10 +8,9 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Filter by stage** — Press `f` followed by a chord key (`i`=idea, `n`=intake, `p`=plan, `r`=review) to filter items by stage
 - **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority, and audit status information such as audit result, review status, and last audit timestamp)
 - **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The detail view metadata section additionally shows the review status (❌ needs review / ✅ reviewed) and the last audit timestamp.
-- **Chord shortcuts** — Multi-key chord sequences provide quick actions like filtering, updating priorities, and more (configurable via `shortcuts.json`)
-- **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is output to stdout with a `CMD:` prefix for the calling framework to execute
+- **Chord shortcuts** — Multi-key chord sequences provide quick actions like updating priorities, stage/status, title, closing/deleting items, running workflows, and toggling review status (configurable via `shortcuts.json`)
+- **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is output to stdout for the calling framework to execute
 - **Keyboard navigation** — Arrow keys or j/k to navigate (wraps at list boundaries), Page Up/Down, g/G for first/last, Enter to select, Escape to go back
-- **Refresh** — Press `r` to reload the work item list from the Worklog
 - **Quit** — Press `q` to exit
 
 ## Requirements
@@ -61,12 +60,36 @@ The plugin pane will then be available via the Herdr plugin system.
    - Press `f` then `r` — Filter to in_review items
    - Press `Escape` to cancel an incomplete chord
 
-4. For other chord shortcuts (displayed in the footer), press the chord leader key followed by the remaining keys to execute actions like updating item priorities or closing items.
+4. Workflow shortcuts (single-key):
+   - Press `c` — Create a new work item
+   - Press `i` — Run the implement workflow on the selected item (intake_complete, plan_complete, in_progress)
+   - Press `n` — Run the intake workflow on the selected item (idea stage)
+   - Press `p` — Run the plan workflow on the selected item (intake_complete stage)
+   - Press `s` — Insert a search command
 
-5. Refresh the list:
-   - Press `r` to reload
+5. Producer review shortcut:
+   - Press `r` — Toggle 'Needs Producer Review' flag and add a comment to the selected item
 
-6. Quit:
+6. Priority update chords (press `u` then `p` then a priority key):
+   - Press `u`, `p`, `l` — Set priority to low
+   - Press `u`, `p`, `m` — Set priority to medium
+   - Press `u`, `p`, `h` — Set priority to high
+   - Press `u`, `p`, `c` — Set priority to critical
+
+7. Other update chords (press `u` then a key):
+   - Press `u`, `s` — Insert an update stage/status template
+   - Press `u`, `t` — Insert an update title template
+
+8. Close/delete chords (press `x` then a key):
+   - Press `x`, `c` — Close the selected item
+   - Press `x`, `d` — Delete the selected item
+
+9. Audit chords (in_review stage only, press `a` then a key):
+   - Press `a`, `a` — Run automatic audit on the selected item
+   - Press `a`, `y` — Approve the selected item (mark ready to close)
+   - Press `a`, `r` — Reject the selected item (mark not ready to close)
+
+10. Quit:
    - Press `q` to close the worklist pane
 
 ### From the command line

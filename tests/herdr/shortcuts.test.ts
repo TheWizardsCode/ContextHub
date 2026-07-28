@@ -28,6 +28,7 @@ describe('ShortcutRegistry', () => {
   beforeEach(() => {
     entries = [
       { chord: ['i'], command: '/skill:implement <id>', view: 'both', label: 'implement', stages: ['intake_complete', 'plan_complete', 'in_progress'] },
+      { chord: ['r'], command: "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>'", view: 'both', label: 'Producer Review' },
       { chord: ['p'], command: '/plan <id>', view: 'both', label: 'plan', stages: ['intake_complete'] },
       { chord: ['c'], command: '/intake', view: 'both', label: 'create new' },
       { chord: ['n'], command: '/intake <id>', view: 'both', label: 'intake', stages: ['idea'] },
@@ -94,11 +95,17 @@ describe('ShortcutRegistry', () => {
         { chord: ['u', 'p', 'm'], command: '!!wl update <id> --priority medium', view: 'both', label: 'priority medium' },
         { chord: ['u', 'p', 'h'], command: '!!wl update <id> --priority high', view: 'both', label: 'priority high' },
         { chord: ['u', 'p', 'c'], command: '!!wl update <id> --priority critical', view: 'both', label: 'priority critical' },
+        { chord: ['u', 's'], command: '!!wl update <id> --status <status> --stage <stage> ', view: 'both', label: 'update stage/status' },
+        { chord: ['u', 't'], command: '!!wl update <id> --title ', view: 'both', label: 'update title' },
         { chord: ['f', 'i'], command: '/wl idea', view: 'both', label: 'filter idea' },
         { chord: ['f', 'n'], command: '/wl intake', view: 'both', label: 'filter intake' },
         { chord: ['f', 'p'], command: '/wl plan', view: 'both', label: 'filter plan' },
         { chord: ['f', 'r'], command: '/wl review', view: 'both', label: 'filter in_review' },
         { chord: ['x', 'c'], command: '!!wl close <id>', view: 'both', label: 'close done' },
+        { chord: ['x', 'd'], command: '!!wl delete <id>', view: 'both', label: 'close deleted' },
+        { chord: ['a', 'a'], command: '/skill:audit <id>', view: 'both', label: 'audit automatic', stages: ['in_review'] },
+        { chord: ['a', 'y'], command: "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'", view: 'both', label: 'audit approve', stages: ['in_review'] },
+        { chord: ['a', 'r'], command: "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'", view: 'both', label: 'audit reject', stages: ['in_review'] },
       ];
     });
 
@@ -115,7 +122,7 @@ describe('ShortcutRegistry', () => {
     it('gets chords by leader key', () => {
       const reg = new ShortcutRegistry(chordEntries);
       const uChords = reg.getChordByLeader('u');
-      expect(uChords.length).toBe(4); // u-p-l, u-p-m, u-p-h, u-p-c
+      expect(uChords.length).toBe(6); // u-p-l, u-p-m, u-p-h, u-p-c, u-s, u-t
     });
 
     it('gets chords by prefix', () => {
@@ -131,11 +138,7 @@ describe('ShortcutRegistry', () => {
     });
 
     it('filters chords by stage', () => {
-      const chordWithStages: ShortcutEntry[] = [
-        ...chordEntries,
-        { chord: ['a', 'a'], command: '/skill:audit <id>', view: 'both', label: 'audit automatic', stages: ['in_review'] },
-      ];
-      const reg = new ShortcutRegistry(chordWithStages);
+      const reg = new ShortcutRegistry(chordEntries);
       const reviewChords = reg.getChordByPrefix(['a', 'a'], 'list', 'in_review');
       expect(reviewChords.length).toBe(1);
       const ideaChords = reg.getChordByPrefix(['a', 'a'], 'list', 'idea');
@@ -146,7 +149,7 @@ describe('ShortcutRegistry', () => {
       const reg = new ShortcutRegistry(chordEntries);
       const chords = reg.getChordEntries();
       // Should include both single-key and multi-key entries
-      expect(chords.length).toBeGreaterThanOrEqual(13);
+      expect(chords.length).toBeGreaterThanOrEqual(21);
     });
   });
 
@@ -166,8 +169,14 @@ describe('ShortcutRegistry', () => {
       const allChords = entries.map(e => e.chord[0]);
       expect(allChords).toContain('c');
       expect(allChords).toContain('s');
+      expect(allChords).toContain('r');
+      expect(allChords).toContain('u');
+      expect(allChords).toContain('x');
+      expect(allChords).toContain('a');
+      expect(allChords).toContain('f');
+      expect(allChords).toContain('i');
       const chordEntries = registry.getChordEntries();
-      expect(chordEntries.length).toBeGreaterThanOrEqual(13);
+      expect(chordEntries.length).toBeGreaterThanOrEqual(21);
     });
 
     it('handles missing shortcuts.json gracefully', async () => {
