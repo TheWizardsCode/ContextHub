@@ -1147,9 +1147,6 @@ export async function runWorklistTui(
   const chordState: ChordState = createChordState();
   let refreshNotification = '';
 
-  // Build chord help hints for the footer
-  const chordHelpHints = shortcutRegistry ? getChordHelpHints(shortcutRegistry as ShortcutRegistry) : '';
-
   // Check if we're in raw mode (stdin is a TTY)
   const isInteractive = process.stdin.isTTY;
   let rawMode = false;
@@ -1299,6 +1296,52 @@ export async function runWorklistTui(
     // Use flattened items for hierarchy display
     const displayItems = state.mode === 'list' ? state.getFlattenedItems() : state.items;
 
+    // ── Compute stage-appropriate shortcut hints for the footer ──
+    let dynamicHints = '';
+    if (shortcutRegistry && chordState.pendingKeys.length === 0) {
+      const reg = shortcutRegistry as ShortcutRegistry;
+      const selIdx = state.selectedIndex;
+      const selStage = displayItems.length > 0 && selIdx < displayItems.length
+        ? displayItems[selIdx]?.stage
+        : undefined;
+      const isEmpty = displayItems.length === 0;
+
+      const relevantEntries = reg.getEntriesForStage(selStage)
+        .filter(e => e.view === 'list' || e.view === 'both')
+        .filter(e => {
+          if (isEmpty && e.command.includes('<id>')) return false;
+          return true;
+        });
+
+      if (relevantEntries.length > 0) {
+        const seenChordLeaders = new Set<string>();
+        const hints = relevantEntries
+          .filter(e => {
+            if (e.chord && e.chord.length >= 2) {
+              const leader = e.chord[0];
+              if (seenChordLeaders.has(leader)) return false;
+              seenChordLeaders.add(leader);
+            }
+            return true;
+          })
+          .map(e => {
+            const label = e.label ?? e.command
+              .replace(/<[^>]+>/g, '')
+              .split(/\r?\n/)[0]
+              .trim()
+              .replace(/^\/(skill:)?/, '');
+            if (e.chord && e.chord.length >= 2) {
+              const leaderKey = e.chord[0];
+              const firstWord = label.split(/\s+/)[0];
+              return `${leaderKey}:${firstWord}...`;
+            }
+            return `${e.key}:${label}`;
+          })
+          .join('  ');
+        dynamicHints = hints;
+      }
+    }
+
     const output = renderer(
       displayItems,
       state.selectedIndex,
@@ -1312,7 +1355,7 @@ export async function runWorklistTui(
       state.detailScrollOffset,
       opts.autoRefresh,
       state.expandedItems,
-      chordHelpHints,
+      dynamicHints,
     );
 
     // Append refresh notification if present
