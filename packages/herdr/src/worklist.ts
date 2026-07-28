@@ -941,6 +941,7 @@ export function createListRenderer(): (
   detailScrollOffset?: number,
   autoRefresh?: boolean,
   expandedItems?: Set<string>,
+  chordHelpHints?: string,
 ) => string {
   return (
     items: WorkItem[],
@@ -955,6 +956,7 @@ export function createListRenderer(): (
     detailScrollOffset?: number,
     autoRefresh?: boolean,
     expandedItems?: Set<string>,
+    chordHelpHints?: string,
   ): string => {
     const { rows, cols } = termSize;
     const output: string[] = [];
@@ -1061,7 +1063,8 @@ export function createListRenderer(): (
       output.push(footerLine);
     } else {
       const chordHint = chordState && chordState.hints ? `  ${chordState.hints}` : '';
-      const footerLine = ` ${ANSI.dim}[↑↓/j:k] nav  [enter] select  [/] filter  [r] refresh  [q] quit${chordHint}${ANSI.reset}`;
+      const chordHelpSuffix = chordHelpHints ? `  ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}` : '';
+      const footerLine = ` ${ANSI.dim}[↑↓/j:k] nav  [enter] select  [/] filter  [r] refresh  [q] quit${chordHint}${chordHelpSuffix}${ANSI.reset}`;
       output.push(footerLine);
     }
 
@@ -1276,6 +1279,7 @@ export async function runWorklistTui(
       state.detailScrollOffset,
       opts.autoRefresh,
       state.expandedItems,
+      chordHelpHints,
     );
 
     // Append refresh notification if present
