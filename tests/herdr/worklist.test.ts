@@ -81,11 +81,11 @@ describe('WorkItemListState', () => {
     expect(state.selectedIndex).toBe(2);
   });
 
-  it('scrolls up and does not go negative', () => {
+  it('scrolls up and wraps to last item', () => {
     const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
     state.selectedIndex = 0;
     state.moveUp();
-    expect(state.selectedIndex).toBe(0);
+    expect(state.selectedIndex).toBe(sampleItems.length - 1);
   });
 
   it('page down moves by visible page size', () => {
@@ -172,7 +172,118 @@ describe('WorkItemListState', () => {
     // Scroll offset should be calculated to show the selected item
     expect(state.scrollOffset).toBeGreaterThan(0);
   });
+
+  // ── Wrap-around navigation ──────────────────────────────────────────
+
+  it('moveUp at index 0 wraps to last item', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.selectedIndex = 0;
+    state.moveUp();
+    expect(state.selectedIndex).toBe(sampleItems.length - 1);
+  });
+
+  it('moveDown at last item wraps to first', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.selectedIndex = sampleItems.length - 1;
+    state.moveDown();
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  it('moveUp does not wrap when not at boundary', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.selectedIndex = 3;
+    state.moveUp();
+    expect(state.selectedIndex).toBe(2);
+  });
+
+  it('moveDown does not wrap when not at boundary', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.selectedIndex = 1;
+    state.moveDown();
+    expect(state.selectedIndex).toBe(2);
+  });
+
+  it('moveUp does nothing on empty list', () => {
+    const state = new WorkItemListState([], DEFAULT_TERM_SIZE);
+    state.moveUp();
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  it('moveDown does nothing on empty list', () => {
+    const state = new WorkItemListState([], DEFAULT_TERM_SIZE);
+    state.moveDown();
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  it('moveUp on single-item list wraps to itself (no crash)', () => {
+    const single = [makeItem({ id: 'WL-ONLY', title: 'Only item' })];
+    const state = new WorkItemListState(single, DEFAULT_TERM_SIZE);
+    state.selectedIndex = 0;
+    state.moveUp();
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  it('moveDown on single-item list wraps to itself (no crash)', () => {
+    const single = [makeItem({ id: 'WL-ONLY', title: 'Only item' })];
+    const state = new WorkItemListState(single, DEFAULT_TERM_SIZE);
+    state.selectedIndex = 0;
+    state.moveDown();
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  // ── Flat-count navigation ───────────────────────────────────────────
+
+  it('goToLast goes to flatCount - 1', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.goToLast();
+    expect(state.selectedIndex).toBe(sampleItems.length - 1);
+  });
+
+  it('goToLast does nothing on empty list', () => {
+    const state = new WorkItemListState([], DEFAULT_TERM_SIZE);
+    state.goToLast();
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  it('pageDown stays within flatCount bounds', () => {
+    const manyItems = Array.from({ length: 50 }, (_, i) =>
+      makeItem({ id: `WL-${String(i).padStart(6, '0')}`, title: `Item ${i}` })
+    );
+    const state = new WorkItemListState(manyItems, { rows: 10, cols: 80 });
+    state.selectedIndex = 49;
+    state.pageDown();
+    expect(state.selectedIndex).toBeLessThanOrEqual(state.flatCount - 1);
+  });
+
+  it('setSelectedIndex clamps using flatCount', () => {
+    const manyItems = Array.from({ length: 50 }, (_, i) =>
+      makeItem({ id: `WL-${String(i).padStart(6, '0')}`, title: `Item ${i}` })
+    );
+    const state = new WorkItemListState(manyItems, DEFAULT_TERM_SIZE);
+    state.setSelectedIndex(999);
+    expect(state.selectedIndex).toBe(state.flatCount - 1);
+  });
+
+  it('setSelectedIndex handles negative index', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    state.setSelectedIndex(-5);
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  it('_adjustScroll calculates maxOffset from flatCount', () => {
+    const manyItems = Array.from({ length: 50 }, (_, i) =>
+      makeItem({ id: `WL-${String(i).padStart(6, '0')}`, title: `Item ${i}` })
+    );
+    const state = new WorkItemListState(manyItems, { rows: 10, cols: 80 });
+    state.selectedIndex = 49;
+    state._adjustScroll();
+    // Should not exceed flatCount-based max offset
+    const listHeight = state._listHeight();
+    const expectedMaxOffset = Math.max(0, state.flatCount - listHeight);
+    expect(state.scrollOffset).toBeLessThanOrEqual(expectedMaxOffset);
+  });
 });
+
 
 describe('StageFilter', () => {
   it('lists all stage options', () => {
@@ -306,9 +417,11 @@ describe('handleKeypress', () => {
 
   it('handles arrow key navigation', () => {
     const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
-    handleKeypress(state, '\x1b[A', DEFAULT_TERM_SIZE); // up
-    expect(state.selectedIndex).toBe(0); // Already at top
-    handleKeypress(state, '\x1b[B', DEFAULT_TERM_SIZE); // down
+    handleKeypress(state, '\x1b[A', DEFAULT_TERM_SIZE); // up wraps to last
+    expect(state.selectedIndex).toBe(4);
+    handleKeypress(state, '\x1b[B', DEFAULT_TERM_SIZE); // down wraps to first
+    expect(state.selectedIndex).toBe(0);
+    handleKeypress(state, '\x1b[B', DEFAULT_TERM_SIZE); // down again
     expect(state.selectedIndex).toBe(1);
   });
 

@@ -173,17 +173,23 @@ export class WorkItemListState {
   // ── Navigation ──────────────────────────────────────────────────
 
   moveUp(): void {
+    if (this.flatCount === 0) return;
     if (this.selectedIndex > 0) {
       this.selectedIndex -= 1;
-      this._adjustScroll();
+    } else {
+      this.selectedIndex = this.flatCount - 1; // wrap to last
     }
+    this._adjustScroll();
   }
 
   moveDown(): void {
-    if (this.selectedIndex < this.items.length - 1) {
+    if (this.flatCount === 0) return;
+    if (this.selectedIndex < this.flatCount - 1) {
       this.selectedIndex += 1;
-      this._adjustScroll();
+    } else {
+      this.selectedIndex = 0; // wrap to first
     }
+    this._adjustScroll();
   }
 
   pageUp(): void {
@@ -194,7 +200,8 @@ export class WorkItemListState {
 
   pageDown(): void {
     const pageSize = this._listHeight();
-    this.selectedIndex = Math.min(this.items.length - 1, this.selectedIndex + pageSize);
+    const maxIndex = Math.max(0, this.flatCount - 1);
+    this.selectedIndex = Math.min(maxIndex, this.selectedIndex + pageSize);
     this._adjustScroll();
   }
 
@@ -210,8 +217,8 @@ export class WorkItemListState {
   goToLast(): void {
     if (this.mode === 'detail') {
       this.detailScrollOffset = 999999; // Will be clamped
-    } else if (this.items.length > 0) {
-      this.selectedIndex = this.items.length - 1;
+    } else if (this.flatCount > 0) {
+      this.selectedIndex = this.flatCount - 1;
       this._adjustScroll();
     }
   }
@@ -324,10 +331,11 @@ export class WorkItemListState {
   }
 
   private _clampSelection(): void {
-    if (this.items.length === 0) {
+    const total = this.flatCount;
+    if (total === 0) {
       this.selectedIndex = 0;
-    } else if (this.selectedIndex >= this.items.length) {
-      this.selectedIndex = this.items.length - 1;
+    } else if (this.selectedIndex >= total) {
+      this.selectedIndex = total - 1;
     } else if (this.selectedIndex < 0) {
       this.selectedIndex = 0;
     }
@@ -346,8 +354,8 @@ export class WorkItemListState {
     } else if (this.selectedIndex >= this.scrollOffset + listHeight) {
       this.scrollOffset = this.selectedIndex - listHeight + 1;
     }
-    // Clamp scroll offset
-    const maxOffset = Math.max(0, this.items.length - listHeight);
+    // Clamp scroll offset using flattened item count
+    const maxOffset = Math.max(0, this.flatCount - listHeight);
     if (this.scrollOffset > maxOffset) {
       this.scrollOffset = maxOffset;
     }

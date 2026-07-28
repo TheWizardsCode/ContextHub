@@ -10,7 +10,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The detail view metadata section additionally shows the review status (❌ needs review / ✅ reviewed) and the last audit timestamp.
 - **Chord shortcuts** — Multi-key chord sequences provide quick actions like filtering, updating priorities, and more (configurable via `shortcuts.json`)
 - **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is output to stdout with a `CMD:` prefix for the calling framework to execute
-- **Keyboard navigation** — Arrow keys or j/k to navigate, Page Up/Down, g/G for first/last, Enter to select, Escape to go back
+- **Keyboard navigation** — Arrow keys or j/k to navigate (wraps at list boundaries), Page Up/Down, g/G for first/last, Enter to select, Escape to go back
 - **Refresh** — Press `r` to reload the work item list from the Worklog
 - **Quit** — Press `q` to exit
 
@@ -45,12 +45,12 @@ The plugin pane will then be available via the Herdr plugin system.
    - Or use the Herdr command palette: `herdr plugin action run worklog-selection-list toggle-worklist`
 
 2. Navigate the list:
-   - `↑`/`k` — Move up
-   - `↓`/`j` — Move down
+   - `↑`/`k` — Move up (wraps to last item when at top)
+   - `↓`/`j` — Move down (wraps to first item when at bottom)
    - `PgUp` — Page up
    - `PgDn` — Page down
    - `g` — Go to first item
-   - `G` — Go to last item
+   - `G` — Go to last item (last visible item in expanded hierarchy)
    - `Enter` — View item details
    - `Escape` — Go back (from detail or filter mode)
 

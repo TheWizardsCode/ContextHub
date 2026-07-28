@@ -299,3 +299,110 @@ describe('createListRenderer hierarchy', () => {
     expect(result).toContain('▶');
   });
 });
+
+describe('Navigation through expanded hierarchy', () => {
+  it('moveDown navigates through all children when parent expanded', () => {
+    const children = [makeChildItem('WL-001', 1), makeChildItem('WL-001', 2), makeChildItem('WL-001', 3)];
+    const items = [makeItem('WL-001', { childCount: 3, children })];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.toggleExpand('WL-001');
+    expect(state.flatCount).toBe(4); // parent + 3 children
+
+    // Move down repeatedly, should navigate through all children
+    state.moveDown(); expect(state.selectedIndex).toBe(1); // child 1
+    state.moveDown(); expect(state.selectedIndex).toBe(2); // child 2
+    state.moveDown(); expect(state.selectedIndex).toBe(3); // child 3
+    // Wraps to first
+    state.moveDown(); expect(state.selectedIndex).toBe(0);
+  });
+
+  it('moveUp navigates back through children when parent expanded', () => {
+    const children = [makeChildItem('WL-001', 1), makeChildItem('WL-001', 2)];
+    const items = [makeItem('WL-001', { childCount: 2, children })];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.toggleExpand('WL-001');
+    expect(state.flatCount).toBe(3); // parent + 2 children
+
+    state.selectedIndex = 2; // last child
+    state.moveUp(); expect(state.selectedIndex).toBe(1); // first child
+    state.moveUp(); expect(state.selectedIndex).toBe(0); // parent
+    state.moveUp(); expect(state.selectedIndex).toBe(2); // wrap to last child
+  });
+
+  it('goToLast navigates to last child when parent expanded', () => {
+    const children = [makeChildItem('WL-001', 1), makeChildItem('WL-001', 2)];
+    const items = [makeItem('WL-001', { childCount: 2, children })];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.toggleExpand('WL-001');
+    state.goToLast();
+    expect(state.selectedIndex).toBe(state.flatCount - 1);
+    expect(state.selectedIndex).toBe(2); // last child
+  });
+
+  it('pageDown does not exceed flatCount when parent expanded', () => {
+    const children = Array.from({ length: 20 }, (_, i) => makeChildItem('WL-001', i + 1));
+    const items = [makeItem('WL-001', { childCount: 20, children })];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.toggleExpand('WL-001');
+    expect(state.flatCount).toBe(21);
+
+    // Page down from near the end — should stay within flatCount
+    state.selectedIndex = 18;
+    state.pageDown();
+    expect(state.selectedIndex).toBeLessThanOrEqual(state.flatCount - 1);
+    expect(state.selectedIndex).toBe(state.flatCount - 1); // should land on last
+  });
+
+  it('pageDown on collapsed list (no children) still works correctly', () => {
+    const manyItems = Array.from({ length: 50 }, (_, i) =>
+      makeItem(`WL-${String(i + 1).padStart(6, '0')}`));
+    const state = new WorkItemListState(manyItems, defaultTermSize);
+    state.selectedIndex = 48;
+    state.pageDown();
+    expect(state.selectedIndex).toBe(manyItems.length - 1);
+  });
+
+  it('setSelectedIndex clamps within flatCount when parent expanded', () => {
+    const children = [makeChildItem('WL-001', 1)];
+    const items = [makeItem('WL-001', { childCount: 1, children })];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.toggleExpand('WL-001');
+    expect(state.flatCount).toBe(2);
+
+    state.setSelectedIndex(10);
+    expect(state.selectedIndex).toBe(1); // flatCount - 1
+  });
+
+  it('moveDown after expand navigates to last child then wraps (multiple parents)', () => {
+    const c1 = [makeChildItem('WL-001', 1)];
+    const i1 = makeItem('WL-001', { childCount: 1, children: c1 });
+    const c2 = [makeChildItem('WL-002', 1)];
+    const i2 = makeItem('WL-002', { childCount: 1, children: c2 });
+    const items = [i1, i2];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.toggleExpand('WL-001');
+    state.toggleExpand('WL-002');
+    expect(state.flatCount).toBe(4); // 2 parents + 2 children
+
+    state.selectedIndex = 0; // i1
+    state.moveDown(); expect(state.selectedIndex).toBe(1); // c1
+    state.moveDown(); expect(state.selectedIndex).toBe(2); // i2
+    state.moveDown(); expect(state.selectedIndex).toBe(3); // c2
+    state.moveDown(); expect(state.selectedIndex).toBe(0); // wraps to i1
+  });
+
+  it('_adjustScroll uses flatCount for max scroll offset when parent expanded', () => {
+    const children = Array.from({ length: 40 }, (_, i) => makeChildItem('WL-001', i + 1));
+    const items = [makeItem('WL-001', { childCount: 40, children })];
+    const state = new WorkItemListState(items, { rows: 10, cols: 80 });
+    state.toggleExpand('WL-001');
+    expect(state.flatCount).toBe(41);
+
+    state.selectedIndex = 40; // last child
+    state._adjustScroll();
+    const listHeight = state._listHeight();
+    const expectedMaxOffset = Math.max(0, state.flatCount - listHeight);
+    expect(state.scrollOffset).toBeLessThanOrEqual(expectedMaxOffset);
+  });
+});
+
