@@ -158,12 +158,125 @@ describe('handleKeypress hierarchy', () => {
     expect(flat.length).toBe(2);
     expect(flat[1].id).toBe('WL-001-C1');
   });
+
+  it('Tab toggles expand for items with children data', () => {
+    const child = makeChildItem('WL-001', 1);
+    const items = [makeItem('WL-001', { childCount: 1, children: [child] })];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.setSelectedIndex(0);
+    // Tab should expand
+    let action = handleKeypress(state, '\t', defaultTermSize);
+    expect(state.isExpanded('WL-001')).toBe(true);
+    expect(state.mode).toBe('list');
+    expect(action).toBe('toggle-expand');
+    // Tab again should collapse
+    action = handleKeypress(state, '\t', defaultTermSize);
+    expect(state.isExpanded('WL-001')).toBe(false);
+    expect(state.mode).toBe('list');
+    expect(action).toBe('toggle-expand');
+  });
+
+  it('Tab is noop for items without children', () => {
+    const items = [makeItem('WL-001')];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.setSelectedIndex(0);
+    const action = handleKeypress(state, '\t', defaultTermSize);
+    expect(state.mode).toBe('list');
+    expect(action).toBeNull();
+    expect(state.detailItem).toBeNull();
+  });
+
+  it('Tab is noop for items with childCount but no pre-loaded children data', () => {
+    const items = [makeItem('WL-001', { childCount: 3 })];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.setSelectedIndex(0);
+    const action = handleKeypress(state, '\t', defaultTermSize);
+    expect(state.isExpanded('WL-001')).toBe(false);
+    expect(state.mode).toBe('list');
+    expect(action).toBe('toggle-expand');
+  });
+
+  it('Tab does not open detail view for items with children', () => {
+    const child = makeChildItem('WL-001', 1);
+    const items = [makeItem('WL-001', { childCount: 1, children: [child] })];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.setSelectedIndex(0);
+    handleKeypress(state, '\t', defaultTermSize);
+    expect(state.mode).toBe('list');
+    expect(state.detailItem).toBeNull();
+  });
+
+  it('Tab triggers on-demand fetch when children not pre-loaded (E2E pipeline)', async () => {
+    // Simulate an item with childCount but no pre-loaded children
+    const childItems = [
+      makeItem('WL-001-C1', { depth: 1, childCount: 0 }),
+      makeItem('WL-001-C2', { depth: 1, childCount: 0 }),
+    ];
+    const items = [makeItem('WL-001', { childCount: 2 })]; // no children array
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.setSelectedIndex(0);
+
+    // Step 1: Tab signals toggle-expand (handleKeypress returns action)
+    const action = handleKeypress(state, '\t', defaultTermSize);
+    expect(action).toBe('toggle-expand');
+    // Tab does NOT expand inline when children are missing
+    expect(state.isExpanded('WL-001')).toBe(false);
+    expect(state.mode).toBe('list');
+
+    // Step 2: Simulate onData handler — fetch children and attach
+    const flat = state.getFlattenedItems();
+    const selected = flat[0];
+    selected.children = childItems;
+    state.toggleExpand(selected.id);
+
+    // Step 3: Verify expanded state shows children
+    const expandedFlat = state.getFlattenedItems();
+    expect(expandedFlat.length).toBe(3); // parent + 2 children
+    expect(expandedFlat[1].id).toBe('WL-001-C1');
+    expect(expandedFlat[1].depth).toBe(1);
+    expect(expandedFlat[2].id).toBe('WL-001-C2');
+    expect(expandedFlat[2].depth).toBe(1);
+
+    // Still in list mode, no detail view
+    expect(state.mode).toBe('list');
+    expect(state.detailItem).toBeNull();
+  });
+
+  it('Tab re-fetches children on each press when previous batch was loaded (E2E pipeline)', async () => {
+    // First press: expand
+    const childItems = [makeItem('WL-001-C1', { depth: 1, childCount: 0 })];
+    const items = [makeItem('WL-001', { childCount: 1 })];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.setSelectedIndex(0);
+
+    // Simulate onData for first press
+    const flat1 = state.getFlattenedItems();
+    flat1[0].children = childItems;
+    state.toggleExpand('WL-001');
+    expect(state.isExpanded('WL-001')).toBe(true);
+    expect(state.getFlattenedItems().length).toBe(2);
+
+    // Second press: collapse
+    const action2 = handleKeypress(state, '\t', defaultTermSize);
+    expect(action2).toBe('toggle-expand');
+    expect(state.isExpanded('WL-001')).toBe(false);
+    expect(state.getFlattenedItems().length).toBe(1);
+
+    // Third press: re-expand (after children already loaded, should toggle inline)
+    const action3 = handleKeypress(state, '\t', defaultTermSize);
+    expect(action3).toBe('toggle-expand');
+    expect(state.isExpanded('WL-001')).toBe(true);
+    expect(state.getFlattenedItems().length).toBe(2);
+  });
 });
 
 describe('createListRenderer hierarchy', () => {
   it('shows expanded children in rendered output', () => {
-    const child = makeChildItem('WL-001', 1);
-    const items = [makeItem('WL-001', { childCount: 1, children: [child] })];
+    const child = makeChildItem('WL-001-C1', 1);
+    const parent = makeItem('WL-001', { childCount: 1, children: [child] });
+    // The renderer receives already-flattened items (flattening is done upstream
+    // by runWorklistTui's render callback via state.getFlattenedItems()).
+    const items = [parent, { ...child, depth: 1 }];
     const renderer = createListRenderer();
     const result = renderer(
       items, 0, 0, defaultTermSize, null, 'list', null, undefined, undefined, 0, false, new Set(['WL-001']),
@@ -173,8 +286,11 @@ describe('createListRenderer hierarchy', () => {
   });
 
   it('hides children when parent collapsed', () => {
-    const child = makeChildItem('WL-001', 1);
-    const items = [makeItem('WL-001', { childCount: 1, children: [child] })];
+    const child = makeChildItem('WL-001-C1', 1);
+    const parent = makeItem('WL-001', { childCount: 1, children: [child] });
+    // Renderer receives already-flattened items; when collapsed there are no
+    // children in the passed array and no expandedItems.
+    const items = [parent];
     const renderer = createListRenderer();
     const result = renderer(
       items, 0, 0, defaultTermSize, null, 'list', null, undefined, undefined, 0, false, new Set<string>(),

@@ -443,6 +443,78 @@ describe('createListRenderer', () => {
     expect(output).toContain('of');
     expect(output).toMatch(/\d+ of \d+/);
   });
+
+  it('does not duplicate children when items are already flattened and expandedItems is set', () => {
+    const renderer = createListRenderer();
+
+    // Simulate items that are ALREADY flattened (parent + children)
+    const child1 = makeItem({ id: 'WL-CHILD1', title: 'Child 1', stage: 'in_progress', childCount: 0 });
+    const child2 = makeItem({ id: 'WL-CHILD2', title: 'Child 2', stage: 'in_progress', childCount: 0 });
+    const child3 = makeItem({ id: 'WL-CHILD3', title: 'Child 3', stage: 'in_progress', childCount: 0 });
+
+    const parent = makeItem({
+      id: 'WL-PARENT',
+      title: 'Parent',
+      stage: 'in_review',
+      childCount: 3,
+      children: [child1, child2, child3],
+    });
+
+    // Already-flattened list (render callback passes state.getFlattenedItems())
+    const alreadyFlattened: WorkItem[] = [parent, child1, child2, child3];
+
+    const expandedItems = new Set<string>(['WL-PARENT']);
+
+    const output = renderer(
+      alreadyFlattened,
+      0, 0, DEFAULT_TERM_SIZE, null, 'list', null,
+      undefined, null, undefined, undefined, expandedItems,
+    );
+
+    // Count occurrences of each child ID in the output
+    const child1Count = (output.match(/WL-CHILD1/g) || []).length;
+    const child2Count = (output.match(/WL-CHILD2/g) || []).length;
+    const child3Count = (output.match(/WL-CHILD3/g) || []).length;
+
+    expect(child1Count).toBe(1);
+    expect(child2Count).toBe(1);
+    expect(child3Count).toBe(1);
+  });
+
+  it('shows children exactly once when parent is expanded (integration: getFlattenedItems + renderer)', () => {
+    const child1 = makeItem({ id: 'WL-C1', title: 'Child 1', childCount: 0 });
+    const child2 = makeItem({ id: 'WL-C2', title: 'Child 2', childCount: 0 });
+    const parent = makeItem({
+      id: 'WL-P',
+      title: 'Parent',
+      childCount: 2,
+      children: [child1, child2],
+      depth: undefined,
+    });
+
+    const stateItems = [parent];
+    const state = new WorkItemListState(stateItems, DEFAULT_TERM_SIZE);
+
+    // Simulate expand: fetch children and toggle
+    state.items = stateItems;
+    state.expandedItems.add('WL-P');
+
+    const flattened = state.getFlattenedItems();
+    expect(flattened).toHaveLength(3); // parent + 2 children
+
+    const renderer = createListRenderer();
+    const output = renderer(
+      flattened,
+      0, 0, DEFAULT_TERM_SIZE, null, 'list', null,
+      undefined, null, undefined, undefined, state.expandedItems,
+    );
+
+    const c1Count = (output.match(/WL-C1/g) || []).length;
+    const c2Count = (output.match(/WL-C2/g) || []).length;
+
+    expect(c1Count).toBe(1);
+    expect(c2Count).toBe(1);
+  });
 });
 
 // ── New: Group separator formatting ─────────────────────────────────

@@ -6,7 +6,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 
 - **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list
 - **Filter by stage** — Press `f` followed by a chord key (`i`=idea, `n`=intake, `p`=plan, `r`=review) to filter items by stage
-- **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority)
+- **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority, and audit status information such as audit result, review status, and last audit timestamp)
 - **Chord shortcuts** — Multi-key chord sequences provide quick actions like filtering, updating priorities, and more (configurable via `shortcuts.json`)
 - **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is output to stdout with a `CMD:` prefix for the calling framework to execute
 - **Keyboard navigation** — Arrow keys or j/k to navigate, Page Up/Down, g/G for first/last, Enter to select, Escape to go back

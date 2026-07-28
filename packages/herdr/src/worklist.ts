@@ -10,7 +10,7 @@
  * Herdr's pane-based model.
  */
 
-import type { WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, type WorkItem } from './fetcher.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
   statusIcon,
@@ -792,6 +792,8 @@ export function keyToAction(key: string): KeyAction {
     case '\r':
     case '\n':
       return 'select';
+    case '\t':
+      return 'toggle-expand';
     case '\x1b':
       return 'back';
     // '/' filter prompt removed — use f-* chords instead
@@ -918,6 +920,23 @@ export function handleKeypress(
     case 'last':
       state.goToLast();
       break;
+    case 'toggle-expand':
+      if (state.mode === 'list' && state.selectedIndex >= 0 && state.items.length > 0) {
+        const flat = state.getFlattenedItems();
+        if (state.selectedIndex < flat.length) {
+          const selected = flat[state.selectedIndex];
+          // Only top-level items with children can be expanded/collapsed
+          if (selected.depth === undefined && selected.childCount && selected.childCount > 0) {
+            // If children data already loaded, toggle inline
+            if (selected.children && selected.children.length > 0) {
+              state.toggleExpand(selected.id);
+            }
+            // Return action so caller can fetch children on demand
+            return 'toggle-expand';
+          }
+        }
+      }
+      return null;
   }
   return action;
 }
@@ -1001,21 +1020,9 @@ export function createListRenderer(): (
     // Filter bar
     output.push(formatFilterBar(activeFilter, cols));
 
-    // Flatten items for hierarchy display
-    const flatItems = expandedItems && expandedItems.size > 0
-      ? (() => {
-          const flattened: WorkItem[] = [];
-          for (const item of items) {
-            flattened.push(item);
-            if (item.childCount && item.children && item.children.length > 0 && expandedItems.has(item.id)) {
-              for (const child of item.children) {
-                flattened.push({ ...child, depth: child.depth ?? 1, _expanded: false });
-              }
-            }
-          }
-          return flattened;
-        })()
-      : items;
+    // Items are already flattened by the caller (render callback in runWorklistTui
+    // calls state.getFlattenedItems() before passing items here). Do NOT re-flatten.
+    const flatItems = items;
 
     // Items with group separators
     const visible = flatItems.slice(scrollOffset, scrollOffset + listHeight);
@@ -1400,6 +1407,22 @@ export async function runWorklistTui(
       cleanup();
       resolve(state.detailItem ?? undefined);
       return;
+    }
+
+    if (action === 'toggle-expand' && state.mode === 'list') {
+      const flat = state.getFlattenedItems();
+      if (state.selectedIndex < flat.length) {
+        const selected = flat[state.selectedIndex];
+        // If children data not yet loaded, fetch them on demand
+        if (selected.childCount && selected.childCount > 0 && (!selected.children || selected.children.length === 0)) {
+          render(); // immediate render while fetch is pending
+          const children = await fetchChildrenForItem(selected.id);
+          selected.children = children;
+          state.toggleExpand(selected.id);
+          render();
+          return;
+        }
+      }
     }
 
     // Re-render

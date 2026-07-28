@@ -8,6 +8,7 @@ import {
   fetchNextItems,
   fetchItemDetails,
   fetchItemsByStage,
+  fetchChildrenForItem,
   checkWlAvailable,
   setExecFileAsync,
   resetExecFileAsync,
@@ -194,6 +195,57 @@ describe('fetchItemsByStage', () => {
 
     const items = await fetchItemsByStage('done');
     expect(items).toEqual([]);
+  });
+});
+
+describe('fetchChildrenForItem', () => {
+  beforeEach(() => {
+    resetExecFileAsync();
+  });
+
+  it('fetches and returns child items for a parent ID', async () => {
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        workItems: [
+          { id: 'WL-001-C1', title: 'Child 1', status: 'open', childCount: 0 },
+          { id: 'WL-001-C2', title: 'Child 2', status: 'open', childCount: 0 },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    const children = await fetchChildrenForItem('WL-001');
+    expect(children).toHaveLength(2);
+    expect(children[0].id).toBe('WL-001-C1');
+    expect(children[0].depth).toBe(1);
+    expect(children[1].id).toBe('WL-001-C2');
+    expect(children[1].depth).toBe(1);
+
+    // Verify correct CLI args — runWl adds --json automatically
+    expect(mockFn).toHaveBeenCalledWith(
+      expect.any(String),
+      ['list', '--parent', 'WL-001', '--json'],
+      { maxBuffer: 5242880 },
+    );
+  });
+
+  it('returns empty array when parent has no children', async () => {
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ workItems: [] }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    const children = await fetchChildrenForItem('WL-NOCHILDREN');
+    expect(children).toEqual([]);
+  });
+
+  it('throws when wl CLI fails', async () => {
+    const mockFn = vi.fn().mockRejectedValue(new Error('WL error'));
+    setExecFileAsync(mockFn as any);
+
+    await expect(fetchChildrenForItem('WL-001')).rejects.toThrow();
   });
 });
 

@@ -315,3 +315,14 @@ export async function fetchActionableCount(): Promise<number | undefined> {
     return undefined;
   }
 }
+
+/**
+ * Fetch child work items for a given parent ID (via `wl list --parent`).
+ * Child items are returned with depth=1 for hierarchical display.
+ */
+export async function fetchChildrenForItem(parentId: string): Promise<WorkItem[]> {
+  const output = await runWl(['list', '--parent', parentId]);
+  const payload = extractJson(output);
+  const items = extractItems(payload);
+  return items.map((item) => ({ ...item, depth: 1 }));
+}
