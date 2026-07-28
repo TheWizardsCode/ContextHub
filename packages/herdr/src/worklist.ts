@@ -1448,9 +1448,17 @@ export async function runWorklistTui(
       );
       if (singleCmd) {
         // Single-key shortcut — execute immediately
-        cleanup();
-        executeResolvedCommand(singleCmd, state, opts.onCommand);
-        render();
+        try {
+          cleanup();
+          executeResolvedCommand(singleCmd, state, opts.onCommand);
+          render();
+        } catch (e) {
+          // Log any error before exit
+          process.stderr.write(`[herdr] Shortcut error: ${(e as Error).message}\n`);
+          process.stderr.write(`[herdr] Shortcut stack: ${(e as Error).stack}\n`);
+          cleanup();
+          render();
+        }
         return;
       }
 
