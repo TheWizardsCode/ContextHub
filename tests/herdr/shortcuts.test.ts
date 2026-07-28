@@ -12,7 +12,7 @@ import type { WorkItem } from '../../packages/herdr/src/fetcher.js';
 
 function makeEntry(overrides: Partial<ShortcutEntry> = {}): ShortcutEntry {
   return {
-    key: 'i',
+    chord: ['i'],
     command: 'implement <id>',
     view: 'both',
     label: 'implement',
@@ -27,42 +27,42 @@ describe('ShortcutRegistry', () => {
 
   beforeEach(() => {
     entries = [
-      { key: 'i', command: '/skill:implement <id>', view: 'both', label: 'implement', stages: ['intake_complete', 'plan_complete', 'in_progress'] },
-      { key: 'p', command: '/plan <id>', view: 'both', label: 'plan', stages: ['intake_complete'] },
-      { key: 'c', command: '/intake', view: 'both', label: 'create new' },
-      { key: 'n', command: '/intake <id>', view: 'both', label: 'intake', stages: ['idea'] },
-      { key: 's', command: '!!wl search ', view: 'both', label: 'Search' },
+      { chord: ['i'], command: '/skill:implement <id>', view: 'both', label: 'implement', stages: ['intake_complete', 'plan_complete', 'in_progress'] },
+      { chord: ['p'], command: '/plan <id>', view: 'both', label: 'plan', stages: ['intake_complete'] },
+      { chord: ['c'], command: '/intake', view: 'both', label: 'create new' },
+      { chord: ['n'], command: '/intake <id>', view: 'both', label: 'intake', stages: ['idea'] },
+      { chord: ['s'], command: '!!wl search ', view: 'both', label: 'Search' },
     ];
   });
 
-  describe('lookup', () => {
-    it('returns undefined for unknown key', () => {
+  describe('lookupChord', () => {
+    it('returns undefined for unknown chord', () => {
       const reg = new ShortcutRegistry(entries);
-      expect(reg.lookup('z', 'list')).toBeUndefined();
+      expect(reg.lookupChord(['z'], 'list')).toBeUndefined();
     });
 
-    it('returns command for known key', () => {
+    it('returns command for known single-key chord', () => {
       const reg = new ShortcutRegistry(entries);
-      expect(reg.lookup('c', 'list')).toBe('/intake');
+      expect(reg.lookupChord(['c'], 'list')).toBe('/intake');
     });
 
     it('filters by view', () => {
       const reg = new ShortcutRegistry(entries);
-      expect(reg.lookup('c', 'list')).toBe('/intake');
-      expect(reg.lookup('c', 'detail')).toBe('/intake');
+      expect(reg.lookupChord(['c'], 'list')).toBe('/intake');
+      expect(reg.lookupChord(['c'], 'detail')).toBe('/intake');
     });
 
     it('filters by stage when entry has stages constraint', () => {
       const reg = new ShortcutRegistry(entries);
       // 'i' is available for intake_complete stage
-      expect(reg.lookup('i', 'list', 'intake_complete')).toBe('/skill:implement <id>');
+      expect(reg.lookupChord(['i'], 'list', 'intake_complete')).toBe('/skill:implement <id>');
       // 'i' is NOT available for idea stage
-      expect(reg.lookup('i', 'list', 'idea')).toBeUndefined();
+      expect(reg.lookupChord(['i'], 'list', 'idea')).toBeUndefined();
     });
 
     it('returns command when stage is undefined but entry has no stages constraint', () => {
       const reg = new ShortcutRegistry(entries);
-      expect(reg.lookup('c', 'list')).toBe('/intake');
+      expect(reg.lookupChord(['c'], 'list')).toBe('/intake');
     });
   });
 
@@ -77,7 +77,7 @@ describe('ShortcutRegistry', () => {
       const reg = new ShortcutRegistry(entries);
       const ideaEntries = reg.getEntriesForStage('idea');
       // Only 'n' (idea) and 'c' and 's' (no stage constraint) should match
-      const ideaIds = ideaEntries.map(e => e.key);
+      const ideaIds = ideaEntries.map(e => e.chord[0]);
       expect(ideaIds).toContain('n');
       expect(ideaIds).toContain('c');
       expect(ideaIds).toContain('s');
@@ -90,15 +90,15 @@ describe('ShortcutRegistry', () => {
     beforeEach(() => {
       chordEntries = [
         ...entries,
-        { key: '', command: '!!wl update <id> --priority low', view: 'both', chord: ['u', 'p', 'l'], label: 'priority low' },
-        { key: '', command: '!!wl update <id> --priority medium', view: 'both', chord: ['u', 'p', 'm'], label: 'priority medium' },
-        { key: '', command: '!!wl update <id> --priority high', view: 'both', chord: ['u', 'p', 'h'], label: 'priority high' },
-        { key: '', command: '!!wl update <id> --priority critical', view: 'both', chord: ['u', 'p', 'c'], label: 'priority critical' },
-        { key: '', command: '/wl idea', view: 'both', chord: ['f', 'i'], label: 'filter idea' },
-        { key: '', command: '/wl intake', view: 'both', chord: ['f', 'n'], label: 'filter intake' },
-        { key: '', command: '/wl plan', view: 'both', chord: ['f', 'p'], label: 'filter plan' },
-        { key: '', command: '/wl review', view: 'both', chord: ['f', 'r'], label: 'filter in_review' },
-        { key: '', command: '!!wl close <id>', view: 'both', chord: ['x', 'c'], label: 'close done' },
+        { chord: ['u', 'p', 'l'], command: '!!wl update <id> --priority low', view: 'both', label: 'priority low' },
+        { chord: ['u', 'p', 'm'], command: '!!wl update <id> --priority medium', view: 'both', label: 'priority medium' },
+        { chord: ['u', 'p', 'h'], command: '!!wl update <id> --priority high', view: 'both', label: 'priority high' },
+        { chord: ['u', 'p', 'c'], command: '!!wl update <id> --priority critical', view: 'both', label: 'priority critical' },
+        { chord: ['f', 'i'], command: '/wl idea', view: 'both', label: 'filter idea' },
+        { chord: ['f', 'n'], command: '/wl intake', view: 'both', label: 'filter intake' },
+        { chord: ['f', 'p'], command: '/wl plan', view: 'both', label: 'filter plan' },
+        { chord: ['f', 'r'], command: '/wl review', view: 'both', label: 'filter in_review' },
+        { chord: ['x', 'c'], command: '!!wl close <id>', view: 'both', label: 'close done' },
       ];
     });
 
@@ -133,7 +133,7 @@ describe('ShortcutRegistry', () => {
     it('filters chords by stage', () => {
       const chordWithStages: ShortcutEntry[] = [
         ...chordEntries,
-        { key: '', command: '/skill:audit <id>', view: 'both', chord: ['a', 'a'], label: 'audit automatic', stages: ['in_review'] },
+        { chord: ['a', 'a'], command: '/skill:audit <id>', view: 'both', label: 'audit automatic', stages: ['in_review'] },
       ];
       const reg = new ShortcutRegistry(chordWithStages);
       const reviewChords = reg.getChordByPrefix(['a', 'a'], 'list', 'in_review');
@@ -145,7 +145,8 @@ describe('ShortcutRegistry', () => {
     it('returns chord entries list', () => {
       const reg = new ShortcutRegistry(chordEntries);
       const chords = reg.getChordEntries();
-      expect(chords.length).toBeGreaterThanOrEqual(8);
+      // Should include both single-key and multi-key entries
+      expect(chords.length).toBeGreaterThanOrEqual(13);
     });
   });
 
@@ -162,11 +163,11 @@ describe('ShortcutRegistry', () => {
       const entries = registry.getEntries();
       expect(entries.length).toBeGreaterThan(0);
       // Should have at least 'c', 's', and 'f' chords
-      const allKeys = entries.map(e => e.key).filter(k => k.length > 0);
-      expect(allKeys).toContain('c');
-      expect(allKeys).toContain('s');
-      const chords = registry.getChordEntries();
-      expect(chords.length).toBeGreaterThanOrEqual(4);
+      const allChords = entries.map(e => e.chord[0]);
+      expect(allChords).toContain('c');
+      expect(allChords).toContain('s');
+      const chordEntries = registry.getChordEntries();
+      expect(chordEntries.length).toBeGreaterThanOrEqual(13);
     });
 
     it('handles missing shortcuts.json gracefully', async () => {

@@ -1,6 +1,6 @@
 [
   {
-    "key": "i",
+    "chord": ["i"],
     "command": "/skill:implement <id>",
     "view": "both",
     "label": "implement",
@@ -8,7 +8,7 @@
     "stages": ["intake_complete", "plan_complete", "in_progress"]
   },
   {
-    "key": "a",
+    "chord": ["a"],
     "command": "/skill:audit <id>",
     "view": "both",
     "label": "audit",
@@ -16,14 +16,14 @@
     "stages": ["in_review"]
   },
   {
-    "key": "c",
+    "chord": ["c"],
     "command": "/intake",
     "view": "both",
     "label": "create new",
     "description": "Create a new work item"
   },
   {
-    "key": "n",
+    "chord": ["n"],
     "command": "/intake <id>",
     "view": "both",
     "label": "intake",
@@ -31,7 +31,7 @@
     "stages": ["idea"]
   },
   {
-    "key": "p",
+    "chord": ["p"],
     "command": "/plan <id>",
     "view": "both",
     "label": "plan",
@@ -39,67 +39,60 @@
     "stages": ["intake_complete"]
   },
   {
-    "key": "s",
+    "chord": ["s"],
     "command": "!!wl search ",
     "view": "both",
     "label": "Search",
     "description": "Search work items"
   },
   {
-    "key": "",
+    "chord": ["f", "i"],
     "command": "/wl idea",
     "view": "both",
-    "chord": ["f", "i"],
     "label": "filter idea",
     "description": "Filter to show only idea-stage items"
   },
   {
-    "key": "",
+    "chord": ["f", "n"],
     "command": "/wl intake",
     "view": "both",
-    "chord": ["f", "n"],
     "label": "filter intake",
     "description": "Filter to show only intake items"
   },
   {
-    "key": "",
+    "chord": ["f", "p"],
     "command": "/wl plan",
     "view": "both",
-    "chord": ["f", "p"],
     "label": "filter plan",
     "description": "Filter to show only plan items"
   },
   {
-    "key": "",
+    "chord": ["f", "r"],
     "command": "/wl review",
     "view": "both",
-    "chord": ["f", "r"],
     "label": "filter in_review",
     "description": "Filter to show only in-review items"
   },
   {
-    "key": "",
+    "chord": ["r", "v"],
     "command": "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>'",
     "view": "both",
-    "chord": ["r", "v"],
     "label": "review",
     "description": "Toggle reviewed status and add producer comment",
     "stages": ["in_review"]
   },
   {
-    "key": "",
+    "chord": ["r", "a"],
     "command": "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
     "view": "both",
-    "chord": ["r", "a"],
     "label": "audit approve",
     "description": "Approve audit — mark as ready to close",
     "stages": ["in_review"]
   },
   {
-    "key": "",
+    "chord": ["r", "r"],
     "command": "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
     "view": "both",
-    "chord": ["r", "r"],
     "label": "audit reject",
     "description": "Reject audit — mark as not ready to close",
     "stages": ["in_review"]

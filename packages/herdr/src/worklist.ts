@@ -668,7 +668,7 @@ export function isChordLeader(key: string, registry: ShortcutRegistry): boolean 
   const chords = registry.getChordEntries();
   return chords.some(c => {
     const chord = c.chord;
-    return chord !== undefined && chord.length >= 2 && chord[0] === key;
+    return chord !== undefined && chord.length >= 1 && chord[0] === key;
   });
 }
 
@@ -1460,7 +1460,7 @@ export async function runWorklistTui(
               const firstWord = label.split(/\s+/)[0];
               return `${leaderKey}:${firstWord}...`;
             }
-            return `${e.key}:${label}`;
+            return `${e.chord[0]}:${label}`;
           })
           .join('  ');
         dynamicHints = hints;

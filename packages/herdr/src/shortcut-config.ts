@@ -2,8 +2,8 @@
  * packages/herdr/src/shortcut-config.ts — Chord shortcut system for Herdr
  *
  * Provides a ShortcutRegistry that loads shortcut entries from shortcuts.json,
- * supporting single-key lookups, multi-key chord sequences, and stage-aware
- * visibility. Ported from the Pi TUI shortcut-config.ts.
+ * supporting chord sequences of any length (a chord of length 1 is a single keypress)
+ * and stage-aware visibility. Ported from the Pi TUI shortcut-config.ts.
  */
 
 import { readFileSync } from 'node:fs';
@@ -15,10 +15,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // ── Types ─────────────────────────────────────────────────────────────
 
 export interface ShortcutEntry {
-  key: string;
   command: string;
   view: 'list' | 'detail' | 'both';
-  chord?: string[];
+  chord: string[];
   label?: string;
   description?: string;
   stages?: string[];
@@ -28,30 +27,21 @@ export interface ShortcutEntry {
 
 export class ShortcutRegistry {
   private entries: ShortcutEntry[];
-  private chordEntries: Map<string, ShortcutEntry[]>;
 
   constructor(entries: ShortcutEntry[]) {
     this.entries = entries;
-
-    // Index chord entries by leader key for fast lookup
-    this.chordEntries = new Map();
-    for (const entry of entries) {
-      const chord = entry.chord;
-      if (chord && chord.length >= 2) {
-        const [leader] = chord;
-        const existing = this.chordEntries.get(leader) ?? [];
-        existing.push(entry);
-        this.chordEntries.set(leader, existing);
-      }
-    }
   }
 
   /**
-   * Look up a shortcut by key, view, and optional stage.
+   * Look up a chord by its full key sequence (supports any length).
    */
-  lookup(key: string, view: string, stage?: string): string | undefined {
+  lookupChord(chordKeys: string[], view: string, stage?: string): string | undefined {
     const match = this.entries.find(entry => {
-      if (entry.key !== key) return false;
+      const chord = entry.chord;
+      if (chord.length !== chordKeys.length) return false;
+      for (let i = 0; i < chord.length; i++) {
+        if (chord[i] !== chordKeys[i]) return false;
+      }
       if (entry.view !== 'both' && entry.view !== view) return false;
       if (stage !== undefined && entry.stages !== undefined && entry.stages.length > 0) {
         if (!entry.stages.includes(stage)) return false;
@@ -83,10 +73,7 @@ export class ShortcutRegistry {
    * Get chord entries whose leader key matches.
    */
   getChordByLeader(leaderKey: string, view?: string): ShortcutEntry[] {
-    const chords = this.chordEntries.get(leaderKey);
-    if (!chords || chords.length === 0) return [];
-    if (view === undefined) return chords;
-    return chords.filter(entry => entry.view === 'both' || entry.view === view);
+    return this.getChordByPrefix([leaderKey], view);
   }
 
   /**
@@ -96,7 +83,7 @@ export class ShortcutRegistry {
     const result: ShortcutEntry[] = [];
     for (const entry of this.entries) {
       const chord = entry.chord;
-      if (!chord || chord.length < prefix.length) continue;
+      if (chord.length < prefix.length) continue;
 
       let matches = true;
       for (let i = 0; i < prefix.length; i++) {
@@ -113,33 +100,13 @@ export class ShortcutRegistry {
     return result;
   }
 
-  /**
-   * Look up a chord by its full key sequence.
-   */
-  lookupChord(chordKeys: string[], view: string, stage?: string): string | undefined {
-    const match = this.entries.find(entry => {
-      const chord = entry.chord;
-      if (!chord || chord.length !== chordKeys.length) return false;
-      for (let i = 0; i < chord.length; i++) {
-        if (chord[i] !== chordKeys[i]) return false;
-      }
-      if (entry.view !== 'both' && entry.view !== view) return false;
-      if (stage !== undefined && entry.stages !== undefined && entry.stages.length > 0) {
-        if (!entry.stages.includes(stage)) return false;
-      }
-      return true;
-    });
-    return match?.command;
-  }
+
 
   /**
-   * Return all chord entries.
+   * Return all entries (each has a chord, any length).
    */
   getChordEntries(): ShortcutEntry[] {
-    return this.entries.filter(entry => {
-      const chord = entry.chord;
-      return chord !== undefined && chord.length >= 2;
-    });
+    return this.entries;
   }
 }
 
@@ -183,20 +150,13 @@ export function loadShortcutConfig(): ShortcutRegistry {
     if (typeof command !== 'string' || command.length === 0) continue;
     if (typeof view !== 'string' || !validViews.has(view)) continue;
 
-    const hasKey = typeof (entry as Record<string, unknown>).key === 'string';
     const rawChord = (entry as Record<string, unknown>).chord;
-    const hasChord = Array.isArray(rawChord) && rawChord.length >= 2;
-
-    if (!hasKey && !hasChord) continue;
+    if (!Array.isArray(rawChord) || rawChord.length < 1) continue;
 
     const shortcutEntry: ShortcutEntry = {
-      key: hasKey ? String((entry as Record<string, unknown>).key) : '',
+      chord: rawChord.map(String),
       command,
       view: view as 'list' | 'detail' | 'both',
-    };
-
-    if (hasChord) {
-      shortcutEntry.chord = rawChord.map(String);
     }
 
     const rawStages = (entry as Record<string, unknown>).stages;
@@ -262,8 +222,8 @@ export function formatChordHints(
         const leaderKey = chord[0];
         const firstWord = label.split(/\s+/)[0];
         hints.push({ nextKey: leaderKey, hint: `${leaderKey}:${firstWord}...`, firstRestWord: firstWord });
-      } else if (e.key) {
-        hints.push({ nextKey: e.key, hint: `${e.key}:${label}`, firstRestWord: label.split(/\s+/)[0] });
+      } else if (e.chord && e.chord.length === 1) {
+        hints.push({ nextKey: e.chord[0], hint: `${e.chord[0]}:${label}`, firstRestWord: label.split(/\s+/)[0] });
       }
     }
   }
