@@ -283,6 +283,33 @@ function colorizeAuditExcerpt(auditText: string): string {
   return theme.text.readyNo(firstLine);
 }
 
+/**
+ * Format an array of [label, value] pairs as a markdown table string.
+ *
+ * Pipe characters (`|`) in values are escaped to `\|` to prevent markdown
+ * table rendering issues. The table has two columns: "Field" and "Value".
+ *
+ * @param rows - Array of [label, value] tuples to render in the table
+ * @returns The markdown table as a string (without trailing newline)
+ */
+function formatMetadataTable(rows: Array<[string, string]>): string {
+  if (rows.length === 0) return '';
+  // Escape pipe characters in values to prevent markdown table breakage
+  const escaped = rows.map(([label, value]) => {
+    const escapedValue = value.replace(/\|/g, '\\|');
+    return [label, escapedValue] as [string, string];
+  });
+
+  const fieldWidth = Math.max(...escaped.map(([l]) => l.length), 5); // min 5 for "Field"
+  const lines: string[] = [];
+  lines.push(`| ${'Field'.padEnd(fieldWidth)} | Value |`);
+  lines.push(`| ${'-'.repeat(fieldWidth)} | ----- |`);
+  for (const [label, value] of escaped) {
+    lines.push(`| ${label.padEnd(fieldWidth)} | ${value} |`);
+  }
+  return lines.join('\n');
+}
+
 // Standard human formatter: supports 'summary' | 'concise' | 'normal' | 'full' | 'raw' | 'markdown' | 'auto'
 export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, format: string | undefined): string {
   // Load config once and reuse for both humanDisplay and cliFormatMarkdown
@@ -334,7 +361,6 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   }
 
   
-  const sortIndexLabel = `SortIndex: ${item.sortIndex}`;
   const rules = loadStatusStageRules();
 
   // Helper to format status line with icon
@@ -363,8 +389,6 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   };
 
   const lines: string[] = [];
-  const titleLine = `Title: ${formatTitleOnly(item)}`;
-  const idLine = `ID:    ${theme.text.muted(item.id)}`;
 
   // summary: truly minimal - just title, status, priority
   if (fmt === 'summary') {
@@ -383,59 +407,59 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
       const lines: string[] = [];
       // First line: title + id (compact)
       lines.push(`${formatTitleOnly(item)} ${theme.text.muted(item.id)}`);
-    // Second line: status, stage (if present) and priority (core metadata shown previously by list)
+    // Build metadata as a markdown table
+    const metaRows: Array<[string, string]> = [];
     if (item.stage !== undefined) {
       const stageLabel = item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage;
-      lines.push(`Status: ${formatStatusWithIcon(item.status)} · Stage: ${stageLabel} | Priority: ${formatPriorityWithIcon(item.priority)}`);
+      metaRows.push(['Status', `${formatStatusWithIcon(item.status)} · Stage: ${stageLabel} | Priority: ${formatPriorityWithIcon(item.priority)}`]);
     } else {
-      lines.push(`Status: ${formatStatusWithIcon(item.status)} | Priority: ${formatPriorityWithIcon(item.priority)}`);
+      metaRows.push(['Status', `${formatStatusWithIcon(item.status)} | Priority: ${formatPriorityWithIcon(item.priority)}`]);
     }
-    lines.push(sortIndexLabel);
-    lines.push(`Risk: ${item.risk || '—'}`);
-    lines.push(`Effort: ${item.effort || '—'}`);
-    if (item.assignee) lines.push(`Assignee: ${item.assignee}`);
-      if (auditResult) {
-      // For human outputs, show a truncated, redacted one-line audit excerpt.
-      // Do not include the author in concise output to keep it compact.
-        const raw = String(auditResult.summary || '');
-        const redacted = redactAuditText(raw);
-        const colorized = colorizeAuditExcerpt(redacted);
-        lines.push(`Audit: ${colorized}`);
-      // Non-blocking warning: if the audit was downgraded to Missing Criteria
-      // because the item lacks acceptance criteria, surface a subtle warning
-      // in normal/concise human outputs so operators notice without failing
-      // the write. This is intentionally non-fatal and mirrors the
-      // conservative policy implemented in buildAuditEntry.
-      if (!auditResult.readyToClose && !auditResult.summary?.startsWith('Ready to close:')) {
-        lines.push(`Warning: Audit claim could not be verified (Missing Criteria)`);
-      }
+    metaRows.push(['SortIndex', String(item.sortIndex)]);
+    metaRows.push(['Risk', item.risk || '—']);
+    metaRows.push(['Effort', item.effort || '—']);
+    if (item.assignee) metaRows.push(['Assignee', item.assignee]);
+    if (auditResult) {
+      const raw = String(auditResult.summary || '');
+      const redacted = redactAuditText(raw);
+      const colorized = colorizeAuditExcerpt(redacted);
+      metaRows.push(['Audit', colorized]);
     }
-    if (item.tags && item.tags.length > 0) lines.push(`Tags: ${item.tags.join(', ')}`);
+    if (item.tags && item.tags.length > 0) metaRows.push(['Tags', item.tags.join(', ')]);
+    lines.push(formatMetadataTable(metaRows));
+    // Non-blocking warning after the table (if applicable)
+    if (auditResult && !auditResult.readyToClose && !auditResult.summary?.startsWith('Ready to close:')) {
+      lines.push(`Warning: Audit claim could not be verified (Missing Criteria)`);
+    }
     return lines.join('\n');
   }
 
   // normal output
   if (fmt === 'normal') {
-    lines.push(idLine);
-    lines.push(titleLine);
+    // Build metadata as a markdown table (ID, Title, Status, SortIndex, Risk, Effort, Assignee, Audit, Parent)
+    const metaRows: Array<[string, string]> = [];
+    metaRows.push(['ID', theme.text.muted(item.id)]);
+    metaRows.push(['Title', formatTitleOnly(item)]);
     if (item.stage !== undefined) {
       const stageLabel = item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage;
-      lines.push(`Status: ${formatStatusWithIcon(item.status)} · Stage: ${stageLabel} | Priority: ${formatPriorityWithIcon(item.priority)}`);
+      metaRows.push(['Status', `${formatStatusWithIcon(item.status)} · Stage: ${stageLabel} | Priority: ${formatPriorityWithIcon(item.priority)}`]);
     } else {
-      lines.push(`Status: ${formatStatusWithIcon(item.status)} | Priority: ${formatPriorityWithIcon(item.priority)}`);
+      metaRows.push(['Status', `${formatStatusWithIcon(item.status)} | Priority: ${formatPriorityWithIcon(item.priority)}`]);
     }
-    lines.push(sortIndexLabel);
-    lines.push(`Risk: ${item.risk || '—'}`);
-    lines.push(`Effort: ${item.effort || '—'}`);
-    if (item.assignee) lines.push(`Assignee: ${item.assignee}`);
-      if (auditResult) {
-        const raw = String(auditResult.summary || '');
-        const redacted = redactAuditText(raw);
-        const colorized = colorizeAuditExcerpt(redacted);
-        // Keep concise audit excerpt in normal output as well (author omitted).
-        lines.push(`Audit: ${colorized}`);
-      }
-    if (item.parentId) lines.push(`Parent: ${item.parentId}`);
+    metaRows.push(['SortIndex', String(item.sortIndex)]);
+    metaRows.push(['Risk', item.risk || '—']);
+    metaRows.push(['Effort', item.effort || '—']);
+    if (item.assignee) metaRows.push(['Assignee', item.assignee]);
+    if (auditResult) {
+      const raw = String(auditResult.summary || '');
+      const redacted = redactAuditText(raw);
+      const colorized = colorizeAuditExcerpt(redacted);
+      metaRows.push(['Audit', colorized]);
+    }
+    if (item.parentId) metaRows.push(['Parent', item.parentId]);
+    if (item.tags && item.tags.length > 0) metaRows.push(['Tags', item.tags.join(', ')]);
+    lines.push(formatMetadataTable(metaRows));
+    // Description remains as a separate section below the table
     if (item.description) lines.push(`Description: ${item.description}`);
     return lines.join('\n');
   }
@@ -475,23 +499,19 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   const statusPriorityValue = item.stage !== undefined
     ? `${formatStatusWithIcon(item.status)} · Stage: ${item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage} | Priority: ${formatPriorityWithIcon(item.priority)}`
     : `${formatStatusWithIcon(item.status)} | Priority: ${formatPriorityWithIcon(item.priority)}`;
+  // Build metadata as a markdown table
   const frontmatter: Array<[string, string]> = [
     ['ID', theme.text.muted(item.id)],
     ['Status', statusPriorityValue],
     ['Type', issueTypeLabel],
     ['SortIndex', String(item.sortIndex)]
   ];
-  if (item.risk) frontmatter.push(['Risk', item.risk]);
-  else frontmatter.push(['Risk', '—']);
-  if (item.effort) frontmatter.push(['Effort', item.effort]);
-  else frontmatter.push(['Effort', '—']);
+  frontmatter.push(['Risk', item.risk || '—']);
+  frontmatter.push(['Effort', item.effort || '—']);
   if (item.assignee) frontmatter.push(['Assignee', item.assignee]);
   if (item.parentId) frontmatter.push(['Parent', item.parentId]);
   if (item.tags && item.tags.length > 0) frontmatter.push(['Tags', item.tags.join(', ')]);
-  const labelWidth = frontmatter.reduce((max, [label]) => Math.max(max, label.length), 0);
-  frontmatter.forEach(([label, value]) => {
-    lines.push(`${label.padEnd(labelWidth)}: ${value}`);
-  });
+  lines.push(formatMetadataTable(frontmatter));
 
   if (item.description) {
     lines.push('');

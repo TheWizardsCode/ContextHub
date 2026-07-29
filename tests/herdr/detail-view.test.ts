@@ -180,7 +180,7 @@ describe('formatDetailContent', () => {
     const item = makeItem({ githubIssueNumber: '123' });
     const lines = formatDetailContent(item, 80);
     const joined = lines.join('\n');
-    expect(joined).toContain('GitHub Issue:');
+    expect(joined).toContain('GitHub Issue');
     expect(joined).toContain('#123');
   });
 

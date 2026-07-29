@@ -641,7 +641,7 @@ function truncateLine(line: string, maxWidth: number): string {
  *
  * Metadata section includes: Status, Priority, Stage, Assignee, Created,
  * Updated, Audit (auditResult icon), Reviewed (needsProducerReview icon),
- * and Audited At (ISO timestamp). See `pushMeta()` calls below.
+ * and Audited At (ISO timestamp). Rendered as a markdown table.
  */
 export function formatDetailContent(
   item: WorkItem | null,
@@ -659,28 +659,39 @@ export function formatDetailContent(
   lines.push(` ${ANSI.bold}${item.title}${ANSI.reset}`);
   lines.push(separator);
 
-  // Metadata
-  const pushMeta = (label: string, value: string | undefined | null): void => {
+  // Metadata — rendered as a markdown table
+  const metaRows: Array<[string, string]> = [];
+  const addMeta = (label: string, value: string | undefined | null): void => {
     if (value != null && value !== '') {
-      lines.push(`  ${label}:     ${value}`);
+      metaRows.push([label, value]);
     }
   };
-  pushMeta('Status', item.status);
-  pushMeta('Priority', item.priority);
-  pushMeta('Stage', item.stage);
-  pushMeta('Type', item.issueType);
-  pushMeta('Risk', item.risk);
-  pushMeta('Effort', item.effort);
-  pushMeta('Children', item.childCount !== undefined ? String(item.childCount) : undefined);
+  addMeta('Status', item.status);
+  addMeta('Priority', item.priority);
+  addMeta('Stage', item.stage);
+  addMeta('Type', item.issueType);
+  addMeta('Risk', item.risk);
+  addMeta('Effort', item.effort);
+  addMeta('Children', item.childCount !== undefined ? String(item.childCount) : undefined);
   if (item.tags && item.tags.length > 0) {
-    lines.push(`  Tags:       ${item.tags.join(', ')}`);
+    metaRows.push(['Tags', item.tags.join(', ')]);
   }
-  pushMeta('GitHub Issue', item.githubIssueNumber ? `#${item.githubIssueNumber}` : undefined);
-  pushMeta('Created', item.createdAt);
-  pushMeta('Updated', item.updatedAt);
-  pushMeta('Audit', auditIcon(item.auditResult));
-  pushMeta('Reviewed', needsProducerReviewIcon(item.needsProducerReview));
-  pushMeta('Audited At', item.auditedAt);
+  addMeta('GitHub Issue', item.githubIssueNumber ? `#${item.githubIssueNumber}` : undefined);
+  addMeta('Created', item.createdAt);
+  addMeta('Updated', item.updatedAt);
+  addMeta('Audit', auditIcon(item.auditResult));
+  addMeta('Reviewed', needsProducerReviewIcon(item.needsProducerReview));
+  addMeta('Audited At', item.auditedAt);
+
+  // Render the metadata as a markdown table
+  if (metaRows.length > 0) {
+    const fieldWidth = Math.max(...metaRows.map(([l]) => l.length), 6);
+    lines.push(`| ${'Field'.padEnd(fieldWidth)} | Value${' '.repeat(Math.max(10, contentWidth - fieldWidth - 12))} |`);
+    lines.push(`| ${'-'.repeat(fieldWidth)} | ${'-'.repeat(Math.max(10, contentWidth - fieldWidth - 12))} |`);
+    for (const [label, value] of metaRows) {
+      lines.push(`| ${label.padEnd(fieldWidth)} | ${value} |`);
+    }
+  }
 
   lines.push(separator);
 
