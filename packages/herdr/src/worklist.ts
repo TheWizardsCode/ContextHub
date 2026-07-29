@@ -630,6 +630,7 @@ export function formatDetailContent(
   if (item.tags && item.tags.length > 0) {
     lines.push(`  Tags:       ${item.tags.join(', ')}`);
   }
+  pushMeta('GitHub Issue', item.githubIssueNumber ? `#${item.githubIssueNumber}` : undefined);
   pushMeta('Created', item.createdAt);
   pushMeta('Updated', item.updatedAt);
   pushMeta('Audit', auditIcon(item.auditResult));

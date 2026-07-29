@@ -11,6 +11,8 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Chord shortcuts** — Multi-key chord sequences provide quick actions like updating priorities, stage/status, title, closing/deleting items, running workflows, and toggling review status (configurable via `shortcuts.json`)
 - **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is output to stdout for the calling framework to execute
 - **Keyboard navigation** — Arrow keys or j/k to navigate (wraps at list boundaries), Page Up/Down, g/G for first/last, Enter to select, Escape to go back
+- **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt
+- **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
 - **Quit** — Press `q` to exit
 
 ## Requirements
@@ -124,7 +126,9 @@ packages/herdr/
 │   └── worklist.ts         # List state, rendering, keyboard handling, command output
 ├── scripts/
 │   ├── open.sh             # Open the worklist pane
-│   └── toggle.sh           # Toggle the worklist pane
+│   ├── toggle.sh           # Toggle the worklist pane
+│   ├── send-to-pi.sh       # Split pane to right, launch pi with agent command
+│   └── open-pi-agent.sh    # Open a fresh interactive pi agent pane
 └── tests/herdr/            # Test files
 ```
 
@@ -134,9 +138,9 @@ packages/herdr/
 - **Terminal UI via raw mode** — The TUI uses raw stdin mode and ANSI escape codes for rendering, making it compatible with any Herdr pane without additional dependencies.
 - **Testable core** — All state management, formatting, and keyboard handling is pure logic in `worklist.ts`, fully testable without a terminal.
 - **Command output via callback** — When a chord resolves to a non-`/wl` command, it is passed to an `onCommand` callback (set by the entry point) which writes the resolved command to stdout with a `CMD:` prefix. The calling framework (Herdr) reads this output to execute arbitrary commands.
+- **Pi agent dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are intercepted by the entry point and routed to a new pi agent pane. The `send-to-pi.sh` script splits the current pane to the right, creates a new pane, runs `pi` with the command as the initial prompt, and renames the pane to "Pi Agent". Non-agent commands continue to use the standard `CMD:` output.
 - **`<id>` placeholder resolution** — Before output, any `<id>` placeholders in the resolved command are replaced with the currently selected work item's ID. If no item is selected and the command requires `<id>`, the command is silently dropped (graceful no-op).
 - **Chord shortcut system** — Multi-key chord sequences are defined in `shortcuts.json` and resolved via `ShortcutRegistry`. Chords can be filtered by view (list/detail) and stage.
-- **No agent launch commands** — Per scope constraints, the plugin only handles listing, filtering, browsing, and selection — not agent execution.
 
 ## Development
 

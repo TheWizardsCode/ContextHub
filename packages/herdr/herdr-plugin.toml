@@ -34,3 +34,10 @@ id = "open-worklist"
 title = "Open worklist"
 description = "Open the Worklog work item selection pane."
 command = ["bash", "scripts/open.sh"]
+
+# Action: open pi agent pane
+[[actions]]
+id = "open-pi-agent"
+title = "Open Pi Agent"
+description = "Open a Pi AI coding agent pane docked on the right."
+command = ["bash", "scripts/open-pi-agent.sh"]

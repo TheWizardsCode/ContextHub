@@ -176,6 +176,21 @@ describe('formatDetailContent', () => {
     expect(joined).not.toContain('Reviewed');
   });
 
+  it('displays githubIssueNumber when present', () => {
+    const item = makeItem({ githubIssueNumber: '123' });
+    const lines = formatDetailContent(item, 80);
+    const joined = lines.join('\n');
+    expect(joined).toContain('GitHub Issue:');
+    expect(joined).toContain('#123');
+  });
+
+  it('omits githubIssueNumber when absent', () => {
+    const item = makeItem({ githubIssueNumber: undefined });
+    const lines = formatDetailContent(item, 80);
+    const joined = lines.join('\n');
+    expect(joined).not.toContain('GitHub Issue');
+  });
+
   it('includes all audit fields in metadata section', () => {
     const item = makeItem({
       auditResult: true,
