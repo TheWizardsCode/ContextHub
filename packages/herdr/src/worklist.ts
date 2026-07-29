@@ -25,6 +25,12 @@ import {
   type IconOptions,
 } from './icons.js';
 import { runSync, createSyncTimer, clampSyncInterval } from './auto-sync.js';
+import {
+  hasUnknownIdentifiers,
+  getUnknownIdentifiers,
+  FormState,
+  substituteIdentifiers,
+} from './form-dialog.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -160,7 +166,7 @@ export class NavigationStack {
 
 // ── State ─────────────────────────────────────────────────────────────
 
-export type ViewMode = 'list' | 'detail' | 'filter';
+export type ViewMode = 'list' | 'detail' | 'filter' | 'form';
 
 /**
  * Mutable state for the work item list UI.
@@ -1454,6 +1460,9 @@ export async function runWorklistTui(
   const state = new WorkItemListState(items, termSize);
   const renderer = defaultRenderer;
   const chordState: ChordState = createChordState();
+  let formState: FormState | null = null;
+  /** Saved mode before entering form overlay (to restore on cancel) */
+  let preFormMode: ViewMode = 'list';
   let refreshNotification = '';
 
   let totalActionableCount: number | undefined;
@@ -1474,6 +1483,9 @@ export async function runWorklistTui(
 
   // Setup cleanup
   const cleanup = (): void => {
+    // Clear form mode on cleanup
+    formState = null;
+    state.mode = preFormMode;
     if (rawMode) {
       try {
         process.stdin.setRawMode?.(false);
@@ -1522,6 +1534,30 @@ export async function runWorklistTui(
   const onData = async (chunk: Buffer): Promise<void> => {
     const key = chunk.toString();
 
+    // ── Form mode handling ──────────────────────────────────────
+    if (formState !== null) {
+      const result = formState.handleInput(key);
+      if (result === 'submitted') {
+        const resolved = formState.getResult();
+        formState = null;
+        state.mode = preFormMode;
+        if (opts.onCommand) {
+          opts.onCommand(resolved);
+        }
+        refreshNotification = `Sent: ${resolved.length > 60 ? resolved.substring(0, 57) + '...' : resolved}`;
+        setTimeout(() => { refreshNotification = ''; render(); }, 3000);
+        render();
+      } else if (result === 'cancelled') {
+        formState = null;
+        state.mode = preFormMode;
+        refreshNotification = '';
+        render();
+      } else {
+        render();
+      }
+      return;
+    }
+
     if (key === 'q' && state.mode !== 'filter') {
       cleanup();
       resolve(undefined);
@@ -1544,6 +1580,52 @@ export async function runWorklistTui(
         const command = chordState.resolvedCommand;
         chordState.resolvedCommand = null;
         if (command) {
+          // Check for unknown identifiers that need form input
+          if (hasUnknownIdentifiers(command)) {
+            // Look up description from shortcut entry
+            let description = '';
+            if (shortcutRegistry) {
+              const entries = (shortcutRegistry as ShortcutRegistry).getEntries();
+              // Reconstruct the full chord that was just completed
+              // The chord key sequences are available from the pending keys
+              const matchingEntry = entries.find(e => e.command === command);
+              if (matchingEntry && matchingEntry.description) {
+                description = matchingEntry.description;
+              }
+            }
+            const unknownIds = getUnknownIdentifiers(command);
+            preFormMode = state.mode;
+            state.mode = 'form';
+            formState = new FormState(
+              command,
+              description,
+              unknownIds,
+              // onSubmit: resolve and execute
+              (resolved: string) => {
+                // Handle <id> resolution
+                let finalCmd = resolved;
+                if (finalCmd.includes('<id>')) {
+                  const flat = state.getFlattenedItems();
+                  const idx = state.selectedIndex;
+                  if (idx >= 0 && idx < flat.length) {
+                    finalCmd = finalCmd.replace(/<id>/g, flat[idx].id);
+                  }
+                }
+                if (opts.onCommand) {
+                  opts.onCommand(finalCmd);
+                }
+              },
+              // onCancel
+              () => {
+                formState = null;
+                state.mode = preFormMode;
+              },
+            );
+            render();
+            return;
+          }
+
+          // No unknown identifiers — execute as before
           executeResolvedCommand(command, state, opts.onCommand);
           // Show a brief flash notification, then continue
           refreshNotification = `Sent: ${command.length > 60 ? command.substring(0, 57) + '...' : command}`;
@@ -1581,6 +1663,43 @@ export async function runWorklistTui(
         state.activeFilter ?? undefined,
       );
       if (singleCmd) {
+        // Single-key shortcut — check for unknown identifiers first
+        if (hasUnknownIdentifiers(singleCmd)) {
+          let description = '';
+          const entries = (shortcutRegistry as ShortcutRegistry).getEntries();
+          const matchingEntry = entries.find(e => e.command === singleCmd);
+          if (matchingEntry && matchingEntry.description) {
+            description = matchingEntry.description;
+          }
+          const unknownIds = getUnknownIdentifiers(singleCmd);
+          preFormMode = state.mode;
+          state.mode = 'form';
+          formState = new FormState(
+            singleCmd,
+            description,
+            unknownIds,
+            (resolved: string) => {
+              let finalCmd = resolved;
+              if (finalCmd.includes('<id>')) {
+                const flat = state.getFlattenedItems();
+                const idx = state.selectedIndex;
+                if (idx >= 0 && idx < flat.length) {
+                  finalCmd = finalCmd.replace(/<id>/g, flat[idx].id);
+                }
+              }
+              if (opts.onCommand) {
+                opts.onCommand(finalCmd);
+              }
+            },
+            () => {
+              formState = null;
+              state.mode = preFormMode;
+            },
+          );
+          render();
+          return;
+        }
+
         // Single-key shortcut — execute immediately and keep TUI alive
         try {
           executeResolvedCommand(singleCmd, state, opts.onCommand);
@@ -1653,6 +1772,15 @@ export async function runWorklistTui(
   const render = (): void => {
     termSize = getTermSize();
     state.termSize = termSize;
+
+    // ── Form overlay rendering ─────────────────────────────────
+    if (formState !== null) {
+      const formOutput = formState.render(termSize.cols, termSize.rows);
+      process.stdout.write(ANSI.clear);
+      process.stdout.write(ANSI.cursorHome);
+      process.stdout.write(formOutput);
+      return;
+    }
 
     // Use flattened items for hierarchy display
     const displayItems = state.mode === 'list' ? state.getFlattenedItems() : state.items;
