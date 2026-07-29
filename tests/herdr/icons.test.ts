@@ -234,4 +234,113 @@ describe('getIconPrefix', () => {
     // noIcons should not contain emoji-like characters
     expect(withoutIcons.length).toBeGreaterThanOrEqual(0);
   });
+
+  it('produces a prefix with no spaces between consecutive icons', () => {
+    const item: WorkItem = { id: 'T1', title: 'Test', status: 'open', stage: 'in_progress' };
+    const prefix = getIconPrefix(item);
+
+    // Extract emoji characters and check they are adjacent (no space between)
+    const emojiRegex = /\p{Emoji}/gu;
+    const emojis = [...prefix.matchAll(emojiRegex)];
+    if (emojis.length >= 2) {
+      const first = emojis[0][0];
+      const second = emojis[1][0];
+      const firstIdx = prefix.indexOf(first);
+      const secondIdx = prefix.indexOf(second, firstIdx + first.length);
+      expect(secondIdx - (firstIdx + first.length)).toBe(0);
+    }
+  });
+
+  it('all icon prefixes have the same display width regardless of icons', () => {
+    function displayWidth(s: string): number {
+      let width = 0;
+      for (const ch of s) {
+        const cp = ch.codePointAt(0) ?? 0;
+        width += cp > 0xffff ? 2 : 1;
+      }
+      return width;
+    }
+
+    const items: WorkItem[] = [
+      { id: 'T1', title: 'T', status: 'open', stage: 'idea', issueType: 'task' as const },
+      { id: 'T2', title: 'T', status: 'in-progress', stage: 'in_review', issueType: 'epic' as const, childCount: 3 },
+      { id: 'T3', title: 'T', status: 'completed', stage: 'plan_complete', needsProducerReview: true },
+      { id: 'T4', title: 'T', status: 'blocked', stage: 'intake_complete', issueType: 'task' as const },
+      { id: 'T5', title: 'T', status: 'open', stage: 'in_progress', issueType: 'epic' as const },
+    ];
+
+    const widths = items.map((item) => displayWidth(getIconPrefix(item)));
+
+    // All widths should be identical
+    const allSame = widths.every((w) => w === widths[0]);
+    expect(allSame).toBe(true);
+  });
+
+  it('prefixes with different icon counts align to the same column width', () => {
+    function displayWidth(s: string): number {
+      let width = 0;
+      for (const ch of s) {
+        const cp = ch.codePointAt(0) ?? 0;
+        width += cp > 0xffff ? 2 : 1;
+      }
+      return width;
+    }
+
+    // Item with only status icon
+    const minimal: WorkItem = { id: 'T1', title: 'T', status: 'open', stage: 'idea', childCount: 0 };
+    // Item with status + stage + review + epic + child count
+    const maximal: WorkItem = {
+      id: 'T2', title: 'T', status: 'completed', stage: 'in_review',
+      needsProducerReview: true, issueType: 'epic' as const, childCount: 5,
+    };
+
+    const minimalPrefix = getIconPrefix(minimal);
+    const maximalPrefix = getIconPrefix(maximal);
+
+    expect(displayWidth(minimalPrefix)).toBe(displayWidth(maximalPrefix));
+  });
+
+  it('handles audit-aware in_review items consistently', () => {
+    function displayWidth(s: string): number {
+      let width = 0;
+      for (const ch of s) {
+        const cp = ch.codePointAt(0) ?? 0;
+        width += cp > 0xffff ? 2 : 1;
+      }
+      return width;
+    }
+
+    const freshAudit: WorkItem = {
+      id: 'T1', title: 'T', status: 'completed', stage: 'in_review',
+      auditResult: true, auditedAt: '2025-01-02T00:00:00.000Z',
+      updatedAt: '2025-01-01T00:00:00.000Z', childCount: 0,
+    };
+    const staleAudit: WorkItem = {
+      id: 'T2', title: 'T', status: 'completed', stage: 'in_review',
+      auditResult: true, auditedAt: '2024-01-01T00:00:00.000Z',
+      updatedAt: '2025-01-01T00:00:00.000Z', childCount: 0,
+    };
+
+    const freshWidth = displayWidth(getIconPrefix(freshAudit));
+    const staleWidth = displayWidth(getIconPrefix(staleAudit));
+    expect(freshWidth).toBe(staleWidth);
+  });
+
+  it('handles items with and without producer review consistently', () => {
+    function displayWidth(s: string): number {
+      let width = 0;
+      for (const ch of s) {
+        const cp = ch.codePointAt(0) ?? 0;
+        width += cp > 0xffff ? 2 : 1;
+      }
+      return width;
+    }
+
+    const withReview: WorkItem = { id: 'T1', title: 'T', status: 'open', stage: 'idea', needsProducerReview: true };
+    const withoutReview: WorkItem = { id: 'T2', title: 'T', status: 'open', stage: 'idea' };
+
+    const withWidth = displayWidth(getIconPrefix(withReview));
+    const withoutWidth = displayWidth(getIconPrefix(withoutReview));
+    expect(withWidth).toBe(withoutWidth);
+  });
 });

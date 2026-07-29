@@ -516,7 +516,7 @@ export function formatItemLine(
 
   const prefix = isSelected ? '▸ ' : '  ';
   const iconPrefix = getIconPrefix(item, { noIcons });
-  const iconStr = iconPrefix.length > 0 ? `${iconPrefix} ` : '';
+  const iconStr = iconPrefix.length > 0 ? `${iconPrefix}` : '';
 
   // Apply stage colouring to the title
   const colouredTitle = item.stage

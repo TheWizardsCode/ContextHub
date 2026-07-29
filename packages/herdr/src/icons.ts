@@ -246,10 +246,31 @@ export function applyStageColour(text: string, stage: string | undefined): strin
   return `\x1b[38;5;${color}m${text}\x1b[0m`;
 }
 
+// ── Terminal display width helpers ────────────────────────────────────
+
+/**
+ * Estimate the terminal display width of a string (cells/columns).
+ * Codepoints above U+FFFF (most emoji) count as 2 cells; others as 1.
+ */
+export function stringDisplayWidth(s: string): number {
+  let width = 0;
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) ?? 0;
+    width += cp > 0xffff ? 2 : 1;
+  }
+  return width;
+}
+
+/** Fixed target width for icon prefix alignment (terminal cells). */
+const ICON_PREFIX_WIDTH = 12;
+
 // ── Icon prefix composition ───────────────────────────────────────────
 
 /**
- * Compute the icon prefix string for a work item (just icon characters, no trailing space).
+ * Compute the icon prefix string for a work item (just icon characters,
+ * no trailing space).  Icons are concatenated without spaces and padded
+ * to a fixed display width so the item-ID column aligns vertically
+ * regardless of how many icon fields are present.
  *
  * Column layout (left to right):
  *   1. Status icon
@@ -286,7 +307,8 @@ export function getIconPrefix(
   // Column 3: producer review flag
   const prIcon = needsProducerReviewIcon(item.needsProducerReview, { noIcons });
 
-  const coreIcons = [sIcon, secondIcon, prIcon].filter(Boolean).join(' ');
+  // Concatenate core icons without spaces between them
+  const coreIcons = [sIcon, secondIcon, prIcon].filter(Boolean).join('');
 
   // Column 4: child count / epic
   let childSuffix = '';
@@ -303,5 +325,13 @@ export function getIconPrefix(
     childSuffix = eIcon;
   }
 
-  return [coreIcons, childSuffix].filter(Boolean).join(' ');
+  // Build full prefix and pad to fixed width for alignment
+  let prefix = [coreIcons, childSuffix].filter(Boolean).join('');
+  const width = stringDisplayWidth(prefix);
+  if (width < ICON_PREFIX_WIDTH) {
+    const padCount = ICON_PREFIX_WIDTH - width;
+    prefix = prefix.padEnd(prefix.length + padCount, ' ');
+  }
+
+  return prefix;
 }
