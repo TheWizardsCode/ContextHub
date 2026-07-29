@@ -10,7 +10,7 @@
  * Herdr's pane-based model.
  */
 
-import { fetchChildrenForItem, runWlSync, type WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, fetchActionableCount, runWlSync, type WorkItem } from './fetcher.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
   statusIcon,
@@ -1437,11 +1437,20 @@ export async function runWorklistTui(
     items = [];
   }
 
+  // Fetch total actionable count (best effort — failure is silent)
+  fetchActionableCount().then((count) => {
+    totalActionableCount = count;
+    render();
+  }).catch(() => {
+    // ignore
+  });
+
   const state = new WorkItemListState(items, termSize);
   const renderer = defaultRenderer;
   const chordState: ChordState = createChordState();
   let refreshNotification = '';
   let syncNotification = '';
+  let totalActionableCount: number | undefined;
 
   // Check if we're in raw mode (stdin is a TTY)
   const isInteractive = process.stdin.isTTY;
@@ -1490,6 +1499,12 @@ export async function runWorklistTui(
     } catch {
       refreshNotification = ` ${ANSI.dim}[Refresh failed]${ANSI.reset}`;
     }
+    // Also fetch the total actionable count on refresh
+    fetchActionableCount().then((count) => {
+      totalActionableCount = count;
+    }).catch(() => {
+      // ignore
+    });
     // Clear notification after brief display
     setTimeout(() => {
       refreshNotification = '';
@@ -1714,7 +1729,7 @@ export async function runWorklistTui(
       state.activeFilter,
       state.mode,
       state.detailItem,
-      undefined,
+      totalActionableCount,
       chordState,
       state.detailScrollOffset,
       opts.autoRefresh,

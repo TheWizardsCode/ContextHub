@@ -548,6 +548,26 @@ describe('createListRenderer', () => {
     expect(output).toContain('in_progress');
   });
 
+  it('shows total actionable count in header when totalCount > items.length', () => {
+    const renderer = createListRenderer();
+    // sampleItems has 5 items, totalCount = 47
+    const output = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null, 47);
+    expect(output).toContain('(top 5 of 47)');
+  });
+
+  it('does not show total count when totalCount equals items.length', () => {
+    const renderer = createListRenderer();
+    // sampleItems has 5 items
+    const output = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null, 5);
+    expect(output).not.toContain('(top');
+  });
+
+  it('does not show total count when undefined', () => {
+    const renderer = createListRenderer();
+    const output = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null);
+    expect(output).not.toContain('(top');
+  });
+
   it('renders group separators when items have groups', () => {
     const groupedItems = [
       makeItem({ id: 'T1', title: 'Item 1', group: 0, groupLabel: 'Priority' }),
