@@ -39,13 +39,29 @@ export const isStatusStageCompatible = (
 ): boolean => {
   if (!status || stage === undefined) return true;
 
-  // Allow common transitional combinations used by the TUI/agents even when
-  // they are not enumerated in the compatibility tables. Historically the
-  // UI and automation have used `in-progress`/`in_progress` status together
-  // with `in_review` (stage). In practice it's also permissible for an
-  // `in-progress` status to exist while the work-item remains in an earlier
-  // stage such as `idea` or `in_progress` (stage values may use underscores
-  // or hyphens depending on source). Treat these as allowed by default.
+  // Allow common transitional combinations used by the audit runner and
+  // batch automation (PlanAll, etc.) even when they are not enumerated in
+  // the compatibility tables.
+  //
+  // WHY THIS EXISTS:
+  // The audit runner (skill/audit/scripts/audit_runner.py) implements a
+  // status lifecycle that temporarily sets `--status in_progress` to claim
+  // a work item, then restores the original status after the audit completes.
+  // This may be called on items in any non-done stage (e.g. a
+  // `completed/in_review` item being re-audited). The config-defined
+  // compatibility table only maps `in-progress` status to stages
+  // `intake_complete`, `plan_complete`, and `in_progress` — which would
+  // reject `in-progress`/`in_review`. This exception bridges that gap.
+  //
+  // RISK: This exception allows potentially invalid state combinations
+  // (e.g. `in-progress`/`in_review`, `in-progress`/`idea`) to persist in
+  // the data store. If the audit process is interrupted after setting
+  // `in-progress` but before restoring the original status, the work item
+  // will remain in a hybrid state until manually corrected. The
+  // `update.ts` guard (skip db.update() when no fields changed) mitigates
+  // accidental stage advancement from `--audit-text`-only calls, and the
+  // try/finally block in audit_runner.py ensures the original status is
+  // restored even on failure.
   const statusNorm = status;
   const stageNorm = stage;
   if ((statusNorm === 'in-progress' || statusNorm === 'in_progress') &&
