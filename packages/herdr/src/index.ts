@@ -20,7 +20,8 @@
 
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
-import { dirname, resolve } from 'path';
+import { dirname, resolve, join, parse } from 'path';
+import { existsSync } from 'fs';
 import { checkWlAvailable, fetchNextItems, fetchItemsByStage } from './fetcher.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
@@ -41,6 +42,36 @@ function isAgentCommand(command: string): boolean {
     command.startsWith('/intake') ||
     command.startsWith('/plan')
   );
+}
+
+/**
+ * Walk up from the current working directory to find the project root
+ * containing a properly initialized `.worklog/` directory (one with a
+ * worklog.db or `initialized` marker). This handles the case where
+ * the plugin is installed from a git worktree that has an incomplete
+ * `.worklog/` directory closer in the tree than the real project root.
+ *
+ * Returns the project root path, or undefined if none found (the caller
+ * should fall back to process.cwd()).
+ */
+function findWorklogRoot(): string | undefined {
+  let dir = process.cwd();
+  const root = parse(dir).root;
+
+  while (true) {
+    const wlDir = join(dir, '.worklog');
+    if (existsSync(wlDir)) {
+      // Check for SQLite database or initialized marker
+      if (existsSync(join(wlDir, 'worklog.db')) || existsSync(join(wlDir, 'initialized'))) {
+        return dir;
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break; // Reached filesystem root
+    dir = parent;
+  }
+
+  return undefined;
 }
 
 // Load settings
@@ -64,6 +95,13 @@ async function main(): Promise<void> {
 
   // Load shortcut config
   const shortcutRegistry = loadShortcutConfig();
+
+  // If we're running from a worktree or other nested location, chdir to
+  // the real project root so `wl` finds the correct .worklog/ directory.
+  const wlRoot = findWorklogRoot();
+  if (wlRoot && wlRoot !== process.cwd()) {
+    process.chdir(wlRoot);
+  }
 
   // Create a fetcher that loads items using the current browseItemCount setting
   // Each call reads from settings so changes take effect on next auto-refresh
