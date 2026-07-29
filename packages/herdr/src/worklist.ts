@@ -1412,8 +1412,10 @@ export async function runWorklistTui(
         const command = chordState.resolvedCommand;
         chordState.resolvedCommand = null;
         if (command) {
-          cleanup();
           executeResolvedCommand(command, state, opts.onCommand);
+          // Show a brief flash notification, then continue
+          refreshNotification = `Sent: ${command.length > 60 ? command.substring(0, 57) + '...' : command}`;
+          setTimeout(() => { refreshNotification = ''; render(); }, 3000);
           render();
           return;
         }
@@ -1447,16 +1449,16 @@ export async function runWorklistTui(
         state.activeFilter ?? undefined,
       );
       if (singleCmd) {
-        // Single-key shortcut — execute immediately
+        // Single-key shortcut — execute immediately and keep TUI alive
         try {
-          cleanup();
           executeResolvedCommand(singleCmd, state, opts.onCommand);
+          // Show a brief flash notification, then continue
+          refreshNotification = `Sent: ${singleCmd.length > 60 ? singleCmd.substring(0, 57) + '...' : singleCmd}`;
+          setTimeout(() => { refreshNotification = ''; render(); }, 3000);
           render();
         } catch (e) {
-          // Log any error before exit
+          refreshNotification = `Error: ${(e as Error).message}`;
           process.stderr.write(`[herdr] Shortcut error: ${(e as Error).message}\n`);
-          process.stderr.write(`[herdr] Shortcut stack: ${(e as Error).stack}\n`);
-          cleanup();
           render();
         }
         return;
