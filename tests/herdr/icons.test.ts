@@ -17,6 +17,7 @@ import {
   iconsEnabled,
   getIconPrefix,
   stageColor,
+  stringDisplayWidth,
 } from '../../packages/herdr/src/icons.js';
 
 import type { WorkItem } from '../../packages/herdr/src/fetcher.js';
@@ -215,10 +216,10 @@ describe('getIconPrefix', () => {
     expect(prefix).toBeTruthy();
   });
 
-  it('includes child count when present', () => {
+  it('does not include child count in prefix', () => {
     const item: WorkItem = { id: 'T1', title: 'Test', status: 'open', childCount: 3 };
     const prefix = getIconPrefix(item);
-    expect(prefix).toMatch(/3/);
+    expect(prefix).not.toMatch(/\(3\)/);
   });
 
   it('includes epic icon for epic type', () => {
@@ -227,12 +228,11 @@ describe('getIconPrefix', () => {
     expect(prefix).toBeTruthy();
   });
 
-  it('returns shorter string in noIcons mode', () => {
+  it('returns same display width in icon and noIcons mode', () => {
     const item: WorkItem = { id: 'T1', title: 'Test', status: 'open', priority: 'high' };
     const withIcons = getIconPrefix(item, { noIcons: false });
     const withoutIcons = getIconPrefix(item, { noIcons: true });
-    // noIcons should not contain emoji-like characters
-    expect(withoutIcons.length).toBeGreaterThanOrEqual(0);
+    expect(stringDisplayWidth(withIcons)).toBe(stringDisplayWidth(withoutIcons));
   });
 
   it('produces a prefix with no spaces between consecutive icons', () => {
@@ -252,15 +252,6 @@ describe('getIconPrefix', () => {
   });
 
   it('all icon prefixes have the same display width regardless of icons', () => {
-    function displayWidth(s: string): number {
-      let width = 0;
-      for (const ch of s) {
-        const cp = ch.codePointAt(0) ?? 0;
-        width += cp > 0xffff ? 2 : 1;
-      }
-      return width;
-    }
-
     const items: WorkItem[] = [
       { id: 'T1', title: 'T', status: 'open', stage: 'idea', issueType: 'task' as const },
       { id: 'T2', title: 'T', status: 'in-progress', stage: 'in_review', issueType: 'epic' as const, childCount: 3 },
@@ -269,7 +260,7 @@ describe('getIconPrefix', () => {
       { id: 'T5', title: 'T', status: 'open', stage: 'in_progress', issueType: 'epic' as const },
     ];
 
-    const widths = items.map((item) => displayWidth(getIconPrefix(item)));
+    const widths = items.map((item) => stringDisplayWidth(getIconPrefix(item)));
 
     // All widths should be identical
     const allSame = widths.every((w) => w === widths[0]);
@@ -277,18 +268,9 @@ describe('getIconPrefix', () => {
   });
 
   it('prefixes with different icon counts align to the same column width', () => {
-    function displayWidth(s: string): number {
-      let width = 0;
-      for (const ch of s) {
-        const cp = ch.codePointAt(0) ?? 0;
-        width += cp > 0xffff ? 2 : 1;
-      }
-      return width;
-    }
-
     // Item with only status icon
     const minimal: WorkItem = { id: 'T1', title: 'T', status: 'open', stage: 'idea', childCount: 0 };
-    // Item with status + stage + review + epic + child count
+    // Item with status + stage + review + epic icon (child count removed from prefix)
     const maximal: WorkItem = {
       id: 'T2', title: 'T', status: 'completed', stage: 'in_review',
       needsProducerReview: true, issueType: 'epic' as const, childCount: 5,
@@ -297,19 +279,10 @@ describe('getIconPrefix', () => {
     const minimalPrefix = getIconPrefix(minimal);
     const maximalPrefix = getIconPrefix(maximal);
 
-    expect(displayWidth(minimalPrefix)).toBe(displayWidth(maximalPrefix));
+    expect(stringDisplayWidth(minimalPrefix)).toBe(stringDisplayWidth(maximalPrefix));
   });
 
   it('handles audit-aware in_review items consistently', () => {
-    function displayWidth(s: string): number {
-      let width = 0;
-      for (const ch of s) {
-        const cp = ch.codePointAt(0) ?? 0;
-        width += cp > 0xffff ? 2 : 1;
-      }
-      return width;
-    }
-
     const freshAudit: WorkItem = {
       id: 'T1', title: 'T', status: 'completed', stage: 'in_review',
       auditResult: true, auditedAt: '2025-01-02T00:00:00.000Z',
@@ -321,26 +294,17 @@ describe('getIconPrefix', () => {
       updatedAt: '2025-01-01T00:00:00.000Z', childCount: 0,
     };
 
-    const freshWidth = displayWidth(getIconPrefix(freshAudit));
-    const staleWidth = displayWidth(getIconPrefix(staleAudit));
+    const freshWidth = stringDisplayWidth(getIconPrefix(freshAudit));
+    const staleWidth = stringDisplayWidth(getIconPrefix(staleAudit));
     expect(freshWidth).toBe(staleWidth);
   });
 
   it('handles items with and without producer review consistently', () => {
-    function displayWidth(s: string): number {
-      let width = 0;
-      for (const ch of s) {
-        const cp = ch.codePointAt(0) ?? 0;
-        width += cp > 0xffff ? 2 : 1;
-      }
-      return width;
-    }
-
     const withReview: WorkItem = { id: 'T1', title: 'T', status: 'open', stage: 'idea', needsProducerReview: true };
     const withoutReview: WorkItem = { id: 'T2', title: 'T', status: 'open', stage: 'idea' };
 
-    const withWidth = displayWidth(getIconPrefix(withReview));
-    const withoutWidth = displayWidth(getIconPrefix(withoutReview));
+    const withWidth = stringDisplayWidth(getIconPrefix(withReview));
+    const withoutWidth = stringDisplayWidth(getIconPrefix(withoutReview));
     expect(withWidth).toBe(withoutWidth);
   });
 });

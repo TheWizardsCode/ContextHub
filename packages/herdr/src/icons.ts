@@ -250,13 +250,44 @@ export function applyStageColour(text: string, stage: string | undefined): strin
 
 /**
  * Estimate the terminal display width of a string (cells/columns).
- * Codepoints above U+FFFF (most emoji) count as 2 cells; others as 1.
+ *
+ * Accounts for:
+ *   - Supplementary-plane characters (> U+FFFF): 2 cells
+ *   - Emoticons/dingbats (U+2300-U+27BF, U+2934-U+2935, U+2B05-U+2B55,
+ *     U+3030 etc.): 2 cells (modern terminals render these as emoji)
+ *   - CJK fullwidth ranges: 2 cells
+ *   - Variation Selectors (U+FE00-U+FE0F), ZWJ (U+200D): 0 cells
+ *   - Everything else: 1 cell
  */
 export function stringDisplayWidth(s: string): number {
   let width = 0;
   for (const ch of s) {
     const cp = ch.codePointAt(0) ?? 0;
-    width += cp > 0xffff ? 2 : 1;
+    // Zero-width characters
+    if (cp === 0x200D || (cp >= 0xFE00 && cp <= 0xFE0F)) continue;
+    // Supplementary plane — almost always 2 cells (modern emoji)
+    if (cp > 0xFFFF) { width += 2; continue; }
+    // Emoji / Dingbat ranges that render as 2 cells in modern terminals
+    if ((cp >= 0x2300 && cp <= 0x27BF) ||
+        (cp >= 0x2934 && cp <= 0x2935) ||
+        (cp >= 0x2B05 && cp <= 0x2B55) ||
+        (cp >= 0x3030 && cp <= 0x303D) ||
+        (cp >= 0x3297 && cp <= 0x3299)) {
+      width += 2; continue;
+    }
+    // CJK fullwidth ranges
+    if ((cp >= 0x1100 && cp <= 0x115F) ||
+        (cp >= 0x2E80 && cp <= 0x9FFF) ||
+        (cp >= 0xAC00 && cp <= 0xD7AF) ||
+        (cp >= 0xF900 && cp <= 0xFAFF) ||
+        (cp >= 0xFE10 && cp <= 0xFE1F) ||
+        (cp >= 0xFE30 && cp <= 0xFE6F) ||
+        (cp >= 0xFF01 && cp <= 0xFF60) ||
+        (cp >= 0xFFE0 && cp <= 0xFFE6)) {
+      width += 2; continue;
+    }
+    // Default: 1 cell
+    width += 1;
   }
   return width;
 }
@@ -310,23 +341,11 @@ export function getIconPrefix(
   // Concatenate core icons without spaces between them
   const coreIcons = [sIcon, secondIcon, prIcon].filter(Boolean).join('');
 
-  // Column 4: child count / epic
-  let childSuffix = '';
-  if (item.childCount !== undefined && item.childCount > 0) {
-    const countStr = `(${item.childCount})`;
-    if (item.issueType === 'epic') {
-      const eIcon = epicIcon({ noIcons });
-      childSuffix = `${eIcon}${countStr}`;
-    } else {
-      childSuffix = countStr;
-    }
-  } else if (item.issueType === 'epic') {
-    const eIcon = epicIcon({ noIcons });
-    childSuffix = eIcon;
-  }
+  // Column 4: epic icon (child count is no longer shown in prefix)
+  const epicSuffix = item.issueType === 'epic' ? epicIcon({ noIcons }) : '';
 
   // Build full prefix and pad to fixed width for alignment
-  let prefix = [coreIcons, childSuffix].filter(Boolean).join('');
+  let prefix = [coreIcons, epicSuffix].filter(Boolean).join('');
   const width = stringDisplayWidth(prefix);
   if (width < ICON_PREFIX_WIDTH) {
     const padCount = ICON_PREFIX_WIDTH - width;
