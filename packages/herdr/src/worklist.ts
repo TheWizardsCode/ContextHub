@@ -413,10 +413,46 @@ export class WorkItemListState {
   // ── Refresh ─────────────────────────────────────────────────────
 
   refreshItems(newItems: WorkItem[]): void {
+    // Capture the currently selected item's ID before replacing items
+    const prevSelectedId = this._captureSelectedId();
+
     this._allItems = [...newItems];
     this._applyFilters();
-    this._clampSelection();
+
+    // Try to restore selection by ID; fall back to clamping if not found
+    if (!this._restoreSelectionById(prevSelectedId)) {
+      this._clampSelection();
+    }
+
     this._adjustScroll();
+  }
+
+  /**
+   * Capture the ID of the currently selected item, or undefined if
+   * the flattened list is empty or nothing is selected.
+   */
+  private _captureSelectedId(): string | undefined {
+    const flat = this.getFlattenedItems();
+    if (flat.length === 0) return undefined;
+    const idx = this.selectedIndex;
+    if (idx < 0 || idx >= flat.length) return undefined;
+    return flat[idx].id;
+  }
+
+  /**
+   * Search the new flattened list for an item matching `id` and
+   * set selectedIndex to its position.
+   *
+   * @returns true if the item was found and selection restored;
+   *          false if the item is no longer visible.
+   */
+  private _restoreSelectionById(id: string | undefined): boolean {
+    if (id === undefined) return false;
+    const flat = this.getFlattenedItems();
+    const newIndex = flat.findIndex((item) => item.id === id);
+    if (newIndex === -1) return false;
+    this.selectedIndex = newIndex;
+    return true;
   }
 
   // ── Internal ────────────────────────────────────────────────────

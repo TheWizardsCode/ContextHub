@@ -1,0 +1,208 @@
+/**
+ * Unit tests for WorkItemListState.refreshItems ID-preserving selection.
+ *
+ * Run: npx vitest run packages/herdr/src/worklist.test.ts
+ */
+
+import { describe, it, expect, beforeEach } from 'vitest';
+import { WorkItemListState, getTermSize } from './worklist.js';
+import type { WorkItem } from './fetcher.js';
+
+/**
+ * Build a minimal WorkItem with required fields.
+ */
+function makeItem(id: string, stage?: string): WorkItem {
+  return { id, title: `Item ${id}`, status: 'open', stage };
+}
+
+/**
+ * Default terminal size (80x24) for test stability.
+ */
+const TERM_80x24 = { rows: 24, cols: 80 };
+getTermSize(); // verify the module loads
+
+describe('WorkItemListState.refreshItems — preserve selection by ID', () => {
+  let items: WorkItem[];
+
+  beforeEach(() => {
+    items = [
+      makeItem('A', 'idea'),
+      makeItem('B', 'intake_complete'),
+      makeItem('C', 'plan_complete'),
+      makeItem('D', 'in_progress'),
+    ];
+  });
+
+  it('preserves selection when items are reordered', () => {
+    const state = new WorkItemListState(items, TERM_80x24);
+    // Select item at index 1 (item 'B')
+    state.selectedIndex = 1;
+    expect(state.getFlattenedItems()[1].id).toBe('B');
+
+    // Refresh with reordered items — 'B' moves to index 3
+    const reordered = [
+      makeItem('D', 'in_progress'),
+      makeItem('C', 'plan_complete'),
+      makeItem('A', 'idea'),
+      makeItem('B', 'intake_complete'),
+    ];
+    state.refreshItems(reordered);
+
+    // Selection should follow 'B' to its new position (index 3)
+    expect(state.selectedIndex).toBe(3);
+    expect(state.getFlattenedItems()[state.selectedIndex].id).toBe('B');
+  });
+
+  it('preserves selection when items are partially reordered', () => {
+    const state = new WorkItemListState(items, TERM_80x24);
+    // Select item at index 2 (item 'C')
+    state.selectedIndex = 2;
+    expect(state.getFlattenedItems()[2].id).toBe('C');
+
+    // Refresh: new items array where only 'C' and 'D' swap places
+    const reordered = [
+      makeItem('A', 'idea'),
+      makeItem('B', 'intake_complete'),
+      makeItem('D', 'in_progress'),
+      makeItem('C', 'plan_complete'),
+    ];
+    state.refreshItems(reordered);
+
+    // 'C' moved from index 2 to index 3
+    expect(state.selectedIndex).toBe(3);
+    expect(state.getFlattenedItems()[state.selectedIndex].id).toBe('C');
+  });
+
+  it('falls back to clamping when selected item is removed', () => {
+    const state = new WorkItemListState(items, TERM_80x24);
+    // Select item at index 3 (item 'D')
+    state.selectedIndex = 3;
+    expect(state.getFlattenedItems()[3].id).toBe('D');
+
+    // Refresh: remove 'D'
+    const reduced = [
+      makeItem('A', 'idea'),
+      makeItem('B', 'intake_complete'),
+      makeItem('C', 'plan_complete'),
+    ];
+    state.refreshItems(reduced);
+
+    // Since selectedIndex was 3 and new flatCount is 3, clamp should set index to 2 (last)
+    expect(state.selectedIndex).toBe(2);
+    expect(state.getFlattenedItems()[2].id).toBe('C');
+  });
+
+  it('falls back to clamping when selected item is filtered out by active filter', () => {
+    const state = new WorkItemListState(items, TERM_80x24);
+    // Apply a filter for 'idea' stage
+    state.applyFilter('idea');
+    // After filter, only item 'A' (index 0) should be visible
+    expect(state.getFlattenedItems().length).toBe(1);
+    expect(state.getFlattenedItems()[0].id).toBe('A');
+
+    // Select item 'A' (the only visible item)
+    expect(state.selectedIndex).toBe(0);
+
+    // Refresh with items where no item has stage 'idea'
+    const noIdeaItems = [
+      makeItem('B', 'intake_complete'),
+      makeItem('C', 'plan_complete'),
+      makeItem('D', 'in_progress'),
+    ];
+    state.refreshItems(noIdeaItems);
+
+    // After refresh with filter active, no items match 'idea' filter.
+    // The selected item 'A' is gone, so fall back to clamping.
+    // _clampSelection sees flatCount=0, sets selectedIndex=0
+    expect(state.selectedIndex).toBe(0);
+    expect(state.getFlattenedItems().length).toBe(0);
+  });
+
+  it('handles empty list gracefully', () => {
+    const state = new WorkItemListState(items, TERM_80x24);
+    state.selectedIndex = 2;
+
+    // Refresh with empty list
+    state.refreshItems([]);
+
+    expect(state.selectedIndex).toBe(0);
+    expect(state.getFlattenedItems().length).toBe(0);
+  });
+
+  it('handles refresh with no previous selection (empty initial list)', () => {
+    const state = new WorkItemListState([], TERM_80x24);
+    expect(state.selectedIndex).toBe(0);
+
+    // Refresh with new items
+    state.refreshItems(items);
+
+    // First item should be selected (clamp to index 0)
+    expect(state.selectedIndex).toBe(0);
+    expect(state.getFlattenedItems()[0].id).toBe('A');
+  });
+
+  it('preserves selection with expanded children after refresh', () => {
+    // Create items with children
+    const parentA = makeItem('PARENT-A', 'idea');
+    parentA.children = [makeItem('CHILD-A1'), makeItem('CHILD-A2')];
+    parentA.childCount = 2;
+
+    const parentB = makeItem('PARENT-B', 'in_progress');
+    parentB.children = [makeItem('CHILD-B1')];
+    parentB.childCount = 1;
+
+    const withChildren = [parentA, parentB];
+    const state = new WorkItemListState(withChildren, TERM_80x24);
+
+    // Expand parent A so children are visible in the flattened list
+    state.toggleExpand('PARENT-A');
+
+    // Flattened: [PARENT-A, CHILD-A1, CHILD-A2, PARENT-B]
+    expect(state.getFlattenedItems().length).toBe(4);
+
+    // Select CHILD-A1 (index 1)
+    state.selectedIndex = 1;
+    expect(state.getFlattenedItems()[1].id).toBe('CHILD-A1');
+
+    // Refresh with reordered parents — swap Parent A and Parent B
+    const reordered = [parentB, parentA];
+    state.refreshItems(reordered);
+
+    // After refresh, expanded state should be preserved via expandedItems Set.
+    // So flattened: [PARENT-B, PARENT-A, CHILD-A1, CHILD-A2]
+    // CHILD-A1 should be at index 2
+    expect(state.selectedIndex).toBe(2);
+    expect(state.getFlattenedItems()[state.selectedIndex].id).toBe('CHILD-A1');
+  });
+
+  it('prefers the selected item ID over the collapsed child position', () => {
+    // Test that when parent is collapsed and then refreshed with expanded
+    // children, the same child ID is found in the new flattened list
+    const itemC = makeItem('C', 'in_progress');
+    itemC.children = [makeItem('CHILD-X')];
+    itemC.childCount = 1;
+
+    const startItems = [
+      makeItem('A', 'idea'),
+      itemC,
+      makeItem('B', 'intake_complete'),
+    ];
+    const state = new WorkItemListState(startItems, TERM_80x24);
+
+    // Select 'B' (index 2)
+    state.selectedIndex = 2;
+    expect(state.getFlattenedItems()[2].id).toBe('B');
+
+    // Refresh with same items but reorder
+    const reordered = [
+      makeItem('B', 'intake_complete'),
+      makeItem('A', 'idea'),
+      itemC,
+    ];
+    state.refreshItems(reordered);
+
+    // 'B' should be at index 0 after reorder
+    expect(state.selectedIndex).toBe(0);
+    expect(state.getFlattenedItems()[0].id).toBe('B');
+  });
+});
