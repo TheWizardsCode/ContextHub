@@ -71,6 +71,8 @@ export interface WorkItem {
   childCount?: number;
   createdAt?: string;
   updatedAt?: string;
+  /** GitHub issue number (e.g., '#123'). */
+  githubIssueNumber?: string;
   group?: number;
   groupLabel?: string;
   needsProducerReview?: boolean;
@@ -145,6 +147,7 @@ function normalizeItem(raw: any): WorkItem {
     description: raw?.description ? String(raw.description) : undefined,
     tags: Array.isArray(raw?.tags) ? raw.tags.map(String) : undefined,
     issueType: raw?.issueType ? String(raw.issueType) : undefined,
+    githubIssueNumber: raw?.githubIssueNumber ? String(raw.githubIssueNumber) : undefined,
     childCount: raw?.childCount !== undefined ? Number(raw.childCount) : undefined,
     createdAt: raw?.createdAt ? String(raw.createdAt) : undefined,
     updatedAt: raw?.updatedAt ? String(raw.updatedAt) : undefined,
