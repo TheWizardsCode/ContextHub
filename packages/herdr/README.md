@@ -107,7 +107,7 @@ herdr plugin action run worklog-selection-list open-worklist
 
 The plugin respects the following environment variables:
 
-- `WL_COUNT` — Number of work items to fetch (default: 20)
+- `WL_COUNT` — Number of work items to fetch (default: 20, now superseded by `browseItemCount` in settings)
 
 ## Architecture
 

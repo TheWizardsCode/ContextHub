@@ -20,8 +20,6 @@ export interface PluginSettings {
   refreshIntervalMs: number;
   /** Show emoji icons in item lines. */
   showIcons: boolean;
-  /** Number of items to fetch from wl. */
-  wlCount: number;
   /** Enable periodic background wl sync. */
   autoSync: boolean;
   /** Interval in ms between background `wl sync` calls. 0 = disabled. Minimum 30000ms. */
@@ -38,7 +36,6 @@ export const defaultSettings: PluginSettings = {
   autoRefresh: true,
   refreshIntervalMs: 30000,
   showIcons: true,
-  wlCount: 20,
   autoSync: true,
   syncIntervalMs: 60000,
   browseItemCount: 10,
@@ -89,8 +86,6 @@ export function loadSettings(settingsPath?: string): PluginSettings {
         ? parsed.refreshIntervalMs : defaultSettings.refreshIntervalMs,
       showIcons: typeof parsed.showIcons === 'boolean'
         ? parsed.showIcons : defaultSettings.showIcons,
-      wlCount: typeof parsed.wlCount === 'number'
-        ? parsed.wlCount : defaultSettings.wlCount,
       autoSync: typeof parsed.autoSync === 'boolean'
         ? parsed.autoSync : defaultSettings.autoSync,
       syncIntervalMs: typeof parsed.syncIntervalMs === 'number'

@@ -29,10 +29,6 @@ describe('defaultSettings', () => {
     expect(defaultSettings.showIcons).toBe(true);
   });
 
-  it('has default WL count of 20', () => {
-    expect(defaultSettings.wlCount).toBe(20);
-  });
-
   it('has default browseItemCount of 10', () => {
     expect(defaultSettings.browseItemCount).toBe(10);
   });
@@ -81,7 +77,6 @@ describe('loadSettings', () => {
       autoRefresh: false,
       refreshIntervalMs: 60000,
       syncIntervalMs: 60000,
-      wlCount: 10,
       browseItemCount: 25,
       showHelpText: false,
     }), 'utf-8');
@@ -89,7 +84,6 @@ describe('loadSettings', () => {
     expect(settings.autoRefresh).toBe(false);
     expect(settings.refreshIntervalMs).toBe(60000);
     expect(settings.syncIntervalMs).toBe(60000);
-    expect(settings.wlCount).toBe(10);
     expect(settings.browseItemCount).toBe(25);
     expect(settings.showHelpText).toBe(false);
   });
@@ -102,7 +96,6 @@ describe('loadSettings', () => {
     expect(settings.autoRefresh).toBe(false);
     expect(settings.refreshIntervalMs).toBe(30000); // from defaults
     expect(settings.syncIntervalMs).toBe(60000); // from defaults
-    expect(settings.wlCount).toBe(20); // from defaults
   });
 
   it('handles malformed JSON', () => {
@@ -132,7 +125,6 @@ describe('saveSettings', () => {
       autoRefresh: false,
       refreshIntervalMs: 60000,
       showIcons: false,
-      wlCount: 10,
       autoSync: false,
       syncIntervalMs: 30000,
       browseItemCount: 25,
@@ -142,7 +134,6 @@ describe('saveSettings', () => {
     expect(existsSync(settingsPath)).toBe(true);
     const loaded = loadSettings(settingsPath);
     expect(loaded.autoRefresh).toBe(false);
-    expect(loaded.wlCount).toBe(10);
   });
 
   it('creates parent directory if needed', () => {

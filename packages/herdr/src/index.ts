@@ -11,7 +11,7 @@
  *
  * Environment:
  *   HERDR_PANE_ID  - Set by Herdr when running in a pane (optional)
- *   WL_COUNT       - Number of items to fetch (default: 20)
+ *   WL_COUNT       - Number of items to fetch (default: 20, now superseded by browseItemCount setting)
  *
  * Exit codes:
  *   0 - Normal exit (user quit or selected an item)
