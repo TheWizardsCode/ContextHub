@@ -509,10 +509,12 @@ export function formatItemLine(
   const depth = item.depth ?? 0;
   const depthIndent = depth > 0 ? '  '.repeat(depth) : '';
 
-  // Expand/collapse icon
+  // Expand/collapse icon — always 2 cells wide to keep alignment.
+  // Items without children get 2 spaces so the icon prefix starts at the
+  // same column regardless of whether the expand arrow is present.
   const expandIcon = item.childCount && item.childCount > 0
     ? (item._expanded ? '▼ ' : '▶ ')
-    : '';
+    : '  ';
 
   const prefix = isSelected ? '▸ ' : '  ';
   const iconPrefix = getIconPrefix(item, { noIcons });
