@@ -191,7 +191,7 @@ describe('findWorklogRoot', () => {
       expect(findWorklogRoot()).toBeUndefined();
     });
 
-    it('does NOT walk up when parent has valid .worklog/ and CWD has none', async () => {
+    it('walks up to parent when it has valid .worklog/', async () => {
       const { findWorklogRoot } = await import('./index.js');
       const base = makeTempDir();
       // Create a parent dir with valid .worklog/
@@ -203,8 +203,8 @@ describe('findWorklogRoot', () => {
       mkdirSync(cwd, { recursive: true });
       vi.spyOn(process, 'cwd').mockReturnValue(cwd);
 
-      // Should return undefined since CWD has no .worklog/ and not in a worktree
-      expect(findWorklogRoot()).toBeUndefined();
+      // Should find the parent's .worklog/ by walking up
+      expect(findWorklogRoot()).toBe(base);
     });
   });
 

@@ -80,48 +80,39 @@ function isInsideWorktree(dir: string): boolean {
  * is found but is NOT valid (lacks `worklog.db` or `initialized` marker):
  * - If we are inside a worktree (path contains `.worklog/worktrees/`), skip
  *   past the invalid `.worklog/` and continue walking up.  Worktree
- *   `.worklog/` directories may be incomplete stubs; the real project root
- *   is above them.
- * - If we are NOT inside a worktree, stop and return `undefined`.  This
- *   prevents the plugin from silently falling back to an unrelated project's
- *   `.worklog/` (e.g., ContextHub) when the user's Herdr tab points to a
- *   different working directory.
+ *   `.worklog/` directories may be incomplete stubs left by `git worktree`
+ *   setup; the real project root is above them.
+ * - If we are NOT inside a worktree, stop walking and return `undefined`.
+ *   This prevents the plugin from silently picking up an unrelated
+ *   project's `.worklog/` higher up the tree when the calling framework
+ *   sets CWD to a project that has no `.worklog/` of its own.
  *
  * Returns the project root path, or `undefined` if no valid `.worklog/` can
  * be found. The caller should handle the `undefined` case by reporting the
  * uninitialized state to the user.
  */
 export function findWorklogRoot(): string | undefined {
-  const cwd = process.cwd();
+  let dir = process.cwd();
+  const root = parse(dir).root;
 
-  // Step 1: Check if the current working directory has a valid .worklog/
-  const cwdWlDir = join(cwd, '.worklog');
-  if (existsSync(cwdWlDir) &&
-      (existsSync(join(cwdWlDir, 'worklog.db')) || existsSync(join(cwdWlDir, 'initialized')))) {
-    return cwd;
-  }
-
-  // Step 2: If we're inside a worktree, walk up to find the project root
-  if (isInsideWorktree(cwd)) {
-    let dir = cwd;
-    const root = parse(dir).root;
-
-    while (true) {
-      const wlDir = join(dir, '.worklog');
-      if (existsSync(wlDir)) {
-        // Check whether this .worklog/ is valid
-        if (existsSync(join(wlDir, 'worklog.db')) || existsSync(join(wlDir, 'initialized'))) {
-          return dir;
-        }
-        // Found an invalid .worklog/ — skip past it (we're in a worktree)
+  while (true) {
+    const wlDir = join(dir, '.worklog');
+    if (existsSync(wlDir)) {
+      if (existsSync(join(wlDir, 'worklog.db')) || existsSync(join(wlDir, 'initialized'))) {
+        // Found a valid .worklog/ — use this directory
+        return dir;
       }
-      const parent = dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
+      // Found .worklog/ but it is NOT valid.
+      // Only walk past it when inside a worktree; otherwise stop here.
+      if (!isInsideWorktree(dir)) {
+        return undefined;
+      }
     }
+    const parent = dirname(dir);
+    if (parent === dir) break; // Reached filesystem root
+    dir = parent;
   }
 
-  // Step 3: No valid .worklog/ found
   return undefined;
 }
 
