@@ -10,7 +10,7 @@
  * Herdr's pane-based model.
  */
 
-import { fetchChildrenForItem, fetchActionableCount, runWlSync, type WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, fetchActionableCount, type WorkItem } from './fetcher.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
   statusIcon,
@@ -24,6 +24,7 @@ import {
   stageColor,
   type IconOptions,
 } from './icons.js';
+import { runSync, createSyncTimer, clampSyncInterval } from './auto-sync.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -1452,7 +1453,7 @@ export async function runWorklistTui(
   const renderer = defaultRenderer;
   const chordState: ChordState = createChordState();
   let refreshNotification = '';
-  let syncNotification = '';
+
   let totalActionableCount: number | undefined;
 
   // Check if we're in raw mode (stdin is a TTY)
@@ -1511,30 +1512,6 @@ export async function runWorklistTui(
     // Clear notification after brief display
     setTimeout(() => {
       refreshNotification = '';
-      render();
-    }, 3000);
-    render();
-  };
-
-  /**
-   * Run `wl sync` and show status notification.
-   */
-  const doSync = async (): Promise<void> => {
-    try {
-      syncNotification = ` ${ANSI.dim}[Syncing...]${ANSI.reset}`;
-      render();
-      const result = await runWlSync();
-      if (result.success) {
-        syncNotification = ` ${ANSI.fg(34)}${ANSI.dim}[Synced]${ANSI.reset}`;
-      } else {
-        syncNotification = ` ${ANSI.fg(196)}${ANSI.dim}[Sync failed: ${result.error ?? 'unknown'}]${ANSI.reset}`;
-      }
-    } catch {
-      syncNotification = ` ${ANSI.fg(196)}${ANSI.dim}[Sync failed]${ANSI.reset}`;
-    }
-    // Clear notification after brief display
-    setTimeout(() => {
-      syncNotification = '';
       render();
     }, 3000);
     render();
@@ -1744,7 +1721,6 @@ export async function runWorklistTui(
     // Append notifications if present
     let notificationLine = '';
     if (refreshNotification) notificationLine += refreshNotification;
-    if (syncNotification) notificationLine += syncNotification;
     const rendered = notificationLine
       ? output + '\n' + notificationLine
       : output;
@@ -1779,12 +1755,17 @@ export async function runWorklistTui(
     }, opts.refreshIntervalMs);
   }
 
-  // Auto-sync timer (separate from list auto-refresh)
-  let syncTimer: ReturnType<typeof setInterval> | undefined;
-  if (opts.autoSync) {
-    syncTimer = setInterval(() => {
-      doSync();
-    }, opts.syncIntervalMs);
+  // Auto-sync timer (background wl sync)
+  let syncTimer: ReturnType<typeof createSyncTimer> | undefined;
+  if (opts.autoSync && opts.syncIntervalMs !== 0) {
+    syncTimer = createSyncTimer({
+      intervalMs: opts.syncIntervalMs,
+      onSync: () => {
+        runSync();
+        doRefresh(false);
+      },
+    });
+    syncTimer.start();
   }
 
   // Cleanup on promise resolution
@@ -1793,7 +1774,7 @@ export async function runWorklistTui(
       clearInterval(refreshTimer);
     }
     if (syncTimer !== undefined) {
-      clearInterval(syncTimer);
+      syncTimer.stop();
     }
     cleanup();
     process.stdout.removeListener('resize', onResize);

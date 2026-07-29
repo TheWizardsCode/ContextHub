@@ -119,6 +119,7 @@ packages/herdr/
 ├── src/
 │   ├── index.ts            # Entry point — TUI main loop
 │   ├── fetcher.ts          # Worklog data fetching via wl CLI
+│   ├── auto-sync.ts       # Background `wl sync` with configurable timer
 │   ├── shortcut-config.ts  # Chord shortcut registry and config loader
 │   ├── shortcuts.json      # Shortcut/chord definitions
 │   ├── icons.ts            # Icon and colour helpers

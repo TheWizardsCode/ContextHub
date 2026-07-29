@@ -6,6 +6,7 @@
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { clampSyncInterval } from './auto-sync.js';
 import { dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -23,7 +24,7 @@ export interface PluginSettings {
   wlCount: number;
   /** Enable periodic background wl sync. */
   autoSync: boolean;
-  /** Interval in ms between syncs. */
+  /** Interval in ms between background `wl sync` calls. 0 = disabled. Minimum 30000ms. */
   syncIntervalMs: number;
   /** Number of items to fetch and display (1-50). */
   browseItemCount: number;
@@ -93,7 +94,8 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       autoSync: typeof parsed.autoSync === 'boolean'
         ? parsed.autoSync : defaultSettings.autoSync,
       syncIntervalMs: typeof parsed.syncIntervalMs === 'number'
-        ? parsed.syncIntervalMs : defaultSettings.syncIntervalMs,
+        ? clampSyncInterval(parsed.syncIntervalMs)
+        : defaultSettings.syncIntervalMs,
       browseItemCount: typeof parsed.browseItemCount === 'number'
         ? parsed.browseItemCount : defaultSettings.browseItemCount,
       showHelpText: typeof parsed.showHelpText === 'boolean'

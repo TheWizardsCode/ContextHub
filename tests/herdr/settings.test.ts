@@ -40,6 +40,14 @@ describe('defaultSettings', () => {
   it('has showHelpText enabled by default', () => {
     expect(defaultSettings.showHelpText).toBe(true);
   });
+
+  it('has syncIntervalMs set to 60000 by default', () => {
+    expect(defaultSettings.syncIntervalMs).toBe(60000);
+  });
+
+  it('has syncIntervalMs enabled by default', () => {
+    expect(defaultSettings.syncIntervalMs).toBeGreaterThan(0);
+  });
 });
 
 describe('loadSettings', () => {
@@ -65,12 +73,14 @@ describe('loadSettings', () => {
     const settings = loadSettings(settingsPath);
     expect(settings.autoRefresh).toBe(true);
     expect(settings.refreshIntervalMs).toBe(30000);
+    expect(settings.syncIntervalMs).toBe(60000);
   });
 
   it('loads settings from existing file', () => {
     writeFileSync(settingsPath, JSON.stringify({
       autoRefresh: false,
       refreshIntervalMs: 60000,
+      syncIntervalMs: 60000,
       wlCount: 10,
       browseItemCount: 25,
       showHelpText: false,
@@ -78,6 +88,7 @@ describe('loadSettings', () => {
     const settings = loadSettings(settingsPath);
     expect(settings.autoRefresh).toBe(false);
     expect(settings.refreshIntervalMs).toBe(60000);
+    expect(settings.syncIntervalMs).toBe(60000);
     expect(settings.wlCount).toBe(10);
     expect(settings.browseItemCount).toBe(25);
     expect(settings.showHelpText).toBe(false);
@@ -90,6 +101,7 @@ describe('loadSettings', () => {
     const settings = loadSettings(settingsPath);
     expect(settings.autoRefresh).toBe(false);
     expect(settings.refreshIntervalMs).toBe(30000); // from defaults
+    expect(settings.syncIntervalMs).toBe(60000); // from defaults
     expect(settings.wlCount).toBe(20); // from defaults
   });
 
