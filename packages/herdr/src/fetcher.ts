@@ -317,6 +317,23 @@ export async function fetchActionableCount(): Promise<number | undefined> {
 }
 
 /**
+ * Run `wl sync` to synchronize local data with the remote.
+ * Returns success status and optional error message.
+ */
+export async function runWlSync(): Promise<{ success: boolean; error?: string }> {
+  try {
+    const output = await runWl(['sync']);
+    const payload = extractJson(output);
+    const result = payload && typeof payload === 'object'
+      ? (payload as Record<string, unknown>)
+      : {};
+    return { success: result?.success !== false };
+  } catch (err: any) {
+    return { success: false, error: err.message ?? String(err) };
+  }
+}
+
+/**
  * Fetch child work items for a given parent ID (via `wl list --parent`).
  * Child items are returned with depth=1 for hierarchical display.
  */

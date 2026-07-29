@@ -21,6 +21,10 @@ export interface PluginSettings {
   showIcons: boolean;
   /** Number of items to fetch from wl. */
   wlCount: number;
+  /** Enable periodic background wl sync. */
+  autoSync: boolean;
+  /** Interval in ms between syncs. */
+  syncIntervalMs: number;
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────
@@ -30,6 +34,8 @@ export const defaultSettings: PluginSettings = {
   refreshIntervalMs: 30000,
   showIcons: true,
   wlCount: 20,
+  autoSync: true,
+  syncIntervalMs: 60000,
 };
 
 // ── Default config path ───────────────────────────────────────────────
@@ -78,6 +84,10 @@ export function loadSettings(settingsPath?: string): PluginSettings {
         ? parsed.showIcons : defaultSettings.showIcons,
       wlCount: typeof parsed.wlCount === 'number'
         ? parsed.wlCount : defaultSettings.wlCount,
+      autoSync: typeof parsed.autoSync === 'boolean'
+        ? parsed.autoSync : defaultSettings.autoSync,
+      syncIntervalMs: typeof parsed.syncIntervalMs === 'number'
+        ? parsed.syncIntervalMs : defaultSettings.syncIntervalMs,
     };
   } catch {
     return { ...defaultSettings };

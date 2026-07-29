@@ -18,10 +18,30 @@
  *   1 - wl CLI not found
  */
 
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
 import { checkWlAvailable, fetchNextItems, fetchItemsByStage } from './fetcher.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { loadSettings, getDefaultSettingsPath } from './settings.js';
+
+// Resolve path to the send-to-pi.sh script (relative to this source file)
+// At runtime (tsx or dist), __dirname equivalent from import.meta.url
+const _currentDir = dirname(fileURLToPath(import.meta.url));
+const SEND_TO_PI_SCRIPT = resolve(_currentDir, '..', 'scripts', 'send-to-pi.sh');
+
+/**
+ * Check if a command is an agent command that should be sent to a pi pane.
+ * Agent commands are those starting with /skill:, /intake, or /plan.
+ */
+function isAgentCommand(command: string): boolean {
+  return (
+    command.startsWith('/skill:') ||
+    command.startsWith('/intake') ||
+    command.startsWith('/plan')
+  );
+}
 
 // Load settings (env var takes precedence)
 const settings = loadSettings();
@@ -68,11 +88,30 @@ async function main(): Promise<void> {
     {
       autoRefresh: settings.autoRefresh,
       refreshIntervalMs: settings.refreshIntervalMs,
+      autoSync: settings.autoSync,
+      syncIntervalMs: settings.syncIntervalMs,
       onCommand: (command: string) => {
-        // Write the resolved command to stdout with a distinguishable prefix
-        // so the calling framework (Herdr) can execute it.
-        // The TUI stays alive — the user can continue browsing or quit normally.
-        process.stdout.write(`CMD:${command}\n`);
+        // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
+        // pane opened to the right. Other commands are written to stdout with the
+        // CMD: prefix for the calling framework (Herdr) to execute.
+        if (isAgentCommand(command)) {
+          // Spawn send-to-pi.sh asynchronously — detached and with stdio ignored
+          // so the TUI loop is not blocked or affected by the script's output.
+          const child = spawn(
+            SEND_TO_PI_SCRIPT,
+            [command],
+            {
+              detached: true,
+              stdio: 'ignore',
+              cwd: process.cwd(),
+              env: { ...process.env },
+            },
+          );
+          child.unref(); // Allow the parent to exit independently
+        } else {
+          // Non-agent commands: write to stdout with CMD: prefix so Herdr executes them
+          process.stdout.write(`CMD:${command}\n`);
+        }
       },
     },
   );

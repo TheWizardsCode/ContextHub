@@ -10,7 +10,7 @@
  * Herdr's pane-based model.
  */
 
-import { fetchChildrenForItem, type WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, runWlSync, type WorkItem } from './fetcher.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
   statusIcon,
@@ -1417,11 +1417,13 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; onCommand?: (command: string) => void },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; onCommand?: (command: string) => void },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
     refreshIntervalMs: options?.refreshIntervalMs ?? 30000,
+    autoSync: options?.autoSync ?? true,
+    syncIntervalMs: options?.syncIntervalMs ?? 60000,
     onCommand: options?.onCommand,
   };
 
@@ -1439,6 +1441,7 @@ export async function runWorklistTui(
   const renderer = defaultRenderer;
   const chordState: ChordState = createChordState();
   let refreshNotification = '';
+  let syncNotification = '';
 
   // Check if we're in raw mode (stdin is a TTY)
   const isInteractive = process.stdin.isTTY;
@@ -1490,6 +1493,30 @@ export async function runWorklistTui(
     // Clear notification after brief display
     setTimeout(() => {
       refreshNotification = '';
+      render();
+    }, 3000);
+    render();
+  };
+
+  /**
+   * Run `wl sync` and show status notification.
+   */
+  const doSync = async (): Promise<void> => {
+    try {
+      syncNotification = ` ${ANSI.dim}[Syncing...]${ANSI.reset}`;
+      render();
+      const result = await runWlSync();
+      if (result.success) {
+        syncNotification = ` ${ANSI.fg(34)}${ANSI.dim}[Synced]${ANSI.reset}`;
+      } else {
+        syncNotification = ` ${ANSI.fg(196)}${ANSI.dim}[Sync failed: ${result.error ?? 'unknown'}]${ANSI.reset}`;
+      }
+    } catch {
+      syncNotification = ` ${ANSI.fg(196)}${ANSI.dim}[Sync failed]${ANSI.reset}`;
+    }
+    // Clear notification after brief display
+    setTimeout(() => {
+      syncNotification = '';
       render();
     }, 3000);
     render();
@@ -1696,9 +1723,12 @@ export async function runWorklistTui(
       state.navigationStack.depth,
     );
 
-    // Append refresh notification if present
-    const rendered = refreshNotification
-      ? output + '\n' + refreshNotification
+    // Append notifications if present
+    let notificationLine = '';
+    if (refreshNotification) notificationLine += refreshNotification;
+    if (syncNotification) notificationLine += syncNotification;
+    const rendered = notificationLine
+      ? output + '\n' + notificationLine
       : output;
 
     // Clear from cursor to end of screen to remove leftover content
@@ -1731,10 +1761,21 @@ export async function runWorklistTui(
     }, opts.refreshIntervalMs);
   }
 
+  // Auto-sync timer (separate from list auto-refresh)
+  let syncTimer: ReturnType<typeof setInterval> | undefined;
+  if (opts.autoSync) {
+    syncTimer = setInterval(() => {
+      doSync();
+    }, opts.syncIntervalMs);
+  }
+
   // Cleanup on promise resolution
   promise.finally(() => {
     if (refreshTimer !== undefined) {
       clearInterval(refreshTimer);
+    }
+    if (syncTimer !== undefined) {
+      clearInterval(syncTimer);
     }
     cleanup();
     process.stdout.removeListener('resize', onResize);
