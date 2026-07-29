@@ -1418,13 +1418,15 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; onCommand?: (command: string) => void },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; onCommand?: (command: string) => void },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
     refreshIntervalMs: options?.refreshIntervalMs ?? 30000,
     autoSync: options?.autoSync ?? true,
     syncIntervalMs: options?.syncIntervalMs ?? 60000,
+    browseItemCount: options?.browseItemCount ?? 10,
+    showHelpText: options?.showHelpText ?? true,
     onCommand: options?.onCommand,
   };
 
@@ -1735,7 +1737,7 @@ export async function runWorklistTui(
       state.detailScrollOffset,
       opts.autoRefresh,
       state.expandedItems,
-      dynamicHints,
+      opts.showHelpText ? dynamicHints : undefined,
       state.navigationStack.depth,
     );
 

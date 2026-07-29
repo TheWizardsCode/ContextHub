@@ -25,6 +25,10 @@ export interface PluginSettings {
   autoSync: boolean;
   /** Interval in ms between syncs. */
   syncIntervalMs: number;
+  /** Number of items to fetch and display (1-50). */
+  browseItemCount: number;
+  /** Show chord help bar at the bottom of the list. */
+  showHelpText: boolean;
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────
@@ -36,6 +40,8 @@ export const defaultSettings: PluginSettings = {
   wlCount: 20,
   autoSync: true,
   syncIntervalMs: 60000,
+  browseItemCount: 10,
+  showHelpText: true,
 };
 
 // ── Default config path ───────────────────────────────────────────────
@@ -88,6 +94,10 @@ export function loadSettings(settingsPath?: string): PluginSettings {
         ? parsed.autoSync : defaultSettings.autoSync,
       syncIntervalMs: typeof parsed.syncIntervalMs === 'number'
         ? parsed.syncIntervalMs : defaultSettings.syncIntervalMs,
+      browseItemCount: typeof parsed.browseItemCount === 'number'
+        ? parsed.browseItemCount : defaultSettings.browseItemCount,
+      showHelpText: typeof parsed.showHelpText === 'boolean'
+        ? parsed.showHelpText : defaultSettings.showHelpText,
     };
   } catch {
     return { ...defaultSettings };

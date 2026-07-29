@@ -32,6 +32,14 @@ describe('defaultSettings', () => {
   it('has default WL count of 20', () => {
     expect(defaultSettings.wlCount).toBe(20);
   });
+
+  it('has default browseItemCount of 10', () => {
+    expect(defaultSettings.browseItemCount).toBe(10);
+  });
+
+  it('has showHelpText enabled by default', () => {
+    expect(defaultSettings.showHelpText).toBe(true);
+  });
 });
 
 describe('loadSettings', () => {
@@ -64,11 +72,15 @@ describe('loadSettings', () => {
       autoRefresh: false,
       refreshIntervalMs: 60000,
       wlCount: 10,
+      browseItemCount: 25,
+      showHelpText: false,
     }), 'utf-8');
     const settings = loadSettings(settingsPath);
     expect(settings.autoRefresh).toBe(false);
     expect(settings.refreshIntervalMs).toBe(60000);
     expect(settings.wlCount).toBe(10);
+    expect(settings.browseItemCount).toBe(25);
+    expect(settings.showHelpText).toBe(false);
   });
 
   it('merges partial settings with defaults', () => {
@@ -109,6 +121,10 @@ describe('saveSettings', () => {
       refreshIntervalMs: 60000,
       showIcons: false,
       wlCount: 10,
+      autoSync: false,
+      syncIntervalMs: 30000,
+      browseItemCount: 25,
+      showHelpText: false,
     };
     saveSettings(settingsPath, settings);
     expect(existsSync(settingsPath)).toBe(true);

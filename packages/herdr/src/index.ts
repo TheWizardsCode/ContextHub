@@ -43,9 +43,8 @@ function isAgentCommand(command: string): boolean {
   );
 }
 
-// Load settings (env var takes precedence)
+// Load settings
 const settings = loadSettings();
-const WL_COUNT = parseInt(process.env.WL_COUNT || String(settings.wlCount), 10);
 
 async function main(): Promise<void> {
   // Check if wl is available
@@ -66,10 +65,13 @@ async function main(): Promise<void> {
   // Load shortcut config
   const shortcutRegistry = loadShortcutConfig();
 
-  // Create a fetcher that loads items
+  // Create a fetcher that loads items using the current browseItemCount setting
+  // Each call reads from settings so changes take effect on next auto-refresh
   const fetcher = async () => {
     try {
-      return await fetchNextItems(WL_COUNT);
+      const currentSettings = loadSettings();
+      const count = Math.min(Math.max(currentSettings.browseItemCount ?? 10, 1), 50);
+      return await fetchNextItems(count);
     } catch {
       return [];
     }
@@ -90,6 +92,7 @@ async function main(): Promise<void> {
       refreshIntervalMs: settings.refreshIntervalMs,
       autoSync: settings.autoSync,
       syncIntervalMs: settings.syncIntervalMs,
+      showHelpText: settings.showHelpText,
       onCommand: (command: string) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Other commands are written to stdout with the

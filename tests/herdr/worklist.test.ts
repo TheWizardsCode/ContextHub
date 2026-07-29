@@ -587,6 +587,30 @@ describe('createListRenderer', () => {
     expect(output).toMatch(/\d+ of \d+/);
   });
 
+  it('shows chord help hints when provided', () => {
+    const renderer = createListRenderer();
+    const output = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null,
+      undefined, null, undefined, undefined, undefined,
+      'u:update  c:close',
+    );
+    expect(output).toContain('u:update');
+    expect(output).toContain('c:close');
+  });
+
+  it('hides chord help hints when undefined', () => {
+    const renderer = createListRenderer();
+    const outputWith = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null,
+      undefined, null, undefined, undefined, undefined,
+      'some hint',
+    );
+    const outputWithout = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null,
+      undefined, null, undefined, undefined, undefined,
+      undefined,
+    );
+    expect(outputWith).toContain('some hint');
+    expect(outputWithout).not.toContain('some hint');
+  });
+
   it('does not duplicate children when items are already flattened and expandedItems is set', () => {
     const renderer = createListRenderer();
 
