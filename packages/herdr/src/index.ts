@@ -33,6 +33,27 @@ const _currentDir = dirname(fileURLToPath(import.meta.url));
 const SEND_TO_PI_SCRIPT = resolve(_currentDir, '..', 'scripts', 'send-to-pi.sh');
 
 /**
+ * Strip bash history-expansion prefixes (`!!` or `!`) from command strings.
+ *
+ * Commands stored in shortcuts.json may be prefixed with `!!` or `!` to
+ * signal that the `wl` command should be executed via a shell.  Herdr does
+ * not understand these prefixes, so they must be stripped before the
+ * `CMD:` prefix is added.
+ *
+ * @param command - Raw command string (possibly prefixed).
+ * @returns The command with any leading `!!` or `!` prefix removed.
+ */
+export function stripCommandPrefix(command: string): string {
+  if (command.startsWith('!!')) {
+    return command.substring(2);
+  }
+  if (command.startsWith('!')) {
+    return command.substring(1);
+  }
+  return command;
+}
+
+/**
  * Check if a command is an agent command that should be sent to a pi pane.
  * Agent commands are those starting with /skill:, /intake, or /plan.
  */
@@ -150,8 +171,10 @@ async function main(): Promise<void> {
           );
           child.unref(); // Allow the parent to exit independently
         } else {
-          // Non-agent commands: write to stdout with CMD: prefix so Herdr executes them
-          process.stdout.write(`CMD:${command}\n`);
+          // Strip `!!` / `!` bash history-expansion prefixes from shortcuts,
+          // then write to stdout with CMD: prefix so Herdr executes them.
+          const clean = stripCommandPrefix(command);
+          process.stdout.write(`CMD:${clean}\n`);
         }
       },
     },
