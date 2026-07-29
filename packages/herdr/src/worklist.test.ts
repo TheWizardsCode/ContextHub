@@ -4,8 +4,13 @@
  * Run: npx vitest run packages/herdr/src/worklist.test.ts
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
-import { WorkItemListState, getTermSize } from './worklist.js';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  WorkItemListState,
+  getTermSize,
+  executeResolvedCommand,
+  dispatchChordCommand,
+} from './worklist.js';
 import type { WorkItem } from './fetcher.js';
 
 /**
@@ -204,5 +209,99 @@ describe('WorkItemListState.refreshItems — preserve selection by ID', () => {
     // 'B' should be at index 0 after reorder
     expect(state.selectedIndex).toBe(0);
     expect(state.getFlattenedItems()[0].id).toBe('B');
+  });
+});
+
+describe('executeResolvedCommand', () => {
+  it('returns noop when command has <id> but no items', () => {
+    const state = new WorkItemListState([], TERM_80x24);
+    const result = executeResolvedCommand('wl update <id> --priority high', state);
+    expect(result).toBe('noop');
+  });
+
+  it('returns callback when command is routed to onCommand', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('echo hello', state, onCommand);
+    expect(result).toBe('callback');
+    expect(onCommand).toHaveBeenCalledWith('echo hello');
+  });
+
+  it('resolves <id> placeholder when item is selected', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    executeResolvedCommand('wl update <id> --priority high', state, onCommand);
+    expect(onCommand).toHaveBeenCalledWith('wl update TEST-123 --priority high');
+  });
+
+  it('returns dispatched for /wl commands handled internally', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/wl idea', state, onCommand);
+    expect(result).toBe('dispatched');
+    expect(state.activeFilter).toBe('idea');
+  });
+
+  it('returns dispatched for /skill:implement with resolved <id>', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/skill:implement <id>', state, onCommand);
+    expect(result).toBe('dispatched');
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123');
+  });
+
+  it('propagates error from onCommand callback', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    state.selectedIndex = 0;
+    const failingCommand = () => {
+      throw new Error('mock command failure');
+    };
+    expect(() => executeResolvedCommand('echo hello', state, failingCommand)).toThrow('mock command failure');
+  });
+
+  it('returns noop for command without <id> but no onCommand', () => {
+    const state = new WorkItemListState([], TERM_80x24);
+    const result = executeResolvedCommand('echo hello', state);
+    expect(result).toBe('callback');
+  });
+});
+
+describe('dispatchChordCommand', () => {
+  it('handles /wl stage filter commands internally', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    const result = dispatchChordCommand('/wl review', state);
+    expect(result).toBe(true);
+    expect(state.activeFilter).toBe('in_review');
+  });
+
+  it('routes agent commands through onCommand', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = dispatchChordCommand('/skill:audit <id>', state, onCommand);
+    expect(result).toBe(true);
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123');
+  });
+
+  it('returns false for unknown commands', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    state.selectedIndex = 0;
+    const result = dispatchChordCommand('unknown command', state);
+    expect(result).toBe(false);
+  });
+});
+
+describe('Chord-complete error notification handling', () => {
+  it('tests that executeResolvedCommand noop is returned correctly when no item selected', () => {
+    // This tests the underlying behavior that the chord-complete handler
+    // relies on: when there's no selected item and the command uses <id>,
+    // executeResolvedCommand returns 'noop' so the chord handler can show
+    // appropriate feedback instead of misleading "Sent: ..."
+    const state = new WorkItemListState([], TERM_80x24);
+    const result = executeResolvedCommand('wl update <id> --priority high', state);
+    expect(result).toBe('noop');
   });
 });

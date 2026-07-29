@@ -1662,9 +1662,18 @@ export async function runWorklistTui(
           }
 
           // No unknown identifiers — execute as before
-          executeResolvedCommand(command, state, opts.onCommand);
-          // Show a brief flash notification, then continue
-          refreshNotification = `Sent: ${command.length > 60 ? command.substring(0, 57) + '...' : command}`;
+          try {
+            const result = executeResolvedCommand(command, state, opts.onCommand);
+            if (result === 'noop') {
+              refreshNotification = `Skipped: ${command.length > 60 ? command.substring(0, 57) + '...' : command} (no item)`;
+            } else {
+              // Show a brief flash notification, then continue
+              refreshNotification = `Sent: ${command.length > 60 ? command.substring(0, 57) + '...' : command}`;
+            }
+          } catch (e) {
+            refreshNotification = `Error: ${(e as Error).message}`;
+            process.stderr.write(`[herdr] Command error: ${(e as Error).message}\n`);
+          }
           setTimeout(() => { refreshNotification = ''; render(); }, 3000);
           render();
           return;
