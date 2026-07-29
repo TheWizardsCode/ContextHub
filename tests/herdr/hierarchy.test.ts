@@ -5,11 +5,13 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   WorkItemListState,
+  NavigationStack,
   handleKeypress,
   formatItemLine,
   createListRenderer,
   type WorkItem,
   type TermSize,
+  type NavigationStackEntry,
 } from '../../packages/herdr/src/worklist.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────
@@ -242,31 +244,160 @@ describe('handleKeypress hierarchy', () => {
     expect(state.detailItem).toBeNull();
   });
 
-  it('Tab re-fetches children on each press when previous batch was loaded (E2E pipeline)', async () => {
-    // First press: expand
-    const childItems = [makeItem('WL-001-C1', { depth: 1, childCount: 0 })];
-    const items = [makeItem('WL-001', { childCount: 1 })];
+  // ── Navigation stack ─────────────────────────────────────────────
+
+  it('can navigate back to parent via Escape after expanding child depth', () => {
+    const child = makeChildItem('WL-001', 1);
+    const items = [makeItem('WL-001', { childCount: 1, children: [child] })];
     const state = new WorkItemListState(items, defaultTermSize);
     state.setSelectedIndex(0);
 
-    // Simulate onData for first press
-    const flat1 = state.getFlattenedItems();
-    flat1[0].children = childItems;
+    // Save parent state first, then expand
+    state.pushNavigationState('WL-001');
     state.toggleExpand('WL-001');
-    expect(state.isExpanded('WL-001')).toBe(true);
     expect(state.getFlattenedItems().length).toBe(2);
 
-    // Second press: collapse
-    const action2 = handleKeypress(state, '\t', defaultTermSize);
-    expect(action2).toBe('toggle-expand');
-    expect(state.isExpanded('WL-001')).toBe(false);
-    expect(state.getFlattenedItems().length).toBe(1);
+    // Navigate to child
+    state.moveDown();
+    expect(state.selectedIndex).toBe(1);
+    expect(state.getFlattenedItems()[1].id).toBe('WL-001-C1');
 
-    // Third press: re-expand (after children already loaded, should toggle inline)
-    const action3 = handleKeypress(state, '\t', defaultTermSize);
-    expect(action3).toBe('toggle-expand');
-    expect(state.isExpanded('WL-001')).toBe(true);
-    expect(state.getFlattenedItems().length).toBe(2);
+    expect(state.navigationStack.depth).toBe(1);
+
+    // Pop navigation state (Escape) — restores parent context
+    const restored = state.popNavigationState();
+    expect(restored).not.toBeNull();
+    expect(restored!.parentId).toBe('WL-001');
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  it('NavigationStack clear resets depth', () => {
+    const child = makeChildItem('WL-001', 1);
+    const items = [makeItem('WL-001', { childCount: 1, children: [child] })];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.setSelectedIndex(0);
+
+    state.pushNavigationState('WL-001');
+    expect(state.navigationStack.depth).toBe(1);
+    state.navigationStack.clear();
+    expect(state.navigationStack.depth).toBe(0);
+  });
+
+  it('Escape in list mode with navigation stack pops to parent context', () => {
+    const child = makeChildItem('WL-001', 1);
+    const items = [makeItem('WL-001', { childCount: 1, children: [child] })];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.setSelectedIndex(0);
+
+    // Save parent state first, then expand and navigate into child
+    state.pushNavigationState('WL-001');
+    state.toggleExpand('WL-001');
+    state.moveDown(); // select child
+    expect(state.navigationStack.depth).toBe(1);
+
+    // Escape pops back to parent context (restores scroll/selection)
+    const action = handleKeypress(state, '\x1b', defaultTermSize);
+    expect(action).toBe('back');
+    expect(state.selectedIndex).toBe(0); // back at parent
+  });
+
+  it('Escape with empty navigation stack closes detail view (existing behavior)', () => {
+    const items = [makeItem('WL-001')];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.setSelectedIndex(0);
+    state.selectItem(); // enters detail mode
+    expect(state.mode).toBe('detail');
+
+    const action = handleKeypress(state, '\x1b', defaultTermSize);
+    expect(action).toBe('back');
+    expect(state.mode).toBe('list');
+  });
+
+  it('multi-level navigation stack supports depth > 1', () => {
+    const grandchild = makeItem('WL-001-C1-C1', { depth: 2, childCount: 0 });
+    const child = makeItem('WL-001-C1', { depth: 1, childCount: 1, children: [grandchild] });
+    const parent = makeItem('WL-001', { childCount: 1, children: [child] });
+    const items = [parent];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.setSelectedIndex(0);
+
+    // Level 1: expand parent
+    state.toggleExpand('WL-001');
+    state.pushNavigationState('WL-001');
+    expect(state.navigationStack.depth).toBe(1);
+
+    // Navigate to child and expand it
+    state.moveDown();
+    state.toggleExpand('WL-001-C1');
+    state.pushNavigationState('WL-001-C1');
+    expect(state.navigationStack.depth).toBe(2);
+
+    // Pop back to child level
+    const lvl1 = state.popNavigationState();
+    expect(lvl1!.parentId).toBe('WL-001-C1');
+    expect(state.navigationStack.depth).toBe(1);
+
+    // Pop back to parent level
+    const lvl0 = state.popNavigationState();
+    expect(lvl0!.parentId).toBe('WL-001');
+    expect(state.navigationStack.depth).toBe(0);
+  });
+
+  it('popNavigationState restores selectedIndex after push/pop cycle', () => {
+    const children = Array.from({ length: 5 }, (_, i) => makeChildItem('WL-001', i + 1));
+    const items = [
+      makeItem('WL-001', { childCount: 5, children }),
+      makeItem('WL-002'),
+    ];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.setSelectedIndex(0);
+
+    // Expand parent then navigate to child index 3
+    state.toggleExpand('WL-001');
+    state.moveDown(); // child 1
+    state.moveDown(); // child 2
+    state.moveDown(); // child 3
+    expect(state.selectedIndex).toBe(3);
+
+    // Push state and then change selection
+    state.pushNavigationState('WL-001');
+    state.selectedIndex = 0;
+
+    // Pop restores original selection
+    state.popNavigationState();
+    expect(state.selectedIndex).toBe(3);
+  });
+
+  it('peekNavigationStack returns top entry without removing it', () => {
+    const items = [makeItem('WL-001', { childCount: 1, children: [makeChildItem('WL-001', 1)] })];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.setSelectedIndex(0);
+
+    state.pushNavigationState('WL-001');
+    expect(state.navigationStack.depth).toBe(1);
+
+    const top = state.navigationStack.peek();
+    expect(top).not.toBeNull();
+    expect(top!.parentId).toBe('WL-001');
+    expect(state.navigationStack.depth).toBe(1); // still there
+  });
+
+  it('Escape from child context collapses expanded parent and returns focus', () => {
+    const child = makeChildItem('WL-001', 1);
+    const items = [makeItem('WL-001', { childCount: 1, children: [child] })];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.setSelectedIndex(0);
+
+    // Save parent state, then expand and navigate into child
+    state.pushNavigationState('WL-001');
+    state.toggleExpand('WL-001');
+    state.moveDown();
+
+    // Escape back to parent
+    const action = handleKeypress(state, '\x1b', defaultTermSize);
+    expect(action).toBe('back');
+    expect(state.isExpanded).toBeDefined();
+    expect(state.selectedIndex).toBe(0);
   });
 });
 
@@ -297,6 +428,40 @@ describe('createListRenderer hierarchy', () => {
     );
     expect(result).not.toContain('WL-001-C1');
     expect(result).toContain('▶');
+  });
+
+  it('shows back hint in footer when navStackDepth > 0', () => {
+    const child = makeChildItem('WL-001-C1', 1);
+    const parent = makeItem('WL-001', { childCount: 1, children: [child] });
+    const items = [parent];
+    const renderer = createListRenderer();
+    const result = renderer(
+      items, 0, 0, defaultTermSize, null, 'list', null, undefined, undefined, 0, false, new Set(['WL-001']),
+      undefined, 1,
+    );
+    expect(result).toContain('[esc] back');
+  });
+
+  it('shows multi-level back hint when navStackDepth > 1', () => {
+    const child = makeChildItem('WL-001-C1', 1);
+    const parent = makeItem('WL-001', { childCount: 1, children: [child] });
+    const items = [parent];
+    const renderer = createListRenderer();
+    const result = renderer(
+      items, 0, 0, defaultTermSize, null, 'list', null, undefined, undefined, 0, false, new Set(['WL-001']),
+      undefined, 2,
+    );
+    expect(result).toContain('[esc] back');
+    expect(result).toContain('(2 levels)');
+  });
+
+  it('does not show back hint when navStackDepth is 0', () => {
+    const items = [makeItem('WL-001')];
+    const renderer = createListRenderer();
+    const result = renderer(
+      items, 0, 0, defaultTermSize, null, 'list', null,
+    );
+    expect(result).not.toContain('[esc] back');
   });
 });
 

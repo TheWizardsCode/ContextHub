@@ -95,6 +95,68 @@ export const ANSI = {
   scrollRegion: (top: number, bottom: number) => `\x1b[${top};${bottom}r`,
 };
 
+// ── Navigation Stack ──────────────────────────────────────────────────
+
+/**
+ * A single entry on the navigation stack, representing a parent context
+ * that the user can return to via Escape.
+ */
+export interface NavigationStackEntry {
+  /** ID of the parent item whose context was saved. */
+  parentId: string;
+  /** Scroll offset at the time of push. */
+  scrollOffset: number;
+  /** Selected index at the time of push. */
+  selectedIndex: number;
+}
+
+/**
+ * A LIFO stack that tracks navigation history for hierarchical browsing.
+ * Each entry captures the parent's scroll position and selection so they
+ * can be restored when the user navigates back via Escape.
+ */
+export class NavigationStack {
+  private stack: NavigationStackEntry[] = [];
+
+  /**
+   * Push a new entry onto the stack.
+   */
+  push(entry: NavigationStackEntry): void {
+    this.stack.push(entry);
+  }
+
+  /**
+   * Pop and return the top entry, or undefined if the stack is empty.
+   */
+  pop(): NavigationStackEntry | undefined {
+    return this.stack.pop();
+  }
+
+  /**
+   * Return the top entry without removing it, or undefined if empty.
+   */
+  peek(): NavigationStackEntry | undefined {
+    return this.stack.length > 0 ? this.stack[this.stack.length - 1] : undefined;
+  }
+
+  /**
+   * Remove all entries from the stack.
+   */
+  clear(): void {
+    this.stack = [];
+  }
+
+  /** Current depth of the navigation stack. */
+  get depth(): number {
+    return this.stack.length;
+  }
+
+  /** Whether the navigation stack is empty (at root level). */
+  get isEmpty(): boolean {
+    return this.stack.length === 0;
+  }
+}
+
 // ── State ─────────────────────────────────────────────────────────────
 
 export type ViewMode = 'list' | 'detail' | 'filter';
@@ -159,6 +221,9 @@ export class WorkItemListState {
 
   /** Set of expanded item IDs (for hierarchical display). */
   expandedItems: Set<string> = new Set();
+
+  /** Navigation stack for hierarchical browsing (push/pop parent contexts). */
+  navigationStack: NavigationStack = new NavigationStack();
 
   /** Terminal size for layout calculations. */
   termSize: TermSize;
@@ -228,6 +293,33 @@ export class WorkItemListState {
    */
   isExpanded(id: string): boolean {
     return this.expandedItems.has(id);
+  }
+
+  /**
+   * Save the current navigation state (scroll position, selection) and push
+   * it onto the navigation stack so the user can return via Escape.
+   */
+  pushNavigationState(parentId: string): void {
+    this.navigationStack.push({
+      parentId,
+      scrollOffset: this.scrollOffset,
+      selectedIndex: this.selectedIndex,
+    });
+  }
+
+  /**
+   * Pop the top navigation stack entry and restore its scroll/selection state.
+   * Returns the restored entry, or undefined if the stack is empty.
+   */
+  popNavigationState(): NavigationStackEntry | undefined {
+    const entry = this.navigationStack.pop();
+    if (entry) {
+      this.scrollOffset = entry.scrollOffset;
+      this.selectedIndex = entry.selectedIndex;
+      this._clampSelection();
+      this._adjustScroll();
+    }
+    return entry;
   }
 
   /**
@@ -959,6 +1051,17 @@ export function handleKeypress(
       state.selectItem();
       return 'select';
     case 'back':
+      // If navigation stack is non-empty, pop to parent context
+      if (!state.navigationStack.isEmpty && state.mode === 'list') {
+        const entry = state.popNavigationState();
+        if (entry) {
+          // Collapse the parent we're returning to, so the view is clean
+          if (state.isExpanded(entry.parentId)) {
+            state.toggleExpand(entry.parentId);
+          }
+          return 'back';
+        }
+      }
       state.back();
       break;
     case 'filter':
@@ -1018,6 +1121,7 @@ export function createListRenderer(): (
   autoRefresh?: boolean,
   expandedItems?: Set<string>,
   chordHelpHints?: string,
+  navStackDepth?: number,
 ) => string {
   return (
     items: WorkItem[],
@@ -1033,6 +1137,7 @@ export function createListRenderer(): (
     autoRefresh?: boolean,
     expandedItems?: Set<string>,
     chordHelpHints?: string,
+    navStackDepth?: number,
   ): string => {
     const { rows, cols } = termSize;
     const output: string[] = [];
@@ -1126,8 +1231,11 @@ export function createListRenderer(): (
       const footerLine = ` ${ANSI.reverse} chord: ${pendingStr} _ ${ANSI.reset}${hintStr}`;
       output.push(footerLine);
     } else {
+      const navHint = (navStackDepth && navStackDepth > 0)
+        ? ` ${ANSI.dim}[esc] back${navStackDepth > 1 ? ` (${navStackDepth} levels)` : ''}${ANSI.reset}`
+        : '';
       const chordHelpSuffix = chordHelpHints ? ` ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}` : '';
-      const footerLine = chordHelpSuffix || ' ';
+      const footerLine = navHint + chordHelpSuffix || ' ';
       output.push(footerLine);
     }
 
@@ -1585,6 +1693,7 @@ export async function runWorklistTui(
       opts.autoRefresh,
       state.expandedItems,
       dynamicHints,
+      state.navigationStack.depth,
     );
 
     // Append refresh notification if present
