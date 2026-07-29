@@ -66,32 +66,62 @@ function isAgentCommand(command: string): boolean {
 }
 
 /**
- * Walk up from the current working directory to find the project root
- * containing a properly initialized `.worklog/` directory (one with a
- * worklog.db or `initialized` marker). This handles the case where
- * the plugin is installed from a git worktree that has an incomplete
- * `.worklog/` directory closer in the tree than the real project root.
- *
- * Returns the project root path, or undefined if none found (the caller
- * should fall back to process.cwd()).
+ * Check whether a path is inside a git worktree managed by the worklog
+ * system, i.e., its path contains `.worklog/worktrees/`.
  */
-function findWorklogRoot(): string | undefined {
-  let dir = process.cwd();
-  const root = parse(dir).root;
+function isInsideWorktree(dir: string): boolean {
+  return dir.includes(join('.worklog', 'worktrees'));
+}
 
-  while (true) {
-    const wlDir = join(dir, '.worklog');
-    if (existsSync(wlDir)) {
-      // Check for SQLite database or initialized marker
-      if (existsSync(join(wlDir, 'worklog.db')) || existsSync(join(wlDir, 'initialized'))) {
-        return dir;
-      }
-    }
-    const parent = dirname(dir);
-    if (parent === dir) break; // Reached filesystem root
-    dir = parent;
+/**
+ * Find the project root containing a valid `.worklog/` directory.
+ *
+ * Walks up from the current working directory. When a `.worklog/` directory
+ * is found but is NOT valid (lacks `worklog.db` or `initialized` marker):
+ * - If we are inside a worktree (path contains `.worklog/worktrees/`), skip
+ *   past the invalid `.worklog/` and continue walking up.  Worktree
+ *   `.worklog/` directories may be incomplete stubs; the real project root
+ *   is above them.
+ * - If we are NOT inside a worktree, stop and return `undefined`.  This
+ *   prevents the plugin from silently falling back to an unrelated project's
+ *   `.worklog/` (e.g., ContextHub) when the user's Herdr tab points to a
+ *   different working directory.
+ *
+ * Returns the project root path, or `undefined` if no valid `.worklog/` can
+ * be found. The caller should handle the `undefined` case by reporting the
+ * uninitialized state to the user.
+ */
+export function findWorklogRoot(): string | undefined {
+  const cwd = process.cwd();
+
+  // Step 1: Check if the current working directory has a valid .worklog/
+  const cwdWlDir = join(cwd, '.worklog');
+  if (existsSync(cwdWlDir) &&
+      (existsSync(join(cwdWlDir, 'worklog.db')) || existsSync(join(cwdWlDir, 'initialized')))) {
+    return cwd;
   }
 
+  // Step 2: If we're inside a worktree, walk up to find the project root
+  if (isInsideWorktree(cwd)) {
+    let dir = cwd;
+    const root = parse(dir).root;
+
+    while (true) {
+      const wlDir = join(dir, '.worklog');
+      if (existsSync(wlDir)) {
+        // Check whether this .worklog/ is valid
+        if (existsSync(join(wlDir, 'worklog.db')) || existsSync(join(wlDir, 'initialized'))) {
+          return dir;
+        }
+        // Found an invalid .worklog/ — skip past it (we're in a worktree)
+      }
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+
+  // Step 3: No valid .worklog/ found
   return undefined;
 }
 
@@ -117,10 +147,38 @@ async function main(): Promise<void> {
   // Load shortcut config
   const shortcutRegistry = loadShortcutConfig();
 
-  // If we're running from a worktree or other nested location, chdir to
-  // the real project root so `wl` finds the correct .worklog/ directory.
+  // Resolve the worklog root based on the current working directory.
+  // findWorklogRoot() will only walk up from a worktree; in all other
+  // cases it returns undefined if CWD has no valid `.worklog/`.
   const wlRoot = findWorklogRoot();
-  if (wlRoot && wlRoot !== process.cwd()) {
+
+  // Debug: log the resolved working directory for troubleshooting.
+  // This is written before the TUI starts so it appears in the Herdr
+  // pane scrollback when the plugin is invoked.
+  process.stderr.write(`[worklog-plugin] cwd: ${process.cwd()}\n`);
+  if (wlRoot) {
+    process.stderr.write(`[worklog-plugin] worklog root: ${wlRoot}\n`);
+  }
+
+  if (!wlRoot) {
+    // No valid .worklog/ found in the tab's working directory.
+    // Report the uninitialized state clearly rather than silently
+    // falling back to another project's .worklog/.
+    console.error('');
+    console.error(`  ⚠ No valid .worklog/ directory found in or above`);
+    console.error(`     ${process.cwd()}`);
+    console.error('');
+    console.error('  The Worklog Herdr plugin requires a project with an');
+    console.error('  initialized Worklog database (.worklog/worklog.db).');
+    console.error('');
+    console.error('  To initialize: run "worklog init" in the project root.');
+    console.error('');
+    process.exit(1);
+  }
+
+  if (wlRoot !== process.cwd()) {
+    // We're in a worktree — chdir to the real project root so `wl`
+    // finds the correct .worklog/ directory.
     process.chdir(wlRoot);
   }
 
