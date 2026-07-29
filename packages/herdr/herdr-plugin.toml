@@ -18,7 +18,7 @@ command = ["npm", "run", "build"]
 [[panes]]
 id = "worklist"
 title = "Work Items"
-placement = "split"
+placement = "tab"
 command = ["npx", "tsx", "src/index.ts"]
 
 # Main action: toggle the worklist pane

@@ -13,6 +13,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Keyboard navigation** — Arrow keys or j/k to navigate (wraps at list boundaries), Page Up/Down, g/G for first/last, Enter to select, Escape to go back
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
+- **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
 - **Quit** — Press `q` to exit
 
 ## Requirements
@@ -42,8 +43,9 @@ The plugin pane will then be available via the Herdr plugin system.
 ### From the Herdr UI
 
 1. Open the worklist pane:
-   - Right-click in any pane → Plugins → Worklog Selection List → Toggle worklist
-   - Or use the Herdr command palette: `herdr plugin action run worklog-selection-list toggle-worklist`
+   - Press `prefix+l` to open the worklist in a new tab
+   - Right-click in any pane → Plugins → Worklog Selection List → Open worklist
+   - Or use the Herdr command palette: `herdr plugin action run worklog-selection-list open-worklist`
 
 2. Navigate the list:
    - `↑`/`k` — Move up (wraps to last item when at top)
@@ -97,11 +99,8 @@ The plugin pane will then be available via the Herdr plugin system.
 ### From the command line
 
 ```bash
-# Direct invocation
+# Direct invocation (opens in a new tab)
 herdr plugin action run worklog-selection-list open-worklist
-
-# Toggle the pane
-herdr plugin action run worklog-selection-list toggle-worklist
 ```
 
 ### Configuration
