@@ -91,8 +91,11 @@ function isInsideWorktree(dir: string): boolean {
  * be found. The caller should handle the `undefined` case by reporting the
  * uninitialized state to the user.
  */
-export function findWorklogRoot(): string | undefined {
-  let dir = process.cwd();
+export function findWorklogRoot(startDir?: string): string | undefined {
+  let dir = startDir ?? process.cwd();
+  if (startDir) {
+    process.stderr.write(`[worklog-plugin] findWorklogRoot starting from HERDR_RESOLVED_CWD: ${startDir}\n`);
+  }
   const root = parse(dir).root;
 
   while (true) {
@@ -138,25 +141,19 @@ async function main(): Promise<void> {
   // Load shortcut config
   const shortcutRegistry = loadShortcutConfig();
 
-  // Resolve the worklog root based on the current working directory.
-  // findWorklogRoot() will only walk up from a worktree; in all other
-  // cases it returns undefined if CWD has no valid `.worklog/`.
-  const wlRoot = findWorklogRoot();
+  // Resolve the worklog root.  We use HERDR_RESOLVED_CWD when set
+  // (passed via --env from open.sh) so that the plugin finds the
+  // correct .worklog/ even though process.cwd() is the plugin dir.
+  const resolvedCwd = process.env.HERDR_RESOLVED_CWD;
+  process.stderr.write(`[worklog-plugin] HERDR_RESOLVED_CWD='${resolvedCwd ?? '(not set)'}'\n`);
+  process.stderr.write(`[worklog-plugin] process.cwd()='${process.cwd()}'\n`);
 
-  // Debug: log the resolved working directory for troubleshooting.
-  // This is written before the TUI starts so it appears in the Herdr
-  // pane scrollback when the plugin is invoked.
-  process.stderr.write(`[worklog-plugin] cwd (process.cwd): ${process.cwd()}\n`);
+  const wlRoot = findWorklogRoot(resolvedCwd);
+
   if (wlRoot) {
     process.stderr.write(`[worklog-plugin] wlRoot resolved: ${wlRoot}\n`);
-  }
-
-  if (!wlRoot) {
-    // No valid .worklog/ found in the tab's working directory.
-    // Don't crash — log the issue and show an empty worklist so the
-    // user can close the pane gracefully and navigate to a project
-    // that has an initialized Worklog database.
-    process.stderr.write(`[worklog-plugin] No valid .worklog/ directory found in or above ${process.cwd()}\n`);
+  } else {
+    process.stderr.write(`[worklog-plugin] No valid .worklog/ directory found in or above '${resolvedCwd ?? process.cwd()}'\n`);
     process.stderr.write(`[worklog-plugin] Showing empty worklist. Navigate to a project with 'worklog init' to see items.\n`);
   }
 
