@@ -22,7 +22,7 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join, parse } from 'path';
 import { existsSync } from 'fs';
-import { checkWlAvailable, fetchNextItems, fetchItemsByStage } from './fetcher.js';
+import { checkWlAvailable, fetchNextItems, fetchItemsByStage, setWorklogDir } from './fetcher.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { loadSettings, getDefaultSettingsPath } from './settings.js';
@@ -168,9 +168,11 @@ async function main(): Promise<void> {
   }
 
   if (wlRoot !== process.cwd()) {
-    // We're in a worktree — chdir to the real project root so `wl`
-    // finds the correct .worklog/ directory.
-    process.chdir(wlRoot);
+    // We're in a worktree — pass the resolved worklog root explicitly
+    // via --worklog-dir so child `wl` processes find the correct data.
+    // This avoids a fragile process.chdir() and works reliably even when
+    // the CWD is inside a different git repo or worktree.
+    setWorklogDir(join(wlRoot, '.worklog'));
   }
 
   // Create a fetcher that loads items using the current browseItemCount setting

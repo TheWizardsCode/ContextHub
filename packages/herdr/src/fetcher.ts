@@ -41,6 +41,30 @@ export function formatWlError(err: WlError): string {
 let execFileAsync = promisify(execFile);
 
 /**
+ * Module-level --worklog-dir override used when the parent process
+ * (e.g. herdr) has resolved the worklog root and wants all child wl CLI
+ * invocations to target that specific directory without relying on CWD.
+ */
+let _worklogDir: string | undefined;
+
+/**
+ * Set the worklog directory path to pass as --worklog-dir to every wl CLI
+ * invocation. The path should point to the .worklog/ subdirectory itself
+ * (e.g. /path/to/project/.worklog).
+ * Pass undefined to clear the override.
+ */
+export function setWorklogDir(dir: string | undefined): void {
+  _worklogDir = dir;
+}
+
+/**
+ * Reset the worklog directory override.
+ */
+export function resetWorklogDir(): void {
+  _worklogDir = undefined;
+}
+
+/**
  * Replace the execFileAsync implementation. Used by tests to inject
  * mock implementations without mocking the child_process module.
  */
@@ -222,7 +246,19 @@ async function runWl(args: string[], includeJson = true): Promise<string> {
 
   for (const binary of CLI_BINARIES) {
     try {
-      const fullArgs = includeJson ? [...args, '--json'] : args;
+      let fullArgs: string[];
+      if (includeJson) {
+        fullArgs = [...args, '--json'];
+      } else {
+        fullArgs = args;
+      }
+
+      // Prepend --worklog-dir when set (it's a global option that must
+      // appear before the subcommand).
+      if (_worklogDir !== undefined) {
+        fullArgs = ['--worklog-dir', _worklogDir, ...fullArgs];
+      }
+
       const result = await execFileAsync(binary, fullArgs, {
         maxBuffer: 1024 * 1024 * 5,
       });
