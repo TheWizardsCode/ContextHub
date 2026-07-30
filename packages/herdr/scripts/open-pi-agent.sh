@@ -1,35 +1,21 @@
 #!/usr/bin/env bash
 # open-pi-agent.sh — Open a Pi AI coding agent pane docked on the right
 #
+# Thin wrapper around the shared open-pi-agent.sh for backward compatibility.
+# The canonical implementation lives at ../shared/open-pi-agent.sh.
+#
 # Opens an interactive pi session in a new pane split to the right of the
-# current pane. The pi agent starts in interactive mode, ready for prompts.
+# current pane.
 
 set -uo pipefail
 
-herdr_bin="${HERDR_BIN_PATH:-herdr}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+shared_script="$script_dir/../shared/open-pi-agent.sh"
 
-# Split the current pane to the right
-split_out="$("$herdr_bin" pane split --current --direction right --no-focus 2>/dev/null || true)"
-
-if [ -z "$split_out" ]; then
-  echo "Error: Failed to split pane. Ensure you are inside a herdr session." >&2
+if [ ! -f "$shared_script" ]; then
+  echo "Error: Shared script not found at $shared_script" >&2
   exit 1
 fi
 
-# Parse the pane_id from JSON output
-np="$(printf '%s' "$split_out" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -n1)"
-
-if [ -z "$np" ]; then
-  echo "Error: Could not determine new pane ID from split output" >&2
-  exit 1
-fi
-
-# Start pi interactively in the new pane
-"$herdr_bin" pane run "$np" exec pi
-
-# Rename the pane
-"$herdr_bin" pane rename "$np" "Pi Agent" >/dev/null 2>&1 || true
-
-# Focus the new pane
-"$herdr_bin" pane zoom "$np" --on >/dev/null 2>&1 || true
-exec "$herdr_bin" pane zoom "$np" --off
+# Forward all arguments to the shared implementation.
+exec "$shared_script" "$@"
