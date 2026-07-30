@@ -22,7 +22,7 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join, parse } from 'path';
 import { existsSync } from 'fs';
-import { checkWlAvailable, fetchNextItems, fetchItemsByStage, setWorklogDir } from './fetcher.js';
+import { checkWlAvailable, fetchNextItems, fetchItemsByStage } from './fetcher.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { loadSettings, getDefaultSettingsPath } from './settings.js';
@@ -141,30 +141,25 @@ async function main(): Promise<void> {
   // Load shortcut config
   const shortcutRegistry = loadShortcutConfig();
 
-  // Resolve the worklog root.  We use HERDR_RESOLVED_CWD when set
-  // (passed via --env from open.sh) so that the plugin finds the
-  // correct .worklog/ even though process.cwd() is the plugin dir.
+  // Use HERDR_RESOLVED_CWD when set (passed via --env from open.sh)
+  // to change the process CWD before any wl invocation.  The wl CLI
+  // auto-discovers the worklog by walking up from process.cwd(), and
+  // --worklog-dir does NOT exist in wl v1.0.3.
   const resolvedCwd = process.env.HERDR_RESOLVED_CWD;
   process.stderr.write(`[worklog-plugin] HERDR_RESOLVED_CWD='${resolvedCwd ?? '(not set)'}'\n`);
+
+  if (resolvedCwd) {
+    process.chdir(resolvedCwd);
+  }
+
   process.stderr.write(`[worklog-plugin] process.cwd()='${process.cwd()}'\n`);
 
-  const wlRoot = findWorklogRoot(resolvedCwd);
-
+  const wlRoot = findWorklogRoot();
   if (wlRoot) {
     process.stderr.write(`[worklog-plugin] wlRoot resolved: ${wlRoot}\n`);
   } else {
-    process.stderr.write(`[worklog-plugin] No valid .worklog/ directory found in or above '${resolvedCwd ?? process.cwd()}'\n`);
+    process.stderr.write(`[worklog-plugin] No valid .worklog/ directory found in or above '${process.cwd()}'\n`);
     process.stderr.write(`[worklog-plugin] Showing empty worklist. Navigate to a project with 'worklog init' to see items.\n`);
-  }
-
-  if (wlRoot && wlRoot !== process.cwd()) {
-    // We're in a worktree — pass the resolved worklog root explicitly
-    // via --worklog-dir so child `wl` processes find the correct data.
-    // This avoids a fragile process.chdir() and works reliably even when
-    // the CWD is inside a different git repo or worktree.
-    const wlDir = join(wlRoot, '.worklog');
-    process.stderr.write(`[worklog-plugin] Setting _worklogDir to ${wlDir}\n`);
-    setWorklogDir(wlDir);
   }
 
   // Create a fetcher that loads items using the current browseItemCount setting
