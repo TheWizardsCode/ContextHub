@@ -12,10 +12,16 @@ set -uo pipefail
 
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
 
+# Debug logging (stderr is captured in Herdr plugin logs)
+echo "[open-worklist] === open.sh start ===" >&2
+echo "[open-worklist] arg1='${1:-<unset>}'" >&2
+echo "[open-worklist] PWD='$PWD'" >&2
+
 # Accept an optional CWD argument.  When called from toggle.sh, the
 # current pane's actual CWD is passed explicitly.  When called directly
 # (open-worklist action), $PWD is used as default.
 cwd="${1:-$PWD}"
+echo "[open-worklist] resolved cwd='$cwd'" >&2
 
 # Pass the working directory to the plugin pane so the plugin
 # uses the correct directory (not the plugin directory) to find the

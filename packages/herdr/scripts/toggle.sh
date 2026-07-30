@@ -8,16 +8,50 @@ set -uo pipefail
 
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
 
-# Try to get the invoking pane's CWD from multiple sources before any
-# pane manipulation.  The action script runs from the plugin directory
-# so $PWD would be the plugin path (wrong).  We query the pane metadata
-# in priority order:
+# ── Debug logging ──────────────────────────────────────────────────
+# All [toggle-worklist] stderr output is captured in Herdr plugin logs
+# so we can trace exactly what CWD the pane is opened with.
+log_debug() { echo "[toggle-worklist] $*" >&2; }
+
+log_debug "=== toggle.sh start ==="
+log_debug "HERDR_PANE_ID='${HERDR_PANE_ID:-unset}'"
+log_debug "PWD='$PWD'"
+log_debug "herdr_bin='$herdr_bin'"
+
+# ── Resolve the pane CWD ───────────────────────────────────────────
+# The action script runs from the plugin directory so $PWD is the
+# plugin path, not the user's working directory.  We query pane
+# metadata in priority order:
 #   1) $HERDR_PANE_ID (set by Herdr to the pane that triggered the action)
 #   2) `herdr pane current` (current focused pane)
 #   3) $PWD (last resort fallback, handled by open.sh)
 pane_cwd=""
+
 if [ -n "${HERDR_PANE_ID:-}" ]; then
-  pane_cwd=$( "$herdr_bin" pane get "$HERDR_PANE_ID" 2>/dev/null | python3 -c "
+  log_debug "Attempt 1: pane get HERDR_PANE_ID='$HERDR_PANE_ID'"
+  raw_pane_get=$( "$herdr_bin" pane get "$HERDR_PANE_ID" 2>&1 )
+  log_debug "pane get raw: $raw_pane_get"
+  pane_cwd=$( echo "$raw_pane_get" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    result = data.get('result', {})
+    pane = result.get('pane', {}) if isinstance(result, dict) else {}
+    if isinstance(pane, dict):
+        cwd = pane.get('cwd') or pane.get('foreground_cwd', '')
+        log_debug('pane get parsed -> cwd=' + repr(cwd))
+        if cwd:
+            print(cwd)
+except Exception as e:
+    log_debug('pane get parse error: ' + str(e))
+" 2>/dev/null || echo "" )
+fi
+
+if [ -z "$pane_cwd" ]; then
+  log_debug "Attempt 2: herdr pane current"
+  raw_pane_current=$( "$herdr_bin" pane current 2>&1 )
+  log_debug "pane current raw: $raw_pane_current"
+  pane_cwd=$( echo "$raw_pane_current" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -32,22 +66,7 @@ except:
 " 2>/dev/null || echo "" )
 fi
 
-# Fallback: query the current focused pane if $HERDR_PANE_ID didn't work
-if [ -z "$pane_cwd" ]; then
-  pane_cwd=$( "$herdr_bin" pane current 2>/dev/null | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    result = data.get('result', {})
-    pane = result.get('pane', {}) if isinstance(result, dict) else {}
-    if isinstance(pane, dict):
-        cwd = pane.get('cwd') or pane.get('foreground_cwd', '')
-        if cwd:
-            print(cwd)
-except:
-    pass
-" 2>/dev/null || echo "" )
-fi
+log_debug "Resolved pane_cwd='$pane_cwd'"
 
 # Check if the worklist pane already exists
 panes="$("$herdr_bin" pane list 2>/dev/null || true)"
@@ -94,6 +113,5 @@ except:
   "$herdr_bin" pane close "$worklist_pane_id" 2>/dev/null || true
 fi
 
-# Open (or re-open) the pane with the current pane's CWD.
-# Pass the captured CWD explicitly — open.sh uses it instead of $PWD.
+log_debug "Calling open.sh with pane_cwd='$pane_cwd'"
 exec bash "$(dirname "${BASH_SOURCE[0]:-$0}")/open.sh" "$pane_cwd"

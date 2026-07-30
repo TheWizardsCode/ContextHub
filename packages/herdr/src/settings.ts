@@ -37,7 +37,7 @@ export const defaultSettings: PluginSettings = {
   refreshIntervalMs: 30000,
   showIcons: true,
   autoSync: true,
-  syncIntervalMs: 60000,
+  syncIntervalMs: 30000,
   browseItemCount: 10,
   showHelpText: true,
 };

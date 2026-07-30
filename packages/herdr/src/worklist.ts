@@ -1478,7 +1478,7 @@ export async function runWorklistTui(
     autoRefresh: options?.autoRefresh ?? true,
     refreshIntervalMs: options?.refreshIntervalMs ?? 30000,
     autoSync: options?.autoSync ?? true,
-    syncIntervalMs: options?.syncIntervalMs ?? 60000,
+    syncIntervalMs: options?.syncIntervalMs ?? 30000,
     browseItemCount: options?.browseItemCount ?? 10,
     showHelpText: options?.showHelpText ?? true,
     onCommand: options?.onCommand,
@@ -1931,10 +1931,13 @@ export async function runWorklistTui(
   // Read keypresses
   process.stdin.on('data', onData);
 
-  // Auto-refresh timer
+  // Auto-refresh timer — optionally runs sync before each fetch when autoSync is enabled
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
   if (opts.autoRefresh) {
     refreshTimer = setInterval(() => {
+      if (opts.autoSync) {
+        runSync();
+      }
       doRefresh(false);
     }, opts.refreshIntervalMs);
   }

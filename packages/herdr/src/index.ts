@@ -146,9 +146,9 @@ async function main(): Promise<void> {
   // Debug: log the resolved working directory for troubleshooting.
   // This is written before the TUI starts so it appears in the Herdr
   // pane scrollback when the plugin is invoked.
-  process.stderr.write(`[worklog-plugin] cwd: ${process.cwd()}\n`);
+  process.stderr.write(`[worklog-plugin] cwd (process.cwd): ${process.cwd()}\n`);
   if (wlRoot) {
-    process.stderr.write(`[worklog-plugin] worklog root: ${wlRoot}\n`);
+    process.stderr.write(`[worklog-plugin] wlRoot resolved: ${wlRoot}\n`);
   }
 
   if (!wlRoot) {
@@ -165,7 +165,9 @@ async function main(): Promise<void> {
     // via --worklog-dir so child `wl` processes find the correct data.
     // This avoids a fragile process.chdir() and works reliably even when
     // the CWD is inside a different git repo or worktree.
-    setWorklogDir(join(wlRoot, '.worklog'));
+    const wlDir = join(wlRoot, '.worklog');
+    process.stderr.write(`[worklog-plugin] Setting _worklogDir to ${wlDir}\n`);
+    setWorklogDir(wlDir);
   }
 
   // Create a fetcher that loads items using the current browseItemCount setting

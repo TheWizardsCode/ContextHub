@@ -109,6 +109,15 @@ The plugin respects the following environment variables:
 
 - `WL_COUNT` — Number of work items to fetch (default: 20, now superseded by `browseItemCount` in settings)
 
+#### Plugin Settings (config file)
+
+Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings include:
+
+- `autoRefresh` — Enable periodic auto-refresh of the work item list (default: `true`)
+- `refreshIntervalMs` — Interval in ms between auto-refreshes (default: `30000`)
+- `autoSync` — Enable periodic background `wl sync` before auto-refreshes (default: `true`)
+- `syncIntervalMs` — Interval in ms between background `wl sync` calls (default: `30000`, minimum: `30000`; set to `0` to disable auto-sync)
+
 ## Architecture
 
 ```
