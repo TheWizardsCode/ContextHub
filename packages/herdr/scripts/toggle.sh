@@ -8,10 +8,16 @@ set -uo pipefail
 
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
 
-# Capture the current pane's CWD before any pane manipulation.
-# The action script runs from the plugin directory, but we need the
-# user's focused pane CWD (e.g., TCE directory) for --cwd below.
-pane_cwd=$( "$herdr_bin" pane current 2>/dev/null | python3 -c "
+# Try to get the invoking pane's CWD from multiple sources before any
+# pane manipulation.  The action script runs from the plugin directory
+# so $PWD would be the plugin path (wrong).  We query the pane metadata
+# in priority order:
+#   1) $HERDR_PANE_ID (set by Herdr to the pane that triggered the action)
+#   2) `herdr pane current` (current focused pane)
+#   3) $PWD (last resort fallback, handled by open.sh)
+pane_cwd=""
+if [ -n "${HERDR_PANE_ID:-}" ]; then
+  pane_cwd=$( "$herdr_bin" pane get "$HERDR_PANE_ID" 2>/dev/null | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -24,6 +30,24 @@ try:
 except:
     pass
 " 2>/dev/null || echo "" )
+fi
+
+# Fallback: query the current focused pane if $HERDR_PANE_ID didn't work
+if [ -z "$pane_cwd" ]; then
+  pane_cwd=$( "$herdr_bin" pane current 2>/dev/null | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    result = data.get('result', {})
+    pane = result.get('pane', {}) if isinstance(result, dict) else {}
+    if isinstance(pane, dict):
+        cwd = pane.get('cwd') or pane.get('foreground_cwd', '')
+        if cwd:
+            print(cwd)
+except:
+    pass
+" 2>/dev/null || echo "" )
+fi
 
 # Check if the worklist pane already exists
 panes="$("$herdr_bin" pane list 2>/dev/null || true)"
@@ -51,7 +75,8 @@ if [ -n "$worklist_pane_id" ]; then
 import sys, json
 try:
     data = json.load(sys.stdin)
-    pane = data.get('result', data) if isinstance(data, dict) else data
+    result = data.get('result', {}) if isinstance(data, dict) else {}
+    pane = result.get('pane', {}) if isinstance(result, dict) else {}
     if isinstance(pane, dict):
         print(pane.get('pane_id', ''))
 except:
