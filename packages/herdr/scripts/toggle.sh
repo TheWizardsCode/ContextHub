@@ -8,6 +8,23 @@ set -uo pipefail
 
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
 
+# Capture the current pane's CWD before any pane manipulation.
+# The action script runs from the plugin directory, but we need the
+# user's focused pane CWD (e.g., TCE directory) for --cwd below.
+pane_cwd=$( "$herdr_bin" pane current 2>/dev/null | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    result = data.get('result', {})
+    pane = result.get('pane', {}) if isinstance(result, dict) else {}
+    if isinstance(pane, dict):
+        cwd = pane.get('cwd') or pane.get('foreground_cwd', '')
+        if cwd:
+            print(cwd)
+except:
+    pass
+" 2>/dev/null || echo "" )
+
 # Check if the worklist pane already exists
 panes="$("$herdr_bin" pane list 2>/dev/null || true)"
 
@@ -52,5 +69,6 @@ except:
   "$herdr_bin" pane close "$worklist_pane_id" 2>/dev/null || true
 fi
 
-# Open (or re-open) the pane with the current tab's CWD
-exec bash "$(dirname "${BASH_SOURCE[0]:-$0}")/open.sh"
+# Open (or re-open) the pane with the current pane's CWD.
+# Pass the captured CWD explicitly — open.sh uses it instead of $PWD.
+exec bash "$(dirname "${BASH_SOURCE[0]:-$0}")/open.sh" "$pane_cwd"
