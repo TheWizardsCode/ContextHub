@@ -686,8 +686,6 @@ export function formatDetailContent(
   // Render the metadata as a markdown table
   if (metaRows.length > 0) {
     const fieldWidth = Math.max(...metaRows.map(([l]) => l.length), 6);
-    lines.push(`| ${'Field'.padEnd(fieldWidth)} | Value${' '.repeat(Math.max(10, contentWidth - fieldWidth - 12))} |`);
-    lines.push(`| ${'-'.repeat(fieldWidth)} | ${'-'.repeat(Math.max(10, contentWidth - fieldWidth - 12))} |`);
     for (const [label, value] of metaRows) {
       lines.push(`| ${label.padEnd(fieldWidth)} | ${value} |`);
     }

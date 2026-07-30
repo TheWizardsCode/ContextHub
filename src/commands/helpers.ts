@@ -302,8 +302,6 @@ function formatMetadataTable(rows: Array<[string, string]>): string {
 
   const fieldWidth = Math.max(...escaped.map(([l]) => l.length), 5); // min 5 for "Field"
   const lines: string[] = [];
-  lines.push(`| ${'Field'.padEnd(fieldWidth)} | Value |`);
-  lines.push(`| ${'-'.repeat(fieldWidth)} | ----- |`);
   for (const [label, value] of escaped) {
     lines.push(`| ${label.padEnd(fieldWidth)} | ${value} |`);
   }
