@@ -153,21 +153,14 @@ async function main(): Promise<void> {
 
   if (!wlRoot) {
     // No valid .worklog/ found in the tab's working directory.
-    // Report the uninitialized state clearly rather than silently
-    // falling back to another project's .worklog/.
-    console.error('');
-    console.error(`  ⚠ No valid .worklog/ directory found in or above`);
-    console.error(`     ${process.cwd()}`);
-    console.error('');
-    console.error('  The Worklog Herdr plugin requires a project with an');
-    console.error('  initialized Worklog database (.worklog/worklog.db).');
-    console.error('');
-    console.error('  To initialize: run "worklog init" in the project root.');
-    console.error('');
-    process.exit(1);
+    // Don't crash — log the issue and show an empty worklist so the
+    // user can close the pane gracefully and navigate to a project
+    // that has an initialized Worklog database.
+    process.stderr.write(`[worklog-plugin] No valid .worklog/ directory found in or above ${process.cwd()}\n`);
+    process.stderr.write(`[worklog-plugin] Showing empty worklist. Navigate to a project with 'worklog init' to see items.\n`);
   }
 
-  if (wlRoot !== process.cwd()) {
+  if (wlRoot && wlRoot !== process.cwd()) {
     // We're in a worktree — pass the resolved worklog root explicitly
     // via --worklog-dir so child `wl` processes find the correct data.
     // This avoids a fragile process.chdir() and works reliably even when
