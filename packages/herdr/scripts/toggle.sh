@@ -44,12 +44,13 @@ except:
   if [ "$worklist_pane_id" = "$focused_pane_id" ]; then
     # Focused — close it
     exec "$herdr_bin" pane close "$worklist_pane_id"
-  else
-    # Not focused — focus it
-    "$herdr_bin" pane zoom "$worklist_pane_id" --on >/dev/null 2>&1 || true
-    exec "$herdr_bin" pane zoom "$worklist_pane_id" --off
   fi
-else
-  # No pane — open it
-  exec bash "$(dirname "${BASH_SOURCE[0]:-$0}")/open.sh"
+  # Pane exists but is NOT focused: the pane process's CWD was set when it
+  # was first created via --cwd in open.sh.  If the user has since switched
+  # to a different project tab, the old CWD is stale and we'd show the wrong
+  # work items.  Close the stale pane and re-open with the current tab's CWD.
+  "$herdr_bin" pane close "$worklist_pane_id" 2>/dev/null || true
 fi
+
+# Open (or re-open) the pane with the current tab's CWD
+exec bash "$(dirname "${BASH_SOURCE[0]:-$0}")/open.sh"
