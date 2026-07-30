@@ -10,6 +10,7 @@ repositories (e.g., ContextHub, open_source_llm).
 |------|-------------|
 | `send-to-pi.sh` | Open a Pi agent pane and send a command. Generalized with `--pane-name`, `--focus`/`--no-focus`, and `--check-cli` options. |
 | `open-pi-agent.sh` | Open an interactive Pi session in a new pane. Generalized with `--pane-name` and `--focus`/`--no-focus` options. |
+| `herdr-agent-state-protocol.md` | Specification for Herdr Unix socket agent state reporting protocol. |
 
 ## Usage
 
@@ -38,6 +39,12 @@ exec "$shared_script" --pane-name "Reviews" --no-focus "$@"
 shared_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../packages/ContextHub/packages/herdr/shared/open-pi-agent.sh"
 exec "$shared_script" --pane-name "Pi Agent"
 ```
+
+## Agent State Protocol
+
+See [herdr-agent-state-protocol.md](./herdr-agent-state-protocol.md) for the
+full specification of how Herdr plugins report agent identity and state
+transitions via Unix domain socket.
 
 ## Options
 
