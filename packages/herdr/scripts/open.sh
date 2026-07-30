@@ -9,12 +9,31 @@ set -uo pipefail
 
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
 
-# Pass the current working directory to the plugin pane so the plugin
-# uses the tab's working directory (not the plugin directory) to find
-# the nearest .worklog/.
+# Query the focused pane's actual working directory via Herdr's API.
+# The action script runs from the plugin installation directory, so
+# $PWD would be the plugin path (wrong).  We get the real CWD from
+# the focused pane metadata instead.
+pane_cwd=$( "$herdr_bin" pane current 2>/dev/null | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    pane = data.get('result', {}).get('pane', {})
+    cwd = pane.get('cwd') or pane.get('foreground_cwd', '')
+    if cwd:
+        print(cwd)
+except:
+    pass
+" 2>/dev/null || echo "" )
+
+# Fall back to $PWD if the query failed (e.g., not in a Herdr pane)
+cwd="${pane_cwd:-$PWD}"
+
+# Pass the captured CWD to the plugin pane so the plugin uses the
+# correct working directory (not the plugin directory) to find the
+# nearest .worklog/.
 exec "$herdr_bin" plugin pane open \
   --plugin worklog-selection-list \
   --entrypoint worklist \
   --placement tab \
-  --cwd "$PWD" \
+  --cwd "$cwd" \
   --focus
