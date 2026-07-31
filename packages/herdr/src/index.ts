@@ -229,8 +229,9 @@ async function main(): Promise<void> {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
         // shortcuts like audit approve/reject, priority updates, close/delete) are
-        // routed to a new herdr pane that runs them visibly; the pane stays open
-        // so the user can inspect the output and closes it manually (prefix+x).
+        // routed to a new herdr pane that runs them visibly; the wrapper keeps
+        // the pane's process alive so the pane stays open for inspection — the
+        // user dismisses it with Enter or herdr prefix+x (close_pane).
         // Everything else is written to stdout with the CMD: prefix for
         // the calling framework (Herdr) to execute.
         const route = routeCommand(command);

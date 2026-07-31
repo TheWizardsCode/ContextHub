@@ -5,8 +5,9 @@
 # shell in the new pane so its command line and output are visible, renames
 # the pane, and manages the pane lifecycle:
 #   - any exit status → the pane stays open so the user can read the output;
-#     the exit status is reported and a hint tells the user how to close the
-#     pane manually (herdr `close_pane` binding, default `prefix+x`)
+#     the exit status is reported and the wrapper keeps running (waits for
+#     Enter) so the pane's process stays alive; the user dismisses the pane
+#     with Enter or herdr `close_pane` (default `prefix+x`)
 #
 # Usage:
 #   run-in-pane.sh <command>
@@ -33,7 +34,14 @@ herdr_bin="${HERDR_BIN_PATH:-herdr}"
 # ── In-pane wrapper mode ─────────────────────────────────────────────────
 # Invoked by the new pane itself (via `herdr pane run ... exec bash
 # <this-script> --exec <command> <pane_id>`). Runs the command, reports the
-# exit status, and leaves the pane open so the user can read the output.
+# exit status, and keeps the pane open so the user can read the output.
+#
+# IMPORTANT: herdr tears down a pane when its primary process exits, so the
+# wrapper must NOT exit after the command finishes. Instead it waits for the
+# user to press Enter (or close the pane with prefix+x), keeping the pane's
+# process alive and the output inspectable. In non-interactive contexts
+# (stdin is not a TTY, e.g. tests) the wait is skipped and the wrapper exits
+# immediately with the command's status.
 if [ "${1:-}" = "--exec" ]; then
   cmd="${2:-}"
   pane_id="${3:-}"
@@ -48,7 +56,22 @@ if [ "${1:-}" = "--exec" ]; then
 
   echo ""
   echo "=== Command exited with status $status ==="
-  echo "Pane left open — close it when done (herdr: prefix+x / close_pane)."
+
+  # Keep the pane's process alive so herdr keeps the pane open for
+  # inspection. Interactive (TTY stdin) panes wait for Enter; a herdr pane
+  # with non-TTY stdin (HERDR_PANE_ID set) stays alive until the user
+  # closes it with prefix+x. Everything else exits immediately with the
+  # command's status (e.g. tests).
+  if [ -t 0 ]; then
+    echo "Pane left open — press Enter to close, or use herdr prefix+x (close_pane)."
+    read -r _ || true
+  elif [ -n "${HERDR_PANE_ID:-}" ]; then
+    echo "Pane left open — close it when done (herdr: prefix+x / close_pane)."
+    # No TTY to wait on (e.g. herdr pane with detached stdin). Block on a
+    # read from /dev/zero (never returns) so this process stays alive and
+    # the pane stays open; the user closes it with herdr prefix+x.
+    read -r _ < /dev/zero || true
+  fi
 
   exit "$status"
 fi
