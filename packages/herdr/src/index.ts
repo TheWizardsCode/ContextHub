@@ -174,6 +174,8 @@ async function main(): Promise<void> {
 
   // Create a fetcher that loads items using the current browseItemCount setting
   // Each call reads from settings so changes take effect on next auto-refresh
+  // Smart selection (see fetchNextItems) guarantees all critical and
+  // completed/in_review items are always shown, regardless of the count.
   const fetcher = async () => {
     try {
       const currentSettings = loadSettings();

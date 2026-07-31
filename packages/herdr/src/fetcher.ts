@@ -9,6 +9,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { selectWorkItems } from './smart-selection.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -298,7 +299,47 @@ export async function checkWlAvailable(): Promise<boolean> {
 }
 
 /**
+ * Merge work item arrays, deduplicating by item ID (first occurrence wins).
+ */
+function mergeUniqueById(...arrays: WorkItem[][]): WorkItem[] {
+  const seen = new Set<string>();
+  const merged: WorkItem[] = [];
+  for (const item of arrays.flat()) {
+    if (!seen.has(item.id)) {
+      seen.add(item.id);
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Fetch the mandatory subsets that must ALWAYS be shown in the default
+ * worklist: all critical items and all completed/in_review items (the
+ * producer-review queue).
+ *
+ * These are fetched explicitly via `wl list` because `wl next -n N` hard-caps
+ * at 32 items — even `-n 500` returns only 32, so a large superset cannot
+ * capture all critical/in_review items. Runs the two queries in parallel to
+ * mitigate refresh latency.
+ */
+async function fetchMandatorySubsets(): Promise<WorkItem[]> {
+  const [criticalOutput, reviewOutput] = await Promise.all([
+    runWl(['list', '--priority', 'critical']),
+    runWl(['list', '--status', 'completed', '--stage', 'in_review']),
+  ]);
+  const criticalItems = extractItems(extractJson(criticalOutput));
+  const reviewItems = extractItems(extractJson(reviewOutput));
+  return mergeUniqueById(criticalItems, reviewItems);
+}
+
+/**
  * Fetch the next available work items (via `wl next`).
+ *
+ * When a count is given, smart selection is applied: all critical and
+ * completed/in_review items are always included (regardless of count) and
+ * the count limits only the remaining "other" items. The mandatory subsets
+ * are merged from explicit `wl list` queries (see fetchMandatorySubsets).
  */
 export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
   const args = ['next'];
@@ -310,10 +351,16 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
   const output = await runWl(args);
   const payload = extractJson(output);
   const items = extractItems(payload);
-  if (count !== undefined) {
-    return items.slice(0, count);
+  if (count === undefined) {
+    return items;
   }
-  return items;
+
+  // Smart selection: merge the mandatory subsets with the regular wl next
+  // results (deduplicated by ID), then always show the mandatory set and
+  // limit only the "other" items to fill the remaining count slots.
+  const mandatory = await fetchMandatorySubsets();
+  const merged = mergeUniqueById(items, mandatory);
+  return selectWorkItems(merged, count);
 }
 
 /**

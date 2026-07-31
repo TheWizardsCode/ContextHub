@@ -528,7 +528,10 @@ export async function defaultChooseWorkItem(
     );
 
     const options = items.map(item => formatBrowseOption(item, undefined, undefined, currentSettings, maxPrefixWidth));
-    const titleSuffix = totalCount !== undefined ? ` (top ${totalCount > 0 ? Math.min(currentSettings.browseItemCount, totalCount) : currentSettings.browseItemCount} of ${totalCount})` : ` (top ${currentSettings.browseItemCount})`;
+    // "top N of M": N = actual displayed count (may exceed browseItemCount when
+    // the mandatory critical/completed-in_review set is shown), M = total count.
+    const displayedCount = items.length;
+    const titleSuffix = totalCount !== undefined ? ` (top ${totalCount > 0 ? Math.min(displayedCount, totalCount) : displayedCount} of ${totalCount})` : ` (top ${displayedCount})`;
     const selected = await ctx.ui.select(`Browse Worklog next items${titleSuffix}`, options);
     if (!selected) return undefined;
 
@@ -696,15 +699,17 @@ export async function defaultChooseWorkItem(
           return cachedLines;
         }
 
-        const browseCount = currentSettings.browseItemCount;
+        // "top N of M": N = actual displayed count (may exceed browseItemCount
+        // when the mandatory critical/completed-in_review set is shown).
+        const displayedCount = items.length;
 
         const isEmpty = items.length === 0;
         const title = isEmpty
           ? truncateToWidth(theme.fg('accent', theme.bold('No work items to browse')), width)
           : (() => {
               const titleSuffix = totalCount !== undefined
-                ? ` (top ${totalCount > 0 ? Math.min(browseCount, totalCount) : browseCount} of ${totalCount})`
-                : ` (top ${browseCount})`;
+                ? ` (top ${totalCount > 0 ? Math.min(displayedCount, totalCount) : displayedCount} of ${totalCount})`
+                : ` (top ${displayedCount})`;
               return truncateToWidth(theme.fg('accent', theme.bold(`Browse Worklog next items${titleSuffix}`)), width);
             })();
 
@@ -1116,8 +1121,6 @@ export async function runBrowseFlow(
   const { listWorkItems, listWorkItemsWithStage, runWlImpl, shortcutRegistry, chooseWorkItem } = options;
 
   try {
-    const itemCount = currentSettings.browseItemCount;
-
     let lastAnnouncedId: string | undefined;
     const announceSelection: SelectionChangeHandler = (
       item: WorklogBrowseItem,
@@ -1127,8 +1130,8 @@ export async function runBrowseFlow(
     };
 
     const reFetchItems = stage
-      ? () => listWorkItemsWithStage(stage).then(newItems => newItems.slice(0, itemCount))
-      : () => listWorkItems().then(newItems => newItems.slice(0, itemCount));
+      ? () => listWorkItemsWithStage(stage)
+      : () => listWorkItems();
 
     const fetchChildren = async (parentId: string): Promise<WorklogBrowseItem[]> => {
       const output = await runWlImpl(['list', '--parent', parentId]);
@@ -1166,8 +1169,8 @@ export async function runBrowseFlow(
             return restored;
           })()
         : stage
-          ? (await listWorkItemsWithStage(stage)).slice(0, itemCount)
-          : (await listWorkItems()).slice(0, itemCount);
+          ? (await listWorkItemsWithStage(stage))
+          : (await listWorkItems());
 
       if (items[0]) {
         announceSelection(items[0]);

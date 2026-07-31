@@ -530,6 +530,11 @@ describe('runBrowseFlow notification path (integration)', () => {
     });
     mockExecSuccess(validOutput);
 
+    // Third/fourth mocks: listWorkItems also fetches the mandatory subsets
+    // (wl list --priority critical, wl list --status completed --stage in_review)
+    mockExecSuccess(JSON.stringify({ workItems: [] }));
+    mockExecSuccess(JSON.stringify({ workItems: [] }));
+
     const notify = vi.fn();
     const registerCommand = vi.fn();
     const registerShortcut = vi.fn();

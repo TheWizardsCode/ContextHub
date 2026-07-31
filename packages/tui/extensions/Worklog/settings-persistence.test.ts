@@ -118,6 +118,7 @@ describe('createDefaultListWorkItems', () => {
     const factory = createDefaultListWorkItems(mockRun);
 
     await factory();
+    // First call: wl next -n 5 (mandatory subset list queries follow).
     expect(mockRun).toHaveBeenNthCalledWith(1,
       expect.arrayContaining(['-n', '5']),
     );
@@ -125,7 +126,9 @@ describe('createDefaultListWorkItems', () => {
     updateSettings({ browseItemCount: 15 });
 
     await factory();
-    expect(mockRun).toHaveBeenNthCalledWith(2,
+    // Second factory call: the wl next call is the 4th invocation overall
+    // (calls 1-3: next + 2 mandatory list queries from the first fetch).
+    expect(mockRun).toHaveBeenNthCalledWith(4,
       expect.arrayContaining(['-n', '15']),
     );
   });

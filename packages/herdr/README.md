@@ -118,6 +118,34 @@ Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings in
 - `autoSync` — Enable periodic background `wl sync` before auto-refreshes (default: `true`)
 - `syncIntervalMs` — Interval in ms between background `wl sync` calls (default: `30000`, minimum: `30000`; set to `0` to disable auto-sync)
 
+### Selection List Behaviour
+
+The default (unfiltered) worklist always shows **all** critical-priority
+items and **all** completed/in_review items (the producer-review queue),
+regardless of the `browseItemCount` setting:
+
+- Items with `priority=critical` are always included.
+- Items with `status=completed` **and** `stage=in_review` are always included.
+- The `browseItemCount` limit applies only to the remaining "other" items.
+  The number of "other" slots is `browseItemCount − (critical count) −
+  (completed/in_review count)`, floored at zero.
+- When critical + completed/in_review items alone meet or exceed
+  `browseItemCount`, all of them are shown anyway (no hard cap on the
+  mandatory set) — the total may exceed the configured count.
+- An item that is both critical and completed/in_review counts once
+  (deduplicated) toward the total.
+
+Example: with `browseItemCount=15`, 2 critical + 3 completed/in_review +
+20 other items → the list shows 2 critical + 3 completed/in_review + the
+first 10 others (15 total). If there were 20 completed/in_review items
+instead of 3, all 22 mandatory items would be shown (22 > 15).
+
+The **stage-filtered** views (press `f` + stage chord) are unchanged: they
+show only items matching the selected stage.
+
+The "top N of M" header reflects the **actual displayed count** (N), which
+may exceed `browseItemCount` when the mandatory set is large.
+
 ## Architecture
 
 ```

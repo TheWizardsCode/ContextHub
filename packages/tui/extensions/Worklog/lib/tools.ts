@@ -9,6 +9,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { currentSettings } from './settings.js';
+import { selectWorkItems } from './smart-selection.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -198,6 +199,41 @@ export async function runWl(args: string[], includeJson = true): Promise<string>
 
 // ── List helpers ──────────────────────────────────────────────────────
 
+/**
+ * Merge work item arrays, deduplicating by item ID (first occurrence wins).
+ */
+export function mergeUniqueById(...arrays: WorklogBrowseItem[][]): WorklogBrowseItem[] {
+  const seen = new Set<string>();
+  const merged: WorklogBrowseItem[] = [];
+  for (const item of arrays.flat()) {
+    if (!seen.has(item.id)) {
+      seen.add(item.id);
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Fetch the mandatory subsets that must ALWAYS be shown in the default
+ * selection list: all critical items and all completed/in_review items (the
+ * producer-review queue).
+ *
+ * These are fetched explicitly via `wl list` because `wl next -n N` hard-caps
+ * at 32 items — even `-n 500` returns only 32, so a large superset cannot
+ * capture all critical/in_review items. Runs the two queries in parallel to
+ * mitigate refresh latency.
+ */
+async function fetchMandatorySubsets(run: RunWlFn): Promise<WorklogBrowseItem[]> {
+  const [criticalOutput, reviewOutput] = await Promise.all([
+    run(['list', '--priority', 'critical']),
+    run(['list', '--status', 'completed', '--stage', 'in_review']),
+  ]);
+  const criticalItems = normalizeListPayload(extractJsonObject(criticalOutput));
+  const reviewItems = normalizeListPayload(extractJsonObject(reviewOutput));
+  return mergeUniqueById(criticalItems, reviewItems);
+}
+
 export function createDefaultListWorkItems(
   run: RunWlFn = runWl,
   count?: number,
@@ -206,7 +242,15 @@ export function createDefaultListWorkItems(
     const itemCount = count ?? currentSettings.browseItemCount;
     const output = await run(['next', '-n', String(itemCount), '--include-in-progress']);
     const payload = extractJsonObject(output);
-    return normalizeListPayload(payload).slice(0, itemCount);
+    const items = normalizeListPayload(payload);
+
+    // Smart selection: merge the mandatory subsets (critical + completed/in_review,
+    // fetched explicitly via wl list because wl next caps at 32 items) with the
+    // regular wl next results, then always show the mandatory set and limit only
+    // the "other" items to fill the remaining count slots.
+    const mandatory = await fetchMandatorySubsets(run);
+    const merged = mergeUniqueById(items, mandatory);
+    return selectWorkItems(merged, itemCount);
   };
 }
 
@@ -251,6 +295,10 @@ export async function fetchTotalActionableCount(run: RunWlFn = runWl): Promise<n
 
 /**
  * Create a cached "next work items" list function using direct SQLite access.
+ *
+ * Smart selection is applied: all critical and completed/in_review items are
+ * always shown (fetched via db.list filters — see fetchMandatorySubsets for
+ * the CLI equivalent), and browseItemCount limits only the remaining items.
  */
 export function createDefaultListWorkItemsDb(
   count?: number,
@@ -260,31 +308,50 @@ export function createDefaultListWorkItemsDb(
     const db = await getDb();
     if (!db) return defaultListWorkItems();
     try {
-      const results = db.next(itemCount, true);
-      if (!Array.isArray(results)) return defaultListWorkItems();
-      return results
+      // Regular next-equivalent: findNextWorkItems mirrors `wl next -n <count>
+      // --include-in-progress` (stage undefined, includeInProgress true).
+      const nextResults = db.findNextWorkItems(itemCount, undefined, undefined, false, undefined, true);
+      const regular = (Array.isArray(nextResults) ? nextResults : [])
         .filter((r: any) => r.workItem)
-        .map((r: any) => ({
-          id: r.workItem.id,
-          title: r.workItem.title,
-          status: r.workItem.status,
-          priority: r.workItem.priority,
-          stage: r.workItem.stage || undefined,
-          risk: r.workItem.risk || undefined,
-          effort: r.workItem.effort || undefined,
-          description: r.workItem.description,
-          auditResult: r.auditResult !== undefined ? r.auditResult : undefined,
-          auditedAt: r.auditedAt !== undefined && r.auditedAt !== null ? String(r.auditedAt) : undefined,
-          needsProducerReview: r.workItem.needsProducerReview !== undefined ? Boolean(r.workItem.needsProducerReview) : undefined,
-          updatedAt: r.workItem.updatedAt ? String(r.workItem.updatedAt) : undefined,
-          issueType: r.workItem.issueType || undefined,
-          tags: r.workItem.tags?.length ? r.workItem.tags : undefined,
-          githubIssueNumber: r.workItem.githubIssueNumber,
-        }))
-        .slice(0, itemCount);
+        .map((r: any) => normalizeDbWorkItem(r.workItem));
+
+      // Mandatory subsets via db.list filters (db.list supports priority /
+      // status / stage filtering). Required because wl next caps at 32 items.
+      const criticalItems = db.list({ priority: 'critical' });
+      const reviewItems = db.list({ status: ['completed'], stage: 'in_review' });
+      const mandatory = mergeUniqueById(
+        (Array.isArray(criticalItems) ? criticalItems : []).map(normalizeDbWorkItem),
+        (Array.isArray(reviewItems) ? reviewItems : []).map(normalizeDbWorkItem),
+      );
+
+      const merged = mergeUniqueById(regular, mandatory);
+      return selectWorkItems(merged, itemCount);
     } catch {
       return defaultListWorkItems();
     }
+  };
+}
+
+/**
+ * Normalize a raw database WorkItem into a WorklogBrowseItem.
+ */
+function normalizeDbWorkItem(item: any): WorklogBrowseItem {
+  return {
+    id: item.id,
+    title: item.title,
+    status: item.status,
+    priority: item.priority || undefined,
+    stage: item.stage || undefined,
+    risk: item.risk || undefined,
+    effort: item.effort || undefined,
+    description: item.description,
+    auditResult: item.auditResult !== undefined ? item.auditResult : undefined,
+    auditedAt: item.auditedAt !== undefined && item.auditedAt !== null ? String(item.auditedAt) : undefined,
+    needsProducerReview: item.needsProducerReview !== undefined ? Boolean(item.needsProducerReview) : undefined,
+    updatedAt: item.updatedAt ? String(item.updatedAt) : undefined,
+    issueType: item.issueType || undefined,
+    tags: item.tags?.length ? item.tags : undefined,
+    githubIssueNumber: item.githubIssueNumber,
   };
 }
 

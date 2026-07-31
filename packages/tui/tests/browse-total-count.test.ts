@@ -137,7 +137,7 @@ describe('Browse list total count in title', () => {
 
     const title = getTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5 of 42)');
+    expect(title).toContain('Browse Worklog next items (top 2 of 42)');
   });
 
   it('shows "top X" (without "of Y") in the custom overlay title when totalCount is undefined', async () => {
@@ -149,7 +149,7 @@ describe('Browse list total count in title', () => {
 
     const title = getTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5)');
+    expect(title).toContain('Browse Worklog next items (top 2)');
     expect(title).not.toContain('of');
   });
 
@@ -162,7 +162,7 @@ describe('Browse list total count in title', () => {
 
     const title = getTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5 of 0)');
+    expect(title).toContain('Browse Worklog next items (top 2 of 0)');
   });
 
   it('handles large totalCount values in the custom overlay title', async () => {
@@ -173,7 +173,7 @@ describe('Browse list total count in title', () => {
 
     const title = getTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5 of 9999)');
+    expect(title).toContain('Browse Worklog next items (top 2 of 9999)');
   });
 
   it('caps displayed count to totalCount when browseItemCount > totalCount in custom overlay title', async () => {
@@ -198,7 +198,27 @@ describe('Browse list total count in title', () => {
 
     const title = getTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5 of 10)');
+    expect(title).toContain('Browse Worklog next items (top 2 of 10)');
+  });
+
+  it('shows the actual displayed count when the list exceeds browseItemCount (mandatory set)', async () => {
+    const { ctx, getTitle } = createMockCustomContext();
+
+    // Smart selection may return MORE items than browseItemCount when the
+    // mandatory critical/completed-in_review set is shown. The heading must
+    // reflect the actual displayed count (items.length), not browseItemCount.
+    const manyItems: WorklogBrowseItem[] = Array.from({ length: 22 }, (_, i) => ({
+      id: `WL-${String(i + 1).padStart(3, '0')}`,
+      title: `Item ${i + 1}`,
+      status: 'open',
+    }));
+    defaultChooseWorkItem(manyItems, ctx, vi.fn(), undefined, undefined, undefined, 100);
+    await new Promise(process.nextTick);
+
+    const title = getTitle();
+    expect(title).not.toBeNull();
+    // browseItemCount defaults to 5, but 22 items are displayed → "top 22 of 100".
+    expect(title).toContain('Browse Worklog next items (top 22 of 100)');
   });
 
   // ── select() fallback path (non-TUI) tests ───────────────────────
@@ -212,7 +232,7 @@ describe('Browse list total count in title', () => {
 
     const title = getSelectTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5 of 42)');
+    expect(title).toContain('Browse Worklog next items (top 2 of 42)');
   });
 
   it('shows "top X" (without "of Y") in the select() fallback title when totalCount is undefined', async () => {
@@ -223,7 +243,7 @@ describe('Browse list total count in title', () => {
 
     const title = getSelectTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5)');
+    expect(title).toContain('Browse Worklog next items (top 2)');
     expect(title).not.toContain('of');
   });
 
@@ -235,7 +255,7 @@ describe('Browse list total count in title', () => {
 
     const title = getSelectTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5 of 0)');
+    expect(title).toContain('Browse Worklog next items (top 2 of 0)');
   });
 
   it('caps displayed count to totalCount when browseItemCount > totalCount in select() fallback title', async () => {
@@ -260,7 +280,7 @@ describe('Browse list total count in title', () => {
 
     const title = getSelectTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5 of 10)');
+    expect(title).toContain('Browse Worklog next items (top 2 of 10)');
   });
 
   // ── Regression: existing tests still pass ────────────────────────

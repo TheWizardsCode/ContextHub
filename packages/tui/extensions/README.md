@@ -8,7 +8,7 @@ The extension has five user-configurable settings:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `browseItemCount` | `5` | Number of work items shown in the browse list (1–50) |
+| `browseItemCount` | `5` | Number of work items shown in the browse list (1–50). Critical and completed/in_review items are always shown regardless of this limit — see [Selection List Behaviour](#selection-list-behaviour) |
 | `showIcons` | `true` | Whether to show emoji icons in the browse list and preview widget |
 | `showActivityIndicator` | `true` | Whether to show the activity indicator (⏵) in the footer |
 | `showHelpText` | `true` | Whether to show the shortcut help text line in the browse selection overlay |
@@ -54,6 +54,34 @@ the browse dialog.
 - Auto-refresh is a hardcoded feature (5-second interval) with no
   configuration UI. It only applies to the browse list overlay, not
   to the detail view.
+
+### Selection List Behaviour
+
+The default (unfiltered) selection list always shows **all** critical-priority
+items and **all** completed/in_review items (the producer-review queue),
+regardless of the `browseItemCount` setting:
+
+- Items with `priority=critical` are always included.
+- Items with `status=completed` **and** `stage=in_review` are always included.
+- The `browseItemCount` limit applies only to the remaining "other" items.
+  The number of "other" slots is `browseItemCount − (critical count) −
+  (completed/in_review count)`, floored at zero.
+- When critical + completed/in_review items alone meet or exceed
+  `browseItemCount`, all of them are shown anyway (no hard cap on the
+  mandatory set) — the total may exceed the configured count.
+- An item that is both critical and completed/in_review counts once
+  (deduplicated) toward the total.
+
+Example: with `browseItemCount=15`, 2 critical + 3 completed/in_review +
+20 other items → the list shows 2 critical + 3 completed/in_review + the
+first 10 others (15 total). If there were 20 completed/in_review items
+instead of 3, all 22 mandatory items would be shown (22 > 15).
+
+The **stage-filtered** views (`/wl idea`, `/wl plan`, …) are unchanged: they
+show only items matching the selected stage.
+
+The "top N of M" title reflects the **actual displayed count** (N), which
+may exceed `browseItemCount` when the mandatory set is large.
 
 ### Hierarchical Navigation (Drill into Children)
 
