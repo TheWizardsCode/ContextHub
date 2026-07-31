@@ -150,6 +150,10 @@ Worklog Specific Ignores
 
 !.worklog/config.yaml
 
+# SQLite runtime sidecar files (WAL/SHM) for worklog DBs
+worklog.db-shm
+worklog.db-wal
+
 # opencode temporary files and directories
 .opencode/
 .tmp
