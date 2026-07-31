@@ -40,7 +40,7 @@ def run_wl(args):
         json.JSONDecodeError: If wl output is not valid JSON.
     """
     cmd = ['wl'] + args
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise RuntimeError(
             f"wl command failed: {' '.join(cmd)}\n"
@@ -145,7 +145,7 @@ def check_queue():
                     ]
                     try:
                         pi_result = subprocess.run(
-                            pi_cmd, capture_output=True, text=True, timeout=600
+                            pi_cmd, capture_output=True, text=True, timeout=600, check=False
                         )
                         if pi_result.returncode != 0:
                             return (
@@ -191,7 +191,7 @@ def parse_args():
 
 def main():
     """Entry point for command-line invocation."""
-    args = parse_args()
+    parse_args()
     result = check_queue()
     print(result)
     if result.startswith('Heartbeat error'):

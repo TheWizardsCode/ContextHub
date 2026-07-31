@@ -434,7 +434,7 @@ class TestHasPhase1BlockingIssuesDeletedChildren:
 
     def test_deleted_child_with_open_child_blocks(self):
         """AC4: Deleted child doesn't mask a genuinely blocking child in phase1."""
-        blocked, reason = _has_phase1_blocking_issues(
+        blocked, _ = _has_phase1_blocking_issues(
             [], [SAMPLE_DELETED_CHILD, SAMPLE_OPEN_CHILD],
         )
         assert blocked, (

@@ -42,7 +42,7 @@ def _wl(cmd_args, cwd):
         RuntimeError: If the wl command fails.
     """
     cmd = ['wl'] + cmd_args
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=False)
     if result.returncode != 0:
         raise RuntimeError(
             f"wl command failed: {' '.join(cmd)}\n"
@@ -66,7 +66,7 @@ class TestHeartbeatIntegration(unittest.TestCase):
         init_result = subprocess.run(
             ['wl', 'init', '--json', '--project-name', 'IntegrationTest',
              '--prefix', 'INT', '--auto-sync', 'no', '--auto-export', 'no'],
-            input='\n', capture_output=True, text=True, cwd=self.test_dir,
+            input='\n', capture_output=True, text=True, cwd=self.test_dir, check=False,
         )
         if init_result.returncode != 0:
             raise RuntimeError(
@@ -80,11 +80,11 @@ class TestHeartbeatIntegration(unittest.TestCase):
         """Restore cwd and remove the temporary directory."""
         try:
             os.chdir(self.orig_cwd)
-        except Exception:
+        except OSError:
             pass
         try:
             shutil.rmtree(self.test_dir, ignore_errors=True)
-        except Exception:
+        except OSError:
             pass
 
     def _create_item(self, title, status='open', stage='idea'):

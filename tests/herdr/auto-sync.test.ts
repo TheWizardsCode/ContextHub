@@ -132,8 +132,8 @@ describe('clampSyncInterval', () => {
 // ── defaultSettings Tests ─────────────────────────────────────────────
 
 describe('defaultSettings — syncIntervalMs', () => {
-  it('has syncIntervalMs set to 60000 (60s)', () => {
-    expect(defaultSettings.syncIntervalMs).toBe(60000);
+  it('has syncIntervalMs set to 30000 (30s) by default', () => {
+    expect(defaultSettings.syncIntervalMs).toBe(30000);
   });
 
   it('has syncIntervalMs enabled by default (non-zero)', () => {
@@ -163,7 +163,7 @@ describe('loadSettings — syncIntervalMs', () => {
 
   it('returns default syncIntervalMs when file does not exist', () => {
     const settings = loadSettings(settingsPath);
-    expect(settings.syncIntervalMs).toBe(60000);
+    expect(settings.syncIntervalMs).toBe(30000);
   });
 
   it('loads syncIntervalMs from existing file', () => {
@@ -199,7 +199,7 @@ describe('loadSettings — syncIntervalMs', () => {
       autoRefresh: false,
     }), 'utf-8');
     const settings = loadSettings(settingsPath);
-    expect(settings.syncIntervalMs).toBe(60000);
+    expect(settings.syncIntervalMs).toBe(30000);
   });
 });
 

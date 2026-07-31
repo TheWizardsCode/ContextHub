@@ -8,11 +8,10 @@ Tests the decision logic of the heartbeat script:
   - Graceful handling of edge cases (empty queue, no next item)
 """
 
-import json
-import unittest
-from unittest.mock import patch, MagicMock
-import sys
 import os
+import sys
+import unittest
+from unittest.mock import patch
 
 # Add the skill scripts directory to the path so we can import heartbeat
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'skill', 'heartbeat', 'scripts'))
@@ -340,11 +339,13 @@ class TestForceFlag(unittest.TestCase):
 
     def test_main_calls_parse_args(self):
         """main() should call parse_args and check_queue."""
-        with patch.object(sys, 'argv', ['heartbeat.py']):
-            with patch('heartbeat.check_queue', return_value='All good'):
-                with patch('heartbeat.print') as mock_print:
-                    heartbeat.main()
-                    mock_print.assert_called_once_with('All good')
+        with (
+            patch.object(sys, 'argv', ['heartbeat.py']),
+            patch('heartbeat.check_queue', return_value='All good'),
+            patch('heartbeat.print') as mock_print,
+        ):
+            heartbeat.main()
+            mock_print.assert_called_once_with('All good')
 
 
 class TestMonkeypatchedEntrypoint(unittest.TestCase):
