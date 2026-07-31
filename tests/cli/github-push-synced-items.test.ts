@@ -19,6 +19,8 @@ function writeGhSeedFile(issues: Array<{ number: number; id: string; title: stri
 }
 
 describe('github push synced items output', () => {
+  // These tests spawn the full CLI via tsx and may be slow under concurrent
+  // load; give them the explicit 60s timeout recommended in vitest.config.ts.
   it('does not print per-item synced list when not verbose', async () => {
     const state = enterTempDir();
     try {
@@ -39,7 +41,7 @@ describe('github push synced items output', () => {
 
       const { stdout } = await execAsync(
         `tsx ${cliPath} github push --repo owner/name`,
-        { cwd: state.tempDir }
+        { cwd: state.tempDir, timeout: 55000 }
       );
 
       expect(stdout).toContain('GitHub sync complete');
@@ -47,7 +49,7 @@ describe('github push synced items output', () => {
     } finally {
       leaveTempDir(state);
     }
-  });
+  }, 60000);
 
   it('prints per-item synced list when --verbose is provided', async () => {
     const state = enterTempDir();
@@ -85,7 +87,7 @@ describe('github push synced items output', () => {
       try {
         const { stdout } = await execAsync(
           `tsx ${cliPath} --verbose github push --repo owner/name`,
-          { cwd: state.tempDir }
+          { cwd: state.tempDir, timeout: 55000 }
         );
 
         expect(stdout).toContain('GitHub sync complete');
