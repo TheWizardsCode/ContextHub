@@ -9,7 +9,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority, and audit status information such as audit result, review status, and last audit timestamp)
 - **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The detail view metadata section additionally shows the review status (❌ needs review / ✅ reviewed) and the last audit timestamp.
 - **Chord shortcuts** — Multi-key chord sequences provide quick actions like updating priorities, stage/status, title, closing/deleting items, running workflows, and toggling review status (configurable via `shortcuts.json`)
-- **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is output to stdout for the calling framework to execute
+- **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is executed **visibly in a new herdr pane** (see `scripts/run-in-pane.sh`) so the user sees the command line and its output; the pane auto-closes on success and stays open on failure
 - **Keyboard navigation** — Arrow keys or j/k to navigate (wraps at list boundaries), Page Up/Down, g/G for first/last, Enter to select, Escape to go back
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane

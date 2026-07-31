@@ -106,8 +106,61 @@ describe('stripCommandPrefix', () => {
 });
 
 // ---------------------------------------------------------------------------
-// routeCommand tests
+// shortcuts.json routing tests
 // ---------------------------------------------------------------------------
+
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+interface ShortcutEntry {
+  chord: string[];
+  command: string;
+}
+
+function loadShortcutsJson(): ShortcutEntry[] {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const raw = readFileSync(join(here, 'shortcuts.json'), 'utf8');
+  return JSON.parse(raw) as ShortcutEntry[];
+}
+
+describe('shortcuts.json command routing', () => {
+  const entries = loadShortcutsJson();
+
+  it('routes the a-y audit-approve command to the visible pane (bug fix)', () => {
+    const entry = entries.find((e) => e.chord.join(',') === 'a,y');
+    expect(entry).toBeDefined();
+    expect(entry!.command.startsWith('!!')).toBe(true);
+    expect(routeCommand(entry!.command)).toBe('pane');
+  });
+
+  it('routes all shell-executed wl commands (!! prefix) to the visible pane', () => {
+    const shellEntries = entries.filter((e) => e.command.startsWith('!!'));
+    expect(shellEntries.length).toBeGreaterThan(0);
+    for (const e of shellEntries) {
+      expect(routeCommand(e.command)).toBe('pane');
+    }
+  });
+
+  it('routes agent commands (/skill:, /intake, /plan) to the agent pane', () => {
+    const agentEntries = entries.filter((e) =>
+      /^\/skill:|^\/intake|^\/plan/.test(e.command),
+    );
+    expect(agentEntries.length).toBeGreaterThan(0);
+    for (const e of agentEntries) {
+      expect(routeCommand(e.command)).toBe('agent');
+    }
+  });
+
+  it('keeps /wl stage-filter commands unprefixed', () => {
+    const filterEntries = entries.filter((e) => e.command.startsWith('/wl '));
+    expect(filterEntries.length).toBeGreaterThan(0);
+    for (const e of filterEntries) {
+      expect(e.command.startsWith('!!')).toBe(false);
+    }
+  });
+});
+
 
 describe('routeCommand', () => {
   describe('agent commands', () => {

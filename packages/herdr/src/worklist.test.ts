@@ -286,6 +286,51 @@ describe('dispatchChordCommand', () => {
     expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123');
   });
 
+  it('routes !!wl reviewed producer-review commands through onCommand', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = dispatchChordCommand(
+      "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>'",
+      state,
+      onCommand,
+    );
+    expect(result).toBe(true);
+    expect(onCommand).toHaveBeenCalledWith(
+      "!!wl reviewed TEST-123 && wl comment add TEST-123 --body '<producer_comment>'",
+    );
+  });
+
+  it('routes a-y audit-approve compound commands through onCommand', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = dispatchChordCommand(
+      "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
+      state,
+      onCommand,
+    );
+    expect(result).toBe(true);
+    expect(onCommand).toHaveBeenCalledWith(
+      "!!wl reviewed TEST-123 false && wl audit-set TEST-123 --ready-to-close yes --summary 'Approved by manual review'",
+    );
+  });
+
+  it('routes a-r audit-reject compound commands through onCommand', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = dispatchChordCommand(
+      "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
+      state,
+      onCommand,
+    );
+    expect(result).toBe(true);
+    expect(onCommand).toHaveBeenCalledWith(
+      "!!wl reviewed TEST-123 false && wl audit-set TEST-123 --ready-to-close no --summary 'Rejected by manual review. <reason>'",
+    );
+  });
+
   it('returns false for unknown commands', () => {
     const state = new WorkItemListState([makeItem('A')], TERM_80x24);
     state.selectedIndex = 0;
