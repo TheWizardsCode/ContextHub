@@ -216,7 +216,6 @@ describe('routeCommand', () => {
 // ---------------------------------------------------------------------------
 
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const tempDirs: string[] = [];
