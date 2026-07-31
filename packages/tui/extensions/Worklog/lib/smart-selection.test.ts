@@ -34,6 +34,8 @@ const inReview = (id: string): WorklogBrowseItem => makeItem(id, { status: 'comp
 /** Item that is BOTH critical and completed/in_review (overlap case). */
 const criticalInReview = (id: string): WorklogBrowseItem => makeItem(id, { priority: 'critical', status: 'completed', stage: 'in_review' });
 const other = (id: string): WorklogBrowseItem => makeItem(id, { priority: 'medium', status: 'open', stage: 'idea' });
+/** Item whose stage is 'done' (fully closed — must never appear in the default list). */
+const done = (id: string, overrides: Partial<WorklogBrowseItem> = {}): WorklogBrowseItem => makeItem(id, { stage: 'done', status: 'completed', ...overrides });
 
 describe('selectWorkItems — smart selection algorithm', () => {
   it('returns a new array and does not mutate the input (pure & deterministic)', () => {
@@ -188,6 +190,53 @@ describe('selectWorkItems — smart selection algorithm', () => {
       expect(result.slice(1, 3).map(i => i.id)).toEqual(['R1', 'R2']);
       // Others retain original relative order.
       expect(result.slice(3).map(i => i.id)).toEqual(['O1', 'O2', 'O3', 'O4']);
+    });
+  });
+
+  describe('done-stage exclusion (WL-0MS94VAII00054L9)', () => {
+    it('excludes a stage=done item from the returned list entirely', () => {
+      const items = [done('D1'), other('O1')];
+      const result = selectWorkItems(items, 10);
+      expect(result.map(i => i.id)).toEqual(['O1']);
+    });
+
+    it('excludes a stage=done item even when it is priority=critical', () => {
+      const items = [done('DC1', { priority: 'critical' }), critical('C1'), other('O1')];
+      const result = selectWorkItems(items, 10);
+      expect(result.map(i => i.id)).toEqual(['C1', 'O1']);
+    });
+
+    it('excludes a stage=done item even when it is status=completed (closed item)', () => {
+      const items = [done('DC1'), inReview('R1'), other('O1')];
+      const result = selectWorkItems(items, 10);
+      expect(result.map(i => i.id)).toEqual(['R1', 'O1']);
+    });
+
+    it('a stage=done item does not consume a browseItemCount slot', () => {
+      const items = [done('D1'), other('O1'), other('O2'), other('O3'), other('O4'), other('O5')];
+      // browseItemCount=5: the done item must not count, so 5 others fill the list.
+      const result = selectWorkItems(items, 5);
+      expect(result).toHaveLength(5);
+      expect(result.map(i => i.id)).toEqual(['O1', 'O2', 'O3', 'O4', 'O5']);
+    });
+
+    it('returns an empty list when all items are stage=done', () => {
+      const items = [done('D1'), done('D2'), done('D3')];
+      expect(selectWorkItems(items, 10)).toEqual([]);
+    });
+
+    it('still shows all mandatory non-done items when done items are interleaved', () => {
+      const items = [
+        critical('C1'),
+        done('D1'),
+        inReview('R1'),
+        done('D2', { priority: 'critical' }),
+        other('O1'),
+        other('O2'),
+      ];
+      // browseItemCount=2: mandatory (C1, R1) = 2 → zero others; done items never appear.
+      const result = selectWorkItems(items, 2);
+      expect(result.map(i => i.id)).toEqual(['C1', 'R1']);
     });
   });
 });

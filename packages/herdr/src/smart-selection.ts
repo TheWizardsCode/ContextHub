@@ -25,6 +25,8 @@ export function isMandatoryItem(item: Pick<WorkItem, 'priority' | 'status' | 'st
 /**
  * Smart-select work items for the default worklist.
  *
+ * - Items whose stage is 'done' (fully closed) are always excluded — the
+ *   default list only shows actionable work (WL-0MS94VAII00054L9).
  * - All mandatory items (critical ∪ completed/in_review) are always included,
  *   deduplicated (an item matching both criteria counts once).
  * - The remaining `browseItemCount` slots are filled with "other" items in
@@ -39,9 +41,10 @@ export function selectWorkItems<T extends Pick<WorkItem, 'priority' | 'status' |
   items: T[],
   browseItemCount: number,
 ): T[] {
-  const criticals = items.filter((i) => i.priority === 'critical');
-  const reviews = items.filter((i) => i.status === 'completed' && i.stage === 'in_review' && i.priority !== 'critical');
-  const others = items.filter((i) => !isMandatoryItem(i));
+  const actionable = items.filter((i) => i.stage !== 'done');
+  const criticals = actionable.filter((i) => i.priority === 'critical');
+  const reviews = actionable.filter((i) => i.status === 'completed' && i.stage === 'in_review' && i.priority !== 'critical');
+  const others = actionable.filter((i) => !isMandatoryItem(i));
   const othersLimit = Math.max(0, browseItemCount - (criticals.length + reviews.length));
   return [...criticals, ...reviews, ...others.slice(0, othersLimit)];
 }
