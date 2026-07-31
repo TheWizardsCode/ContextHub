@@ -31,6 +31,29 @@ import { loadSettings, getDefaultSettingsPath } from './settings.js';
 // At runtime (tsx or dist), __dirname equivalent from import.meta.url
 const _currentDir = dirname(fileURLToPath(import.meta.url));
 const SEND_TO_PI_SCRIPT = resolve(_currentDir, '..', 'scripts', 'send-to-pi.sh');
+const RUN_IN_PANE_SCRIPT = resolve(_currentDir, '..', 'scripts', 'run-in-pane.sh');
+
+/**
+ * Routes a resolved command to its execution channel.
+ *
+ * - `'agent'` — agent workflow commands (`/skill:*`, `/intake`, `/plan`)
+ *   are sent to a new pi agent pane via `send-to-pi.sh`.
+ * - `'pane'` — commands prefixed with `!!` or `!` (shell-executed commands
+ *   such as the audit/review/priority shortcuts) are run visibly in a new
+ *   herdr pane via `run-in-pane.sh`.
+ * - `'stdout'` — everything else falls back to the `CMD:` stdout protocol.
+ */
+export type CommandRoute = 'agent' | 'pane' | 'stdout';
+
+export function routeCommand(command: string): CommandRoute {
+  if (isAgentCommand(command)) {
+    return 'agent';
+  }
+  if (command.startsWith('!!') || command.startsWith('!')) {
+    return 'pane';
+  }
+  return 'stdout';
+}
 
 /**
  * Strip bash history-expansion prefixes (`!!` or `!`) from command strings.
@@ -204,14 +227,33 @@ async function main(): Promise<void> {
       showHelpText: settings.showHelpText,
       onCommand: (command: string) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
-        // pane opened to the right. Other commands are written to stdout with the
-        // CMD: prefix for the calling framework (Herdr) to execute.
-        if (isAgentCommand(command)) {
+        // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
+        // shortcuts like audit approve/reject, priority updates, close/delete) are
+        // routed to a new herdr pane that runs them visibly and auto-closes on
+        // success. Everything else is written to stdout with the CMD: prefix for
+        // the calling framework (Herdr) to execute.
+        const route = routeCommand(command);
+        if (route === 'agent') {
           // Spawn send-to-pi.sh asynchronously — detached and with stdio ignored
           // so the TUI loop is not blocked or affected by the script's output.
           const child = spawn(
             SEND_TO_PI_SCRIPT,
             [command],
+            {
+              detached: true,
+              stdio: 'ignore',
+              cwd: resolvedCwd ?? process.cwd(),
+              env: { ...process.env },
+            },
+          );
+          child.unref(); // Allow the parent to exit independently
+        } else if (route === 'pane') {
+          // Strip `!!` / `!` bash history-expansion prefixes, then run the
+          // command visibly in a new herdr pane via run-in-pane.sh.
+          const clean = stripCommandPrefix(command);
+          const child = spawn(
+            RUN_IN_PANE_SCRIPT,
+            [clean],
             {
               detached: true,
               stdio: 'ignore',

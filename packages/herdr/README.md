@@ -166,6 +166,7 @@ packages/herdr/
 │   ├── open.sh             # Open the worklist pane
 │   ├── toggle.sh           # Toggle the worklist pane
 │   ├── send-to-pi.sh       # Split pane to right, launch pi with agent command
+│   ├── run-in-pane.sh      # Run a shell command visibly in a new pane (auto-close on success)
 │   └── open-pi-agent.sh    # Open a fresh interactive pi agent pane
 └── tests/herdr/            # Test files
 ```
@@ -175,8 +176,10 @@ packages/herdr/
 - **No direct database access** — The plugin uses the `wl` CLI as the backend data source, ensuring compatibility without duplicating data-access logic.
 - **Terminal UI via raw mode** — The TUI uses raw stdin mode and ANSI escape codes for rendering, making it compatible with any Herdr pane without additional dependencies.
 - **Testable core** — All state management, formatting, and keyboard handling is pure logic in `worklist.ts`, fully testable without a terminal.
-- **Command output via callback** — When a chord resolves to a non-`/wl` command, it is passed to an `onCommand` callback (set by the entry point) which writes the resolved command to stdout with a `CMD:` prefix. The calling framework (Herdr) reads this output to execute arbitrary commands.
-- **Pi agent dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are intercepted by the entry point and routed to a new pi agent pane. The `send-to-pi.sh` script splits the current pane to the right, creates a new pane, runs `pi` with the command as the initial prompt, and renames the pane to "Pi Agent". Non-agent commands continue to use the standard `CMD:` output.
+- **Command routing via callback** — When a chord resolves to a non-`/wl` command, it is passed to an `onCommand` callback (set by the entry point) which routes it by prefix:
+  - `!!`/`!` prefixed commands (shell-executed shortcuts such as audit approve/reject, priority updates, close/delete) are run **visibly in a new herdr pane** via `scripts/run-in-pane.sh` — the pane auto-closes after a short pause on success and stays open on failure for error inspection.
+  - Everything else is written to stdout with a `CMD:` prefix for the calling framework (Herdr) to execute.
+- **Pi agent dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are intercepted by the entry point and routed to a new pi agent pane. The `send-to-pi.sh` script splits the current pane to the right, creates a new pane, runs `pi` with the command as the initial prompt, and renames the pane to "Pi Agent". Agent commands are routed before any prefix handling, so they are unaffected by `!!`/`!` processing.
 - **`<id>` placeholder resolution** — Before output, any `<id>` placeholders in the resolved command are replaced with the currently selected work item's ID. If no item is selected and the command requires `<id>`, the command is silently dropped (graceful no-op).
 - **Chord shortcut system** — Multi-key chord sequences are defined in `shortcuts.json` and resolved via `ShortcutRegistry`. Chords can be filtered by view (list/detail) and stage.
 

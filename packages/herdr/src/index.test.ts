@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
-import { stripCommandPrefix } from './index.js';
+import { stripCommandPrefix, routeCommand } from './index.js';
 import {
   fetchItemsByStage,
   resetExecFileAsync,
@@ -101,6 +101,57 @@ describe('stripCommandPrefix', () => {
       expect(stripCommandPrefix('!!wl update <id> --title ')).toBe(
         'wl update <id> --title ',
       );
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// routeCommand tests
+// ---------------------------------------------------------------------------
+
+describe('routeCommand', () => {
+  describe('agent commands', () => {
+    it('routes /skill: commands to the agent pane', () => {
+      expect(routeCommand('/skill:implement <id>')).toBe('agent');
+      expect(routeCommand('/skill:audit <id>')).toBe('agent');
+    });
+
+    it('routes /intake and /plan commands to the agent pane', () => {
+      expect(routeCommand('/intake')).toBe('agent');
+      expect(routeCommand('/intake <id>')).toBe('agent');
+      expect(routeCommand('/plan <id>')).toBe('agent');
+    });
+  });
+
+  describe('!! / ! prefixed commands', () => {
+    it('routes !!-prefixed wl commands to the visible pane', () => {
+      expect(
+        routeCommand(
+          '!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary \'Approved by manual review\'',
+        ),
+      ).toBe('pane');
+    });
+
+    it('routes !!-prefixed single commands to the visible pane', () => {
+      expect(routeCommand('!!wl update <id> --priority high')).toBe('pane');
+      expect(routeCommand('!!wl close <id>')).toBe('pane');
+      expect(routeCommand('!!wl delete <id>')).toBe('pane');
+    });
+
+    it('routes single-! prefixed commands to the visible pane', () => {
+      expect(routeCommand('!wl update <id> --title ')).toBe('pane');
+    });
+  });
+
+  describe('unprefixed commands', () => {
+    it('routes unprefixed commands to stdout (CMD:)', () => {
+      expect(
+        routeCommand(
+          'wl reviewed <id> && wl comment add <id> --body \'<producer_comment>\'',
+        ),
+      ).toBe('stdout');
+      expect(routeCommand('wl search ')).toBe('stdout');
+      expect(routeCommand('/wl idea')).toBe('stdout');
     });
   });
 });
