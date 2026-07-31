@@ -46,12 +46,16 @@ import { vi, describe, it, expect, beforeEach, type Mock } from 'vitest';
 // ── Module-level mocks ──────────────────────────────────────────────────
 // Mock child_process.execFile so we can simulate CLI error output without
 // requiring a real .worklog directory or installed worklog CLI.
-
-const mockExecFile = vi.hoisted(() => vi.fn());
-
-vi.mock('node:child_process', () => ({
-  execFile: mockExecFile,
-}));
+//
+// The mock instance lives in the shared globalThis store installed by
+// tests/setup-tests.ts (which registers both `child_process` and
+// `node:child_process` to the same instances). tools.ts resolves execFile
+// lazily (promisify inside runWl), so the mock is observable regardless of
+// module-load order.
+const mockExecFile = vi.hoisted(() => {
+  const store = (globalThis as any).__sharedChildProcessMocks;
+  return store?.mockExecFile ?? vi.fn();
+});
 
 // ── Imports (resolved after mock is installed) ──────────────────────────
 
@@ -96,6 +100,12 @@ function mockExecSuccess(stdout: string): void {
 describe('runWl initialization error detection (unit)', () => {
   beforeEach(() => {
     mockExecFile.mockReset();
+    // Restore real execFile default so other files sharing the store
+    // (e.g. tests/cli/mock-timeout.test.ts) keep real CLI behavior.
+    const realExecFile = (globalThis as any).__sharedChildProcessMocks?.realExecFile;
+    if (realExecFile) {
+      mockExecFile.mockImplementation(realExecFile);
+    }
   });
 
   describe('detecting known not-initialized pattern', () => {
@@ -326,6 +336,12 @@ describe('runWl initialization error detection (unit)', () => {
 describe('stdout / JSON mode detection (stdout fallback)', () => {
   beforeEach(() => {
     mockExecFile.mockReset();
+    // Restore real execFile default so other files sharing the store
+    // (e.g. tests/cli/mock-timeout.test.ts) keep real CLI behavior.
+    const realExecFile = (globalThis as any).__sharedChildProcessMocks?.realExecFile;
+    if (realExecFile) {
+      mockExecFile.mockImplementation(realExecFile);
+    }
   });
 
   it('detects init error when it arrives via stdout (JSON mode)', async () => {
@@ -391,6 +407,12 @@ describe('stdout / JSON mode detection (stdout fallback)', () => {
 describe('runBrowseFlow notification path (integration)', () => {
   beforeEach(() => {
     mockExecFile.mockReset();
+    // Restore real execFile default so other files sharing the store
+    // (e.g. tests/cli/mock-timeout.test.ts) keep real CLI behavior.
+    const realExecFile = (globalThis as any).__sharedChildProcessMocks?.realExecFile;
+    if (realExecFile) {
+      mockExecFile.mockImplementation(realExecFile);
+    }
   });
 
   it('shows the friendly notification when runWl encounters the initialization error', async () => {

@@ -26,6 +26,8 @@ interface MockStore {
   mockSpawn: ReturnType<typeof vi.fn>;
   mockExecSync: ReturnType<typeof vi.fn>;
   mockSpawnSync: ReturnType<typeof vi.fn>;
+  mockExecFile: ReturnType<typeof vi.fn>;
+  realExecFile?: (file: string, args: readonly string[], options: object, cb: (err: Error | null, stdout?: string, stderr?: string) => void) => void;
 }
 
 /**
@@ -40,6 +42,11 @@ export function initChildProcessMocks(): MockStore {
       mockSpawn: vi.fn(),
       mockExecSync: vi.fn(),
       mockSpawnSync: vi.fn(),
+      mockExecFile: vi.fn(
+        (_file: string, _args: string[], _opts: object, _cb: (err: Error | null, stdout?: string, stderr?: string) => void) => {
+          // no-op default; setup installs the real execFile
+        },
+      ),
     };
   }
   return (globalThis as any)[STORE_KEY] as MockStore;

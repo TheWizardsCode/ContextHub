@@ -9,10 +9,12 @@ import * as fs from 'fs'
 // Test files that need to override spawn/execSync/spawnSync can call
 // mockSpawn.mockImplementation(...) on the shared mocks.
 import { initChildProcessMocks } from './child-process-mocks.js'
-const { mockSpawn, mockExecSync, mockSpawnSync } = initChildProcessMocks()
+const store = initChildProcessMocks()
+const { mockSpawn, mockExecSync, mockSpawnSync, mockExecFile } = store
 
 vi.mock('child_process', async (importOriginal) => {
   const actual = await importOriginal()
+  store.realExecFile = actual.execFile
   return {
     ...actual,
     // By default delegate to real implementation so CLI tests work.
@@ -20,6 +22,19 @@ vi.mock('child_process', async (importOriginal) => {
     spawn: mockSpawn.mockImplementation(actual.spawn),
     execSync: mockExecSync.mockImplementation(actual.execSync),
     spawnSync: mockSpawnSync.mockImplementation(actual.spawnSync),
+    execFile: mockExecFile.mockImplementation(actual.execFile),
+  }
+})
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal()
+  if (!store.realExecFile) store.realExecFile = actual.execFile
+  return {
+    ...actual,
+    spawn: mockSpawn.mockImplementation(actual.spawn),
+    execSync: mockExecSync.mockImplementation(actual.execSync),
+    spawnSync: mockSpawnSync.mockImplementation(actual.spawnSync),
+    execFile: mockExecFile.mockImplementation(actual.execFile),
   }
 })
 

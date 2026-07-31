@@ -11,7 +11,12 @@ import { promisify } from 'node:util';
 import { currentSettings } from './settings.js';
 import { selectWorkItems } from './smart-selection.js';
 
-const execFileAsync = promisify(execFile);
+// Promisify lazily inside the call site rather than at module scope.
+// ESM named imports are live bindings, but `promisify(execFile)` snapshots
+// the function reference at module-load time; tests that mock
+// `node:child_process` (e.g. runWl-init-detection.test.ts) would otherwise
+// keep seeing the pre-mock binding. Resolving per-call keeps the mock
+// observable.
 
 /**
  * Lazily load getWorklogDb so that tests can mock wl-integration.js
@@ -175,6 +180,7 @@ export async function runWl(args: string[], includeJson = true): Promise<string>
   for (const binary of binaries) {
     try {
       const fullArgs = includeJson ? [...args, '--json'] : args;
+      const execFileAsync = promisify(execFile);
       const result = await execFileAsync(binary, fullArgs, { maxBuffer: 1024 * 1024 * 5 });
       return result.stdout;
     } catch (error: any) {
