@@ -85,41 +85,40 @@ may exceed `browseItemCount` when the mandatory set is large.
 
 ### Hierarchical Navigation (Drill into Children)
 
-The browse selection list now supports navigating into child work items
+The browse selection list supports navigating into child work items
 when an item has children. This allows you to drill down through the
 work-item hierarchy without leaving the browse dialog.
 
 **How it works:**
 
 - When an item in the browse list has children (`childCount > 0`), pressing
-  **Enter** on that item shows its children in the list instead of opening
-  the detail view. All items with children are visually marked with a child
-  count indicator (e.g., `(3)`), regardless of their issue type.
-- When viewing children, a **".." (parent) entry** appears at the top of
-  the list. Selecting it and pressing **Enter** navigates back to the
-  parent level.
-- Pressing **Escape** while viewing children also navigates back one level
-  in the hierarchy.
+  **Tab** on that item navigates into its children. All items with children
+  are visually marked with a child count indicator (e.g., `(3)`),
+  regardless of their issue type.
+- **Enter** on any item (including parents with children) opens the detail
+  view, as before.
+- Pressing **Escape** while viewing children navigates back one level in
+  the hierarchy. The footer shows a `[esc] back` hint (with `(N levels)`
+  when nested deeper than one level) while inside a child list.
 - You can drill down **arbitrarily deep** through the hierarchy (children
-  of children of children, etc.) using the same Enter mechanism at each
+  of children of children, etc.) using the same Tab mechanism at each
   level.
-- When navigating back to a parent level (via Escape or the ".." entry),
-  the previously selected item and list state are restored, so you return
-  to the same position you left.
-- When at the root level (no parent context), pressing Enter on an item
-  without children opens the detail view as before — behavior is unchanged
-  for non-parent items.
+- When navigating back to a parent level (via Escape), the previously
+  selected item and list state are restored, so you return to the same
+  position you left.
+- At the root level (no parent context), pressing Enter on an item without
+  children opens the detail view as before — behavior is unchanged for
+  non-parent items.
 
 **Example flow:**
 
 1. Browse the root list — items with children show `(N)` count indicators.
-2. Press Enter on an epic or other item with children → the list updates
-   to show its child work items, with a ".." entry at the top.
-3. Press Enter on a child that also has children → navigate further down.
+2. Press Tab on an epic or other item with children → the list updates to
+   show its child work items.
+3. Press Tab on a child that also has children → navigate further down.
 4. Press Escape to go back up one level.
-5. Press Enter on the ".." entry to also go back up one level.
-6. At root level, pressing Enter on a leaf item opens the detail view.
-7. Escape at root level closes the browse overlay.
+5. At root level, pressing Enter on a leaf item opens the detail view.
+6. Escape at root level closes the browse overlay.
 
 **Note:** When navigating within child items, the auto-refresh feature
 calls `fetchChildren()` to re-fetch the child items of the current parent
