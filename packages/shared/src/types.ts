@@ -119,6 +119,8 @@ export interface WorkItemQuery {
   status?: WorkItemStatus[];
   priority?: WorkItemPriority;
   parentId?: string | null;
+  /** When true, only return root items (items with no parent). Mutually exclusive with parentId. */
+  rootOnly?: boolean;
   tags?: string[];
   assignee?: string;
   stage?: string;

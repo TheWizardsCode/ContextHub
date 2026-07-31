@@ -1170,6 +1170,9 @@ export class WorklogDatabase {
       if (query.parentId !== undefined) {
         items = items.filter(item => item.parentId === query.parentId);
       }
+      if (query.rootOnly) {
+        items = items.filter(item => item.parentId === null);
+      }
       if (query.tags && query.tags.length > 0) {
         items = items.filter(item => 
           query.tags!.some(tag => item.tags.includes(tag))
@@ -1485,23 +1488,10 @@ export class WorklogDatabase {
       this.debug(`${debugPrefix} unblocked criticals after filters=${selectable.length}`);
 
       if (selectable.length > 0) {
-        // Filter out critical children whose parent is a valid candidate
-        // (open, not deleted/completed/in-progress) — the parent should be
-        // preferred for selection via Stage 5.
-        selectable = selectable.filter(item => {
-          if (!item.parentId) return true;
-          const parent = allItems.find(p => p.id === item.parentId);
-          if (!parent) return true;
-          // Parent is a valid candidate if it is actionable
-          if (
-            parent.status !== 'deleted' &&
-            parent.status !== 'completed' &&
-            parent.status !== 'in-progress'
-          ) {
-            return false; // Skip child, parent will compete in Stage 5
-          }
-          return true;
-        });
+        // Strict root-only (WL-0MS964SIA0057ABR): only root criticals are
+        // selectable here. Children are hidden entirely (no orphan promotion)
+        // and their parent, if actionable, competes in Stage 5.
+        selectable = selectable.filter(item => !item.parentId);
       }
 
       if (selectable.length > 0) {
@@ -1567,7 +1557,20 @@ export class WorklogDatabase {
       );
       this.debug(`${debugPrefix} blocking candidates=${blockingPairs.length} after filters=${filteredBlockingPairs.length}`);
 
-      const selectedBlocking = this.selectHighestPriorityBlocking(filteredBlockingPairs, options.sortOrderCache);
+      // Strict root-only (WL-0MS964SIA0057ABR): never surface child blockers.
+      // Resolve each blocker to its root parent when the parent is selectable;
+      // drop blockers whose parent is not selectable (children are hidden
+      // entirely — no orphan promotion).
+      const rootBlockingPairs: { blocking: WorkItem; critical: WorkItem }[] = [];
+      for (const pair of filteredBlockingPairs) {
+        const resolved = this.resolveBlockerToRoot(pair.blocking, allItems, assignee, searchTerm, excluded);
+        if (resolved) {
+          rootBlockingPairs.push({ blocking: resolved, critical: pair.critical });
+        }
+      }
+      this.debug(`${debugPrefix} root-resolved blocking candidates=${rootBlockingPairs.length}`);
+
+      const selectedBlocking = this.selectHighestPriorityBlocking(rootBlockingPairs, options.sortOrderCache);
 
       if (selectedBlocking) {
         this.debug(`${debugPrefix} selected blocker=${selectedBlocking.blocking.id} ("${selectedBlocking.blocking.title}") for critical ${selectedBlocking.critical.id}`);
@@ -1583,23 +1586,12 @@ export class WorklogDatabase {
       if (excluded && excluded.size > 0) {
         selectableBlocked = selectableBlocked.filter(item => !excluded.has(item.id));
       }
-      // Filter out critical children whose parent is a valid candidate — the
-      // parent should be preferred for selection via Stage 5.
-      selectableBlocked = selectableBlocked.filter(item => {
-        if (!item.parentId) return true;
-        const parent = allItems.find(p => p.id === item.parentId);
-        if (!parent) return true;
-        if (
-          parent.status !== 'deleted' &&
-          parent.status !== 'completed' &&
-          parent.status !== 'in-progress'
-        ) {
-          return false;
-        }
-        return true;
-      });
+      // Strict root-only (WL-0MS964SIA0057ABR): only root blocked criticals
+      // are eligible for the last-resort selection. Children are hidden
+      // entirely (no orphan promotion).
+      selectableBlocked = selectableBlocked.filter(item => !item.parentId);
       if (selectableBlocked.length === 0) {
-        this.debug(`${debugPrefix} all blocked criticals filtered out by parent-candidate filter — returning null`);
+        this.debug(`${debugPrefix} all blocked criticals filtered out by root-only filter — returning null`);
         return null;
       }
       const selectedBlockedCritical = this.selectBySortIndex(selectableBlocked, undefined, options.sortOrderCache, options.edgeCache);
@@ -1911,6 +1903,62 @@ export class WorklogDatabase {
    *      accounting for priority inheritance from blocked dependents) then age
    *      (ascending) break ties.
    */
+
+  /**
+   * Resolve a would-be-surfaced blocker to a root-level item (strict root-only,
+   * WL-0MS964SIA0057ABR).
+   *
+   * - Root blockers (no parentId) are returned as-is.
+   * - A child blocker is resolved to its parent when the parent is selectable
+   *   (a root-level item with an actionable status and no active dependency
+   *   blockers, matching the Stage 5 candidate rules). The parent is the unit
+   *   of work and is surfaced instead of the child.
+   * - Returns null when the blocker is a child whose parent is not selectable
+   *   (e.g. the parent is closed/completed/deleted/in-progress/blocked). Such
+   *   children are hidden entirely — never promoted to root.
+   */
+  private resolveBlockerToRoot(
+    blocker: WorkItem,
+    allItems: WorkItem[],
+    assignee?: string,
+    searchTerm?: string,
+    excluded?: Set<string>
+  ): WorkItem | null {
+    if (!blocker.parentId) {
+      return blocker; // already a root blocker
+    }
+    const parent = allItems.find(p => p.id === blocker.parentId);
+    if (!parent) {
+      // Parent is missing (deleted) — the child is an orphan; hidden entirely.
+      return null;
+    }
+    // The parent itself must be a root item (no grandparent) so the surfaced
+    // item is always root-level.
+    if (parent.parentId) {
+      return null;
+    }
+    // Parent must be actionable and not dependency-blocked (matching Stage 5
+    // candidate rules: open, not deleted/completed/in-progress/blocked).
+    if (
+      parent.status === 'deleted' ||
+      parent.status === 'completed' ||
+      parent.status === 'in-progress' ||
+      parent.status === 'blocked'
+    ) {
+      return null;
+    }
+    if (this.getActiveDependencyBlockers(parent.id).length > 0) {
+      return null;
+    }
+    if (excluded?.has(parent.id)) {
+      return null;
+    }
+    if (this.applyFilters([parent], assignee, searchTerm).length === 0) {
+      return null;
+    }
+    return parent;
+  }
+
   private findNextWorkItemFromItems(
     items: WorkItem[],
     assignee?: string,
@@ -1981,6 +2029,12 @@ export class WorklogDatabase {
     ).filter(item => !this.isInProgressSubtree(item, items));
     this.debug(`${debugPrefix} non-critical blocked=${nonCriticalBlocked.length}`);
 
+    // Strict root-only (WL-0MS964SIA0057ABR): tracks whether any would-be
+    // blocker was a hidden child whose parent is not selectable. If no blocker
+    // can be surfaced and no root candidate remains in Stage 5, wl next
+    // returns null with a clear reason rather than surfacing the child.
+    let droppedHiddenChildBlocker = false;
+
     if (nonCriticalBlocked.length > 0 && filteredItems.length > 0) {
       // Find the highest priority value among open candidates
       const bestCompetitorPriority = Math.max(
@@ -2022,29 +2076,32 @@ export class WorklogDatabase {
           this.applyFilters([pair.blocking], assignee, searchTerm).length > 0
         );
 
-        // Filter out child blockers whose parent is a valid (non-deleted,
-        // non-completed, non-in-progress) candidate — the parent should be
-        // preferred for selection via Stage 5 (open item selection) which
-        // correctly returns parents without descending into children.
-        // This mirrors the hierarchy-aware filtering in Stage 2
-        // (handleCriticalEscalation) for unblocked criticals.
-        filteredBlockers = filteredBlockers.filter(pair => {
-          if (!pair.blocking.parentId) return true;
-          const parent = items.find(p => p.id === pair.blocking.parentId);
-          if (!parent) return true;
-          // Parent is a valid candidate if it is actionable (open, not
-          // deleted/completed/in-progress/blocked). A blocked parent cannot
-          // compete in Stage 5, so its child blockers should be preserved.
-          if (
-            parent.status !== 'deleted' &&
-            parent.status !== 'completed' &&
-            parent.status !== 'in-progress' &&
-            parent.status !== 'blocked'
-          ) {
-            return false; // Skip child blocker, parent will compete in Stage 5
+        // Strict root-only (WL-0MS964SIA0057ABR): child blockers are never
+        // surfaced by wl next.
+        //  - A child blocker whose parent is a selectable actionable root
+        //    candidate is dropped — the parent competes in Stage 5 (open item
+        //    selection) and is the unit of work surfaced there.
+        //  - A child blocker whose parent is NOT selectable is hidden entirely
+        //    (no orphan promotion); if no surfacable blocker remains and no
+        //    root candidate exists, wl next returns null with a clear reason.
+        const rootOnlyBlockers: { blocking: WorkItem; blocked: WorkItem }[] = [];
+        for (const pair of filteredBlockers) {
+          if (!pair.blocking.parentId) {
+            // Root-level blocker — surfacing it is fine.
+            rootOnlyBlockers.push(pair);
+            continue;
           }
-          return true;
-        });
+          // Child blocker: resolve to parent when selectable, else hidden.
+          const resolved = this.resolveBlockerToRoot(pair.blocking, items, assignee, searchTerm, excluded);
+          if (resolved) {
+            // Parent is selectable — it competes in Stage 5 (existing
+            // hierarchy awareness, WL-0MQF95NCC0024H61).
+            this.debug(`${debugPrefix}   drop child blocker ${pair.blocking.id} (selectable parent ${resolved.id} competes in Stage 5)`);
+          } else {
+            droppedHiddenChildBlocker = true;
+          }
+        }
+        filteredBlockers = rootOnlyBlockers;
 
         // Filter out blockers that belong to an in-progress parent subtree —
         // children of in-progress parents must not appear as independent
@@ -2081,22 +2138,31 @@ export class WorklogDatabase {
     }
     this.debug(`${debugPrefix} open candidates=${filteredItems.length}`);
 
-    // Identify root-level candidates: items whose parent is not in the candidate set
-    // (orphan promotion: items whose parent is closed/completed and not in the pool
-    // continue to be promoted to root level)
+    // Identify root-level candidates: items with no parent. Strict root-only
+    // (WL-0MS964SIA0057ABR): orphan promotion is removed — children whose
+    // parent is closed/deleted/not in the candidate pool are NOT promoted
+    // and are not returned by wl next.
     // Children of in-progress parents are excluded — the entire in-progress
     // subtree should be skipped from wl next recommendations.
-    const candidateIds = new Set(filteredItems.map(item => item.id));
-    const rootCandidates = filteredItems.filter(item => !item.parentId || !candidateIds.has(item.parentId))
+    const rootCandidates = filteredItems.filter(item => !item.parentId)
       .filter(item => !this.isInProgressSubtree(item, items));
     this.debug(`${debugPrefix} root candidates=${rootCandidates.length}`);
 
     if (rootCandidates.length === 0) {
-      // Fallback: all items have parents in the pool (shouldn't happen normally).
+      // Fallback: no root-level candidates. Strict root-only — do not
+      // descend into children, and do not promote orphans.
       // Still exclude items in an in-progress subtree even in the fallback path
       // so that the entire in-progress subtree is skipped.
-      const fallbackItems = filteredItems.filter(item => !this.isInProgressSubtree(item, items));
+      const fallbackItems = filteredItems.filter(item => !item.parentId && !this.isInProgressSubtree(item, items));
       if (fallbackItems.length === 0) {
+        // Clear reason when blockers were hidden children (WL-0MS964SIA0057ABR):
+        // the child is hidden entirely and its parent is not selectable.
+        if (droppedHiddenChildBlocker) {
+          return {
+            workItem: null,
+            reason: 'No work items available — blockers are child items whose parents are not selectable (children are hidden from wl next)'
+          };
+        }
         return { workItem: null, reason: 'No work items available' };
       }
       const selected = this.selectBySortIndex(fallbackItems, effectivePriorityCache, sortOrderCache, edgeCache, items);

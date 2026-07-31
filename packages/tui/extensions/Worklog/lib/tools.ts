@@ -85,6 +85,8 @@ export interface WorklogBrowseItem {
   status: string;
   priority?: string;
   stage?: string;
+  /** Parent work item id; null/undefined for root items */
+  parentId?: string | null;
   risk?: string;
   effort?: string;
   description?: string;
@@ -131,6 +133,7 @@ export function normalizeListPayload(payload: unknown): WorklogBrowseItem[] {
       status: String(item?.status ?? 'unknown'),
       priority: item?.priority ? String(item.priority) : undefined,
       stage: item?.stage ? String(item.stage) : undefined,
+      parentId: item?.parentId != null ? String(item.parentId) : undefined,
       risk: item?.risk ? String(item.risk) : undefined,
       effort: item?.effort ? String(item.effort) : undefined,
       description: item?.description ? String(item.description) : undefined,
@@ -225,9 +228,12 @@ export function mergeUniqueById(...arrays: WorklogBrowseItem[][]): WorklogBrowse
  * mitigate refresh latency.
  */
 async function fetchMandatorySubsets(run: RunWlFn): Promise<WorklogBrowseItem[]> {
+  // Root-only (WL-0MS964SIA0057ABR): child items are hidden from the
+  // top-level selection list — they are only visible under their parent via
+  // drill-down (Tab).
   const [criticalOutput, reviewOutput] = await Promise.all([
-    run(['list', '--priority', 'critical']),
-    run(['list', '--status', 'completed', '--stage', 'in_review']),
+    run(['list', '--priority', 'critical', '--root-only']),
+    run(['list', '--status', 'completed', '--stage', 'in_review', '--root-only']),
   ]);
   const criticalItems = normalizeListPayload(extractJsonObject(criticalOutput));
   const reviewItems = normalizeListPayload(extractJsonObject(reviewOutput));
@@ -317,8 +323,10 @@ export function createDefaultListWorkItemsDb(
 
       // Mandatory subsets via db.list filters (db.list supports priority /
       // status / stage filtering). Required because wl next caps at 32 items.
-      const criticalItems = db.list({ priority: 'critical' });
-      const reviewItems = db.list({ status: ['completed'], stage: 'in_review' });
+      // Root-only (WL-0MS964SIA0057ABR): children are hidden from the
+      // top-level list; they remain visible via drill-down.
+      const criticalItems = db.list({ priority: 'critical', rootOnly: true });
+      const reviewItems = db.list({ status: ['completed'], stage: 'in_review', rootOnly: true });
       const mandatory = mergeUniqueById(
         (Array.isArray(criticalItems) ? criticalItems : []).map(normalizeDbWorkItem),
         (Array.isArray(reviewItems) ? reviewItems : []).map(normalizeDbWorkItem),
@@ -342,6 +350,7 @@ function normalizeDbWorkItem(item: any): WorklogBrowseItem {
     status: item.status,
     priority: item.priority || undefined,
     stage: item.stage || undefined,
+    parentId: item.parentId != null ? String(item.parentId) : undefined,
     risk: item.risk || undefined,
     effort: item.effort || undefined,
     description: item.description,
@@ -366,7 +375,9 @@ export function createListWorkItemsWithStageDb(
     const db = await getDb();
     if (!db) return defaultListWorkItemsWithStage(stage);
     try {
-      const items = db.list({ stage });
+      // Root-only (WL-0MS964SIA0057ABR): stage-filtered top-level lists hide
+      // child items; children remain reachable via drill-down (wl list --parent).
+      const items = db.list({ stage, rootOnly: true });
       if (!Array.isArray(items)) return defaultListWorkItemsWithStage(stage);
       return items
         .sort((a: any, b: any) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))

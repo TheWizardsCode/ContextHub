@@ -237,5 +237,21 @@ describe('selectWorkItems — smart selection algorithm', () => {
       const result = selectWorkItems(items, 2);
       expect(result.map(i => i.id)).toEqual(['C1', 'R1']);
     });
+
+    it('hides child items from the selection list (WL-0MS964SIA0057ABR)', () => {
+      const items = [
+        critical('C1'),
+        inReview('R1'),
+        other('O1'),
+        // Children must never appear at top level even if they match a
+        // mandatory criterion or are otherwise actionable.
+        makeItem('ChildCritical', { priority: 'critical', parentId: 'C1' }),
+        makeItem('ChildReview', { status: 'completed', stage: 'in_review', parentId: 'R1' }),
+        makeItem('ChildOther', { parentId: 'O1' }),
+      ];
+      const result = selectWorkItems(items, 10);
+      const ids = result.map(i => i.id);
+      expect(ids).toEqual(['C1', 'R1', 'O1']);
+    });
   });
 });

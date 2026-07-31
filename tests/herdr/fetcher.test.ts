@@ -125,6 +125,27 @@ describe('fetchNextItems', () => {
     expect(items[0].status).toBe('unknown');
     expect(items[1].title).toBe('Has title');
   });
+
+  it('fetches mandatory subsets root-only (WL-0MS964SIA0057ABR)', async () => {
+    // Both mandatory-subset `wl list` queries must pass --root-only so child
+    // items never appear in the top-level worklist.
+    const mockFn = vi.fn().mockImplementation((_bin: string, args: string[]) => {
+      const stdout = JSON.stringify({ workItems: [] });
+      return Promise.resolve({ stdout, stderr: '' });
+    });
+    setExecFileAsync(mockFn as any);
+
+    await fetchNextItems(10);
+    const calls = mockFn.mock.calls.map((c: any) => c[1]);
+    const listCalls = calls.filter((args: string[]) => args[0] === 'list');
+    // Two mandatory-subset queries: critical + completed/in_review.
+    expect(listCalls.length).toBeGreaterThanOrEqual(2);
+    for (const args of listCalls) {
+      expect(args).toContain('--root-only');
+    }
+    // Drill-down (children) is NOT root-only — children must remain fetchable.
+    expect(calls.some((args: string[]) => args.includes('--parent'))).toBe(false);
+  });
 });
 
 describe('fetchItemDetails', () => {
@@ -195,6 +216,20 @@ describe('fetchItemsByStage', () => {
 
     const items = await fetchItemsByStage('done');
     expect(items).toEqual([]);
+  });
+
+  it('passes --root-only to wl list for stage queries (WL-0MS964SIA0057ABR)', async () => {
+    const mockFn = vi.fn().mockImplementation((_bin: string, args: string[]) => {
+      const stdout = JSON.stringify({ workItems: [] });
+      return Promise.resolve({ stdout, stderr: '' });
+    });
+    setExecFileAsync(mockFn as any);
+
+    await fetchItemsByStage('in_progress');
+    const calls = mockFn.mock.calls.map((c: any) => c[1]);
+    expect(calls).toHaveLength(1);
+    // runWl appends --json automatically.
+    expect(calls[0]).toEqual(['list', '--stage', 'in_progress', '--root-only', '--json']);
   });
 });
 

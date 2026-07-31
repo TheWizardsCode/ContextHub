@@ -37,11 +37,15 @@ export function isMandatoryItem(item: Pick<WorkItem, 'priority' | 'status' | 'st
  * Pure & deterministic: takes (items, browseItemCount), returns a new array,
  * does not mutate the input. The caller clamps `browseItemCount` to 1–50.
  */
-export function selectWorkItems<T extends Pick<WorkItem, 'priority' | 'status' | 'stage'>>(
+export function selectWorkItems<T extends Pick<WorkItem, 'priority' | 'status' | 'stage' | 'parentId'>>(
   items: T[],
   browseItemCount: number,
 ): T[] {
-  const actionable = items.filter((i) => i.stage !== 'done');
+  // Defensive root-only filter (WL-0MS964SIA0057ABR): merged lists can never
+  // contain child items regardless of source. Children are only visible under
+  // their parent via expand.
+  const rootOnly = items.filter((i) => !i.parentId);
+  const actionable = rootOnly.filter((i) => i.stage !== 'done');
   const criticals = actionable.filter((i) => i.priority === 'critical');
   const reviews = actionable.filter((i) => i.status === 'completed' && i.stage === 'in_review' && i.priority !== 'critical');
   const others = actionable.filter((i) => !isMandatoryItem(i));

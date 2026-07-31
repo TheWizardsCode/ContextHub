@@ -299,6 +299,27 @@ describe('runWl initialization error detection (unit)', () => {
         /Unable to execute wl\/worklog CLI/,
       );
     });
+
+    it('passes --root-only to mandatory-subset wl list queries (WL-0MS964SIA0057ABR)', async () => {
+      // Success responses for: next, critical list, completed/in_review list.
+      mockExecSuccess(JSON.stringify({ results: [] }));
+      mockExecSuccess(JSON.stringify({ workItems: [] }));
+      mockExecSuccess(JSON.stringify({ workItems: [] }));
+
+      const listItems = createDefaultListWorkItems();
+      const items = await listItems();
+      expect(items).toEqual([]);
+
+      // Every wl list invocation for the mandatory subsets must carry
+      // --root-only so child items never appear in the top-level list.
+      const listCalls = mockExecFile.mock.calls
+        .map((c: any) => c[1])
+        .filter((args: string[]) => args[0] === 'list');
+      expect(listCalls.length).toBeGreaterThanOrEqual(2);
+      for (const args of listCalls) {
+        expect(args).toContain('--root-only');
+      }
+    });
   });
 });
 

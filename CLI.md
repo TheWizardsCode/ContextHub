@@ -446,11 +446,13 @@ Suggest the next work item(s) to work on. Non-actionable items (deleted, complet
 
 #### Hierarchy-aware selection
 
-`wl next` is hierarchy-aware: it returns **parent items** instead of descending into their children. For example, if an epic has open child tasks, `wl next` returns the epic itself — not one of its children. This surfaces the high-level unit of work for you to claim, after which you can work on its sub-tasks.
+`wl next` is strictly root-only: it returns **parent items** only and never returns an item with a `parentId` set. For example, if an epic has open child tasks, `wl next` returns the epic itself — never one of its children. This surfaces the high-level unit of work for you to claim, after which you can work on its sub-tasks (reachable via `wl list --parent <id>` or drill-down in the TUIs).
 
-Leaf items (items without children, or whose children are all completed) continue to be returned normally. Items whose parent is completed, deleted, or otherwise absent from the candidate pool are promoted to root level (orphan promotion) and compete on their own merit.
+Leaf items (items without children, or whose children are all completed) continue to be returned normally. **Orphan promotion is removed** — children whose parent is completed, deleted, or otherwise absent from the candidate pool are hidden entirely and are NOT promoted to root level. Such children remain reachable via `wl list --parent <id>`, `wl show`, and search.
 
-Items whose parent (or ancestor) has status `in-progress` are **not** promoted — the entire in-progress subtree is skipped from `wl next` recommendations. This includes critical-priority children: they are only surfaced when their parent is not a valid (open, non-completed, non-deleted, non-in-progress) candidate.
+Items whose parent (or ancestor) has status `in-progress` are **not** returned — the entire in-progress subtree is skipped from `wl next` recommendations. This includes critical-priority children.
+
+In blocker-surfacing and critical-escalation paths, child blockers are never returned directly: a child blocker whose parent is a selectable actionable root is surfaced as that parent instead, and a child blocker whose parent is not selectable is hidden entirely (returning null with a clear reason when no other work is available).
 
 In batch mode (`-n <count>`), children of returned parents are also excluded from subsequent results, ensuring the batch never contains items from the same subtree.
 
@@ -471,13 +473,13 @@ When multiple candidate items exist, `wl next` ranks them using the following cr
 3. **Blocked penalty** — items with active dependency blockers are excluded by default (see `--include-blocked`).
 4. **Tie-breakers** — sort_index, then age (older items first) break remaining ties.
 
-Items with `status: 'blocked'` that have `critical` priority trigger a special escalation path: their direct blockers are surfaced immediately, bypassing the general ranking logic. Blocked `critical` items that are children of an open parent are still escalated — the parent item's blockers will be surfaced if the critical child is in its tree.
+Items with `status: 'blocked'` that have `critical` priority trigger a special escalation path: their direct blockers are surfaced immediately, bypassing the general ranking logic. Blocked `critical` items that are children of an open parent are still escalated — the parent item's blockers will be surfaced if the critical child is in its tree. Child blockers are never returned directly (see "Hierarchy-aware selection" above).
 
 #### Backward compatibility
 
 The `--include-blocked` flag behavior is unchanged. The ranking boost only affects ordering among candidates that are already considered (i.e., unblocked items by default).
 
-The JSON output schema is unchanged — only the selection behavior differs: parent items are now returned instead of children.
+The JSON output schema is unchanged — only the selection behavior differs: only root items (parents) are now returned instead of children.
 
 Options:
 
@@ -603,6 +605,7 @@ Options:
 `-s, --status <status>` (optional)
 `-p, --priority <priority>` (optional)
 `--parent <id>` — Filter by parent ID (direct children only) (optional).
+`--root-only` — Show only root-level items (items with no parent). Mutually exclusive with `--parent` (optional).
 `--tags <tags>` (optional)
 `-a, --assignee <assignee>` (optional)
 `-n, --number <n>` (optional) — Limit the number of items returned
@@ -621,6 +624,8 @@ wl list -s open -p high
 wl list -s open,in-progress    # status is open OR in-progress
 wl list --status open,completed,blocked
 wl list -s open,in-progress --stage in_review  # status AND stage filters
+wl list --root-only            # root items only (no parents)
+wl list --root-only -p critical
 wl search "signup"
 wl -F concise list -s in-progress
 wl --json list -s open --tags backlog

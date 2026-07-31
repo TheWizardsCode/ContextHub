@@ -88,6 +88,8 @@ export interface WorkItem {
   status: string;
   priority?: string;
   stage?: string;
+  /** Parent work item id; null/undefined for root items */
+  parentId?: string | null;
   risk?: string;
   effort?: string;
   description?: string;
@@ -167,6 +169,7 @@ function normalizeItem(raw: any): WorkItem {
     status: String(raw?.status ?? 'unknown'),
     priority: raw?.priority ? String(raw.priority) : undefined,
     stage: raw?.stage ? String(raw.stage) : undefined,
+    parentId: raw?.parentId != null ? String(raw.parentId) : undefined,
     risk: raw?.risk ? String(raw.risk) : undefined,
     effort: raw?.effort ? String(raw.effort) : undefined,
     description: raw?.description ? String(raw.description) : undefined,
@@ -324,9 +327,11 @@ function mergeUniqueById(...arrays: WorkItem[][]): WorkItem[] {
  * mitigate refresh latency.
  */
 async function fetchMandatorySubsets(): Promise<WorkItem[]> {
+  // Root-only (WL-0MS964SIA0057ABR): child items are hidden from the
+  // top-level worklist — they are only visible under their parent via expand.
   const [criticalOutput, reviewOutput] = await Promise.all([
-    runWl(['list', '--priority', 'critical']),
-    runWl(['list', '--status', 'completed', '--stage', 'in_review']),
+    runWl(['list', '--priority', 'critical', '--root-only']),
+    runWl(['list', '--status', 'completed', '--stage', 'in_review', '--root-only']),
   ]);
   const criticalItems = extractItems(extractJson(criticalOutput));
   const reviewItems = extractItems(extractJson(reviewOutput));
@@ -365,9 +370,11 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
 
 /**
  * Fetch work items filtered by stage (via `wl list --stage`).
+ * Root-only (WL-0MS964SIA0057ABR): stage-filtered top-level lists hide
+ * child items; children remain reachable via expand (wl list --parent).
  */
 export async function fetchItemsByStage(stage: string): Promise<WorkItem[]> {
-  const output = await runWl(['list', '--stage', stage]);
+  const output = await runWl(['list', '--stage', stage, '--root-only']);
   const payload = extractJson(output);
   return extractItems(payload);
 }
