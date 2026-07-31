@@ -22,7 +22,7 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join, parse } from 'path';
 import { existsSync } from 'fs';
-import { checkWlAvailable, fetchNextItems, fetchItemsByStage } from './fetcher.js';
+import { checkWlAvailable, fetchNextItems, fetchItemsByStage, setWorklogDir } from './fetcher.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { loadSettings, getDefaultSettingsPath } from './settings.js';
@@ -122,6 +122,22 @@ export function findWorklogRoot(startDir?: string): string | undefined {
 // Load settings
 const settings = loadSettings();
 
+/**
+ * Resolve the worklog root starting from the given directory (or the
+ * process CWD when not provided) and configure the fetcher so every child
+ * `wl` invocation targets that root's database via `--worklog-dir`.
+ *
+ * Returns the resolved project root, or undefined when no valid `.worklog/`
+ * is found (in which case the fetcher falls back to default resolution).
+ */
+export function configureWorklogTarget(startDir?: string): string | undefined {
+  const wlRoot = findWorklogRoot(startDir);
+  if (wlRoot) {
+    setWorklogDir(join(wlRoot, '.worklog'));
+  }
+  return wlRoot;
+}
+
 async function main(): Promise<void> {
   // Check if wl is available
   const wlAvailable = await checkWlAvailable();
@@ -142,23 +158,17 @@ async function main(): Promise<void> {
   const shortcutRegistry = loadShortcutConfig();
 
   // Use HERDR_RESOLVED_CWD when set (passed via --env from open.sh)
-  // to change the process CWD before any wl invocation.  The wl CLI
-  // auto-discovers the worklog by walking up from process.cwd(), and
-  // --worklog-dir does NOT exist in wl v1.0.3.
+  // as the starting directory for worklog discovery. The resolved root
+  // is passed to child `wl` processes via --worklog-dir (setWorklogDir),
+  // so we do NOT rely on a fragile process.chdir().
   const resolvedCwd = process.env.HERDR_RESOLVED_CWD;
   process.stderr.write(`[worklog-plugin] HERDR_RESOLVED_CWD='${resolvedCwd ?? '(not set)'}'\n`);
 
-  if (resolvedCwd) {
-    process.chdir(resolvedCwd);
-  }
-
-  process.stderr.write(`[worklog-plugin] process.cwd()='${process.cwd()}'\n`);
-
-  const wlRoot = findWorklogRoot();
+  const wlRoot = configureWorklogTarget(resolvedCwd ?? process.cwd());
   if (wlRoot) {
     process.stderr.write(`[worklog-plugin] wlRoot resolved: ${wlRoot}\n`);
   } else {
-    process.stderr.write(`[worklog-plugin] No valid .worklog/ directory found in or above '${process.cwd()}'\n`);
+    process.stderr.write(`[worklog-plugin] No valid .worklog/ directory found in or above '${resolvedCwd ?? process.cwd()}'\n`);
     process.stderr.write(`[worklog-plugin] Showing empty worklist. Navigate to a project with 'worklog init' to see items.\n`);
   }
 
@@ -203,7 +213,7 @@ async function main(): Promise<void> {
             {
               detached: true,
               stdio: 'ignore',
-              cwd: process.cwd(),
+              cwd: resolvedCwd ?? process.cwd(),
               env: { ...process.env },
             },
           );
