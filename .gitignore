@@ -145,6 +145,9 @@ Worklog Specific Ignores
 # Ignore Worklog directory by default
 .worklog/*
 
+# Ignore nested Worklog worktree directories anywhere in the tree
+**/.worklog/
+
 !.worklog/config.yaml
 
 # opencode temporary files and directories
