@@ -4,8 +4,9 @@
 # Splits the current pane to the right, runs the given command through a
 # shell in the new pane so its command line and output are visible, renames
 # the pane, and manages the pane lifecycle:
-#   - exit 0      → brief pause (500ms), then the pane auto-closes
-#   - non-zero    → the pane stays open for error inspection
+#   - any exit status → the pane stays open so the user can read the output;
+#     the exit status is reported and a hint tells the user how to close the
+#     pane manually (herdr `close_pane` binding, default `prefix+x`)
 #
 # Usage:
 #   run-in-pane.sh <command>
@@ -32,7 +33,7 @@ herdr_bin="${HERDR_BIN_PATH:-herdr}"
 # ── In-pane wrapper mode ─────────────────────────────────────────────────
 # Invoked by the new pane itself (via `herdr pane run ... exec bash
 # <this-script> --exec <command> <pane_id>`). Runs the command, reports the
-# exit status, and closes the pane on success.
+# exit status, and leaves the pane open so the user can read the output.
 if [ "${1:-}" = "--exec" ]; then
   cmd="${2:-}"
   pane_id="${3:-}"
@@ -47,12 +48,7 @@ if [ "${1:-}" = "--exec" ]; then
 
   echo ""
   echo "=== Command exited with status $status ==="
-
-  if [ "$status" -eq 0 ]; then
-    # Brief pause so the user can read the final output, then close.
-    sleep 0.5
-    "$herdr_bin" pane close "$pane_id" >/dev/null 2>&1 || true
-  fi
+  echo "Pane left open — close it when done (herdr: prefix+x / close_pane)."
 
   exit "$status"
 fi
