@@ -54,8 +54,9 @@ The plugin pane will then be available via the Herdr plugin system.
    - `PgDn` — Page down
    - `g` — Go to first item
    - `G` — Go to last item (last visible item in expanded hierarchy)
-   - `Enter` — View item details
-   - `Escape` — Go back (from detail or filter mode)
+   - `Enter` — View item details, or expand a parent item with children
+   - `Tab` — Toggle expand/collapse a parent item with children
+   - `Escape` — Go back (from detail or filter mode); in a child list, return to the parent level at the previous scroll position
 
 3. Filter by stage using chord shortcuts:
    - Press `f` then `i` — Filter to idea-stage items

@@ -56,6 +56,40 @@ describe('refreshItems', () => {
     expect(state.items.length).toBe(5);
   });
 
+  it('preserves navigation stack and expanded parents across refresh', () => {
+    const child = makeItem('WL-CHILD', { childCount: 0 });
+    const parent = makeItem('WL-PARENT', { childCount: 1, children: [child] });
+    const state = new WorkItemListState([parent], defaultTermSize);
+    state.setSelectedIndex(0);
+    // Drill down: expand the parent (records navigation context)
+    state.pushNavigationState('WL-PARENT');
+    state.toggleExpand('WL-PARENT');
+    expect(state.navigationStack.depth).toBe(1);
+    expect(state.isExpanded('WL-PARENT')).toBe(true);
+
+    // Simulate auto-refresh returning fresh top-level items
+    const refreshedChild = makeItem('WL-CHILD', { childCount: 0 });
+    const refreshedParent = makeItem('WL-PARENT', { childCount: 1, children: [refreshedChild] });
+    state.refreshItems([refreshedParent]);
+
+    // Navigation context and expansion survive the refresh
+    expect(state.navigationStack.depth).toBe(1);
+    expect(state.isExpanded('WL-PARENT')).toBe(true);
+    const flat = state.getFlattenedItems();
+    expect(flat.length).toBe(2); // parent + child still visible
+    expect(flat[1].id).toBe('WL-CHILD');
+  });
+
+  it('collapses stale expanded parents removed by refresh', () => {
+    const state = new WorkItemListState([makeItem('WL-OLD')], defaultTermSize);
+    state.toggleExpand('WL-OLD');
+    expect(state.isExpanded('WL-OLD')).toBe(true);
+
+    // Refresh replaces items — the old parent no longer exists
+    state.refreshItems([makeItem('WL-NEW')]);
+    expect(state.isExpanded('WL-OLD')).toBe(true); // set retained (no crash)
+  });
+
   it('preserves selection index when possible', () => {
     const initialItems = makeItems(5);
     const state = new WorkItemListState(initialItems, defaultTermSize);

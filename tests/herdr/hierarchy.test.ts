@@ -178,6 +178,40 @@ describe('handleKeypress hierarchy', () => {
     expect(action).toBe('toggle-expand');
   });
 
+  it('expanding via Enter pushes navigation state; Escape returns to parent', () => {
+    const child = makeChildItem('WL-001', 1);
+    const items = [makeItem('WL-001', { childCount: 1, children: [child] }) ];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.setSelectedIndex(0);
+    // Enter expands the parent and records the parent context
+    const expandAction = handleKeypress(state, '\r', defaultTermSize);
+    expect(expandAction).toBe('toggle-expand');
+    expect(state.isExpanded('WL-001')).toBe(true);
+    expect(state.navigationStack.depth).toBe(1);
+    expect(state.navigationStack.peek()?.parentId).toBe('WL-001');
+
+    // Navigate onto the child, then Escape pops back to the parent
+    state.moveDown();
+    expect(state.getFlattenedItems()[state.selectedIndex].id).toBe('WL-001-C1');
+    const backAction = handleKeypress(state, '\x1b', defaultTermSize);
+    expect(backAction).toBe('back');
+    expect(state.selectedIndex).toBe(0);
+    expect(state.navigationStack.depth).toBe(0);
+  });
+
+  it('collapsing a parent clears its navigation-stack entry', () => {
+    const child = makeChildItem('WL-001', 1);
+    const items = [makeItem('WL-001', { childCount: 1, children: [child] }) ];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.setSelectedIndex(0);
+    // Expand (pushes) then collapse (should clear)
+    handleKeypress(state, '\t', defaultTermSize);
+    expect(state.navigationStack.depth).toBe(1);
+    handleKeypress(state, '\t', defaultTermSize);
+    expect(state.isExpanded('WL-001')).toBe(false);
+    expect(state.navigationStack.depth).toBe(0);
+  });
+
   it('Tab is noop for items without children', () => {
     const items = [makeItem('WL-001')];
     const state = new WorkItemListState(items, defaultTermSize);

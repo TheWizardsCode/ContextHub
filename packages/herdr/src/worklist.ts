@@ -153,6 +153,21 @@ export class NavigationStack {
     this.stack = [];
   }
 
+  /**
+   * Remove the topmost entry whose parentId matches, if any.
+   * Used when collapsing a parent: the saved context for that parent is no
+   * longer reachable, so keeping it would make a later Escape pop into a
+   * collapsed parent.
+   */
+  removeForParent(parentId: string): void {
+    for (let i = this.stack.length - 1; i >= 0; i--) {
+      if (this.stack[i].parentId === parentId) {
+        this.stack.splice(i, 1);
+        return;
+      }
+    }
+  }
+
   /** Current depth of the navigation stack. */
   get depth(): number {
     return this.stack.length;
@@ -327,6 +342,14 @@ export class WorkItemListState {
       this._adjustScroll();
     }
     return entry;
+  }
+
+  /**
+   * Drop the saved navigation context for a parent, used when that parent is
+   * collapsed so a later Escape does not pop back into a collapsed list.
+   */
+  clearNavigationStateFor(parentId: string): void {
+    this.navigationStack.removeForParent(parentId);
   }
 
   /**
@@ -1098,6 +1121,15 @@ export function handleKeypress(
           const selected = flat[state.selectedIndex];
           // Toggle expand/collapse for items with actual children data
           if (selected.children && selected.children.length > 0 && selected.depth === undefined) {
+            if (state.isExpanded(selected.id)) {
+              // Collapsing — remove the matching navigation-stack entry so
+              // a later Escape does not pop back into a collapsed parent.
+              state.clearNavigationStateFor(selected.id);
+            } else {
+              // Drilling down — save the current (parent) scroll/selection
+              // state so Escape can return to it.
+              state.pushNavigationState(selected.id);
+            }
             state.toggleExpand(selected.id);
             return 'toggle-expand';
           }
@@ -1139,6 +1171,13 @@ export function handleKeypress(
           const selected = flat[state.selectedIndex];
           // Only top-level items with children can be expanded/collapsed
           if (selected.depth === undefined && selected.childCount && selected.childCount > 0) {
+            // Track hierarchy: push parent state before expanding so Escape
+            // can return to it; drop the entry when collapsing.
+            if (state.isExpanded(selected.id)) {
+              state.clearNavigationStateFor(selected.id);
+            } else {
+              state.pushNavigationState(selected.id);
+            }
             // If children data already loaded, toggle inline
             if (selected.children && selected.children.length > 0) {
               state.toggleExpand(selected.id);
@@ -1552,6 +1591,22 @@ export async function runWorklistTui(
       const newItems = await fetcher();
       const oldLen = state.items.length;
       state.refreshItems(newItems);
+      // Re-fetch children for expanded parents so the hierarchy view stays
+      // fresh after an auto/manual refresh while inside a child context.
+      const expanded = [...state.expandedItems];
+      if (expanded.length > 0) {
+        const byId = new Map(newItems.map((it) => [it.id, it]));
+        await Promise.all(expanded.map(async (parentId) => {
+          const parent = byId.get(parentId);
+          if (!parent) return; // parent no longer exists
+          try {
+            const children = await fetchChildrenForItem(parentId);
+            parent.children = children;
+          } catch {
+            // ignore: keep previously fetched children on refresh failure
+          }
+        }));
+      }
       if (showNotification && newItems.length !== oldLen) {
         const diff = newItems.length - oldLen;
         const msg = diff > 0 ? `+${diff} new` : `${diff} removed`;
