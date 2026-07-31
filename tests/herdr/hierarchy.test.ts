@@ -402,6 +402,33 @@ describe('handleKeypress hierarchy', () => {
     expect(state.selectedIndex).toBe(3);
   });
 
+  it('popNavigationState restores scrollOffset captured at push time', () => {
+    const items = [
+      makeItem('WL-001', { childCount: 1, children: [makeChildItem('WL-001', 1)] }),
+      ...Array.from({ length: 30 }, (_, i) => makeItem(`WL-SCROLL-${i}`)),
+    ];
+    const state = new WorkItemListState(items, defaultTermSize);
+    state.setSelectedIndex(0);
+
+    // Scroll down so the parent list has a non-zero scroll offset
+    state.moveDown();
+    state.moveDown();
+    state.moveDown();
+    expect(state.selectedIndex).toBeGreaterThan(0);
+    expect(state.scrollOffset).toBeGreaterThanOrEqual(0);
+    const capturedOffset = state.scrollOffset;
+
+    // Push parent context (as Enter/Tab expansion does), then move away
+    state.pushNavigationState('WL-001');
+    state.selectedIndex = 0;
+    state.scrollOffset = 0;
+
+    // Pop restores the scroll position captured at push time
+    const restored = state.popNavigationState();
+    expect(restored).not.toBeNull();
+    expect(state.scrollOffset).toBe(capturedOffset);
+  });
+
   it('peekNavigationStack returns top entry without removing it', () => {
     const items = [makeItem('WL-001', { childCount: 1, children: [makeChildItem('WL-001', 1)] })];
     const state = new WorkItemListState(items, defaultTermSize);
