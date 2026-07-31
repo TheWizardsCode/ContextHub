@@ -543,6 +543,48 @@ describe('dispatchChordCommand', () => {
     expect(dispatchChordCommand('!!wl update <id> --priority high', state)).toBe(false);
   });
 
+  it('routes each priority chord template with id substitution', () => {
+    const items = [makeWorkItem('WL-001')];
+    const templates = [
+      ['!!wl update <id> --priority low', '!!wl update WL-001 --priority low'],
+      ['!!wl update <id> --priority medium', '!!wl update WL-001 --priority medium'],
+      ['!!wl update <id> --priority high', '!!wl update WL-001 --priority high'],
+      ['!!wl update <id> --priority critical', '!!wl update WL-001 --priority critical'],
+    ] as const;
+    for (const [template, expected] of templates) {
+      const commands: string[] = [];
+      const callback = (cmd: string) => { commands.push(cmd); };
+      const result = executeResolvedCommand(template, makeState(items), callback);
+      expect(result).toBe('callback');
+      expect(commands).toEqual([expected]);
+    }
+  });
+
+  it('routes u-s stage/status chord template with id substitution', () => {
+    const items = [makeWorkItem('WL-001')];
+    const commands: string[] = [];
+    const callback = (cmd: string) => { commands.push(cmd); };
+    const result = executeResolvedCommand('!!wl update <id> --status <status> --stage <stage> ', makeState(items), callback);
+    expect(result).toBe('callback');
+    expect(commands).toEqual(['!!wl update WL-001 --status <status> --stage <stage> ']);
+  });
+
+  it('routes audit approve/reject chord templates with id substitution', () => {
+    const items = [makeWorkItem('WL-001')];
+    const templates = [
+      ["!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'", "!!wl reviewed WL-001 false && wl audit-set WL-001 --ready-to-close yes --summary 'Approved by manual review'"],
+      ["!!wl reviewed <id> false && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'", "!!wl reviewed WL-001 false && wl audit-set WL-001 --ready-to-close no --summary 'Rejected by manual review. <reason>'"],
+    ] as const;
+    for (const [template, expected] of templates) {
+      const commands: string[] = [];
+      const callback = (cmd: string) => { commands.push(cmd); };
+      // dispatchChordCommand handles !!wl reviewed/audit-set and routes to onCommand
+      const result = executeResolvedCommand(template, makeState(items), callback);
+      expect(result).toBe('dispatched');
+      expect(commands).toEqual([expected]);
+    }
+  });
+
   it('returns false for !!wl close command (falls through to executeResolvedCommand)', () => {
     const items = [makeWorkItem('WL-001')];
     const state = makeState(items);
