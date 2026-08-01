@@ -10,8 +10,20 @@ import {
   getTermSize,
   executeResolvedCommand,
   dispatchChordCommand,
+  ANSI,
 } from './worklist.js';
 import type { WorkItem } from './fetcher.js';
+
+// ── ANSI helpers ───────────────────────────────────────────────────────
+// Regression test: the sync-failed status indicator uses ANSI.yellow
+// (WL-0MS4FIUYS001K08K) but `yellow` was missing from the ANSI object,
+// breaking `npm run build` (tsc) in packages/herdr.
+
+describe('ANSI helpers', () => {
+  it('defines yellow as a valid ANSI escape code', () => {
+    expect(ANSI.yellow).toBe('\x1b[33m');
+  });
+});
 
 /**
  * Build a minimal WorkItem with required fields.

@@ -97,18 +97,43 @@ function isInsideWorktree(dir: string): boolean {
 }
 
 /**
+ * Check whether a `.worklog/` directory is a leftover worktree container
+ * rather than a real project worklog.
+ *
+ * The implement tool's worktree lifecycle creates `.worklog/worktrees/`
+ * directories (e.g. inside `packages/herdr` when the tool runs with that
+ * CWD). After worktrees are cleaned up, an empty `worktrees/` subdirectory
+ * may remain. Such a stub has no `config.yaml`, `initialized` marker, or
+ * `worklog.db` — it is NOT a project worklog and must not block upward
+ * resolution to the real project root.
+ */
+function isWorktreeContainerStub(wlDir: string): boolean {
+  return (
+    existsSync(join(wlDir, 'worktrees')) &&
+    !existsSync(join(wlDir, 'config.yaml')) &&
+    !existsSync(join(wlDir, 'initialized')) &&
+    !existsSync(join(wlDir, 'worklog.db'))
+  );
+}
+
+/**
  * Find the project root containing a valid `.worklog/` directory.
  *
  * Walks up from the current working directory. When a `.worklog/` directory
  * is found but is NOT valid (lacks `worklog.db` or `initialized` marker):
+ * - If it is a leftover worktree container stub (contains only a
+ *   `worktrees/` subdirectory and no config markers), skip past it and
+ *   continue walking up. Such stubs are created by the implement tool's
+ *   worktree lifecycle (e.g. inside `packages/herdr`) and are not real
+ *   project worklogs.
  * - If we are inside a worktree (path contains `.worklog/worktrees/`), skip
  *   past the invalid `.worklog/` and continue walking up.  Worktree
  *   `.worklog/` directories may be incomplete stubs left by `git worktree`
  *   setup; the real project root is above them.
- * - If we are NOT inside a worktree, stop walking and return `undefined`.
- *   This prevents the plugin from silently picking up an unrelated
- *   project's `.worklog/` higher up the tree when the calling framework
- *   sets CWD to a project that has no `.worklog/` of its own.
+ * - Otherwise, stop walking and return `undefined`.  This prevents the
+ *   plugin from silently picking up an unrelated project's `.worklog/`
+ *   higher up the tree when the calling framework sets CWD to a project
+ *   that has no `.worklog/` of its own.
  *
  * Returns the project root path, or `undefined` if no valid `.worklog/` can
  * be found. The caller should handle the `undefined` case by reporting the
@@ -129,8 +154,9 @@ export function findWorklogRoot(startDir?: string): string | undefined {
         return dir;
       }
       // Found .worklog/ but it is NOT valid.
-      // Only walk past it when inside a worktree; otherwise stop here.
-      if (!isInsideWorktree(dir)) {
+      // Only walk past it when it is a leftover worktree container stub or
+      // when inside a worktree; otherwise stop here.
+      if (!isWorktreeContainerStub(wlDir) && !isInsideWorktree(dir)) {
         return undefined;
       }
     }

@@ -416,6 +416,28 @@ describe('findWorklogRoot', () => {
 
       expect(findWorklogRoot()).toBe(worktreeDir);
     });
+
+    it('walks past a leftover .worklog/worktrees container stub to find the real project worklog', async () => {
+      // Regression: a stray `.worklog/worktrees/` container (created by the
+      // implement tool's worktree lifecycle, e.g. inside packages/herdr)
+      // must not block upward resolution to the real project root.
+      const { findWorklogRoot } = await import('./index.js');
+      const base = makeTempDir();
+      const projectRoot = join(base, 'context-hub');
+
+      // Real, valid .worklog/ at the project root
+      mkdirSync(join(projectRoot, '.worklog'), { recursive: true });
+      writeFileSync(join(projectRoot, '.worklog', 'worklog.db'), '');
+
+      // CWD is a plugin dir that contains a leftover worktree container
+      // (empty .worklog/worktrees/, no config.yaml / initialized / worklog.db)
+      const cwd = join(projectRoot, 'packages', 'herdr');
+      mkdirSync(join(cwd, '.worklog', 'worktrees'), { recursive: true });
+
+      vi.spyOn(process, 'cwd').mockReturnValue(cwd);
+
+      expect(findWorklogRoot()).toBe(projectRoot);
+    });
   });
 });
 

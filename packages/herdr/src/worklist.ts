@@ -89,6 +89,7 @@ export const ANSI = {
   dim: '\x1b[2m',
   reverse: '\x1b[7m',
   underline: '\x1b[4m',
+  yellow: '\x1b[33m',
   clear: '\x1b[2J',
   clearLine: '\x1b[2K',
   cursorHome: '\x1b[H',
