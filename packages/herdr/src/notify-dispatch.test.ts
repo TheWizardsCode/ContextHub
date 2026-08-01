@@ -33,6 +33,7 @@ vi.mock('./notify.js', () => ({
 import { runWorklistTui } from './worklist.js';
 import { showToast } from './notify.js';
 import { runSync } from './auto-sync.js';
+import { ShortcutRegistry } from './shortcut-config.js';
 
 const mockShowToast = showToast as Mock;
 const mockRunSync = runSync as Mock;
@@ -156,5 +157,75 @@ describe('runWorklistTui toast dispatch', () => {
     // No '[Refreshed', '[Synced', 'Sent:', 'Skipped:', 'Error:' bottom lines
     expect(rendered).not.toMatch(/\[(Refreshed|Synced|Refresh failed|Sync failed)/);
     expect(rendered).not.toMatch(/\n(Sent|Skipped|Error):/);
+  });
+});
+
+describe('form command dispatch — single onCommand per submission (WL-0MSAL0RN1009YNJ7)', () => {
+  const createIntakeRegistry = () => new ShortcutRegistry([
+    {
+      chord: ['c'],
+      command: '/intake\n<desc>\nPriority: medium',
+      view: 'both',
+      description: 'Create a new work item with a description and priority.',
+    },
+  ]);
+
+  it('dispatches onCommand exactly once when the create-new intake form is submitted', async () => {
+    const onCommand = vi.fn();
+    const p = runWorklistTui(async () => [], [], createIntakeRegistry(), {
+      autoRefresh: false,
+      autoSync: false,
+      showHelpText: false,
+      onCommand,
+    });
+    await tick();
+
+    // Press 'c' — opens the Command Input form (unknown identifier <desc>)
+    dataHandler?.(Buffer.from('c'));
+    await tick();
+
+    // Type a description (one keypress per char) and submit with Enter
+    for (const ch of 'My new item') {
+      dataHandler?.(Buffer.from(ch));
+      await tick();
+    }
+    dataHandler?.(Buffer.from('\r'));
+    await tick();
+    await tick();
+
+    // Regression: the form's onSubmit callback AND the onData 'submitted'
+    // branch both used to call onCommand, spawning TWO pi panes.
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    expect(onCommand).toHaveBeenCalledWith('/intake\nMy new item\nPriority: medium');
+
+    dataHandler?.(Buffer.from('q'));
+    await p;
+  });
+
+  it('shows exactly one Sent toast per form submission', async () => {
+    const onCommand = vi.fn();
+    const p = runWorklistTui(async () => [], [], createIntakeRegistry(), {
+      autoRefresh: false,
+      autoSync: false,
+      showHelpText: false,
+      onCommand,
+    });
+    await tick();
+
+    dataHandler?.(Buffer.from('c'));
+    await tick();
+    for (const ch of 'desc') {
+      dataHandler?.(Buffer.from(ch));
+      await tick();
+    }
+    dataHandler?.(Buffer.from('\r'));
+    await tick();
+    await tick();
+
+    expect(mockShowToast).toHaveBeenCalledTimes(1);
+    expect(mockShowToast).toHaveBeenCalledWith('Sent', expect.objectContaining({ body: expect.stringContaining('/intake') }));
+
+    dataHandler?.(Buffer.from('q'));
+    await p;
   });
 });

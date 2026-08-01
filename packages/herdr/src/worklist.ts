@@ -1700,9 +1700,9 @@ export async function runWorklistTui(
         const resolved = formState.getResult();
         formState = null;
         state.mode = preFormMode;
-        if (opts.onCommand) {
-          opts.onCommand(resolved);
-        }
+        // NOTE: dispatch happens inside FormState's onSubmit callback (which
+        // resolves <id> placeholders) — do NOT call onCommand again here or
+        // every form submission spawns TWO agent panes (WL-0MSAL0RN1009YNJ7).
         showToast('Sent', { body: resolved.length > 60 ? resolved.substring(0, 57) + '...' : resolved });
         render();
       } else if (result === 'cancelled') {
