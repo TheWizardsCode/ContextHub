@@ -19,7 +19,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       - name: Install dependencies
@@ -31,6 +31,11 @@ jobs:
       - name: Verify package builds
         run: npm pack
 
+      - name: Initialize Worklog
+        run: |
+          node ./dist/cli.js init --project-name "ContextHub" --prefix WL --agents-template skip --json > /dev/null
+          echo "✓ Worklog initialized"
+
       - name: Run headless smoke test
         run: |
           # Verify the wl command is available and works
@@ -39,30 +44,36 @@ jobs:
 
           # Verify the TUI module loads without errors (using tsx for TypeScript imports)
           npx tsx -e "
-            const { ChatPane } = await import('./packages/tui/extensions/chatPane.js');
-            const { ActionPalette } = await import('./packages/tui/extensions/actionPalette.js');
-            const { runWl } = await import('./packages/tui/extensions/wl-integration.js');
+          (async () => {
+            const { ChatPane } = await import('./packages/tui/extensions/Worklog/chatPane.ts');
+            const { ActionPalette } = await import('./packages/tui/extensions/Worklog/actionPalette.ts');
+            const { runWl } = await import('./packages/tui/extensions/wl-integration.ts');
             console.log('✓ TUI modules load successfully');
+          })();
           "
 
           # Verify chat pane can send messages
           npx tsx -e "
-            const { ChatPane } = await import('./packages/tui/extensions/chatPane.js');
+          (async () => {
+            const { ChatPane } = await import('./packages/tui/extensions/Worklog/chatPane.ts');
             const pane = new ChatPane();
             pane.clear();
             console.log('✓ ChatPane instantiated');
+          })();
           "
 
           # Verify action palette has default actions
           npx tsx -e "
-            const { ChatPane } = await import('./packages/tui/extensions/chatPane.js');
-            const { ActionPalette } = await import('./packages/tui/extensions/actionPalette.js');
+          (async () => {
+            const { ChatPane } = await import('./packages/tui/extensions/Worklog/chatPane.ts');
+            const { ActionPalette } = await import('./packages/tui/extensions/Worklog/actionPalette.ts');
             const chat = new ChatPane();
             const palette = new ActionPalette(chat);
             palette.open();
             const actions = palette.getFilteredActions();
             if (actions.length < 5) throw new Error('Expected at least 5 default actions, got ' + actions.length);
             console.log('✓ ActionPalette has ' + actions.length + ' default actions');
+          })();
           "
 
           # Verify pi-audit module works

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Simple build helper: reads package.json and writes src/version.ts and
-// replaces placeholder in dist/cli-utils.js when present. This script is
-// intended to be run as part of the npm build step (after tsc).
+// patches dist/version.js after tsc compiles it. This script is intended
+// to be run as part of the npm build step (after tsc).
 const fs = require('fs');
 const path = require('path');
 
@@ -17,18 +17,18 @@ function writeSrcVersion(version) {
   fs.writeFileSync(path.resolve(process.cwd(), 'src/version.ts'), out, 'utf8');
 }
 
-function patchDist(version) {
-  const distPath = path.resolve(process.cwd(), 'dist/cli-utils.js');
+function patchDistVersion(version) {
+  const distPath = path.resolve(process.cwd(), 'dist/version.js');
   if (!fs.existsSync(distPath)) return;
   const raw = fs.readFileSync(distPath, 'utf8');
-  const patched = raw.replace("'%%WORKLOG_VERSION_PLACEHOLDER%%'", `'${version}'`);
+  const patched = raw.replace(/WORKLOG_VERSION = '(\d+\.\d+\.\d+)'/, `WORKLOG_VERSION = '${version}'`);
   fs.writeFileSync(distPath, patched, 'utf8');
 }
 
 function main() {
   const v = readPackageVersion();
   writeSrcVersion(v);
-  patchDist(v);
+  patchDistVersion(v);
 }
 
 main();

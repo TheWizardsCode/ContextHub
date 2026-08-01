@@ -9,6 +9,9 @@ import { getDefaultDataPath } from './jsonl.js';
 import type { PluginContext } from './plugin-types.js';
 import { renderCliMarkdown, shouldUseFormattedOutput, resolveMarkdownEnabled, type CliOutputOptions } from './cli-output.js';
 
+import { createRequire } from 'module';
+const _cliUtilsRequire = createRequire(import.meta.url);
+
 import { WORKLOG_VERSION } from './version.js';
 
 /**
@@ -215,16 +218,13 @@ export function createPluginContext(program: Command): PluginContext {
 export function getVersion(): string {
   try {
     // Resolve package.json relative to project root (where this module is
-    // located). Use dynamic import so this works under ESM and in tests.
-    // Keep this synchronous-ish by using require-style read via fs.
+    // located). Use createRequire to safely load fs/path in ESM context.
+    // Keep this synchronous-ish by using readFileSync via createRequire.
     // Use a try/catch to avoid throwing in environments where filesystem
     // access is restricted.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const path = require('path');
+    const path = _cliUtilsRequire('path');
     const pkgPath = path.resolve(process.cwd(), 'package.json');
-    // We deliberately avoid require() because of ESM; use fs.readFileSync instead.
-    // Import fs lazily to keep startup cost low.
-    const fs = require('fs');
+    const fs = _cliUtilsRequire('fs');
     const raw = fs.readFileSync(pkgPath, 'utf8');
     const pkg = JSON.parse(raw);
     if (pkg && pkg.version) return String(pkg.version);
