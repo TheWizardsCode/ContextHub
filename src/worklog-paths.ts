@@ -28,6 +28,40 @@ export function getWorklogDirOverride(): string | undefined {
   return _worklogDirOverride;
 }
 
+/**
+ * Parse `--worklog-dir <path>` (or `--worklog-dir=<path>`) from raw argv and
+ * apply the override immediately.
+ *
+ * This MUST run before any code that resolves the worklog directory (e.g.
+ * `createPluginContext()` computing `ctx.dataPath`). Previously the override
+ * was only applied in commander's `preAction` hook, which runs after module
+ * load — so `wl sync --worklog-dir <proj>/.worklog` computed `ctx.dataPath`
+ * (and the `-f/--file` default derived from it) from the process cwd instead
+ * of the override, fetching the WRONG project's remote ref while writing to
+ * the right project's database (cross-project pollution, WL-0MSAH26DD001XXST).
+ */
+export function applyWorklogDirOverrideFromArgv(argv: string[]): void {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--worklog-dir') {
+      const value = argv[i + 1];
+      if (value !== undefined) {
+        setWorklogDirOverride(value);
+        return;
+      }
+    } else if (arg.startsWith('--worklog-dir=')) {
+      const value = arg.slice('--worklog-dir='.length);
+      if (value !== '') {
+        setWorklogDirOverride(value);
+        return;
+      }
+    }
+  }
+  // No --worklog-dir in argv: clear any (possibly stale) override so the
+  // override state always reflects the current invocation.
+  setWorklogDirOverride(undefined);
+}
+
 function getRepoRoot(startDir?: string): string | null {
   try {
     const root = child_process.execSync('git rev-parse --show-toplevel', {

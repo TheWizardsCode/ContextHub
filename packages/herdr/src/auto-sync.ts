@@ -13,6 +13,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import * as path from 'node:path';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -112,10 +113,19 @@ export function runSync(worklogDir?: string, options?: RunSyncOptions): Promise<
       const syncArgs = worklogDir
         ? ['--worklog-dir', worklogDir, 'sync', ...(ifIdle ? ['--if-idle'] : [])]
         : ['sync', ...(ifIdle ? ['--if-idle'] : [])];
-      const child = spawn('wl', syncArgs, {
+      // Root the spawned `wl sync` at the tab project (the parent of the
+      // .worklog dir) so the CLI resolves its git context against the tab
+      // project. Without a cwd the child inherits the pane's cwd, which can
+      // live in a DIFFERENT git repo than the tab project — sync would then
+      // fetch the wrong project's remote ref and merge it into the tab
+      // project's database (cross-project pollution, WL-0MSAH26DD001XXST).
+      const syncCwd = worklogDir ? path.dirname(path.resolve(worklogDir)) : undefined;
+      const spawnOptions: any = {
         stdio: ['ignore', 'ignore', 'ignore'], // Discard output
         detached: false,
-      });
+      };
+      if (syncCwd) spawnOptions.cwd = syncCwd;
+      const child = spawn('wl', syncArgs, spawnOptions);
 
       _syncInFlight = true;
 

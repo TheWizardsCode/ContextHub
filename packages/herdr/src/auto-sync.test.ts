@@ -145,6 +145,40 @@ describe('runSync', () => {
     expect(outcome).toHaveProperty('success');
   });
 
+  it('spawns wl sync with cwd rooted at the worklog project when worklogDir is provided (WL-0MSAH26DD001XXST)', async () => {
+    childEventToFire = 'close';
+    const promise = runSync('/tmp/proj/.worklog');
+
+    // The child must run from the tab project (parent of .worklog) so the CLI
+    // resolves its git context against the tab project, never the pane cwd.
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'wl',
+      ['--worklog-dir', '/tmp/proj/.worklog', 'sync'],
+      {
+        stdio: ['ignore', 'ignore', 'ignore'],
+        detached: false,
+        cwd: '/tmp/proj',
+      }
+    );
+
+    if (childEventCallback) childEventCallback();
+    await promise;
+  });
+
+  it('does not set cwd when no worklogDir is provided (inherits pane cwd)', async () => {
+    childEventToFire = 'close';
+    const promise = runSync();
+
+    // Exact match on the options proves no cwd key is present.
+    expect(mockSpawn).toHaveBeenCalledWith('wl', ['sync'], {
+      stdio: ['ignore', 'ignore', 'ignore'],
+      detached: false,
+    });
+
+    if (childEventCallback) childEventCallback();
+    await promise;
+  });
+
   it('resolves when child emits error event (e.g. ENOENT)', async () => {
     childEventToFire = 'error';
     const promise = runSync();

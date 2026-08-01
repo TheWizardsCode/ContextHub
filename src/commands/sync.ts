@@ -6,7 +6,7 @@ import type { PluginContext } from '../plugin-types.js';
 import type { SyncOptions, SyncDebugOptions } from '../cli-types.js';
 import type { WorkItem, Comment, DependencyEdge } from '../types.js';
 import type { GitTarget, SyncResult } from '../sync.js';
-import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges } from '../sync.js';
+import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, assertDataFileInCwdRepo } from '../sync.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
 import { importFromJsonlContent } from '../jsonl.js';
 import { mergeAuditResults } from '../sync.js';
@@ -47,6 +47,14 @@ export async function performSync(
   const isJsonMode = options.isJsonMode ?? false;
   const isVerbose = options.isVerbose ?? false;
   const isSilent = options.silent || false;
+
+  // Cross-project safety guard (WL-0MSAH26DD001XXST): fail loudly BEFORE any
+  // merge work if the data file belongs to a different git repo than the
+  // process cwd (e.g. `wl sync --worklog-dir <other-proj>/.worklog` run from
+  // inside this repo). Without this, sync would merge the cwd repo's remote
+  // worklog ref into the target project's database and push the pollution.
+  await assertDataFileInCwdRepo(options.file);
+
   const logPath = getWorklogLogPath('sync.log');
   const logLine = createLogFileWriter(logPath);
   logLine(`--- sync start ${new Date().toISOString()} file=${options.file} ---`);

@@ -613,6 +613,65 @@ async function getRepoRoot(): Promise<string> {
   return stdout.trim();
 }
 
+/**
+ * Find the git repo root that owns `filePath` (by running git from the file's
+ * directory). Returns null when the file is not inside a git repository.
+ */
+async function getRepoRootForPath(filePath: string): Promise<string | null> {
+  const dir = path.dirname(path.resolve(filePath));
+  try {
+    const { stdout } = await execAsync('git rev-parse --show-toplevel', { cwd: dir });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Cross-project sync guard (WL-0MSAH26DD001XXST).
+ *
+ * `wl sync --worklog-dir <proj>/.worklog` run from inside a DIFFERENT git
+ * repo used to fetch the cwd repo's remote worklog ref (because the `-f`
+ * default was resolved from the cwd before the override applied) and merge
+ * it into <proj>'s database, then push the polluted union back to <proj>'s
+ * remote. This guard fails loudly whenever the data file lives in a
+ * different git repository than the process cwd, so a sync can never merge
+ * foreign-prefix items from another project.
+ */
+export async function assertDataFileInCwdRepo(dataFilePath: string): Promise<void> {
+  let cwdRepoRoot: string | null = null;
+  try {
+    cwdRepoRoot = (await getRepoRoot()).trim() || null;
+  } catch {
+    // cwd is not inside a git repository; existing code paths report that.
+  }
+
+  const dataRepoRoot = await getRepoRootForPath(dataFilePath);
+
+  if (cwdRepoRoot && dataRepoRoot && cwdRepoRoot !== dataRepoRoot) {
+    throw new Error(
+      `Cross-project sync blocked: data file '${dataFilePath}' belongs to git repository '${dataRepoRoot}', ` +
+      `but this command is running inside git repository '${cwdRepoRoot}'. ` +
+      `Merging would combine two projects' worklog data (WL-0MSAH26DD001XXST). ` +
+      `Run 'wl sync' from inside '${dataRepoRoot}' or remove the --worklog-dir flag.`
+    );
+  }
+  if (cwdRepoRoot && !dataRepoRoot) {
+    throw new Error(
+      `Cross-project sync blocked: data file '${dataFilePath}' is not inside a git repository, ` +
+      `but this command is running inside git repository '${cwdRepoRoot}'. ` +
+      `Run 'wl sync' from inside a directory in the same repository as '${dataFilePath}'.`
+    );
+  }
+  if (!cwdRepoRoot && dataRepoRoot) {
+    throw new Error(
+      `Cross-project sync blocked: data file '${dataFilePath}' belongs to git repository '${dataRepoRoot}', ` +
+      `but the current directory is not inside a git repository. ` +
+      `Run 'wl sync' from inside '${dataRepoRoot}'.`
+    );
+  }
+}
+
 async function fetchRemote(remote: string): Promise<void> {
   await execAsync(`git fetch ${escapeShellArg(remote)}`);
 }
@@ -709,6 +768,10 @@ function getRepoRelativePath(repoRootPath: string, filePath: string): { absolute
 }
 
 export async function getRemoteDataFileContent(dataFilePath: string, target: GitTarget): Promise<string | null> {
+  // Cross-project safety guard: never read the remote worklog ref of a
+  // different repository than the one owning the data file.
+  await assertDataFileInCwdRepo(dataFilePath);
+
   // Check if we're in a git repository
   await execAsync('git rev-parse --git-dir');
 
@@ -829,6 +892,10 @@ export async function gitPushDataFileToBranch(
   commitMessage: string,
   target: GitTarget
 ): Promise<void> {
+  // Cross-project safety guard: never push the data file to a different
+  // repository's remote ref than the one owning the file.
+  await assertDataFileInCwdRepo(repoDataFilePath);
+
   // SAFETY GUARD: reject pushes to regular branches or tags.
   // Worklog data must only be stored on dedicated refs under refs/worklog/
   // to prevent accidental corruption of the project working tree.

@@ -58,7 +58,7 @@ const defaultTermSize: TermSize = { rows: 24, cols: 80 };
 
 // ── Mock spawn for sync tests ─────────────────────────────────────────
 
-let mockSpawnCalls: { command: string; args: string[] }[] = [];
+let mockSpawnCalls: { command: string; args: string[]; options?: any }[] = [];
 let mockSpawnReject: boolean = false;
 let mockSpawnDelay = 0;
 let mockSpawnExitCode: number | null = null;
@@ -69,8 +69,8 @@ vi.mock('node:child_process', async () => {
   const actual = await vi.importActual('node:child_process');
   return {
     ...actual,
-    spawn: vi.fn((command: string, args: string[], _opts?: any) => {
-      mockSpawnCalls.push({ command, args });
+    spawn: vi.fn((command: string, args: string[], opts?: any) => {
+      mockSpawnCalls.push({ command, args, options: opts });
       const closeCode = mockSpawnExitCode !== null ? mockSpawnExitCode : (mockSpawnReject ? 127 : 0);
       if (mockSpawnReject) {
         // Simulate a spawn failure (e.g., wl not found)
@@ -236,6 +236,20 @@ describe('runSync', () => {
     expect(mockSpawnCalls[0].args).toContain('--worklog-dir');
     expect(mockSpawnCalls[0].args).toContain('/tmp/project/.worklog');
     expect(mockSpawnCalls[0].args).toContain('sync');
+    result.catch(() => {});
+  });
+
+  it('spawns wl sync with cwd rooted at the tab project (WL-0MSAH26DD001XXST)', async () => {
+    const result = runSync('/tmp/project/.worklog');
+    await vi.advanceTimersByTimeAsync(100);
+    expect(mockSpawnCalls[0].options?.cwd).toBe('/tmp/project');
+    result.catch(() => {});
+  });
+
+  it('does not set cwd when no worklog is provided (inherits pane cwd)', async () => {
+    const result = runSync();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(mockSpawnCalls[0].options?.cwd).toBeUndefined();
     result.catch(() => {});
   });
 
