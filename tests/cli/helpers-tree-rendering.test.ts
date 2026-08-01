@@ -139,8 +139,8 @@ describe('tree rendering helpers', () => {
     spy.mockRestore();
 
     const normalized = lines.map(stripAnsi).join('\n');
-    expect(normalized).toContain('Risk: Low');
-    expect(normalized).toContain('Effort: XS');
+    expect(normalized).toContain('| Risk      | Low');
+    expect(normalized).toContain('| Effort    | XS');
   });
 
   it('shows Risk and Effort placeholders in normal format when fields are empty', () => {
@@ -152,7 +152,7 @@ describe('tree rendering helpers', () => {
     spy.mockRestore();
 
     const normalized = lines.map(stripAnsi).join('\n');
-    expect(normalized).toContain('Risk: —');
-    expect(normalized).toContain('Effort: —');
+    expect(normalized).toContain('| Risk      | —');
+    expect(normalized).toContain('| Effort    | —');
   });
 });

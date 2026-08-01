@@ -6,6 +6,28 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as child_process from 'child_process';
 
+/**
+ * Module-level override for --worklog-dir CLI option.
+ * When set, resolveWorklogDir() returns this path directly,
+ * bypassing all filesystem-walking and git-based resolution.
+ */
+let _worklogDirOverride: string | undefined;
+
+/**
+ * Set an explicit worklog directory override.
+ * Pass undefined to clear the override and restore normal resolution.
+ */
+export function setWorklogDirOverride(dir: string | undefined): void {
+  _worklogDirOverride = dir;
+}
+
+/**
+ * Get the current worklog directory override, if any.
+ */
+export function getWorklogDirOverride(): string | undefined {
+  return _worklogDirOverride;
+}
+
 function getRepoRoot(): string | null {
   try {
     const root = child_process.execSync('git rev-parse --show-toplevel', {
@@ -39,6 +61,11 @@ function hasWorklogConfig(worklogDir: string): boolean {
 }
 
 export function resolveWorklogDir(): string {
+  // If a --worklog-dir override is active, return it directly
+  if (_worklogDirOverride !== undefined) {
+    return _worklogDirOverride;
+  }
+
   const cwd = process.cwd();
   const cwdWorklog = path.join(cwd, '.worklog');
 

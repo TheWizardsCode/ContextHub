@@ -8,7 +8,7 @@ The extension has five user-configurable settings:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `browseItemCount` | `5` | Number of work items shown in the browse list (1–50) |
+| `browseItemCount` | `5` | Number of work items shown in the browse list (1–50). Critical and completed/in_review items are always shown regardless of this limit — see [Selection List Behaviour](#selection-list-behaviour) |
 | `showIcons` | `true` | Whether to show emoji icons in the browse list and preview widget |
 | `showActivityIndicator` | `true` | Whether to show the activity indicator (⏵) in the footer |
 | `showHelpText` | `true` | Whether to show the shortcut help text line in the browse selection overlay |
@@ -55,43 +55,70 @@ the browse dialog.
   configuration UI. It only applies to the browse list overlay, not
   to the detail view.
 
+### Selection List Behaviour
+
+The default (unfiltered) selection list always shows **all** critical-priority
+items and **all** completed/in_review items (the producer-review queue),
+regardless of the `browseItemCount` setting:
+
+- Items with `priority=critical` are always included.
+- Items with `status=completed` **and** `stage=in_review` are always included.
+- The `browseItemCount` limit applies only to the remaining "other" items.
+  The number of "other" slots is `browseItemCount − (critical count) −
+  (completed/in_review count)`, floored at zero.
+- When critical + completed/in_review items alone meet or exceed
+  `browseItemCount`, all of them are shown anyway (no hard cap on the
+  mandatory set) — the total may exceed the configured count.
+- An item that is both critical and completed/in_review counts once
+  (deduplicated) toward the total.
+
+Example: with `browseItemCount=15`, 2 critical + 3 completed/in_review +
+20 other items → the list shows 2 critical + 3 completed/in_review + the
+first 10 others (15 total). If there were 20 completed/in_review items
+instead of 3, all 22 mandatory items would be shown (22 > 15).
+
+The **stage-filtered** views (`/wl idea`, `/wl plan`, …) are unchanged: they
+show only items matching the selected stage.
+
+The "top N of M" title reflects the **actual displayed count** (N), which
+may exceed `browseItemCount` when the mandatory set is large.
+
 ### Hierarchical Navigation (Drill into Children)
 
-The browse selection list now supports navigating into child work items
+The browse selection list supports navigating into child work items
 when an item has children. This allows you to drill down through the
 work-item hierarchy without leaving the browse dialog.
 
 **How it works:**
 
 - When an item in the browse list has children (`childCount > 0`), pressing
-  **Enter** on that item shows its children in the list instead of opening
-  the detail view. All items with children are visually marked with a child
-  count indicator (e.g., `(3)`), regardless of their issue type.
-- When viewing children, a **".." (parent) entry** appears at the top of
-  the list. Selecting it and pressing **Enter** navigates back to the
-  parent level.
-- Pressing **Escape** while viewing children also navigates back one level
-  in the hierarchy.
+  **Tab** on that item navigates into its children. All items with children
+  are visually marked with a child count indicator (e.g., `(3)`),
+  regardless of their issue type.
+- **Enter** on any item (including parents with children) opens the detail
+  view, as before.
+- Pressing **Escape** while viewing children navigates back one level in
+  the hierarchy. The footer shows a `[esc] back` hint (with `(N levels)`
+  when nested deeper than one level) while inside a child list.
 - You can drill down **arbitrarily deep** through the hierarchy (children
-  of children of children, etc.) using the same Enter mechanism at each
+  of children of children, etc.) using the same Tab mechanism at each
   level.
-- When navigating back to a parent level (via Escape or the ".." entry),
-  the previously selected item and list state are restored, so you return
-  to the same position you left.
-- When at the root level (no parent context), pressing Enter on an item
-  without children opens the detail view as before — behavior is unchanged
-  for non-parent items.
+- When navigating back to a parent level (via Escape), the previously
+  selected item and list state are restored, so you return to the same
+  position you left.
+- At the root level (no parent context), pressing Enter on an item without
+  children opens the detail view as before — behavior is unchanged for
+  non-parent items.
 
 **Example flow:**
 
 1. Browse the root list — items with children show `(N)` count indicators.
-2. Press Enter on an epic or other item with children → the list updates
-   to show its child work items, with a ".." entry at the top.
-3. Press Enter on a child that also has children → navigate further down.
+2. Press Tab on an epic or other item with children → the list updates to
+   show its child work items.
+3. Press Tab on a child that also has children → navigate further down.
 4. Press Escape to go back up one level.
-5. Press Enter on the ".." entry to also go back up one level.
-6. At root level, pressing Enter on a leaf item opens the detail view.
-7. Escape at root level closes the browse overlay.
+5. At root level, pressing Enter on a leaf item opens the detail view.
+6. Escape at root level closes the browse overlay.
 
 **Note:** When navigating within child items, the auto-refresh feature
 calls `fetchChildren()` to re-fetch the child items of the current parent

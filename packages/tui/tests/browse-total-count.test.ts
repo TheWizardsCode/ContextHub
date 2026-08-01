@@ -2,6 +2,18 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
   getAgentDir: () => '/home/test-user/.pi/agent',
 }));
 
+// Wrap fetchTotalActionableCount so auto-refresh re-fetch behavior is
+// observable and controllable (ESM live bindings make vi.spyOn on the module
+// namespace insufficient for modules that already imported the function).
+let mockTotalCount: number | undefined;
+vi.mock('../extensions/Worklog/lib/tools.js', async (importOriginal) => {
+  const actual: any = await importOriginal();
+  return {
+    ...actual,
+    fetchTotalActionableCount: vi.fn(async () => mockTotalCount),
+  };
+});
+
 vi.mock('node:fs', () => ({
   readFileSync: vi.fn((path) => {
     if (String(path).endsWith('shortcuts.json')) {
@@ -137,7 +149,7 @@ describe('Browse list total count in title', () => {
 
     const title = getTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5 of 42)');
+    expect(title).toContain('Browse Worklog next items (top 2 of 42)');
   });
 
   it('shows "top X" (without "of Y") in the custom overlay title when totalCount is undefined', async () => {
@@ -149,7 +161,7 @@ describe('Browse list total count in title', () => {
 
     const title = getTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5)');
+    expect(title).toContain('Browse Worklog next items (top 2)');
     expect(title).not.toContain('of');
   });
 
@@ -162,7 +174,7 @@ describe('Browse list total count in title', () => {
 
     const title = getTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5 of 0)');
+    expect(title).toContain('Browse Worklog next items (top 2 of 0)');
   });
 
   it('handles large totalCount values in the custom overlay title', async () => {
@@ -173,7 +185,7 @@ describe('Browse list total count in title', () => {
 
     const title = getTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5 of 9999)');
+    expect(title).toContain('Browse Worklog next items (top 2 of 9999)');
   });
 
   it('caps displayed count to totalCount when browseItemCount > totalCount in custom overlay title', async () => {
@@ -198,7 +210,47 @@ describe('Browse list total count in title', () => {
 
     const title = getTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5 of 10)');
+    expect(title).toContain('Browse Worklog next items (top 2 of 10)');
+  });
+
+  it('shows the actual displayed count when the list exceeds browseItemCount (mandatory set)', async () => {
+    const { ctx, getTitle } = createMockCustomContext();
+
+    // Smart selection may return MORE items than browseItemCount when the
+    // mandatory critical/completed-in_review set is shown. The heading must
+    // reflect the actual displayed count (items.length), not browseItemCount.
+    const manyItems: WorklogBrowseItem[] = Array.from({ length: 22 }, (_, i) => ({
+      id: `WL-${String(i + 1).padStart(3, '0')}`,
+      title: `Item ${i + 1}`,
+      status: 'open',
+    }));
+    defaultChooseWorkItem(manyItems, ctx, vi.fn(), undefined, undefined, undefined, 100);
+    await new Promise(process.nextTick);
+
+    const title = getTitle();
+    expect(title).not.toBeNull();
+    // browseItemCount defaults to 5, but 22 items are displayed → "top 22 of 100".
+    expect(title).toContain('Browse Worklog next items (top 22 of 100)');
+  });
+
+  it('does not under-report N when the mandatory set exceeds the actionable total', async () => {
+    const { ctx, getTitle } = createMockCustomContext();
+
+    // 7 items displayed (mandatory critical/completed-in_review set), but the
+    // actionable total counts only open/in-progress/blocked → total=3.
+    // N must reflect the actual displayed count (7), not be capped to M (3).
+    const sevenItems: WorklogBrowseItem[] = Array.from({ length: 7 }, (_, i) => ({
+      id: `WL-M${String(i + 1).padStart(3, '0')}`,
+      title: `Mandatory ${i + 1}`,
+      status: 'completed',
+      stage: 'in_review',
+    }));
+    defaultChooseWorkItem(sevenItems, ctx, vi.fn(), undefined, undefined, undefined, 3);
+    await new Promise(process.nextTick);
+
+    const title = getTitle();
+    expect(title).not.toBeNull();
+    expect(title).toContain('Browse Worklog next items (top 7 of 3)');
   });
 
   // ── select() fallback path (non-TUI) tests ───────────────────────
@@ -212,7 +264,7 @@ describe('Browse list total count in title', () => {
 
     const title = getSelectTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5 of 42)');
+    expect(title).toContain('Browse Worklog next items (top 2 of 42)');
   });
 
   it('shows "top X" (without "of Y") in the select() fallback title when totalCount is undefined', async () => {
@@ -223,7 +275,7 @@ describe('Browse list total count in title', () => {
 
     const title = getSelectTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5)');
+    expect(title).toContain('Browse Worklog next items (top 2)');
     expect(title).not.toContain('of');
   });
 
@@ -235,7 +287,7 @@ describe('Browse list total count in title', () => {
 
     const title = getSelectTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5 of 0)');
+    expect(title).toContain('Browse Worklog next items (top 2 of 0)');
   });
 
   it('caps displayed count to totalCount when browseItemCount > totalCount in select() fallback title', async () => {
@@ -260,7 +312,7 @@ describe('Browse list total count in title', () => {
 
     const title = getSelectTitle();
     expect(title).not.toBeNull();
-    expect(title).toContain('Browse Worklog next items (top 5 of 10)');
+    expect(title).toContain('Browse Worklog next items (top 2 of 10)');
   });
 
   // ── Regression: existing tests still pass ────────────────────────
@@ -292,5 +344,69 @@ describe('Browse list total count in title', () => {
 
     // Should have called select() with the title and never thrown
     expect(ctx.ui.select).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-fetches the total actionable count on auto-refresh and updates the title', async () => {
+    vi.useFakeTimers();
+    try {
+      mockTotalCount = 7;
+      const tools = await import('../extensions/Worklog/lib/tools.js');
+      const fetchSpy = (tools as any).fetchTotalActionableCount;
+      fetchSpy.mockClear();
+
+      const reFetchItems = vi.fn().mockResolvedValue([
+        { id: 'WL-001', title: 'First item', status: 'open' },
+        { id: 'WL-002', title: 'Second item', status: 'in_progress' },
+        { id: 'WL-003', title: 'Third item', status: 'open' },
+      ]);
+
+      let capturedWidget: { render: (w: number) => string[] } | null = null;
+      const ctx = {
+        ui: {
+          custom: vi.fn(<T>(
+            factory: (
+              tui: any,
+              theme: any,
+              _keybindings: unknown,
+              done: (value: T) => void,
+            ) => {
+              render: (width: number) => string[];
+              invalidate: () => void;
+              handleInput?: (data: string) => void;
+            },
+          ) => {
+            const tui = { requestRender: vi.fn() };
+            const theme = { fg: vi.fn((_c: string, t: string) => t), bold: vi.fn((t: string) => t) };
+            const done = vi.fn();
+            capturedWidget = factory(tui, theme, undefined, done);
+            return new Promise<T>(() => { /* never resolves */ });
+          }),
+          notify: vi.fn(),
+          setEditorText: vi.fn(),
+          setWidget: vi.fn(),
+          select: vi.fn(),
+        },
+      };
+
+      defaultChooseWorkItem(items, ctx as any, vi.fn(), undefined, reFetchItems, undefined, 7);
+
+      // Initial render shows "top 2 of 7" (2 initial items, total 7)
+      let title = capturedWidget!.render(80)[0];
+      expect(title).toContain('top 2 of 7');
+
+      // Auto-refresh fires after 5s and re-fetches the count
+      await vi.advanceTimersByTimeAsync(5000);
+            expect(fetchSpy).toHaveBeenCalled();
+      expect(reFetchItems).toHaveBeenCalledTimes(1);
+
+      // Change the count and trigger another refresh; re-render shows new total
+      mockTotalCount = 9;
+      await vi.advanceTimersByTimeAsync(5000);
+      title = capturedWidget!.render(80)[0];
+      expect(title).toContain('top 3 of 9');
+    } finally {
+      vi.useRealTimers();
+      mockTotalCount = undefined;
+    }
   });
 });

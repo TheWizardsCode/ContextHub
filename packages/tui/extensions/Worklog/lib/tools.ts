@@ -9,8 +9,14 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { currentSettings } from './settings.js';
+import { selectWorkItems } from './smart-selection.js';
 
-const execFileAsync = promisify(execFile);
+// Promisify lazily inside the call site rather than at module scope.
+// ESM named imports are live bindings, but `promisify(execFile)` snapshots
+// the function reference at module-load time; tests that mock
+// `node:child_process` (e.g. runWl-init-detection.test.ts) would otherwise
+// keep seeing the pre-mock binding. Resolving per-call keeps the mock
+// observable.
 
 /**
  * Lazily load getWorklogDb so that tests can mock wl-integration.js
@@ -84,6 +90,8 @@ export interface WorklogBrowseItem {
   status: string;
   priority?: string;
   stage?: string;
+  /** Parent work item id; null/undefined for root items */
+  parentId?: string | null;
   risk?: string;
   effort?: string;
   description?: string;
@@ -130,6 +138,7 @@ export function normalizeListPayload(payload: unknown): WorklogBrowseItem[] {
       status: String(item?.status ?? 'unknown'),
       priority: item?.priority ? String(item.priority) : undefined,
       stage: item?.stage ? String(item.stage) : undefined,
+      parentId: item?.parentId != null ? String(item.parentId) : undefined,
       risk: item?.risk ? String(item.risk) : undefined,
       effort: item?.effort ? String(item.effort) : undefined,
       description: item?.description ? String(item.description) : undefined,
@@ -171,6 +180,7 @@ export async function runWl(args: string[], includeJson = true): Promise<string>
   for (const binary of binaries) {
     try {
       const fullArgs = includeJson ? [...args, '--json'] : args;
+      const execFileAsync = promisify(execFile);
       const result = await execFileAsync(binary, fullArgs, { maxBuffer: 1024 * 1024 * 5 });
       return result.stdout;
     } catch (error: any) {
@@ -198,6 +208,44 @@ export async function runWl(args: string[], includeJson = true): Promise<string>
 
 // ── List helpers ──────────────────────────────────────────────────────
 
+/**
+ * Merge work item arrays, deduplicating by item ID (first occurrence wins).
+ */
+export function mergeUniqueById(...arrays: WorklogBrowseItem[][]): WorklogBrowseItem[] {
+  const seen = new Set<string>();
+  const merged: WorklogBrowseItem[] = [];
+  for (const item of arrays.flat()) {
+    if (!seen.has(item.id)) {
+      seen.add(item.id);
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Fetch the mandatory subsets that must ALWAYS be shown in the default
+ * selection list: all critical items and all completed/in_review items (the
+ * producer-review queue).
+ *
+ * These are fetched explicitly via `wl list` because `wl next -n N` hard-caps
+ * at 32 items — even `-n 500` returns only 32, so a large superset cannot
+ * capture all critical/in_review items. Runs the two queries in parallel to
+ * mitigate refresh latency.
+ */
+async function fetchMandatorySubsets(run: RunWlFn): Promise<WorklogBrowseItem[]> {
+  // Root-only (WL-0MS964SIA0057ABR): child items are hidden from the
+  // top-level selection list — they are only visible under their parent via
+  // drill-down (Tab).
+  const [criticalOutput, reviewOutput] = await Promise.all([
+    run(['list', '--priority', 'critical', '--root-only']),
+    run(['list', '--status', 'completed', '--stage', 'in_review', '--root-only']),
+  ]);
+  const criticalItems = normalizeListPayload(extractJsonObject(criticalOutput));
+  const reviewItems = normalizeListPayload(extractJsonObject(reviewOutput));
+  return mergeUniqueById(criticalItems, reviewItems);
+}
+
 export function createDefaultListWorkItems(
   run: RunWlFn = runWl,
   count?: number,
@@ -206,7 +254,15 @@ export function createDefaultListWorkItems(
     const itemCount = count ?? currentSettings.browseItemCount;
     const output = await run(['next', '-n', String(itemCount), '--include-in-progress']);
     const payload = extractJsonObject(output);
-    return normalizeListPayload(payload).slice(0, itemCount);
+    const items = normalizeListPayload(payload);
+
+    // Smart selection: merge the mandatory subsets (critical + completed/in_review,
+    // fetched explicitly via wl list because wl next caps at 32 items) with the
+    // regular wl next results, then always show the mandatory set and limit only
+    // the "other" items to fill the remaining count slots.
+    const mandatory = await fetchMandatorySubsets(run);
+    const merged = mergeUniqueById(items, mandatory);
+    return selectWorkItems(merged, itemCount);
   };
 }
 
@@ -251,6 +307,10 @@ export async function fetchTotalActionableCount(run: RunWlFn = runWl): Promise<n
 
 /**
  * Create a cached "next work items" list function using direct SQLite access.
+ *
+ * Smart selection is applied: all critical and completed/in_review items are
+ * always shown (fetched via db.list filters — see fetchMandatorySubsets for
+ * the CLI equivalent), and browseItemCount limits only the remaining items.
  */
 export function createDefaultListWorkItemsDb(
   count?: number,
@@ -260,31 +320,53 @@ export function createDefaultListWorkItemsDb(
     const db = await getDb();
     if (!db) return defaultListWorkItems();
     try {
-      const results = db.next(itemCount, true);
-      if (!Array.isArray(results)) return defaultListWorkItems();
-      return results
+      // Regular next-equivalent: findNextWorkItems mirrors `wl next -n <count>
+      // --include-in-progress` (stage undefined, includeInProgress true).
+      const nextResults = db.findNextWorkItems(itemCount, undefined, undefined, false, undefined, true);
+      const regular = (Array.isArray(nextResults) ? nextResults : [])
         .filter((r: any) => r.workItem)
-        .map((r: any) => ({
-          id: r.workItem.id,
-          title: r.workItem.title,
-          status: r.workItem.status,
-          priority: r.workItem.priority,
-          stage: r.workItem.stage || undefined,
-          risk: r.workItem.risk || undefined,
-          effort: r.workItem.effort || undefined,
-          description: r.workItem.description,
-          auditResult: r.auditResult !== undefined ? r.auditResult : undefined,
-          auditedAt: r.auditedAt !== undefined && r.auditedAt !== null ? String(r.auditedAt) : undefined,
-          needsProducerReview: r.workItem.needsProducerReview !== undefined ? Boolean(r.workItem.needsProducerReview) : undefined,
-          updatedAt: r.workItem.updatedAt ? String(r.workItem.updatedAt) : undefined,
-          issueType: r.workItem.issueType || undefined,
-          tags: r.workItem.tags?.length ? r.workItem.tags : undefined,
-          githubIssueNumber: r.workItem.githubIssueNumber,
-        }))
-        .slice(0, itemCount);
+        .map((r: any) => normalizeDbWorkItem(r.workItem));
+
+      // Mandatory subsets via db.list filters (db.list supports priority /
+      // status / stage filtering). Required because wl next caps at 32 items.
+      // Root-only (WL-0MS964SIA0057ABR): children are hidden from the
+      // top-level list; they remain visible via drill-down.
+      const criticalItems = db.list({ priority: 'critical', rootOnly: true });
+      const reviewItems = db.list({ status: ['completed'], stage: 'in_review', rootOnly: true });
+      const mandatory = mergeUniqueById(
+        (Array.isArray(criticalItems) ? criticalItems : []).map(normalizeDbWorkItem),
+        (Array.isArray(reviewItems) ? reviewItems : []).map(normalizeDbWorkItem),
+      );
+
+      const merged = mergeUniqueById(regular, mandatory);
+      return selectWorkItems(merged, itemCount);
     } catch {
       return defaultListWorkItems();
     }
+  };
+}
+
+/**
+ * Normalize a raw database WorkItem into a WorklogBrowseItem.
+ */
+function normalizeDbWorkItem(item: any): WorklogBrowseItem {
+  return {
+    id: item.id,
+    title: item.title,
+    status: item.status,
+    priority: item.priority || undefined,
+    stage: item.stage || undefined,
+    parentId: item.parentId != null ? String(item.parentId) : undefined,
+    risk: item.risk || undefined,
+    effort: item.effort || undefined,
+    description: item.description,
+    auditResult: item.auditResult !== undefined ? item.auditResult : undefined,
+    auditedAt: item.auditedAt !== undefined && item.auditedAt !== null ? String(item.auditedAt) : undefined,
+    needsProducerReview: item.needsProducerReview !== undefined ? Boolean(item.needsProducerReview) : undefined,
+    updatedAt: item.updatedAt ? String(item.updatedAt) : undefined,
+    issueType: item.issueType || undefined,
+    tags: item.tags?.length ? item.tags : undefined,
+    githubIssueNumber: item.githubIssueNumber,
   };
 }
 
@@ -299,7 +381,9 @@ export function createListWorkItemsWithStageDb(
     const db = await getDb();
     if (!db) return defaultListWorkItemsWithStage(stage);
     try {
-      const items = db.list({ stage });
+      // Root-only (WL-0MS964SIA0057ABR): stage-filtered top-level lists hide
+      // child items; children remain reachable via drill-down (wl list --parent).
+      const items = db.list({ stage, rootOnly: true });
       if (!Array.isArray(items)) return defaultListWorkItemsWithStage(stage);
       return items
         .sort((a: any, b: any) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))

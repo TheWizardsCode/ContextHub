@@ -1,14 +1,20 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
-import * as childProcess from 'child_process'
+import { createRequire } from 'module'
 import { fileURLToPath } from 'url'
 import { promisify } from 'util'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
-const execFile = promisify(childProcess.execFile)
+// Resolve the truly-real child_process via createRequire. The vitest global
+// setup (tests/setup-tests.ts) mocks `child_process` (spawn/execSync/etc.);
+// promisifying the mocked execFile breaks callback-arity detection and
+// returns undefined stdout/stderr. This test drives the mock-bin scripts and
+// needs the real 4-arity execFile.
+const realChildProcess = createRequire(import.meta.url)('child_process')
+const execFile = promisify(realChildProcess.execFile)
 
 const mockBinDir = path.join(__dirname, 'mock-bin')
 const gitMockPath = path.join(mockBinDir, 'git')

@@ -249,6 +249,37 @@ describe('WorklogDatabase', () => {
       expect(items).toHaveLength(5);
     });
 
+    it('should filter rootOnly to items without a parent (WL-0MS964SIA0057ABR)', () => {
+      const parent = db.create({ title: 'Parent', status: 'open', priority: 'medium' });
+      db.create({ title: 'Child', status: 'open', priority: 'medium', parentId: parent.id });
+      const items = db.list({ rootOnly: true });
+      expect(items.length).toBeGreaterThan(0);
+      items.forEach(item => expect(item.parentId).toBeNull());
+      expect(items.some(item => item.id === parent.id)).toBe(true);
+      expect(items.some(item => item.title === 'Child')).toBe(false);
+    });
+
+    it('rootOnly combines with other filters (WL-0MS964SIA0057ABR)', () => {
+      const parent = db.create({ title: 'Critical parent', status: 'open', priority: 'critical' });
+      db.create({ title: 'Critical child', status: 'open', priority: 'critical', parentId: parent.id });
+      db.create({ title: 'Low root', status: 'open', priority: 'low' });
+      const items = db.list({ rootOnly: true, priority: 'critical' });
+      // Seeded Task 5 (critical) is also a root item, so at least the new
+      // critical parent and Task 5 must match; the critical child must not.
+      expect(items.length).toBeGreaterThanOrEqual(2);
+      expect(items.every(item => item.parentId === null)).toBe(true);
+      expect(items.some(item => item.title === 'Critical parent')).toBe(true);
+      expect(items.some(item => item.title === 'Critical child')).toBe(false);
+    });
+
+    it('rootOnly does not affect --parent child lookup (WL-0MS964SIA0057ABR)', () => {
+      const parent = db.create({ title: 'Parent', status: 'open', priority: 'medium' });
+      const child = db.create({ title: 'Child', status: 'open', priority: 'medium', parentId: parent.id });
+      const items = db.list({ parentId: parent.id });
+      expect(items).toHaveLength(1);
+      expect(items[0].id).toBe(child.id);
+    });
+
     it('should filter by needsProducerReview true', () => {
       const items = db.list({ needsProducerReview: true });
       expect(items).toHaveLength(2);
@@ -1685,13 +1716,13 @@ describe('WorklogDatabase', () => {
       expect(result.workItem).toBeNull();
     });
 
-    it('should select blocking child for blocked item', () => {
+    it('should surface parent instead of blocking child for blocked item (WL-0MS964SIA0057ABR)', () => {
       const blocked = db.create({
         title: 'Blocked task',
         priority: 'high',
         status: 'blocked'
       });
-      const blocker = db.create({
+      db.create({
         title: 'Blocking child',
         priority: 'low',
         status: 'open',
@@ -1699,11 +1730,12 @@ describe('WorklogDatabase', () => {
       });
 
       const result = db.findNextWorkItem();
-      // The blocked parent (high priority) has no open competitors of equal
-      // or higher priority, so Stage 3 (non-critical blocker surfacing)
-      // surfaces the blocking child.
-      expect(result.workItem?.id).toBe(blocker.id);
-      expect(result.reason).toContain('Blocking issue');
+      // Strict root-only: the blocking child is hidden entirely (no orphan
+      // promotion). The parent (high priority, root) is the unit of work and
+      // is surfaced via Stage 5 (open item selection) instead.
+      expect(result.workItem?.id).toBe(blocked.id);
+      expect(result.workItem?.parentId).toBeNull();
+      expect(result.reason).toContain('Next open item');
     });
 
     it('should select dependency blocker for blocked item', () => {
@@ -1717,6 +1749,37 @@ describe('WorklogDatabase', () => {
       // surfaces the dependency blocker.
       expect(result.workItem?.id).toBe(blocker.id);
       expect(result.reason).toContain('Blocking issue');
+    });
+
+    it('should surface parent when a child dependency blocker has a selectable parent (WL-0MS964SIA0057ABR)', () => {
+      // blockerParent (medium, open, root) is selectable; blockerChild is its
+      // child and is the dep-edge blocker for the blocked item.
+      const blockerParent = db.create({ title: 'Blocker parent', priority: 'medium', status: 'open' });
+      const blockerChild = db.create({ title: 'Blocker child', priority: 'low', status: 'open', parentId: blockerParent.id });
+      const blocked = db.create({ title: 'Blocked task', priority: 'high', status: 'blocked' });
+      db.addDependencyEdge(blocked.id, blockerChild.id);
+
+      const result = db.findNextWorkItem();
+      // Strict root-only: the child blocker is hidden, but its parent is a
+      // selectable actionable root — the parent competes in Stage 5 and is
+      // surfaced as the unit of work instead of the child.
+      expect(result.workItem?.id).toBe(blockerParent.id);
+      expect(result.workItem?.parentId).toBeNull();
+    });
+
+    it('should return null with clear reason when child blocker parent is not selectable (WL-0MS964SIA0057ABR)', () => {
+      // blockerParent (completed, root) is NOT selectable; blockerChild is its
+      // child and is the only blocker for the blocked item.
+      const blockerParent = db.create({ title: 'Blocker parent', priority: 'medium', status: 'completed' });
+      const blockerChild = db.create({ title: 'Blocker child', priority: 'low', status: 'open', parentId: blockerParent.id });
+      const blocked = db.create({ title: 'Blocked task', priority: 'high', status: 'blocked' });
+      db.addDependencyEdge(blocked.id, blockerChild.id);
+
+      const result = db.findNextWorkItem();
+      // The child blocker is hidden entirely and its parent is not selectable,
+      // so wl next returns null with a clear reason (no orphan promotion).
+      expect(result.workItem).toBeNull();
+      expect(result.reason).toContain('No work items available');
     });
 
     it('should ignore blocking issues mentioned in description', () => {
@@ -1832,18 +1895,20 @@ describe('WorklogDatabase', () => {
       expect(result.reason).toContain('Next open item by sort_index');
     });
 
-    it('should prefer blocker of higher-priority blocked item over lower-priority open items with child blockers', () => {
+    it('should surface critical parent instead of child blocker for blocked critical item (WL-0MS964SIA0057ABR)', () => {
       // Child blocker (open) blocks Parent (critical, blocked)
-      // LowItem (high, open) -- should lose because parent is critical
+      // HighItem (high, open) -- should lose because parent is critical
       const parent = db.create({ title: 'Blocked parent', priority: 'critical', status: 'blocked' });
-      const childBlocker = db.create({ title: 'Blocking child', priority: 'low', status: 'open', parentId: parent.id });
+      db.create({ title: 'Blocking child', priority: 'low', status: 'open', parentId: parent.id });
       db.create({ title: 'High priority item', priority: 'high', status: 'open' });
 
       const result = db.findNextWorkItem();
-      // Should select child blocker because blocked parent is critical
-      // Note: critical blocked items are handled by Phase 2, so this may return via Phase 2
-      expect(result.workItem?.id).toBe(childBlocker.id);
-      expect(result.reason).toContain('Blocking issue');
+      // Strict root-only: the child blocker is hidden entirely. Critical work
+      // must not be silently dropped, so the blocked critical parent is
+      // surfaced via the last-resort escalation path.
+      expect(result.workItem?.id).toBe(parent.id);
+      expect(result.workItem?.parentId).toBeNull();
+      expect(result.reason).toContain('Blocked critical');
     });
 
     it('Phase 4: sibling wins over child of lower-priority parent (Example 1)', async () => {
@@ -2346,19 +2411,16 @@ describe('WorklogDatabase', () => {
       });
     });
 
-    // WL-0MM1CD2IJ1R2ZI5J: orphan promotion for items under completed parents
-    describe('orphan promotion: skip completed subtrees', () => {
-      it('should not surface open child under completed parent before a root-level open item with higher sortIndex', () => {
-        // Scenario from the bug report:
+    // WL-0MS964SIA0057ABR: orphan promotion is REMOVED — children whose
+    // parent is closed/deleted are hidden entirely from wl next (strict
+    // root-only). The old WL-0MM1CD2IJ1R2ZI5J promotion behavior is
+    // superseded.
+    describe('strict root-only: no orphan promotion (WL-0MS964SIA0057ABR)', () => {
+      it('hides open child under completed parent (orphan not promoted)', () => {
         // Root epic (completed, sortIndex=100)
         //   └── Child feature (completed, sortIndex=200)
         //         └── Orphan task (open, low, sortIndex=300)
         // Root feature (open, medium, sortIndex=500)
-        //
-        // Without the fix, DFS enters the completed subtree first (sortIndex=100)
-        // and surfaces the orphan (sortIndex=300) before the root feature (sortIndex=500).
-        // With the fix, the orphan is promoted to root level and the root feature
-        // should be compared directly against it.
         const rootEpic = db.create({ title: 'CLI Epic', priority: 'high', status: 'completed', issueType: 'epic', sortIndex: 100 });
         const childFeature = db.create({ title: 'Add dep command', priority: 'high', status: 'completed', parentId: rootEpic.id, sortIndex: 200 });
         const orphan = db.create({ title: 'Docs follow-up', priority: 'low', status: 'open', parentId: childFeature.id, sortIndex: 300 });
@@ -2366,22 +2428,11 @@ describe('WorklogDatabase', () => {
 
         const result = db.findNextWorkItem();
         expect(result.workItem).not.toBeNull();
-        // The root feature (medium priority, sortIndex=500) should be selected because
-        // the orphan's completed ancestors no longer pull it to the front via low sortIndex
-        // Both are now at root level: orphan (sortIndex=300) vs rootFeature (sortIndex=500).
-        // Orphan sorts first by sortIndex but is low priority. Since sortIndexes differ,
-        // selectBySortIndex picks by sortIndex order. The orphan (300) is still picked first
-        // by raw sortIndex. BUT the key fix is that the orphan is no longer hidden under
-        // the completed epic's tree position -- it competes at root level on its own sortIndex.
-        // The orphan at sortIndex=300 will be picked before rootFeature at sortIndex=500.
-        // That is acceptable -- the fix ensures the orphan doesn't get an unfair position
-        // boost from its completed ancestor's sortIndex=100.
-        // Let's verify it does NOT descend into completed subtree to find the orphan
-        // by checking the orphan competes at root level
-        expect([orphan.id, rootFeature.id]).toContain(result.workItem!.id);
+        // The orphan is hidden entirely — only the root feature is selectable.
+        expect(result.workItem!.id).toBe(rootFeature.id);
       });
 
-      it('should promote deeply nested orphan to root level when all ancestors are completed', () => {
+      it('hides deeply nested orphan when all ancestors are completed', () => {
         // Deep hierarchy: all ancestors completed
         // Root (completed, sortIndex=100)
         //   └── L1 (completed, sortIndex=200)
@@ -2396,7 +2447,7 @@ describe('WorklogDatabase', () => {
 
         const result = db.findNextWorkItem();
         expect(result.workItem).not.toBeNull();
-        // anotherRoot has sortIndex=50 which is lower, so it should be picked first
+        // Orphan is hidden; anotherRoot is the only root candidate.
         expect(result.workItem!.id).toBe(anotherRoot.id);
       });
 
@@ -2413,16 +2464,33 @@ describe('WorklogDatabase', () => {
         expect(result.workItem!.id).toBe(parent.id);
       });
 
-      it('should promote orphan under deleted parent to root level', () => {
+      it('hides orphan under deleted parent (not promoted)', () => {
         const deletedParent = db.create({ title: 'Deleted parent', priority: 'high', status: 'deleted', sortIndex: 100 });
         const orphan = db.create({ title: 'Orphan under deleted', priority: 'medium', status: 'open', parentId: deletedParent.id, sortIndex: 200 });
         const rootItem = db.create({ title: 'Root item', priority: 'medium', status: 'open', sortIndex: 50 });
 
         const result = db.findNextWorkItem();
         expect(result.workItem).not.toBeNull();
-        // rootItem (sortIndex=50) should be picked over orphan (sortIndex=200) since
-        // the orphan is promoted to root and compared on its own sortIndex
+        // Orphan is hidden; rootItem is the only root candidate.
         expect(result.workItem!.id).toBe(rootItem.id);
+      });
+
+      it('returns null when only orphans exist under closed parents', () => {
+        const closedParent = db.create({ title: 'Closed parent', priority: 'high', status: 'completed', sortIndex: 100 });
+        db.create({ title: 'Only orphan', priority: 'medium', status: 'open', parentId: closedParent.id, sortIndex: 200 });
+
+        const result = db.findNextWorkItem();
+        // No root-level candidates remain — orphan is hidden entirely.
+        expect(result.workItem).toBeNull();
+      });
+
+      it('never returns a child even for critical orphans under closed parents', () => {
+        const closedParent = db.create({ title: 'Closed parent', priority: 'high', status: 'completed', sortIndex: 100 });
+        db.create({ title: 'Critical orphan', priority: 'critical', status: 'open', parentId: closedParent.id, sortIndex: 200 });
+
+        const result = db.findNextWorkItem();
+        // Critical children are also hidden entirely (no promotion).
+        expect(result.workItem).toBeNull();
       });
     });
 

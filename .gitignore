@@ -145,7 +145,14 @@ Worklog Specific Ignores
 # Ignore Worklog directory by default
 .worklog/*
 
+# Ignore nested Worklog worktree directories anywhere in the tree
+**/.worklog/
+
 !.worklog/config.yaml
+
+# SQLite runtime sidecar files (WAL/SHM) for worklog DBs
+worklog.db-shm
+worklog.db-wal
 
 # opencode temporary files and directories
 .opencode/

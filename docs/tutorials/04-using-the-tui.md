@@ -162,34 +162,43 @@ When OpenCode is active, the response appears in a bottom pane:
 
 ## Step 6a: Pi Extension Browse Shortcuts
 
-When using the Pi agent with the Worklog browse extension (launched via `piman`), you can quickly insert commands into the editor using keyboard shortcuts. These shortcuts are **config-driven** — defined in `packages/tui/extensions/shortcuts.json` and dispatched dynamically by the shortcut registry, so they can be extended or customized without editing source code.
+When using the Pi agent with the Worklog browse extension (launched via `piman`), you can quickly insert commands into the editor using keyboard shortcuts. These shortcuts are **config-driven** — defined in `packages/tui/extensions/Worklog/shortcuts.json` and dispatched dynamically by the shortcut registry, so they can be extended or customized without editing source code.
 
 ### Browse List View Shortcuts
 
 In the browse selection list (when you see a list of work items), press one of the following keys to insert a command for the selected item:
 
-| Key | Command Inserted |
-|-----|------------------|
-| `i` | `implement <selected-id>` |
-| `p` | `plan <selected-id>` |
-| `n` | `intake <selected-id>` |
-| `c` | `create <description>` |
-| `a` | `audit <selected-id>` |
+| Key | Command Inserted | Stage filter |
+|-----|------------------|-------------|
+| `c` | `/intake` (create new item) | — |
+| `n` | `/intake <id>` | `idea` |
+| `p` | `/plan <id>` | `intake_complete` |
+| `i` | `/skill:implement <id>` | `intake_complete`, `plan_complete`, `in_progress` |
+| `s` | search | — |
+| `r` | producer-review toggle | — |
+| `f i` / `f n` / `f p` / `f r` | stage filters (idea / intake / plan / in_review) | — |
+| `u p l/m/h/c` | update priority (low/medium/high/critical) | — |
+| `u s` | update stage/status | — |
+| `u t` | update title | — |
+| `x c` / `x d` | close / delete | — |
+| `a a` / `a y` / `a r` | audit (automatic / approve / reject) | `in_review` |
 
-The command text is inserted into the Pi editor (without a trailing newline), allowing you to review or edit it before pressing Enter to submit.
+The command text is inserted into the Pi editor (without a trailing newline), allowing you to review or edit it before pressing Enter to submit. Chords (multi-key shortcuts like `u p h`) are entered by pressing each key in sequence.
 
 ### Detail View Shortcuts
 
-In the detail scrollable view (when viewing a single work item), the same shortcuts work identically: press `i`, `p`, `n`, or `a` to insert the corresponding command for the currently displayed work item. The detail view also clears its preview widget before closing the modal, giving you a clean editor to work in.
+In the detail scrollable view (when viewing a single work item), the same shortcuts work identically: press `i`, `p`, `n`, `c`, `s`, or `r` (plus the `u`, `x`, `a`, and `f` chords) to insert the corresponding command for the currently displayed work item. The detail view also clears its preview widget before closing the modal, giving you a clean editor to work in.
 
 When viewing details, a shortcut hint line appears at the bottom of the rendered content showing available keys for the current work item's stage (same formatting and filtering as the selection list hints). When a chord leader key (e.g., `u`) is pressed, the hint line updates to show available chord completions. The hint line respects the `showHelpText` setting and can be hidden via `/wl settings`.
 
 ### How It Works
 
 Each shortcut is defined as a JSON object with:
-- `key`: The single-character key (e.g., `"i"`)
-- `command`: The template string to insert (e.g., `"implement <id>"`)
+- `key` (or `chord`): The single-character key or chord sequence (e.g., `"i"` or `["u", "p", "h"]`)
+- `command`: The template string to insert (e.g., `/skill:implement <id>`)
 - `view`: Which view(s) the shortcut applies to (`"list"`, `"detail"`, or `"both"`)
+- `label` / `description`: Human-readable metadata shown in the help-line hints
+- `stages` (optional): Restricts the shortcut to items in the listed stages (e.g., audit chords only appear for `in_review` items)
 
 The `shortcutRegistry` loads `shortcuts.json` at extension init time and dispatches matched shortcuts in both the browse list and detail view handlers. Navigation keys (`Up`, `Down`, `Enter`, `Escape`, `PageUp`, `PageDown`, `G`) remain functional in both views.
 

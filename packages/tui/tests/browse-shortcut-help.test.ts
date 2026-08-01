@@ -209,4 +209,48 @@ describe('Browse list help text with shortcuts', () => {
     expect(helpLine!).not.toContain('↑↓ navigate');
     expect(helpLine!).toContain('i:implement');
   });
+
+  it('shows collapsed chord-family hints for u/x/f leaders with their labels', async () => {
+    const chordRegistry = new ShortcutRegistry([
+      { key: 'i', command: '/skill:implement <id>', view: 'both', label: 'implement' },
+      { chord: ['u', 'p', 'l'], command: '!!wl update <id> --priority low', view: 'both', label: 'update priority low' },
+      { chord: ['u', 'p', 'h'], command: '!!wl update <id> --priority high', view: 'both', label: 'update priority high' },
+      { chord: ['u', 's'], command: '!!wl update <id> --status <status> --stage <stage>', view: 'both', label: 'update stage/status' },
+      { chord: ['x', 'c'], command: '!!wl close <id>', view: 'both', label: 'close done' },
+      { chord: ['x', 'd'], command: '!!wl delete <id>', view: 'both', label: 'close deleted' },
+      { chord: ['f', 'i'], command: '/wl idea', view: 'both', label: 'filter idea' },
+      { chord: ['f', 'r'], command: '/wl review', view: 'both', label: 'filter in_review' },
+    ]);
+    const { ctx, getHelpLine } = createMockContext();
+    defaultChooseWorkItem(items, ctx, vi.fn(), chordRegistry);
+    await new Promise(process.nextTick);
+
+    const helpLine = getHelpLine();
+    // Chord families are collapsed to a single leader hint each
+    expect(helpLine!).toContain('u:update...');
+    expect(helpLine!).toContain('x:close...');
+    expect(helpLine!).toContain('f:filter...');
+    // Single-key entries still render as key:label
+    expect(helpLine!).toContain('i:implement');
+  });
+
+  it('shows stage-gated audit chords only when item is in_review', async () => {
+    const auditRegistry = new ShortcutRegistry([
+      { key: 'i', command: '/skill:implement <id>', view: 'both', label: 'implement' },
+      { chord: ['a', 'a'], command: '/skill:audit <id>', view: 'both', label: 'audit automatic', stages: ['in_review'] },
+      { chord: ['a', 'y'], command: '!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary \'Approved by manual review\'', view: 'both', label: 'audit approve', stages: ['in_review'] },
+    ]);
+    const reviewItems = [{ id: 'WL-001', title: 'Test item', status: 'open', stage: 'in_review' }];
+    const ideaItems = [{ id: 'WL-001', title: 'Test item', status: 'open', stage: 'idea' }];
+
+    const reviewCtx = createMockContext();
+    defaultChooseWorkItem(reviewItems, reviewCtx.ctx, vi.fn(), auditRegistry);
+    await new Promise(process.nextTick);
+    expect(reviewCtx.getHelpLine()!).toContain('a:audit...');
+
+    const ideaCtx = createMockContext();
+    defaultChooseWorkItem(ideaItems, ideaCtx.ctx, vi.fn(), auditRegistry);
+    await new Promise(process.nextTick);
+    expect(ideaCtx.getHelpLine()!).not.toContain('a:audit');
+  });
 });
