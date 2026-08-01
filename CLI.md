@@ -871,6 +871,7 @@ Subcommands:
 - `upgrade [options]` — Preview or apply pending database schema migrations. Options: `--dry-run` (preview without applying), `--confirm` (apply non-interactively).
 - `prune [options]` — Prune soft-deleted work items older than a specified age. Options: `--days <n>` (age threshold in days), `--dry-run` (show what would be pruned).
 - `file-paths [options]` — Check intake-stage items for missing or incorrect `**Key Files:**` sections. Options: `--add-placeholder` (add a placeholder section).
+- `foreign-items [options]` — Report work items whose ID prefix does not match the project prefix (cross-project pollution detection). Options: `--dry-run` (read-only; default), `--prefix <prefix>` (override classification prefix).
 
 Examples:
 
@@ -886,6 +887,8 @@ wl doctor stage-sync              # Detect stale status/stage combinations (dry-
 wl doctor stage-sync --apply      # Fix stale status/stage combinations
 wl doctor file-paths                    # Check intake-stage items for **Key Files:** sections
 wl doctor file-paths --add-placeholder   # Add placeholder **Key Files:** section to missing items
+wl doctor foreign-items                  # Report foreign-prefix work items (read-only)
+wl doctor foreign-items --dry-run --json # JSON report of foreign items
 
 Known stale combinations detected by `stage-sync`:
 

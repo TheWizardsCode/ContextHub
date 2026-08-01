@@ -71,6 +71,23 @@ Notes on GitHub-linked items:
 
 JSON output from `--json` includes a `skippedIds` array when such items are detected during a dry-run or actual prune.
 
+### Detecting foreign work items (`wl doctor foreign-items`)
+
+Reports work items whose ID prefix does not match the project's configured prefix (from `.worklog/config.yaml`). This is used to detect cross-project worklog pollution: a work item is *foreign* when the substring before the first `-` in its ID differs from the configured prefix (e.g. `WL-` items in a `SA` project). IDs without a `-` separator cannot be classified and are left alone.
+
+```bash
+# Report foreign items (read-only; default)
+wl doctor foreign-items --dry-run
+
+# JSON output for scripting
+wl doctor foreign-items --dry-run --json
+
+# Override the prefix used for classification
+wl doctor foreign-items --prefix SA
+```
+
+The report includes total items scanned, the foreign count, counts grouped by prefix, the deleted/non-deleted breakdown, and the full list of foreign IDs. Dry-run mode never modifies the database.
+
 ## Backups
 
 When `wl doctor upgrade` applies migrations, it automatically:

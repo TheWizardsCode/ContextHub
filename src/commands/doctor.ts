@@ -11,6 +11,7 @@ import { dryRunHooks, upgradeHooks, detectHooksTargetDir, type HookDryRunResult,
 import { validateFilePaths, applyFilePathsFix, DEFAULT_INTAKE_STAGES } from '../doctor/file-paths-check.js';
 import { importFromJsonl } from '../jsonl.js';
 import { mergeWorkItems, mergeComments, mergeAuditResults } from '../sync.js';
+import { buildForeignItemReport } from '../doctor/foreign-items-check.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { normalizePriority, isValidPriority, isMappablePriority, PRIORITY_MAP, CANONICAL_PRIORITIES } from '../validators/priority.js';
@@ -455,6 +456,45 @@ export default function register(ctx: PluginContext): void {
         if (utils.isJsonMode()) output.json({ success: false, error: message });
         else console.error(`Doctor prune failed: ${message}`);
       }
+    });
+
+  doctor
+    .command('foreign-items')
+    .description('Report work items whose ID prefix does not match the project prefix')
+    .option('--dry-run', 'Show foreign items without modifying anything (default)')
+    .option('--prefix <prefix>', 'Override the default prefix')
+    .action(async (opts: { dryRun?: boolean; prefix?: string }) => {
+      utils.requireInitialized();
+      const db = utils.getDatabase(opts.prefix);
+      const config = utils.getConfig();
+      // The parent `doctor` command also declares --prefix and captures it
+      // for child commands; fall back to it when the child value is absent.
+      const configuredPrefix = opts.prefix || doctor.opts().prefix || config?.prefix || 'WI';
+      const allItems = db.getAll();
+
+      const report = buildForeignItemReport(allItems, configuredPrefix, true);
+
+      if (utils.isJsonMode()) {
+        output.json(report);
+        return;
+      }
+
+      console.log(`Doctor foreign-items: ${report.totalItems} item(s) scanned, ${report.foreignCount} foreign item(s) (prefix: ${report.prefix}).`);
+      if (report.foreignCount === 0) {
+        console.log('No foreign items found.');
+        return;
+      }
+
+      const prefixes = Object.keys(report.byPrefix).sort();
+      for (const prefix of prefixes) {
+        const group = report.byPrefix[prefix];
+        console.log(`\n${prefix}: ${group.count} item(s) (${group.deleted} deleted, ${group.nonDeleted} non-deleted)`);
+        for (const id of group.ids) {
+          console.log(`  - ${id}`);
+        }
+      }
+      console.log(`\nTotal: ${report.deletedForeignCount} deleted, ${report.nonDeletedForeignCount} non-deleted foreign item(s).`);
+      console.log('Dry-run only; nothing was modified.');
     });
 
   doctor
