@@ -9,6 +9,7 @@ import {
   fetchItemDetails,
   fetchItemsByStage,
   fetchChildrenForItem,
+  fetchActionableCount,
   checkWlAvailable,
   setExecFileAsync,
   resetExecFileAsync,
@@ -145,6 +146,53 @@ describe('fetchNextItems', () => {
     }
     // Drill-down (children) is NOT root-only — children must remain fetchable.
     expect(calls.some((args: string[]) => args.includes('--parent'))).toBe(false);
+  });
+});
+
+describe('fetchActionableCount', () => {
+  beforeEach(() => {
+    resetExecFileAsync();
+  });
+
+  it('returns the count from wl list output', async () => {
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ count: 47 }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    const count = await fetchActionableCount();
+    expect(count).toBe(47);
+  });
+
+  it('returns undefined when the count field is missing', async () => {
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ workItems: [] }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    const count = await fetchActionableCount();
+    expect(count).toBeUndefined();
+  });
+
+  it('returns undefined when wl fails (graceful degradation)', async () => {
+    const mockFn = vi.fn().mockRejectedValue(new Error('wl not found'));
+    setExecFileAsync(mockFn as any);
+
+    const count = await fetchActionableCount();
+    expect(count).toBeUndefined();
+  });
+
+  it('queries only open/in-progress/blocked statuses', async () => {
+    const mockFn = vi.fn().mockResolvedValue({ stdout: JSON.stringify({ count: 5 }), stderr: '' });
+    setExecFileAsync(mockFn as any);
+
+    await fetchActionableCount();
+    const args = mockFn.mock.calls[0][1];
+    expect(args).toContain('list');
+    expect(args).toContain('--status');
+    expect(args).toContain('open,in-progress,blocked');
   });
 });
 
