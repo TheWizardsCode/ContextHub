@@ -25,6 +25,30 @@ export const MIN_SYNC_INTERVAL_MS = 30_000;
 /** Sentinel value meaning "sync is disabled". */
 export const SYNC_DISABLED = 0;
 
+// ── Single-flight state ───────────────────────────────────────────────
+
+/**
+ * Process-wide in-flight guard: only one `wl sync` may run at a time within
+ * this pane process. Overlapping auto-sync ticks are skipped (single-flight)
+ * so the worklist pane cannot spawn a lock storm of its own.
+ */
+let _syncInFlight = false;
+
+/**
+ * Test helper: reset the in-flight guard between tests.
+ */
+export function _resetSyncInFlight(): void {
+  _syncInFlight = false;
+}
+
+/**
+ * Whether a background `wl sync` is currently in-flight in this process.
+ * Used by the UI to avoid piling on more syncs while one is running.
+ */
+export function isSyncInFlight(): boolean {
+  return _syncInFlight;
+}
+
 // ── Options ───────────────────────────────────────────────────────────
 
 /**
@@ -48,6 +72,17 @@ export function clampSyncInterval(intervalMs: number): number {
   return Math.max(intervalMs, MIN_SYNC_INTERVAL_MS);
 }
 
+export interface RunSyncOptions {
+  /**
+   * Single-flight / lock-aware guard: skip (do not spawn) when another sync
+   * is already in-flight in this process, and pass `--if-idle` to `wl sync`
+   * so the CLI also skips when the file lock is held by another process.
+   * Auto-sync paths set this; manual syncs (user-triggered) leave it off so
+   * they wait for the lock like a regular `wl sync`.
+   */
+  ifIdle?: boolean;
+}
+
 /**
  * Run `wl sync` in the background using `spawn`.
  *
@@ -55,25 +90,44 @@ export function clampSyncInterval(intervalMs: number): number {
  * sync succeeded so the UI can surface status. If `wl` is not available the
  * promise resolves with `success: false` (no throw).
  *
+ * With `ifIdle`, overlapping syncs are skipped (single-flight guard) and the
+ * spawned CLI gets `--if-idle` so it exits immediately when the cross-process
+ * file lock is held — preventing lock-storm process pile-up.
+ *
  * @returns A promise resolving with the sync outcome.
  */
-export function runSync(worklogDir?: string): Promise<{ success: boolean; error?: string }> {
-  return new Promise<{ success: boolean; error?: string }>((resolve) => {
+export function runSync(worklogDir?: string, options?: RunSyncOptions): Promise<{ success: boolean; error?: string; skipped?: boolean }> {
+  const ifIdle = options?.ifIdle ?? false;
+
+  // Single-flight guard: never spawn a second sync while one is in-flight
+  // (auto-sync path). The caller is told the sync was skipped.
+  if (ifIdle && _syncInFlight) {
+    return Promise.resolve({ success: false, skipped: true, error: 'sync already in progress' });
+  }
+
+  return new Promise<{ success: boolean; error?: string; skipped?: boolean }>((resolve) => {
     try {
       // Target the resolved worklog (same as other wl invocations) so the
       // background sync operates on the tab project, not the plugin's CWD.
       const syncArgs = worklogDir
-        ? ['--worklog-dir', worklogDir, 'sync']
-        : ['sync'];
+        ? ['--worklog-dir', worklogDir, 'sync', ...(ifIdle ? ['--if-idle'] : [])]
+        : ['sync', ...(ifIdle ? ['--if-idle'] : [])];
       const child = spawn('wl', syncArgs, {
         stdio: ['ignore', 'ignore', 'ignore'], // Discard output
         detached: false,
       });
 
+      _syncInFlight = true;
+
       let settled = false;
+      // Safety timeout: if spawn never fires close/error, resolve after 10s.
+      // Declared before settle so the guard can clear it once the sync ends.
+      let timeout: ReturnType<typeof setTimeout> | undefined;
       const settle = (outcome: { success: boolean; error?: string }) => {
         if (!settled) {
           settled = true;
+          _syncInFlight = false;
+          if (timeout) clearTimeout(timeout);
           resolve(outcome);
         }
       };
@@ -93,14 +147,14 @@ export function runSync(worklogDir?: string): Promise<{ success: boolean; error?
         settle({ success: false, error: msg || 'wl sync failed' });
       });
 
-      // Safety timeout: if spawn never fires close/error, resolve after 10s
-      const timeout = setTimeout(() => {
+      timeout = setTimeout(() => {
         child.kill();
         settle({ success: false, error: 'wl sync timed out' });
       }, 10_000);
       if (timeout.unref) timeout.unref(); // Don't keep node alive
     } catch (err) {
       // Worst-case: spawn itself throws (extremely rare)
+      _syncInFlight = false;
       const msg = err && typeof err === 'object' && 'message' in (err as any)
         ? String((err as any).message)
         : String(err);

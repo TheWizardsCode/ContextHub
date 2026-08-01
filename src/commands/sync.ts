@@ -13,7 +13,7 @@ import { mergeAuditResults } from '../sync.js';
 import { loadConfig } from '../config.js';
 import { displayConflictDetails } from './helpers.js';
 import { createLogFileWriter, getWorklogLogPath, logConflictDetails } from '../logging.js';
-import { withFileLock, getLockPathForJsonl } from '../file-lock.js';
+import { withFileLock, getLockPathForJsonl, LockBusyError } from '../file-lock.js';
 import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -339,6 +339,7 @@ export default function register(ctx: PluginContext): void {
     .option('--git-branch <ref>', 'Git ref to store worklog data (use refs/worklog/data to avoid GitHub PR banners)', DEFAULT_GIT_BRANCH)
     .option('--no-push', 'Skip pushing changes back to git')
     .option('--dry-run', 'Show what would be synced without making changes')
+    .option('--if-idle', 'Skip (exit 0) if another sync is already in progress — lock-aware guard for auto-sync spawners; prevents process pile-up under lock contention')
     .option('--no-re-sort', 'Skip automatic re-sort after sync')
     .option('--re-sort-sync', 'Force a synchronous re-sort after sync', false)
     .action(async (options: SyncOptions) => {
@@ -357,20 +358,37 @@ export default function register(ctx: PluginContext): void {
       try {
         const lockPath = getLockPathForJsonl(options.file || dataPath);
         const isVerbose = program.opts().verbose;
-        await withFileLock(lockPath, () =>
-          performSync(dataPath, utils.getDatabase, {
-            file: options.file || dataPath,
-            prefix: options.prefix,
-            gitRemote,
-            gitBranch,
-            push: options.push ?? true,
-            dryRun: options.dryRun ?? false,
-            silent: false,
-            isJsonMode,
-            isVerbose
-          })
+        await withFileLock(
+          lockPath,
+          () =>
+            performSync(dataPath, utils.getDatabase, {
+              file: options.file || dataPath,
+              prefix: options.prefix,
+              gitRemote,
+              gitBranch,
+              push: options.push ?? true,
+              dryRun: options.dryRun ?? false,
+              silent: false,
+              isJsonMode,
+              isVerbose
+            }),
+          options.ifIdle ? { skipIfLocked: true } : undefined
         );
       } catch (error) {
+        // Lock-aware guard: another sync holds the lock — skip gracefully
+        // (exit 0, no error) so auto-sync spawners do not pile up waiting.
+        if (error instanceof LockBusyError) {
+          if (isJsonMode) {
+            output.json({
+              success: true,
+              skipped: true,
+              reason: 'another sync is already in progress'
+            });
+          } else {
+            console.log('\nSync skipped: another sync is already in progress');
+          }
+          process.exit(0);
+        }
         if (isJsonMode) {
           output.json({
             success: false,

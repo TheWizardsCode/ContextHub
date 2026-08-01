@@ -115,8 +115,11 @@ function _triggerAutoSync(): void {
 
   _autoSyncInFlight = true;
 
-  // Fire-and-forget: invoke wl sync in background, then clear the guard
-  runWl(['sync']).finally(() => {
+  // Fire-and-forget: invoke wl sync in background, then clear the guard.
+  // `--if-idle` makes the sync skip when the file lock is held by another
+  // process (cross-process mutex) so multiple TUI instances/panes cannot pile
+  // up into a lock storm (WL-0MSAB7ZUC004SK7E).
+  runWl(['sync', '--if-idle']).finally(() => {
     _autoSyncInFlight = false;
   }).catch(() => {
     _autoSyncInFlight = false;

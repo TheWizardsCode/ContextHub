@@ -1640,8 +1640,24 @@ export async function runWorklistTui(
   // Run `wl sync` and surface the outcome in the notification area so sync
   // status is visible (success and graceful failure). Targets the resolved
   // worklog directory so sync operates on the tab project.
-  const doSync = async (): Promise<void> => {
-    const outcome = await runSync(getWorklogDir());
+  //
+  // With ifIdle=true (auto-sync timer path) runSync applies its single-flight
+  // guard and passes --if-idle to the CLI, so overlapping syncs are skipped
+  // instead of piling up (lock-storm prevention). Manual 'S' syncs pass
+  // ifIdle=false and wait for the lock like a regular wl sync.
+  const doSync = async (ifIdle = false): Promise<void> => {
+    const outcome = await runSync(getWorklogDir(), { ifIdle });
+    if (outcome.skipped) {
+      // Another sync is already in-flight / holding the lock — do not pile on.
+      // Surface a subtle "in progress" note instead of an error.
+      syncNotification = ` ${ANSI.dim}[Sync in progress]${ANSI.reset}`;
+      render();
+      setTimeout(() => {
+        syncNotification = '';
+        render();
+      }, 3000);
+      return;
+    }
     syncNotification = outcome.success
       ? ` ${ANSI.dim}[Synced]${ANSI.reset}`
       : ` ${ANSI.yellow}[Sync failed: ${outcome.error ?? 'unknown error'}]${ANSI.reset}`;
@@ -2013,24 +2029,26 @@ export async function runWorklistTui(
   // Read keypresses
   process.stdin.on('data', onData);
 
-  // Auto-refresh timer — optionally runs sync before each fetch when autoSync is enabled
+  // Auto-refresh timer — fetches fresh items on an interval. NOTE: this timer
+  // does NOT run `wl sync`; the dedicated SyncTimer below is the single sync
+  // source. Running sync from both timers caused a double-spawn per pane that
+  // amplified the wl sync lock storm (WL-0MSAB7ZUC004SK7E).
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
   if (opts.autoRefresh) {
     refreshTimer = setInterval(() => {
-      if (opts.autoSync) {
-        doSync();
-      }
       doRefresh(false);
     }, opts.refreshIntervalMs);
   }
 
-  // Auto-sync timer (background wl sync)
+  // Auto-sync timer (background wl sync) — the only auto-sync source. Uses the
+  // single-flight + lock-aware (--if-idle) guard so concurrent panes/TUI
+  // instances skip instead of piling up under lock contention.
   let syncTimer: ReturnType<typeof createSyncTimer> | undefined;
   if (opts.autoSync && opts.syncIntervalMs !== 0) {
     syncTimer = createSyncTimer({
       intervalMs: opts.syncIntervalMs,
       onSync: () => {
-        doSync();
+        doSync(true); // ifIdle: skip when another sync is in-flight / lock held
         doRefresh(false);
       },
     });

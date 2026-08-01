@@ -53,6 +53,7 @@ import {
   DEFAULT_SYNC_INTERVAL_MS,
   MIN_SYNC_INTERVAL_MS,
   SYNC_DISABLED,
+  _resetSyncInFlight,
 } from './auto-sync.js';
 
 // Re-import the mocked spawn for assertions
@@ -63,6 +64,7 @@ beforeEach(() => {
   spawnShouldThrow = false;
   childEventToFire = 'close';
   childEventCallback = null;
+  _resetSyncInFlight();
 });
 
 afterEach(() => {
@@ -173,6 +175,79 @@ describe('runSync', () => {
     // The mock child's kill should have been called
     const outcome = await promise;
     expect(outcome.success).toBe(false);
+  });
+
+  it('skips a second sync while one is in-flight (single-flight guard)', async () => {
+    vi.useFakeTimers();
+    // First sync stays in-flight (no close/error event)
+    childEventToFire = null;
+    const first = runSync(undefined, { ifIdle: true });
+
+    // Second overlapping auto-sync tick is skipped without spawning
+    const second = runSync(undefined, { ifIdle: true });
+    const outcome = await second;
+    expect(outcome.skipped).toBe(true);
+    expect(outcome.success).toBe(false);
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+
+    // Let the first settle via its safety timeout so the guard is released
+    // (no dangling promise).
+    await vi.advanceTimersByTimeAsync(10_000);
+    const firstOutcome = await first;
+    expect(firstOutcome.success).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it('spawns a new sync after the in-flight one settles (guard released)', async () => {
+    vi.useFakeTimers();
+    childEventToFire = 'close';
+    const first = runSync(undefined, { ifIdle: true });
+    if (childEventCallback) childEventCallback();
+    await first;
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+
+    // Guard released — a later tick spawns again
+    const second = runSync(undefined, { ifIdle: true });
+    if (childEventCallback) childEventCallback();
+    const outcome = await second;
+    expect(outcome.skipped).toBeUndefined();
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it('passes --if-idle to wl sync when the ifIdle option is set', async () => {
+    childEventToFire = 'close';
+    const promise = runSync(undefined, { ifIdle: true });
+    expect(mockSpawn).toHaveBeenCalledWith('wl', ['sync', '--if-idle'], expect.any(Object));
+    if (childEventCallback) childEventCallback();
+    await promise;
+  });
+
+  it('does not pass --if-idle for manual (non-ifIdle) syncs', async () => {
+    childEventToFire = 'close';
+    const promise = runSync();
+    expect(mockSpawn).toHaveBeenCalledWith('wl', ['sync'], expect.any(Object));
+    if (childEventCallback) childEventCallback();
+    await promise;
+  });
+
+  it('two panes sharing a process do not double-spawn syncs on the same tick (lock-storm regression)', async () => {
+    vi.useFakeTimers();
+    // Simulate two worklist panes in one process, each firing onSync with the
+    // auto-sync (ifIdle) flag on the same tick. The single-flight guard must
+    // collapse them into ONE spawn, not two (WL-0MSAB7ZUC004SK7E).
+    childEventToFire = null; // first sync stays in-flight
+    const p1 = runSync(undefined, { ifIdle: true });
+    const p2 = runSync(undefined, { ifIdle: true });
+
+    const o2 = await p2;
+    expect(o2.skipped).toBe(true); // second pane's tick was skipped
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+
+    // Clean up: settle the in-flight sync via its safety timeout
+    await vi.advanceTimersByTimeAsync(10_000);
+    await p1;
+    vi.useRealTimers();
   });
 });
 

@@ -29,6 +29,20 @@ export interface FileLockOptions {
   maxLockAge?: number;
   /** Maximum delay in milliseconds between retry attempts after exponential growth (default 2 000). */
   maxRetryDelay?: number;
+  /** If true and the lock is currently held by a live process, fail fast with a `LockBusyError` instead of retrying until the timeout. Stale/age-expired locks are still cleaned up first. Used by `wl sync --if-idle` so auto-sync spawners skip instead of queueing (lock-storm prevention). */
+  skipIfLocked?: boolean;
+}
+
+/**
+ * Thrown when `skipIfLocked` is set and the file lock is currently held by
+ * a live process. Callers (e.g. `wl sync --if-idle`) treat this as "skip —
+ * another sync is already running" rather than an error.
+ */
+export class LockBusyError extends Error {
+  constructor(lockPath: string) {
+    super(`File lock busy at ${lockPath}; another process holds it`);
+    this.name = 'LockBusyError';
+  }
 }
 
 export interface FileLockInfo {
@@ -231,6 +245,7 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
   const staleLockCleanup = options?.staleLockCleanup ?? true;
   const maxLockAge = options?.maxLockAge ?? DEFAULT_MAX_LOCK_AGE_MS;
   const maxRetryDelay = options?.maxRetryDelay ?? DEFAULT_MAX_RETRY_DELAY_MS;
+  const skipIfLocked = options?.skipIfLocked ?? false;
 
   const deadline = Date.now() + timeout;
 
@@ -358,6 +373,14 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
       }
 
       // Lock is held by a live process (or on another host) — wait and retry
+      // unless the caller asked to skip (lock-aware guard: auto-sync paths use
+      // this so concurrent panes/TUI instances do not pile up waiting).
+      if (skipIfLocked) {
+        const existingInfo = readLockInfo(lockPath);
+        debugLog(`Lock busy at ${lockPath} and skipIfLocked set; skipping (PID ${existingInfo?.pid ?? 'unknown'})`);
+        throw new LockBusyError(lockPath);
+      }
+
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
         // Will be caught by the timeout check at the top of the loop

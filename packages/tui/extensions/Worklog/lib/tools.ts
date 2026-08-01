@@ -173,7 +173,15 @@ export const NOT_INITIALIZED_FRIENDLY =
 
 // ── CLI execution ─────────────────────────────────────────────────────
 
-export async function runWl(args: string[], includeJson = true): Promise<string> {
+/**
+ * Default timeout (ms) for `wl`/`worklog` CLI invocations via runWl.
+ * A sync hung on the file lock previously hung forever (no timeout); this
+ * bounds every call so a stuck `wl sync` cannot persist indefinitely
+ * (lock-storm prevention, WL-0MSAB7ZUC004SK7E). Overridable via env.
+ */
+export const DEFAULT_WL_TIMEOUT_MS = Number(process.env.WL_RUN_TIMEOUT_MS) || 60_000;
+
+export async function runWl(args: string[], includeJson = true, timeoutMs: number = DEFAULT_WL_TIMEOUT_MS): Promise<string> {
   const binaries = ['wl', 'worklog'];
   let lastError: unknown;
 
@@ -181,12 +189,23 @@ export async function runWl(args: string[], includeJson = true): Promise<string>
     try {
       const fullArgs = includeJson ? [...args, '--json'] : args;
       const execFileAsync = promisify(execFile);
-      const result = await execFileAsync(binary, fullArgs, { maxBuffer: 1024 * 1024 * 5 });
+      const result = await execFileAsync(binary, fullArgs, {
+        maxBuffer: 1024 * 1024 * 5,
+        timeout: timeoutMs,
+      });
       return result.stdout;
     } catch (error: any) {
       if (error && error.code === 'ENOENT') {
         lastError = error;
         continue;
+      }
+
+      // execFile kills the child and rejects with killed/signal set when the
+      // timeout fires. Surface a clear, actionable message instead of the
+      // raw "Command failed" error.
+      if (error && (error.killed === true || error.signal || error.code === 'ETIMEDOUT')) {
+        const cmd = `${binary} ${args.join(' ')}`;
+        throw new Error(`Command timed out after ${timeoutMs}ms: ${cmd}. The worklog file lock may be contended; a sync may already be running.`);
       }
 
       const stderr = typeof error?.stderr === 'string' ? error.stderr.trim() : '';

@@ -714,6 +714,7 @@ Important options:
 - `--git-branch <ref>` — Git ref to store worklog data (optional; default: `refs/worklog/data` or value from configuration).
 - `--no-push` — Skip pushing changes (optional).
 - `--dry-run` — Preview changes without modifying local state or git (optional).
+- `--if-idle` — Lock-aware guard for auto-sync spawners: skip (exit 0, JSON `skipped: true`) if another sync is already in progress. Prevents lock-storm process pile-up from multiple panes/TUI instances. Stale locks are still cleaned first. Manual syncs should omit this flag to keep the wait-for-lock behavior.
 - `--prefix <prefix>` — Operate on a specific prefix (optional).
 
 Examples:
