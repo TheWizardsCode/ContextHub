@@ -22,7 +22,7 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join, parse } from 'path';
 import { existsSync } from 'fs';
-import { checkWlAvailable, fetchNextItems, fetchItemsByStage, setWorklogDir } from './fetcher.js';
+import { checkWlAvailable, fetchNextItems, fetchItemsByStage, setWorklogDir, claimWorkItem } from './fetcher.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
@@ -86,6 +86,59 @@ function isAgentCommand(command: string): boolean {
     command.startsWith('/intake') ||
     command.startsWith('/plan')
   );
+}
+
+/**
+ * Work-item ID format: a prefix (e.g. `WL`, `SA`) followed by a hash,
+ * e.g. `WL-0MS9NPHQU005Y3VE`.
+ */
+const WORK_ITEM_ID_PATTERN = /^[A-Z]+-\w+$/;
+
+/**
+ * Assignee used when the plugin claims a work-item (sets status to
+ * in_progress) before dispatching an agent command. Matches the agent
+ * handle used across the worklog (see AGENTS.md claim pattern).
+ */
+const AGENT_ASSIGNEE = 'Map';
+
+/**
+ * Extract the work-item ID from an agent command string.
+ *
+ * Agent commands are typically `/intake <id>`, `/plan <id>`, or
+ * `/skill:<name> <id>` with the ID as the last argument. All tokens are
+ * scanned for the work-item ID pattern and the last match is returned.
+ * Commands without an ID (e.g. `/intake` alone) return `undefined` and
+ * skip the status update gracefully.
+ */
+export function extractWorkItemId(command: string): string | undefined {
+  const tokens = command.trim().split(/\s+/);
+  for (let i = tokens.length - 1; i >= 0; i -= 1) {
+    if (WORK_ITEM_ID_PATTERN.test(tokens[i])) {
+      return tokens[i];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Claim the work-item referenced by an agent command (set its status to
+ * in_progress) before the agent pane is spawned.
+ *
+ * Non-blocking: never throws. Failures are logged to stderr and must not
+ * prevent the agent pane from opening (AC2). Commands without a work-item
+ * ID (e.g. `/intake` alone) are skipped silently.
+ */
+export async function claimItemForAgentCommand(command: string): Promise<void> {
+  const itemId = extractWorkItemId(command);
+  if (!itemId) {
+    return;
+  }
+  const result = await claimWorkItem(itemId, AGENT_ASSIGNEE);
+  if (!result.success) {
+    process.stderr.write(
+      `[worklog-plugin] Failed to set ${itemId} status to in_progress: ${result.error ?? 'unknown error'}\n`,
+    );
+  }
 }
 
 /**
@@ -274,7 +327,7 @@ async function main(): Promise<void> {
       // Re-read on every render so a showHelpText change applies on the next
       // refresh (no plugin restart needed), matching browseItemCount behavior.
       getShowHelpText: () => loadSettings().showHelpText ?? true,
-      onCommand: (command: string) => {
+      onCommand: async (command: string) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
         // shortcuts like audit approve/reject, priority updates, close/delete) are
@@ -290,6 +343,14 @@ async function main(): Promise<void> {
         // (wlRoot) explicitly to the pane-spawning scripts via --cwd.
         const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
         if (route === 'agent') {
+          // Claim the referenced work-item BEFORE spawning the agent pane so it
+          // appears in_progress immediately. Non-blocking: failures are logged
+          // to stderr and never prevent the pane from opening (AC2).
+          try {
+            await claimItemForAgentCommand(command);
+          } catch {
+            // Belt-and-suspenders: a claim failure must never block the pane.
+          }
           // Spawn send-to-pi.sh asynchronously — detached and with stdio ignored
           // so the TUI loop is not blocked or affected by the script's output.
           const child = spawn(
