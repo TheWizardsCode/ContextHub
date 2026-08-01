@@ -161,6 +161,18 @@ export function configureWorklogTarget(startDir?: string): string | undefined {
   return wlRoot;
 }
 
+/**
+ * Report text emitted when no valid `.worklog/` directory is found in or
+ * above the given start directory. Extracted so tests can assert the
+ * uninitialized reporting without launching the full TUI.
+ */
+export function uninitializedReport(startDir: string): string {
+  return [
+    `[worklog-plugin] No valid .worklog/ directory found in or above '${startDir}'`,
+    `[worklog-plugin] Showing empty worklist. Navigate to a project with 'worklog init' to see items.`,
+  ].join('\n') + '\n';
+}
+
 async function main(): Promise<void> {
   // Check if wl is available
   const wlAvailable = await checkWlAvailable();
@@ -191,8 +203,7 @@ async function main(): Promise<void> {
   if (wlRoot) {
     process.stderr.write(`[worklog-plugin] wlRoot resolved: ${wlRoot}\n`);
   } else {
-    process.stderr.write(`[worklog-plugin] No valid .worklog/ directory found in or above '${resolvedCwd ?? process.cwd()}'\n`);
-    process.stderr.write(`[worklog-plugin] Showing empty worklist. Navigate to a project with 'worklog init' to see items.\n`);
+    process.stderr.write(uninitializedReport(resolvedCwd ?? process.cwd()));
   }
 
   // Create a fetcher that loads items using the current browseItemCount setting
@@ -200,6 +211,12 @@ async function main(): Promise<void> {
   // Smart selection (see fetchNextItems) guarantees all critical and
   // completed/in_review items are always shown, regardless of the count.
   const fetcher = async () => {
+    // When no valid .worklog/ exists in the tab directory, do NOT fetch from
+    // the plugin's own CWD (which would show an unrelated project's items).
+    // Return an empty list so the TUI shows the uninitialized/empty state.
+    if (!wlRoot) {
+      return [];
+    }
     try {
       const currentSettings = loadSettings();
       const count = clampBrowseItemCount(currentSettings.browseItemCount ?? defaultSettings.browseItemCount);
@@ -276,10 +293,21 @@ async function main(): Promise<void> {
           );
           child.unref(); // Allow the parent to exit independently
         } else {
-          // Strip `!!` / `!` bash history-expansion prefixes from shortcuts,
-          // then write to stdout with CMD: prefix so Herdr executes them.
-          const clean = stripCommandPrefix(command);
-          process.stdout.write(`CMD:${clean}\n`);
+          // Plain (non-!!) shell commands: run them visibly in a new herdr pane
+          // from the resolved project root so they always execute in the tab's
+          // working directory (herdr v0.7.5 has no CMD: handling, so the stdout
+          // CMD: protocol is not a reliable execution path).
+          const child = spawn(
+            RUN_IN_PANE_SCRIPT,
+            ['--cwd', targetCwd, command],
+            {
+              detached: true,
+              stdio: 'ignore',
+              cwd: targetCwd,
+              env: { ...process.env, HERDR_RESOLVED_CWD: targetCwd },
+            },
+          );
+          child.unref();
         }
       },
     },

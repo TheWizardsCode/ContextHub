@@ -523,4 +523,11 @@ describe('configureWorklogTarget', () => {
     const resolved = configureWorklogTarget(process.env.HERDR_RESOLVED_CWD);
     expect(resolved).toBe(root);
   });
+
+  it('reports the uninitialized state with actionable stderr messages', async () => {
+    const { uninitializedReport } = await import('./index.js');
+    const report = uninitializedReport('/tmp/nonexistent-project');
+    expect(report).toContain("No valid .worklog/ directory found in or above '/tmp/nonexistent-project'");
+    expect(report).toContain('Showing empty worklist. Navigate to a project with \'worklog init\' to see items.');
+  });
 });
