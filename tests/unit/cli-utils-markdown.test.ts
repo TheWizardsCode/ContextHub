@@ -3,20 +3,26 @@
  * Tests the --format precedence chain (CLI > config > auto-detect)
  * and the --format auto bypass of config.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Command } from 'commander';
 import { createMarkdownOutputHelpers } from '../../src/cli-utils.js';
 
 // Mock loadConfig to control config responses in tests
+// Shared loadConfig mock so tests can set return values directly. cli-utils.ts
+// imports { loadConfig } as a live binding; mutating a vi.hoisted mock is the
+// only reliably observable way to control it (vi.spyOn on the namespace object
+// was flaky in full-suite runs).
+const mockLoadConfig = vi.hoisted(() => vi.fn(() => ({
+  projectName: 'TestProject',
+  prefix: 'TP',
+  cliFormatMarkdown: undefined,
+  statuses: [{ value: 'open', label: 'Open' }],
+  stages: [{ value: 'idea', label: 'Idea' }],
+  statusStageCompatibility: {},
+})));
+
 vi.mock('../../src/config.js', () => ({
-  loadConfig: vi.fn(() => ({
-    projectName: 'TestProject',
-    prefix: 'TP',
-    cliFormatMarkdown: undefined,
-    statuses: [{ value: 'open', label: 'Open' }],
-    stages: [{ value: 'idea', label: 'Idea' }],
-    statusStageCompatibility: {},
-  })),
+  loadConfig: mockLoadConfig,
   loadConfigRelaxed: vi.fn(() => ({
     projectName: 'TestProject',
     prefix: 'TP',
@@ -37,6 +43,20 @@ vi.mock('../../src/jsonl.js', () => ({
 }));
 
 describe('createMarkdownOutputHelpers', () => {
+  beforeEach(() => {
+    // Reset to the default (cliFormatMarkdown: undefined) between tests so a
+    // mockReturnValue from a previous test does not leak.
+    mockLoadConfig.mockReset();
+    mockLoadConfig.mockImplementation(() => ({
+      projectName: 'TestProject',
+      prefix: 'TP',
+      cliFormatMarkdown: undefined,
+      statuses: [{ value: 'open', label: 'Open' }],
+      stages: [{ value: 'idea', label: 'Idea' }],
+      statusStageCompatibility: {},
+    }));
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -55,8 +75,7 @@ describe('createMarkdownOutputHelpers', () => {
 
   describe('CLI flag precedence', () => {
     it('--format markdown enables markdown regardless of config', async () => {
-      const config = await import('../../src/config.js');
-      vi.spyOn(config, 'loadConfig').mockReturnValue({
+      mockLoadConfig.mockReturnValue({
         projectName: 'TestProject',
         prefix: 'TP',
         cliFormatMarkdown: false,
@@ -67,8 +86,7 @@ describe('createMarkdownOutputHelpers', () => {
     });
 
     it('--format plain disables markdown regardless of config', async () => {
-      const config = await import('../../src/config.js');
-      vi.spyOn(config, 'loadConfig').mockReturnValue({
+      mockLoadConfig.mockReturnValue({
         projectName: 'TestProject',
         prefix: 'TP',
         cliFormatMarkdown: true,
@@ -79,8 +97,7 @@ describe('createMarkdownOutputHelpers', () => {
     });
 
     it('--format text disables markdown regardless of config', async () => {
-      const config = await import('../../src/config.js');
-      vi.spyOn(config, 'loadConfig').mockReturnValue({
+      mockLoadConfig.mockReturnValue({
         projectName: 'TestProject',
         prefix: 'TP',
         cliFormatMarkdown: true,
@@ -91,8 +108,7 @@ describe('createMarkdownOutputHelpers', () => {
     });
 
     it('--format auto ignores config and uses TTY detection (non-TTY)', async () => {
-      const config = await import('../../src/config.js');
-      vi.spyOn(config, 'loadConfig').mockReturnValue({
+      mockLoadConfig.mockReturnValue({
         projectName: 'TestProject',
         prefix: 'TP',
         cliFormatMarkdown: true,
@@ -105,8 +121,7 @@ describe('createMarkdownOutputHelpers', () => {
     });
 
     it('--format auto in TTY should use TTY detection, not config', async () => {
-      const config = await import('../../src/config.js');
-      vi.spyOn(config, 'loadConfig').mockReturnValue({
+      mockLoadConfig.mockReturnValue({
         projectName: 'TestProject',
         prefix: 'TP',
         cliFormatMarkdown: false,
@@ -122,8 +137,7 @@ describe('createMarkdownOutputHelpers', () => {
 
   describe('config precedence', () => {
     it('cliFormatMarkdown true enables markdown when no CLI flag', async () => {
-      const config = await import('../../src/config.js');
-      vi.spyOn(config, 'loadConfig').mockReturnValue({
+      mockLoadConfig.mockReturnValue({
         projectName: 'TestProject',
         prefix: 'TP',
         cliFormatMarkdown: true,
@@ -134,8 +148,7 @@ describe('createMarkdownOutputHelpers', () => {
     });
 
     it('cliFormatMarkdown false disables markdown when no CLI flag', async () => {
-      const config = await import('../../src/config.js');
-      vi.spyOn(config, 'loadConfig').mockReturnValue({
+      mockLoadConfig.mockReturnValue({
         projectName: 'TestProject',
         prefix: 'TP',
         cliFormatMarkdown: false,
@@ -146,8 +159,7 @@ describe('createMarkdownOutputHelpers', () => {
     });
 
     it('no CLI flag and no config: auto-detect from TTY', async () => {
-      const config = await import('../../src/config.js');
-      vi.spyOn(config, 'loadConfig').mockReturnValue({
+      mockLoadConfig.mockReturnValue({
         projectName: 'TestProject',
         prefix: 'TP',
       } as any);
@@ -160,8 +172,7 @@ describe('createMarkdownOutputHelpers', () => {
 
   describe('JSON mode precedence', () => {
     it('JSON mode disables markdown regardless of other settings', async () => {
-      const config = await import('../../src/config.js');
-      vi.spyOn(config, 'loadConfig').mockReturnValue({
+      mockLoadConfig.mockReturnValue({
         projectName: 'TestProject',
         prefix: 'TP',
         cliFormatMarkdown: true,
@@ -174,8 +185,7 @@ describe('createMarkdownOutputHelpers', () => {
 
   describe('render and print methods', () => {
     it('render returns rendered text when markdown enabled', async () => {
-      const config = await import('../../src/config.js');
-      vi.spyOn(config, 'loadConfig').mockReturnValue({
+      mockLoadConfig.mockReturnValue({
         projectName: 'TestProject',
         prefix: 'TP',
       } as any);
@@ -193,8 +203,7 @@ describe('createMarkdownOutputHelpers', () => {
     });
 
     it('render returns plain text when markdown disabled', async () => {
-      const config = await import('../../src/config.js');
-      vi.spyOn(config, 'loadConfig').mockReturnValue({
+      mockLoadConfig.mockReturnValue({
         projectName: 'TestProject',
         prefix: 'TP',
       } as any);

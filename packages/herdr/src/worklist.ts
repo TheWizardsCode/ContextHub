@@ -662,9 +662,10 @@ function truncateLine(line: string, maxWidth: number): string {
  * Build the full content lines for a detail view (without scrolling).
  * Returns an array of lines ready for viewport rendering.
  *
- * Metadata section includes: Status, Priority, Stage, Assignee, Created,
- * Updated, Audit (auditResult icon), Reviewed (needsProducerReview icon),
- * and Audited At (ISO timestamp). Rendered as a markdown table.
+ * Metadata section includes: Status, Priority, Stage, Type, Risk, Effort,
+ * Children, Tags, GitHub Issue (number), Created, Updated, Audit
+ * (auditResult icon), Reviewed (needsProducerReview icon), and Audited At
+ * (ISO timestamp). Rendered as a markdown table.
  */
 export function formatDetailContent(
   item: WorkItem | null,

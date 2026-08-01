@@ -8,6 +8,7 @@ import {
   defaultSettings,
   loadSettings,
   saveSettings,
+  clampBrowseItemCount,
 } from '../../packages/herdr/src/settings.js';
 import { unlinkSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -31,6 +32,15 @@ describe('defaultSettings', () => {
 
   it('has default browseItemCount of 10', () => {
     expect(defaultSettings.browseItemCount).toBe(10);
+  });
+
+  it('clamps browseItemCount to the [1, 50] range at load time', () => {
+    expect(clampBrowseItemCount(0)).toBe(1);
+    expect(clampBrowseItemCount(-5)).toBe(1);
+    expect(clampBrowseItemCount(99)).toBe(50);
+    expect(clampBrowseItemCount(25)).toBe(25);
+    expect(clampBrowseItemCount(NaN)).toBe(10);
+    expect(clampBrowseItemCount(2.7)).toBe(3);
   });
 
   it('has showHelpText enabled by default', () => {
@@ -70,6 +80,14 @@ describe('loadSettings', () => {
     expect(settings.autoRefresh).toBe(true);
     expect(settings.refreshIntervalMs).toBe(30000);
     expect(settings.syncIntervalMs).toBe(30000);
+  });
+
+  it('clamps browseItemCount when loading out-of-range persisted value', () => {
+    writeFileSync(settingsPath, JSON.stringify({
+      browseItemCount: 999,
+    }), 'utf-8');
+    const settings = loadSettings(settingsPath);
+    expect(settings.browseItemCount).toBe(50);
   });
 
   it('loads settings from existing file', () => {

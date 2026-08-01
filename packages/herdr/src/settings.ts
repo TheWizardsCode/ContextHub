@@ -42,6 +42,20 @@ export const defaultSettings: PluginSettings = {
   showHelpText: true,
 };
 
+/** Minimum allowed browseItemCount. */
+export const MIN_BROWSE_ITEM_COUNT = 1;
+/** Maximum allowed browseItemCount. */
+export const MAX_BROWSE_ITEM_COUNT = 50;
+
+/**
+ * Clamp a browseItemCount value to the supported [1, 50] range.
+ * Used at load time so persisted/parsed values cannot exceed the bounds.
+ */
+export function clampBrowseItemCount(value: number): number {
+  if (!Number.isFinite(value)) return defaultSettings.browseItemCount;
+  return Math.min(Math.max(Math.round(value), MIN_BROWSE_ITEM_COUNT), MAX_BROWSE_ITEM_COUNT);
+}
+
 // ── Default config path ───────────────────────────────────────────────
 
 /**
@@ -92,7 +106,7 @@ export function loadSettings(settingsPath?: string): PluginSettings {
         ? clampSyncInterval(parsed.syncIntervalMs)
         : defaultSettings.syncIntervalMs,
       browseItemCount: typeof parsed.browseItemCount === 'number'
-        ? parsed.browseItemCount : defaultSettings.browseItemCount,
+        ? clampBrowseItemCount(parsed.browseItemCount) : defaultSettings.browseItemCount,
       showHelpText: typeof parsed.showHelpText === 'boolean'
         ? parsed.showHelpText : defaultSettings.showHelpText,
     };

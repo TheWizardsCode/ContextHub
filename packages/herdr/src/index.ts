@@ -25,7 +25,7 @@ import { existsSync } from 'fs';
 import { checkWlAvailable, fetchNextItems, fetchItemsByStage, setWorklogDir } from './fetcher.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
-import { loadSettings, getDefaultSettingsPath } from './settings.js';
+import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
 
 // Resolve path to the send-to-pi.sh script (relative to this source file)
 // At runtime (tsx or dist), __dirname equivalent from import.meta.url
@@ -202,7 +202,7 @@ async function main(): Promise<void> {
   const fetcher = async () => {
     try {
       const currentSettings = loadSettings();
-      const count = Math.min(Math.max(currentSettings.browseItemCount ?? 10, 1), 50);
+      const count = clampBrowseItemCount(currentSettings.browseItemCount ?? defaultSettings.browseItemCount);
       return await fetchNextItems(count);
     } catch {
       return [];
@@ -215,16 +215,19 @@ async function main(): Promise<void> {
   // The command is written to stdout with a CMD: prefix so the calling
   // framework (Herdr) can execute it. The TUI stays alive after sending
   // the command — the user can continue browsing or quit normally.
+  // Settings are re-read so browseItemCount and showHelpText changes apply
+  // on the next invocation (no plugin restart needed).
+  const runSettings = loadSettings();
   const selectedItem = await runWorklistTui(
     fetcher,
     undefined,
     shortcutRegistry,
     {
-      autoRefresh: settings.autoRefresh,
-      refreshIntervalMs: settings.refreshIntervalMs,
-      autoSync: settings.autoSync,
-      syncIntervalMs: settings.syncIntervalMs,
-      showHelpText: settings.showHelpText,
+      autoRefresh: runSettings.autoRefresh,
+      refreshIntervalMs: runSettings.refreshIntervalMs,
+      autoSync: runSettings.autoSync,
+      syncIntervalMs: runSettings.syncIntervalMs,
+      showHelpText: runSettings.showHelpText,
       onCommand: (command: string) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
