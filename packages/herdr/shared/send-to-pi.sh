@@ -15,10 +15,13 @@
 #   --focus              Zoom/focus the new pane (default: on)
 #   --no-focus           Explicitly skip zoom/focus
 #   --check-cli          Check herdr CLI availability before proceeding
+#   --cwd <path>         Working directory for the new pane (default: $HERDR_RESOLVED_CWD, then $PWD)
 #   -h, --help           Show this help message
 #
 # Environment variables:
 #   HERDR_BIN_PATH       Path to the herdr CLI binary (default: herdr on PATH)
+#   HERDR_RESOLVED_CWD   Resolved project root for the new pane (set by the
+#                        worklist plugin; overrides $PWD when --cwd is absent)
 #
 # Returns:
 #   0 on success
@@ -38,6 +41,7 @@ show_help() {
 pane_name="Pi Agent"
 focus=true
 check_cli=false
+cwd_arg=""
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
 
 # ── Parse arguments ─────────────────────────────────────────────────────
@@ -61,6 +65,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --check-cli)
       check_cli=true
+      shift
+      ;;
+    --cwd)
+      cwd_arg="$2"
+      shift 2
+      ;;
+    --cwd=*)
+      cwd_arg="${1#*=}"
       shift
       ;;
     -h|--help)
@@ -97,8 +109,14 @@ if [ "$check_cli" = true ] && ! command -v "$herdr_bin" &>/dev/null; then
   exit 1
 fi
 
+# ── Resolve the target CWD for the new pane ─────────────────────────
+# Priority: --cwd arg > HERDR_RESOLVED_CWD > $PWD.  The new pane must
+# start in the correct project root; herdr's "follow" policy would
+# otherwise inherit the source pane's CWD (e.g. the plugin directory).
+target_cwd="${cwd_arg:-${HERDR_RESOLVED_CWD:-$PWD}}"
+
 # ── Split the current pane to the right ──────────────────────────────
-split_out="$("$herdr_bin" pane split --current --direction right --no-focus 2>/dev/null || true)"
+split_out="$("$herdr_bin" pane split --current --direction right --no-focus --cwd "$target_cwd" 2>/dev/null || true)"
 
 if [ -z "$split_out" ]; then
   echo "Error: Failed to split pane. Ensure you are inside a herdr session." >&2

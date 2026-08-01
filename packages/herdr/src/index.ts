@@ -235,17 +235,22 @@ async function main(): Promise<void> {
         // Everything else is written to stdout with the CMD: prefix for
         // the calling framework (Herdr) to execute.
         const route = routeCommand(command);
+        // The new pane must start in the correct project root.  herdr's
+        // "follow" CWD policy would otherwise inherit the source pane's CWD
+        // (the plugin directory), so we pass the resolved project root
+        // (wlRoot) explicitly to the pane-spawning scripts via --cwd.
+        const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
         if (route === 'agent') {
           // Spawn send-to-pi.sh asynchronously — detached and with stdio ignored
           // so the TUI loop is not blocked or affected by the script's output.
           const child = spawn(
             SEND_TO_PI_SCRIPT,
-            [command],
+            ['--cwd', targetCwd, command],
             {
               detached: true,
               stdio: 'ignore',
-              cwd: resolvedCwd ?? process.cwd(),
-              env: { ...process.env },
+              cwd: targetCwd,
+              env: { ...process.env, HERDR_RESOLVED_CWD: targetCwd },
             },
           );
           child.unref(); // Allow the parent to exit independently
@@ -255,12 +260,12 @@ async function main(): Promise<void> {
           const clean = stripCommandPrefix(command);
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            [clean],
+            ['--cwd', targetCwd, clean],
             {
               detached: true,
               stdio: 'ignore',
-              cwd: resolvedCwd ?? process.cwd(),
-              env: { ...process.env },
+              cwd: targetCwd,
+              env: { ...process.env, HERDR_RESOLVED_CWD: targetCwd },
             },
           );
           child.unref(); // Allow the parent to exit independently

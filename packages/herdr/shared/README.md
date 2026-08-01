@@ -8,9 +8,29 @@ repositories (e.g., ContextHub, open_source_llm).
 
 | File | Description |
 |------|-------------|
-| `send-to-pi.sh` | Open a Pi agent pane and send a command. Generalized with `--pane-name`, `--focus`/`--no-focus`, and `--check-cli` options. |
-| `open-pi-agent.sh` | Open an interactive Pi session in a new pane. Generalized with `--pane-name` and `--focus`/`--no-focus` options. |
+| `send-to-pi.sh` | Open a Pi agent pane and send a command. Generalized with `--pane-name`, `--focus`/`--no-focus`, `--check-cli`, and `--cwd` options. |
+| `open-pi-agent.sh` | Open an interactive Pi session in a new pane. Generalized with `--pane-name`, `--focus`/`--no-focus`, and `--cwd` options. |
 | `herdr-agent-state-protocol.md` | Specification for Herdr Unix socket agent state reporting protocol. |
+
+## Working directory of new panes
+
+By default Herdr creates new panes with a `follow` CWD policy, which inherits
+the **source pane's** working directory. When a plugin spawns one of these
+scripts from its own installation directory, the resulting pane (pi agent or
+command output) would start in the plugin directory — not the user's project.
+
+To ensure the new pane operates in the correct project, both scripts accept a
+`--cwd <path>` option and resolve the target CWD in priority order:
+
+1. `--cwd <path>` argument
+2. `HERDR_RESOLVED_CWD` environment variable (set by the worklist plugin's
+   `open.sh`/`toggle.sh` to the user's actual project directory)
+3. `$PWD` of the calling process
+
+The resolved target is passed to `herdr pane split --cwd <path>`, so the new
+pane starts in the correct project root and `wl` commands, skills, and
+relative paths resolve against the user's project rather than the plugin's
+installation directory.
 
 ## Usage
 

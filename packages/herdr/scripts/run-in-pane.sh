@@ -78,6 +78,14 @@ fi
 
 # ── Main mode: split, run, rename ────────────────────────────────────────
 pane_name="${RUN_IN_PANE_NAME:-Command Output}"
+# The command is everything after the leading options. Currently the only
+# supported option is --cwd (target project root for the new pane);
+# everything else is treated as the command to run.
+target_cwd=""
+if [ "${1:-}" = "--cwd" ]; then
+  target_cwd="$2"
+  shift 2
+fi
 COMMAND="$*"
 
 if [ -z "$COMMAND" ]; then
@@ -91,7 +99,12 @@ if ! command -v "$herdr_bin" &>/dev/null; then
 fi
 
 # Split the current pane to the right
-split_out="$("$herdr_bin" pane split --current --direction right --no-focus 2>/dev/null || true)"
+# Resolve the target CWD for the new pane: --cwd arg > HERDR_RESOLVED_CWD
+# > $PWD.  The new pane must start in the correct project root; herdr's
+# "follow" policy would otherwise inherit the source pane's CWD (e.g. the
+# plugin directory).
+target_cwd="${target_cwd:-${HERDR_RESOLVED_CWD:-$PWD}}"
+split_out="$("$herdr_bin" pane split --current --direction right --no-focus --cwd "$target_cwd" 2>/dev/null || true)"
 
 if [ -z "$split_out" ]; then
   echo "Error: Failed to split pane. Ensure you are inside a herdr session." >&2
