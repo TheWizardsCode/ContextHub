@@ -1,5 +1,7 @@
 # Changelog
 
+## v1.0.6 (2026-08-01)
+
 ## Unreleased
 ### Features
 - Show total actionable count in browse list title ("top N of M") with auto-refresh (WL-0MS4FIEN40037GB9)
