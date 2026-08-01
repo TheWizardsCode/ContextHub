@@ -812,7 +812,8 @@ function ensureDir(p: string): void {
 async function withTempWorktree<T>(
   repoRootPath: string,
   target: GitTarget,
-  run: (worktreePath: string) => Promise<T>
+  run: (worktreePath: string) => Promise<T>,
+  options?: { forceOrphan?: boolean }
 ): Promise<T> {
   const worklogDir = path.join(repoRootPath, '.worklog');
   ensureDir(worklogDir);
@@ -820,7 +821,12 @@ async function withTempWorktree<T>(
   const tmpRoot = fs.mkdtempSync(path.join(worklogDir, 'tmp-worktree-'));
   const worktreePath = path.join(tmpRoot, 'wt');
 
-  const { hasRemote, remoteTrackingRef } = await fetchTargetRef(target);
+  // When forceOrphan is set (ref rewrite), bypass the remote fetch entirely:
+  // fetching the polluted remote ref would re-import foreign items into the
+  // local tracking ref. Instead create a fresh orphan branch from HEAD.
+  const { hasRemote, remoteTrackingRef } = options?.forceOrphan
+    ? { hasRemote: false, remoteTrackingRef: '' }
+    : await fetchTargetRef(target);
   const baseRef = hasRemote ? remoteTrackingRef : 'HEAD';
 
   try {
@@ -962,4 +968,93 @@ export async function gitPushDataFileToBranch(
       `git -C ${escapeShellArg(worktreePath)} push --no-verify ${escapeShellArg(target.remote)} HEAD:${escapeShellArg(pushTarget)}`
     );
   });
+}
+
+/**
+ * Rewrite a project's worklog data ref so it contains ONLY the given JSONL,
+ * force-pushing a fresh orphan commit that bypasses the polluted remote history.
+ *
+ * This is the remote-ref cleanup half of `wl doctor foreign-items --apply --push`.
+ * Unlike `gitPushDataFileToBranch` (which fetches and merges the remote ref
+ * first — re-importing foreign items), this function NEVER fetches the remote:
+ * it creates an orphan branch containing only the clean JSONL, force-pushes it
+ * to `refs/worklog/data`, and updates the local tracking ref to match.
+ *
+ * Safety: rejects pushes to regular branches/tags (only dedicated refs under
+ * `refs/worklog/` are allowed), matching `gitPushDataFileToBranch`.
+ *
+ * @param repoDataFilePath - Path to the clean JSONL file to publish.
+ * @param commitMessage - Commit message for the rewritten ref.
+ * @param target - Git remote + branch/ref target.
+ * @returns The SHA of the rewritten ref tip.
+ */
+export async function rewriteAndForcePushDataFile(
+  repoDataFilePath: string,
+  commitMessage: string,
+  target: GitTarget
+): Promise<string> {
+  // Cross-project safety guard: never push a data file to a different
+  // repository's remote ref than the one owning the file.
+  await assertDataFileInCwdRepo(repoDataFilePath);
+
+  // SAFETY GUARD: reject pushes to regular branches or tags.
+  // Worklog data must only be stored on dedicated refs under refs/worklog/.
+  const branch = target.branch;
+  if (branch.startsWith('refs/heads/') || branch.startsWith('refs/tags/')) {
+    throw new Error(
+      `Refusing to push worklog data to '${branch}'. ` +
+      `Worklog data must be pushed to a dedicated ref under refs/worklog/ ` +
+      `(e.g. refs/worklog/data).`
+    );
+  }
+
+  await execAsync('git rev-parse --git-dir');
+
+  const repoRootPath = await getRepoRoot();
+  const { relativePath } = getRepoRelativePath(repoRootPath, repoDataFilePath);
+  const srcAbsPath = path.resolve(repoDataFilePath);
+
+  if (!fs.existsSync(srcAbsPath)) {
+    throw new Error(`Worklog data file not found: ${srcAbsPath}`);
+  }
+
+  const remoteTrackingRef = getRemoteTrackingRef(target.remote, branch);
+  const pushTarget = branch.startsWith('refs/') ? branch : `refs/heads/${branch}`;
+  let tipSha = '';
+
+  await withTempWorktree(repoRootPath, target, async (worktreePath) => {
+    const dstAbsPath = path.join(worktreePath, relativePath);
+    ensureDir(path.dirname(dstAbsPath));
+    fs.copyFileSync(srcAbsPath, dstAbsPath);
+
+    const escapedMsg = escapeShellArg(commitMessage);
+    const escapedRel = escapeShellArg(relativePath);
+
+    // Stage and commit only the JSONL file (force-add: .worklog/ is gitignored).
+    await execAsync(`git -C ${escapeShellArg(worktreePath)} add -f -- ${escapedRel}`);
+    const { stdout: staged } = await execAsync(
+      `git -C ${escapeShellArg(worktreePath)} diff --cached --name-only -- ${escapedRel}`
+    );
+    if (!staged.trim()) {
+      throw new Error('Nothing staged for the rewrite; aborting to avoid an empty ref');
+    }
+
+    await execAsync(`git -C ${escapeShellArg(worktreePath)} commit -m ${escapedMsg}`);
+
+    // Force-push the orphan commit, replacing the polluted remote ref entirely.
+    await execAsync(
+      `git -C ${escapeShellArg(worktreePath)} push --force --no-verify ${escapeShellArg(target.remote)} HEAD:${escapeShellArg(pushTarget)}`
+    );
+
+    const { stdout } = await execAsync(`git -C ${escapeShellArg(worktreePath)} rev-parse HEAD`);
+    tipSha = stdout.trim();
+  }, { forceOrphan: true });
+
+  // Update the local tracking ref so a subsequent `wl sync` reads the clean
+  // ref (refs/worklog/remotes/<remote>/...) instead of the polluted one.
+  if (tipSha) {
+    await execAsync(`git update-ref ${escapeShellArg(remoteTrackingRef)} ${escapeShellArg(tipSha)}`);
+  }
+
+  return tipSha;
 }

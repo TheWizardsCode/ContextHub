@@ -871,7 +871,7 @@ Subcommands:
 - `upgrade [options]` — Preview or apply pending database schema migrations. Options: `--dry-run` (preview without applying), `--confirm` (apply non-interactively).
 - `prune [options]` — Prune soft-deleted work items older than a specified age. Options: `--days <n>` (age threshold in days), `--dry-run` (show what would be pruned).
 - `file-paths [options]` — Check intake-stage items for missing or incorrect `**Key Files:**` sections. Options: `--add-placeholder` (add a placeholder section).
-- `foreign-items [options]` — Report work items whose ID prefix does not match the project prefix (cross-project pollution detection). Options: `--dry-run` (read-only; default), `--apply` (hard-delete foreign items with full cascade — destructive, requires explicit opt-in), `--prefix <prefix>` (override classification prefix).
+- `foreign-items [options]` — Report work items whose ID prefix does not match the project prefix (cross-project pollution detection). Options: `--dry-run` (read-only; default), `--apply` (hard-delete foreign items with full cascade — destructive, requires explicit opt-in), `--push` (after `--apply`, rewrite the remote worklog ref so it contains only own items — destructive; requires `--apply`), `--prefix <prefix>` (override classification prefix).
 
 Examples:
 
@@ -890,6 +890,7 @@ wl doctor file-paths --add-placeholder   # Add placeholder **Key Files:** sectio
 wl doctor foreign-items                  # Report foreign-prefix work items (read-only)
 wl doctor foreign-items --dry-run --json # JSON report of foreign items
 wl doctor foreign-items --apply          # Hard-delete foreign items (destructive)
+wl doctor foreign-items --apply --push  # Clean DB and rewrite remote worklog ref
 
 Known stale combinations detected by `stage-sync`:
 

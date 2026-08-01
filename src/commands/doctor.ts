@@ -10,7 +10,9 @@ import { listPendingMigrations, runMigrations } from '../migrations/index.js';
 import { dryRunHooks, upgradeHooks, detectHooksTargetDir, type HookDryRunResult, type HookUpgradeResult } from '../doctor/hook-upgrade.js';
 import { validateFilePaths, applyFilePathsFix, DEFAULT_INTAKE_STAGES } from '../doctor/file-paths-check.js';
 import { importFromJsonl } from '../jsonl.js';
-import { mergeWorkItems, mergeComments, mergeAuditResults } from '../sync.js';
+import { mergeWorkItems, mergeComments, mergeAuditResults, rewriteAndForcePushDataFile } from '../sync.js';
+import { getSyncDefaults } from './sync.js';
+import { withFileLock, getLockPathForJsonl } from '../file-lock.js';
 import { buildForeignItemReport, applyForeignItemCleanup } from '../doctor/foreign-items-check.js';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -463,8 +465,9 @@ export default function register(ctx: PluginContext): void {
     .description('Report work items whose ID prefix does not match the project prefix')
     .option('--dry-run', 'Show foreign items without modifying anything (default)')
     .option('--apply', 'Hard-delete foreign items from the database (destructive; requires explicit opt-in)')
+    .option('--push', 'After --apply, rewrite and force-push the remote worklog ref so it contains only own items (destructive)')
     .option('--prefix <prefix>', 'Override the default prefix')
-    .action(async (opts: { dryRun?: boolean; apply?: boolean; prefix?: string }) => {
+    .action(async (opts: { dryRun?: boolean; apply?: boolean; push?: boolean; prefix?: string }) => {
       utils.requireInitialized();
       const db = utils.getDatabase(opts.prefix);
       const config = utils.getConfig();
@@ -475,11 +478,54 @@ export default function register(ctx: PluginContext): void {
 
       const report = buildForeignItemReport(allItems, configuredPrefix, !opts.apply);
 
+      // Safety: --push requires --apply. Rewriting the remote ref without
+      // cleaning the DB would publish foreign items.
+      if (opts.push && !opts.apply) {
+        if (utils.isJsonMode()) {
+          output.json({
+            success: false,
+            error: '--push requires --apply: the remote ref can only be rewritten after foreign items are removed from the database.',
+          });
+          return;
+        }
+        console.error('Doctor foreign-items: --push requires --apply (rewriting the remote ref without cleaning the DB would push foreign items).');
+        process.exitCode = 1;
+        return;
+      }
+
       // Destructive path: hard-delete foreign items with full cascade.
       if (opts.apply) {
         const result = applyForeignItemCleanup(db, report);
+
+        // Optional remote ref rewrite: publish a clean JSONL (only own items)
+        // to the project's worklog ref, bypassing the polluted remote history.
+        let pushResult: string | null = null;
+        if (opts.push) {
+          const jsonlPath = await db.exportForSync();
+          const lockPath = getLockPathForJsonl(jsonlPath);
+          const defaults = getSyncDefaults(config || undefined);
+          const gitTarget = {
+            remote: defaults.gitRemote,
+            branch: defaults.gitBranch,
+          };
+          pushResult = await withFileLock(lockPath, async () => {
+            const tipSha = await rewriteAndForcePushDataFile(
+              jsonlPath,
+              'Rewrite worklog ref: remove foreign items',
+              gitTarget
+            );
+            // Ephemeral JSONL pattern: remove the local file after a successful push.
+            try { db.deleteLocalJsonl(); } catch (_) { /* best-effort */ }
+            return tipSha;
+          });
+        }
+
         if (utils.isJsonMode()) {
-          output.json(result);
+          if (opts.push) {
+            output.json({ ...result, push: true, pushRef: getSyncDefaults(config || undefined).gitBranch, pushSha: pushResult });
+          } else {
+            output.json(result);
+          }
           return;
         }
         console.log(`Doctor foreign-items: removed ${result.removedCount} foreign item(s) (total: ${result.totalBefore} -> ${result.totalAfter}; own: ${result.ownBefore} -> ${result.ownAfter}).`);
@@ -488,6 +534,9 @@ export default function register(ctx: PluginContext): void {
           for (const id of result.removedIds) {
             console.log(`  - ${id}`);
           }
+        }
+        if (opts.push) {
+          console.log(`Rewrote ${getSyncDefaults(config || undefined).gitBranch} (${pushResult}) with own items only.`);
         }
         if (result.errors.length > 0) {
           console.log(`\n${result.errors.length} error(s):`);
