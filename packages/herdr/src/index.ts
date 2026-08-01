@@ -319,7 +319,21 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error('Worklog plugin error:', err);
-  process.exit(1);
-});
+// Only auto-run main() when this module is the entry point (launched directly
+// by herdr/tsx), not when it is imported by tests or other modules. Without
+// this guard, importing index.js in a vitest worker triggers the TUI and can
+// call process.exit(1) (e.g. wl not on PATH in CI), crashing the test runner.
+const isEntryPoint = (() => {
+  try {
+    return !!process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+  } catch {
+    return false;
+  }
+})();
+
+if (isEntryPoint) {
+  main().catch((err) => {
+    console.error('Worklog plugin error:', err);
+    process.exit(1);
+  });
+}
