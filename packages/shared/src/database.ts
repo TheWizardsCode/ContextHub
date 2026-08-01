@@ -5,7 +5,7 @@
 import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { WorkItem, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult } from './types.js';
+import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult } from './types.js';
 import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions } from './persistent-store.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
 
@@ -1211,6 +1211,37 @@ export class WorklogDatabase {
     return this.store.getAllWorkItems().filter(
       item => item.parentId === parentId
     );
+  }
+
+  /**
+   * Cascade a priority downgrade to direct children.
+   *
+   * When a work item's priority is reduced away from `critical`, any direct
+   * children still at `critical` priority are downgraded to `high` so that
+   * critical-priority subtasks of a non-critical parent are resolved.
+   * Children already at `high`, `medium`, or `low` are left untouched, and
+   * grandchildren are not affected.
+   *
+   * @param parentId - id of the work item whose children should be checked
+   * @param newPriority - the parent's new priority; when still `critical`
+   *   this is a no-op (no children are touched)
+   * @returns the list of children whose priority was downgraded (empty if none)
+   */
+  cascadePriorityDowngrade(parentId: string, newPriority: WorkItemPriority): WorkItem[] {
+    if (newPriority === 'critical') {
+      return [];
+    }
+    const downgraded: WorkItem[] = [];
+    const children = this.getChildren(parentId);
+    for (const child of children) {
+      if (child.priority === 'critical') {
+        const updated = this.update(child.id, { priority: 'high' });
+        if (updated) {
+          downgraded.push(updated);
+        }
+      }
+    }
+    return downgraded;
   }
 
   /**

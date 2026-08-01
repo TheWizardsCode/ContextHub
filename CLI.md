@@ -152,6 +152,11 @@ Automatic re-sort:
 - Use `--no-re-sort` to suppress the automatic re-sort for updates.
 - Use `--re-sort-sync` to force the re-sort to run synchronously (blocking) when callers need immediate ordering guarantees.
 
+Priority downgrade cascade:
+
+- When an item's priority is downgraded away from `critical` (to `high`, `medium`, or `low`), any direct children still at `critical` priority are automatically downgraded to `high` so that a non-critical parent has no critical subtasks. Children already at `high` or below are left untouched.
+- In JSON mode, the downgraded children are reported in a `downgradedChildren` array. In human-readable mode, a summary line like `[Downgraded 2 child(ren) from critical to high]` is printed.
+
 Example:
 
 ```sh
