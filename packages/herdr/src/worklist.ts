@@ -1281,9 +1281,37 @@ export function createListRenderer(): (
     // calls state.getFlattenedItems() before passing items here). Do NOT re-flatten.
     const flatItems = items;
 
-    // Items with group separators
-    const visible = flatItems.slice(scrollOffset, scrollOffset + listHeight);
+    // Items with group separators. Each `── <Group> ──` separator consumes a
+    // row, so the visible window must be sized so header + blank + filter bar
+    // + items + separators + fill + footer fit in `rows - 1` lines (the last
+    // row is reserved for the notification line appended by render()). Without
+    // this accounting the output overflows the pane and the terminal scrolls
+    // the header/top items off the top (WL-0MSAAON63003N6LO).
+    const chromeLines = 4; // header + blank + filter bar + footer
+    const budgetForItemsAndSeps = Math.max(0, rows - 1 - chromeLines);
+    // Count the group separators a window would render (same logic as the
+    // render loop below) so the window can be trimmed when separators would
+    // overflow the pane height.
+    const countSeparators = (window: WorkItem[]): number => {
+      let count = 0;
+      let lastGroup: number | undefined;
+      for (const item of window) {
+        if (item.group !== undefined && item.id !== '..') {
+          if (lastGroup === undefined || item.group !== lastGroup) {
+            count++;
+          }
+          lastGroup = item.group;
+        }
+      }
+      return count;
+    };
+    let visible = flatItems.slice(scrollOffset, scrollOffset + listHeight);
+    while (visible.length > 0 && visible.length + countSeparators(visible) > budgetForItemsAndSeps) {
+      // Drop trailing items until items + separators fit the pane height.
+      visible = visible.slice(0, -1);
+    }
     let lastDisplayedGroup: number | undefined;
+    let numSeparators = 0;
     for (let i = 0; i < visible.length; i++) {
       const actualIndex = scrollOffset + i;
       const item = visible[i];
@@ -1294,6 +1322,7 @@ export function createListRenderer(): (
           const label = item.groupLabel ?? `Group ${item.group}`;
           const sepColor = stageColor(item.stage);
           output.push(` ${ANSI.fg(sepColor)}${ANSI.bold}── ${label} ──${ANSI.reset}`);
+          numSeparators++;
         }
         lastDisplayedGroup = item.group;
       }
@@ -1313,8 +1342,8 @@ export function createListRenderer(): (
       }
     }
 
-    // Fill remaining rows
-    const used = 3 + 1 + visible.length; // header + blank + filterbar + items
+    // Fill remaining rows (header + blank + filter bar + items + separators)
+    const used = chromeLines + visible.length + numSeparators;
     for (let i = used; i < rows - 1; i++) {
       output.push('');
     }
@@ -1335,6 +1364,14 @@ export function createListRenderer(): (
       const chordHelpSuffix = chordHelpHints ? ` ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}` : '';
       const footerLine = navHint + chordHelpSuffix || ' ';
       output.push(footerLine);
+    }
+
+    // Safety clamp: never exceed the renderer's `rows - 1` budget so the
+    // notification line appended by render() always fits the pane. Only
+    // triggers for pathological tiny term sizes where even the chrome rows
+    // do not fit; the header (first line) is always preserved.
+    while (output.length > rows - 1) {
+      output.pop();
     }
 
     return output.join('\n');
@@ -1999,12 +2036,13 @@ export async function runWorklistTui(
       state.navigationStack.depth,
     );
 
-    // Append notifications if present
-    let notificationLine = '';
-    if (refreshNotification) notificationLine += refreshNotification;
-    if (syncNotification) notificationLine += syncNotification;
+    // Append notifications if present. The renderer guarantees output is at
+    // most `rows - 1` lines, so the notification line always fits within the
+    // pane height; trim defensively so a future renderer regression cannot
+    // overflow the pane again (WL-0MSAAON63003N6LO).
+    const notificationLine = [refreshNotification, syncNotification].filter(Boolean).join('');
     const rendered = notificationLine
-      ? output + '\n' + notificationLine
+      ? output.split('\n').slice(0, Math.max(1, termSize.rows - 1)).join('\n') + '\n' + notificationLine
       : output;
 
     // Clear from cursor to end of screen to remove leftover content

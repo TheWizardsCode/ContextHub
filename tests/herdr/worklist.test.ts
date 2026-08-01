@@ -682,6 +682,70 @@ describe('createListRenderer', () => {
     expect(c1Count).toBe(1);
     expect(c2Count).toBe(1);
   });
+
+  // ── Line-count invariant (WL-0MSAAON63003N6LO) ─────────────────
+  // The renderer must never produce more than `rows - 1` lines so that
+  // render()'s notification append stays within the pane height; otherwise
+  // the terminal scrolls the header and top items off the top of the pane.
+
+  it('keeps output within rows - 1 lines with multiple group separators', () => {
+    // One item per group forces a separator per item — the worst case for
+    // the layout budget (each separator consumes a row).
+    const manyGroups: WorkItem[] = Array.from({ length: 30 }, (_, i) =>
+      makeItem({ id: `WL-G${i}`, title: `Group item ${i}`, group: i, groupLabel: `Group ${i}` }),
+    );
+    const renderer = createListRenderer();
+    const output = renderer(manyGroups, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null);
+    expect(output.split('\n').length).toBeLessThanOrEqual(DEFAULT_TERM_SIZE.rows - 1);
+    // AC1: the header must stay visible
+    expect(output).toContain('Work Items');
+  });
+
+  it('keeps output within rows - 1 lines with no groups', () => {
+    const renderer = createListRenderer();
+    const output = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null);
+    expect(output.split('\n').length).toBeLessThanOrEqual(DEFAULT_TERM_SIZE.rows - 1);
+    expect(output).toContain('Work Items');
+  });
+
+  it('keeps output within rows - 1 lines for a short list', () => {
+    const shortList: WorkItem[] = [makeItem({ id: 'WL-ONE', title: 'Only item' })];
+    const renderer = createListRenderer();
+    const output = renderer(shortList, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null);
+    expect(output.split('\n').length).toBeLessThanOrEqual(DEFAULT_TERM_SIZE.rows - 1);
+    expect(output).toContain('Work Items');
+  });
+
+  it('keeps output within rows - 1 lines at a pane-sized terminal (53 rows)', () => {
+    const paneSize = { rows: 53, cols: 253 };
+    // 60 items across 10 groups: many separators + a full window.
+    const manyGroups: WorkItem[] = Array.from({ length: 60 }, (_, i) =>
+      makeItem({
+        id: `WL-G${i}`,
+        title: `Group item ${i}`,
+        group: i % 10,
+        groupLabel: `Group ${i % 10}`,
+      }),
+    );
+    const renderer = createListRenderer();
+    const output = renderer(manyGroups, 0, 0, paneSize, null, 'list', null);
+    expect(output.split('\n').length).toBeLessThanOrEqual(paneSize.rows - 1);
+    expect(output).toContain('Work Items');
+  });
+
+  it('render plus an active notification line never exceeds rows lines', () => {
+    const groupedItems: WorkItem[] = [
+      makeItem({ id: 'T1', title: 'Item 1', group: 0, groupLabel: 'Priority' }),
+      makeItem({ id: 'T2', title: 'Item 2', group: 0 }),
+      makeItem({ id: 'T3', title: 'Item 3', group: 1, groupLabel: 'Backlog' }),
+    ];
+    const renderer = createListRenderer();
+    const output = renderer(groupedItems, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null);
+    // Simulate render()'s notification append (see runWorklistTui render()).
+    const renderedWithNotification =
+      output.split('\n').slice(0, DEFAULT_TERM_SIZE.rows - 1).join('\n') + '\n' + ' [Synced]';
+    expect(renderedWithNotification.split('\n').length).toBeLessThanOrEqual(DEFAULT_TERM_SIZE.rows);
+  });
 });
 
 // ── New: Group separator formatting ─────────────────────────────────

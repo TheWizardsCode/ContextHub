@@ -11,6 +11,7 @@ import {
   executeResolvedCommand,
   dispatchChordCommand,
   ANSI,
+  createListRenderer,
 } from './worklist.js';
 import type { WorkItem } from './fetcher.js';
 
@@ -37,6 +38,49 @@ function makeItem(id: string, stage?: string): WorkItem {
  */
 const TERM_80x24 = { rows: 24, cols: 80 };
 getTermSize(); // verify the module loads
+
+// ── Line-count invariant (WL-0MSAAON63003N6LO) ─────────────────────────
+// The list renderer must never emit more than `rows - 1` lines (leaving the
+// last row for the notification line appended by render()), otherwise the
+// terminal scrolls the header/top items off the top of the pane.
+
+describe('createListRenderer — line-count invariant', () => {
+  const renderer = createListRenderer();
+
+  it('renders at most rows - 1 lines with multiple group separators', () => {
+    const grouped: WorkItem[] = Array.from({ length: 30 }, (_, i) => ({
+      ...makeItem(`G${i}`),
+      group: i,
+      groupLabel: `Group ${i}`,
+    }));
+    const output = renderer(grouped, 0, 0, TERM_80x24, null, 'list', null);
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    expect(output).toContain('Work Items');
+  });
+
+  it('renders at most rows - 1 lines with no groups', () => {
+    const items: WorkItem[] = [makeItem('A'), makeItem('B'), makeItem('C')];
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    expect(output).toContain('Work Items');
+  });
+
+  it('renders at most rows - 1 lines for a short list', () => {
+    const items: WorkItem[] = [makeItem('A')];
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    expect(output).toContain('Work Items');
+  });
+
+  it('keeps render plus an active notification line within rows lines', () => {
+    const items: WorkItem[] = [makeItem('A'), makeItem('B'), makeItem('C')];
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    // Simulate render()'s notification append (see runWorklistTui render()).
+    const withNotification =
+      output.split('\n').slice(0, TERM_80x24.rows - 1).join('\n') + '\n' + ' [Synced]';
+    expect(withNotification.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows);
+  });
+});
 
 describe('WorkItemListState.refreshItems — preserve selection by ID', () => {
   let items: WorkItem[];
