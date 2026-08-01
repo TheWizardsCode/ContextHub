@@ -487,7 +487,7 @@ Options:
 `--stage <stage>` — Filter by stage: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` (optional).
 `--search <term>` (optional)
 `-n, --number <n>` — Number of items to return (optional; default: `1`).
-`-g, --groups <n>` — Number of parallel-safe groups to identify (optional; default: `3`). Only meaningful when `-n > 1`. Groups items by priority, stage and file-path conflicts extracted from their descriptions, placing items that affect different files in the same group and conflicting items in separate groups. Items with priority `critical` are placed in a single "Critical" group at the top. Items with unknown/other stages are grouped together in a single "Other" group. See "Parallel-safe grouping" below.
+`-g, --groups <n>` — Number of parallel-safe groups to identify (optional; default: `3`). Only meaningful when `-n > 1`. Groups items by priority, stage and file-path conflicts extracted from their descriptions, placing items that affect different files in the same group and conflicting items in separate groups. Items with priority `critical` are partitioned into `Critical Group N` file-path conflict groups at the top. Items with unknown/other stages are grouped together in a single "Other" group. See "Parallel-safe grouping" below.
 `--include-blocked` — Include dependency-blocked items (excluded by default).
 `--no-re-sort` — Skip automatic re-sort before selection, preserving current `sort_index` order (optional).
 `--re-sort-sync` — Force a synchronous (blocking) re-sort when automatic re-sort is triggered. By default automatic re-sorts are run asynchronously to avoid blocking interactive commands.
@@ -524,21 +524,22 @@ When `-n > 1`, `wl next` automatically groups items into parallel-safe groups ba
 The grouping algorithm uses a greedy first-fit strategy:
 
 1. Extract file paths from each item's description using a `**Key Files:**` section convention (see [docs/FILE_PATH_CONVENTION.md](docs/FILE_PATH_CONVENTION.md) for the full specification).
-2. **Critical priority items** are grouped first into a single "Critical" group at the very top, regardless of stage or file-path conflicts.
-3. Assign each remaining item to the first group containing no item that touches the same files.
-4. Items with unknown/other stages (and not critical) are placed together in a single "Other" group (no file-overlap splitting).
+2. **Critical priority items** are partitioned first into `Critical Group N` file-path conflict groups at the very top.
+3. Non-critical items with stage `plan_complete` or `intake_complete` are partitioned into `Group N` file-path conflict groups.
+4. `idea` items are placed together in a single "Idea" group.
+5. Items with unknown/other stages (and not critical) are placed together in a single "Other" group (no file-overlap splitting).
+6. `in_review` items are placed in a single "In Review" group, last.
 
 The group display order is:
-1. **Critical** — single group for all `critical` priority items (if any).
-2. **Other** — single group for items with unknown/other stages.
-3. **Plan Complete Group N** — grouped by file-path conflicts.
-4. **In Review** — single group.
-5. **Intake Complete** — single group.
-6. **Idea** — single group.
+1. **Critical Group N** — critical items partitioned by file-path conflicts (items sharing a file path land in different groups; items with unknown paths get singleton groups).
+2. **Group N** — plan_complete + intake_complete items partitioned by file-path conflicts. Within each group, `plan_complete` items appear first, then `intake_complete` items (no headings between the sub-groups), each sub-group sorted by priority (high → medium → low). The same stage sub-sort applies inside each Critical Group N.
+3. **Idea** — single group, sorted by priority.
+4. **Other** — single group for items with unknown/other stages.
+5. **In Review** — single group (last).
 
 In JSON output (`--json` with `-n > 1`), each result entry includes a `group` field (integer, 1-indexed) indicating the group assignment.
 
-In human-readable output, group headings (e.g., `── Critical ──`, `── Other ──`, `── Plan Complete Group 1 ──`, `── In Review ──`) are displayed between groups.
+In human-readable output, group headings (e.g., `── Critical Group 1 ──`, `── Group 1 ──`, `── Idea ──`, `── Other ──`, `── In Review ──`) are displayed between groups.
 
 The Pi TUI selection list renders group separator lines between items in different groups, helping you quickly identify items you can work on in parallel.
 

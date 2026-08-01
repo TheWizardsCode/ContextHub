@@ -106,15 +106,18 @@ export function groupItemsByFilePaths(
  * Assign items to groups based on priority, stage and file-path conflicts.
  *
  * Grouping rules (display order — most actionable first):
- * - Items with priority `critical` → all placed in a single group labeled "Critical"
- *   at the very top, regardless of stage or file-path conflicts.
- * - Items with other/unknown stage → all placed in a single group labeled "Other"
- *   (no file-overlap splitting, all such items share one group).
- * - Items with stage `plan_complete` → grouped by file-path conflicts using the
- *   greedy first-fit algorithm, labeled "Plan Complete Group N".
- * - Items with stage `in_review` → all placed in one group labeled "In Review".
- * - Items with stage `intake_complete` → all placed in one group labeled "Intake Complete".
+ * - Items with priority `critical` → partitioned by file-path conflicts using the
+ *   greedy first-fit algorithm, labeled `Critical Group 1..x`, placed first.
+ * - Non-critical items with stage `plan_complete` or `intake_complete` → partitioned
+ *   by file-path conflicts using the greedy first-fit algorithm, labeled `Group 1..x`.
  * - Items with stage `idea` → all placed in one group labeled "Idea" (no conflict checking).
+ * - All remaining non-critical items (unknown/other stages, `in_progress`, etc.) → all
+ *   placed in a single group labeled "Other".
+ * - Items with stage `in_review` → all placed in one group labeled "In Review", placed last.
+ *
+ * Within-group ordering (stage sub-sort `plan_complete` → `intake_complete` → remaining
+ * stages, then priority high → medium → low) is applied by callers via
+ * `compareGroupableItems` / `compareGroupedItems`.
  *
  * @param items - Array of items with id, priority, stage, and extracted file paths
  * @param maxFilePathGroups - Maximum number of file-path-based groups (default 3)
@@ -126,70 +129,57 @@ export function assignItemGroups(
 ): Map<string, GroupAssignment> {
   const result = new Map<string, GroupAssignment>();
 
-  const knownStages = new Set(['idea', 'intake_complete', 'in_review', 'plan_complete']);
-
   let nextGroup = 1;
 
-  // 0. Critical — single group for all items with priority 'critical', regardless of stage
-  const criticalIds = new Set<string>();
+  // Remap file-path group numbers (from groupItemsByFilePaths, 1-indexed per slice)
+  // to sequential display group numbers starting at `startGroup`.
+  const remapToSequential = (
+    fileGroups: Map<string, number>,
+    startGroup: number,
+  ): { map: Map<number, number>; count: number } => {
+    const unique = [...new Set(fileGroups.values())].sort((a, b) => a - b);
+    const map = new Map<number, number>();
+    unique.forEach((g, i) => map.set(g, startGroup + i));
+    return { map, count: unique.length };
+  };
+
+  // 0. Critical Group N — all critical items partitioned by file-path conflicts.
+  //    Labels use a per-category counter (Critical Group 1, 2, ...) independent of
+  //    the sequential ordering number.
   const criticalItems = items.filter(item => item.priority === 'critical');
   if (criticalItems.length > 0) {
-    for (const item of criticalItems) {
-      criticalIds.add(item.id);
-      result.set(item.id, { group: nextGroup, groupLabel: 'Critical' });
+    const criticalGroups = groupItemsByFilePaths(criticalItems, maxFilePathGroups);
+    const { map: groupNumMap, count } = remapToSequential(criticalGroups, nextGroup);
+    const categoryGroupNumbers = [...new Set(criticalGroups.values())].sort((a, b) => a - b);
+    const labelNumByFileGroup = new Map<number, number>();
+    categoryGroupNumbers.forEach((g, i) => labelNumByFileGroup.set(g, i + 1));
+    for (const [id, g] of criticalGroups) {
+      const groupNum = groupNumMap.get(g)!;
+      result.set(id, { group: groupNum, groupLabel: `Critical Group ${labelNumByFileGroup.get(g)}` });
     }
-    nextGroup++;
+    nextGroup += count;
   }
 
-  // 1. Other — single group for all items with unknown/other stages (excluding critical)
-  const otherItems = items.filter(item => !criticalIds.has(item.id) && (!item.stage || !knownStages.has(item.stage)));
-  if (otherItems.length > 0) {
-    for (const item of otherItems) {
-      result.set(item.id, { group: nextGroup, groupLabel: 'Other' });
+  // 1. Group N — non-critical plan_complete + intake_complete items partitioned
+  //    by file-path conflicts (no stage prefix in the label).
+  const planIntakeItems = items.filter(
+    item => item.priority !== 'critical' && (item.stage === 'plan_complete' || item.stage === 'intake_complete'),
+  );
+  if (planIntakeItems.length > 0) {
+    const planIntakeGroups = groupItemsByFilePaths(planIntakeItems, maxFilePathGroups);
+    const { map: groupNumMap, count } = remapToSequential(planIntakeGroups, nextGroup);
+    const categoryGroupNumbers = [...new Set(planIntakeGroups.values())].sort((a, b) => a - b);
+    const labelNumByFileGroup = new Map<number, number>();
+    categoryGroupNumbers.forEach((g, i) => labelNumByFileGroup.set(g, i + 1));
+    for (const [id, g] of planIntakeGroups) {
+      const groupNum = groupNumMap.get(g)!;
+      result.set(id, { group: groupNum, groupLabel: `Group ${labelNumByFileGroup.get(g)}` });
     }
-    nextGroup++;
+    nextGroup += count;
   }
 
-  // 2. Group plan_complete items by file-path conflicts (excluding critical)
-  const planCompleteItems = items.filter(item => !criticalIds.has(item.id) && item.stage === 'plan_complete');
-  if (planCompleteItems.length > 0) {
-    const planGroups = groupItemsByFilePaths(planCompleteItems, maxFilePathGroups);
-    // Map file-path group numbers to sequential group numbers after Other
-    const uniqueGroups = [...new Set(planGroups.values())].sort((a, b) => a - b);
-    const groupNumMap = new Map<number, number>();
-    for (let i = 0; i < uniqueGroups.length; i++) {
-      groupNumMap.set(uniqueGroups[i], nextGroup + i);
-    }
-    for (const [id, g] of planGroups) {
-      const newGroupNum = groupNumMap.get(g)!;
-      result.set(id, {
-        group: newGroupNum,
-        groupLabel: `Plan Complete Group ${newGroupNum}`,
-      });
-    }
-    nextGroup += uniqueGroups.length;
-  }
-
-  // 3. In Review (excluding critical)
-  const inReviewItems = items.filter(item => !criticalIds.has(item.id) && item.stage === 'in_review');
-  if (inReviewItems.length > 0) {
-    for (const item of inReviewItems) {
-      result.set(item.id, { group: nextGroup, groupLabel: 'In Review' });
-    }
-    nextGroup++;
-  }
-
-  // 4. Intake Complete (excluding critical)
-  const intakeCompleteItems = items.filter(item => !criticalIds.has(item.id) && item.stage === 'intake_complete');
-  if (intakeCompleteItems.length > 0) {
-    for (const item of intakeCompleteItems) {
-      result.set(item.id, { group: nextGroup, groupLabel: 'Intake Complete' });
-    }
-    nextGroup++;
-  }
-
-  // 5. Idea (excluding critical)
-  const ideaItems = items.filter(item => !criticalIds.has(item.id) && item.stage === 'idea');
+  // 2. Idea — single group for all non-critical idea items.
+  const ideaItems = items.filter(item => item.priority !== 'critical' && item.stage === 'idea');
   if (ideaItems.length > 0) {
     for (const item of ideaItems) {
       result.set(item.id, { group: nextGroup, groupLabel: 'Idea' });
@@ -197,5 +187,86 @@ export function assignItemGroups(
     nextGroup++;
   }
 
+  // 3. Other — single group for all remaining non-critical items (unknown/other
+  //    stages such as in_progress, done, undefined, ...).
+  const otherItems = items.filter(
+    item =>
+      item.priority !== 'critical' &&
+      item.stage !== 'in_review' &&
+      item.stage !== 'plan_complete' &&
+      item.stage !== 'intake_complete' &&
+      item.stage !== 'idea',
+  );
+  if (otherItems.length > 0) {
+    for (const item of otherItems) {
+      result.set(item.id, { group: nextGroup, groupLabel: 'Other' });
+    }
+    nextGroup++;
+  }
+
+  // 4. In Review — single group for all non-critical in_review items, placed last.
+  const inReviewItems = items.filter(item => item.priority !== 'critical' && item.stage === 'in_review');
+  if (inReviewItems.length > 0) {
+    for (const item of inReviewItems) {
+      result.set(item.id, { group: nextGroup, groupLabel: 'In Review' });
+    }
+    nextGroup++;
+  }
+
   return result;
+}
+
+// ── Within-group ordering ────────────────────────────────────────────
+
+/**
+ * Stage sub-order within a group: plan_complete first, then intake_complete,
+ * then all remaining stages. No headings are rendered between sub-groups.
+ */
+const WITHIN_GROUP_STAGE_ORDER: Record<string, number> = {
+  plan_complete: 0,
+  intake_complete: 1,
+};
+// Any stage not listed above (including undefined/empty) → 2 (remaining).
+const REMAINING_STAGE_ORDER = 2;
+
+/**
+ * Priority order for within-group sorting: high → medium → low.
+ * Unknown priorities are treated as medium (matching helpers.ts conventions).
+ */
+const WITHIN_GROUP_PRIORITY_ORDER: Record<string, number> = {
+  high: 0,
+  medium: 1,
+  low: 2,
+};
+const DEFAULT_PRIORITY_ORDER = WITHIN_GROUP_PRIORITY_ORDER.medium;
+
+/**
+ * Compare two items for within-group display order:
+ * stage sub-sort (plan_complete → intake_complete → remaining stages), then
+ * priority (high → medium → low), then id as a deterministic tie-break.
+ */
+export function compareGroupableItems(a: GroupableItem, b: GroupableItem): number {
+  const stageA = WITHIN_GROUP_STAGE_ORDER[a.stage ?? ''] ?? REMAINING_STAGE_ORDER;
+  const stageB = WITHIN_GROUP_STAGE_ORDER[b.stage ?? ''] ?? REMAINING_STAGE_ORDER;
+  if (stageA !== stageB) return stageA - stageB;
+  const prioA = WITHIN_GROUP_PRIORITY_ORDER[a.priority ?? ''] ?? DEFAULT_PRIORITY_ORDER;
+  const prioB = WITHIN_GROUP_PRIORITY_ORDER[b.priority ?? ''] ?? DEFAULT_PRIORITY_ORDER;
+  if (prioA !== prioB) return prioA - prioB;
+  return a.id.localeCompare(b.id);
+}
+
+/**
+ * Compare two items for full display order: assigned group first (ascending
+ * group number), then within-group order via `compareGroupableItems`.
+ * Items without an assignment sort after all assigned items.
+ */
+export function compareGroupedItems(
+  groupMap: Map<string, GroupAssignment>,
+  a: GroupableItem,
+  b: GroupableItem,
+): number {
+  const ga = groupMap.get(a.id)?.group ?? Number.MAX_SAFE_INTEGER;
+  const gb = groupMap.get(b.id)?.group ?? Number.MAX_SAFE_INTEGER;
+  if (ga !== gb) return ga - gb;
+  return compareGroupableItems(a, b);
 }

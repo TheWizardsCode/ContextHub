@@ -10,6 +10,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { currentSettings } from './settings.js';
 import { selectWorkItems } from './smart-selection.js';
+import { regroupWorkItems } from './grouping.js';
 
 // Promisify lazily inside the call site rather than at module scope.
 // ESM named imports are live bindings, but `promisify(execFile)` snapshots
@@ -281,7 +282,11 @@ export function createDefaultListWorkItems(
     // the "other" items to fill the remaining count slots.
     const mandatory = await fetchMandatorySubsets(run);
     const merged = mergeUniqueById(items, mandatory);
-    return selectWorkItems(merged, itemCount);
+    const selected = selectWorkItems(merged, itemCount);
+    // Regroup the final selected set so every displayed item (mandatory wl
+    // list items included) receives a correct group assignment and no
+    // duplicate section headings render (WL-0MSAK8YLB0025EGW).
+    return regroupWorkItems(selected);
   };
 }
 
@@ -358,7 +363,10 @@ export function createDefaultListWorkItemsDb(
       );
 
       const merged = mergeUniqueById(regular, mandatory);
-      return selectWorkItems(merged, itemCount);
+      const selected = selectWorkItems(merged, itemCount);
+      // Regroup so every displayed item receives a correct group assignment
+      // (WL-0MSAK8YLB0025EGW) — mirror of the CLI-backed path above.
+      return regroupWorkItems(selected);
     } catch {
       return defaultListWorkItems();
     }

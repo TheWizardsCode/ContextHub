@@ -10,6 +10,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { selectWorkItems } from './smart-selection.js';
+import { regroupWorkItems } from './grouping.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -374,7 +375,11 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
   // limit only the "other" items to fill the remaining count slots.
   const mandatory = await fetchMandatorySubsets();
   const merged = mergeUniqueById(items, mandatory);
-  return selectWorkItems(merged, count);
+  const selected = selectWorkItems(merged, count);
+  // Regroup the final selected set so every displayed item (mandatory wl
+  // list items included) receives a correct group assignment and no
+  // duplicate section headings render (WL-0MSAK8YLB0025EGW).
+  return regroupWorkItems(selected);
 }
 
 /**

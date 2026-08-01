@@ -13,6 +13,7 @@ import {
   ANSI,
   createListRenderer,
 } from './worklist.js';
+import { regroupWorkItems } from './grouping.js';
 import type { WorkItem } from './fetcher.js';
 
 // ── ANSI helpers ───────────────────────────────────────────────────────
@@ -79,6 +80,28 @@ describe('createListRenderer — line-count invariant', () => {
     const withNotification =
       output.split('\n').slice(0, TERM_80x24.rows - 1).join('\n') + '\n' + ' [Synced]';
     expect(withNotification.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows);
+  });
+
+  it('regression (WL-0MSAK8YLB0025EGW): renders exactly one In Review section, after Other', () => {
+    // Simulated merged list: wl next results carry group metadata (including a
+    // non-completed in_review item with an "In Review" label) while mandatory
+    // wl list items (completed/in_review) carry none. After regroupWorkItems
+    // the renderer must emit exactly one ── In Review ── separator, after Other.
+    const merged: WorkItem[] = [
+      { ...makeItem('NEXT-PLAN'), stage: 'plan_complete', priority: 'high', group: 2, groupLabel: 'Group 1' },
+      { ...makeItem('NEXT-REVIEW'), stage: 'in_review', priority: 'medium', status: 'in-progress', group: 5, groupLabel: 'In Review' },
+      { ...makeItem('NEXT-OTHER'), stage: 'in_progress', priority: 'medium', group: 3, groupLabel: 'Other' },
+      // Mandatory wl list subsets — no group metadata.
+      { ...makeItem('LIST-CRIT'), stage: 'plan_complete', priority: 'critical' },
+      { ...makeItem('LIST-REV'), stage: 'in_review', priority: 'medium', status: 'completed' },
+    ];
+    const regrouped = regroupWorkItems(merged, 3);
+    const output = renderer(regrouped, 0, 0, TERM_80x24, null, 'list', null);
+    const inReviewSeparators = (output.match(/── In Review ──/g) ?? []).length;
+    expect(inReviewSeparators).toBe(1);
+    // In Review separator appears after the Other separator in the rendered output.
+    expect(output.indexOf('── Other ──')).toBeGreaterThan(-1);
+    expect(output.indexOf('── In Review ──')).toBeGreaterThan(output.indexOf('── Other ──'));
   });
 });
 
