@@ -18,6 +18,26 @@ Settings are stored in Pi's canonical settings files under the `context-hub`
 namespace. Settings changed via `/wl settings` are persisted to the project's
 `.pi/settings.json`.
 
+### Project `.pi` Discovery
+
+The project settings directory is discovered the same way as the `.worklog`
+directory (see `resolveWorklogDir()`/`resolvePiDir()` in `src/worklog-paths.ts`):
+
+1. Walk up from the current working directory toward the git repo root; the
+   **nearest** directory with a `.pi/settings.json` wins — a local settings
+   file in the working directory (or a closer ancestor) overrides the repo
+   root.
+2. If no `.pi/settings.json` exists between the working directory and the
+   repo root, the **git repo root's** `.pi/settings.json` is used.
+3. Outside a git repository, the working directory is used as-is.
+
+This means a project-level `.pi/settings.json` at the repo root is the
+canonical settings location: running pi from a subdirectory (e.g.
+`packages/herdr/`) loads and persists settings to the repo root unless a
+closer `.pi/settings.json` exists. Unlike `.worklog`, worktree isolation is
+not applied — `.pi` holds developer configuration, so settings are shared
+across the repository.
+
 ### Resolution Order
 
 Settings are resolved from multiple locations, with later sources overriding
@@ -30,7 +50,9 @@ earlier ones:
 | 3 | Project settings | `<project>/.pi/settings.json` → `{ "context-hub": { ... } }` |
 
 Project settings always win, allowing per-project overrides while individual
-team members can set personal defaults globally.
+team members can set personal defaults globally. `project` is resolved
+repo-root aware as described above (nearest `.pi/settings.json` wins, falling
+back to the git repo root).
 
 ### Auto-Refresh
 
