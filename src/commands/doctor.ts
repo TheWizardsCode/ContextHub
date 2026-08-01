@@ -11,7 +11,7 @@ import { dryRunHooks, upgradeHooks, detectHooksTargetDir, type HookDryRunResult,
 import { validateFilePaths, applyFilePathsFix, DEFAULT_INTAKE_STAGES } from '../doctor/file-paths-check.js';
 import { importFromJsonl } from '../jsonl.js';
 import { mergeWorkItems, mergeComments, mergeAuditResults } from '../sync.js';
-import { buildForeignItemReport } from '../doctor/foreign-items-check.js';
+import { buildForeignItemReport, applyForeignItemCleanup } from '../doctor/foreign-items-check.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { normalizePriority, isValidPriority, isMappablePriority, PRIORITY_MAP, CANONICAL_PRIORITIES } from '../validators/priority.js';
@@ -462,8 +462,9 @@ export default function register(ctx: PluginContext): void {
     .command('foreign-items')
     .description('Report work items whose ID prefix does not match the project prefix')
     .option('--dry-run', 'Show foreign items without modifying anything (default)')
+    .option('--apply', 'Hard-delete foreign items from the database (destructive; requires explicit opt-in)')
     .option('--prefix <prefix>', 'Override the default prefix')
-    .action(async (opts: { dryRun?: boolean; prefix?: string }) => {
+    .action(async (opts: { dryRun?: boolean; apply?: boolean; prefix?: string }) => {
       utils.requireInitialized();
       const db = utils.getDatabase(opts.prefix);
       const config = utils.getConfig();
@@ -472,7 +473,31 @@ export default function register(ctx: PluginContext): void {
       const configuredPrefix = opts.prefix || doctor.opts().prefix || config?.prefix || 'WI';
       const allItems = db.getAll();
 
-      const report = buildForeignItemReport(allItems, configuredPrefix, true);
+      const report = buildForeignItemReport(allItems, configuredPrefix, !opts.apply);
+
+      // Destructive path: hard-delete foreign items with full cascade.
+      if (opts.apply) {
+        const result = applyForeignItemCleanup(db, report);
+        if (utils.isJsonMode()) {
+          output.json(result);
+          return;
+        }
+        console.log(`Doctor foreign-items: removed ${result.removedCount} foreign item(s) (total: ${result.totalBefore} -> ${result.totalAfter}; own: ${result.ownBefore} -> ${result.ownAfter}).`);
+        if (result.removedIds.length > 0) {
+          console.log('Removed IDs:');
+          for (const id of result.removedIds) {
+            console.log(`  - ${id}`);
+          }
+        }
+        if (result.errors.length > 0) {
+          console.log(`\n${result.errors.length} error(s):`);
+          for (const e of result.errors) {
+            console.log(`  - ${e.id}: ${e.error}`);
+          }
+          process.exitCode = 1;
+        }
+        return;
+      }
 
       if (utils.isJsonMode()) {
         output.json(report);
@@ -494,7 +519,7 @@ export default function register(ctx: PluginContext): void {
         }
       }
       console.log(`\nTotal: ${report.deletedForeignCount} deleted, ${report.nonDeletedForeignCount} non-deleted foreign item(s).`);
-      console.log('Dry-run only; nothing was modified.');
+      console.log('Dry-run only; nothing was modified. Use --apply to hard-delete foreign items.');
     });
 
   doctor

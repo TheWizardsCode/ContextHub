@@ -84,9 +84,14 @@ wl doctor foreign-items --dry-run --json
 
 # Override the prefix used for classification
 wl doctor foreign-items --prefix SA
+
+# Hard-delete all foreign items (destructive; explicit opt-in required)
+wl doctor foreign-items --apply
 ```
 
 The report includes total items scanned, the foreign count, counts grouped by prefix, the deleted/non-deleted breakdown, and the full list of foreign IDs. Dry-run mode never modifies the database.
+
+`--apply` hard-deletes every foreign item with full cascade: the work item row, its comments, dependency edges referencing it, its `audit_results` row, and its FTS index entry. Own items are never touched. The result reports before/after totals, per-prefix removed counts, and any errors. Run `--dry-run` first to preview exactly what will be removed.
 
 ## Backups
 

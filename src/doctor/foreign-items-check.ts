@@ -117,3 +117,98 @@ export function buildForeignItemReport(
     foreignIds,
   };
 }
+
+/** Result of applying the foreign-items cleanup. */
+export interface ForeignItemApplyResult {
+  success: boolean;
+  apply: boolean;
+  prefix: string;
+  totalBefore: number;
+  totalAfter: number;
+  foreignBefore: number;
+  foreignAfter: number;
+  ownBefore: number;
+  ownAfter: number;
+  removedCount: number;
+  removedByPrefix: Record<string, number>;
+  removedIds: string[];
+  errors: Array<{ id: string; error: string }>;
+}
+
+/**
+ * Hard-delete all foreign items listed in the report with full cascade.
+ *
+ * For each foreign item, the following are removed:
+ * - the workitem row (via store.deleteWorkItem, which also removes
+ *   dependency edges referencing the item and its comments)
+ * - the audit_results row (NOT cascaded by deleteWorkItem)
+ * - the FTS index entry (NOT cascaded by deleteWorkItem)
+ *
+ * Own items are never touched. The operation is destructive and should be
+ * gated by an explicit `--apply` flag by the caller.
+ *
+ * @param db - The WorklogDatabase instance (store accessed via `(db as any).store`).
+ * @param report - The foreign-item report (only `foreignIds` and `prefix` are used).
+ * @returns Before/after counts, per-prefix removed counts, and any errors.
+ */
+export function applyForeignItemCleanup(
+  db: { getAll(): WorkItem[] },
+  report: Pick<ForeignItemReport, 'foreignIds' | 'prefix'>,
+): ForeignItemApplyResult {
+  const store = (db as any).store;
+  const totalBefore = db.getAll().length;
+  const foreignBefore = report.foreignIds.length;
+  const ownBefore = totalBefore - foreignBefore;
+
+  const removedIds: string[] = [];
+  const removedByPrefix: Record<string, number> = {};
+  const errors: Array<{ id: string; error: string }> = [];
+
+  for (const id of report.foreignIds) {
+    const prefix = extractIdPrefix(id);
+    const key = (prefix ?? '').toUpperCase();
+    try {
+      // Cascade beyond deleteWorkItem: audit results and FTS entries are NOT
+      // removed by deleteWorkItem and must be cleaned explicitly.
+      if (store && typeof store.deleteAuditResult === 'function') {
+        try { store.deleteAuditResult(id); } catch (_) { /* best-effort */ }
+      }
+      if (store && typeof store.deleteFtsEntry === 'function') {
+        try { store.deleteFtsEntry(id); } catch (_) { /* best-effort */ }
+      }
+      let ok = false;
+      if (store && typeof store.deleteWorkItem === 'function') {
+        ok = store.deleteWorkItem(id);
+      }
+      if (ok) {
+        removedIds.push(id);
+        removedByPrefix[key] = (removedByPrefix[key] ?? 0) + 1;
+      } else {
+        errors.push({ id, error: 'deleteWorkItem returned false (item not found)' });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push({ id, error: message });
+    }
+  }
+
+  const totalAfter = db.getAll().length;
+  const remainingIds = new Set(db.getAll().map(item => item.id));
+  const foreignAfter = report.foreignIds.filter(id => remainingIds.has(id)).length;
+
+  return {
+    success: errors.length === 0,
+    apply: true,
+    prefix: report.prefix,
+    totalBefore,
+    totalAfter,
+    foreignBefore,
+    foreignAfter,
+    ownBefore,
+    ownAfter: totalAfter - foreignAfter,
+    removedCount: removedIds.length,
+    removedByPrefix,
+    removedIds,
+    errors,
+  };
+}
