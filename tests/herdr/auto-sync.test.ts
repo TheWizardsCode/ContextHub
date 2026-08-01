@@ -230,6 +230,15 @@ describe('runSync', () => {
     result.catch(() => {});
   });
 
+  it('passes --worklog-dir when a worklog is provided', async () => {
+    const result = runSync('/tmp/project/.worklog');
+    await vi.advanceTimersByTimeAsync(100);
+    expect(mockSpawnCalls[0].args).toContain('--worklog-dir');
+    expect(mockSpawnCalls[0].args).toContain('/tmp/project/.worklog');
+    expect(mockSpawnCalls[0].args).toContain('sync');
+    result.catch(() => {});
+  });
+
   it('does not crash on spawn failure (wl not found)', async () => {
     mockSpawnReject = true;
     // Should not throw; reports failure gracefully

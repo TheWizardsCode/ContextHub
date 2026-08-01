@@ -10,7 +10,7 @@
  * Herdr's pane-based model.
  */
 
-import { fetchChildrenForItem, fetchActionableCount, type WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, fetchActionableCount, getWorklogDir, type WorkItem } from './fetcher.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
   statusIcon,
@@ -1637,9 +1637,10 @@ export async function runWorklistTui(
   };
 
   // Run `wl sync` and surface the outcome in the notification area so sync
-  // status is visible (success and graceful failure).
+  // status is visible (success and graceful failure). Targets the resolved
+  // worklog directory so sync operates on the tab project.
   const doSync = async (): Promise<void> => {
-    const outcome = await runSync();
+    const outcome = await runSync(getWorklogDir());
     syncNotification = outcome.success
       ? ` ${ANSI.dim}[Synced]${ANSI.reset}`
       : ` ${ANSI.yellow}[Sync failed: ${outcome.error ?? 'unknown error'}]${ANSI.reset}`;

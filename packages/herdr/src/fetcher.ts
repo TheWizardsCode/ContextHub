@@ -59,6 +59,14 @@ export function setWorklogDir(dir: string | undefined): void {
 }
 
 /**
+ * Return the current --worklog-dir override (if any). Used by other modules
+ * (e.g. auto-sync) so their `wl` invocations target the same worklog.
+ */
+export function getWorklogDir(): string | undefined {
+  return _worklogDir;
+}
+
+/**
  * Reset the worklog directory override.
  */
 export function resetWorklogDir(): void {

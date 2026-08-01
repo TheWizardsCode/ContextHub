@@ -57,10 +57,15 @@ export function clampSyncInterval(intervalMs: number): number {
  *
  * @returns A promise resolving with the sync outcome.
  */
-export function runSync(): Promise<{ success: boolean; error?: string }> {
+export function runSync(worklogDir?: string): Promise<{ success: boolean; error?: string }> {
   return new Promise<{ success: boolean; error?: string }>((resolve) => {
     try {
-      const child = spawn('wl', ['sync'], {
+      // Target the resolved worklog (same as other wl invocations) so the
+      // background sync operates on the tab project, not the plugin's CWD.
+      const syncArgs = worklogDir
+        ? ['--worklog-dir', worklogDir, 'sync']
+        : ['sync'];
+      const child = spawn('wl', syncArgs, {
         stdio: ['ignore', 'ignore', 'ignore'], // Discard output
         detached: false,
       });
