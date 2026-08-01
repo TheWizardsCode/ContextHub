@@ -985,7 +985,7 @@ export function getChordHelpHints(registry: ShortcutRegistry | undefined): strin
 // ── Keyboard handling ─────────────────────────────────────────────────
 
 export type KeyAction = 'up' | 'down' | 'pageup' | 'pagedown' | 'select'
-  | 'back' | 'filter' | 'refresh' | 'quit' | 'first' | 'last'
+  | 'back' | 'filter' | 'refresh' | 'sync' | 'quit' | 'first' | 'last'
   | 'chord-start' | 'chord-complete' | 'chord-cancel'
   | 'toggle-expand' | null;
 
@@ -1030,6 +1030,8 @@ export function keyToAction(key: string): KeyAction {
       return 'first';
     case 'G':
       return 'last';
+    case 'S':
+      return 'sync';
     default:
       return null;
   }
@@ -1550,6 +1552,7 @@ export async function runWorklistTui(
   /** Saved mode before entering form overlay (to restore on cancel) */
   let preFormMode: ViewMode = 'list';
   let refreshNotification = '';
+  let syncNotification = '';
 
   let totalActionableCount: number | undefined;
 
@@ -1631,6 +1634,20 @@ export async function runWorklistTui(
       render();
     }, 3000);
     render();
+  };
+
+  // Run `wl sync` and surface the outcome in the notification area so sync
+  // status is visible (success and graceful failure).
+  const doSync = async (): Promise<void> => {
+    const outcome = await runSync();
+    syncNotification = outcome.success
+      ? ` ${ANSI.dim}[Synced]${ANSI.reset}`
+      : ` ${ANSI.yellow}[Sync failed: ${outcome.error ?? 'unknown error'}]${ANSI.reset}`;
+    render();
+    setTimeout(() => {
+      syncNotification = '';
+      render();
+    }, 3000);
   };
 
   const onData = async (chunk: Buffer): Promise<void> => {
@@ -1846,6 +1863,11 @@ export async function runWorklistTui(
       return;
     }
 
+    if (action === 'sync') {
+      await doSync();
+      return;
+    }
+
     if (action === 'select' && prevMode === 'detail') {
       cleanup();
       resolve(state.detailItem ?? undefined);
@@ -1962,6 +1984,7 @@ export async function runWorklistTui(
     // Append notifications if present
     let notificationLine = '';
     if (refreshNotification) notificationLine += refreshNotification;
+    if (syncNotification) notificationLine += syncNotification;
     const rendered = notificationLine
       ? output + '\n' + notificationLine
       : output;
@@ -1993,7 +2016,7 @@ export async function runWorklistTui(
   if (opts.autoRefresh) {
     refreshTimer = setInterval(() => {
       if (opts.autoSync) {
-        runSync();
+        doSync();
       }
       doRefresh(false);
     }, opts.refreshIntervalMs);
@@ -2005,7 +2028,7 @@ export async function runWorklistTui(
     syncTimer = createSyncTimer({
       intervalMs: opts.syncIntervalMs,
       onSync: () => {
-        runSync();
+        doSync();
         doRefresh(false);
       },
     });

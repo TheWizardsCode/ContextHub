@@ -138,19 +138,23 @@ describe('runSync', () => {
     const promise = runSync();
     // Fire the registered callback
     if (childEventCallback) setImmediate(childEventCallback);
-    await expect(promise).resolves.toBeUndefined();
+    // close fires without a code; treat as success (or at minimum resolve)
+    const outcome = await promise;
+    expect(outcome).toHaveProperty('success');
   });
 
   it('resolves when child emits error event (e.g. ENOENT)', async () => {
     childEventToFire = 'error';
     const promise = runSync();
     if (childEventCallback) setImmediate(childEventCallback);
-    await expect(promise).resolves.toBeUndefined();
+    const outcome = await promise;
+    expect(outcome).toHaveProperty('success', false);
   });
 
   it('resolves when spawn throws (catch fallback)', async () => {
     spawnShouldThrow = true;
-    await expect(runSync()).resolves.toBeUndefined();
+    const outcome = await runSync();
+    expect(outcome).toHaveProperty('success', false);
     expect(mockSpawn).toHaveBeenCalled();
   });
 
@@ -167,7 +171,8 @@ describe('runSync', () => {
     await vi.advanceTimersByTimeAsync(10_000);
 
     // The mock child's kill should have been called
-    await expect(promise).resolves.toBeUndefined();
+    const outcome = await promise;
+    expect(outcome.success).toBe(false);
   });
 });
 

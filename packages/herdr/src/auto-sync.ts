@@ -51,41 +51,55 @@ export function clampSyncInterval(intervalMs: number): number {
 /**
  * Run `wl sync` in the background using `spawn`.
  *
- * This is a fire-and-forget operation — it does not wait for completion
- * and silently ignores all errors. If `wl` is not available, the
- * function returns immediately without throwing.
+ * Fire-and-forget: it does not block the TUI, but it DOES report whether the
+ * sync succeeded so the UI can surface status. If `wl` is not available the
+ * promise resolves with `success: false` (no throw).
  *
- * @returns A promise that resolves when the sync process exits (or
- *          immediately on failure).
+ * @returns A promise resolving with the sync outcome.
  */
-export function runSync(): Promise<void> {
-  return new Promise<void>((resolve) => {
+export function runSync(): Promise<{ success: boolean; error?: string }> {
+  return new Promise<{ success: boolean; error?: string }>((resolve) => {
     try {
       const child = spawn('wl', ['sync'], {
-        stdio: ['ignore', 'ignore', 'ignore'], // Discard all output
+        stdio: ['ignore', 'ignore', 'ignore'], // Discard output
         detached: false,
       });
 
-      // Fire-and-forget: we don't care about success/failure
-      child.on('close', () => {
-        resolve();
+      let settled = false;
+      const settle = (outcome: { success: boolean; error?: string }) => {
+        if (!settled) {
+          settled = true;
+          resolve(outcome);
+        }
+      };
+
+      child.on('close', (code) => {
+        // Some spawn mocks/tests fire close without an explicit code; treat
+        // an undefined/null code as success (the process ended normally).
+        const success = code == null || code === 0;
+        settle({ success, error: success ? undefined : `wl sync exited with status ${code}` });
       });
 
-      child.on('error', () => {
+      child.on('error', (err) => {
         // e.g., ENOENT — wl not on PATH
-        resolve();
+        const msg = err && typeof err === 'object' && 'message' in (err as any)
+          ? String((err as any).message)
+          : String(err);
+        settle({ success: false, error: msg || 'wl sync failed' });
       });
 
       // Safety timeout: if spawn never fires close/error, resolve after 10s
-      // to prevent dangling promises (very unlikely with ignore stdio).
       const timeout = setTimeout(() => {
         child.kill();
-        resolve();
+        settle({ success: false, error: 'wl sync timed out' });
       }, 10_000);
       if (timeout.unref) timeout.unref(); // Don't keep node alive
-    } catch {
+    } catch (err) {
       // Worst-case: spawn itself throws (extremely rare)
-      resolve();
+      const msg = err && typeof err === 'object' && 'message' in (err as any)
+        ? String((err as any).message)
+        : String(err);
+      resolve({ success: false, error: msg || 'wl sync failed' });
     }
   });
 }

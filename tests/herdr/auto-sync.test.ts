@@ -61,6 +61,7 @@ const defaultTermSize: TermSize = { rows: 24, cols: 80 };
 let mockSpawnCalls: { command: string; args: string[] }[] = [];
 let mockSpawnReject: boolean = false;
 let mockSpawnDelay = 0;
+let mockSpawnExitCode: number | null = null;
 
 const originalSpawn = spawn;
 
@@ -70,6 +71,7 @@ vi.mock('node:child_process', async () => {
     ...actual,
     spawn: vi.fn((command: string, args: string[], _opts?: any) => {
       mockSpawnCalls.push({ command, args });
+      const closeCode = mockSpawnExitCode !== null ? mockSpawnExitCode : (mockSpawnReject ? 127 : 0);
       if (mockSpawnReject) {
         // Simulate a spawn failure (e.g., wl not found)
         return {
@@ -84,7 +86,7 @@ vi.mock('node:child_process', async () => {
           },
           on: (event: string, cb: (code: number) => void) => {
             if (event === 'close') {
-              cb(127);
+              cb(closeCode);
             }
           },
           kill: () => {},
@@ -102,7 +104,7 @@ vi.mock('node:child_process', async () => {
         stderr: { on: () => {} },
         on: (event: string, cb: (code: number) => void) => {
           if (event === 'close') {
-            cb(0);
+            cb(closeCode);
           }
         },
         kill: () => {},
@@ -209,6 +211,7 @@ describe('runSync', () => {
   beforeEach(() => {
     mockSpawnCalls = [];
     mockSpawnReject = false;
+    mockSpawnExitCode = null;
     vi.useFakeTimers();
   });
 
@@ -229,8 +232,23 @@ describe('runSync', () => {
 
   it('does not crash on spawn failure (wl not found)', async () => {
     mockSpawnReject = true;
-    // Should not throw
+    // Should not throw; reports failure gracefully
     await expect(runSync()).resolves.not.toThrow();
+    const outcome = await runSync();
+    expect(outcome.success).toBe(false);
+  });
+
+  it('reports success when wl sync exits with status 0', async () => {
+    mockSpawnExitCode = 0;
+    const outcome = await runSync();
+    expect(outcome.success).toBe(true);
+  });
+
+  it('reports failure when wl sync exits non-zero', async () => {
+    mockSpawnExitCode = 1;
+    const outcome = await runSync();
+    expect(outcome.success).toBe(false);
+    expect(outcome.error).toMatch(/status 1/);
   });
 
   it('handles stderr output without crashing', async () => {
@@ -247,6 +265,7 @@ describe('createSyncTimer', () => {
   beforeEach(() => {
     mockSpawnCalls = [];
     mockSpawnReject = false;
+    mockSpawnExitCode = null;
     mockCallback = vi.fn();
     vi.useFakeTimers();
   });
@@ -338,6 +357,7 @@ describe('auto-refresh + sync integration', () => {
     video = '';
     mockSpawnCalls = [];
     mockSpawnReject = false;
+    mockSpawnExitCode = null;
     vi.useFakeTimers();
   });
 

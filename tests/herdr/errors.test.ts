@@ -171,6 +171,15 @@ describe('handleKeypress edge cases', () => {
     expect(state.mode).toBe('detail');
     expect(state.detailItem?.id).toBe('WL-001');
   });
+
+  it('maps uppercase S to the sync action', () => {
+    const items = [makeItem('WL-001')];
+    const state = new WorkItemListState(items, defaultTermSize);
+    // 'S' (uppercase) triggers a manual sync; must not be treated as quit or
+    // an unrecognized key.
+    const action = handleKeypress(state, 'S', defaultTermSize);
+    expect(action).toBe('sync');
+  });
 });
 
 describe('footer key hints', () => {
