@@ -215,8 +215,8 @@ async function main(): Promise<void> {
   // The command is written to stdout with a CMD: prefix so the calling
   // framework (Herdr) can execute it. The TUI stays alive after sending
   // the command — the user can continue browsing or quit normally.
-  // Settings are re-read so browseItemCount and showHelpText changes apply
-  // on the next invocation (no plugin restart needed).
+  // Settings are re-read so browseItemCount (per fetch) and showHelpText
+  // (per render) changes apply without a plugin restart.
   const runSettings = loadSettings();
   const selectedItem = await runWorklistTui(
     fetcher,
@@ -228,6 +228,9 @@ async function main(): Promise<void> {
       autoSync: runSettings.autoSync,
       syncIntervalMs: runSettings.syncIntervalMs,
       showHelpText: runSettings.showHelpText,
+      // Re-read on every render so a showHelpText change applies on the next
+      // refresh (no plugin restart needed), matching browseItemCount behavior.
+      getShowHelpText: () => loadSettings().showHelpText ?? true,
       onCommand: (command: string) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed

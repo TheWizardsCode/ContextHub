@@ -6,7 +6,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 
 - **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list. The top-level list is root-only: child work items are hidden and appear only under their parent via expand.
 - **Filter by stage** — Press `f` followed by a chord key (`i`=idea, `n`=intake, `p`=plan, `r`=review) to filter items by stage
-- **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority, and audit status information such as audit result, review status, and last audit timestamp)
+- **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority, GitHub issue number, and audit status information such as audit result, review status, and last audit timestamp)
 - **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The detail view metadata section additionally shows the review status (❌ needs review / ✅ reviewed) and the last audit timestamp.
 - **Chord shortcuts** — Multi-key chord sequences provide quick actions like updating priorities, stage/status, title, closing/deleting items, running workflows, and toggling review status (configurable via `shortcuts.json`)
 - **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is executed **visibly in a new herdr pane** (see `scripts/run-in-pane.sh`) so the user sees the command line and its output; the wrapper keeps the pane's process alive so the pane stays open for inspection — dismiss it with Enter or close it with `prefix+x`
@@ -118,6 +118,9 @@ Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings in
 - `refreshIntervalMs` — Interval in ms between auto-refreshes (default: `30000`)
 - `autoSync` — Enable periodic background `wl sync` before auto-refreshes (default: `true`)
 - `syncIntervalMs` — Interval in ms between background `wl sync` calls (default: `30000`, minimum: `30000`; set to `0` to disable auto-sync)
+- `browseItemCount` — Max number of non-mandatory items to show in the list (default: `10`, range `1`–`50`; critical and completed/in_review items are always shown regardless)
+- `showHelpText` — Show the shortcut hint line at the bottom of the list (default: `true`); changes apply on the next render without a plugin restart
+- `showIcons` — Toggle icons in the list (default: `true`)
 
 ### Selection List Behaviour
 
