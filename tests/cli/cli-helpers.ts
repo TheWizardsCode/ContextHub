@@ -309,7 +309,8 @@ export function seedWorkItems(
       text: string;
     };
   }>,
-  comments: Comment[] = []
+  comments: Comment[] = [],
+  auditResults?: Array<{ workItemId: string; readyToClose: boolean; auditedAt: string; summary?: string | null; rawOutput?: string | null; author?: string | null }>
 ): WorkItem[] {
   const now = new Date().toISOString();
   const seeded = items.map((item, index) => ({
@@ -339,6 +340,6 @@ export function seedWorkItems(
     }));
 
   const dataPath = path.join(dir, '.worklog', 'worklog-data.jsonl');
-  exportToJsonl(seeded, comments, dataPath, []);
+  exportToJsonl(seeded, comments, dataPath, [], auditResults || []);
   return seeded;
 }
