@@ -96,6 +96,8 @@ The report includes total items scanned, the foreign count, counts grouped by pr
 
 `--apply` hard-deletes every foreign item with full cascade: the work item row, its comments, dependency edges referencing it, its `audit_results` row, and its FTS index entry. Own items are never touched. The result reports before/after totals, per-prefix removed counts, and any errors. Run `--dry-run` first to preview exactly what will be removed.
 
+See [docs/CROSS_PROJECT_POLLUTION_CLEANUP.md](docs/CROSS_PROJECT_POLLUTION_CLEANUP.md) for the full usage guide, recommended workflow, and the pollution-source sweep findings.
+
 Adding `--push` rewrites the project's remote worklog ref (`origin refs/worklog/data`, or the configured `syncBranch`) so it contains only the project's own items, bypassing the polluted remote history entirely (a fresh orphan commit is force-pushed and the local tracking ref is updated to match). `--push` requires `--apply` — rewriting the ref without cleaning the DB would publish foreign items. After the push, a subsequent `wl sync` pulls the clean ref and cannot re-import foreign items.
 
 ## Backups
