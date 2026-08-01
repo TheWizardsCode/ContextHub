@@ -51,7 +51,7 @@ The TUI is implemented as a Pi extension located in `packages/tui/`:
 
 ### Browse & Select
 
-On launch, the TUI shows a list of recommended next work items. Navigate with
+On launch, the TUI shows a list of recommended next work items (root items only — child work items are hidden and appear only under their parent via drill-down). Navigate with
 Up/Down arrows, press Enter to see full details, or use shortcut keys:
 
 - **i** — insert `implement <id>` into the editor

@@ -528,7 +528,12 @@ export async function defaultChooseWorkItem(
     );
 
     const options = items.map(item => formatBrowseOption(item, undefined, undefined, currentSettings, maxPrefixWidth));
-    const titleSuffix = totalCount !== undefined ? ` (top ${totalCount > 0 ? Math.min(currentSettings.browseItemCount, totalCount) : currentSettings.browseItemCount} of ${totalCount})` : ` (top ${currentSettings.browseItemCount})`;
+    // "top N of M": N = actual displayed count (may exceed browseItemCount and
+    // even the actionable total when the mandatory critical/completed-in_review
+    // set is shown — those items are not counted by fetchTotalActionableCount),
+    // M = actionable total.
+    const displayedCount = items.length;
+    const titleSuffix = totalCount !== undefined ? ` (top ${displayedCount} of ${totalCount})` : ` (top ${displayedCount})`;
     const selected = await ctx.ui.select(`Browse Worklog next items${titleSuffix}`, options);
     if (!selected) return undefined;
 
@@ -551,6 +556,9 @@ export async function defaultChooseWorkItem(
     let lastSelectionId = items[0]?.id;
     let cachedWidth: number | undefined;
     let cachedLines: string[] | undefined;
+    // Mutable so auto-refresh can update the total actionable count without
+    // rebuilding the widget (the render closure reads this each frame).
+    let currentTotalCount: number | undefined = totalCount;
 
     const invalidateCache = () => {
       cachedWidth = undefined;
@@ -601,6 +609,16 @@ export async function defaultChooseWorkItem(
             lastSelectionId = item.id;
             onSelectionChange(item);
           }
+
+          // Keep the "top N of M" count fresh: the total actionable count is
+          // re-fetched on every auto-refresh so M does not go stale in long
+          // sessions. Uses the module default runWl (this closure has no
+          // injected run function).
+          fetchTotalActionableCount().then((count) => {
+            currentTotalCount = count;
+          }).catch(() => {
+            // ignore; keep the previous count on fetch failure
+          });
 
           invalidateCache();
           tui.requestRender();
@@ -696,15 +714,17 @@ export async function defaultChooseWorkItem(
           return cachedLines;
         }
 
-        const browseCount = currentSettings.browseItemCount;
+        // "top N of M": N = actual displayed count (may exceed browseItemCount
+        // when the mandatory critical/completed-in_review set is shown).
+        const displayedCount = items.length;
 
         const isEmpty = items.length === 0;
         const title = isEmpty
           ? truncateToWidth(theme.fg('accent', theme.bold('No work items to browse')), width)
           : (() => {
-              const titleSuffix = totalCount !== undefined
-                ? ` (top ${totalCount > 0 ? Math.min(browseCount, totalCount) : browseCount} of ${totalCount})`
-                : ` (top ${browseCount})`;
+              const titleSuffix = currentTotalCount !== undefined
+                ? ` (top ${displayedCount} of ${currentTotalCount})`
+                : ` (top ${displayedCount})`;
               return truncateToWidth(theme.fg('accent', theme.bold(`Browse Worklog next items${titleSuffix}`)), width);
             })();
 
@@ -1116,8 +1136,6 @@ export async function runBrowseFlow(
   const { listWorkItems, listWorkItemsWithStage, runWlImpl, shortcutRegistry, chooseWorkItem } = options;
 
   try {
-    const itemCount = currentSettings.browseItemCount;
-
     let lastAnnouncedId: string | undefined;
     const announceSelection: SelectionChangeHandler = (
       item: WorklogBrowseItem,
@@ -1127,8 +1145,8 @@ export async function runBrowseFlow(
     };
 
     const reFetchItems = stage
-      ? () => listWorkItemsWithStage(stage).then(newItems => newItems.slice(0, itemCount))
-      : () => listWorkItems().then(newItems => newItems.slice(0, itemCount));
+      ? () => listWorkItemsWithStage(stage)
+      : () => listWorkItems();
 
     const fetchChildren = async (parentId: string): Promise<WorklogBrowseItem[]> => {
       const output = await runWlImpl(['list', '--parent', parentId]);
@@ -1166,8 +1184,8 @@ export async function runBrowseFlow(
             return restored;
           })()
         : stage
-          ? (await listWorkItemsWithStage(stage)).slice(0, itemCount)
-          : (await listWorkItems()).slice(0, itemCount);
+          ? (await listWorkItemsWithStage(stage))
+          : (await listWorkItems());
 
       if (items[0]) {
         announceSelection(items[0]);

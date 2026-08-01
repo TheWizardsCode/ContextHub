@@ -17,6 +17,7 @@ export default function register(ctx: PluginContext): void {
     .option('-s, --status <status>', 'Filter by status')
     .option('-p, --priority <priority>', 'Filter by priority')
     .option('--parent <id>', 'Filter by parent id (direct children only)')
+    .option('--root-only', 'Show only root-level items (items without a parent)')
     
     .option('-n, --number <n>', 'Limit the number of items returned')
     .option('--deleted', 'Include deleted items in results')
@@ -48,6 +49,13 @@ export default function register(ctx: PluginContext): void {
         query.status = statuses.map(s => s.replace(/_/g, '-') as WorkItemStatus);
       }
       if (options.priority) query.priority = options.priority as WorkItemPriority;
+      if (options.rootOnly && options.parent) {
+        output.error('--root-only and --parent cannot be used together', { success: false, error: '--root-only and --parent cannot be used together' });
+        process.exit(1);
+      }
+      if (options.rootOnly) {
+        query.rootOnly = true;
+      }
       if (options.parent) {
         const normalizedParentId = utils.normalizeCliId(options.parent, options.prefix) || options.parent;
         const parent = db.get(normalizedParentId);

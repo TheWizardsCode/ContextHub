@@ -358,6 +358,28 @@ export default function register(ctx: PluginContext): void {
           }
         }
 
+        // SAFETY: If no work-item fields changed (e.g. only --audit-text was
+        // provided, which is handled above via db.saveAuditResult), skip
+        // db.update() entirely to prevent any accidental stage/status
+        // transitions. The audit persistence handler above already called
+        // db.saveAuditResult() — there is nothing more to update on the
+        // work item record itself.
+        if (Object.keys(updates).length === 0) {
+          const current = db.get(normalizedId);
+          if (!current) {
+            const message = `Work item not found: ${normalizedId}`;
+            results.push({ id: normalizedId, success: false, error: message });
+            continue;
+          }
+          // Include audit data in JSON output when audit was written
+          if (auditWritten && auditEntryForOutput) {
+            (current as any).auditResult = db.getAuditResult(normalizedId);
+            (current as any).audit = { time: auditEntryForOutput.time, author: auditEntryForOutput.author, text: auditEntryForOutput.text, status: auditEntryForOutput.status };
+          }
+          results.push({ id: normalizedId, success: true, workItem: current });
+          continue;
+        }
+
         const item = db.update(normalizedId, updates);
         if (!item) {
           const message = `Work item not found: ${normalizedId}`;

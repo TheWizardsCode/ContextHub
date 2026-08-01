@@ -348,11 +348,16 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
 
     it('should prefer child blocker when blocked parent has critical priority', () => {
       const parent = db.create({ title: 'Blocked parent', priority: 'critical', status: 'blocked' });
-      const childBlocker = db.create({ title: 'Blocking child', priority: 'low', status: 'open', parentId: parent.id });
+      db.create({ title: 'Blocking child', priority: 'low', status: 'open', parentId: parent.id });
       db.create({ title: 'High priority item', priority: 'high', status: 'open' });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem!.id).toBe(childBlocker.id);
+      // Strict root-only (WL-0MS964SIA0057ABR): the child blocker is hidden
+      // entirely. The blocked critical parent is the unit of work and is
+      // surfaced via the critical last-resort path instead.
+      expect(result.workItem!.id).toBe(parent.id);
+      expect(result.workItem!.parentId).toBeNull();
+      expect(result.reason).toContain('critical');
     });
   });
 
@@ -588,13 +593,15 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
     });
 
     it('should still surface blockers for blocked items without in_review stage', () => {
-      // A regular blocked item (not in_review) should be handled by normal blocked logic
+      // A regular blocked item (not in_review) should be handled by normal blocked logic.
+      // Strict root-only (WL-0MS964SIA0057ABR): the child blocker is hidden;
+      // the blocked parent (root, high priority) is the unit of work.
       const blocked = db.create({ title: 'Blocked', status: 'blocked', priority: 'high' });
-      const blocker = db.create({ title: 'Blocker child', status: 'open', priority: 'low', parentId: blocked.id });
+      db.create({ title: 'Blocker child', status: 'open', priority: 'low', parentId: blocked.id });
 
       const result = db.findNextWorkItem();
-      // Should surface the blocker for the blocked item
-      expect(result.workItem!.id).toBe(blocker.id);
+      expect(result.workItem!.id).toBe(blocked.id);
+      expect(result.workItem!.parentId).toBeNull();
     });
 
     it('should not affect open items with in_review stage (edge case)', () => {
@@ -746,17 +753,17 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
   // surface their direct blocker (child or dependency edge).
   // ─────────────────────────────────────────────────────────────────────
   describe('critical escalation (WL-0MM346MLV0THH548)', () => {
-    it('should surface blocker of critical item assigned to a different user', async () => {
+    it('should hide child blocker of critical item assigned to a different user (WL-0MS964SIA0057ABR)', async () => {
       // Critical item assigned to Bob is blocked by a task assigned to Alice.
-      // When Alice queries wl next --assignee alice, the blocker should surface
-      // because handleCriticalEscalation operates on the FULL item set.
+      // Strict root-only: the child blocker is hidden entirely (no orphan
+      // promotion). Alice's own root work (high priority) is surfaced instead.
       const critical = db.create({
         title: 'Critical Bob item',
         priority: 'critical',
         status: 'blocked',
         assignee: 'bob',
       });
-      const aliceBlocker = db.create({
+      db.create({
         title: 'Alice blocker',
         priority: 'medium',
         status: 'open',
@@ -764,7 +771,7 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
         parentId: critical.id,
       });
       await wait(10);
-      db.create({
+      const aliceTask = db.create({
         title: 'Alice normal task',
         priority: 'high',
         status: 'open',
@@ -773,8 +780,9 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
 
       const result = db.findNextWorkItem('alice');
       expect(result.workItem).not.toBeNull();
-      expect(result.workItem!.id).toBe(aliceBlocker.id);
-      expect(result.reason).toContain('critical');
+      // The child blocker is hidden; alice's root-level task is the unit of work.
+      expect(result.workItem!.id).toBe(aliceTask.id);
+      expect(result.workItem!.parentId).toBeNull();
     });
 
     it('should surface dep-edge blocker of critical item from full set', async () => {
@@ -927,23 +935,23 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       expect(result.workItem!.id).toBe(critical.id);
     });
 
-    it('should surface blocker from outside search filter for critical item', async () => {
+    it('should hide child blocker from outside search filter for critical item (WL-0MS964SIA0057ABR)', async () => {
       // Critical item mentions "infra" in its title but its blocker mentions "auth".
-      // When searching for "auth", the blocker should be surfaced because
-      // critical escalation finds the critical from the full set.
+      // Strict root-only: the child blocker is hidden entirely. Searching for
+      // "auth" surfaces alice's/any root-level auth work instead.
       const critical = db.create({
         title: 'Critical infra issue',
         priority: 'critical',
         status: 'blocked',
       });
-      const blocker = db.create({
+      db.create({
         title: 'Auth service fix',
         priority: 'medium',
         status: 'open',
         parentId: critical.id,
       });
       await wait(10);
-      db.create({
+      const authDocs = db.create({
         title: 'Auth docs update',
         priority: 'low',
         status: 'open',
@@ -951,8 +959,9 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
 
       const result = db.findNextWorkItem(undefined, 'auth');
       expect(result.workItem).not.toBeNull();
-      expect(result.workItem!.id).toBe(blocker.id);
-      expect(result.reason).toContain('critical');
+      // The child blocker is hidden; the root-level auth item is surfaced.
+      expect(result.workItem!.id).toBe(authDocs.id);
+      expect(result.workItem!.parentId).toBeNull();
     });
 
     it('should handle critical with both child and dep-edge blockers', async () => {
@@ -987,13 +996,13 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       expect(result.reason).toContain('critical');
     });
 
-    it('should skip excluded blockers in batch mode', async () => {
+    it('should hide child blockers in batch mode (WL-0MS964SIA0057ABR)', async () => {
       const critical = db.create({
         title: 'Critical parent',
         priority: 'critical',
         status: 'blocked',
       });
-      const child1 = db.create({
+      db.create({
         title: 'First child',
         priority: 'high',
         status: 'open',
@@ -1001,7 +1010,7 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
         sortIndex: 100,
       });
       await wait(10);
-      const child2 = db.create({
+      db.create({
         title: 'Second child',
         priority: 'high',
         status: 'open',
@@ -1010,11 +1019,17 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       });
 
       const results = db.findNextWorkItems(2);
-      expect(results.length).toBe(2);
-      // First batch result should pick child1 (lower sortIndex)
-      expect(results[0].workItem!.id).toBe(child1.id);
-      // Second batch result should pick child2 (child1 is excluded)
-      expect(results[1].workItem!.id).toBe(child2.id);
+      // Strict root-only: the child blockers are hidden. The blocked critical
+      // parent is surfaced via the last-resort escalation path; no child items
+      // appear in any batch result.
+      expect(results.length).toBeGreaterThan(0);
+      const ids = results.map(r => r.workItem?.id).filter(Boolean);
+      expect(ids[0]).toBe(critical.id);
+      for (const r of results) {
+        if (r.workItem) {
+          expect(r.workItem.parentId).toBeNull();
+        }
+      }
     });
   });
 
@@ -1484,9 +1499,9 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       expect(result.workItem!.id).toBe(parent.id);
     });
 
-    it('should return critical child when parent is completed', () => {
+    it('should hide critical child when parent is completed (WL-0MS964SIA0057ABR)', () => {
       const parent = db.create({ title: 'Completed parent', priority: 'low', status: 'completed' });
-      const criticalChild = db.create({
+      db.create({
         title: 'Critical child',
         priority: 'critical',
         status: 'open',
@@ -1494,14 +1509,14 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       });
 
       const result = db.findNextWorkItem();
-      // Parent is completed, so child should be promoted via orphan promotion
-      expect(result.workItem).not.toBeNull();
-      expect(result.workItem!.id).toBe(criticalChild.id);
+      // Strict root-only: no orphan promotion — the critical child is hidden
+      // entirely and no root candidate remains.
+      expect(result.workItem).toBeNull();
     });
 
-    it('should return critical child when parent is deleted', () => {
+    it('should hide critical child when parent is deleted (WL-0MS964SIA0057ABR)', () => {
       const parent = db.create({ title: 'Deleted parent', priority: 'low', status: 'deleted' });
-      const criticalChild = db.create({
+      db.create({
         title: 'Critical child',
         priority: 'critical',
         status: 'open',
@@ -1509,18 +1524,16 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       });
 
       const result = db.findNextWorkItem();
-      // Parent is deleted, so child should be promoted via orphan promotion
-      expect(result.workItem).not.toBeNull();
-      expect(result.workItem!.id).toBe(criticalChild.id);
+      // Strict root-only: no orphan promotion — the critical child is hidden
+      // entirely and no root candidate remains.
+      expect(result.workItem).toBeNull();
     });
 
-    it('should return critical child when parent is in-progress', () => {
-      // Fix 1 filters children when parent is a VALID candidate (open, not
-      // deleted/completed/in-progress). In-progress is excluded from valid, so
-      // the critical child IS surfaced via critical escalation. Fix 2 (Stage 5)
-      // only applies to non-critical children — critical escalation runs first.
+    it('should hide critical child when parent is in-progress (WL-0MS964SIA0057ABR)', () => {
+      // Strict root-only: children are never surfaced, even when the parent is
+      // in-progress (not a valid candidate). No orphan promotion.
       const parent = db.create({ title: 'In-progress parent', priority: 'low', status: 'in-progress' });
-      const criticalChild = db.create({
+      db.create({
         title: 'Critical child',
         priority: 'critical',
         status: 'open',
@@ -1528,9 +1541,7 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       });
 
       const result = db.findNextWorkItem();
-      // Parent is in-progress, so the child is surfaced via critical escalation
-      expect(result.workItem).not.toBeNull();
-      expect(result.workItem!.id).toBe(criticalChild.id);
+      expect(result.workItem).toBeNull();
     });
 
     it('should prefer parent when critical child exists alongside other open items', () => {
@@ -1620,10 +1631,11 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       }
     });
 
-    it('should return blocked critical child when parent is completed', () => {
-      // Orphan promotion — parent is completed, so child should be surfaced
+    it('should hide blocked critical child when parent is completed (WL-0MS964SIA0057ABR)', () => {
+      // Strict root-only: no orphan promotion — the blocked critical child is
+      // hidden entirely even when its parent is completed.
       const parent = db.create({ title: 'Completed parent', priority: 'low', status: 'completed' });
-      const criticalChild = db.create({
+      db.create({
         title: 'Blocked critical orphan',
         priority: 'critical',
         status: 'blocked',
@@ -1631,14 +1643,14 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem).not.toBeNull();
-      expect(result.workItem!.id).toBe(criticalChild.id);
+      expect(result.workItem).toBeNull();
     });
 
-    it('should return blocked critical child when parent is deleted', () => {
-      // Orphan promotion — parent is deleted, so child should be surfaced
+    it('should hide blocked critical child when parent is deleted (WL-0MS964SIA0057ABR)', () => {
+      // Strict root-only: no orphan promotion — the blocked critical child is
+      // hidden entirely even when its parent is deleted.
       const parent = db.create({ title: 'Deleted parent', priority: 'low', status: 'deleted' });
-      const criticalChild = db.create({
+      db.create({
         title: 'Blocked critical orphan',
         priority: 'critical',
         status: 'blocked',
@@ -1646,14 +1658,14 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem).not.toBeNull();
-      expect(result.workItem!.id).toBe(criticalChild.id);
+      expect(result.workItem).toBeNull();
     });
 
-    it('should return blocked critical child when parent is in-progress', () => {
-      // In-progress parent is NOT a valid candidate, so the child is surfaced
+    it('should hide blocked critical child when parent is in-progress (WL-0MS964SIA0057ABR)', () => {
+      // Strict root-only: children are never surfaced, even when the parent is
+      // in-progress (not a valid candidate). No orphan promotion.
       const parent = db.create({ title: 'In-progress parent', priority: 'low', status: 'in-progress' });
-      const criticalChild = db.create({
+      db.create({
         title: 'Blocked critical child',
         priority: 'critical',
         status: 'blocked',
@@ -1661,8 +1673,7 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       });
 
       const result = db.findNextWorkItem();
-      expect(result.workItem).not.toBeNull();
-      expect(result.workItem!.id).toBe(criticalChild.id);
+      expect(result.workItem).toBeNull();
     });
 
     it('should not surface child-blockers of blocked critical child when parent is valid candidate', () => {
@@ -1784,24 +1795,24 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       expect(result.workItem!.id).toBe(rootItem.id);
     });
 
-    it('should still promote child when parent is completed (orphan promotion preserved)', () => {
+    it('should hide orphan child when parent is completed (WL-0MS964SIA0057ABR)', () => {
       const parent = db.create({ title: 'Completed parent', priority: 'high', status: 'completed', sortIndex: 100 });
-      const orphan = db.create({ title: 'Orphan child', priority: 'high', status: 'open', parentId: parent.id, sortIndex: 200 });
+      db.create({ title: 'Orphan child', priority: 'high', status: 'open', parentId: parent.id, sortIndex: 200 });
 
       const result = db.findNextWorkItem();
-      // Orphan promotion still works for completed parents
-      expect(result.workItem).not.toBeNull();
-      expect(result.workItem!.id).toBe(orphan.id);
+      // Strict root-only: orphan promotion removed — the child is hidden
+      // entirely (user decision Q1: "b" hidden entirely).
+      expect(result.workItem).toBeNull();
     });
 
-    it('should still promote child when parent is deleted (orphan promotion preserved)', () => {
+    it('should hide orphan child when parent is deleted (WL-0MS964SIA0057ABR)', () => {
       const parent = db.create({ title: 'Deleted parent', priority: 'high', status: 'deleted', sortIndex: 100 });
-      const orphan = db.create({ title: 'Orphan child', priority: 'high', status: 'open', parentId: parent.id, sortIndex: 200 });
+      db.create({ title: 'Orphan child', priority: 'high', status: 'open', parentId: parent.id, sortIndex: 200 });
 
       const result = db.findNextWorkItem();
-      // Orphan promotion still works for deleted parents
-      expect(result.workItem).not.toBeNull();
-      expect(result.workItem!.id).toBe(orphan.id);
+      // Strict root-only: orphan promotion removed — the child is hidden
+      // entirely (user decision Q1: "b" hidden entirely).
+      expect(result.workItem).toBeNull();
     });
 
     it('should not surface children of in-progress parent in batch mode', () => {
@@ -1863,20 +1874,21 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       expect(result.reason).toContain('Blocking issue');
     });
 
-    it('should surface dependency-edge blocker that is an orphan child (parent completed)', () => {
-      // Scenario: The blocker is a child of a completed parent (orphan)
-      // — orphan promotion makes it root-level, so it should be surfaced.
+    it('should hide dependency-edge blocker that is an orphan child (parent completed) (WL-0MS964SIA0057ABR)', () => {
+      // Strict root-only: the blocker is a child of a completed parent (orphan).
+      // Orphan promotion is removed — the child blocker is hidden entirely and
+      // its parent (completed) is not selectable, so wl next returns null with
+      // a clear reason.
       const completedParent = db.create({ title: 'Completed parent', priority: 'high', status: 'completed' });
       const orphanBlocker = db.create({ title: 'Orphan blocker', priority: 'medium', status: 'open', parentId: completedParent.id });
       const blockedItem = db.create({ title: 'Blocked item', priority: 'high', status: 'blocked' });
       db.addDependencyEdge(blockedItem.id, orphanBlocker.id);
 
       const result = db.findNextWorkItem();
-
-      // Orphan blocker should be surfaced (parent completed means no hierarchy suppression)
-      expect(result.workItem).not.toBeNull();
-      expect(result.workItem!.id).toBe(orphanBlocker.id);
-      expect(result.reason).toContain('Blocking issue');
+      // The child blocker is hidden; its parent is completed (not selectable),
+      // so wl next returns null with a clear reason (no orphan promotion).
+      expect(result.workItem).toBeNull();
+      expect(result.reason).toContain('No work items available');
     });
 
     it('should suppress child blockers in batch mode when parent is valid candidate', () => {

@@ -46,12 +46,16 @@ import { vi, describe, it, expect, beforeEach, type Mock } from 'vitest';
 // ── Module-level mocks ──────────────────────────────────────────────────
 // Mock child_process.execFile so we can simulate CLI error output without
 // requiring a real .worklog directory or installed worklog CLI.
-
-const mockExecFile = vi.hoisted(() => vi.fn());
-
-vi.mock('node:child_process', () => ({
-  execFile: mockExecFile,
-}));
+//
+// The mock instance lives in the shared globalThis store installed by
+// tests/setup-tests.ts (which registers both `child_process` and
+// `node:child_process` to the same instances). tools.ts resolves execFile
+// lazily (promisify inside runWl), so the mock is observable regardless of
+// module-load order.
+const mockExecFile = vi.hoisted(() => {
+  const store = (globalThis as any).__sharedChildProcessMocks;
+  return store?.mockExecFile ?? vi.fn();
+});
 
 // ── Imports (resolved after mock is installed) ──────────────────────────
 
@@ -96,6 +100,12 @@ function mockExecSuccess(stdout: string): void {
 describe('runWl initialization error detection (unit)', () => {
   beforeEach(() => {
     mockExecFile.mockReset();
+    // Restore real execFile default so other files sharing the store
+    // (e.g. tests/cli/mock-timeout.test.ts) keep real CLI behavior.
+    const realExecFile = (globalThis as any).__sharedChildProcessMocks?.realExecFile;
+    if (realExecFile) {
+      mockExecFile.mockImplementation(realExecFile);
+    }
   });
 
   describe('detecting known not-initialized pattern', () => {
@@ -299,12 +309,39 @@ describe('runWl initialization error detection (unit)', () => {
         /Unable to execute wl\/worklog CLI/,
       );
     });
+
+    it('passes --root-only to mandatory-subset wl list queries (WL-0MS964SIA0057ABR)', async () => {
+      // Success responses for: next, critical list, completed/in_review list.
+      mockExecSuccess(JSON.stringify({ results: [] }));
+      mockExecSuccess(JSON.stringify({ workItems: [] }));
+      mockExecSuccess(JSON.stringify({ workItems: [] }));
+
+      const listItems = createDefaultListWorkItems();
+      const items = await listItems();
+      expect(items).toEqual([]);
+
+      // Every wl list invocation for the mandatory subsets must carry
+      // --root-only so child items never appear in the top-level list.
+      const listCalls = mockExecFile.mock.calls
+        .map((c: any) => c[1])
+        .filter((args: string[]) => args[0] === 'list');
+      expect(listCalls.length).toBeGreaterThanOrEqual(2);
+      for (const args of listCalls) {
+        expect(args).toContain('--root-only');
+      }
+    });
   });
 });
 
 describe('stdout / JSON mode detection (stdout fallback)', () => {
   beforeEach(() => {
     mockExecFile.mockReset();
+    // Restore real execFile default so other files sharing the store
+    // (e.g. tests/cli/mock-timeout.test.ts) keep real CLI behavior.
+    const realExecFile = (globalThis as any).__sharedChildProcessMocks?.realExecFile;
+    if (realExecFile) {
+      mockExecFile.mockImplementation(realExecFile);
+    }
   });
 
   it('detects init error when it arrives via stdout (JSON mode)', async () => {
@@ -370,6 +407,12 @@ describe('stdout / JSON mode detection (stdout fallback)', () => {
 describe('runBrowseFlow notification path (integration)', () => {
   beforeEach(() => {
     mockExecFile.mockReset();
+    // Restore real execFile default so other files sharing the store
+    // (e.g. tests/cli/mock-timeout.test.ts) keep real CLI behavior.
+    const realExecFile = (globalThis as any).__sharedChildProcessMocks?.realExecFile;
+    if (realExecFile) {
+      mockExecFile.mockImplementation(realExecFile);
+    }
   });
 
   it('shows the friendly notification when runWl encounters the initialization error', async () => {
@@ -529,6 +572,11 @@ describe('runBrowseFlow notification path (integration)', () => {
       results: [{ workItem: { id: 'WL-001', title: 'Test', status: 'open' } }],
     });
     mockExecSuccess(validOutput);
+
+    // Third/fourth mocks: listWorkItems also fetches the mandatory subsets
+    // (wl list --priority critical, wl list --status completed --stage in_review)
+    mockExecSuccess(JSON.stringify({ workItems: [] }));
+    mockExecSuccess(JSON.stringify({ workItems: [] }));
 
     const notify = vi.fn();
     const registerCommand = vi.fn();

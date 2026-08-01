@@ -47,6 +47,8 @@ export interface ListOptions {
   status?: string;
   priority?: WorkItemPriority;
   parent?: string;
+  /** Only root-level items (items without a parent) */
+  rootOnly?: boolean;
   tags?: string;
   assignee?: string;
   stage?: string;

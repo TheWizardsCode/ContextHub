@@ -453,18 +453,32 @@ WL_NO_ICONS=1 wl list --format full
 
 ### Output Examples
 
-**CLI (TTY) with icons:**
+**CLI (TTY) with icons (normal format):**
 ```
-ID:    TEST-1
-Title: Set up CI pipeline
-Status: 🟢 Open [OPEN] · Stage: In Progress | Priority: 🚨 critical [CRIT]
+| Field     | Value |
+| --------- | ----- |
+| ID        | TEST-1 |
+| Title     | Set up CI pipeline |
+| Status    | 🟢 Open [OPEN] · Stage: In Progress \| Priority: 🚨 critical [CRIT] |
+| SortIndex | 100 |
+| Risk      | — |
+| Effort    | — |
+
+Description: A test item for audit formatting
 ```
 
 **CLI with icons disabled:**
 ```
-ID:    TEST-1
-Title: Set up CI pipeline
-Status: [OPEN] · Stage: In Progress | Priority: critical
+| Field     | Value |
+| --------- | ----- |
+| ID        | TEST-1 |
+| Title     | Set up CI pipeline |
+| Status    | [OPEN] · Stage: In Progress \| Priority: critical |
+| SortIndex | 100 |
+| Risk      | — |
+| Effort    | — |
+
+Description: A test item for audit formatting
 ```
 
 **TUI list:**

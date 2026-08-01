@@ -42,6 +42,7 @@ import auditResultCommand from './commands/audit-result.js';
 import completionCommand from './commands/completion.js';
 import cleanupWorktreeCommand from './commands/cleanup-worktree.js';
 import { detectWorktreeFromCwd, registerCurrentProcess } from './process-lifecycle.js';
+import { setWorklogDirOverride } from './worklog-paths.js';
 
 // Watch flag parsing - supports -w, -wN, --watch, --watch=N
 function parseWatchFlag(argv: string[]) {
@@ -192,11 +193,21 @@ program
   .option('--json', 'Output in JSON format (machine-readable)')
   .option('--verbose', 'Show verbose output including debug messages')
   .option('-F, --format <format>', 'Human display format (choices: full|summary|concise|normal|raw|markdown|plain|text|auto)')
-  .option('-w, --watch [seconds]', 'Rerun the command every N seconds (default: 5)');
+  .option('-w, --watch [seconds]', 'Rerun the command every N seconds (default: 5)')
+  .option('--worklog-dir <path>', 'Explicit path to .worklog directory (bypasses automatic directory resolution)');
 
 // Validate CLI-provided format early before any command action runs
 program.hook('preAction', () => {
-  const cliFormat = program.opts().format;
+  const opts = program.opts();
+
+  // Apply --worklog-dir override if provided
+  if (opts.worklogDir) {
+    setWorklogDirOverride(opts.worklogDir);
+  } else {
+    setWorklogDirOverride(undefined);
+  }
+
+  const cliFormat = opts.format;
   if (cliFormat && !isValidFormat(cliFormat)) {
     console.error(`Invalid --format value: ${cliFormat}`);
     console.error(`Valid formats: ${Array.from(ALLOWED_FORMATS).join(', ')}`);
