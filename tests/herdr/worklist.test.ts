@@ -795,3 +795,43 @@ describe('formatItemLine with icons and colours', () => {
   });
 });
 
+// ── Toast notifications replace bottom-line status (WL-0MSACL482002RNYH) ──
+
+// The renderer must never emit more than `rows` lines: status feedback is
+// surfaced via Herdr toasts (showToast), never appended as a bottom line.
+
+describe('renderer line-count invariant (toast notifications)', () => {
+  it('renders at most rows lines for a full list', () => {
+    const manyItems = Array.from({ length: 30 }, (_, i) =>
+      makeItem({ id: `T${i}`, title: `Item ${i}` }),
+    );
+    const renderer = createListRenderer();
+    const output = renderer(manyItems, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null);
+    const lines = output.split('\n');
+    // Notification feedback is surfaced via toasts — never appended as a
+    // bottom line. (Group-separator budget is tracked in WL-0MSAAON63003N6LO.)
+    expect(lines.length).toBeLessThanOrEqual(DEFAULT_TERM_SIZE.rows);
+  });
+
+  it('renders at most rows lines for a short list', () => {
+    const renderer = createListRenderer();
+    const output = renderer([makeItem({ id: 'A', title: 'Only' })], 0, 0, DEFAULT_TERM_SIZE, null, 'list', null);
+    const lines = output.split('\n');
+    expect(lines.length).toBeLessThanOrEqual(DEFAULT_TERM_SIZE.rows);
+  });
+
+  it('renders at most rows lines with no items', () => {
+    const renderer = createListRenderer();
+    const output = renderer([], 0, 0, DEFAULT_TERM_SIZE, null, 'list', null);
+    const lines = output.split('\n');
+    expect(lines.length).toBeLessThanOrEqual(DEFAULT_TERM_SIZE.rows);
+  });
+
+  it('renders at most rows lines in filter mode', () => {
+    const renderer = createListRenderer();
+    const output = renderer([], 0, 0, DEFAULT_TERM_SIZE, null, 'filter', null);
+    const lines = output.split('\n');
+    expect(lines.length).toBeLessThanOrEqual(DEFAULT_TERM_SIZE.rows);
+  });
+});
+

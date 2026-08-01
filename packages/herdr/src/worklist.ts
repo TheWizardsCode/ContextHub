@@ -25,6 +25,7 @@ import {
   type IconOptions,
 } from './icons.js';
 import { runSync, createSyncTimer, clampSyncInterval } from './auto-sync.js';
+import { showToast } from './notify.js';
 import {
   hasUnknownIdentifiers,
   getUnknownIdentifiers,
@@ -1589,8 +1590,6 @@ export async function runWorklistTui(
   let formState: FormState | null = null;
   /** Saved mode before entering form overlay (to restore on cancel) */
   let preFormMode: ViewMode = 'list';
-  let refreshNotification = '';
-  let syncNotification = '';
 
   let totalActionableCount: number | undefined;
 
@@ -1653,12 +1652,12 @@ export async function runWorklistTui(
       if (showNotification && newItems.length !== oldLen) {
         const diff = newItems.length - oldLen;
         const msg = diff > 0 ? `+${diff} new` : `${diff} removed`;
-        refreshNotification = ` ${ANSI.dim}[Refreshed: ${msg}]${ANSI.reset}`;
+        showToast('Refreshed', { body: msg });
       } else if (showNotification) {
-        refreshNotification = ` ${ANSI.dim}[Refreshed]${ANSI.reset}`;
+        showToast('Refreshed');
       }
     } catch {
-      refreshNotification = ` ${ANSI.dim}[Refresh failed]${ANSI.reset}`;
+      showToast('Refresh failed');
     }
     // Also fetch the total actionable count on refresh
     fetchActionableCount().then((count) => {
@@ -1666,17 +1665,12 @@ export async function runWorklistTui(
     }).catch(() => {
       // ignore
     });
-    // Clear notification after brief display
-    setTimeout(() => {
-      refreshNotification = '';
-      render();
-    }, 3000);
     render();
   };
 
-  // Run `wl sync` and surface the outcome in the notification area so sync
-  // status is visible (success and graceful failure). Targets the resolved
-  // worklog directory so sync operates on the tab project.
+  // Run `wl sync` and surface the outcome as a toast so sync status is
+  // visible (success and graceful failure). Targets the resolved worklog
+  // directory so sync operates on the tab project.
   //
   // With ifIdle=true (auto-sync timer path) runSync applies its single-flight
   // guard and passes --if-idle to the CLI, so overlapping syncs are skipped
@@ -1686,23 +1680,14 @@ export async function runWorklistTui(
     const outcome = await runSync(getWorklogDir(), { ifIdle });
     if (outcome.skipped) {
       // Another sync is already in-flight / holding the lock — do not pile on.
-      // Surface a subtle "in progress" note instead of an error.
-      syncNotification = ` ${ANSI.dim}[Sync in progress]${ANSI.reset}`;
-      render();
-      setTimeout(() => {
-        syncNotification = '';
-        render();
-      }, 3000);
+      showToast('Sync in progress');
       return;
     }
-    syncNotification = outcome.success
-      ? ` ${ANSI.dim}[Synced]${ANSI.reset}`
-      : ` ${ANSI.yellow}[Sync failed: ${outcome.error ?? 'unknown error'}]${ANSI.reset}`;
-    render();
-    setTimeout(() => {
-      syncNotification = '';
-      render();
-    }, 3000);
+    if (outcome.success) {
+      showToast('Synced');
+    } else {
+      showToast('Sync failed', { body: outcome.error ?? 'unknown error' });
+    }
   };
 
   const onData = async (chunk: Buffer): Promise<void> => {
@@ -1718,13 +1703,11 @@ export async function runWorklistTui(
         if (opts.onCommand) {
           opts.onCommand(resolved);
         }
-        refreshNotification = `Sent: ${resolved.length > 60 ? resolved.substring(0, 57) + '...' : resolved}`;
-        setTimeout(() => { refreshNotification = ''; render(); }, 3000);
+        showToast('Sent', { body: resolved.length > 60 ? resolved.substring(0, 57) + '...' : resolved });
         render();
       } else if (result === 'cancelled') {
         formState = null;
         state.mode = preFormMode;
-        refreshNotification = '';
         render();
       } else {
         render();
@@ -1803,16 +1786,15 @@ export async function runWorklistTui(
           try {
             const result = executeResolvedCommand(command, state, opts.onCommand);
             if (result === 'noop') {
-              refreshNotification = `Skipped: ${command.length > 60 ? command.substring(0, 57) + '...' : command} (no item)`;
+              showToast('Skipped', { body: `${command.length > 60 ? command.substring(0, 57) + '...' : command} (no item)` });
             } else {
-              // Show a brief flash notification, then continue
-              refreshNotification = `Sent: ${command.length > 60 ? command.substring(0, 57) + '...' : command}`;
+              // Surface a brief toast, then continue
+              showToast('Sent', { body: command.length > 60 ? command.substring(0, 57) + '...' : command });
             }
           } catch (e) {
-            refreshNotification = `Error: ${(e as Error).message}`;
+            showToast('Error', { body: (e as Error).message });
             process.stderr.write(`[herdr] Command error: ${(e as Error).message}\n`);
           }
-          setTimeout(() => { refreshNotification = ''; render(); }, 3000);
           render();
           return;
         }
@@ -1886,12 +1868,11 @@ export async function runWorklistTui(
         // Single-key shortcut — execute immediately and keep TUI alive
         try {
           executeResolvedCommand(singleCmd, state, opts.onCommand);
-          // Show a brief flash notification, then continue
-          refreshNotification = `Sent: ${singleCmd.length > 60 ? singleCmd.substring(0, 57) + '...' : singleCmd}`;
-          setTimeout(() => { refreshNotification = ''; render(); }, 3000);
+          // Surface a brief toast, then continue
+          showToast('Sent', { body: singleCmd.length > 60 ? singleCmd.substring(0, 57) + '...' : singleCmd });
           render();
         } catch (e) {
-          refreshNotification = `Error: ${(e as Error).message}`;
+          showToast('Error', { body: (e as Error).message });
           process.stderr.write(`[herdr] Shortcut error: ${(e as Error).message}\n`);
           render();
         }
@@ -1948,9 +1929,6 @@ export async function runWorklistTui(
     // Re-render
     render();
   };
-
-  // Reset refresh notification on any keypress
-  const originalOnData = onData;
 
   let resolve: (value: WorkItem | undefined) => void;
   const promise = new Promise<WorkItem | undefined>((res) => {
@@ -2036,14 +2014,9 @@ export async function runWorklistTui(
       state.navigationStack.depth,
     );
 
-    // Append notifications if present. The renderer guarantees output is at
-    // most `rows - 1` lines, so the notification line always fits within the
-    // pane height; trim defensively so a future renderer regression cannot
-    // overflow the pane again (WL-0MSAAON63003N6LO).
-    const notificationLine = [refreshNotification, syncNotification].filter(Boolean).join('');
-    const rendered = notificationLine
-      ? output.split('\n').slice(0, Math.max(1, termSize.rows - 1)).join('\n') + '\n' + notificationLine
-      : output;
+    // Notifications are surfaced via Herdr toasts (showToast), never as a
+    // bottom line — the pane output must stay within the terminal budget.
+    const rendered = output;
 
     // Clear from cursor to end of screen to remove leftover content
     // from previous renders of different heights
