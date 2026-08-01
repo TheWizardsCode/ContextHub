@@ -48,11 +48,11 @@ working directory the agent was in when the skill was loaded.
 
 ### AGENTS.md References
 
-The global AGENTS.md at `~/.pi/agent/AGENTS.md` uses `skills/<name>/...`
-prefixes since it lives one directory above the `skills/` directory:
+The global AGENTS.md at `~/.pi/agent/AGENTS.md` uses absolute
+`/home/rgardler/.pi/agent/skills/<name>/SKILL.md` paths in markdown links:
 
 ```
-resources/skills/ship/SKILL.md           # ~/.pi/agent/AGENTS.md → ~/.pi/agent/skills/ship/SKILL.md  
+[ship skill](/home/rgardler/.pi/agent/skills/ship/SKILL.md)   # from ~/.pi/agent/AGENTS.md
 ```
 
 ### Backward Compatibility
