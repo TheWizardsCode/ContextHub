@@ -15,6 +15,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
 - **Quit** — Press `q` to exit
+- **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
 
 ## Requirements
 
@@ -189,6 +190,7 @@ packages/herdr/
 │   ├── shortcut-config.ts  # Chord shortcut registry and config loader
 │   ├── shortcuts.json      # Shortcut/chord definitions
 │   ├── icons.ts            # Icon and colour helpers
+│   ├── code-freeze.ts      # Code Freeze marker detection (fail-open)
 │   ├── settings.ts         # User settings management
 │   └── worklist.ts         # List state, rendering, keyboard handling, command output
 ├── scripts/
@@ -214,6 +216,49 @@ packages/herdr/
 - **Correct project directory for new panes** — Panes created by `send-to-pi.sh`, `open-pi-agent.sh`, and `run-in-pane.sh` are started in the correct project root. Herdr's `follow` CWD policy would otherwise inherit the source pane's CWD (the plugin directory), so each script resolves a target CWD (`--cwd` arg > `HERDR_RESOLVED_CWD` > `$PWD`) and passes it to `herdr pane split --cwd`. The entry point passes the resolved worklog root (`wlRoot`) so skills, `wl` commands, and relative paths operate on the user's project rather than the plugin's installation directory.
 - **`<id>` placeholder resolution** — Before output, any `<id>` placeholders in the resolved command are replaced with the currently selected work item's ID. If no item is selected and the command requires `<id>`, the command is silently dropped (graceful no-op).
 - **Chord shortcut system** — Multi-key chord sequences are defined in `shortcuts.json` and resolved via `ShortcutRegistry`. Chords can be filtered by view (list/detail) and stage.
+
+## Code Freeze
+
+While a ship-it (dev → main release) process is running, the project is put into **Code Freeze**: new implementation work must not land on `dev` until the release completes. This plugin detects the freeze and enforces it client-side in the worklist.
+
+### Marker contract (cross-repo)
+
+The freeze state is communicated via a marker file written by the ship release process (owned by the SorraAgents ship skill — see `SA-0MSBU4OBU005WJNB`) and read by this plugin:
+
+```
+<worklog-dir>/code-freeze.json
+```
+
+Where `<worklog-dir>` is the project's `.worklog/` directory (the same directory the plugin passes to `wl --worklog-dir`). The file is JSON:
+
+```json
+{
+  "active": true,
+  "reason": "ship release in progress",
+  "startedAt": "2026-08-02T00:00:00Z",
+  "pid": 12345
+}
+```
+
+Semantics:
+
+| Marker state | Freeze status |
+|---|---|
+| File present with `active: true` | **ON** — implementation blocked |
+| File absent | OFF |
+| `active: false` (or missing) | OFF |
+| Corrupt / unreadable file | OFF (fail-open) |
+
+Fail-open is deliberate: a broken or missing marker must never block browsing the worklist.
+
+### Plugin behaviour while frozen
+
+- **Banner** — The selection list renders a prominent red `⛔ CODE FREEZE` banner above the header, warning that implementation is blocked. The banner respects the `rows - 1` pane-height budget (see WL-0MSAAON63003N6LO).
+- **Implement commands blocked** — Any implement command (`/skill:implement`, `/skill:implement-single`, `/skill:implementall`, via single-key `i`, chord, or typed dispatch) is **not** routed: no pi agent pane is spawned, no work item is claimed, and no `<id>` substitution happens. The marker is re-read at dispatch time, so a freeze that starts between refreshes is still enforced.
+- **Notice dialog** — When an implement command is attempted during a freeze, a modal dialog explains that implementation is blocked until the release finishes. Dismiss with `Esc`, `Enter`, or `q` to return to the list.
+- **Other commands unaffected** — Audit, intake, plan, review, priority, search, sync, and navigation continue to work normally during a freeze.
+
+This plugin only **reads** the marker; writing/clearing it is the ship release process's job (tracked in `SA-0MSBU4OBU005WJNB`).
 
 ## Development
 
