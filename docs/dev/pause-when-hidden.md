@@ -4,6 +4,10 @@ This document describes the pause-when-hidden behavior shipped in
 WL-0MSB1N0HB0007N6N (Pi extension polls `wl list` / `wl next` even when the
 selection list is not visible) and how to verify it.
 
+> **Related:** see [wl-process-spawning-investigation.md](./wl-process-spawning-investigation.md)
+> for the full root-cause analysis, spawn trace, remediation plan, and
+> health-check proposal (WL-0MSB19J56006E87J).
+
 ## Background
 
 Pi agent sessions and herdr worklist panes spawn `wl` subprocesses on a
