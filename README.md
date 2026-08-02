@@ -55,7 +55,7 @@ wl show <parent-id> -c
 wl sync
 
 # Mirror to GitHub Issues (optional)
-wl github push
+wl github push          # add --verbose for a per-item synced list + timing breakdown
 wl github import
 ```
 
