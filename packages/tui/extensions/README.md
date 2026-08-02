@@ -77,6 +77,23 @@ the browse dialog.
   configuration UI. It only applies to the browse list overlay, not
   to the detail view.
 
+**Idle gating (pause-when-idle):** The auto-refresh interval (and its
+background `wl sync --if-idle` trigger) pauses when the selection list has
+had **no keypresses for 30 seconds** (`IDLE_PAUSE_MS` in
+`Worklog/lib/browse.ts`). This stops idle or hidden selection lists from
+spawning `wl` subprocesses — each 5s tick previously spawned 4–5 `wl`
+processes (~60/min per mounted widget), which with many concurrent pi
+sessions caused severe memory and CPU pressure (WL-0MSB1N0HB0007N6N).
+
+- **Mount counts as interaction** — a freshly opened selection list starts
+  in the active state and refreshes normally.
+- **Resume on keypress** — the first keypress after an idle pause triggers
+  an immediate refresh and resumes the normal 5s cadence.
+- **No settings toggle** — the idle threshold is a named module constant
+  (30s), always on, fail-open (manual actions and navigation are never
+  gated).
+- While the user actively browses, the cadence is unchanged (5s refresh).
+
 ### Selection List Behaviour
 
 The default (unfiltered) selection list always shows **all** critical-priority

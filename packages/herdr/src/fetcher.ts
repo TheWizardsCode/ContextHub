@@ -83,6 +83,15 @@ export function setExecFileAsync(mock: typeof execFileAsync): void {
 }
 
 /**
+ * Return the current execFileAsync implementation. Lets other modules
+ * (e.g. visibility.ts) share the same injectable exec seam used by tests,
+ * so mocks installed via setExecFileAsync() apply to those modules too.
+ */
+export function getExecFileAsync(): typeof execFileAsync {
+  return execFileAsync;
+}
+
+/**
  * Reset execFileAsync to the real implementation.
  */
 export function resetExecFileAsync(): void {

@@ -58,6 +58,14 @@ const { priorityIcon, statusIcon, stageIcon, auditIcon, epicIcon, iconsEnabled, 
 // ── Auto-sync state ────────────────────────────────────────────────
 
 /**
+ * Idle threshold (ms) for the browse widget's auto-refresh/auto-sync.
+ * When the widget has had no keypresses for this long, the 5s refresh
+ * interval pauses (zero `wl` subprocess spawns) until the next keypress.
+ * Named module constant (no settings toggle — always-on, fail-open).
+ */
+export const IDLE_PAUSE_MS = 30_000;
+
+/**
  * In-flight guard flag for TUI background auto-sync.
  * Prevents concurrent background syncs when multiple auto-refresh
  * intervals fire before a previous sync completes.
@@ -563,10 +571,18 @@ export async function defaultChooseWorkItem(
     // rebuilding the widget (the render closure reads this each frame).
     let currentTotalCount: number | undefined = totalCount;
 
+    // Idle-gating: mount counts as interaction (freshly opened widget starts
+    // active), updated on every keypress. Auto-refresh/auto-sync pause after
+    // IDLE_PAUSE_MS without interaction (WL-0MSB1N0HB0007N6N).
+    let lastInteractionAt = Date.now();
+
     const invalidateCache = () => {
       cachedWidth = undefined;
       cachedLines = undefined;
     };
+
+    // True when the widget has been idle for longer than IDLE_PAUSE_MS.
+    const isIdle = (): boolean => Date.now() - lastInteractionAt > IDLE_PAUSE_MS;
 
     // ── Auto-refresh interval ──────────────────────────────────────
     let refreshInterval: ReturnType<typeof setInterval> | undefined;
@@ -574,6 +590,12 @@ export async function defaultChooseWorkItem(
     if (reFetchItems) {
       refreshInterval = setInterval(async () => {
         if (pendingChord.length > 0) return;
+
+        // Idle-gating (WL-0MSB1N0HB0007N6N): when the selection list has had
+        // no keypresses for IDLE_PAUSE_MS, skip the fetch AND the auto-sync
+        // trigger so idle/hidden sessions spawn zero wl subprocesses. A
+        // keypress resumes the cadence (see handleInput).
+        if (isIdle()) return;
 
         // Trigger background auto-sync if interval has elapsed
         _triggerAutoSync();
@@ -822,6 +844,33 @@ export async function defaultChooseWorkItem(
       },
       handleInput: (data: string) => {
         const lookupKey = data.length === 1 ? data : undefined;
+
+        // Idle-gating (WL-0MSB1N0HB0007N6N): every keypress counts as
+        // interaction. The FIRST keypress after an idle pause triggers an
+        // immediate refresh and resumes the normal cadence.
+        const wasIdle = isIdle();
+        lastInteractionAt = Date.now();
+        if (wasIdle && reFetchItems) {
+          // Resume: refresh now, then the interval resumes its normal cadence.
+          void (async () => {
+            try {
+              const newItems = await reFetchItems();
+              if (newItems.length === 0 && items.length === 0) return;
+              items.length = 0;
+              items.push(...newItems);
+              selectedIndex = 0;
+              const item = items[selectedIndex];
+              if (item) {
+                lastSelectionId = item.id;
+                onSelectionChange(item);
+              }
+              invalidateCache();
+              tui.requestRender();
+            } catch {
+              // Silently ignore refresh errors
+            }
+          })();
+        }
 
         // ── Pending chord state ────────────────────────────────────
         if (pendingChord.length > 0 && lookupKey) {

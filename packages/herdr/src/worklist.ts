@@ -11,6 +11,7 @@
  */
 
 import { fetchChildrenForItem, fetchActionableCount, getWorklogDir, type WorkItem } from './fetcher.js';
+import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
   statusIcon,
@@ -1221,6 +1222,7 @@ export function createListRenderer(): (
   expandedItems?: Set<string>,
   chordHelpHints?: string,
   navStackDepth?: number,
+  panePaused?: boolean,
 ) => string {
   return (
     items: WorkItem[],
@@ -1237,6 +1239,7 @@ export function createListRenderer(): (
     expandedItems?: Set<string>,
     chordHelpHints?: string,
     navStackDepth?: number,
+    panePaused?: boolean,
   ): string => {
     const { rows, cols } = termSize;
     const output: string[] = [];
@@ -1271,6 +1274,9 @@ export function createListRenderer(): (
     }
     if (autoRefresh) {
       header += ` ${ANSI.dim}[auto-refresh on]${ANSI.reset}`;
+    }
+    if (panePaused) {
+      header += ` ${ANSI.fg(220)}[paused — hidden]${ANSI.reset}`;
     }
     output.push(header);
     output.push('');
@@ -1592,6 +1598,17 @@ export async function runWorklistTui(
   let preFormMode: ViewMode = 'list';
 
   let totalActionableCount: number | undefined;
+
+  // Pane-visibility gating (pause-when-hidden). When the pane's tab is not
+  // focused, auto-refresh/auto-sync timer ticks are skipped so hidden panes
+  // stop spawning wl processes. Fail-open: when visibility can't be
+  // determined (no HERDR_PANE_ID / CLI error) the pane is treated as visible
+  // and polling proceeds as today. PollGate memoizes the pane-get exec within
+  // a TTL so refresh+sync ticks in one cycle share a single `herdr pane get`.
+  const paneGate = new PollGate(isPaneVisible, DEFAULT_POLL_GATE_TTL_MS);
+  // Whether the pane is currently hidden (drives the header indicator).
+  // Updated by the gate check on each timer tick; fail-open defaults to false.
+  let panePaused = false;
 
   // Check if we're in raw mode (stdin is a TTY)
   const isInteractive = process.stdin.isTTY;
@@ -2012,6 +2029,7 @@ export async function runWorklistTui(
       state.expandedItems,
       opts.getShowHelpText() ? dynamicHints : undefined,
       state.navigationStack.depth,
+      panePaused,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a
@@ -2044,9 +2062,16 @@ export async function runWorklistTui(
   // does NOT run `wl sync`; the dedicated SyncTimer below is the single sync
   // source. Running sync from both timers caused a double-spawn per pane that
   // amplified the wl sync lock storm (WL-0MSAB7ZUC004SK7E).
+  // Visibility-gated: when the pane is hidden (not focused), ticks are
+  // skipped so hidden panes spawn zero wl processes (pause-when-hidden).
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
   if (opts.autoRefresh) {
-    refreshTimer = setInterval(() => {
+    refreshTimer = setInterval(async () => {
+      if (!(await paneGate.visible())) {
+        panePaused = true;
+        return;
+      }
+      panePaused = false;
       doRefresh(false);
     }, opts.refreshIntervalMs);
   }
@@ -2054,11 +2079,18 @@ export async function runWorklistTui(
   // Auto-sync timer (background wl sync) — the only auto-sync source. Uses the
   // single-flight + lock-aware (--if-idle) guard so concurrent panes/TUI
   // instances skip instead of piling up under lock contention.
+  // Visibility-gated like the refresh timer: hidden panes skip the sync
+  // (and its follow-up refresh) entirely.
   let syncTimer: ReturnType<typeof createSyncTimer> | undefined;
   if (opts.autoSync && opts.syncIntervalMs !== 0) {
     syncTimer = createSyncTimer({
       intervalMs: opts.syncIntervalMs,
-      onSync: () => {
+      onSync: async () => {
+        if (!(await paneGate.visible())) {
+          panePaused = true;
+          return;
+        }
+        panePaused = false;
         doSync(true); // ifIdle: skip when another sync is in-flight / lock held
         doRefresh(false);
       },

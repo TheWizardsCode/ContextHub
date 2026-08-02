@@ -122,6 +122,32 @@ Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings in
 - `showHelpText` — Show the shortcut hint line at the bottom of the list (default: `true`); changes apply on the next render without a plugin restart
 - `showIcons` — Toggle icons in the list (default: `true`)
 
+### Pause-when-hidden (pane visibility gating)
+
+When the worklist pane's tab is **hidden (not focused)**, the auto-refresh and
+auto-sync timers pause so hidden panes stop spawning `wl` processes (~4–5 per
+30s tick per pane). With many open panes this previously caused heavy `wl`
+process churn and memory pressure (WL-0MSB1N0HB0007N6N).
+
+- **Visibility signal** — Herdr sets `HERDR_PANE_ID` for panes it spawns; a
+  hidden (non-focused) tab reports `result.pane.focused === false` from
+  `herdr pane get <id>`. The plugin checks this via `visibility.ts`.
+- **Fail-open** — when visibility cannot be determined (no `HERDR_PANE_ID`
+  env, herdr CLI missing/erroring, unparseable output) the pane is treated
+  as visible and polling proceeds exactly as before. Standalone runs (outside
+  Herdr) are unaffected.
+- **Cadence unchanged when visible** — while the pane is focused (or
+  fail-open), auto-refresh/auto-sync keep their existing intervals (30s /
+  60s defaults).
+- **Header indicator** — while the pane is hidden the list header shows
+  `[paused — hidden]` so operators can tell gating is active.
+- **Never gated** — manual actions (navigation, `S` manual sync, shortcut
+  chords, the initial data load) work regardless of pane visibility.
+- **Shared visibility check** — the `PollGate` TTL memoizer (~2s) makes the
+  refresh and sync ticks in one cycle share a single `herdr pane get` call
+  (≤1 visibility exec per cycle).
+- **No settings toggle** — pause-when-hidden is always on.
+
 ### Selection List Behaviour
 
 The default (unfiltered) worklist always shows **all** critical-priority
