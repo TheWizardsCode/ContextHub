@@ -507,6 +507,20 @@ describe('hook-upgrade module', () => {
       expect(content!).toContain('--git-branch refs/worklog/data');
     });
 
+    it('canonical pre-push contains both worktree guards', () => {
+      const content = generateCanonicalHookContent('pre-push');
+      expect(content).not.toBeNull();
+      expect(content!).toContain('git-common-dir');
+      expect(content!).toContain('tmp-worktree');
+    });
+
+    it('canonical pre-push matches committed .githooks/pre-push byte-for-byte (modulo trailing newline)', () => {
+      const canonical = generateCanonicalHookContent('pre-push')!;
+      const committed = fs.readFileSync(path.join(process.cwd(), '.githooks', 'pre-push'), 'utf-8');
+      const stripTrailingNewline = (s: string) => (s.endsWith('\n') ? s.slice(0, -1) : s);
+      expect(stripTrailingNewline(canonical)).toBe(stripTrailingNewline(committed));
+    });
+
     it('returns content for post-checkout hook', () => {
       const content = generateCanonicalHookContent('post-checkout');
       expect(content).not.toBeNull();
