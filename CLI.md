@@ -713,6 +713,14 @@ Team commands support sharing and synchronization of the canonical worklog with 
 
 Sync local worklog data with the canonical JSONL ref in git (pull, merge, push).
 
+Concurrent syncs are serialized: `wl sync` holds a process-level file lock on
+`.worklog/worklog-data.jsonl.lock` (O_EXCL mutex with stale-lock cleanup) for
+the duration of the pull/merge/push. At most one sync runs per worklog at a
+time; a second sync waits up to 30s for the lock (then reports a clear error
+and exits non-zero) unless `--if-idle` is given, in which case it skips
+(exit 0, `skipped: true`). See also `wl unlock` for manual stale-lock
+removal.
+
 Important options:
 
 - `-f, --file <filepath>` — Data file path (optional; default: configured data path, commonly `.worklog/worklog-data.jsonl`).
