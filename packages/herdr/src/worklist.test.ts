@@ -10,6 +10,8 @@ import {
   getTermSize,
   executeResolvedCommand,
   dispatchChordCommand,
+  isImplementCommand,
+  formatCodeFreezeDialog,
   ANSI,
   createListRenderer,
 } from './worklist.js';
@@ -427,5 +429,171 @@ describe('Chord-complete error notification handling', () => {
     const state = new WorkItemListState([], TERM_80x24);
     const result = executeResolvedCommand('wl update <id> --priority high', state);
     expect(result).toBe('noop');
+  });
+});
+
+// ── Code Freeze: implement-command blocking ──────────────────────────────
+// When the project is in Code Freeze (ship release in progress) the plugin
+// must NOT route /skill:implement commands to the pi agent pane. All other
+// commands keep working. See WL-0MSBU4KMA004PKSR.
+
+describe('executeResolvedCommand — code freeze blocking', () => {
+  const makeFrozen = () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    return state;
+  };
+
+  it('blocks /skill:implement when freeze is active (returns blocked, no onCommand)', () => {
+    const state = makeFrozen();
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/skill:implement <id>', state, onCommand, true);
+    expect(result).toBe('blocked');
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it('blocks /skill:implement-single when freeze is active', () => {
+    const state = makeFrozen();
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/skill:implement-single <id>', state, onCommand, true);
+    expect(result).toBe('blocked');
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it('does not resolve <id> or mutate state when blocked', () => {
+    const state = makeFrozen();
+    const onCommand = vi.fn();
+    executeResolvedCommand('/skill:implement <id>', state, onCommand, true);
+    expect(onCommand).not.toHaveBeenCalled();
+    expect(state.mode).toBe('list'); // no selection/detail side effects
+  });
+
+  it('routes /skill:implement normally when freeze is inactive (default)', () => {
+    const state = makeFrozen();
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/skill:implement <id>', state, onCommand);
+    expect(result).toBe('dispatched');
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123');
+  });
+
+  it('routes /skill:implement normally when freeze is explicitly false', () => {
+    const state = makeFrozen();
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/skill:implement <id>', state, onCommand, false);
+    expect(result).toBe('dispatched');
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123');
+  });
+
+  it('does not block non-implement commands during a freeze', () => {
+    const state = makeFrozen();
+    const onCommand = vi.fn();
+    const auditResult = executeResolvedCommand('/skill:audit <id>', state, onCommand, true);
+    expect(auditResult).toBe('dispatched');
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123');
+  });
+
+  it('does not block wl / intake / plan commands during a freeze', () => {
+    const state = makeFrozen();
+    const onCommand = vi.fn();
+    expect(executeResolvedCommand('/intake <id>', state, onCommand, true)).toBe('dispatched');
+    expect(executeResolvedCommand('/plan <id>', state, onCommand, true)).toBe('dispatched');
+    expect(executeResolvedCommand('!!wl update <id> --priority high', state, onCommand, true)).toBe('callback');
+    expect(onCommand).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('isImplementCommand', () => {
+  it('matches /skill:implement prefixes', () => {
+    expect(isImplementCommand('/skill:implement <id>')).toBe(true);
+    expect(isImplementCommand('/skill:implement')).toBe(true);
+    expect(isImplementCommand('/skill:implement-single <id>')).toBe(true);
+    expect(isImplementCommand('/skill:implementall <id>')).toBe(true);
+  });
+
+  it('does not match other agent commands', () => {
+    expect(isImplementCommand('/skill:audit <id>')).toBe(false);
+    expect(isImplementCommand('/intake <id>')).toBe(false);
+    expect(isImplementCommand('/plan <id>')).toBe(false);
+    expect(isImplementCommand('!!wl reviewed <id>')).toBe(false);
+  });
+});
+
+// ── Code Freeze: banner rendering ────────────────────────────────────────
+// The banner must appear only when freeze is active and must never break the
+// `rows - 1` line-count invariant (WL-0MSAAON63003N6LO).
+
+describe('createListRenderer — code freeze banner', () => {
+  const renderer = createListRenderer();
+
+  it('renders a CODE FREEZE banner when freeze is active', () => {
+    const output = renderer(
+      [makeItem('A'), makeItem('B')],
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      true, // codeFreezeActive
+    );
+    expect(output).toContain('CODE FREEZE');
+    expect(output).toContain('implement');
+  });
+
+  it('does not render a banner when freeze is inactive (default)', () => {
+    const output = renderer([makeItem('A')], 0, 0, TERM_80x24, null, 'list', null);
+    expect(output).not.toContain('CODE FREEZE');
+  });
+
+  it('keeps the rows - 1 line-count invariant with the banner', () => {
+    const grouped: WorkItem[] = Array.from({ length: 30 }, (_, i) => ({
+      ...makeItem(`G${i}`),
+      group: i,
+      groupLabel: `Group ${i}`,
+    }));
+    const output = renderer(
+      grouped,
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      true, // codeFreezeActive
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+  });
+});
+
+// ── Code Freeze: dialog rendering ────────────────────────────────────────
+
+describe('formatCodeFreezeDialog', () => {
+  it('renders a bordered dialog with the freeze message and dismiss hint', () => {
+    const dialog = formatCodeFreezeDialog(80, 24, 'ship release in progress');
+    expect(dialog).toContain('CODE FREEZE');
+    expect(dialog).toContain('ship release in progress');
+    expect(dialog).toContain('Esc');
+    expect(dialog).toContain('Enter');
+  });
+
+  it('renders a fallback message when no reason is provided', () => {
+    const dialog = formatCodeFreezeDialog(80, 24);
+    expect(dialog).toContain('CODE FREEZE');
   });
 });
