@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
-import { stripCommandPrefix, routeCommand } from './index.js';
+import { stripCommandPrefix, routeCommand, stripAgentPromptPrefix } from './index.js';
 import {
   fetchItemsByStage,
   resetExecFileAsync,
@@ -65,6 +65,12 @@ describe('stripCommandPrefix', () => {
       expect(stripCommandPrefix('/plan <id>')).toBe('/plan <id>');
     });
 
+    it('leaves /prompt: commands unchanged', () => {
+      expect(stripCommandPrefix('/prompt:Review this code')).toBe(
+        '/prompt:Review this code',
+      );
+    });
+
     it('leaves /wl filter commands unchanged', () => {
       expect(stripCommandPrefix('/wl idea')).toBe('/wl idea');
       expect(stripCommandPrefix('/wl review')).toBe('/wl review');
@@ -116,6 +122,8 @@ import { dirname, join } from 'node:path';
 interface ShortcutEntry {
   chord: string[];
   command: string;
+  view: string;
+  label?: string;
 }
 
 function loadShortcutsJson(): ShortcutEntry[] {
@@ -152,6 +160,29 @@ describe('shortcuts.json command routing', () => {
     }
   });
 
+  it('routes /prompt: entries to the agent pane', () => {
+    const promptEntries = entries.filter((e) => e.command.startsWith('/prompt:'));
+    expect(promptEntries.length).toBeGreaterThan(0);
+    for (const e of promptEntries) {
+      expect(routeCommand(e.command)).toBe('agent');
+    }
+  });
+
+  it('uses a free chord for /prompt: entries (no collision with existing chords)', () => {
+    const promptEntries = entries.filter((e) => e.command.startsWith('/prompt:'));
+    expect(promptEntries.length).toBeGreaterThan(0);
+    const usedChords = new Set(
+      entries
+        .filter((e) => !e.command.startsWith('/prompt:'))
+        .map((e) => e.chord.join(' ')),
+    );
+    for (const e of promptEntries) {
+      expect(usedChords.has(e.chord.join(' '))).toBe(false);
+      expect(e.view).toBe('both');
+      expect(e.label).toBeTruthy();
+    }
+  });
+
   it('keeps /wl stage-filter commands unprefixed', () => {
     const filterEntries = entries.filter((e) => e.command.startsWith('/wl '));
     expect(filterEntries.length).toBeGreaterThan(0);
@@ -173,6 +204,12 @@ describe('routeCommand', () => {
       expect(routeCommand('/intake')).toBe('agent');
       expect(routeCommand('/intake <id>')).toBe('agent');
       expect(routeCommand('/plan <id>')).toBe('agent');
+    });
+
+    it('routes /prompt: commands to the agent pane', () => {
+      expect(routeCommand('/prompt:Some prompt text')).toBe('agent');
+      expect(routeCommand('/prompt:Review the current work item')).toBe('agent');
+      expect(routeCommand('/prompt:')).toBe('agent');
     });
   });
 
@@ -206,6 +243,31 @@ describe('routeCommand', () => {
       expect(routeCommand('wl search ')).toBe('stdout');
       expect(routeCommand('/wl idea')).toBe('stdout');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stripAgentPromptPrefix tests
+// ---------------------------------------------------------------------------
+
+describe('stripAgentPromptPrefix', () => {
+  it('strips the /prompt: prefix, leaving the prompt text', () => {
+    expect(stripAgentPromptPrefix('/prompt:Review the current work item')).toBe(
+      'Review the current work item',
+    );
+  });
+
+  it('strips /prompt: leaving an empty string when nothing follows', () => {
+    expect(stripAgentPromptPrefix('/prompt:')).toBe('');
+  });
+
+  it('leaves non-/prompt: commands unchanged', () => {
+    expect(stripAgentPromptPrefix('/skill:implement <id>')).toBe(
+      '/skill:implement <id>',
+    );
+    expect(stripAgentPromptPrefix('/intake <id>')).toBe('/intake <id>');
+    expect(stripAgentPromptPrefix('/plan <id>')).toBe('/plan <id>');
+    expect(stripAgentPromptPrefix('!!wl close <id>')).toBe('!!wl close <id>');
   });
 });
 

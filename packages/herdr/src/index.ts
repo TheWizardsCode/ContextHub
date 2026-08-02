@@ -77,14 +77,35 @@ export function stripCommandPrefix(command: string): string {
 }
 
 /**
+ * Strip the `/prompt:` routing prefix from a free-form prompt command.
+ *
+ * `/prompt:` commands are routed to the agent channel (a new pi pane) so the
+ * user can inject an arbitrary prompt, not just skill/workflow invocations.
+ * The prefix is a routing signal only — pi must receive the bare prompt text
+ * (e.g. `Review the current work item and suggest next steps`), not the
+ * prefix itself.
+ *
+ * @param command - Raw command string, possibly starting with `/prompt:`.
+ * @returns The prompt text with the `/prompt:` prefix removed; unchanged
+ *          commands (no `/prompt:` prefix) are returned as-is.
+ */
+export function stripAgentPromptPrefix(command: string): string {
+  if (command.startsWith('/prompt:')) {
+    return command.substring('/prompt:'.length);
+  }
+  return command;
+}
+
+/**
  * Check if a command is an agent command that should be sent to a pi pane.
- * Agent commands are those starting with /skill:, /intake, or /plan.
+ * Agent commands are those starting with /skill:, /intake, /plan, or /prompt:.
  */
 function isAgentCommand(command: string): boolean {
   return (
     command.startsWith('/skill:') ||
     command.startsWith('/intake') ||
-    command.startsWith('/plan')
+    command.startsWith('/plan') ||
+    command.startsWith('/prompt:')
   );
 }
 
@@ -351,11 +372,15 @@ async function main(): Promise<void> {
           } catch {
             // Belt-and-suspenders: a claim failure must never block the pane.
           }
+          // Free-form prompts (/prompt:...) carry a routing prefix that pi must
+          // NOT see — strip it so pi receives only the prompt text. Skill/
+          // workflow commands (/skill:*, /intake, /plan) pass through unchanged.
+          const agentPrompt = stripAgentPromptPrefix(command);
           // Spawn send-to-pi.sh asynchronously — detached and with stdio ignored
           // so the TUI loop is not blocked or affected by the script's output.
           const child = spawn(
             SEND_TO_PI_SCRIPT,
-            ['--cwd', targetCwd, command],
+            ['--cwd', targetCwd, agentPrompt],
             {
               detached: true,
               stdio: 'ignore',

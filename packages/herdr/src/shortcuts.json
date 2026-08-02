@@ -189,6 +189,16 @@
   },
   {
     "chord": [
+      "o",
+      "p"
+    ],
+    "command": "/prompt:Review the current work item and suggest next steps",
+    "view": "both",
+    "label": "open pi prompt",
+    "description": "Open a new Pi agent pane with a free-form prompt."
+  },
+  {
+    "chord": [
       "f",
       "i"
     ],
