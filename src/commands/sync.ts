@@ -6,7 +6,7 @@ import type { PluginContext } from '../plugin-types.js';
 import type { SyncOptions, SyncDebugOptions } from '../cli-types.js';
 import type { WorkItem, Comment, DependencyEdge } from '../types.js';
 import type { GitTarget, SyncResult } from '../sync.js';
-import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, assertDataFileInCwdRepo } from '../sync.js';
+import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, assertDataFileInCwdRepo, filterRemoteDataByPrefix } from '../sync.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
 import { importFromJsonlContent } from '../jsonl.js';
 import { mergeAuditResults } from '../sync.js';
@@ -93,10 +93,33 @@ export async function performSync(
   let remoteAudits: any[] = [];
   if (remoteContent) {
     const remoteData = importFromJsonlContent(remoteContent);
-    remoteItems = remoteData.items;
-    remoteComments = remoteData.comments;
-    remoteEdges = remoteData.dependencyEdges || [];
-    remoteAudits = remoteData.auditResults || [];
+    // Cross-project prefix filter (SA-0MSC0BM1V0032UYT): never import work
+    // items whose ID prefix does not match the project prefix, and drop their
+    // comments/edges/audits too. Defense-in-depth behind the repo-context
+    // guard (WL-0MSAH26DD001XXST) for stale/daemon processes that loaded
+    // pre-fix code: foreign items cannot re-enter even if a sync reaches the
+    // merge step with a polluted remote snapshot.
+    const configForPrefix = loadConfig();
+    const projectPrefix = (options.prefix || configForPrefix?.prefix || 'WI').toUpperCase();
+    const filtered = filterRemoteDataByPrefix(
+      remoteData.items,
+      remoteData.comments,
+      remoteData.dependencyEdges || [],
+      remoteData.auditResults || [],
+      projectPrefix
+    );
+    if (filtered.droppedItems.length > 0) {
+      const preview = filtered.droppedItems.slice(0, 5).join(', ');
+      const ellipsis = filtered.droppedItems.length > 5 ? ', …' : '';
+      logLine(`Foreign-prefix filter: dropped ${filtered.droppedItems.length} remote item(s) not matching prefix '${projectPrefix}' (${preview}${ellipsis})`);
+      if (!isJsonMode && !isSilent) {
+        console.log(`\nForeign-prefix filter: dropped ${filtered.droppedItems.length} remote item(s) not matching project prefix '${projectPrefix}' (${preview}${ellipsis})`);
+      }
+    }
+    remoteItems = filtered.items;
+    remoteComments = filtered.comments;
+    remoteEdges = filtered.edges;
+    remoteAudits = filtered.audits;
   }
 
   if (!isJsonMode && !isSilent) {

@@ -130,3 +130,56 @@ be re-pollution sources:
 - **Stale comment IDs** (e.g. a `WI-C0...` comment ID on an own item in
   Tableau-Card-Engine) — comments are attached data on own items, not foreign
   work items; removing them would delete legitimate history.
+
+## Defense-in-depth: sync prefix filter (SA-0MSC0BM1V0032UYT)
+
+On 2026-08-02 the SorraAgents worklog was **re-contaminated** with foreign
+`WL-` items even though the repo-context guard (`assertDataFileInCwdRepo`,
+WL-0MSAH26DD001XXST) had been deployed 55 minutes earlier. Investigation
+showed the polluting sync ran **pre-fix code**: a process (or daemon) that
+loaded modules before the guard was built, re-importing a stale pre-cleanup
+snapshot. The repo-context guard is not enough against already-running
+processes that never re-read the binary/source.
+
+As defense-in-depth, `wl sync` now applies a **prefix filter at merge time**
+(`filterRemoteDataByPrefix` in `src/sync.ts`): work items fetched from the
+remote ref whose ID prefix does not match the project's configured prefix
+(`--prefix`, or `.worklog/config.yaml` → `prefix`) are **never imported**, and
+their comments, dependency edges and audit results are dropped with them. IDs
+without a `-` separator are unclassifiable and are kept (matching
+`wl doctor foreign-items`). The filter is the last line of defence: even a
+sync that somehow reaches the merge step with a polluted remote snapshot
+cannot re-import foreign items.
+
+```bash
+# A sync against a polluted remote ref logs/prints the dropped foreign items
+wl sync
+# e.g. "Foreign-prefix filter: dropped N remote item(s) not matching project prefix 'SA'"
+```
+
+## Daemon / long-running process restart procedure
+
+Long-running `wl`-spawning processes keep whatever code they loaded at
+startup — rebuilding `dist/` does **not** change them. After any `wl` upgrade
+(especially guard/filter changes), restart or terminate them:
+
+1. **Orphaned/test-harness processes** — terminate processes running
+   worktree or deleted-worktree sources, e.g. `tsx <worktree>/src/cli.ts`:
+   `ps aux | grep -E "tsx .*worktrees.*cli.ts|tsx src/cli.ts"` then kill the
+   PIDs (they reparent to PID 1 and never exit on their own).
+2. **herdr server + panes** — the server (and its panes) load the
+   `worklog-selection-list` plugin from `packages/herdr` at startup. Restart
+   so panes pick up current `auto-sync`/`fetcher` code:
+   ```bash
+   herdr server stop   # or: kill <herdr-server-pid>
+   herdr server start
+   ```
+   > ⚠ Restarting the herdr server terminates every pane it hosts (including
+   > active pi/agent sessions). Coordinate with operators before restarting.
+3. **pi TUI Worklog extension** — the extension spawns the installed `wl` CLI
+   per invocation, so no restart is needed for CLI-side fixes; only a `pi`
+   restart reloads extension code itself.
+
+After restart, verify with `wl sync --dry-run --no-push` (expect `itemsAdded=0`
+and no "Foreign-prefix filter: dropped …" line for a clean project) and
+`wl doctor foreign-items --dry-run` (expect 0 foreign).
