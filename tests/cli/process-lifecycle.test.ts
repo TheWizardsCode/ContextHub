@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import * as childProcess from 'child_process'
 import { promisify } from 'util'
 
@@ -14,14 +14,43 @@ async function isAlive(pid: number): Promise<boolean> {
   }
 }
 
-/** Return the PID of the first process whose command line matches the pattern. */
+/**
+ * Return the PID of the first process whose command line EXACTLY matches the
+ * pattern. The pattern is anchored (^...$) so shell wrappers whose cmdline
+ * merely CONTAINS the pattern (e.g. `sh -c 'sleep 0.2 && sleep 30'`) never
+ * match — only the real target process does (WL-0MSCA645J005YM1E).
+ */
 async function findPidByPattern(pattern: string): Promise<number | null> {
   try {
-    const { stdout } = await exec(`pgrep -f "${pattern}" | head -1`)
+    const { stdout } = await exec(`pgrep -f "^${pattern}$" | head -1`)
     const pid = Number(stdout.trim())
     return Number.isInteger(pid) && pid > 0 ? pid : null
   } catch {
     return null
+  }
+}
+
+/**
+ * Kill every process whose command line exactly matches the pattern.
+ * Best-effort: pgrep exits 1 (throwing) when nothing matches, and a process
+ * may exit between pgrep and kill — both are ignored.
+ */
+async function killAllMatching(pattern: string): Promise<void> {
+  let stdout = ''
+  try {
+    const res = await exec(`pgrep -f "^${pattern}$"`)
+    stdout = res.stdout
+  } catch {
+    return // no matches
+  }
+  for (const line of stdout.split(/\n/)) {
+    const pid = Number(line.trim())
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      // already exited — ignore
+    }
   }
 }
 
@@ -128,6 +157,14 @@ describe('tracking set edge cases', () => {
 })
 
 describe('orphaned process prevention (WL-0MSB447TJ000R3N8)', () => {
+  beforeEach(async () => {
+    // Kill any stale `sleep 30` left behind by a previous failed run. Without
+    // this, findPidByPattern('sleep 30') -> `pgrep -f ... | head -1` returns
+    // the OLDEST match (lowest PID), so the test asserts on a process it did
+    // not spawn and the suite fails spuriously (flaky, WL-0MSCA645J005YM1E).
+    await killAllMatching('sleep 30')
+  })
+
   it('killTrackedProcesses kills the full process tree, not just the shell PID', async () => {
     const helpers = await import('./cli-helpers.js')
     const { execAsync, killTrackedProcesses, pidTrackingSet } = helpers
