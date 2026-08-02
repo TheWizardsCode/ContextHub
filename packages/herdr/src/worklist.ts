@@ -1559,7 +1559,7 @@ export async function runWorklistTui(
     autoRefresh: options?.autoRefresh ?? true,
     refreshIntervalMs: options?.refreshIntervalMs ?? 30000,
     autoSync: options?.autoSync ?? true,
-    syncIntervalMs: options?.syncIntervalMs ?? 30000,
+    syncIntervalMs: options?.syncIntervalMs ?? 60000,
     browseItemCount: options?.browseItemCount ?? 10,
     showHelpText: options?.showHelpText ?? true,
     getShowHelpText: options?.getShowHelpText ?? (() => options?.showHelpText ?? true),

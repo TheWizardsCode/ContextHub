@@ -118,7 +118,7 @@ vi.mock('node:child_process', async () => {
 describe('clampSyncInterval', () => {
   it('returns the value as-is when above minimum', () => {
     expect(clampSyncInterval(60000)).toBe(60000);
-    expect(clampSyncInterval(45000)).toBe(45000);
+    expect(clampSyncInterval(90000)).toBe(90000);
   });
 
   it('caps values below minimum to the minimum', () => {
@@ -134,8 +134,8 @@ describe('clampSyncInterval', () => {
 // ── defaultSettings Tests ─────────────────────────────────────────────
 
 describe('defaultSettings — syncIntervalMs', () => {
-  it('has syncIntervalMs set to 30000 (30s) by default', () => {
-    expect(defaultSettings.syncIntervalMs).toBe(30000);
+  it('has syncIntervalMs set to 60000 (60s) by default', () => {
+    expect(defaultSettings.syncIntervalMs).toBe(60000);
   });
 
   it('has syncIntervalMs enabled by default (non-zero)', () => {
@@ -165,7 +165,7 @@ describe('loadSettings — syncIntervalMs', () => {
 
   it('returns default syncIntervalMs when file does not exist', () => {
     const settings = loadSettings(settingsPath);
-    expect(settings.syncIntervalMs).toBe(30000);
+    expect(settings.syncIntervalMs).toBe(60000);
   });
 
   it('loads syncIntervalMs from existing file', () => {
@@ -201,7 +201,7 @@ describe('loadSettings — syncIntervalMs', () => {
       autoRefresh: false,
     }), 'utf-8');
     const settings = loadSettings(settingsPath);
-    expect(settings.syncIntervalMs).toBe(30000);
+    expect(settings.syncIntervalMs).toBe(60000);
   });
 });
 
@@ -300,7 +300,7 @@ describe('createSyncTimer', () => {
 
   it('schedules sync at the configured interval', () => {
     const options: SyncOptions = {
-      intervalMs: 45000,
+      intervalMs: 60000,
       onSync: mockCallback,
     };
     const timer = createSyncTimer(options);
@@ -309,12 +309,12 @@ describe('createSyncTimer', () => {
     // Timer fires immediately on start (1st call), then every interval
     expect(mockCallback).toHaveBeenCalledTimes(1);
 
-    // Advance past first interval (45000ms)
-    vi.advanceTimersByTime(45000);
+    // Advance past first interval (60000ms)
+    vi.advanceTimersByTime(60000);
     expect(mockCallback).toHaveBeenCalledTimes(2);
 
-    // Advance past second interval (90000ms total)
-    vi.advanceTimersByTime(45000);
+    // Advance past second interval (120000ms total)
+    vi.advanceTimersByTime(60000);
     expect(mockCallback).toHaveBeenCalledTimes(3);
 
     timer.stop();
@@ -331,12 +331,12 @@ describe('createSyncTimer', () => {
     // Timer fires immediately on start (1st call)
     expect(mockCallback).toHaveBeenCalledTimes(1);
 
-    // At 10000ms — should NOT have fired again (clamped to 30000ms)
+    // At 10000ms — should NOT have fired again (clamped to 60000ms)
     vi.advanceTimersByTime(10000);
     expect(mockCallback).toHaveBeenCalledTimes(1);
 
-    // At 30000ms total — should have fired again (10000ms + 20000ms = 30000ms)
-    vi.advanceTimersByTime(20000);
+    // At 60000ms total — should have fired again (10000ms + 50000ms = 60000ms)
+    vi.advanceTimersByTime(50000);
     expect(mockCallback).toHaveBeenCalledTimes(2);
 
     timer.stop();
@@ -358,7 +358,7 @@ describe('createSyncTimer', () => {
 
   it('cleans up on stop', () => {
     const options: SyncOptions = {
-      intervalMs: 45000,
+      intervalMs: 60000,
       onSync: mockCallback,
     };
     const timer = createSyncTimer(options);
@@ -366,7 +366,7 @@ describe('createSyncTimer', () => {
     timer.stop();
 
     // Should not fire after stop
-    vi.advanceTimersByTimeAsync(45000);
+    vi.advanceTimersByTimeAsync(60000);
     expect(mockCallback).not.toHaveBeenCalled();
   });
 });

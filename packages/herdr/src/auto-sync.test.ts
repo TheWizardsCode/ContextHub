@@ -76,12 +76,12 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('constants', () => {
-  it('DEFAULT_SYNC_INTERVAL_MS is 30_000', () => {
-    expect(DEFAULT_SYNC_INTERVAL_MS).toBe(30_000);
+  it('DEFAULT_SYNC_INTERVAL_MS is 60_000', () => {
+    expect(DEFAULT_SYNC_INTERVAL_MS).toBe(60_000);
   });
 
-  it('MIN_SYNC_INTERVAL_MS is 30_000', () => {
-    expect(MIN_SYNC_INTERVAL_MS).toBe(30_000);
+  it('MIN_SYNC_INTERVAL_MS is 60_000', () => {
+    expect(MIN_SYNC_INTERVAL_MS).toBe(60_000);
   });
 
   it('SYNC_DISABLED is 0', () => {
@@ -110,8 +110,8 @@ describe('clampSyncInterval', () => {
   });
 
   it('returns value unchanged for values at or above MIN', () => {
-    expect(clampSyncInterval(30_000)).toBe(30_000);
     expect(clampSyncInterval(60_000)).toBe(60_000);
+    expect(clampSyncInterval(90_000)).toBe(90_000);
     expect(clampSyncInterval(120_000)).toBe(120_000);
   });
 });
@@ -194,7 +194,7 @@ describe('runSync', () => {
     expect(mockSpawn).toHaveBeenCalled();
   });
 
-  it('triggers safety timeout after 10s to prevent dangling promises', async () => {
+  it('triggers safety timeout after 60s to prevent dangling promises', async () => {
     vi.useFakeTimers();
 
     // No child event will fire (childEventCallback is null)
@@ -203,12 +203,42 @@ describe('runSync', () => {
     const promise = runSync();
     expect(mockSpawn).toHaveBeenCalledWith('wl', ['sync'], expect.any(Object));
 
-    // Advance past the 10s safety timeout
-    await vi.advanceTimersByTimeAsync(10_000);
+    // Advance past the 60s safety timeout
+    await vi.advanceTimersByTimeAsync(60_000);
 
     // The mock child's kill should have been called
     const outcome = await promise;
     expect(outcome.success).toBe(false);
+  });
+
+  it('does not kill a sync that completes before the 60s safety timeout', async () => {
+    vi.useFakeTimers();
+
+    // childEventToFire is 'close' (beforeEach default): the close handler is
+    // registered so we can simulate a slow-but-completing sync at 59s.
+    const promise = runSync();
+
+    // Advance to 59s — still within the 60s safety timeout, so the sync is
+    // not killed and the promise has not settled.
+    await vi.advanceTimersByTimeAsync(59_000);
+
+    // Manually resolve the child via the close event at 59s (simulating a sync
+    // that completed at 59s — a legitimately slow sync on a large dataset).
+    // If the shared global child_process mock is active instead (the file-local
+    // vi.mock may not win on a warm transform cache), the real child settles on
+    // its own — the assertion below only requires that a completed sync is
+    // never reported as timed out.
+    if (childEventCallback) childEventCallback();
+
+    const outcome = await promise;
+    // A sync that completed before the 60s timeout must never be killed and
+    // reported as timed out (WL-0MSAKM838006RZNR).
+    expect(outcome.error).not.toBe('wl sync timed out');
+    if (childEventCallback) {
+      // File-local mock active: close fired with no code → success.
+      expect(outcome.success).toBe(true);
+    }
+    vi.useRealTimers();
   });
 
   it('skips a second sync while one is in-flight (single-flight guard)', async () => {
@@ -226,7 +256,7 @@ describe('runSync', () => {
 
     // Let the first settle via its safety timeout so the guard is released
     // (no dangling promise).
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     const firstOutcome = await first;
     expect(firstOutcome.success).toBe(false);
     vi.useRealTimers();
@@ -279,7 +309,7 @@ describe('runSync', () => {
     expect(mockSpawn).toHaveBeenCalledTimes(1);
 
     // Clean up: settle the in-flight sync via its safety timeout
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await p1;
     vi.useRealTimers();
   });
@@ -311,15 +341,15 @@ describe('SyncTimer', () => {
   });
 
   it('calls onSync repeatedly at the configured interval', async () => {
-    const timer = new SyncTimer({ intervalMs: 30_000, onSync });
+    const timer = new SyncTimer({ intervalMs: 60_000, onSync });
     timer.start();
     expect(onSync).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     expect(onSync).toHaveBeenCalledTimes(2);
-    expect(onSync).toHaveBeenLastCalledWith(30_000);
+    expect(onSync).toHaveBeenLastCalledWith(60_000);
 
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     expect(onSync).toHaveBeenCalledTimes(3);
 
     timer.stop();
@@ -341,11 +371,11 @@ describe('SyncTimer', () => {
   });
 
   it('stop() prevents further onSync calls', async () => {
-    const timer = new SyncTimer({ intervalMs: 30_000, onSync });
+    const timer = new SyncTimer({ intervalMs: 60_000, onSync });
     timer.start();
     expect(onSync).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     expect(onSync).toHaveBeenCalledTimes(2);
 
     timer.stop();

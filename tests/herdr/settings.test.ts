@@ -47,8 +47,8 @@ describe('defaultSettings', () => {
     expect(defaultSettings.showHelpText).toBe(true);
   });
 
-  it('has syncIntervalMs set to 30000 (30s) by default', () => {
-    expect(defaultSettings.syncIntervalMs).toBe(30000);
+  it('has syncIntervalMs set to 60000 (60s) by default', () => {
+    expect(defaultSettings.syncIntervalMs).toBe(60000);
   });
 
   it('has syncIntervalMs enabled by default', () => {
@@ -79,7 +79,7 @@ describe('loadSettings', () => {
     const settings = loadSettings(settingsPath);
     expect(settings.autoRefresh).toBe(true);
     expect(settings.refreshIntervalMs).toBe(30000);
-    expect(settings.syncIntervalMs).toBe(30000);
+    expect(settings.syncIntervalMs).toBe(60000);
   });
 
   it('clamps browseItemCount when loading out-of-range persisted value', () => {
@@ -113,7 +113,7 @@ describe('loadSettings', () => {
     const settings = loadSettings(settingsPath);
     expect(settings.autoRefresh).toBe(false);
     expect(settings.refreshIntervalMs).toBe(30000); // from defaults
-    expect(settings.syncIntervalMs).toBe(30000); // from defaults
+    expect(settings.syncIntervalMs).toBe(60000); // from defaults
   });
 
   it('handles malformed JSON', () => {

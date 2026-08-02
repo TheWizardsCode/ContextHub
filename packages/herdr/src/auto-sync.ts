@@ -8,7 +8,7 @@
  * Key design decisions:
  *  - Fire-and-forget: uses `spawn` with no output capture (stderr is ignored)
  *  - Never blocks: sync runs concurrently with refresh, errors are silently swallowed
- *  - Clamped interval: minimum 30s, 0 means disabled
+ *  - Clamped interval: minimum 60s, 0 means disabled
  *  - Idempotent: multiple overlapping syncs are harmless (wl sync is idempotent)
  */
 
@@ -17,11 +17,11 @@ import * as path from 'node:path';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
-/** Default sync interval in milliseconds (30s). */
-export const DEFAULT_SYNC_INTERVAL_MS = 30_000;
+/** Default sync interval in milliseconds (60s). */
+export const DEFAULT_SYNC_INTERVAL_MS = 60_000;
 
-/** Minimum allowed sync interval in milliseconds (30s). */
-export const MIN_SYNC_INTERVAL_MS = 30_000;
+/** Minimum allowed sync interval in milliseconds (60s). */
+export const MIN_SYNC_INTERVAL_MS = 60_000;
 
 /** Sentinel value meaning "sync is disabled". */
 export const SYNC_DISABLED = 0;
@@ -130,7 +130,11 @@ export function runSync(worklogDir?: string, options?: RunSyncOptions): Promise<
       _syncInFlight = true;
 
       let settled = false;
-      // Safety timeout: if spawn never fires close/error, resolve after 10s.
+      // Safety timeout: if spawn never fires close/error, resolve after 60s.
+      // This matches the Pi TUI extension's DEFAULT_WL_TIMEOUT_MS (60s) so that
+      // legitimately slow syncs (11.6 MB JSONL, SSH push) are not killed. The
+      // single-flight guard still prevents process pile-up; this timeout only
+      // catches truly hung spawns (e.g. binary missing, infinite wait).
       // Declared before settle so the guard can clear it once the sync ends.
       let timeout: ReturnType<typeof setTimeout> | undefined;
       const settle = (outcome: { success: boolean; error?: string }) => {
@@ -160,7 +164,7 @@ export function runSync(worklogDir?: string, options?: RunSyncOptions): Promise<
       timeout = setTimeout(() => {
         child.kill();
         settle({ success: false, error: 'wl sync timed out' });
-      }, 10_000);
+      }, 60_000);
       if (timeout.unref) timeout.unref(); // Don't keep node alive
     } catch (err) {
       // Worst-case: spawn itself throws (extremely rare)

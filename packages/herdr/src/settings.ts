@@ -22,7 +22,7 @@ export interface PluginSettings {
   showIcons: boolean;
   /** Enable periodic background wl sync. */
   autoSync: boolean;
-  /** Interval in ms between background `wl sync` calls. 0 = disabled. Minimum 30000ms. */
+  /** Interval in ms between background `wl sync` calls. 0 = disabled. Minimum 60000ms. */
   syncIntervalMs: number;
   /** Number of items to fetch and display (1-50). */
   browseItemCount: number;
@@ -37,7 +37,7 @@ export const defaultSettings: PluginSettings = {
   refreshIntervalMs: 30000,
   showIcons: true,
   autoSync: true,
-  syncIntervalMs: 30000,
+  syncIntervalMs: 60000,
   browseItemCount: 10,
   showHelpText: true,
 };
