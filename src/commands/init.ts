@@ -276,6 +276,18 @@ function installPostPullHooks(options: { silent: boolean }): { installed: boolea
      `if [ \"$WORKLOG_SKIP_POST_PULL\" = \"1\" ]; then\n` +
      `  exit 0\n` +
      `fi\n` +
+     `# Skip when inside a temp worktree created by withTempWorktree for internal\n` +
+     `# sync operations. These worktrees don't have worklog initialized.\n` +
+     `case \"$PWD\" in\n` +
+     `  *tmp-worktree-*)\n` +
+     `    exit 0\n` +
+     `    ;;\n` +
+     `esac\n` +
+     `# Skip when inside a git worktree (not the main checkout).\n` +
+     `# Worktrees are for feature development; sync runs from the main checkout.\n` +
+     `if [ \"$(git rev-parse --git-dir 2>/dev/null)\" != \"$(git rev-parse --git-common-dir 2>/dev/null)\" ]; then\n` +
+     `  exit 0\n` +
+     `fi\n` +
      `if command -v wl >/dev/null 2>&1; then\n` +
      `  WL=wl\n` +
      `elif command -v worklog >/dev/null 2>&1; then\n` +
@@ -370,6 +382,18 @@ function installCommittedHooks(options: { silent: boolean }): { installed: boole
     `if [ \"$WORKLOG_SKIP_POST_PULL\" = \"1\" ]; then\n` +
     `  exit 0\n` +
     `fi\n` +
+    `# Skip when inside a temp worktree created by withTempWorktree for internal\n` +
+    `# sync operations. These worktrees don't have worklog initialized.\n` +
+    `case \"$PWD\" in\n` +
+    `  *tmp-worktree-*)\n` +
+    `    exit 0\n` +
+    `    ;;\n` +
+    `esac\n` +
+    `# Skip when inside a git worktree (not the main checkout).\n` +
+    `# Worktrees are for feature development; sync runs from the main checkout.\n` +
+    `if [ \"$(git rev-parse --git-dir 2>/dev/null)\" != \"$(git rev-parse --git-common-dir 2>/dev/null)\" ]; then\n` +
+    `  exit 0\n` +
+    `fi\n` +
     `if command -v wl >/dev/null 2>&1; then\n` +
     `  WL=wl\n` +
     `elif command -v worklog >/dev/null 2>&1; then\n` +
@@ -432,6 +456,18 @@ function installCommittedHooks(options: { silent: boolean }): { installed: boole
       `# Set WORKLOG_SKIP_POST_CHECKOUT=1 to bypass.\n` +
       `set -e\n` +
       `if [ \"$WORKLOG_SKIP_POST_CHECKOUT\" = \"1\" ]; then\n` +
+      `  exit 0\n` +
+      `fi\n` +
+      `# Skip when inside a temp worktree created by withTempWorktree for internal\n` +
+      `# sync operations. These worktrees don't have worklog initialized.\n` +
+      `case \"$PWD\" in\n` +
+      `  *tmp-worktree-*)\n` +
+      `    exit 0\n` +
+      `    ;;\n` +
+      `esac\n` +
+      `# Skip when inside a git worktree (not the main checkout).\n` +
+      `# Worktrees are for feature development; sync runs from the main checkout.\n` +
+      `if [ \"$(git rev-parse --git-dir 2>/dev/null)\" != \"$(git rev-parse --git-common-dir 2>/dev/null)\" ]; then\n` +
       `  exit 0\n` +
       `fi\n` +
       `if command -v wl >/dev/null 2>&1; then\n` +

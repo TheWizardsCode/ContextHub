@@ -8,9 +8,34 @@ import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
-import { contextExec, withinWorktreeContext, killProcessesForWorktree } from './process-lifecycle.js';
+import { contextExec, withinWorktreeContext, killProcessesForWorktree, type TrackedExecResult } from './process-lifecycle.js';
 
-const execAsync = contextExec;
+/**
+ * Git exports GIT_DIR (and GIT_WORK_TREE / GIT_INDEX_FILE) when it invokes
+ * hooks, and `wl sync` spawned from a hook inherits them. A leaked GIT_DIR
+ * redirects `git -C <path> ...` commands to the CALLER's worktree (its
+ * index/HEAD/refs) instead of the repository named on the command line —
+ * which produced destructive "Sync work items and comments" commits on
+ * worktree branches (WL-0MS99Y6R40028Q9G). Every git command in this module
+ * therefore runs with those variables cleared, matching git's own behavior
+ * of unsetting them for hook child processes.
+ */
+function sanitizeGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const clean = { ...env };
+  delete clean.GIT_DIR;
+  delete clean.GIT_WORK_TREE;
+  delete clean.GIT_INDEX_FILE;
+  return clean;
+}
+
+async function gitExecAsync(
+  command: string,
+  options?: { cwd?: string }
+): Promise<TrackedExecResult> {
+  return contextExec(command, { ...options, env: sanitizeGitEnv(process.env) });
+}
+
+const execAsync = gitExecAsync;
 
 // git show of large JSONL can exceed Node's exec() maxBuffer.
 // Use spawn to stream the output when reading remote content.
@@ -20,14 +45,17 @@ async function execGitCaptureStdout(args: string[], options?: { cwd?: string }):
     // wrappers. Pass args as a single command string to avoid the
     // DEP0190 deprecation warning about unescaped args with shell=true.
     const useShell = process.platform === 'win32';
+    const childEnv = sanitizeGitEnv(process.env);
     const child = useShell
       ? childProcess.spawn(`git ${args.map(a => escapeShellArg(a)).join(' ')}`, [], {
           cwd: options?.cwd,
+          env: childEnv,
           stdio: ['ignore', 'pipe', 'pipe'],
           shell: true,
         })
       : childProcess.spawn('git', args, {
           cwd: options?.cwd,
+          env: childEnv,
           stdio: ['ignore', 'pipe', 'pipe'],
         });
     let out = '';

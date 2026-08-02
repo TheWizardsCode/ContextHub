@@ -368,3 +368,146 @@ describe('pre-push hook worktree safety', () => {
     }
   });
 });
+
+describe('post-checkout / post-pull hook worktree safety (WL-0MS99Y6R40028Q9G)', () => {
+  it('post-checkout hook template (.githooks/post-checkout) skips sync in git worktrees', () => {
+    const hookSource = fs.readFileSync(
+      new URL('../.githooks/post-checkout', import.meta.url),
+      'utf8'
+    );
+    // Should skip temp worktrees (PWD contains tmp-worktree-)
+    expect(hookSource).toContain('tmp-worktree');
+    // Should skip git worktrees using git-dir vs git-common-dir comparison
+    expect(hookSource).toContain('git-common-dir');
+    expect(hookSource).toContain('git-dir');
+    expect(hookSource).toContain('exit 0');
+  });
+
+  it('worklog-post-pull hook template (.githooks/worklog-post-pull) skips sync in git worktrees', () => {
+    const hookSource = fs.readFileSync(
+      new URL('../.githooks/worklog-post-pull', import.meta.url),
+      'utf8'
+    );
+    expect(hookSource).toContain('tmp-worktree');
+    expect(hookSource).toContain('git-common-dir');
+    expect(hookSource).toContain('git-dir');
+    expect(hookSource).toContain('exit 0');
+  });
+
+  it('src/commands/init.ts generates worktree-safe post-checkout hook content', () => {
+    const initSource = fs.readFileSync(
+      new URL('../src/commands/init.ts', import.meta.url),
+      'utf8'
+    );
+    const idx = initSource.indexOf('const postCheckoutContent');
+    expect(idx).toBeGreaterThan(-1);
+    const block = initSource.slice(idx, idx + 4000);
+    expect(block).toContain('tmp-worktree');
+    expect(block).toContain('git-common-dir');
+    expect(block).toContain('git-dir');
+  });
+
+  it('src/commands/init.ts generates worktree-safe central post-pull script content', () => {
+    const initSource = fs.readFileSync(
+      new URL('../src/commands/init.ts', import.meta.url),
+      'utf8'
+    );
+    // Two central script templates exist: installPostPullHooks and installCommittedHooks.
+    const first = initSource.indexOf('const centralScriptContent');
+    const second = initSource.indexOf('const centralScriptContent', first + 1);
+    expect(first).toBeGreaterThan(-1);
+    expect(second).toBeGreaterThan(-1);
+    for (const idx of [first, second]) {
+      const block = initSource.slice(idx, idx + 4000);
+      expect(block).toContain('tmp-worktree');
+      expect(block).toContain('git-common-dir');
+      expect(block).toContain('git-dir');
+    }
+  });
+
+  it('src/doctor/hook-upgrade.ts canonical post-checkout content includes the worktree skip', () => {
+    const hookUpgradeSource = fs.readFileSync(
+      new URL('../src/doctor/hook-upgrade.ts', import.meta.url),
+      'utf8'
+    );
+    const idx = hookUpgradeSource.indexOf("case 'post-checkout':");
+    expect(idx).toBeGreaterThan(-1);
+    const block = hookUpgradeSource.slice(idx, idx + 4000);
+    expect(block).toContain('tmp-worktree');
+    expect(block).toContain('git-common-dir');
+    expect(block).toContain('git-dir');
+  });
+
+  it('src/doctor/hook-upgrade.ts canonical worklog-post-pull content includes the worktree skip', () => {
+    const hookUpgradeSource = fs.readFileSync(
+      new URL('../src/doctor/hook-upgrade.ts', import.meta.url),
+      'utf8'
+    );
+    const idx = hookUpgradeSource.indexOf("case 'worklog-post-pull':");
+    expect(idx).toBeGreaterThan(-1);
+    const block = hookUpgradeSource.slice(idx, idx + 4000);
+    expect(block).toContain('tmp-worktree');
+    expect(block).toContain('git-common-dir');
+    expect(block).toContain('git-dir');
+  });
+});
+
+describe('GIT_DIR leak defense in sync.ts (WL-0MS99Y6R40028Q9G)', () => {
+  let cleanupDirs: string[] = [];
+  let origCwd: string;
+  let origPath: string | undefined;
+  let origGitDir: string | undefined;
+
+  afterEach(() => {
+    if (origCwd) {
+      try { process.chdir(origCwd); } catch { /* ignore */ }
+    }
+    if (origPath !== undefined) {
+      process.env.PATH = origPath;
+    }
+    if (origGitDir !== undefined) {
+      process.env.GIT_DIR = origGitDir;
+    } else {
+      delete process.env.GIT_DIR;
+    }
+    for (const dir of cleanupDirs) {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+    cleanupDirs = [];
+  });
+
+  it('gitPushDataFileToBranch with leaked GIT_DIR (hook env) makes no commit on the current branch', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-gitdir-leak-'));
+    cleanupDirs.push(tmpDir);
+
+    const { localRepo, dataFilePath } = createMockRepo(tmpDir);
+    const target: GitTarget = { remote: 'origin', branch: 'refs/worklog/data' };
+
+    // Simulate git exporting GIT_DIR when it invokes a hook: point it at a
+    // gitdir that does NOT exist. Real git would fail (or worse, operate on
+    // the wrong repository) for every command that inherits it. The mock
+    // mirrors that by exiting 128 when GIT_DIR is set to a missing dir.
+    // If sync.ts sanitizes GIT_* env for its child git processes, the mock
+    // never sees GIT_DIR and the sync succeeds without touching the branch.
+    origGitDir = process.env.GIT_DIR;
+    process.env.GIT_DIR = path.join(tmpDir, 'leaked-gitdir');
+    origCwd = process.cwd();
+    origPath = process.env.PATH;
+    process.chdir(localRepo);
+    process.env.PATH = `${mockBinDir}${path.delimiter}${origPath || ''}`;
+
+    await expect(gitPushDataFileToBranch(dataFilePath, 'hook-env sync', target))
+      .resolves.toBeUndefined();
+  });
+
+  it('sync.ts sanitizes GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE for child git processes', () => {
+    const syncSource = fs.readFileSync(
+      new URL('../src/sync.ts', import.meta.url),
+      'utf8'
+    );
+    expect(syncSource).toContain('sanitizeGitEnv');
+    expect(syncSource).toContain('delete clean.GIT_DIR');
+    expect(syncSource).toContain('delete clean.GIT_WORK_TREE');
+    expect(syncSource).toContain('delete clean.GIT_INDEX_FILE');
+  });
+});

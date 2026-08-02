@@ -118,6 +118,18 @@ set -e
 if [ "$WORKLOG_SKIP_POST_PULL" = "1" ]; then
   exit 0
 fi
+# Skip when inside a temp worktree created by withTempWorktree for internal
+# sync operations. These worktrees don't have worklog initialized.
+case "$PWD" in
+  *tmp-worktree-*)
+    exit 0
+    ;;
+esac
+# Skip when inside a git worktree (not the main checkout).
+# Worktrees are for feature development; sync runs from the main checkout.
+if [ "$(git rev-parse --git-dir 2>/dev/null)" != "$(git rev-parse --git-common-dir 2>/dev/null)" ]; then
+  exit 0
+fi
 if command -v wl >/dev/null 2>&1; then
   WL=wl
 elif command -v worklog >/dev/null 2>&1; then
@@ -129,7 +141,11 @@ fi
 if "$WL" sync --git-branch refs/worklog/data >/dev/null 2>&1; then
   :
 else
-  echo "worklog: sync failed or not initialized; continuing" >&2
+  if [ ! -d ".worklog" ]; then
+    echo "worklog: not initialized in this checkout/worktree. Run \\"wl init\\" to set up this location." >&2
+  else
+    echo "worklog: sync failed; continuing" >&2
+  fi
 fi
 exit 0
 `;
@@ -171,6 +187,18 @@ set -e
 if [ "$WORKLOG_SKIP_POST_CHECKOUT" = "1" ]; then
   exit 0
 fi
+# Skip when inside a temp worktree created by withTempWorktree for internal
+# sync operations. These worktrees don't have worklog initialized.
+case "$PWD" in
+  *tmp-worktree-*)
+    exit 0
+    ;;
+esac
+# Skip when inside a git worktree (not the main checkout).
+# Worktrees are for feature development; sync runs from the main checkout.
+if [ "$(git rev-parse --git-dir 2>/dev/null)" != "$(git rev-parse --git-common-dir 2>/dev/null)" ]; then
+  exit 0
+fi
 if command -v wl >/dev/null 2>&1; then
   WL=wl
 elif command -v worklog >/dev/null 2>&1; then
@@ -182,7 +210,11 @@ fi
 if "$WL" sync --git-branch refs/worklog/data >/dev/null 2>&1; then
   :
 else
-  echo "worklog: sync failed or not initialized; continuing" >&2
+  if [ ! -d ".worklog" ]; then
+    echo "worklog: not initialized in this checkout/worktree. Run \\"wl init\\" to set up this location." >&2
+  else
+    echo "worklog: sync failed; continuing" >&2
+  fi
 fi
 exit 0
 `;
@@ -480,6 +512,10 @@ describe('hook-upgrade module', () => {
       expect(content).not.toBeNull();
       expect(content!).toContain('worklog:post-checkout-hook:v1');
       expect(content!).toContain('--git-branch refs/worklog/data');
+      // WL-0MS99Y6R40028Q9G: post-checkout must skip sync in worktrees.
+      expect(content!).toContain('tmp-worktree');
+      expect(content!).toContain('git-common-dir');
+      expect(content!).toContain('git-dir');
     });
 
     it('returns content for post-merge hook (wrapper)', () => {
@@ -500,6 +536,10 @@ describe('hook-upgrade module', () => {
       expect(content).not.toBeNull();
       expect(content!).toContain('worklog:post-pull-hook:v1');
       expect(content!).toContain('--git-branch refs/worklog/data');
+      // WL-0MS99Y6R40028Q9G: post-pull must skip sync in worktrees.
+      expect(content!).toContain('tmp-worktree');
+      expect(content!).toContain('git-common-dir');
+      expect(content!).toContain('git-dir');
     });
 
     it('returns null for unknown hook names', () => {

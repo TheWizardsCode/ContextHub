@@ -101,10 +101,19 @@ A hook is considered outdated when it:
 - Lacks the safe `--git-branch refs/worklog/data` guard, or
 - Contains hardcoded paths like `/tmp/Worklog/...` or absolute paths to `.git/hooks/` for
   the central post-pull script (should use `$(dirname "$0")`), or
+- Lacks the worktree-skip guard (a `git rev-parse --git-dir != git rev-parse --git-common-dir`
+  check plus a `*tmp-worktree-*` PWD check), or
 - Differs in any way from the committed `.githooks/` version.
 
 Only hooks that contain a Worklog marker (`worklog:pre-push-hook:`, `worklog:post-pull-hook:`,
 or `worklog:post-checkout-hook:`) are considered for upgrade. Non-Worklog hooks are skipped.
+
+> **Worktree safety:** All hooks (`pre-push`, `post-checkout`, `post-merge`/`post-rewrite` via
+> `worklog-post-pull`) skip the sync when running inside a git worktree (where
+> `git rev-parse --git-dir` differs from `git rev-parse --git-common-dir`) or inside the
+> internal `tmp-worktree-*` worktrees used by `wl sync`. Sync is only meaningful from the
+> main checkout; running it from a worktree previously produced destructive "Sync work
+> items and comments" commits that deleted tracked files (WL-0MS99Y6R40028Q9G).
 
 Examples:
 
@@ -126,9 +135,12 @@ Examples:
 
 The committed hook scripts live in `.githooks/` and include:
 - `pre-push` — auto-syncs Worklog data before pushing, uses `--git-branch refs/worklog/data`
-- `post-checkout` — auto-syncs after branch checkout
+- `post-checkout` — auto-syncs after branch checkout; skips worktrees/temp worktrees
 - `post-merge` — wrapper that delegates to `worklog-post-pull`
 - `post-rewrite` — wrapper that delegates to `worklog-post-pull`
-- `worklog-post-pull` — central sync script
+- `worklog-post-pull` — central sync script; skips worktrees/temp worktrees
+
+All hooks skip sync when run inside a git worktree or a `tmp-worktree-*` temp worktree
+(WL-0MS99Y6R40028Q9G).
 
 See `src/doctor/hook-upgrade.ts` for the implementation.
