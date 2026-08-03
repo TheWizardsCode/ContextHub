@@ -276,9 +276,22 @@ Fail-open is deliberate: a broken or missing marker must never block browsing th
 ### Plugin behaviour while frozen
 
 - **Banner** — The selection list renders a prominent red `⛔ CODE FREEZE` banner above the header, warning that implementation is blocked. The banner respects the `rows - 1` pane-height budget (see WL-0MSAAON63003N6LO).
+- **Implement shortcut hidden** — The `i` / `/skill:implement` shortcut in `shortcuts.json` carries `"code_freeze": "block"`, so while a freeze is active it is filtered out of the shortcut registry: it does not appear in the footer/chord help hints and pressing it does nothing (no dialog, no dispatch). See [Shortcut filtering during a freeze](#shortcut-filtering-during-a-freeze).
 - **Implement commands blocked** — Any implement command (`/skill:implement`, `/skill:implement-single`, `/skill:implementall`, via single-key `i`, chord, or typed dispatch) is **not** routed: no pi agent pane is spawned, no work item is claimed, and no `<id>` substitution happens. The marker is re-read at dispatch time, so a freeze that starts between refreshes is still enforced.
 - **Notice dialog** — When an implement command is attempted during a freeze, a modal dialog explains that implementation is blocked until the release finishes. Dismiss with `Esc`, `Enter`, or `q` to return to the list.
 - **Other commands unaffected** — Audit, intake, plan, review, priority, search, sync, and navigation continue to work normally during a freeze.
+
+### Shortcut filtering during a freeze
+
+Each entry in `shortcuts.json` may carry an optional `code_freeze` field controlling its visibility while the project is frozen (WL-0MSD81VEL009XHWA):
+
+| `code_freeze` value | Behaviour during a freeze |
+|---|---|
+| `"block"` | Shortcut hidden: excluded from registry lookups and help hints; pressing its key does nothing |
+| `"allow"` | Shortcut always shown, even during a freeze |
+| omitted | Always shown (backward compatible) |
+
+Any other value is logged as invalid and treated as omitted (always shown) — a bad value never hides or breaks a shortcut. The registry methods `lookupChord()`, `lookupChordEntry()`, `getEntriesForStage()`, `getChordByPrefix()`, `getChordByLeader()`, and `getChordEntries()` accept a `codeFreezeActive` parameter and exclude `"block"` entries while a freeze is active, so footer hints, chord hints, and dispatch lookups all respect the freeze automatically.
 
 This plugin only **reads** the marker; writing/clearing it is the ship release process's job (tracked in `SA-0MSBU4OBU005WJNB`).
 

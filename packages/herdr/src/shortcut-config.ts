@@ -30,6 +30,17 @@ export interface ShortcutEntry {
    * explicit model default to `plan` (WL-0MSD48ZFC0043AO3).
    */
   model?: string;
+  /**
+   * Code-freeze visibility (WL-0MSD81VEL009XHWA). When the project is in a
+   * Code Freeze (ship release in progress):
+   *   - `'block'`  — the shortcut is hidden: excluded from lookups and help
+   *                  hints while a freeze is active.
+   *   - `'allow'`  — the shortcut is always shown, even during a freeze.
+   *   - omitted    — always shown (backward compatible).
+   * Parsed from the `code_freeze` key in shortcuts.json; invalid values are
+   * logged and treated as omitted.
+   */
+  codeFreeze?: 'block' | 'allow';
 }
 
 // ── Registry ──────────────────────────────────────────────────────────
@@ -42,18 +53,28 @@ export class ShortcutRegistry {
   }
 
   /**
+   * True when an entry is hidden during a Code Freeze: the entry is marked
+   * `codeFreeze: 'block'` and a freeze is currently active. Allow/omitted
+   * entries are always visible (WL-0MSD81VEL009XHWA).
+   */
+  private isBlockedByFreeze(entry: ShortcutEntry, codeFreezeActive?: boolean): boolean {
+    return codeFreezeActive === true && entry.codeFreeze === 'block';
+  }
+
+  /**
    * Look up a chord by its full key sequence (supports any length).
    */
-  lookupChord(chordKeys: string[], view: string, stage?: string): string | undefined {
-    return this.lookupChordEntry(chordKeys, view, stage)?.command;
+  lookupChord(chordKeys: string[], view: string, stage?: string, codeFreezeActive?: boolean): string | undefined {
+    return this.lookupChordEntry(chordKeys, view, stage, codeFreezeActive)?.command;
   }
 
   /**
    * Look up a chord by its full key sequence and return the matching entry
    * (command, model, label, ...). Returns undefined when no entry matches.
    */
-  lookupChordEntry(chordKeys: string[], view: string, stage?: string): ShortcutEntry | undefined {
+  lookupChordEntry(chordKeys: string[], view: string, stage?: string, codeFreezeActive?: boolean): ShortcutEntry | undefined {
     return this.entries.find(entry => {
+      if (this.isBlockedByFreeze(entry, codeFreezeActive)) return false;
       const chord = entry.chord;
       if (chord.length !== chordKeys.length) return false;
       for (let i = 0; i < chord.length; i++) {
@@ -70,8 +91,9 @@ export class ShortcutRegistry {
   /**
    * Return all entries visible for the given stage.
    */
-  getEntriesForStage(stage?: string): ShortcutEntry[] {
+  getEntriesForStage(stage?: string, codeFreezeActive?: boolean): ShortcutEntry[] {
     return this.entries.filter(entry => {
+      if (this.isBlockedByFreeze(entry, codeFreezeActive)) return false;
       if (entry.stages === undefined || entry.stages.length === 0) return true;
       if (stage === undefined) return false;
       return entry.stages.includes(stage);
@@ -88,16 +110,17 @@ export class ShortcutRegistry {
   /**
    * Get chord entries whose leader key matches.
    */
-  getChordByLeader(leaderKey: string, view?: string): ShortcutEntry[] {
-    return this.getChordByPrefix([leaderKey], view);
+  getChordByLeader(leaderKey: string, view?: string, codeFreezeActive?: boolean): ShortcutEntry[] {
+    return this.getChordByPrefix([leaderKey], view, undefined, codeFreezeActive);
   }
 
   /**
    * Get chord entries whose chord array starts with the given prefix.
    */
-  getChordByPrefix(prefix: string[], view?: string, stage?: string): ShortcutEntry[] {
+  getChordByPrefix(prefix: string[], view?: string, stage?: string, codeFreezeActive?: boolean): ShortcutEntry[] {
     const result: ShortcutEntry[] = [];
     for (const entry of this.entries) {
+      if (this.isBlockedByFreeze(entry, codeFreezeActive)) continue;
       const chord = entry.chord;
       if (chord.length < prefix.length) continue;
 
@@ -119,10 +142,12 @@ export class ShortcutRegistry {
 
 
   /**
-   * Return all entries (each has a chord, any length).
+   * Return all entries (each has a chord, any length). When a freeze is
+   * active, entries marked `code_freeze: 'block'` are omitted.
    */
-  getChordEntries(): ShortcutEntry[] {
-    return this.entries;
+  getChordEntries(codeFreezeActive?: boolean): ShortcutEntry[] {
+    if (codeFreezeActive !== true) return this.entries;
+    return this.entries.filter(entry => !this.isBlockedByFreeze(entry, true));
   }
 }
 
@@ -187,6 +212,15 @@ export function parseShortcutEntry(raw: unknown): ShortcutEntry | undefined {
   const model = entry.model;
   if (typeof model === 'string' && model.trim().length > 0) {
     shortcutEntry.model = model.trim();
+  }
+
+  const codeFreeze = entry.code_freeze;
+  if (codeFreeze === 'block' || codeFreeze === 'allow') {
+    shortcutEntry.codeFreeze = codeFreeze;
+  } else if (codeFreeze !== undefined) {
+    // Invalid values are logged and treated as omit (always shown) — a bad
+    // value must never hide or break a shortcut (WL-0MSD81VEL009XHWA).
+    console.error(`[shortcut-config] Invalid code_freeze value "${String(codeFreeze)}" for shortcut "${command}"; expected "block" or "allow", treating as omitted`);
   }
 
   // Agent-bound commands without an explicit model run on the default

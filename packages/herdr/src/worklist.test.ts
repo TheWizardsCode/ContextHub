@@ -14,7 +14,12 @@ import {
   formatCodeFreezeDialog,
   ANSI,
   createListRenderer,
+  isChordLeader,
+  processChordInput,
+  createChordState,
+  getChordHelpHints,
 } from './worklist.js';
+import { loadShortcutConfig, ShortcutRegistry } from './shortcut-config.js';
 import { regroupWorkItems } from './grouping.js';
 import type { WorkItem } from './fetcher.js';
 
@@ -518,6 +523,54 @@ describe('isImplementCommand', () => {
     expect(isImplementCommand('/intake <id>')).toBe(false);
     expect(isImplementCommand('/plan <id>')).toBe(false);
     expect(isImplementCommand('!!wl reviewed <id>')).toBe(false);
+  });
+});
+
+// ── Code Freeze: shortcut registry integration (WL-0MSD81VEL009XHWA) ─────
+// The `i` / /skill:implement entry in the REAL shortcuts.json is marked
+// `code_freeze: "block"`, so during a freeze it is filtered from the registry:
+// it is not a chord leader, does not resolve via processChordInput, and is
+// omitted from help hints.
+
+describe('code-freeze shortcut filtering — worklist integration', () => {
+  let registry: ShortcutRegistry;
+
+  beforeEach(() => {
+    registry = loadShortcutConfig();
+  });
+
+  it('does not treat i as a chord leader during a freeze', () => {
+    expect(isChordLeader('i', registry, true)).toBe(false);
+    expect(isChordLeader('i', registry, false)).toBe(true);
+  });
+
+  it('does not resolve the i chord via processChordInput during a freeze', () => {
+    const chordState = createChordState();
+    chordState.pendingKeys = ['i'];
+    const result = processChordInput(chordState, 'i', registry, 'list', undefined, true);
+    expect(result).not.toBe('chord-complete');
+    expect(chordState.resolvedCommand).toBeNull();
+  });
+
+  it('omits blocked shortcuts from chord help hints during a freeze', () => {
+    // getChordHelpHints only lists multi-key chord leaders, so use a
+    // synthetic registry with a blocked multi-key chord to observe filtering.
+    const multi = new ShortcutRegistry([
+      { chord: ['i', 'x'], command: '/skill:implement <id>', view: 'both', codeFreeze: 'block' },
+      { chord: ['a', 'a'], command: '/skill:audit <id>', view: 'both' },
+    ]);
+    const hints = getChordHelpHints(multi, true);
+    expect(hints).not.toContain('i');
+    expect(hints).toContain('a');
+    const normalHints = getChordHelpHints(multi, false);
+    expect(normalHints).toContain('i');
+  });
+
+  it('omits blocked shortcuts from stage entries used for footer hints during a freeze', () => {
+    const entries = registry.getEntriesForStage('plan_complete', true);
+    expect(entries.some(e => e.chord[0] === 'i')).toBe(false);
+    const normalEntries = registry.getEntriesForStage('plan_complete', false);
+    expect(normalEntries.some(e => e.chord[0] === 'i')).toBe(true);
   });
 });
 

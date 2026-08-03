@@ -852,8 +852,8 @@ export function createChordState(): ChordState {
 /**
  * Check if a key matches any chord leader in the registry.
  */
-export function isChordLeader(key: string, registry: ShortcutRegistry): boolean {
-  const chords = registry.getChordEntries();
+export function isChordLeader(key: string, registry: ShortcutRegistry, codeFreezeActive?: boolean): boolean {
+  const chords = registry.getChordEntries(codeFreezeActive);
   return chords.some(c => {
     const chord = c.chord;
     return chord !== undefined && chord.length >= 1 && chord[0] === key;
@@ -873,11 +873,12 @@ export function processChordInput(
   registry: ShortcutRegistry,
   view: string,
   stage?: string,
+  codeFreezeActive?: boolean,
 ): 'chord-complete' | 'chord-cancel' | null {
   const pending = [...chordState.pendingKeys, key];
 
   // Check if this completes a chord
-  const entry = registry.lookupChordEntry(pending, view, stage);
+  const entry = registry.lookupChordEntry(pending, view, stage, codeFreezeActive);
   if (entry) {
     chordState.pendingKeys = [];
     chordState.hints = '';
@@ -887,7 +888,7 @@ export function processChordInput(
   }
 
   // Check if this is a valid prefix for more chords
-  const nextChords = registry.getChordByPrefix(pending, view, stage);
+  const nextChords = registry.getChordByPrefix(pending, view, stage, codeFreezeActive);
   if (nextChords.length > 0) {
     chordState.pendingKeys = pending;
     // Update hints
@@ -970,9 +971,9 @@ export function formatChordHintsForHelp(
  * Get chord hints for showing in the help bar when in list mode.
  * Shows leader keys and abbreviated labels for all chords.
  */
-export function getChordHelpHints(registry: ShortcutRegistry | undefined): string {
+export function getChordHelpHints(registry: ShortcutRegistry | undefined, codeFreezeActive?: boolean): string {
   if (!registry) return '';
-  const chords = registry.getChordEntries();
+  const chords = registry.getChordEntries(codeFreezeActive);
   // Group by leader key
   const byLeader = new Map<string, string[]>();
   for (const c of chords) {
@@ -1894,6 +1895,7 @@ export async function runWorklistTui(
         shortcutRegistry as ShortcutRegistry,
         state.mode === 'detail' ? 'detail' : 'list',
         state.activeFilter ?? undefined,
+        codeFreezeActive,
       );
 
       if (chordResult === 'chord-complete') {
@@ -2002,12 +2004,13 @@ export async function runWorklistTui(
 
     // If key wasn't handled as navigation and chord registry exists,
     // check if it's a shortcut or part of a chord sequence
-    if (shortcutRegistry && (action === null || isChordLeader(key, shortcutRegistry as ShortcutRegistry))) {
+    if (shortcutRegistry && (action === null || isChordLeader(key, shortcutRegistry as ShortcutRegistry, codeFreezeActive))) {
       // First: check if this key is a complete single-key shortcut
       const singleEntry = (shortcutRegistry as ShortcutRegistry).lookupChordEntry(
         [key],
         state.mode === 'detail' ? 'detail' : 'list',
         state.activeFilter ?? undefined,
+        codeFreezeActive,
       );
       if (singleEntry) {
         const singleCmd = singleEntry.command;
@@ -2078,10 +2081,11 @@ export async function runWorklistTui(
       }
 
       // Second: check if this key starts a multi-key chord sequence
-      if (isChordLeader(key, shortcutRegistry as ShortcutRegistry)) {
+      if (isChordLeader(key, shortcutRegistry as ShortcutRegistry, codeFreezeActive)) {
         const nextChords = (shortcutRegistry as ShortcutRegistry).getChordByPrefix([key],
           state.mode === 'detail' ? 'detail' : 'list',
-          state.activeFilter ?? undefined);
+          state.activeFilter ?? undefined,
+          codeFreezeActive);
         if (nextChords.length > 0) {
           chordState.pendingKeys = [key];
           chordState.hints = formatChordHintsForHelp(nextChords, [key]);
@@ -2172,7 +2176,7 @@ export async function runWorklistTui(
         : undefined;
       const isEmpty = displayItems.length === 0;
 
-      const relevantEntries = reg.getEntriesForStage(selStage)
+      const relevantEntries = reg.getEntriesForStage(selStage, codeFreezeActive)
         .filter(e => e.view === 'list' || e.view === 'both')
         .filter(e => {
           if (isEmpty && e.command.includes('<id>')) return false;

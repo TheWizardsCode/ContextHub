@@ -50,7 +50,7 @@ vi.mock('./notify.js', () => ({
 import { runWorklistTui } from './worklist.js';
 import { setWorklogDir, resetWorklogDir, type WorkItem } from './fetcher.js';
 import { CODE_FREEZE_MARKER_FILENAME } from './code-freeze.js';
-import { loadShortcutConfig } from './shortcut-config.js';
+import { loadShortcutConfig, ShortcutRegistry } from './shortcut-config.js';
 
 // ---------------------------------------------------------------------------
 // Fake stdin/stdout harness (same pattern as notify-dispatch.test.ts)
@@ -127,13 +127,42 @@ function writeActiveFreezeMarker(reason?: string): void {
 }
 
 /**
+ * A registry whose implement (`i`) shortcut is NOT marked `code_freeze:
+ * "block"` (e.g. a user-defined shortcut, or one explicitly allowed). During
+ * a freeze the shortcut still resolves, so the dispatch-time freeze guard in
+ * executeResolvedCommand blocks it and shows the notice dialog — the behavior
+ * covered by the parent epic (WL-0MSBU4KMA004PKSR AC7).
+ *
+ * The REAL shortcuts.json marks `i` as `code_freeze: "block"` (WL-0MSD81VEL009XHWA),
+ * so with the production registry the shortcut is hidden entirely during a
+ * freeze (no dialog, no dispatch) — covered by the dedicated test below.
+ */
+function createUnblockedImplementRegistry(): ShortcutRegistry {
+  return new ShortcutRegistry([
+    {
+      chord: ['i'],
+      command: '/skill:implement <id>',
+      view: 'both',
+      label: 'implement',
+      description: 'Run the implement workflow on the selected work item',
+      model: 'code',
+    },
+  ]);
+}
+
+/**
  * Start the TUI with auto-refresh/sync disabled and a real marker dir.
  *
- * Uses the REAL shortcut registry (loadShortcutConfig, same as production
- * index.ts) so the 'i' single-key /skill:implement shortcut is registered.
+ * Defaults to the REAL shortcut registry (loadShortcutConfig, same as
+ * production index.ts) so the 'i' single-key /skill:implement shortcut is
+ * registered with its production `code_freeze: "block"` marking.
  */
-function startTui(onCommand?: (c: string) => void, items: WorkItem[] = []): Promise<WorkItem | undefined> {
-  return runWorklistTui(async () => items, items, loadShortcutConfig(), {
+function startTui(
+  onCommand?: (c: string) => void,
+  items: WorkItem[] = [],
+  registry = loadShortcutConfig(),
+): Promise<WorkItem | undefined> {
+  return runWorklistTui(async () => items, items, registry, {
     autoRefresh: false,
     autoSync: false,
     showHelpText: false,
@@ -170,10 +199,15 @@ function dialogShowing(): boolean {
 // ---------------------------------------------------------------------------
 
 describe('Code Freeze notice dialog — dismissal key handling (AC7)', () => {
+  // The dialog is triggered via an implement shortcut that is NOT hidden by
+  // code_freeze (see createUnblockedImplementRegistry above) — the dispatch
+  // guard still blocks it and shows the dialog.
+  const registry = createUnblockedImplementRegistry();
+
   it('shows the dialog when implement is pressed during a freeze and does not dispatch', async () => {
     writeActiveFreezeMarker('ship release in progress');
     const onCommand = vi.fn();
-    const p = startTui(onCommand, [makeItem('WL-TEST-1', 'plan_complete')]);
+    const p = startTui(onCommand, [makeItem('WL-TEST-1', 'plan_complete')], registry);
     await tick();
 
     dataHandler?.(Buffer.from('i')); // /skill:implement <id> single-key shortcut
@@ -195,7 +229,7 @@ describe('Code Freeze notice dialog — dismissal key handling (AC7)', () => {
   it('dismisses the dialog with Esc and returns to the list without dispatching', async () => {
     writeActiveFreezeMarker('ship release in progress');
     const onCommand = vi.fn();
-    const p = startTui(onCommand, [makeItem('WL-TEST-1', 'plan_complete')]);
+    const p = startTui(onCommand, [makeItem('WL-TEST-1', 'plan_complete')], registry);
     await tick();
 
     dataHandler?.(Buffer.from('i'));
@@ -226,7 +260,7 @@ describe('Code Freeze notice dialog — dismissal key handling (AC7)', () => {
   it('dismisses the dialog with Enter', async () => {
     writeActiveFreezeMarker();
     const onCommand = vi.fn();
-    const p = startTui(onCommand);
+    const p = startTui(onCommand, [], registry);
     await tick();
 
     dataHandler?.(Buffer.from('i'));
@@ -248,7 +282,7 @@ describe('Code Freeze notice dialog — dismissal key handling (AC7)', () => {
   it('dismisses the dialog with q without quitting the TUI', async () => {
     writeActiveFreezeMarker();
     const onCommand = vi.fn();
-    const p = startTui(onCommand);
+    const p = startTui(onCommand, [], registry);
     await tick();
 
     dataHandler?.(Buffer.from('i'));
@@ -277,7 +311,7 @@ describe('Code Freeze notice dialog — dismissal key handling (AC7)', () => {
   it('consumes every other key while the dialog is showing (modal)', async () => {
     writeActiveFreezeMarker();
     const onCommand = vi.fn();
-    const p = startTui(onCommand, [makeItem('WL-TEST-1', 'plan_complete')]);
+    const p = startTui(onCommand, [makeItem('WL-TEST-1', 'plan_complete')], registry);
     await tick();
 
     dataHandler?.(Buffer.from('i'));
@@ -310,7 +344,7 @@ describe('Code Freeze notice dialog — dismissal key handling (AC7)', () => {
   it('re-shows the dialog when implement is attempted again after dismissal (freeze persists)', async () => {
     writeActiveFreezeMarker();
     const onCommand = vi.fn();
-    const p = startTui(onCommand, [makeItem('WL-TEST-1', 'plan_complete')]);
+    const p = startTui(onCommand, [makeItem('WL-TEST-1', 'plan_complete')], registry);
     await tick();
 
     dataHandler?.(Buffer.from('i'));
@@ -339,7 +373,7 @@ describe('Code Freeze notice dialog — dismissal key handling (AC7)', () => {
   it('dispatches implement normally when not frozen (no dialog)', async () => {
     // No marker written → not frozen.
     const onCommand = vi.fn();
-    const p = startTui(onCommand, [makeItem('WL-TEST-1', 'plan_complete')]);
+    const p = startTui(onCommand, [makeItem('WL-TEST-1', 'plan_complete')], registry);
     await tick();
 
     dataHandler?.(Buffer.from('i'));
@@ -348,6 +382,32 @@ describe('Code Freeze notice dialog — dismissal key handling (AC7)', () => {
 
     expect(onCommand).toHaveBeenCalledWith('/skill:implement WL-TEST-1', 'code');
     expect(rawOutput()).not.toContain('CODE FREEZE');
+
+    dataHandler?.(Buffer.from('q'));
+    await p;
+  });
+
+  it('hides the blocked implement shortcut during a freeze with the real registry (no dialog, no dispatch)', async () => {
+    // The production shortcuts.json marks `i` as `code_freeze: "block"`
+    // (WL-0MSD81VEL009XHWA AC4) — during a freeze the shortcut is filtered
+    // from the registry, so pressing it does nothing: no dialog, no dispatch.
+    writeActiveFreezeMarker('ship release in progress');
+    const onCommand = vi.fn();
+    const p = startTui(onCommand, [makeItem('WL-TEST-1', 'plan_complete')], loadShortcutConfig());
+    await tick();
+
+    dataHandler?.(Buffer.from('i'));
+    await tick();
+    await tick();
+
+    expect(dialogShowing()).toBe(false);
+    expect(onCommand).not.toHaveBeenCalled();
+    // The TUI is still alive and interactive.
+    const writesBefore = writes.length;
+    dataHandler?.(Buffer.from('j'));
+    await tick();
+    await tick();
+    expect(writes.length).toBeGreaterThan(writesBefore);
 
     dataHandler?.(Buffer.from('q'));
     await p;

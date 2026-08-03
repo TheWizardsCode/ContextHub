@@ -48,7 +48,8 @@
     ],
     "label": "implement",
     "description": "Run the implement workflow on the selected work item",
-    "model": "code"
+    "model": "code",
+    "code_freeze": "block"
   },
   {
     "chord": [
