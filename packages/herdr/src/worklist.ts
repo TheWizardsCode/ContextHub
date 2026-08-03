@@ -2240,6 +2240,36 @@ export async function runWorklistTui(
   // Read keypresses
   process.stdin.on('data', onData);
 
+  // Resume poll — while the pane is hidden, visibility is polled on a short
+  // interval so the hidden → visible transition triggers an immediate
+  // doRefresh instead of waiting for the next refreshIntervalMs tick. The
+  // poll uses only herdr pane get (via the PollGate memoizer, TTL aligned
+  // with the poll interval) — never wl — preserving the zero-wl-when-hidden
+  // guarantee.
+  const RESUME_POLL_INTERVAL_MS = DEFAULT_POLL_GATE_TTL_MS;
+  let resumePollTimer: ReturnType<typeof setInterval> | undefined;
+
+  const stopResumePoll = (): void => {
+    if (resumePollTimer !== undefined) {
+      clearInterval(resumePollTimer);
+      resumePollTimer = undefined;
+    }
+  };
+
+  /** Start the resume poll (no-op when already running). */
+  const startResumePoll = (): void => {
+    if (resumePollTimer !== undefined) return;
+    resumePollTimer = setInterval(async () => {
+      if (await paneGate.visible()) {
+        // Hidden → visible transition: refresh immediately (with the
+        // "refreshed" notification) and let the normal cadence resume.
+        stopResumePoll();
+        panePaused = false;
+        doRefresh(true);
+      }
+    }, RESUME_POLL_INTERVAL_MS);
+  };
+
   // Auto-refresh timer — fetches fresh items on an interval. NOTE: this timer
   // does NOT run `wl sync`; the dedicated SyncTimer below is the single sync
   // source. Running sync from both timers caused a double-spawn per pane that
@@ -2251,8 +2281,10 @@ export async function runWorklistTui(
     refreshTimer = setInterval(async () => {
       if (!(await paneGate.visible())) {
         panePaused = true;
+        startResumePoll();
         return;
       }
+      stopResumePoll();
       panePaused = false;
       doRefresh(false);
     }, opts.refreshIntervalMs);
@@ -2270,8 +2302,10 @@ export async function runWorklistTui(
       onSync: async () => {
         if (!(await paneGate.visible())) {
           panePaused = true;
+          startResumePoll();
           return;
         }
+        stopResumePoll();
         panePaused = false;
         doSync(true); // ifIdle: skip when another sync is in-flight / lock held
         doRefresh(false);
@@ -2288,6 +2322,7 @@ export async function runWorklistTui(
     if (syncTimer !== undefined) {
       syncTimer.stop();
     }
+    stopResumePoll();
     cleanup();
     process.stdout.removeListener('resize', onResize);
     process.stdin.removeListener('data', onData);

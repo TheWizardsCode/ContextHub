@@ -399,5 +399,156 @@ describe('worklist TUI visibility gating — getExecFileAsync seam', () => {
   });
 });
 
+describe('worklist TUI visibility gating — hidden → visible transition (WL-0MSBVS4AS006ZQEZ)', () => {
+  /**
+   * Exec mock with a dynamic focused flag (read per pane-get call), so a
+   * test can flip the pane from hidden to visible mid-run.
+   */
+  function makeDynamicExecMock(getFocused: () => boolean | undefined, paneGetCalls?: { count: number }): Mock {
+    return vi.fn(async (bin: string, args: string[]) => {
+      if (bin === 'herdr' && args[0] === 'pane' && args[1] === 'get') {
+        if (paneGetCalls) paneGetCalls.count += 1;
+        const focused = getFocused();
+        if (focused === undefined) {
+          throw new Error('herdr: pane not found');
+        }
+        return {
+          stdout: JSON.stringify({ id: 'cli:pane:get', result: { pane: { focused } } }),
+          stderr: '',
+        };
+      }
+      if (args.includes('list') && args.includes('--status')) {
+        return { stdout: JSON.stringify({ count: 5 }), stderr: '' };
+      }
+      return { stdout: JSON.stringify({ workItems: [] }), stderr: '' };
+    });
+  }
+
+  it('hidden → visible transition triggers an immediate fetch outside the normal tick', async () => {
+    vi.useFakeTimers();
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    let paneFocused = false;
+    setExecFileAsync(makeDynamicExecMock(() => paneFocused) as any);
+
+    const fetcher = vi.fn().mockResolvedValue([]);
+    const p = runWorklistTui(fetcher, [], undefined, {
+      autoRefresh: true,
+      refreshIntervalMs: 30_000,
+      autoSync: false,
+      showHelpText: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    fetcher.mockClear();
+
+    // First refresh tick while hidden: skipped, pane pauses.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetcher).not.toHaveBeenCalled();
+
+    // Pane regains focus → the resume poll catches the transition and the
+    // list re-fetches immediately (t=32s, outside the 30s tick at t=60s).
+    paneFocused = true;
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    await quit(p);
+  });
+
+  it('while hidden the resume poll spawns only herdr pane get — never the fetcher', async () => {
+    vi.useFakeTimers();
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    const paneGetCalls = { count: 0 };
+    setExecFileAsync(makeDynamicExecMock(() => false, paneGetCalls) as any);
+
+    const fetcher = vi.fn().mockResolvedValue([]);
+    const p = runWorklistTui(fetcher, [], undefined, {
+      autoRefresh: true,
+      refreshIntervalMs: 30_000,
+      autoSync: false,
+      showHelpText: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    fetcher.mockClear();
+
+    // Hidden tick starts the resume poll; run several polls while still hidden.
+    await vi.advanceTimersByTimeAsync(30_000);
+    const execsAfterFirstTick = paneGetCalls.count;
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(paneGetCalls.count).toBeGreaterThan(execsAfterFirstTick); // pane-get polls only
+
+    await quit(p);
+  });
+
+  it('after the immediate transition refresh, refreshes follow the normal refreshIntervalMs cadence', async () => {
+    vi.useFakeTimers();
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    let paneFocused = false;
+    setExecFileAsync(makeDynamicExecMock(() => paneFocused) as any);
+
+    const fetcher = vi.fn().mockResolvedValue([]);
+    const p = runWorklistTui(fetcher, [], undefined, {
+      autoRefresh: true,
+      refreshIntervalMs: 30_000,
+      autoSync: false,
+      showHelpText: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    fetcher.mockClear();
+
+    // Two hidden refresh cycles (t=30s, t=60s): no fetches.
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetcher).not.toHaveBeenCalled();
+
+    // Become visible: immediate fetch via the resume poll (t=62s).
+    paneFocused = true;
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // No fetches until the next regular tick (t=90s), then every 30s.
+    await vi.advanceTimersByTimeAsync(27_000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1_000); // t=90s: regular tick
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(30_000); // t=120s: regular tick
+    expect(fetcher).toHaveBeenCalledTimes(3);
+
+    await quit(p);
+  });
+
+  it('the [paused — hidden] header indicator clears once the transition refresh completes', async () => {
+    vi.useFakeTimers();
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    let paneFocused = false;
+    setExecFileAsync(makeDynamicExecMock(() => paneFocused) as any);
+
+    const fetcher = vi.fn().mockResolvedValue([]);
+    const p = runWorklistTui(fetcher, [], undefined, {
+      autoRefresh: true,
+      refreshIntervalMs: 30_000,
+      autoSync: false,
+      showHelpText: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Hidden tick pauses the pane; a navigation render shows the indicator.
+    await vi.advanceTimersByTimeAsync(30_000);
+    writes.length = 0;
+    dataHandler?.(Buffer.from('j'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(writes.join('')).toContain('[paused — hidden]');
+
+    // Regain focus: the immediate transition refresh re-renders without it.
+    paneFocused = true;
+    writes.length = 0;
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(writes.join('')).not.toContain('[paused — hidden]');
+
+    await quit(p);
+  });
+});
+
 // Silence unused-var lint for showToast in the manual-sync assertion import.
 void showToast;

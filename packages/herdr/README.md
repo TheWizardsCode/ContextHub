@@ -141,7 +141,13 @@ process churn and memory pressure (WL-0MSB1N0HB0007N6N).
   fail-open), auto-refresh/auto-sync keep their existing intervals (30s /
   60s defaults).
 - **Header indicator** — while the pane is hidden the list header shows
-  `[paused — hidden]` so operators can tell gating is active.
+  `[paused — hidden]` so operators can tell gating is active; the indicator
+  clears as soon as the list refreshes after the pane becomes visible.
+- **Immediate refresh on resume** — while the pane is hidden a lightweight
+  resume poll (2s interval, `herdr pane get` only — never `wl`) watches for
+  the hidden → visible transition; the moment the tab regains focus the list
+  re-fetches immediately (with a "Refreshed" notification) instead of waiting
+  for the next 30s tick, then the normal cadence resumes.
 - **Never gated** — manual actions (navigation, `S` manual sync, shortcut
   chords, the initial data load) work regardless of pane visibility.
 - **Shared visibility check** — the `PollGate` TTL memoizer (~2s) makes the
