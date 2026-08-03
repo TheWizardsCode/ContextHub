@@ -10,6 +10,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The detail view metadata section additionally shows the review status (❌ needs review / ✅ reviewed) and the last audit timestamp.
 - **Chord shortcuts** — Multi-key chord sequences provide quick actions like updating priorities, stage/status, title, closing/deleting items, running workflows, and toggling review status (configurable via `shortcuts.json`)
 - **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is executed **visibly in a new herdr pane** (see `scripts/run-in-pane.sh`) so the user sees the command line and its output; the wrapper keeps the pane's process alive so the pane stays open for inspection — dismiss it with Enter or close it with `prefix+x`
+- **Command input form** — When a chord command contains unknown `<identifier>` placeholders (e.g. `!!wl update <id> --status <status> --stage <stage>`), the plugin shows a modal input form so you can fill in the values before the command runs. Known identifiers like `<id>` are still auto-substituted with the selected item's ID. The dialog is 80% of the pane width (40-column minimum), text wraps at the inner width, and the box grows downward as content is entered. See [Command input form](#command-input-form).
 - **Keyboard navigation** — Arrow keys or j/k to navigate (wraps at list boundaries), Page Up/Down, g/G for first/last, Enter to select, Escape to go back
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text.
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
@@ -183,6 +184,17 @@ show only items matching the selected stage.
 The "top N of M" header reflects the **actual displayed count** (N), which
 may exceed `browseItemCount` when the mandatory set is large.
 
+## Command input form
+
+When a chord shortcut resolves to a command that contains **unknown identifiers** — angle-bracket placeholders other than the known `<id>` (e.g. `--status <status>`, `--stage <stage>`, `--reason <reason>`) — the plugin displays a modal form overlay instead of dispatching the command directly:
+
+- One labeled input field per unknown identifier; `Tab`/`↑`/`↓` navigate between fields, `Enter` submits, `Esc` cancels.
+- The active field shows a block cursor at the end of its value; the typed value is substituted into the command on submit (`<id>` remains auto-substituted with the selected item's ID).
+- The dialog width is **80% of the pane width** (clamped to a 40-column minimum and to the pane width minus borders), and stays horizontally centered.
+- The description and field values **wrap at the dialog's inner width**; as a value wraps to more lines the dialog **expands downward**, bounded by the terminal height so it never overflows the pane.
+
+Rendering is ANSI-aware: visible width is measured by stripping SGR escape sequences (no external width/wrap dependencies).
+
 ## Architecture
 
 ```
@@ -197,6 +209,7 @@ packages/herdr/
 │   ├── shortcuts.json      # Shortcut/chord definitions
 │   ├── icons.ts            # Icon and colour helpers
 │   ├── code-freeze.ts      # Code Freeze marker detection (fail-open)
+│   ├── form-dialog.ts      # Form state + rendering for parameter input (unknown <identifiers>)
 │   ├── settings.ts         # User settings management
 │   └── worklist.ts         # List state, rendering, keyboard handling, command output
 ├── scripts/
@@ -222,6 +235,7 @@ packages/herdr/
 - **Free-form prompts via `/prompt:`** — Commands starting with `/prompt:` are also routed to the agent pane, but the `/prompt:` routing prefix is stripped before `send-to-pi.sh` runs, so pi receives only the bare prompt text (e.g. `pi "Review the current work item and suggest next steps"`). This lets a chord shortcut open a new pi instance with an arbitrary injected prompt, not just a skill/workflow invocation. The `o-p` chord provides a default `Review the current work item and suggest next steps` prompt; edit `src/shortcuts.json` to bind your own prompt text to any free chord.
 - **Correct project directory for new panes** — Panes created by `send-to-pi.sh`, `open-pi-agent.sh`, and `run-in-pane.sh` are started in the correct project root. Herdr's `follow` CWD policy would otherwise inherit the source pane's CWD (the plugin directory), so each script resolves a target CWD (`--cwd` arg > `HERDR_RESOLVED_CWD` > `$PWD`) and passes it to `herdr pane split --cwd`. The entry point passes the resolved worklog root (`wlRoot`) so skills, `wl` commands, and relative paths operate on the user's project rather than the plugin's installation directory.
 - **`<id>` placeholder resolution** — Before output, any `<id>` placeholders in the resolved command are replaced with the currently selected work item's ID. If no item is selected and the command requires `<id>`, the command is silently dropped (graceful no-op).
+- **Parameter input form** — Chord commands containing unknown `<identifier>` placeholders open a modal input form (`form-dialog.ts`) before dispatch. The dialog renders at 80% of the pane width (40-column minimum, centered), wraps the description and field values at its inner content width, and expands downward as content wraps — bounded by the terminal height. Every content line is padded to exactly the border width so the box borders stay aligned at any pane width (see WL-0MSAKRBOC005T320).
 - **Chord shortcut system** — Multi-key chord sequences are defined in `shortcuts.json` and resolved via `ShortcutRegistry`. Chords can be filtered by view (list/detail) and stage.
 
 ## Code Freeze

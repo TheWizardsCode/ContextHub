@@ -95,6 +95,100 @@ const ANSI = {
   cursorUp: (n: number) => `\x1b[${n}A`,
 };
 
+/** SGR escape sequence matcher (e.g. `\x1b[38;5;76m`). */
+const SGR_RE = /\x1b\[[0-9;]*m/g;
+
+/** Non-global matcher for testing whether a segment is an SGR sequence. */
+const IS_SGR_RE = /^\x1b\[[0-9;]*m$/;
+
+/**
+ * Measure the visible (displayed) width of a string, ignoring ANSI SGR
+ * sequences. Consistent with the convention used elsewhere in this package
+ * (e.g. `worklist.ts`) — no external width/wrap dependencies.
+ */
+function visibleWidth(content: string): number {
+  return content.replace(SGR_RE, '').length;
+}
+
+/**
+ * Wrap content at a visible width, preserving ANSI SGR styling.
+ *
+ * Text is wrapped greedily at the given width. When a line break falls
+ * inside a styled region, the open style codes are re-emitted at the start
+ * of the continuation line so wrapped text keeps its styling. ANSI codes
+ * themselves consume no width. `\n` in the input acts as a hard break.
+ */
+function wrapContent(content: string, width: number): string[] {
+  if (width < 1) return [content];
+  const segments = content.split(/(\x1b\[[0-9;]*m)/g).filter((s) => s !== '');
+  const lines: string[] = [];
+  let current = '';
+  let currentWidth = 0;
+  let openAnsi: string[] = [];
+
+  const flush = (): void => {
+    lines.push(current);
+    current = '';
+    currentWidth = 0;
+  };
+
+  for (const seg of segments) {
+    if (IS_SGR_RE.test(seg)) {
+      current += seg;
+      if (seg === ANSI.reset) openAnsi = [];
+      else openAnsi.push(seg);
+      continue;
+    }
+    for (const ch of seg) {
+      if (ch === '\n') {
+        flush();
+        current += openAnsi.join('');
+        continue;
+      }
+      if (currentWidth >= width) {
+        flush();
+        current += openAnsi.join('');
+        // Drop the whitespace that triggered the break so continuation
+        // lines do not start with a stray space (and stay within width).
+        if (/\s/.test(ch)) continue;
+      }
+      current += ch;
+      currentWidth += 1;
+    }
+  }
+  flush();
+  // Drop a trailing empty line produced by a trailing hard break.
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  return lines;
+}
+
+/**
+ * Truncate content to a maximum visible width, preserving ANSI styling and
+ * appending '…' when truncated. Used as a defensive guard in `padLine` so
+ * no content line can ever exceed the dialog border width.
+ */
+function truncateToWidth(content: string, maxWidth: number): string {
+  if (visibleWidth(content) <= maxWidth) return content;
+  const segments = content.split(/(\x1b\[[0-9;]*m)/g).filter((s) => s !== '');
+  let out = '';
+  let remaining = Math.max(0, maxWidth - 1); // reserve room for '…'
+  let hasOpenStyle = false;
+  for (const seg of segments) {
+    if (IS_SGR_RE.test(seg)) {
+      out += seg;
+      if (seg === ANSI.reset) hasOpenStyle = false;
+      else hasOpenStyle = true;
+      continue;
+    }
+    if (remaining <= 0) break;
+    const take = seg.slice(0, remaining);
+    out += take;
+    remaining -= take.length;
+  }
+  if (hasOpenStyle) out += ANSI.reset;
+  return `${out}…`;
+}
+
 // ── FormState ─────────────────────────────────────────────────────────
 
 /**
@@ -218,46 +312,65 @@ export class FormState {
    * The overlay has a border box, description header, labeled input fields
    * (with active field highlighted), and submit/cancel instructions.
    *
+   * The dialog width is 80% of the pane width (clamped to a 40-column
+   * minimum and to the pane width minus borders), the description and field
+   * values wrap at the inner content width, and the box grows downward as
+   * wrapped content grows — bounded by `maxRows` so it never overflows the
+   * terminal. Every content line is padded to exactly the border width.
+   *
    * @param maxCols - Terminal width
    * @param maxRows - Terminal height
    * @returns The rendered overlay string, ready for stdout
    */
   render(maxCols: number, maxRows: number): string {
-    const lines: string[] = [];
-    const dialogWidth = Math.min(maxCols - 4, 60);
-    const dialogMinWidth = 40;
-    const effectiveWidth = Math.max(dialogMinWidth, dialogWidth);
+    // ── Width: 80% of the pane width, clamped ───────────────────────
+    const minWidth = 40;
+    const maxWidth = Math.max(minWidth, maxCols - 4);
+    const effectiveWidth = Math.min(
+      Math.max(Math.floor(maxCols * 0.8), minWidth),
+      maxWidth,
+    );
     const leftPad = Math.max(0, Math.floor((maxCols - effectiveWidth) / 2));
+    const innerWidth = effectiveWidth - 4; // `│ ` + content + ` │`
 
     const padLine = (content: string): string => {
-      const visibleLen = content.replace(/\x1b\[[0-9;]*m/g, '').length;
-      const padding = effectiveWidth - visibleLen - 2; // 2 for border spaces
-      const rightPad = Math.max(0, padding);
-      return ' '.repeat(leftPad) + `│ ${content}${' '.repeat(rightPad)} │`;
+      const truncated = truncateToWidth(content, innerWidth);
+      const visibleLen = visibleWidth(truncated);
+      // 4 non-content columns: `│ ` left border + ` │` right border.
+      const rightPad = Math.max(0, effectiveWidth - visibleLen - 4);
+      return (
+        ' '.repeat(leftPad) +
+        `│ ${truncated}${' '.repeat(rightPad)} │`
+      );
     };
 
     const borderLine = (left: string, right: string): string => {
       return ' '.repeat(leftPad) + `${left}${'─'.repeat(effectiveWidth - 2)}${right}`;
     };
 
+    // Row budget for the content between the two borders (border lines and
+    // one blank line above/below the box are outside the budget).
+    const availableRows = Math.max(5, maxRows - 4);
+    const content: string[] = [];
+    const pushContent = (c: string): void => {
+      if (content.length < availableRows) content.push(c);
+    };
+
     // ── Build form content ────────────────────────────────────────
 
-    lines.push('');
-
-    // Top border
-    lines.push(borderLine('┌', '┐'));
-
     // Title
-    lines.push(padLine(`${ANSI.bold}${ANSI.fg(76)}⌨ Command Input${ANSI.reset}`));
-    lines.push(padLine(''));
+    pushContent(`${ANSI.bold}${ANSI.fg(76)}⌨ Command Input${ANSI.reset}`);
+    pushContent('');
 
-    // Description
-    const descLine = ` ${ANSI.fg(33)}${this.description}${ANSI.reset}`;
-    lines.push(padLine(descLine));
+    // Description — wrapped at the inner width
+    const descContent = ` ${ANSI.fg(33)}${this.description}${ANSI.reset}`;
+    for (const dl of wrapContent(descContent, innerWidth)) {
+      pushContent(dl);
+    }
 
     // Separator
-    lines.push(padLine(` ${ANSI.dim}${'─'.repeat(Math.min(effectiveWidth - 6, 40))}${ANSI.reset}`));
-    lines.push(padLine(''));
+    pushContent(` ${ANSI.dim}${'─'.repeat(Math.min(effectiveWidth - 6, 40))}${ANSI.reset}`);
+    pushContent('');
 
     // Fields
     for (let i = 0; i < this.fields.length; i++) {
@@ -268,47 +381,82 @@ export class FormState {
       const labelPrefix = isActive ? `${ANSI.fg(76)}▶${ANSI.reset} ` : '  ';
       const labelStyle = isActive ? `${ANSI.bold}${ANSI.fg(76)}` : `${ANSI.dim}`;
       const labelLine = `${labelPrefix}${labelStyle}${field.name}:${ANSI.reset}`;
-      lines.push(padLine(labelLine));
+      pushContent(labelLine);
 
-      // Value line — show the typed value with cursor indicator
+      // Value lines — wrapped; the active field reserves one column for
+      // the cursor indicator so the last line stays within the border.
+      // The 2-column indent is part of the rendered line, so the wrap
+      // width for the text itself is `innerWidth - 2` (minus one more
+      // column for the active field's cursor).
       const displayValue = field.value || '';
-      const cursorStyle = isActive ? `${ANSI.reverse} ${ANSI.reset}` : ' ';
-      const valueDisplay = isActive
-        ? `${displayValue}${cursorStyle}`
-        : `${displayValue}${' '.repeat(Math.max(1, 10 - displayValue.length))}`;
       const valueStyle = isActive ? `${ANSI.fg(33)}` : `${ANSI.dim}`;
-      const valueLine = `  ${valueStyle}${valueDisplay}${ANSI.reset}`;
-      lines.push(padLine(valueLine));
+      const wrapWidth = isActive
+        ? Math.max(1, innerWidth - 3)
+        : Math.max(1, innerWidth - 2);
+      let valueLines = wrapContent(
+        `${valueStyle}${displayValue}${ANSI.reset}`,
+        wrapWidth,
+      );
+      if (valueLines.length === 0) valueLines = [''];
+
+      const shown: string[] = [];
+      for (const vl of valueLines) {
+        if (content.length >= availableRows) break;
+        content.push(`  ${vl}`);
+        shown.push(vl);
+      }
+
+      if (shown.length > 0) {
+        const lastIdx = content.length - 1;
+        // Truncation marker when the row budget clipped wrapped lines.
+        if (shown.length < valueLines.length) {
+          content[lastIdx] = truncateToWidth(`${content[lastIdx]}…`, innerWidth);
+        }
+        // Cursor indicator (active) / minimum field width (inactive) on
+        // the last shown line.
+        if (isActive) {
+          content[lastIdx] = `${content[lastIdx]}${ANSI.reverse} ${ANSI.reset}`;
+        } else {
+          const vis = visibleWidth(content[lastIdx]);
+          const pad = Math.min(
+            Math.max(0, 10 - vis),
+            Math.max(0, innerWidth - vis),
+          );
+          content[lastIdx] = `${content[lastIdx]}${' '.repeat(pad)}`;
+        }
+      }
 
       // Blank line between fields
       if (i < this.fields.length - 1) {
-        lines.push(padLine(''));
+        pushContent('');
       }
     }
 
-    // Separator
-    lines.push(padLine(''));
-    lines.push(padLine(` ${ANSI.dim}${'─'.repeat(Math.min(effectiveWidth - 6, 40))}${ANSI.reset}`));
+    // Bottom separator
+    pushContent('');
+    pushContent(` ${ANSI.dim}${'─'.repeat(Math.min(effectiveWidth - 6, 40))}${ANSI.reset}`);
 
-    // Instructions
-    lines.push(padLine(''));
-    const instructionLine = `${ANSI.dim}[Tab/↑↓] navigate  [Enter] submit  [Esc] cancel${ANSI.reset}`;
-    lines.push(padLine(instructionLine));
+    // Instructions (short form on narrow dialogs so the hint fits)
+    pushContent('');
+    const fullHint = '[Tab/↑↓] navigate  [Enter] submit  [Esc] cancel';
+    const shortHint = '[Tab] next [Enter] ok [Esc] cancel';
+    const hint = visibleWidth(fullHint) <= innerWidth ? fullHint : shortHint;
+    pushContent(`${ANSI.dim}${hint}${ANSI.reset}`);
 
-    // Bottom border
+    // ── Assemble the box ──────────────────────────────────────────
+    const lines: string[] = [''];
+    lines.push(borderLine('┌', '┐'));
+    for (const c of content) lines.push(padLine(c));
     lines.push(borderLine('└', '┘'));
     lines.push('');
 
-    // Calculate total lines used
-    const totalLines = lines.length;
-
-    // If there's room below the dialog, add blank lines to fill
-    const remaining = Math.max(0, maxRows - totalLines);
+    // Fill remaining rows with blank lines (never exceeding maxRows).
+    const remaining = Math.max(0, maxRows - lines.length);
     for (let i = 0; i < remaining; i++) {
       lines.push('');
     }
 
-    return lines.join('\n');
+    return lines.slice(0, maxRows).join('\n');
   }
 }
 
