@@ -10,6 +10,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { currentSettings } from './settings.js';
 import { selectWorkItems } from './smart-selection.js';
+import { regroupWorkItems } from './grouping.js';
 
 // Promisify lazily inside the call site rather than at module scope.
 // ESM named imports are live bindings, but `promisify(execFile)` snapshots
@@ -173,7 +174,15 @@ export const NOT_INITIALIZED_FRIENDLY =
 
 // ── CLI execution ─────────────────────────────────────────────────────
 
-export async function runWl(args: string[], includeJson = true): Promise<string> {
+/**
+ * Default timeout (ms) for `wl`/`worklog` CLI invocations via runWl.
+ * A sync hung on the file lock previously hung forever (no timeout); this
+ * bounds every call so a stuck `wl sync` cannot persist indefinitely
+ * (lock-storm prevention, WL-0MSAB7ZUC004SK7E). Overridable via env.
+ */
+export const DEFAULT_WL_TIMEOUT_MS = Number(process.env.WL_RUN_TIMEOUT_MS) || 60_000;
+
+export async function runWl(args: string[], includeJson = true, timeoutMs: number = DEFAULT_WL_TIMEOUT_MS): Promise<string> {
   const binaries = ['wl', 'worklog'];
   let lastError: unknown;
 
@@ -181,12 +190,23 @@ export async function runWl(args: string[], includeJson = true): Promise<string>
     try {
       const fullArgs = includeJson ? [...args, '--json'] : args;
       const execFileAsync = promisify(execFile);
-      const result = await execFileAsync(binary, fullArgs, { maxBuffer: 1024 * 1024 * 5 });
+      const result = await execFileAsync(binary, fullArgs, {
+        maxBuffer: 1024 * 1024 * 5,
+        timeout: timeoutMs,
+      });
       return result.stdout;
     } catch (error: any) {
       if (error && error.code === 'ENOENT') {
         lastError = error;
         continue;
+      }
+
+      // execFile kills the child and rejects with killed/signal set when the
+      // timeout fires. Surface a clear, actionable message instead of the
+      // raw "Command failed" error.
+      if (error && (error.killed === true || error.signal || error.code === 'ETIMEDOUT')) {
+        const cmd = `${binary} ${args.join(' ')}`;
+        throw new Error(`Command timed out after ${timeoutMs}ms: ${cmd}. The worklog file lock may be contended; a sync may already be running.`);
       }
 
       const stderr = typeof error?.stderr === 'string' ? error.stderr.trim() : '';
@@ -262,7 +282,11 @@ export function createDefaultListWorkItems(
     // the "other" items to fill the remaining count slots.
     const mandatory = await fetchMandatorySubsets(run);
     const merged = mergeUniqueById(items, mandatory);
-    return selectWorkItems(merged, itemCount);
+    const selected = selectWorkItems(merged, itemCount);
+    // Regroup the final selected set so every displayed item (mandatory wl
+    // list items included) receives a correct group assignment and no
+    // duplicate section headings render (WL-0MSAK8YLB0025EGW).
+    return regroupWorkItems(selected);
   };
 }
 
@@ -339,7 +363,10 @@ export function createDefaultListWorkItemsDb(
       );
 
       const merged = mergeUniqueById(regular, mandatory);
-      return selectWorkItems(merged, itemCount);
+      const selected = selectWorkItems(merged, itemCount);
+      // Regroup so every displayed item receives a correct group assignment
+      // (WL-0MSAK8YLB0025EGW) — mirror of the CLI-backed path above.
+      return regroupWorkItems(selected);
     } catch {
       return defaultListWorkItems();
     }

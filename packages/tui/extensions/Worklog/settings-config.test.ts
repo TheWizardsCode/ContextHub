@@ -14,6 +14,7 @@ import { WorklogConfig } from './config.js';
 const mockReadFileSync = vi.hoisted(() => vi.fn());
 const mockWriteFileSync = vi.hoisted(() => vi.fn());
 const mockMkdirSync = vi.hoisted(() => vi.fn());
+const mockExistsSync = vi.hoisted(() => vi.fn(() => false));
 
 // Track fs.watch calls for testing
 const mockWatchClose = vi.hoisted(() => vi.fn());
@@ -27,6 +28,7 @@ vi.mock('node:fs', () => ({
   readFileSync: mockReadFileSync,
   writeFileSync: mockWriteFileSync,
   mkdirSync: mockMkdirSync,
+  existsSync: mockExistsSync,
   watch: mockWatch,
 }));
 
@@ -417,6 +419,7 @@ describe('WorklogConfig — hot-reload foundation', () => {
     mockReadFileSync.mockReset();
     mockWriteFileSync.mockReset();
     mockMkdirSync.mockReset();
+    mockExistsSync.mockReset();
     mockWatch.mockReset();
     mockWatchClose.mockReset();
     mockWatchListeners.length = 0;
@@ -792,6 +795,7 @@ describe('WorklogConfig — runtime settings updates', () => {
     mockReadFileSync.mockReset();
     mockWriteFileSync.mockReset();
     mockMkdirSync.mockReset();
+    mockExistsSync.mockReset();
 
     // Default: all settings files missing
     mockReadFileSync.mockImplementation(() => {
@@ -928,6 +932,7 @@ describe('WorklogConfig — config validation', () => {
     mockReadFileSync.mockReset();
     mockWriteFileSync.mockReset();
     mockMkdirSync.mockReset();
+    mockExistsSync.mockReset();
 
     // Default: all settings files missing
     mockReadFileSync.mockImplementation(() => {

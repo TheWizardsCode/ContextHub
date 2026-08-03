@@ -31,6 +31,7 @@ vi.mock('node:fs', () => ({
   writeFileSync: mockWriteFileSync,
   mkdirSync: mockMkdirSync,
   realpathSync: vi.fn((p) => p),
+  existsSync: vi.fn(() => false),
 }));
 
 vi.mock('@earendil-works/pi-coding-agent', () => ({

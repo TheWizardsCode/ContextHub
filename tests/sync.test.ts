@@ -3,11 +3,14 @@
  * These tests focus on the complex merge logic with conflict resolution
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { mergeWorkItems, mergeComments } from '../src/sync.js';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { mergeWorkItems, mergeComments, assertDataFileInCwdRepo } from '../src/sync.js';
+import { performSync } from '../src/commands/sync.js';
 import { isDefaultValue } from '../src/sync/merge-utils.js';
 import { WorklogDatabase } from '../src/database.js';
 
@@ -1188,6 +1191,79 @@ describe('Sync Operations', () => {
       // Local version should be preserved
       expect(result.merged[0].author).toBe('Alice');
       expect(result.merged[0].comment).toBe('Local version');
+    });
+  });
+
+  describe('cross-project sync guard (WL-0MSAH26DD001XXST)', () => {
+    let repoA: string;
+    let repoB: string;
+    let origCwd: string;
+
+    beforeEach(() => {
+      origCwd = process.cwd();
+      repoA = mkdtempSync(path.join(tmpdir(), 'wl-guard-a-'));
+      repoB = mkdtempSync(path.join(tmpdir(), 'wl-guard-b-'));
+      // Mock git (tests/cli/mock-bin) treats a .git dir as a repo root.
+      for (const repo of [repoA, repoB]) {
+        fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+        fs.mkdirSync(path.join(repo, '.worklog'), { recursive: true });
+      }
+    });
+
+    afterEach(() => {
+      process.chdir(origCwd);
+      try { rmSync(repoA, { recursive: true, force: true }); } catch { /* ignore */ }
+      try { rmSync(repoB, { recursive: true, force: true }); } catch { /* ignore */ }
+    });
+
+    it('passes when the data file lives inside the cwd repo', async () => {
+      process.chdir(repoA);
+      const dataFile = path.join(repoA, '.worklog', 'worklog-data.jsonl');
+      await expect(assertDataFileInCwdRepo(dataFile)).resolves.toBeUndefined();
+    });
+
+    it('blocks when the data file belongs to a different repo (cross-project merge)', async () => {
+      process.chdir(repoA);
+      const foreignDataFile = path.join(repoB, '.worklog', 'worklog-data.jsonl');
+      await expect(assertDataFileInCwdRepo(foreignDataFile)).rejects.toThrow(
+        /Cross-project sync blocked/
+      );
+      await expect(assertDataFileInCwdRepo(foreignDataFile)).rejects.toThrow(/WL-0MSAH26DD001XXST/);
+    });
+
+    it('blocks when the data file is not inside any git repo but cwd is', async () => {
+      process.chdir(repoA);
+      const nonRepoDir = mkdtempSync(path.join(tmpdir(), 'wl-guard-nonrepo-'));
+      try {
+        const dataFile = path.join(nonRepoDir, '.worklog', 'worklog-data.jsonl');
+        await expect(assertDataFileInCwdRepo(dataFile)).rejects.toThrow(
+          /Cross-project sync blocked/
+        );
+      } finally {
+        try { rmSync(nonRepoDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
+    });
+
+    it('reproduces the original scenario: sync with --worklog-dir at another repo fails before any DB work', async () => {
+      process.chdir(repoA);
+      const foreignDataFile = path.join(repoB, '.worklog', 'worklog-data.jsonl');
+      let dbOpened = false;
+      const getDatabase = () => {
+        dbOpened = true;
+        throw new Error('getDatabase should not be called — the cross-project guard must fail first');
+      };
+      await expect(
+        performSync(foreignDataFile, getDatabase, {
+          file: foreignDataFile,
+          prefix: 'TEST',
+          gitRemote: 'origin',
+          gitBranch: 'refs/worklog/data',
+          push: false,
+          dryRun: false,
+        })
+      ).rejects.toThrow(/Cross-project sync blocked/);
+      // No merge happened: the database (the merge target) was never opened.
+      expect(dbOpened).toBe(false);
     });
   });
 });

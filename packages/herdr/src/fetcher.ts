@@ -10,6 +10,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { selectWorkItems } from './smart-selection.js';
+import { regroupWorkItems } from './grouping.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -79,6 +80,15 @@ export function resetWorklogDir(): void {
  */
 export function setExecFileAsync(mock: typeof execFileAsync): void {
   execFileAsync = mock;
+}
+
+/**
+ * Return the current execFileAsync implementation. Lets other modules
+ * (e.g. visibility.ts) share the same injectable exec seam used by tests,
+ * so mocks installed via setExecFileAsync() apply to those modules too.
+ */
+export function getExecFileAsync(): typeof execFileAsync {
+  return execFileAsync;
 }
 
 /**
@@ -253,7 +263,7 @@ function extractItems(payload: unknown): WorkItem[] {
 
 const CLI_BINARIES = ['wl', 'worklog'];
 
-async function runWl(args: string[], includeJson = true): Promise<string> {
+async function runWl(args: string[], includeJson = true, timeoutMs?: number): Promise<string> {
   let lastError: unknown;
 
   for (const binary of CLI_BINARIES) {
@@ -273,6 +283,7 @@ async function runWl(args: string[], includeJson = true): Promise<string> {
 
       const result = await execFileAsync(binary, fullArgs, {
         maxBuffer: 1024 * 1024 * 5,
+        ...(timeoutMs !== undefined ? { timeout: timeoutMs } : {}),
       });
       return result.stdout;
     } catch (error: any) {
@@ -373,7 +384,11 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
   // limit only the "other" items to fill the remaining count slots.
   const mandatory = await fetchMandatorySubsets();
   const merged = mergeUniqueById(items, mandatory);
-  return selectWorkItems(merged, count);
+  const selected = selectWorkItems(merged, count);
+  // Regroup the final selected set so every displayed item (mandatory wl
+  // list items included) receives a correct group assignment and no
+  // duplicate section headings render (WL-0MSAK8YLB0025EGW).
+  return regroupWorkItems(selected);
 }
 
 /**
@@ -443,4 +458,42 @@ export async function fetchChildrenForItem(parentId: string): Promise<WorkItem[]
   const payload = extractJson(output);
   const items = extractItems(payload);
   return items.map((item) => ({ ...item, depth: 1 }));
+}
+
+// ── Work-item claiming ────────────────────────────────────────────────
+
+/**
+ * Result of a work-item claim (status → in_progress) attempt.
+ */
+export interface ClaimResult {
+  success: boolean;
+  error?: string;
+}
+
+/**
+ * Timeout for claim status updates so a hung `wl` CLI cannot delay the
+ * agent pane from opening (AC2: failures must not block the pane).
+ */
+const CLAIM_TIMEOUT_MS = 3000;
+
+/**
+ * Claim a work item before dispatching an agent command: set its status
+ * to `in_progress` with the given assignee, matching the claim pattern
+ * documented in AGENTS.md. Targets the configured worklog database via
+ * `--worklog-dir` when set.
+ *
+ * Never throws — failures are returned so callers can log them without
+ * blocking the agent pane from opening.
+ */
+export async function claimWorkItem(id: string, assignee: string): Promise<ClaimResult> {
+  try {
+    await runWl(
+      ['update', id, '--status', 'in_progress', '--assignee', assignee],
+      true,
+      CLAIM_TIMEOUT_MS,
+    );
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message ?? String(err) };
+  }
 }

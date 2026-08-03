@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { createPluginContext } from '../../src/cli-utils.js';
+import { applyWorklogDirOverrideFromArgv, setWorklogDirOverride } from '../../src/worklog-paths.js';
 // Import the shared throttler so the in-process harness can wait for any
 // scheduled GitHub tasks to drain when a parse timeout occurs. Accessing the
 // instance here is a pragmatic test-harness-only measure to avoid closing
@@ -142,6 +143,11 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
   // unless all connections are explicitly closed.
   const openDatabases: Array<{ close(): void }> = [];
 
+  // Mirror src/cli.ts: apply --worklog-dir from argv BEFORE creating the
+  // plugin context so ctx.dataPath (and -f/--file defaults) reflect the
+  // override (WL-0MSAH26DD001XXST).
+  applyWorklogDirOverrideFromArgv(args);
+
   try {
     const program = new Command();
     // Configure global options to match src/cli.ts so --json/--verbose/etc are recognized
@@ -152,7 +158,8 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
       .option('--json', 'Output in JSON format (machine-readable)')
       .option('--verbose', 'Show verbose output including debug messages')
       .option('-F, --format <format>', 'Human display format (choices: concise|normal|full|raw)')
-      .option('-w, --watch [seconds]', 'Rerun the command every N seconds (default: 5)');
+      .option('-w, --watch [seconds]', 'Rerun the command every N seconds (default: 5)')
+      .option('--worklog-dir <path>', 'Explicit path to .worklog directory (bypasses automatic directory resolution)');
 
     const ctx = createPluginContext(program);
     // Wrap getDatabase to track instances for cleanup
@@ -175,6 +182,12 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
        program.hook('preAction', (thisCommand: any, actionCommand: any) => {
         const name = actionCommand?.name?.() || thisCommand.name?.() || (thisCommand._name ?? '(unknown)');
         const opts = typeof actionCommand?.opts === 'function' ? actionCommand.opts() : (thisCommand.opts ? thisCommand.opts() : {});
+        // Mirror src/cli.ts preAction: apply/clear the --worklog-dir override
+        // from commander's parsed options so path resolution stays consistent.
+        if (opts && typeof opts === 'object' && 'worklogDir' in opts) {
+          if (opts.worklogDir) setWorklogDirOverride(opts.worklogDir);
+          else setWorklogDirOverride(undefined);
+        }
         lastActionName = name;
         lastActionOpts = opts || {};
       });

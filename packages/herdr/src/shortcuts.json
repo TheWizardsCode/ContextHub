@@ -3,7 +3,7 @@
     "chord": [
       "c"
     ],
-    "command": "/intake",
+    "command": "/intake <description>",
     "view": "both",
     "label": "create new",
     "description": "Create a new work item with a description and priority."
@@ -50,7 +50,7 @@
     "chord": [
       "r"
     ],
-    "command": "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>'",
+    "command": "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>' --author <author>",
     "view": "both",
     "label": "Producer Review",
     "description": "Toggle the 'Needs Producer Review' flag."
@@ -59,7 +59,7 @@
     "chord": [
       "s"
     ],
-    "command": "!!wl search ",
+    "command": "!!wl search <search_term>",
     "view": "both",
     "label": "Search",
     "description": "Search all workitems for keyword(s)."
@@ -162,7 +162,7 @@
       "u",
       "t"
     ],
-    "command": "!!wl update <id> --title",
+    "command": "!!wl update <id> --title <title>",
     "view": "both",
     "label": "update title",
     "description": "Update the title of the selected work item"
@@ -186,6 +186,16 @@
     "view": "both",
     "label": "close deleted",
     "description": "Delete the work item."
+  },
+  {
+    "chord": [
+      "o",
+      "p"
+    ],
+    "command": "/prompt:Review the current work item and suggest next steps",
+    "view": "both",
+    "label": "open pi prompt",
+    "description": "Open a new Pi agent pane with a free-form prompt."
   },
   {
     "chord": [

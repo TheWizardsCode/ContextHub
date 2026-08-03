@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as childProcess from 'child_process';
-import { acquireFileLock, releaseFileLock, withFileLock, getLockPathForJsonl, isFileLockHeld, _resetLockState, formatLockAge, sleepSync } from '../src/file-lock.js';
+import { acquireFileLock, releaseFileLock, withFileLock, getLockPathForJsonl, isFileLockHeld, _resetLockState, formatLockAge, sleepSync, LockBusyError } from '../src/file-lock.js';
 import type { FileLockInfo } from '../src/file-lock.js';
 import { createTempDir, cleanupTempDir } from './test-utils.js';
 
@@ -246,6 +246,80 @@ describe('file-lock', () => {
       expect(() => {
         withFileLock(lockPath, () => {}, { timeout: 100 });
       }).toThrow(/Failed to acquire file lock/);
+    });
+  });
+
+  describe('skipIfLocked (--if-idle lock-aware guard)', () => {
+    it('should throw LockBusyError immediately when lock is held by a live process', () => {
+      // Lock held by the current (live) process
+      const lockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
+
+      const start = Date.now();
+      expect(() => {
+        acquireFileLock(lockPath, { skipIfLocked: true, timeout: 30000 });
+      }).toThrow(LockBusyError);
+      // Must NOT wait for the 30s timeout — fails fast
+      expect(Date.now() - start).toBeLessThan(1000);
+    });
+
+    it('should throw LockBusyError from withFileLock when skipIfLocked and lock held', () => {
+      const lockInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(lockInfo));
+
+      const start = Date.now();
+      expect(() => {
+        withFileLock(lockPath, () => { throw new Error('should not run'); }, { skipIfLocked: true, timeout: 30000 });
+      }).toThrow(LockBusyError);
+      expect(Date.now() - start).toBeLessThan(1000);
+    });
+
+    it('should acquire immediately when lock is free and skipIfLocked is set', () => {
+      expect(() => {
+        acquireFileLock(lockPath, { skipIfLocked: true, timeout: 30000 });
+      }).not.toThrow();
+      expect(fs.existsSync(lockPath)).toBe(true);
+      releaseFileLock(lockPath);
+    });
+
+    it('should still clean up a stale lock from a dead process when skipIfLocked is set', () => {
+      const staleLockInfo: FileLockInfo = {
+        pid: 999999, // Very unlikely to be a real PID
+        hostname: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(staleLockInfo));
+
+      // Stale cleanup runs before the busy check, so acquisition succeeds
+      expect(() => {
+        acquireFileLock(lockPath, { skipIfLocked: true, timeout: 5000 });
+      }).not.toThrow();
+      const content = fs.readFileSync(lockPath, 'utf-8');
+      const info: FileLockInfo = JSON.parse(content);
+      expect(info.pid).toBe(process.pid);
+      releaseFileLock(lockPath);
+    });
+
+    it('should still remove an age-expired lock when skipIfLocked is set', () => {
+      const expiredInfo: FileLockInfo = {
+        pid: process.pid, // alive, but lock is older than maxLockAge
+        hostname: os.hostname(),
+        acquiredAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(), // 10 min old
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(expiredInfo));
+
+      expect(() => {
+        acquireFileLock(lockPath, { skipIfLocked: true, timeout: 5000, maxLockAge: 300000 });
+      }).not.toThrow();
+      releaseFileLock(lockPath);
     });
   });
 

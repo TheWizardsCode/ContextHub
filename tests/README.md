@@ -241,6 +241,17 @@ The E2E tests in `tests/e2e/agent-flow.test.ts` verify:
 - `runWl` CLI integration layer with real `wl` commands
 - Full chat pane to wl CLI pipeline for create/update flows
 
+The E2E tests in `tests/e2e/headless-tui.test.ts` exercise the **built** CLI
+(`dist/cli.js`) with `wl list`/`next`/`show`, plus TUI module loading. They
+require a build first (`npm run build`) and self-initialize the worklog
+(`.worklog/initialized`) in a `beforeAll` hook so they can be run in isolation:
+
+```bash
+# Build, then run headless TUI E2E tests
+npm run build
+npx vitest run tests/e2e/headless-tui.test.ts
+```
+
 These tests are also gated in CI via `.github/workflows/install-and-smoke-test.yml`.
 
 Guidance for authors

@@ -87,7 +87,7 @@ describe('github push synced items output', () => {
       try {
         const { stdout } = await execAsync(
           `tsx ${cliPath} --verbose github push --repo owner/name`,
-          { cwd: state.tempDir, timeout: 55000 }
+          { cwd: state.tempDir, timeout: 170000 }
         );
 
         expect(stdout).toContain('GitHub sync complete');
@@ -112,5 +112,8 @@ describe('github push synced items output', () => {
     } finally {
       leaveTempDir(state);
     }
-  });
+  }, 180000); // Generous explicit timeout: the in-process CLI run can take >60s on
+              // heavily loaded dev boxes (tsx + github push + mock gh spawns), which
+              // exceeds the 30s global testTimeout. The non-verbose sibling test
+              // above sets an explicit 60s timeout for the same reason.
 });

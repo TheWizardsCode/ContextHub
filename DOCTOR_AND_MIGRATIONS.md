@@ -71,6 +71,35 @@ Notes on GitHub-linked items:
 
 JSON output from `--json` includes a `skippedIds` array when such items are detected during a dry-run or actual prune.
 
+### Detecting foreign work items (`wl doctor foreign-items`)
+
+Reports work items whose ID prefix does not match the project's configured prefix (from `.worklog/config.yaml`). This is used to detect cross-project worklog pollution: a work item is *foreign* when the substring before the first `-` in its ID differs from the configured prefix (e.g. `WL-` items in a `SA` project). IDs without a `-` separator cannot be classified and are left alone.
+
+```bash
+# Report foreign items (read-only; default)
+wl doctor foreign-items --dry-run
+
+# JSON output for scripting
+wl doctor foreign-items --dry-run --json
+
+# Override the prefix used for classification
+wl doctor foreign-items --prefix SA
+
+# Hard-delete all foreign items (destructive; explicit opt-in required)
+wl doctor foreign-items --apply
+
+# Clean the DB and rewrite the remote worklog ref so it contains only own items
+wl doctor foreign-items --apply --push
+```
+
+The report includes total items scanned, the foreign count, counts grouped by prefix, the deleted/non-deleted breakdown, and the full list of foreign IDs. Dry-run mode never modifies the database.
+
+`--apply` hard-deletes every foreign item with full cascade: the work item row, its comments, dependency edges referencing it, its `audit_results` row, and its FTS index entry. Own items are never touched. The result reports before/after totals, per-prefix removed counts, and any errors. Run `--dry-run` first to preview exactly what will be removed.
+
+See [docs/CROSS_PROJECT_POLLUTION_CLEANUP.md](docs/CROSS_PROJECT_POLLUTION_CLEANUP.md) for the full usage guide, recommended workflow, and the pollution-source sweep findings.
+
+Adding `--push` rewrites the project's remote worklog ref (`origin refs/worklog/data`, or the configured `syncBranch`) so it contains only the project's own items, bypassing the polluted remote history entirely (a fresh orphan commit is force-pushed and the local tracking ref is updated to match). `--push` requires `--apply` — rewriting the ref without cleaning the DB would publish foreign items. After the push, a subsequent `wl sync` pulls the clean ref and cannot re-import foreign items.
+
 ## Backups
 
 When `wl doctor upgrade` applies migrations, it automatically:

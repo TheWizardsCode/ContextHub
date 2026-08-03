@@ -51,3 +51,4 @@ These rules are configured via GitHub's UI:
 
 - Incident: WL-0MRCTZZ82000X7TM (RCA: wl sync pre-push hook destroyed repository)
 - Hook fixes: Same work item — `.githooks/pre-push`, `.githooks/post-merge`, `.githooks/post-rewrite`, `.githooks/post-checkout`, `.githooks/worklog-post-pull`, `.git/hooks/pre-push`, `.git/hooks/worklog-post-pull`
+- Worktree data-loss incident: WL-0MS99Y6R40028Q9G — the post-checkout/post-pull hooks ran `wl sync` inside git worktrees (git exports `GIT_DIR` to hooks, redirecting `wl sync`'s temp-worktree git commands to the caller's worktree), producing destructive commits that deleted tracked files on worktree branches. Fixed by (a) adding the worktree-skip guard to `post-checkout` and `worklog-post-pull` (matching the pre-push guard), and (b) clearing `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` for git child processes in `withTempWorktree()`/`gitPushDataFileToBranch()` so `wl sync` can never touch the caller's branch.

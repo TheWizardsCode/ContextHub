@@ -22,7 +22,7 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join, parse } from 'path';
 import { existsSync } from 'fs';
-import { checkWlAvailable, fetchNextItems, fetchItemsByStage, setWorklogDir } from './fetcher.js';
+import { checkWlAvailable, fetchNextItems, fetchItemsByStage, setWorklogDir, claimWorkItem } from './fetcher.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
@@ -77,15 +77,89 @@ export function stripCommandPrefix(command: string): string {
 }
 
 /**
+ * Strip the `/prompt:` routing prefix from a free-form prompt command.
+ *
+ * `/prompt:` commands are routed to the agent channel (a new pi pane) so the
+ * user can inject an arbitrary prompt, not just skill/workflow invocations.
+ * The prefix is a routing signal only — pi must receive the bare prompt text
+ * (e.g. `Review the current work item and suggest next steps`), not the
+ * prefix itself.
+ *
+ * @param command - Raw command string, possibly starting with `/prompt:`.
+ * @returns The prompt text with the `/prompt:` prefix removed; unchanged
+ *          commands (no `/prompt:` prefix) are returned as-is.
+ */
+export function stripAgentPromptPrefix(command: string): string {
+  if (command.startsWith('/prompt:')) {
+    return command.substring('/prompt:'.length);
+  }
+  return command;
+}
+
+/**
  * Check if a command is an agent command that should be sent to a pi pane.
- * Agent commands are those starting with /skill:, /intake, or /plan.
+ * Agent commands are those starting with /skill:, /intake, /plan, or /prompt:.
  */
 function isAgentCommand(command: string): boolean {
   return (
     command.startsWith('/skill:') ||
     command.startsWith('/intake') ||
-    command.startsWith('/plan')
+    command.startsWith('/plan') ||
+    command.startsWith('/prompt:')
   );
+}
+
+/**
+ * Work-item ID format: a prefix (e.g. `WL`, `SA`) followed by a hash,
+ * e.g. `WL-0MS9NPHQU005Y3VE`.
+ */
+const WORK_ITEM_ID_PATTERN = /^[A-Z]+-\w+$/;
+
+/**
+ * Assignee used when the plugin claims a work-item (sets status to
+ * in_progress) before dispatching an agent command. Matches the agent
+ * handle used across the worklog (see AGENTS.md claim pattern).
+ */
+const AGENT_ASSIGNEE = 'Map';
+
+/**
+ * Extract the work-item ID from an agent command string.
+ *
+ * Agent commands are typically `/intake <id>`, `/plan <id>`, or
+ * `/skill:<name> <id>` with the ID as the last argument. All tokens are
+ * scanned for the work-item ID pattern and the last match is returned.
+ * Commands without an ID (e.g. `/intake` alone) return `undefined` and
+ * skip the status update gracefully.
+ */
+export function extractWorkItemId(command: string): string | undefined {
+  const tokens = command.trim().split(/\s+/);
+  for (let i = tokens.length - 1; i >= 0; i -= 1) {
+    if (WORK_ITEM_ID_PATTERN.test(tokens[i])) {
+      return tokens[i];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Claim the work-item referenced by an agent command (set its status to
+ * in_progress) before the agent pane is spawned.
+ *
+ * Non-blocking: never throws. Failures are logged to stderr and must not
+ * prevent the agent pane from opening (AC2). Commands without a work-item
+ * ID (e.g. `/intake` alone) are skipped silently.
+ */
+export async function claimItemForAgentCommand(command: string): Promise<void> {
+  const itemId = extractWorkItemId(command);
+  if (!itemId) {
+    return;
+  }
+  const result = await claimWorkItem(itemId, AGENT_ASSIGNEE);
+  if (!result.success) {
+    process.stderr.write(
+      `[worklog-plugin] Failed to set ${itemId} status to in_progress: ${result.error ?? 'unknown error'}\n`,
+    );
+  }
 }
 
 /**
@@ -97,18 +171,43 @@ function isInsideWorktree(dir: string): boolean {
 }
 
 /**
+ * Check whether a `.worklog/` directory is a leftover worktree container
+ * rather than a real project worklog.
+ *
+ * The implement tool's worktree lifecycle creates `.worklog/worktrees/`
+ * directories (e.g. inside `packages/herdr` when the tool runs with that
+ * CWD). After worktrees are cleaned up, an empty `worktrees/` subdirectory
+ * may remain. Such a stub has no `config.yaml`, `initialized` marker, or
+ * `worklog.db` — it is NOT a project worklog and must not block upward
+ * resolution to the real project root.
+ */
+function isWorktreeContainerStub(wlDir: string): boolean {
+  return (
+    existsSync(join(wlDir, 'worktrees')) &&
+    !existsSync(join(wlDir, 'config.yaml')) &&
+    !existsSync(join(wlDir, 'initialized')) &&
+    !existsSync(join(wlDir, 'worklog.db'))
+  );
+}
+
+/**
  * Find the project root containing a valid `.worklog/` directory.
  *
  * Walks up from the current working directory. When a `.worklog/` directory
  * is found but is NOT valid (lacks `worklog.db` or `initialized` marker):
+ * - If it is a leftover worktree container stub (contains only a
+ *   `worktrees/` subdirectory and no config markers), skip past it and
+ *   continue walking up. Such stubs are created by the implement tool's
+ *   worktree lifecycle (e.g. inside `packages/herdr`) and are not real
+ *   project worklogs.
  * - If we are inside a worktree (path contains `.worklog/worktrees/`), skip
  *   past the invalid `.worklog/` and continue walking up.  Worktree
  *   `.worklog/` directories may be incomplete stubs left by `git worktree`
  *   setup; the real project root is above them.
- * - If we are NOT inside a worktree, stop walking and return `undefined`.
- *   This prevents the plugin from silently picking up an unrelated
- *   project's `.worklog/` higher up the tree when the calling framework
- *   sets CWD to a project that has no `.worklog/` of its own.
+ * - Otherwise, stop walking and return `undefined`.  This prevents the
+ *   plugin from silently picking up an unrelated project's `.worklog/`
+ *   higher up the tree when the calling framework sets CWD to a project
+ *   that has no `.worklog/` of its own.
  *
  * Returns the project root path, or `undefined` if no valid `.worklog/` can
  * be found. The caller should handle the `undefined` case by reporting the
@@ -129,8 +228,9 @@ export function findWorklogRoot(startDir?: string): string | undefined {
         return dir;
       }
       // Found .worklog/ but it is NOT valid.
-      // Only walk past it when inside a worktree; otherwise stop here.
-      if (!isInsideWorktree(dir)) {
+      // Only walk past it when it is a leftover worktree container stub or
+      // when inside a worktree; otherwise stop here.
+      if (!isWorktreeContainerStub(wlDir) && !isInsideWorktree(dir)) {
         return undefined;
       }
     }
@@ -248,7 +348,7 @@ async function main(): Promise<void> {
       // Re-read on every render so a showHelpText change applies on the next
       // refresh (no plugin restart needed), matching browseItemCount behavior.
       getShowHelpText: () => loadSettings().showHelpText ?? true,
-      onCommand: (command: string) => {
+      onCommand: async (command: string) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
         // shortcuts like audit approve/reject, priority updates, close/delete) are
@@ -264,11 +364,23 @@ async function main(): Promise<void> {
         // (wlRoot) explicitly to the pane-spawning scripts via --cwd.
         const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
         if (route === 'agent') {
+          // Claim the referenced work-item BEFORE spawning the agent pane so it
+          // appears in_progress immediately. Non-blocking: failures are logged
+          // to stderr and never prevent the pane from opening (AC2).
+          try {
+            await claimItemForAgentCommand(command);
+          } catch {
+            // Belt-and-suspenders: a claim failure must never block the pane.
+          }
+          // Free-form prompts (/prompt:...) carry a routing prefix that pi must
+          // NOT see — strip it so pi receives only the prompt text. Skill/
+          // workflow commands (/skill:*, /intake, /plan) pass through unchanged.
+          const agentPrompt = stripAgentPromptPrefix(command);
           // Spawn send-to-pi.sh asynchronously — detached and with stdio ignored
           // so the TUI loop is not blocked or affected by the script's output.
           const child = spawn(
             SEND_TO_PI_SCRIPT,
-            ['--cwd', targetCwd, command],
+            ['--cwd', targetCwd, agentPrompt],
             {
               detached: true,
               stdio: 'ignore',

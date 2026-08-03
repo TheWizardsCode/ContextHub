@@ -247,4 +247,29 @@ describe('CLI Init Tests', () => {
       cleanupTempDir(tempDir);
     }
   }, 45000);
+
+  it('should write .githooks/pre-push containing worktree guards on fresh init', async () => {
+    const tempDir = createTempDir();
+    try {
+      await initRepo(tempDir);
+
+      await execAsync(
+        `tsx ${cliPath} init --project-name "Guard Test" --prefix GUARD --auto-export yes --auto-sync no --workflow-inline no --agents-template skip --stats-plugin-overwrite no`,
+        { cwd: tempDir }
+      );
+
+      const hookPath = path.join(tempDir, '.githooks', 'pre-push');
+      expect(fs.existsSync(hookPath)).toBe(true);
+      const hook = fs.readFileSync(hookPath, 'utf-8');
+      expect(hook).toContain('git-common-dir');
+      expect(hook).toContain('tmp-worktree');
+
+      // Generated hook matches the committed canonical hook (modulo trailing newline)
+      const committed = fs.readFileSync(path.join(process.cwd(), '.githooks', 'pre-push'), 'utf-8');
+      const stripTrailingNewline = (s: string) => (s.endsWith('\n') ? s.slice(0, -1) : s);
+      expect(stripTrailingNewline(hook)).toBe(stripTrailingNewline(committed));
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  }, 45000);
 });

@@ -5,7 +5,7 @@
  * Run: npx vitest run packages/tui/extensions/lib/tools.test.ts
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('@earendil-works/pi-coding-agent', () => ({
   getAgentDir: () => '/home/test-user/.pi/agent',
@@ -89,6 +89,49 @@ describe('lib/tools exports', () => {
       expect(NOT_INITIALIZED_PATTERN.test('worklog: not initialized in this checkout/worktree')).toBe(true);
       expect(NOT_INITIALIZED_PATTERN.test('Worklog system is not initialized.')).toBe(true);
       expect(NOT_INITIALIZED_PATTERN.test('normal output')).toBe(false);
+    });
+  });
+
+  describe('runWl timeout (lock-storm prevention)', () => {
+    const mockExecFile = vi.hoisted(() => {
+      const store = (globalThis as any).__sharedChildProcessMocks;
+      return store?.mockExecFile ?? vi.fn();
+    });
+
+    beforeEach(() => {
+      mockExecFile.mockReset();
+      const realExecFile = (globalThis as any).__sharedChildProcessMocks?.realExecFile;
+      if (realExecFile) {
+        mockExecFile.mockImplementation(realExecFile);
+      }
+    });
+
+    it('passes a timeout option to execFile so hung syncs cannot persist', async () => {
+      const { runWl } = await import('./tools.js');
+      let capturedOptions: any = null;
+      mockExecFile.mockImplementationOnce(
+        (_binary: string, _args: string[], options: any, callback: (err: Error | null, result: { stdout: string }) => void) => {
+          capturedOptions = options;
+          callback(null, { stdout: '{"success":true}' });
+        },
+      );
+
+      const out = await runWl(['sync']);
+      expect(out).toBe('{"success":true}');
+      expect(capturedOptions).not.toBeNull();
+      expect(capturedOptions.timeout).toBeGreaterThan(0);
+    });
+
+    it('surfaces a clear timeout error when execFile reports a killed child', async () => {
+      const { runWl } = await import('./tools.js');
+      mockExecFile.mockImplementationOnce(
+        (_binary: string, _args: string[], _options: any, callback: (err: Error | null) => void) => {
+          const err = Object.assign(new Error('Command failed'), { killed: true, signal: 'SIGTERM', code: 'ETIMEDOUT' });
+          callback(err);
+        },
+      );
+
+      await expect(runWl(['sync'])).rejects.toThrow(/timed out after/);
     });
   });
 });

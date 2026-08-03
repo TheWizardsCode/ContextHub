@@ -8,7 +8,7 @@ import { theme } from '../theme.js';
 import { normalizeActionArgs } from './cli-utils.js';
 import { loadStatusStageRules } from '../status-stage-rules.js';
 import { extractFilePaths, type GroupAssignment } from './helpers.js';
-import { assignItemGroups } from './grouping.js';
+import { assignItemGroups, compareGroupedItems } from './grouping.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -138,9 +138,21 @@ export default function register(ctx: PluginContext): void {
         });
 
         const sortByGroup = (a: any, b: any) => {
-          const ga = groupMap?.get(a.workItem?.id)?.group ?? 0;
-          const gb = groupMap?.get(b.workItem?.id)?.group ?? 0;
-          return ga - gb;
+          return compareGroupedItems(
+            groupMap!,
+            {
+              id: a.workItem?.id,
+              stage: a.workItem?.stage,
+              priority: a.workItem?.priority,
+              filePaths: [],
+            },
+            {
+              id: b.workItem?.id,
+              stage: b.workItem?.stage,
+              priority: b.workItem?.priority,
+              filePaths: [],
+            },
+          );
         };
         if (groupsEnabled && groupMap) {
           enrichedResults.sort(sortByGroup);
@@ -191,14 +203,27 @@ export default function register(ctx: PluginContext): void {
       if (note) console.log(theme.text.muted(`Note: ${note}`));
       console.log('===============================\n');
 
-      // Sort by group for display (groups first, then within groups by original order)
+      // Sort by group for display (groups first, then within groups by stage
+      // sub-order and priority).
       const displayResults = [...availableResults];
       if (groupsEnabled && groupMap) {
-        displayResults.sort((a: any, b: any) => {
-          const assignmentA = groupMap.get(a.workItem?.id);
-          const assignmentB = groupMap.get(b.workItem?.id);
-          return (assignmentA?.group ?? 0) - (assignmentB?.group ?? 0);
-        });
+        displayResults.sort((a: any, b: any) =>
+          compareGroupedItems(
+            groupMap!,
+            {
+              id: a.workItem?.id,
+              stage: a.workItem?.stage,
+              priority: a.workItem?.priority,
+              filePaths: [],
+            },
+            {
+              id: b.workItem?.id,
+              stage: b.workItem?.stage,
+              priority: b.workItem?.priority,
+              filePaths: [],
+            },
+          ),
+        );
       }
 
       let lastGroup: number | null = null;

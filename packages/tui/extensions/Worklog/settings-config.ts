@@ -5,10 +5,13 @@
  * namespace. Resolution order (later wins):
  *   1. Built-in defaults (DEFAULT_SETTINGS)
  *   2. Global settings:  ~/.pi/agent/settings.json → { "context-hub": { ... } }
- *   3. Project settings: <cwd>/.pi/settings.json    → { "context-hub": { ... } }
+ *   3. Project settings: <project>/.pi/settings.json → { "context-hub": { ... } }
  *
- * Settings are persisted to the project's .pi/settings.json when changed via
- * the `/wl settings` command.
+ * The project settings directory is resolved repo-root aware via
+ * resolvePiDir() in src/worklog-paths.ts (same discovery as .worklog):
+ * walking up from the working directory to the git repo root, the nearest
+ * directory with a `.pi/settings.json` wins (local overrides repo root);
+ * otherwise the repo root is used.
  *
  * Follows the same namespaced-read pattern established by
  * @zosmaai/pi-llm-wiki (see packages/llm-wiki/lib/task-config.ts).
@@ -26,6 +29,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
+import { resolvePiDir } from '../../../../src/worklog-paths.js';
 import { DEFAULT_RECOVERY_CONFIG, type RecoveryConfig } from './lib/recovery/error-patterns.js';
 
 /**
@@ -209,7 +213,12 @@ function readNamespacedSettings(path: string): Partial<Settings> {
  * Resolution order:
  *   1. Built-in defaults (DEFAULT_SETTINGS)
  *   2. Global settings:  ~/.pi/agent/settings.json → { "context-hub": { ... } }
- *   3. Project settings: <cwd>/.pi/settings.json    → { "context-hub": { ... } }
+ *   3. Project settings: <project>/.pi/settings.json → { "context-hub": { ... } }
+ *
+ * The project settings directory is resolved repo-root aware via
+ * resolvePiDir(): walking up from `cwd` toward the git repo root, the
+ * nearest directory with a `.pi/settings.json` wins (local overrides repo
+ * root); otherwise the repo root is used.
  *
  * Later sources override earlier ones (project wins over global, etc.).
  *
@@ -218,7 +227,7 @@ function readNamespacedSettings(path: string): Partial<Settings> {
  * @returns A fully populated Settings object (no partials, never undefined)
  */
 export function loadSettings(cwd?: string, agentDir?: string): Settings {
-  const projectDir = cwd ?? process.cwd();
+  const projectDir = resolvePiDir(cwd ?? process.cwd());
 
   // Resolve the Pi agent global settings directory.
   // If getAgentDir() is unavailable (e.g., outside Pi runtime), skip global.
@@ -246,6 +255,11 @@ export function loadSettings(cwd?: string, agentDir?: string): Settings {
  * Persist settings to the project's `.pi/settings.json` under the
  * `context-hub` namespace.
  *
+ * The target project directory is resolved repo-root aware via
+ * resolvePiDir(): local `.pi/settings.json` in the working directory wins,
+ * otherwise settings are written to the git repo root's `.pi/settings.json`
+ * (project-level config shared across the repository).
+ *
  * Reads the existing file (if any), merges the provided settings into the
  * `context-hub` section while preserving other namespaces and keys, and
  * writes the result back. Creates the `.pi/` directory if it does not exist.
@@ -254,7 +268,7 @@ export function loadSettings(cwd?: string, agentDir?: string): Settings {
  * @param cwd - Project working directory (defaults to process.cwd())
  */
 export function persistSettings(partial: Partial<Settings>, cwd?: string): void {
-  const projectDir = cwd ?? process.cwd();
+  const projectDir = resolvePiDir(cwd ?? process.cwd());
   const settingsPath = join(projectDir, '.pi', 'settings.json');
 
   try {

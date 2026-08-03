@@ -150,16 +150,20 @@ export default function register(ctx: PluginContext): void {
         // This is needed so consumers (e.g. Pi TUI extension) can show the
         // correct audit icon (✅/❌/❓) without an extra round-trip per item.
         // Build a lookup map from all audit results for efficiency with large lists.
-        const auditMap = new Map<string, boolean>();
+        const auditMap = new Map<string, { readyToClose: boolean; auditedAt: string | null }>();
         const allAudits = db.getAllAuditResults();
         for (const ar of allAudits) {
-          auditMap.set(ar.workItemId, ar.readyToClose);
+          auditMap.set(ar.workItemId, { readyToClose: ar.readyToClose, auditedAt: ar.auditedAt ?? null });
         }
-        const enrichedItems = limited.map(item => ({
-          ...item,
-          auditResult: auditMap.has(item.id) ? auditMap.get(item.id) : null,
-          childCount: childCounts.get(item.id) ?? 0,
-        }));
+        const enrichedItems = limited.map(item => {
+          const audit = auditMap.get(item.id);
+          return {
+            ...item,
+            auditResult: audit ? audit.readyToClose : null,
+            auditedAt: audit ? audit.auditedAt : null,
+            childCount: childCounts.get(item.id) ?? 0,
+          };
+        });
         output.json({ success: true, count: enrichedItems.length, workItems: enrichedItems });
       } else {
         if (items.length === 0) {

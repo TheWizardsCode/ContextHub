@@ -42,6 +42,18 @@ Worklog stores work items and comments in `.worklog/worklog-data.jsonl` (the mos
 If `autoSync` is enabled, Worklog runs `wl sync` in the background after each local write (debounced). This keeps the canonical ref up to date without manual sync.
 Auto-sync is off by default to avoid unexpected git operations during local edits and to let teams choose when to publish shared data.
 
+### Auto-Sync Concurrency Guard (`wl sync --if-idle`)
+
+Interactive UIs (the Pi TUI worklog extension and Herdr worklist panes) run background auto-syncs on a timer. Multiple panes/TUI instances can fire syncs at the same time; without a guard they queue up waiting for the file lock, which can produce a self-sustaining "lock storm" of stuck `wl sync` processes (60+ observed).
+
+To prevent this, auto-sync spawners pass `wl sync --if-idle`:
+
+- If the worklog file lock is **free**, the sync runs normally.
+- If the lock is **held by another sync**, `wl sync --if-idle` exits immediately with `skipped: true` (exit 0) instead of waiting up to the 30s lock timeout — so spawners skip instead of piling up.
+- Stale/age-expired locks are still cleaned up before the busy check, so a dead process's lock cannot wedge sync forever.
+
+Manual `wl sync` (without `--if-idle`) keeps the original behavior: it waits for the lock (with exponential backoff) and runs to completion.
+
 ### Config Options
 
 Set in `.worklog/config.yaml` (local) or `.worklog/config.defaults.yaml` (team defaults):

@@ -47,6 +47,15 @@ DEBUG=${WORKLOG_GIT_MOCK_DEBUG:-0}
 log() { if [ "$DEBUG" = "1" ]; then echo "[mock-git] $*" >> /tmp/worklog-mock.log 2>/dev/null || true; fi }
 log "INVOKE: $PWD -- $*"
 
+# Simulate the hook-env GIT_DIR leak (WL-0MS99Y6R40028Q9G): git exports
+# GIT_DIR when it invokes hooks. If GIT_DIR is set and does not point to a
+# valid directory, fail like real git. wl sync must sanitize GIT_* env for
+# its child git processes, so a leaked GIT_DIR must never reach this mock.
+if [ -n "${GIT_DIR:-}" ] && [ ! -d "$GIT_DIR" ]; then
+  echo "fatal: '$GIT_DIR' does not appear to be a git repository" >&2
+  exit 128
+fi
+
 # Timeout safety net check at dispatch
 _check_timeout
 
