@@ -466,6 +466,70 @@ describe('WorklogDatabase', () => {
     });
   });
 
+  describe('cascadePriorityDowngrade', () => {
+    it('should downgrade critical children to high when parent is downgraded', () => {
+      const parent = db.create({ title: 'Parent', priority: 'critical' });
+      const child1 = db.create({ title: 'Child 1', priority: 'critical', parentId: parent.id });
+      const child2 = db.create({ title: 'Child 2', priority: 'critical', parentId: parent.id });
+
+      const downgraded = db.cascadePriorityDowngrade(parent.id, 'high');
+
+      expect(downgraded.map(c => c.id).sort()).toEqual([child1.id, child2.id].sort());
+      expect(db.get(child1.id)?.priority).toBe('high');
+      expect(db.get(child2.id)?.priority).toBe('high');
+      // Parent itself is untouched by the cascade
+      expect(db.get(parent.id)?.priority).toBe('critical');
+    });
+
+    it('should leave children already at high or below unaffected', () => {
+      const parent = db.create({ title: 'Parent', priority: 'critical' });
+      const highChild = db.create({ title: 'High child', priority: 'high', parentId: parent.id });
+      const mediumChild = db.create({ title: 'Medium child', priority: 'medium', parentId: parent.id });
+      const lowChild = db.create({ title: 'Low child', priority: 'low', parentId: parent.id });
+      const criticalChild = db.create({ title: 'Critical child', priority: 'critical', parentId: parent.id });
+
+      const downgraded = db.cascadePriorityDowngrade(parent.id, 'medium');
+
+      expect(downgraded.map(c => c.id)).toEqual([criticalChild.id]);
+      expect(db.get(highChild.id)?.priority).toBe('high');
+      expect(db.get(mediumChild.id)?.priority).toBe('medium');
+      expect(db.get(lowChild.id)?.priority).toBe('low');
+      expect(db.get(criticalChild.id)?.priority).toBe('high');
+    });
+
+    it('should return an empty array when no critical children exist', () => {
+      const parent = db.create({ title: 'Parent', priority: 'critical' });
+      const child = db.create({ title: 'Child', priority: 'high', parentId: parent.id });
+
+      const downgraded = db.cascadePriorityDowngrade(parent.id, 'high');
+
+      expect(downgraded).toEqual([]);
+      expect(db.get(child.id)?.priority).toBe('high');
+    });
+
+    it('should be a no-op when new priority is still critical (critical to critical)', () => {
+      const parent = db.create({ title: 'Parent', priority: 'critical' });
+      const child = db.create({ title: 'Child', priority: 'critical', parentId: parent.id });
+
+      const downgraded = db.cascadePriorityDowngrade(parent.id, 'critical');
+
+      expect(downgraded).toEqual([]);
+      expect(db.get(child.id)?.priority).toBe('critical');
+    });
+
+    it('should only downgrade direct children, not grandchildren', () => {
+      const parent = db.create({ title: 'Parent', priority: 'critical' });
+      const child = db.create({ title: 'Child', priority: 'critical', parentId: parent.id });
+      const grandchild = db.create({ title: 'Grandchild', priority: 'critical', parentId: child.id });
+
+      const downgraded = db.cascadePriorityDowngrade(parent.id, 'high');
+
+      expect(downgraded.map(c => c.id)).toEqual([child.id]);
+      expect(db.get(child.id)?.priority).toBe('high');
+      expect(db.get(grandchild.id)?.priority).toBe('critical');
+    });
+  });
+
   describe('comments', () => {
     let workItemId: string;
 

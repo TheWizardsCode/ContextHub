@@ -17,6 +17,7 @@
  */
 
 import { watch } from 'node:fs';
+import { resolvePiDir } from '../../../../src/worklog-paths.js';
 import { loadSettings, persistSettings, validateNumber, validateBoolean, DEFAULT_SETTINGS, CONFIG_VERSION, type Settings } from './settings-config.js';
 
 /**
@@ -40,6 +41,9 @@ export class WorklogConfig {
   /**
    * Load configuration from disk for the given project directory.
    *
+   * The project directory is resolved repo-root aware via resolvePiDir()
+   * (see src/worklog-paths.ts) and cached in `_projectDir` so loading,
+   * persistence and file watching all target the same settings file.
    * Delegates to loadSettings() from settings-config.ts, which merges
    * default, global, and project-level settings (project wins).
    * Subsequent calls reload from disk and notify subscribers if values
@@ -48,9 +52,10 @@ export class WorklogConfig {
    * @param cwd - Project working directory (defaults to process.cwd())
    */
   load(cwd?: string): void {
-    const dir = cwd ?? process.cwd();
-    this._projectDir = dir;
-    const newConfig = loadSettings(dir);
+    // Resolve the settings directory once: nearest .pi/settings.json wins,
+    // falling back to the git repo root (mirrors .worklog discovery).
+    this._projectDir = resolvePiDir(cwd ?? process.cwd());
+    const newConfig = loadSettings(this._projectDir);
     // Apply migrations to bring older config versions up to current
     this._migrate(newConfig);
     const changed = JSON.stringify(this._config) !== JSON.stringify(newConfig);

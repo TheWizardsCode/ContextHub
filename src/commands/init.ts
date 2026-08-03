@@ -276,6 +276,18 @@ function installPostPullHooks(options: { silent: boolean }): { installed: boolea
      `if [ \"$WORKLOG_SKIP_POST_PULL\" = \"1\" ]; then\n` +
      `  exit 0\n` +
      `fi\n` +
+     `# Skip when inside a temp worktree created by withTempWorktree for internal\n` +
+     `# sync operations. These worktrees don't have worklog initialized.\n` +
+     `case \"$PWD\" in\n` +
+     `  *tmp-worktree-*)\n` +
+     `    exit 0\n` +
+     `    ;;\n` +
+     `esac\n` +
+     `# Skip when inside a git worktree (not the main checkout).\n` +
+     `# Worktrees are for feature development; sync runs from the main checkout.\n` +
+     `if [ \"$(git rev-parse --git-dir 2>/dev/null)\" != \"$(git rev-parse --git-common-dir 2>/dev/null)\" ]; then\n` +
+     `  exit 0\n` +
+     `fi\n` +
      `if command -v wl >/dev/null 2>&1; then\n` +
      `  WL=wl\n` +
      `elif command -v worklog >/dev/null 2>&1; then\n` +
@@ -370,6 +382,18 @@ function installCommittedHooks(options: { silent: boolean }): { installed: boole
     `if [ \"$WORKLOG_SKIP_POST_PULL\" = \"1\" ]; then\n` +
     `  exit 0\n` +
     `fi\n` +
+    `# Skip when inside a temp worktree created by withTempWorktree for internal\n` +
+    `# sync operations. These worktrees don't have worklog initialized.\n` +
+    `case \"$PWD\" in\n` +
+    `  *tmp-worktree-*)\n` +
+    `    exit 0\n` +
+    `    ;;\n` +
+    `esac\n` +
+    `# Skip when inside a git worktree (not the main checkout).\n` +
+    `# Worktrees are for feature development; sync runs from the main checkout.\n` +
+    `if [ \"$(git rev-parse --git-dir 2>/dev/null)\" != \"$(git rev-parse --git-common-dir 2>/dev/null)\" ]; then\n` +
+    `  exit 0\n` +
+    `fi\n` +
     `if command -v wl >/dev/null 2>&1; then\n` +
     `  WL=wl\n` +
     `elif command -v worklog >/dev/null 2>&1; then\n` +
@@ -396,34 +420,76 @@ function installCommittedHooks(options: { silent: boolean }): { installed: boole
     `exec \"${centralPath}\" \"$@\"\n`
   );
 
-   const prePushContent =
-     `#!/bin/sh\n` +
-     `# ${WORKLOG_PRE_PUSH_HOOK_MARKER}\n` +
-     `# Auto-sync Worklog data before pushing (committed hooks).\n` +
-     `# Set WORKLOG_SKIP_PRE_PUSH=1 to bypass.\n` +
-     `set -e\n` +
-     `if [ \"$WORKLOG_SKIP_PRE_PUSH\" = \"1\" ]; then\n` +
-     `  exit 0\n` +
-     `fi\n` +
-     `skip=0\n` +
-     `while read local_ref local_sha remote_ref remote_sha; do\n` +
-     `  if [ \"$remote_ref\" = \"refs/worklog/data\" ]; then\n` +
-     `    skip=1\n` +
-     `  fi\n` +
-     `done\n` +
-     `if [ \"$skip\" = \"1\" ]; then\n` +
-     `  exit 0\n` +
-     `fi\n` +
-     `if command -v wl >/dev/null 2>&1; then\n` +
-     `  WL=wl\n` +
-     `elif command -v worklog >/dev/null 2>&1; then\n` +
-     `  WL=worklog\n` +
-     `else\n` +
-     `  echo \"worklog: wl/worklog not found; skipping pre-push sync\" >&2\n` +
-     `  exit 0\n` +
-     `fi\n` +
-     `$WL sync --git-branch refs/worklog/data\n` +
-     `exit 0\n`;
+   const prePushContent = [
+     '#!/bin/sh',
+     `# ${WORKLOG_PRE_PUSH_HOOK_MARKER}`,
+     '#',
+     '# Auto-sync Worklog data before pushing.',
+     '#',
+     '# This hook runs `wl sync` before any push to ensure worklog data is',
+     '# committed and pushed to the dedicated refs/worklog/data branch.',
+     '# It uses a temporary worktree to avoid corrupting the project working tree',
+     '# (see WL-0MQRBT8BS00355AB for the bug this prevents).',
+     '#',
+     '# BYPASS: Set WORKLOG_SKIP_PRE_PUSH=1 to skip the sync entirely.',
+     '#   export WORKLOG_SKIP_PRE_PUSH=1',
+     '#   git push origin HEAD:refs/heads/dev',
+     '#',
+     'set -e',
+     '',
+     'if [ "$WORKLOG_SKIP_PRE_PUSH" = "1" ]; then',
+     '  echo "worklog: pre-push sync skipped (WORKLOG_SKIP_PRE_PUSH=1)"',
+     '  exit 0',
+     'fi',
+     '',
+     '# Skip when running inside a temp worktree created by withTempWorktree',
+     "# for internal sync operations. These worktrees don't have worklog",
+     '# initialized and the push is already done with --no-verify as defense.',
+     'case "$PWD" in',
+     '  *tmp-worktree-*)',
+     '    exit 0',
+     '    ;;',
+     'esac',
+     '',
+     '# Skip when inside a git worktree (not the main checkout).',
+     "# Worktrees are for feature development and typically don't have worklog",
+     '# initialized. The sync should run from the main checkout.',
+     'if [ "$(git rev-parse --git-dir 2>/dev/null)" != "$(git rev-parse --git-common-dir 2>/dev/null)" ]; then',
+     '  exit 0',
+     'fi',
+     '',
+     '# Read stdin to check which refs are being pushed.',
+     '# If pushing to refs/worklog/data, skip the sync to avoid infinite loops.',
+     'skip=0',
+     'while read local_ref local_sha remote_ref remote_sha; do',
+     '  if [ "$remote_ref" = "refs/worklog/data" ]; then',
+     '    skip=1',
+     '  fi',
+     'done',
+     '',
+     'if [ "$skip" = "1" ]; then',
+     '  exit 0',
+     'fi',
+     '',
+     'if command -v wl >/dev/null 2>&1; then',
+     '  WL=wl',
+     'elif command -v worklog >/dev/null 2>&1; then',
+     '  WL=worklog',
+     'else',
+     '  echo "worklog: wl/worklog not found; skipping pre-push sync" >&2',
+     '  exit 0',
+     'fi',
+     '',
+     '# Force the data branch to refs/worklog/data regardless of config.',
+     '# This prevents the sync from accidentally pushing to a standard branch',
+     '# if the user has overridden syncBranch in their worklog config.',
+     '"$WL" sync --git-branch refs/worklog/data || {',
+     '  echo "worklog: pre-push sync failed (pushing anyway)" >&2',
+     '  exit 0',
+     '}',
+     'exit 0',
+     '',
+   ].join('\n');
 
     const postCheckoutContent =
       `#!/bin/sh\n` +
@@ -432,6 +498,18 @@ function installCommittedHooks(options: { silent: boolean }): { installed: boole
       `# Set WORKLOG_SKIP_POST_CHECKOUT=1 to bypass.\n` +
       `set -e\n` +
       `if [ \"$WORKLOG_SKIP_POST_CHECKOUT\" = \"1\" ]; then\n` +
+      `  exit 0\n` +
+      `fi\n` +
+      `# Skip when inside a temp worktree created by withTempWorktree for internal\n` +
+      `# sync operations. These worktrees don't have worklog initialized.\n` +
+      `case \"$PWD\" in\n` +
+      `  *tmp-worktree-*)\n` +
+      `    exit 0\n` +
+      `    ;;\n` +
+      `esac\n` +
+      `# Skip when inside a git worktree (not the main checkout).\n` +
+      `# Worktrees are for feature development; sync runs from the main checkout.\n` +
+      `if [ \"$(git rev-parse --git-dir 2>/dev/null)\" != \"$(git rev-parse --git-common-dir 2>/dev/null)\" ]; then\n` +
       `  exit 0\n` +
       `fi\n` +
       `if command -v wl >/dev/null 2>&1; then\n` +

@@ -6,14 +6,14 @@ import type { PluginContext } from '../plugin-types.js';
 import type { SyncOptions, SyncDebugOptions } from '../cli-types.js';
 import type { WorkItem, Comment, DependencyEdge } from '../types.js';
 import type { GitTarget, SyncResult } from '../sync.js';
-import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges } from '../sync.js';
+import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, assertDataFileInCwdRepo, filterRemoteDataByPrefix } from '../sync.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
 import { importFromJsonlContent } from '../jsonl.js';
 import { mergeAuditResults } from '../sync.js';
 import { loadConfig } from '../config.js';
 import { displayConflictDetails } from './helpers.js';
 import { createLogFileWriter, getWorklogLogPath, logConflictDetails } from '../logging.js';
-import { withFileLock, getLockPathForJsonl } from '../file-lock.js';
+import { withFileLock, getLockPathForJsonl, LockBusyError } from '../file-lock.js';
 import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -47,6 +47,14 @@ export async function performSync(
   const isJsonMode = options.isJsonMode ?? false;
   const isVerbose = options.isVerbose ?? false;
   const isSilent = options.silent || false;
+
+  // Cross-project safety guard (WL-0MSAH26DD001XXST): fail loudly BEFORE any
+  // merge work if the data file belongs to a different git repo than the
+  // process cwd (e.g. `wl sync --worklog-dir <other-proj>/.worklog` run from
+  // inside this repo). Without this, sync would merge the cwd repo's remote
+  // worklog ref into the target project's database and push the pollution.
+  await assertDataFileInCwdRepo(options.file);
+
   const logPath = getWorklogLogPath('sync.log');
   const logLine = createLogFileWriter(logPath);
   logLine(`--- sync start ${new Date().toISOString()} file=${options.file} ---`);
@@ -85,10 +93,33 @@ export async function performSync(
   let remoteAudits: any[] = [];
   if (remoteContent) {
     const remoteData = importFromJsonlContent(remoteContent);
-    remoteItems = remoteData.items;
-    remoteComments = remoteData.comments;
-    remoteEdges = remoteData.dependencyEdges || [];
-    remoteAudits = remoteData.auditResults || [];
+    // Cross-project prefix filter (SA-0MSC0BM1V0032UYT): never import work
+    // items whose ID prefix does not match the project prefix, and drop their
+    // comments/edges/audits too. Defense-in-depth behind the repo-context
+    // guard (WL-0MSAH26DD001XXST) for stale/daemon processes that loaded
+    // pre-fix code: foreign items cannot re-enter even if a sync reaches the
+    // merge step with a polluted remote snapshot.
+    const configForPrefix = loadConfig();
+    const projectPrefix = (options.prefix || configForPrefix?.prefix || 'WI').toUpperCase();
+    const filtered = filterRemoteDataByPrefix(
+      remoteData.items,
+      remoteData.comments,
+      remoteData.dependencyEdges || [],
+      remoteData.auditResults || [],
+      projectPrefix
+    );
+    if (filtered.droppedItems.length > 0) {
+      const preview = filtered.droppedItems.slice(0, 5).join(', ');
+      const ellipsis = filtered.droppedItems.length > 5 ? ', …' : '';
+      logLine(`Foreign-prefix filter: dropped ${filtered.droppedItems.length} remote item(s) not matching prefix '${projectPrefix}' (${preview}${ellipsis})`);
+      if (!isJsonMode && !isSilent) {
+        console.log(`\nForeign-prefix filter: dropped ${filtered.droppedItems.length} remote item(s) not matching project prefix '${projectPrefix}' (${preview}${ellipsis})`);
+      }
+    }
+    remoteItems = filtered.items;
+    remoteComments = filtered.comments;
+    remoteEdges = filtered.edges;
+    remoteAudits = filtered.audits;
   }
 
   if (!isJsonMode && !isSilent) {
@@ -339,6 +370,7 @@ export default function register(ctx: PluginContext): void {
     .option('--git-branch <ref>', 'Git ref to store worklog data (use refs/worklog/data to avoid GitHub PR banners)', DEFAULT_GIT_BRANCH)
     .option('--no-push', 'Skip pushing changes back to git')
     .option('--dry-run', 'Show what would be synced without making changes')
+    .option('--if-idle', 'Skip (exit 0) if another sync is already in progress — lock-aware guard for auto-sync spawners; prevents process pile-up under lock contention')
     .option('--no-re-sort', 'Skip automatic re-sort after sync')
     .option('--re-sort-sync', 'Force a synchronous re-sort after sync', false)
     .action(async (options: SyncOptions) => {
@@ -357,20 +389,37 @@ export default function register(ctx: PluginContext): void {
       try {
         const lockPath = getLockPathForJsonl(options.file || dataPath);
         const isVerbose = program.opts().verbose;
-        await withFileLock(lockPath, () =>
-          performSync(dataPath, utils.getDatabase, {
-            file: options.file || dataPath,
-            prefix: options.prefix,
-            gitRemote,
-            gitBranch,
-            push: options.push ?? true,
-            dryRun: options.dryRun ?? false,
-            silent: false,
-            isJsonMode,
-            isVerbose
-          })
+        await withFileLock(
+          lockPath,
+          () =>
+            performSync(dataPath, utils.getDatabase, {
+              file: options.file || dataPath,
+              prefix: options.prefix,
+              gitRemote,
+              gitBranch,
+              push: options.push ?? true,
+              dryRun: options.dryRun ?? false,
+              silent: false,
+              isJsonMode,
+              isVerbose
+            }),
+          options.ifIdle ? { skipIfLocked: true } : undefined
         );
       } catch (error) {
+        // Lock-aware guard: another sync holds the lock — skip gracefully
+        // (exit 0, no error) so auto-sync spawners do not pile up waiting.
+        if (error instanceof LockBusyError) {
+          if (isJsonMode) {
+            output.json({
+              success: true,
+              skipped: true,
+              reason: 'another sync is already in progress'
+            });
+          } else {
+            console.log('\nSync skipped: another sync is already in progress');
+          }
+          process.exit(0);
+        }
         if (isJsonMode) {
           output.json({
             success: false,

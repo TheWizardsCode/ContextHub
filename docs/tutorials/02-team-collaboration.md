@@ -155,6 +155,12 @@ wl github push
 
 This creates or updates GitHub Issues for each work item, adding labels like `wl:status:open`, `wl:priority:high`, and `wl:type:feature`. Parent/child relationships are preserved using GitHub sub-issues.
 
+Pass the global `--verbose` flag to see a per-item synced list (action, id, title, URL) plus a timing breakdown:
+
+```bash
+wl --verbose github push
+```
+
 ### Import from GitHub
 
 ```bash

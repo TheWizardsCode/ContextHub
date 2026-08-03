@@ -1905,6 +1905,9 @@ describe('Worklog browse pi extension', () => {
     const items = await listWorkItems();
 
     expect(runWl).toHaveBeenCalledWith(['next', '-n', '5', '--include-in-progress']);
+    // Every displayed item receives a group assignment after regrouping
+    // (WL-0MSAK8YLB0025EGW): the idea item lands in "Idea", the in_progress
+    // item in "Other".
     expect(items).toEqual([
       {
         id: 'WL-10',
@@ -1915,6 +1918,8 @@ describe('Worklog browse pi extension', () => {
         risk: 'Low',
         effort: 'Small',
         description: 'alpha\nbeta',
+        group: 1,
+        groupLabel: 'Idea',
       },
       {
         id: 'WL-11',
@@ -1925,6 +1930,8 @@ describe('Worklog browse pi extension', () => {
         risk: 'High',
         effort: 'Large',
         description: 'gamma\ndelta',
+        group: 2,
+        groupLabel: 'Other',
       },
     ]);
   });

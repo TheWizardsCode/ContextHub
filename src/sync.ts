@@ -8,9 +8,34 @@ import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
-import { contextExec, withinWorktreeContext, killProcessesForWorktree } from './process-lifecycle.js';
+import { contextExec, withinWorktreeContext, killProcessesForWorktree, type TrackedExecResult } from './process-lifecycle.js';
 
-const execAsync = contextExec;
+/**
+ * Git exports GIT_DIR (and GIT_WORK_TREE / GIT_INDEX_FILE) when it invokes
+ * hooks, and `wl sync` spawned from a hook inherits them. A leaked GIT_DIR
+ * redirects `git -C <path> ...` commands to the CALLER's worktree (its
+ * index/HEAD/refs) instead of the repository named on the command line —
+ * which produced destructive "Sync work items and comments" commits on
+ * worktree branches (WL-0MS99Y6R40028Q9G). Every git command in this module
+ * therefore runs with those variables cleared, matching git's own behavior
+ * of unsetting them for hook child processes.
+ */
+function sanitizeGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const clean = { ...env };
+  delete clean.GIT_DIR;
+  delete clean.GIT_WORK_TREE;
+  delete clean.GIT_INDEX_FILE;
+  return clean;
+}
+
+async function gitExecAsync(
+  command: string,
+  options?: { cwd?: string }
+): Promise<TrackedExecResult> {
+  return contextExec(command, { ...options, env: sanitizeGitEnv(process.env) });
+}
+
+const execAsync = gitExecAsync;
 
 // git show of large JSONL can exceed Node's exec() maxBuffer.
 // Use spawn to stream the output when reading remote content.
@@ -20,14 +45,17 @@ async function execGitCaptureStdout(args: string[], options?: { cwd?: string }):
     // wrappers. Pass args as a single command string to avoid the
     // DEP0190 deprecation warning about unescaped args with shell=true.
     const useShell = process.platform === 'win32';
+    const childEnv = sanitizeGitEnv(process.env);
     const child = useShell
       ? childProcess.spawn(`git ${args.map(a => escapeShellArg(a)).join(' ')}`, [], {
           cwd: options?.cwd,
+          env: childEnv,
           stdio: ['ignore', 'pipe', 'pipe'],
           shell: true,
         })
       : childProcess.spawn('git', args, {
           cwd: options?.cwd,
+          env: childEnv,
           stdio: ['ignore', 'pipe', 'pipe'],
         });
     let out = '';
@@ -154,6 +182,83 @@ function mergeRemoteItem(
   if (differentTimestampMerge.conflictDetail) {
     conflictDetails.push(differentTimestampMerge.conflictDetail);
   }
+}
+
+/**
+ * Cross-project prefix filter (SA-0MSC0BM1V0032UYT) — defense-in-depth.
+ *
+ * `assertDataFileInCwdRepo` (WL-0MSAH26DD001XXST) blocks syncs whose data
+ * file lives in a different git repo than the process cwd, but a stale
+ * long-running process (loaded pre-fix modules) or a bypassed repo-context
+ * check can still reach the merge step with foreign data. This filter makes
+ * the merge itself prefix-aware: work items whose ID prefix does not match
+ * the project prefix are never imported, and their comments, dependency
+ * edges and audit results are dropped with them.
+ *
+ * IDs without a '-' separator cannot be classified and are kept, matching
+ * `wl doctor foreign-items` behaviour.
+ *
+ * @param id - The work item ID (e.g. `WL-0MSAH2A71000MUA3`).
+ * @param projectPrefix - The project's configured prefix (e.g. `WL`), matched case-insensitively.
+ * @returns True when the item belongs to the project (or is unclassifiable).
+ */
+export function isOwnProjectItemId(id: string, projectPrefix: string): boolean {
+  const dash = id.indexOf('-');
+  if (dash <= 0) {
+    return true; // no dash, or leading dash — cannot be classified (consistent with doctor)
+  }
+  return id.slice(0, dash).toUpperCase() === projectPrefix.toUpperCase();
+}
+
+/**
+ * Filter remote sync data so only records belonging to the project prefix
+ * can enter the merge. Comments, dependency edges and audit results that
+ * reference dropped foreign items are removed with them.
+ *
+ * @param items - Remote work items fetched from the remote ref.
+ * @param comments - Remote comments.
+ * @param edges - Remote dependency edges.
+ * @param audits - Remote audit results.
+ * @param projectPrefix - The project's configured prefix (case-insensitive).
+ * @returns The filtered sets plus the IDs of dropped foreign items (for observability).
+ */
+export function filterRemoteDataByPrefix(
+  items: WorkItem[],
+  comments: Comment[],
+  edges: DependencyEdge[],
+  audits: AuditResult[],
+  projectPrefix: string
+): {
+  items: WorkItem[];
+  comments: Comment[];
+  edges: DependencyEdge[];
+  audits: AuditResult[];
+  droppedItems: string[];
+} {
+  const allowedItemIds = new Set<string>();
+  const keptItems: WorkItem[] = [];
+  const droppedItems: string[] = [];
+
+  for (const item of items) {
+    if (isOwnProjectItemId(item.id, projectPrefix)) {
+      allowedItemIds.add(item.id);
+      keptItems.push(item);
+    } else {
+      droppedItems.push(item.id);
+    }
+  }
+
+  const keptComments = comments.filter(c => allowedItemIds.has(c.workItemId));
+  const keptEdges = edges.filter(e => allowedItemIds.has(e.fromId) && allowedItemIds.has(e.toId));
+  const keptAudits = audits.filter(a => allowedItemIds.has(a.workItemId));
+
+  return {
+    items: keptItems,
+    comments: keptComments,
+    edges: keptEdges,
+    audits: keptAudits,
+    droppedItems,
+  };
 }
 
 function mergeSameTimestampItems(
@@ -613,6 +718,65 @@ async function getRepoRoot(): Promise<string> {
   return stdout.trim();
 }
 
+/**
+ * Find the git repo root that owns `filePath` (by running git from the file's
+ * directory). Returns null when the file is not inside a git repository.
+ */
+async function getRepoRootForPath(filePath: string): Promise<string | null> {
+  const dir = path.dirname(path.resolve(filePath));
+  try {
+    const { stdout } = await execAsync('git rev-parse --show-toplevel', { cwd: dir });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Cross-project sync guard (WL-0MSAH26DD001XXST).
+ *
+ * `wl sync --worklog-dir <proj>/.worklog` run from inside a DIFFERENT git
+ * repo used to fetch the cwd repo's remote worklog ref (because the `-f`
+ * default was resolved from the cwd before the override applied) and merge
+ * it into <proj>'s database, then push the polluted union back to <proj>'s
+ * remote. This guard fails loudly whenever the data file lives in a
+ * different git repository than the process cwd, so a sync can never merge
+ * foreign-prefix items from another project.
+ */
+export async function assertDataFileInCwdRepo(dataFilePath: string): Promise<void> {
+  let cwdRepoRoot: string | null = null;
+  try {
+    cwdRepoRoot = (await getRepoRoot()).trim() || null;
+  } catch {
+    // cwd is not inside a git repository; existing code paths report that.
+  }
+
+  const dataRepoRoot = await getRepoRootForPath(dataFilePath);
+
+  if (cwdRepoRoot && dataRepoRoot && cwdRepoRoot !== dataRepoRoot) {
+    throw new Error(
+      `Cross-project sync blocked: data file '${dataFilePath}' belongs to git repository '${dataRepoRoot}', ` +
+      `but this command is running inside git repository '${cwdRepoRoot}'. ` +
+      `Merging would combine two projects' worklog data (WL-0MSAH26DD001XXST). ` +
+      `Run 'wl sync' from inside '${dataRepoRoot}' or remove the --worklog-dir flag.`
+    );
+  }
+  if (cwdRepoRoot && !dataRepoRoot) {
+    throw new Error(
+      `Cross-project sync blocked: data file '${dataFilePath}' is not inside a git repository, ` +
+      `but this command is running inside git repository '${cwdRepoRoot}'. ` +
+      `Run 'wl sync' from inside a directory in the same repository as '${dataFilePath}'.`
+    );
+  }
+  if (!cwdRepoRoot && dataRepoRoot) {
+    throw new Error(
+      `Cross-project sync blocked: data file '${dataFilePath}' belongs to git repository '${dataRepoRoot}', ` +
+      `but the current directory is not inside a git repository. ` +
+      `Run 'wl sync' from inside '${dataRepoRoot}'.`
+    );
+  }
+}
+
 async function fetchRemote(remote: string): Promise<void> {
   await execAsync(`git fetch ${escapeShellArg(remote)}`);
 }
@@ -709,6 +873,10 @@ function getRepoRelativePath(repoRootPath: string, filePath: string): { absolute
 }
 
 export async function getRemoteDataFileContent(dataFilePath: string, target: GitTarget): Promise<string | null> {
+  // Cross-project safety guard: never read the remote worklog ref of a
+  // different repository than the one owning the data file.
+  await assertDataFileInCwdRepo(dataFilePath);
+
   // Check if we're in a git repository
   await execAsync('git rev-parse --git-dir');
 
@@ -749,7 +917,8 @@ function ensureDir(p: string): void {
 async function withTempWorktree<T>(
   repoRootPath: string,
   target: GitTarget,
-  run: (worktreePath: string) => Promise<T>
+  run: (worktreePath: string) => Promise<T>,
+  options?: { forceOrphan?: boolean }
 ): Promise<T> {
   const worklogDir = path.join(repoRootPath, '.worklog');
   ensureDir(worklogDir);
@@ -757,7 +926,12 @@ async function withTempWorktree<T>(
   const tmpRoot = fs.mkdtempSync(path.join(worklogDir, 'tmp-worktree-'));
   const worktreePath = path.join(tmpRoot, 'wt');
 
-  const { hasRemote, remoteTrackingRef } = await fetchTargetRef(target);
+  // When forceOrphan is set (ref rewrite), bypass the remote fetch entirely:
+  // fetching the polluted remote ref would re-import foreign items into the
+  // local tracking ref. Instead create a fresh orphan branch from HEAD.
+  const { hasRemote, remoteTrackingRef } = options?.forceOrphan
+    ? { hasRemote: false, remoteTrackingRef: '' }
+    : await fetchTargetRef(target);
   const baseRef = hasRemote ? remoteTrackingRef : 'HEAD';
 
   try {
@@ -829,6 +1003,10 @@ export async function gitPushDataFileToBranch(
   commitMessage: string,
   target: GitTarget
 ): Promise<void> {
+  // Cross-project safety guard: never push the data file to a different
+  // repository's remote ref than the one owning the file.
+  await assertDataFileInCwdRepo(repoDataFilePath);
+
   // SAFETY GUARD: reject pushes to regular branches or tags.
   // Worklog data must only be stored on dedicated refs under refs/worklog/
   // to prevent accidental corruption of the project working tree.
@@ -895,4 +1073,93 @@ export async function gitPushDataFileToBranch(
       `git -C ${escapeShellArg(worktreePath)} push --no-verify ${escapeShellArg(target.remote)} HEAD:${escapeShellArg(pushTarget)}`
     );
   });
+}
+
+/**
+ * Rewrite a project's worklog data ref so it contains ONLY the given JSONL,
+ * force-pushing a fresh orphan commit that bypasses the polluted remote history.
+ *
+ * This is the remote-ref cleanup half of `wl doctor foreign-items --apply --push`.
+ * Unlike `gitPushDataFileToBranch` (which fetches and merges the remote ref
+ * first — re-importing foreign items), this function NEVER fetches the remote:
+ * it creates an orphan branch containing only the clean JSONL, force-pushes it
+ * to `refs/worklog/data`, and updates the local tracking ref to match.
+ *
+ * Safety: rejects pushes to regular branches/tags (only dedicated refs under
+ * `refs/worklog/` are allowed), matching `gitPushDataFileToBranch`.
+ *
+ * @param repoDataFilePath - Path to the clean JSONL file to publish.
+ * @param commitMessage - Commit message for the rewritten ref.
+ * @param target - Git remote + branch/ref target.
+ * @returns The SHA of the rewritten ref tip.
+ */
+export async function rewriteAndForcePushDataFile(
+  repoDataFilePath: string,
+  commitMessage: string,
+  target: GitTarget
+): Promise<string> {
+  // Cross-project safety guard: never push a data file to a different
+  // repository's remote ref than the one owning the file.
+  await assertDataFileInCwdRepo(repoDataFilePath);
+
+  // SAFETY GUARD: reject pushes to regular branches or tags.
+  // Worklog data must only be stored on dedicated refs under refs/worklog/.
+  const branch = target.branch;
+  if (branch.startsWith('refs/heads/') || branch.startsWith('refs/tags/')) {
+    throw new Error(
+      `Refusing to push worklog data to '${branch}'. ` +
+      `Worklog data must be pushed to a dedicated ref under refs/worklog/ ` +
+      `(e.g. refs/worklog/data).`
+    );
+  }
+
+  await execAsync('git rev-parse --git-dir');
+
+  const repoRootPath = await getRepoRoot();
+  const { relativePath } = getRepoRelativePath(repoRootPath, repoDataFilePath);
+  const srcAbsPath = path.resolve(repoDataFilePath);
+
+  if (!fs.existsSync(srcAbsPath)) {
+    throw new Error(`Worklog data file not found: ${srcAbsPath}`);
+  }
+
+  const remoteTrackingRef = getRemoteTrackingRef(target.remote, branch);
+  const pushTarget = branch.startsWith('refs/') ? branch : `refs/heads/${branch}`;
+  let tipSha = '';
+
+  await withTempWorktree(repoRootPath, target, async (worktreePath) => {
+    const dstAbsPath = path.join(worktreePath, relativePath);
+    ensureDir(path.dirname(dstAbsPath));
+    fs.copyFileSync(srcAbsPath, dstAbsPath);
+
+    const escapedMsg = escapeShellArg(commitMessage);
+    const escapedRel = escapeShellArg(relativePath);
+
+    // Stage and commit only the JSONL file (force-add: .worklog/ is gitignored).
+    await execAsync(`git -C ${escapeShellArg(worktreePath)} add -f -- ${escapedRel}`);
+    const { stdout: staged } = await execAsync(
+      `git -C ${escapeShellArg(worktreePath)} diff --cached --name-only -- ${escapedRel}`
+    );
+    if (!staged.trim()) {
+      throw new Error('Nothing staged for the rewrite; aborting to avoid an empty ref');
+    }
+
+    await execAsync(`git -C ${escapeShellArg(worktreePath)} commit -m ${escapedMsg}`);
+
+    // Force-push the orphan commit, replacing the polluted remote ref entirely.
+    await execAsync(
+      `git -C ${escapeShellArg(worktreePath)} push --force --no-verify ${escapeShellArg(target.remote)} HEAD:${escapeShellArg(pushTarget)}`
+    );
+
+    const { stdout } = await execAsync(`git -C ${escapeShellArg(worktreePath)} rev-parse HEAD`);
+    tipSha = stdout.trim();
+  }, { forceOrphan: true });
+
+  // Update the local tracking ref so a subsequent `wl sync` reads the clean
+  // ref (refs/worklog/remotes/<remote>/...) instead of the polluted one.
+  if (tipSha) {
+    await execAsync(`git update-ref ${escapeShellArg(remoteTrackingRef)} ${escapeShellArg(tipSha)}`);
+  }
+
+  return tipSha;
 }

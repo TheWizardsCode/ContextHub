@@ -18,6 +18,26 @@ Settings are stored in Pi's canonical settings files under the `context-hub`
 namespace. Settings changed via `/wl settings` are persisted to the project's
 `.pi/settings.json`.
 
+### Project `.pi` Discovery
+
+The project settings directory is discovered the same way as the `.worklog`
+directory (see `resolveWorklogDir()`/`resolvePiDir()` in `src/worklog-paths.ts`):
+
+1. Walk up from the current working directory toward the git repo root; the
+   **nearest** directory with a `.pi/settings.json` wins — a local settings
+   file in the working directory (or a closer ancestor) overrides the repo
+   root.
+2. If no `.pi/settings.json` exists between the working directory and the
+   repo root, the **git repo root's** `.pi/settings.json` is used.
+3. Outside a git repository, the working directory is used as-is.
+
+This means a project-level `.pi/settings.json` at the repo root is the
+canonical settings location: running pi from a subdirectory (e.g.
+`packages/herdr/`) loads and persists settings to the repo root unless a
+closer `.pi/settings.json` exists. Unlike `.worklog`, worktree isolation is
+not applied — `.pi` holds developer configuration, so settings are shared
+across the repository.
+
 ### Resolution Order
 
 Settings are resolved from multiple locations, with later sources overriding
@@ -30,7 +50,9 @@ earlier ones:
 | 3 | Project settings | `<project>/.pi/settings.json` → `{ "context-hub": { ... } }` |
 
 Project settings always win, allowing per-project overrides while individual
-team members can set personal defaults globally.
+team members can set personal defaults globally. `project` is resolved
+repo-root aware as described above (nearest `.pi/settings.json` wins, falling
+back to the git repo root).
 
 ### Auto-Refresh
 
@@ -54,6 +76,23 @@ the browse dialog.
 - Auto-refresh is a hardcoded feature (5-second interval) with no
   configuration UI. It only applies to the browse list overlay, not
   to the detail view.
+
+**Idle gating (pause-when-idle):** The auto-refresh interval (and its
+background `wl sync --if-idle` trigger) pauses when the selection list has
+had **no keypresses for 30 seconds** (`IDLE_PAUSE_MS` in
+`Worklog/lib/browse.ts`). This stops idle or hidden selection lists from
+spawning `wl` subprocesses — each 5s tick previously spawned 4–5 `wl`
+processes (~60/min per mounted widget), which with many concurrent pi
+sessions caused severe memory and CPU pressure (WL-0MSB1N0HB0007N6N).
+
+- **Mount counts as interaction** — a freshly opened selection list starts
+  in the active state and refreshes normally.
+- **Resume on keypress** — the first keypress after an idle pause triggers
+  an immediate refresh and resumes the normal 5s cadence.
+- **No settings toggle** — the idle threshold is a named module constant
+  (30s), always on, fail-open (manual actions and navigation are never
+  gated).
+- While the user actively browses, the cadence is unchanged (5s refresh).
 
 ### Selection List Behaviour
 

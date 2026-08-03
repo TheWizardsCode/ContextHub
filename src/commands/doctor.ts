@@ -10,7 +10,10 @@ import { listPendingMigrations, runMigrations } from '../migrations/index.js';
 import { dryRunHooks, upgradeHooks, detectHooksTargetDir, type HookDryRunResult, type HookUpgradeResult } from '../doctor/hook-upgrade.js';
 import { validateFilePaths, applyFilePathsFix, DEFAULT_INTAKE_STAGES } from '../doctor/file-paths-check.js';
 import { importFromJsonl } from '../jsonl.js';
-import { mergeWorkItems, mergeComments, mergeAuditResults } from '../sync.js';
+import { mergeWorkItems, mergeComments, mergeAuditResults, rewriteAndForcePushDataFile } from '../sync.js';
+import { getSyncDefaults } from './sync.js';
+import { withFileLock, getLockPathForJsonl } from '../file-lock.js';
+import { buildForeignItemReport, applyForeignItemCleanup } from '../doctor/foreign-items-check.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { normalizePriority, isValidPriority, isMappablePriority, PRIORITY_MAP, CANONICAL_PRIORITIES } from '../validators/priority.js';
@@ -455,6 +458,117 @@ export default function register(ctx: PluginContext): void {
         if (utils.isJsonMode()) output.json({ success: false, error: message });
         else console.error(`Doctor prune failed: ${message}`);
       }
+    });
+
+  doctor
+    .command('foreign-items')
+    .description('Report work items whose ID prefix does not match the project prefix')
+    .option('--dry-run', 'Show foreign items without modifying anything (default)')
+    .option('--apply', 'Hard-delete foreign items from the database (destructive; requires explicit opt-in)')
+    .option('--push', 'After --apply, rewrite and force-push the remote worklog ref so it contains only own items (destructive)')
+    .option('--prefix <prefix>', 'Override the default prefix')
+    .action(async (opts: { dryRun?: boolean; apply?: boolean; push?: boolean; prefix?: string }) => {
+      utils.requireInitialized();
+      const db = utils.getDatabase(opts.prefix);
+      const config = utils.getConfig();
+      // The parent `doctor` command also declares --prefix and captures it
+      // for child commands; fall back to it when the child value is absent.
+      const configuredPrefix = opts.prefix || doctor.opts().prefix || config?.prefix || 'WI';
+      const allItems = db.getAll();
+
+      const report = buildForeignItemReport(allItems, configuredPrefix, !opts.apply);
+
+      // Safety: --push requires --apply. Rewriting the remote ref without
+      // cleaning the DB would publish foreign items.
+      if (opts.push && !opts.apply) {
+        if (utils.isJsonMode()) {
+          output.json({
+            success: false,
+            error: '--push requires --apply: the remote ref can only be rewritten after foreign items are removed from the database.',
+          });
+          return;
+        }
+        console.error('Doctor foreign-items: --push requires --apply (rewriting the remote ref without cleaning the DB would push foreign items).');
+        process.exitCode = 1;
+        return;
+      }
+
+      // Destructive path: hard-delete foreign items with full cascade.
+      if (opts.apply) {
+        const result = applyForeignItemCleanup(db, report);
+
+        // Optional remote ref rewrite: publish a clean JSONL (only own items)
+        // to the project's worklog ref, bypassing the polluted remote history.
+        let pushResult: string | null = null;
+        if (opts.push) {
+          const jsonlPath = await db.exportForSync();
+          const lockPath = getLockPathForJsonl(jsonlPath);
+          const defaults = getSyncDefaults(config || undefined);
+          const gitTarget = {
+            remote: defaults.gitRemote,
+            branch: defaults.gitBranch,
+          };
+          pushResult = await withFileLock(lockPath, async () => {
+            const tipSha = await rewriteAndForcePushDataFile(
+              jsonlPath,
+              'Rewrite worklog ref: remove foreign items',
+              gitTarget
+            );
+            // Ephemeral JSONL pattern: remove the local file after a successful push.
+            try { db.deleteLocalJsonl(); } catch (_) { /* best-effort */ }
+            return tipSha;
+          });
+        }
+
+        if (utils.isJsonMode()) {
+          if (opts.push) {
+            output.json({ ...result, push: true, pushRef: getSyncDefaults(config || undefined).gitBranch, pushSha: pushResult });
+          } else {
+            output.json(result);
+          }
+          return;
+        }
+        console.log(`Doctor foreign-items: removed ${result.removedCount} foreign item(s) (total: ${result.totalBefore} -> ${result.totalAfter}; own: ${result.ownBefore} -> ${result.ownAfter}).`);
+        if (result.removedIds.length > 0) {
+          console.log('Removed IDs:');
+          for (const id of result.removedIds) {
+            console.log(`  - ${id}`);
+          }
+        }
+        if (opts.push) {
+          console.log(`Rewrote ${getSyncDefaults(config || undefined).gitBranch} (${pushResult}) with own items only.`);
+        }
+        if (result.errors.length > 0) {
+          console.log(`\n${result.errors.length} error(s):`);
+          for (const e of result.errors) {
+            console.log(`  - ${e.id}: ${e.error}`);
+          }
+          process.exitCode = 1;
+        }
+        return;
+      }
+
+      if (utils.isJsonMode()) {
+        output.json(report);
+        return;
+      }
+
+      console.log(`Doctor foreign-items: ${report.totalItems} item(s) scanned, ${report.foreignCount} foreign item(s) (prefix: ${report.prefix}).`);
+      if (report.foreignCount === 0) {
+        console.log('No foreign items found.');
+        return;
+      }
+
+      const prefixes = Object.keys(report.byPrefix).sort();
+      for (const prefix of prefixes) {
+        const group = report.byPrefix[prefix];
+        console.log(`\n${prefix}: ${group.count} item(s) (${group.deleted} deleted, ${group.nonDeleted} non-deleted)`);
+        for (const id of group.ids) {
+          console.log(`  - ${id}`);
+        }
+      }
+      console.log(`\nTotal: ${report.deletedForeignCount} deleted, ${report.nonDeletedForeignCount} non-deleted foreign item(s).`);
+      console.log('Dry-run only; nothing was modified. Use --apply to hard-delete foreign items.');
     });
 
   doctor

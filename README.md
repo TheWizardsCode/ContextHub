@@ -55,7 +55,7 @@ wl show <parent-id> -c
 wl sync
 
 # Mirror to GitHub Issues (optional)
-wl github push
+wl github push          # add --verbose for a per-item synced list + timing breakdown
 wl github import
 ```
 
@@ -123,6 +123,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | [MULTI_PROJECT_GUIDE.md](MULTI_PROJECT_GUIDE.md) | Multi-project setup with custom prefixes |
 | [API.md](API.md) | REST API endpoints and usage |
 | [docs/FILE_PATH_CONVENTION.md](docs/FILE_PATH_CONVENTION.md) | File path convention for work item descriptions |
+| [docs/CROSS_PROJECT_POLLUTION_CLEANUP.md](docs/CROSS_PROJECT_POLLUTION_CLEANUP.md) | Detecting and removing cross-project worklog pollution (`wl doctor foreign-items`) |
 
 ### Reference
 

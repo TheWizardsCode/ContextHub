@@ -16,16 +16,39 @@ import { runInProcess } from './cli-inproc.js';
 export const pidTrackingSet: Set<number> = new Set();
 
 /**
- * Send SIGTERM to all tracked process PIDs and clear the tracking set.
+ * Kill a PID and all its descendants (process tree).
+ *
+ * On POSIX systems children spawned via `child_process.spawn`/`exec` with a
+ * shell share the shell's process group. Killing the shell PID alone leaves
+ * the actual command (e.g. `tsx src/cli.ts --json create`) and its own
+ * children (e.g. the node CLI process) orphaned with ppid=1 — exactly the
+ * leak seen in WL-0MSB447TJ000R3N8. We therefore kill the process group
+ * (`-pid`) first, which terminates every member of the tree, and fall back
+ * to a plain PID kill when no process group exists.
+ */
+export function killProcessTree(pid: number, signal: NodeJS.Signals = 'SIGTERM'): void {
+  // Kill the whole process group (shell + command + grandchildren).
+  try {
+    process.kill(-pid, signal);
+    return;
+  } catch {
+    // EPERM/ESRCH: no process group or already dead — fall through.
+  }
+  // Fallback: kill just the PID.
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // Process may already have exited; ignore.
+  }
+}
+
+/**
+ * Send SIGTERM to all tracked process trees and clear the tracking set.
  * Safe to call multiple times; already-exited PIDs are silently ignored.
  */
 export function killTrackedProcesses(): void {
   for (const pid of pidTrackingSet) {
-    try {
-      process.kill(pid, 'SIGTERM');
-    } catch {
-      // Process may already have exited; ignore
-    }
+    killProcessTree(pid, 'SIGTERM');
   }
   pidTrackingSet.clear();
 }
@@ -73,25 +96,68 @@ function _trackChild(proc: childProcess.ChildProcess): void {
 /**
  * Wrapper around child_process.exec that tracks the child PID and injects
  * the test-local mock-bin directory into PATH.
+ *
+ * Spawns with `detached: true` (POSIX) so the child gets its own process
+ * group — this is what allows `killProcessTree` to kill the whole tree
+ * (shell + command + grandchildren) instead of orphaning descendants
+ * (WL-0MSB447TJ000R3N8).
  */
 function _execTracked(
   command: string,
-  options?: childProcess.ExecOptions
+  options?: childProcess.ExecOptions & { timeout?: number }
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = childProcess.exec(command, options as any, (error, stdout, stderr) => {
-      if (error) {
-        (error as any).stdout = stdout ?? '';
-        (error as any).stderr = stderr ?? '';
-        reject(error);
-      } else {
-        resolve({
-          stdout: typeof stdout === 'string' ? stdout : stdout?.toString('utf-8') ?? '',
-          stderr: typeof stderr === 'string' ? stderr : stderr?.toString('utf-8') ?? '',
-        });
-      }
+    const timeoutMs = options?.timeout ?? 30000;
+    const child = childProcess.spawn(command, {
+      shell: true,
+      cwd: options?.cwd,
+      env: options?.env,
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
     _trackChild(child);
+
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      if (child.pid) killProcessTree(child.pid, 'SIGKILL');
+    }, timeoutMs);
+
+    child.stdout?.setEncoding('utf-8');
+    child.stderr?.setEncoding('utf-8');
+    child.stdout?.on('data', (d) => { stdout += d; });
+    child.stderr?.on('data', (d) => { stderr += d; });
+
+    const settle = () => {
+      clearTimeout(timeoutId);
+      if (timedOut) {
+        const err: any = new Error(`Command timed out after ${timeoutMs}ms: ${command}`);
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      resolve({ stdout, stderr });
+    };
+
+    child.on('error', (err) => {
+      clearTimeout(timeoutId);
+      reject(err);
+    });
+    child.on('close', (code) => {
+      if (code === 0) {
+        settle();
+      } else {
+        clearTimeout(timeoutId);
+        const err: any = new Error(`Command failed with exit code ${code ?? 'null'}: ${command}`);
+        err.stdout = stdout;
+        err.stderr = stderr;
+        err.code = code;
+        reject(err);
+      }
+    });
   });
 }
 
@@ -174,12 +240,19 @@ export async function execWithInput(
       shell: true,
       cwd: options?.cwd,
       env,
+      detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe']
     });
     _trackChild(child);
 
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    const timeoutMs = options?.timeout ?? 30000;
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      if (child.pid) killProcessTree(child.pid, 'SIGKILL');
+    }, timeoutMs);
 
     child.stdout.setEncoding('utf-8');
     child.stderr.setEncoding('utf-8');
@@ -191,8 +264,16 @@ export async function execWithInput(
       stderr += chunk;
     });
 
-    child.on('error', reject);
+    child.on('error', (err) => {
+      clearTimeout(timeoutId);
+      reject(err);
+    });
     child.on('close', (code) => {
+      clearTimeout(timeoutId);
+      if (timedOut) {
+        reject(new Error(`Command timed out after ${timeoutMs}ms: ${command}`));
+        return;
+      }
       resolve({ stdout, stderr, exitCode: code });
     });
 
@@ -213,6 +294,45 @@ export function enterTempDir(): { tempDir: string; originalCwd: string } {
 export function leaveTempDir(state: { tempDir: string; originalCwd: string }): void {
   process.chdir(state.originalCwd);
   cleanupTempDir(state.tempDir);
+}
+
+// ── Stale wl process cleanup (WL-0MSB447TJ000R3N8) ───────────────────
+
+/**
+ * Kill any stale `wl`/`worklog` CLI processes whose command line matches a
+ * substring (e.g. a test worktree slug like `init-pre-push-guards`).
+ *
+ * Test-spawned `wl create` processes can outlive the test worker when the
+ * worker is killed with SIGKILL (vitest timeout / worktree cleanup): the
+ * `tsx`/`node` grandchildren are reparented to init (ppid=1) with a deleted
+ * cwd and hang forever. This helper provides a belt-and-suspenders sweep for
+ * CI teardown and for manual cleanup of known test worktrees.
+ *
+ * @param match - Substring to match against the process command line.
+ * @param signal - Signal to send (default SIGKILL — hung processes may not
+ *                 handle SIGTERM; the CLI is stateless so SIGKILL is safe).
+ * @returns The number of processes killed.
+ */
+export function killStaleWlProcesses(match: string, signal: NodeJS.Signals = 'SIGKILL'): number {
+  const { execFileSync } = childProcess;
+  let killed = 0;
+  let stdout = '';
+  try {
+    stdout = execFileSync('pgrep', ['-f', `wl.*${match}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    return 0; // no matches (pgrep exits 1) or pgrep unavailable
+  }
+  for (const line of stdout.split(/\n/)) {
+    const pid = Number(line.trim());
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+    try {
+      killProcessTree(pid, signal);
+      killed += 1;
+    } catch {
+      // already dead / no permission
+    }
+  }
+  return killed;
 }
 
 export function writeConfig(dir: string, projectName: string = 'Test Project', prefix: string = 'TEST'): void {
@@ -309,7 +429,8 @@ export function seedWorkItems(
       text: string;
     };
   }>,
-  comments: Comment[] = []
+  comments: Comment[] = [],
+  auditResults?: Array<{ workItemId: string; readyToClose: boolean; auditedAt: string; summary?: string | null; rawOutput?: string | null; author?: string | null }>
 ): WorkItem[] {
   const now = new Date().toISOString();
   const seeded = items.map((item, index) => ({
@@ -339,6 +460,6 @@ export function seedWorkItems(
     }));
 
   const dataPath = path.join(dir, '.worklog', 'worklog-data.jsonl');
-  exportToJsonl(seeded, comments, dataPath, []);
+  exportToJsonl(seeded, comments, dataPath, [], auditResults || []);
   return seeded;
 }

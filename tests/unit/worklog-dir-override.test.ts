@@ -110,30 +110,80 @@ describe('resolveWorklogDir with worklogDir override', () => {
 });
 
 // ---------------------------------------------------------------------------
-// getDefaultDataPath with --worklog-dir override
+// applyWorklogDirOverrideFromArgv — early --worklog-dir application
+// (WL-0MSAH26DD001XXST: the override must be applied before ctx.dataPath is
+// computed, otherwise -f/--file defaults resolve from the cwd repo)
 // ---------------------------------------------------------------------------
 
-describe('getDefaultDataPath with worklogDir override', () => {
+describe('applyWorklogDirOverrideFromArgv', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), 'wl-data-override-'));
+    tempDir = mkdtempSync(join(tmpdir(), 'wl-argv-override-'));
   });
 
   afterEach(() => {
     try { rmSync(tempDir, { recursive: true }); } catch { /* ignore */ }
   });
 
-  it('computes data path under the override worklog directory', async () => {
+  it('applies --worklog-dir <path> from argv', async () => {
     const mod = await import('../../src/worklog-paths.js');
+    try {
+      const overrideDir = join(tempDir, 'proj', '.worklog');
+      mod.applyWorklogDirOverrideFromArgv(['--worklog-dir', overrideDir, 'sync']);
+      expect(mod.getWorklogDirOverride()).toBe(overrideDir);
+      expect(mod.resolveWorklogDir()).toBe(overrideDir);
+    } finally {
+      mod.setWorklogDirOverride(undefined);
+    }
+  });
 
-    const overrideDir = join(tempDir, 'project', '.worklog');
-    mkdirSync(overrideDir, { recursive: true });
-    writeFileSync(join(overrideDir, 'config.yaml'), 'projectName: test\nprefix: TEST\n');
+  it('applies --worklog-dir=<path> (equals form) from argv', async () => {
+    const mod = await import('../../src/worklog-paths.js');
+    try {
+      const overrideDir = join(tempDir, 'proj', '.worklog');
+      mod.applyWorklogDirOverrideFromArgv(['sync', `--worklog-dir=${overrideDir}`]);
+      expect(mod.getWorklogDirOverride()).toBe(overrideDir);
+    } finally {
+      mod.setWorklogDirOverride(undefined);
+    }
+  });
 
-    mod.setWorklogDirOverride(overrideDir);
+  it('does not override when --worklog-dir is absent (and clears stale overrides)', async () => {
+    const mod = await import('../../src/worklog-paths.js');
+    try {
+      // Simulate a stale override from a previous invocation (e.g. another
+      // in-process run): the absence of --worklog-dir must clear it.
+      mod.setWorklogDirOverride(join(tempDir, 'stale', '.worklog'));
+      mod.applyWorklogDirOverrideFromArgv(['sync', '--dry-run']);
+      expect(mod.getWorklogDirOverride()).toBeUndefined();
+    } finally {
+      mod.setWorklogDirOverride(undefined);
+    }
+  });
 
-    const dataPath = mod.resolveWorklogDir();
-    expect(dataPath).toBe(overrideDir);
+  it('does not override for a trailing --worklog-dir with no value', async () => {
+    const mod = await import('../../src/worklog-paths.js');
+    try {
+      mod.setWorklogDirOverride(undefined);
+      mod.applyWorklogDirOverrideFromArgv(['sync', '--worklog-dir']);
+      expect(mod.getWorklogDirOverride()).toBeUndefined();
+    } finally {
+      mod.setWorklogDirOverride(undefined);
+    }
+  });
+
+  it('dataPath resolution order: getDefaultDataPath reflects the override', async () => {
+    const mod = await import('../../src/worklog-paths.js');
+    const jsonl = await import('../../src/jsonl.js');
+    try {
+      const overrideDir = join(tempDir, 'proj', '.worklog');
+      // This mirrors src/cli.ts: apply the override BEFORE createPluginContext
+      // computes ctx.dataPath via getDefaultDataPath().
+      mod.applyWorklogDirOverrideFromArgv(['--worklog-dir', overrideDir, 'sync']);
+      expect(jsonl.getDefaultDataPath()).toBe(join(overrideDir, 'worklog-data.jsonl'));
+    } finally {
+      mod.setWorklogDirOverride(undefined);
+    }
   });
 });

@@ -4,7 +4,8 @@
 
 The `wl next --groups/-g` grouping feature determines parallel-work safety by
 extracting file paths from work item descriptions. To make this work reliably,
-all `intake_complete` work items **should** include a `**Key Files:**` or `## Key Files` section
+all `intake_complete` and `plan_complete` work items **should** include a
+`**Key Files:**` or `## Key Files` section
 listing the files the work item will touch.
 
 ## Convention Specification
@@ -112,10 +113,20 @@ Section exists but no valid paths:
 | Stage | Required? |
 |---|---|
 | `idea` | No (optional) |
-| `intake_complete` | **Should** include |
-| `plan_complete` | **Should** include (groups items) |
+| `intake_complete` | **Should** include (groups items into `Group N`) |
+| `plan_complete` | **Should** include (groups items into `Group N`) |
 | `in_progress` | Optional |
 | `in_review` | No |
+
+### Group display order
+
+`wl next -n N` displays groups in this order (WL-0MSAK8YLB0025EGW):
+
+1. **Critical Group N** — `critical` priority items partitioned by file-path conflicts (items sharing a file path land in different groups; items with unknown paths get singleton groups).
+2. **Group N** — non-critical `plan_complete` + `intake_complete` items partitioned by file-path conflicts. Within each group, `plan_complete` items appear first, then `intake_complete` items (no headings between sub-groups), each sorted by priority (high → medium → low).
+3. **Idea** — single group, sorted by priority.
+4. **Other** — single group for all remaining items.
+5. **In Review** — single group (last).
 
 ### Programmatic Access
 

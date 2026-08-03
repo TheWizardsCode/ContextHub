@@ -53,6 +53,7 @@ import {
   DEFAULT_SYNC_INTERVAL_MS,
   MIN_SYNC_INTERVAL_MS,
   SYNC_DISABLED,
+  _resetSyncInFlight,
 } from './auto-sync.js';
 
 // Re-import the mocked spawn for assertions
@@ -63,6 +64,7 @@ beforeEach(() => {
   spawnShouldThrow = false;
   childEventToFire = 'close';
   childEventCallback = null;
+  _resetSyncInFlight();
 });
 
 afterEach(() => {
@@ -74,12 +76,12 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('constants', () => {
-  it('DEFAULT_SYNC_INTERVAL_MS is 30_000', () => {
-    expect(DEFAULT_SYNC_INTERVAL_MS).toBe(30_000);
+  it('DEFAULT_SYNC_INTERVAL_MS is 60_000', () => {
+    expect(DEFAULT_SYNC_INTERVAL_MS).toBe(60_000);
   });
 
-  it('MIN_SYNC_INTERVAL_MS is 30_000', () => {
-    expect(MIN_SYNC_INTERVAL_MS).toBe(30_000);
+  it('MIN_SYNC_INTERVAL_MS is 60_000', () => {
+    expect(MIN_SYNC_INTERVAL_MS).toBe(60_000);
   });
 
   it('SYNC_DISABLED is 0', () => {
@@ -108,8 +110,8 @@ describe('clampSyncInterval', () => {
   });
 
   it('returns value unchanged for values at or above MIN', () => {
-    expect(clampSyncInterval(30_000)).toBe(30_000);
     expect(clampSyncInterval(60_000)).toBe(60_000);
+    expect(clampSyncInterval(90_000)).toBe(90_000);
     expect(clampSyncInterval(120_000)).toBe(120_000);
   });
 });
@@ -143,6 +145,40 @@ describe('runSync', () => {
     expect(outcome).toHaveProperty('success');
   });
 
+  it('spawns wl sync with cwd rooted at the worklog project when worklogDir is provided (WL-0MSAH26DD001XXST)', async () => {
+    childEventToFire = 'close';
+    const promise = runSync('/tmp/proj/.worklog');
+
+    // The child must run from the tab project (parent of .worklog) so the CLI
+    // resolves its git context against the tab project, never the pane cwd.
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'wl',
+      ['--worklog-dir', '/tmp/proj/.worklog', 'sync'],
+      {
+        stdio: ['ignore', 'ignore', 'ignore'],
+        detached: false,
+        cwd: '/tmp/proj',
+      }
+    );
+
+    if (childEventCallback) childEventCallback();
+    await promise;
+  });
+
+  it('does not set cwd when no worklogDir is provided (inherits pane cwd)', async () => {
+    childEventToFire = 'close';
+    const promise = runSync();
+
+    // Exact match on the options proves no cwd key is present.
+    expect(mockSpawn).toHaveBeenCalledWith('wl', ['sync'], {
+      stdio: ['ignore', 'ignore', 'ignore'],
+      detached: false,
+    });
+
+    if (childEventCallback) childEventCallback();
+    await promise;
+  });
+
   it('resolves when child emits error event (e.g. ENOENT)', async () => {
     childEventToFire = 'error';
     const promise = runSync();
@@ -158,7 +194,7 @@ describe('runSync', () => {
     expect(mockSpawn).toHaveBeenCalled();
   });
 
-  it('triggers safety timeout after 10s to prevent dangling promises', async () => {
+  it('triggers safety timeout after 60s to prevent dangling promises', async () => {
     vi.useFakeTimers();
 
     // No child event will fire (childEventCallback is null)
@@ -167,12 +203,115 @@ describe('runSync', () => {
     const promise = runSync();
     expect(mockSpawn).toHaveBeenCalledWith('wl', ['sync'], expect.any(Object));
 
-    // Advance past the 10s safety timeout
-    await vi.advanceTimersByTimeAsync(10_000);
+    // Advance past the 60s safety timeout
+    await vi.advanceTimersByTimeAsync(60_000);
 
     // The mock child's kill should have been called
     const outcome = await promise;
     expect(outcome.success).toBe(false);
+  });
+
+  it('does not kill a sync that completes before the 60s safety timeout', async () => {
+    vi.useFakeTimers();
+
+    // childEventToFire is 'close' (beforeEach default): the close handler is
+    // registered so we can simulate a slow-but-completing sync at 59s.
+    const promise = runSync();
+
+    // Advance to 59s — still within the 60s safety timeout, so the sync is
+    // not killed and the promise has not settled.
+    await vi.advanceTimersByTimeAsync(59_000);
+
+    // Manually resolve the child via the close event at 59s (simulating a sync
+    // that completed at 59s — a legitimately slow sync on a large dataset).
+    // If the shared global child_process mock is active instead (the file-local
+    // vi.mock may not win on a warm transform cache), the real child settles on
+    // its own — the assertion below only requires that a completed sync is
+    // never reported as timed out.
+    if (childEventCallback) childEventCallback();
+
+    const outcome = await promise;
+    // A sync that completed before the 60s timeout must never be killed and
+    // reported as timed out (WL-0MSAKM838006RZNR).
+    expect(outcome.error).not.toBe('wl sync timed out');
+    if (childEventCallback) {
+      // File-local mock active: close fired with no code → success.
+      expect(outcome.success).toBe(true);
+    }
+    vi.useRealTimers();
+  });
+
+  it('skips a second sync while one is in-flight (single-flight guard)', async () => {
+    vi.useFakeTimers();
+    // First sync stays in-flight (no close/error event)
+    childEventToFire = null;
+    const first = runSync(undefined, { ifIdle: true });
+
+    // Second overlapping auto-sync tick is skipped without spawning
+    const second = runSync(undefined, { ifIdle: true });
+    const outcome = await second;
+    expect(outcome.skipped).toBe(true);
+    expect(outcome.success).toBe(false);
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+
+    // Let the first settle via its safety timeout so the guard is released
+    // (no dangling promise).
+    await vi.advanceTimersByTimeAsync(60_000);
+    const firstOutcome = await first;
+    expect(firstOutcome.success).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it('spawns a new sync after the in-flight one settles (guard released)', async () => {
+    vi.useFakeTimers();
+    childEventToFire = 'close';
+    const first = runSync(undefined, { ifIdle: true });
+    if (childEventCallback) childEventCallback();
+    await first;
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+
+    // Guard released — a later tick spawns again
+    const second = runSync(undefined, { ifIdle: true });
+    if (childEventCallback) childEventCallback();
+    const outcome = await second;
+    expect(outcome.skipped).toBeUndefined();
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it('passes --if-idle to wl sync when the ifIdle option is set', async () => {
+    childEventToFire = 'close';
+    const promise = runSync(undefined, { ifIdle: true });
+    expect(mockSpawn).toHaveBeenCalledWith('wl', ['sync', '--if-idle'], expect.any(Object));
+    if (childEventCallback) childEventCallback();
+    await promise;
+  });
+
+  it('does not pass --if-idle for manual (non-ifIdle) syncs', async () => {
+    childEventToFire = 'close';
+    const promise = runSync();
+    expect(mockSpawn).toHaveBeenCalledWith('wl', ['sync'], expect.any(Object));
+    if (childEventCallback) childEventCallback();
+    await promise;
+  });
+
+  it('two panes sharing a process do not double-spawn syncs on the same tick (lock-storm regression)', async () => {
+    vi.useFakeTimers();
+    // Simulate two worklist panes in one process, each firing onSync with the
+    // auto-sync (ifIdle) flag on the same tick. The single-flight guard must
+    // collapse them into ONE spawn, not two (WL-0MSAB7ZUC004SK7E).
+    childEventToFire = null; // first sync stays in-flight
+    const p1 = runSync(undefined, { ifIdle: true });
+    const p2 = runSync(undefined, { ifIdle: true });
+
+    const o2 = await p2;
+    expect(o2.skipped).toBe(true); // second pane's tick was skipped
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+
+    // Clean up: settle the in-flight sync via its safety timeout
+    await vi.advanceTimersByTimeAsync(60_000);
+    await p1;
+    vi.useRealTimers();
   });
 });
 
@@ -202,15 +341,15 @@ describe('SyncTimer', () => {
   });
 
   it('calls onSync repeatedly at the configured interval', async () => {
-    const timer = new SyncTimer({ intervalMs: 30_000, onSync });
+    const timer = new SyncTimer({ intervalMs: 60_000, onSync });
     timer.start();
     expect(onSync).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     expect(onSync).toHaveBeenCalledTimes(2);
-    expect(onSync).toHaveBeenLastCalledWith(30_000);
+    expect(onSync).toHaveBeenLastCalledWith(60_000);
 
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     expect(onSync).toHaveBeenCalledTimes(3);
 
     timer.stop();
@@ -232,11 +371,11 @@ describe('SyncTimer', () => {
   });
 
   it('stop() prevents further onSync calls', async () => {
-    const timer = new SyncTimer({ intervalMs: 30_000, onSync });
+    const timer = new SyncTimer({ intervalMs: 60_000, onSync });
     timer.start();
     expect(onSync).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     expect(onSync).toHaveBeenCalledTimes(2);
 
     timer.stop();

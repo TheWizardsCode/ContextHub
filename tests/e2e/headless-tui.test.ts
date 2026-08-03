@@ -13,9 +13,34 @@
  * components directly, these tests exercise the built executable itself.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { execa } from 'execa';
 import * as path from 'path';
+import * as fs from 'fs';
+
+const PROJECT_ROOT = path.join(__dirname, '..', '..');
+const INIT_SEMAPHORE = path.join(PROJECT_ROOT, '.worklog', 'initialized');
+
+/**
+ * Ensure the worklog is initialized before running CLI commands.
+ * CI runs `wl init` before the test suite, but this test file may also be
+ * run in isolation (e.g. `npx vitest run tests/e2e/headless-tui.test.ts`),
+ * in which case the `.worklog/initialized` semaphore does not exist yet and
+ * every `wl` CLI invocation exits with "Worklog system is not initialized".
+ */
+function ensureWorklogInitialized(): void {
+  if (!fs.existsSync(INIT_SEMAPHORE)) {
+    fs.mkdirSync(path.dirname(INIT_SEMAPHORE), { recursive: true });
+    fs.writeFileSync(
+      INIT_SEMAPHORE,
+      JSON.stringify({
+        version: '0.0.0-test',
+        initializedAt: new Date().toISOString(),
+      }, null, 2),
+      'utf-8'
+    );
+  }
+}
 
 /**
  * Run a wl CLI command via the built executable.
@@ -44,6 +69,10 @@ function runTuiHeadless(...args: string[]): ReturnType<typeof execa> {
 }
 
 describe('E2E: Headless TUI - built executable', () => {
+  beforeAll(() => {
+    ensureWorklogInitialized();
+  });
+
   describe('wl list command via built CLI', () => {
     it('executes wl list -n 1 --json and returns valid JSON', async () => {
       const { stdout } = await runWlCli('list', '-n', '1', '--json');

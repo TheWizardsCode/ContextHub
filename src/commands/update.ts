@@ -4,7 +4,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { UpdateOptions } from '../cli-types.js';
-import type { UpdateWorkItemInput, WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel } from '../types.js';
+import type { UpdateWorkItemInput, WorkItem, WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel } from '../types.js';
 import { promises as fs } from 'fs';
 import { humanFormatWorkItem, resolveFormat, extractFilePaths } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
@@ -380,6 +380,9 @@ export default function register(ctx: PluginContext): void {
           continue;
         }
 
+        // Capture the previous priority before the update so we can detect a
+        // downgrade away from `critical` and cascade it to children.
+        const oldPriority = (db.get(normalizedId)?.priority) as WorkItemPriority | undefined;
         const item = db.update(normalizedId, updates);
         if (!item) {
           const message = `Work item not found: ${normalizedId}`;
@@ -389,6 +392,15 @@ export default function register(ctx: PluginContext): void {
 
         if (updates.status || updates.stage) {
           db.reconcileDependentStatus(normalizedId);
+        }
+
+        // Cascade a priority downgrade: when the item's priority moves away
+        // from `critical`, any direct children still at `critical` are
+        // downgraded to `high` so a non-critical parent has no critical
+        // subtasks. Children already at high/medium/low are left untouched.
+        let downgradedChildren: WorkItem[] = [];
+        if (updates.priority && oldPriority === 'critical' && priorityCandidate !== 'critical') {
+          downgradedChildren = db.cascadePriorityDowngrade(normalizedId, priorityCandidate as WorkItemPriority);
         }
 
         // Mark that an impactful change was made if any qualifying fields were
@@ -415,7 +427,12 @@ export default function register(ctx: PluginContext): void {
           (item as any).audit = { time: auditEntryForOutput.time, author: auditEntryForOutput.author, text: auditEntryForOutput.text, status: auditEntryForOutput.status };
         }
 
-        results.push({ id: normalizedId, success: true, workItem: item });
+        results.push({
+          id: normalizedId,
+          success: true,
+          workItem: item,
+          ...(downgradedChildren.length > 0 ? { downgradedChildren } : {}),
+        });
       }
 
       // Determine overall success
@@ -426,7 +443,13 @@ export default function register(ctx: PluginContext): void {
         // per-id results.
         if (results.length === 1) {
           const r = results[0];
-          if (r.success) output.json({ success: true, workItem: r.workItem });
+          if (r.success) {
+            const jsonOut: any = { success: true, workItem: r.workItem };
+            if (r.downgradedChildren?.length) {
+              jsonOut.downgradedChildren = r.downgradedChildren;
+            }
+            output.json(jsonOut);
+          }
           else {
             const { success: _ignored, ...rest } = r;
             output.json({ success: false, ...rest });
@@ -440,6 +463,9 @@ export default function register(ctx: PluginContext): void {
           if (r.success) {
             console.log('Updated work item:');
             console.log(humanFormatWorkItem(r.workItem, db, format));
+            if (r.downgradedChildren?.length) {
+              console.log(`[Downgraded ${r.downgradedChildren.length} child(ren) from critical to high]`);
+            }
           } else {
             output.error(r.error, { success: false, error: r.error });
           }

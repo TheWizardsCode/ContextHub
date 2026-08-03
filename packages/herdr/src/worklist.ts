@@ -11,6 +11,8 @@
  */
 
 import { fetchChildrenForItem, fetchActionableCount, getWorklogDir, type WorkItem } from './fetcher.js';
+import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
+import { readCodeFreezeState } from './code-freeze.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
   statusIcon,
@@ -25,6 +27,7 @@ import {
   type IconOptions,
 } from './icons.js';
 import { runSync, createSyncTimer, clampSyncInterval } from './auto-sync.js';
+import { showToast } from './notify.js';
 import {
   hasUnknownIdentifiers,
   getUnknownIdentifiers,
@@ -89,6 +92,7 @@ export const ANSI = {
   dim: '\x1b[2m',
   reverse: '\x1b[7m',
   underline: '\x1b[4m',
+  yellow: '\x1b[33m',
   clear: '\x1b[2J',
   clearLine: '\x1b[2K',
   cursorHome: '\x1b[H',
@@ -1219,6 +1223,8 @@ export function createListRenderer(): (
   expandedItems?: Set<string>,
   chordHelpHints?: string,
   navStackDepth?: number,
+  panePaused?: boolean,
+  codeFreezeActive?: boolean,
 ) => string {
   return (
     items: WorkItem[],
@@ -1235,6 +1241,8 @@ export function createListRenderer(): (
     expandedItems?: Set<string>,
     chordHelpHints?: string,
     navStackDepth?: number,
+    panePaused?: boolean,
+    codeFreezeActive?: boolean,
   ): string => {
     const { rows, cols } = termSize;
     const output: string[] = [];
@@ -1270,7 +1278,20 @@ export function createListRenderer(): (
     if (autoRefresh) {
       header += ` ${ANSI.dim}[auto-refresh on]${ANSI.reset}`;
     }
+    if (panePaused) {
+      header += ` ${ANSI.fg(220)}[paused — hidden]${ANSI.reset}`;
+    }
     output.push(header);
+
+    // Code Freeze banner — a prominent warning that implementation is
+    // blocked while a ship release is in progress. The banner consumes one
+    // chrome row (chromeLines accounts for it) so the `rows - 1` pane
+    // line-count invariant still holds (WL-0MSAAON63003N6LO).
+    if (codeFreezeActive) {
+      const bannerText = `⛔ CODE FREEZE — ship release in progress; implement actions blocked`;
+      const bannerLine = `${ANSI.bg(196)}${ANSI.fg(231)} ${bannerText} ${ANSI.reset}`;
+      output.push(truncateLine(bannerLine, cols));
+    }
     output.push('');
 
     // Filter bar
@@ -1280,9 +1301,38 @@ export function createListRenderer(): (
     // calls state.getFlattenedItems() before passing items here). Do NOT re-flatten.
     const flatItems = items;
 
-    // Items with group separators
-    const visible = flatItems.slice(scrollOffset, scrollOffset + listHeight);
+    // Items with group separators. Each `── <Group> ──` separator consumes a
+    // row, so the visible window must be sized so header + blank + filter bar
+    // + items + separators + fill + footer fit in `rows - 1` lines (the last
+    // row is reserved for the notification line appended by render()). Without
+    // this accounting the output overflows the pane and the terminal scrolls
+    // the header/top items off the top (WL-0MSAAON63003N6LO).
+    const bannerActive = codeFreezeActive === true;
+    const chromeLines = bannerActive ? 5 : 4; // header + banner + blank + filter bar + footer
+    const budgetForItemsAndSeps = Math.max(0, rows - 1 - chromeLines);
+    // Count the group separators a window would render (same logic as the
+    // render loop below) so the window can be trimmed when separators would
+    // overflow the pane height.
+    const countSeparators = (window: WorkItem[]): number => {
+      let count = 0;
+      let lastGroup: number | undefined;
+      for (const item of window) {
+        if (item.group !== undefined && item.id !== '..') {
+          if (lastGroup === undefined || item.group !== lastGroup) {
+            count++;
+          }
+          lastGroup = item.group;
+        }
+      }
+      return count;
+    };
+    let visible = flatItems.slice(scrollOffset, scrollOffset + listHeight);
+    while (visible.length > 0 && visible.length + countSeparators(visible) > budgetForItemsAndSeps) {
+      // Drop trailing items until items + separators fit the pane height.
+      visible = visible.slice(0, -1);
+    }
     let lastDisplayedGroup: number | undefined;
+    let numSeparators = 0;
     for (let i = 0; i < visible.length; i++) {
       const actualIndex = scrollOffset + i;
       const item = visible[i];
@@ -1293,6 +1343,7 @@ export function createListRenderer(): (
           const label = item.groupLabel ?? `Group ${item.group}`;
           const sepColor = stageColor(item.stage);
           output.push(` ${ANSI.fg(sepColor)}${ANSI.bold}── ${label} ──${ANSI.reset}`);
+          numSeparators++;
         }
         lastDisplayedGroup = item.group;
       }
@@ -1312,8 +1363,8 @@ export function createListRenderer(): (
       }
     }
 
-    // Fill remaining rows
-    const used = 3 + 1 + visible.length; // header + blank + filterbar + items
+    // Fill remaining rows (header + blank + filter bar + items + separators)
+    const used = chromeLines + visible.length + numSeparators;
     for (let i = used; i < rows - 1; i++) {
       output.push('');
     }
@@ -1334,6 +1385,14 @@ export function createListRenderer(): (
       const chordHelpSuffix = chordHelpHints ? ` ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}` : '';
       const footerLine = navHint + chordHelpSuffix || ' ';
       output.push(footerLine);
+    }
+
+    // Safety clamp: never exceed the renderer's `rows - 1` budget so the
+    // notification line appended by render() always fits the pane. Only
+    // triggers for pathological tiny term sizes where even the chrome rows
+    // do not fit; the header (first line) is always preserved.
+    while (output.length > rows - 1) {
+      output.pop();
     }
 
     return output.join('\n');
@@ -1377,6 +1436,82 @@ function resolveAndRouteCommand(
     onCommand(resolvedCommand);
   }
   return true;
+}
+
+/**
+ * Check whether a command starts an implementation workflow.
+ *
+ * Matches `/skill:implement`, `/skill:implement-single`, and
+ * `/skill:implementall` (the implement command family). These are the
+ * commands blocked while the project is in Code Freeze.
+ */
+export function isImplementCommand(command: string): boolean {
+  const firstToken = command.trim().split(/\s+/)[0] ?? '';
+  return firstToken.startsWith('/skill:implement');
+}
+
+/**
+ * Render the Code Freeze notice dialog as a terminal overlay.
+ *
+ * Shown when the user issues an implement command while the project is in
+ * Code Freeze. Informational only — no input fields; dismissed with Esc or
+ * Enter, returning to the list without executing the command.
+ *
+ * @param maxCols - Terminal width
+ * @param maxRows - Terminal height
+ * @param reason - Optional freeze reason from the marker (e.g. "ship release")
+ * @returns The rendered overlay string, ready for stdout
+ */
+export function formatCodeFreezeDialog(maxCols: number, maxRows: number, reason?: string): string {
+  const lines: string[] = [];
+  const dialogWidth = Math.min(maxCols - 4, 64);
+  const dialogMinWidth = 44;
+  const effectiveWidth = Math.max(dialogMinWidth, dialogWidth);
+  const leftPad = Math.max(0, Math.floor((maxCols - effectiveWidth) / 2));
+
+  const padLine = (content: string): string => {
+    const visibleLen = content.replace(/\x1b\[[0-9;]*m/g, '').length;
+    const rightPad = Math.max(0, effectiveWidth - visibleLen - 2);
+    return ' '.repeat(leftPad) + `│ ${content}${' '.repeat(rightPad)} │`;
+  };
+
+  const borderLine = (left: string, right: string): string => {
+    return ' '.repeat(leftPad) + `${left}${'─'.repeat(effectiveWidth - 2)}${right}`;
+  };
+
+  lines.push('');
+  lines.push(borderLine('┌', '┐'));
+
+  // Title
+  lines.push(padLine(`${ANSI.bold}${ANSI.fg(196)}⛔ CODE FREEZE${ANSI.reset}`));
+  lines.push(padLine(''));
+
+  // Body
+  lines.push(padLine(` ${ANSI.bold}Implementation is blocked while a ship-it release${ANSI.reset}`));
+  lines.push(padLine(` ${ANSI.bold}is in progress for this project.${ANSI.reset}`));
+  lines.push(padLine(''));
+  if (reason) {
+    lines.push(padLine(` ${ANSI.dim}Reason: ${reason}${ANSI.reset}`));
+    lines.push(padLine(''));
+  }
+  lines.push(padLine(` ${ANSI.dim}No agent pane was spawned and no work item was claimed.${ANSI.reset}`));
+  lines.push(padLine(''));
+  lines.push(padLine(` ${ANSI.dim}The freeze lifts automatically when the release finishes.${ANSI.reset}`));
+  lines.push(padLine(''));
+
+  lines.push(borderLine('├', '┤'));
+  lines.push(padLine(''));
+  lines.push(padLine(`${ANSI.dim}[Esc] dismiss  [Enter] dismiss${ANSI.reset}`));
+  lines.push(borderLine('└', '┘'));
+  lines.push('');
+
+  const totalLines = lines.length;
+  const remaining = Math.max(0, maxRows - totalLines);
+  for (let i = 0; i < remaining; i++) {
+    lines.push('');
+  }
+
+  return lines.join('\n');
 }
 
 /**
@@ -1446,6 +1581,8 @@ export function dispatchChordCommand(
   return false;
 }
 
+export type ExecuteResult = 'dispatched' | 'callback' | 'noop' | 'blocked';
+
 /**
  * Execute a resolved chord command.
  *
@@ -1454,23 +1591,37 @@ export function dispatchChordCommand(
  *    `/skill:implement`, `/skill:audit`, `/intake`, `/plan`, `!!wl reviewed`,
  *    and compound `&& wl audit-set` commands (resolves `<id>` and routes to
  *    `onCommand`). Returns 'dispatched'.
- * 2. For unrecognised command families, resolves `<id>` placeholders and
+ * 2. Code Freeze guard — when `codeFreezeActive` is true and the command is
+ *    an implement command, the command is NOT routed; returns 'blocked' so
+ *    the caller can show the Code Freeze dialog instead of spawning a pane.
+ * 3. For unrecognised command families, resolves `<id>` placeholders and
  *    passes to the optional `onCommand` callback. Returns 'callback'.
- * 3. If the command contains `<id>` but no item is selected, silently
+ * 4. If the command contains `<id>` but no item is selected, silently
  *    drops with 'noop'.
  *
  * @param command - The resolved command string (may contain `<id>` placeholders)
  * @param state - Current work item list state (for selected item lookup)
  * @param onCommand - Optional callback to receive resolved commands
+ * @param codeFreezeActive - Whether the project is in Code Freeze (implement
+ *                           commands are blocked). Defaults to false.
  * @returns 'dispatched' if handled by dispatchChordCommand,
  *          'callback' if passed to onCommand,
- *          'noop' if skipped (no item + <id> requirement)
+ *          'noop' if skipped (no item + <id> requirement),
+ *          'blocked' if frozen and the command is an implement command.
  */
 export function executeResolvedCommand(
   command: string,
   state: WorkItemListState,
   onCommand?: (command: string) => void,
-): 'dispatched' | 'callback' | 'noop' {
+  codeFreezeActive = false,
+): ExecuteResult {
+  // Code Freeze guard: never route implement commands while frozen.
+  // This runs BEFORE dispatchChordCommand so no pane spawn, claim, or
+  // <id> substitution can happen for a blocked command.
+  if (codeFreezeActive && isImplementCommand(command)) {
+    return 'blocked';
+  }
+
   // Try dispatchChordCommand first — handles /wl, /skill:, /intake, /plan,
   // !!wl reviewed, and compound audit commands
   if (dispatchChordCommand(command, state, onCommand)) {
@@ -1520,7 +1671,7 @@ export async function runWorklistTui(
     autoRefresh: options?.autoRefresh ?? true,
     refreshIntervalMs: options?.refreshIntervalMs ?? 30000,
     autoSync: options?.autoSync ?? true,
-    syncIntervalMs: options?.syncIntervalMs ?? 30000,
+    syncIntervalMs: options?.syncIntervalMs ?? 60000,
     browseItemCount: options?.browseItemCount ?? 10,
     showHelpText: options?.showHelpText ?? true,
     getShowHelpText: options?.getShowHelpText ?? (() => options?.showHelpText ?? true),
@@ -1551,10 +1702,35 @@ export async function runWorklistTui(
   let formState: FormState | null = null;
   /** Saved mode before entering form overlay (to restore on cancel) */
   let preFormMode: ViewMode = 'list';
-  let refreshNotification = '';
-  let syncNotification = '';
 
   let totalActionableCount: number | undefined;
+
+  // Code Freeze state: whether the project is frozen (banner) and whether
+  // the Code Freeze notice dialog is currently showing. The banner state is
+  // refreshed on each data refresh; the command-dispatch path re-reads the
+  // marker fresh so a freeze that starts between refreshes is still enforced
+  // at dispatch time (fail-safe client-side blocking).
+  let codeFreezeActive = false;
+  let codeFreezeNotice = false;
+
+  /** Re-read the code-freeze marker (fail-open: errors => not frozen). */
+  const refreshFreezeState = (): void => {
+    codeFreezeActive = readCodeFreezeState().active;
+  };
+
+  // Initial Code Freeze state read (fail-open: no marker => not frozen).
+  refreshFreezeState();
+
+  // Pane-visibility gating (pause-when-hidden). When the pane's tab is not
+  // focused, auto-refresh/auto-sync timer ticks are skipped so hidden panes
+  // stop spawning wl processes. Fail-open: when visibility can't be
+  // determined (no HERDR_PANE_ID / CLI error) the pane is treated as visible
+  // and polling proceeds as today. PollGate memoizes the pane-get exec within
+  // a TTL so refresh+sync ticks in one cycle share a single `herdr pane get`.
+  const paneGate = new PollGate(isPaneVisible, DEFAULT_POLL_GATE_TTL_MS);
+  // Whether the pane is currently hidden (drives the header indicator).
+  // Updated by the gate check on each timer tick; fail-open defaults to false.
+  let panePaused = false;
 
   // Check if we're in raw mode (stdin is a TTY)
   const isInteractive = process.stdin.isTTY;
@@ -1596,6 +1772,9 @@ export async function runWorklistTui(
       const newItems = await fetcher();
       const oldLen = state.items.length;
       state.refreshItems(newItems);
+      // Re-read the Code Freeze marker so a freeze that started (or ended)
+      // since the last refresh is reflected in the banner promptly.
+      refreshFreezeState();
       // Re-fetch children for expanded parents so the hierarchy view stays
       // fresh after an auto/manual refresh while inside a child context.
       const expanded = [...state.expandedItems];
@@ -1615,12 +1794,12 @@ export async function runWorklistTui(
       if (showNotification && newItems.length !== oldLen) {
         const diff = newItems.length - oldLen;
         const msg = diff > 0 ? `+${diff} new` : `${diff} removed`;
-        refreshNotification = ` ${ANSI.dim}[Refreshed: ${msg}]${ANSI.reset}`;
+        showToast('Refreshed', { body: msg });
       } else if (showNotification) {
-        refreshNotification = ` ${ANSI.dim}[Refreshed]${ANSI.reset}`;
+        showToast('Refreshed');
       }
     } catch {
-      refreshNotification = ` ${ANSI.dim}[Refresh failed]${ANSI.reset}`;
+      showToast('Refresh failed');
     }
     // Also fetch the total actionable count on refresh
     fetchActionableCount().then((count) => {
@@ -1628,31 +1807,45 @@ export async function runWorklistTui(
     }).catch(() => {
       // ignore
     });
-    // Clear notification after brief display
-    setTimeout(() => {
-      refreshNotification = '';
-      render();
-    }, 3000);
     render();
   };
 
-  // Run `wl sync` and surface the outcome in the notification area so sync
-  // status is visible (success and graceful failure). Targets the resolved
-  // worklog directory so sync operates on the tab project.
-  const doSync = async (): Promise<void> => {
-    const outcome = await runSync(getWorklogDir());
-    syncNotification = outcome.success
-      ? ` ${ANSI.dim}[Synced]${ANSI.reset}`
-      : ` ${ANSI.yellow}[Sync failed: ${outcome.error ?? 'unknown error'}]${ANSI.reset}`;
-    render();
-    setTimeout(() => {
-      syncNotification = '';
-      render();
-    }, 3000);
+  // Run `wl sync` and surface the outcome as a toast so sync status is
+  // visible (success and graceful failure). Targets the resolved worklog
+  // directory so sync operates on the tab project.
+  //
+  // With ifIdle=true (auto-sync timer path) runSync applies its single-flight
+  // guard and passes --if-idle to the CLI, so overlapping syncs are skipped
+  // instead of piling up (lock-storm prevention). Manual 'S' syncs pass
+  // ifIdle=false and wait for the lock like a regular wl sync.
+  const doSync = async (ifIdle = false): Promise<void> => {
+    const outcome = await runSync(getWorklogDir(), { ifIdle });
+    if (outcome.skipped) {
+      // Another sync is already in-flight / holding the lock — do not pile on.
+      showToast('Sync in progress');
+      return;
+    }
+    if (outcome.success) {
+      showToast('Synced');
+    } else {
+      showToast('Sync failed', { body: outcome.error ?? 'unknown error' });
+    }
   };
 
   const onData = async (chunk: Buffer): Promise<void> => {
     const key = chunk.toString();
+
+    // ── Code Freeze notice handling ─────────────────────────────
+    // While the notice is showing, Esc/Enter/q dismiss it and return to the
+    // list. All other keys are consumed (the notice is modal). The blocked
+    // command is never executed, so no pane is spawned.
+    if (codeFreezeNotice) {
+      if (key === '\x1b' || key === '\r' || key === '\n' || key === 'q') {
+        codeFreezeNotice = false;
+      }
+      render();
+      return;
+    }
 
     // ── Form mode handling ──────────────────────────────────────
     if (formState !== null) {
@@ -1661,16 +1854,14 @@ export async function runWorklistTui(
         const resolved = formState.getResult();
         formState = null;
         state.mode = preFormMode;
-        if (opts.onCommand) {
-          opts.onCommand(resolved);
-        }
-        refreshNotification = `Sent: ${resolved.length > 60 ? resolved.substring(0, 57) + '...' : resolved}`;
-        setTimeout(() => { refreshNotification = ''; render(); }, 3000);
+        // NOTE: dispatch happens inside FormState's onSubmit callback (which
+        // resolves <id> placeholders) — do NOT call onCommand again here or
+        // every form submission spawns TWO agent panes (WL-0MSAL0RN1009YNJ7).
+        showToast('Sent', { body: resolved.length > 60 ? resolved.substring(0, 57) + '...' : resolved });
         render();
       } else if (result === 'cancelled') {
         formState = null;
         state.mode = preFormMode;
-        refreshNotification = '';
         render();
       } else {
         render();
@@ -1731,6 +1922,12 @@ export async function runWorklistTui(
                     finalCmd = finalCmd.replace(/<id>/g, flat[idx].id);
                   }
                 }
+                // Code Freeze guard: never submit an implement command while
+                // frozen — show the notice instead of dispatching.
+                if (readCodeFreezeState().active && isImplementCommand(finalCmd)) {
+                  codeFreezeNotice = true;
+                  return;
+                }
                 if (opts.onCommand) {
                   opts.onCommand(finalCmd);
                 }
@@ -1747,18 +1944,27 @@ export async function runWorklistTui(
 
           // No unknown identifiers — execute as before
           try {
-            const result = executeResolvedCommand(command, state, opts.onCommand);
-            if (result === 'noop') {
-              refreshNotification = `Skipped: ${command.length > 60 ? command.substring(0, 57) + '...' : command} (no item)`;
+            // Fresh marker read at dispatch time: a freeze that started
+            // between refreshes is enforced here (fail-safe client-side).
+            const frozen = readCodeFreezeState().active;
+            if (frozen) {
+              codeFreezeActive = true;
+            }
+            const result = executeResolvedCommand(command, state, opts.onCommand, frozen);
+            if (result === 'blocked') {
+              // Code Freeze — show the notice dialog; the command was NOT
+              // routed, no pane spawned, no work item claimed.
+              codeFreezeNotice = true;
+            } else if (result === 'noop') {
+              showToast('Skipped', { body: `${command.length > 60 ? command.substring(0, 57) + '...' : command} (no item)` });
             } else {
-              // Show a brief flash notification, then continue
-              refreshNotification = `Sent: ${command.length > 60 ? command.substring(0, 57) + '...' : command}`;
+              // Surface a brief toast, then continue
+              showToast('Sent', { body: command.length > 60 ? command.substring(0, 57) + '...' : command });
             }
           } catch (e) {
-            refreshNotification = `Error: ${(e as Error).message}`;
+            showToast('Error', { body: (e as Error).message });
             process.stderr.write(`[herdr] Command error: ${(e as Error).message}\n`);
           }
-          setTimeout(() => { refreshNotification = ''; render(); }, 3000);
           render();
           return;
         }
@@ -1816,6 +2022,12 @@ export async function runWorklistTui(
                   finalCmd = finalCmd.replace(/<id>/g, flat[idx].id);
                 }
               }
+              // Code Freeze guard: never submit an implement command while
+              // frozen — show the notice instead of dispatching.
+              if (readCodeFreezeState().active && isImplementCommand(finalCmd)) {
+                codeFreezeNotice = true;
+                return;
+              }
               if (opts.onCommand) {
                 opts.onCommand(finalCmd);
               }
@@ -1831,13 +2043,22 @@ export async function runWorklistTui(
 
         // Single-key shortcut — execute immediately and keep TUI alive
         try {
-          executeResolvedCommand(singleCmd, state, opts.onCommand);
-          // Show a brief flash notification, then continue
-          refreshNotification = `Sent: ${singleCmd.length > 60 ? singleCmd.substring(0, 57) + '...' : singleCmd}`;
-          setTimeout(() => { refreshNotification = ''; render(); }, 3000);
+          // Fresh marker read at dispatch time (fail-safe client-side).
+          const frozen = readCodeFreezeState().active;
+          if (frozen) {
+            codeFreezeActive = true;
+          }
+          const result = executeResolvedCommand(singleCmd, state, opts.onCommand, frozen);
+          if (result === 'blocked') {
+            // Code Freeze — show the notice dialog; no pane spawned.
+            codeFreezeNotice = true;
+          } else {
+            // Surface a brief toast, then continue
+            showToast('Sent', { body: singleCmd.length > 60 ? singleCmd.substring(0, 57) + '...' : singleCmd });
+          }
           render();
         } catch (e) {
-          refreshNotification = `Error: ${(e as Error).message}`;
+          showToast('Error', { body: (e as Error).message });
           process.stderr.write(`[herdr] Shortcut error: ${(e as Error).message}\n`);
           render();
         }
@@ -1895,9 +2116,6 @@ export async function runWorklistTui(
     render();
   };
 
-  // Reset refresh notification on any keypress
-  const originalOnData = onData;
-
   let resolve: (value: WorkItem | undefined) => void;
   const promise = new Promise<WorkItem | undefined>((res) => {
     resolve = res;
@@ -1913,6 +2131,18 @@ export async function runWorklistTui(
       process.stdout.write(ANSI.clear);
       process.stdout.write(ANSI.cursorHome);
       process.stdout.write(formOutput);
+      return;
+    }
+
+    // ── Code Freeze notice overlay rendering ───────────────────
+    // Shown when an implement command was attempted during a freeze. The
+    // freeze reason (if any) comes from the marker for a helpful message.
+    if (codeFreezeNotice) {
+      const freezeReason = readCodeFreezeState().reason;
+      const dialogOutput = formatCodeFreezeDialog(termSize.cols, termSize.rows, freezeReason);
+      process.stdout.write(ANSI.clear);
+      process.stdout.write(ANSI.cursorHome);
+      process.stdout.write(dialogOutput);
       return;
     }
 
@@ -1980,15 +2210,13 @@ export async function runWorklistTui(
       state.expandedItems,
       opts.getShowHelpText() ? dynamicHints : undefined,
       state.navigationStack.depth,
+      panePaused,
+      codeFreezeActive,
     );
 
-    // Append notifications if present
-    let notificationLine = '';
-    if (refreshNotification) notificationLine += refreshNotification;
-    if (syncNotification) notificationLine += syncNotification;
-    const rendered = notificationLine
-      ? output + '\n' + notificationLine
-      : output;
+    // Notifications are surfaced via Herdr toasts (showToast), never as a
+    // bottom line — the pane output must stay within the terminal budget.
+    const rendered = output;
 
     // Clear from cursor to end of screen to remove leftover content
     // from previous renders of different heights
@@ -2012,24 +2240,40 @@ export async function runWorklistTui(
   // Read keypresses
   process.stdin.on('data', onData);
 
-  // Auto-refresh timer — optionally runs sync before each fetch when autoSync is enabled
+  // Auto-refresh timer — fetches fresh items on an interval. NOTE: this timer
+  // does NOT run `wl sync`; the dedicated SyncTimer below is the single sync
+  // source. Running sync from both timers caused a double-spawn per pane that
+  // amplified the wl sync lock storm (WL-0MSAB7ZUC004SK7E).
+  // Visibility-gated: when the pane is hidden (not focused), ticks are
+  // skipped so hidden panes spawn zero wl processes (pause-when-hidden).
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
   if (opts.autoRefresh) {
-    refreshTimer = setInterval(() => {
-      if (opts.autoSync) {
-        doSync();
+    refreshTimer = setInterval(async () => {
+      if (!(await paneGate.visible())) {
+        panePaused = true;
+        return;
       }
+      panePaused = false;
       doRefresh(false);
     }, opts.refreshIntervalMs);
   }
 
-  // Auto-sync timer (background wl sync)
+  // Auto-sync timer (background wl sync) — the only auto-sync source. Uses the
+  // single-flight + lock-aware (--if-idle) guard so concurrent panes/TUI
+  // instances skip instead of piling up under lock contention.
+  // Visibility-gated like the refresh timer: hidden panes skip the sync
+  // (and its follow-up refresh) entirely.
   let syncTimer: ReturnType<typeof createSyncTimer> | undefined;
   if (opts.autoSync && opts.syncIntervalMs !== 0) {
     syncTimer = createSyncTimer({
       intervalMs: opts.syncIntervalMs,
-      onSync: () => {
-        doSync();
+      onSync: async () => {
+        if (!(await paneGate.visible())) {
+          panePaused = true;
+          return;
+        }
+        panePaused = false;
+        doSync(true); // ifIdle: skip when another sync is in-flight / lock held
         doRefresh(false);
       },
     });

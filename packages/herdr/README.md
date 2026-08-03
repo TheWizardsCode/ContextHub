@@ -11,10 +11,11 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Chord shortcuts** — Multi-key chord sequences provide quick actions like updating priorities, stage/status, title, closing/deleting items, running workflows, and toggling review status (configurable via `shortcuts.json`)
 - **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is executed **visibly in a new herdr pane** (see `scripts/run-in-pane.sh`) so the user sees the command line and its output; the wrapper keeps the pane's process alive so the pane stays open for inspection — dismiss it with Enter or close it with `prefix+x`
 - **Keyboard navigation** — Arrow keys or j/k to navigate (wraps at list boundaries), Page Up/Down, g/G for first/last, Enter to select, Escape to go back
-- **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt
+- **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text.
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
 - **Quit** — Press `q` to exit
+- **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
 
 ## Requirements
 
@@ -116,11 +117,37 @@ Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings in
 
 - `autoRefresh` — Enable periodic auto-refresh of the work item list (default: `true`)
 - `refreshIntervalMs` — Interval in ms between auto-refreshes (default: `30000`)
-- `autoSync` — Enable periodic background `wl sync` before auto-refreshes (default: `true`)
-- `syncIntervalMs` — Interval in ms between background `wl sync` calls (default: `30000`, minimum: `30000`; set to `0` to disable auto-sync)
+- `autoSync` — Enable periodic background `wl sync` before auto-refreshes (default: `true`). Background syncs use a single-flight in-process guard and pass `wl sync --if-idle`, so overlapping syncs (from this pane or other panes/TUI instances) are skipped instead of piling up — preventing wl sync lock storms (WL-0MSAB7ZUC004SK7E).
+- `syncIntervalMs` — Interval in ms between background `wl sync` calls (default: `60000`, minimum: `60000`; set to `0` to disable auto-sync)
 - `browseItemCount` — Max number of non-mandatory items to show in the list (default: `10`, range `1`–`50`; critical and completed/in_review items are always shown regardless)
 - `showHelpText` — Show the shortcut hint line at the bottom of the list (default: `true`); changes apply on the next render without a plugin restart
 - `showIcons` — Toggle icons in the list (default: `true`)
+
+### Pause-when-hidden (pane visibility gating)
+
+When the worklist pane's tab is **hidden (not focused)**, the auto-refresh and
+auto-sync timers pause so hidden panes stop spawning `wl` processes (~4–5 per
+30s tick per pane). With many open panes this previously caused heavy `wl`
+process churn and memory pressure (WL-0MSB1N0HB0007N6N).
+
+- **Visibility signal** — Herdr sets `HERDR_PANE_ID` for panes it spawns; a
+  hidden (non-focused) tab reports `result.pane.focused === false` from
+  `herdr pane get <id>`. The plugin checks this via `visibility.ts`.
+- **Fail-open** — when visibility cannot be determined (no `HERDR_PANE_ID`
+  env, herdr CLI missing/erroring, unparseable output) the pane is treated
+  as visible and polling proceeds exactly as before. Standalone runs (outside
+  Herdr) are unaffected.
+- **Cadence unchanged when visible** — while the pane is focused (or
+  fail-open), auto-refresh/auto-sync keep their existing intervals (30s /
+  60s defaults).
+- **Header indicator** — while the pane is hidden the list header shows
+  `[paused — hidden]` so operators can tell gating is active.
+- **Never gated** — manual actions (navigation, `S` manual sync, shortcut
+  chords, the initial data load) work regardless of pane visibility.
+- **Shared visibility check** — the `PollGate` TTL memoizer (~2s) makes the
+  refresh and sync ticks in one cycle share a single `herdr pane get` call
+  (≤1 visibility exec per cycle).
+- **No settings toggle** — pause-when-hidden is always on.
 
 ### Selection List Behaviour
 
@@ -163,6 +190,7 @@ packages/herdr/
 │   ├── shortcut-config.ts  # Chord shortcut registry and config loader
 │   ├── shortcuts.json      # Shortcut/chord definitions
 │   ├── icons.ts            # Icon and colour helpers
+│   ├── code-freeze.ts      # Code Freeze marker detection (fail-open)
 │   ├── settings.ts         # User settings management
 │   └── worklist.ts         # List state, rendering, keyboard handling, command output
 ├── scripts/
@@ -178,14 +206,60 @@ packages/herdr/
 
 - **No direct database access** — The plugin uses the `wl` CLI as the backend data source, ensuring compatibility without duplicating data-access logic.
 - **Terminal UI via raw mode** — The TUI uses raw stdin mode and ANSI escape codes for rendering, making it compatible with any Herdr pane without additional dependencies.
+- **Fixed-height pane rendering** — The list renderer budgets its output to `rows - 1` lines (header + blank + filter bar + items + group separators + fill + footer), reserving the last row for the transient notification line (e.g. `[Synced]`, `[Refresh failed]`). Group separator lines count against the budget, so the pane never scrolls the header or top items off the top of the view regardless of item/group count (see WL-0MSAAON63003N6LO).
 - **Testable core** — All state management, formatting, and keyboard handling is pure logic in `worklist.ts`, fully testable without a terminal.
+- **Toast notifications instead of bottom-line status** — Transient status feedback (refresh outcomes, sync outcomes, sent/skipped command feedback, errors) is surfaced via Herdr toast notifications (`herdr notification show`) instead of being appended to the bottom of the pane output. This keeps the rendered pane within the terminal height budget, so the list header and top lines are never pushed off the top of the pane. Toast delivery requires `ui.toast.delivery = "herdr"` in `~/.config/herdr/config.toml`; toasts appear in the bottom-right corner by default. The helper lives in `notify.ts` and is fire-and-forget (failures are tolerated silently).
 - **Command routing via callback** — When a chord resolves to a non-`/wl` command, it is passed to an `onCommand` callback (set by the entry point) which routes it by prefix:
   - `!!`/`!` prefixed commands (shell-executed shortcuts such as audit approve/reject, priority updates, close/delete) are run **visibly in a new herdr pane** via `scripts/run-in-pane.sh` — the wrapper keeps the pane's process alive so the pane stays open (exit status reported; dismiss with Enter or close with `prefix+x`) so the user can inspect the command output.
   - Everything else is written to stdout with a `CMD:` prefix for the calling framework (Herdr) to execute.
 - **Pi agent dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are intercepted by the entry point and routed to a new pi agent pane. The `send-to-pi.sh` script splits the current pane to the right, creates a new pane, runs `pi` with the command as the initial prompt, and renames the pane to "Pi Agent". Agent commands are routed before any prefix handling, so they are unaffected by `!!`/`!` processing.
+- **Free-form prompts via `/prompt:`** — Commands starting with `/prompt:` are also routed to the agent pane, but the `/prompt:` routing prefix is stripped before `send-to-pi.sh` runs, so pi receives only the bare prompt text (e.g. `pi "Review the current work item and suggest next steps"`). This lets a chord shortcut open a new pi instance with an arbitrary injected prompt, not just a skill/workflow invocation. The `o-p` chord provides a default `Review the current work item and suggest next steps` prompt; edit `src/shortcuts.json` to bind your own prompt text to any free chord.
 - **Correct project directory for new panes** — Panes created by `send-to-pi.sh`, `open-pi-agent.sh`, and `run-in-pane.sh` are started in the correct project root. Herdr's `follow` CWD policy would otherwise inherit the source pane's CWD (the plugin directory), so each script resolves a target CWD (`--cwd` arg > `HERDR_RESOLVED_CWD` > `$PWD`) and passes it to `herdr pane split --cwd`. The entry point passes the resolved worklog root (`wlRoot`) so skills, `wl` commands, and relative paths operate on the user's project rather than the plugin's installation directory.
 - **`<id>` placeholder resolution** — Before output, any `<id>` placeholders in the resolved command are replaced with the currently selected work item's ID. If no item is selected and the command requires `<id>`, the command is silently dropped (graceful no-op).
 - **Chord shortcut system** — Multi-key chord sequences are defined in `shortcuts.json` and resolved via `ShortcutRegistry`. Chords can be filtered by view (list/detail) and stage.
+
+## Code Freeze
+
+While a ship-it (dev → main release) process is running, the project is put into **Code Freeze**: new implementation work must not land on `dev` until the release completes. This plugin detects the freeze and enforces it client-side in the worklist.
+
+### Marker contract (cross-repo)
+
+The freeze state is communicated via a marker file written by the ship release process (owned by the SorraAgents ship skill — see `SA-0MSBU4OBU005WJNB`) and read by this plugin:
+
+```
+<worklog-dir>/code-freeze.json
+```
+
+Where `<worklog-dir>` is the project's `.worklog/` directory (the same directory the plugin passes to `wl --worklog-dir`). The file is JSON:
+
+```json
+{
+  "active": true,
+  "reason": "ship release in progress",
+  "startedAt": "2026-08-02T00:00:00Z",
+  "pid": 12345
+}
+```
+
+Semantics:
+
+| Marker state | Freeze status |
+|---|---|
+| File present with `active: true` | **ON** — implementation blocked |
+| File absent | OFF |
+| `active: false` (or missing) | OFF |
+| Corrupt / unreadable file | OFF (fail-open) |
+
+Fail-open is deliberate: a broken or missing marker must never block browsing the worklist.
+
+### Plugin behaviour while frozen
+
+- **Banner** — The selection list renders a prominent red `⛔ CODE FREEZE` banner above the header, warning that implementation is blocked. The banner respects the `rows - 1` pane-height budget (see WL-0MSAAON63003N6LO).
+- **Implement commands blocked** — Any implement command (`/skill:implement`, `/skill:implement-single`, `/skill:implementall`, via single-key `i`, chord, or typed dispatch) is **not** routed: no pi agent pane is spawned, no work item is claimed, and no `<id>` substitution happens. The marker is re-read at dispatch time, so a freeze that starts between refreshes is still enforced.
+- **Notice dialog** — When an implement command is attempted during a freeze, a modal dialog explains that implementation is blocked until the release finishes. Dismiss with `Esc`, `Enter`, or `q` to return to the list.
+- **Other commands unaffected** — Audit, intake, plan, review, priority, search, sync, and navigation continue to work normally during a freeze.
+
+This plugin only **reads** the marker; writing/clearing it is the ship release process's job (tracked in `SA-0MSBU4OBU005WJNB`).
 
 ## Development
 

@@ -42,7 +42,7 @@ import auditResultCommand from './commands/audit-result.js';
 import completionCommand from './commands/completion.js';
 import cleanupWorktreeCommand from './commands/cleanup-worktree.js';
 import { detectWorktreeFromCwd, registerCurrentProcess } from './process-lifecycle.js';
-import { setWorklogDirOverride } from './worklog-paths.js';
+import { applyWorklogDirOverrideFromArgv, setWorklogDirOverride } from './worklog-paths.js';
 
 // Watch flag parsing - supports -w, -wN, --watch, --watch=N
 function parseWatchFlag(argv: string[]) {
@@ -231,6 +231,15 @@ program.hook('preAction', () => {
     // Ignore errors — verbosity is best-effort
   }
 });
+
+// Apply the --worklog-dir override from argv BEFORE creating the plugin
+// context, so ctx.dataPath (and every -f/--file default derived from it)
+// reflects the override. The preAction hook below re-applies/clears the
+// override from commander's parsed options, but by then ctx.dataPath has
+// already been computed — resolving it from the process cwd instead would
+// let `wl sync --worklog-dir <proj>/.worklog` fetch the cwd repo's remote
+// ref while writing to <proj>'s database (WL-0MSAH26DD001XXST).
+applyWorklogDirOverrideFromArgv(process.argv.slice(2));
 
 // Create shared plugin context
 const ctx = createPluginContext(program);

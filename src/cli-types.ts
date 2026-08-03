@@ -142,6 +142,8 @@ export interface SyncOptions {
   noReSort?: boolean;
   /** Force a synchronous re-sort when run (blocks until complete) */
   reSortSync?: boolean;
+  /** Lock-aware guard: skip (exit 0) if another sync is already in progress */
+  ifIdle?: boolean;
 }
 
 export interface SyncDebugOptions {
