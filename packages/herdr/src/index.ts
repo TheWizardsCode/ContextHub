@@ -20,8 +20,8 @@
 
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
-import { dirname, resolve, join, parse } from 'path';
-import { existsSync } from 'fs';
+import { dirname, resolve, join } from 'path';
+import { resolveWorklogRoot } from '@worklog/shared/worklog-paths';
 import { checkWlAvailable, fetchNextItems, fetchItemsByStage, setWorklogDir, claimWorkItem } from './fetcher.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
@@ -183,86 +183,6 @@ export async function claimItemForAgentCommand(command: string): Promise<void> {
   }
 }
 
-/**
- * Check whether a path is inside a git worktree managed by the worklog
- * system, i.e., its path contains `.worklog/worktrees/`.
- */
-function isInsideWorktree(dir: string): boolean {
-  return dir.includes(join('.worklog', 'worktrees'));
-}
-
-/**
- * Check whether a `.worklog/` directory is a leftover worktree container
- * rather than a real project worklog.
- *
- * The implement tool's worktree lifecycle creates `.worklog/worktrees/`
- * directories (e.g. inside `packages/herdr` when the tool runs with that
- * CWD). After worktrees are cleaned up, an empty `worktrees/` subdirectory
- * may remain. Such a stub has no `config.yaml`, `initialized` marker, or
- * `worklog.db` — it is NOT a project worklog and must not block upward
- * resolution to the real project root.
- */
-function isWorktreeContainerStub(wlDir: string): boolean {
-  return (
-    existsSync(join(wlDir, 'worktrees')) &&
-    !existsSync(join(wlDir, 'config.yaml')) &&
-    !existsSync(join(wlDir, 'initialized')) &&
-    !existsSync(join(wlDir, 'worklog.db'))
-  );
-}
-
-/**
- * Find the project root containing a valid `.worklog/` directory.
- *
- * Walks up from the current working directory. When a `.worklog/` directory
- * is found but is NOT valid (lacks `worklog.db` or `initialized` marker):
- * - If it is a leftover worktree container stub (contains only a
- *   `worktrees/` subdirectory and no config markers), skip past it and
- *   continue walking up. Such stubs are created by the implement tool's
- *   worktree lifecycle (e.g. inside `packages/herdr`) and are not real
- *   project worklogs.
- * - If we are inside a worktree (path contains `.worklog/worktrees/`), skip
- *   past the invalid `.worklog/` and continue walking up.  Worktree
- *   `.worklog/` directories may be incomplete stubs left by `git worktree`
- *   setup; the real project root is above them.
- * - Otherwise, stop walking and return `undefined`.  This prevents the
- *   plugin from silently picking up an unrelated project's `.worklog/`
- *   higher up the tree when the calling framework sets CWD to a project
- *   that has no `.worklog/` of its own.
- *
- * Returns the project root path, or `undefined` if no valid `.worklog/` can
- * be found. The caller should handle the `undefined` case by reporting the
- * uninitialized state to the user.
- */
-export function findWorklogRoot(startDir?: string): string | undefined {
-  let dir = startDir ?? process.cwd();
-  if (startDir) {
-    process.stderr.write(`[worklog-plugin] findWorklogRoot starting from HERDR_RESOLVED_CWD: ${startDir}\n`);
-  }
-  const root = parse(dir).root;
-
-  while (true) {
-    const wlDir = join(dir, '.worklog');
-    if (existsSync(wlDir)) {
-      if (existsSync(join(wlDir, 'worklog.db')) || existsSync(join(wlDir, 'initialized'))) {
-        // Found a valid .worklog/ — use this directory
-        return dir;
-      }
-      // Found .worklog/ but it is NOT valid.
-      // Only walk past it when it is a leftover worktree container stub or
-      // when inside a worktree; otherwise stop here.
-      if (!isWorktreeContainerStub(wlDir) && !isInsideWorktree(dir)) {
-        return undefined;
-      }
-    }
-    const parent = dirname(dir);
-    if (parent === dir) break; // Reached filesystem root
-    dir = parent;
-  }
-
-  return undefined;
-}
-
 // Load settings
 const settings = loadSettings();
 
@@ -271,11 +191,19 @@ const settings = loadSettings();
  * process CWD when not provided) and configure the fetcher so every child
  * `wl` invocation targets that root's database via `--worklog-dir`.
  *
+ * The resolution itself is delegated to the shared
+ * `resolveWorklogRoot()` (packages/shared/src/worklog-paths.ts) — the same
+ * strategy the `wl` CLI uses — so the plugin and the CLI can never disagree
+ * about what constitutes the project root.
+ *
  * Returns the resolved project root, or undefined when no valid `.worklog/`
  * is found (in which case the fetcher falls back to default resolution).
  */
 export function configureWorklogTarget(startDir?: string): string | undefined {
-  const wlRoot = findWorklogRoot(startDir);
+  if (startDir) {
+    process.stderr.write(`[worklog-plugin] resolving worklog root from HERDR_RESOLVED_CWD: ${startDir}\n`);
+  }
+  const wlRoot = resolveWorklogRoot(startDir);
   if (wlRoot) {
     setWorklogDir(join(wlRoot, '.worklog'));
   }

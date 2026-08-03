@@ -13,6 +13,10 @@
     "./types": {
       "types": "./dist/types.d.ts",
       "import": "./dist/types.js"
+    },
+    "./worklog-paths": {
+      "types": "./dist/worklog-paths.d.ts",
+      "import": "./dist/worklog-paths.js"
     }
   },
   "files": [
