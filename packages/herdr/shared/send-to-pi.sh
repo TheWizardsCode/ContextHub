@@ -16,6 +16,8 @@
 #   --no-focus           Explicitly skip zoom/focus
 #   --check-cli          Check herdr CLI availability before proceeding
 #   --cwd <path>         Working directory for the new pane (default: $HERDR_RESOLVED_CWD, then $PWD)
+#   --model <pattern>    Forward `--model <pattern>` to the pi CLI invocation
+#                        (pi model pattern or id, e.g. `code` or `provider/id`)
 #   -h, --help           Show this help message
 #
 # Environment variables:
@@ -42,6 +44,7 @@ pane_name="Pi Agent"
 focus=true
 check_cli=false
 cwd_arg=""
+model_arg=""
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
 
 # ── Parse arguments ─────────────────────────────────────────────────────
@@ -73,6 +76,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --cwd=*)
       cwd_arg="${1#*=}"
+      shift
+      ;;
+    --model)
+      model_arg="$2"
+      shift 2
+      ;;
+    --model=*)
+      model_arg="${1#*=}"
       shift
       ;;
     -h|--help)
@@ -134,7 +145,13 @@ fi
 
 # ── Run pi with the command in the new pane ──────────────────────────
 quoted_cmd="$(printf '%q' "$COMMAND")"
-"$herdr_bin" pane run "$np" exec pi "$quoted_cmd"
+if [ -n "$model_arg" ]; then
+  # Forward the model pattern so the pi CLI opens with the requested model
+  # (e.g. `pi --model code '/skill:implement <id>'`).
+  "$herdr_bin" pane run "$np" exec pi --model "$model_arg" "$quoted_cmd"
+else
+  "$herdr_bin" pane run "$np" exec pi "$quoted_cmd"
+fi
 
 # ── Rename the pane ────────────────────────────────────────────────
 "$herdr_bin" pane rename "$np" "$pane_name" >/dev/null 2>&1 || true

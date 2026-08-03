@@ -8,7 +8,7 @@ repositories (e.g., ContextHub, open_source_llm).
 
 | File | Description |
 |------|-------------|
-| `send-to-pi.sh` | Open a Pi agent pane and send a command. Generalized with `--pane-name`, `--focus`/`--no-focus`, `--check-cli`, and `--cwd` options. |
+| `send-to-pi.sh` | Open a Pi agent pane and send a command. Generalized with `--pane-name`, `--focus`/`--no-focus`, `--check-cli`, `--cwd`, and `--model` options. |
 | `open-pi-agent.sh` | Open an interactive Pi session in a new pane. Generalized with `--pane-name`, `--focus`/`--no-focus`, and `--cwd` options. |
 | `herdr-agent-state-protocol.md` | Specification for Herdr Unix socket agent state reporting protocol. |
 
@@ -31,6 +31,14 @@ The resolved target is passed to `herdr pane split --cwd <path>`, so the new
 pane starts in the correct project root and `wl` commands, skills, and
 relative paths resolve against the user's project rather than the plugin's
 installation directory.
+
+## Selecting the pi model
+
+`send-to-pi.sh` accepts a `--model <pattern>` option that is forwarded to the
+`pi` CLI invocation (`pi --model <pattern> '<command>'`), so callers can open
+the agent pane with a specific model (e.g. the herdr worklist plugin forwards
+the `model` field from its `shortcuts.json` entries). When `--model` is
+omitted, no `--model` flag is passed and pi uses its default model.
 
 ## Usage
 

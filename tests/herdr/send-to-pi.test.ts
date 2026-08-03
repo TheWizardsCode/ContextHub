@@ -156,3 +156,33 @@ describe('send-to-pi.sh --cwd propagation', () => {
     expect(log.some((line) => line.includes('pane run') && line.includes('/skill:audit'))).toBe(true);
   });
 });
+
+describe('send-to-pi.sh --model forwarding', () => {
+  it('passes --model to the pi invocation when --model is provided', () => {
+    const { status, log } = runScript(['--cwd', '/tmp/project-root', '--model', 'code', '/skill:implement <id>']);
+    expect(status).toBe(0);
+    const run = log.find((line) => line.includes('pane run'));
+    expect(run).toBeDefined();
+    expect(run).toContain('--model');
+    expect(run).toContain('code');
+    expect(run).toContain('/skill:implement');
+  });
+
+  it('supports the --model=<pattern> syntax', () => {
+    const { status, log } = runScript(['--cwd', '/tmp/project-root', '--model=code', '/skill:implement <id>']);
+    expect(status).toBe(0);
+    const run = log.find((line) => line.includes('pane run'));
+    expect(run).toBeDefined();
+    expect(run).toContain('--model');
+    expect(run).toContain('code');
+  });
+
+  it('omits --model from the pi invocation when not provided', () => {
+    const { status, log } = runScript(['--cwd', '/tmp/project-root', '/skill:implement <id>']);
+    expect(status).toBe(0);
+    const run = log.find((line) => line.includes('pane run'));
+    expect(run).toBeDefined();
+    expect(run).not.toContain('--model');
+    expect(run).not.toContain('code');
+  });
+});

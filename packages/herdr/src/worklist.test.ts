@@ -306,7 +306,7 @@ describe('executeResolvedCommand', () => {
     const onCommand = vi.fn();
     const result = executeResolvedCommand('echo hello', state, onCommand);
     expect(result).toBe('callback');
-    expect(onCommand).toHaveBeenCalledWith('echo hello');
+    expect(onCommand).toHaveBeenCalledWith('echo hello', undefined);
   });
 
   it('resolves <id> placeholder when item is selected', () => {
@@ -314,7 +314,7 @@ describe('executeResolvedCommand', () => {
     state.selectedIndex = 0;
     const onCommand = vi.fn();
     executeResolvedCommand('wl update <id> --priority high', state, onCommand);
-    expect(onCommand).toHaveBeenCalledWith('wl update TEST-123 --priority high');
+    expect(onCommand).toHaveBeenCalledWith('wl update TEST-123 --priority high', undefined);
   });
 
   it('returns dispatched for /wl commands handled internally', () => {
@@ -331,7 +331,7 @@ describe('executeResolvedCommand', () => {
     const onCommand = vi.fn();
     const result = executeResolvedCommand('/skill:implement <id>', state, onCommand);
     expect(result).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123');
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123', undefined);
   });
 
   it('propagates error from onCommand callback', () => {
@@ -364,7 +364,7 @@ describe('dispatchChordCommand', () => {
     const onCommand = vi.fn();
     const result = dispatchChordCommand('/skill:audit <id>', state, onCommand);
     expect(result).toBe(true);
-    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123');
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', undefined);
   });
 
   it('routes !!wl reviewed producer-review commands through onCommand', () => {
@@ -379,6 +379,7 @@ describe('dispatchChordCommand', () => {
     expect(result).toBe(true);
     expect(onCommand).toHaveBeenCalledWith(
       "!!wl reviewed TEST-123 && wl comment add TEST-123 --body '<producer_comment>'",
+      undefined,
     );
   });
 
@@ -394,6 +395,7 @@ describe('dispatchChordCommand', () => {
     expect(result).toBe(true);
     expect(onCommand).toHaveBeenCalledWith(
       "!!wl reviewed TEST-123 false && wl audit-set TEST-123 --ready-to-close yes --summary 'Approved by manual review'",
+      undefined,
     );
   });
 
@@ -409,6 +411,7 @@ describe('dispatchChordCommand', () => {
     expect(result).toBe(true);
     expect(onCommand).toHaveBeenCalledWith(
       "!!wl reviewed TEST-123 false && wl audit-set TEST-123 --ready-to-close no --summary 'Rejected by manual review. <reason>'",
+      undefined,
     );
   });
 
@@ -473,7 +476,7 @@ describe('executeResolvedCommand — code freeze blocking', () => {
     const onCommand = vi.fn();
     const result = executeResolvedCommand('/skill:implement <id>', state, onCommand);
     expect(result).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123');
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123', undefined);
   });
 
   it('routes /skill:implement normally when freeze is explicitly false', () => {
@@ -481,7 +484,7 @@ describe('executeResolvedCommand — code freeze blocking', () => {
     const onCommand = vi.fn();
     const result = executeResolvedCommand('/skill:implement <id>', state, onCommand, false);
     expect(result).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123');
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123', undefined);
   });
 
   it('does not block non-implement commands during a freeze', () => {
@@ -489,7 +492,7 @@ describe('executeResolvedCommand — code freeze blocking', () => {
     const onCommand = vi.fn();
     const auditResult = executeResolvedCommand('/skill:audit <id>', state, onCommand, true);
     expect(auditResult).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123');
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', undefined);
   });
 
   it('does not block wl / intake / plan commands during a freeze', () => {

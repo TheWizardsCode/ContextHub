@@ -3,8 +3,8 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ShortcutRegistry, type ShortcutEntry } from '../../packages/herdr/src/shortcut-config.js';
-import { dispatchChordCommand, executeResolvedCommand, WorkItemListState } from '../../packages/herdr/src/worklist.js';
+import { ShortcutRegistry, parseShortcutEntry, type ShortcutEntry } from '../../packages/herdr/src/shortcut-config.js';
+import { dispatchChordCommand, executeResolvedCommand, WorkItemListState, createChordState, processChordInput } from '../../packages/herdr/src/worklist.js';
 import { getTermSize } from '../../packages/herdr/src/worklist.js';
 import type { WorkItem } from '../../packages/herdr/src/fetcher.js';
 
@@ -186,6 +186,136 @@ describe('ShortcutRegistry', () => {
       const mod = await import('../../packages/herdr/src/shortcut-config.js');
       const registry = mod.loadShortcutConfig();
       expect(registry).toBeDefined();
+    });
+  });
+
+  // ── model field (WL-0MSD48ZFC0043AO3) ─────────────────────────────
+
+  describe('parseShortcutEntry model field', () => {
+    it('parses an optional model string', () => {
+      const entry = parseShortcutEntry({
+        chord: ['i'],
+        command: '/skill:implement <id>',
+        view: 'both',
+        model: 'code',
+      });
+      expect(entry).toBeDefined();
+      expect(entry!.model).toBe('code');
+    });
+
+    it('defaults agent-bound commands without a model to plan', () => {
+      const entry = parseShortcutEntry({
+        chord: ['p'],
+        command: '/plan <id>',
+        view: 'both',
+      });
+      expect(entry!.model).toBe('plan');
+    });
+
+    it('defaults /skill:, /intake, /prompt: commands to plan when model absent', () => {
+      for (const command of ['/skill:audit <id>', '/intake <id>', '/prompt:Review the item']) {
+        const entry = parseShortcutEntry({ chord: ['x'], command, view: 'both' });
+        expect(entry!.model).toBe('plan');
+      }
+    });
+
+    it('does not add a model to shell (!!) or /wl filter commands', () => {
+      for (const command of ['!!wl update <id> --priority high', '/wl idea', 'echo hello']) {
+        const entry = parseShortcutEntry({ chord: ['x'], command, view: 'both' });
+        expect(entry!.model).toBeUndefined();
+      }
+    });
+
+    it('ignores non-string model values (defaults to plan for agent commands)', () => {
+      const entry = parseShortcutEntry({
+        chord: ['i'],
+        command: '/skill:implement <id>',
+        view: 'both',
+        model: 42,
+      } as unknown as Record<string, unknown>);
+      expect(entry!.model).toBe('plan');
+    });
+
+    it('trims whitespace from model values', () => {
+      const entry = parseShortcutEntry({
+        chord: ['i'],
+        command: '/skill:implement <id>',
+        view: 'both',
+        model: '  code  ',
+      });
+      expect(entry!.model).toBe('code');
+    });
+  });
+
+  describe('lookupChordEntry', () => {
+    it('returns the full entry (command + model) for a matching chord', () => {
+      const reg = new ShortcutRegistry([
+        { chord: ['i'], command: '/skill:implement <id>', view: 'both', model: 'code' },
+      ]);
+      const entry = reg.lookupChordEntry(['i'], 'list');
+      expect(entry?.command).toBe('/skill:implement <id>');
+      expect(entry?.model).toBe('code');
+    });
+
+    it('returns undefined for an unknown chord', () => {
+      const reg = new ShortcutRegistry([]);
+      expect(reg.lookupChordEntry(['z'], 'list')).toBeUndefined();
+    });
+  });
+
+  describe('processChordInput resolvedModel', () => {
+    it('sets resolvedModel when a chord completes on a model-bound entry', () => {
+      const reg = new ShortcutRegistry([
+        { chord: ['i'], command: '/skill:implement <id>', view: 'both', model: 'code' },
+      ]);
+      const state = createChordState();
+      const result = processChordInput(state, 'i', reg, 'list');
+      expect(result).toBe('chord-complete');
+      expect(state.resolvedCommand).toBe('/skill:implement <id>');
+      expect(state.resolvedModel).toBe('code');
+    });
+
+    it('leaves resolvedModel null for entries without a model', () => {
+      const reg = new ShortcutRegistry([
+        { chord: ['r'], command: '!!wl reviewed <id>', view: 'both' },
+      ]);
+      const state = createChordState();
+      processChordInput(state, 'r', reg, 'list');
+      expect(state.resolvedCommand).toBe('!!wl reviewed <id>');
+      expect(state.resolvedModel).toBeNull();
+    });
+  });
+
+  describe('loadShortcutConfig model values (real shortcuts.json)', () => {
+    it('assigns explicit model values to LLM-bound entries', async () => {
+      const mod = await import('../../packages/herdr/src/shortcut-config.js');
+      const registry = mod.loadShortcutConfig();
+      const byCommand = new Map(registry.getEntries().map((e) => [e.command, e]));
+
+      expect(byCommand.get('/skill:implement <id>')?.model).toBe('code');
+      expect(byCommand.get('/skill:audit <id>')?.model).toBe('plan');
+      expect(byCommand.get('/plan <id>')?.model).toBe('plan');
+      expect(byCommand.get('/intake <description>')?.model).toBe('plan');
+      expect(byCommand.get('/intake <id>')?.model).toBe('plan');
+      expect(byCommand.get('/prompt:Review the current work item and suggest next steps')?.model).toBe('author');
+    });
+
+    it('leaves shell and /wl filter entries without a model', async () => {
+      const mod = await import('../../packages/herdr/src/shortcut-config.js');
+      const registry = mod.loadShortcutConfig();
+      const entries = registry.getEntries();
+
+      const shellEntries = entries.filter((e) => e.command.startsWith('!!'));
+      expect(shellEntries.length).toBeGreaterThan(0);
+      for (const e of shellEntries) {
+        expect(e.model).toBeUndefined();
+      }
+
+      const filterEntries = entries.filter((e) => e.command.startsWith('/wl '));
+      expect(filterEntries.length).toBeGreaterThan(0);
+      for (const e of filterEntries) {
+        expect(e.model).toBeUndefined();
+      }
     });
   });
 });
@@ -809,5 +939,51 @@ describe('runWorklistTui options (type-level)', () => {
     // Options parameter should accept onCommand
     const optionsType = mod.runWorklistTui.length;
     expect(optionsType).toBeGreaterThanOrEqual(3); // fetcher, initialItems, shortcutRegistry, options
+  });
+});
+
+// ── model propagation (WL-0MSD48ZFC0043AO3) ──────────────────────────
+
+describe('model propagation through dispatch', () => {
+  it('passes the model to onCommand for agent commands', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const calls: Array<[string, string | undefined]> = [];
+    const callback = (cmd: string, model?: string) => { calls.push([cmd, model]); };
+
+    const result = executeResolvedCommand('/skill:implement <id>', state, callback, false, 'code');
+    expect(result).toBe('dispatched');
+    expect(calls).toEqual([['/skill:implement WL-001', 'code']]);
+  });
+
+  it('omits the model argument when none is provided', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const calls: Array<[string, string | undefined]> = [];
+    const callback = (cmd: string, model?: string) => { calls.push([cmd, model]); };
+
+    executeResolvedCommand('/plan <id>', state, callback, false, undefined);
+    expect(calls).toEqual([['/plan WL-001', undefined]]);
+  });
+
+  it('passes the model through dispatchChordCommand to onCommand', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const calls: Array<[string, string | undefined]> = [];
+    const callback = (cmd: string, model?: string) => { calls.push([cmd, model]); };
+
+    const result = dispatchChordCommand('/skill:audit <id>', state, callback, 'plan');
+    expect(result).toBe(true);
+    expect(calls).toEqual([['/skill:audit WL-001', 'plan']]);
+  });
+
+  it('does not attach a model to non-agent fallback commands', () => {
+    const items = [makeWorkItem('WL-001')];
+    const state = makeState(items);
+    const calls: Array<[string, string | undefined]> = [];
+    const callback = (cmd: string, model?: string) => { calls.push([cmd, model]); };
+
+    executeResolvedCommand('!!wl close <id>', state, callback);
+    expect(calls).toEqual([['!!wl close WL-001', undefined]]);
   });
 });

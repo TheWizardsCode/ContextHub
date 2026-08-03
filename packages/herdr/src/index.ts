@@ -97,6 +97,27 @@ export function stripAgentPromptPrefix(command: string): string {
 }
 
 /**
+ * Build the argument vector for spawning `send-to-pi.sh` for an agent
+ * command.
+ *
+ * The resolved project root is passed via `--cwd`. When the shortcut entry
+ * carries a `model` (WL-0MSD48ZFC0043AO3), `--model <pattern>` is forwarded
+ * so the pi CLI opens with the requested model (e.g. `pi --model code
+ * '/skill:implement <id>'`). Free-form `/prompt:` commands have their routing
+ * prefix stripped here so pi receives only the prompt text. Commands without
+ * a model get no `--model` flag.
+ */
+export function buildSendToPiArgs(command: string, targetCwd: string, model?: string): string[] {
+  const agentPrompt = stripAgentPromptPrefix(command);
+  const args = ['--cwd', targetCwd];
+  if (model) {
+    args.push('--model', model);
+  }
+  args.push(agentPrompt);
+  return args;
+}
+
+/**
  * Check if a command is an agent command that should be sent to a pi pane.
  * Agent commands are those starting with /skill:, /intake, /plan, or /prompt:.
  */
@@ -348,7 +369,7 @@ async function main(): Promise<void> {
       // Re-read on every render so a showHelpText change applies on the next
       // refresh (no plugin restart needed), matching browseItemCount behavior.
       getShowHelpText: () => loadSettings().showHelpText ?? true,
-      onCommand: async (command: string) => {
+      onCommand: async (command: string, model?: string) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
         // shortcuts like audit approve/reject, priority updates, close/delete) are
@@ -372,15 +393,13 @@ async function main(): Promise<void> {
           } catch {
             // Belt-and-suspenders: a claim failure must never block the pane.
           }
-          // Free-form prompts (/prompt:...) carry a routing prefix that pi must
-          // NOT see — strip it so pi receives only the prompt text. Skill/
-          // workflow commands (/skill:*, /intake, /plan) pass through unchanged.
-          const agentPrompt = stripAgentPromptPrefix(command);
           // Spawn send-to-pi.sh asynchronously — detached and with stdio ignored
           // so the TUI loop is not blocked or affected by the script's output.
+          // The `model` from the shortcut entry (if any) is forwarded as
+          // `--model <pattern>` so the pi CLI opens with the right model.
           const child = spawn(
             SEND_TO_PI_SCRIPT,
-            ['--cwd', targetCwd, agentPrompt],
+            buildSendToPiArgs(command, targetCwd, model),
             {
               detached: true,
               stdio: 'ignore',

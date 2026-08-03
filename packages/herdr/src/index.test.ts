@@ -5,13 +5,57 @@
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
-import { stripCommandPrefix, routeCommand, stripAgentPromptPrefix } from './index.js';
+import { stripCommandPrefix, routeCommand, stripAgentPromptPrefix, buildSendToPiArgs } from './index.js';
 import {
   fetchItemsByStage,
   resetExecFileAsync,
   resetWorklogDir,
   setExecFileAsync,
 } from './fetcher.js';
+
+// ---------------------------------------------------------------------------
+// buildSendToPiArgs tests (WL-0MSD48ZFC0043AO3)
+// ---------------------------------------------------------------------------
+
+describe('buildSendToPiArgs', () => {
+  it('includes --model <model> for agent commands with a model', () => {
+    expect(buildSendToPiArgs('/skill:implement <id>', '/project', 'code')).toEqual([
+      '--cwd',
+      '/project',
+      '--model',
+      'code',
+      '/skill:implement <id>',
+    ]);
+  });
+
+  it('omits --model when no model is provided', () => {
+    expect(buildSendToPiArgs('/skill:implement <id>', '/project')).toEqual([
+      '--cwd',
+      '/project',
+      '/skill:implement <id>',
+    ]);
+  });
+
+  it('strips the /prompt: prefix and keeps the model', () => {
+    expect(buildSendToPiArgs('/prompt:Review the item', '/project', 'author')).toEqual([
+      '--cwd',
+      '/project',
+      '--model',
+      'author',
+      'Review the item',
+    ]);
+  });
+
+  it('passes /plan with the plan model', () => {
+    expect(buildSendToPiArgs('/plan <id>', '/project', 'plan')).toEqual([
+      '--cwd',
+      '/project',
+      '--model',
+      'plan',
+      '/plan <id>',
+    ]);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // stripCommandPrefix tests

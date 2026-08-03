@@ -845,6 +845,7 @@ export function createChordState(): ChordState {
     pendingKeys: [],
     hints: '',
     resolvedCommand: null,
+    resolvedModel: null,
   };
 }
 
@@ -876,11 +877,12 @@ export function processChordInput(
   const pending = [...chordState.pendingKeys, key];
 
   // Check if this completes a chord
-  const command = registry.lookupChord(pending, view, stage);
-  if (command) {
+  const entry = registry.lookupChordEntry(pending, view, stage);
+  if (entry) {
     chordState.pendingKeys = [];
     chordState.hints = '';
-    chordState.resolvedCommand = command;
+    chordState.resolvedCommand = entry.command;
+    chordState.resolvedModel = entry.model ?? null;
     return 'chord-complete';
   }
 
@@ -1000,6 +1002,11 @@ export interface ChordState {
   hints: string;
   /** The resolved command if chord was completed (cleared after execution) */
   resolvedCommand: string | null;
+  /**
+   * The model pattern bound to the resolved shortcut entry, if any
+   * (cleared after execution). Used to spawn the pi CLI with `--model`.
+   */
+  resolvedModel: string | null;
 }
 
 /**
@@ -1417,7 +1424,8 @@ const defaultRenderer = createListRenderer();
 function resolveAndRouteCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string) => void,
+  onCommand?: (command: string, model?: string) => void,
+  model?: string,
 ): boolean {
   let resolvedCommand = command;
 
@@ -1433,7 +1441,7 @@ function resolveAndRouteCommand(
   }
 
   if (onCommand) {
-    onCommand(resolvedCommand);
+    onCommand(resolvedCommand, model);
   }
   return true;
 }
@@ -1533,7 +1541,8 @@ export function formatCodeFreezeDialog(maxCols: number, maxRows: number, reason?
 export function dispatchChordCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string) => void,
+  onCommand?: (command: string, model?: string) => void,
+  model?: string,
 ): boolean {
   // ── /wl <stage> commands (internal dispatch) ──────────────
   const wlStageMatch = command.match(/^\/wl\s+(\S+)$/);
@@ -1555,26 +1564,26 @@ export function dispatchChordCommand(
 
   // ── Agent skill invocations ─────────────────────────────
   if (command.startsWith('/skill:implement')) {
-    return resolveAndRouteCommand(command, state, onCommand);
+    return resolveAndRouteCommand(command, state, onCommand, model);
   }
   if (command.startsWith('/skill:audit')) {
-    return resolveAndRouteCommand(command, state, onCommand);
+    return resolveAndRouteCommand(command, state, onCommand, model);
   }
 
   // ── Agent workflow commands ─────────────────────────────
   if (command.startsWith('/intake')) {
-    return resolveAndRouteCommand(command, state, onCommand);
+    return resolveAndRouteCommand(command, state, onCommand, model);
   }
   if (command.startsWith('/plan')) {
-    return resolveAndRouteCommand(command, state, onCommand);
+    return resolveAndRouteCommand(command, state, onCommand, model);
   }
 
   // ── Producer review / audit compound commands ───────────
   if (command.startsWith('!!wl reviewed')) {
-    return resolveAndRouteCommand(command, state, onCommand);
+    return resolveAndRouteCommand(command, state, onCommand, model);
   }
   if (command.includes('&& wl audit-set')) {
-    return resolveAndRouteCommand(command, state, onCommand);
+    return resolveAndRouteCommand(command, state, onCommand, model);
   }
 
   // Unknown command — not handled
@@ -1612,8 +1621,9 @@ export type ExecuteResult = 'dispatched' | 'callback' | 'noop' | 'blocked';
 export function executeResolvedCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string) => void,
+  onCommand?: (command: string, model?: string) => void,
   codeFreezeActive = false,
+  model?: string,
 ): ExecuteResult {
   // Code Freeze guard: never route implement commands while frozen.
   // This runs BEFORE dispatchChordCommand so no pane spawn, claim, or
@@ -1624,7 +1634,7 @@ export function executeResolvedCommand(
 
   // Try dispatchChordCommand first — handles /wl, /skill:, /intake, /plan,
   // !!wl reviewed, and compound audit commands
-  if (dispatchChordCommand(command, state, onCommand)) {
+  if (dispatchChordCommand(command, state, onCommand, model)) {
     return 'dispatched';
   }
 
@@ -1643,7 +1653,7 @@ export function executeResolvedCommand(
   }
 
   if (onCommand) {
-    onCommand(resolvedCommand);
+    onCommand(resolvedCommand, model);
   }
   return 'callback';
 }
@@ -1665,7 +1675,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; onCommand?: (command: string) => void },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; onCommand?: (command: string, model?: string) => void },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -1889,7 +1899,9 @@ export async function runWorklistTui(
       if (chordResult === 'chord-complete') {
         // Chord resolved — execute the command
         const command = chordState.resolvedCommand;
+        const model = chordState.resolvedModel;
         chordState.resolvedCommand = null;
+        chordState.resolvedModel = null;
         if (command) {
           // Check for unknown identifiers that need form input
           if (hasUnknownIdentifiers(command)) {
@@ -1929,7 +1941,7 @@ export async function runWorklistTui(
                   return;
                 }
                 if (opts.onCommand) {
-                  opts.onCommand(finalCmd);
+                  opts.onCommand(finalCmd, model ?? undefined);
                 }
               },
               // onCancel
@@ -1950,7 +1962,7 @@ export async function runWorklistTui(
             if (frozen) {
               codeFreezeActive = true;
             }
-            const result = executeResolvedCommand(command, state, opts.onCommand, frozen);
+            const result = executeResolvedCommand(command, state, opts.onCommand, frozen, model ?? undefined);
             if (result === 'blocked') {
               // Code Freeze — show the notice dialog; the command was NOT
               // routed, no pane spawned, no work item claimed.
@@ -1992,19 +2004,19 @@ export async function runWorklistTui(
     // check if it's a shortcut or part of a chord sequence
     if (shortcutRegistry && (action === null || isChordLeader(key, shortcutRegistry as ShortcutRegistry))) {
       // First: check if this key is a complete single-key shortcut
-      const singleCmd = (shortcutRegistry as ShortcutRegistry).lookupChord(
+      const singleEntry = (shortcutRegistry as ShortcutRegistry).lookupChordEntry(
         [key],
         state.mode === 'detail' ? 'detail' : 'list',
         state.activeFilter ?? undefined,
       );
-      if (singleCmd) {
+      if (singleEntry) {
+        const singleCmd = singleEntry.command;
+        const singleModel = singleEntry.model ?? undefined;
         // Single-key shortcut — check for unknown identifiers first
         if (hasUnknownIdentifiers(singleCmd)) {
           let description = '';
-          const entries = (shortcutRegistry as ShortcutRegistry).getEntries();
-          const matchingEntry = entries.find(e => e.command === singleCmd);
-          if (matchingEntry && matchingEntry.description) {
-            description = matchingEntry.description;
+          if (singleEntry.description) {
+            description = singleEntry.description;
           }
           const unknownIds = getUnknownIdentifiers(singleCmd);
           preFormMode = state.mode;
@@ -2029,7 +2041,7 @@ export async function runWorklistTui(
                 return;
               }
               if (opts.onCommand) {
-                opts.onCommand(finalCmd);
+                opts.onCommand(finalCmd, singleModel);
               }
             },
             () => {
@@ -2048,7 +2060,7 @@ export async function runWorklistTui(
           if (frozen) {
             codeFreezeActive = true;
           }
-          const result = executeResolvedCommand(singleCmd, state, opts.onCommand, frozen);
+          const result = executeResolvedCommand(singleCmd, state, opts.onCommand, frozen, singleModel);
           if (result === 'blocked') {
             // Code Freeze — show the notice dialog; no pane spawned.
             codeFreezeNotice = true;
@@ -2074,6 +2086,7 @@ export async function runWorklistTui(
           chordState.pendingKeys = [key];
           chordState.hints = formatChordHintsForHelp(nextChords, [key]);
           chordState.resolvedCommand = null;
+          chordState.resolvedModel = null;
           render();
           return;
         }

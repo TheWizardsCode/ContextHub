@@ -6,7 +6,8 @@
     "command": "/intake <description>",
     "view": "both",
     "label": "create new",
-    "description": "Create a new work item with a description and priority."
+    "description": "Create a new work item with a description and priority.",
+    "model": "plan"
   },
   {
     "chord": [
@@ -18,7 +19,8 @@
       "idea"
     ],
     "label": "intake",
-    "description": "Ensure that the selected item is reasonably well defined in terms of objectives."
+    "description": "Ensure that the selected item is reasonably well defined in terms of objectives.",
+    "model": "plan"
   },
   {
     "chord": [
@@ -30,7 +32,8 @@
       "intake_complete"
     ],
     "label": "plan",
-    "description": "Run the plan workflow on the selected work item"
+    "description": "Run the plan workflow on the selected work item",
+    "model": "plan"
   },
   {
     "chord": [
@@ -44,7 +47,8 @@
       "in_progress"
     ],
     "label": "implement",
-    "description": "Run the implement workflow on the selected work item"
+    "description": "Run the implement workflow on the selected work item",
+    "model": "code"
   },
   {
     "chord": [
@@ -75,7 +79,8 @@
       "in_review"
     ],
     "label": "audit automatic",
-    "description": "Trigger automatic audit of the selected work item."
+    "description": "Trigger automatic audit of the selected work item.",
+    "model": "plan"
   },
   {
     "chord": [
@@ -195,7 +200,8 @@
     "command": "/prompt:Review the current work item and suggest next steps",
     "view": "both",
     "label": "open pi prompt",
-    "description": "Open a new Pi agent pane with a free-form prompt."
+    "description": "Open a new Pi agent pane with a free-form prompt.",
+    "model": "author"
   },
   {
     "chord": [

@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+const validViews = new Set(['list', 'detail', 'both']);
+
 // ── Types ─────────────────────────────────────────────────────────────
 
 export interface ShortcutEntry {
@@ -21,6 +23,13 @@ export interface ShortcutEntry {
   label?: string;
   description?: string;
   stages?: string[];
+  /**
+   * Optional pi model pattern (e.g. `plan`, `code`, `author`) used when the
+   * command is dispatched to the agent channel: the spawned `pi` CLI is
+   * invoked with `--model <pattern>`. Agent-bound commands without an
+   * explicit model default to `plan` (WL-0MSD48ZFC0043AO3).
+   */
+  model?: string;
 }
 
 // ── Registry ──────────────────────────────────────────────────────────
@@ -36,7 +45,15 @@ export class ShortcutRegistry {
    * Look up a chord by its full key sequence (supports any length).
    */
   lookupChord(chordKeys: string[], view: string, stage?: string): string | undefined {
-    const match = this.entries.find(entry => {
+    return this.lookupChordEntry(chordKeys, view, stage)?.command;
+  }
+
+  /**
+   * Look up a chord by its full key sequence and return the matching entry
+   * (command, model, label, ...). Returns undefined when no entry matches.
+   */
+  lookupChordEntry(chordKeys: string[], view: string, stage?: string): ShortcutEntry | undefined {
+    return this.entries.find(entry => {
       const chord = entry.chord;
       if (chord.length !== chordKeys.length) return false;
       for (let i = 0; i < chord.length; i++) {
@@ -48,7 +65,6 @@ export class ShortcutRegistry {
       }
       return true;
     });
-    return match?.command;
   }
 
   /**
@@ -113,6 +129,78 @@ export class ShortcutRegistry {
 // ── Loader ────────────────────────────────────────────────────────────
 
 /**
+ * True when a command is routed to the pi agent pane (the agent channel).
+ * Agent-bound commands may carry a `model` so the spawned pi CLI opens with
+ * `--model <pattern>` (WL-0MSD48ZFC0043AO3).
+ */
+function isAgentCommand(command: string): boolean {
+  return (
+    command.startsWith('/skill:') ||
+    command.startsWith('/intake') ||
+    command.startsWith('/plan') ||
+    command.startsWith('/prompt:')
+  );
+}
+
+/**
+ * Parse and validate a single raw shortcut entry from shortcuts.json.
+ *
+ * Returns a validated {@link ShortcutEntry}, or undefined when the raw entry
+ * is invalid (missing/invalid command, view, or chord). Extracted from
+ * {@link loadShortcutConfig} so parsing (including the optional `model`
+ * field and its `plan` default for agent-bound commands) is unit-testable.
+ */
+export function parseShortcutEntry(raw: unknown): ShortcutEntry | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+
+  const entry = raw as Record<string, unknown>;
+  const command = entry.command;
+  const view = entry.view;
+
+  if (typeof command !== 'string' || command.length === 0) return undefined;
+  if (typeof view !== 'string' || !validViews.has(view)) return undefined;
+
+  const rawChord = entry.chord;
+  if (!Array.isArray(rawChord) || rawChord.length < 1) return undefined;
+
+  const shortcutEntry: ShortcutEntry = {
+    chord: rawChord.map(String),
+    command,
+    view: view as 'list' | 'detail' | 'both',
+  };
+
+  const rawStages = entry.stages;
+  if (Array.isArray(rawStages) && rawStages.length > 0 && rawStages.every(s => typeof s === 'string')) {
+    shortcutEntry.stages = rawStages;
+  }
+
+  const label = entry.label;
+  if (typeof label === 'string' && label.trim().length > 0) {
+    shortcutEntry.label = label.trim();
+  }
+
+  const description = entry.description;
+  if (typeof description === 'string' && description.trim().length > 0) {
+    shortcutEntry.description = description.trim();
+  }
+
+  const model = entry.model;
+  if (typeof model === 'string' && model.trim().length > 0) {
+    shortcutEntry.model = model.trim();
+  }
+
+  // Agent-bound commands without an explicit model run on the default
+  // `plan` model so every pi pane spawned from a shortcut opens with a
+  // deterministic model (WL-0MSD48ZFC0043AO3). Non-agent commands (shell
+  // `!!` and `/wl` filter entries) never carry a model.
+  if (shortcutEntry.model === undefined && isAgentCommand(command)) {
+    shortcutEntry.model = 'plan';
+  }
+
+  return shortcutEntry;
+}
+
+/**
  * Load and validate shortcut config from shortcuts.json.
  */
 export function loadShortcutConfig(): ShortcutRegistry {
@@ -138,43 +226,13 @@ export function loadShortcutConfig(): ShortcutRegistry {
     return new ShortcutRegistry([]);
   }
 
-  const validViews = new Set(['list', 'detail', 'both']);
   const validEntries: ShortcutEntry[] = [];
 
   for (const entry of parsed) {
-    if (!entry || typeof entry !== 'object') continue;
-
-    const command = (entry as Record<string, unknown>).command;
-    const view = (entry as Record<string, unknown>).view;
-
-    if (typeof command !== 'string' || command.length === 0) continue;
-    if (typeof view !== 'string' || !validViews.has(view)) continue;
-
-    const rawChord = (entry as Record<string, unknown>).chord;
-    if (!Array.isArray(rawChord) || rawChord.length < 1) continue;
-
-    const shortcutEntry: ShortcutEntry = {
-      chord: rawChord.map(String),
-      command,
-      view: view as 'list' | 'detail' | 'both',
+    const parsedEntry = parseShortcutEntry(entry);
+    if (parsedEntry) {
+      validEntries.push(parsedEntry);
     }
-
-    const rawStages = (entry as Record<string, unknown>).stages;
-    if (Array.isArray(rawStages) && rawStages.length > 0 && rawStages.every(s => typeof s === 'string')) {
-      shortcutEntry.stages = rawStages;
-    }
-
-    const label = (entry as Record<string, unknown>).label;
-    if (typeof label === 'string' && label.trim().length > 0) {
-      shortcutEntry.label = label.trim();
-    }
-
-    const description = (entry as Record<string, unknown>).description;
-    if (typeof description === 'string' && description.trim().length > 0) {
-      shortcutEntry.description = description.trim();
-    }
-
-    validEntries.push(shortcutEntry);
   }
 
   return new ShortcutRegistry(validEntries);
