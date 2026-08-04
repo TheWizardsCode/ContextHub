@@ -311,6 +311,11 @@ async function main(): Promise<void> {
         // "follow" CWD policy would otherwise inherit the source pane's CWD
         // (the plugin directory), so we pass the resolved project root
         // (wlRoot) explicitly to the pane-spawning scripts via --cwd.
+        // Fallback order: resolved worklog root, then HERDR_RESOLVED_CWD
+        // (the directory the user ran the plugin from), then process.cwd().
+        // resolvedCwd is preferred over process.cwd() because it reflects
+        // the user's intended project, which may differ when the plugin
+        // process CWD is the herdr extension directory.
         const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
         if (route === 'agent') {
           // Claim the referenced work-item BEFORE spawning the agent pane so it
