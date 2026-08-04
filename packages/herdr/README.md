@@ -16,6 +16,8 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
 - **Quit** — Press `q` to exit
+- **Metadata panel** — The bottom portion of the list view (roughly 20–40% of the pane height, responsive to terminal size) is reserved for the selected item's metadata: ID, title, status, stage, priority, type, risk, effort, tags, audit info, and more. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
+- **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
 - **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
 
 ## Requirements
@@ -184,6 +186,47 @@ show only items matching the selected stage.
 The "top N of M" header reflects the **actual displayed count** (N), which
 may exceed `browseItemCount` when the mandatory set is large.
 
+## Metadata panel
+
+The list view reserves the bottom rows of the pane for a metadata panel
+showing the **selected** item's fields. The panel is always on: the list
+area shrinks to `rows - 1 - panelHeight`, and `panelHeight` scales linearly
+from 20% of the pane height (on short panes) up to 40% (on tall panes),
+clamped to a minimum of 3 rows so it is always usable.
+
+- The panel shows the item ID as a header separator, followed by its
+  metadata (status, stage, priority, type, risk, effort, children/parent
+  counts, tags, GitHub issue number, created/updated timestamps, and audit
+  state).
+- For items whose stage is `in_progress`, the panel additionally shows
+  **`Last command:`** — the most recent command the plugin dispatched
+  against that item (`none yet` until the first dispatch).
+- The panel scrolls **independently** of the list: press `m` to scroll the
+  panel down and `M` to scroll it up. A `[m/M scroll N%]` indicator appears
+  on the last panel line whenever the content overflows. Navigating the
+  list, filtering, or refreshing resets the panel scroll so the top of the
+  panel is always visible again.
+
+## Command log
+
+Every command the plugin dispatches against a work item is recorded in a
+local JSON log so the panel (and tools) can show what was last run against
+an item. Recording is best-effort: it happens **before** the command is
+executed (a downstream failure never skips the entry) and a log failure
+never breaks dispatch.
+
+- **What is recorded** — Any command routed through the plugin's dispatch
+  paths (`dispatchChordCommand` / `resolveAndRouteCommand`, single-key
+  shortcuts, and form submissions) that carries a work item ID, either via
+  `<id>` substitution or as an explicit ID token in the command text.
+- **What is not recorded** — Commands without an item ID (e.g. plain shell
+  commands), commands dispatched directly through the external `wl` CLI
+  outside the plugin, and failed `<id>` resolutions (no item selected).
+- **Log file** — `~/.config/herdr/worklog-command-log.json`. Per item the
+  log keeps the most recent `MAX_ENTRIES_PER_ITEM` (50) entries. The file
+  is written atomically (temp file + rename); missing, empty, or corrupt
+  JSON degrades gracefully to an empty log.
+
 ## Command input form
 
 When a chord shortcut resolves to a command that contains **unknown identifiers** — angle-bracket placeholders other than the known `<id>` (e.g. `--status <status>`, `--stage <stage>`, `--reason <reason>`) — the plugin displays a modal form overlay instead of dispatching the command directly:
@@ -210,6 +253,7 @@ packages/herdr/
 │   ├── icons.ts            # Icon and colour helpers
 │   ├── code-freeze.ts      # Code Freeze marker detection (fail-open)
 │   ├── form-dialog.ts      # Form state + rendering for parameter input (unknown <identifiers>)
+│   ├── command-log.ts      # Command log: record/get last command per work item
 │   ├── settings.ts         # User settings management
 │   └── worklist.ts         # List state, rendering, keyboard handling, command output
 ├── scripts/
@@ -238,6 +282,8 @@ packages/herdr/
 - **`<id>` placeholder resolution** — Before output, any `<id>` placeholders in the resolved command are replaced with the currently selected work item's ID. If no item is selected and the command requires `<id>`, the command is silently dropped (graceful no-op).
 - **Parameter input form** — Chord commands containing unknown `<identifier>` placeholders open a modal input form (`form-dialog.ts`) before dispatch. The dialog renders at 80% of the pane width (40-column minimum, centered), wraps the description and field values at its inner content width, and expands downward as content wraps — bounded by the terminal height. Every content line is padded to exactly the border width so the box borders stay aligned at any pane width (see WL-0MSAKRBOC005T320).
 - **Chord shortcut system** — Multi-key chord sequences are defined in `shortcuts.json` and resolved via `ShortcutRegistry`. Chords can be filtered by view (list/detail) and stage. Entries may carry an optional `model` field (see **Model selection per shortcut** above).
+- **Metadata panel** — The bottom of the list view is reserved for the selected item's metadata (`formatMetadataPanel` in `worklist.ts`). The panel height ramps linearly with pane height (20% → 40%, min 3 rows) via `computeMetadataPanelHeight`, and the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows`, so the two views never drift apart (see WL-0MSAYNVBY006LM9X).
+- **Command log** — Dispatched commands targeting a work item are recorded in `command-log.ts` before execution; the panel surfaces the last command for `in_progress` items. Recording is fire-and-forget (never breaks dispatch) and the log file is written atomically (see WL-0MSAYNVBY006LM9X).
 
 ## Code Freeze
 

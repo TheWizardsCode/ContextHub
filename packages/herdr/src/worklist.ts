@@ -28,6 +28,7 @@ import {
 } from './icons.js';
 import { runSync, createSyncTimer, clampSyncInterval } from './auto-sync.js';
 import { showToast } from './notify.js';
+import { recordCommand, getLastCommand } from './command-log.js';
 import {
   hasUnknownIdentifiers,
   getUnknownIdentifiers,
@@ -57,6 +58,43 @@ export const STAGE_COLORS: Record<string, number> = {
   in_review: 220,
   completed: 33,
 };
+
+// ── Metadata panel sizing (WL-0MSAYNVBY006LM9X) ─────────────────────────
+// The list renderer reserves the bottom of the pane for a metadata panel
+// showing the selected item's fields plus its last recorded command. The
+// panel share of the pane height ramps linearly between MIN_META_SHARE on
+// small panes and MAX_META_SHARE on tall panes, so the list always keeps at
+// least 60% of the pane.
+
+/** Minimum share of pane rows reserved for the metadata panel (small panes). */
+export const MIN_META_SHARE = 0.2;
+/** Maximum share of pane rows reserved for the metadata panel (tall panes). */
+export const MAX_META_SHARE = 0.4;
+
+/** Pane height (rows) at which the panel uses the minimum share. */
+const META_SHARE_MIN_ROWS = 12;
+/** Pane height (rows) at which the panel reaches the maximum share. */
+const META_SHARE_MAX_ROWS = 40;
+
+/**
+ * Compute the number of pane rows reserved for the metadata panel.
+ *
+ * The share ramps linearly from MIN_META_SHARE at `META_SHARE_MIN_ROWS` to
+ * MAX_META_SHARE at `META_SHARE_MAX_ROWS`. The result is clamped to a
+ * minimum of 3 rows (so the panel stays usable) and to MAX_META_SHARE of the
+ * pane (so the list keeps at least 60%).
+ *
+ * @param rows - Total pane height in rows.
+ * @returns Number of panel rows (always < rows).
+ */
+export function computeMetadataPanelHeight(rows: number): number {
+  let share = MIN_META_SHARE;
+  if (rows > META_SHARE_MIN_ROWS) {
+    const t = Math.min(1, (rows - META_SHARE_MIN_ROWS) / (META_SHARE_MAX_ROWS - META_SHARE_MIN_ROWS));
+    share = MIN_META_SHARE + (MAX_META_SHARE - MIN_META_SHARE) * t;
+  }
+  return Math.max(3, Math.min(Math.round(rows * share), Math.floor(rows * MAX_META_SHARE)));
+}
 
 // ── Terminal helpers ─────────────────────────────────────────────────
 
@@ -208,6 +246,7 @@ export class WorkItemListState {
     this.selectedIndex = index;
     this._clampSelection();
     this._adjustScroll();
+    this._resetMetaScroll();
   }
 
   /** Number of items in the flattened (display) list. */
@@ -245,6 +284,13 @@ export class WorkItemListState {
   /** Scroll offset within the detail view. */
   detailScrollOffset = 0;
 
+  /**
+   * Scroll offset within the metadata panel. Reset to 0 whenever the
+   * selection changes so a stale position from a previous item never
+   * leaves the panel blank (WL-0MSAYNVBY006LM9X-FT4).
+   */
+  metaScrollOffset = 0;
+
   /** Set of expanded item IDs (for hierarchical display). */
   expandedItems: Set<string> = new Set();
 
@@ -271,6 +317,7 @@ export class WorkItemListState {
       this.selectedIndex = this.flatCount - 1; // wrap to last
     }
     this._adjustScroll();
+    this._resetMetaScroll();
   }
 
   moveDown(): void {
@@ -281,12 +328,14 @@ export class WorkItemListState {
       this.selectedIndex = 0; // wrap to first
     }
     this._adjustScroll();
+    this._resetMetaScroll();
   }
 
   pageUp(): void {
     const pageSize = this._listHeight();
     this.selectedIndex = Math.max(0, this.selectedIndex - pageSize);
     this._adjustScroll();
+    this._resetMetaScroll();
   }
 
   pageDown(): void {
@@ -294,6 +343,7 @@ export class WorkItemListState {
     const maxIndex = Math.max(0, this.flatCount - 1);
     this.selectedIndex = Math.min(maxIndex, this.selectedIndex + pageSize);
     this._adjustScroll();
+    this._resetMetaScroll();
   }
 
   goToFirst(): void {
@@ -302,6 +352,7 @@ export class WorkItemListState {
     } else {
       this.selectedIndex = 0;
       this.scrollOffset = 0;
+      this._resetMetaScroll();
     }
   }
 
@@ -311,6 +362,7 @@ export class WorkItemListState {
     } else if (this.flatCount > 0) {
       this.selectedIndex = this.flatCount - 1;
       this._adjustScroll();
+      this._resetMetaScroll();
     }
   }
 
@@ -344,6 +396,7 @@ export class WorkItemListState {
       this.selectedIndex = entry.selectedIndex;
       this._clampSelection();
       this._adjustScroll();
+      this._resetMetaScroll();
     }
     return entry;
   }
@@ -390,6 +443,7 @@ export class WorkItemListState {
     this.detailItem = item;
     this.mode = 'detail';
     this.detailScrollOffset = 0;
+    this._resetMetaScroll();
   }
 
   back(): void {
@@ -416,6 +470,44 @@ export class WorkItemListState {
     this.detailScrollOffset = Math.min(maxScroll, this.detailScrollOffset + amount);
   }
 
+  // ── Metadata panel scroll ───────────────────────────────────────
+
+  /**
+   * Return the currently selected flattened item, or null when the list is
+   * empty or the selection is out of range.
+   */
+  getSelectedItem(): WorkItem | null {
+    const flat = this.getFlattenedItems();
+    if (flat.length === 0) return null;
+    const idx = this.selectedIndex;
+    if (idx < 0 || idx >= flat.length) return null;
+    return flat[idx];
+  }
+
+  /** Scroll the metadata panel up (toward the start of the content). */
+  metaScrollUp(amount = 1): void {
+    this.metaScrollOffset = Math.max(0, this.metaScrollOffset - amount);
+  }
+
+  /** Scroll the metadata panel down (toward the end of the content). */
+  metaScrollDown(amount = 1): void {
+    const panelHeight = computeMetadataPanelHeight(this.termSize.rows);
+    const selected = this.getSelectedItem();
+    if (!selected) return;
+    const allLines = formatMetadataPanel(selected, this.termSize.cols, panelHeight, 0);
+    const maxScroll = Math.max(0, allLines.length - panelHeight);
+    this.metaScrollOffset = Math.min(maxScroll, this.metaScrollOffset + amount);
+  }
+
+  /**
+   * Reset the metadata panel scroll offset. Called whenever the selection
+   * changes so the panel always starts at the top for the newly selected
+   * item.
+   */
+  private _resetMetaScroll(): void {
+    this.metaScrollOffset = 0;
+  }
+
   // ── Filtering ───────────────────────────────────────────────────
 
   activateFilter(): void {
@@ -428,6 +520,7 @@ export class WorkItemListState {
     this.selectedIndex = 0;
     this.scrollOffset = 0;
     this.mode = 'list';
+    this._resetMetaScroll();
   }
 
   clearFilter(): void {
@@ -435,6 +528,7 @@ export class WorkItemListState {
     this._applyFilters();
     this.selectedIndex = 0;
     this.scrollOffset = 0;
+    this._resetMetaScroll();
   }
 
   // ── Refresh ─────────────────────────────────────────────────────
@@ -452,6 +546,11 @@ export class WorkItemListState {
     }
 
     this._adjustScroll();
+    // Only reset the metadata scroll when the selection actually changed
+    // (auto-refreshes with the same item selected keep the user's position).
+    if (this._captureSelectedId() !== prevSelectedId) {
+      this._resetMetaScroll();
+    }
   }
 
   /**
@@ -503,10 +602,11 @@ export class WorkItemListState {
     }
   }
 
-  /** Number of visible list rows. */
+  /** Number of visible list rows (accounts for the metadata panel). */
   _listHeight(): number {
     // Reserve 3 rows for header, 1 for filter bar, 1 for footer, 1 for status
-    return Math.max(3, this.termSize.rows - 6);
+    const panelHeight = computeMetadataPanelHeight(this.termSize.rows);
+    return Math.max(3, this.termSize.rows - 6 - panelHeight);
   }
 
   _adjustScroll(): void {
@@ -663,13 +763,134 @@ function truncateLine(line: string, maxWidth: number): string {
 }
 
 /**
+ * Build the metadata table rows for a work item (label/value pairs).
+ *
+ * Includes every tracked field: ID, Title, Status, Stage, Priority, Type,
+ * Risk, Effort, Children, Parent, Tags, GitHub Issue, Created, Updated,
+ * Audit, Reviewed, and Audited At. Fields that are unset are omitted.
+ * Shared by the detail view and the list-mode metadata panel so both stay
+ * consistent (WL-0MSAYNVBY006LM9X-FT4).
+ */
+export function buildMetaRows(item: WorkItem): Array<[string, string]> {
+  const metaRows: Array<[string, string]> = [];
+  const addMeta = (label: string, value: string | undefined | null): void => {
+    if (value != null && value !== '') {
+      metaRows.push([label, value]);
+    }
+  };
+  addMeta('ID', item.id);
+  addMeta('Title', item.title);
+  addMeta('Status', item.status);
+  addMeta('Stage', item.stage);
+  addMeta('Priority', item.priority);
+  addMeta('Type', item.issueType);
+  addMeta('Risk', item.risk);
+  addMeta('Effort', item.effort);
+  addMeta('Children', item.childCount !== undefined ? String(item.childCount) : undefined);
+  addMeta('Parent', item.parentId);
+  if (item.tags && item.tags.length > 0) {
+    metaRows.push(['Tags', item.tags.join(', ')]);
+  }
+  addMeta('GitHub Issue', item.githubIssueNumber ? `#${item.githubIssueNumber}` : undefined);
+  addMeta('Created', item.createdAt);
+  addMeta('Updated', item.updatedAt);
+  addMeta('Audit', auditIcon(item.auditResult));
+  addMeta('Reviewed', needsProducerReviewIcon(item.needsProducerReview));
+  addMeta('Audited At', item.auditedAt);
+  return metaRows;
+}
+
+/**
+ * Format the metadata panel shown below the selection list.
+ *
+ * Renders the selected item's fields (via {@link buildMetaRows}) plus a last
+ * command line when the item's stage is `in_progress`. The panel scrolls
+ * independently with its own offset: when the content is taller than the
+ * panel, `metaScrollOffset` selects the visible window and a `[m/M scroll]`
+ * indicator is appended to the last line.
+ *
+ * @param item - Selected work item (or null for an empty panel).
+ * @param maxCols - Terminal width (lines are truncated to fit).
+ * @param panelRows - Number of rows available for the panel.
+ * @param metaScrollOffset - Vertical scroll offset into the panel content.
+ * @param lastCommand - Most recent command for the item (shown only when the
+ *                      item stage is `in_progress`).
+ * @returns Exactly `panelRows` lines ready for the renderer.
+ */
+export function formatMetadataPanel(
+  item: WorkItem | null,
+  maxCols: number,
+  panelRows: number,
+  metaScrollOffset = 0,
+  lastCommand?: string | null,
+): string[] {
+  const lines: string[] = [];
+  if (!item) {
+    // Blank panel — pad to the full height
+    while (lines.length < panelRows) {
+      lines.push('');
+    }
+    return lines;
+  }
+
+  // Header separator identifying the selected item
+  lines.push(` ${ANSI.dim}── ${item.id} ──${ANSI.reset}`);
+
+  // Metadata rows
+  const metaRows = buildMetaRows(item);
+  if (metaRows.length > 0) {
+    const fieldWidth = Math.max(...metaRows.map(([l]) => l.length), 6);
+    for (const [label, value] of metaRows) {
+      lines.push(` ${label.padEnd(fieldWidth)} ${value}`);
+    }
+  }
+
+  // Last command — only meaningful while the item is being worked on
+  if (item.stage === 'in_progress') {
+    if (lastCommand) {
+      lines.push(` ${ANSI.dim}Last command: ${lastCommand}${ANSI.reset}`);
+    } else {
+      lines.push(` ${ANSI.dim}Last command: none yet${ANSI.reset}`);
+    }
+  }
+
+  // Truncate to fit the terminal width
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].length > 0) {
+      lines[i] = truncateLine(lines[i], maxCols);
+    }
+  }
+
+  // Apply independent scrolling
+  const maxScroll = Math.max(0, lines.length - panelRows);
+  const safeOffset = Math.min(metaScrollOffset, maxScroll);
+  const visible = lines.slice(safeOffset, safeOffset + panelRows);
+
+  // Scroll indicator when content overflows
+  if (lines.length > panelRows) {
+    const percent = Math.round(((safeOffset + panelRows) / lines.length) * 100);
+    const indicator = ` ${ANSI.dim}[m/M scroll ${Math.min(percent, 100)}%]${ANSI.reset}`;
+    visible[visible.length - 1] = truncateLine(visible[visible.length - 1] + indicator, maxCols);
+  }
+
+  // Pad to the panel height
+  while (visible.length < panelRows) {
+    visible.push('');
+  }
+
+  return visible;
+}
+
+/**
  * Build the full content lines for a detail view (without scrolling).
  * Returns an array of lines ready for viewport rendering.
  *
  * Metadata section includes: Status, Priority, Stage, Type, Risk, Effort,
  * Children, Tags, GitHub Issue (number), Created, Updated, Audit
  * (auditResult icon), Reviewed (needsProducerReview icon), and Audited At
- * (ISO timestamp). Rendered as a markdown table.
+ * (ISO timestamp). Rendered as a markdown table. ID and Title are shown in
+ * the header (from the shared {@link buildMetaRows} set they are omitted
+ * from the table to avoid duplication).
  */
 export function formatDetailContent(
   item: WorkItem | null,
@@ -687,29 +908,10 @@ export function formatDetailContent(
   lines.push(` ${ANSI.bold}${item.title}${ANSI.reset}`);
   lines.push(separator);
 
-  // Metadata — rendered as a markdown table
-  const metaRows: Array<[string, string]> = [];
-  const addMeta = (label: string, value: string | undefined | null): void => {
-    if (value != null && value !== '') {
-      metaRows.push([label, value]);
-    }
-  };
-  addMeta('Status', item.status);
-  addMeta('Priority', item.priority);
-  addMeta('Stage', item.stage);
-  addMeta('Type', item.issueType);
-  addMeta('Risk', item.risk);
-  addMeta('Effort', item.effort);
-  addMeta('Children', item.childCount !== undefined ? String(item.childCount) : undefined);
-  if (item.tags && item.tags.length > 0) {
-    metaRows.push(['Tags', item.tags.join(', ')]);
-  }
-  addMeta('GitHub Issue', item.githubIssueNumber ? `#${item.githubIssueNumber}` : undefined);
-  addMeta('Created', item.createdAt);
-  addMeta('Updated', item.updatedAt);
-  addMeta('Audit', auditIcon(item.auditResult));
-  addMeta('Reviewed', needsProducerReviewIcon(item.needsProducerReview));
-  addMeta('Audited At', item.auditedAt);
+  // Metadata — rendered as a markdown table (shared row builder; ID and
+  // Title are already shown in the header above, so they are filtered out
+  // here to avoid duplicating them).
+  const metaRows = buildMetaRows(item).filter(([label]) => label !== 'ID' && label !== 'Title');
 
   // Render the metadata as a markdown table
   if (metaRows.length > 0) {
@@ -993,6 +1195,7 @@ export function getChordHelpHints(registry: ShortcutRegistry | undefined, codeFr
 
 export type KeyAction = 'up' | 'down' | 'pageup' | 'pagedown' | 'select'
   | 'back' | 'filter' | 'refresh' | 'sync' | 'quit' | 'first' | 'last'
+  | 'meta-up' | 'meta-down'
   | 'chord-start' | 'chord-complete' | 'chord-cancel'
   | 'toggle-expand' | null;
 
@@ -1044,6 +1247,10 @@ export function keyToAction(key: string): KeyAction {
       return 'last';
     case 'S':
       return 'sync';
+    case 'm':
+      return 'meta-down';
+    case 'M':
+      return 'meta-up';
     default:
       return null;
   }
@@ -1179,6 +1386,13 @@ export function handleKeypress(
     case 'last':
       state.goToLast();
       break;
+    case 'meta-down':
+      // Scroll the metadata panel (independent of list navigation)
+      state.metaScrollDown(1);
+      break;
+    case 'meta-up':
+      state.metaScrollUp(1);
+      break;
     case 'toggle-expand':
       if (state.mode === 'list' && state.selectedIndex >= 0 && state.items.length > 0) {
         const flat = state.getFlattenedItems();
@@ -1233,6 +1447,8 @@ export function createListRenderer(): (
   navStackDepth?: number,
   panePaused?: boolean,
   codeFreezeActive?: boolean,
+  metaScrollOffset?: number,
+  metaLastCommand?: string,
 ) => string {
   return (
     items: WorkItem[],
@@ -1251,10 +1467,16 @@ export function createListRenderer(): (
     navStackDepth?: number,
     panePaused?: boolean,
     codeFreezeActive?: boolean,
+    metaScrollOffset?: number,
+    metaLastCommand?: string,
   ): string => {
     const { rows, cols } = termSize;
     const output: string[] = [];
-    const listHeight = Math.max(3, rows - 6);
+    // The metadata panel reserves 20–40% of the pane height below the list;
+    // the list area is the remaining height minus the notification row.
+    const panelHeight = computeMetadataPanelHeight(rows);
+    const listArea = Math.max(1, rows - 1 - panelHeight);
+    const listHeight = Math.max(3, rows - 6 - panelHeight);
 
     if (mode === 'detail' && detailItem) {
       const viewportHeight = Math.max(10, rows - 1);
@@ -1317,7 +1539,7 @@ export function createListRenderer(): (
     // the header/top items off the top (WL-0MSAAON63003N6LO).
     const bannerActive = codeFreezeActive === true;
     const chromeLines = bannerActive ? 5 : 4; // header + banner + blank + filter bar + footer
-    const budgetForItemsAndSeps = Math.max(0, rows - 1 - chromeLines);
+    const budgetForItemsAndSeps = Math.max(0, listArea - chromeLines);
     // Count the group separators a window would render (same logic as the
     // render loop below) so the window can be trimmed when separators would
     // overflow the pane height.
@@ -1373,7 +1595,7 @@ export function createListRenderer(): (
 
     // Fill remaining rows (header + blank + filter bar + items + separators)
     const used = chromeLines + visible.length + numSeparators;
-    for (let i = used; i < rows - 1; i++) {
+    for (let i = used; i < listArea; i++) {
       output.push('');
     }
 
@@ -1393,6 +1615,25 @@ export function createListRenderer(): (
       const chordHelpSuffix = chordHelpHints ? ` ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}` : '';
       const footerLine = navHint + chordHelpSuffix || ' ';
       output.push(footerLine);
+    }
+
+    // ── Metadata panel ────────────────────────────────────────────
+    // Reserve the bottom `panelHeight` rows for the selected item's
+    // metadata (plus its last command when in_progress). The panel has its
+    // own scroll offset (m/M) so long metadata never affects list
+    // navigation (WL-0MSAYNVBY006LM9X).
+    const selectedItem = selectedIndex >= 0 && selectedIndex < items.length
+      ? items[selectedIndex]
+      : null;
+    const panelLines = formatMetadataPanel(
+      selectedItem,
+      cols,
+      panelHeight,
+      metaScrollOffset ?? 0,
+      metaLastCommand,
+    );
+    for (const line of panelLines) {
+      output.push(line);
     }
 
     // Safety clamp: never exceed the renderer's `rows - 1` budget so the
@@ -1415,9 +1656,50 @@ export function createListRenderer(): (
 const defaultRenderer = createListRenderer();
 
 /**
+ * Work-item ID format: a prefix (e.g. `WL`, `SA`) followed by a hash,
+ * e.g. `WL-0MS9NPHQU005Y3VE`.
+ */
+const WORK_ITEM_ID_TOKEN = /^[A-Z]+-[\w-]+$/;
+
+/**
+ * Extract the last work-item ID token from a command string, if any.
+ * Commands without an item ID (e.g. `echo hello`) return undefined and are
+ * not recorded in the command log.
+ */
+export function extractWorkItemIdFromCommand(command: string): string | undefined {
+  const tokens = command.trim().split(/\s+/);
+  for (let i = tokens.length - 1; i >= 0; i -= 1) {
+    if (WORK_ITEM_ID_TOKEN.test(tokens[i])) {
+      return tokens[i];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Record a command against its work item in the command log.
+ *
+ * Best effort: failures are swallowed so logging can never break command
+ * dispatch. Commands without a work item ID are not recorded (only
+ * plugin-dispatched commands with an item ID are logged).
+ */
+function logCommandForItem(command: string, itemId?: string): void {
+  if (!itemId) return;
+  try {
+    recordCommand(itemId, command);
+  } catch {
+    // Logging must never break command routing
+  }
+}
+
+/**
  * Resolve `<id>` placeholders in a command and route it through the
  * output mechanism. Used by {@link dispatchChordCommand} for agent
  * workflow and audit command families.
+ *
+ * The resolved command is recorded in the command log against its work
+ * item BEFORE it is routed, so a downstream failure never skips the log
+ * entry (WL-0MSEPP104006PS7T).
  *
  * @returns true if the command was resolved and routed, false if
  *          `<id>` was required but no item is selected (no-op)
@@ -1429,17 +1711,23 @@ function resolveAndRouteCommand(
   model?: string,
 ): boolean {
   let resolvedCommand = command;
+  let itemId: string | undefined;
 
   if (resolvedCommand.includes('<id>')) {
     const flat = state.getFlattenedItems();
     const idx = state.selectedIndex;
     if (idx >= 0 && idx < flat.length) {
       resolvedCommand = resolvedCommand.replace(/<id>/g, flat[idx].id);
+      itemId = flat[idx].id;
     } else {
       // No item selected and command requires <id> — graceful no-op
       return false;
     }
+  } else {
+    itemId = extractWorkItemIdFromCommand(resolvedCommand);
   }
+
+  logCommandForItem(resolvedCommand, itemId);
 
   if (onCommand) {
     onCommand(resolvedCommand, model);
@@ -1641,17 +1929,24 @@ export function executeResolvedCommand(
 
   // Not a recognised command family — resolve <id> placeholders and call onCommand
   let resolvedCommand = command;
+  let itemId: string | undefined;
 
   if (resolvedCommand.includes('<id>')) {
     const flat = state.getFlattenedItems();
     const idx = state.selectedIndex;
     if (idx >= 0 && idx < flat.length) {
       resolvedCommand = resolvedCommand.replace(/<id>/g, flat[idx].id);
+      itemId = flat[idx].id;
     } else {
       // No item selected and command requires <id> — graceful no-op
       return 'noop';
     }
+  } else {
+    itemId = extractWorkItemIdFromCommand(resolvedCommand);
   }
+
+  // Record before execution so failures never skip the log entry.
+  logCommandForItem(resolvedCommand, itemId);
 
   if (onCommand) {
     onCommand(resolvedCommand, model);
@@ -1936,6 +2231,9 @@ export async function runWorklistTui(
                     finalCmd = finalCmd.replace(/<id>/g, flat[idx].id);
                   }
                 }
+                // Record the submitted command against its work item before
+                // routing it (WL-0MSEPP104006PS7T).
+                logCommandForItem(finalCmd, extractWorkItemIdFromCommand(finalCmd));
                 // Code Freeze guard: never submit an implement command while
                 // frozen — show the notice instead of dispatching.
                 if (readCodeFreezeState().active && isImplementCommand(finalCmd)) {
@@ -2037,6 +2335,9 @@ export async function runWorklistTui(
                   finalCmd = finalCmd.replace(/<id>/g, flat[idx].id);
                 }
               }
+              // Record the submitted command against its work item before
+              // routing it (WL-0MSEPP104006PS7T).
+              logCommandForItem(finalCmd, extractWorkItemIdFromCommand(finalCmd));
               // Code Freeze guard: never submit an implement command while
               // frozen — show the notice instead of dispatching.
               if (readCodeFreezeState().active && isImplementCommand(finalCmd)) {
@@ -2212,6 +2513,21 @@ export async function runWorklistTui(
       }
     }
 
+    // Look up the selected item's last recorded command for the metadata
+    // panel (only shown for in_progress items). Best effort: a missing or
+    // unreadable log yields undefined and the panel falls back gracefully.
+    let metaLastCommand: string | undefined;
+    if (state.mode === 'list') {
+      const selected = state.getSelectedItem();
+      if (selected && selected.stage === 'in_progress') {
+        try {
+          metaLastCommand = getLastCommand(selected.id)?.command ?? undefined;
+        } catch {
+          // ignore: panel shows the graceful "none yet" fallback
+        }
+      }
+    }
+
     const output = renderer(
       displayItems,
       state.selectedIndex,
@@ -2229,6 +2545,8 @@ export async function runWorklistTui(
       state.navigationStack.depth,
       panePaused,
       codeFreezeActive,
+      state.metaScrollOffset,
+      metaLastCommand,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

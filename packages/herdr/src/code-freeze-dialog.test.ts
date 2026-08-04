@@ -50,6 +50,7 @@ vi.mock('./notify.js', () => ({
 import { runWorklistTui } from './worklist.js';
 import { setWorklogDir, resetWorklogDir, type WorkItem } from './fetcher.js';
 import { CODE_FREEZE_MARKER_FILENAME } from './code-freeze.js';
+import { setLogPath, resetLogPath } from './command-log.js';
 import { loadShortcutConfig, ShortcutRegistry } from './shortcut-config.js';
 
 // ---------------------------------------------------------------------------
@@ -66,6 +67,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   dataHandler = undefined;
   writes = [];
+
+  // Isolate the command log so dispatched commands never touch the user's
+  // real ~/.config/herdr log (WL-0MSEPP104006PS7T).
+  setLogPath(join(tmpdir(), `herdr-cfd-cmdlog-${process.pid}-${Date.now()}.json`));
 
   // A fresh worklog dir per test; the marker is written by helpers below.
   tmpDir = mkdtempSync(join(tmpdir(), 'herdr-cfd-'));
@@ -101,6 +106,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetWorklogDir();
+  resetLogPath();
   rmSync(tmpDir, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
