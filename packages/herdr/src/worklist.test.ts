@@ -23,6 +23,8 @@ import {
   handleKeypress,
   computeMetadataPanelHeight,
   formatMetadataPanel,
+  formatTimestamp,
+  buildMetaRows,
 } from './worklist.js';
 import { setLogPath, resetLogPath, recordCommand, getLastCommand } from './command-log.js';
 import { loadShortcutConfig, ShortcutRegistry } from './shortcut-config.js';
@@ -1007,5 +1009,63 @@ describe('command recording in dispatch paths', () => {
     executeResolvedCommand('/skill:implement <id>', state);
     const last = getLastCommand('WL-TEST-1');
     expect(last!.command).toBe('/skill:implement WL-TEST-1');
+  });
+});
+
+// ── Readable local timestamps (WL-0MSF8HYUX0012WA9) ─────────────────────
+// Timestamps are displayed as DD/MM/YY HH:MM in local time. Expected values
+// below are derived from the same Date instants so the tests pass in any
+// timezone while still proving local-time conversion and zero-padding.
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+/** Local DD/MM/YY HH:MM string for an ISO instant (mirror of the UI format). */
+function localDDMMYY(iso: string): string {
+  const d = new Date(iso);
+  return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${pad2(d.getFullYear() % 100)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+describe('formatTimestamp — readable local DD/MM/YY HH:MM', () => {
+  it('formats an ISO-8601 UTC timestamp in local time', () => {
+    const iso = '2026-08-04T13:05:09.000Z';
+    expect(formatTimestamp(iso)).toBe(localDDMMYY(iso));
+  });
+
+  it('zero-pads day, month, year and time components', () => {
+    // Local 4 Aug 2026 00:05 — every component needs padding
+    const iso = new Date(2026, 7, 4, 0, 5).toISOString();
+    expect(formatTimestamp(iso)).toBe('04/08/26 00:05');
+  });
+
+  it('uses 24h time and two-digit year for the afternoon', () => {
+    const iso = new Date(2026, 11, 31, 23, 59).toISOString();
+    expect(formatTimestamp(iso)).toBe('31/12/26 23:59');
+  });
+
+  it('returns invalid input unchanged (graceful degradation)', () => {
+    expect(formatTimestamp('not-a-date')).toBe('not-a-date');
+    expect(formatTimestamp('')).toBe('');
+  });
+});
+
+describe('buildMetaRows — timestamps rendered via formatTimestamp', () => {
+  it('shows Created/Updated/Audited At as local DD/MM/YY HH:MM', () => {
+    const rows = new Map(buildMetaRows(makeRichItem()));
+    expect(rows.get('Created')).toBe(localDDMMYY('2026-08-01T10:00:00.000Z'));
+    expect(rows.get('Updated')).toBe(localDDMMYY('2026-08-02T10:00:00.000Z'));
+    expect(rows.get('Audited At')).toBe(localDDMMYY('2026-08-03T10:00:00.000Z'));
+    // No raw ISO strings leak into the rendered rows
+    for (const [, value] of rows) {
+      expect(value).not.toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    }
+  });
+
+  it('omits timestamp rows when the item has none', () => {
+    const rows = new Map(buildMetaRows(makeItem('WL-NO-TS')));
+    expect(rows.has('Created')).toBe(false);
+    expect(rows.has('Updated')).toBe(false);
+    expect(rows.has('Audited At')).toBe(false);
   });
 });

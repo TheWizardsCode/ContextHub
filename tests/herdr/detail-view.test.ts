@@ -138,12 +138,17 @@ describe('formatDetailContent', () => {
     expect(joined).toContain('\u2753'); // AUDIT_UNKNOWN (❓)
   });
 
-  it('displays auditedAt when present', () => {
+  it('displays auditedAt when present as readable local time', () => {
     const item = makeItem({ auditedAt: '2025-06-15T10:30:00Z' });
     const lines = formatDetailContent(item, 80);
     const joined = lines.join('\n');
     expect(joined).toContain('Audited At');
-    expect(joined).toContain('2025-06-15T10:30:00Z');
+    // Formatted as DD/MM/YY HH:MM in local time (WL-0MSF8HYUX0012WA9)
+    const d = new Date('2025-06-15T10:30:00Z');
+    const pad = (n: number): string => String(n).padStart(2, '0');
+    const local = `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${pad(d.getFullYear() % 100)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    expect(joined).toContain(local);
+    expect(joined).not.toContain('2025-06-15T10:30:00Z');
   });
 
   it('omits auditedAt when absent', () => {

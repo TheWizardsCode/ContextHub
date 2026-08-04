@@ -763,11 +763,32 @@ function truncateLine(line: string, maxWidth: number): string {
 }
 
 /**
+ * Format an ISO-8601 timestamp for display as `DD/MM/YY HH:MM` in the
+ * user's local time zone (zero-padded, 24-hour clock).
+ *
+ * Unparseable input is returned unchanged so a corrupt timestamp never
+ * breaks rendering (WL-0MSF8HYUX0012WA9).
+ */
+export function formatTimestamp(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) {
+    return iso;
+  }
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return (
+    `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${pad(d.getFullYear() % 100)} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  );
+}
+
+/**
  * Build the metadata table rows for a work item (label/value pairs).
  *
  * Includes every tracked field: ID, Title, Status, Stage, Priority, Type,
  * Risk, Effort, Children, Parent, Tags, GitHub Issue, Created, Updated,
  * Audit, Reviewed, and Audited At. Fields that are unset are omitted.
+ * Timestamps (Created, Updated, Audited At) are rendered in local time as
+ * `DD/MM/YY HH:MM` via {@link formatTimestamp}.
  * Shared by the detail view and the list-mode metadata panel so both stay
  * consistent (WL-0MSAYNVBY006LM9X-FT4).
  */
@@ -792,11 +813,11 @@ export function buildMetaRows(item: WorkItem): Array<[string, string]> {
     metaRows.push(['Tags', item.tags.join(', ')]);
   }
   addMeta('GitHub Issue', item.githubIssueNumber ? `#${item.githubIssueNumber}` : undefined);
-  addMeta('Created', item.createdAt);
-  addMeta('Updated', item.updatedAt);
+  addMeta('Created', item.createdAt ? formatTimestamp(item.createdAt) : undefined);
+  addMeta('Updated', item.updatedAt ? formatTimestamp(item.updatedAt) : undefined);
   addMeta('Audit', auditIcon(item.auditResult));
   addMeta('Reviewed', needsProducerReviewIcon(item.needsProducerReview));
-  addMeta('Audited At', item.auditedAt);
+  addMeta('Audited At', item.auditedAt ? formatTimestamp(item.auditedAt) : undefined);
   return metaRows;
 }
 
