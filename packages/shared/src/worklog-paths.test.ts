@@ -4,20 +4,23 @@
  *
  * The scenarios below were migrated from the herdr plugin's findWorklogRoot
  * tests and extended with the `wl` CLI's validation rules (config.yaml) and
- * git repo-root fallback. They pin the documented precedence order:
+ * the git repo-root boundary. They pin the documented precedence order
+ * (producer-approved, see WL-0MS7TQVK2001X4EG):
  *
- *   1. Nearest valid `.worklog/` wins (walk up from startDir).
+ *   1. Nearest valid `.worklog/` wins (walk up from startDir). A
+ *      `.worklog/` is valid when it contains `config.yaml` OR `initialized`;
+ *      a `worklog.db`-only dir is INVALID.
  *   2. Invalid `.worklog/` dirs are skipped only when they are leftover
  *      worktree containers or the path is inside a managed worktree
  *      (`.worklog/worktrees/…`); otherwise they act as a boundary.
- *   3. Git repo-root fallback: only when the walk found nothing, the
- *      enclosing repo root's VALID `.worklog/` is preferred.
+ *   3. The walk never passes the nearest git repo root (`git rev-parse
+ *      --show-toplevel`, worktree-aware).
  *   4. `undefined` when no valid root exists.
  *
  * Run: npx vitest run packages/shared/src/worklog-paths.test.ts
  */
 
-import { describe, it, expect, beforeEach, afterEach, beforeAll, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -33,9 +36,14 @@ function makeTempDir(): string {
 }
 
 /** Create a valid `.worklog/` in the given project root. */
-function makeValidWorklog(root: string, marker: 'worklog.db' | 'initialized' | 'config.yaml' = 'worklog.db'): void {
+function makeValidWorklog(root: string, marker: 'config.yaml' | 'initialized' = 'config.yaml'): void {
   mkdirSync(join(root, '.worklog'), { recursive: true });
   writeFileSync(join(root, '.worklog', marker), marker === 'config.yaml' ? 'projectName: test\nprefix: TEST\n' : '');
+}
+
+/** Create a git repository marker (`.git` dir) at the given directory. */
+function makeGitRepo(dir: string): void {
+  mkdirSync(join(dir, '.git'), { recursive: true });
 }
 
 describe('resolveWorklogRoot', () => {
@@ -54,9 +62,9 @@ describe('resolveWorklogRoot', () => {
   });
 
   describe('startDir has a valid .worklog/', () => {
-    it('returns startDir when .worklog/ contains worklog.db', () => {
+    it('returns startDir when .worklog/ contains config.yaml (wl CLI rule)', () => {
       const root = makeTempDir();
-      makeValidWorklog(root, 'worklog.db');
+      makeValidWorklog(root, 'config.yaml');
       expect(resolveWorklogRoot(root)).toBe(root);
     });
 
@@ -66,10 +74,13 @@ describe('resolveWorklogRoot', () => {
       expect(resolveWorklogRoot(root)).toBe(root);
     });
 
-    it('returns startDir when .worklog/ contains config.yaml (wl CLI rule)', () => {
+    it('treats a worklog.db-only .worklog/ as INVALID (returns undefined)', () => {
+      // Producer-approved rule: valid = config.yaml OR initialized. A
+      // directory containing only worklog.db is a partial/legacy state.
       const root = makeTempDir();
-      makeValidWorklog(root, 'config.yaml');
-      expect(resolveWorklogRoot(root)).toBe(root);
+      mkdirSync(join(root, '.worklog'), { recursive: true });
+      writeFileSync(join(root, '.worklog', 'worklog.db'), '');
+      expect(resolveWorklogRoot(root)).toBeUndefined();
     });
   });
 
@@ -176,6 +187,20 @@ describe('resolveWorklogRoot', () => {
 
       expect(resolveWorklogRoot(worktreeDir)).toBe(worktreeDir);
     });
+
+    it('lifts the git boundary inside a managed worktree (real git worktree root)', () => {
+      // A managed worktree is itself a git repo, so its own git top-level
+      // must NOT stop the walk — the main project's .worklog/ is above it.
+      const base = makeTempDir();
+      const projectRoot = join(base, 'context-hub');
+      makeValidWorklog(projectRoot);
+
+      const worktreeDir = join(projectRoot, '.worklog', 'worktrees', 'wl-XYZ-feature');
+      mkdirSync(worktreeDir, { recursive: true });
+      makeGitRepo(worktreeDir); // the worktree is its own git checkout
+
+      expect(resolveWorklogRoot(worktreeDir)).toBe(projectRoot);
+    });
   });
 
   describe('Edge cases', () => {
@@ -192,7 +217,7 @@ describe('resolveWorklogRoot', () => {
       makeValidWorklog(projectRoot);
 
       // startDir is a plugin dir that contains a leftover worktree container
-      // (empty .worklog/worktrees/, no config.yaml / initialized / worklog.db)
+      // (empty .worklog/worktrees/, no config.yaml / initialized)
       const cwd = join(projectRoot, 'packages', 'herdr');
       mkdirSync(join(cwd, '.worklog', 'worktrees'), { recursive: true });
 
@@ -200,25 +225,39 @@ describe('resolveWorklogRoot', () => {
     });
   });
 
-  describe('Git repo-root fallback', () => {
-    it('prefers the repo root VALID .worklog/ when startDir has an invalid non-stub .worklog/', () => {
-      // Preserves the wl CLI's resolveWorklogDir behavior: an uninitialized
-      // .worklog/ in a subdirectory must not shadow an initialized repo root.
+  describe('Git repo-root boundary', () => {
+    it('finds the repo root .worklog/ when walking up inside a repo', () => {
       const base = makeTempDir();
-      mkdirSync(join(base, '.git')); // mock-git top-level marker
-      makeValidWorklog(base, 'worklog.db');
+      makeGitRepo(base);
+      makeValidWorklog(base, 'config.yaml');
 
       const cwd = join(base, 'sub');
       mkdirSync(cwd, { recursive: true });
-      mkdirSync(join(cwd, '.worklog')); // invalid, non-stub
 
       expect(resolveWorklogRoot(cwd)).toBe(base);
     });
 
-    it('returns undefined when the repo root .worklog/ is also invalid', () => {
+    it('stops at the git repo root — nested repo with a valid parent-repo .worklog/ returns undefined', () => {
+      // The walk must never pass the nearest git repo root, even when an
+      // outer project has a valid .worklog/ above it.
       const base = makeTempDir();
-      mkdirSync(join(base, '.git'));
-      mkdirSync(join(base, '.worklog')); // invalid at repo root too
+      makeValidWorklog(base); // outer project root has a valid .worklog/
+
+      const inner = join(base, 'inner-repo');
+      makeGitRepo(inner); // nested repo, no .worklog/
+      const cwd = join(inner, 'src');
+      mkdirSync(cwd, { recursive: true });
+
+      expect(resolveWorklogRoot(cwd)).toBeUndefined();
+    });
+
+    it('stops at an invalid non-stub .worklog/ even when the repo root has a valid one', () => {
+      // Documented behavior change (WL-0MS7TQVK2001X4EG): an uninitialized
+      // .worklog/ in a subdirectory is a boundary — it must NOT fall back
+      // to the initialized repo root. Callers surface the fallback.
+      const base = makeTempDir();
+      makeGitRepo(base);
+      makeValidWorklog(base, 'config.yaml');
 
       const cwd = join(base, 'sub');
       mkdirSync(cwd, { recursive: true });
@@ -227,18 +266,16 @@ describe('resolveWorklogRoot', () => {
       expect(resolveWorklogRoot(cwd)).toBeUndefined();
     });
 
-    it('walks up inside a nested repo to the outer repo root .worklog/ when the inner repo has none', () => {
+    it('returns undefined when the repo root .worklog/ is also invalid', () => {
       const base = makeTempDir();
-      makeValidWorklog(base); // outer project root has a valid .worklog/
+      makeGitRepo(base);
+      mkdirSync(join(base, '.worklog')); // invalid at repo root too
 
-      const inner = join(base, 'inner-repo');
-      mkdirSync(join(inner, '.git'), { recursive: true });
-      const cwd = join(inner, 'src');
+      const cwd = join(base, 'sub');
       mkdirSync(cwd, { recursive: true });
+      mkdirSync(join(cwd, '.worklog')); // invalid, non-stub
 
-      // The walk passes the inner repo root (no .worklog/) and finds the
-      // outer root's valid .worklog/ — nearest valid wins.
-      expect(resolveWorklogRoot(cwd)).toBe(base);
+      expect(resolveWorklogRoot(cwd)).toBeUndefined();
     });
   });
 });

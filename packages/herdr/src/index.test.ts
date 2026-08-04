@@ -365,7 +365,7 @@ describe('configureWorklogTarget', () => {
     const { configureWorklogTarget } = await import('./index.js');
     const root = makeTempDir();
     mkdirSync(join(root, '.worklog'));
-    writeFileSync(join(root, '.worklog', 'worklog.db'), '');
+    writeFileSync(join(root, '.worklog', 'config.yaml'), 'projectName: test\nprefix: TEST\n');
     resetWorklogDir();
 
     const resolved = configureWorklogTarget(root);
@@ -407,7 +407,7 @@ describe('configureWorklogTarget', () => {
     const { configureWorklogTarget } = await import('./index.js');
     const root = makeTempDir();
     mkdirSync(join(root, '.worklog'));
-    writeFileSync(join(root, '.worklog', 'worklog.db'), '');
+    writeFileSync(join(root, '.worklog', 'config.yaml'), 'projectName: test\nprefix: TEST\n');
     const unrelated = makeTempDir();
     process.cwd = () => unrelated; // Simulate the plugin running from its own dir
     resetWorklogDir();
@@ -431,7 +431,7 @@ describe('configureWorklogTarget', () => {
     const { configureWorklogTarget } = await import('./index.js');
     const root = makeTempDir();
     mkdirSync(join(root, '.worklog'));
-    writeFileSync(join(root, '.worklog', 'worklog.db'), '');
+    writeFileSync(join(root, '.worklog', 'config.yaml'), 'projectName: test\nprefix: TEST\n');
     process.env.HERDR_RESOLVED_CWD = root;
     resetWorklogDir();
 

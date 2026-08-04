@@ -13,29 +13,33 @@
  *   `initialized`, skipped invalid `.worklog/` stubs, and had no git
  *   dependency.
  *
- * `resolveWorklogRoot()` unifies both behind one deterministic strategy.
+ * `resolveWorklogRoot()` unifies both behind one deterministic strategy
+ * (producer-approved, see WL-0MS7TQVK2001X4EG).
  *
  * # Resolution strategy (precedence order)
  *
  * 1. **Nearest valid `.worklog/` wins** — walk up from `startDir` (default
- *    `process.cwd()`). A `.worklog/` is *valid* when it contains any of:
- *    `config.yaml`, `initialized`, or `worklog.db` (the superset of both
- *    engines' validation rules).
+ *    `process.cwd()`). A `.worklog/` is *valid* when it contains either of
+ *    the markers `wl init` writes: `config.yaml` (user config) or
+ *    `initialized` (init semaphore). A directory containing only
+ *    `worklog.db` is a partial/legacy state and is NOT valid.
  * 2. **Invalid `.worklog/` handling** — an existing `.worklog/` without any
- *    of those markers is skipped ONLY when it is:
+ *    valid marker is skipped ONLY when it is:
  *    - a leftover worktree container stub (a `worktrees/` subdirectory and
  *      no markers), or
  *    - the current path is inside a managed worktree
  *      (the path contains `.worklog/worktrees/`).
  *    In every other case the invalid `.worklog/` is a boundary: walking
  *    stops so an unrelated project's `.worklog/` higher up the tree is
- *    never picked up.
- * 3. **Git repo-root fallback** — when the walk found nothing (either it
- *    exhausted the tree or stopped at an invalid boundary), resolve the
- *    enclosing git repo root (`git rev-parse --show-toplevel` from
- *    `startDir`). If that repo root has a VALID `.worklog/`, prefer it.
- *    This preserves the `wl` CLI's behavior of preferring an initialized
- *    repo-root `.worklog/` over an uninitialized one in a subdirectory.
+ *    never picked up, and an uninitialized subdirectory never falls back to
+ *    an initialized repo root.
+ * 3. **Git repo-root boundary** — the walk never passes the nearest git
+ *    repo root (`git rev-parse --show-toplevel` from `startDir`,
+ *    worktree-aware). The repo root's own `.worklog/` is checked before the
+ *    boundary stops the walk. Exception: when `startDir` is inside a
+ *    managed worktree (`.worklog/worktrees/…`), the walk continues past the
+ *    worktree's own git root so the main project's `.worklog/` is found.
+ *    Outside git, the walk continues to the filesystem root.
  * 4. **Return `undefined`** when no valid root exists. Callers decide how
  *    to surface the uninitialized state (e.g. the `wl` CLI falls back to
  *    `<cwd>/.worklog`; the herdr plugin reports the uninitialized state).
@@ -51,15 +55,15 @@ import { join, dirname } from 'node:path';
 import { execSync } from 'node:child_process';
 
 /**
- * A `.worklog/` directory is valid when it contains any of the markers
- * written by `wl init` / `wl migrate`: the user config, the initialization
- * semaphore, or the SQLite database.
+ * A `.worklog/` directory is valid when it contains either of the markers
+ * written by `wl init`: the user config (`config.yaml`) or the
+ * initialization semaphore (`initialized`). A directory containing only
+ * `worklog.db` is a partial/legacy state and is NOT valid.
  */
 function isValidWorklogDir(wlDir: string): boolean {
   return (
     existsSync(join(wlDir, 'config.yaml')) ||
-    existsSync(join(wlDir, 'initialized')) ||
-    existsSync(join(wlDir, 'worklog.db'))
+    existsSync(join(wlDir, 'initialized'))
   );
 }
 
@@ -74,8 +78,7 @@ function isWorktreeContainerStub(wlDir: string): boolean {
   return (
     existsSync(join(wlDir, 'worktrees')) &&
     !existsSync(join(wlDir, 'config.yaml')) &&
-    !existsSync(join(wlDir, 'initialized')) &&
-    !existsSync(join(wlDir, 'worklog.db'))
+    !existsSync(join(wlDir, 'initialized'))
   );
 }
 
@@ -89,7 +92,16 @@ function isInsideManagedWorktree(dir: string): boolean {
   return dir.includes(join('.worklog', 'worktrees'));
 }
 
-/** Resolve the enclosing git repo top-level from `startDir`, or null. */
+/**
+ * Resolve the enclosing git repo top-level from `startDir`, or null.
+ *
+ * The result is only trusted when the reported root actually contains a
+ * `.git` entry (directory or worktree gitfile). Real git only ever reports
+ * a top-level with `.git`, so this is a no-op there; it guards against git
+ * shims/mocks (e.g. the test mock at tests/cli/mock-bin/git) that fall back
+ * to echoing the current directory when no repository is found, which would
+ * otherwise turn every directory into a bogus git boundary.
+ */
 function getGitTopLevel(startDir: string): string | null {
   try {
     const root = execSync('git rev-parse --show-toplevel', {
@@ -97,7 +109,10 @@ function getGitTopLevel(startDir: string): string | null {
       stdio: ['ignore', 'pipe', 'ignore'],
       cwd: startDir,
     }).trim();
-    return root || null;
+    if (root && existsSync(join(root, '.git'))) {
+      return root;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -115,7 +130,11 @@ function getGitTopLevel(startDir: string): string | null {
 export function resolveWorklogRoot(startDir?: string): string | undefined {
   const cwd = startDir ?? process.cwd();
 
-  // Phase 1: nearest-wins filesystem walk.
+  // Nearest-wins filesystem walk, bounded by the enclosing git repo root.
+  // Inside a managed worktree the git boundary is lifted so the walk can
+  // reach the main project's `.worklog/` above the worktree.
+  const repoTop = isInsideManagedWorktree(cwd) ? null : getGitTopLevel(cwd);
+
   let dir = cwd;
   while (true) {
     const wlDir = join(dir, '.worklog');
@@ -129,18 +148,10 @@ export function resolveWorklogRoot(startDir?: string): string | undefined {
         break;
       }
     }
+    if (repoTop && dir === repoTop) break; // Never walk past the git repo root
     const parent = dirname(dir);
     if (parent === dir) break; // Reached filesystem root
     dir = parent;
-  }
-
-  // Phase 2: git repo-root fallback. Only a VALID repo-root .worklog/
-  // overrides the undefined result — an invalid one stays a boundary.
-  const repoRoot = getGitTopLevel(cwd);
-  if (repoRoot) {
-    if (isValidWorklogDir(join(repoRoot, '.worklog'))) {
-      return repoRoot;
-    }
   }
 
   return undefined;
