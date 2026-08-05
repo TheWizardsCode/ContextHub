@@ -2,30 +2,37 @@
  * packages/herdr/src/downtime-worker.ts — Local-LLM downtime worker (contract)
  *
  * Test-first contract for the herdr downtime worker (parent
- * WL-0MSF49FMW009M06K). This module defines the exported contracts the
- * implementation features must satisfy, plus the PURE parts that are fully
- * implemented here:
+ * WL-0MSF49FMW009M06K). Implemented in F1 (tests + fixtures), F2 (settings
+ * clamps, poller, parsing, runtime idle evaluation) and F3 (idle tracker,
+ * dispatch orchestration, pane spawn):
  *
  *  - `isIdleStatus` — idle detection from a `/llama/local/status` payload.
+ *  - `evaluateIdle` — runtime idle evaluation with the fail-closed
+ *    degradation for a configured N < total slots (no per-slot data yet).
+ *  - `parseLlamaStatus` / `fetchLocalStatus` / `createDowntimePoller` — the
+ *    single-flight poller for `GET {proxyUrl}/llama/local/status` with
+ *    per-poll timeout and fail-closed parsing.
+ *  - `createIdleTracker` — continuous idle-duration tracker (idleSince vs
+ *    threshold).
+ *  - `dispatchDowntimeWork` — dispatch orchestration: `wl next --stage
+ *    intake_complete` → `/skill:plan <id>`, fallback `--stage idea` →
+ *    `/skill:intake <id>`, pre-dispatch claim, per-process single-flight.
+ *  - `buildDowntimePaneArgs` / `spawnDowntimePane` — send-to-pi.sh
+ *    invocation (`--pane-name Downtime <kind>`, `--no-focus`, `--cwd`,
+ *    `--model`), detached and unref'd.
+ *  - `createDowntimeWorker` — per-tick orchestrator (poll → evaluate →
+ *    track → dispatch) with settings re-read each tick.
  *  - `buildDowntimePrompt` / `BLOCKED_QUESTIONS_INSTRUCTION` — dispatched
  *    agent prompt, including the blocked-questions instruction.
  *  - `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` /
- *    `clampDowntimeRequiredFreeSlots` — settings clamps. The settings keys
- *    and load/merge wiring live in `settings.ts` (WL-0MSG80254005ZNE9).
+ *    `clampDowntimeRequiredFreeSlots` — settings clamps, wired into
+ *    `settings.ts`.
  *
- * The remaining stateful / side-effectful parts are FAIL-CLOSED stubs whose
- * contracts are implemented by the downstream feature:
- *
- *  - `createIdleTracker` — real idle-duration tracker in
- *    WL-0MSG80AG700429M8 (F3).
- *  - `dispatchDowntimeWork` — real dispatch orchestration (`wl next`,
- *    send-to-pi.sh pane spawn, pre-dispatch claim, single-flight) in
- *    WL-0MSG80AG700429M8 (F3).
- *
- * Fail-closed behaviour (never dispatch, never throw) is the SAFE default:
- * until the full worker lands, the plugin must not dispatch work based on
- * unverified logic.
+ * Fail-closed behaviour (never dispatch, never throw) is the SAFE default
+ * at every boundary.
  */
+
+import { spawn } from 'node:child_process';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -111,14 +118,14 @@ export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): bo
   return isIdleStatus(status, effective);
 }
 
-// ── Idle-duration tracker (stub — F3) ─────────────────────────────────
+// ── Idle-duration tracker (implemented — F3) ──────────────────────────
 
 export interface IdleTracker {
   /** Idle-since timestamp (ms), or null when not currently in an idle run. */
   readonly idleSince: number | null;
   /**
-   * Record one poll result. `isIdle` true advances the idle run; false
-   * resets it (idleSince = null).
+   * Record one poll result. `isIdle` true starts (or continues) the idle
+   * run; false resets it (idleSince = null).
    */
   record(isIdle: boolean, now?: number): void;
   /**
@@ -129,17 +136,24 @@ export interface IdleTracker {
 }
 
 /**
- * FAIL-CLOSED stub (implemented in WL-0MSG80AG700429M8): never reports an
- * idle threshold met, so no dispatch can occur until the real tracker lands.
+ * Continuous idle-duration tracker. `idleSince` is set on the first idle
+ * poll and kept fixed for the whole idle run (so consecutive idle polls
+ * advance the run); ANY busy poll resets it to null. A dispatch therefore
+ * only fires after the idle state has been continuous for the full
+ * threshold, and a fresh full idle period is required after any busy poll.
  */
 export function createIdleTracker(): IdleTracker {
+  let idleSince: number | null = null;
   return {
-    idleSince: null,
-    record(_isIdle: boolean, _now?: number): void {
-      // stub
+    get idleSince(): number | null {
+      return idleSince;
     },
-    isThresholdMet(_thresholdMs: number, _now?: number): boolean {
-      return false;
+    record(isIdle: boolean, now: number = Date.now()): void {
+      idleSince = isIdle ? (idleSince ?? now) : null;
+    },
+    isThresholdMet(thresholdMs: number, now: number = Date.now()): boolean {
+      if (idleSince === null) return false;
+      return now - idleSince >= thresholdMs;
     },
   };
 }
@@ -278,7 +292,7 @@ export function createDowntimePoller(
   };
 }
 
-// ── Dispatch (stub — F3) ──────────────────────────────────────────────
+// ── Dispatch (implemented — F3) ───────────────────────────────────────
 
 export type DowntimeStage = 'intake_complete' | 'idea';
 export type DowntimeSkillKind = 'plan' | 'intake';
@@ -293,6 +307,8 @@ export interface DowntimeCandidate {
 export interface DowntimeWorkerDeps {
   /** Runs `wl next --stage <stage> --json` and returns the first candidate or null. */
   getNextItem(stage: DowntimeStage): Promise<DowntimeCandidate | null>;
+  /** Claims the item (`wl update <id> --status in_progress`) before dispatch. */
+  claimItem(itemId: string): Promise<void>;
   /** Opens a visible pi agent pane running the prompt (via send-to-pi.sh). */
   spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<void>;
 }
@@ -305,17 +321,211 @@ export interface DowntimeDispatchOutcome {
 }
 
 /**
- * FAIL-CLOSED stub (implemented in WL-0MSG80AG700429M8): never dispatches.
- * The real implementation selects `wl next --stage intake_complete` →
- * `/skill:plan <id>` (falling back to `--stage idea` → `/skill:intake
- * <id>`), opens a visible pane via `spawnAgentPane`, and honours the
- * single-flight guard.
+ * Per-process single-flight guard: at most one dispatch can be in flight at
+ * a time (concurrent calls are refused, not queued). Cross-pane
+ * serialization is handled by the pre-dispatch claim (Q5 — no lock file):
+ * the claimed item leaves `wl next`'s selection set for other panes.
+ */
+let dispatchInFlight = false;
+
+/**
+ * Dispatch one downtime work item. Selection: `wl next --stage
+ * intake_complete` → `/skill:plan <id>`; if none, `wl next --stage idea` →
+ * `/skill:intake <id>`; if both are empty, no dispatch. The item is claimed
+ * BEFORE the pane spawns so it appears in_progress immediately and a second
+ * pane cannot select it. The caller must only invoke this once the idle
+ * tracker reports the threshold met (AC1); a dispatch consumes the local
+ * slot, so the proxy reports busy and the tracker requires a fresh full
+ * idle period before the next dispatch.
  */
 export async function dispatchDowntimeWork(
-  _deps: DowntimeWorkerDeps,
-  _opts: { model: string; cwd: string },
+  deps: DowntimeWorkerDeps,
+  opts: { model: string; cwd: string },
 ): Promise<DowntimeDispatchOutcome> {
-  return { dispatched: false, reason: 'not-implemented' };
+  if (dispatchInFlight) {
+    return { dispatched: false, reason: 'dispatch-in-flight' };
+  }
+  dispatchInFlight = true;
+  try {
+    const intakeComplete = await deps.getNextItem('intake_complete');
+    if (intakeComplete !== null) {
+      await deps.claimItem(intakeComplete.id);
+      await deps.spawnAgentPane(buildDowntimePrompt('plan', intakeComplete), opts);
+      return { dispatched: true, candidate: intakeComplete, kind: 'plan' };
+    }
+    const idea = await deps.getNextItem('idea');
+    if (idea !== null) {
+      await deps.claimItem(idea.id);
+      await deps.spawnAgentPane(buildDowntimePrompt('intake', idea), opts);
+      return { dispatched: true, candidate: idea, kind: 'intake' };
+    }
+    return { dispatched: false, reason: 'no-candidate' };
+  } finally {
+    dispatchInFlight = false;
+  }
+}
+
+/**
+ * Argument vector for spawning `send-to-pi.sh`: visible pane named
+ * `Downtime <kind>`, `--no-focus` (visible but never steals focus),
+ * `--cwd <wlRoot>`, `--model <downtimeModel>`, then the prompt.
+ */
+export function buildDowntimePaneArgs(
+  kind: DowntimeSkillKind,
+  prompt: string,
+  opts: { model: string; cwd: string },
+): string[] {
+  return [
+    '--pane-name',
+    `Downtime ${kind}`,
+    '--no-focus',
+    '--cwd',
+    opts.cwd,
+    '--model',
+    opts.model,
+    prompt,
+  ];
+}
+
+/** Minimal spawn handle: the caller unrefs so the parent can exit first. */
+export interface DowntimeSpawnHandle {
+  unref(): void;
+}
+
+/** Injectable spawn boundary (matches the repo's injectable-seam pattern). */
+export type DowntimeSpawn = (
+  scriptPath: string,
+  args: string[],
+  opts: { cwd: string },
+) => DowntimeSpawnHandle;
+
+/**
+ * Spawn options for `send-to-pi.sh`: detached, stdio ignored, resolved cwd
+ * forwarded so the pane opens in the right project root.
+ */
+export function buildDowntimeSpawnOptions(cwd: string): {
+  detached: boolean;
+  stdio: 'ignore';
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+} {
+  return {
+    detached: true,
+    stdio: 'ignore',
+    cwd,
+    env: { ...process.env, HERDR_RESOLVED_CWD: cwd },
+  };
+}
+
+/** Default spawn: detached, stdio ignored, resolved cwd forwarded. */
+export const defaultDowntimeSpawn: DowntimeSpawn = (scriptPath, args, opts) =>
+  spawn(scriptPath, args, buildDowntimeSpawnOptions(opts.cwd));
+
+/**
+ * Spawn `send-to-pi.sh` detached with stdio ignored, then unref so the
+ * parent (plugin) process can exit independently — same pattern as the
+ * TUI's existing agent dispatches.
+ */
+export function spawnDowntimePane(
+  scriptPath: string,
+  args: string[],
+  opts: { cwd: string },
+  spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
+): void {
+  const child = spawnFn(scriptPath, args, opts);
+  child.unref();
+}
+
+// ── Worker orchestrator (implemented — F3) ────────────────────────────
+
+/** Per-tick configuration; re-read every tick so settings apply live. */
+export interface DowntimeWorkerConfig {
+  poller: DowntimePoller;
+  deps: DowntimeWorkerDeps;
+  /** Re-read each tick so settings changes apply without a restart. */
+  config(): {
+    enabled: boolean;
+    thresholdMs: number;
+    requiredFreeSlots: number;
+    model: string;
+    cwd: string;
+  };
+}
+
+export interface DowntimeWorkerTickResult {
+  polled: boolean;
+  dispatched: boolean;
+  idle: boolean;
+}
+
+export interface DowntimeWorker {
+  /** One poll + evaluation + possible dispatch. Call from the scheduler task. */
+  tick(): Promise<DowntimeWorkerTickResult>;
+  /** Idle-since timestamp of the current idle run (null when busy). */
+  readonly idleSince: number | null;
+  /** True while a dispatch is in flight. */
+  readonly dispatching: boolean;
+  /** Timestamp of the last successful dispatch (null until the first). */
+  readonly lastDispatchAt: number | null;
+}
+
+/**
+ * Compose poller + idle evaluation + tracker + dispatch into the per-tick
+ * worker the scheduler loop (F4) registers as a due-work task.
+ */
+export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker {
+  const tracker = createIdleTracker();
+  let dispatching = false;
+  let lastDispatchAt: number | null = null;
+
+  return {
+    get idleSince(): number | null {
+      return tracker.idleSince;
+    },
+    get dispatching(): boolean {
+      return dispatching;
+    },
+    get lastDispatchAt(): number | null {
+      return lastDispatchAt;
+    },
+    async tick(): Promise<DowntimeWorkerTickResult> {
+      const cfg = opts.config();
+      if (!cfg.enabled) return { polled: false, dispatched: false, idle: false };
+      if (opts.poller.isPolling()) return { polled: false, dispatched: false, idle: tracker.idleSince !== null };
+
+      const status = await opts.poller.poll();
+      if (status === null) {
+        tracker.record(false); // endpoint failure/ambiguity → busy
+        return { polled: true, dispatched: false, idle: false };
+      }
+
+      const idle = evaluateIdle(status, cfg.requiredFreeSlots);
+      tracker.record(idle);
+      if (!idle) return { polled: true, dispatched: false, idle: false };
+      if (!tracker.isThresholdMet(cfg.thresholdMs)) {
+        return { polled: true, dispatched: false, idle: true };
+      }
+      if (dispatching) return { polled: true, dispatched: false, idle: true };
+
+      dispatching = true;
+      try {
+        const outcome = await dispatchDowntimeWork(opts.deps, {
+          model: cfg.model,
+          cwd: cfg.cwd,
+        });
+        if (outcome.dispatched) {
+          lastDispatchAt = Date.now();
+          // Belt-and-suspenders: even if the proxy does not immediately
+          // report busy, require a fresh full idle period before the next
+          // dispatch (AC5).
+          tracker.record(false);
+        }
+        return { polled: true, dispatched: outcome.dispatched, idle: true };
+      } finally {
+        dispatching = false;
+      }
+    },
+  };
 }
 
 // ── Blocked-questions prompt (implemented) ────────────────────────────

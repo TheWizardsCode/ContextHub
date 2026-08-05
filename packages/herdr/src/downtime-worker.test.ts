@@ -7,25 +7,26 @@
  * (cf. WL-0MQD1N3JD007B0FZ).
  *
  * Green suites test the parts implemented so far (idle detection,
- * blocked-questions prompt, settings clamps, fixture coherence, and — since
- * WL-0MSG80254005ZNE9 — the poller, fail-closed parsing and runtime idle
- * evaluation). The `describe.skip` blocks define the remaining contract
- * matrix; the owning implementation feature flips them back on:
- *
- *  - threshold timing / dispatch / single-flight → WL-0MSG80AG700429M8 (F3)
- *
- * The remaining stubs are fail-closed (never dispatch, never throw), which
- * is the safe default until the full worker lands.
+ * blocked-questions prompt, settings clamps, fixture coherence, the poller
+ * and fail-closed parsing from WL-0MSG80254005ZNE9, and the idle tracker,
+ * dispatch orchestration, pane spawn and worker orchestrator from
+ * WL-0MSG80AG700429M8).
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   isIdleStatus,
   evaluateIdle,
   parseLlamaStatus,
   fetchLocalStatus,
   createDowntimePoller,
+  createIdleTracker,
+  dispatchDowntimeWork,
+  createDowntimeWorker,
   buildDowntimePrompt,
+  buildDowntimePaneArgs,
+  spawnDowntimePane,
+  buildDowntimeSpawnOptions,
   BLOCKED_QUESTIONS_INSTRUCTION,
   clampDowntimePollInterval,
   clampDowntimeIdleThresholdMs,
@@ -33,11 +34,11 @@ import {
   DOWNTIME_POLL_INTERVAL_FLOOR_MS,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
-  createIdleTracker,
-  dispatchDowntimeWork,
   type LlamaStatus,
   type LlamaStatusFetcher,
   type DowntimeCandidate,
+  type DowntimeWorkerDeps,
+  type DowntimeSpawn,
 } from './downtime-worker.js';
 import {
   statusFixtures,
@@ -49,6 +50,16 @@ import {
   jsonResponseFixture,
   type LlamaStatusHttpResponse,
 } from './downtime-worker.fixtures.js';
+
+/** Shared deps mock for dispatch tests. */
+function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
+  return {
+    getNextItem: vi.fn().mockResolvedValue(null),
+    claimItem: vi.fn().mockResolvedValue(undefined),
+    spawnAgentPane: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  };
+}
 
 // ── Fixture coherence (AC1) ───────────────────────────────────────────
 
@@ -123,127 +134,163 @@ describe('idle detection (isIdleStatus)', () => {
   });
 });
 
-// ── Threshold timing (AC3) — implemented in F3 (WL-0MSG80AG700429M8) ──
+// ── Threshold timing (AC1/AC3) ────────────────────────────────────────
 
-describe.skip('threshold timing (idle-duration tracker)', () => {
+describe('threshold timing (idle-duration tracker)', () => {
   const thresholdMs = 240_000;
 
   it('dispatches only after idle has lasted the full threshold continuously', () => {
-    vi.useFakeTimers();
     const tracker = createIdleTracker();
-    const start = Date.now();
+    const start = 1_000_000;
 
     tracker.record(true, start);
     expect(tracker.idleSince).toBe(start);
     expect(tracker.isThresholdMet(thresholdMs, start + thresholdMs - 1)).toBe(false);
     expect(tracker.isThresholdMet(thresholdMs, start + thresholdMs)).toBe(true);
-
-    vi.useRealTimers();
   });
 
   it('any busy poll resets the idle-since timestamp', () => {
-    vi.useFakeTimers();
     const tracker = createIdleTracker();
-    const start = Date.now();
+    const start = 1_000_000;
 
     tracker.record(true, start);
     tracker.record(false, start + 120_000);
     expect(tracker.idleSince).toBeNull();
     expect(tracker.isThresholdMet(thresholdMs, start + 360_000)).toBe(false);
+  });
 
-    vi.useRealTimers();
+  it('keeps the idle run start fixed across consecutive idle polls', () => {
+    const tracker = createIdleTracker();
+    const start = 1_000_000;
+    tracker.record(true, start);
+    tracker.record(true, start + 30_000);
+    tracker.record(true, start + 60_000);
+    expect(tracker.idleSince).toBe(start);
+    expect(tracker.isThresholdMet(thresholdMs, start + 60_000)).toBe(false);
+    expect(tracker.isThresholdMet(thresholdMs, start + thresholdMs)).toBe(true);
   });
 });
 
-// ── Dispatch selection (AC4) — implemented in F3 (WL-0MSG80AG700429M8) ─
+// ── Dispatch selection (AC2) ──────────────────────────────────────────
 
-describe.skip('dispatch selection', () => {
+describe('dispatch selection', () => {
   it('runs /skill:plan on the next intake_complete item', async () => {
-    const getNextItem = vi.fn().mockResolvedValue({
-      id: 'WL-ABC',
-      title: 'Some task',
-      stage: 'intake_complete',
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        id: 'WL-ABC',
+        title: 'Some task',
+        stage: 'intake_complete',
+      }),
     });
-    const spawnAgentPane = vi.fn().mockResolvedValue(undefined);
 
-    const outcome = await dispatchDowntimeWork(
-      { getNextItem, spawnAgentPane },
-      { model: 'plan', cwd: '/repo' },
-    );
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
-    expect(getNextItem).toHaveBeenCalledWith('intake_complete');
+    expect(deps.getNextItem).toHaveBeenCalledWith('intake_complete');
+    expect(deps.getNextItem).toHaveBeenCalledTimes(1);
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
-    expect(spawnAgentPane).toHaveBeenCalledWith(
+    expect(outcome.candidate?.id).toBe('WL-ABC');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-ABC'),
       { model: 'plan', cwd: '/repo' },
     );
   });
 
+  it('claims the item BEFORE the pane spawns', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        id: 'WL-ABC',
+        title: 'Some task',
+        stage: 'intake_complete',
+      }),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-ABC');
+    const claimOrder = (deps.claimItem as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const spawnOrder = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    expect(claimOrder).toBeLessThan(spawnOrder);
+  });
+
   it('falls back to /skill:intake on the next idea item when none is intake_complete', async () => {
-    const getNextItem = vi
-      .fn()
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ id: 'WL-DEF', title: 'An idea', stage: 'idea' });
-    const spawnAgentPane = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({
+      getNextItem: vi
+        .fn()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ id: 'WL-DEF', title: 'An idea', stage: 'idea' }),
+    });
 
-    const outcome = await dispatchDowntimeWork(
-      { getNextItem, spawnAgentPane },
-      { model: 'plan', cwd: '/repo' },
-    );
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
-    expect(getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
-    expect(getNextItem).toHaveBeenNthCalledWith(2, 'idea');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea');
     expect(outcome.kind).toBe('intake');
-    expect(spawnAgentPane).toHaveBeenCalledWith(
+    expect(outcome.candidate?.id).toBe('WL-DEF');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-DEF');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:intake WL-DEF'),
       expect.anything(),
     );
   });
 
   it('does not dispatch when no item exists in either stage', async () => {
-    const getNextItem = vi.fn().mockResolvedValue(null);
-    const spawnAgentPane = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps();
 
-    const outcome = await dispatchDowntimeWork(
-      { getNextItem, spawnAgentPane },
-      { model: 'plan', cwd: '/repo' },
-    );
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea');
     expect(outcome.dispatched).toBe(false);
-    expect(spawnAgentPane).not.toHaveBeenCalled();
+    expect(outcome.reason).toBe('no-candidate');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 });
 
-// ── Single-flight (AC5) — implemented in F3 (WL-0MSG80AG700429M8) ─────
+// ── Single-flight (AC5) ───────────────────────────────────────────────
 
-describe.skip('single-flight dispatch guard', () => {
+describe('single-flight dispatch guard', () => {
   it('does not dispatch a second time while one dispatch is in flight', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const getNextItem = vi.fn().mockResolvedValue({
-      id: 'WL-ABC',
-      title: 'Some task',
-      stage: 'intake_complete',
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        id: 'WL-ABC',
+        title: 'Some task',
+        stage: 'intake_complete',
+      }),
+      spawnAgentPane: vi.fn().mockImplementation(() => gate),
     });
-    const spawnAgentPane = vi.fn().mockImplementation(() => gate);
 
-    const first = dispatchDowntimeWork(
-      { getNextItem, spawnAgentPane },
-      { model: 'plan', cwd: '/repo' },
-    );
-    const second = dispatchDowntimeWork(
-      { getNextItem, spawnAgentPane },
-      { model: 'plan', cwd: '/repo' },
-    );
+    const first = dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+    const second = dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
     release();
     const [firstOutcome, secondOutcome] = await Promise.all([first, second]);
 
-    expect(spawnAgentPane).toHaveBeenCalledTimes(1);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
     expect(firstOutcome.dispatched).toBe(true);
     expect(secondOutcome.dispatched).toBe(false);
+    expect(secondOutcome.reason).toBe('dispatch-in-flight');
+  });
+
+  it('allows a new dispatch once the previous one has completed', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        id: 'WL-ABC',
+        title: 'Some task',
+        stage: 'intake_complete',
+      }),
+    });
+
+    const first = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+    const second = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(first.dispatched).toBe(true);
+    expect(second.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -458,5 +505,223 @@ describe('downtime settings clamps', () => {
     expect(clampDowntimeRequiredFreeSlots(Number.NaN)).toBe(0);
     expect(clampDowntimeRequiredFreeSlots(2.7)).toBe(3);
     expect(clampDowntimeRequiredFreeSlots(2)).toBe(2);
+  });
+});
+
+// ── Pane spawn (AC4) ──────────────────────────────────────────────────
+
+describe('downtime pane spawn (send-to-pi.sh)', () => {
+  it('builds --pane-name / --no-focus / --cwd / --model args for a plan dispatch', () => {
+    const args = buildDowntimePaneArgs('plan', 'Run /skill:plan WL-ABC — Some task.', {
+      model: 'plan',
+      cwd: '/repo',
+    });
+    expect(args).toEqual([
+      '--pane-name',
+      'Downtime plan',
+      '--no-focus',
+      '--cwd',
+      '/repo',
+      '--model',
+      'plan',
+      'Run /skill:plan WL-ABC — Some task.',
+    ]);
+  });
+
+  it('uses the intake pane name and forwards the configured model', () => {
+    const args = buildDowntimePaneArgs('intake', 'Run /skill:intake WL-DEF', {
+      model: 'code',
+      cwd: '/repo',
+    });
+    expect(args).toContain('Downtime intake');
+    expect(args).toContain('code');
+    expect(args).not.toContain('Downtime plan');
+  });
+
+  it('spawns via the injectable spawn and unrefs the child', () => {
+    const spawnFn = vi.fn(() => ({ unref: vi.fn() })) as unknown as DowntimeSpawn;
+
+    spawnDowntimePane('/path/to/send-to-pi.sh', ['--no-focus', 'prompt'], { cwd: '/repo' }, spawnFn);
+
+    expect(spawnFn).toHaveBeenCalledWith('/path/to/send-to-pi.sh', ['--no-focus', 'prompt'], {
+      cwd: '/repo',
+    });
+    const handle = (spawnFn as ReturnType<typeof vi.fn>).mock.results[0].value;
+    expect(handle.unref).toHaveBeenCalled();
+  });
+
+  it('buildDowntimeSpawnOptions uses detached/ignore options with the resolved cwd', () => {
+    const options = buildDowntimeSpawnOptions('/repo');
+    expect(options).toEqual({
+      detached: true,
+      stdio: 'ignore',
+      cwd: '/repo',
+      env: expect.objectContaining({ HERDR_RESOLVED_CWD: '/repo' }),
+    });
+  });
+});
+
+// ── Worker orchestrator (AC1/AC5) ─────────────────────────────────────
+
+describe('downtime worker orchestrator (createDowntimeWorker)', () => {
+  function makeWorker(overrides: {
+    enabled?: boolean;
+    thresholdMs?: number;
+    status?: unknown;
+    deps?: Partial<DowntimeWorkerDeps>;
+  } = {}) {
+    const cfg = {
+      enabled: overrides.enabled ?? true,
+      thresholdMs: overrides.thresholdMs ?? 240_000,
+      requiredFreeSlots: 0,
+      model: 'plan',
+      cwd: '/repo',
+    };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(jsonResponseFixture(overrides.status ?? idleAllSlotsFree));
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        id: 'WL-ABC',
+        title: 'Some task',
+        stage: 'intake_complete',
+      }),
+      ...overrides.deps,
+    });
+    const worker = createDowntimeWorker({
+      poller,
+      deps,
+      config: () => ({ ...cfg }),
+    });
+    return { worker, deps, cfg, fetcher };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('does nothing (no poll, no dispatch) when disabled', async () => {
+    const { worker, deps, fetcher } = makeWorker({ enabled: false });
+    const result = await worker.tick();
+    expect(result).toEqual({ polled: false, dispatched: false, idle: false });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('treats a busy status as busy and never dispatches', async () => {
+    const { worker, deps } = makeWorker({ status: { ...idleAllSlotsFree, active_query: true } });
+    const result = await worker.tick();
+    expect(result.idle).toBe(false);
+    expect(worker.idleSince).toBeNull();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('does not dispatch until the idle duration reaches the threshold (AC1)', async () => {
+    const { worker, deps, cfg } = makeWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    expect(worker.idleSince).toBe(start);
+
+    vi.setSystemTime(start + cfg.thresholdMs - 1);
+    const before = await worker.tick();
+    expect(before.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    const at = await worker.tick();
+    expect(at.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    expect(worker.lastDispatchAt).toBe(start + cfg.thresholdMs);
+  });
+
+  it('requires a fresh full idle period after a dispatch (AC5)', async () => {
+    const { worker, deps, cfg } = makeWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + cfg.thresholdMs);
+    await worker.tick();
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+
+    // Still idle at the next tick: the tracker was reset after dispatch, so
+    // no second dispatch until another full idle period has elapsed.
+    vi.setSystemTime(start + cfg.thresholdMs + 30_000);
+    const next = await worker.tick();
+    expect(next.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    expect(worker.idleSince).toBe(start + cfg.thresholdMs + 30_000);
+
+    vi.setSystemTime(start + cfg.thresholdMs + 30_000 + cfg.thresholdMs);
+    const after = await worker.tick();
+    expect(after.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(2);
+  });
+
+  it('a busy poll (proxy busy after dispatch) resets the idle run', async () => {
+    const { worker, deps, cfg, fetcher } = makeWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + cfg.thresholdMs);
+    await worker.tick();
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+
+    fetcher.mockResolvedValueOnce(jsonResponseFixture({ ...idleAllSlotsFree, active_query: true }));
+    vi.setSystemTime(start + cfg.thresholdMs + 30_000);
+    const busy = await worker.tick();
+    expect(busy.idle).toBe(false);
+    expect(worker.idleSince).toBeNull();
+
+    // Back to idle: a full new run is required before the next dispatch.
+    vi.setSystemTime(start + cfg.thresholdMs + 60_000);
+    const reIdle = await worker.tick();
+    expect(reIdle.idle).toBe(true);
+    expect(reIdle.dispatched).toBe(false);
+    vi.setSystemTime(start + cfg.thresholdMs + 60_000 + cfg.thresholdMs);
+    const reDispatch = await worker.tick();
+    expect(reDispatch.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-reads settings each tick so changes apply without a restart', async () => {
+    const { worker, deps, cfg } = makeWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+
+    cfg.thresholdMs = 60_000; // operator changes the setting live
+    vi.setSystemTime(start + 60_000);
+    const result = await worker.tick();
+    expect(result.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not start a second dispatch while one is in flight (worker single-flight)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { worker, deps } = makeWorker({
+      deps: { spawnAgentPane: vi.fn().mockImplementation(() => gate) },
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + 240_000);
+
+    const first = worker.tick();
+    const second = await worker.tick();
+    expect(second.dispatched).toBe(false);
+
+    release();
+    const firstResult = await first;
+    expect(firstResult.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
   });
 });
