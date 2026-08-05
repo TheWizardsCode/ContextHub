@@ -24,7 +24,7 @@
  * ```
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -233,16 +233,17 @@ function saveLog(logData: CommandLogData): void {
   try {
     const content = JSON.stringify(logData, null, 2);
     writeFileSync(tempPath, content, 'utf-8');
-    // On POSIX systems, rename is atomic
-    writeFileSync(logPath, content, 'utf-8');
+    // On POSIX systems, rename is atomic — readers see either the old
+    // or the new file, never a partially written one.
+    renameSync(tempPath, logPath);
   } catch {
     // If atomic write fails, log the error but don't crash the plugin
     // The log will be re-read on next access
   } finally {
-    // Clean up temp file if it still exists
+    // Clean up temp file if it still exists (rename failed or was skipped)
     try {
       if (existsSync(tempPath)) {
-        writeFileSync(tempPath, '', 'utf-8');
+        unlinkSync(tempPath);
       }
     } catch {
       // Best effort cleanup
