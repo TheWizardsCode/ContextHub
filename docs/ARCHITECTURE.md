@@ -206,7 +206,7 @@ consumers agree because they share the same resolver.
 - **Git push**: Depends on network (typically 1-5s)
 - **Import**: ~100ms per 1000 items
 
-## Read Cache (src/read-cache.ts)
+## Read Cache (src/read-cache.ts, src/read-cache-cli.ts)
 
 Pure-read commands (`list`, `next`, `show`, `search`, `status` in JSON mode)
 cache their results on disk so repeated, byte-identical queries are served
@@ -217,26 +217,66 @@ without re-spawning work.
 - **Location**: XDG cache dir — `$WL_CACHE_DIR` if set, else
   `$XDG_CACHE_HOME/wl`, else `~/.cache/wl`.
 - **Entry files**: `<cache-dir>/<64-hex-sha256>.json`, one per query.
+- **State counters**: `<cache-dir>/state/<64-hex-sha256>.json` — one
+  monotonic write counter per worklog dir (see below).
 - **Cache key**: SHA-256 over (wl version, resolved absolute worklog dir,
   argv elements in order). The version is included so a wl upgrade with a
   changed output schema never serves stale-shaped entries.
-- **Entry header** stores the key inputs plus a WAL-aware DB fingerprint:
-  `[mtimeMs, size]` of `worklog.db`, `worklog.db-wal` and `worklog.db-shm`
-  captured at write time.
+- **Entry header** stores the key inputs plus a DB-state fingerprint captured
+  at write time.
 
-### Invalidation semantics
+### Fingerprint model
 
-- **Primary (WAL-aware fingerprint)**: on read, the fingerprint is recomputed
-  and compared to the one stored in the entry. Any change to `worklog.db`
-  (checkpoint), `worklog.db-wal` (write commit), or `worklog.db-shm`
-  (connection) invalidates the entry. This is required because `worklog.db`
-  mtime alone is unreliable in WAL mode — writes land in the WAL and the main
-  file only changes on checkpoint. Missing DB files fingerprint as zeros, so a
-  DB that is later created (files appear) also invalidates.
+Two fingerprint providers exist; the CLI uses the counter-based one:
+
+- **File fingerprint (module default, `computeDbFingerprint`)**: `[mtimeMs,
+  size]` of `worklog.db`, `worklog.db-wal` and `worklog.db-shm`. This is
+  WAL-aware (writes land in the WAL before checkpoint) but **not stable
+  across processes**: the app's own `journal_mode = WAL` pragma + schema/FTS
+  init rewrite the DB header on every open/close, so consecutive read
+  processes see different file states.
+- **State counter (CLI, `counterFingerprint`)**: a monotonic per-worklog-dir
+  integer in the cache dir. It is stable across reads (reads never touch it)
+  and changes exactly when a write lands, so it is the CLI's fingerprint of
+  record. The file fingerprint remains available for direct module use.
+
+### Invalidation semantics (CLI wiring)
+
+- **Writes invalidate**: write commands (`create`, `update`, `close`,
+  `delete`, `comment`, `dep`, `import`, `sync`, `github`, …) bump the state
+  counter in a `preAction` hook *before* their action mutates the DB, and
+  drop entry files — so an identical read immediately after a write returns
+  fresh data.
+- **Read write-byproducts count as writes**: `next`'s auto re-sort bumps the
+  counter after it lands (only when it actually changed sort indices), so
+  cached `next`/`list` results stay sound; `search --rebuild-index` is
+  excluded from caching outright and invalidates.
+- **Mid-action race guard**: a backfill is only stored if the state counter
+  is unchanged since the pre-action lookup (a concurrent write bumped it).
 - **TTL bounding safety net**: entries older than the TTL (default 30s,
-  aligned with the Herdr 30s refresh cadence) are never served.
-- **Writes bypass the cache**: write commands do not read from the cache; F2+
-  wires `invalidate()` so writes/sync drop the affected entries.
+  aligned with the Herdr 30s refresh cadence) are never served. This also
+  bounds staleness from writes the counter misses (e.g. external tools
+  writing the DB directly).
+- **JSON mode only**: text output is env/TTY dependent and never cached.
+  `--semantic`/`--semantic-only` (external embedding API) are never cached.
+
+### CLI dispatch
+
+`src/cli.ts` checks the cache for cacheable read invocations *before*
+`program.parse()` — on a hit it prints the cached payload (byte-identical to
+`output.json` formatting) and exits without running any action or opening the
+DB. Misses run normally; the JSON payload emitted via `output.json` is routed
+through `ReadCacheCli.onJsonOutput` for backfill.
+
+### Spawn instrumentation (spawn-reduction measurement)
+
+Env-gated counters (`src/spawn-counter.ts`): `WL_SPAWN_COUNT_FILE=<path>`
+appends one `<kind>\t<ts>\t<pid>` line per recorded spawn;
+`WL_SPAWN_COUNT=1` (no file) logs `[wl:spawn]` lines to stderr. A cache
+miss records `read-work`; a cache hit records `cache-hit`. With the cache
+disabled (`WL_CACHE_DISABLED=1`), cacheable reads record `read-work` too, so
+the baseline is measurable. `tests/cli/read-cache-spawn-reduction.test.ts`
+simulates a 6-pane refresh and asserts ≥60% fewer work spawns.
 
 ### Concurrency & bounding
 

@@ -9,6 +9,7 @@ import { normalizeActionArgs } from './cli-utils.js';
 import { loadStatusStageRules } from '../status-stage-rules.js';
 import { extractFilePaths, type GroupAssignment } from './helpers.js';
 import { assignItemGroups, compareGroupedItems } from './grouping.js';
+import { invalidateCacheForWrite } from '../read-cache-cli.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -70,8 +71,19 @@ export default function register(ctx: PluginContext): void {
         }
         try {
           if (typeof (db as any).reSort === 'function') {
-            if (options.reSortSync) (db as any).reSort(recencyPolicy as 'prefer' | 'avoid' | 'ignore');
-            else void Promise.resolve().then(() => (db as any).reSort(recencyPolicy as 'prefer' | 'avoid' | 'ignore'));
+            if (options.reSortSync) {
+              const result = (db as any).reSort(recencyPolicy as 'prefer' | 'avoid' | 'ignore');
+              // The re-sort is a DB write: bump the read-cache state counter
+              // so cached `next` results reflect the re-sorted order.
+              if (result?.updated > 0) invalidateCacheForWrite();
+            } else {
+              void Promise.resolve()
+                .then(() => (db as any).reSort(recencyPolicy as 'prefer' | 'avoid' | 'ignore'))
+                .then((result: any) => {
+                  if (result?.updated > 0) invalidateCacheForWrite();
+                })
+                .catch(() => {});
+            }
           }
         } catch (_e) {}
       }

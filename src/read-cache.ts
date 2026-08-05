@@ -48,11 +48,26 @@ export interface ReadCacheOptions {
   now?: () => number;
   /** Version string included in the cache key (default `WORKLOG_VERSION`). */
   version?: string;
+  /**
+   * Custom DB-state fingerprint provider (default: WAL-aware file snapshot).
+   *
+   * The wl CLI (F2) uses a stable counter-based fingerprint instead: the
+   * SQLite files are rewritten by the app on every open/close cycle
+   * (`journal_mode = WAL` + schema init touch the header), so file-based
+   * fingerprints are not stable across processes. The counter is monotonic
+   * per worklog dir and bumped on every write, so it is stable across reads
+   * yet changes exactly when the data does.
+   */
+  fingerprint?: (worklogDir: string) => DbFingerprint;
 }
 
 /**
- * mtime+size snapshot of the WAL-mode SQLite files for a worklog dir.
- * Each pair is `[mtimeMs, size]`; missing files fingerprint as `[0, 0]`.
+ * Snapshot of the DB state for a worklog dir.
+ *
+ * The file-pair fields capture the WAL-mode SQLite files (default provider;
+ * `[mtimeMs, size]` per file, `[0, 0]` when missing). The optional
+ * `stateCounter` field is the F2 CLI fingerprint: a monotonic per-worklog-dir
+ * write counter stored in the cache dir (see `bumpStateCounter`).
  */
 export interface DbFingerprint {
   /** worklog.db — rewritten on WAL checkpoint */
@@ -61,6 +76,8 @@ export interface DbFingerprint {
   wal: [number, number];
   /** worklog.db-shm — shared-memory index, touched on connections */
   shm: [number, number];
+  /** F2 CLI fingerprint: monotonic per-worklog-dir write counter. */
+  stateCounter?: number;
 }
 
 /** A single cache entry: header (key + freshness metadata) + cached value. */
@@ -119,8 +136,62 @@ export function fingerprintsEqual(a: DbFingerprint, b: DbFingerprint): boolean {
     a.wal[0] === b.wal[0] &&
     a.wal[1] === b.wal[1] &&
     a.shm[0] === b.shm[0] &&
-    a.shm[1] === b.shm[1]
+    a.shm[1] === b.shm[1] &&
+    (a.stateCounter ?? 0) === (b.stateCounter ?? 0)
   );
+}
+
+// ---------------------------------------------------------------------------
+// F2 counter-based fingerprint (stable across process open/close churn)
+// ---------------------------------------------------------------------------
+
+/** Path of the per-worklog-dir state counter file within a cache dir. */
+export function stateCounterFilePath(cacheDir: string, worklogDir: string): string {
+  const hash = createHash('sha256').update(path.resolve(worklogDir)).digest('hex');
+  return path.join(cacheDir, 'state', `${hash}.json`);
+}
+
+/**
+ * Read the monotonic write-counter for a worklog dir (0 when absent — a
+ * fresh cache dir means no writes have been observed, which is the safe
+ * baseline for entries written from the same counter value).
+ */
+export function readStateCounter(cacheDir: string, worklogDir: string): number {
+  try {
+    const raw = fs.readFileSync(stateCounterFilePath(cacheDir, worklogDir), 'utf-8');
+    const parsed = JSON.parse(raw) as { state?: number };
+    const state = Number(parsed?.state);
+    return Number.isFinite(state) && state >= 0 ? Math.floor(state) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Atomically increment the per-worklog-dir write counter. Returns the new
+ * value. Concurrent increments may coalesce (both write N+1) but can never
+ * regress the counter, which is all freshness checking needs.
+ */
+export function bumpStateCounter(cacheDir: string, worklogDir: string): number {
+  const file = stateCounterFilePath(cacheDir, worklogDir);
+  const next = readStateCounter(cacheDir, worklogDir) + 1;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+    fs.writeFileSync(tmp, JSON.stringify({ state: next }), 'utf-8');
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    debugLog(`failed to bump state counter: ${(err as Error).message}`);
+  }
+  return next;
+}
+
+/**
+ * The F2 CLI fingerprint: file fields are inert, `stateCounter` carries the
+ * per-worklog-dir write counter.
+ */
+export function counterFingerprint(cacheDir: string, worklogDir: string): DbFingerprint {
+  return { db: [0, 0], wal: [0, 0], shm: [0, 0], stateCounter: readStateCounter(cacheDir, worklogDir) };
 }
 
 /**
@@ -171,6 +242,7 @@ export class ReadCache {
   private readonly maxEntries: number;
   private readonly now: () => number;
   private readonly version: string;
+  private readonly fingerprint: (worklogDir: string) => DbFingerprint;
   private hits = 0;
   private misses = 0;
 
@@ -180,10 +252,16 @@ export class ReadCache {
     this.maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
     this.now = options.now ?? (() => Date.now());
     this.version = options.version ?? WORKLOG_VERSION;
+    this.fingerprint = options.fingerprint ?? computeDbFingerprint;
   }
 
   getCacheDir(): string {
     return this.cacheDir;
+  }
+
+  /** DB-state fingerprint for a worklog dir under this cache's provider. */
+  fingerprintFor(worklogDir: string): DbFingerprint {
+    return this.fingerprint(path.resolve(worklogDir));
   }
 
   /** Cache key for a (worklog-dir, argv) pair under this cache's version. */
@@ -251,7 +329,7 @@ export class ReadCache {
     }
 
     // WAL-aware freshness: any change to db/-wal/-shm invalidates.
-    const fp = computeDbFingerprint(dir);
+    const fp = this.fingerprintFor(dir);
     if (!fingerprintsEqual(fp, entry.dbFingerprint)) {
       debugLog(`db state changed for ${key}; removing`);
       this.removeFile(entryPath);
@@ -289,7 +367,7 @@ export class ReadCache {
       worklogDir: dir,
       argv: [...argv],
       version: this.version,
-      dbFingerprint: options?.dbFingerprint ?? computeDbFingerprint(dir),
+      dbFingerprint: options?.dbFingerprint ?? this.fingerprintFor(dir),
       createdAt: now,
       accessedAt: now,
       value,
