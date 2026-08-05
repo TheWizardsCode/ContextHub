@@ -10,6 +10,9 @@
  * Herdr's pane-based model.
  */
 
+import { readFileSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
+
 import { fetchChildrenForItem, fetchActionableCount, getWorklogDir, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { readCodeFreezeState } from './code-freeze.js';
@@ -35,6 +38,8 @@ import {
   FormState,
   substituteIdentifiers,
 } from './form-dialog.js';
+import { extractFilePaths } from './grouping.js';
+import { renderMarkdownViewer, renderNoteLinks } from './md-viewer.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -916,6 +921,7 @@ export function formatMetadataPanel(
 export function formatDetailContent(
   item: WorkItem | null,
   maxCols: number,
+  readFile?: (filePath: string) => string | null,
 ): string[] {
   if (!item) return [];
 
@@ -951,24 +957,39 @@ export function formatDetailContent(
     lines.push('');
     const descLines = item.description.split('\n');
     for (const dl of descLines) {
-      // Wrap long lines to fit width
+      // Wrap long lines to fit width; NOTE markers render as links.
       const indent = 2;
       const wrapWidth = contentWidth - indent - 2;
-      if (dl.length > wrapWidth && wrapWidth > 10) {
-        let remaining = dl;
+      const linked = renderNoteLinks(dl);
+      if (linked.length > wrapWidth && wrapWidth > 10) {
+        let remaining = linked;
         while (remaining.length > 0) {
           const seg = remaining.slice(0, wrapWidth);
           remaining = remaining.slice(wrapWidth);
           lines.push(`  ${seg}`);
         }
       } else {
-        lines.push(`  ${dl}`);
+        lines.push(`  ${linked}`);
       }
       // Limit total lines
       if (lines.length > 500) {
         lines.push(`  ... (truncated, ${descLines.length} total description lines)`);
         break;
       }
+    }
+  }
+
+  // Generic md-document viewer for a Key Files: .podcast.md episode file
+  // (preview-only; no notes editor). When a readFile callback is provided
+  // and the item references a readable .md file, render it in place of the
+  // raw description so the producer sees the paragraph-format episode.
+  if (readFile) {
+    const mdViewerLines = renderFileViewer(item, maxCols, readFile);
+    if (mdViewerLines.length > 0) {
+      lines.push('');
+      lines.push(` ${ANSI.underline}Episode file (md viewer)${ANSI.reset}`);
+      lines.push('');
+      lines.push(...mdViewerLines);
     }
   }
 
@@ -986,6 +1007,42 @@ export function formatDetailContent(
 }
 
 /**
+ * Render a Key Files: .md document (e.g. an episode .podcast.md) for the
+ * detail view via the generic markdown viewer.
+ *
+ * @param item - The work item whose description carries a `Key Files:` path.
+ * @param maxCols - Terminal width.
+ * @param readFile - Synchronous file reader (path -> content or null).
+ * @returns Viewer lines, or [] when no readable .md file is referenced.
+ */
+export function renderFileViewer(
+  item: WorkItem | null,
+  maxCols: number,
+  readFile: (filePath: string) => string | null,
+): string[] {
+  if (!item) return [];
+  const mdPath = firstMarkdownKeyFile(item.description);
+  if (!mdPath) return [];
+  const content = readFile(mdPath);
+  if (content == null) return [];
+  return renderMarkdownViewer(content, maxCols);
+}
+
+/**
+ * Return the first `Key Files:` path ending in `.md` (or empty).
+ *
+ * Mirrors the `Key Files:` convention used by Worklog descriptions; the
+ * plugin's `extractFilePaths` in grouping.ts provides the full list, and
+ * this helper picks the first markdown document among them.
+ */
+export function firstMarkdownKeyFile(description: string | undefined): string {
+  if (!description) return '';
+  const paths = extractFilePaths(description);
+  const md = paths.find(p => p.endsWith('.md'));
+  return md ?? '';
+}
+
+/**
  * Format the detail view for a single work item, with scrolling support.
  *
  * @param item - The work item to display
@@ -999,8 +1056,9 @@ export function formatDetailView(
   maxCols: number,
   scrollOffset = 0,
   viewportHeight = 20,
+  readFile?: (filePath: string) => string | null,
 ): string {
-  const allLines = formatDetailContent(item, maxCols);
+  const allLines = formatDetailContent(item, maxCols, readFile);
   if (allLines.length === 0) return '';
 
   const totalLines = allLines.length;
@@ -1470,6 +1528,7 @@ export function createListRenderer(): (
   codeFreezeActive?: boolean,
   metaScrollOffset?: number,
   metaLastCommand?: string,
+  readFile?: (filePath: string) => string | null,
 ) => string {
   return (
     items: WorkItem[],
@@ -1490,6 +1549,7 @@ export function createListRenderer(): (
     codeFreezeActive?: boolean,
     metaScrollOffset?: number,
     metaLastCommand?: string,
+    readFile?: (filePath: string) => string | null,
   ): string => {
     const { rows, cols } = termSize;
     const output: string[] = [];
@@ -1502,7 +1562,7 @@ export function createListRenderer(): (
     if (mode === 'detail' && detailItem) {
       const viewportHeight = Math.max(10, rows - 1);
       const offset = detailScrollOffset ?? 0;
-      return formatDetailView(detailItem, cols, offset, viewportHeight);
+      return formatDetailView(detailItem, cols, offset, viewportHeight, readFile);
     }
 
     if (mode === 'filter') {
@@ -2486,6 +2546,21 @@ export async function runWorklistTui(
     resolve = res;
   });
 
+  /**
+   * Read a Key Files: markdown document (e.g. an episode .podcast.md) for
+   * the generic md viewer in the detail pane. Paths are relative to the
+   * worklog root (the process CWD when the plugin runs in a pane).
+   * Fail-open: unreadable or missing files yield null and the detail view
+   * falls back to the raw description.
+   */
+  const readKeyFile = (filePath: string): string | null => {
+    try {
+      return readFileSync(resolvePath(filePath, process.cwd()), 'utf-8');
+    } catch {
+      return null;
+    }
+  };
+
   const render = (): void => {
     termSize = getTermSize();
     state.termSize = termSize;
@@ -2594,6 +2669,7 @@ export async function runWorklistTui(
       codeFreezeActive,
       state.metaScrollOffset,
       metaLastCommand,
+      readKeyFile,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

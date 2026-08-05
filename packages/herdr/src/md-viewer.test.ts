@@ -13,6 +13,11 @@ import {
   renderNoteLinks,
   renderMarkdownViewer,
 } from './md-viewer.js';
+import {
+  formatDetailContent,
+  firstMarkdownKeyFile,
+  renderFileViewer,
+} from './worklist.js';
 import { assignItemGroups, regroupWorkItems, type GroupableItem } from './grouping.js';
 import type { WorkItem } from './fetcher.js';
 
@@ -185,5 +190,75 @@ describe('podcast item stage grouping', () => {
     expect(byId.get('ep-written')?.groupLabel).toBe('In Review');
     expect(byId.get('ep-idea')?.groupLabel).toBe('Idea');
     expect(byId.get('ep-drafted')?.groupLabel).toMatch(/^Group \d+$/);
+  });
+});
+
+// ── Detail-view wiring: NOTE links + Key Files md viewer ──────────────
+
+describe('detail-view wiring', () => {
+  /** Build a WorkItem whose description references a Key Files .md. */
+  function makeEpisodeItem(description: string): WorkItem {
+    return {
+      id: 'OSL-EP1',
+      title: 'Episode One',
+      status: 'open',
+      stage: 'in_review',
+      priority: 'medium',
+      description,
+    };
+  }
+
+  it('firstMarkdownKeyFile returns the first .md path from Key Files', () => {
+    const desc = '**Key Files:**\n- `podcast/episode-one.podcast.md`\n- `src/notes.txt`';
+    expect(firstMarkdownKeyFile(desc)).toBe('podcast/episode-one.podcast.md');
+  });
+
+  it('firstMarkdownKeyFile returns empty when no .md path exists', () => {
+    expect(firstMarkdownKeyFile('**Key Files:**\n- `src/notes.txt`')).toBe('');
+    expect(firstMarkdownKeyFile('No key files')).toBe('');
+    expect(firstMarkdownKeyFile(undefined)).toBe('');
+  });
+
+  it('renderFileViewer renders the Key Files .md via the md viewer', () => {
+    const item = makeEpisodeItem(
+      '**Key Files:**\n- `podcast/episode-one.podcast.md`',
+    );
+    const readFile = (p: string): string | null =>
+      p === 'podcast/episode-one.podcast.md'
+        ? '# Episode\n\nNova: Hello [NOTE OSL-AAA: fix me]'
+        : null;
+    const lines = renderFileViewer(item, 80, readFile);
+    expect(lines.join('\n')).toContain('Episode');
+    expect(lines.join('\n')).toContain('OSL-AAA↗');
+  });
+
+  it('renderFileViewer returns [] when the file is unreadable', () => {
+    const item = makeEpisodeItem(
+      '**Key Files:**\n- `podcast/episode-one.podcast.md`',
+    );
+    expect(renderFileViewer(item, 80, () => null)).toEqual([]);
+  });
+
+  it('formatDetailContent renders NOTE markers as links in the description', () => {
+    const item = makeEpisodeItem(
+      'Sorra: text [NOTE OSL-0MSG7Y0C6005QFES: WIKI FACT CHECK: unsupported claim]',
+    );
+    const joined = formatDetailContent(item, 120).join('\n');
+    expect(joined).toContain('OSL-0MSG7Y0C6005QFES↗');
+    expect(joined).not.toContain('[NOTE');
+  });
+
+  it('formatDetailContent embeds the md viewer section when readFile is provided', () => {
+    const item = makeEpisodeItem(
+      '**Key Files:**\n- `podcast/episode-one.podcast.md`\n\nSome description.',
+    );
+    const readFile = (p: string): string | null =>
+      p === 'podcast/episode-one.podcast.md'
+        ? '# Episode One\n\nNova: Hello [NOTE OSL-AAA: fix me]'
+        : null;
+    const joined = formatDetailContent(item, 120, readFile).join('\n');
+    expect(joined).toContain('Episode file (md viewer)');
+    expect(joined).toContain('Episode One');
+    expect(joined).toContain('OSL-AAA↗');
   });
 });

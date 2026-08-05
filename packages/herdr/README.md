@@ -18,6 +18,9 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Quit** — Press `q` to exit
 - **Metadata panel** — The bottom portion of the list view (roughly 20–40% of the pane height, responsive to terminal size) is reserved for the selected item's metadata: ID, title, status, stage, priority, type, risk, effort, tags, audit info, and more. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
+- **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` — no custom stage values). Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
+- **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, headings/lists/code shown) as a preview. See [Markdown viewer](#markdown-viewer).
+- **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. See [Inline note links](#inline-note-links).
 - **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
 
 ## Requirements
@@ -207,6 +210,41 @@ clamped to a minimum of 3 rows so it is always usable.
   list, filtering, or refreshing resets the panel scroll so the top of the
   panel is always visible again.
 
+## Stage grouping
+
+Work items are grouped by their Worklog **stage** using the standard
+lifecycle stages only — `idea`, `intake_complete`, `plan_complete`,
+`in_progress`, `in_review`, `done`. No custom stage values are required for
+grouping, so podcast episode items group exactly as their frontmatter
+`pipeline_stage` maps 1:1 onto the Worklog stages (PRD §7.2). Groups render
+in the canonical order (Critical → Group N → Idea → Other → In Review) with
+group separators in the list; stage changes re-group items on the next
+refresh.
+
+## Markdown viewer
+
+When a work item's description carries a `Key Files:` path to a markdown
+document (e.g. a podcast episode `.podcast.md`), the **detail view** renders
+that file with a generic markdown viewer instead of showing only the raw
+description. The viewer:
+
+- skips the YAML frontmatter block;
+- renders ATX headings, bullet lists, fenced code blocks, and paragraphs;
+- is preview-only (no notes editor);
+- falls back to the raw description when the file is missing/unreadable.
+
+The rendered lines appear under an `Episode file (md viewer)` heading in the
+detail view, scrollable with the usual `↑↓/j:k` keys.
+
+## Inline note links
+
+Inline `[NOTE <id>: ...]` review-note markers (PRD §7.1) — where `<id>` is
+the Worklog note-child work item id — are rendered as **clickable links** to
+the note work items: the marker is displayed as `<id>↗` and the note text is
+never shown in the viewer (notes are internal review notes, not dialogue).
+This applies to both the description section and the markdown viewer in the
+detail view.
+
 ## Command log
 
 Every command the plugin dispatches against a work item is recorded in a
@@ -253,6 +291,7 @@ packages/herdr/
 │   ├── icons.ts            # Icon and colour helpers
 │   ├── code-freeze.ts      # Code Freeze marker detection (fail-open)
 │   ├── form-dialog.ts      # Form state + rendering for parameter input (unknown <identifiers>)
+│   ├── md-viewer.ts        # Generic markdown viewer + inline [NOTE <id>: ...] link rendering
 │   ├── command-log.ts      # Command log: record/get last command per work item
 │   ├── settings.ts         # User settings management
 │   └── worklist.ts         # List state, rendering, keyboard handling, command output
