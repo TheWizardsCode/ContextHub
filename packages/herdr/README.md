@@ -182,6 +182,16 @@ pre-dispatch claim; there is deliberately **no cross-pane lock file**. A
 small residual risk of two panes dispatching at the same idle boundary is
 accepted — the claim prevents duplicate work on the same item.
 
+**Audit trail** — every successful dispatch records two traces: (1) a
+comment on the dispatched item (`wl comment add`, author
+`herdr-downtime`) stating the automatic dispatch, the skill run, and the
+UTC timestamp — this survives `wl sync` and is the durable trail; and (2) a
+bounded JSONL entry in `.worklog/downtime-dispatches.log` under the
+resolved worklog root (rolling — only the most recent 100 entries are
+kept). The `.worklog` log file is gitignored and local-only; both writes
+are fail-closed, so a comment or log failure never blocks or fails a
+dispatch.
+
 The worker runs inside the plugin's single consolidated scheduler loop (one
 `setInterval`; no independent timers), uses unref'd timers, and is cleaned up
 when the pane exits. While the pane is open the list header shows the worker

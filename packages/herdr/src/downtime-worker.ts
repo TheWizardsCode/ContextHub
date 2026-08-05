@@ -311,6 +311,22 @@ export interface DowntimeWorkerDeps {
   claimItem(itemId: string): Promise<void>;
   /** Opens a visible pi agent pane running the prompt (via send-to-pi.sh). */
   spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<void>;
+  /**
+   * Audit trail for a successful dispatch: comment on the item + rolling
+   * log entry under `.worklog`. Must never throw (fail-closed).
+   */
+  recordDispatch(event: DowntimeDispatchEvent): Promise<void>;
+}
+
+/** Audit event recorded for every successful downtime dispatch. */
+export interface DowntimeDispatchEvent {
+  itemId: string;
+  kind: DowntimeSkillKind;
+  /** ISO-8601 UTC timestamp of the dispatch. */
+  dispatchedAt: string;
+  /** Worklog root (the rolling log lives at `<cwd>/.worklog`). */
+  cwd: string;
+  title?: string;
 }
 
 export interface DowntimeDispatchOutcome {
@@ -351,17 +367,43 @@ export async function dispatchDowntimeWork(
     if (intakeComplete !== null) {
       await deps.claimItem(intakeComplete.id);
       await deps.spawnAgentPane(buildDowntimePrompt('plan', intakeComplete), opts);
+      await recordDispatchAudit(deps, 'plan', intakeComplete, opts.cwd);
       return { dispatched: true, candidate: intakeComplete, kind: 'plan' };
     }
     const idea = await deps.getNextItem('idea');
     if (idea !== null) {
       await deps.claimItem(idea.id);
       await deps.spawnAgentPane(buildDowntimePrompt('intake', idea), opts);
+      await recordDispatchAudit(deps, 'intake', idea, opts.cwd);
       return { dispatched: true, candidate: idea, kind: 'intake' };
     }
     return { dispatched: false, reason: 'no-candidate' };
   } finally {
     dispatchInFlight = false;
+  }
+}
+
+/**
+ * Record the audit event for a successful dispatch. Wrapped so a failing
+ * audit implementation (or a stub that rejects) can never fail or block the
+ * dispatch itself — the audit trail is best-effort (AC4).
+ */
+async function recordDispatchAudit(
+  deps: DowntimeWorkerDeps,
+  kind: DowntimeSkillKind,
+  candidate: DowntimeCandidate,
+  cwd: string,
+): Promise<void> {
+  try {
+    await deps.recordDispatch({
+      itemId: candidate.id,
+      kind,
+      dispatchedAt: new Date().toISOString(),
+      cwd,
+      title: candidate.title,
+    });
+  } catch {
+    // fail-closed: audit logging must never crash or block the worker
   }
 }
 
@@ -554,6 +596,23 @@ export function buildDowntimePrompt(kind: DowntimeSkillKind, candidate: Downtime
     `Run ${skill} ${candidate.id} — ${candidate.title}.`,
     BLOCKED_QUESTIONS_INSTRUCTION,
   ].join('\n');
+}
+
+/**
+ * Build the audit comment added to the item on a successful downtime
+ * dispatch: author-visible statement of the automatic dispatch, the skill
+ * run, the item, and the UTC timestamp. Newlines in the title are
+ * collapsed so the comment stays a single clean line.
+ */
+export function buildDowntimeDispatchComment(
+  itemId: string,
+  kind: DowntimeSkillKind,
+  dispatchedAt: string,
+  title?: string,
+): string {
+  const skill = kind === 'plan' ? '/skill:plan' : '/skill:intake';
+  const suffix = title ? ` (${title.replace(/[\r\n]+/g, ' ')})` : '';
+  return `Auto-dispatched by the herdr downtime worker at ${dispatchedAt} — running ${skill} ${itemId}${suffix}.`;
 }
 
 // ── Wiring helpers (implemented — F4) ─────────────────────────────────

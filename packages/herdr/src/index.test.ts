@@ -13,6 +13,7 @@ import {
   buildSendToPiArgs,
   createDowntimeDeps,
 } from './index.js';
+import { DOWNTIME_LOG_FILE } from './downtime-log.js';
 import {
   fetchItemsByStage,
   resetExecFileAsync,
@@ -579,5 +580,95 @@ describe('createDowntimeDeps', () => {
       expect.arrayContaining(['--pane-name', 'Downtime intake']),
       expect.anything(),
     );
+  });
+});
+
+describe('createDowntimeDeps recordDispatch', () => {
+  afterEach(() => {
+    resetExecFileAsync();
+    resetWorklogDir();
+    for (const dir of tempDirs) {
+      try { rmSync(dir, { recursive: true }); } catch { /* ignore */ }
+    }
+    tempDirs.length = 0;
+  });
+
+  it('adds an audit comment via wl comment add with the herdr-downtime author', async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.recordDispatch({
+      itemId: 'WL-ABC',
+      kind: 'plan',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+      cwd: '/repo',
+    });
+
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      [
+        'comment',
+        'add',
+        'WL-ABC',
+        '--comment',
+        expect.stringContaining('/skill:plan WL-ABC'),
+        '--author',
+        'herdr-downtime',
+        '--json',
+      ],
+      expect.anything(),
+    );
+  });
+
+  it('writes a JSONL entry to .worklog/downtime-dispatches.log under the cwd', async () => {
+    setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.recordDispatch({
+      itemId: 'WL-ABC',
+      kind: 'intake',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+      cwd,
+    });
+
+    const raw = readFileSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), 'utf8');
+    const lines = raw.split('\n').filter((l) => l.trim() !== '');
+    expect(lines).toHaveLength(1);
+    const entry = JSON.parse(lines[0]);
+    expect(entry.itemId).toBe('WL-ABC');
+    expect(entry.kind).toBe('intake');
+    expect(entry.dispatchedAt).toBe('2026-01-01T00:00:00.000Z');
+  });
+
+  it('is fail-closed when wl comment add fails (no throw, dispatch unaffected)', async () => {
+    setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+
+    await expect(
+      deps.recordDispatch({
+        itemId: 'WL-ABC',
+        kind: 'plan',
+        dispatchedAt: '2026-01-01T00:00:00.000Z',
+        cwd: '/repo',
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('is fail-closed when the log write fails (e.g. .worklog path is a file)', async () => {
+    setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
+    const cwd = makeTempDir();
+    writeFileSync(join(cwd, '.worklog'), 'not a directory', 'utf8');
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await expect(
+      deps.recordDispatch({
+        itemId: 'WL-ABC',
+        kind: 'plan',
+        dispatchedAt: '2026-01-01T00:00:00.000Z',
+        cwd,
+      }),
+    ).resolves.toBeUndefined();
   });
 });

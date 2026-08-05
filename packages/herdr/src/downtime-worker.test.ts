@@ -30,6 +30,7 @@ import {
   BLOCKED_QUESTIONS_INSTRUCTION,
   parseNextItemOutput,
   skillKindFromPrompt,
+  buildDowntimeDispatchComment,
   clampDowntimePollInterval,
   clampDowntimeIdleThresholdMs,
   clampDowntimeRequiredFreeSlots,
@@ -59,6 +60,7 @@ function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     getNextItem: vi.fn().mockResolvedValue(null),
     claimItem: vi.fn().mockResolvedValue(undefined),
     spawnAgentPane: vi.fn().mockResolvedValue(undefined),
+    recordDispatch: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -247,6 +249,84 @@ describe('dispatch selection', () => {
     expect(outcome.reason).toBe('no-candidate');
     expect(deps.claimItem).not.toHaveBeenCalled();
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+});
+
+// ── Dispatch audit trail (WL-0MSGPI4AR000YOK8) ────────────────────────
+
+describe('dispatch audit trail', () => {
+  it('records a plan dispatch with item id, kind, timestamp and cwd', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        id: 'WL-ABC',
+        title: 'Some task',
+        stage: 'intake_complete',
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.recordDispatch).toHaveBeenCalledTimes(1);
+    const event = (deps.recordDispatch as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(event.itemId).toBe('WL-ABC');
+    expect(event.kind).toBe('plan');
+    expect(event.cwd).toBe('/repo');
+    expect(Number.isNaN(Date.parse(event.dispatchedAt))).toBe(false);
+  });
+
+  it('records an intake fallback dispatch', async () => {
+    const deps = makeDeps({
+      getNextItem: vi
+        .fn()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ id: 'WL-DEF', title: 'An idea', stage: 'idea' }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.kind).toBe('intake');
+    const event = (deps.recordDispatch as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(event.itemId).toBe('WL-DEF');
+    expect(event.kind).toBe('intake');
+  });
+
+  it('does not record when nothing is dispatched', async () => {
+    const deps = makeDeps();
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+  });
+
+  it('keeps the dispatch successful when recordDispatch fails (audit never blocks work)', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        id: 'WL-ABC',
+        title: 'Some task',
+        stage: 'intake_complete',
+      }),
+      recordDispatch: vi.fn().mockRejectedValue(new Error('audit boom')),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+  });
+});
+
+describe('buildDowntimeDispatchComment', () => {
+  it('states the skill, item id, and ISO timestamp', () => {
+    const comment = buildDowntimeDispatchComment('WL-ABC', 'plan', '2026-01-01T00:00:00.000Z');
+    expect(comment).toContain('/skill:plan WL-ABC');
+    expect(comment).toContain('2026-01-01T00:00:00.000Z');
+    expect(comment).toContain('herdr downtime worker');
+  });
+
+  it('sanitizes newlines out of the embedded title', () => {
+    const comment = buildDowntimeDispatchComment('WL-ABC', 'intake', '2026-01-01T00:00:00.000Z', 'multi\nline\rtitle');
+    expect(comment).toContain('multi line title');
+    expect(comment).not.toMatch(/[\r\n]/);
   });
 });
 

@@ -44,9 +44,12 @@ import {
   type DowntimeWorkerDeps,
   type DowntimeStage,
   type DowntimeCandidate,
+  type DowntimeDispatchEvent,
   type DowntimeSpawn,
   defaultDowntimeSpawn,
+  buildDowntimeDispatchComment,
 } from './downtime-worker.js';
+import { appendDowntimeLogEntry } from './downtime-log.js';
 
 // Resolve path to the send-to-pi.sh script (relative to this source file)
 // At runtime (tsx or dist), __dirname equivalent from import.meta.url
@@ -240,6 +243,33 @@ export function createDowntimeDeps(
         { cwd: opts.cwd },
         spawnFn,
       );
+    },
+    async recordDispatch(event: DowntimeDispatchEvent): Promise<void> {
+      // 1. Durable trail: a comment on the item itself (survives wl sync).
+      try {
+        await getExecFileAsync()(
+          'wl',
+          [
+            'comment',
+            'add',
+            event.itemId,
+            '--comment',
+            buildDowntimeDispatchComment(event.itemId, event.kind, event.dispatchedAt),
+            '--author',
+            'herdr-downtime',
+            '--json',
+          ],
+          { timeout: 5000 },
+        );
+      } catch {
+        // fail-closed: audit logging must never crash the worker
+      }
+      // 2. Rolling local log (bounded JSONL under <cwd>/.worklog).
+      try {
+        await appendDowntimeLogEntry(event.cwd, JSON.stringify(event));
+      } catch {
+        // fail-closed
+      }
     },
   };
 }
