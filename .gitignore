@@ -174,3 +174,6 @@ tmp/
 # Ignore generated test timings from local test runs
 test-timings.json
 __pycache__/
+
+# Effort-and-risk skill output dumps written to repo root
+final-WL-*.json

@@ -24,7 +24,7 @@ remediation plan are documented here.
 | # | Source | Spawn rate (per source) | wl commands | Status |
 |---|--------|------------------------|-------------|--------|
 | 1 | Pi extension browse selection widget (`packages/tui/extensions/Worklog/lib/browse.ts`) | every 5s while active (4–5 spawns/tick) | `wl next`, `wl list`, `wl sync --if-idle` | **FIXED** (idle-gated + pane-focus-gated, `b8840d99`) |
-| 2 | Herdr worklist pane (`packages/herdr/src/worklist.ts` + `fetcher.ts`) | every `refreshIntervalMs` (user settings: **1500 ms!**) — 4 spawns/tick | `wl next`, `wl list --priority critical --root-only`, `wl list --status completed --stage in_review --root-only`, `wl list --status open,in-progress,blocked` | Gated in code (`b8840d99`) but **running panes pre-date the fix** + **settings override too aggressive** |
+| 2 | Herdr worklist pane (`packages/herdr/src/worklist.ts` + `fetcher.ts`) | every `refreshIntervalMs` (user settings: **1500 ms!**) — 4 spawns/tick | `wl next`, `wl list --priority critical --root-only`, `wl list --status completed --stage in_review --root-only`, `wl list --status open,in-progress,blocked` | Gated in code (`b8840d99`) but **running panes pre-date the fix** + **settings override too aggressive**; refresh cycles single-flight since WL-0MSBVYBMD004007C |
 | 3 | Test harness `execAsync`/`execWithInput` (`tests/cli/cli-helpers.ts`) | per-test; leaked processes hang indefinitely | `wl create`, `wl show`, `wl update`, `wl init` | **FIXED** (process-tree kill + timeout, WL-0MSB447TJ000R3N8) |
 | 4 | Agent-invoked `wl` queries via the `bash` tool (skills: heartbeat, implement, intake, plan, cleanup) | per-query, sequential | `wl next`, `wl list`, `wl sync`, `wl show`, `wl update`, `wl comment` | Acceptable; bounded by agent activity |
 | 5 | `wl sync --if-idle` auto-sync timers (herdr panes / pi widget) | every 60s per visible pane | `wl sync --if-idle` | Gated with the pollers; lock-aware (`--if-idle`) |
@@ -112,6 +112,10 @@ Two aggravating factors were found:
    load (slow `wl` due to SQLite/lock contention), refresh cycles overlap and
    processes pile up. (`doSync` has a single-flight guard via
    `--if-idle`/`createSyncTimer`, but `doRefresh` does not.)
+   **FIXED — WL-0MSBVYBMD004007C:** `doRefresh` now carries a per-pane
+   in-flight guard: a tick that fires while the previous refresh cycle is
+   still awaiting its `wl` calls is skipped (single-flight), and the cadence
+   resumes on the next tick.
 
 ### 2.3 Test-harness orphans (FIXED — WL-0MSB447TJ000R3N8)
 

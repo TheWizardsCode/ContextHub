@@ -196,7 +196,8 @@ describe('form command dispatch — single onCommand per submission (WL-0MSAL0RN
     // Regression: the form's onSubmit callback AND the onData 'submitted'
     // branch both used to call onCommand, spawning TWO pi panes.
     expect(onCommand).toHaveBeenCalledTimes(1);
-    expect(onCommand).toHaveBeenCalledWith('/intake\nMy new item\nPriority: medium');
+    // The registry entry carries no model, so the second arg is undefined.
+    expect(onCommand).toHaveBeenCalledWith('/intake\nMy new item\nPriority: medium', undefined);
 
     dataHandler?.(Buffer.from('q'));
     await p;
@@ -224,6 +225,107 @@ describe('form command dispatch — single onCommand per submission (WL-0MSAL0RN
 
     expect(mockShowToast).toHaveBeenCalledTimes(1);
     expect(mockShowToast).toHaveBeenCalledWith('Sent', expect.objectContaining({ body: expect.stringContaining('/intake') }));
+
+    dataHandler?.(Buffer.from('q'));
+    await p;
+  });
+});
+
+describe('model propagation through TUI dispatch (WL-0MSD48ZFC0043AO3)', () => {
+  const createModelRegistry = () => new ShortcutRegistry([
+    {
+      chord: ['i'],
+      command: '/skill:implement <id>',
+      view: 'both',
+      label: 'implement',
+      model: 'code',
+      stages: ['intake_complete', 'plan_complete', 'in_progress'],
+    },
+    {
+      chord: ['a', 'a'],
+      command: '/skill:audit <id>',
+      view: 'both',
+      label: 'audit automatic',
+      model: 'plan',
+      stages: ['in_review'],
+    },
+  ]);
+
+  it('passes the shortcut model to onCommand on single-key dispatch', async () => {
+    const onCommand = vi.fn();
+    const items = [{ id: 'WL-001', title: 'Item', status: 'open', stage: 'plan_complete' }];
+    const p = runWorklistTui(async () => items, items, createModelRegistry(), {
+      autoRefresh: false,
+      autoSync: false,
+      showHelpText: false,
+      onCommand,
+    });
+    await tick();
+
+    dataHandler?.(Buffer.from('i'));
+    await tick();
+    await tick();
+
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement WL-001', 'code');
+
+    dataHandler?.(Buffer.from('q'));
+    await p;
+  });
+
+  it('passes the shortcut model to onCommand on multi-key chord dispatch', async () => {
+    const onCommand = vi.fn();
+    const items = [{ id: 'WL-001', title: 'Item', status: 'open', stage: 'in_review' }];
+    const p = runWorklistTui(async () => items, items, createModelRegistry(), {
+      autoRefresh: false,
+      autoSync: false,
+      showHelpText: false,
+      onCommand,
+    });
+    await tick();
+
+    dataHandler?.(Buffer.from('a'));
+    await tick();
+    dataHandler?.(Buffer.from('a'));
+    await tick();
+    await tick();
+
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit WL-001', 'plan');
+
+    dataHandler?.(Buffer.from('q'));
+    await p;
+  });
+
+  it('passes the shortcut model to onCommand after form submission', async () => {
+    const onCommand = vi.fn();
+    const registry = new ShortcutRegistry([
+      {
+        chord: ['c'],
+        command: '/intake <description>',
+        view: 'both',
+        description: 'Create a new work item.',
+        model: 'plan',
+      },
+    ]);
+    const p = runWorklistTui(async () => [], [], registry, {
+      autoRefresh: false,
+      autoSync: false,
+      showHelpText: false,
+      onCommand,
+    });
+    await tick();
+
+    // 'c' opens the Command Input form (unknown identifier <description>)
+    dataHandler?.(Buffer.from('c'));
+    await tick();
+    for (const ch of 'My item') {
+      dataHandler?.(Buffer.from(ch));
+      await tick();
+    }
+    dataHandler?.(Buffer.from('\r'));
+    await tick();
+    await tick();
+
+    expect(onCommand).toHaveBeenCalledWith('/intake My item', 'plan');
 
     dataHandler?.(Buffer.from('q'));
     await p;

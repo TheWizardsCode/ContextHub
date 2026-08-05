@@ -17,11 +17,18 @@ import {
 
 describe('extractIdentifiers', () => {
   it('extracts a single identifier', () => {
-    expect(extractIdentifiers('!!wl update <id> --title <title>')).toEqual(['id', 'title']);
+    expect(extractIdentifiers('!!wl update <id> --title <title>')).toEqual([
+      { name: 'id', default: '' },
+      { name: 'title', default: '' },
+    ]);
   });
 
   it('extracts multiple identifiers', () => {
-    expect(extractIdentifiers('!!wl update <id> --status <status> --stage <stage>')).toEqual(['id', 'status', 'stage']);
+    expect(extractIdentifiers('!!wl update <id> --status <status> --stage <stage>')).toEqual([
+      { name: 'id', default: '' },
+      { name: 'status', default: '' },
+      { name: 'stage', default: '' },
+    ]);
   });
 
   it('returns empty array for no identifiers', () => {
@@ -33,7 +40,10 @@ describe('extractIdentifiers', () => {
   });
 
   it('extracts identifiers with underscores', () => {
-    expect(extractIdentifiers('<my_var> <another_var>')).toEqual(['my_var', 'another_var']);
+    expect(extractIdentifiers('<my_var> <another_var>')).toEqual([
+      { name: 'my_var', default: '' },
+      { name: 'another_var', default: '' },
+    ]);
   });
 
   it('ignores non-matching patterns (no angle brackets)', () => {
@@ -41,15 +51,48 @@ describe('extractIdentifiers', () => {
   });
 
   it('handles mixed identifiers and regular text', () => {
-    expect(extractIdentifiers('/cmd <id> --opt <value> && echo done')).toEqual(['id', 'value']);
+    expect(extractIdentifiers('/cmd <id> --opt <value> && echo done')).toEqual([
+      { name: 'id', default: '' },
+      { name: 'value', default: '' },
+    ]);
   });
 
   it('deduplicates identifiers', () => {
-    expect(extractIdentifiers('<id> --title <id>')).toEqual(['id']);
+    expect(extractIdentifiers('<id> --title <id>')).toEqual([{ name: 'id', default: '' }]);
   });
 
   it('treats <reason> as an identifier', () => {
-    expect(extractIdentifiers("!!wl comment add <id> --body '<reason>'")).toEqual(['id', 'reason']);
+    expect(extractIdentifiers("!!wl comment add <id> --body '<reason>'")).toEqual([
+      { name: 'id', default: '' },
+      { name: 'reason', default: '' },
+    ]);
+  });
+
+  it('captures inline defaults from the template', () => {
+    expect(
+      extractIdentifiers("wl create <description> --priority <priority default='medium'>"),
+    ).toEqual([
+      { name: 'description', default: '' },
+      { name: 'priority', default: 'medium' },
+    ]);
+  });
+
+  it('captures double-quoted inline defaults', () => {
+    expect(
+      extractIdentifiers('wl update <id> --status <status default="in_progress">'),
+    ).toEqual([
+      { name: 'id', default: '' },
+      { name: 'status', default: 'in_progress' },
+    ]);
+  });
+
+  it('captures defaults containing spaces', () => {
+    expect(
+      extractIdentifiers('wl update <id> --title <title default="Default value.">'),
+    ).toEqual([
+      { name: 'id', default: '' },
+      { name: 'title', default: 'Default value.' },
+    ]);
   });
 });
 
@@ -69,11 +112,16 @@ describe('getUnknownIdentifiers', () => {
   });
 
   it('returns unknown identifiers excluding known ones', () => {
-    expect(getUnknownIdentifiers('!!wl update <id> --title <title>')).toEqual(['title']);
+    expect(getUnknownIdentifiers('!!wl update <id> --title <title>')).toEqual([
+      { name: 'title', default: '' },
+    ]);
   });
 
   it('returns multiple unknown identifiers', () => {
-    expect(getUnknownIdentifiers('!!wl update <id> --status <status> --stage <stage>')).toEqual(['status', 'stage']);
+    expect(getUnknownIdentifiers('!!wl update <id> --status <status> --stage <stage>')).toEqual([
+      { name: 'status', default: '' },
+      { name: 'stage', default: '' },
+    ]);
   });
 
   it('returns empty for no identifiers at all', () => {
@@ -81,7 +129,24 @@ describe('getUnknownIdentifiers', () => {
   });
 
   it('handles all unknown (no known identifiers)', () => {
-    expect(getUnknownIdentifiers('!!wl create --title <title>')).toEqual(['title']);
+    expect(getUnknownIdentifiers('!!wl create --title <title>')).toEqual([
+      { name: 'title', default: '' },
+    ]);
+  });
+
+  it('keeps inline defaults on unknown identifiers', () => {
+    expect(
+      getUnknownIdentifiers('wl create <description> --priority <priority default="medium">'),
+    ).toEqual([
+      { name: 'description', default: '' },
+      { name: 'priority', default: 'medium' },
+    ]);
+  });
+
+  it('excludes known identifiers even when they carry a default', () => {
+    expect(getUnknownIdentifiers('wl update <id default="WL-001"> --title <title>')).toEqual([
+      { name: 'title', default: '' },
+    ]);
   });
 });
 
@@ -114,6 +179,30 @@ describe('substituteIdentifiers', () => {
     const result = substituteIdentifiers('!!wl search test', {});
     expect(result).toBe('!!wl search test');
   });
+
+  it('uses the inline default when no explicit value is provided', () => {
+    const result = substituteIdentifiers(
+      'wl create <description> --priority <priority default="medium">',
+      { description: 'A new item' },
+    );
+    expect(result).toBe('wl create A new item --priority medium');
+  });
+
+  it('gives explicit values precedence over inline defaults', () => {
+    const result = substituteIdentifiers(
+      'wl create <description> --priority <priority default="medium">',
+      { description: 'A new item', priority: 'high' },
+    );
+    expect(result).toBe('wl create A new item --priority high');
+  });
+
+  it('prefers an explicit empty value over the inline default', () => {
+    const result = substituteIdentifiers(
+      'wl update <id> --status <status default="in_progress">',
+      { id: 'WL-001', status: '' },
+    );
+    expect(result).toBe('wl update WL-001 --status ');
+  });
 });
 
 // ── FormState ─────────────────────────────────────────────────────────
@@ -126,7 +215,7 @@ describe('FormState', () => {
       const state = new FormState(
         '!!wl update <id> --title <title> --status <status>',
         'Update the title and status',
-        ['title', 'status'],
+        [{ name: 'title', default: '' }, { name: 'status', default: '' }],
         onSubmit,
         onCancel,
       );
@@ -143,11 +232,30 @@ describe('FormState', () => {
       const state = new FormState(
         '!!wl update <id> --title <title>',
         '',
-        ['title'],
+        [{ name: 'title', default: '' }],
         onSubmit,
         onCancel,
       );
       expect(state.description).toBe('!!wl update <id> --title <title>');
+    });
+
+    it('pre-fills field values with inline defaults', () => {
+      const onSubmit = vi.fn();
+      const onCancel = vi.fn();
+      const state = new FormState(
+        'wl create <description> --priority <priority default="medium">',
+        'Create a new work item',
+        [
+          { name: 'description', default: '' },
+          { name: 'priority', default: 'medium' },
+        ],
+        onSubmit,
+        onCancel,
+      );
+      expect(state.fields[0].value).toBe('');
+      expect(state.fields[1].value).toBe('medium');
+      // Submitting without edits keeps the default
+      expect(state.getResult()).toBe('wl create  --priority medium');
     });
   });
 
@@ -158,7 +266,7 @@ describe('FormState', () => {
       const state = new FormState(
         '!!wl update <id> --title <title>',
         'Update title',
-        ['title'],
+        [{ name: 'title', default: '' }],
         onSubmit,
         onCancel,
       );
@@ -171,7 +279,7 @@ describe('FormState', () => {
     it('ignores control characters in field value', () => {
       const onSubmit = vi.fn();
       const onCancel = vi.fn();
-      const state = new FormState('cmd <title>', '', ['title'], onSubmit, onCancel);
+      const state = new FormState('cmd <title>', '', [{ name: 'title', default: '' }], onSubmit, onCancel);
       state.handleInput('\x01'); // Ctrl+A
       expect(state.fields[0].value).toBe('');
     });
@@ -181,7 +289,7 @@ describe('FormState', () => {
     it('deletes last character from active field', () => {
       const onSubmit = vi.fn();
       const onCancel = vi.fn();
-      const state = new FormState('cmd <title>', '', ['title'], onSubmit, onCancel);
+      const state = new FormState('cmd <title>', '', [{ name: 'title', default: '' }], onSubmit, onCancel);
       state.handleInput('A');
       state.handleInput('B');
       state.handleInput('C');
@@ -193,7 +301,7 @@ describe('FormState', () => {
     it('does nothing when field is empty', () => {
       const onSubmit = vi.fn();
       const onCancel = vi.fn();
-      const state = new FormState('cmd <title>', '', ['title'], onSubmit, onCancel);
+      const state = new FormState('cmd <title>', '', [{ name: 'title', default: '' }], onSubmit, onCancel);
       state.handleInput('\x7f');
       expect(state.fields[0].value).toBe('');
     });
@@ -203,7 +311,7 @@ describe('FormState', () => {
     it('tab advances to next field', () => {
       const onSubmit = vi.fn();
       const onCancel = vi.fn();
-      const state = new FormState('cmd <a> <b>', '', ['a', 'b'], onSubmit, onCancel);
+      const state = new FormState('cmd <a> <b>', '', [{ name: 'a', default: '' }, { name: 'b', default: '' }], onSubmit, onCancel);
       expect(state.activeFieldIndex).toBe(0);
       state.handleInput('\t');
       expect(state.activeFieldIndex).toBe(1);
@@ -212,7 +320,7 @@ describe('FormState', () => {
     it('tab wraps around from last field to first', () => {
       const onSubmit = vi.fn();
       const onCancel = vi.fn();
-      const state = new FormState('cmd <a> <b>', '', ['a', 'b'], onSubmit, onCancel);
+      const state = new FormState('cmd <a> <b>', '', [{ name: 'a', default: '' }, { name: 'b', default: '' }], onSubmit, onCancel);
       state.activeFieldIndex = 1;
       state.handleInput('\t');
       expect(state.activeFieldIndex).toBe(0);
@@ -223,7 +331,7 @@ describe('FormState', () => {
     it('calls onSubmit with substituted command when enter pressed', () => {
       const onSubmit = vi.fn();
       const onCancel = vi.fn();
-      const state = new FormState('!!wl update <id> --title <title>', '', ['title'], onSubmit, onCancel);
+      const state = new FormState('!!wl update <id> --title <title>', '', [{ name: 'title', default: '' }], onSubmit, onCancel);
       state.fields[0].value = 'My Title';
       state.handleInput('\r');
       expect(onSubmit).toHaveBeenCalledWith(
@@ -235,7 +343,7 @@ describe('FormState', () => {
     it('submits with empty field values', () => {
       const onSubmit = vi.fn();
       const onCancel = vi.fn();
-      const state = new FormState('!!wl update <id> --title <title>', '', ['title'], onSubmit, onCancel);
+      const state = new FormState('!!wl update <id> --title <title>', '', [{ name: 'title', default: '' }], onSubmit, onCancel);
       state.handleInput('\r');
       expect(onSubmit).toHaveBeenCalledWith(
         '!!wl update <id> --title '
@@ -245,7 +353,7 @@ describe('FormState', () => {
     it('calls onSubmit with ID already resolved', () => {
       const onSubmit = vi.fn();
       const onCancel = vi.fn();
-      const state = new FormState('!!wl update <id> --title <title> --status <status>', '', ['title', 'status'], onSubmit, onCancel);
+      const state = new FormState('!!wl update <id> --title <title> --status <status>', '', [{ name: 'title', default: '' }, { name: 'status', default: '' }], onSubmit, onCancel);
       state.fields[0].value = 'New Title';
       state.fields[1].value = 'completed';
       state.handleInput('\r');
@@ -259,7 +367,7 @@ describe('FormState', () => {
     it('calls onCancel when escape pressed', () => {
       const onSubmit = vi.fn();
       const onCancel = vi.fn();
-      const state = new FormState('cmd <title>', '', ['title'], onSubmit, onCancel);
+      const state = new FormState('cmd <title>', '', [{ name: 'title', default: '' }], onSubmit, onCancel);
       state.handleInput('\x1b');
       expect(onCancel).toHaveBeenCalled();
       expect(onSubmit).not.toHaveBeenCalled();
@@ -270,7 +378,7 @@ describe('FormState', () => {
     it('arrow up goes to previous field', () => {
       const onSubmit = vi.fn();
       const onCancel = vi.fn();
-      const state = new FormState('cmd <a> <b>', '', ['a', 'b'], onSubmit, onCancel);
+      const state = new FormState('cmd <a> <b>', '', [{ name: 'a', default: '' }, { name: 'b', default: '' }], onSubmit, onCancel);
       state.activeFieldIndex = 1;
       state.handleInput('\x1b[A');
       expect(state.activeFieldIndex).toBe(0);
@@ -279,7 +387,7 @@ describe('FormState', () => {
     it('arrow down goes to next field', () => {
       const onSubmit = vi.fn();
       const onCancel = vi.fn();
-      const state = new FormState('cmd <a> <b>', '', ['a', 'b'], onSubmit, onCancel);
+      const state = new FormState('cmd <a> <b>', '', [{ name: 'a', default: '' }, { name: 'b', default: '' }], onSubmit, onCancel);
       state.handleInput('\x1b[B');
       expect(state.activeFieldIndex).toBe(1);
     });
@@ -287,7 +395,7 @@ describe('FormState', () => {
     it('arrow up wraps from first to last', () => {
       const onSubmit = vi.fn();
       const onCancel = vi.fn();
-      const state = new FormState('cmd <a> <b> <c>', '', ['a', 'b', 'c'], onSubmit, onCancel);
+      const state = new FormState('cmd <a> <b> <c>', '', [{ name: 'a', default: '' }, { name: 'b', default: '' }, { name: 'c', default: '' }], onSubmit, onCancel);
       state.handleInput('\x1b[A');
       expect(state.activeFieldIndex).toBe(2);
     });
@@ -295,7 +403,7 @@ describe('FormState', () => {
     it('arrow down wraps from last to first', () => {
       const onSubmit = vi.fn();
       const onCancel = vi.fn();
-      const state = new FormState('cmd <a> <b>', '', ['a', 'b'], onSubmit, onCancel);
+      const state = new FormState('cmd <a> <b>', '', [{ name: 'a', default: '' }, { name: 'b', default: '' }], onSubmit, onCancel);
       state.activeFieldIndex = 1;
       state.handleInput('\x1b[B');
       expect(state.activeFieldIndex).toBe(0);
@@ -309,7 +417,7 @@ describe('FormState', () => {
       const state = new FormState(
         'cmd <title> <status>',
         'My Description',
-        ['title', 'status'],
+        [{ name: 'title', default: '' }, { name: 'status', default: '' }],
         onSubmit,
         onCancel,
       );
@@ -324,7 +432,7 @@ describe('FormState', () => {
       const state = new FormState(
         'cmd <title>',
         'Update the title of the work item',
-        ['title'],
+        [{ name: 'title', default: '' }],
         onSubmit,
         onCancel,
       );
@@ -338,7 +446,7 @@ describe('FormState', () => {
       const state = new FormState(
         'cmd <title> <status>',
         'Description',
-        ['title', 'status'],
+        [{ name: 'title', default: '' }, { name: 'status', default: '' }],
         onSubmit,
         onCancel,
       );
@@ -353,7 +461,7 @@ describe('FormState', () => {
       const state = new FormState(
         'cmd <title>',
         'Description',
-        ['title'],
+        [{ name: 'title', default: '' }],
         onSubmit,
         onCancel,
       );
@@ -368,7 +476,7 @@ describe('FormState', () => {
       const state = new FormState(
         'cmd <title>',
         'Description',
-        ['title'],
+        [{ name: 'title', default: '' }],
         onSubmit,
         onCancel,
       );
@@ -384,7 +492,7 @@ describe('FormState', () => {
       const state = new FormState(
         'cmd <title> <status>',
         'Description',
-        ['title', 'status'],
+        [{ name: 'title', default: '' }, { name: 'status', default: '' }],
         onSubmit,
         onCancel,
       );
@@ -401,7 +509,7 @@ describe('FormState', () => {
       const state = new FormState(
         '!!wl update <id> --title <title>',
         '',
-        ['title'],
+        [{ name: 'title', default: '' }],
         onSubmit,
         onCancel,
       );

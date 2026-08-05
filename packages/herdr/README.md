@@ -10,11 +10,17 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The detail view metadata section additionally shows the review status (❌ needs review / ✅ reviewed) and the last audit timestamp.
 - **Chord shortcuts** — Multi-key chord sequences provide quick actions like updating priorities, stage/status, title, closing/deleting items, running workflows, and toggling review status (configurable via `shortcuts.json`)
 - **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is executed **visibly in a new herdr pane** (see `scripts/run-in-pane.sh`) so the user sees the command line and its output; the wrapper keeps the pane's process alive so the pane stays open for inspection — dismiss it with Enter or close it with `prefix+x`
+- **Command input form** — When a chord command contains unknown `<identifier>` placeholders (e.g. `!!wl update <id> --status <status> --stage <stage>`), the plugin shows a modal input form so you can fill in the values before the command runs. Known identifiers like `<id>` are still auto-substituted with the selected item's ID. The dialog is 80% of the pane width (40-column minimum), text wraps at the inner width, and the box grows downward as content is entered. See [Command input form](#command-input-form).
 - **Keyboard navigation** — Arrow keys or j/k to navigate (wraps at list boundaries), Page Up/Down, g/G for first/last, Enter to select, Escape to go back
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text.
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
 - **Quit** — Press `q` to exit
+- **Metadata panel** — The bottom portion of the list view (roughly 20–40% of the pane height, responsive to terminal size) is reserved for the selected item's metadata: ID, title, status, stage, priority, type, risk, effort, tags, audit info, and more. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
+- **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
+- **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` — no custom stage values). Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
+- **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, headings/lists/code shown) as a preview. See [Markdown viewer](#markdown-viewer).
+- **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. See [Inline note links](#inline-note-links).
 - **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
 
 ## Requirements
@@ -116,7 +122,7 @@ The plugin respects the following environment variables:
 Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings include:
 
 - `autoRefresh` — Enable periodic auto-refresh of the work item list (default: `true`)
-- `refreshIntervalMs` — Interval in ms between auto-refreshes (default: `30000`)
+- `refreshIntervalMs` — Interval in ms between auto-refreshes (default: `30000`). Refresh cycles are single-flight: a tick that fires while the previous refresh is still awaiting its `wl` calls is skipped (no overlapping refresh cycles / wl spawn bursts from a pane), and the cadence resumes on the next tick (WL-0MSBVYBMD004007C).
 - `autoSync` — Enable periodic background `wl sync` before auto-refreshes (default: `true`). Background syncs use a single-flight in-process guard and pass `wl sync --if-idle`, so overlapping syncs (from this pane or other panes/TUI instances) are skipped instead of piling up — preventing wl sync lock storms (WL-0MSAB7ZUC004SK7E).
 - `syncIntervalMs` — Interval in ms between background `wl sync` calls (default: `60000`, minimum: `60000`; set to `0` to disable auto-sync)
 - `browseItemCount` — Max number of non-mandatory items to show in the list (default: `10`, range `1`–`50`; critical and completed/in_review items are always shown regardless)
@@ -141,7 +147,13 @@ process churn and memory pressure (WL-0MSB1N0HB0007N6N).
   fail-open), auto-refresh/auto-sync keep their existing intervals (30s /
   60s defaults).
 - **Header indicator** — while the pane is hidden the list header shows
-  `[paused — hidden]` so operators can tell gating is active.
+  `[paused — hidden]` so operators can tell gating is active; the indicator
+  clears as soon as the list refreshes after the pane becomes visible.
+- **Immediate refresh on resume** — while the pane is hidden a lightweight
+  resume poll (2s interval, `herdr pane get` only — never `wl`) watches for
+  the hidden → visible transition; the moment the tab regains focus the list
+  re-fetches immediately (with a "Refreshed" notification) instead of waiting
+  for the next 30s tick, then the normal cadence resumes.
 - **Never gated** — manual actions (navigation, `S` manual sync, shortcut
   chords, the initial data load) work regardless of pane visibility.
 - **Shared visibility check** — the `PollGate` TTL memoizer (~2s) makes the
@@ -177,6 +189,94 @@ show only items matching the selected stage.
 The "top N of M" header reflects the **actual displayed count** (N), which
 may exceed `browseItemCount` when the mandatory set is large.
 
+## Metadata panel
+
+The list view reserves the bottom rows of the pane for a metadata panel
+showing the **selected** item's fields. The panel is always on: the list
+area shrinks to `rows - 1 - panelHeight`, and `panelHeight` scales linearly
+from 20% of the pane height (on short panes) up to 40% (on tall panes),
+clamped to a minimum of 3 rows so it is always usable.
+
+- The panel shows the item ID as a header separator, followed by its
+  metadata (status, stage, priority, type, risk, effort, children/parent
+  counts, tags, GitHub issue number, created/updated timestamps, and audit
+  state).
+- For items whose stage is `in_progress`, the panel additionally shows
+  **`Last command:`** — the most recent command the plugin dispatched
+  against that item (`none yet` until the first dispatch).
+- The panel scrolls **independently** of the list: press `m` to scroll the
+  panel down and `M` to scroll it up. A `[m/M scroll N%]` indicator appears
+  on the last panel line whenever the content overflows. Navigating the
+  list, filtering, or refreshing resets the panel scroll so the top of the
+  panel is always visible again.
+
+## Stage grouping
+
+Work items are grouped by their Worklog **stage** using the standard
+lifecycle stages only — `idea`, `intake_complete`, `plan_complete`,
+`in_progress`, `in_review`, `done`. No custom stage values are required for
+grouping, so podcast episode items group exactly as their frontmatter
+`pipeline_stage` maps 1:1 onto the Worklog stages (PRD §7.2). Groups render
+in the canonical order (Critical → Group N → Idea → Other → In Review) with
+group separators in the list; stage changes re-group items on the next
+refresh.
+
+## Markdown viewer
+
+When a work item's description carries a `Key Files:` path to a markdown
+document (e.g. a podcast episode `.podcast.md`), the **detail view** renders
+that file with a generic markdown viewer instead of showing only the raw
+description. The viewer:
+
+- skips the YAML frontmatter block;
+- renders ATX headings, bullet lists, fenced code blocks, and paragraphs;
+- is preview-only (no notes editor);
+- falls back to the raw description when the file is missing/unreadable.
+
+The rendered lines appear under an `Episode file (md viewer)` heading in the
+detail view, scrollable with the usual `↑↓/j:k` keys.
+
+## Inline note links
+
+Inline `[NOTE <id>: ...]` review-note markers (PRD §7.1) — where `<id>` is
+the Worklog note-child work item id — are rendered as **clickable links** to
+the note work items: the marker is displayed as `<id>↗` and the note text is
+never shown in the viewer (notes are internal review notes, not dialogue).
+This applies to both the description section and the markdown viewer in the
+detail view.
+
+## Command log
+
+Every command the plugin dispatches against a work item is recorded in a
+local JSON log so the panel (and tools) can show what was last run against
+an item. Recording is best-effort: it happens **before** the command is
+executed (a downstream failure never skips the entry) and a log failure
+never breaks dispatch.
+
+- **What is recorded** — Any command routed through the plugin's dispatch
+  paths (`dispatchChordCommand` / `resolveAndRouteCommand`, single-key
+  shortcuts, and form submissions) that carries a work item ID, either via
+  `<id>` substitution or as an explicit ID token in the command text.
+- **What is not recorded** — Commands without an item ID (e.g. plain shell
+  commands), commands dispatched directly through the external `wl` CLI
+  outside the plugin, and failed `<id>` resolutions (no item selected).
+- **Log file** — `~/.config/herdr/worklog-command-log.json`. Per item the
+  log keeps the most recent `MAX_ENTRIES_PER_ITEM` (50) entries. The file
+  is written atomically (temp file + rename); missing, empty, or corrupt
+  JSON degrades gracefully to an empty log.
+
+## Command input form
+
+When a chord shortcut resolves to a command that contains **unknown identifiers** — angle-bracket placeholders other than the known `<id>` (e.g. `--status <status>`, `--stage <stage>`, `--reason <reason>`) — the plugin displays a modal form overlay instead of dispatching the command directly:
+
+- One labeled input field per unknown identifier; `Tab`/`↑`/`↓` navigate between fields, `Enter` submits, `Esc` cancels.
+- Identifiers may declare an inline default: `<priority default="medium">`. The field is pre-filled with the default (which is used verbatim if you submit without editing it), and you can clear it or type over it before submitting.
+- The active field shows a block cursor at the end of its value; the typed value is substituted into the command on submit (`<id>` remains auto-substituted with the selected item's ID).
+- The dialog width is **80% of the pane width** (clamped to a 40-column minimum and to the pane width minus borders), and stays horizontally centered.
+- The description and field values **wrap at the dialog's inner width**; as a value wraps to more lines the dialog **expands downward**, bounded by the terminal height so it never overflows the pane.
+
+Rendering is ANSI-aware: visible width is measured by stripping SGR escape sequences (no external width/wrap dependencies).
+
 ## Architecture
 
 ```
@@ -191,6 +291,9 @@ packages/herdr/
 │   ├── shortcuts.json      # Shortcut/chord definitions
 │   ├── icons.ts            # Icon and colour helpers
 │   ├── code-freeze.ts      # Code Freeze marker detection (fail-open)
+│   ├── form-dialog.ts      # Form state + rendering for parameter input (unknown <identifiers>)
+│   ├── md-viewer.ts        # Generic markdown viewer + inline [NOTE <id>: ...] link rendering
+│   ├── command-log.ts      # Command log: record/get last command per work item
 │   ├── settings.ts         # User settings management
 │   └── worklist.ts         # List state, rendering, keyboard handling, command output
 ├── scripts/
@@ -213,10 +316,14 @@ packages/herdr/
   - `!!`/`!` prefixed commands (shell-executed shortcuts such as audit approve/reject, priority updates, close/delete) are run **visibly in a new herdr pane** via `scripts/run-in-pane.sh` — the wrapper keeps the pane's process alive so the pane stays open (exit status reported; dismiss with Enter or close with `prefix+x`) so the user can inspect the command output.
   - Everything else is written to stdout with a `CMD:` prefix for the calling framework (Herdr) to execute.
 - **Pi agent dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are intercepted by the entry point and routed to a new pi agent pane. The `send-to-pi.sh` script splits the current pane to the right, creates a new pane, runs `pi` with the command as the initial prompt, and renames the pane to "Pi Agent". Agent commands are routed before any prefix handling, so they are unaffected by `!!`/`!` processing.
-- **Free-form prompts via `/prompt:`** — Commands starting with `/prompt:` are also routed to the agent pane, but the `/prompt:` routing prefix is stripped before `send-to-pi.sh` runs, so pi receives only the bare prompt text (e.g. `pi "Review the current work item and suggest next steps"`). This lets a chord shortcut open a new pi instance with an arbitrary injected prompt, not just a skill/workflow invocation. The `o-p` chord provides a default `Review the current work item and suggest next steps` prompt; edit `src/shortcuts.json` to bind your own prompt text to any free chord.
-- **Correct project directory for new panes** — Panes created by `send-to-pi.sh`, `open-pi-agent.sh`, and `run-in-pane.sh` are started in the correct project root. Herdr's `follow` CWD policy would otherwise inherit the source pane's CWD (the plugin directory), so each script resolves a target CWD (`--cwd` arg > `HERDR_RESOLVED_CWD` > `$PWD`) and passes it to `herdr pane split --cwd`. The entry point passes the resolved worklog root (`wlRoot`) so skills, `wl` commands, and relative paths operate on the user's project rather than the plugin's installation directory.
+- **Model selection per shortcut** — Each LLM-bound shortcut entry in `shortcuts.json` may carry an optional `model` field (a pi model pattern such as `plan`, `code`, or `author`). When the command is dispatched to the agent channel, `--model <pattern>` is forwarded to the spawned `pi` CLI (e.g. `pi --model code '/skill:implement <id>'`), so every workflow runs on an appropriately specialised model without manual model switching. Agent-bound entries without a `model` field default to `plan`; shell (`!!`) and `/wl` filter entries never carry a model and never receive a `--model` flag. The default mapping in `src/shortcuts.json`: `/plan`, `/intake`, `/skill:audit`, `/prompt:` → `plan`; `/skill:implement` → `code`.
+- **Free-form prompts via `/prompt:`** — Commands starting with `/prompt:` are also routed to the agent pane, but the `/prompt:` routing prefix is stripped before `send-to-pi.sh` runs, so pi receives only the bare prompt text (e.g. `pi "What are the audit gaps reported in the most recent audit for WL-123"`). This lets a chord shortcut open a new pi instance with an arbitrary injected prompt, not just a skill/workflow invocation. The `P-p` chord opens the command input form so you can type any free-form prompt, and `P-a` opens pi with `What are the audit gaps reported in the most recent audit for <id>` (the selected item's ID is substituted automatically). Edit `src/shortcuts.json` to bind your own prompt text to any free chord.
+- **Correct project directory for new panes** — Panes created by `send-to-pi.sh`, `open-pi-agent.sh`, and `run-in-pane.sh` are started in the correct project root. Herdr's `follow` CWD policy would otherwise inherit the source pane's CWD (the plugin directory), so each script resolves a target CWD (`--cwd` arg > `HERDR_RESOLVED_CWD` > `$PWD`) and applies it in both launch modes: `--no-resize` passes it to `herdr pane split --cwd`, and the default resize mode forwards it to `grid.py --cwd` which includes it in the `pane.split` RPC params. The entry point passes the resolved worklog root (`wlRoot`) so skills, `wl` commands, and relative paths operate on the user's project rather than the plugin's installation directory.
 - **`<id>` placeholder resolution** — Before output, any `<id>` placeholders in the resolved command are replaced with the currently selected work item's ID. If no item is selected and the command requires `<id>`, the command is silently dropped (graceful no-op).
-- **Chord shortcut system** — Multi-key chord sequences are defined in `shortcuts.json` and resolved via `ShortcutRegistry`. Chords can be filtered by view (list/detail) and stage.
+- **Parameter input form** — Chord commands containing unknown `<identifier>` placeholders open a modal input form (`form-dialog.ts`) before dispatch. The dialog renders at 80% of the pane width (40-column minimum, centered), wraps the description and field values at its inner content width, and expands downward as content wraps — bounded by the terminal height. Every content line is padded to exactly the border width so the box borders stay aligned at any pane width (see WL-0MSAKRBOC005T320).
+- **Chord shortcut system** — Multi-key chord sequences are defined in `shortcuts.json` and resolved via `ShortcutRegistry`. Chords can be filtered by view (list/detail) and stage. Entries may carry an optional `model` field (see **Model selection per shortcut** above).
+- **Metadata panel** — The bottom of the list view is reserved for the selected item's metadata (`formatMetadataPanel` in `worklist.ts`). The panel height ramps linearly with pane height (20% → 40%, min 3 rows) via `computeMetadataPanelHeight`, and the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows`, so the two views never drift apart (see WL-0MSAYNVBY006LM9X).
+- **Command log** — Dispatched commands targeting a work item are recorded in `command-log.ts` before execution; the panel surfaces the last command for `in_progress` items. Recording is fire-and-forget (never breaks dispatch) and the log file is written atomically (see WL-0MSAYNVBY006LM9X).
 
 ## Code Freeze
 
@@ -255,9 +362,22 @@ Fail-open is deliberate: a broken or missing marker must never block browsing th
 ### Plugin behaviour while frozen
 
 - **Banner** — The selection list renders a prominent red `⛔ CODE FREEZE` banner above the header, warning that implementation is blocked. The banner respects the `rows - 1` pane-height budget (see WL-0MSAAON63003N6LO).
+- **Implement shortcut hidden** — The `i` / `/skill:implement` shortcut in `shortcuts.json` carries `"code_freeze": "block"`, so while a freeze is active it is filtered out of the shortcut registry: it does not appear in the footer/chord help hints and pressing it does nothing (no dialog, no dispatch). See [Shortcut filtering during a freeze](#shortcut-filtering-during-a-freeze).
 - **Implement commands blocked** — Any implement command (`/skill:implement`, `/skill:implement-single`, `/skill:implementall`, via single-key `i`, chord, or typed dispatch) is **not** routed: no pi agent pane is spawned, no work item is claimed, and no `<id>` substitution happens. The marker is re-read at dispatch time, so a freeze that starts between refreshes is still enforced.
 - **Notice dialog** — When an implement command is attempted during a freeze, a modal dialog explains that implementation is blocked until the release finishes. Dismiss with `Esc`, `Enter`, or `q` to return to the list.
 - **Other commands unaffected** — Audit, intake, plan, review, priority, search, sync, and navigation continue to work normally during a freeze.
+
+### Shortcut filtering during a freeze
+
+Each entry in `shortcuts.json` may carry an optional `code_freeze` field controlling its visibility while the project is frozen (WL-0MSD81VEL009XHWA):
+
+| `code_freeze` value | Behaviour during a freeze |
+|---|---|
+| `"block"` | Shortcut hidden: excluded from registry lookups and help hints; pressing its key does nothing |
+| `"allow"` | Shortcut always shown, even during a freeze |
+| omitted | Always shown (backward compatible) |
+
+Any other value is logged as invalid and treated as omitted (always shown) — a bad value never hides or breaks a shortcut. The registry methods `lookupChord()`, `lookupChordEntry()`, `getEntriesForStage()`, `getChordByPrefix()`, `getChordByLeader()`, and `getChordEntries()` accept a `codeFreezeActive` parameter and exclude `"block"` entries while a freeze is active, so footer hints, chord hints, and dispatch lookups all respect the freeze automatically.
 
 This plugin only **reads** the marker; writing/clearing it is the ship release process's job (tracked in `SA-0MSBU4OBU005WJNB`).
 

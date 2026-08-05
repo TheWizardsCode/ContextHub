@@ -3,10 +3,11 @@
     "chord": [
       "c"
     ],
-    "command": "/intake <description>",
+    "command": "/intake <description> --priority <priority default='medium'>",
     "view": "both",
     "label": "create new",
-    "description": "Create a new work item with a description and priority."
+    "description": "Create a new work item with a description and priority.",
+    "model": "plan"
   },
   {
     "chord": [
@@ -18,7 +19,8 @@
       "idea"
     ],
     "label": "intake",
-    "description": "Ensure that the selected item is reasonably well defined in terms of objectives."
+    "description": "Ensure that the selected item is reasonably well defined in terms of objectives.",
+    "model": "plan"
   },
   {
     "chord": [
@@ -30,7 +32,8 @@
       "intake_complete"
     ],
     "label": "plan",
-    "description": "Run the plan workflow on the selected work item"
+    "description": "Run the plan workflow on the selected work item",
+    "model": "plan"
   },
   {
     "chord": [
@@ -44,7 +47,9 @@
       "in_progress"
     ],
     "label": "implement",
-    "description": "Run the implement workflow on the selected work item"
+    "description": "Run the implement workflow on the selected work item",
+    "model": "code",
+    "code_freeze": "block"
   },
   {
     "chord": [
@@ -75,7 +80,8 @@
       "in_review"
     ],
     "label": "audit automatic",
-    "description": "Trigger automatic audit of the selected work item."
+    "description": "Trigger automatic audit of the selected work item.",
+    "model": "plan"
   },
   {
     "chord": [
@@ -189,13 +195,25 @@
   },
   {
     "chord": [
-      "o",
+      "P",
       "p"
     ],
-    "command": "/prompt:Review the current work item and suggest next steps",
+    "command": "/prompt:<prompt>",
     "view": "both",
-    "label": "open pi prompt",
-    "description": "Open a new Pi agent pane with a free-form prompt."
+    "label": "prompt free-form",
+    "description": "Open a new Pi agent pane with a free-form prompt typed into the command input form.",
+    "model": "plan"
+  },
+  {
+    "chord": [
+      "P",
+      "a"
+    ],
+    "command": "/prompt:What are the audit gaps reported in the most recent audit for <id>",
+    "view": "both",
+    "label": "prompt audit gaps",
+    "description": "Open a new Pi agent pane asking for the audit gaps from the selected item's most recent audit.",
+    "model": "plan"
   },
   {
     "chord": [

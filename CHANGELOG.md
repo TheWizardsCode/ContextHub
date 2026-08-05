@@ -1,5 +1,7 @@
 # Changelog
 
+## v1.0.8 (2026-08-05)
+
 ## v1.0.7 (2026-08-03)
 ### Features
 - wl sync lock storm: 60+ stuck sync processes spawned by worklist pane auto-sync (WL-0MSAB7ZUC004SK7E)

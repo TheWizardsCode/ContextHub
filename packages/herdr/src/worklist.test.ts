@@ -4,7 +4,9 @@
  * Run: npx vitest run packages/herdr/src/worklist.test.ts
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   WorkItemListState,
   getTermSize,
@@ -14,7 +16,18 @@ import {
   formatCodeFreezeDialog,
   ANSI,
   createListRenderer,
+  isChordLeader,
+  processChordInput,
+  createChordState,
+  getChordHelpHints,
+  handleKeypress,
+  computeMetadataPanelHeight,
+  formatMetadataPanel,
+  formatTimestamp,
+  buildMetaRows,
 } from './worklist.js';
+import { setLogPath, resetLogPath, recordCommand, getLastCommand } from './command-log.js';
+import { loadShortcutConfig, ShortcutRegistry } from './shortcut-config.js';
 import { regroupWorkItems } from './grouping.js';
 import type { WorkItem } from './fetcher.js';
 
@@ -41,6 +54,18 @@ function makeItem(id: string, stage?: string): WorkItem {
  */
 const TERM_80x24 = { rows: 24, cols: 80 };
 getTermSize(); // verify the module loads
+
+// ── Command-log isolation ───────────────────────────────────────────────
+// Dispatch-path tests (executeResolvedCommand / dispatchChordCommand) record
+// commands against work items via recordCommand(). Point the log at a temp
+// file so the user's real ~/.config/herdr log is never touched
+// (WL-0MSEPP104006PS7T).
+beforeEach(() => {
+  setLogPath(join(tmpdir(), `herdr-test-cmdlog-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`));
+});
+afterEach(() => {
+  resetLogPath();
+});
 
 // ── Line-count invariant (WL-0MSAAON63003N6LO) ─────────────────────────
 // The list renderer must never emit more than `rows - 1` lines (leaving the
@@ -306,7 +331,7 @@ describe('executeResolvedCommand', () => {
     const onCommand = vi.fn();
     const result = executeResolvedCommand('echo hello', state, onCommand);
     expect(result).toBe('callback');
-    expect(onCommand).toHaveBeenCalledWith('echo hello');
+    expect(onCommand).toHaveBeenCalledWith('echo hello', undefined);
   });
 
   it('resolves <id> placeholder when item is selected', () => {
@@ -314,7 +339,7 @@ describe('executeResolvedCommand', () => {
     state.selectedIndex = 0;
     const onCommand = vi.fn();
     executeResolvedCommand('wl update <id> --priority high', state, onCommand);
-    expect(onCommand).toHaveBeenCalledWith('wl update TEST-123 --priority high');
+    expect(onCommand).toHaveBeenCalledWith('wl update TEST-123 --priority high', undefined);
   });
 
   it('returns dispatched for /wl commands handled internally', () => {
@@ -331,7 +356,7 @@ describe('executeResolvedCommand', () => {
     const onCommand = vi.fn();
     const result = executeResolvedCommand('/skill:implement <id>', state, onCommand);
     expect(result).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123');
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123', undefined);
   });
 
   it('propagates error from onCommand callback', () => {
@@ -364,7 +389,7 @@ describe('dispatchChordCommand', () => {
     const onCommand = vi.fn();
     const result = dispatchChordCommand('/skill:audit <id>', state, onCommand);
     expect(result).toBe(true);
-    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123');
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', undefined);
   });
 
   it('routes !!wl reviewed producer-review commands through onCommand', () => {
@@ -379,6 +404,7 @@ describe('dispatchChordCommand', () => {
     expect(result).toBe(true);
     expect(onCommand).toHaveBeenCalledWith(
       "!!wl reviewed TEST-123 && wl comment add TEST-123 --body '<producer_comment>'",
+      undefined,
     );
   });
 
@@ -394,6 +420,7 @@ describe('dispatchChordCommand', () => {
     expect(result).toBe(true);
     expect(onCommand).toHaveBeenCalledWith(
       "!!wl reviewed TEST-123 false && wl audit-set TEST-123 --ready-to-close yes --summary 'Approved by manual review'",
+      undefined,
     );
   });
 
@@ -409,6 +436,7 @@ describe('dispatchChordCommand', () => {
     expect(result).toBe(true);
     expect(onCommand).toHaveBeenCalledWith(
       "!!wl reviewed TEST-123 false && wl audit-set TEST-123 --ready-to-close no --summary 'Rejected by manual review. <reason>'",
+      undefined,
     );
   });
 
@@ -473,7 +501,7 @@ describe('executeResolvedCommand — code freeze blocking', () => {
     const onCommand = vi.fn();
     const result = executeResolvedCommand('/skill:implement <id>', state, onCommand);
     expect(result).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123');
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123', undefined);
   });
 
   it('routes /skill:implement normally when freeze is explicitly false', () => {
@@ -481,7 +509,7 @@ describe('executeResolvedCommand — code freeze blocking', () => {
     const onCommand = vi.fn();
     const result = executeResolvedCommand('/skill:implement <id>', state, onCommand, false);
     expect(result).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123');
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123', undefined);
   });
 
   it('does not block non-implement commands during a freeze', () => {
@@ -489,7 +517,7 @@ describe('executeResolvedCommand — code freeze blocking', () => {
     const onCommand = vi.fn();
     const auditResult = executeResolvedCommand('/skill:audit <id>', state, onCommand, true);
     expect(auditResult).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123');
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', undefined);
   });
 
   it('does not block wl / intake / plan commands during a freeze', () => {
@@ -515,6 +543,54 @@ describe('isImplementCommand', () => {
     expect(isImplementCommand('/intake <id>')).toBe(false);
     expect(isImplementCommand('/plan <id>')).toBe(false);
     expect(isImplementCommand('!!wl reviewed <id>')).toBe(false);
+  });
+});
+
+// ── Code Freeze: shortcut registry integration (WL-0MSD81VEL009XHWA) ─────
+// The `i` / /skill:implement entry in the REAL shortcuts.json is marked
+// `code_freeze: "block"`, so during a freeze it is filtered from the registry:
+// it is not a chord leader, does not resolve via processChordInput, and is
+// omitted from help hints.
+
+describe('code-freeze shortcut filtering — worklist integration', () => {
+  let registry: ShortcutRegistry;
+
+  beforeEach(() => {
+    registry = loadShortcutConfig();
+  });
+
+  it('does not treat i as a chord leader during a freeze', () => {
+    expect(isChordLeader('i', registry, true)).toBe(false);
+    expect(isChordLeader('i', registry, false)).toBe(true);
+  });
+
+  it('does not resolve the i chord via processChordInput during a freeze', () => {
+    const chordState = createChordState();
+    chordState.pendingKeys = ['i'];
+    const result = processChordInput(chordState, 'i', registry, 'list', undefined, true);
+    expect(result).not.toBe('chord-complete');
+    expect(chordState.resolvedCommand).toBeNull();
+  });
+
+  it('omits blocked shortcuts from chord help hints during a freeze', () => {
+    // getChordHelpHints only lists multi-key chord leaders, so use a
+    // synthetic registry with a blocked multi-key chord to observe filtering.
+    const multi = new ShortcutRegistry([
+      { chord: ['i', 'x'], command: '/skill:implement <id>', view: 'both', codeFreeze: 'block' },
+      { chord: ['a', 'a'], command: '/skill:audit <id>', view: 'both' },
+    ]);
+    const hints = getChordHelpHints(multi, true);
+    expect(hints).not.toContain('i');
+    expect(hints).toContain('a');
+    const normalHints = getChordHelpHints(multi, false);
+    expect(normalHints).toContain('i');
+  });
+
+  it('omits blocked shortcuts from stage entries used for footer hints during a freeze', () => {
+    const entries = registry.getEntriesForStage('plan_complete', true);
+    expect(entries.some(e => e.chord[0] === 'i')).toBe(false);
+    const normalEntries = registry.getEntriesForStage('plan_complete', false);
+    expect(normalEntries.some(e => e.chord[0] === 'i')).toBe(true);
   });
 });
 
@@ -595,5 +671,459 @@ describe('formatCodeFreezeDialog', () => {
   it('renders a fallback message when no reason is provided', () => {
     const dialog = formatCodeFreezeDialog(80, 24);
     expect(dialog).toContain('CODE FREEZE');
+  });
+});
+
+// ── Metadata panel (WL-0MSAYNVBY006LM9X-FT3) ─────────────────────────────
+// The list renderer reserves 20–40% of the pane height for a metadata panel
+// below the selection list. Tests cover the height ramp, field rendering,
+// selection-driven updates, independent scrolling, and regressions.
+
+function makeRichItem(): WorkItem {
+  return {
+    id: 'WL-RICH1',
+    title: 'Rich metadata item',
+    status: 'in_progress',
+    stage: 'in_progress',
+    priority: 'high',
+    issueType: 'feature',
+    risk: 'medium',
+    effort: '3',
+    tags: ['frontend', 'ui'],
+    createdAt: '2026-08-01T10:00:00.000Z',
+    updatedAt: '2026-08-02T10:00:00.000Z',
+    childCount: 2,
+    needsProducerReview: true,
+    auditResult: true,
+    auditedAt: '2026-08-03T10:00:00.000Z',
+    githubIssueNumber: '42',
+    parentId: 'WL-PARENT1',
+  };
+}
+
+describe('computeMetadataPanelHeight — responsive ramp', () => {
+  it('stays within 20%–40% of pane rows', () => {
+    for (const rows of [12, 18, 24, 30, 40, 50, 80]) {
+      const panel = computeMetadataPanelHeight(rows);
+      // Min-3 clamp allows a small overshoot of the 20% floor on tiny panes.
+      expect(panel).toBeGreaterThanOrEqual(Math.round(rows * 0.2) - 1);
+      expect(panel).toBeLessThanOrEqual(Math.round(rows * 0.4));
+      expect(panel).toBeLessThan(rows);
+    }
+  });
+
+  it('grows monotonically with pane height', () => {
+    const small = computeMetadataPanelHeight(12);
+    const medium = computeMetadataPanelHeight(24);
+    const tall = computeMetadataPanelHeight(40);
+    expect(medium).toBeGreaterThanOrEqual(small);
+    expect(tall).toBeGreaterThanOrEqual(medium);
+  });
+
+  it('leaves at least 60% of the pane for the list', () => {
+    for (const rows of [12, 18, 24, 30, 40, 50]) {
+      const panel = computeMetadataPanelHeight(rows);
+      expect(rows - panel).toBeGreaterThanOrEqual(Math.floor(rows * 0.6) - 1); // rounding slack
+    }
+  });
+});
+
+describe('formatMetadataPanel — field rendering and scrolling', () => {
+  it('renders all WorkItem metadata fields for the selected item', () => {
+    const joined = formatMetadataPanel(makeRichItem(), 80, 20, 0).join('\n');
+    expect(joined).toContain('WL-RICH1');
+    expect(joined).toContain('Rich metadata item');
+    expect(joined).toContain('Status');
+    expect(joined).toContain('in_progress');
+    expect(joined).toContain('Priority');
+    expect(joined).toContain('high');
+    expect(joined).toContain('Type');
+    expect(joined).toContain('feature');
+    expect(joined).toContain('Risk');
+    expect(joined).toContain('medium');
+    expect(joined).toContain('Effort');
+    expect(joined).toContain('3');
+    expect(joined).toContain('Tags');
+    expect(joined).toContain('frontend, ui');
+    expect(joined).toContain('Created');
+    expect(joined).toContain('Updated');
+    expect(joined).toContain('Children');
+    expect(joined).toContain('2');
+    expect(joined).toContain('Reviewed');
+    expect(joined).toContain('Audit');
+    expect(joined).toContain('GitHub Issue');
+    expect(joined).toContain('#42');
+    expect(joined).toContain('Parent');
+    expect(joined).toContain('WL-PARENT1');
+  });
+
+  it('returns exactly panelRows lines', () => {
+    expect(formatMetadataPanel(makeRichItem(), 80, 7, 0).length).toBe(7);
+  });
+
+  it('handles null item with a blank panel', () => {
+    const lines = formatMetadataPanel(null, 80, 7, 0);
+    expect(lines.length).toBe(7);
+    expect(lines.join('').trim()).toBe('');
+  });
+
+  it('scrolls independently when content overflows', () => {
+    const full = formatMetadataPanel(makeRichItem(), 80, 3, 0);
+    const scrolled = formatMetadataPanel(makeRichItem(), 80, 3, 1);
+    expect(scrolled[0]).not.toBe(full[0]);
+    // Huge offset clamps to the last viewport
+    expect(formatMetadataPanel(makeRichItem(), 80, 3, 999).length).toBe(3);
+    // Offset 0 returns the first viewport
+    expect(formatMetadataPanel(makeRichItem(), 80, 3, 0)[0]).toBe(full[0]);
+  });
+
+  it('truncates long lines to the terminal width', () => {
+    const longTags = { ...makeRichItem(), tags: ['x'.repeat(120)] };
+    const lines = formatMetadataPanel(longTags, 40, 20, 0);
+    for (const line of lines) {
+      expect(line.replace(/\x1b\[[0-9;]*m/g, '').length).toBeLessThanOrEqual(40);
+    }
+  });
+});
+
+describe('createListRenderer — metadata panel in list mode', () => {
+  const renderer = createListRenderer();
+
+  it('renders a metadata panel for the selected item', () => {
+    const output = renderer([makeRichItem(), makeItem('WL-OTHER')], 0, 0, TERM_80x24, null, 'list', null);
+    expect(output).toContain('── WL-RICH1 ──'); // panel header separator
+    expect(output).toContain('Rich metadata item');
+  });
+
+  it('updates the panel when selection changes', () => {
+    const items = [makeRichItem(), makeItem('WL-SECOND', 'idea')];
+    const first = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    expect(first).toContain('── WL-RICH1 ──');
+    const second = renderer(items, 1, 0, TERM_80x24, null, 'list', null);
+    expect(second).toContain('── WL-SECOND ──');
+    expect(second).not.toContain('── WL-RICH1 ──');
+  });
+
+  it('keeps the rows - 1 line-count invariant with panel + groups + banner', () => {
+    const grouped: WorkItem[] = Array.from({ length: 30 }, (_, i) => ({
+      ...makeItem(`G${i}`),
+      group: i,
+      groupLabel: `Group ${i}`,
+    }));
+    const output = renderer(
+      grouped, 0, 0, TERM_80x24, null, 'list', null,
+      undefined, null, 0, false, undefined, undefined, 0, false, true, 0, '/skill:audit WL-G0',
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    expect(output).toContain('CODE FREEZE');
+    expect(output).toContain('── Group 0 ──');
+  });
+
+  it('keeps render plus notification line within rows lines', () => {
+    const items = [makeItem('A'), makeItem('B'), makeItem('C')];
+    const output = renderer(
+      items, 0, 0, TERM_80x24, null, 'list', null,
+      undefined, null, 0, false, undefined, undefined, 0, false, false, 3, undefined,
+    );
+    const withNotification =
+      output.split('\n').slice(0, TERM_80x24.rows - 1).join('\n') + '\n' + ' [Synced]';
+    expect(withNotification.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows);
+  });
+});
+
+describe('WorkItemListState — metadata scroll state', () => {
+  it('resets metaScrollOffset when selection changes', () => {
+    const state = new WorkItemListState([makeItem('A'), makeItem('B'), makeItem('C')], TERM_80x24);
+    state.metaScrollOffset = 4;
+    state.moveDown();
+    expect(state.metaScrollOffset).toBe(0);
+    state.metaScrollOffset = 4;
+    state.moveUp();
+    expect(state.metaScrollOffset).toBe(0);
+    state.metaScrollOffset = 4;
+    state.pageDown();
+    expect(state.metaScrollOffset).toBe(0);
+    state.metaScrollOffset = 4;
+    state.goToFirst();
+    expect(state.metaScrollOffset).toBe(0);
+    state.metaScrollOffset = 4;
+    state.goToLast();
+    expect(state.metaScrollOffset).toBe(0);
+  });
+
+  it('clamps metaScrollDown to the panel content height', () => {
+    const state = new WorkItemListState([makeRichItem()], TERM_80x24);
+    const panelHeight = computeMetadataPanelHeight(TERM_80x24.rows);
+    const content = formatMetadataPanel(state.getSelectedItem()!, TERM_80x24.cols, panelHeight, 0);
+    const maxScroll = Math.max(0, content.length - panelHeight);
+    state.metaScrollDown(100);
+    expect(state.metaScrollOffset).toBe(maxScroll);
+  });
+
+  it('metaScrollUp clamps at zero', () => {
+    const state = new WorkItemListState([makeRichItem()], TERM_80x24);
+    state.metaScrollOffset = 2;
+    state.metaScrollUp(10);
+    expect(state.metaScrollOffset).toBe(0);
+  });
+});
+
+describe('handleKeypress — metadata scroll keys', () => {
+  it('scrolls the metadata panel with m/M without moving list selection', () => {
+    const state = new WorkItemListState([makeRichItem(), makeItem('B')], TERM_80x24);
+    const before = state.selectedIndex;
+    expect(handleKeypress(state, 'm', TERM_80x24)).toBe('meta-down');
+    expect(state.selectedIndex).toBe(before);
+    expect(handleKeypress(state, 'M', TERM_80x24)).toBe('meta-up');
+    expect(state.selectedIndex).toBe(before);
+  });
+
+  it('does not conflict with list navigation keys j/k', () => {
+    const state = new WorkItemListState([makeItem('A'), makeItem('B')], TERM_80x24);
+    handleKeypress(state, 'j', TERM_80x24);
+    expect(state.selectedIndex).toBe(1);
+    handleKeypress(state, 'k', TERM_80x24);
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  it('pageUp/pageDown navigate by a full page via state', () => {
+    const items = Array.from({ length: 30 }, (_, i) => makeItem(`WL-PAGE-${i}`));
+    const state = new WorkItemListState(items, TERM_80x24);
+
+    // pageUp clamps at the first item
+    state.selectedIndex = 5;
+    state.pageUp();
+    expect(state.selectedIndex).toBe(0);
+
+    // pageDown advances by the list page size (11 rows on 80x24)
+    state.selectedIndex = 0;
+    state.pageDown();
+    expect(state.selectedIndex).toBe(11);
+
+    // pageDown clamps at the last item
+    state.selectedIndex = 29;
+    state.pageDown();
+    expect(state.selectedIndex).toBe(29);
+
+    // pageUp moves back exactly one page
+    state.selectedIndex = 23;
+    state.pageUp();
+    expect(state.selectedIndex).toBe(12);
+  });
+
+  it('goToFirst/goToLast jump to the ends via state', () => {
+    const items = Array.from({ length: 10 }, (_, i) => makeItem(`WL-EDGE-${i}`));
+    const state = new WorkItemListState(items, TERM_80x24);
+    state.selectedIndex = 5;
+    state.goToLast();
+    expect(state.selectedIndex).toBe(9);
+    state.goToFirst();
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  it('dispatches PgUp/PgDn/g/G keys through handleKeypress', () => {
+    const items = Array.from({ length: 30 }, (_, i) => makeItem(`WL-KEY-${i}`));
+    const state = new WorkItemListState(items, TERM_80x24);
+
+    // g → first
+    state.selectedIndex = 15;
+    expect(handleKeypress(state, 'g', TERM_80x24)).toBe('first');
+    expect(state.selectedIndex).toBe(0);
+
+    // G → last
+    expect(handleKeypress(state, 'G', TERM_80x24)).toBe('last');
+    expect(state.selectedIndex).toBe(29);
+
+    // PgUp (\x1b[5~) → pageup
+    expect(handleKeypress(state, '\x1b[5~', TERM_80x24)).toBe('pageup');
+    expect(state.selectedIndex).toBe(18); // 29 - 11
+
+    // PgDn (\x1b[6~) → pagedown
+    state.selectedIndex = 0;
+    expect(handleKeypress(state, '\x1b[6~', TERM_80x24)).toBe('pagedown');
+    expect(state.selectedIndex).toBe(11);
+  });
+});
+
+// ── Last-command display (WL-0MSEPP1DE00285TQ-FT6) ───────────────────────
+// The metadata panel shows the most recent recorded command when the selected
+// item's stage is in_progress, hidden otherwise, with a graceful fallback.
+
+describe('formatMetadataPanel — last command line (in_progress only)', () => {
+  it('shows the last command for in_progress items', () => {
+    const joined = formatMetadataPanel(makeRichItem(), 80, 20, 0, '/skill:audit WL-RICH1').join('\n');
+    expect(joined).toContain('Last command:');
+    expect(joined).toContain('/skill:audit WL-RICH1');
+  });
+
+  it('hides the last-command line for non-in_progress items', () => {
+    const item = { ...makeRichItem(), stage: 'idea', status: 'open' };
+    const joined = formatMetadataPanel(item, 80, 20, 0, '/skill:audit WL-RICH1').join('\n');
+    expect(joined).not.toContain('Last command:');
+  });
+
+  it('shows a graceful fallback when in_progress has no command yet', () => {
+    const joined = formatMetadataPanel(makeRichItem(), 80, 20, 0, null).join('\n');
+    expect(joined).toContain('Last command:');
+    expect(joined).toContain('none yet');
+  });
+});
+
+describe('metadata panel — command log integration', () => {
+  let logPath: string;
+
+  beforeEach(() => {
+    logPath = join(tmpdir(), `herdr-cmdlog-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+    setLogPath(logPath);
+  });
+
+  afterEach(() => {
+    resetLogPath();
+  });
+
+  it('records a command and displays it in the panel for in_progress items', () => {
+    recordCommand('WL-RICH1', '/skill:audit WL-RICH1');
+    const last = getLastCommand('WL-RICH1');
+    expect(last).not.toBeNull();
+    expect(last!.command).toBe('/skill:audit WL-RICH1');
+    const joined = formatMetadataPanel(makeRichItem(), 80, 20, 0, last?.command).join('\n');
+    expect(joined).toContain('/skill:audit WL-RICH1');
+  });
+
+  it('returns null for items without recorded commands', () => {
+    expect(getLastCommand('WL-NOPE')).toBeNull();
+  });
+});
+
+// ── Command recording in dispatch paths (WL-0MSEPP104006PS7T-FT5) ────────
+// Every command routed through dispatchChordCommand() / resolveAndRouteCommand()
+// that carries a work item ID is recorded in the command log BEFORE it is
+// executed, so downstream failures never skip the entry. Commands without an
+// item ID are not logged.
+
+describe('command recording in dispatch paths', () => {
+  it('records commands routed through resolveAndRouteCommand with <id>', () => {
+    const state = new WorkItemListState([makeItem('WL-TEST-1')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/skill:implement <id>', state, onCommand);
+    expect(result).toBe('dispatched');
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement WL-TEST-1', undefined);
+    const last = getLastCommand('WL-TEST-1');
+    expect(last).not.toBeNull();
+    expect(last!.command).toBe('/skill:implement WL-TEST-1');
+  });
+
+  it('records commands with an explicit item ID (no <id> placeholder)', () => {
+    const state = new WorkItemListState([], TERM_80x24);
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('!!wl reviewed WL-TEST-1', state, onCommand);
+    expect(result).toBe('dispatched');
+    const last = getLastCommand('WL-TEST-1');
+    expect(last).not.toBeNull();
+    expect(last!.command).toBe('!!wl reviewed WL-TEST-1');
+  });
+
+  it('does not record commands without an item ID', () => {
+    const state = new WorkItemListState([makeItem('WL-TEST-1')], TERM_80x24);
+    const onCommand = vi.fn();
+    expect(executeResolvedCommand('echo hello', state, onCommand)).toBe('callback');
+    expect(getLastCommand('WL-TEST-1')).toBeNull();
+  });
+
+  it('records before execution so a failing onCommand still logs', () => {
+    const state = new WorkItemListState([makeItem('WL-TEST-1')], TERM_80x24);
+    state.selectedIndex = 0;
+    const failing = () => {
+      throw new Error('boom');
+    };
+    expect(() => executeResolvedCommand('/skill:implement <id>', state, failing)).toThrow('boom');
+    const last = getLastCommand('WL-TEST-1');
+    expect(last).not.toBeNull();
+    expect(last!.command).toBe('/skill:implement WL-TEST-1');
+  });
+
+  it('does not record when <id> cannot be resolved (noop)', () => {
+    const state = new WorkItemListState([], TERM_80x24);
+    const onCommand = vi.fn();
+    expect(executeResolvedCommand('wl update <id> --priority high', state, onCommand)).toBe('noop');
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it('records dispatchChordCommand-routed agent commands', () => {
+    const state = new WorkItemListState([makeItem('WL-TEST-1')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    expect(dispatchChordCommand('/skill:audit <id>', state, onCommand)).toBe(true);
+    const last = getLastCommand('WL-TEST-1');
+    expect(last).not.toBeNull();
+    expect(last!.command).toBe('/skill:audit WL-TEST-1');
+  });
+
+  it('keeps the most recent command per item (bounded log)', () => {
+    const state = new WorkItemListState([makeItem('WL-TEST-1')], TERM_80x24);
+    state.selectedIndex = 0;
+    executeResolvedCommand('/skill:audit <id>', state);
+    executeResolvedCommand('/skill:implement <id>', state);
+    const last = getLastCommand('WL-TEST-1');
+    expect(last!.command).toBe('/skill:implement WL-TEST-1');
+  });
+});
+
+// ── Readable local timestamps (WL-0MSF8HYUX0012WA9) ─────────────────────
+// Timestamps are displayed as DD/MM/YY HH:MM in local time. Expected values
+// below are derived from the same Date instants so the tests pass in any
+// timezone while still proving local-time conversion and zero-padding.
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+/** Local DD/MM/YY HH:MM string for an ISO instant (mirror of the UI format). */
+function localDDMMYY(iso: string): string {
+  const d = new Date(iso);
+  return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${pad2(d.getFullYear() % 100)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+describe('formatTimestamp — readable local DD/MM/YY HH:MM', () => {
+  it('formats an ISO-8601 UTC timestamp in local time', () => {
+    const iso = '2026-08-04T13:05:09.000Z';
+    expect(formatTimestamp(iso)).toBe(localDDMMYY(iso));
+  });
+
+  it('zero-pads day, month, year and time components', () => {
+    // Local 4 Aug 2026 00:05 — every component needs padding
+    const iso = new Date(2026, 7, 4, 0, 5).toISOString();
+    expect(formatTimestamp(iso)).toBe('04/08/26 00:05');
+  });
+
+  it('uses 24h time and two-digit year for the afternoon', () => {
+    const iso = new Date(2026, 11, 31, 23, 59).toISOString();
+    expect(formatTimestamp(iso)).toBe('31/12/26 23:59');
+  });
+
+  it('returns invalid input unchanged (graceful degradation)', () => {
+    expect(formatTimestamp('not-a-date')).toBe('not-a-date');
+    expect(formatTimestamp('')).toBe('');
+  });
+});
+
+describe('buildMetaRows — timestamps rendered via formatTimestamp', () => {
+  it('shows Created/Updated/Audited At as local DD/MM/YY HH:MM', () => {
+    const rows = new Map(buildMetaRows(makeRichItem()));
+    expect(rows.get('Created')).toBe(localDDMMYY('2026-08-01T10:00:00.000Z'));
+    expect(rows.get('Updated')).toBe(localDDMMYY('2026-08-02T10:00:00.000Z'));
+    expect(rows.get('Audited At')).toBe(localDDMMYY('2026-08-03T10:00:00.000Z'));
+    // No raw ISO strings leak into the rendered rows
+    for (const [, value] of rows) {
+      expect(value).not.toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    }
+  });
+
+  it('omits timestamp rows when the item has none', () => {
+    const rows = new Map(buildMetaRows(makeItem('WL-NO-TS')));
+    expect(rows.has('Created')).toBe(false);
+    expect(rows.has('Updated')).toBe(false);
+    expect(rows.has('Audited At')).toBe(false);
   });
 });

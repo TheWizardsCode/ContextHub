@@ -18,6 +18,26 @@ log_debug "HERDR_PANE_ID='${HERDR_PANE_ID:-unset}'"
 log_debug "PWD='$PWD'"
 log_debug "herdr_bin='$herdr_bin'"
 
+# ── Resolve the logical CWD of a Worklog plugin pane ───────────────
+# When the invoking pane is a Worklog plugin (label == "Work Items"),
+# herdr pane get reports cwd as the plugin extension directory
+# (/path/to/herdr/packages/herdr) rather than the project root the
+# pane is actually browsing.  The pane process has HERDR_RESOLVED_CWD
+# in its environment with the correct project root.  We read it from
+# /proc/<shell_pid>/environ via `herdr pane process-info`.
+#
+# Returns the logical CWD on stdout, or empty string on failure.
+_resolve_plugin_cwd() {
+  local pane_id="$1"
+  local shell_pid
+  shell_pid=$( "$herdr_bin" pane process-info --pane "$pane_id" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['process_info']['shell_pid'])" 2>/dev/null )
+  if [ -z "$shell_pid" ] || [ ! -f "/proc/$shell_pid/environ" ]; then
+    return
+  fi
+  tr '\0' '\n' < "/proc/$shell_pid/environ" | grep '^HERDR_RESOLVED_CWD=' | cut -d= -f2- || true
+}
+
 # ── Resolve the pane CWD ───────────────────────────────────────────
 # The action script runs from the plugin directory so $PWD is the
 # plugin path, not the user's working directory.  We query pane
@@ -26,6 +46,7 @@ log_debug "herdr_bin='$herdr_bin'"
 #   2) `herdr pane current` (current focused pane)
 #   3) $PWD (last resort fallback, handled by open.sh)
 pane_cwd=""
+pane_id_for_plugin_check=""
 
 if [ -n "${HERDR_PANE_ID:-}" ]; then
   log_debug "Attempt 1: pane get HERDR_PANE_ID='$HERDR_PANE_ID'"
@@ -45,6 +66,7 @@ try:
 except Exception as e:
     log_debug('pane get parse error: ' + str(e))
 " 2>/dev/null || echo "" )
+  pane_id_for_plugin_check="$HERDR_PANE_ID"
 fi
 
 if [ -z "$pane_cwd" ]; then
@@ -64,6 +86,28 @@ try:
 except:
     pass
 " 2>/dev/null || echo "" )
+  pane_id_for_plugin_check=$( echo "$raw_pane_current" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    result = data.get('result', {}) if isinstance(data, dict) else {}
+    pane = result.get('pane', {}) if isinstance(result, dict) else {}
+    if isinstance(pane, dict):
+        print(pane.get('pane_id', ''))
+except:
+    pass
+" 2>/dev/null || echo "" )
+fi
+
+# If the invoking pane is a Worklog plugin pane, its logical CWD
+# (HERDR_RESOLVED_CWD in the pane's env) is more accurate than the
+# filesystem cwd reported by `pane get` (the plugin directory).
+if [ -n "$pane_id_for_plugin_check" ]; then
+  plugin_cwd=$( _resolve_plugin_cwd "$pane_id_for_plugin_check" )
+  if [ -n "$plugin_cwd" ]; then
+    log_debug "Plugin pane detected — HERDR_RESOLVED_CWD='$plugin_cwd'"
+    pane_cwd="$plugin_cwd"
+  fi
 fi
 
 log_debug "Resolved pane_cwd='$pane_cwd'"
@@ -71,7 +115,9 @@ log_debug "Resolved pane_cwd='$pane_cwd'"
 # Check if the worklist pane already exists
 panes="$("$herdr_bin" pane list 2>/dev/null || true)"
 
-# Find our pane by looking for one with the entrypoint command pattern
+# Find our pane by looking for one with the entrypoint command pattern.
+# Note: `pane list` does not expose a `command` field for plugin panes,
+# so we identify Worklog plugin panes by their label ("Work Items").
 worklist_pane_id=$(printf '%s' "$panes" | python3 -c "
 import sys, json
 try:
@@ -80,8 +126,9 @@ try:
     if isinstance(panes, dict) and 'panes' in panes:
         panes = panes['panes']
     for p in (panes if isinstance(panes, list) else []):
+        label = p.get('label', '')
         cmd = ' '.join(p.get('command', []) or [])
-        if 'worklog-selection-list' in cmd or 'packages/herdr/src/index.ts' in cmd:
+        if label == 'Work Items' or 'worklog-selection-list' in cmd or 'packages/herdr/src/index.ts' in cmd:
             print(p.get('pane_id', ''))
             break
 except:
