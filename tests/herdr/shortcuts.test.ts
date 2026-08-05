@@ -297,7 +297,8 @@ describe('ShortcutRegistry', () => {
       expect(byCommand.get('/plan <id>')?.model).toBe('plan');
       expect(byCommand.get('/intake <description>')?.model).toBe('plan');
       expect(byCommand.get('/intake <id>')?.model).toBe('plan');
-      expect(byCommand.get('/prompt:Review the current work item and suggest next steps')?.model).toBe('author');
+      expect(byCommand.get('/prompt:<prompt>')?.model).toBe('plan');
+      expect(byCommand.get('/prompt:What are the audit gaps reported in the most recent audit for <id>')?.model).toBe('plan');
     });
 
     it('leaves shell and /wl filter entries without a model', async () => {
