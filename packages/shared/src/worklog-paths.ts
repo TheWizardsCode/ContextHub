@@ -60,7 +60,7 @@ import { execSync } from 'node:child_process';
  * initialization semaphore (`initialized`). A directory containing only
  * `worklog.db` is a partial/legacy state and is NOT valid.
  */
-function isValidWorklogDir(wlDir: string): boolean {
+export function isValidWorklogDir(wlDir: string): boolean {
   return (
     existsSync(join(wlDir, 'config.yaml')) ||
     existsSync(join(wlDir, 'initialized'))
@@ -74,7 +74,7 @@ function isValidWorklogDir(wlDir: string): boolean {
  * and may leave an empty `worktrees/` behind after cleanup. Such a stub is
  * NOT a project worklog and must not block upward resolution.
  */
-function isWorktreeContainerStub(wlDir: string): boolean {
+export function isWorktreeContainerStub(wlDir: string): boolean {
   return (
     existsSync(join(wlDir, 'worktrees')) &&
     !existsSync(join(wlDir, 'config.yaml')) &&
@@ -88,7 +88,7 @@ function isWorktreeContainerStub(wlDir: string): boolean {
  * directories may be incomplete stubs left by `git worktree` setup; the
  * real project root is above them.
  */
-function isInsideManagedWorktree(dir: string): boolean {
+export function isInsideWorktree(dir: string): boolean {
   return dir.includes(join('.worklog', 'worktrees'));
 }
 
@@ -102,12 +102,13 @@ function isInsideManagedWorktree(dir: string): boolean {
  * to echoing the current directory when no repository is found, which would
  * otherwise turn every directory into a bogus git boundary.
  */
-function getGitTopLevel(startDir: string): string | null {
+export function getGitRepoRoot(startDir?: string): string | null {
+  const cwd = startDir ?? process.cwd();
   try {
     const root = execSync('git rev-parse --show-toplevel', {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
-      cwd: startDir,
+      cwd,
     }).trim();
     if (root && existsSync(join(root, '.git'))) {
       return root;
@@ -133,7 +134,7 @@ export function resolveWorklogRoot(startDir?: string): string | undefined {
   // Nearest-wins filesystem walk, bounded by the enclosing git repo root.
   // Inside a managed worktree the git boundary is lifted so the walk can
   // reach the main project's `.worklog/` above the worktree.
-  const repoTop = isInsideManagedWorktree(cwd) ? null : getGitTopLevel(cwd);
+  const repoTop = isInsideWorktree(cwd) ? null : getGitRepoRoot(cwd);
 
   let dir = cwd;
   while (true) {
@@ -144,7 +145,7 @@ export function resolveWorklogRoot(startDir?: string): string | undefined {
       }
       // Invalid .worklog/: only walk past leftover worktree containers and
       // paths inside a managed worktree; otherwise it is a boundary.
-      if (!isWorktreeContainerStub(wlDir) && !isInsideManagedWorktree(dir)) {
+      if (!isWorktreeContainerStub(wlDir) && !isInsideWorktree(dir)) {
         break;
       }
     }

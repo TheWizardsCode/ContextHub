@@ -24,7 +24,7 @@ import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { resolveWorklogRoot } from './worklog-paths.js';
+import { resolveWorklogRoot, isValidWorklogDir, isWorktreeContainerStub, isInsideWorktree, getGitRepoRoot } from './worklog-paths.js';
 
 const tempDirs: string[] = [];
 
@@ -277,5 +277,71 @@ describe('resolveWorklogRoot', () => {
 
       expect(resolveWorklogRoot(cwd)).toBeUndefined();
     });
+  });
+});
+
+describe('exported helpers (public API contract, WL-0MSAWAQ9B004A3WX AC3)', () => {
+  it('exports isValidWorklogDir, isWorktreeContainerStub, isInsideWorktree, getGitRepoRoot', () => {
+    expect(typeof isValidWorklogDir).toBe('function');
+    expect(typeof isWorktreeContainerStub).toBe('function');
+    expect(typeof isInsideWorktree).toBe('function');
+    expect(typeof getGitRepoRoot).toBe('function');
+  });
+
+  it('isValidWorklogDir: config.yaml and initialized markers are valid; worklog.db-only is not', () => {
+    const root = makeTempDir();
+    const wl = join(root, '.worklog');
+
+    mkdirSync(wl, { recursive: true });
+    expect(isValidWorklogDir(wl)).toBe(false); // no markers
+
+    writeFileSync(join(wl, 'config.yaml'), 'projectName: test\n');
+    expect(isValidWorklogDir(wl)).toBe(true);
+
+    rmSync(wl, { recursive: true });
+    mkdirSync(wl, { recursive: true });
+    writeFileSync(join(wl, 'initialized'), '');
+    expect(isValidWorklogDir(wl)).toBe(true);
+
+    rmSync(wl, { recursive: true });
+    mkdirSync(wl, { recursive: true });
+    writeFileSync(join(wl, 'worklog.db'), '');
+    expect(isValidWorklogDir(wl)).toBe(false); // partial/legacy state
+  });
+
+  it('isWorktreeContainerStub: worktrees/ without markers is a stub; with a marker it is not', () => {
+    const root = makeTempDir();
+    const wl = join(root, '.worklog');
+
+    mkdirSync(join(wl, 'worktrees'), { recursive: true });
+    expect(isWorktreeContainerStub(wl)).toBe(true);
+
+    writeFileSync(join(wl, 'config.yaml'), 'projectName: test\n');
+    expect(isWorktreeContainerStub(wl)).toBe(false);
+  });
+
+  it('isInsideWorktree: paths containing .worklog/worktrees are inside; others are not', () => {
+    const base = makeTempDir();
+    expect(isInsideWorktree(join(base, '.worklog', 'worktrees', 'wl-XYZ', 'src'))).toBe(true);
+    expect(isInsideWorktree(join(base, '.worklog', 'worktrees'))).toBe(true);
+    expect(isInsideWorktree(join(base, 'packages', 'herdr'))).toBe(false);
+    expect(isInsideWorktree(base)).toBe(false);
+  });
+
+  it('getGitRepoRoot: returns the enclosing repo top-level inside a repo; null outside', () => {
+    const base = makeTempDir();
+
+    // Outside git: the mock git echoes cwd (no .git marker) → guarded null.
+    expect(getGitRepoRoot(base)).toBeNull();
+
+    // Inside a repo: nearest ancestor with .git wins.
+    makeGitRepo(base);
+    const sub = join(base, 'sub', 'deep');
+    mkdirSync(sub, { recursive: true });
+    expect(getGitRepoRoot(sub)).toBe(base);
+
+    // Defaults startDir to process.cwd().
+    vi.spyOn(process, 'cwd').mockReturnValue(base);
+    expect(getGitRepoRoot()).toBe(base);
   });
 });

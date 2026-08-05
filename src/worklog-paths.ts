@@ -4,8 +4,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as child_process from 'child_process';
-import { resolveWorklogRoot } from '@worklog/shared/worklog-paths';
+import { resolveWorklogRoot, getGitRepoRoot } from '@worklog/shared/worklog-paths';
 
 /**
  * Module-level override for --worklog-dir CLI option.
@@ -63,19 +62,6 @@ export function applyWorklogDirOverrideFromArgv(argv: string[]): void {
   setWorklogDirOverride(undefined);
 }
 
-function getRepoRoot(startDir?: string): string | null {
-  try {
-    const root = child_process.execSync('git rev-parse --show-toplevel', {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      cwd: startDir
-    }).trim();
-    return root || null;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Resolve the project directory that owns the `.pi` settings folder,
  * mirroring resolveWorklogDir()'s git-repo-root discovery:
@@ -89,6 +75,10 @@ function getRepoRoot(startDir?: string): string | null {
  *      shared across the whole repository.
  *   3. Outside a git repository, return `startDir` unchanged.
  *
+ * The git repo root is discovered via the shared `getGitRepoRoot()` helper
+ * (packages/shared/src/worklog-paths.ts) — the same helper the worklog-root
+ * resolver uses — so there is no duplicated git discovery.
+ *
  * Unlike `.worklog`, worktree isolation is intentionally NOT applied here:
  * `.pi` holds developer configuration (not per-worktree project data), so
  * settings resolve to the nearest project root and are shared.
@@ -98,7 +88,7 @@ function getRepoRoot(startDir?: string): string | null {
  */
 export function resolvePiDir(startDir?: string): string {
   const cwd = startDir ?? process.cwd();
-  const repoRoot = getRepoRoot(cwd);
+  const repoRoot = getGitRepoRoot(cwd);
 
   if (repoRoot) {
     // Walk up from cwd to the repo root (inclusive), returning the nearest
