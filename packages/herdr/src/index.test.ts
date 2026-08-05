@@ -235,6 +235,30 @@ describe('shortcuts.json command routing', () => {
       expect(e.command.startsWith('!!')).toBe(false);
     }
   });
+
+  it('binds P-p to the free-form prompt and P-a to the audit-gaps prompt', () => {
+    const freePrompt = entries.find((e) => e.chord.join(' ') === 'P p');
+    expect(freePrompt).toBeDefined();
+    expect(freePrompt!.command).toBe('/prompt:<prompt>');
+    expect(freePrompt!.view).toBe('both');
+    expect(routeCommand(freePrompt!.command)).toBe('agent');
+
+    const auditPrompt = entries.find((e) => e.chord.join(' ') === 'P a');
+    expect(auditPrompt).toBeDefined();
+    expect(auditPrompt!.command).toBe(
+      '/prompt:What are the audit gaps reported in the most recent audit for <id>',
+    );
+    expect(auditPrompt!.view).toBe('both');
+    expect(routeCommand(auditPrompt!.command)).toBe('agent');
+  });
+
+  it('keeps the single-key p chord bound to plan (P leader does not shadow it)', () => {
+    const planEntry = entries.find((e) => e.chord.join(' ') === 'p');
+    expect(planEntry).toBeDefined();
+    expect(planEntry!.command).toBe('/plan <id>');
+    // The uppercase P leader is distinct from the lowercase p plan chord.
+    expect(entries.some((e) => e.chord.join(' ') === 'P')).toBe(false);
+  });
 });
 
 

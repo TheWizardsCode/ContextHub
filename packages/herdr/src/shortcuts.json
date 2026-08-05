@@ -206,6 +206,28 @@
   },
   {
     "chord": [
+      "P",
+      "p"
+    ],
+    "command": "/prompt:<prompt>",
+    "view": "both",
+    "label": "prompt free-form",
+    "description": "Open a new Pi agent pane with a free-form prompt typed into the command input form.",
+    "model": "author"
+  },
+  {
+    "chord": [
+      "P",
+      "a"
+    ],
+    "command": "/prompt:What are the audit gaps reported in the most recent audit for <id>",
+    "view": "both",
+    "label": "prompt audit gaps",
+    "description": "Open a new Pi agent pane asking for the audit gaps from the selected item's most recent audit.",
+    "model": "author"
+  },
+  {
+    "chord": [
       "f",
       "i"
     ],
