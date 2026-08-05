@@ -10,6 +10,11 @@
  * The herdr CLI is mocked via HERDR_BIN_PATH pointing at a fake `herdr`
  * binary that records every invocation to a log file and returns a valid
  * pane_id for the split call.
+ *
+ * These tests exercise the PLAIN split path (--no-resize): the `--cwd`
+ * propagation is implemented on `herdr pane split`, which resize mode
+ * (the default) delegates to grid.py instead. Resize-mode behavior is
+ * covered by packages/herdr/shared/tests/test_scripts.sh.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -96,7 +101,7 @@ function splitInvocation(log: string[]): string | undefined {
 
 describe('open-pi-agent.sh --cwd propagation', () => {
   it('passes --cwd to pane split when --cwd arg is provided', () => {
-    const { status, log } = runScript(['--cwd', '/tmp/project-root']);
+    const { status, log } = runScript(['--no-resize', '--cwd', '/tmp/project-root']);
     expect(status).toBe(0);
     const split = splitInvocation(log);
     expect(split).toBeDefined();
@@ -105,7 +110,7 @@ describe('open-pi-agent.sh --cwd propagation', () => {
   });
 
   it('passes HERDR_RESOLVED_CWD to pane split when set', () => {
-    const { status, log } = runScript([], {
+    const { status, log } = runScript(['--no-resize'], {
       HERDR_RESOLVED_CWD: '/home/user/projects/podcast',
     });
     expect(status).toBe(0);
@@ -120,7 +125,7 @@ describe('open-pi-agent.sh --cwd propagation', () => {
     mkdirSync(cwd, { recursive: true });
     let status = 0;
     try {
-      execFileSync('bash', [SCRIPT], {
+      execFileSync('bash', [SCRIPT, '--no-resize'], {
         encoding: 'utf-8',
         cwd,
         env: {
@@ -146,7 +151,7 @@ describe('open-pi-agent.sh --cwd propagation', () => {
   });
 
   it('starts pi interactively in the new pane', () => {
-    const { status, log } = runScript(['--cwd', '/tmp/project-root']);
+    const { status, log } = runScript(['--no-resize', '--cwd', '/tmp/project-root']);
     expect(status).toBe(0);
     expect(log.some((line) => line.includes('pane run') && line.includes('pi'))).toBe(true);
   });

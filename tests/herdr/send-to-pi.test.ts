@@ -10,6 +10,11 @@
  * The herdr CLI is mocked via HERDR_BIN_PATH pointing at a fake `herdr`
  * binary that records every invocation to a log file and returns a valid
  * pane_id for the split call.
+ *
+ * These tests exercise the PLAIN split path (--no-resize): the `--cwd`
+ * propagation is implemented on `herdr pane split`, which resize mode
+ * (the default) delegates to grid.py instead. Resize-mode behavior is
+ * covered by packages/herdr/shared/tests/test_scripts.sh.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -99,7 +104,7 @@ function splitInvocation(log: string[]): string | undefined {
 
 describe('send-to-pi.sh --cwd propagation', () => {
   it('passes --cwd to pane split when --cwd arg is provided', () => {
-    const { status, log } = runScript(['--cwd', '/tmp/project-root', '/skill:audit <id>']);
+    const { status, log } = runScript(['--no-resize', '--cwd', '/tmp/project-root', '/skill:audit <id>']);
     expect(status).toBe(0);
     const split = splitInvocation(log);
     expect(split).toBeDefined();
@@ -108,7 +113,7 @@ describe('send-to-pi.sh --cwd propagation', () => {
   });
 
   it('passes HERDR_RESOLVED_CWD to pane split when set', () => {
-    const { status, log } = runScript(['/skill:audit <id>'], {
+    const { status, log } = runScript(['--no-resize', '/skill:audit <id>'], {
       HERDR_RESOLVED_CWD: '/home/user/projects/podcast',
     });
     expect(status).toBe(0);
@@ -123,7 +128,7 @@ describe('send-to-pi.sh --cwd propagation', () => {
     mkdirSync(cwd, { recursive: true });
     let status = 0;
     try {
-      execFileSync('bash', [SCRIPT, '/skill:audit <id>'], {
+      execFileSync('bash', [SCRIPT, '--no-resize', '/skill:audit <id>'], {
         encoding: 'utf-8',
         cwd,
         env: {
@@ -149,7 +154,7 @@ describe('send-to-pi.sh --cwd propagation', () => {
   });
 
   it('still sends the command to the pi pane', () => {
-    const { status, log } = runScript(['--cwd', '/tmp/project-root', '/skill:audit <id>']);
+    const { status, log } = runScript(['--no-resize', '--cwd', '/tmp/project-root', '/skill:audit <id>']);
     expect(status).toBe(0);
     // The command is bash-escaped (printf %q) when forwarded, so match on
     // the unescaped token rather than the exact string.
@@ -159,7 +164,7 @@ describe('send-to-pi.sh --cwd propagation', () => {
 
 describe('send-to-pi.sh --model forwarding', () => {
   it('passes --model to the pi invocation when --model is provided', () => {
-    const { status, log } = runScript(['--cwd', '/tmp/project-root', '--model', 'code', '/skill:implement <id>']);
+    const { status, log } = runScript(['--no-resize', '--cwd', '/tmp/project-root', '--model', 'code', '/skill:implement <id>']);
     expect(status).toBe(0);
     const run = log.find((line) => line.includes('pane run'));
     expect(run).toBeDefined();
@@ -169,7 +174,7 @@ describe('send-to-pi.sh --model forwarding', () => {
   });
 
   it('supports the --model=<pattern> syntax', () => {
-    const { status, log } = runScript(['--cwd', '/tmp/project-root', '--model=code', '/skill:implement <id>']);
+    const { status, log } = runScript(['--no-resize', '--cwd', '/tmp/project-root', '--model=code', '/skill:implement <id>']);
     expect(status).toBe(0);
     const run = log.find((line) => line.includes('pane run'));
     expect(run).toBeDefined();
@@ -178,7 +183,7 @@ describe('send-to-pi.sh --model forwarding', () => {
   });
 
   it('omits --model from the pi invocation when not provided', () => {
-    const { status, log } = runScript(['--cwd', '/tmp/project-root', '/skill:implement <id>']);
+    const { status, log } = runScript(['--no-resize', '--cwd', '/tmp/project-root', '/skill:implement <id>']);
     expect(status).toBe(0);
     const run = log.find((line) => line.includes('pane run'));
     expect(run).toBeDefined();
