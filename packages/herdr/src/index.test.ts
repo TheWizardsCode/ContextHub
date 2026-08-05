@@ -169,6 +169,7 @@ interface ShortcutEntry {
   command: string;
   view: string;
   label?: string;
+  model?: string;
 }
 
 function loadShortcutsJson(): ShortcutEntry[] {
@@ -241,6 +242,7 @@ describe('shortcuts.json command routing', () => {
     expect(freePrompt).toBeDefined();
     expect(freePrompt!.command).toBe('/prompt:<prompt>');
     expect(freePrompt!.view).toBe('both');
+    expect(freePrompt!.model).toBe('plan');
     expect(routeCommand(freePrompt!.command)).toBe('agent');
 
     const auditPrompt = entries.find((e) => e.chord.join(' ') === 'P a');
@@ -249,6 +251,7 @@ describe('shortcuts.json command routing', () => {
       '/prompt:What are the audit gaps reported in the most recent audit for <id>',
     );
     expect(auditPrompt!.view).toBe('both');
+    expect(auditPrompt!.model).toBe('plan');
     expect(routeCommand(auditPrompt!.command)).toBe('agent');
   });
 

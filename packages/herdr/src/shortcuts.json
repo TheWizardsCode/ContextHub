@@ -213,7 +213,7 @@
     "view": "both",
     "label": "prompt free-form",
     "description": "Open a new Pi agent pane with a free-form prompt typed into the command input form.",
-    "model": "author"
+    "model": "plan"
   },
   {
     "chord": [
@@ -224,7 +224,7 @@
     "view": "both",
     "label": "prompt audit gaps",
     "description": "Open a new Pi agent pane asking for the audit gaps from the selected item's most recent audit.",
-    "model": "author"
+    "model": "plan"
   },
   {
     "chord": [
