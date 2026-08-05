@@ -206,6 +206,50 @@ consumers agree because they share the same resolver.
 - **Git push**: Depends on network (typically 1-5s)
 - **Import**: ~100ms per 1000 items
 
+## Read Cache (src/read-cache.ts)
+
+Pure-read commands (`list`, `next`, `show`, `search`, `status` in JSON mode)
+cache their results on disk so repeated, byte-identical queries are served
+without re-spawning work.
+
+### Cache layout
+
+- **Location**: XDG cache dir — `$WL_CACHE_DIR` if set, else
+  `$XDG_CACHE_HOME/wl`, else `~/.cache/wl`.
+- **Entry files**: `<cache-dir>/<64-hex-sha256>.json`, one per query.
+- **Cache key**: SHA-256 over (wl version, resolved absolute worklog dir,
+  argv elements in order). The version is included so a wl upgrade with a
+  changed output schema never serves stale-shaped entries.
+- **Entry header** stores the key inputs plus a WAL-aware DB fingerprint:
+  `[mtimeMs, size]` of `worklog.db`, `worklog.db-wal` and `worklog.db-shm`
+  captured at write time.
+
+### Invalidation semantics
+
+- **Primary (WAL-aware fingerprint)**: on read, the fingerprint is recomputed
+  and compared to the one stored in the entry. Any change to `worklog.db`
+  (checkpoint), `worklog.db-wal` (write commit), or `worklog.db-shm`
+  (connection) invalidates the entry. This is required because `worklog.db`
+  mtime alone is unreliable in WAL mode — writes land in the WAL and the main
+  file only changes on checkpoint. Missing DB files fingerprint as zeros, so a
+  DB that is later created (files appear) also invalidates.
+- **TTL bounding safety net**: entries older than the TTL (default 30s,
+  aligned with the Herdr 30s refresh cadence) are never served.
+- **Writes bypass the cache**: write commands do not read from the cache; F2+
+  wires `invalidate()` so writes/sync drop the affected entries.
+
+### Concurrency & bounding
+
+- **Atomic writes**: entries are written to a temp file (`<key>.json.tmp-*`)
+  then renamed into place, so concurrent readers/writers across processes
+  never observe partial entries.
+- **LRU bound**: when the entry count exceeds `maxEntries` (default 1000),
+  TTL-expired entries are dropped first, then least-recently-accessed entries
+  are evicted.
+- **Observability**: set `WL_CACHE_DEBUG=1` to log cache hits/misses/reasons to
+  stderr (`[wl:cache]`). `ReadCache.stats()` exposes hit/miss counters for
+  spawn-reduction instrumentation.
+
 ## Future Considerations
 
 ### Potential Enhancements
