@@ -13,11 +13,15 @@
 #   --pane-name <name>   Name to assign to the new pane (default: "Pi Agent")
 #   --focus              Zoom/focus the new pane (default: on)
 #   --no-focus           Explicitly skip zoom/focus
+#   --resize             Split right AND rebalance the right side into an even
+#                        grid (anchor keeps 50% width x 100% height) (default)
+#   --no-resize          Plain herdr split-right, no layout changes (default is resize)
 #   --cwd <path>         Working directory for the new pane (default: $HERDR_RESOLVED_CWD, then $PWD)
 #   -h, --help           Show this help message
 #
 # Environment variables:
 #   HERDR_BIN_PATH       Path to the herdr CLI binary (default: herdr on PATH)
+#   HERDR_GRID_BIN       Path to the grid helper (default: grid.py next to this script)
 #   HERDR_RESOLVED_CWD   Resolved project root for the new pane (set by the
 #                        worklist plugin; overrides $PWD when --cwd is absent)
 #
@@ -38,7 +42,9 @@ show_help() {
 pane_name="Pi Agent"
 focus=true
 cwd_arg=""
+resize=true
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
+grid_bin="${HERDR_GRID_BIN:-$(cd "$(dirname "$0")" && pwd)/grid.py}"
 
 # ── Parse arguments ─────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -57,6 +63,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-focus)
       focus=false
+      shift
+      ;;
+    --resize)
+      resize=true
+      shift
+      ;;
+    --no-resize)
+      resize=false
       shift
       ;;
     --cwd)
@@ -92,18 +106,33 @@ done
 target_cwd="${cwd_arg:-${HERDR_RESOLVED_CWD:-$PWD}}"
 
 # ── Split the current pane to the right ──────────────────────────────
-split_out="$("$herdr_bin" pane split --current --direction right --no-focus --cwd "$target_cwd" 2>/dev/null || true)"
-
-if [ -z "$split_out" ]; then
-  echo "Error: Failed to split pane. Ensure you are inside a herdr session." >&2
-  exit 1
+if [ "$resize" = true ]; then
+  # Resize mode: resolve the anchor pane and let the grid helper perform the
+  # split and rebalance (safe ops only: pane.split + layout.set_split_ratio).
+  anchor="$("$herdr_bin" pane current --json 2>/dev/null | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -n1)"
+  if [ -z "$anchor" ]; then
+    echo "Error: Could not resolve the current pane. Ensure you are inside a herdr session." >&2
+    exit 1
+  fi
+  grid_out="$(python3 "$grid_bin" "$anchor" 2>&1)" || true
+  if [ -z "$grid_out" ] || ! echo "$grid_out" | grep -q '"pane_id"'; then
+    echo "Error: Grid rebalance failed: $grid_out" >&2
+    echo "Hint: retry with --no-resize for a plain split." >&2
+    exit 1
+  fi
+  np="$(printf '%s' "$grid_out" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -n1)"
+else
+  # Plain split-right (herdr default), no layout changes.
+  split_out="$("$herdr_bin" pane split --current --direction right --no-focus --cwd "$target_cwd" 2>/dev/null || true)"
+  if [ -z "$split_out" ]; then
+    echo "Error: Failed to split pane. Ensure you are inside a herdr session." >&2
+    exit 1
+  fi
+  np="$(printf '%s' "$split_out" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -n1)"
 fi
 
-# Parse the pane_id from JSON output
-np="$(printf '%s' "$split_out" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -n1)"
-
 if [ -z "$np" ]; then
-  echo "Error: Could not determine new pane ID from split output" >&2
+  echo "Error: Could not determine new pane ID" >&2
   exit 1
 fi
 
