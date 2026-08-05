@@ -27,6 +27,7 @@ const visible = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
 interface FieldOpts {
   name: string;
   value?: string;
+  default?: string;
 }
 
 function makeForm(opts: {
@@ -38,7 +39,7 @@ function makeForm(opts: {
   const state = new FormState(
     '!!wl update <id> --status <status> --stage <stage>',
     opts.description ?? 'Update the status of the selected work item',
-    fields.map((f) => f.name),
+    fields.map((f) => ({ name: f.name, default: f.default ?? '' })),
     () => {},
     () => {},
   );
@@ -216,7 +217,7 @@ describe('FormState interactions', () => {
     const state = new FormState(
       'wl update <id> --status <status> --stage <stage>',
       'd',
-      ['status', 'stage'],
+      [{ name: 'status', default: '' }, { name: 'stage', default: '' }],
       (r) => {
         result = r;
       },
@@ -231,7 +232,7 @@ describe('FormState interactions', () => {
 
   it('cancels with Esc', () => {
     let cancelled = false;
-    const state = new FormState('cmd <x>', 'd', ['x'], () => {}, () => {
+    const state = new FormState('cmd <x>', 'd', [{ name: 'x', default: '' }], () => {}, () => {
       cancelled = true;
     });
     expect(state.handleInput('\x1b')).toBe('cancelled');
@@ -239,7 +240,13 @@ describe('FormState interactions', () => {
   });
 
   it('navigates fields with Tab and arrow keys (with wrap-around)', () => {
-    const state = new FormState('cmd <a> <b> <c>', 'd', ['a', 'b', 'c'], () => {}, () => {});
+    const state = new FormState(
+      'cmd <a> <b> <c>',
+      'd',
+      [{ name: 'a', default: '' }, { name: 'b', default: '' }, { name: 'c', default: '' }],
+      () => {},
+      () => {},
+    );
     expect(state.activeFieldIndex).toBe(0);
     state.handleInput('\t');
     expect(state.activeFieldIndex).toBe(1);
@@ -254,11 +261,40 @@ describe('FormState interactions', () => {
   });
 
   it('edits the active field value with character input and backspace', () => {
-    const state = new FormState('cmd <x>', 'd', ['x'], () => {}, () => {});
+    const state = new FormState('cmd <x>', 'd', [{ name: 'x', default: '' }], () => {}, () => {});
     for (const ch of 'hello') state.handleInput(ch);
     expect(state.fields[0].value).toBe('hello');
     state.handleInput('\x7f');
     expect(state.fields[0].value).toBe('hell');
+  });
+
+  it('pre-fills fields with their inline default value', () => {
+    const state = new FormState(
+      'wl create <description> --priority <priority default="medium">',
+      'd',
+      [{ name: 'description', default: '' }, { name: 'priority', default: 'medium' }],
+      () => {},
+      () => {},
+    );
+    expect(state.fields[0].value).toBe('');
+    expect(state.fields[1].value).toBe('medium');
+    // Submitting without edits uses the default (empty description stays empty)
+    expect(state.getResult()).toBe('wl create  --priority medium');
+  });
+
+  it('lets the user override an inline default', () => {
+    const state = new FormState(
+      'wl create <description> --priority <priority default="medium">',
+      'd',
+      [{ name: 'description', default: '' }, { name: 'priority', default: 'medium' }],
+      () => {},
+      () => {},
+    );
+    state.handleInput('\t');
+    // Clear the pre-filled default before typing a replacement
+    for (let i = 0; i < 'medium'.length; i++) state.handleInput('\x7f');
+    for (const ch of 'high') state.handleInput(ch);
+    expect(state.getResult()).toBe('wl create  --priority high');
   });
 });
 
@@ -266,19 +302,67 @@ describe('FormState interactions', () => {
 
 describe('identifier helpers', () => {
   it('extracts unique identifiers in order', () => {
-    expect(extractIdentifiers('wl update <id> --status <status> --status <status>')).toEqual([
-      'id',
-      'status',
+    expect(
+      extractIdentifiers('wl update <id> --status <status> --status <status>'),
+    ).toEqual([
+      { name: 'id', default: '' },
+      { name: 'status', default: '' },
+    ]);
+  });
+
+  it('extracts inline defaults alongside identifiers', () => {
+    expect(
+      extractIdentifiers('wl create <description> --priority <priority default="medium">'),
+    ).toEqual([
+      { name: 'description', default: '' },
+      { name: 'priority', default: 'medium' },
+    ]);
+  });
+
+  it('supports single-quoted defaults', () => {
+    expect(
+      extractIdentifiers('wl create <description> --priority <priority default=\'medium\'>'),
+    ).toEqual([
+      { name: 'description', default: '' },
+      { name: 'priority', default: 'medium' },
     ]);
   });
 
   it('treats <id> as a known identifier', () => {
-    expect(getUnknownIdentifiers('wl update <id> --title <title>')).toEqual(['title']);
+    expect(getUnknownIdentifiers('wl update <id> --title <title>')).toEqual([
+      { name: 'title', default: '' },
+    ]);
+  });
+
+  it('reports defaults on unknown identifiers', () => {
+    expect(
+      getUnknownIdentifiers('wl create <description> --priority <priority default="medium">'),
+    ).toEqual([
+      { name: 'description', default: '' },
+      { name: 'priority', default: 'medium' },
+    ]);
   });
 
   it('substitutes provided values and leaves unknown placeholders intact', () => {
     expect(
       substituteIdentifiers('wl update <id> --status <status>', { status: 'in_progress' }),
     ).toBe('wl update <id> --status in_progress');
+  });
+
+  it('substitutes the inline default when no explicit value is given', () => {
+    expect(
+      substituteIdentifiers('wl create <description> --priority <priority default="medium">', {
+        description: 'A new item',
+      }),
+    ).toBe('wl create A new item --priority medium');
+  });
+
+  it('gives explicit values precedence over inline defaults', () => {
+    expect(
+      substituteIdentifiers('wl create <description> --priority <priority default="medium">', {
+        description: 'A new item',
+        priority: 'high',
+      }),
+    ).toBe('wl create A new item --priority high');
   });
 });

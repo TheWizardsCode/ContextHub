@@ -9,24 +9,41 @@
 
 // ── Identifier extraction ─────────────────────────────────────────────
 
-const IDENTIFIER_RE = /<([a-zA-Z_][a-zA-Z0-9_]*)>/g;
+/**
+ * Regex that matches <name> and <name default="value"> patterns.
+ * Capture groups: [1]=name, [2]=default value (optional, without quotes)
+ */
+const IDENTIFIER_RE =
+  /<([a-zA-Z_][a-zA-Z0-9_]*)(?:\s+default\s*=\s*["']([^"']*)["'])?\s*>/g;
+
+/**
+ * An identifier extracted from a command template.
+ */
+export interface ExtractedIdentifier {
+  /** Identifier name (e.g., 'title', 'status') */
+  name: string;
+  /** Optional default value from the template (e.g., 'medium') */
+  default: string;
+}
 
 /**
  * Extract all unique <identifier> patterns from a command string.
  *
+ * Supports the syntax `<name>` and `<name default="value">`.
+ *
  * @param command - The command string to scan
- * @returns Array of unique identifier names (without angle brackets)
+ * @returns Array of unique identifier descriptors (without angle brackets)
  */
-export function extractIdentifiers(command: string): string[] {
+export function extractIdentifiers(command: string): ExtractedIdentifier[] {
   const seen = new Set<string>();
-  const result: string[] = [];
+  const result: ExtractedIdentifier[] = [];
   let match: RegExpExecArray | null;
   const re = new RegExp(IDENTIFIER_RE.source, 'g');
   while ((match = re.exec(command)) !== null) {
     const name = match[1];
     if (!seen.has(name)) {
       seen.add(name);
-      result.push(name);
+      result.push({ name, default: match[2] ?? '' });
     }
   }
   return result;
@@ -42,11 +59,11 @@ export const KNOWN_IDENTIFIERS = new Set<string>(['id']);
  * Get identifiers that are NOT in the known set.
  *
  * @param command - The command string to scan
- * @returns Array of unknown identifier names (without angle brackets)
+ * @returns Array of unknown identifier descriptors (without angle brackets)
  */
-export function getUnknownIdentifiers(command: string): string[] {
+export function getUnknownIdentifiers(command: string): ExtractedIdentifier[] {
   return extractIdentifiers(command).filter(
-    (name) => !KNOWN_IDENTIFIERS.has(name),
+    (id) => !KNOWN_IDENTIFIERS.has(id.name),
   );
 }
 
@@ -55,17 +72,26 @@ export function getUnknownIdentifiers(command: string): string[] {
 /**
  * Substitute all <identifier> placeholders in a command with provided values.
  *
+ * Identifiers with an inline default (`<name default="value">`) fall back to
+ * their default when no explicit value is supplied.
+ *
  * @param command - The command template with <identifier> placeholders
- * @param values - Map of identifier name to replacement value
+ * @param values - Map of identifier name to replacement value (explicit values
+ *                 take precedence over inline defaults)
  * @returns The command with all matching placeholders replaced
  */
 export function substituteIdentifiers(
   command: string,
   values: Record<string, string>,
 ): string {
-  return command.replace(/<([a-zA-Z_][a-zA-Z0-9_]*)>/g, (_, name: string) => {
-    return name in values ? values[name] : `<${name}>`;
-  });
+  return command.replace(
+    /<([a-zA-Z_][a-zA-Z0-9_]*)(?:\s+default\s*=\s*["']([^"']*)["'])?\s*>/g,
+    (_, name: string, def: string | undefined) => {
+      if (name in values) return values[name];
+      if (def !== undefined) return def;
+      return `<${name}>`;
+    },
+  );
 }
 
 // ── Form types ────────────────────────────────────────────────────────
@@ -75,6 +101,8 @@ export interface FormField {
   name: string;
   /** Current text value entered by the user */
   value: string;
+  /** Optional default value from the command template */
+  default: string;
 }
 
 export interface FormResult {
@@ -220,15 +248,16 @@ export class FormState {
   constructor(
     commandTemplate: string,
     description: string,
-    unknownIdentifiers: string[],
+    unknownIdentifiers: ExtractedIdentifier[],
     onSubmit: (result: string) => void,
     onCancel: () => void,
   ) {
     this.commandTemplate = commandTemplate;
     this.description = description || commandTemplate;
-    this.fields = unknownIdentifiers.map((name) => ({
-      name,
-      value: '',
+    this.fields = unknownIdentifiers.map((id) => ({
+      name: id.name,
+      value: id.default,
+      default: id.default,
     }));
     this.activeFieldIndex = 0;
     this.onSubmit = onSubmit;

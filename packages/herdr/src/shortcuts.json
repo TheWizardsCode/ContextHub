@@ -3,7 +3,7 @@
     "chord": [
       "c"
     ],
-    "command": "/intake <description>",
+    "command": "/intake <description> --priority <priority default='medium'>",
     "view": "both",
     "label": "create new",
     "description": "Create a new work item with a description and priority.",

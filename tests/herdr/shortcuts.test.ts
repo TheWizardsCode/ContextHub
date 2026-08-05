@@ -295,7 +295,7 @@ describe('ShortcutRegistry', () => {
       expect(byCommand.get('/skill:implement <id>')?.model).toBe('code');
       expect(byCommand.get('/skill:audit <id>')?.model).toBe('plan');
       expect(byCommand.get('/plan <id>')?.model).toBe('plan');
-      expect(byCommand.get('/intake <description>')?.model).toBe('plan');
+      expect(byCommand.get("/intake <description> --priority <priority default='medium'>")?.model).toBe('plan');
       expect(byCommand.get('/intake <id>')?.model).toBe('plan');
       expect(byCommand.get('/prompt:<prompt>')?.model).toBe('plan');
       expect(byCommand.get('/prompt:What are the audit gaps reported in the most recent audit for <id>')?.model).toBe('plan');

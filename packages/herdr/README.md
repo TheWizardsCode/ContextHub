@@ -270,6 +270,7 @@ never breaks dispatch.
 When a chord shortcut resolves to a command that contains **unknown identifiers** — angle-bracket placeholders other than the known `<id>` (e.g. `--status <status>`, `--stage <stage>`, `--reason <reason>`) — the plugin displays a modal form overlay instead of dispatching the command directly:
 
 - One labeled input field per unknown identifier; `Tab`/`↑`/`↓` navigate between fields, `Enter` submits, `Esc` cancels.
+- Identifiers may declare an inline default: `<priority default="medium">`. The field is pre-filled with the default (which is used verbatim if you submit without editing it), and you can clear it or type over it before submitting.
 - The active field shows a block cursor at the end of its value; the typed value is substituted into the command on submit (`<id>` remains auto-substituted with the selected item's ID).
 - The dialog width is **80% of the pane width** (clamped to a 40-column minimum and to the pane width minus borders), and stays horizontally centered.
 - The description and field values **wrap at the dialog's inner width**; as a value wraps to more lines the dialog **expands downward**, bounded by the terminal height so it never overflows the pane.
