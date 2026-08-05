@@ -351,6 +351,63 @@ else
 fi
 
 echo ""
+echo "=== Test: default focus zooms the new pane (--focus implied) ==="
+run_send "hello" >/dev/null 2>&1 || true
+if grep -q "pane zoom" "$HERDR_LOG" 2>/dev/null; then
+  pass "send-to-pi default focuses the new pane (zoom invoked)"
+else
+  fail "send-to-pi default should focus the new pane (zoom)"
+  echo "  herdr log: $(cat "$HERDR_LOG" 2>/dev/null)"
+fi
+run_open "hello" >/dev/null 2>&1 || true
+if grep -q "pane zoom" "$HERDR_LOG" 2>/dev/null; then
+  pass "open-pi-agent default focuses the new pane (zoom invoked)"
+else
+  fail "open-pi-agent default should focus the new pane (zoom)"
+  echo "  herdr log: $(cat "$HERDR_LOG" 2>/dev/null)"
+fi
+
+echo ""
+echo "=== Test: --no-focus skips the zoom calls ==="
+run_send --no-focus "hello" >/dev/null 2>&1 || true
+if grep -q "pane zoom" "$HERDR_LOG" 2>/dev/null; then
+  fail "send-to-pi --no-focus should not zoom the pane"
+  echo "  herdr log: $(cat "$HERDR_LOG" 2>/dev/null)"
+else
+  pass "send-to-pi --no-focus skips zoom"
+fi
+run_open --no-focus "hello" >/dev/null 2>&1 || true
+if grep -q "pane zoom" "$HERDR_LOG" 2>/dev/null; then
+  fail "open-pi-agent --no-focus should not zoom the pane"
+  echo "  herdr log: $(cat "$HERDR_LOG" 2>/dev/null)"
+else
+  pass "open-pi-agent --no-focus skips zoom"
+fi
+
+echo ""
+echo "=== Test: --check-cli fails fast when herdr CLI is missing ==="
+# Use a non-existent binary path so --check-cli aborts before launching.
+rm -f "$HERDR_LOG" "$GRID_LOG"
+out="$(HERDR_BIN_PATH="$SANDBOX/no-such-herdr" HERDR_GRID_BIN="$MOCK_GRID" "$SEND_TO_PI" --check-cli "hello" 2>&1)"
+rc=$?
+if [ "$rc" -ne 0 ] && echo "$out" | grep -qi "not found\|missing\|unavailable"; then
+  pass "send-to-pi --check-cli exits non-zero with a clear error when herdr is missing"
+else
+  fail "send-to-pi --check-cli should fail fast when herdr is missing (rc=$rc)"
+  echo "  output: $out"
+fi
+
+# Without --check-cli the script still fails (herdr missing), but reaches
+# the split path instead of the CLI availability check.
+rm -f "$HERDR_LOG" "$GRID_LOG"
+out="$(HERDR_BIN_PATH="$SANDBOX/no-such-herdr" HERDR_GRID_BIN="$MOCK_GRID" "$SEND_TO_PI" "hello" 2>&1)" || true
+if [ -n "$out" ]; then
+  pass "send-to-pi without --check-cli still reports an error when herdr is missing"
+else
+  fail "send-to-pi without --check-cli should report an error when herdr is missing"
+fi
+
+echo ""
 echo "========================================"
 echo "Results: $PASS passed, $FAIL failed"
 echo "========================================"
