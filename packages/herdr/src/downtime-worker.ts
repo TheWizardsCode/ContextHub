@@ -467,6 +467,8 @@ export interface DowntimeWorker {
   readonly dispatching: boolean;
   /** Timestamp of the last successful dispatch (null until the first). */
   readonly lastDispatchAt: number | null;
+  /** Whether the worker is enabled per the current settings (re-read). */
+  readonly enabled: boolean;
 }
 
 /**
@@ -487,6 +489,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     },
     get lastDispatchAt(): number | null {
       return lastDispatchAt;
+    },
+    get enabled(): boolean {
+      return opts.config().enabled;
     },
     async tick(): Promise<DowntimeWorkerTickResult> {
       const cfg = opts.config();
@@ -549,6 +554,39 @@ export function buildDowntimePrompt(kind: DowntimeSkillKind, candidate: Downtime
     `Run ${skill} ${candidate.id} — ${candidate.title}.`,
     BLOCKED_QUESTIONS_INSTRUCTION,
   ].join('\n');
+}
+
+// ── Wiring helpers (implemented — F4) ─────────────────────────────────
+
+/**
+ * Parse the stdout of `wl next --stage <stage> --json` into the first
+ * candidate. Returns null (no dispatch) for empty output, a null
+ * `workItem`, missing ids, or malformed JSON.
+ */
+export function parseNextItemOutput(stdout: string, stage: DowntimeStage): DowntimeCandidate | null {
+  try {
+    const parsed = JSON.parse(stdout) as {
+      workItem?: { id?: unknown; title?: unknown } | null;
+    };
+    const raw = parsed?.workItem;
+    if (!raw || typeof raw !== 'object') return null;
+    if (typeof raw.id !== 'string' || raw.id.length === 0) return null;
+    return {
+      id: raw.id,
+      title: typeof raw.title === 'string' ? raw.title : '',
+      stage,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Derive the dispatch kind from a prompt built by `buildDowntimePrompt`
+ * (the pane name is `Downtime plan` / `Downtime intake`).
+ */
+export function skillKindFromPrompt(prompt: string): DowntimeSkillKind {
+  return prompt.includes('/skill:plan ') ? 'plan' : 'intake';
 }
 
 // ── Settings clamps (implemented — wired into settings.ts by F2) ──────

@@ -28,6 +28,8 @@ import {
   spawnDowntimePane,
   buildDowntimeSpawnOptions,
   BLOCKED_QUESTIONS_INSTRUCTION,
+  parseNextItemOutput,
+  skillKindFromPrompt,
   clampDowntimePollInterval,
   clampDowntimeIdleThresholdMs,
   clampDowntimeRequiredFreeSlots,
@@ -505,6 +507,60 @@ describe('downtime settings clamps', () => {
     expect(clampDowntimeRequiredFreeSlots(Number.NaN)).toBe(0);
     expect(clampDowntimeRequiredFreeSlots(2.7)).toBe(3);
     expect(clampDowntimeRequiredFreeSlots(2)).toBe(2);
+  });
+});
+
+// ── Wiring helpers (F4) ───────────────────────────────────────────────
+
+describe('parseNextItemOutput', () => {
+  it('parses the workItem from `wl next --stage <stage> --json`', () => {
+    const stdout = JSON.stringify({ success: true, workItem: { id: 'WL-ABC', title: 'Some task' } });
+    expect(parseNextItemOutput(stdout, 'intake_complete')).toEqual({
+      id: 'WL-ABC',
+      title: 'Some task',
+      stage: 'intake_complete',
+    });
+  });
+
+  it('returns null when wl next reports no item (workItem null)', () => {
+    const stdout = JSON.stringify({ success: false, workItem: null, reason: 'no items' });
+    expect(parseNextItemOutput(stdout, 'idea')).toBeNull();
+  });
+
+  it('returns null for malformed JSON', () => {
+    expect(parseNextItemOutput('not json', 'idea')).toBeNull();
+  });
+
+  it('returns null when the workItem lacks an id', () => {
+    const stdout = JSON.stringify({ success: true, workItem: { title: 'no id' } });
+    expect(parseNextItemOutput(stdout, 'idea')).toBeNull();
+  });
+});
+
+describe('skillKindFromPrompt', () => {
+  it('derives plan from a /skill:plan prompt and intake otherwise', () => {
+    expect(skillKindFromPrompt('Run /skill:plan WL-ABC — Task.')).toBe('plan');
+    expect(skillKindFromPrompt('Run /skill:intake WL-DEF — Idea.')).toBe('intake');
+  });
+});
+
+describe('downtime worker enabled state', () => {
+  it('exposes the enabled flag from the per-tick config', async () => {
+    const cfg = { enabled: true };
+    const worker = createDowntimeWorker({
+      poller: createDowntimePoller('http://proxy:8000'),
+      deps: makeDeps(),
+      config: () => ({
+        enabled: cfg.enabled,
+        thresholdMs: 240_000,
+        requiredFreeSlots: 0,
+        model: 'plan',
+        cwd: '/repo',
+      }),
+    });
+    expect(worker.enabled).toBe(true);
+    cfg.enabled = false;
+    expect(worker.enabled).toBe(false);
   });
 });
 

@@ -22,10 +22,31 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join } from 'path';
 import { resolveWorklogRoot } from '@worklog/shared/worklog-paths';
-import { checkWlAvailable, fetchNextItems, fetchItemsByStage, setWorklogDir, claimWorkItem } from './fetcher.js';
+import {
+  checkWlAvailable,
+  fetchNextItems,
+  fetchItemsByStage,
+  setWorklogDir,
+  claimWorkItem,
+  getExecFileAsync,
+} from './fetcher.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
+import {
+  createDowntimeWorker,
+  createDowntimePoller,
+  buildDowntimePaneArgs,
+  spawnDowntimePane,
+  parseNextItemOutput,
+  skillKindFromPrompt,
+  type DowntimeWorker,
+  type DowntimeWorkerDeps,
+  type DowntimeStage,
+  type DowntimeCandidate,
+  type DowntimeSpawn,
+  defaultDowntimeSpawn,
+} from './downtime-worker.js';
 
 // Resolve path to the send-to-pi.sh script (relative to this source file)
 // At runtime (tsx or dist), __dirname equivalent from import.meta.url
@@ -183,6 +204,46 @@ export async function claimItemForAgentCommand(command: string): Promise<void> {
   }
 }
 
+/**
+ * Build the real downtime-worker dependencies (WL-0MSF49FMW009M06K):
+ * `wl next --stage <stage> --json` for dispatch selection, `wl update
+ * <id> --status in_progress` for the pre-dispatch claim, and
+ * `send-to-pi.sh` for the visible (non-focus-stealing) agent pane. Every
+ * boundary is fail-closed: a wl failure yields no candidate (no dispatch)
+ * rather than an exception.
+ */
+export function createDowntimeDeps(
+  scriptPath: string,
+  assignee: string,
+  spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
+): DowntimeWorkerDeps {
+  return {
+    async getNextItem(stage: DowntimeStage): Promise<DowntimeCandidate | null> {
+      try {
+        const { stdout } = await getExecFileAsync()('wl', ['next', '--stage', stage, '--json'], {
+          encoding: 'utf8',
+        });
+        return parseNextItemOutput(stdout, stage);
+      } catch {
+        return null; // wl failure → no dispatch (fail-closed)
+      }
+    },
+    async claimItem(itemId: string): Promise<void> {
+      // claimWorkItem never throws (failures are returned and logged).
+      await claimWorkItem(itemId, assignee);
+    },
+    async spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<void> {
+      const kind = skillKindFromPrompt(prompt);
+      spawnDowntimePane(
+        scriptPath,
+        buildDowntimePaneArgs(kind, prompt, opts),
+        { cwd: opts.cwd },
+        spawnFn,
+      );
+    },
+  };
+}
+
 // Load settings
 const settings = loadSettings();
 
@@ -284,6 +345,27 @@ async function main(): Promise<void> {
   // Settings are re-read so browseItemCount (per fetch) and showHelpText
   // (per render) changes apply without a plugin restart.
   const runSettings = loadSettings();
+  // Downtime worker (local-LLM idle dispatch, WL-0MSF49FMW009M06K): built
+  // when enabled; settings are re-read every tick via `config()` so changes
+  // apply without a plugin restart. The dispatch panes open in the resolved
+  // worklog root (--cwd).
+  const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
+  const downtimeWorker: DowntimeWorker | undefined = runSettings.downtimeEnabled
+    ? createDowntimeWorker({
+        poller: createDowntimePoller(runSettings.downtimeProxyUrl),
+        deps: createDowntimeDeps(SEND_TO_PI_SCRIPT, AGENT_ASSIGNEE),
+        config: () => {
+          const s = loadSettings();
+          return {
+            enabled: s.downtimeEnabled,
+            thresholdMs: s.downtimeIdleThresholdMs,
+            requiredFreeSlots: s.downtimeRequiredFreeSlots,
+            model: s.downtimeModel,
+            cwd: targetCwd,
+          };
+        },
+      })
+    : undefined;
   const selectedItem = await runWorklistTui(
     fetcher,
     undefined,
@@ -294,6 +376,8 @@ async function main(): Promise<void> {
       autoSync: runSettings.autoSync,
       syncIntervalMs: runSettings.syncIntervalMs,
       showHelpText: runSettings.showHelpText,
+      downtimeWorker,
+      downtimePollIntervalMs: runSettings.downtimePollIntervalMs,
       // Re-read on every render so a showHelpText change applies on the next
       // refresh (no plugin restart needed), matching browseItemCount behavior.
       getShowHelpText: () => loadSettings().showHelpText ?? true,

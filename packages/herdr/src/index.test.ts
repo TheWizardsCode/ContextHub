@@ -6,7 +6,13 @@
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
-import { stripCommandPrefix, routeCommand, stripAgentPromptPrefix, buildSendToPiArgs } from './index.js';
+import {
+  stripCommandPrefix,
+  routeCommand,
+  stripAgentPromptPrefix,
+  buildSendToPiArgs,
+  createDowntimeDeps,
+} from './index.js';
 import {
   fetchItemsByStage,
   resetExecFileAsync,
@@ -266,8 +272,7 @@ describe('shortcuts.json command routing', () => {
 
 
 describe('routeCommand', () => {
-  describe('agent commands', () => {
-    it('routes /skill: commands to the agent pane', () => {
+  describe('agent commands', () => {    it('routes /skill: commands to the agent pane', () => {
       expect(routeCommand('/skill:implement <id>')).toBe('agent');
       expect(routeCommand('/skill:audit <id>')).toBe('agent');
     });
@@ -471,5 +476,108 @@ describe('configureWorklogTarget', () => {
     const report = uninitializedReport('/tmp/nonexistent-project');
     expect(report).toContain("No valid .worklog/ directory found in or above '/tmp/nonexistent-project'");
     expect(report).toContain('Showing empty worklist. Navigate to a project with \'worklog init\' to see items.');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createDowntimeDeps tests (WL-0MSF49FMW009M06K, F4 wiring)
+// ---------------------------------------------------------------------------
+
+describe('createDowntimeDeps', () => {
+  afterEach(() => {
+    resetExecFileAsync();
+    resetWorklogDir();
+  });
+
+  it('getNextItem runs wl next --stage and parses the first workItem', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ success: true, workItem: { id: 'WL-ABC', title: 'Some task' } }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const candidate = await deps.getNextItem('intake_complete');
+
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      ['next', '--stage', 'intake_complete', '--json'],
+      expect.anything(),
+    );
+    expect(candidate).toEqual({ id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' });
+  });
+
+  it('getNextItem returns null when wl reports no item', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ success: false, workItem: null, reason: 'none' }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getNextItem('idea')).toBeNull();
+  });
+
+  it('getNextItem fails closed (null) when wl errors', async () => {
+    setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getNextItem('idea')).toBeNull();
+  });
+
+  it('claimItem runs wl update --status in_progress --assignee', async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.claimItem('WL-ABC');
+
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      ['update', 'WL-ABC', '--status', 'in_progress', '--assignee', 'Map', '--json'],
+      expect.anything(),
+    );
+  });
+
+  it('spawnAgentPane spawns send-to-pi.sh with the derived pane name and args', async () => {
+    const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
+
+    await deps.spawnAgentPane('Run /skill:plan WL-ABC — Some task.', {
+      model: 'plan',
+      cwd: '/repo',
+    });
+
+    expect(spawnFn).toHaveBeenCalledWith(
+      '/path/to/send-to-pi.sh',
+      [
+        '--pane-name',
+        'Downtime plan',
+        '--no-focus',
+        '--cwd',
+        '/repo',
+        '--model',
+        'plan',
+        'Run /skill:plan WL-ABC — Some task.',
+      ],
+      { cwd: '/repo' },
+    );
+    const handle = (spawnFn as ReturnType<typeof vi.fn>).mock.results[0].value;
+    expect(handle.unref).toHaveBeenCalled();
+  });
+
+  it('spawnAgentPane derives the intake pane name from the prompt', async () => {
+    const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
+
+    await deps.spawnAgentPane('Run /skill:intake WL-DEF — An idea.', {
+      model: 'plan',
+      cwd: '/repo',
+    });
+
+    expect(spawnFn).toHaveBeenCalledWith(
+      '/path/to/send-to-pi.sh',
+      expect.arrayContaining(['--pane-name', 'Downtime intake']),
+      expect.anything(),
+    );
   });
 });

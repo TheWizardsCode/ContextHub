@@ -129,6 +129,65 @@ Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings in
 - `showHelpText` — Show the shortcut hint line at the bottom of the list (default: `true`); changes apply on the next render without a plugin restart
 - `showIcons` — Toggle icons in the list (default: `true`)
 
+### Downtime worker (local-LLM idle dispatch)
+
+When the local LLM (llama-server behind the llama-proxy) is idle, the plugin
+can use that compute to advance the worklog backlog automatically: after the
+proxy reports idle continuously for the configured threshold, it opens a
+visible (non-focus-stealing) pi agent pane that runs `/skill:plan` on the
+next `intake_complete` item — or falls back to `/skill:intake` on the next
+`idea` item (parent WL-0MSF49FMW009M06K).
+
+Settings (all re-read each poll, so changes apply without a plugin restart):
+
+- `downtimeEnabled` — Enable the downtime worker (default: `true`)
+- `downtimeIdleThresholdMs` — Minimum continuous idle duration before a
+dispatch (default: `240000` = 4 minutes, floor 1s)
+- `downtimeRequiredFreeSlots` — Required free slots; `0` means **all** slots
+must be free (default). A positive integer N is accepted; without per-slot
+identity data the worker fails closed to all-slots-free for `0 < N < total`;
+`N > total` never dispatches.
+- `downtimePollIntervalMs` — Poll interval for the proxy status endpoint
+(default: `30000`, hard floor `10000`)
+- `downtimeProxyUrl` — Base URL of the llama-proxy (default:
+`http://192.168.0.199:8000`)
+- `downtimeModel` — pi model pattern for dispatched panes (default: `plan`)
+
+The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
+Idle means: llama-server running, no active query, no model switch, no active
+local lease, and the required free-slot condition met. Endpoint failures,
+timeouts, and ambiguous responses are treated as **busy** (no dispatch) and
+never crash the plugin. Each poll is single-flight with a per-poll timeout.
+
+**Dispatch behaviour** — once idle has been continuous for the threshold, the
+worker runs `wl next --stage intake_complete --json` and dispatches
+`/skill:plan <id>`; if no such item it runs `wl next --stage idea --json` and
+dispatches `/skill:intake <id>`; if both are empty nothing is dispatched.
+The item is claimed (`wl update <id> --status in_progress`) *before* the pane
+spawns, so it appears in-progress immediately and a second pane's `wl next`
+cannot select it. Panes are named `Downtime plan` / `Downtime intake`, opened
+with `--no-focus` (visible, never steals focus), `--cwd <worklog root>` and
+`--model <downtimeModel>`.
+
+**Blocked-questions handling** — the dispatched prompt instructs the agent:
+if it cannot proceed because it needs answers, record the questions in a
+comment on the work item (`wl comment add <id> --comment ...`) and mark the
+item as needing producer review (`wl update <id> --needs-producer-review
+true`), then stop — it never blocks indefinitely.
+
+**No lock file (cross-pane decision Q5)** — concurrent panes are serialized
+by the idle→busy cadence (a dispatch consumes the local slot, so the proxy
+reports busy and the worker requires a fresh full idle period) and by the
+pre-dispatch claim; there is deliberately **no cross-pane lock file**. A
+small residual risk of two panes dispatching at the same idle boundary is
+accepted — the claim prevents duplicate work on the same item.
+
+The worker runs inside the plugin's single consolidated scheduler loop (one
+`setInterval`; no independent timers), uses unref'd timers, and is cleaned up
+when the pane exits. While the pane is open the list header shows the worker
+state, e.g. `[⏳ downtime idle 3:12]`, `[downtime busy]`,
+`[⏳ downtime dispatching]`, or `[downtime disabled]`.
+
 ### Pause-when-hidden (pane visibility gating)
 
 When the worklist pane's tab is **hidden (not focused)**, the auto-refresh and

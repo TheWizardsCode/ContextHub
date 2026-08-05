@@ -31,6 +31,7 @@ import {
 } from './icons.js';
 import { runSync } from './auto-sync.js';
 import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
+import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, type DowntimeWorker } from './downtime-worker.js';
 import { showToast } from './notify.js';
 import { recordCommand, getLastCommand } from './command-log.js';
 import {
@@ -1510,6 +1511,29 @@ export function handleKeypress(
  * current state. The caller should write this to stdout and handle
  * terminal setup/teardown.
  */
+/**
+ * Render the inline downtime-worker status fragment appended to the list
+ * header (AC3, WL-0MSF49FMW009M06K): `[⏳ downtime idle m:ss]`,
+ * `[downtime busy]`, `[⏳ downtime dispatching]`, or `[downtime disabled]`.
+ * Inline-only — it never adds a row, so the pane-height budget is intact.
+ */
+export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string {
+  if (!worker) return '';
+  if (worker.dispatching) {
+    return ` ${ANSI.fg(208)}[⏳ downtime dispatching]${ANSI.reset}`;
+  }
+  if (!worker.enabled) {
+    return ` ${ANSI.dim}[downtime disabled]${ANSI.reset}`;
+  }
+  if (worker.idleSince !== null) {
+    const elapsedSecs = Math.max(0, Math.floor((Date.now() - worker.idleSince) / 1000));
+    const minutes = Math.floor(elapsedSecs / 60);
+    const seconds = elapsedSecs % 60;
+    return ` ${ANSI.fg(34)}[⏳ downtime idle ${minutes}:${String(seconds).padStart(2, '0')}]${ANSI.reset}`;
+  }
+  return ` ${ANSI.dim}[downtime busy]${ANSI.reset}`;
+}
+
 export function createListRenderer(): (
   items: WorkItem[],
   selectedIndex: number,
@@ -1530,6 +1554,7 @@ export function createListRenderer(): (
   metaScrollOffset?: number,
   metaLastCommand?: string,
   readFile?: (filePath: string) => string | null,
+  downtimeStatus?: string,
 ) => string {
   return (
     items: WorkItem[],
@@ -1551,6 +1576,7 @@ export function createListRenderer(): (
     metaScrollOffset?: number,
     metaLastCommand?: string,
     readFile?: (filePath: string) => string | null,
+    downtimeStatus?: string,
   ): string => {
     const { rows, cols } = termSize;
     const output: string[] = [];
@@ -1592,6 +1618,9 @@ export function createListRenderer(): (
     }
     if (panePaused) {
       header += ` ${ANSI.fg(220)}[paused — hidden]${ANSI.reset}`;
+    }
+    if (downtimeStatus) {
+      header += downtimeStatus;
     }
     output.push(header);
 
@@ -2053,7 +2082,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; onCommand?: (command: string, model?: string) => void },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; onCommand?: (command: string, model?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -2064,6 +2093,8 @@ export async function runWorklistTui(
     showHelpText: options?.showHelpText ?? true,
     getShowHelpText: options?.getShowHelpText ?? (() => options?.showHelpText ?? true),
     onCommand: options?.onCommand,
+    downtimeWorker: options?.downtimeWorker,
+    downtimePollIntervalMs: options?.downtimePollIntervalMs ?? DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   };
 
   let termSize = getTermSize();
@@ -2671,6 +2702,7 @@ export async function runWorklistTui(
       state.metaScrollOffset,
       metaLastCommand,
       readKeyFile,
+      renderDowntimeStatus(opts.downtimeWorker),
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a
@@ -2787,6 +2819,23 @@ export async function runWorklistTui(
       }
     },
   });
+
+  // Downtime-worker task — polls the llama-proxy for idle state and, after
+  // the configured idle threshold, dispatches a pi agent pane (parent
+  // WL-0MSF49FMW009M06K). Unlike refresh/sync it is NOT visibility-gated:
+  // the worker runs while the worklist pane is open (parent Assumptions).
+  // Single-flight: the poller and dispatch guards inside the worker prevent
+  // overlapping work; the scheduler task itself is also single-flight.
+  if (opts.downtimeWorker) {
+    scheduler.addTask({
+      id: 'downtime',
+      intervalMs: opts.downtimePollIntervalMs,
+      singleFlight: true,
+      run: async () => {
+        await opts.downtimeWorker?.tick();
+      },
+    });
+  }
 
   scheduler.start();
 

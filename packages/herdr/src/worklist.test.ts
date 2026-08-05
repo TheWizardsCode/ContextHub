@@ -16,6 +16,7 @@ import {
   formatCodeFreezeDialog,
   ANSI,
   createListRenderer,
+  renderDowntimeStatus,
   isChordLeader,
   processChordInput,
   createChordState,
@@ -26,6 +27,7 @@ import {
   formatTimestamp,
   buildMetaRows,
 } from './worklist.js';
+import type { DowntimeWorker } from './downtime-worker.js';
 import { setLogPath, resetLogPath, recordCommand, getLastCommand } from './command-log.js';
 import { loadShortcutConfig, ShortcutRegistry } from './shortcut-config.js';
 import { regroupWorkItems } from './grouping.js';
@@ -1125,5 +1127,65 @@ describe('buildMetaRows — timestamps rendered via formatTimestamp', () => {
     expect(rows.has('Created')).toBe(false);
     expect(rows.has('Updated')).toBe(false);
     expect(rows.has('Audited At')).toBe(false);
+  });
+});
+
+// ── Downtime status indicator (WL-0MSF49FMW009M06K, F4) ───────────────
+
+describe('renderDowntimeStatus', () => {
+  it('renders nothing when no worker is present', () => {
+    expect(renderDowntimeStatus(undefined)).toBe('');
+  });
+
+  it('renders the continuous idle duration as m:ss', () => {
+    const worker = {
+      idleSince: Date.now() - 192_000, // 3:12
+      dispatching: false,
+      enabled: true,
+    } as unknown as DowntimeWorker;
+    const status = renderDowntimeStatus(worker);
+    expect(status).toContain('downtime idle 3:12');
+    expect(status).toContain('⏳');
+  });
+
+  it('renders the dispatching state', () => {
+    const worker = {
+      idleSince: Date.now() - 60_000,
+      dispatching: true,
+      enabled: true,
+    } as unknown as DowntimeWorker;
+    expect(renderDowntimeStatus(worker)).toContain('downtime dispatching');
+  });
+
+  it('renders the disabled state', () => {
+    const worker = {
+      idleSince: null,
+      dispatching: false,
+      enabled: false,
+    } as unknown as DowntimeWorker;
+    expect(renderDowntimeStatus(worker)).toContain('downtime disabled');
+  });
+
+  it('renders busy when the proxy is not idle', () => {
+    const worker = {
+      idleSince: null,
+      dispatching: false,
+      enabled: true,
+    } as unknown as DowntimeWorker;
+    expect(renderDowntimeStatus(worker)).toContain('downtime busy');
+  });
+
+  it('appends the status inline to the list header without adding a row', () => {
+    const items = [makeItem('WL-1', 'open')];
+    const renderer = createListRenderer();
+    const output = renderer(
+      items, 0, 0, TERM_80x24, null, 'list', null,
+      undefined, null, 0, true, undefined, undefined, 0, false, false,
+      0, undefined, undefined,
+      ' [⏳ downtime idle 0:05]',
+    );
+    expect(output).toContain('Work Items');
+    expect(output).toContain('[⏳ downtime idle 0:05]');
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
   });
 });
