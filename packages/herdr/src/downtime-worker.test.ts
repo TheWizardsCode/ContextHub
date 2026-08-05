@@ -6,22 +6,25 @@
  * test-suite feature created before the implementation features
  * (cf. WL-0MQD1N3JD007B0FZ).
  *
- * Green suites test the parts implemented in this feature (idle detection,
- * blocked-questions prompt, settings clamps, fixture coherence). The
- * `describe.skip` blocks define the remaining contract matrix; their owning
- * implementation features flip them back on:
+ * Green suites test the parts implemented so far (idle detection,
+ * blocked-questions prompt, settings clamps, fixture coherence, and — since
+ * WL-0MSG80254005ZNE9 — the poller, fail-closed parsing and runtime idle
+ * evaluation). The `describe.skip` blocks define the remaining contract
+ * matrix; the owning implementation feature flips them back on:
  *
- *  - endpoint failures / poller        → WL-0MSG80254005ZNE9 (F2)
- *  - threshold timing / dispatch /
- *    single-flight                     → WL-0MSG80AG700429M8 (F3)
+ *  - threshold timing / dispatch / single-flight → WL-0MSG80AG700429M8 (F3)
  *
- * The current stubs are fail-closed (never dispatch, never throw), which is
- * the safe default until the full worker lands.
+ * The remaining stubs are fail-closed (never dispatch, never throw), which
+ * is the safe default until the full worker lands.
  */
 
 import { describe, it, expect, vi } from 'vitest';
 import {
   isIdleStatus,
+  evaluateIdle,
+  parseLlamaStatus,
+  fetchLocalStatus,
+  createDowntimePoller,
   buildDowntimePrompt,
   BLOCKED_QUESTIONS_INSTRUCTION,
   clampDowntimePollInterval,
@@ -31,9 +34,9 @@ import {
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   createIdleTracker,
-  createDowntimePoller,
   dispatchDowntimeWork,
   type LlamaStatus,
+  type LlamaStatusFetcher,
   type DowntimeCandidate,
 } from './downtime-worker.js';
 import {
@@ -44,6 +47,7 @@ import {
   timeoutErrorFixture,
   httpErrorResponseFixture,
   jsonResponseFixture,
+  type LlamaStatusHttpResponse,
 } from './downtime-worker.fixtures.js';
 
 // ── Fixture coherence (AC1) ───────────────────────────────────────────
@@ -243,9 +247,9 @@ describe.skip('single-flight dispatch guard', () => {
   });
 });
 
-// ── Endpoint failures (AC6) — implemented in F2 (WL-0MSG80254005ZNE9) ─
+// ── Endpoint failures & poller (AC6) — implemented in F2 ──────────────
 
-describe.skip('endpoint failures', () => {
+describe('endpoint failures and poller', () => {
   it('network errors are treated as busy and never throw', async () => {
     const fetcher = vi.fn().mockRejectedValue(networkErrorFixture);
     const poller = createDowntimePoller('http://proxy:8000', fetcher);
@@ -269,6 +273,130 @@ describe.skip('endpoint failures', () => {
     const poller = createDowntimePoller('http://proxy:8000', fetcher);
     await poller.poll();
     expect(fetcher).toHaveBeenCalledWith('http://proxy:8000/llama/local/status', expect.anything());
+  });
+
+  it('normalises a trailing slash on the proxy URL', async () => {
+    const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
+    const poller = createDowntimePoller('http://proxy:8000/', fetcher);
+    await poller.poll();
+    expect(fetcher).toHaveBeenCalledWith('http://proxy:8000/llama/local/status', expect.anything());
+  });
+
+  it('returns the parsed status on a successful poll', async () => {
+    const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    await expect(poller.poll()).resolves.toEqual(idleAllSlotsFree);
+  });
+
+  it('treats invalid JSON as busy', async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError('Unexpected token');
+      },
+    });
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    await expect(poller.poll()).resolves.toBeNull();
+  });
+
+  it('treats payloads with missing required fields as busy', async () => {
+    const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(ambiguousMissingFieldsRaw));
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    await expect(poller.poll()).resolves.toBeNull();
+  });
+
+  it('derives local_lease_active from the lease fields when the boolean is absent', async () => {
+    const status = parseLlamaStatus({
+      llama_server_running: true,
+      active_query: false,
+      model_switch_in_progress: false,
+      available_slots: 4,
+      total_slots: 4,
+      local_owner_session_id: 'session-1',
+      local_owner_lease_remaining_seconds: 120,
+    });
+    expect(status).not.toBeNull();
+    expect(status!.local_lease_active).toBe(true);
+    expect(evaluateIdle(status!, 0)).toBe(false);
+  });
+
+  it('coalesces overlapping polls (single-flight, no overlapping fetches)', async () => {
+    let release!: () => void;
+    const gate = new Promise<LlamaStatusHttpResponse>((resolve) => {
+      release = () => resolve(jsonResponseFixture(idleAllSlotsFree));
+    });
+    const fetcher = vi.fn().mockImplementation(() => gate);
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+
+    const first = poller.poll();
+    expect(poller.isPolling()).toBe(true);
+    const second = poller.poll();
+    release();
+
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(firstResult).toEqual(idleAllSlotsFree);
+    expect(secondResult).toBe(firstResult); // same coalesced result
+    expect(poller.isPolling()).toBe(false);
+  });
+
+  it('aborts the request after the per-poll timeout (fail closed)', async () => {
+    vi.useFakeTimers();
+    let receivedSignal: unknown;
+    const fetcher = vi.fn((_url: string, init?: { signal?: unknown }) => {
+      receivedSignal = init?.signal;
+      return new Promise<LlamaStatusHttpResponse>((_resolve, reject) => {
+        const signal = init?.signal as AbortSignal | undefined;
+        signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      });
+    });
+
+    const poller = createDowntimePoller('http://proxy:8000', fetcher, 5_000);
+    const pollPromise = poller.poll();
+    expect(receivedSignal).toBeDefined();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(pollPromise).resolves.toBeNull();
+    expect(poller.isPolling()).toBe(false);
+    vi.useRealTimers();
+  });
+});
+
+// ── Runtime idle evaluation (F2, AC5) ─────────────────────────────────
+
+describe('runtime idle evaluation (evaluateIdle)', () => {
+  const idle: LlamaStatus = {
+    llama_server_running: true,
+    active_query: false,
+    model_switch_in_progress: false,
+    local_lease_active: false,
+    available_slots: 4,
+    total_slots: 4,
+  };
+
+  it('N=0 (default) requires all slots free', () => {
+    expect(evaluateIdle(idle, 0)).toBe(true);
+    expect(evaluateIdle({ ...idle, available_slots: 3 }, 0)).toBe(false);
+  });
+
+  it('degrades 0 < N < total slots to ALL slots free (fail-closed, no per-slot data)', () => {
+    // Without per-slot identity (LP-0MSG5TA7Y002GN39), N=2 with 4 slots
+    // must NOT dispatch on "any 2 free" — it requires all 4 free.
+    expect(evaluateIdle({ ...idle, available_slots: 2 }, 2)).toBe(false);
+    expect(evaluateIdle({ ...idle, available_slots: 4 }, 2)).toBe(true);
+  });
+
+  it('N == total slots behaves like all slots free', () => {
+    expect(evaluateIdle({ ...idle, available_slots: 4 }, 4)).toBe(true);
+    expect(evaluateIdle({ ...idle, available_slots: 3 }, 4)).toBe(false);
+  });
+
+  it('N > total slots can never be idle (never dispatches)', () => {
+    expect(evaluateIdle({ ...idle, available_slots: 4 }, 5)).toBe(false);
+  });
+
+  it('ambiguous responses (total_slots 0) are busy', () => {
+    expect(evaluateIdle({ ...idle, total_slots: 0, available_slots: 0 }, 0)).toBe(false);
   });
 });
 

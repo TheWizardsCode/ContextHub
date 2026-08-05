@@ -7,6 +7,16 @@
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { clampSyncInterval } from './auto-sync.js';
+import {
+  clampDowntimeIdleThresholdMs,
+  clampDowntimePollInterval,
+  clampDowntimeRequiredFreeSlots,
+  DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+  DEFAULT_DOWNTIME_MODEL,
+  DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
+  DEFAULT_DOWNTIME_PROXY_URL,
+  DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
+} from './downtime-worker.js';
 import { dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -28,6 +38,18 @@ export interface PluginSettings {
   browseItemCount: number;
   /** Show chord help bar at the bottom of the list. */
   showHelpText: boolean;
+  /** Enable the downtime worker (local-LLM idle dispatch). */
+  downtimeEnabled: boolean;
+  /** Minimum continuous idle duration before dispatch (ms). */
+  downtimeIdleThresholdMs: number;
+  /** Required free slots; 0 = all slots (default), or a positive integer N. */
+  downtimeRequiredFreeSlots: number;
+  /** Poll interval for the proxy status endpoint (hard floor 10s). */
+  downtimePollIntervalMs: number;
+  /** Base URL of the llama-proxy (e.g. http://192.168.0.199:8000). */
+  downtimeProxyUrl: string;
+  /** pi model pattern for dispatched agent panes (default `plan`). */
+  downtimeModel: string;
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────
@@ -40,6 +62,12 @@ export const defaultSettings: PluginSettings = {
   syncIntervalMs: 60000,
   browseItemCount: 10,
   showHelpText: true,
+  downtimeEnabled: true,
+  downtimeIdleThresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+  downtimeRequiredFreeSlots: DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
+  downtimePollIntervalMs: DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
+  downtimeProxyUrl: DEFAULT_DOWNTIME_PROXY_URL,
+  downtimeModel: DEFAULT_DOWNTIME_MODEL,
 };
 
 /** Minimum allowed browseItemCount. */
@@ -109,6 +137,21 @@ export function loadSettings(settingsPath?: string): PluginSettings {
         ? clampBrowseItemCount(parsed.browseItemCount) : defaultSettings.browseItemCount,
       showHelpText: typeof parsed.showHelpText === 'boolean'
         ? parsed.showHelpText : defaultSettings.showHelpText,
+      downtimeEnabled: typeof parsed.downtimeEnabled === 'boolean'
+        ? parsed.downtimeEnabled : defaultSettings.downtimeEnabled,
+      downtimeIdleThresholdMs: typeof parsed.downtimeIdleThresholdMs === 'number'
+        ? clampDowntimeIdleThresholdMs(parsed.downtimeIdleThresholdMs)
+        : defaultSettings.downtimeIdleThresholdMs,
+      downtimeRequiredFreeSlots: typeof parsed.downtimeRequiredFreeSlots === 'number'
+        ? clampDowntimeRequiredFreeSlots(parsed.downtimeRequiredFreeSlots)
+        : defaultSettings.downtimeRequiredFreeSlots,
+      downtimePollIntervalMs: typeof parsed.downtimePollIntervalMs === 'number'
+        ? clampDowntimePollInterval(parsed.downtimePollIntervalMs)
+        : defaultSettings.downtimePollIntervalMs,
+      downtimeProxyUrl: typeof parsed.downtimeProxyUrl === 'string' && parsed.downtimeProxyUrl.length > 0
+        ? parsed.downtimeProxyUrl : defaultSettings.downtimeProxyUrl,
+      downtimeModel: typeof parsed.downtimeModel === 'string' && parsed.downtimeModel.length > 0
+        ? parsed.downtimeModel : defaultSettings.downtimeModel,
     };
   } catch {
     return { ...defaultSettings };

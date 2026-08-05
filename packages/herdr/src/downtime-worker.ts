@@ -13,20 +13,18 @@
  *    `clampDowntimeRequiredFreeSlots` — settings clamps. The settings keys
  *    and load/merge wiring live in `settings.ts` (WL-0MSG80254005ZNE9).
  *
- * The stateful / side-effectful parts are FAIL-CLOSED stubs whose contracts
- * are implemented by the downstream features:
+ * The remaining stateful / side-effectful parts are FAIL-CLOSED stubs whose
+ * contracts are implemented by the downstream feature:
  *
- *  - `createDowntimePoller` — real HTTP poller for `GET {proxyUrl}/llama/
- *    local/status` in WL-0MSG80254005ZNE9 (F2).
  *  - `createIdleTracker` — real idle-duration tracker in
  *    WL-0MSG80AG700429M8 (F3).
  *  - `dispatchDowntimeWork` — real dispatch orchestration (`wl next`,
  *    send-to-pi.sh pane spawn, pre-dispatch claim, single-flight) in
  *    WL-0MSG80AG700429M8 (F3).
  *
- * Fail-closed stub behaviour (never dispatch, never throw) is the SAFE
- * default: until the full worker lands, the plugin must not dispatch work
- * based on unverified logic.
+ * Fail-closed behaviour (never dispatch, never throw) is the SAFE default:
+ * until the full worker lands, the plugin must not dispatch work based on
+ * unverified logic.
  */
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -96,6 +94,23 @@ export function isIdleStatus(status: LlamaStatus, requiredFreeSlots: number): bo
   return available >= required;
 }
 
+/**
+ * Runtime idle evaluation (F2). Same conditions as `isIdleStatus`, plus the
+ * fail-closed fallback from planning decision Q7: while the proxy does not
+ * expose per-slot identity (LP-0MSG5TA7Y002GN39), a configured N with
+ * 0 < N < total slots degrades to requiring ALL slots free — stricter than
+ * configured, never "any N slots" without same-slot identity. N > total
+ * slots never dispatches (carried through `isIdleStatus`).
+ */
+export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): boolean {
+  const total = status.total_slots;
+  if (!Number.isFinite(total) || total <= 0) return false; // ambiguous → busy
+  const effective = requiredFreeSlots > 0 && requiredFreeSlots < total
+    ? total
+    : requiredFreeSlots;
+  return isIdleStatus(status, effective);
+}
+
 // ── Idle-duration tracker (stub — F3) ─────────────────────────────────
 
 export interface IdleTracker {
@@ -129,7 +144,7 @@ export function createIdleTracker(): IdleTracker {
   };
 }
 
-// ── Poller (stub — F2) ────────────────────────────────────────────────
+// ── Poller (implemented — F2) ────────────────────────────────────────
 
 /**
  * Minimal structural fetch signature (the DOM `fetch` type is not part of
@@ -141,11 +156,95 @@ export type LlamaStatusFetcher = (
   init?: { signal?: unknown },
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
+/** Per-poll timeout: an unresponsive proxy must fail closed, not hang. */
+export const DEFAULT_DOWNTIME_POLL_TIMEOUT_MS = 5_000;
+
+/**
+ * Fail-closed parse of a `GET /llama/local/status` payload. Returns null
+ * (treated as busy by the caller) when required fields are missing or
+ * malformed. `local_lease_active` is derived from the lease fields the
+ * proxy actually serves when the boolean is not present.
+ */
+export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const o = raw as Record<string, unknown>;
+
+  if (typeof o.llama_server_running !== 'boolean') return null;
+  if (typeof o.active_query !== 'boolean') return null;
+  if (typeof o.model_switch_in_progress !== 'boolean') return null;
+
+  const available = o.available_slots;
+  const total = o.total_slots;
+  if (typeof available !== 'number' || !Number.isFinite(available) || available < 0) return null;
+  if (typeof total !== 'number' || !Number.isFinite(total) || total <= 0) return null;
+
+  let localLeaseActive: boolean;
+  if (typeof o.local_lease_active === 'boolean') {
+    localLeaseActive = o.local_lease_active;
+  } else {
+    // Derived from the lease fields served by the llama-proxy.
+    const ownerSession = o.local_owner_session_id;
+    const leaseSeconds = o.local_owner_lease_remaining_seconds;
+    localLeaseActive =
+      (typeof ownerSession === 'string' && ownerSession.length > 0) ||
+      (typeof leaseSeconds === 'number' && Number.isFinite(leaseSeconds) && leaseSeconds > 0);
+  }
+
+  return {
+    llama_server_running: o.llama_server_running,
+    active_query: o.active_query,
+    model_switch_in_progress: o.model_switch_in_progress,
+    local_lease_active: localLeaseActive,
+    available_slots: available,
+    total_slots: total,
+    current_model: typeof o.current_model === 'string' ? o.current_model : undefined,
+    local_owner_session_id:
+      typeof o.local_owner_session_id === 'string' ? o.local_owner_session_id : undefined,
+    local_owner_lease_remaining_seconds:
+      typeof o.local_owner_lease_remaining_seconds === 'number'
+        ? o.local_owner_lease_remaining_seconds
+        : undefined,
+  };
+}
+
+/**
+ * Fetch and parse `GET {url}/llama/local/status` with a per-poll timeout.
+ * Every failure mode — network error, timeout, HTTP error status, invalid
+ * JSON, ambiguous payload — resolves to null (busy); this function never
+ * throws.
+ */
+export async function fetchLocalStatus(
+  url: string,
+  opts?: { timeoutMs?: number; fetcher?: LlamaStatusFetcher },
+): Promise<LlamaStatus | null> {
+  const timeoutMs = opts?.timeoutMs ?? DEFAULT_DOWNTIME_POLL_TIMEOUT_MS;
+  const fetcher = opts?.fetcher ?? (globalThis.fetch as unknown as LlamaStatusFetcher);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetcher(url, { signal: controller.signal });
+    if (!res.ok) return null;
+    let raw: unknown;
+    try {
+      raw = await res.json();
+    } catch {
+      return null; // invalid JSON
+    }
+    return parseLlamaStatus(raw);
+  } catch {
+    return null; // network errors / timeouts → busy, never throw
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export interface DowntimePoller {
   /**
    * Poll `GET {proxyUrl}/llama/local/status` once. Resolves to the parsed
    * status, or null when the endpoint failed/timed out or the payload was
-   * ambiguous (both cases are treated as busy by the caller).
+   * ambiguous (both cases are treated as busy by the caller). Overlapping
+   * calls coalesce onto the in-flight poll (single-flight).
    */
   poll(): Promise<LlamaStatus | null>;
   /** True while a poll is in flight (single-flight guard for the loop). */
@@ -153,19 +252,28 @@ export interface DowntimePoller {
 }
 
 /**
- * FAIL-CLOSED stub (implemented in WL-0MSG80254005ZNE9): resolves busy
- * (null) without performing any network I/O.
+ * Single-flight poller for the llama-proxy status endpoint. `poll()` never
+ * overlaps: a second call while one poll is in flight returns the same
+ * in-flight promise.
  */
 export function createDowntimePoller(
-  _proxyUrl: string,
-  _fetcher: LlamaStatusFetcher = globalThis.fetch as unknown as LlamaStatusFetcher,
+  proxyUrl: string,
+  fetcher: LlamaStatusFetcher = globalThis.fetch as unknown as LlamaStatusFetcher,
+  timeoutMs: number = DEFAULT_DOWNTIME_POLL_TIMEOUT_MS,
 ): DowntimePoller {
+  let inFlight: Promise<LlamaStatus | null> | null = null;
+  const url = `${proxyUrl.replace(/\/+$/, '')}${DOWNTIME_STATUS_PATH}`;
+
   return {
-    async poll(): Promise<LlamaStatus | null> {
-      return null;
+    poll(): Promise<LlamaStatus | null> {
+      if (inFlight !== null) return inFlight;
+      inFlight = fetchLocalStatus(url, { timeoutMs, fetcher }).finally(() => {
+        inFlight = null;
+      });
+      return inFlight;
     },
     isPolling(): boolean {
-      return false;
+      return inFlight !== null;
     },
   };
 }

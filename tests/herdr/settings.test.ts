@@ -54,6 +54,27 @@ describe('defaultSettings', () => {
   it('has syncIntervalMs enabled by default', () => {
     expect(defaultSettings.syncIntervalMs).toBeGreaterThan(0);
   });
+
+  it('has downtimeEnabled enabled by default', () => {
+    expect(defaultSettings.downtimeEnabled).toBe(true);
+  });
+
+  it('has a 4-minute idle threshold by default', () => {
+    expect(defaultSettings.downtimeIdleThresholdMs).toBe(240000);
+  });
+
+  it('has downtimeRequiredFreeSlots 0 (all slots) by default', () => {
+    expect(defaultSettings.downtimeRequiredFreeSlots).toBe(0);
+  });
+
+  it('has a 30s poll interval by default', () => {
+    expect(defaultSettings.downtimePollIntervalMs).toBe(30000);
+  });
+
+  it('has the llama-proxy URL and plan model by default', () => {
+    expect(defaultSettings.downtimeProxyUrl).toBe('http://192.168.0.199:8000');
+    expect(defaultSettings.downtimeModel).toBe('plan');
+  });
 });
 
 describe('loadSettings', () => {
@@ -88,6 +109,33 @@ describe('loadSettings', () => {
     }), 'utf-8');
     const settings = loadSettings(settingsPath);
     expect(settings.browseItemCount).toBe(50);
+  });
+
+  it('clamps downtime settings when loading out-of-range persisted values', () => {
+    writeFileSync(settingsPath, JSON.stringify({
+      downtimePollIntervalMs: 5000,          // below the 10s floor
+      downtimeIdleThresholdMs: -1,           // negative → default
+      downtimeRequiredFreeSlots: -2,         // negative → 0 (all slots)
+      downtimeModel: '',                     // empty → default
+    }), 'utf-8');
+    const settings = loadSettings(settingsPath);
+    expect(settings.downtimePollIntervalMs).toBe(10000);
+    expect(settings.downtimeIdleThresholdMs).toBe(240000);
+    expect(settings.downtimeRequiredFreeSlots).toBe(0);
+    expect(settings.downtimeModel).toBe('plan');
+  });
+
+  it('merges partial downtime settings with defaults', () => {
+    writeFileSync(settingsPath, JSON.stringify({
+      downtimeEnabled: false,
+      downtimeProxyUrl: 'http://10.0.0.5:8000',
+    }), 'utf-8');
+    const settings = loadSettings(settingsPath);
+    expect(settings.downtimeEnabled).toBe(false);
+    expect(settings.downtimeProxyUrl).toBe('http://10.0.0.5:8000');
+    expect(settings.downtimeIdleThresholdMs).toBe(240000); // from defaults
+    expect(settings.downtimePollIntervalMs).toBe(30000); // from defaults
+    expect(settings.downtimeRequiredFreeSlots).toBe(0); // from defaults
   });
 
   it('loads settings from existing file', () => {
@@ -147,6 +195,12 @@ describe('saveSettings', () => {
       syncIntervalMs: 30000,
       browseItemCount: 25,
       showHelpText: false,
+      downtimeEnabled: true,
+      downtimeIdleThresholdMs: 240000,
+      downtimeRequiredFreeSlots: 0,
+      downtimePollIntervalMs: 30000,
+      downtimeProxyUrl: 'http://192.168.0.199:8000',
+      downtimeModel: 'plan',
     };
     saveSettings(settingsPath, settings);
     expect(existsSync(settingsPath)).toBe(true);
