@@ -9,7 +9,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as url from 'node:url';
 import os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Temporary directory helpers
@@ -181,7 +186,7 @@ describe('command-log module', () => {
   // -----------------------------------------------------------------------
 
   describe('atomic write', () => {
-    it('writes to a temp file then renames', () => {
+    it('writes complete content and leaves no temp file behind', () => {
       const logPath = path.join(tempDir, 'command-log.json');
       setLogPath(logPath);
 
@@ -190,9 +195,41 @@ describe('command-log module', () => {
       // The file should exist
       expect(fs.existsSync(logPath)).toBe(true);
 
-      // It should be valid JSON
+      // No temp files may remain after a successful write
+      const leftovers = fs.readdirSync(tempDir).filter(f => f.includes('.tmp.'));
+      expect(leftovers).toEqual([]);
+
+      // Content must be complete and valid JSON
       const data = readRawLog(logPath);
       expect(data).not.toBeNull();
+      expect(data!.entries!['WL-ATOMIC']).toHaveLength(1);
+      expect(data!.entries!['WL-ATOMIC'][0].command).toBe('test command');
+    });
+
+    it('does not corrupt the existing log when a write fails mid-flight', () => {
+      const logPath = path.join(tempDir, 'command-log.json');
+      setLogPath(logPath);
+
+      // Seed a log file with known content
+      recordCommand('WL-OLD', 'old command');
+      const before = fs.readFileSync(logPath, 'utf-8');
+
+      // Point the log at a path whose parent is a regular file — the temp
+      // write will fail, exercising the failure path of saveLog.
+      const blocker = path.join(tempDir, 'blocker');
+      fs.writeFileSync(blocker, 'not a directory', 'utf-8');
+      const badLog = path.join(blocker, 'command-log.json');
+      setLogPath(badLog);
+
+      // Must not throw — saveLog swallows write errors
+      expect(() => recordCommand('WL-NEW', 'new command')).not.toThrow();
+
+      // Original log file must be untouched
+      expect(fs.readFileSync(logPath, 'utf-8')).toBe(before);
+
+      // No temp files may linger
+      const leftovers = fs.readdirSync(tempDir).filter(f => f.includes('.tmp.'));
+      expect(leftovers).toEqual([]);
     });
   });
 
@@ -252,38 +289,66 @@ describe('command-log module', () => {
   // -----------------------------------------------------------------------
 
   describe('concurrent write safety', () => {
-    it('does not corrupt data on concurrent writes', () => {
+    it('keeps the log valid and uncorrupted across real concurrent processes', async () => {
       const logPath = path.join(tempDir, 'command-log.json');
       setLogPath(logPath);
 
-      // Simulate concurrent writes using promises
-      const promises: Promise<void>[] = [];
-      for (let i = 0; i < 10; i++) {
-        promises.push(
-          new Promise<void>(resolve => {
-            recordCommand(`WL-CONC-${i % 3}`, `concurrent command ${i}`);
-            resolve();
+      // Worker script: imports the module under test from an absolute path
+      // and records N commands for a given item id. Spawned concurrently to
+      // exercise true multi-process file access (not single-threaded
+      // promise interleaving).
+      const modulePath = new URL('./command-log.ts', import.meta.url).href;
+      const worker = path.join(tempDir, 'worker.ts');
+      fs.writeFileSync(
+        worker,
+        `import { recordCommand, setLogPath } from ${JSON.stringify(modulePath)};
+const logPath = process.argv[2];
+const itemId = process.argv[3];
+const count = Number(process.argv[4]);
+setLogPath(logPath);
+for (let i = 0; i < count; i++) {
+  recordCommand(itemId, \`cmd-\${i}\`);
+}
+`,
+        'utf-8'
+      );
+
+      const writers = 4;
+      const writesPerWriter = 5;
+      const runs: Promise<unknown>[] = [];
+      for (let w = 0; w < writers; w++) {
+        const itemId = `WL-CONC-${w}`;
+        runs.push(
+          execFileAsync('npx', ['tsx', worker, logPath, itemId, String(writesPerWriter)], {
+            cwd: new URL('../../../..', import.meta.url).pathname,
+            timeout: 60_000,
           })
         );
       }
-      Promise.all(promises).catch(() => {
-        // Should not throw
-      });
+      await Promise.all(runs);
 
-      // Allow a tiny delay for file I/O
-      const start = Date.now();
-      while (Date.now() - start < 50) { /* spin */ }
-
-      // All items should still be retrievable
-      for (let i = 0; i < 3; i++) {
-        const last = getLastCommand(`WL-CONC-${i}`);
-        expect(last).not.toBeNull();
-        expect(last!.itemId).toBe(`WL-CONC-${i}`);
-      }
-
-      // The log file should be valid JSON
+      // The log file must be structurally valid JSON with a complete entries
+      // object — atomic rename guarantees no torn/partial writes.
       const data = readRawLog(logPath);
       expect(data).not.toBeNull();
-    });
+      expect(data!.version).toBe(1);
+      expect(typeof data!.entries).toBe('object');
+      expect(data!.entries).not.toBeNull();
+
+      // Every entry present must be well-formed.
+      for (const [id, entries] of Object.entries(data!.entries)) {
+        expect(id).toMatch(/^WL-CONC-\d$/);
+        expect(entries.length).toBeGreaterThan(0);
+        for (const entry of entries) {
+          expect(entry.itemId).toBe(id);
+          expect(typeof entry.command).toBe('string');
+          expect(typeof entry.timestamp).toBe('string');
+        }
+      }
+
+      // No temp files may remain after concurrent writes
+      const leftovers = fs.readdirSync(tempDir).filter(f => f.includes('.tmp.'));
+      expect(leftovers).toEqual([]);
+    }, 90_000);
   });
 });
