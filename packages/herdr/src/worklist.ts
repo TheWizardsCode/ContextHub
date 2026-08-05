@@ -2091,50 +2091,76 @@ export async function runWorklistTui(
   };
 
   // Data reading callback
+
+  /**
+   * In-flight guard: true while a refresh cycle is awaiting its fetcher/wl
+   * calls. A refresh tick that fires while this is set is SKIPPED
+   * (single-flight), so refresh cycles never overlap and wl processes cannot
+   * pile up under load (WL-0MSBVYBMD004007C). Cleared in `finally` so a
+   * rejecting fetcher can never leave the guard stuck. Per-pane scope
+   * (declared inside runWorklistTui): panes refresh independently. A skipped
+   * tick is not coalesced — the next tick or a manual refresh updates the
+   * list (no stale-forever regression). Mirrors the `_syncInFlight` guard in
+   * auto-sync.ts.
+   */
+  let refreshInFlight = false;
+
   /**
    * Fetch and apply updated items, with optional notification.
    */
   const doRefresh = async (showNotification = false): Promise<void> => {
-    try {
-      const newItems = await fetcher();
-      const oldLen = state.items.length;
-      state.refreshItems(newItems);
-      // Re-read the Code Freeze marker so a freeze that started (or ended)
-      // since the last refresh is reflected in the banner promptly.
-      refreshFreezeState();
-      // Re-fetch children for expanded parents so the hierarchy view stays
-      // fresh after an auto/manual refresh while inside a child context.
-      const expanded = [...state.expandedItems];
-      if (expanded.length > 0) {
-        const byId = new Map(newItems.map((it) => [it.id, it]));
-        await Promise.all(expanded.map(async (parentId) => {
-          const parent = byId.get(parentId);
-          if (!parent) return; // parent no longer exists
-          try {
-            const children = await fetchChildrenForItem(parentId);
-            parent.children = children;
-          } catch {
-            // ignore: keep previously fetched children on refresh failure
-          }
-        }));
-      }
-      if (showNotification && newItems.length !== oldLen) {
-        const diff = newItems.length - oldLen;
-        const msg = diff > 0 ? `+${diff} new` : `${diff} removed`;
-        showToast('Refreshed', { body: msg });
-      } else if (showNotification) {
-        showToast('Refreshed');
-      }
-    } catch {
-      showToast('Refresh failed');
+    // Single-flight guard: skip the tick while the previous refresh cycle is
+    // still running, so overlapping wl spawn bursts cannot happen.
+    if (refreshInFlight) {
+      return;
     }
-    // Also fetch the total actionable count on refresh
-    fetchActionableCount().then((count) => {
-      totalActionableCount = count;
-    }).catch(() => {
-      // ignore
-    });
-    render();
+    refreshInFlight = true;
+    try {
+      try {
+        const newItems = await fetcher();
+        const oldLen = state.items.length;
+        state.refreshItems(newItems);
+        // Re-read the Code Freeze marker so a freeze that started (or ended)
+        // since the last refresh is reflected in the banner promptly.
+        refreshFreezeState();
+        // Re-fetch children for expanded parents so the hierarchy view stays
+        // fresh after an auto/manual refresh while inside a child context.
+        const expanded = [...state.expandedItems];
+        if (expanded.length > 0) {
+          const byId = new Map(newItems.map((it) => [it.id, it]));
+          await Promise.all(expanded.map(async (parentId) => {
+            const parent = byId.get(parentId);
+            if (!parent) return; // parent no longer exists
+            try {
+              const children = await fetchChildrenForItem(parentId);
+              parent.children = children;
+            } catch {
+              // ignore: keep previously fetched children on refresh failure
+            }
+          }));
+        }
+        if (showNotification && newItems.length !== oldLen) {
+          const diff = newItems.length - oldLen;
+          const msg = diff > 0 ? `+${diff} new` : `${diff} removed`;
+          showToast('Refreshed', { body: msg });
+        } else if (showNotification) {
+          showToast('Refreshed');
+        }
+      } catch {
+        showToast('Refresh failed');
+      }
+      // Also fetch the total actionable count on refresh
+      fetchActionableCount().then((count) => {
+        totalActionableCount = count;
+      }).catch(() => {
+        // ignore
+      });
+      render();
+    } finally {
+      // Always clear the guard — a successful, failed, or aborted cycle must
+      // never block the next refresh tick.
+      refreshInFlight = false;
+    }
   };
 
   // Run `wl sync` and surface the outcome as a toast so sync status is
