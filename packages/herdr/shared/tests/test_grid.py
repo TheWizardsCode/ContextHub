@@ -20,7 +20,6 @@ import socket
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -30,10 +29,10 @@ _SHARED_DIR = Path(__file__).resolve().parent.parent
 if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 
-from grid import (  # noqa: E402
+from grid import (
     GridBuilder,
-    parse_grid_tree,
     compute_rebalance_ratios,
+    parse_grid_tree,
     rpc,
 )
 
@@ -155,7 +154,7 @@ class MockHerdr:
         while not self._stop.is_set():
             try:
                 conn, _ = self._server_socket.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 break

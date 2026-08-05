@@ -56,7 +56,7 @@ export type Stage = (typeof STAGES)[number];
 
 // Re-export stage colors from icons for backward compatibility
 export const STAGE_COLORS: Record<string, number> = {
-  idea: 241,
+  idea: 247,
   intake_complete: 68,
   plan_complete: 172,
   in_progress: 76,
