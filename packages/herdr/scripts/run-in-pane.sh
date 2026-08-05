@@ -67,10 +67,11 @@ if [ "${1:-}" = "--exec" ]; then
     read -r _ || true
   elif [ -n "${HERDR_PANE_ID:-}" ]; then
     echo "Pane left open — close it when done (herdr: prefix+x / close_pane)."
-    # No TTY to wait on (e.g. herdr pane with detached stdin). Block on a
-    # read from /dev/zero (never returns) so this process stays alive and
-    # the pane stays open; the user closes it with herdr prefix+x.
-    read -r _ < /dev/zero || true
+    # No TTY to wait on (e.g. herdr pane with detached stdin). Block
+    # indefinitely with ~0% CPU using 'sleep infinity' so this process
+    # stays alive and the pane stays open; the user closes it with
+    # herdr prefix+x.
+    sleep infinity
   fi
 
   exit "$status"
