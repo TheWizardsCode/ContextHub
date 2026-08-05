@@ -10,7 +10,7 @@ repositories (e.g., ContextHub, open_source_llm).
 |------|-------------|
 | `send-to-pi.sh` | Open a Pi agent pane and send a command. Generalized with `--pane-name`, `--focus`/`--no-focus`, `--resize`/`--no-resize`, `--check-cli`, `--cwd`, and `--model` options. |
 | `open-pi-agent.sh` | Open an interactive Pi session in a new pane. Generalized with `--pane-name`, `--focus`/`--no-focus`, `--resize`/`--no-resize`, and `--cwd` options. |
-| `grid.py` | Python grid-rebalance helper: grows an even-completion 2-column grid to the right of the anchor pane (validated against herdr 0.7.5). |
+| `grid.py` | Python grid-rebalance helper: grows an even-completion 2-column grid to the right of the anchor pane (validated against herdr 0.7.5). Accepts an optional `--cwd <path>` forwarded to the `pane.split` RPC. |
 | `herdr-agent-state-protocol.md` | Specification for Herdr Unix socket agent state reporting protocol. |
 
 ## Pane-launch modes: `--resize` (default) / `--no-resize`
@@ -52,10 +52,16 @@ To ensure the new pane operates in the correct project, both scripts accept a
    `open.sh`/`toggle.sh` to the user's actual project directory)
 3. `$PWD` of the calling process
 
-The resolved target is passed to `herdr pane split --cwd <path>`, so the new
-pane starts in the correct project root and `wl` commands, skills, and
-relative paths resolve against the user's project rather than the plugin's
-installation directory.
+The resolved target is passed to `herdr pane split --cwd <path>` (in
+`--no-resize` mode) or forwarded to the grid helper via `grid.py --cwd <path>`
+(in the default `--resize` mode), which includes it in the `pane.split` RPC
+params for the newly created pane. Either way the new pane starts in the
+correct project root and `wl` commands, skills, and relative paths resolve
+against the user's project rather than the plugin's installation directory.
+
+`grid.py`'s `--cwd` is optional and backward compatible: when omitted the
+`pane.split` RPC carries no `cwd` key and herdr's `follow` policy applies
+(the new pane inherits the split target's CWD).
 
 ## Selecting the pi model
 

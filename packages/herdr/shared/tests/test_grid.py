@@ -673,6 +673,80 @@ class TestJsonRpcFormat:
 
 
 # ---------------------------------------------------------------------------
+# Tests: cwd propagation to pane.split
+# ---------------------------------------------------------------------------
+
+class TestCwdPropagation:
+    """The optional cwd is forwarded to the pane.split RPC params."""
+
+    def test_split_omits_cwd_by_default(self, mock):
+        # Backward compatibility: when no cwd is provided, the pane.split
+        # params must not contain a cwd key (herdr follows the split target).
+        build_grid("w1:p80", 1)
+        splits = mock.split_calls()
+        assert len(splits) == 1
+        assert "cwd" not in splits[0]["params"]
+
+    def test_split_includes_cwd_when_set(self, mock):
+        builder = GridBuilder("w1:p80", cwd="/proj/root")
+        new_id = builder.add_pane()
+        assert new_id == "w1:p101"
+        splits = mock.split_calls()
+        assert len(splits) == 1
+        assert splits[0]["params"]["cwd"] == "/proj/root"
+        # Existing params are unchanged
+        assert splits[0]["params"]["target_pane_id"] == "w1:p80"
+        assert splits[0]["params"]["direction"] == "right"
+        assert splits[0]["params"]["ratio"] == 0.5
+        assert splits[0]["params"]["focus"] is False
+
+    def test_cwd_forwarded_on_all_growth_splits(self, mock):
+        builder = GridBuilder("w1:p80", cwd="/proj/root")
+        for _ in range(6):
+            builder.add_pane()
+        splits = mock.split_calls()
+        assert len(splits) == 6
+        for s in splits:
+            assert s["params"].get("cwd") == "/proj/root"
+
+    def test_cli_forwards_cwd(self, mock):
+        env = dict(os.environ)
+        env["HERDR_SOCKET_PORT"] = str(os.environ["HERDR_SOCKET_PORT"])
+        result = subprocess.run(
+            [sys.executable, str(_SHARED_DIR / "grid.py"), "--cwd", "/proj/root", "w1:p80"],
+            capture_output=True, text=True, env=env, cwd=str(_SHARED_DIR), check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        out = json.loads(result.stdout)
+        assert out["pane_id"] == "w1:p101"
+        splits = mock.split_calls()
+        assert len(splits) == 1
+        assert splits[0]["params"].get("cwd") == "/proj/root"
+
+    def test_cli_without_cwd_is_backward_compatible(self, mock):
+        env = dict(os.environ)
+        env["HERDR_SOCKET_PORT"] = str(os.environ["HERDR_SOCKET_PORT"])
+        result = subprocess.run(
+            [sys.executable, str(_SHARED_DIR / "grid.py"), "w1:p80"],
+            capture_output=True, text=True, env=env, cwd=str(_SHARED_DIR), check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        splits = mock.split_calls()
+        assert len(splits) == 1
+        assert "cwd" not in splits[0]["params"]
+
+    def test_cli_rejects_unknown_option(self):
+        env = dict(os.environ)
+        env["HERDR_SOCKET_PORT"] = "1"
+        result = subprocess.run(
+            [sys.executable, str(_SHARED_DIR / "grid.py"), "--bogus", "w1:p80"],
+            capture_output=True, text=True, env=env, cwd=str(_SHARED_DIR), check=False,
+        )
+        assert result.returncode != 0
+        assert "unknown option" in result.stderr
+
+
+# ---------------------------------------------------------------------------
 # Tests: safe operations only
 # ---------------------------------------------------------------------------
 

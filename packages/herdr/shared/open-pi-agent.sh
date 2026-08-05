@@ -16,7 +16,9 @@
 #   --resize             Split right AND rebalance the right side into an even
 #                        grid (anchor keeps 50% width x 100% height) (default)
 #   --no-resize          Plain herdr split-right, no layout changes (default is resize)
-#   --cwd <path>         Working directory for the new pane (default: $HERDR_RESOLVED_CWD, then $PWD)
+#   --cwd <path>         Working directory for the new pane (default: $HERDR_RESOLVED_CWD, then $PWD).
+#                        Honored in both --resize (forwarded to grid.py) and --no-resize
+#                        (herdr pane split --cwd) modes.
 #   -h, --help           Show this help message
 #
 # Environment variables:
@@ -118,7 +120,9 @@ if [ "$resize" = true ]; then
     echo "Error: Could not resolve the current pane. Ensure you are inside a herdr session." >&2
     exit 1
   fi
-  grid_out="$(python3 "$grid_bin" "$anchor" 2>&1)" || true
+  # Forward the resolved target CWD so the new pane starts in the correct
+  # project root (herdr's pane.split RPC accepts cwd, herdr 0.7.5).
+  grid_out="$(python3 "$grid_bin" --cwd "$target_cwd" "$anchor" 2>&1)" || true
   if [ -z "$grid_out" ] || ! echo "$grid_out" | grep -q '"pane_id"'; then
     echo "Error: Grid rebalance failed: $grid_out" >&2
     echo "Hint: retry with --no-resize for a plain split." >&2

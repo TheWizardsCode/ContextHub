@@ -31,7 +31,12 @@ Growth policy (even-completion):
   after every k>=3 step: rebalance(len(L), len(R))
 
 Usage from bash:
-  python3 grid.py <anchor-pane-id>
+  python3 grid.py [--cwd <path>] <anchor-pane-id>
+
+The optional --cwd value is forwarded to herdr's pane.split RPC so the new
+pane starts in the requested working directory instead of inheriting the
+split target's CWD (herdr "follow" policy). When omitted the RPC carries no
+cwd key and herdr follows the target pane (backward compatible).
 
 The script prints the new pane id as JSON on stdout:
   {"pane_id": "w1:pAB"}
@@ -344,19 +349,29 @@ class GridBuilder:
 
     Usage:
         builder = GridBuilder("w1:p80")
+        builder = GridBuilder("w1:p80", cwd="/proj/root")
         new_pane_id = builder.add_pane()
+
+    Args:
+        anchor_pane_id: pane id of the fixed left pane (split target for k=1)
+        cwd: optional working directory forwarded to the pane.split RPC so
+            the new pane starts in the requested project root.
     """
 
-    def __init__(self, anchor_pane_id: str):
+    def __init__(self, anchor_pane_id: str, cwd: str | None = None):
         self.anchor = anchor_pane_id
+        self.cwd = cwd
 
     def _split(self, target: str, direction: str, ratio: float) -> str:
-        resp = rpc("pane.split", {
+        params: dict[str, Any] = {
             "target_pane_id": target,
             "direction": direction,
             "ratio": ratio,
             "focus": False,
-        })
+        }
+        if self.cwd is not None:
+            params["cwd"] = self.cwd
+        resp = rpc("pane.split", params)
         result = resp.get("result", {})
         pane = result.get("pane", {})
         return pane.get("pane_id", "")
@@ -446,16 +461,36 @@ def main() -> None:
     """CLI entry point: grow the grid by one pane.
 
     Usage:
-        python3 grid.py <anchor-pane-id>
+        python3 grid.py [--cwd <path>] <anchor-pane-id>
 
     Prints the new pane id as JSON on stdout.
     """
-    if len(sys.argv) < 2:
-        print("Usage: grid.py <anchor-pane-id>", file=sys.stderr)
+    args = sys.argv[1:]
+    cwd: str | None = None
+    anchor: str | None = None
+    while args:
+        arg = args.pop(0)
+        if arg == "--cwd":
+            if not args:
+                print("Error: --cwd requires a value", file=sys.stderr)
+                sys.exit(1)
+            cwd = args.pop(0)
+        elif arg.startswith("--cwd="):
+            cwd = arg.split("=", 1)[1]
+        elif arg.startswith("-"):
+            print(f"Error: unknown option: {arg}", file=sys.stderr)
+            sys.exit(1)
+        else:
+            if anchor is not None:
+                print("Error: unexpected extra argument", file=sys.stderr)
+                sys.exit(1)
+            anchor = arg
+
+    if anchor is None:
+        print("Usage: grid.py [--cwd <path>] <anchor-pane-id>", file=sys.stderr)
         sys.exit(1)
 
-    anchor = sys.argv[1]
-    builder = GridBuilder(anchor)
+    builder = GridBuilder(anchor, cwd=cwd)
     try:
         new_pane_id = builder.add_pane()
         if not new_pane_id:

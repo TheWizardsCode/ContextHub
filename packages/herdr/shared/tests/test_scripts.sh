@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # test_scripts.sh — bash tests for the shared launch scripts' resize mode
 #
-# Covers --resize (default) / --no-resize handling in:
+# Covers --resize (default) / --no-resize handling and --cwd forwarding to
+# the grid helper in resize mode for:
 #   packages/herdr/shared/send-to-pi.sh
 #   packages/herdr/shared/open-pi-agent.sh
 #
@@ -108,7 +109,7 @@ echo "=== Test: Scripts exist and are executable ==="
 echo ""
 echo "=== Test: Default mode (no flag) uses resize — grid helper invoked with anchor pane ==="
 out="$(run_send "do the thing")" || true
-if grep -q "grid:anchor-pane-9" "$GRID_LOG" 2>/dev/null; then
+if grep -q "grid:--cwd .* anchor-pane-9" "$GRID_LOG" 2>/dev/null; then
   pass "send-to-pi default mode invokes grid helper with anchor pane id"
 else
   fail "send-to-pi default mode should invoke grid helper with anchor pane id"
@@ -131,9 +132,63 @@ else
 fi
 
 echo ""
+echo "=== Test: resize mode forwards --cwd to the grid helper ==="
+# HERDR_RESOLVED_CWD takes priority over \$PWD when --cwd is absent
+HERDR_RESOLVED_CWD="/resolved/proj" run_send "do the thing" >/dev/null 2>&1 || true
+if grep -q "grid:--cwd /resolved/proj anchor-pane-9" "$GRID_LOG" 2>/dev/null; then
+  pass "send-to-pi resize mode forwards HERDR_RESOLVED_CWD to the grid helper"
+else
+  fail "send-to-pi resize mode should forward HERDR_RESOLVED_CWD to the grid helper"
+  echo "  grid log: $(cat "$GRID_LOG" 2>/dev/null)"
+fi
+
+run_send --cwd /tmp/proj "do the thing" >/dev/null 2>&1 || true
+if grep -q "grid:--cwd /tmp/proj anchor-pane-9" "$GRID_LOG" 2>/dev/null; then
+  pass "send-to-pi resize mode forwards explicit --cwd to the grid helper"
+else
+  fail "send-to-pi resize mode should forward explicit --cwd to the grid helper"
+  echo "  grid log: $(cat "$GRID_LOG" 2>/dev/null)"
+fi
+
+run_send "do the thing" >/dev/null 2>&1 || true
+if grep -q "grid:--cwd" "$GRID_LOG" 2>/dev/null; then
+  pass "send-to-pi resize mode always passes --cwd (defaults to \$PWD)"
+else
+  fail "send-to-pi resize mode should always pass --cwd to the grid helper"
+  echo "  grid log: $(cat "$GRID_LOG" 2>/dev/null)"
+fi
+
+HERDR_RESOLVED_CWD="/resolved/proj" run_open >/dev/null 2>&1 || true
+if grep -q "grid:--cwd /resolved/proj anchor-pane-9" "$GRID_LOG" 2>/dev/null; then
+  pass "open-pi-agent resize mode forwards HERDR_RESOLVED_CWD to the grid helper"
+else
+  fail "open-pi-agent resize mode should forward HERDR_RESOLVED_CWD to the grid helper"
+  echo "  grid log: $(cat "$GRID_LOG" 2>/dev/null)"
+fi
+
+run_open --cwd /tmp/proj >/dev/null 2>&1 || true
+if grep -q "grid:--cwd /tmp/proj anchor-pane-9" "$GRID_LOG" 2>/dev/null; then
+  pass "open-pi-agent resize mode forwards explicit --cwd to the grid helper"
+else
+  fail "open-pi-agent resize mode should forward explicit --cwd to the grid helper"
+  echo "  grid log: $(cat "$GRID_LOG" 2>/dev/null)"
+fi
+
+unset HERDR_RESOLVED_CWD
+
+# Regression: --no-resize keeps the plain-split path (grid helper not invoked)
+run_send --no-resize "do the thing" >/dev/null 2>&1 || true
+if [ ! -s "$GRID_LOG" ]; then
+  pass "send-to-pi --no-resize still avoids the grid helper (regression)"
+else
+  fail "send-to-pi --no-resize should still avoid the grid helper"
+  echo "  grid log: $(cat "$GRID_LOG" 2>/dev/null)"
+fi
+
+echo ""
 echo "=== Test: open-pi-agent default mode uses resize ==="
 run_open >/dev/null 2>&1 || true
-if grep -q "grid:anchor-pane-9" "$GRID_LOG" 2>/dev/null; then
+if grep -q "grid:--cwd .* anchor-pane-9" "$GRID_LOG" 2>/dev/null; then
   pass "open-pi-agent default mode invokes grid helper with anchor pane id"
 else
   fail "open-pi-agent default mode should invoke grid helper"
@@ -155,7 +210,7 @@ else
   fail "send-to-pi --no-resize should perform plain pane split right"
   echo "  herdr log: $(cat "$HERDR_LOG" 2>/dev/null)"
 fi
-if grep -q "grid:anchor-pane-9" "$GRID_LOG" 2>/dev/null; then
+if grep -q "grid:--cwd .* anchor-pane-9" "$GRID_LOG" 2>/dev/null; then
   fail "send-to-pi --no-resize must not call grid helper"
 else
   pass "send-to-pi --no-resize never calls grid helper"
@@ -173,7 +228,7 @@ fi
 echo ""
 echo "=== Test: explicit --resize flag behaves like default ==="
 run_send --resize "do the thing" >/dev/null 2>&1 || true
-if grep -q "grid:anchor-pane-9" "$GRID_LOG" 2>/dev/null; then
+if grep -q "grid:--cwd .* anchor-pane-9" "$GRID_LOG" 2>/dev/null; then
   pass "explicit --resize invokes grid helper"
 else
   fail "explicit --resize should invoke grid helper"
