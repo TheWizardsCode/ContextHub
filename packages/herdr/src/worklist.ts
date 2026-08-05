@@ -29,7 +29,8 @@ import {
   stageColor,
   type IconOptions,
 } from './icons.js';
-import { runSync, createSyncTimer, clampSyncInterval } from './auto-sync.js';
+import { runSync } from './auto-sync.js';
+import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { showToast } from './notify.js';
 import { recordCommand, getLastCommand } from './command-log.js';
 import {
@@ -2698,66 +2699,60 @@ export async function runWorklistTui(
   // Read keypresses
   process.stdin.on('data', onData);
 
-  // Resume poll — while the pane is hidden, visibility is polled on a short
-  // interval so the hidden → visible transition triggers an immediate
-  // doRefresh instead of waiting for the next refreshIntervalMs tick. The
-  // poll uses only herdr pane get (via the PollGate memoizer, TTL aligned
-  // with the poll interval) — never wl — preserving the zero-wl-when-hidden
-  // guarantee.
-  const RESUME_POLL_INTERVAL_MS = DEFAULT_POLL_GATE_TTL_MS;
-  let resumePollTimer: ReturnType<typeof setInterval> | undefined;
+  // ── Consolidated scheduler loop (WL-0MSG4NMF0000YBRP) ──────────────
+  // All periodic plugin work — auto-refresh, auto-sync, visibility
+  // resume-poll, and future downtime-worker ticks — runs through ONE
+  // TaskScheduler interval. Tasks are dispatched by due-time deadline at a
+  // 1s base tick; each task applies its own visibility gate (refresh/sync
+  // skip when hidden, resume-poll only runs while hidden). Tick cadence,
+  // pause-when-hidden gating, and shutdown cleanup live in one place.
+  const scheduler = new TaskScheduler(DEFAULT_SCHEDULER_TICK_MS);
 
   const stopResumePoll = (): void => {
-    if (resumePollTimer !== undefined) {
-      clearInterval(resumePollTimer);
-      resumePollTimer = undefined;
-    }
+    scheduler.setDisabled('resume-poll', true);
   };
 
   /** Start the resume poll (no-op when already running). */
   const startResumePoll = (): void => {
-    if (resumePollTimer !== undefined) return;
-    resumePollTimer = setInterval(async () => {
-      if (await paneGate.visible()) {
-        // Hidden → visible transition: refresh immediately (with the
-        // "refreshed" notification) and let the normal cadence resume.
-        stopResumePoll();
-        panePaused = false;
-        doRefresh(true);
-      }
-    }, RESUME_POLL_INTERVAL_MS);
+    scheduler.setDisabled('resume-poll', false);
   };
 
-  // Auto-refresh timer — fetches fresh items on an interval. NOTE: this timer
-  // does NOT run `wl sync`; the dedicated SyncTimer below is the single sync
-  // source. Running sync from both timers caused a double-spawn per pane that
+  // Auto-refresh task — fetches fresh items on an interval. NOTE: this task
+  // does NOT run `wl sync`; the dedicated sync task below is the single sync
+  // source. Running sync from both tasks caused a double-spawn per pane that
   // amplified the wl sync lock storm (WL-0MSAB7ZUC004SK7E).
   // Visibility-gated: when the pane is hidden (not focused), ticks are
   // skipped so hidden panes spawn zero wl processes (pause-when-hidden).
-  let refreshTimer: ReturnType<typeof setInterval> | undefined;
   if (opts.autoRefresh) {
-    refreshTimer = setInterval(async () => {
-      if (!(await paneGate.visible())) {
-        panePaused = true;
-        startResumePoll();
-        return;
-      }
-      stopResumePoll();
-      panePaused = false;
-      doRefresh(false);
-    }, opts.refreshIntervalMs);
+    scheduler.addTask({
+      id: 'refresh',
+      intervalMs: opts.refreshIntervalMs,
+      singleFlight: true,
+      run: async () => {
+        if (!(await paneGate.visible())) {
+          panePaused = true;
+          startResumePoll();
+          return;
+        }
+        stopResumePoll();
+        panePaused = false;
+        doRefresh(false);
+      },
+    });
   }
 
-  // Auto-sync timer (background wl sync) — the only auto-sync source. Uses the
-  // single-flight + lock-aware (--if-idle) guard so concurrent panes/TUI
-  // instances skip instead of piling up under lock contention.
-  // Visibility-gated like the refresh timer: hidden panes skip the sync
-  // (and its follow-up refresh) entirely.
-  let syncTimer: ReturnType<typeof createSyncTimer> | undefined;
+  // Auto-sync task (background wl sync) — the only auto-sync source. Uses
+  // the single-flight + lock-aware (--if-idle) guard so concurrent
+  // panes/TUI instances skip instead of piling up under lock contention.
+  // Visibility-gated like the refresh task: hidden panes skip the sync
+  // (and its follow-up refresh) entirely. Fires once immediately on start
+  // (as the previous SyncTimer did) so the first sync cycle is not delayed.
   if (opts.autoSync && opts.syncIntervalMs !== 0) {
-    syncTimer = createSyncTimer({
+    scheduler.addTask({
+      id: 'sync',
       intervalMs: opts.syncIntervalMs,
-      onSync: async () => {
+      fireImmediately: true,
+      run: async () => {
         if (!(await paneGate.visible())) {
           panePaused = true;
           startResumePoll();
@@ -2769,18 +2764,35 @@ export async function runWorklistTui(
         doRefresh(false);
       },
     });
-    syncTimer.start();
   }
+
+  // Visibility resume-poll — runs only while the pane is hidden. Polls
+  // pane visibility on a short interval so the hidden → visible transition
+  // triggers an immediate doRefresh instead of waiting for the next
+  // refreshIntervalMs tick. The poll uses only herdr pane get (via the
+  // PollGate memoizer, TTL aligned with the poll interval) — never wl —
+  // preserving the zero-wl-when-hidden guarantee.
+  scheduler.addTask({
+    id: 'resume-poll',
+    intervalMs: DEFAULT_POLL_GATE_TTL_MS,
+    singleFlight: true,
+    disabled: true,
+    run: async () => {
+      if (await paneGate.visible()) {
+        // Hidden → visible transition: refresh immediately (with the
+        // "refreshed" notification) and let the normal cadence resume.
+        stopResumePoll();
+        panePaused = false;
+        doRefresh(true);
+      }
+    },
+  });
+
+  scheduler.start();
 
   // Cleanup on promise resolution
   promise.finally(() => {
-    if (refreshTimer !== undefined) {
-      clearInterval(refreshTimer);
-    }
-    if (syncTimer !== undefined) {
-      syncTimer.stop();
-    }
-    stopResumePoll();
+    scheduler.stop();
     cleanup();
     process.stdout.removeListener('resize', onResize);
     process.stdin.removeListener('data', onData);
