@@ -199,6 +199,12 @@ def parse_grid_tree(tree: dict) -> dict:
         return {"tab_id": tree.get("tab_id", ""), "root": root, "anchor": _pane_id(root.get("first", {})), "l_col": [], "r_col": [], "k": 0, "is_fresh": True}
 
     anchor = _pane_id(root.get("first", {}))
+    # If the first child is not a pane (e.g. a nested split from panes added
+    # by pre-grid code, or any other unrecognised shape), there is no anchor
+    # to grow from — treat the layout as unrecognised so the caller falls
+    # back to a fresh right-split of the current pane.
+    if not anchor:
+        return {"tab_id": tree.get("tab_id", ""), "root": root, "anchor": "", "l_col": [], "r_col": [], "k": 0, "is_fresh": True}
     s1 = root.get("second")
     if not isinstance(s1, dict):
         return {"tab_id": tree.get("tab_id", ""), "root": root, "anchor": anchor, "l_col": [], "r_col": [], "k": 0, "is_fresh": True}

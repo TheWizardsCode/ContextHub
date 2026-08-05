@@ -144,7 +144,11 @@ target_cwd="${cwd_arg:-${HERDR_RESOLVED_CWD:-$PWD}}"
 if [ "$resize" = true ]; then
   # Resize mode: resolve the anchor pane and let the grid helper perform the
   # split and rebalance (safe ops only: pane.split + layout.set_split_ratio).
-  anchor="$("$herdr_bin" pane current --json 2>/dev/null | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -n1)"
+  # `pane current` emits JSON by default; it does NOT accept --json
+  # (herdr 0.7.5: "unknown option: --json", exit 2).
+  # The sed tolerates optional whitespace after the colon (json.dumps in
+  # grid.py emits `"pane_id": "..."` while the herdr CLI emits `"pane_id":"..."`).
+  anchor="$("$herdr_bin" pane current 2>/dev/null | sed -n 's/.*"pane_id": *"\([^"]*\)".*/\1/p' | head -n1)"
   if [ -z "$anchor" ]; then
     echo "Error: Could not resolve the current pane. Ensure you are inside a herdr session." >&2
     exit 1
@@ -155,7 +159,7 @@ if [ "$resize" = true ]; then
     echo "Hint: retry with --no-resize for a plain split." >&2
     exit 1
   fi
-  np="$(printf '%s' "$grid_out" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -n1)"
+  np="$(printf '%s' "$grid_out" | sed -n 's/.*"pane_id": *"\([^"]*\)".*/\1/p' | head -n1)"
 else
   # Plain split-right (herdr default), no layout changes.
   split_out="$("$herdr_bin" pane split --current --direction right --no-focus --cwd "$target_cwd" 2>/dev/null || true)"
@@ -163,7 +167,7 @@ else
     echo "Error: Failed to split pane. Ensure you are inside a herdr session." >&2
     exit 1
   fi
-  np="$(printf '%s' "$split_out" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -n1)"
+  np="$(printf '%s' "$split_out" | sed -n 's/.*"pane_id": *"\([^"]*\)".*/\1/p' | head -n1)"
 fi
 
 if [ -z "$np" ]; then

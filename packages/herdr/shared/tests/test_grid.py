@@ -364,6 +364,19 @@ class TestStateDetection:
         state = parse_grid_tree({"tab_id": "w1:t1", "root": None})
         assert state["is_fresh"] is True
 
+    def test_nested_first_child_falls_back_fresh(self):
+        # root: right [ right[pane, pane], pane ] — first child is a split,
+        # not a pane (e.g. panes added by pre-grid code). No anchor exists to
+        # grow from, so the state must be treated as fresh so the caller falls
+        # back to splitting the current pane right.
+        state = parse_grid_tree({
+            "tab_id": "w1:t1",
+            "root": right(right(P("w1:p26"), P("w1:p28")), P("w1:p27")),
+        })
+        assert state["is_fresh"] is True
+        assert state["anchor"] == ""
+        assert state["k"] == 0
+
 
 # ---------------------------------------------------------------------------
 # Tests: rebalance ratios
@@ -431,6 +444,21 @@ class TestGrowthPolicy:
         assert splits[0]["params"]["direction"] == "right"
         assert splits[0]["params"]["ratio"] == 0.5
         assert splits[0]["params"]["focus"] is False
+        assert mock.ratio_calls() == []
+
+    def test_unrecognised_layout_falls_back_to_plain_right_split(self, mock):
+        # Layout not built by the grid code (e.g. panes added by pre-grid
+        # scripts or manual splits): root: right [ right[pane, pane], pane ].
+        # No anchor exists, so add_pane must fall back to a plain right-split
+        # of the current pane rather than splitting some wrong subtree.
+        mock.root = right(right(P("w1:p26"), P("w1:p28")), P("w1:p27"))
+        builder = GridBuilder("w1:p26")
+        new_id = builder.add_pane()
+        assert new_id == "w1:p101"
+        splits = mock.split_calls()
+        assert len(splits) == 1
+        assert splits[0]["params"]["target_pane_id"] == "w1:p26"
+        assert splits[0]["params"]["direction"] == "right"
         assert mock.ratio_calls() == []
 
     def test_k2_splits_s1_down(self, mock):

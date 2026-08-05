@@ -71,13 +71,15 @@ MOCK
 chmod +x "$MOCK_HERDR"
 
 # Mock grid helper — records the invocation, prints a fake new pane id.
+# Emits JSON with a space after the colon (like grid.py's json.dumps) so the
+# scripts' sed parsing is exercised against the real output format.
 MOCK_GRID="$SANDBOX/mock-grid.py"
 cat > "$MOCK_GRID" <<MOCK
 #!/usr/bin/env python3
 import sys
 with open("$GRID_LOG", "a") as f:
     f.write("grid:" + " ".join(sys.argv[1:]) + "\n")
-print('{"pane_id":"grid-pane-5"}')
+print('{"pane_id": "grid-pane-5"}')
 MOCK
 chmod +x "$MOCK_GRID"
 
@@ -121,6 +123,11 @@ if grep -q "pane current" "$HERDR_LOG" 2>/dev/null; then
   pass "send-to-pi resolves the anchor pane via 'herdr pane current'"
 else
   fail "send-to-pi should resolve anchor via 'herdr pane current'"
+fi
+if grep -q "pane current --json" "$HERDR_LOG" 2>/dev/null; then
+  fail "send-to-pi must not pass --json to 'herdr pane current' (herdr 0.7.5 rejects it)"
+else
+  pass "send-to-pi calls 'herdr pane current' without --json"
 fi
 
 echo ""
