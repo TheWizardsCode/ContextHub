@@ -228,7 +228,7 @@ export function isAuditFresh(
  */
 export function stageColor(stage: string | undefined): number {
   const colors: Record<string, number> = {
-    idea: 241,             // grey
+    idea: 247,             // grey
     intake_complete: 68,   // blue-ish
     plan_complete: 172,    // orange-ish
     in_progress: 76,       // green-ish

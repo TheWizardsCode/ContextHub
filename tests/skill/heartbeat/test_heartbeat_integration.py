@@ -228,6 +228,42 @@ class TestHeartbeatRunWlRealSubprocess(unittest.TestCase):
     """Tests that heartbeat.run_wl() actually calls the wl CLI via
     subprocess (not mocked) and handles failures gracefully."""
 
+    def setUp(self):
+        """Create a temporary directory with an initialized worklog.
+
+        This is required because run_wl() spawns 'wl' via subprocess
+        using the current process cwd (no cwd= argument), so the
+        current directory must contain a valid .worklog/.
+        """
+        self.test_dir = tempfile.mkdtemp(prefix='heartbeat_subprocess_')
+        self.orig_cwd = os.getcwd()
+        self.addCleanup(self._cleanup)
+
+        # Initialize a fresh worklog in the temp directory
+        init_result = subprocess.run(
+            ['wl', 'init', '--json', '--project-name', 'IntegrationTest',
+             '--prefix', 'INT', '--auto-sync', 'no', '--auto-export', 'no'],
+            input='\n', capture_output=True, text=True, cwd=self.test_dir, check=False,
+        )
+        if init_result.returncode != 0:
+            raise RuntimeError(
+                f"wl init failed: {init_result.stderr}"
+            )
+
+        # Switch to the temp directory so subprocess.wl sees our DB
+        os.chdir(self.test_dir)
+
+    def _cleanup(self):
+        """Restore cwd and remove the temporary directory."""
+        try:
+            os.chdir(self.orig_cwd)
+        except OSError:
+            pass
+        try:
+            shutil.rmtree(self.test_dir, ignore_errors=True)
+        except OSError:
+            pass
+
     def test_run_wl_successful_command(self):
         """run_wl with a valid command returns parsed JSON."""
         result = heartbeat.run_wl(['list', '--json'])

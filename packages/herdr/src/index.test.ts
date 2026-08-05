@@ -1,17 +1,62 @@
 /**
- * Unit tests for stripCommandPrefix and findWorklogRoot in index.ts
+ * Unit tests for command routing helpers in index.ts (the worklog-root
+ * resolution tests live in packages/shared/src/worklog-paths.test.ts).
  *
  * Run: npx vitest run packages/herdr/src/index.test.ts
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
-import { stripCommandPrefix, routeCommand, stripAgentPromptPrefix } from './index.js';
+import { stripCommandPrefix, routeCommand, stripAgentPromptPrefix, buildSendToPiArgs } from './index.js';
 import {
   fetchItemsByStage,
   resetExecFileAsync,
   resetWorklogDir,
   setExecFileAsync,
 } from './fetcher.js';
+
+// ---------------------------------------------------------------------------
+// buildSendToPiArgs tests (WL-0MSD48ZFC0043AO3)
+// ---------------------------------------------------------------------------
+
+describe('buildSendToPiArgs', () => {
+  it('includes --model <model> for agent commands with a model', () => {
+    expect(buildSendToPiArgs('/skill:implement <id>', '/project', 'code')).toEqual([
+      '--cwd',
+      '/project',
+      '--model',
+      'code',
+      '/skill:implement <id>',
+    ]);
+  });
+
+  it('omits --model when no model is provided', () => {
+    expect(buildSendToPiArgs('/skill:implement <id>', '/project')).toEqual([
+      '--cwd',
+      '/project',
+      '/skill:implement <id>',
+    ]);
+  });
+
+  it('strips the /prompt: prefix and keeps the model', () => {
+    expect(buildSendToPiArgs('/prompt:Review the item', '/project', 'author')).toEqual([
+      '--cwd',
+      '/project',
+      '--model',
+      'author',
+      'Review the item',
+    ]);
+  });
+
+  it('passes /plan with the plan model', () => {
+    expect(buildSendToPiArgs('/plan <id>', '/project', 'plan')).toEqual([
+      '--cwd',
+      '/project',
+      '--model',
+      'plan',
+      '/plan <id>',
+    ]);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // stripCommandPrefix tests
@@ -124,6 +169,7 @@ interface ShortcutEntry {
   command: string;
   view: string;
   label?: string;
+  model?: string;
 }
 
 function loadShortcutsJson(): ShortcutEntry[] {
@@ -189,6 +235,32 @@ describe('shortcuts.json command routing', () => {
     for (const e of filterEntries) {
       expect(e.command.startsWith('!!')).toBe(false);
     }
+  });
+
+  it('binds P-p to the free-form prompt and P-a to the audit-gaps prompt', () => {
+    const freePrompt = entries.find((e) => e.chord.join(' ') === 'P p');
+    expect(freePrompt).toBeDefined();
+    expect(freePrompt!.command).toBe('/prompt:<prompt>');
+    expect(freePrompt!.view).toBe('both');
+    expect(freePrompt!.model).toBe('plan');
+    expect(routeCommand(freePrompt!.command)).toBe('agent');
+
+    const auditPrompt = entries.find((e) => e.chord.join(' ') === 'P a');
+    expect(auditPrompt).toBeDefined();
+    expect(auditPrompt!.command).toBe(
+      '/prompt:What are the audit gaps reported in the most recent audit for <id>',
+    );
+    expect(auditPrompt!.view).toBe('both');
+    expect(auditPrompt!.model).toBe('plan');
+    expect(routeCommand(auditPrompt!.command)).toBe('agent');
+  });
+
+  it('keeps the single-key p chord bound to plan (P leader does not shadow it)', () => {
+    const planEntry = entries.find((e) => e.chord.join(' ') === 'p');
+    expect(planEntry).toBeDefined();
+    expect(planEntry!.command).toBe('/plan <id>');
+    // The uppercase P leader is distinct from the lowercase p plan chord.
+    expect(entries.some((e) => e.chord.join(' ') === 'P')).toBe(false);
   });
 });
 
@@ -272,9 +344,7 @@ describe('stripAgentPromptPrefix', () => {
 });
 
 // ---------------------------------------------------------------------------
-// findWorklogRoot integration tests
-// Use real temp directories to avoid vi.mock hoisting issues with node:fs.
-// Each test imports the module via dynamic import to get a fresh reference.
+// Temp-dir helpers (shared by the configureWorklogTarget tests below)
 // ---------------------------------------------------------------------------
 
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
@@ -290,218 +360,6 @@ function makeTempDir(): string {
   tempDirs.push(dir);
   return dir;
 }
-
-describe('findWorklogRoot', () => {
-  let originalCwd: () => string;
-
-  beforeAll(() => {
-    originalCwd = process.cwd;
-  });
-
-  afterEach(() => {
-    process.cwd = originalCwd;
-    for (const dir of tempDirs) {
-      try { rmSync(dir, { recursive: true }); } catch { /* ignore */ }
-    }
-    tempDirs.length = 0;
-  });
-
-  describe('CWD has a valid .worklog/', () => {
-    it('returns CWD when .worklog/ contains worklog.db', async () => {
-      const { findWorklogRoot } = await import('./index.js');
-      const root = makeTempDir();
-      mkdirSync(join(root, '.worklog'));
-      writeFileSync(join(root, '.worklog', 'worklog.db'), '');
-      vi.spyOn(process, 'cwd').mockReturnValue(root);
-
-      expect(findWorklogRoot()).toBe(root);
-    });
-
-    it('returns CWD when .worklog/ contains initialized marker', async () => {
-      const { findWorklogRoot } = await import('./index.js');
-      const root = makeTempDir();
-      mkdirSync(join(root, '.worklog'));
-      writeFileSync(join(root, '.worklog', 'initialized'), '');
-      vi.spyOn(process, 'cwd').mockReturnValue(root);
-
-      expect(findWorklogRoot()).toBe(root);
-    });
-  });
-
-  describe('CWD has no valid .worklog/ and not in worktree', () => {
-    it('returns undefined when CWD has no .worklog/ at all', async () => {
-      const { findWorklogRoot } = await import('./index.js');
-      const root = makeTempDir();
-      vi.spyOn(process, 'cwd').mockReturnValue(root);
-
-      expect(findWorklogRoot()).toBeUndefined();
-    });
-
-    it('returns undefined when .worklog/ exists but is invalid (no markers)', async () => {
-      const { findWorklogRoot } = await import('./index.js');
-      const root = makeTempDir();
-      mkdirSync(join(root, '.worklog')); // Empty - no worklog.db or initialized
-      vi.spyOn(process, 'cwd').mockReturnValue(root);
-
-      expect(findWorklogRoot()).toBeUndefined();
-    });
-
-    it('does NOT walk up to parent directories when CWD has no .worklog/', async () => {
-      const { findWorklogRoot } = await import('./index.js');
-      const base = makeTempDir();
-      // Create ContextHub-like .worklog/ at a parent level (sibling)
-      const contextHubRoot = join(base, 'context-hub');
-      mkdirSync(join(contextHubRoot, '.worklog'), { recursive: true });
-      writeFileSync(join(contextHubRoot, '.worklog', 'worklog.db'), '');
-
-      // CWD is a separate directory at the same level, no .worklog/
-      const cwd = join(base, 'unrelated-dir');
-      mkdirSync(cwd, { recursive: true });
-      vi.spyOn(process, 'cwd').mockReturnValue(cwd);
-
-      // Should NOT find ContextHub's .worklog/ by walking up
-      expect(findWorklogRoot()).toBeUndefined();
-    });
-
-    it('walks up to parent when it has valid .worklog/', async () => {
-      const { findWorklogRoot } = await import('./index.js');
-      const base = makeTempDir();
-      // Create a parent dir with valid .worklog/
-      mkdirSync(join(base, '.worklog'), { recursive: true });
-      writeFileSync(join(base, '.worklog', 'worklog.db'), '');
-
-      // CWD is a subdirectory with no .worklog/
-      const cwd = join(base, 'subdir');
-      mkdirSync(cwd, { recursive: true });
-      vi.spyOn(process, 'cwd').mockReturnValue(cwd);
-
-      // Should find the parent's .worklog/ by walking up
-      expect(findWorklogRoot()).toBe(base);
-    });
-  });
-
-  describe('Inside a worktree (.worklog/worktrees/ in path)', () => {
-    it('walks up from worktree directory to find project root .worklog/', async () => {
-      const { findWorklogRoot } = await import('./index.js');
-      const base = makeTempDir();
-      const projectRoot = join(base, 'context-hub');
-
-      // Create a valid .worklog/ at the project root
-      mkdirSync(join(projectRoot, '.worklog'), { recursive: true });
-      writeFileSync(join(projectRoot, '.worklog', 'worklog.db'), '');
-
-      // Create a worktree deep inside the project
-      const worktreeDir = join(projectRoot, '.worklog', 'worktrees', 'wl-XYZ-feature', 'src');
-      mkdirSync(worktreeDir, { recursive: true });
-
-      vi.spyOn(process, 'cwd').mockReturnValue(worktreeDir);
-
-      expect(findWorklogRoot()).toBe(projectRoot);
-    });
-
-    it('skips past invalid .worklog/ inside worktree to find project root', async () => {
-      const { findWorklogRoot } = await import('./index.js');
-      const base = makeTempDir();
-      const projectRoot = join(base, 'context-hub');
-
-      // Create a valid .worklog/ at the project root
-      mkdirSync(join(projectRoot, '.worklog'), { recursive: true });
-      writeFileSync(join(projectRoot, '.worklog', 'worklog.db'), '');
-
-      // Create a worktree with an invalid .worklog/ (empty dir)
-      const worktreeDir = join(projectRoot, '.worklog', 'worktrees', 'wl-XYZ-feature');
-      mkdirSync(worktreeDir, { recursive: true });
-      mkdirSync(join(worktreeDir, '.worklog')); // No worklog.db, no initialized
-
-      vi.spyOn(process, 'cwd').mockReturnValue(worktreeDir);
-
-      expect(findWorklogRoot()).toBe(projectRoot);
-    });
-
-    it('returns undefined when no project root .worklog/ found above worktree', async () => {
-      const { findWorklogRoot } = await import('./index.js');
-      const base = makeTempDir();
-
-      // Create a worktree but NO valid .worklog/ at the project root
-      const worktreeDir = join(base, 'project', '.worklog', 'worktrees', 'wl-XYZ-feature');
-      mkdirSync(worktreeDir, { recursive: true });
-
-      vi.spyOn(process, 'cwd').mockReturnValue(worktreeDir);
-
-      expect(findWorklogRoot()).toBeUndefined();
-    });
-
-    it('walks up from deeply nested worktree path', async () => {
-      const { findWorklogRoot } = await import('./index.js');
-      const base = makeTempDir();
-      const projectRoot = join(base, 'context-hub');
-
-      // Create a valid .worklog/ at the project root
-      mkdirSync(join(projectRoot, '.worklog'), { recursive: true });
-      writeFileSync(join(projectRoot, '.worklog', 'worklog.db'), '');
-
-      // Deeply nested worktree path
-      const worktreeDir = join(
-        projectRoot, '.worklog', 'worktrees', 'wl-XYZ-feature',
-        'packages', 'herdr', 'src',
-      );
-      mkdirSync(worktreeDir, { recursive: true });
-
-      vi.spyOn(process, 'cwd').mockReturnValue(worktreeDir);
-
-      expect(findWorklogRoot()).toBe(projectRoot);
-    });
-  });
-
-  describe('Edge cases', () => {
-    it('stops at filesystem root without infinite loop', async () => {
-      const { findWorklogRoot } = await import('./index.js');
-      vi.spyOn(process, 'cwd').mockReturnValue('/');
-      expect(findWorklogRoot()).toBeUndefined();
-    });
-
-    it('prefers CWD .worklog/ over worktree walking', async () => {
-      const { findWorklogRoot } = await import('./index.js');
-      const base = makeTempDir();
-      const projectRoot = join(base, 'context-hub');
-
-      // Create valid .worklog/ at project root
-      mkdirSync(join(projectRoot, '.worklog'), { recursive: true });
-      writeFileSync(join(projectRoot, '.worklog', 'worklog.db'), '');
-
-      // Create worktree with its OWN valid .worklog/
-      const worktreeDir = join(projectRoot, '.worklog', 'worktrees', 'wl-XYZ-feature');
-      mkdirSync(join(worktreeDir, '.worklog'), { recursive: true });
-      writeFileSync(join(worktreeDir, '.worklog', 'worklog.db'), '');
-
-      vi.spyOn(process, 'cwd').mockReturnValue(worktreeDir);
-
-      expect(findWorklogRoot()).toBe(worktreeDir);
-    });
-
-    it('walks past a leftover .worklog/worktrees container stub to find the real project worklog', async () => {
-      // Regression: a stray `.worklog/worktrees/` container (created by the
-      // implement tool's worktree lifecycle, e.g. inside packages/herdr)
-      // must not block upward resolution to the real project root.
-      const { findWorklogRoot } = await import('./index.js');
-      const base = makeTempDir();
-      const projectRoot = join(base, 'context-hub');
-
-      // Real, valid .worklog/ at the project root
-      mkdirSync(join(projectRoot, '.worklog'), { recursive: true });
-      writeFileSync(join(projectRoot, '.worklog', 'worklog.db'), '');
-
-      // CWD is a plugin dir that contains a leftover worktree container
-      // (empty .worklog/worktrees/, no config.yaml / initialized / worklog.db)
-      const cwd = join(projectRoot, 'packages', 'herdr');
-      mkdirSync(join(cwd, '.worklog', 'worktrees'), { recursive: true });
-
-      vi.spyOn(process, 'cwd').mockReturnValue(cwd);
-
-      expect(findWorklogRoot()).toBe(projectRoot);
-    });
-  });
-});
 
 // ---------------------------------------------------------------------------
 // configureWorklogTarget tests
@@ -534,7 +392,7 @@ describe('configureWorklogTarget', () => {
     const { configureWorklogTarget } = await import('./index.js');
     const root = makeTempDir();
     mkdirSync(join(root, '.worklog'));
-    writeFileSync(join(root, '.worklog', 'worklog.db'), '');
+    writeFileSync(join(root, '.worklog', 'config.yaml'), 'projectName: test\nprefix: TEST\n');
     resetWorklogDir();
 
     const resolved = configureWorklogTarget(root);
@@ -576,7 +434,7 @@ describe('configureWorklogTarget', () => {
     const { configureWorklogTarget } = await import('./index.js');
     const root = makeTempDir();
     mkdirSync(join(root, '.worklog'));
-    writeFileSync(join(root, '.worklog', 'worklog.db'), '');
+    writeFileSync(join(root, '.worklog', 'config.yaml'), 'projectName: test\nprefix: TEST\n');
     const unrelated = makeTempDir();
     process.cwd = () => unrelated; // Simulate the plugin running from its own dir
     resetWorklogDir();
@@ -600,7 +458,7 @@ describe('configureWorklogTarget', () => {
     const { configureWorklogTarget } = await import('./index.js');
     const root = makeTempDir();
     mkdirSync(join(root, '.worklog'));
-    writeFileSync(join(root, '.worklog', 'worklog.db'), '');
+    writeFileSync(join(root, '.worklog', 'config.yaml'), 'projectName: test\nprefix: TEST\n');
     process.env.HERDR_RESOLVED_CWD = root;
     resetWorklogDir();
 
