@@ -1,6 +1,6 @@
 {
   "name": "worklog",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "A simple experimental issue tracker for AI agents",
   "main": "dist/index.js",
   "type": "module",
