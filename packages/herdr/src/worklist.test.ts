@@ -885,6 +885,64 @@ describe('handleKeypress — metadata scroll keys', () => {
     handleKeypress(state, 'k', TERM_80x24);
     expect(state.selectedIndex).toBe(0);
   });
+
+  it('pageUp/pageDown navigate by a full page via state', () => {
+    const items = Array.from({ length: 30 }, (_, i) => makeItem(`WL-PAGE-${i}`));
+    const state = new WorkItemListState(items, TERM_80x24);
+
+    // pageUp clamps at the first item
+    state.selectedIndex = 5;
+    state.pageUp();
+    expect(state.selectedIndex).toBe(0);
+
+    // pageDown advances by the list page size (11 rows on 80x24)
+    state.selectedIndex = 0;
+    state.pageDown();
+    expect(state.selectedIndex).toBe(11);
+
+    // pageDown clamps at the last item
+    state.selectedIndex = 29;
+    state.pageDown();
+    expect(state.selectedIndex).toBe(29);
+
+    // pageUp moves back exactly one page
+    state.selectedIndex = 23;
+    state.pageUp();
+    expect(state.selectedIndex).toBe(12);
+  });
+
+  it('goToFirst/goToLast jump to the ends via state', () => {
+    const items = Array.from({ length: 10 }, (_, i) => makeItem(`WL-EDGE-${i}`));
+    const state = new WorkItemListState(items, TERM_80x24);
+    state.selectedIndex = 5;
+    state.goToLast();
+    expect(state.selectedIndex).toBe(9);
+    state.goToFirst();
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  it('dispatches PgUp/PgDn/g/G keys through handleKeypress', () => {
+    const items = Array.from({ length: 30 }, (_, i) => makeItem(`WL-KEY-${i}`));
+    const state = new WorkItemListState(items, TERM_80x24);
+
+    // g → first
+    state.selectedIndex = 15;
+    expect(handleKeypress(state, 'g', TERM_80x24)).toBe('first');
+    expect(state.selectedIndex).toBe(0);
+
+    // G → last
+    expect(handleKeypress(state, 'G', TERM_80x24)).toBe('last');
+    expect(state.selectedIndex).toBe(29);
+
+    // PgUp (\x1b[5~) → pageup
+    expect(handleKeypress(state, '\x1b[5~', TERM_80x24)).toBe('pageup');
+    expect(state.selectedIndex).toBe(18); // 29 - 11
+
+    // PgDn (\x1b[6~) → pagedown
+    state.selectedIndex = 0;
+    expect(handleKeypress(state, '\x1b[6~', TERM_80x24)).toBe('pagedown');
+    expect(state.selectedIndex).toBe(11);
+  });
 });
 
 // ── Last-command display (WL-0MSEPP1DE00285TQ-FT6) ───────────────────────
