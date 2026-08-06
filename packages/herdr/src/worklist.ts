@@ -844,7 +844,10 @@ export function formatTimestamp(iso: string): string {
  *
  * Includes every tracked field: ID, Title, Status, Stage, Priority, Type,
  * Risk, Effort, Children, Parent, Tags, GitHub Issue, Created, Updated,
- * Audit, Reviewed, and Audited At. Fields that are unset are omitted.
+ * Audit, Reviewed, and Audited At. When the item's `Key Files:` section
+ * contains `.md` paths, a `Related Docs` row lists every one of them (joined
+ * with `, `); the row is omitted when there are no `.md` Key Files
+ * (WL-0MSGTLSUT002NF29). Fields that are unset are omitted.
  * Timestamps (Created, Updated, Audited At) are rendered in local time as
  * `DD/MM/YY HH:MM` via {@link formatTimestamp}.
  * Shared by the detail view and the list-mode metadata panel so both stay

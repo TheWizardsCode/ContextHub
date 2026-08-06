@@ -20,7 +20,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Metadata panel** — The bottom portion of the list view (roughly 20–40% of the pane height, responsive to terminal size) is reserved for the selected item's metadata: ID, title, status, stage, priority, type, risk, effort, tags, audit info, and more. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
 - **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` — no custom stage values). Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
-- **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, headings/lists/code shown) as a preview. See [Markdown viewer](#markdown-viewer).
+- **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, headings/lists/code shown) as a preview. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
 - **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. See [Inline note links](#inline-note-links).
 - **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
 
@@ -303,6 +303,13 @@ clamped to a minimum of 3 rows so it is always usable.
   metadata (status, stage, priority, type, risk, effort, children/parent
   counts, tags, GitHub issue number, created/updated timestamps, and audit
   state).
+- When the item's description has a `Key Files:` section containing one or
+  more `.md` paths, the panel also shows a **`Related Docs`** row listing
+  every markdown path (joined with `, `; long values are truncated to the
+  pane width). Non-markdown Key Files (`.ts`, `.json`, …) are excluded, and
+  the row is omitted entirely when there are no `.md` Key Files. The row is
+  **display-only** — opening a document happens from the detail view's
+  Related Docs table of contents (see [Markdown viewer](#markdown-viewer)).
 - For items whose stage is `in_progress`, the panel additionally shows
   **`Last command:`** — the most recent command the plugin dispatched
   against that item (`none yet` until the first dispatch).
@@ -345,6 +352,26 @@ then `process.cwd()` as a last resort.
 
 The rendered lines appear under an `Episode file (md viewer)` heading in the
 detail view, scrollable with the usual `↑↓/j:k` keys.
+
+### Related Docs table of contents
+
+When the item has at least one `.md` Key File, the **top of the detail view**
+shows a persistent **`Related Docs`** table of contents listing every markdown
+Key File (numbered, with a focus indicator on the selected entry). This makes
+all associated documents visible — not just the first one — and lets you open
+any of them:
+
+- `↑`/`↓` and `j`/`k` move the ToC selection (clamped to its bounds).
+- **`Enter`** renders the selected document's content in the markdown viewer
+  (replacing the auto-rendered first file for that selection; the first file
+  remains the initial default).
+- The ToC stays **visible on all renders**: while the viewed document scrolls,
+  the ToC remains pinned at the top of the detail view.
+- Navigating **past the last ToC entry** transfers focus to document
+  scrolling (the usual `↑↓/j:k`, `g`/`G`, `pgup`/`pgdn` keys apply there);
+  navigating **up past the top of the document** returns focus to the ToC.
+- `esc`/`q` exit the detail view as usual. Items with no `.md` Key Files
+  render exactly as before (no ToC).
 
 ## Inline note links
 
