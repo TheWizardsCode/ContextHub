@@ -60,7 +60,7 @@ export const defaultSettings: PluginSettings = {
   showIcons: true,
   autoSync: true,
   syncIntervalMs: 60000,
-  browseItemCount: 10,
+  browseItemCount: 20,
   showHelpText: true,
   downtimeEnabled: true,
   downtimeIdleThresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
