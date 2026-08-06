@@ -5,14 +5,18 @@ import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 // The exact keybinding block scripts/install-herdr.sh must insert.
+// Updated for WL-0MSHIHJFO0042WRV: the script now binds prefix+l to the
+// open-podcast-editor-tab action (open-worklist is the legacy v0.1.x action
+// the script migrates away from), so this constant must match the current
+// script output.
 const KEYBINDING_BLOCK = `[[keys.command]]
 key = "prefix+l"
-command = "herdr plugin action invoke worklog-selection-list.open-worklist"
-description = "Open the Worklog work item selection pane in a new tab."
+command = "herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab"
+description = "Open the Podcast Editing tab (Worklog work item selection pane)."
 `;
 
 // Marker the script uses for its existence check.
-const COMMAND_MARKER = 'worklog-selection-list.open-worklist';
+const COMMAND_MARKER = 'worklog-selection-list.open-podcast-editor-tab';
 
 function runScript(env: Record<string, string>): {
   status: number;

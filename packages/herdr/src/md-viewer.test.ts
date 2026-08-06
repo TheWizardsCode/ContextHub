@@ -152,7 +152,7 @@ function toGroupable(item: WorkItem): GroupableItem {
 }
 
 describe('podcast item stage grouping', () => {
-  it('groups podcast items by standard lifecycle stages with no custom values', () => {
+  it('groups podcast items into priority buckets with no custom stage values', () => {
     const items: WorkItem[] = [
       makeItem('ep-idea', 'idea'),
       makeItem('ep-drafted', 'plan_complete'),
@@ -161,21 +161,22 @@ describe('podcast item stage grouping', () => {
     ];
     const groups = assignItemGroups(items.map(toGroupable));
 
-    // Group labels must come from the standard stage mapping; no custom
-    // stage strings appear in any label.
+    // Group labels must come from the priority buckets; no custom stage
+    // strings appear in any label.
     const labels = [...groups.values()].map(g => g.groupLabel);
     const allLabels = labels.join(' ');
     expect(allLabels).not.toMatch(/sourced|drafted|written|produced/);
 
-    // Idea → 'Idea', plan_complete → 'Group N', in_review → 'In Review'.
-    expect(groups.get('ep-idea')?.groupLabel).toBe('Idea');
-    expect(groups.get('ep-drafted')?.groupLabel).toMatch(/^Group \d+$/);
-    expect(groups.get('ep-written')?.groupLabel).toBe('In Review');
-    // done is not one of the known buckets → 'Other'.
-    expect(groups.get('ep-produced')?.groupLabel).toBe('Other');
+    // All podcast items share the default (medium) priority → one Medium
+    // section per the priority-first grouping (WL-0MSI1LVTJ001M9EY),
+    // regardless of stage.
+    expect(new Set(labels)).toEqual(new Set(['Medium']));
+    for (const [, assignment] of groups) {
+      expect(assignment.groupLabel).toBe('Medium');
+    }
   });
 
-  it('regroupWorkItems keeps podcast stage groups stable after reorder', () => {
+  it('regroupWorkItems orders same-priority items by stage within the bucket', () => {
     const items: WorkItem[] = [
       makeItem('ep-idea', 'idea'),
       makeItem('ep-drafted', 'plan_complete'),
@@ -186,10 +187,12 @@ describe('podcast item stage grouping', () => {
     const regrouped = regroupWorkItems(shuffled);
 
     const byId = new Map(regrouped.map(i => [i.id, i]));
-    // In Review must come last.
-    expect(byId.get('ep-written')?.groupLabel).toBe('In Review');
-    expect(byId.get('ep-idea')?.groupLabel).toBe('Idea');
-    expect(byId.get('ep-drafted')?.groupLabel).toMatch(/^Group \d+$/);
+    // All items share the default (medium) priority → one Medium section,
+    // ordered by stage in workflow order: idea → plan_complete → in_review.
+    expect(byId.get('ep-idea')?.groupLabel).toBe('Medium');
+    expect(byId.get('ep-drafted')?.groupLabel).toBe('Medium');
+    expect(byId.get('ep-written')?.groupLabel).toBe('Medium');
+    expect(regrouped.map(i => i.id)).toEqual(['ep-idea', 'ep-drafted', 'ep-written']);
   });
 });
 

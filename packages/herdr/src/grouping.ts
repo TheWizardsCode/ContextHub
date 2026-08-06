@@ -10,6 +10,12 @@
  * TUI Worklog extension (packages/tui/extensions/Worklog/lib/grouping.ts).
  * Keep the two copies and the core implementation in sync.
  *
+ * Note: this copy intentionally diverges for the selection-list ordering
+ * (WL-0MSI1LVTJ001M9EY): groups are priority buckets (Critical → High →
+ * Medium → Low) with items sorted by stage within each bucket. The `wl`
+ * CLI and Pi TUI copies are unchanged (a follow-up to align the Pi TUI
+ * list is tracked separately).
+ *
  * Why regrouping is needed: the worklist merges `wl next` results (which
  * carry `group`/`groupLabel` assignments) with mandatory subsets fetched via
  * `wl list` (critical + completed/in_review items, which carry NO group
@@ -126,158 +132,51 @@ export interface GroupAssignment {
 // ── Grouping algorithm ────────────────────────────────────────────────
 
 /**
- * Greedy first-fit grouping algorithm for file-path-based conflict detection.
+ * Assign items to groups ordered by priority first, then stage
+ * (WL-0MSI1LVTJ001M9EY).
  *
- * Assigns each item to the first group (1-indexed) that contains no item
- * sharing any file path with it. Items with empty file paths (unknown) are
- * each placed in their own singleton "restricted" group.
+ * Group display order (most important first):
+ * - **Critical** — all `critical` priority items (one section).
+ * - **High** — all `high` priority items (one section).
+ * - **Medium** — all `medium` priority items plus items with an
+ *   unknown/empty priority (they sort as medium per the DEFAULT_PRIORITY
+ *   convention) (one section).
+ * - **Low** — all `low` priority items (one section).
  *
- * Mirrors `groupItemsByFilePaths` in src/commands/grouping.ts.
- */
-export function groupItemsByFilePaths(
-  items: GroupableItem[],
-  maxGroups: number = 3,
-): Map<string, number> {
-  const itemGroup = new Map<string, number>();
-  const groupPaths = new Map<number, Set<string>>();
-  const restrictedGroups = new Set<number>();
-  let nextGroup = 1;
-
-  for (const item of items) {
-    const { id, filePaths } = item;
-
-    // Items with unknown file paths → singleton restricted group.
-    if (filePaths.length === 0) {
-      itemGroup.set(id, nextGroup);
-      groupPaths.set(nextGroup, new Set());
-      restrictedGroups.add(nextGroup);
-      nextGroup++;
-      continue;
-    }
-
-    // Try to find an existing group this item fits in.
-    let assigned = false;
-    const groupsToCheck = Math.min(maxGroups, nextGroup - 1);
-    for (let g = 1; g <= groupsToCheck; g++) {
-      const existingPaths = groupPaths.get(g);
-      if (!existingPaths) continue;
-
-      if (restrictedGroups.has(g)) continue;
-
-      const hasConflict = filePaths.some(fp => existingPaths.has(fp));
-      if (!hasConflict) {
-        for (const fp of filePaths) {
-          existingPaths.add(fp);
-        }
-        itemGroup.set(id, g);
-        assigned = true;
-        break;
-      }
-    }
-
-    if (!assigned) {
-      const newGroup = nextGroup;
-      groupPaths.set(newGroup, new Set(filePaths));
-      itemGroup.set(id, newGroup);
-      nextGroup++;
-    }
-  }
-
-  return itemGroup;
-}
-
-/**
- * Assign items to groups based on priority, stage and file-path conflicts.
+ * Within a bucket, items sort by stage in workflow order (idea →
+ * intake_complete → plan_complete → in_progress → in_review → done) then
+ * id; no stage sub-headers are rendered (the within-bucket order is
+ * implicit, matching prior behavior).
  *
- * Group display order (most actionable first):
- * - **Critical Group N** — critical items partitioned by file-path conflicts
- *   (per-category label counter, no single all-inclusive "Critical" group).
- * - **Group N** — non-critical `plan_complete` + `intake_complete` items
- *   partitioned by file-path conflicts (no stage prefix in the label).
- * - **Idea** — single group for all `idea` items.
- * - **Other** — single group for all remaining non-critical items.
- * - **In Review** — single group for all `in_review` items, placed last.
- *
- * Mirrors `assignItemGroups` in src/commands/grouping.ts.
+ * The previous file-path conflict partitioning (Critical Group N / Group N
+ * labels, WL-0MSAKPVR9005B6XJ) is dropped: the selection list now renders
+ * one section per priority bucket, so priority is the primary sort key and
+ * file-path partitioning no longer applies to the Herdr selection list.
  */
 export function assignItemGroups(
   items: GroupableItem[],
-  maxFilePathGroups: number = 3,
+  _maxFilePathGroups: number = 3,
 ): Map<string, GroupAssignment> {
   const result = new Map<string, GroupAssignment>();
 
+  // One section per priority bucket, ordered Critical → High → Medium → Low.
+  // Unknown/empty priorities land in the Medium bucket (DEFAULT_PRIORITY).
+  const buckets: Array<{ label: string; priority: string }> = [
+    { label: 'Critical', priority: 'critical' },
+    { label: 'High', priority: 'high' },
+    { label: 'Medium', priority: 'medium' },
+    { label: 'Low', priority: 'low' },
+  ];
+
   let nextGroup = 1;
-
-  // Remap file-path group numbers to sequential display group numbers
-  // starting at `startGroup`; returns the mapping and the count consumed.
-  const remapToSequential = (
-    fileGroups: Map<string, number>,
-    startGroup: number,
-  ): { map: Map<number, number>; count: number } => {
-    const unique = [...new Set(fileGroups.values())].sort((a, b) => a - b);
-    const map = new Map<number, number>();
-    unique.forEach((g, i) => map.set(g, startGroup + i));
-    return { map, count: unique.length };
-  };
-
-  // 0. Critical Group N.
-  const criticalItems = items.filter(item => item.priority === 'critical');
-  if (criticalItems.length > 0) {
-    const criticalGroups = groupItemsByFilePaths(criticalItems, maxFilePathGroups);
-    const { map: groupNumMap, count } = remapToSequential(criticalGroups, nextGroup);
-    const labelNumByFileGroup = buildLabelCounter(criticalGroups);
-    for (const [id, g] of criticalGroups) {
-      const groupNum = groupNumMap.get(g)!;
-      result.set(id, { group: groupNum, groupLabel: `Critical Group ${labelNumByFileGroup.get(g)}` });
-    }
-    nextGroup += count;
-  }
-
-  // 1. Group N (plan_complete + intake_complete).
-  const planIntakeItems = items.filter(
-    item => item.priority !== 'critical' && (item.stage === 'plan_complete' || item.stage === 'intake_complete'),
-  );
-  if (planIntakeItems.length > 0) {
-    const planIntakeGroups = groupItemsByFilePaths(planIntakeItems, maxFilePathGroups);
-    const { map: groupNumMap, count } = remapToSequential(planIntakeGroups, nextGroup);
-    const labelNumByFileGroup = buildLabelCounter(planIntakeGroups);
-    for (const [id, g] of planIntakeGroups) {
-      const groupNum = groupNumMap.get(g)!;
-      result.set(id, { group: groupNum, groupLabel: `Group ${labelNumByFileGroup.get(g)}` });
-    }
-    nextGroup += count;
-  }
-
-  // 2. Idea.
-  const ideaItems = items.filter(item => item.priority !== 'critical' && item.stage === 'idea');
-  if (ideaItems.length > 0) {
-    for (const item of ideaItems) {
-      result.set(item.id, { group: nextGroup, groupLabel: 'Idea' });
-    }
-    nextGroup++;
-  }
-
-  // 3. Other.
-  const otherItems = items.filter(
-    item =>
-      item.priority !== 'critical' &&
-      item.stage !== 'in_review' &&
-      item.stage !== 'plan_complete' &&
-      item.stage !== 'intake_complete' &&
-      item.stage !== 'idea',
-  );
-  if (otherItems.length > 0) {
-    for (const item of otherItems) {
-      result.set(item.id, { group: nextGroup, groupLabel: 'Other' });
-    }
-    nextGroup++;
-  }
-
-  // 4. In Review (last).
-  const inReviewItems = items.filter(item => item.priority !== 'critical' && item.stage === 'in_review');
-  if (inReviewItems.length > 0) {
-    for (const item of inReviewItems) {
-      result.set(item.id, { group: nextGroup, groupLabel: 'In Review' });
+  for (const bucket of buckets) {
+    const bucketRank = PRIORITY_ORDER[bucket.priority];
+    const bucketItems = items.filter(
+      item => (PRIORITY_ORDER[item.priority ?? ''] ?? DEFAULT_PRIORITY_ORDER) === bucketRank,
+    );
+    if (bucketItems.length === 0) continue;
+    for (const item of bucketItems) {
+      result.set(item.id, { group: nextGroup, groupLabel: bucket.label });
     }
     nextGroup++;
   }
@@ -285,52 +184,52 @@ export function assignItemGroups(
   return result;
 }
 
-/**
- * Build a per-category label counter mapping file-path group numbers (from
- * groupItemsByFilePaths) to sequential category labels (1, 2, ...).
- */
-function buildLabelCounter(fileGroups: Map<string, number>): Map<number, number> {
-  const unique = [...new Set(fileGroups.values())].sort((a, b) => a - b);
-  const map = new Map<number, number>();
-  unique.forEach((g, i) => map.set(g, i + 1));
-  return map;
-}
-
 // ── Within-group ordering ─────────────────────────────────────────────
 
 /**
- * Stage sub-order within a group: plan_complete first, then intake_complete,
- * then all remaining stages. No headings are rendered between sub-groups.
+ * Priority order for sorting: critical → high → medium → low. Matches the
+ * existing priority ranking in src/commands/helpers.ts (critical=4 >
+ * high=3 > medium=2 > low=1). Unknown priorities sort as medium (existing
+ * DEFAULT_PRIORITY convention).
  */
-const WITHIN_GROUP_STAGE_ORDER: Record<string, number> = {
-  plan_complete: 0,
+const PRIORITY_ORDER: Record<string, number> = {
+  critical: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
+};
+const DEFAULT_PRIORITY_ORDER = PRIORITY_ORDER.medium;
+
+/**
+ * Stage order for sorting, matching the canonical stage order recorded in
+ * the work item record / config defaults (src/config.ts): idea →
+ * intake_complete → plan_complete → in_progress → in_review → done.
+ * Unknown stages sort after known ones.
+ */
+const STAGE_ORDER: Record<string, number> = {
+  idea: 0,
   intake_complete: 1,
+  plan_complete: 2,
+  in_progress: 3,
+  in_review: 4,
+  done: 5,
 };
-const REMAINING_STAGE_ORDER = 2;
+const UNKNOWN_STAGE_ORDER = Number.MAX_SAFE_INTEGER;
 
 /**
- * Priority order for within-group sorting: high → medium → low.
- * Unknown priorities are treated as medium.
- */
-const WITHIN_GROUP_PRIORITY_ORDER: Record<string, number> = {
-  high: 0,
-  medium: 1,
-  low: 2,
-};
-const DEFAULT_PRIORITY_ORDER = WITHIN_GROUP_PRIORITY_ORDER.medium;
-
-/**
- * Compare two items for within-group display order:
- * stage sub-sort (plan_complete → intake_complete → remaining stages), then
- * priority (high → medium → low), then id as a deterministic tie-break.
+ * Compare two items for display order: priority first (critical → high →
+ * medium → low), then stage (workflow order idea → intake_complete →
+ * plan_complete → in_progress → in_review → done), then id as a
+ * deterministic tie-break. Unknown priorities sort as medium; unknown
+ * stages sort after known ones.
  */
 export function compareGroupableItems(a: GroupableItem, b: GroupableItem): number {
-  const stageA = WITHIN_GROUP_STAGE_ORDER[a.stage ?? ''] ?? REMAINING_STAGE_ORDER;
-  const stageB = WITHIN_GROUP_STAGE_ORDER[b.stage ?? ''] ?? REMAINING_STAGE_ORDER;
-  if (stageA !== stageB) return stageA - stageB;
-  const prioA = WITHIN_GROUP_PRIORITY_ORDER[a.priority ?? ''] ?? DEFAULT_PRIORITY_ORDER;
-  const prioB = WITHIN_GROUP_PRIORITY_ORDER[b.priority ?? ''] ?? DEFAULT_PRIORITY_ORDER;
+  const prioA = PRIORITY_ORDER[a.priority ?? ''] ?? DEFAULT_PRIORITY_ORDER;
+  const prioB = PRIORITY_ORDER[b.priority ?? ''] ?? DEFAULT_PRIORITY_ORDER;
   if (prioA !== prioB) return prioA - prioB;
+  const stageA = STAGE_ORDER[a.stage ?? ''] ?? UNKNOWN_STAGE_ORDER;
+  const stageB = STAGE_ORDER[b.stage ?? ''] ?? UNKNOWN_STAGE_ORDER;
+  if (stageA !== stageB) return stageA - stageB;
   return a.id.localeCompare(b.id);
 }
 
@@ -340,7 +239,8 @@ export function compareGroupableItems(a: GroupableItem, b: GroupableItem): numbe
  * Regroup and order a set of selected work items (e.g. the output of
  * selectWorkItems) so that every item receives a `group`/`groupLabel`
  * (mandatory wl list items included) and the list renders in the canonical
- * group order with no duplicate section headings.
+ * priority-bucket order (Critical → High → Medium → Low) with no duplicate
+ * section headings.
  *
  * Does not filter or drop items — the always-show-mandatory guarantee of
  * selectWorkItems is preserved. Items are only reordered and stamped.
