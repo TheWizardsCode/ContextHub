@@ -37,10 +37,15 @@ describe('mock-bin/git timeout guard', () => {
     // Simulate a long-running command by asking git to do init (which creates a .git dir)
     // Then run rev-parse with a very short timeout
     const result = await execFile(gitMockPath, ['rev-parse', '--show-toplevel'], {
-      env: { ...process.env, WORKLOG_MOCK_TIMEOUT: '1' },
+      // 1s was too tight for normal execution on loaded machines (bash
+      // startup alone can exceed it), which made the guard fire spuriously
+      // (exit 124) and flake the test under full-suite parallel load. Use a
+      // generous budget: the point is that a NORMAL rev-parse must never
+      // trip the guard, not that it finishes within a second.
+      env: { ...process.env, WORKLOG_MOCK_TIMEOUT: '30' },
       timeout: 10000,
     })
-    // A timeout of 1s should be enough for normal execution, but the timeout
+    // A timeout should be enough for normal execution, but the timeout
     // mechanism must not cause premature exit. This test validates that basic
     // operations work within the timeout window.
     // Just verify it completes normally - no error
