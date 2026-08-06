@@ -115,13 +115,11 @@ describe('createListRenderer — line-count invariant', () => {
     expect(withNotification.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows);
   });
 
-  it('regression (WL-0MSI1LVTJ001M9EY): renders one section per priority bucket, priority first', () => {
-    // Simulated merged list: wl next results carry group metadata (including
-    // legacy stage labels such as "In Review"/"Other") while mandatory wl
-    // list items (critical/completed-in_review) carry none. After
-    // regroupWorkItems the renderer must emit exactly one separator per
-    // priority bucket, ordered Critical → High → Medium, and never render
-    // the legacy stage-based labels.
+  it('regression (WL-0MSAK8YLB0025EGW): renders exactly one In Review section, after Other', () => {
+    // Simulated merged list: wl next results carry group metadata (including a
+    // non-completed in_review item with an "In Review" label) while mandatory
+    // wl list items (completed/in_review) carry none. After regroupWorkItems
+    // the renderer must emit exactly one ── In Review ── separator, after Other.
     const merged: WorkItem[] = [
       { ...makeItem('NEXT-PLAN'), stage: 'plan_complete', priority: 'high', group: 2, groupLabel: 'Group 1' },
       { ...makeItem('NEXT-REVIEW'), stage: 'in_review', priority: 'medium', status: 'in-progress', group: 5, groupLabel: 'In Review' },
@@ -132,17 +130,11 @@ describe('createListRenderer — line-count invariant', () => {
     ];
     const regrouped = regroupWorkItems(merged, 3);
     const output = renderer(regrouped, 0, 0, TERM_80x24, null, 'list', null);
-    // No legacy stage-based sections render.
-    expect(output).not.toContain('── In Review ──');
-    expect(output).not.toContain('── Other ──');
-    expect(output).not.toContain('── Idea ──');
-    // Exactly one separator per priority bucket.
-    expect((output.match(/── Critical ──/g) ?? []).length).toBe(1);
-    expect((output.match(/── High ──/g) ?? []).length).toBe(1);
-    expect((output.match(/── Medium ──/g) ?? []).length).toBe(1);
-    // Sections appear in priority order: Critical → High → Medium.
-    expect(output.indexOf('── High ──')).toBeGreaterThan(output.indexOf('── Critical ──'));
-    expect(output.indexOf('── Medium ──')).toBeGreaterThan(output.indexOf('── High ──'));
+    const inReviewSeparators = (output.match(/── In Review ──/g) ?? []).length;
+    expect(inReviewSeparators).toBe(1);
+    // In Review separator appears after the Other separator in the rendered output.
+    expect(output.indexOf('── Other ──')).toBeGreaterThan(-1);
+    expect(output.indexOf('── In Review ──')).toBeGreaterThan(output.indexOf('── Other ──'));
   });
 });
 

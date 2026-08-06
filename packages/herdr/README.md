@@ -20,7 +20,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Quit** — Press `q` to exit
 - **Metadata panel** — The bottom portion of the list view (roughly 20–40% of the pane height, responsive to terminal size) is reserved for the selected item's metadata: ID, title, status, stage, priority, type, risk, effort, tags, audit info, and more. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
-- **Priority-first grouping** — Work items are grouped into priority buckets ordered `Critical` → `High` → `Medium` → `Low`, with items sorted by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` — no custom stage values) within each bucket. Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Priority-first grouping](#priority-first-grouping).
+- **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` — no custom stage values). Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
 - **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, headings/lists/code shown) as a preview. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
 - **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. See [Inline note links](#inline-note-links).
 - **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
@@ -330,23 +330,16 @@ clamped to a minimum of 3 rows so it is always usable.
   list, filtering, or refreshing resets the panel scroll so the top of the
   panel is always visible again.
 
-## Priority-first grouping
+## Stage grouping
 
-Work items are grouped into **priority buckets** first — `Critical` →
-`High` → `Medium` → `Low` — so the highest-priority work appears at the top
-of the selection list. Items with an unknown/empty priority are treated as
-`Medium` (the existing `DEFAULT_PRIORITY` convention). Within each bucket,
-items sort by their Worklog **stage** using the standard lifecycle stages
-only — `idea`, `intake_complete`, `plan_complete`, `in_progress`,
-`in_review`, `done` — in the order recorded in the work item record. No
-custom stage values are required for grouping, so podcast episode items
-group exactly as their frontmatter `pipeline_stage` maps 1:1 onto the
-Worklog stages (PRD §7.2). One `── <Priority> ──` separator renders per
-priority bucket (no stage sub-headers; the within-bucket stage order is
-implicit). Stage changes re-group items on the next refresh. Note: the
-previous file-path conflict partitioning (`Critical Group N` / `Group N`
-labels) is no longer applied to the selection list — priority is the
-primary ordering.
+Work items are grouped by their Worklog **stage** using the standard
+lifecycle stages only — `idea`, `intake_complete`, `plan_complete`,
+`in_progress`, `in_review`, `done`. No custom stage values are required for
+grouping, so podcast episode items group exactly as their frontmatter
+`pipeline_stage` maps 1:1 onto the Worklog stages (PRD §7.2). Groups render
+in the canonical order (Critical → Group N → Idea → Other → In Review) with
+group separators in the list; stage changes re-group items on the next
+refresh.
 
 ## Markdown viewer
 
