@@ -247,6 +247,12 @@ Two fingerprint providers exist; the CLI uses the counter-based one:
   counter in a `preAction` hook *before* their action mutates the DB, and
   drop entry files — so an identical read immediately after a write returns
   fresh data.
+- **Sync invalidates again after success** (F3): a successful `wl sync`
+  bumps the counter a second time *after* the pull/merge/push completes
+  (`src/commands/sync.ts`), so entries cached by concurrent readers DURING
+  the sync window (at the post-preAction counter) are also never served —
+  post-pull reads always return the merged data. Skipped (lock-busy) and
+  failed syncs exit before this point and do not invalidate.
 - **Read write-byproducts count as writes**: `next`'s auto re-sort bumps the
   counter after it lands (only when it actually changed sort indices), so
   cached `next`/`list` results stay sound; `search --rebuild-index` is
@@ -267,6 +273,24 @@ Two fingerprint providers exist; the CLI uses the counter-based one:
 `output.json` formatting) and exits without running any action or opening the
 DB. Misses run normally; the JSON payload emitted via `output.json` is routed
 through `ReadCacheCli.onJsonOutput` for backfill.
+
+### Cross-instance sync heartbeat (F3, herdr auto-sync)
+
+`wl sync` writes `<worklogDir>/last-sync-time` (ISO timestamp) only on
+success — this doubles as the per-worklog-dir sync heartbeat. Herdr's
+background auto-sync (`packages/herdr/src/auto-sync.ts`) checks the heartbeat
+before spawning `wl sync` and skips — without spawning a process — when a
+sync succeeded within the freshness window (`heartbeatTtlMs`).
+
+- The TTL is the sync interval minus a 15s margin
+  (`heartbeatTtlForInterval`), so the sync cadence still lands ~once per
+  interval across all panes while only the first pane per window spawns
+  (6 panes → 1 spawn, measured in `auto-sync.test.ts`).
+- Failed or skipped syncs never refresh the marker (the CLI writes it only on
+  success; dry-runs return before the write), so a stale heartbeat always
+  falls out of the window and a real sync eventually runs again (no
+  indefinite skip).
+- Manual user syncs (pane `S`) bypass the heartbeat check and always run.
 
 ### Spawn instrumentation (spawn-reduction measurement)
 

@@ -19,6 +19,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
 import { contextExec } from '../process-lifecycle.js';
+import { invalidateCacheForWrite } from '../read-cache-cli.js';
 
 const execAsync = contextExec;
 
@@ -405,6 +406,17 @@ export default function register(ctx: PluginContext): void {
             }),
           options.ifIdle ? { skipIfLocked: true } : undefined
         );
+
+        // Post-sync read-cache invalidation (F3 — WL-0MSGAEJQA005QG3W): a
+        // successful sync pulled and merged remote data into the DB. Bump the
+        // read-cache state counter so entries cached BEFORE or DURING the
+        // sync window are never served — the next identical read must return
+        // post-pull data (AC1). Only reached on success: skipped (lock busy)
+        // and failed syncs exit before this line and do not refresh the
+        // sync heartbeat either (AC3).
+        if (process.env.WL_CACHE_DISABLED !== '1') {
+          invalidateCacheForWrite();
+        }
       } catch (error) {
         // Lock-aware guard: another sync holds the lock — skip gracefully
         // (exit 0, no error) so auto-sync spawners do not pile up waiting.

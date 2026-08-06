@@ -29,7 +29,7 @@ import {
   stageColor,
   type IconOptions,
 } from './icons.js';
-import { runSync } from './auto-sync.js';
+import { runSync, heartbeatTtlForInterval } from './auto-sync.js';
 import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, type DowntimeWorker } from './downtime-worker.js';
 import { showToast } from './notify.js';
@@ -2261,11 +2261,20 @@ export async function runWorklistTui(
   //
   // With ifIdle=true (auto-sync timer path) runSync applies its single-flight
   // guard and passes --if-idle to the CLI, so overlapping syncs are skipped
-  // instead of piling up (lock-storm prevention). Manual 'S' syncs pass
-  // ifIdle=false and wait for the lock like a regular wl sync.
-  const doSync = async (ifIdle = false): Promise<void> => {
-    const outcome = await runSync(getWorklogDir(), { ifIdle });
+  // instead of piling up (lock-storm prevention). With a heartbeatTtlMs the
+  // auto-sync path ALSO skips without spawning when another pane synced
+  // recently (cross-instance coordination, F3 — WL-0MSGAEJQA005QG3W); such
+  // skips are silent because the data is already fresh. Manual 'S' syncs pass
+  // ifIdle=false and no heartbeat, so they always wait for the lock like a
+  // regular wl sync.
+  const doSync = async (ifIdle = false, heartbeatTtlMs?: number): Promise<void> => {
+    const outcome = await runSync(getWorklogDir(), {
+      ifIdle,
+      ...(heartbeatTtlMs !== undefined ? { heartbeat: true, heartbeatTtlMs } : {}),
+    });
     if (outcome.skipped) {
+      // Heartbeat skip: another pane synced within the window — silent.
+      if (outcome.reason === 'heartbeat') return;
       // Another sync is already in-flight / holding the lock — do not pile on.
       showToast('Sync in progress');
       return;
@@ -2775,11 +2784,17 @@ export async function runWorklistTui(
 
   // Auto-sync task (background wl sync) — the only auto-sync source. Uses
   // the single-flight + lock-aware (--if-idle) guard so concurrent
-  // panes/TUI instances skip instead of piling up under lock contention.
-  // Visibility-gated like the refresh task: hidden panes skip the sync
-  // (and its follow-up refresh) entirely. Fires once immediately on start
-  // (as the previous SyncTimer did) so the first sync cycle is not delayed.
+  // panes/TUI instances skip instead of piling up under lock contention,
+  // and the cross-instance heartbeat (F3) so only the first pane per window
+  // spawns `wl sync` at all. Visibility-gated like the refresh task: hidden
+  // panes skip the sync (and its follow-up refresh) entirely. Fires once
+  // immediately on start (as the previous SyncTimer did) so the first sync
+  // cycle is not delayed.
   if (opts.autoSync && opts.syncIntervalMs !== 0) {
+    // Heartbeat window tied to the configured interval (interval minus a 15s
+    // margin) so the sync cadence still lands ~once per interval while only
+    // the first pane per window spawns a process.
+    const heartbeatTtlMs = heartbeatTtlForInterval(opts.syncIntervalMs);
     scheduler.addTask({
       id: 'sync',
       intervalMs: opts.syncIntervalMs,
@@ -2792,7 +2807,7 @@ export async function runWorklistTui(
         }
         stopResumePoll();
         panePaused = false;
-        doSync(true); // ifIdle: skip when another sync is in-flight / lock held
+        doSync(true, heartbeatTtlMs); // ifIdle + heartbeat: skip when another sync is in-flight / fresh
         doRefresh(false);
       },
     });

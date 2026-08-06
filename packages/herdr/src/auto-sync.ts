@@ -13,6 +13,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -25,6 +26,65 @@ export const MIN_SYNC_INTERVAL_MS = 60_000;
 
 /** Sentinel value meaning "sync is disabled". */
 export const SYNC_DISABLED = 0;
+
+/**
+ * Default heartbeat freshness window (45s): MIN_SYNC_INTERVAL_MS minus a
+ * 15s margin. Must be SHORTER than the sync interval so at least one pane's
+ * tick lands outside the window each cycle — otherwise the heartbeat skip
+ * would suppress every future sync (indefinite skip, AC3).
+ */
+export const DEFAULT_HEARTBEAT_TTL_MS = MIN_SYNC_INTERVAL_MS - 15_000;
+
+// ── Cross-instance sync heartbeat (F3 — WL-0MSGAEJQA005QG3W) ──────────
+
+/**
+ * Heartbeat marker file: `<worklogDir>/last-sync-time` containing an ISO
+ * timestamp. Written by the wl CLI only after a successful `wl sync` (see
+ * src/commands/sync.ts), so its presence means "a sync succeeded recently in
+ * SOME instance/process".
+ */
+export function syncHeartbeatPath(worklogDir: string): string {
+  return path.join(path.resolve(worklogDir), 'last-sync-time');
+}
+
+/**
+ * Read the last-success sync timestamp (epoch ms) for a worklog dir.
+ * Returns undefined when the marker is absent or unparseable.
+ */
+export function readSyncHeartbeatMs(worklogDir: string): number | undefined {
+  try {
+    const raw = fs.readFileSync(syncHeartbeatPath(worklogDir), 'utf-8').trim();
+    const ts = Date.parse(raw);
+    return Number.isFinite(ts) ? ts : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * True when a successful sync landed within the last `ttlMs` for the
+ * worklog dir. `now` is injectable for tests.
+ */
+export function isSyncHeartbeatFresh(
+  worklogDir: string,
+  ttlMs: number,
+  now: number = Date.now()
+): boolean {
+  const ts = readSyncHeartbeatMs(worklogDir);
+  return ts !== undefined && now - ts < ttlMs;
+}
+
+/**
+ * Heartbeat TTL for a configured sync interval: the interval minus a 15s
+ * margin (clamped to ≥1s), so syncs land roughly once per interval across
+ * all panes while only the first pane per window spawns. 0 (sync disabled)
+ * maps to 0.
+ */
+export function heartbeatTtlForInterval(intervalMs: number): number {
+  const clamped = clampSyncInterval(intervalMs);
+  if (clamped === SYNC_DISABLED) return SYNC_DISABLED;
+  return Math.max(1_000, clamped - 15_000);
+}
 
 // ── Single-flight state ───────────────────────────────────────────────
 
@@ -82,6 +142,24 @@ export interface RunSyncOptions {
    * they wait for the lock like a regular `wl sync`.
    */
   ifIdle?: boolean;
+  /**
+   * Cross-instance heartbeat skip (auto-sync only): skip spawning `wl sync`
+   * entirely when a recent successful sync (heartbeat marker) exists for the
+   * worklog dir — so with 6 panes on one worklog, only the first to tick
+   * inside a window spawns a process. Manual/user syncs leave this off so
+   * they always run.
+   */
+  heartbeat?: boolean;
+  /** Freshness window for the heartbeat (ms); default DEFAULT_HEARTBEAT_TTL_MS. */
+  heartbeatTtlMs?: number;
+}
+
+export interface SyncOutcome {
+  success: boolean;
+  error?: string;
+  skipped?: boolean;
+  /** Why the sync was skipped: `in-flight` (single-flight guard) or `heartbeat` (fresh marker). */
+  reason?: 'in-flight' | 'heartbeat';
 }
 
 /**
@@ -95,10 +173,25 @@ export interface RunSyncOptions {
  * spawned CLI gets `--if-idle` so it exits immediately when the cross-process
  * file lock is held — preventing lock-storm process pile-up.
  *
+ * With `heartbeat`, the sync is skipped without spawning a process when a
+ * recent successful sync already happened in another instance (cross-instance
+ * coordination, F3).
+ *
  * @returns A promise resolving with the sync outcome.
  */
-export function runSync(worklogDir?: string, options?: RunSyncOptions): Promise<{ success: boolean; error?: string; skipped?: boolean }> {
+export function runSync(worklogDir?: string, options?: RunSyncOptions): Promise<SyncOutcome> {
   const ifIdle = options?.ifIdle ?? false;
+
+  // Cross-instance heartbeat skip: a successful sync in ANY pane/instance
+  // writes the heartbeat marker, so with 6 panes only the first to tick
+  // inside a window spawns `wl sync`; the rest skip without spawning a
+  // process (measured in the 6-pane spawn-reduction simulation).
+  if (options?.heartbeat && worklogDir) {
+    const ttlMs = options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS;
+    if (isSyncHeartbeatFresh(worklogDir, ttlMs)) {
+      return Promise.resolve({ success: false, skipped: true, reason: 'heartbeat', error: 'sync heartbeat fresh' });
+    }
+  }
 
   // Single-flight guard: never spawn a second sync while one is in-flight
   // (auto-sync path). The caller is told the sync was skipped.
@@ -106,7 +199,7 @@ export function runSync(worklogDir?: string, options?: RunSyncOptions): Promise<
     return Promise.resolve({ success: false, skipped: true, error: 'sync already in progress' });
   }
 
-  return new Promise<{ success: boolean; error?: string; skipped?: boolean }>((resolve) => {
+  return new Promise<SyncOutcome>((resolve) => {
     try {
       // Target the resolved worklog (same as other wl invocations) so the
       // background sync operates on the tab project, not the plugin's CWD.
