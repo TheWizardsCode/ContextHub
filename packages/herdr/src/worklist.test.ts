@@ -1361,6 +1361,7 @@ describe('renderDowntimeStatus', () => {
 // text fallbacks ([OPEN], [IDEA], ...) instead of emoji icons.
 
 const OPEN_ICON = '\u{1F513}'; // 🔓 — the open-status icon
+const AUDIT_UNKNOWN_ICON = '\u{2753}'; // ❓ — audit-unknown icon (metadata panel)
 
 describe('createListRenderer — showIcons gating', () => {
   it('renders emoji icons by default (backwards compatible)', () => {
@@ -1376,6 +1377,8 @@ describe('createListRenderer — showIcons gating', () => {
     expect(output).not.toContain(OPEN_ICON);
     expect(output).toContain('[OPEN]'); // status text fallback
     expect(output).toContain('[IDEA]'); // stage text fallback
+    expect(output).not.toContain(AUDIT_UNKNOWN_ICON); // metadata panel audit icon
+    expect(output).toContain('[?]'); // audit text fallback
   });
 
   it('re-reads the getter on every render (settings re-read path)', () => {

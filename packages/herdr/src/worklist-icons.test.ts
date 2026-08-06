@@ -105,6 +105,7 @@ async function quit(p: Promise<unknown>): Promise<void> {
 }
 
 const OPEN_ICON = '\u{1F513}'; // 🔓 — the open-status icon
+const AUDIT_UNKNOWN_ICON = '\u{2753}'; // ❓ — audit-unknown icon (metadata panel)
 
 describe('worklist — showIcons gating through runWorklistTui', () => {
   it('renders item icons by default (backwards compatible)', async () => {
@@ -127,6 +128,7 @@ describe('worklist — showIcons gating through runWorklistTui', () => {
     expect(output).toContain(OPEN_ICON);
     expect(output).toContain('WL-1');
     expect(output).not.toContain('[OPEN]');
+    expect(output).toContain(AUDIT_UNKNOWN_ICON); // metadata panel audit icon still shown
 
     await quit(p);
   });
@@ -152,6 +154,8 @@ describe('worklist — showIcons gating through runWorklistTui', () => {
     expect(output).not.toContain(OPEN_ICON);
     expect(output).toContain('[OPEN]'); // status text fallback
     expect(output).toContain('WL-1');
+    expect(output).not.toContain(AUDIT_UNKNOWN_ICON); // metadata panel audit icon
+    expect(output).toContain('[?]'); // audit text fallback
 
     await quit(p);
   });

@@ -824,7 +824,7 @@ export function formatTimestamp(iso: string): string {
  * Shared by the detail view and the list-mode metadata panel so both stay
  * consistent (WL-0MSAYNVBY006LM9X-FT4).
  */
-export function buildMetaRows(item: WorkItem): Array<[string, string]> {
+export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, string]> {
   const metaRows: Array<[string, string]> = [];
   const addMeta = (label: string, value: string | undefined | null): void => {
     if (value != null && value !== '') {
@@ -847,8 +847,8 @@ export function buildMetaRows(item: WorkItem): Array<[string, string]> {
   addMeta('GitHub Issue', item.githubIssueNumber ? `#${item.githubIssueNumber}` : undefined);
   addMeta('Created', item.createdAt ? formatTimestamp(item.createdAt) : undefined);
   addMeta('Updated', item.updatedAt ? formatTimestamp(item.updatedAt) : undefined);
-  addMeta('Audit', auditIcon(item.auditResult));
-  addMeta('Reviewed', needsProducerReviewIcon(item.needsProducerReview));
+  addMeta('Audit', auditIcon(item.auditResult, { noIcons }));
+  addMeta('Reviewed', needsProducerReviewIcon(item.needsProducerReview, { noIcons }));
   addMeta('Audited At', item.auditedAt ? formatTimestamp(item.auditedAt) : undefined);
   return metaRows;
 }
@@ -876,6 +876,7 @@ export function formatMetadataPanel(
   panelRows: number,
   metaScrollOffset = 0,
   lastCommand?: string | null,
+  noIcons = false,
 ): string[] {
   const lines: string[] = [];
   if (!item) {
@@ -890,7 +891,7 @@ export function formatMetadataPanel(
   lines.push(` ${ANSI.dim}── ${item.id} ──${ANSI.reset}`);
 
   // Metadata rows
-  const metaRows = buildMetaRows(item);
+  const metaRows = buildMetaRows(item, noIcons);
   if (metaRows.length > 0) {
     const fieldWidth = Math.max(...metaRows.map(([l]) => l.length), 6);
     for (const [label, value] of metaRows) {
@@ -949,6 +950,7 @@ export function formatDetailContent(
   item: WorkItem | null,
   maxCols: number,
   readFile?: (filePath: string) => string | null,
+  noIcons = false,
 ): string[] {
   if (!item) return [];
 
@@ -965,7 +967,7 @@ export function formatDetailContent(
   // Metadata — rendered as a markdown table (shared row builder; ID and
   // Title are already shown in the header above, so they are filtered out
   // here to avoid duplicating them).
-  const metaRows = buildMetaRows(item).filter(([label]) => label !== 'ID' && label !== 'Title');
+  const metaRows = buildMetaRows(item, noIcons).filter(([label]) => label !== 'ID' && label !== 'Title');
 
   // Render the metadata as a markdown table
   if (metaRows.length > 0) {
@@ -1084,8 +1086,9 @@ export function formatDetailView(
   scrollOffset = 0,
   viewportHeight = 20,
   readFile?: (filePath: string) => string | null,
+  noIcons = false,
 ): string {
-  const allLines = formatDetailContent(item, maxCols, readFile);
+  const allLines = formatDetailContent(item, maxCols, readFile, noIcons);
   if (allLines.length === 0) return '';
 
   const totalLines = allLines.length;
@@ -1595,6 +1598,10 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     downtimeStatus?: string,
   ): string => {
     const { rows, cols } = termSize;
+    // Icons are gated by the getter for the whole frame (list lines, detail
+    // view, and metadata panel alike) so showIcons=false omits every item
+    // icon, including audit/review icons (AC1, WL-0MSBV4RYO008JL70).
+    const noIcons = !showIconsGetter();
     const output: string[] = [];
     // The metadata panel reserves 20–40% of the pane height below the list;
     // the list area is the remaining height minus the notification row.
@@ -1605,7 +1612,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     if (mode === 'detail' && detailItem) {
       const viewportHeight = Math.max(10, rows - 1);
       const offset = detailScrollOffset ?? 0;
-      return formatDetailView(detailItem, cols, offset, viewportHeight, readFile);
+      return formatDetailView(detailItem, cols, offset, viewportHeight, readFile, noIcons);
     }
 
     if (mode === 'filter') {
@@ -1708,7 +1715,6 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       const expandedItem = { ...item, _expanded: hasChildCount && isExpanded };
 
       const isSelected = actualIndex === selectedIndex;
-      const noIcons = !showIconsGetter();
       const line = formatItemLine(expandedItem, cols, isSelected, noIcons);
       if (isSelected) {
         output.push(`${ANSI.reverse}${line}${ANSI.reset}`);
@@ -1755,6 +1761,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       panelHeight,
       metaScrollOffset ?? 0,
       metaLastCommand,
+      noIcons,
     );
     for (const line of panelLines) {
       output.push(line);
