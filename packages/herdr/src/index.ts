@@ -528,11 +528,15 @@ async function main(): Promise<void> {
       autoSync: runSettings.autoSync,
       syncIntervalMs: runSettings.syncIntervalMs,
       showHelpText: runSettings.showHelpText,
+      showIcons: runSettings.showIcons,
       downtimeWorker,
       downtimePollIntervalMs: runSettings.downtimePollIntervalMs,
       // Re-read on every render so a showHelpText change applies on the next
       // refresh (no plugin restart needed), matching browseItemCount behavior.
       getShowHelpText: () => loadSettings().showHelpText ?? true,
+      // Re-read on every render so a showIcons change applies on the next
+      // refresh (no plugin restart needed), matching showHelpText behavior.
+      getShowIcons: () => loadSettings().showIcons ?? true,
       // Merge agent-status state into freshly fetched items (top-level +
       // expanded children) on every refresh cycle (WL-0MSBQUJQX005RAT9).
       // Fail-open: herdr errors yield no icons; the list keeps working.

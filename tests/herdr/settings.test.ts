@@ -138,6 +138,18 @@ describe('loadSettings', () => {
     expect(settings.downtimeRequiredFreeSlots).toBe(0); // from defaults
   });
 
+  it('loads showIcons: false from the config file', () => {
+    writeFileSync(settingsPath, JSON.stringify({ showIcons: false }), 'utf-8');
+    const settings = loadSettings(settingsPath);
+    expect(settings.showIcons).toBe(false);
+  });
+
+  it('defaults showIcons to true when missing from the config', () => {
+    writeFileSync(settingsPath, JSON.stringify({ autoRefresh: false }), 'utf-8');
+    const settings = loadSettings(settingsPath);
+    expect(settings.showIcons).toBe(true);
+  });
+
   it('loads settings from existing file', () => {
     writeFileSync(settingsPath, JSON.stringify({
       autoRefresh: false,

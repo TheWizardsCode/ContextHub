@@ -160,7 +160,7 @@ Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings in
 - `syncIntervalMs` — Interval in ms between background `wl sync` calls (default: `60000`, minimum: `60000`; set to `0` to disable auto-sync)
 - `browseItemCount` — Max number of non-mandatory items to show in the list (default: `10`, range `1`–`50`; critical and completed/in_review items are always shown regardless)
 - `showHelpText` — Show the shortcut hint line at the bottom of the list (default: `true`); changes apply on the next render without a plugin restart
-- `showIcons` — Toggle icons in the list (default: `true`)
+- `showIcons` — Toggle icons in the list (default: `true`); changes apply on the next render without a plugin restart
 
 ### Downtime worker (local-LLM idle dispatch)
 

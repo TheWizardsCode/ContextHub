@@ -25,7 +25,6 @@ import {
   needsProducerReviewIcon,
   getIconPrefix,
   applyStageColour,
-  iconsEnabled,
   stageColor,
   type IconOptions,
 } from './icons.js';
@@ -1548,7 +1547,7 @@ export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string
   return ` ${ANSI.dim}[downtime busy]${ANSI.reset}`;
 }
 
-export function createListRenderer(): (
+export function createListRenderer(getShowIcons?: () => boolean): (
   items: WorkItem[],
   selectedIndex: number,
   scrollOffset: number,
@@ -1570,6 +1569,9 @@ export function createListRenderer(): (
   readFile?: (filePath: string) => string | null,
   downtimeStatus?: string,
 ) => string {
+  // Default to icons enabled when no getter is supplied (backwards
+  // compatible — callers/tests that render without options keep icons).
+  const showIconsGetter = getShowIcons ?? (() => true);
   return (
     items: WorkItem[],
     selectedIndex: number,
@@ -1706,7 +1708,7 @@ export function createListRenderer(): (
       const expandedItem = { ...item, _expanded: hasChildCount && isExpanded };
 
       const isSelected = actualIndex === selectedIndex;
-      const noIcons = !iconsEnabled();
+      const noIcons = !showIconsGetter();
       const line = formatItemLine(expandedItem, cols, isSelected, noIcons);
       if (isSelected) {
         output.push(`${ANSI.reverse}${line}${ANSI.reset}`);
@@ -1771,11 +1773,6 @@ export function createListRenderer(): (
 }
 
 // ── Main TUI loop ─────────────────────────────────────────────────────
-
-/**
- * Default renderer instance.
- */
-const defaultRenderer = createListRenderer();
 
 /**
  * Work-item ID format: a prefix (e.g. `WL`, `SA`) followed by a hash,
@@ -2093,7 +2090,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; onCommand?: (command: string, model?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void> },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void> },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -2103,6 +2100,8 @@ export async function runWorklistTui(
     browseItemCount: options?.browseItemCount ?? 10,
     showHelpText: options?.showHelpText ?? true,
     getShowHelpText: options?.getShowHelpText ?? (() => options?.showHelpText ?? true),
+    showIcons: options?.showIcons ?? true,
+    getShowIcons: options?.getShowIcons ?? (() => options?.showIcons ?? true),
     onCommand: options?.onCommand,
     downtimeWorker: options?.downtimeWorker,
     downtimePollIntervalMs: options?.downtimePollIntervalMs ?? DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
@@ -2128,7 +2127,10 @@ export async function runWorklistTui(
   });
 
   const state = new WorkItemListState(items, termSize);
-  const renderer = defaultRenderer;
+  // Icons are gated by the getShowIcons getter (re-read on every render so a
+  // showIcons setting change applies without a plugin restart — same pattern
+  // as getShowHelpText). The renderer is created per-TUI-run with the getter.
+  const renderer = createListRenderer(opts.getShowIcons);
   const chordState: ChordState = createChordState();
   let formState: FormState | null = null;
   /** Saved mode before entering form overlay (to restore on cancel) */

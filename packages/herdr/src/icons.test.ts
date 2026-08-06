@@ -14,10 +14,25 @@ import { describe, it, expect } from 'vitest';
 import {
   agentStatusIcon,
   getIconPrefix,
+  iconsEnabled,
   stringDisplayWidth,
 } from './icons.js';
 import { formatItemLine } from './worklist.js';
 import type { WorkItem } from './fetcher.js';
+
+describe('iconsEnabled — noIcons flag (WL-0MSBV4RYO008JL70)', () => {
+  it('returns true by default', () => {
+    expect(iconsEnabled()).toBe(true);
+  });
+
+  it('returns false when noIcons is true', () => {
+    expect(iconsEnabled({ noIcons: true })).toBe(false);
+  });
+
+  it('returns true when noIcons is false', () => {
+    expect(iconsEnabled({ noIcons: false })).toBe(true);
+  });
+});
 
 describe('agentStatusIcon', () => {
   it('maps working → 🟢 (green circle)', () => {

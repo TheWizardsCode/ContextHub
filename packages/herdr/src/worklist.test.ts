@@ -1353,3 +1353,43 @@ describe('renderDowntimeStatus', () => {
     expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
   });
 });
+
+// ── showIcons gating (WL-0MSBV4RYO008JL70) ─────────────────────────────
+// The renderer consults the getShowIcons getter on EVERY render, so a
+// showIcons setting change applies without a plugin restart (same pattern
+// as getShowHelpText). When the getter returns false, item lines render
+// text fallbacks ([OPEN], [IDEA], ...) instead of emoji icons.
+
+const OPEN_ICON = '\u{1F513}'; // 🔓 — the open-status icon
+
+describe('createListRenderer — showIcons gating', () => {
+  it('renders emoji icons by default (backwards compatible)', () => {
+    const renderer = createListRenderer();
+    const output = renderer([makeItem('A', 'idea')], 0, 0, TERM_80x24, null, 'list', null);
+    expect(output).toContain(OPEN_ICON);
+    expect(output).not.toContain('[OPEN]');
+  });
+
+  it('renders text fallbacks instead of icons when getShowIcons returns false', () => {
+    const renderer = createListRenderer(() => false);
+    const output = renderer([makeItem('A', 'idea')], 0, 0, TERM_80x24, null, 'list', null);
+    expect(output).not.toContain(OPEN_ICON);
+    expect(output).toContain('[OPEN]'); // status text fallback
+    expect(output).toContain('[IDEA]'); // stage text fallback
+  });
+
+  it('re-reads the getter on every render (settings re-read path)', () => {
+    let showIcons = true;
+    const renderer = createListRenderer(() => showIcons);
+
+    const withIcons = renderer([makeItem('A', 'idea')], 0, 0, TERM_80x24, null, 'list', null);
+    expect(withIcons).toContain(OPEN_ICON);
+
+    // Simulate the user editing the config: flip the flag, render again —
+    // the getter is consulted per-render, so the change applies immediately.
+    showIcons = false;
+    const withoutIcons = renderer([makeItem('A', 'idea')], 0, 0, TERM_80x24, null, 'list', null);
+    expect(withoutIcons).not.toContain(OPEN_ICON);
+    expect(withoutIcons).toContain('[OPEN]');
+  });
+});
