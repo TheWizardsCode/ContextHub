@@ -14,6 +14,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ShortcutRegistry, parseShortcutEntry, loadShortcutConfig } from './shortcut-config.js';
 import type { ShortcutEntry } from './shortcut-config.js';
 
@@ -222,5 +225,112 @@ describe('ShortcutRegistry — codeFreezeActive filtering', () => {
       expect(registry.getChordEntries(false)).toHaveLength(3);
       expect(registry.getChordEntries()).toHaveLength(3);
     });
+  });
+});
+
+// ── Project-local overrides (WL-0MSHUMX5C004NC4O) ───────────────────────
+//
+// Merge contract for a project-local <worklog-root>/shortcuts.json loaded
+// over the bundled defaults: local-wins override on chord+view, new local
+// chords appended, deterministic and deduplicated, malformed local file
+// falls back to bundled-only with a logged error.
+
+describe('loadShortcutConfig — project-local shortcuts.json overrides', () => {
+  let tempRoots: string[] = [];
+
+  /** Create a temp worklog root; `files` maps relative path -> content. */
+  function makeLocalRoot(files: Record<string, string>): string {
+    const dir = mkdtempSync(join(tmpdir(), 'herdr-shortcut-override-'));
+    tempRoots.push(dir);
+    for (const [rel, content] of Object.entries(files)) {
+      writeFileSync(join(dir, rel), content);
+    }
+    return dir;
+  }
+
+  afterEach(() => {
+    for (const dir of tempRoots) {
+      try { rmSync(dir, { recursive: true }); } catch { /* ignore */ }
+    }
+    tempRoots = [];
+    vi.restoreAllMocks();
+  });
+
+  it('is byte-identical to bundled-only when no local file exists', () => {
+    const bundled = loadShortcutConfig();
+    const root = makeLocalRoot({}); // empty dir — no shortcuts.json
+    const registry = loadShortcutConfig(root);
+    expect(registry.getEntries()).toEqual(bundled.getEntries());
+  });
+
+  it('is byte-identical to bundled-only when worklogRoot is undefined', () => {
+    const bundled = loadShortcutConfig();
+    expect(loadShortcutConfig(undefined).getEntries()).toEqual(bundled.getEntries());
+  });
+
+  it('appends a local entry with a new chord and resolves it via lookupChord', () => {
+    const bundled = loadShortcutConfig();
+    const root = makeLocalRoot({
+      'shortcuts.json': JSON.stringify([
+        { chord: ['w'], command: '/prompt:Write a podcast script for <id>', view: 'both', label: 'podcast script' },
+      ]),
+    });
+    const registry = loadShortcutConfig(root);
+    const entries = registry.getEntries();
+    expect(entries).toHaveLength(bundled.getEntries().length + 1);
+    expect(registry.lookupChord(['w'], 'list')).toBe('/prompt:Write a podcast script for <id>');
+    // Bundled entries are unchanged.
+    expect(registry.lookupChord(['i'], 'list')).toBe(bundled.lookupChord(['i'], 'list'));
+  });
+
+  it('replaces a bundled entry when the local file overrides the same chord+view', () => {
+    const bundled = loadShortcutConfig();
+    const root = makeLocalRoot({
+      'shortcuts.json': JSON.stringify([
+        { chord: ['i'], command: '/prompt:overridden', view: 'both', label: 'overridden', model: 'author' },
+      ]),
+    });
+    const registry = loadShortcutConfig(root);
+    const entry = registry.lookupChordEntry(['i'], 'list');
+    expect(entry?.command).toBe('/prompt:overridden');
+    expect(entry?.label).toBe('overridden');
+    expect(entry?.model).toBe('author');
+    // Replaced, not appended: total count unchanged and no duplicate remains.
+    expect(registry.getEntries()).toHaveLength(bundled.getEntries().length);
+    const matches = registry.getEntries().filter(e => e.chord.join(',') === 'i' && e.view === 'both');
+    expect(matches).toHaveLength(1);
+  });
+
+  it('falls back to bundled-only and logs an error for a malformed local file', () => {
+    const bundled = loadShortcutConfig();
+    const cases: Array<[string, string]> = [
+      ['invalid JSON', '{ not json'],
+      ['non-array', '{"chord": ["x"]}'],
+      ['invalid entries', JSON.stringify([{ chord: ['x'], command: '', view: 'both' }])],
+    ];
+    for (const [name, content] of cases) {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const root = makeLocalRoot({ 'shortcuts.json': content });
+      const registry = loadShortcutConfig(root);
+      expect(registry.getEntries()).toEqual(bundled.getEntries());
+      expect(spy).toHaveBeenCalled();
+      spy.mockRestore();
+    }
+  });
+
+  it('deduplicates chord+view within the local file (last wins) deterministically', () => {
+    const root = makeLocalRoot({
+      'shortcuts.json': JSON.stringify([
+        { chord: ['w'], command: '/prompt:first', view: 'both', label: 'first' },
+        { chord: ['w'], command: '/prompt:second', view: 'both', label: 'second' },
+      ]),
+    });
+    const a = loadShortcutConfig(root);
+    const b = loadShortcutConfig(root);
+    const matches = a.getEntries().filter(e => e.chord.join(',') === 'w' && e.view === 'both');
+    expect(matches).toHaveLength(1);
+    expect(matches[0].command).toBe('/prompt:second');
+    // Merge order is stable across runs.
+    expect(JSON.stringify(a.getEntries())).toBe(JSON.stringify(b.getEntries()));
   });
 });

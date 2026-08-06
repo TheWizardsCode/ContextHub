@@ -438,9 +438,6 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Load shortcut config
-  const shortcutRegistry = loadShortcutConfig();
-
   // Use HERDR_RESOLVED_CWD when set (passed via --env from open.sh)
   // as the starting directory for worklog discovery. The resolved root
   // is passed to child `wl` processes via --worklog-dir (setWorklogDir),
@@ -454,6 +451,13 @@ async function main(): Promise<void> {
   } else {
     process.stderr.write(uninitializedReport(resolvedCwd ?? process.cwd()));
   }
+
+  // Load shortcut config: bundled defaults merged with a project-local
+  // <worklog-root>/shortcuts.json when present (local wins on chord+view,
+  // WL-0MSHUMX5C004NC4O). Loaded AFTER configureWorklogTarget so the
+  // resolved wlRoot (when found) is available for local override discovery;
+  // without a worklog root the registry is the bundled-only default.
+  const shortcutRegistry = loadShortcutConfig(wlRoot);
 
   // Agent tracker (WL-0MSBQUJQX005RAT9): records which worklist-spawned
   // agent pane is attached to each work item. The state file lives in the

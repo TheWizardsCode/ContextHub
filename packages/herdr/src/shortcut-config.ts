@@ -6,7 +6,7 @@
  * and stage-aware visibility. Ported from the Pi TUI shortcut-config.ts.
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -235,16 +235,19 @@ export function parseShortcutEntry(raw: unknown): ShortcutEntry | undefined {
 }
 
 /**
- * Load and validate shortcut config from shortcuts.json.
+ * Load and validate the bundled default entries from src/shortcuts.json.
+ *
+ * Returns an empty array when the bundled file is missing or malformed,
+ * mirroring the pre-extensibility behaviour of {@link loadShortcutConfig}.
  */
-export function loadShortcutConfig(): ShortcutRegistry {
+function loadBundledEntries(): ShortcutEntry[] {
   const configPath = join(__dirname, 'shortcuts.json');
 
   let raw: string;
   try {
     raw = readFileSync(configPath, 'utf-8');
   } catch {
-    return new ShortcutRegistry([]);
+    return [];
   }
 
   let parsed: unknown;
@@ -252,12 +255,12 @@ export function loadShortcutConfig(): ShortcutRegistry {
     parsed = JSON.parse(raw);
   } catch {
     console.error('[shortcut-config] Malformed shortcuts.json');
-    return new ShortcutRegistry([]);
+    return [];
   }
 
   if (!Array.isArray(parsed)) {
     console.error('[shortcut-config] shortcuts.json must be an array');
-    return new ShortcutRegistry([]);
+    return [];
   }
 
   const validEntries: ShortcutEntry[] = [];
@@ -269,7 +272,100 @@ export function loadShortcutConfig(): ShortcutRegistry {
     }
   }
 
-  return new ShortcutRegistry(validEntries);
+  return validEntries;
+}
+
+/**
+ * Load project-local shortcut entries from <worklogRoot>/shortcuts.json.
+ *
+ * The local file (WL-0MSHUMX5C004NC4O) lets a consumer project add its own
+ * chords and override bundled defaults without editing the plugin bundle.
+ * Entries are validated with the same {@link parseShortcutEntry} rules as the
+ * bundled file; invalid entries are logged and skipped (never crash). A
+ * missing, unreadable, malformed (bad JSON / non-array) local file falls back
+ * to bundled-only with an error logged.
+ */
+function loadLocalEntries(worklogRoot: string): ShortcutEntry[] {
+  const localPath = join(worklogRoot, 'shortcuts.json');
+  if (!existsSync(localPath)) return [];
+
+  let raw: string;
+  try {
+    raw = readFileSync(localPath, 'utf-8');
+  } catch {
+    console.error(`[shortcut-config] Could not read project-local shortcuts.json at ${localPath}; using bundled defaults only`);
+    return [];
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    console.error(`[shortcut-config] Malformed project-local shortcuts.json at ${localPath}; using bundled defaults only`);
+    return [];
+  }
+
+  if (!Array.isArray(parsed)) {
+    console.error(`[shortcut-config] Project-local shortcuts.json at ${localPath} must be an array; using bundled defaults only`);
+    return [];
+  }
+
+  const localEntries: ShortcutEntry[] = [];
+  for (const entry of parsed) {
+    const parsedEntry = parseShortcutEntry(entry);
+    if (parsedEntry) {
+      localEntries.push(parsedEntry);
+    } else {
+      console.error(`[shortcut-config] Invalid entry in project-local shortcuts.json at ${localPath}; skipping entry`);
+    }
+  }
+  return localEntries;
+}
+
+/**
+ * Merge bundled defaults with project-local entries.
+ *
+ * Local wins: an entry with the same view+chord replaces the bundled one;
+ * entries with new chords are appended. Bundled order is preserved for
+ * untouched entries (a Map keyed by view+chord keeps the first-inserted
+ * position when a key is re-set), so the resulting registry is deterministic
+ * with no duplicate view+chord pairs. Within the local file, later entries
+ * win for the same view+chord.
+ */
+function mergeShortcutEntries(bundled: ShortcutEntry[], local: ShortcutEntry[]): ShortcutEntry[] {
+  const key = (e: ShortcutEntry): string => `${e.view}\u0000${e.chord.join('\u0001')}`;
+  const merged = new Map<string, ShortcutEntry>();
+  for (const entry of bundled) {
+    merged.set(key(entry), entry);
+  }
+  for (const entry of local) {
+    merged.set(key(entry), entry);
+  }
+  return [...merged.values()];
+}
+
+/**
+ * Load and validate shortcut config from shortcuts.json.
+ *
+ * Loads the bundled defaults first, then merges a project-local
+ * `<worklogRoot>/shortcuts.json` over them when present (local wins on
+ * chord+view, WL-0MSHUMX5C004NC4O). Without a local file — or when
+ * `worklogRoot` is undefined — the registry is byte-identical to the
+ * bundled-only output.
+ */
+export function loadShortcutConfig(worklogRoot?: string): ShortcutRegistry {
+  const bundledEntries = loadBundledEntries();
+
+  if (!worklogRoot) {
+    return new ShortcutRegistry(bundledEntries);
+  }
+
+  const localEntries = loadLocalEntries(worklogRoot);
+  if (localEntries.length === 0) {
+    return new ShortcutRegistry(bundledEntries);
+  }
+
+  return new ShortcutRegistry(mergeShortcutEntries(bundledEntries, localEntries));
 }
 
 /**
