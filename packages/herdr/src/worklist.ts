@@ -544,8 +544,34 @@ export class WorkItemListState {
     // Capture the currently selected item's ID before replacing items
     const prevSelectedId = this._captureSelectedId();
 
+    // The fetcher returns fresh top-level objects that never carry a
+    // `children` array (normalizeItem drops it), so a plain swap would
+    // momentarily collapse every expanded parent until doRefresh re-fetches
+    // children asynchronously — the reported flicker (WL-0MSBVBNGH002RDP5).
+    // Carry the previously fetched children over to the new objects by ID so
+    // the flattened view — and any selection pointing at a child — survives
+    // the swap atomically; doRefresh replaces the carried-over data with
+    // fresh children immediately afterwards.
+    const prevChildrenById = new Map<string, WorkItem[]>();
+    for (const item of this._allItems) {
+      if (item.children && item.children.length > 0) {
+        prevChildrenById.set(item.id, item.children);
+      }
+    }
+
     this._allItems = [...newItems];
     this._applyFilters();
+
+    // Attach carried-over children only where the new object has no children
+    // yet (fresh children attached by doRefresh are never clobbered).
+    for (const item of this._allItems) {
+      if (item.childCount && item.childCount > 0 && !item.children) {
+        const prev = prevChildrenById.get(item.id);
+        if (prev) {
+          item.children = prev;
+        }
+      }
+    }
 
     // Try to restore selection by ID; fall back to clamping if not found
     if (!this._restoreSelectionById(prevSelectedId)) {
@@ -2195,28 +2221,49 @@ export async function runWorklistTui(
     refreshInFlight = true;
     try {
       try {
-        const newItems = await fetcher();
+        // Fetch the new top-level items and the children of currently
+        // expanded parents in PARALLEL, then apply both in one synchronous
+        // refreshItems step. The fetcher returns fresh top-level objects
+        // without `children`, so a swap followed by an async children
+        // re-fetch would render a collapsed intermediate state — the
+        // "momentary collapse" flicker (WL-0MSBVBNGH002RDP5). Fetching
+        // children up front removes that window entirely; refreshItems also
+        // carries over previously fetched children as a safety net when a
+        // children re-fetch fails.
+        const expanded = [...state.expandedItems];
+        const freshChildren = new Map<string, WorkItem[]>();
+        const fetchExpandedChildren = async (parentId: string): Promise<WorkItem[]> => {
+          try {
+            const children = await fetchChildrenForItem(parentId);
+            freshChildren.set(parentId, children);
+            return children;
+          } catch {
+            // Ignore: refreshItems carries over the previously fetched
+            // children when the re-fetch fails.
+            return [];
+          }
+        };
+        const [newItems] = await Promise.all([
+          fetcher(),
+          ...expanded.map(fetchExpandedChildren),
+        ]);
         const oldLen = state.items.length;
+
+        // Attach freshly fetched children to the new parent objects BEFORE
+        // the swap so the flattened view is complete at render time.
+        if (freshChildren.size > 0) {
+          const byId = new Map(newItems.map((it) => [it.id, it]));
+          for (const [parentId, children] of freshChildren) {
+            const parent = byId.get(parentId);
+            if (parent) {
+              parent.children = children;
+            }
+          }
+        }
         state.refreshItems(newItems);
         // Re-read the Code Freeze marker so a freeze that started (or ended)
         // since the last refresh is reflected in the banner promptly.
         refreshFreezeState();
-        // Re-fetch children for expanded parents so the hierarchy view stays
-        // fresh after an auto/manual refresh while inside a child context.
-        const expanded = [...state.expandedItems];
-        if (expanded.length > 0) {
-          const byId = new Map(newItems.map((it) => [it.id, it]));
-          await Promise.all(expanded.map(async (parentId) => {
-            const parent = byId.get(parentId);
-            if (!parent) return; // parent no longer exists
-            try {
-              const children = await fetchChildrenForItem(parentId);
-              parent.children = children;
-            } catch {
-              // ignore: keep previously fetched children on refresh failure
-            }
-          }));
-        }
         // Merge agent-status state into the refreshed items (top-level +
         // expanded children) so the agent icons reflect the latest tracker
         // state (WL-0MSBQUJQX005RAT9). Fail-open: no herdr CLI → no icons.

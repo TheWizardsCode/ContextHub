@@ -352,6 +352,105 @@ describe('WorkItemListState.refreshItems — preserve selection by ID', () => {
     expect(state.getFlattenedItems()[state.selectedIndex].id).toBe('CHILD-A1');
   });
 
+  it('keeps expanded children visible when refresh supplies new objects without children (production fetcher shape)', () => {
+    // The production fetcher (normalizeItem) never populates `children` on
+    // top-level items — each refresh returns NEW object references that only
+    // carry childCount. This test models that shape (WL-0MSBVBNGH002RDP5).
+    const parentA = makeItem('PARENT-A', 'idea');
+    parentA.children = [makeItem('CHILD-A1'), makeItem('CHILD-A2')];
+    parentA.childCount = 2;
+
+    const parentB = makeItem('PARENT-B', 'in_progress');
+    parentB.children = [makeItem('CHILD-B1')];
+    parentB.childCount = 1;
+
+    const state = new WorkItemListState([parentA, parentB], TERM_80x24);
+    state.toggleExpand('PARENT-A');
+
+    // Flattened: [PARENT-A, CHILD-A1, CHILD-A2, PARENT-B]
+    expect(state.getFlattenedItems().length).toBe(4);
+    expect(state.getFlattenedItems()[1].id).toBe('CHILD-A1');
+
+    // Refresh with brand-new objects that LACK `children` — exactly what the
+    // fetcher returns (children are fetched separately for expanded parents).
+    const freshParentA = { ...makeItem('PARENT-A', 'idea'), childCount: 2 };
+    const freshParentB = { ...makeItem('PARENT-B', 'in_progress'), childCount: 1 };
+    state.refreshItems([freshParentB, freshParentA]);
+
+    // Expanded children must remain in the flattened view — no momentary
+    // collapse window after the swap.
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual([
+      'PARENT-B',
+      'PARENT-A',
+      'CHILD-A1',
+      'CHILD-A2',
+    ]);
+  });
+
+  it('restores selection on a child of an expanded parent after a children-less refresh', () => {
+    // A selected CHILD must survive a refresh that swaps in children-less
+    // objects (previously the new flattened list lost the child, so selection
+    // jumped to the top of the list) — WL-0MSBVBNGH002RDP5 AC-4.
+    const parentA = makeItem('PARENT-A', 'idea');
+    parentA.children = [makeItem('CHILD-A1'), makeItem('CHILD-A2')];
+    parentA.childCount = 2;
+
+    const parentB = makeItem('PARENT-B', 'in_progress');
+    parentB.childCount = 1;
+
+    const state = new WorkItemListState([parentA, parentB], TERM_80x24);
+    state.toggleExpand('PARENT-A');
+
+    // Select CHILD-A1 (flattened index 1).
+    state.selectedIndex = 1;
+    expect(state.getFlattenedItems()[1].id).toBe('CHILD-A1');
+
+    // Refresh with children-less NEW objects, reordered (B first).
+    const freshParentA = { ...makeItem('PARENT-A', 'idea'), childCount: 2 };
+    const freshParentB = { ...makeItem('PARENT-B', 'in_progress'), childCount: 1 };
+    state.refreshItems([freshParentB, freshParentA]);
+
+    // CHILD-A1 is still visible and selected (now flattened index 2 after
+    // the reorder) — the selection followed the child, not the top of the list.
+    expect(state.getFlattenedItems()[2].id).toBe('CHILD-A1');
+    expect(state.getFlattenedItems()[state.selectedIndex].id).toBe('CHILD-A1');
+  });
+
+  it('does not overwrite fresh children already attached to the new objects (carry-over only fills gaps)', () => {
+    // doRefresh attaches freshly fetched children to the new parent objects
+    // BEFORE refreshItems; the carry-over must never clobber fresh data with
+    // stale children (WL-0MSBVBNGH002RDP5 AC-3 freshness).
+    const parentA = makeItem('PARENT-A', 'idea');
+    parentA.children = [makeItem('CHILD-OLD')];
+    parentA.childCount = 1;
+
+    const state = new WorkItemListState([parentA], TERM_80x24);
+    state.toggleExpand('PARENT-A');
+
+    const freshParentA = { ...makeItem('PARENT-A', 'idea'), childCount: 1 };
+    freshParentA.children = [makeItem('CHILD-FRESH')];
+    state.refreshItems([freshParentA]);
+
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['PARENT-A', 'CHILD-FRESH']);
+  });
+
+  it('does not carry children over for a parent that no longer exists after refresh', () => {
+    const parentA = makeItem('PARENT-A', 'idea');
+    parentA.children = [makeItem('CHILD-A1')];
+    parentA.childCount = 1;
+
+    const state = new WorkItemListState([parentA], TERM_80x24);
+    state.toggleExpand('PARENT-A');
+    expect(state.getFlattenedItems().length).toBe(2);
+
+    // Refresh: PARENT-A is gone; only PARENT-B remains (no children).
+    const freshParentB = { ...makeItem('PARENT-B', 'in_progress'), childCount: 0 };
+    state.refreshItems([freshParentB]);
+
+    // No orphan children may leak into the flattened view.
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['PARENT-B']);
+  });
+
   it('prefers the selected item ID over the collapsed child position', () => {
     // Test that when parent is collapsed and then refreshed with expanded
     // children, the same child ID is found in the new flattened list
