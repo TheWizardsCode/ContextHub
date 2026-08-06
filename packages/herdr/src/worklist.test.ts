@@ -1568,7 +1568,14 @@ describe('buildMetaRows — Related Docs row (WL-0MSHWHRIF001YHF8)', () => {
 });
 
 describe('detail view ToC for Related Docs (WL-0MSHWHULZ001FL8I)', () => {
-  const twoMd = () => makeKeyFilesItem('WL-TOC', ['docs/prd.md', 'docs/episode.podcast.md']);
+  const twoMd = () => {
+    const item = makeKeyFilesItem('WL-TOC', ['docs/prd.md', 'docs/episode.podcast.md']);
+    // Long body so the document region is scrollable: the focus-transfer
+    // tests need maxScroll ≥ 2 (j,j scrolls down, k,k returns to the top,
+    // k returns focus to the ToC).
+    item.description += '\n\n' + Array.from({ length: 60 }, (_, i) => `lorem ipsum dolor line ${i}`).join('\n');
+    return item;
+  };
 
   it('renders a ToC at the top listing every Related Doc when the item has .md Key Files', () => {
     const joined = formatDetailContent(twoMd(), 80, undefined, true, 0, true, 0).join('\n');
