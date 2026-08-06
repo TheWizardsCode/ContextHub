@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import {
   WorkItemListState,
   getTermSize,
@@ -28,11 +28,13 @@ import {
   formatTimestamp,
   buildMetaRows,
   resolveKeyFilePath,
+  formatDetailContent,
+  formatDetailView,
 } from './worklist.js';
 import type { DowntimeWorker } from './downtime-worker.js';
 import { setLogPath, resetLogPath, recordCommand, getLastCommand } from './command-log.js';
 import { loadShortcutConfig, ShortcutRegistry } from './shortcut-config.js';
-import { regroupWorkItems } from './grouping.js';
+import { regroupWorkItems, extractFilePaths } from './grouping.js';
 import { setWorklogDir, resetWorklogDir, type WorkItem } from './fetcher.js';
 
 // ── ANSI helpers ───────────────────────────────────────────────────────
@@ -1472,5 +1474,259 @@ describe('resolveKeyFilePath (Key Files md resolution)', () => {
     writeFileSync(join(root, 'abs.podcast.md'), '# Abs');
     const abs = join(root, 'abs.podcast.md');
     expect(resolveKeyFilePath(abs)).toBe(abs);
+  });
+});
+
+// ── Related Docs row + detail ToC + open-in-viewer (WL-0MSGTLSUT002NF29) ─
+// Test-first contract (WL-0MSHWHP0S0036DDU): these tests are written BEFORE
+// the Related Docs row (WL-0MSHWHRIF001YHF8) and detail ToC
+// (WL-0MSHWHULZ001FL8I) implementations land. New-behavior assertions are
+// expected to be RED at creation time and turn GREEN once the row and ToC
+// features are implemented. Tests exercise the existing public API
+// (buildMetaRows / formatMetadataPanel / formatDetailContent /
+// formatDetailView / handleKeypress / WorkItemListState / resolveKeyFilePath)
+// plus the ToC state fields that the ToC feature adds to WorkItemListState:
+//   - detailToCIndex     : selected ToC entry (0-based; default 0)
+//   - detailToCFocus     : true when keyboard focus is on the ToC, false
+//                          when focus is on the document scroll region
+//   - detailRenderedIndex: which Key File's content is shown in the md
+//                          viewer (default 0 = first file, auto-render)
+//   - handleKeypress in detail mode: j/k and arrow keys move detailToCIndex
+//     when detailToCFocus is true; navigating past the last ToC entry
+//     transfers focus to document scrolling (detailToCFocus = false); k at
+//     the top of the document returns focus to the ToC. Enter (\r) renders
+//     mdPaths[detailToCIndex] by setting detailRenderedIndex.
+// formatDetailContent/formatDetailView accept optional trailing params:
+//   (…, detailToCIndex, detailToCFocus, detailRenderedIndex) and render a
+//   pinned "Related Docs" ToC at the top of the detail view when the item
+//   has ≥1 .md Key File.
+
+/** Build an item whose description carries a **Key Files:** section. */
+function makeKeyFilesItem(id: string, paths: string[]): WorkItem {
+  return {
+    ...makeItem(id),
+    description: [
+      `# ${id} title`,
+      '',
+      '**Key Files:**',
+      ...paths.map(p => `- \`${p}\``),
+      '',
+      '## Notes',
+      'Body text for the description section.',
+    ].join('\n'),
+  };
+}
+
+describe('buildMetaRows — Related Docs row (WL-0MSHWHRIF001YHF8)', () => {
+  it('emits a Related Docs row listing every .md path from Key Files, joined with ", "', () => {
+    const item = makeKeyFilesItem('WL-REL', ['docs/prd.md', 'docs/episode.podcast.md']);
+    const rows = new Map(buildMetaRows(item));
+    expect(rows.get('Related Docs')).toBe('docs/prd.md, docs/episode.podcast.md');
+  });
+
+  it('omits the row when the item has no Key Files section at all', () => {
+    const item = makeItem('WL-PLAIN');
+    const rows = new Map(buildMetaRows(item));
+    expect(rows.has('Related Docs')).toBe(false);
+  });
+
+  it('omits the row when Key Files contains no .md files', () => {
+    const item = makeKeyFilesItem('WL-NO-MD', ['src/app.ts', 'data.json']);
+    const rows = new Map(buildMetaRows(item));
+    expect(rows.has('Related Docs')).toBe(false);
+  });
+
+  it('includes only .md paths from a mixed Key Files list', () => {
+    const item = makeKeyFilesItem('WL-MIX', ['src/app.ts', 'docs/guide.md', 'data.json', 'docs/api.md']);
+    const rows = new Map(buildMetaRows(item));
+    expect(rows.get('Related Docs')).toBe('docs/guide.md, docs/api.md');
+  });
+
+  it('renders the row in the metadata panel (formatMetadataPanel)', () => {
+    const item = makeKeyFilesItem('WL-PANEL', ['docs/prd.md', 'docs/episode.podcast.md']);
+    const joined = formatMetadataPanel(item, 80, 20, 0, null).join('\n');
+    expect(joined).toContain('Related Docs');
+    expect(joined).toContain('docs/prd.md, docs/episode.podcast.md');
+  });
+
+  it('renders the row in the detail-view metadata table (formatDetailContent)', () => {
+    const item = makeKeyFilesItem('WL-DETAIL', ['docs/prd.md', 'docs/episode.podcast.md']);
+    const joined = formatDetailContent(item, 80).join('\n');
+    expect(joined).toContain('Related Docs');
+    expect(joined).toContain('docs/prd.md, docs/episode.podcast.md');
+  });
+
+  it('truncates very long Related Docs values to the terminal width', () => {
+    const paths = Array.from({ length: 10 }, (_, i) => `docs/very-long-document-name-${i}.md`);
+    const item = makeKeyFilesItem('WL-LONG', paths);
+    const joined = formatMetadataPanel(item, 40, 20, 0, null).join('\n');
+    for (const line of joined.split('\n')) {
+      const visible = line.replace(/\x1b\[[0-9;]*m/g, '');
+      expect(visible.length).toBeLessThanOrEqual(40);
+    }
+  });
+});
+
+describe('detail view ToC for Related Docs (WL-0MSHWHULZ001FL8I)', () => {
+  const twoMd = () => makeKeyFilesItem('WL-TOC', ['docs/prd.md', 'docs/episode.podcast.md']);
+
+  it('renders a ToC at the top listing every Related Doc when the item has .md Key Files', () => {
+    const joined = formatDetailContent(twoMd(), 80, undefined, true, 0, true, 0).join('\n');
+    expect(joined).toContain('Related Docs');
+    expect(joined).toContain('1. docs/prd.md');
+    expect(joined).toContain('2. docs/episode.podcast.md');
+  });
+
+  it('renders no ToC when the item has no .md Key Files', () => {
+    const item = makeKeyFilesItem('WL-NO-TOC', ['src/app.ts']);
+    const joined = formatDetailContent(item, 80, undefined, true, 0, true, 0).join('\n');
+    expect(joined).not.toContain('1. ');
+    expect(joined).not.toContain('Related Docs');
+  });
+
+  it('marks the focused ToC entry with a focus indicator', () => {
+    const focusedFirst = formatDetailContent(twoMd(), 80, undefined, true, 0, true, 0).join('\n');
+    expect(focusedFirst).toContain('▸ 1. docs/prd.md');
+    const focusedSecond = formatDetailContent(twoMd(), 80, undefined, true, 1, true, 0).join('\n');
+    expect(focusedSecond).toContain('▸ 2. docs/episode.podcast.md');
+  });
+
+  it('moves ToC selection with j/k and arrow keys via handleKeypress', () => {
+    const state = new WorkItemListState([twoMd()], TERM_80x24);
+    state.selectedIndex = 0;
+    state.selectItem();
+    expect(state.mode).toBe('detail');
+    expect(state.detailToCIndex).toBe(0);
+    expect(state.detailToCFocus).toBe(true);
+
+    handleKeypress(state, 'j', TERM_80x24);
+    expect(state.detailToCIndex).toBe(1);
+    handleKeypress(state, 'k', TERM_80x24);
+    expect(state.detailToCIndex).toBe(0);
+
+    handleKeypress(state, '\x1b[B', TERM_80x24); // ↓
+    expect(state.detailToCIndex).toBe(1);
+    handleKeypress(state, '\x1b[A', TERM_80x24); // ↑
+    expect(state.detailToCIndex).toBe(0);
+  });
+
+  it('clamps ToC selection at the bounds', () => {
+    const state = new WorkItemListState([twoMd()], TERM_80x24);
+    state.selectedIndex = 0;
+    state.selectItem();
+    handleKeypress(state, 'k', TERM_80x24); // above first entry — clamp at 0
+    expect(state.detailToCIndex).toBe(0);
+    handleKeypress(state, 'j', TERM_80x24);
+    handleKeypress(state, 'j', TERM_80x24); // at last entry — stays (focus moves to doc, see below)
+    expect(state.detailToCIndex).toBe(1);
+  });
+
+  it('navigating past the last ToC entry transfers focus to document scrolling', () => {
+    const state = new WorkItemListState([twoMd()], TERM_80x24);
+    state.selectedIndex = 0;
+    state.selectItem();
+    handleKeypress(state, 'j', TERM_80x24); // → entry 1
+    handleKeypress(state, 'j', TERM_80x24); // past last → doc focus
+    expect(state.detailToCFocus).toBe(false);
+    // j now scrolls the document
+    const before = state.detailScrollOffset;
+    handleKeypress(state, 'j', TERM_80x24);
+    expect(state.detailScrollOffset).toBe(before + 1);
+  });
+
+  it('navigating up past the top of the document returns focus to the ToC', () => {
+    const state = new WorkItemListState([twoMd()], TERM_80x24);
+    state.selectedIndex = 0;
+    state.selectItem();
+    handleKeypress(state, 'j', TERM_80x24); // → entry 1
+    handleKeypress(state, 'j', TERM_80x24); // past last → doc focus
+    expect(state.detailToCFocus).toBe(false);
+    // Scroll down a couple of lines then back up to the top.
+    handleKeypress(state, 'j', TERM_80x24);
+    handleKeypress(state, 'j', TERM_80x24);
+    handleKeypress(state, 'k', TERM_80x24);
+    handleKeypress(state, 'k', TERM_80x24);
+    expect(state.detailScrollOffset).toBe(0);
+    // k at the top returns focus to the ToC
+    handleKeypress(state, 'k', TERM_80x24);
+    expect(state.detailToCFocus).toBe(true);
+    expect(state.detailToCIndex).toBe(1);
+  });
+
+  it('keeps the ToC pinned at the top while the document scrolls', () => {
+    const item = twoMd();
+    // Make the document long enough to scroll well past the ToC.
+    item.description += '\n\n' + Array.from({ length: 60 }, (_, i) => `lorem ipsum dolor line ${i}`).join('\n');
+    const view = formatDetailView(item, 80, 40, 24, undefined, true, 1, false, 0);
+    const lines = view.split('\n');
+    const firstLines = lines.slice(0, 8).join('\n');
+    expect(firstLines).toContain('Related Docs');
+    expect(firstLines).toContain('1. docs/prd.md');
+  });
+});
+
+describe('Related Docs — open in markdown viewer (WL-0MSGTLSUT002NF29)', () => {
+  const readFileFor = (content: Record<string, string>) =>
+    (filePath: string): string | null => content[filePath] ?? null;
+
+  it('auto-renders the first .md Key File by default (existing behavior preserved)', () => {
+    const item = makeKeyFilesItem('WL-AUTO', ['docs/prd.md', 'docs/episode.podcast.md']);
+    const readFile = readFileFor({ 'docs/prd.md': '# PRD content' });
+    const joined = formatDetailContent(item, 80, readFile, true, 0, true, 0).join('\n');
+    expect(joined).toContain('PRD content');
+  });
+
+  it('Enter on a ToC entry renders that specific file in the markdown viewer', () => {
+    const item = makeKeyFilesItem('WL-OPEN', ['docs/prd.md', 'docs/episode.podcast.md']);
+    const state = new WorkItemListState([item], TERM_80x24);
+    state.selectedIndex = 0;
+    state.selectItem();
+    handleKeypress(state, 'j', TERM_80x24); // ToC → entry 1
+    handleKeypress(state, '\r', TERM_80x24); // Enter renders the selected doc
+    expect(state.detailRenderedIndex).toBe(1);
+
+    const readFile = readFileFor({
+      'docs/prd.md': '# PRD content',
+      'docs/episode.podcast.md': '# Episode content',
+    });
+    const joined = formatDetailContent(item, 80, readFile, true, 1, true, 1).join('\n');
+    expect(joined).toContain('Episode content');
+    expect(joined).not.toContain('PRD content');
+  });
+
+  it('unreadable or missing files fail open without crashing', () => {
+    const item = makeKeyFilesItem('WL-MISSING', ['docs/ghost.md']);
+    const joined = formatDetailContent(item, 80, readFileFor({}), true, 0, true, 0).join('\n');
+    // No crash; the raw description still renders.
+    expect(joined).toContain('Body text for the description section.');
+  });
+
+  it('resolves Key Files against the worklog root, never process.cwd()', () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-related-docs-'));
+    const originalCwd = process.cwd();
+    try {
+      setWorklogDir(join(root, '.worklog'));
+      mkdirSync(join(root, 'docs'), { recursive: true });
+      writeFileSync(join(root, 'docs', 'episode.podcast.md'), '# Worklog root content');
+
+      // Decoy: same relative path in the plugin CWD — must NOT win.
+      const cwdDir = mkdtempSync(join(tmpdir(), 'herdr-related-docs-cwd-'));
+      process.chdir(cwdDir);
+      mkdirSync(join(cwdDir, 'docs'), { recursive: true });
+      writeFileSync(join(cwdDir, 'docs', 'episode.podcast.md'), '# CWD decoy content');
+
+      const readFile = (filePath: string): string | null => {
+        const resolved = resolveKeyFilePath(filePath);
+        return resolved ? readFileSync(resolved, 'utf-8') : null;
+      };
+      const item = makeKeyFilesItem('WL-ROOT', ['docs/episode.podcast.md']);
+      const joined = formatDetailContent(item, 80, readFile, true, 0, true, 0).join('\n');
+      expect(joined).toContain('Worklog root content');
+      expect(joined).not.toContain('CWD decoy content');
+    } finally {
+      process.chdir(originalCwd);
+      resetWorklogDir();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
