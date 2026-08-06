@@ -7,12 +7,16 @@ import { spawnSync } from 'node:child_process';
 // The exact keybinding block scripts/install-herdr.sh must insert.
 const KEYBINDING_BLOCK = `[[keys.command]]
 key = "prefix+l"
-command = "herdr plugin action invoke worklog-selection-list.open-worklist"
-description = "Open the Worklog work item selection pane in a new tab."
+command = "herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab"
+description = "Open the Podcast Editing tab (Worklog work item selection pane)."
 `;
 
 // Marker the script uses for its existence check.
-const COMMAND_MARKER = 'worklog-selection-list.open-worklist';
+const COMMAND_MARKER = 'worklog-selection-list.open-podcast-editor-tab';
+
+// Legacy v0.1.x binding that prefix+l previously pointed at; install-herdr.sh
+// migrates it in-place to the new action (never duplicates the key).
+const LEGACY_BINDING = 'herdr plugin action invoke worklog-selection-list.open-worklist';
 
 function runScript(env: Record<string, string>): {
   status: number;
@@ -133,5 +137,21 @@ describe('install-herdr script', () => {
     const content = fs.readFileSync(configPath, 'utf8');
     expect(content).toBe('existing = true\n' + KEYBINDING_BLOCK);
     expect(countOccurrences(content, COMMAND_MARKER)).toBe(1);
+  });
+
+  it('migrates a legacy open-worklist binding in-place to the new action', () => {
+    const tempDir = makeTempDir('worklog-herdr-migrate-');
+    const configPath = path.join(tempDir, 'config.toml');
+    const legacyBlock = `[[keys.command]]\nkey = "prefix+l"\ncommand = "${LEGACY_BINDING}"\ndescription = "Open the Worklog work item selection pane in a new tab."\n`;
+    fs.writeFileSync(configPath, legacyBlock);
+
+    const result = runScript({ HERDR_CONFIG_PATH: configPath });
+    expect(result.status).toBe(0);
+    const content = fs.readFileSync(configPath, 'utf8');
+    // Legacy command replaced in-place; no duplicate keybinding inserted.
+    expect(countOccurrences(content, LEGACY_BINDING)).toBe(0);
+    expect(countOccurrences(content, COMMAND_MARKER)).toBe(1);
+    expect(countOccurrences(content, '[[keys.command]]')).toBe(1);
+    expect(content).toContain('command = "herdr plugin action invoke ' + COMMAND_MARKER + '"');
   });
 });

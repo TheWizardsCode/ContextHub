@@ -108,15 +108,16 @@ export function groupItemsByFilePaths(
  * Grouping rules (display order — most actionable first):
  * - Items with priority `critical` → partitioned by file-path conflicts using the
  *   greedy first-fit algorithm, labeled `Critical Group 1..x`, placed first.
- * - Non-critical items with stage `plan_complete` or `intake_complete` → partitioned
- *   by file-path conflicts using the greedy first-fit algorithm, labeled `Group 1..x`.
+ * - Non-critical items with stage `in_progress`, `plan_complete` or `intake_complete`
+ *   → partitioned by file-path conflicts using the greedy first-fit algorithm,
+ *   labeled `Group 1..x` (no stage prefix in the label).
  * - Items with stage `idea` → all placed in one group labeled "Idea" (no conflict checking).
- * - All remaining non-critical items (unknown/other stages, `in_progress`, etc.) → all
- *   placed in a single group labeled "Other".
+ * - All remaining non-critical items (unknown/other/custom stages, `done`, etc.) → all
+ *   placed in a single group labeled "Other" (safety net for unknown/custom stages).
  * - Items with stage `in_review` → all placed in one group labeled "In Review", placed last.
  *
- * Within-group ordering (stage sub-sort `plan_complete` → `intake_complete` → remaining
- * stages, then priority high → medium → low) is applied by callers via
+ * Within-group ordering (stage sub-sort `in_progress` → `plan_complete` → `intake_complete`
+ * → remaining stages, then priority high → medium → low) is applied by callers via
  * `compareGroupableItems` / `compareGroupedItems`.
  *
  * @param items - Array of items with id, priority, stage, and extracted file paths
@@ -160,18 +161,20 @@ export function assignItemGroups(
     nextGroup += count;
   }
 
-  // 1. Group N — non-critical plan_complete + intake_complete items partitioned
-  //    by file-path conflicts (no stage prefix in the label).
-  const planIntakeItems = items.filter(
-    item => item.priority !== 'critical' && (item.stage === 'plan_complete' || item.stage === 'intake_complete'),
+  // 1. Group N — non-critical in_progress + plan_complete + intake_complete items
+  //    partitioned by file-path conflicts (no stage prefix in the label).
+  const groupNItems = items.filter(
+    item =>
+      item.priority !== 'critical' &&
+      (item.stage === 'in_progress' || item.stage === 'plan_complete' || item.stage === 'intake_complete'),
   );
-  if (planIntakeItems.length > 0) {
-    const planIntakeGroups = groupItemsByFilePaths(planIntakeItems, maxFilePathGroups);
-    const { map: groupNumMap, count } = remapToSequential(planIntakeGroups, nextGroup);
-    const categoryGroupNumbers = [...new Set(planIntakeGroups.values())].sort((a, b) => a - b);
+  if (groupNItems.length > 0) {
+    const groupNGroups = groupItemsByFilePaths(groupNItems, maxFilePathGroups);
+    const { map: groupNumMap, count } = remapToSequential(groupNGroups, nextGroup);
+    const categoryGroupNumbers = [...new Set(groupNGroups.values())].sort((a, b) => a - b);
     const labelNumByFileGroup = new Map<number, number>();
     categoryGroupNumbers.forEach((g, i) => labelNumByFileGroup.set(g, i + 1));
-    for (const [id, g] of planIntakeGroups) {
+    for (const [id, g] of groupNGroups) {
       const groupNum = groupNumMap.get(g)!;
       result.set(id, { group: groupNum, groupLabel: `Group ${labelNumByFileGroup.get(g)}` });
     }
@@ -188,11 +191,12 @@ export function assignItemGroups(
   }
 
   // 3. Other — single group for all remaining non-critical items (unknown/other
-  //    stages such as in_progress, done, undefined, ...).
+  //    custom stages such as done, undefined, custom, ...). Safety net only.
   const otherItems = items.filter(
     item =>
       item.priority !== 'critical' &&
       item.stage !== 'in_review' &&
+      item.stage !== 'in_progress' &&
       item.stage !== 'plan_complete' &&
       item.stage !== 'intake_complete' &&
       item.stage !== 'idea',
@@ -219,15 +223,17 @@ export function assignItemGroups(
 // ── Within-group ordering ────────────────────────────────────────────
 
 /**
- * Stage sub-order within a group: plan_complete first, then intake_complete,
- * then all remaining stages. No headings are rendered between sub-groups.
+ * Stage sub-order within a group: in_progress first (actively being worked),
+ * then plan_complete, then intake_complete, then all remaining stages.
+ * No headings are rendered between sub-groups.
  */
 const WITHIN_GROUP_STAGE_ORDER: Record<string, number> = {
-  plan_complete: 0,
-  intake_complete: 1,
+  in_progress: 0,
+  plan_complete: 1,
+  intake_complete: 2,
 };
-// Any stage not listed above (including undefined/empty) → 2 (remaining).
-const REMAINING_STAGE_ORDER = 2;
+// Any stage not listed above (including undefined/empty) → 3 (remaining).
+const REMAINING_STAGE_ORDER = 3;
 
 /**
  * Priority order for within-group sorting: high → medium → low.
@@ -242,8 +248,9 @@ const DEFAULT_PRIORITY_ORDER = WITHIN_GROUP_PRIORITY_ORDER.medium;
 
 /**
  * Compare two items for within-group display order:
- * stage sub-sort (plan_complete → intake_complete → remaining stages), then
- * priority (high → medium → low), then id as a deterministic tie-break.
+ * stage sub-sort (in_progress → plan_complete → intake_complete → remaining
+ * stages), then priority (high → medium → low), then id as a deterministic
+ * tie-break.
  */
 export function compareGroupableItems(a: GroupableItem, b: GroupableItem): number {
   const stageA = WITHIN_GROUP_STAGE_ORDER[a.stage ?? ''] ?? REMAINING_STAGE_ORDER;

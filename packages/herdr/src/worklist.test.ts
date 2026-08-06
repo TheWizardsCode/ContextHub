@@ -123,7 +123,7 @@ describe('createListRenderer — line-count invariant', () => {
     const merged: WorkItem[] = [
       { ...makeItem('NEXT-PLAN'), stage: 'plan_complete', priority: 'high', group: 2, groupLabel: 'Group 1' },
       { ...makeItem('NEXT-REVIEW'), stage: 'in_review', priority: 'medium', status: 'in-progress', group: 5, groupLabel: 'In Review' },
-      { ...makeItem('NEXT-OTHER'), stage: 'in_progress', priority: 'medium', group: 3, groupLabel: 'Other' },
+      { ...makeItem('NEXT-OTHER'), stage: 'custom', priority: 'medium', group: 3, groupLabel: 'Other' },
       // Mandatory wl list subsets — no group metadata.
       { ...makeItem('LIST-CRIT'), stage: 'plan_complete', priority: 'critical' },
       { ...makeItem('LIST-REV'), stage: 'in_review', priority: 'medium', status: 'completed' },

@@ -339,7 +339,10 @@ grouping, so podcast episode items group exactly as their frontmatter
 `pipeline_stage` maps 1:1 onto the Worklog stages (PRD §7.2). Groups render
 in the canonical order (Critical → Group N → Idea → Other → In Review) with
 group separators in the list; stage changes re-group items on the next
-refresh.
+refresh. Non-critical `in_progress` items join the file-path-partitioned
+`Group N` lists alongside `plan_complete`/`intake_complete` items and sort
+ahead of them (actively-worked items first); "Other" remains only as a
+safety net for unknown/custom stages.
 
 ## Markdown viewer
 
