@@ -30,8 +30,9 @@ describe('defaultSettings', () => {
     expect(defaultSettings.showIcons).toBe(true);
   });
 
-  it('has default browseItemCount of 10', () => {
-    expect(defaultSettings.browseItemCount).toBe(10);
+  it('has default browseItemCount of 20', () => {
+    // Default raised 10 → 20 in WL-0MSHUDQXR009T29L (see packages/herdr/src/settings.ts)
+    expect(defaultSettings.browseItemCount).toBe(20);
   });
 
   it('clamps browseItemCount to the [1, 50] range at load time', () => {
@@ -39,7 +40,8 @@ describe('defaultSettings', () => {
     expect(clampBrowseItemCount(-5)).toBe(1);
     expect(clampBrowseItemCount(99)).toBe(50);
     expect(clampBrowseItemCount(25)).toBe(25);
-    expect(clampBrowseItemCount(NaN)).toBe(10);
+    // Non-finite input falls back to the default (20, not 10)
+    expect(clampBrowseItemCount(NaN)).toBe(20);
     expect(clampBrowseItemCount(2.7)).toBe(3);
   });
 

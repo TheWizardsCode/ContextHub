@@ -136,6 +136,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | [docs/prd/sort_order_PRD.md](docs/prd/sort_order_PRD.md) | Sort order product requirements |
 | [docs/validation/status-stage-inventory.md](docs/validation/status-stage-inventory.md) | Status/stage validation rules |
 | [docs/SKILL_AUTHORING.md](docs/SKILL_AUTHORING.md) | Skill authoring guide with script best practices |
+| [docs/dev/wl-process-healthcheck.md](docs/dev/wl-process-healthcheck.md) | wl process healthcheck watchdog usage (cron/systemd, thresholds) |
 
 ## Tutorials
 

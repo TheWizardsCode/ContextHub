@@ -39,6 +39,7 @@ jobs:
               - 'src/index.ts'
               - 'tests/**/*.test.ts'
               - 'test/**/*.test.ts'
+              - 'scripts/wl-process-healthcheck.sh'
 
   docs-only:
     runs-on: ubuntu-latest
@@ -75,3 +76,15 @@ jobs:
 
       - name: Run CLI tests
         run: npm test
+
+      - name: Assert no orphaned tsx src/cli.ts processes (regression gate)
+        run: |
+          count=$(ps -eo args | grep -c '[t]sx .*src/cli[.]ts' || true)
+          echo "Orphaned tsx src/cli.ts processes: ${count}"
+          if [ "${count}" -gt 0 ]; then
+            echo "Orphaned tsx src/cli.ts processes:" >&2
+            ps -eo pid,ppid,etime,args | grep '[t]sx .*src/cli[.]ts' || true
+            echo "ERROR: ${count} orphaned tsx src/cli.ts processes remain (regression of WL-0MSB447TJ000R3N8)" >&2
+            exit 1
+          fi
+          echo "OK: no orphaned tsx src/cli.ts processes"
