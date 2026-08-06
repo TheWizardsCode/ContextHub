@@ -21,6 +21,8 @@
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join } from 'path';
+import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { resolveWorklogRoot } from '@worklog/shared/worklog-paths';
 import {
   checkWlAvailable,
@@ -30,6 +32,7 @@ import {
   claimWorkItem,
   getExecFileAsync,
 } from './fetcher.js';
+import { AgentTracker, AGENT_PANES_FILE, mergeAgentStates } from './agent-tracker.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
@@ -130,15 +133,121 @@ export function stripAgentPromptPrefix(command: string): string {
  * '/skill:implement <id>'`). Free-form `/prompt:` commands have their routing
  * prefix stripped here so pi receives only the prompt text. Commands without
  * a model get no `--model` flag.
+ *
+ * When `paneIdFile` is provided (agent commands carrying a work-item ID,
+ * WL-0MSBQUJQX005RAT9), `--pane-id-file <path>` is forwarded so the script
+ * writes the new pane ID immediately after the split succeeds — the plugin
+ * reads it back to record the work-item ↔ pane association.
  */
-export function buildSendToPiArgs(command: string, targetCwd: string, model?: string): string[] {
+export function buildSendToPiArgs(
+  command: string,
+  targetCwd: string,
+  model?: string,
+  paneIdFile?: string,
+): string[] {
   const agentPrompt = stripAgentPromptPrefix(command);
   const args = ['--cwd', targetCwd];
   if (model) {
     args.push('--model', model);
   }
+  if (paneIdFile) {
+    args.push('--pane-id-file', paneIdFile);
+  }
   args.push(agentPrompt);
   return args;
+}
+
+/**
+ * Parse the pane-ID file written by send-to-pi.sh (`--pane-id-file`).
+ *
+ * The script writes `{"pane_id": "<id>"}` immediately after the pane split
+ * succeeds. Tolerates log lines prefixed before the JSON envelope.
+ * Returns undefined when the file is absent, unparseable, or has no pane id.
+ */
+export function parsePaneIdFile(raw: string): string | undefined {
+  const start = raw.indexOf('{');
+  if (start < 0) return undefined;
+  try {
+    const obj = JSON.parse(raw.slice(start)) as Record<string, unknown>;
+    const paneId = obj?.pane_id ?? obj?.paneId;
+    return typeof paneId === 'string' && paneId !== '' ? paneId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// ── Pane-ID capture (WL-0MSBQUJQX005RAT9) ─────────────────────────────
+
+/** Poll interval for the pane-ID file capture loop. */
+export const CAPTURE_POLL_INTERVAL_MS = 200;
+/** Total time budget for the pane-ID file capture loop. */
+export const CAPTURE_TIMEOUT_MS = 5000;
+
+/**
+ * Injectable filesystem/timer dependencies for {@link capturePaneIdFromFile}
+ * (tests replace these so no real polling or temp files are needed).
+ */
+export interface PaneIdFileDeps {
+  existsSync?: (p: string) => boolean;
+  readFile?: (p: string) => string;
+  unlink?: (p: string) => void;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+/**
+ * Poll for the pane-ID file written by send-to-pi.sh, record the
+ * work-item ↔ pane association, and clean up the temp file.
+ *
+ * Fire-and-forget (never awaited by the TUI): the loop polls briefly for
+ * the file so pane-ID capture never blocks the TUI event loop or changes
+ * spawn behavior. A missing file (split failed) is a no-op — no entry is
+ * recorded. All failures are swallowed (fail-open).
+ *
+ * @param workItemId - Work item the agent command was dispatched for.
+ * @param paneIdFile - Path passed to send-to-pi.sh via `--pane-id-file`.
+ * @param record - Records the association (typically
+ *                 `tracker.recordAgentForWorkItem`).
+ * @param deps - Injectable fs/timer dependencies (tests).
+ * @returns The captured pane ID, or undefined on timeout.
+ */
+export async function capturePaneIdFromFile(
+  workItemId: string,
+  paneIdFile: string,
+  record: (workItemId: string, paneId: string) => void | Promise<void>,
+  deps: PaneIdFileDeps = {},
+): Promise<string | undefined> {
+  const existsSyncFn = deps.existsSync ?? ((p: string) => existsSync(p));
+  const readFileFn = deps.readFile ?? ((p: string) => readFileSync(p, 'utf8'));
+  const unlinkFn = deps.unlink ?? ((p: string) => { try { unlinkSync(p); } catch { /* ignore */ } });
+  const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+  const now = deps.now ?? (() => Date.now());
+  const deadline = now() + CAPTURE_TIMEOUT_MS;
+
+  while (now() < deadline) {
+    if (existsSyncFn(paneIdFile)) {
+      let raw: string | null = null;
+      try {
+        raw = readFileFn(paneIdFile);
+      } catch {
+        raw = null; // file mid-write — keep polling
+      }
+      const paneId = raw !== null ? parsePaneIdFile(raw) : undefined;
+      if (paneId) {
+        try {
+          await record(workItemId, paneId);
+        } catch {
+          // Recording must never break dispatch; the temp file is still
+          // cleaned up below.
+        }
+        unlinkFn(paneIdFile);
+        return paneId;
+      }
+    }
+    await sleep(CAPTURE_POLL_INTERVAL_MS);
+  }
+  // Timed out — the split may have failed or the file never appeared.
+  return undefined;
 }
 
 /**
@@ -346,6 +455,15 @@ async function main(): Promise<void> {
     process.stderr.write(uninitializedReport(resolvedCwd ?? process.cwd()));
   }
 
+  // Agent tracker (WL-0MSBQUJQX005RAT9): records which worklist-spawned
+  // agent pane is attached to each work item. The state file lives in the
+  // project's gitignored .worklog/ directory and is shared across worklist
+  // panes/tabs. Fail-open: without a valid worklog root the tracker runs
+  // in-memory only (no persistence).
+  const agentTracker = new AgentTracker({
+    stateFile: wlRoot ? join(wlRoot, '.worklog', AGENT_PANES_FILE) : undefined,
+  });
+
   // Create a fetcher that loads items using the current browseItemCount setting
   // Each call reads from settings so changes take effect on next auto-refresh
   // Smart selection (see fetchNextItems) guarantees all critical and
@@ -360,7 +478,11 @@ async function main(): Promise<void> {
     try {
       const currentSettings = loadSettings();
       const count = clampBrowseItemCount(currentSettings.browseItemCount ?? defaultSettings.browseItemCount);
-      return await fetchNextItems(count);
+      const items = await fetchNextItems(count);
+      // Merge agent-status state into the fetched items (fail-open: no herdr
+      // CLI → no icons, list still works). Also covers the initial load.
+      await mergeAgentStates(items, agentTracker);
+      return items;
     } catch {
       return [];
     }
@@ -411,6 +533,10 @@ async function main(): Promise<void> {
       // Re-read on every render so a showHelpText change applies on the next
       // refresh (no plugin restart needed), matching browseItemCount behavior.
       getShowHelpText: () => loadSettings().showHelpText ?? true,
+      // Merge agent-status state into freshly fetched items (top-level +
+      // expanded children) on every refresh cycle (WL-0MSBQUJQX005RAT9).
+      // Fail-open: herdr errors yield no icons; the list keeps working.
+      mergeAgentStates: (items) => mergeAgentStates(items, agentTracker),
       onCommand: async (command: string, model?: string) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
@@ -440,13 +566,22 @@ async function main(): Promise<void> {
           } catch {
             // Belt-and-suspenders: a claim failure must never block the pane.
           }
+          // Agent-pane association capture (WL-0MSBQUJQX005RAT9): when the
+          // command carries a work-item ID, ask send-to-pi.sh to write the
+          // new pane ID to a temp file (--pane-id-file) right after the split
+          // succeeds, then record the work-item ↔ pane association
+          // fire-and-forget. Commands without an ID are not tracked (AC6).
+          const itemId = extractWorkItemId(command);
+          const paneIdFile = itemId
+            ? join(tmpdir(), `herdr-pane-${process.pid}-${Date.now()}.json`)
+            : undefined;
           // Spawn send-to-pi.sh asynchronously — detached and with stdio ignored
           // so the TUI loop is not blocked or affected by the script's output.
           // The `model` from the shortcut entry (if any) is forwarded as
           // `--model <pattern>` so the pi CLI opens with the right model.
           const child = spawn(
             SEND_TO_PI_SCRIPT,
-            buildSendToPiArgs(command, targetCwd, model),
+            buildSendToPiArgs(command, targetCwd, model, paneIdFile),
             {
               detached: true,
               stdio: 'ignore',
@@ -455,6 +590,13 @@ async function main(): Promise<void> {
             },
           );
           child.unref(); // Allow the parent to exit independently
+          if (itemId && paneIdFile) {
+            // Fire-and-forget: polling must never block the TUI loop. A
+            // missing file (split failed) is a no-op — no entry recorded.
+            void capturePaneIdFromFile(itemId, paneIdFile, (wid, pid) =>
+              agentTracker.recordAgentForWorkItem(wid, pid),
+            );
+          }
         } else if (route === 'pane') {
           // Strip `!!` / `!` bash history-expansion prefixes, then run the
           // command visibly in a new herdr pane via run-in-pane.sh.

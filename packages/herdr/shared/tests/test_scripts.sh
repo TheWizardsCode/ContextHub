@@ -256,6 +256,49 @@ else
 fi
 
 echo ""
+echo "=== Test: --pane-id-file writes the new pane id after the split (resize mode) ==="
+PID_FILE="$SANDBOX/pane-id.json"
+rm -f "$PID_FILE"
+run_send --pane-id-file "$PID_FILE" "hello" >/dev/null 2>&1 || true
+if [ -f "$PID_FILE" ] && grep -q '"pane_id":"grid-pane-5"' "$PID_FILE"; then
+  pass "send-to-pi --pane-id-file writes the grid pane id (resize mode)"
+else
+  fail "send-to-pi --pane-id-file should write the grid pane id"
+  echo "  file: $(cat "$PID_FILE" 2>/dev/null)"
+fi
+
+rm -f "$PID_FILE"
+run_send --no-resize --pane-id-file "$PID_FILE" "hello" >/dev/null 2>&1 || true
+if [ -f "$PID_FILE" ] && grep -q '"pane_id":"plain-pane-1"' "$PID_FILE"; then
+  pass "send-to-pi --pane-id-file writes the plain-split pane id (--no-resize)"
+else
+  fail "send-to-pi --pane-id-file should write the plain-split pane id"
+  echo "  file: $(cat "$PID_FILE" 2>/dev/null)"
+fi
+
+rm -f "$PID_FILE"
+run_send "hello" >/dev/null 2>&1 || true
+if [ ! -f "$PID_FILE" ]; then
+  pass "send-to-pi without --pane-id-file writes no file (backward compatible)"
+else
+  fail "send-to-pi without --pane-id-file must not write a pane-id file"
+fi
+
+rm -f "$PID_FILE"
+run_send --pane-id-file "$SANDBOX/missing-dir/pane-id.json" "hello" >/dev/null 2>&1 || true
+if [ ! -f "$SANDBOX/missing-dir/pane-id.json" ]; then
+  pass "send-to-pi tolerates an unwritable --pane-id-file path (spawn not aborted)"
+else
+  fail "send-to-pi should tolerate an unwritable --pane-id-file path"
+fi
+
+if grep -q "pane run grid-pane-5 exec pi" "$HERDR_LOG" 2>/dev/null; then
+  pass "send-to-pi --pane-id-file still spawns pi after writing the file"
+else
+  fail "send-to-pi --pane-id-file should still spawn pi"
+fi
+
+echo ""
 echo "=== Test: open-pi-agent --pane-name and --cwd ==="
 run_open --pane-name "My Agent" --cwd /tmp/proj >/dev/null 2>&1 || true
 if grep -q "pane rename grid-pane-5 My Agent" "$HERDR_LOG" 2>/dev/null; then

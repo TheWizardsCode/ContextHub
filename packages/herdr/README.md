@@ -13,6 +13,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Command input form** — When a chord command contains unknown `<identifier>` placeholders (e.g. `!!wl update <id> --status <status> --stage <stage>`), the plugin shows a modal input form so you can fill in the values before the command runs. Known identifiers like `<id>` are still auto-substituted with the selected item's ID. The dialog is 80% of the pane width (40-column minimum), text wraps at the inner width, and the box grows downward as content is entered. See [Command input form](#command-input-form).
 - **Keyboard navigation** — Arrow keys or j/k to navigate (wraps at list boundaries), Page Up/Down, g/G for first/last, Enter to select, Escape to go back
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text.
+- **Agent status tracking** — When an agent command carrying a work-item ID is dispatched, the worklist records which pi agent pane is attached to that item (persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes). The list shows a live agent-status icon at the start of each row's icon prefix: 🟢 working, ⛔ blocked, ⚪ idle. Done/closed items (and items without an agent) show no icon. The icon is a fixed-width slot so the item-ID column never shifts. See [Agent status icons](#agent-status-icons).
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
 - **Quit** — Press `q` to exit
@@ -124,6 +125,18 @@ The plugin pane will then be available via the Herdr plugin system.
 10. Quit:
    - Press `q` to close the worklist pane
 
+### Agent status icons
+
+Rows that have a worklist-spawned pi agent pane attached show the agent's live status as the first icon in the row's icon prefix:
+
+| Icon | Meaning |
+|------|---------|
+| 🟢 | Agent is working on the item |
+| ⛔ | Agent is blocked |
+| ⚪ | Agent is idle (spawned but not currently active) |
+| *(none)* | No agent attached, or the agent finished (`done`/closed) |
+
+The icon occupies a fixed-width slot, so the remaining icons and the item-ID column stay perfectly aligned whether or not a row has an agent. State is refreshed from the herdr CLI on each worklist refresh (with a short TTL); if the CLI is unavailable the list renders without icons rather than failing.
 ### From the command line
 
 ```bash

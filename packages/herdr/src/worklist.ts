@@ -2082,7 +2082,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; onCommand?: (command: string, model?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; onCommand?: (command: string, model?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void> },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -2095,6 +2095,7 @@ export async function runWorklistTui(
     onCommand: options?.onCommand,
     downtimeWorker: options?.downtimeWorker,
     downtimePollIntervalMs: options?.downtimePollIntervalMs ?? DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
+    mergeAgentStates: options?.mergeAgentStates,
   };
 
   let termSize = getTermSize();
@@ -2230,6 +2231,14 @@ export async function runWorklistTui(
               // ignore: keep previously fetched children on refresh failure
             }
           }));
+        }
+        // Merge agent-status state into the refreshed items (top-level +
+        // expanded children) so the agent icons reflect the latest tracker
+        // state (WL-0MSBQUJQX005RAT9). Fail-open: no herdr CLI → no icons.
+        try {
+          await opts.mergeAgentStates?.(newItems);
+        } catch {
+          // Fail-open: a merge failure must never break the refresh cycle.
         }
         if (showNotification && newItems.length !== oldLen) {
           const diff = newItems.length - oldLen;
@@ -2571,6 +2580,13 @@ export async function runWorklistTui(
           render(); // immediate render while fetch is pending
           const children = await fetchChildrenForItem(selected.id);
           selected.children = children;
+          // Merge agent-status state into the freshly loaded children so
+          // their rows show agent icons too (WL-0MSBQUJQX005RAT9).
+          try {
+            await opts.mergeAgentStates?.([selected]);
+          } catch {
+            // Fail-open: a merge failure must never break expansion.
+          }
           state.toggleExpand(selected.id);
           render();
           return;

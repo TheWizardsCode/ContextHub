@@ -23,6 +23,9 @@
 #                        (herdr pane split --cwd) modes.
 #   --model <pattern>    Forward `--model <pattern>` to the pi CLI invocation
 #                        (pi model pattern or id, e.g. `code` or `provider/id`)
+#   --pane-id-file <path> Write the new pane ID as JSON ({"pane_id": "<id>"}) to
+#                        <path> immediately after the split succeeds. Backward
+#                        compatible: absent flag = current behavior (no file).
 #   -h, --help           Show this help message
 #
 # Environment variables:
@@ -51,6 +54,7 @@ focus=true
 check_cli=false
 cwd_arg=""
 model_arg=""
+pane_id_file=""
 resize=true
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
 grid_bin="${HERDR_GRID_BIN:-$(cd "$(dirname "$0")" && pwd)/grid.py}"
@@ -100,6 +104,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --model=*)
       model_arg="${1#*=}"
+      shift
+      ;;
+    --pane-id-file)
+      pane_id_file="$2"
+      shift 2
+      ;;
+    --pane-id-file=*)
+      pane_id_file="${1#*=}"
       shift
       ;;
     -h|--help)
@@ -177,6 +189,15 @@ fi
 if [ -z "$np" ]; then
   echo "Error: Could not determine new pane ID" >&2
   exit 1
+fi
+
+# ── Publish the new pane ID (optional) ──────────────────────────────
+# When --pane-id-file is given, write the pane ID immediately after the split
+# succeeds so the calling plugin can record the pane association without
+# parsing herdr output itself. Best effort: a failed write must not abort the
+# (already successful) pane spawn.
+if [ -n "$pane_id_file" ]; then
+  printf '{"pane_id":"%s"}\n' "$np" > "$pane_id_file" 2>/dev/null || true
 fi
 
 # ── Run pi with the command in the new pane ──────────────────────────

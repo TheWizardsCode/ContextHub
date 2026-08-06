@@ -123,6 +123,12 @@ Sent when the agent is shutting down or going out of scope (e.g., on `Drop`).
 | `working` | Background work in progress (e.g. TTS generation, review pipeline) |
 | `blocked` | Waiting for user input (e.g. note-editing mode, confirmation dialog) |
 
+> **Consumed by the worklist plugin:** the herdr worklist plugin
+> (WL-0MSBQUJQX005RAT9) mirrors these states to render a per-row agent-status
+> icon (🟢 working / ⛔ blocked / ⚪ idle). The herdr CLI's `agent list`
+> command is the authoritative status source; the plugin queries it with a
+> TTL memoizer and fails open (no icons) when it is unavailable.
+
 ## ID Generation
 
 Message IDs follow the pattern:

@@ -11,6 +11,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { selectWorkItems } from './smart-selection.js';
 import { regroupWorkItems } from './grouping.js';
+import type { AgentState } from './agent-tracker.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -133,6 +134,12 @@ export interface WorkItem {
   depth?: number;
   /** Internal: whether the expand icon should show collapsed state. */
   _expanded?: boolean;
+  /**
+   * Current agent status for the worklist-spawned agent pane associated
+   * with this item (merged by the agent tracker). `idle`/`working`/`blocked`
+   * render an icon; `done`/`unknown`/absent render none (WL-0MSBQUJQX005RAT9).
+   */
+  agentState?: AgentState;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
