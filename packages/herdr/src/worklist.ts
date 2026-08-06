@@ -290,6 +290,22 @@ export class WorkItemListState {
   /** Scroll offset within the detail view. */
   detailScrollOffset = 0;
 
+  /** Selected Related Docs ToC entry (detail mode, 0-based). */
+  detailToCIndex = 0;
+
+  /**
+   * Keyboard focus in the detail view: true = ToC navigation, false =
+   * document scroll region (WL-0MSHWHULZ001FL8I).
+   */
+  detailToCFocus = true;
+
+  /**
+   * Which Key File's content is rendered in the md viewer (default 0 =
+   * first file, auto-render preserved). Enter on a ToC entry sets this to
+   * detailToCIndex.
+   */
+  detailRenderedIndex = 0;
+
   /**
    * Scroll offset within the metadata panel. Reset to 0 whenever the
    * selection changes so a stale position from a previous item never
@@ -449,6 +465,12 @@ export class WorkItemListState {
     this.detailItem = item;
     this.mode = 'detail';
     this.detailScrollOffset = 0;
+    // Reset ToC/focus state per item (WL-0MSHWHULZ001FL8I): first entry
+    // selected, keyboard focus on the ToC, auto-render of the first file
+    // remains the initial default.
+    this.detailToCIndex = 0;
+    this.detailToCFocus = true;
+    this.detailRenderedIndex = 0;
     this._resetMetaScroll();
   }
 
@@ -471,8 +493,12 @@ export class WorkItemListState {
   detailScrollDown(amount = 1): void {
     const maxCols = this.termSize.cols;
     const viewportHeight = Math.max(10, this.termSize.rows - 4);
+    // The ToC is pinned at the top of the detail view, so the scrollable
+    // region is the body below it (WL-0MSHWHULZ001FL8I).
     const allLines = formatDetailContent(this.detailItem, maxCols);
-    const maxScroll = Math.max(0, allLines.length - viewportHeight);
+    const tocLines = formatDetailToC(this.detailItem, maxCols).length;
+    const bodyLines = Math.max(0, allLines.length - tocLines);
+    const maxScroll = Math.max(0, bodyLines - viewportHeight);
     this.detailScrollOffset = Math.min(maxScroll, this.detailScrollOffset + amount);
   }
 
@@ -818,7 +844,10 @@ export function formatTimestamp(iso: string): string {
  *
  * Includes every tracked field: ID, Title, Status, Stage, Priority, Type,
  * Risk, Effort, Children, Parent, Tags, GitHub Issue, Created, Updated,
- * Audit, Reviewed, and Audited At. Fields that are unset are omitted.
+ * Audit, Reviewed, and Audited At. When the item's `Key Files:` section
+ * contains `.md` paths, a `Related Docs` row lists every one of them (joined
+ * with `, `); the row is omitted when there are no `.md` Key Files
+ * (WL-0MSGTLSUT002NF29). Fields that are unset are omitted.
  * Timestamps (Created, Updated, Audited At) are rendered in local time as
  * `DD/MM/YY HH:MM` via {@link formatTimestamp}.
  * Shared by the detail view and the list-mode metadata panel so both stay
@@ -947,6 +976,45 @@ export function formatMetadataPanel(
 }
 
 /**
+ * Build the Related Docs Table of Contents (ToC) lines for the detail view
+ * (WL-0MSHWHULZ001FL8I).
+ *
+ * Lists every `.md` Key File of the item, numbered, with a focus indicator
+ * (`▸`) on the selected entry. Returns [] when the item has no `.md` Key
+ * Files so the detail view renders exactly as before.
+ *
+ * @param item - Work item whose `Key Files:` section is scanned.
+ * @param maxCols - Terminal width.
+ * @param detailToCIndex - Selected ToC entry (0-based).
+ * @param detailToCFocus - Whether keyboard focus is on the ToC (unused for
+ *   rendering; kept for parity with the state and future dimming).
+ * @param noIcons - Icons gated off (focus indicator is a plain text marker).
+ * @returns ToC lines, or [] when the item has no `.md` Key Files.
+ */
+export function formatDetailToC(
+  item: WorkItem | null,
+  maxCols: number,
+  detailToCIndex = 0,
+  detailToCFocus = true,
+  noIcons = false,
+): string[] {
+  if (!item) return [];
+  const mdPaths = extractFilePaths(item.description ?? '').filter(p => p.endsWith('.md'));
+  if (mdPaths.length === 0) return [];
+
+  const lines: string[] = [];
+  lines.push('');
+  lines.push(` ${ANSI.underline}Related Docs${ANSI.reset}`);
+  lines.push('');
+  mdPaths.forEach((path, i) => {
+    const marker = i === detailToCIndex ? '▸' : ' ';
+    lines.push(` ${marker} ${i + 1}. ${path}`);
+  });
+  lines.push('');
+  return lines;
+}
+
+/**
  * Build the full content lines for a detail view (without scrolling).
  * Returns an array of lines ready for viewport rendering.
  *
@@ -956,12 +1024,20 @@ export function formatMetadataPanel(
  * (ISO timestamp). Rendered as a markdown table. ID and Title are shown in
  * the header (from the shared {@link buildMetaRows} set they are omitted
  * from the table to avoid duplication).
+ *
+ * When the item has ≥1 `.md` Key File, a pinned `Related Docs` ToC is
+ * rendered at the top (see {@link formatDetailToC}); the md viewer section
+ * below renders the file at `detailRenderedIndex` (default 0 = first file,
+ * preserving the existing auto-render behavior).
  */
 export function formatDetailContent(
   item: WorkItem | null,
   maxCols: number,
   readFile?: (filePath: string) => string | null,
   noIcons = false,
+  detailToCIndex = 0,
+  detailToCFocus = true,
+  detailRenderedIndex = 0,
 ): string[] {
   if (!item) return [];
 
@@ -974,6 +1050,10 @@ export function formatDetailContent(
   lines.push(` ${item.id}`);
   lines.push(` ${ANSI.bold}${item.title}${ANSI.reset}`);
   lines.push(separator);
+
+  // Related Docs ToC — pinned at the top of the detail view
+  // (WL-0MSHWHULZ001FL8I).
+  lines.push(...formatDetailToC(item, maxCols, detailToCIndex, detailToCFocus, noIcons));
 
   // Metadata — rendered as a markdown table (shared row builder; ID and
   // Title are already shown in the header above, so they are filtered out
@@ -1023,8 +1103,13 @@ export function formatDetailContent(
   // (preview-only; no notes editor). When a readFile callback is provided
   // and the item references a readable .md file, render it in place of the
   // raw description so the producer sees the paragraph-format episode.
+  // Renders the file at detailRenderedIndex (default 0 = first file, the
+  // existing auto-render); Enter on a ToC entry selects another file
+  // (WL-0MSHWHULZ001FL8I).
   if (readFile) {
-    const mdViewerLines = renderFileViewer(item, maxCols, readFile);
+    const mdPaths = extractFilePaths(item.description ?? '').filter(p => p.endsWith('.md'));
+    const mdPath = mdPaths[detailRenderedIndex] ?? mdPaths[0];
+    const mdViewerLines = renderFileViewer(item, maxCols, readFile, mdPath);
     if (mdViewerLines.length > 0) {
       lines.push('');
       lines.push(` ${ANSI.underline}Episode file (md viewer)${ANSI.reset}`);
@@ -1053,17 +1138,20 @@ export function formatDetailContent(
  * @param item - The work item whose description carries a `Key Files:` path.
  * @param maxCols - Terminal width.
  * @param readFile - Synchronous file reader (path -> content or null).
+ * @param mdPath - Optional explicit .md path to render. When omitted,
+ *   falls back to the first .md Key File (existing auto-render behavior).
  * @returns Viewer lines, or [] when no readable .md file is referenced.
  */
 export function renderFileViewer(
   item: WorkItem | null,
   maxCols: number,
   readFile: (filePath: string) => string | null,
+  mdPath?: string,
 ): string[] {
   if (!item) return [];
-  const mdPath = firstMarkdownKeyFile(item.description);
-  if (!mdPath) return [];
-  const content = readFile(mdPath);
+  const path = mdPath ?? firstMarkdownKeyFile(item.description);
+  if (!path) return [];
+  const content = readFile(path);
   if (content == null) return [];
   return renderMarkdownViewer(content, maxCols);
 }
@@ -1139,17 +1227,27 @@ export function formatDetailView(
   viewportHeight = 20,
   readFile?: (filePath: string) => string | null,
   noIcons = false,
+  detailToCIndex = 0,
+  detailToCFocus = true,
+  detailRenderedIndex = 0,
 ): string {
-  const allLines = formatDetailContent(item, maxCols, readFile, noIcons);
+  // The Related Docs ToC is pinned at the top of the detail view; only the
+  // body below it scrolls (WL-0MSHWHULZ001FL8I).
+  const tocLines = formatDetailToC(item, maxCols, detailToCIndex, detailToCFocus, noIcons);
+  const allLines = formatDetailContent(item, maxCols, readFile, noIcons, detailToCIndex, detailToCFocus, detailRenderedIndex);
   if (allLines.length === 0) return '';
 
-  const totalLines = allLines.length;
+  const bodyLines = allLines.slice(tocLines.length);
+  const totalLines = bodyLines.length;
   const maxScroll = Math.max(0, totalLines - viewportHeight);
   const safeOffset = Math.min(scrollOffset, maxScroll);
 
-  const visible = allLines.slice(safeOffset, safeOffset + viewportHeight);
+  const visible = [
+    ...tocLines,
+    ...bodyLines.slice(safeOffset, safeOffset + viewportHeight),
+  ];
 
-  // Add scroll indicator if content is long
+  // Add scroll indicator if the body is long
   if (totalLines > viewportHeight && safeOffset <= maxScroll) {
     const percent = totalLines > 0
       ? Math.round(((safeOffset + viewportHeight) / totalLines) * 100)
@@ -1424,13 +1522,61 @@ export function handleKeypress(
       state.back();
       return 'back';
     }
-    // Detail scrolling
+
+    // Related Docs ToC navigation (WL-0MSHWHULZ001FL8I). When the item has
+    // ≥1 .md Key File and keyboard focus is on the ToC (detailToCFocus),
+    // j/k/arrows move the ToC selection; Enter renders the selected doc.
+    // Navigating past the last entry transfers focus to document scrolling.
+    const mdCount = state.detailItem
+      ? extractFilePaths(state.detailItem.description ?? '').filter(p => p.endsWith('.md')).length
+      : 0;
+    const hasToC = mdCount > 0;
+
+    if (hasToC && state.detailToCFocus) {
+      if (key === 'j' || key === '\x1b[B') {
+        if (state.detailToCIndex < mdCount - 1) {
+          state.detailToCIndex += 1;
+        } else {
+          // Past the last entry → document scrolling focus
+          state.detailToCFocus = false;
+        }
+        return null;
+      }
+      if (key === 'k' || key === '\x1b[A') {
+        if (state.detailToCIndex > 0) {
+          state.detailToCIndex -= 1;
+        }
+        return null;
+      }
+      if (key === '\r' || key === '\n') {
+        // Enter renders the selected document in the md viewer
+        state.detailRenderedIndex = state.detailToCIndex;
+        return null;
+      }
+      if (key === 'g') {
+        state.detailToCIndex = 0;
+        return null;
+      }
+      if (key === 'G') {
+        state.detailToCIndex = mdCount - 1;
+        return null;
+      }
+      return null;
+    }
+
+    // Detail scrolling — when the item has a ToC this branch runs while
+    // focus is on the document; k at the top of the document returns focus
+    // to the ToC (WL-0MSHWHULZ001FL8I).
     if (key === 'j' || key === '\x1b[B') {
       state.detailScrollDown(1);
       return null;
     }
     if (key === 'k' || key === '\x1b[A') {
-      state.detailScrollUp(1);
+      if (hasToC && state.detailScrollOffset <= 0) {
+        state.detailToCFocus = true;
+      } else {
+        state.detailScrollUp(1);
+      }
       return null;
     }
     if (key === '\x1b[6~') {
@@ -1623,6 +1769,9 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   metaLastCommand?: string,
   readFile?: (filePath: string) => string | null,
   downtimeStatus?: string,
+  detailToCIndex?: number,
+  detailToCFocus?: boolean,
+  detailRenderedIndex?: number,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -1648,6 +1797,9 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     metaLastCommand?: string,
     readFile?: (filePath: string) => string | null,
     downtimeStatus?: string,
+    detailToCIndex?: number,
+    detailToCFocus?: boolean,
+    detailRenderedIndex?: number,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -1664,7 +1816,17 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     if (mode === 'detail' && detailItem) {
       const viewportHeight = Math.max(10, rows - 1);
       const offset = detailScrollOffset ?? 0;
-      return formatDetailView(detailItem, cols, offset, viewportHeight, readFile, noIcons);
+      return formatDetailView(
+        detailItem,
+        cols,
+        offset,
+        viewportHeight,
+        readFile,
+        noIcons,
+        detailToCIndex ?? 0,
+        detailToCFocus ?? true,
+        detailRenderedIndex ?? 0,
+      );
     }
 
     if (mode === 'filter') {
@@ -2824,6 +2986,9 @@ export async function runWorklistTui(
       metaLastCommand,
       readKeyFile,
       renderDowntimeStatus(opts.downtimeWorker),
+      state.detailToCIndex,
+      state.detailToCFocus,
+      state.detailRenderedIndex,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a
