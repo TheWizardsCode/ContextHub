@@ -292,6 +292,16 @@ sync succeeded within the freshness window (`heartbeatTtlMs`).
   indefinite skip).
 - Manual user syncs (pane `S`) bypass the heartbeat check and always run.
 
+### In-process fetch memoization (F4, herdr fetcher)
+
+`packages/herdr/src/fetcher.ts` dedupes concurrent identical `runWl` READ
+fetches within one pane process via an in-flight promise memo keyed by
+(worklog-dir, args, json-mode): racing refresh ticks that issue the same
+query spawn `wl` once and share the result. Writes are never memoized — a
+write clears the memo so a read issued after it cannot share a pre-write
+in-flight result. The memo is per-process, bounded (64 in-flight entries),
+and cleared on `setWorklogDir`/`resetWorklogDir`.
+
 ### Spawn instrumentation (spawn-reduction measurement)
 
 Env-gated counters (`src/spawn-counter.ts`): `WL_SPAWN_COUNT_FILE=<path>`
