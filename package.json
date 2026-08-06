@@ -22,7 +22,6 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:tui": "bash ./tests/tui-ci-run.sh",
     "test:timings": "node ./scripts/test-timings.cjs",
     "benchmark:sort-index": "tsx scripts/benchmark-sort-index.ts",
     "benchmark:wl-next": "tsx bench/wl-next-perf.ts",

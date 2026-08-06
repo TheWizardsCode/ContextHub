@@ -327,6 +327,6 @@ You built a complete Worklog plugin that:
 
 ## Next steps
 
-- [Using the TUI](04-using-the-tui.md) -- browse work items interactively
+- [Planning and Tracking an Epic](05-planning-an-epic.md) -- plan and track an epic with parent/child relationships
 - [Plugin Guide](../../PLUGIN_GUIDE.md) -- full plugin API reference with advanced topics
 - [Example Plugins](../../examples/README.md) -- working plugin examples (stats, bulk-tag, CSV export)

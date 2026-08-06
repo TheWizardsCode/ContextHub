@@ -11,7 +11,7 @@
  * ```
  * **Key Files:**
  * - `src/commands/next.ts`
- * - `packages/tui/extensions/lib/browse.ts`
+ * - `src/commands/list.ts`
  * ```
  *
  * See docs/FILE_PATH_CONVENTION.md for the full specification.

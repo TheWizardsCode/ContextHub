@@ -260,5 +260,4 @@ wl list --tags "auth"
 ## Next steps
 
 - [Team Collaboration with Git Sync](02-team-collaboration.md) -- share your epic with the team
-- [Using the TUI](04-using-the-tui.md) -- visualize epic hierarchy interactively
 - [CLI Reference](../../CLI.md) -- full command documentation

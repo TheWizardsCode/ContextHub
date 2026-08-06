@@ -59,26 +59,17 @@ wl github push          # add --verbose for a per-item synced list + timing brea
 wl github import
 ```
 
-### Using the TUI
+### Pi agent plugin
 
-```bash
-wl tui                # Launch Pi-based TUI (interactive browse + agent chat)
-wl tui --in-progress  # Launch Pi-based TUI, show only in-progress items
-wl tui --perf         # Enable performance instrumentation and write diagnostics artifacts under .worklog/
-wl tui --perf         # Launch Pi-based TUI with performance instrumentation
-```
+The repository includes a Pi extension that auto-loads into every pi session
+(via a global symlink under `~/.pi/agent/extensions`). It provides the
+agent-side capabilities that complement the Herdr plugin: an activity
+indicator and session health/model display in the pi footer, guardrails that
+protect worklog database files, a `skill_path` tool, automatic error recovery
+(`/retry`), and proactive Local Proxy model lease release. Work item browsing
+and management is provided by the [Herdr plugin](packages/herdr/).
 
-Press `O` in the TUI to access the Pi agent chat pane. The Pi-based TUI provides natural language chat, an action palette with agent-driven flows, and all work item operations through the `wl` CLI. See [TUI.md](TUI.md) for controls, including quick stage filters (`Alt+T` for `intake_complete`, `Alt+P` for `plan_complete`) that exclude closed items.
-
-For the Pi-based TUI design checklist, see [docs/ux/design-checklist.md](docs/ux/design-checklist.md).
-
-For freeze triage and profiling details (including `TUI_CHORD_DEBUG`, `strace`, and artifact locations), see [docs/TUI_PROFILING.md](docs/TUI_PROFILING.md).
-
-### Install the Pi Worklog browse extension
-
-The repository includes a Pi extension that adds a Worklog browse flow (`/wl` and `Ctrl+Shift+B`) which lists the next 5 recommended work items (`wl next -n 5`) and previews the selected item in a widget above the editor as selection changes (`title <id>`, `Priority/Stage/Status`, `Risk/Effort`, and the first 7 description lines). The top-level list is root-only: child work items are hidden and only appear under their parent via Tab drill-down (children are reachable through `wl list --parent <id>`). Pressing Enter on a selected item opens a focused scrollable detail view backed by `wl show <id> --format markdown`, with keyboard navigation support for Up/Down, PageUp/PageDown, Space, `g` (top), `G` (bottom), and `Esc` (close).
-
-Install it globally by creating a symlink under `~/.pi/agent/extensions`:
+Install the extension globally:
 
 ```bash
 npm run install:pi-extension
@@ -141,8 +132,6 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | Document | Description |
 |----------|-------------|
 | [docs/opencode-to-pi-migration.md](docs/opencode-to-pi-migration.md) | Migration guide from OpenCode to Pi framework |
-| [docs/ux/design-checklist.md](docs/ux/design-checklist.md) | Pi-based TUI design checklist |
-| [docs/tui-ci.md](docs/tui-ci.md) | Headless TUI testing for CI |
 | [docs/migrations.md](docs/migrations.md) | Database migration system |
 | [docs/prd/sort_order_PRD.md](docs/prd/sort_order_PRD.md) | Sort order product requirements |
 | [docs/validation/status-stage-inventory.md](docs/validation/status-stage-inventory.md) | Status/stage validation rules |
@@ -157,7 +146,6 @@ Step-by-step guides for learning Worklog:
 | [Your First Work Item](docs/tutorials/01-your-first-work-item.md) | New users | Install, init, create, update, and close work items |
 | [Team Collaboration](docs/tutorials/02-team-collaboration.md) | Team leads | Git sync, GitHub mirroring, multi-user workflow |
 | [Building a Plugin](docs/tutorials/03-building-a-plugin.md) | Developers | Plugin API, database access, testing |
-| [Using the TUI](docs/tutorials/04-using-the-tui.md) | Any user | Interactive tree view, keyboard shortcuts, Pi agent chat, action palette |
 | [Planning an Epic](docs/tutorials/05-planning-an-epic.md) | Project leads | Epics, child items, dependencies, wl next |
 
 See [docs/tutorials/README.md](docs/tutorials/README.md) for the full tutorial index.
@@ -198,7 +186,6 @@ npm run dev           # Development mode with auto-reload
 npm test              # Run all tests
 npm run test:watch    # Tests in watch mode
 npm run test:coverage # Tests with coverage report
-npm run test:tui      # TUI tests only (CI/headless)
 ```
 
 ### Vitest Configuration

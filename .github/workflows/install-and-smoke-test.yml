@@ -42,37 +42,32 @@ jobs:
           node ./dist/cli.js list -n 1 --json > /dev/null
           echo "✓ wl CLI works"
 
-          # Verify the TUI module loads without errors (using tsx for TypeScript imports)
+          # Verify the Pi extension entry point and retained agent-side modules load
+          # without errors (using tsx for TypeScript imports)
           npx tsx -e "
           (async () => {
-            const { ChatPane } = await import('./packages/tui/extensions/Worklog/chatPane.ts');
-            const { ActionPalette } = await import('./packages/tui/extensions/Worklog/actionPalette.ts');
+            const { createWorklogPiExtension } = await import('./packages/tui/extensions/Worklog/index.ts');
+            if (typeof createWorklogPiExtension !== 'function') throw new Error('createWorklogPiExtension is not a function');
             const { runWl } = await import('./packages/tui/extensions/wl-integration.ts');
-            console.log('✓ TUI modules load successfully');
+            const { INSTALL_GUARDRAILS } = await import('./packages/tui/extensions/Worklog/lib/guardrails.ts');
+            const { registerSkillPathTool } = await import('./packages/tui/extensions/Worklog/lib/skill-path.ts');
+            const { registerLeaseRelease } = await import('./packages/tui/extensions/Worklog/lease-release.ts');
+            console.log('✓ Pi extension modules load successfully');
           })();
           "
 
-          # Verify chat pane can send messages
+          # Verify the extension registers its feature modules (dry run, no pi runtime)
           npx tsx -e "
           (async () => {
-            const { ChatPane } = await import('./packages/tui/extensions/Worklog/chatPane.ts');
-            const pane = new ChatPane();
-            pane.clear();
-            console.log('✓ ChatPane instantiated');
-          })();
-          "
-
-          # Verify action palette has default actions
-          npx tsx -e "
-          (async () => {
-            const { ChatPane } = await import('./packages/tui/extensions/Worklog/chatPane.ts');
-            const { ActionPalette } = await import('./packages/tui/extensions/Worklog/actionPalette.ts');
-            const chat = new ChatPane();
-            const palette = new ActionPalette(chat);
-            palette.open();
-            const actions = palette.getFilteredActions();
-            if (actions.length < 5) throw new Error('Expected at least 5 default actions, got ' + actions.length);
-            console.log('✓ ActionPalette has ' + actions.length + ' default actions');
+            const { createWorklogPiExtension } = await import('./packages/tui/extensions/Worklog/index.ts');
+            const registered: string[] = [];
+            const piStub = {
+              on: () => {}, registerCommand: () => {}, registerTool: () => {},
+              ui: { setStatus: () => {}, setFooter: () => {}, notify: () => {} },
+            };
+            const register = createWorklogPiExtension();
+            register(piStub);
+            console.log('✓ Extension registers without errors');
           })();
           "
 
@@ -86,9 +81,3 @@ jobs:
 
       - name: Run full test suite
         run: npm test
-
-      - name: Run E2E agent flow tests
-        run: npx vitest run tests/e2e/agent-flow.test.ts
-
-      - name: Run E2E headless TUI tests
-        run: npx vitest run tests/e2e/headless-tui.test.ts

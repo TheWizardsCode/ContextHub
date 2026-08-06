@@ -10,7 +10,9 @@ This document uses two concrete examples so the steps are easy to follow. There'
 
 This includes:
 
-- The **TUI OpenCode dialog** today (press `O` in `wl tui`)
+- The **TUI OpenCode dialog** (legacy, removed — the Pi-based TUI that
+  replaced it was also removed; work item browsing is now provided by the
+  Herdr plugin)
 - Future **LLM-powered CLI commands** (e.g., issue/work-item management helpers)
 
 The goal is to make it easy for agents to leverage **local compute** for tasks that don’t require a massive cloud-hosted model running on a huge GPU, while still allowing optional cloud providers when they’re genuinely needed.
@@ -24,7 +26,7 @@ Worklog does **not** call any model provider directly.
 1. Worklog starts (or connects to) an LLM provider. By default it does this through an **OpenCode server** (`opencode serve`)
 2. OpenCode server talks to a **model provider** (Ollama locally, Foundry Local, cloud providers, or any other provider you configure)
 
-See [docs/opencode-tui.md](docs/opencode-tui.md) for the current TUI integration details.
+See the [Herdr plugin](packages/herdr/) for the current work item UI.
 
 ---
 
@@ -198,17 +200,14 @@ Document your chosen OpenCode settings here once confirmed:
 - Base URL: `http://localhost:11434/...` (TBD)
 - Model: `llama3.1` (example)
 
-### Run Worklog TUI with OpenCode (Ollama)
+### Run Worklog with a local LLM (Ollama)
+
+The `wl` CLI itself does not call a model provider directly. Local models can
+be used by agents via standard provider configuration (e.g. Ollama
+`http://localhost:11434/`):
 
 ```powershell
 $env:OPENCODE_SERVER_PORT = 51625
-wl tui
-```
-
-Press `O`, wait for `[OK]`, then try:
-
-```
-Summarize the selected work item in 3 bullets.
 ```
 
 ---
