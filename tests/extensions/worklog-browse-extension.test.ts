@@ -1685,20 +1685,67 @@ describe('Worklog browse pi extension', () => {
       vi.clearAllMocks();
     });
 
-    it('createListWorkItemsWithStage runs wl next -n 5 --stage', async () => {
+    it('createListWorkItemsWithStage runs wl list --status open --stage <stage> --root-only', async () => {
       const runWl = vi.fn().mockResolvedValue(JSON.stringify({
         success: true,
         count: 1,
-        results: [{ workItem: { id: 'WL-S1', title: 'Stage item', status: 'open', stage: 'in_review' } }],
+        workItems: [{ id: 'WL-S1', title: 'Stage item', status: 'open', stage: 'in_review' }],
       }));
 
       const listFn = createListWorkItemsWithStage(runWl as any);
       const items = await listFn('in_review');
 
-      expect(runWl).toHaveBeenCalledWith(['next', '-n', '5', '--stage', 'in_review', '--include-in-progress']);
+      // All open root items in the stage are fetched via wl list (not wl next),
+      // with no browseItemCount cap (WL-0MSDT8X1V003206G).
+      expect(runWl).toHaveBeenCalledWith(['list', '--status', 'open', '--stage', 'in_review', '--root-only']);
       expect(items).toEqual([
         { id: 'WL-S1', title: 'Stage item', status: 'open', stage: 'in_review' },
       ]);
+    });
+
+    it('createListWorkItemsWithStage returns every open root item, ignoring the browseItemCount cap', async () => {
+      // 7 open root items — more than the default browseItemCount of 5.
+      const openRoots = Array.from({ length: 7 }, (_, i) => ({
+        id: `WL-ROOT-${i}`,
+        title: `Root item ${i}`,
+        status: 'open',
+        stage: 'idea',
+        parentId: null,
+      }));
+      const runWl = vi.fn().mockResolvedValue(JSON.stringify({
+        success: true,
+        count: 7,
+        workItems: openRoots,
+      }));
+
+      const listFn = createListWorkItemsWithStage(runWl as any);
+      const items = await listFn('idea');
+
+      // No .slice(0, itemCount): every CLI result passes through, in the
+      // standard list order (sortIndex) returned by wl list.
+      expect(items).toHaveLength(7);
+      expect(items.map(i => i.id)).toEqual(openRoots.map(w => w.id));
+      expect(runWl).toHaveBeenCalledTimes(1);
+    });
+
+    it('createListWorkItemsWithStage passes wl list results through untouched (no client-side re-filtering)', async () => {
+      // The CLI --status open flag enforces AC #2 (open only). The function
+      // must not re-apply selection logic: whatever wl list returns (already
+      // open, root-only, sortIndex-ordered) is shown in full.
+      const runWl = vi.fn().mockResolvedValue(JSON.stringify({
+        success: true,
+        count: 3,
+        workItems: [
+          { id: 'WL-LOW', title: 'Deprioritised but open', status: 'open', stage: 'plan_complete' },
+          { id: 'WL-HIGH', title: 'High priority', status: 'open', stage: 'plan_complete' },
+          { id: 'WL-MID', title: 'Mid priority', status: 'open', stage: 'plan_complete' },
+        ],
+      }));
+
+      const listFn = createListWorkItemsWithStage(runWl as any);
+      const items = await listFn('plan_complete');
+
+      expect(items.map(i => i.id)).toEqual(['WL-LOW', 'WL-HIGH', 'WL-MID']);
     });
 
     it('handler with no args uses default listWorkItems (backward compatibility)', async () => {

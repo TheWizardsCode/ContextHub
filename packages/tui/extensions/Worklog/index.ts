@@ -127,7 +127,7 @@ export function createWorklogBrowseExtension(deps: WorklogBrowseDependencies = {
     });
 
     pi.registerCommand('wl', {
-      description: `Browse next ${currentSettings.browseItemCount} work items, optionally filtered by stage and settings`,
+      description: `Browse work items, optionally filtered by stage (stage-filtered views show every open item in that stage) and settings`,
       handler: async (_args: string, ctx: ExtensionCommandContext) => {
         showActivity(ctx as any, '/wl', currentSettings.showActivityIndicator);
         const trimmed = _args?.trim() ?? '';

@@ -523,7 +523,9 @@ handler returns without performing any search or injection.
 
 ## `/wl` Slash Command — Stage Filtering
 
-The `/wl` slash command browses work items recommended by the `wl next` algorithm. The number of items shown is controlled by the `browseItemCount` setting (default: 5). It also supports an optional stage filter argument.
+The `/wl` slash command browses work items recommended by the `wl next` algorithm. The number of items shown in the default (unfiltered) view is controlled by the `browseItemCount` setting (default: 5). It also supports an optional stage filter argument.
+
+When a stage filter is applied (`/wl <stage>`), the browse list shows **every open work item** in that stage — there is no `browseItemCount` cap and the `wl next` selection algorithm is not applied. "Open" means `status=open`; blocked, in-progress, and completed items are excluded. Results are ordered by the standard list order (sortIndex), matching the unfiltered browse list. Child items remain hidden in the filtered top-level list and are reachable via Tab drill-down, exactly as in the unfiltered view.
 
 ### Usage
 

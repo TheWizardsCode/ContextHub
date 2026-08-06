@@ -4,7 +4,8 @@
  * Verifies that:
  * 1. createDefaultListWorkItems dynamically reads currentSettings.browseItemCount
  *    on each invocation, not at factory-creation time (fix for stale-capture bug).
- * 2. createListWorkItemsWithStage has the same dynamic behavior.
+ * 2. createListWorkItemsWithStage fetches ALL open root items via wl list (no
+ *    browseItemCount cap, count arg unused) — see WL-0MSDT8X1V003206G.
  * 3. updateSettings() correctly updates the module-level currentSettings,
  *    and factory functions pick up the new value on subsequent calls.
  * 4. updateSettings() persists changes to .pi/settings.json under the
@@ -146,22 +147,25 @@ describe('createListWorkItemsWithStage', () => {
     vi.clearAllMocks();
   });
 
-  it('uses currentSettings.browseItemCount when no explicit count is given', async () => {
+  it('runs wl list --status open --stage <stage> --root-only with no cap', async () => {
     const factory = createListWorkItemsWithStage(mockRun);
     await factory('in_progress');
 
-    expect(mockRun).toHaveBeenCalledWith(
-      expect.arrayContaining(['-n', '5']),
-    );
+    // Stage-filtered views fetch ALL open root items via wl list, without a
+    // browseItemCount cap or the wl next selection algorithm
+    // (WL-0MSDT8X1V003206G).
+    expect(mockRun).toHaveBeenCalledWith(['list', '--status', 'open', '--stage', 'in_progress', '--root-only']);
+    expect(mockRun.mock.calls[0][0]).not.toContain('-n');
   });
 
-  it('uses explicit count when provided', async () => {
+  it('ignores an explicit count (count governs only the unfiltered view)', async () => {
     const factory = createListWorkItemsWithStage(mockRun, 3);
     await factory('in_progress');
 
-    expect(mockRun).toHaveBeenCalledWith(
-      expect.arrayContaining(['-n', '3']),
-    );
+    // The `count` parameter is kept for API compatibility but is unused by
+    // the stage-filtered view (no -n is emitted).
+    expect(mockRun.mock.calls[0][0]).not.toContain('-n');
+    expect(mockRun).toHaveBeenCalledWith(['list', '--status', 'open', '--stage', 'in_progress', '--root-only']);
   });
 
   it('passes stage argument to the run function', async () => {
@@ -173,31 +177,28 @@ describe('createListWorkItemsWithStage', () => {
     );
   });
 
-  it('dynamically reads updated currentSettings after factory creation', async () => {
+  it('does not read currentSettings.browseItemCount (filtered view is uncapped)', async () => {
     const factory = createListWorkItemsWithStage(mockRun);
 
     updateSettings({ browseItemCount: 20 });
 
     await factory('in_progress');
 
-    expect(mockRun).toHaveBeenCalledWith(
-      expect.arrayContaining(['-n', '20']),
-    );
+    // No -n emitted: browseItemCount is irrelevant to the stage-filtered view.
+    expect(mockRun.mock.calls[0][0]).not.toContain('-n');
+    expect(mockRun).toHaveBeenCalledWith(['list', '--status', 'open', '--stage', 'in_progress', '--root-only']);
   });
 
-  it('dynamically reads updated currentSettings on second call without recreation', async () => {
+  it('returns all items on every call without a count cap', async () => {
     const factory = createListWorkItemsWithStage(mockRun);
 
     await factory('intake_complete');
-    expect(mockRun).toHaveBeenNthCalledWith(1,
-      expect.arrayContaining(['-n', '5']),
-    );
-
-    updateSettings({ browseItemCount: 8 });
     await factory('in_review');
+
+    expect(mockRun).toHaveBeenNthCalledWith(1,
+      ['list', '--status', 'open', '--stage', 'intake_complete', '--root-only']);
     expect(mockRun).toHaveBeenNthCalledWith(2,
-      expect.arrayContaining(['-n', '8']),
-    );
+      ['list', '--status', 'open', '--stage', 'in_review', '--root-only']);
   });
 });
 

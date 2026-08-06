@@ -290,15 +290,26 @@ export function createDefaultListWorkItems(
   };
 }
 
+/**
+ * Create a stage-filtered list function.
+ *
+ * Stage-filtered views show ALL open root items in the stage, ordered by the
+ * standard list order (sortIndex) — no `browseItemCount` cap and no `wl next`
+ * selection algorithm (WL-0MSDT8X1V003206G). "Open" means `status=open`;
+ * blocked/in-progress/completed items are excluded. Root-only
+ * (WL-0MS964SIA0057ABR): children stay hidden in the top-level list and
+ * remain reachable via drill-down. The `count` parameter is kept for API
+ * compatibility but is unused by the filtered view — it continues to govern
+ * only the unfiltered `/wl` list.
+ */
 export function createListWorkItemsWithStage(
   run: RunWlFn = runWl,
   count?: number,
 ): (stage: string) => Promise<WorklogBrowseItem[]> {
   return async (stage: string): Promise<WorklogBrowseItem[]> => {
-    const itemCount = count ?? currentSettings.browseItemCount;
-    const output = await run(['next', '-n', String(itemCount), '--stage', stage, '--include-in-progress']);
+    const output = await run(['list', '--status', 'open', '--stage', stage, '--root-only']);
     const payload = extractJsonObject(output);
-    return normalizeListPayload(payload).slice(0, itemCount);
+    return normalizeListPayload(payload);
   };
 }
 
@@ -404,13 +415,16 @@ export function createListWorkItemsWithStageDb(
   count?: number,
 ): (stage: string) => Promise<WorklogBrowseItem[]> {
   return async (stage: string): Promise<WorklogBrowseItem[]> => {
-    const itemCount = count ?? currentSettings.browseItemCount;
     const db = await getDb();
     if (!db) return defaultListWorkItemsWithStage(stage);
     try {
-      // Root-only (WL-0MS964SIA0057ABR): stage-filtered top-level lists hide
-      // child items; children remain reachable via drill-down (wl list --parent).
-      const items = db.list({ stage, rootOnly: true });
+      // All open root items in the stage, ordered by sortIndex — mirrors the
+      // CLI-backed path (wl list --status open --stage <stage> --root-only,
+      // WL-0MSDT8X1V003206G). Root-only (WL-0MS964SIA0057ABR): stage-filtered
+      // top-level lists hide child items; children remain reachable via
+      // drill-down (wl list --parent). The `count` parameter is kept for API
+      // compatibility but is unused by the filtered view.
+      const items = db.list({ stage, rootOnly: true, status: ['open'] });
       if (!Array.isArray(items)) return defaultListWorkItemsWithStage(stage);
       return items
         .sort((a: any, b: any) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))
@@ -430,8 +444,7 @@ export function createListWorkItemsWithStageDb(
           issueType: item.issueType || undefined,
           tags: item.tags?.length ? item.tags : undefined,
           githubIssueNumber: item.githubIssueNumber,
-        }))
-        .slice(0, itemCount);
+        }));
     } catch {
       return defaultListWorkItemsWithStage(stage);
     }
