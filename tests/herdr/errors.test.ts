@@ -6,7 +6,6 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   WorkItemListState,
   formatItemLine,
-  formatFilterBar,
   createListRenderer,
   handleKeypress,
   type WorkItem,

@@ -134,6 +134,70 @@ describe('createListRenderer — line-count invariant', () => {
   });
 });
 
+// ── Filter chrome removal (WL-0MSGTSPXK007POB1) ────────────────────────
+// The list mode no longer emits a blank line after the header/banner nor a
+// standalone filter status bar; the active stage filter is indicated in the
+// header only (via filterLabel). The two freed rows are given back to the
+// item list (page size 11 → 13 on 80x24).
+
+describe('createListRenderer — no blank line, no filter bar', () => {
+  const renderer = createListRenderer();
+
+  it('does not render a blank line between the header and the first item', () => {
+    const output = renderer([makeItem('A'), makeItem('B'), makeItem('C')], 0, 0, TERM_80x24, null, 'list', null);
+    const lines = output.split('\n');
+    expect(lines[0]).toContain('Work Items');
+    expect(lines[1].trim()).not.toBe('');
+    expect(lines[1]).toContain('A');
+  });
+
+  it('does not render a blank line between the code-freeze banner and the first item', () => {
+    const output = renderer(
+      [makeItem('A'), makeItem('B')],
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      true, // codeFreezeActive
+    );
+    const lines = output.split('\n');
+    expect(lines[0]).toContain('Work Items');
+    expect(lines[1]).toContain('CODE FREEZE');
+    expect(lines[2].trim()).not.toBe('');
+    expect(lines[2]).toContain('A');
+  });
+
+  it('renders no standalone filter bar when unfiltered', () => {
+    const output = renderer([makeItem('A')], 0, 0, TERM_80x24, null, 'list', null);
+    expect(output).not.toContain('No filter');
+    expect(output).not.toContain('press [f]');
+  });
+
+  it('renders no standalone filter bar when filtered (header carries the indication)', () => {
+    const output = renderer([makeItem('A')], 0, 0, TERM_80x24, 'in_review', 'list', null);
+    expect(output).not.toMatch(/Filter: /);
+  });
+
+  it('still indicates an active stage filter in the header', () => {
+    const output = renderer([makeItem('A')], 0, 0, TERM_80x24, 'in_review', 'list', null);
+    const firstLine = output.split('\n')[0];
+    expect(firstLine).toContain('Work Items');
+    expect(firstLine).toContain('(filtered: in_review)');
+    const unfiltered = renderer([makeItem('A')], 0, 0, TERM_80x24, null, 'list', null);
+    expect(unfiltered.split('\n')[0]).not.toContain('filtered:');
+  });
+});
+
 describe('WorkItemListState.refreshItems — preserve selection by ID', () => {
   let items: WorkItem[];
 
@@ -897,10 +961,11 @@ describe('handleKeypress — metadata scroll keys', () => {
     state.pageUp();
     expect(state.selectedIndex).toBe(0);
 
-    // pageDown advances by the list page size (11 rows on 80x24)
+    // pageDown advances by the list page size (13 rows on 80x24 — the
+    // freed blank + filter-bar chrome rows are given back to the list)
     state.selectedIndex = 0;
     state.pageDown();
-    expect(state.selectedIndex).toBe(11);
+    expect(state.selectedIndex).toBe(13);
 
     // pageDown clamps at the last item
     state.selectedIndex = 29;
@@ -910,7 +975,7 @@ describe('handleKeypress — metadata scroll keys', () => {
     // pageUp moves back exactly one page
     state.selectedIndex = 23;
     state.pageUp();
-    expect(state.selectedIndex).toBe(12);
+    expect(state.selectedIndex).toBe(10);
   });
 
   it('goToFirst/goToLast jump to the ends via state', () => {
@@ -938,12 +1003,12 @@ describe('handleKeypress — metadata scroll keys', () => {
 
     // PgUp (\x1b[5~) → pageup
     expect(handleKeypress(state, '\x1b[5~', TERM_80x24)).toBe('pageup');
-    expect(state.selectedIndex).toBe(18); // 29 - 11
+    expect(state.selectedIndex).toBe(16); // 29 - 13
 
     // PgDn (\x1b[6~) → pagedown
     state.selectedIndex = 0;
     expect(handleKeypress(state, '\x1b[6~', TERM_80x24)).toBe('pagedown');
-    expect(state.selectedIndex).toBe(11);
+    expect(state.selectedIndex).toBe(13);
   });
 });
 

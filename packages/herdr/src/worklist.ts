@@ -611,9 +611,9 @@ export class WorkItemListState {
 
   /** Number of visible list rows (accounts for the metadata panel). */
   _listHeight(): number {
-    // Reserve 3 rows for header, 1 for filter bar, 1 for footer, 1 for status
+    // Reserve 3 rows for header, 1 for footer, 1 for status
     const panelHeight = computeMetadataPanelHeight(this.termSize.rows);
-    return Math.max(3, this.termSize.rows - 6 - panelHeight);
+    return Math.max(3, this.termSize.rows - 4 - panelHeight);
   }
 
   _adjustScroll(): void {
@@ -1085,18 +1085,6 @@ export function formatDetailView(
   }
 
   return visible.join('\n');
-}
-
-/**
- * Format the filter status bar.
- */
-export function formatFilterBar(filter: string | null, maxCols: number): string {
-  if (filter) {
-    const color = STAGE_COLORS[filter] || 241;
-    const bar = ` ${ANSI.bg(color)}${ANSI.fg(16)} Filter: ${filter} ${ANSI.reset}`;
-    return bar.padEnd(maxCols, '─');
-  }
-  return ` ${ANSI.dim}No filter — press [f] then [i/n/p/r] to filter by stage${ANSI.reset}`.padEnd(maxCols, ' ');
 }
 
 /**
@@ -1584,7 +1572,7 @@ export function createListRenderer(): (
     // the list area is the remaining height minus the notification row.
     const panelHeight = computeMetadataPanelHeight(rows);
     const listArea = Math.max(1, rows - 1 - panelHeight);
-    const listHeight = Math.max(3, rows - 6 - panelHeight);
+    const listHeight = Math.max(3, rows - 4 - panelHeight);
 
     if (mode === 'detail' && detailItem) {
       const viewportHeight = Math.max(10, rows - 1);
@@ -1633,23 +1621,20 @@ export function createListRenderer(): (
       const bannerLine = `${ANSI.bg(196)}${ANSI.fg(231)} ${bannerText} ${ANSI.reset}`;
       output.push(truncateLine(bannerLine, cols));
     }
-    output.push('');
-
-    // Filter bar
-    output.push(formatFilterBar(activeFilter, cols));
 
     // Items are already flattened by the caller (render callback in runWorklistTui
     // calls state.getFlattenedItems() before passing items here). Do NOT re-flatten.
     const flatItems = items;
 
     // Items with group separators. Each `── <Group> ──` separator consumes a
-    // row, so the visible window must be sized so header + blank + filter bar
-    // + items + separators + fill + footer fit in `rows - 1` lines (the last
-    // row is reserved for the notification line appended by render()). Without
-    // this accounting the output overflows the pane and the terminal scrolls
-    // the header/top items off the top (WL-0MSAAON63003N6LO).
+    // row, so the visible window must be sized so header + items + separators
+    // + fill + footer fit in `rows - 1` lines (the last row is reserved for
+    // the notification line appended by render()). Without this accounting the
+    // output overflows the pane and the terminal scrolls the header/top items
+    // off the top (WL-0MSAAON63003N6LO). The active stage filter is indicated
+    // in the header only (filterLabel) — no standalone filter bar is rendered.
     const bannerActive = codeFreezeActive === true;
-    const chromeLines = bannerActive ? 5 : 4; // header + banner + blank + filter bar + footer
+    const chromeLines = bannerActive ? 3 : 2; // header + banner + footer
     const budgetForItemsAndSeps = Math.max(0, listArea - chromeLines);
     // Count the group separators a window would render (same logic as the
     // render loop below) so the window can be trimmed when separators would
@@ -1704,7 +1689,7 @@ export function createListRenderer(): (
       }
     }
 
-    // Fill remaining rows (header + blank + filter bar + items + separators)
+    // Fill remaining rows (header + items + separators)
     const used = chromeLines + visible.length + numSeparators;
     for (let i = used; i < listArea; i++) {
       output.push('');
