@@ -79,6 +79,8 @@ jobs:
 
       - name: Assert no orphaned tsx src/cli.ts processes (regression gate)
         run: |
+          # Regression gate: after the test suite, assert zero orphaned
+          # "tsx src/cli.ts" processes remain (covers WL-0MSB447TJ000R3N8).
           count=$(ps -eo args | grep -c '[t]sx .*src/cli[.]ts' || true)
           echo "Orphaned tsx src/cli.ts processes: ${count}"
           if [ "${count}" -gt 0 ]; then
