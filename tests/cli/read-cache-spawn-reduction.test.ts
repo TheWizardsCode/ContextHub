@@ -14,14 +14,14 @@ import { spawnSync } from 'child_process';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { writeConfig, writeInitSemaphore } from './cli-helpers.js';
-import { createTempDir, cleanupTempDir } from '../test-utils.js';
+import { createTempDir, cleanupTempDir, resolveTsxBin } from '../test-utils.js';
 import { countSpawnRecords } from '../../src/spawn-counter.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..', '..');
 const cliPath = path.join(projectRoot, 'src', 'cli.ts');
-const tsxBin = path.join(projectRoot, 'node_modules', '.bin', 'tsx');
+const tsxBin = resolveTsxBin(__dirname);
 
 const PANES = 6;
 

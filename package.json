@@ -13,6 +13,7 @@
   },
   "scripts": {
     "build": "npm run build:shared && tsc && node ./scripts/generate-version.cjs",
+    "postbuild": "bash ./scripts/install-herdr.sh",
     "build:shared": "cd packages/shared && npm run build",
     "dev": "tsx watch src/index.ts",
     "prestart": "npm run build",

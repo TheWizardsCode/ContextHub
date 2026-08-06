@@ -8,6 +8,29 @@ import * as os from 'os';
 import { describe as vitestDescribe, it as vitestIt } from 'vitest';
 
 /**
+ * Resolve the `tsx` CLI binary path.
+ *
+ * Worktrees have an empty local `node_modules` (deps resolve upward to the
+ * main checkout), so a plain `<repoRoot>/node_modules/.bin/tsx` path breaks
+ * for tests that spawn tsx as a subprocess from a worktree. Walk up parent
+ * directories until a real `node_modules/.bin/tsx` is found.
+ */
+export function resolveTsxBin(fromDir: string): string {
+  let dir = path.resolve(fromDir);
+  for (;;) {
+    const candidate = path.join(dir, 'node_modules', '.bin', 'tsx');
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) {
+      throw new Error(`tsx binary not found walking up from ${fromDir}`);
+    }
+    dir = parent;
+  }
+}
+
+/**
  * Create a temporary directory for test files
  */
 export function createTempDir(): string {

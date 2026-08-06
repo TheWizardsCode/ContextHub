@@ -26,7 +26,7 @@ import {
   DEFAULT_TTL_MS,
   DEFAULT_MAX_ENTRIES,
 } from '../src/read-cache.js';
-import { createTempDir, cleanupTempDir } from './test-utils.js';
+import { createTempDir, cleanupTempDir, resolveTsxBin } from './test-utils.js';
 
 // ── helpers ────────────────────────────────────────────────────────────
 
@@ -488,7 +488,7 @@ describe('read-cache', () => {
 
     it('survives concurrent cross-process readers/writers (spawned via tsx)', async () => {
       const childScript = path.resolve(__dirname, 'read-cache-concurrent-child.ts');
-      const tsxBin = path.resolve(__dirname, '..', 'node_modules', '.bin', 'tsx');
+      const tsxBin = resolveTsxBin(__dirname);
       const workers = 4;
       const rounds = 15;
       const run = (id: number) =>

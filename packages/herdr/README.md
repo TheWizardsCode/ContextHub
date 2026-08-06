@@ -36,11 +36,31 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 # Clone the repository
 cd /path/to/worklog-repo
 
+# Build the repo — the postbuild hook automatically links the herdr plugin
+# and registers the prefix+l keybinding (idempotent; safe to re-run)
+npm run build
+
+# Build the plugin (also triggered by herdr's own [[build]] step)
+cd packages/herdr && npm run build
+```
+
+`npm run build` runs `scripts/install-herdr.sh` via the root `postbuild` hook. The script:
+
+- Links the plugin with `herdr plugin link packages/herdr/herdr-plugin.toml` (a no-op when already linked).
+- Inserts the `prefix+l` → `worklog-selection-list.open-worklist` keybinding into your herdr config (`~/.config/herdr/config.toml`, or `$HERDR_CONFIG_PATH` when set) **only if** it is not already present — re-running the build never creates duplicate keybindings.
+- Warns (without failing the build) when `herdr` is not on PATH or the config cannot be written, so `npm run build` succeeds in CI/offline environments.
+
+Manual install (fallback, if you prefer not to run the build):
+
+```bash
 # Link the plugin in Herdr
 herdr plugin link packages/herdr/herdr-plugin.toml
 
-# Build the plugin
-cd packages/herdr && npm run build
+# Add the keybinding to ~/.config/herdr/config.toml if not already present
+# [[keys.command]]
+# key = "prefix+l"
+# command = "herdr plugin action invoke worklog-selection-list.open-worklist"
+# description = "Open the Worklog work item selection pane in a new tab."
 ```
 
 The plugin pane will then be available via the Herdr plugin system.
