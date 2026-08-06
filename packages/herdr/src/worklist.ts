@@ -850,6 +850,17 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
   addMeta('Audit', auditIcon(item.auditResult, { noIcons }));
   addMeta('Reviewed', needsProducerReviewIcon(item.needsProducerReview, { noIcons }));
   addMeta('Audited At', item.auditedAt ? formatTimestamp(item.auditedAt) : undefined);
+
+  // Related Docs — every .md path referenced in the item's `Key Files:`
+  // section, joined with a compact delimiter so multi-file values fit the
+  // existing label/value row format (WL-0MSGTLSUT002NF29). Display-only:
+  // paths are shown as written in the description, no file I/O at render
+  // time; resolution happens at open time via resolveKeyFilePath.
+  const mdPaths = extractFilePaths(item.description ?? '').filter(p => p.endsWith('.md'));
+  if (mdPaths.length > 0) {
+    metaRows.push(['Related Docs', mdPaths.join(', ')]);
+  }
+
   return metaRows;
 }
 
