@@ -335,6 +335,14 @@ description. The viewer:
 - is preview-only (no notes editor);
 - falls back to the raw description when the file is missing/unreadable.
 
+Key Files paths are resolved against the **worklog root** (the directory
+containing `.worklog/`, from `HERDR_RESOLVED_CWD` / `configureWorklogTarget`)
+— never the plugin pane's process CWD, which is the plugin source dir — with
+fallback candidates tried in order: the worklog root, then the legacy
+podcast-relative base `<root>/.llm-wiki/wiki/podcast/` (older episode items
+wrote Key Files paths relative to the podcast dir rather than the wiki root),
+then `process.cwd()` as a last resort.
+
 The rendered lines appear under an `Episode file (md viewer)` heading in the
 detail view, scrollable with the usual `↑↓/j:k` keys.
 

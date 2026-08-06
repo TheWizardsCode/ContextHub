@@ -50,26 +50,36 @@ describe('read-cache spawn reduction (6-pane simulation)', () => {
   let spawnFile: string;
   let envBase: Record<string, string>;
 
-  beforeEach(() => {
-    tempDir = createTempDir();
-    writeConfig(tempDir, 'Spawn Reduction', 'SPR');
-    writeInitSemaphore(tempDir);
-    spawnFile = path.join(tempDir, 'spawns.log');
-    envBase = { WL_TUI_MODE: '1', WL_SPAWN_COUNT_FILE: spawnFile };
+  beforeEach(
+    () => {
+      tempDir = createTempDir();
+      writeConfig(tempDir, 'Spawn Reduction', 'SPR');
+      writeInitSemaphore(tempDir);
+      spawnFile = path.join(tempDir, 'spawns.log');
+      // WL_CACHE_TTL_MS: the 30s default TTL (a bounding safety net) can
+      // expire cache entries mid-run on loaded machines where each tsx
+      // subprocess spawn takes seconds; raise it so the simulation measures
+      // cache behaviour, not wall-clock timing.
+      envBase = { WL_TUI_MODE: '1', WL_SPAWN_COUNT_FILE: spawnFile, WL_CACHE_TTL_MS: '300000' };
 
-    // Seed a realistic worklog (open/critical/completed-in-review/blocked).
-    const seed: Array<[string, string[]]> = [
-      ['Critical Open', ['--priority', 'critical']],
-      ['High Open', ['--priority', 'high']],
-      ['Completed Review', ['--priority', 'medium', '--status', 'completed', '--stage', 'in_review']],
-      ['Blocked Item', ['--priority', 'low', '--status', 'blocked']],
-      ['In Progress', ['--priority', 'high', '--status', 'in-progress']],
-    ];
-    for (const [title, extra] of seed) {
-      const res = runCli(['--json', 'create', '-t', title, ...extra], tempDir, envBase);
-      expect(res.status).toBe(0);
-    }
-  });
+      // Seed a realistic worklog (open/critical/completed-in-review/blocked).
+      const seed: Array<[string, string[]]> = [
+        ['Critical Open', ['--priority', 'critical']],
+        ['High Open', ['--priority', 'high']],
+        ['Completed Review', ['--priority', 'medium', '--status', 'completed', '--stage', 'in_review']],
+        ['Blocked Item', ['--priority', 'low', '--status', 'blocked']],
+        ['In Progress', ['--priority', 'high', '--status', 'in-progress']],
+      ];
+      for (const [title, extra] of seed) {
+        const res = runCli(['--json', 'create', '-t', title, ...extra], tempDir, envBase);
+        expect(res.status).toBe(0);
+      }
+    },
+    // Seeding runs 5 `tsx src/cli.ts create` subprocesses (cold tsx starts
+    // can take seconds each on a loaded machine); the default 10s hook
+    // timeout makes this beforeEach flake out. Matches the it() budget.
+    180_000,
+  );
 
   afterEach(() => {
     cleanupTempDir(tempDir);
@@ -115,6 +125,6 @@ describe('read-cache spawn reduction (6-pane simulation)', () => {
     expect(cachedWork).toBeLessThanOrEqual(0.4 * baselineWork);
     expect(cachedHits).toBeGreaterThan(0); // panes 1-5 were served from cache
   },
-  180_000 // slow: 60+ tsx subprocess spawns
+  300_000 // slow: 60+ tsx subprocess spawns (180s was too tight on loaded dev machines)
   );
 });
