@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import {
   WorkItemListState,
   getTermSize,
@@ -26,12 +27,13 @@ import {
   formatMetadataPanel,
   formatTimestamp,
   buildMetaRows,
+  resolveKeyFilePath,
 } from './worklist.js';
 import type { DowntimeWorker } from './downtime-worker.js';
 import { setLogPath, resetLogPath, recordCommand, getLastCommand } from './command-log.js';
 import { loadShortcutConfig, ShortcutRegistry } from './shortcut-config.js';
 import { regroupWorkItems } from './grouping.js';
-import type { WorkItem } from './fetcher.js';
+import { setWorklogDir, resetWorklogDir, type WorkItem } from './fetcher.js';
 
 // ── ANSI helpers ───────────────────────────────────────────────────────
 // Regression test: the sync-failed status indicator uses ANSI.yellow
@@ -1351,5 +1353,81 @@ describe('renderDowntimeStatus', () => {
     expect(output).toContain('Work Items');
     expect(output).toContain('[⏳ downtime idle 0:05]');
     expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+  });
+});
+
+// ── Key Files md path resolution (WL-0MSGEA9AY0080V4Q) ─────────────────
+// Regression: readKeyFile resolved `Key Files:` paths against the plugin
+// pane's process.cwd() (the herdr plugin source dir), NOT the worklog root,
+// so episode .podcast.md files never rendered in the detail view.
+// resolveKeyFilePath must prefer the configured worklog root, then the
+// legacy podcast-relative base (.llm-wiki/wiki/podcast/), and only fall
+// back to process.cwd() as a last resort. Fail-open: no candidate on disk
+// yields null so the detail view falls back to the raw description.
+
+describe('resolveKeyFilePath (Key Files md resolution)', () => {
+  let root: string;
+  let originalCwd: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'herdr-keyfiles-'));
+    // Simulate configureWorklogTarget: the resolved worklog root is the
+    // parent of the configured .worklog dir
+    // (setWorklogDir(join(wlRoot, '.worklog'))).
+    setWorklogDir(join(root, '.worklog'));
+    originalCwd = process.cwd();
+  });
+
+  afterEach(() => {
+    resetWorklogDir();
+    process.chdir(originalCwd);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('resolves Key Files paths against the worklog root, not process.cwd()', () => {
+    writeFileSync(join(root, 'episode.podcast.md'), '# Episode');
+    const resolved = resolveKeyFilePath('episode.podcast.md');
+    expect(resolved).toBe(join(root, 'episode.podcast.md'));
+  });
+
+  it('falls back to the legacy podcast-relative base under the worklog root', () => {
+    const podcastDir = join(root, '.llm-wiki', 'wiki', 'podcast', 'irish-folklore-fine-tuning');
+    mkdirSync(podcastDir, { recursive: true });
+    writeFileSync(join(podcastDir, 'irish-folklore-fine-tuning.podcast.md'), '# Episode');
+    const resolved = resolveKeyFilePath('irish-folklore-fine-tuning/irish-folklore-fine-tuning.podcast.md');
+    expect(resolved).toBe(join(podcastDir, 'irish-folklore-fine-tuning.podcast.md'));
+  });
+
+  it('prefers the worklog root over the podcast base when both exist', () => {
+    const podcastDir = join(root, '.llm-wiki', 'wiki', 'podcast');
+    mkdirSync(podcastDir, { recursive: true });
+    writeFileSync(join(root, 'shared.podcast.md'), 'root copy');
+    writeFileSync(join(podcastDir, 'shared.podcast.md'), 'podcast copy');
+    const resolved = resolveKeyFilePath('shared.podcast.md');
+    expect(resolved).toBe(join(root, 'shared.podcast.md'));
+  });
+
+  it('falls back to process.cwd() as a last resort when no worklog dir is configured', () => {
+    resetWorklogDir();
+    const cwdDir = mkdtempSync(join(tmpdir(), 'herdr-keyfiles-cwd-'));
+    process.chdir(cwdDir);
+    try {
+      writeFileSync(join(cwdDir, 'notes.md'), '# Notes');
+      const resolved = resolveKeyFilePath('notes.md');
+      expect(resolved).toBe(join(cwdDir, 'notes.md'));
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(cwdDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null when no candidate exists on disk', () => {
+    expect(resolveKeyFilePath('missing/file.podcast.md')).toBeNull();
+  });
+
+  it('accepts absolute Key Files paths directly', () => {
+    writeFileSync(join(root, 'abs.podcast.md'), '# Abs');
+    const abs = join(root, 'abs.podcast.md');
+    expect(resolveKeyFilePath(abs)).toBe(abs);
   });
 });

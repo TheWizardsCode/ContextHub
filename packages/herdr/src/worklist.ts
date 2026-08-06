@@ -10,8 +10,8 @@
  * Herdr's pane-based model.
  */
 
-import { readFileSync } from 'node:fs';
-import { resolve as resolvePath } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve as resolvePath } from 'node:path';
 
 import { fetchChildrenForItem, fetchActionableCount, getWorklogDir, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
@@ -1068,6 +1068,47 @@ export function firstMarkdownKeyFile(description: string | undefined): string {
   const paths = extractFilePaths(description);
   const md = paths.find(p => p.endsWith('.md'));
   return md ?? '';
+}
+
+/**
+ * Resolve a `Key Files:` markdown path to an absolute filesystem path.
+ *
+ * Key Files paths are documented as relative to the worklog root, but the
+ * plugin pane's process CWD is the plugin source directory — NOT the worklog
+ * root — so resolving against `process.cwd()` alone is wrong
+ * (WL-0MSGEA9AY0080V4Q). Candidates are tried in order:
+ *
+ * 1. the resolved worklog root (the directory containing `.worklog/`,
+ *    derived from the configured worklog dir — see configureWorklogTarget /
+ *    HERDR_RESOLVED_CWD),
+ * 2. the legacy podcast-relative base `<root>/.llm-wiki/wiki/podcast/`
+ *    (older episode items wrote Key Files paths relative to the podcast dir
+ *    rather than the wiki root),
+ * 3. `process.cwd()` as a last resort (plain CWD-relative key paths).
+ *
+ * Fail-open: returns null when no candidate exists on disk, so the detail
+ * view falls back to the raw description.
+ */
+export function resolveKeyFilePath(filePath: string): string | null {
+  const bases: string[] = [];
+  const wlDir = getWorklogDir();
+  if (wlDir) {
+    const wlRoot = dirname(wlDir);
+    bases.push(wlRoot);
+    bases.push(join(wlRoot, '.llm-wiki', 'wiki', 'podcast'));
+  }
+  bases.push(process.cwd());
+  for (const base of bases) {
+    try {
+      const candidate = resolvePath(base, filePath);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    } catch {
+      // Ignore unreadable base and try the next candidate.
+    }
+  }
+  return null;
 }
 
 /**
@@ -2637,14 +2678,17 @@ export async function runWorklistTui(
 
   /**
    * Read a Key Files: markdown document (e.g. an episode .podcast.md) for
-   * the generic md viewer in the detail pane. Paths are relative to the
-   * worklog root (the process CWD when the plugin runs in a pane).
-   * Fail-open: unreadable or missing files yield null and the detail view
-   * falls back to the raw description.
+   * the generic md viewer in the detail pane. Paths are resolved against
+   * the worklog root (via resolveKeyFilePath) — the plugin pane's process
+   * CWD is the plugin source dir, not the worklog root
+   * (WL-0MSGEA9AY0080V4Q). Fail-open: unreadable or missing files yield
+   * null and the detail view falls back to the raw description.
    */
   const readKeyFile = (filePath: string): string | null => {
+    const resolved = resolveKeyFilePath(filePath);
+    if (!resolved) return null;
     try {
-      return readFileSync(resolvePath(filePath, process.cwd()), 'utf-8');
+      return readFileSync(resolved, 'utf-8');
     } catch {
       return null;
     }
