@@ -499,12 +499,16 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
 }
 
 /**
- * Fetch work items filtered by stage (via `wl list --stage`).
+ * Fetch work items filtered by stage (via `wl list`).
+ * Open items only (WL-0MSDT8X1V003206G): the stage-filtered worklist shows
+ * every open root item in the stage — items with status `blocked`,
+ * `in-progress`, or `completed` are excluded even when their stage matches.
  * Root-only (WL-0MS964SIA0057ABR): stage-filtered top-level lists hide
  * child items; children remain reachable via expand (wl list --parent).
+ * Results are ordered by the standard list order (sortIndex).
  */
 export async function fetchItemsByStage(stage: string): Promise<WorkItem[]> {
-  const output = await runWl(['list', '--stage', stage, '--root-only']);
+  const output = await runWl(['list', '--status', 'open', '--stage', stage, '--root-only']);
   const payload = extractJson(output);
   return extractItems(payload);
 }

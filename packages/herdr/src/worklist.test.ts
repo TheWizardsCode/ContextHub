@@ -30,12 +30,14 @@ import {
   resolveKeyFilePath,
   formatDetailContent,
   formatDetailView,
+  fetchItemsForView,
+  formatChordHintsForHelp,
 } from './worklist.js';
 import type { DowntimeWorker } from './downtime-worker.js';
 import { setLogPath, resetLogPath, recordCommand, getLastCommand } from './command-log.js';
 import { loadShortcutConfig, ShortcutRegistry } from './shortcut-config.js';
 import { regroupWorkItems, extractFilePaths } from './grouping.js';
-import { setWorklogDir, resetWorklogDir, type WorkItem } from './fetcher.js';
+import { setWorklogDir, resetWorklogDir, setExecFileAsync, resetExecFileAsync, type WorkItem } from './fetcher.js';
 
 // ── ANSI helpers ───────────────────────────────────────────────────────
 // Regression test: the sync-failed status indicator uses ANSI.yellow
@@ -519,6 +521,25 @@ describe('executeResolvedCommand', () => {
     expect(state.activeFilter).toBe('idea');
   });
 
+  it('routes unknown /wl stage arguments to the callback (error notification, no crash)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/wl bogus', state, onCommand);
+    expect(result).toBe('callback');
+    expect(onCommand).toHaveBeenCalledWith('/wl bogus', undefined);
+    expect(state.activeFilter).toBeNull();
+  });
+
+  it('returns dispatched for /wl with no arguments and clears the filter (sprint)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    state.applyFilter('idea');
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/wl', state, onCommand);
+    expect(result).toBe('dispatched');
+    expect(state.activeFilter).toBeNull();
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
   it('returns dispatched for /skill:implement with resolved <id>', () => {
     const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
     state.selectedIndex = 0;
@@ -550,6 +571,41 @@ describe('dispatchChordCommand', () => {
     const result = dispatchChordCommand('/wl review', state);
     expect(result).toBe(true);
     expect(state.activeFilter).toBe('in_review');
+  });
+
+  it('accepts canonical stage names and the progress alias for /wl commands', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    expect(dispatchChordCommand('/wl progress', state)).toBe(true);
+    expect(state.activeFilter).toBe('in_progress');
+    expect(dispatchChordCommand('/wl intake_complete', state)).toBe(true);
+    expect(state.activeFilter).toBe('intake_complete');
+    expect(dispatchChordCommand('/wl plan_complete', state)).toBe(true);
+    expect(state.activeFilter).toBe('plan_complete');
+    expect(dispatchChordCommand('/wl in_review', state)).toBe(true);
+    expect(state.activeFilter).toBe('in_review');
+  });
+
+  it('leaves unknown /wl stage arguments unhandled (no crash, no filter)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    const result = dispatchChordCommand('/wl bogus', state);
+    expect(result).toBe(false);
+    expect(state.activeFilter).toBeNull();
+  });
+
+  it('clears the stage filter for /wl with no arguments (sprint, WL-0MSGSE15000746F7)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    state.applyFilter('idea');
+    expect(state.activeFilter).toBe('idea');
+    const result = dispatchChordCommand('/wl', state);
+    expect(result).toBe(true);
+    expect(state.activeFilter).toBeNull();
+  });
+
+  it('shows the sprint chord in the f-chord help line (WL-0MSGSE15000746F7)', () => {
+    const registry = loadShortcutConfig();
+    const chords = registry.getChordByPrefix(['f'], 'list', undefined, false);
+    const hints = formatChordHintsForHelp(chords, ['f']);
+    expect(hints).toContain('s:sprint');
   });
 
   it('routes agent commands through onCommand', () => {
@@ -614,6 +670,48 @@ describe('dispatchChordCommand', () => {
     state.selectedIndex = 0;
     const result = dispatchChordCommand('unknown command', state);
     expect(result).toBe(false);
+  });
+});
+
+describe('fetchItemsForView — stage-filtered fetch', () => {
+  beforeEach(() => {
+    resetExecFileAsync();
+  });
+
+  it('fetches all open root items in the stage when a filter is active', async () => {
+    const stageItems = [makeItem('A', 'idea'), makeItem('B', 'idea')];
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ workItems: stageItems }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
+
+    const items = await fetchItemsForView('idea', defaultFetcher);
+
+    expect(items.map((i) => i.id)).toEqual(['A', 'B']);
+    expect(defaultFetcher).not.toHaveBeenCalled();
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs).toContain('list');
+    expect(callArgs[callArgs.indexOf('--status') + 1]).toBe('open');
+    expect(callArgs[callArgs.indexOf('--stage') + 1]).toBe('idea');
+    expect(callArgs).toContain('--root-only');
+  });
+
+  it('uses the default fetcher when no filter is active', async () => {
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
+    const items = await fetchItemsForView(null, defaultFetcher);
+    expect(items.map((i) => i.id)).toEqual(['C']);
+    expect(defaultFetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the default fetcher when the stage fetch fails', async () => {
+    const mockFn = vi.fn().mockRejectedValue(new Error('wl failed'));
+    setExecFileAsync(mockFn as any);
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
+
+    const items = await fetchItemsForView('idea', defaultFetcher);
+    expect(items.map((i) => i.id)).toEqual(['C']);
   });
 });
 

@@ -449,12 +449,14 @@ describe('audit selection (selectAuditCandidate)', () => {
     // auditedAt exactly 60s before updatedAt -> stale (selected)
     const boundaryStale: AuditCandidate = {
       id: 'B1',
+      title: 'Boundary stale',
       auditedAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-01-01T00:01:00.000Z',
     };
     // auditedAt just under 60s before updatedAt -> fresh (not selected)
     const boundaryFresh: AuditCandidate = {
       id: 'B2',
+      title: 'Boundary fresh',
       auditedAt: '2026-01-01T00:00:30.000Z',
       updatedAt: '2026-01-01T00:01:00.000Z',
     };

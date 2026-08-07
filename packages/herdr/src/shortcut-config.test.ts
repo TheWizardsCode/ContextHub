@@ -117,6 +117,14 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     expect(entry?.codeFreeze).toBe('block');
     expect(entry?.command).toBe('/skill:implement <id>');
   });
+
+  it('registers the f s sprint chord to return to the default view (WL-0MSGSE15000746F7)', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['f', 's'], 'list', undefined, false);
+    expect(entry).toBeDefined();
+    expect(entry?.command).toBe('/wl');
+    expect(entry?.label).toBe('sprint');
+  });
 });
 
 // ── Registry filtering ───────────────────────────────────────────────────

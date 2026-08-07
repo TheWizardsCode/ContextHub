@@ -13,7 +13,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
-import { fetchChildrenForItem, fetchActionableCount, getWorklogDir, type WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, fetchActionableCount, fetchItemsByStage, getWorklogDir, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { readCodeFreezeState } from './code-freeze.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
@@ -54,6 +54,23 @@ export const STAGES = [
 ] as const;
 
 export type Stage = (typeof STAGES)[number];
+
+// ── /wl <stage> argument map (WL-0MSDT8X1V003206G) ────────────────────
+// Maps every accepted /wl stage argument — shorthand aliases and canonical
+// stage names — to the internal stage name used for filtering. Matches the
+// Pi TUI extension's STAGE_MAP so `/wl <stage>` behaviour is identical.
+export const STAGE_MAP: Record<string, string> = {
+  intake: 'intake_complete',
+  plan: 'plan_complete',
+  progress: 'in_progress',
+  review: 'in_review',
+  // Canonical names mapped to themselves for validation
+  idea: 'idea',
+  intake_complete: 'intake_complete',
+  plan_complete: 'plan_complete',
+  in_progress: 'in_progress',
+  in_review: 'in_review',
+};
 
 // Re-export stage colors from icons for backward compatibility
 export const STAGE_COLORS: Record<string, number> = {
@@ -2159,6 +2176,39 @@ export function formatCodeFreezeDialog(maxCols: number, maxRows: number, reason?
 }
 
 /**
+ * Fetch the items for the current view.
+ *
+ * When a stage filter is active, the worklist shows EVERY open root item in
+ * that stage (`wl list --status open --stage <stage> --root-only`) — not
+ * just the `browseItemCount`-capped `wl next` subset — so stage-filtered
+ * views give a complete picture of the stage (WL-0MSDT8X1V003206G). Items
+ * with status `blocked`, `in-progress`, or `completed` are excluded; child
+ * items stay hidden and remain reachable via expand exactly as in the
+ * unfiltered view. Results follow the standard list order (sortIndex).
+ *
+ * Without an active filter the default fetcher is used unchanged (the
+ * default `/wl` view keeps its existing smart-selection behaviour). If the
+ * stage fetch fails, the default fetcher is used as a fallback so a `wl`
+ * error can never blank the list.
+ *
+ * @param activeFilter - The active stage filter (null = unfiltered view)
+ * @param defaultFetcher - The default fetcher for the unfiltered view
+ */
+export function fetchItemsForView(
+  activeFilter: string | null,
+  defaultFetcher: () => Promise<WorkItem[]>,
+): Promise<WorkItem[]> {
+  if (activeFilter) {
+    // Fail-open: a wl error must never blank the list — fall back to the
+    // default fetcher (which itself fails open in index.ts).
+    return fetchItemsByStage(activeFilter).catch(() => defaultFetcher());
+  }
+  // Unfiltered: delegate straight to the default fetcher so the refresh
+  // cadence is byte-for-byte unchanged (single-flight timing preserved).
+  return defaultFetcher();
+}
+
+/**
  * Dispatch a chord command by mapping it to the appropriate TUI action
  * or routing it through the stdout command output mechanism.
  *
@@ -2184,18 +2234,20 @@ export function dispatchChordCommand(
   const wlStageMatch = command.match(/^\/wl\s+(\S+)$/);
   if (wlStageMatch) {
     const wlStage = wlStageMatch[1];
-    // Map wl stage names to internal stage names
-    const stageMap: Record<string, string> = {
-      idea: 'idea',
-      intake: 'intake_complete',
-      plan: 'plan_complete',
-      review: 'in_review',
-    };
-    const internalStage = stageMap[wlStage];
+    const internalStage = STAGE_MAP[wlStage];
     if (internalStage) {
       state.applyFilter(internalStage);
       return true;
     }
+  }
+
+  // ── /wl (no arguments): return to the default unfiltered view ────
+  // Equivalent to the Pi TUI's `/wl` with no args (WL-0MSGSE15000746F7):
+  // clears the active stage filter so the next refresh shows the standard
+  // smart-selection list. No-op when no filter is active.
+  if (/^\/wl\s*$/.test(command)) {
+    state.clearFilter();
+    return true;
   }
 
   // ── Agent skill invocations ─────────────────────────────
@@ -2474,7 +2526,7 @@ export async function runWorklistTui(
           }
         };
         const [newItems] = await Promise.all([
-          fetcher(),
+          fetchItemsForView(state.activeFilter, fetcher),
           ...expanded.map(fetchExpandedChildren),
         ]);
         const oldLen = state.items.length;
@@ -2524,6 +2576,20 @@ export async function runWorklistTui(
       // never block the next refresh tick.
       refreshInFlight = false;
     }
+  };
+
+  /**
+   * True when the resolved command is a `/wl` view command — a stage filter
+   * (`/wl <stage>`, shorthand alias or canonical name) or the clear-filter
+   * `/wl` with no arguments. Used after dispatch to trigger a view refetch:
+   * filtered views show every open root item in the stage
+   * (WL-0MSDT8X1V003206G); clearing the filter restores the default view
+   * (WL-0MSGSE15000746F7).
+   */
+  const isWlViewCommand = (cmd: string): boolean => {
+    if (/^\/wl\s*$/.test(cmd)) return true;
+    const m = cmd.match(/^\/wl\s+(\S+)$/);
+    return m !== null && STAGE_MAP[m[1]] !== undefined;
   };
 
   // Run `wl sync` and surface the outcome as a toast so sync status is
@@ -2692,6 +2758,12 @@ export async function runWorklistTui(
               // Surface a brief toast, then continue
               showToast('Sent', { body: command.length > 60 ? command.substring(0, 57) + '...' : command });
             }
+            // Stage-filter dispatch (/wl <stage> or f-chord shortcut): refetch
+            // so the filtered view shows EVERY open root item in the stage,
+            // not just the already-loaded subset (WL-0MSDT8X1V003206G).
+            if (result === 'dispatched' && isWlViewCommand(command)) {
+              await doRefresh(true);
+            }
           } catch (e) {
             showToast('Error', { body: (e as Error).message });
             process.stderr.write(`[herdr] Command error: ${(e as Error).message}\n`);
@@ -2790,6 +2862,12 @@ export async function runWorklistTui(
           } else {
             // Surface a brief toast, then continue
             showToast('Sent', { body: singleCmd.length > 60 ? singleCmd.substring(0, 57) + '...' : singleCmd });
+          }
+          // Stage-filter dispatch (/wl <stage> or f-chord shortcut): refetch
+          // so the filtered view shows EVERY open root item in the stage,
+          // not just the already-loaded subset (WL-0MSDT8X1V003206G).
+          if (result === 'dispatched' && isWlViewCommand(singleCmd)) {
+            await doRefresh(true);
           }
           render();
         } catch (e) {
