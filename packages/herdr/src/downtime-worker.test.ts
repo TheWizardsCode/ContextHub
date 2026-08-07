@@ -362,6 +362,9 @@ describe('dispatch audit tier', () => {
 });
 
 describe('audit selection (selectAuditCandidate)', () => {
+  // Fixed clock so the 7-day recency filter is deterministic (all fixture
+  // dates fall within the window).
+  const NOW = new Date('2026-01-01T00:05:00.000Z').getTime();
   const fresh: AuditCandidate = {
     id: 'FRESH',
     title: 'fresh',
@@ -379,24 +382,24 @@ describe('audit selection (selectAuditCandidate)', () => {
   const unaudited: AuditCandidate = { id: 'NOAUDIT', title: 'no audit', sortIndex: 100 };
 
   it('selects an item with a missing audit', () => {
-    expect(selectAuditCandidate([fresh, unaudited])?.id).toBe('NOAUDIT');
+    expect(selectAuditCandidate([fresh, unaudited], NOW)?.id).toBe('NOAUDIT');
   });
 
   it('does not select an item with a fresh audit', () => {
-    expect(selectAuditCandidate([fresh])).toBeNull();
+    expect(selectAuditCandidate([fresh], NOW)).toBeNull();
   });
 
   it('selects a stale item (audit older than the 60s buffer)', () => {
-    expect(selectAuditCandidate([fresh, stale])).toEqual(stale);
+    expect(selectAuditCandidate([fresh, stale], NOW)).toEqual(stale);
   });
 
   it('sorts ascending by sortIndex and returns the first', () => {
-    expect(selectAuditCandidate([stale, unaudited])?.id).toBe('NOAUDIT');
-    expect(selectAuditCandidate([{ ...unaudited, sortIndex: 500 }, stale])?.id).toBe('STALE');
+    expect(selectAuditCandidate([stale, unaudited], NOW)?.id).toBe('NOAUDIT');
+    expect(selectAuditCandidate([{ ...unaudited, sortIndex: 500 }, stale], NOW)?.id).toBe('STALE');
   });
 
   it('returns null on an empty list', () => {
-    expect(selectAuditCandidate([])).toBeNull();
+    expect(selectAuditCandidate([], NOW)).toBeNull();
   });
 
   it('classifies the 60s freshness boundary correctly', () => {
@@ -412,8 +415,73 @@ describe('audit selection (selectAuditCandidate)', () => {
       auditedAt: '2026-01-01T00:00:30.000Z',
       updatedAt: '2026-01-01T00:01:00.000Z',
     };
-    expect(selectAuditCandidate([boundaryStale])?.id).toBe('B1');
-    expect(selectAuditCandidate([boundaryFresh])).toBeNull();
+    expect(selectAuditCandidate([boundaryStale], NOW)?.id).toBe('B1');
+    expect(selectAuditCandidate([boundaryFresh], NOW)).toBeNull();
+  });
+});
+
+describe('audit selection 7-day recency (selectAuditCandidate)', () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const NOW = new Date('2026-01-01T12:00:00.000Z').getTime();
+  const recentStale: AuditCandidate = {
+    id: 'RECENT',
+    title: 'modified 6 days ago',
+    // audited >60s before updatedAt -> stale audit (selected by freshness)
+    auditedAt: new Date(NOW - 6 * DAY_MS - 120_000).toISOString(),
+    updatedAt: new Date(NOW - 6 * DAY_MS).toISOString(),
+    sortIndex: 100,
+  };
+  const ancientStale: AuditCandidate = {
+    id: 'ANCIENT',
+    title: 'modified 8 days ago',
+    auditedAt: new Date(NOW - 8 * DAY_MS - 120_000).toISOString(),
+    updatedAt: new Date(NOW - 8 * DAY_MS).toISOString(),
+    sortIndex: 100,
+  };
+
+  it('selects a stale-audit item modified within the last 7 days', () => {
+    expect(selectAuditCandidate([ancientStale, recentStale], NOW)?.id).toBe('RECENT');
+  });
+
+  it('excludes stale-audit items not modified within the last 7 days', () => {
+    expect(selectAuditCandidate([ancientStale], NOW)).toBeNull();
+  });
+
+  it('includes a candidate with a missing updatedAt (recency cannot be verified)', () => {
+    const missing: AuditCandidate = { id: 'MISSING', title: 'no updatedAt', sortIndex: 100 };
+    expect(selectAuditCandidate([missing], NOW)?.id).toBe('MISSING');
+  });
+
+  it('excludes a candidate with an unparseable updatedAt (fail-closed)', () => {
+    const garbage: AuditCandidate = {
+      id: 'GARBAGE',
+      title: 'bad date',
+      updatedAt: 'not-a-date',
+      sortIndex: 100,
+    };
+    expect(selectAuditCandidate([garbage], NOW)).toBeNull();
+  });
+
+  it('includes a candidate modified exactly 7 days ago (boundary inclusive)', () => {
+    const boundary: AuditCandidate = {
+      id: 'EDGE',
+      title: 'exactly 7 days',
+      auditedAt: new Date(NOW - 7 * DAY_MS - 120_000).toISOString(),
+      updatedAt: new Date(NOW - 7 * DAY_MS).toISOString(),
+      sortIndex: 100,
+    };
+    expect(selectAuditCandidate([boundary], NOW)?.id).toBe('EDGE');
+  });
+
+  it('excludes a candidate modified 7 days and 1ms ago', () => {
+    const justOutside: AuditCandidate = {
+      id: 'OUT',
+      title: '7 days + 1ms',
+      auditedAt: new Date(NOW - 7 * DAY_MS - 120_001).toISOString(),
+      updatedAt: new Date(NOW - 7 * DAY_MS - 1).toISOString(),
+      sortIndex: 100,
+    };
+    expect(selectAuditCandidate([justOutside], NOW)).toBeNull();
   });
 });
 

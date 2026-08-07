@@ -561,13 +561,17 @@ describe('createDowntimeDeps', () => {
   });
 
   it('getNextAuditCandidate runs wl list completed/in_review and selects the first stale-audit item', async () => {
+    // Fixture times are relative to now so the 7-day recency filter passes
+    // (selectAuditCandidate defaults to Date.now()).
+    const now = Date.now();
+    const HOUR_MS = 60 * 60 * 1000;
     const mockExec = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({
         success: true,
         count: 2,
         workItems: [
-          { id: 'WL-FRESH', title: 'Fresh audit', auditedAt: '2026-01-01T00:00:30.000Z', updatedAt: '2026-01-01T00:00:00.000Z', sortIndex: 100 },
-          { id: 'WL-STALE', title: 'Stale audit', auditedAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:02:00.000Z', sortIndex: 200 },
+          { id: 'WL-FRESH', title: 'Fresh audit', auditedAt: new Date(now - 30 * 60 * 1000).toISOString(), updatedAt: new Date(now - HOUR_MS).toISOString(), sortIndex: 100 },
+          { id: 'WL-STALE', title: 'Stale audit', auditedAt: new Date(now - 2 * HOUR_MS).toISOString(), updatedAt: new Date(now - HOUR_MS).toISOString(), sortIndex: 200 },
         ],
       }),
       stderr: '',

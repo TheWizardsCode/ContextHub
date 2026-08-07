@@ -15,8 +15,8 @@
  *  - `createIdleTracker` — continuous idle-duration tracker (idleSince vs
  *    threshold).
  *  - `dispatchDowntimeWork` — dispatch orchestration: completed/in_review
- *    items without a valid audit → `/skill:audit <id>` (audit tier,
- *    WL-0MSI8H3HP000K0RG), then `wl next --stage intake_complete` →
+ *    items without a valid audit (modified within the last 7 days) →
+ *    `/skill:audit <id>` (audit tier, WL-0MSI8H3HP000K0RG), then `wl next --stage intake_complete` →
  *    `/skill:plan <id>`, fallback `--stage idea` → `/skill:intake <id>`,
  *    pre-dispatch claim, per-process single-flight.
  *    `wl next` failures are reported as `{ok:false}` (fail closed to busy)
@@ -67,6 +67,12 @@ export const DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS = 60_000;
 
 /** Default pause after a genuine empty backlog: 60 minutes. */
 export const DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS = 3_600_000;
+
+/**
+ * Audit-tier recency window: a completed/in_review candidate is only
+ * dispatched for audit when it was modified within the last 7 days.
+ */
+export const DOWNTIME_AUDIT_RECENCY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export const DEFAULT_DOWNTIME_PROXY_URL = 'http://192.168.0.199:8000';
 export const DEFAULT_DOWNTIME_MODEL = 'plan';
@@ -794,10 +800,27 @@ export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | n
  * review icon that is neither ⏳ nor 🔍). Returns null when no candidate is
  * unaudited/stale (or the list is empty). Missing auditedAt/updatedAt means
  * not fresh → selected.
+ *
+ * 7-day recency filter: a candidate must have been modified within
+ * `DOWNTIME_AUDIT_RECENCY_WINDOW_MS` (7 days) to be dispatched. A MISSING
+ * `updatedAt` is still included (recency cannot be verified → include, per
+ * operator decision — absent data must not silently drop candidates); an
+ * unparseable `updatedAt` is excluded (fail-closed: recency cannot be
+ * verified). `now` is injectable for deterministic tests.
  */
-export function selectAuditCandidate(candidates: AuditCandidate[]): AuditCandidate | null {
+export function selectAuditCandidate(
+  candidates: AuditCandidate[],
+  now: number = Date.now(),
+): AuditCandidate | null {
+  const recencyCutoff = now - DOWNTIME_AUDIT_RECENCY_WINDOW_MS;
   const target = candidates
     .filter((c) => !isAuditFresh(c.auditedAt, c.updatedAt))
+    .filter((c) => {
+      if (!c.updatedAt) return true; // missing → include
+      const updated = new Date(c.updatedAt).getTime();
+      if (Number.isNaN(updated)) return false; // unparseable → fail-closed exclude
+      return updated >= recencyCutoff;
+    })
     .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
   return target[0] ?? null;
 }
