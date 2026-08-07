@@ -257,6 +257,18 @@ broken `wl` CLI stops burning idle cycles instead of retrying forever. A
 successful dispatch, a genuine no-candidate outcome, or an expired pause
 resets the strike counter; a single transient error never pauses on its own.
 
+**Hang protection** — every downtime `wl` invocation (`wl next` and
+`wl list` selection lookups) runs with a bounded 10s timeout, so a hung `wl`
+child is killed and the lookup fails closed to a CLI-error strike within a
+bounded time instead of wedging the dispatch task until a pane restart
+(previously the two selection lookups had **no** timeout, so a single hang
+permanently stopped downtime dispatch — silently). As a belt-and-suspenders
+backstop, the scheduler also wraps each downtime-task run in a 60s watchdog:
+a tick run that hangs past the bound is abandoned and the task's
+single-flight flag resets, so the next scheduler tick retries. Healthy runs
+complete in well under a second and are unaffected (the watchdog timer is
+cleared when the run settles).
+
 **Worklog-root routing** — the downtime worker's `wl next` selection and its
 `wl comment add` audit trail run through the same `--worklog-dir` override as
 the worklist, so idle dispatch picks (and comments on) items from the tab's

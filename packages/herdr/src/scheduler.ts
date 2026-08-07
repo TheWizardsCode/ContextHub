@@ -60,6 +60,17 @@ export interface SchedulerTask {
   fireImmediately?: boolean;
   /** Start disabled (skipped until `setDisabled(id, false)`). */
   disabled?: boolean;
+  /**
+   * Bounded-run watchdog (WL-0MSJIPHD0001L1J9): when set, a run that does
+   * not settle within this many milliseconds is abandoned (the run promise
+   * is not cancellable, but the loop stops awaiting it) and the task's
+   * single-flight `inFlight` flag resets so the NEXT tick retries — a hung
+   * run can never permanently wedge the task. Runs that settle first clear
+   * the watchdog timer, so a healthy cadence is unchanged. The abandoned
+   * run's own guards (e.g. the downtime worker's dispatching single-flight)
+   * prevent overlapping work once it settles.
+   */
+  runTimeoutMs?: number;
 }
 
 /** Internal bookkeeping for a registered task. */
@@ -179,16 +190,61 @@ export class TaskScheduler {
    * failing task never takes down the loop; tasks that need to surface
    * errors should catch them in their own `run` (as the worklist's
    * doRefresh/doSync do).
+   *
+   * When the task carries a `runTimeoutMs` watchdog, a run that hangs past
+   * the bound is abandoned: the loop stops awaiting it and resets the
+   * in-flight flag so the next tick retries (a hung run must never
+   * permanently wedge the task, WL-0MSJIPHD0001L1J9).
    */
   private async runTask(entry: TaskEntry, now: number): Promise<void> {
     entry.dueAt = now + entry.task.intervalMs;
     entry.inFlight = true;
     try {
-      await entry.task.run();
+      const timeoutMs = entry.task.runTimeoutMs;
+      if (timeoutMs !== undefined && timeoutMs > 0) {
+        await runWithTimeout(entry.task.run(), timeoutMs, () => {
+          process.stderr.write(
+            `[worklog-plugin] Task '${entry.task.id}' run exceeded ${timeoutMs}ms — abandoning; next tick will retry\n`,
+          );
+        });
+      } else {
+        await entry.task.run();
+      }
     } catch {
       // A failing task must never take down the loop or the plugin.
     } finally {
       entry.inFlight = false;
     }
   }
+}
+
+/**
+ * Await `run` but give up after `timeoutMs` when it hangs: the caller
+ * proceeds (the abandoned promise is not cancellable, but its own guards —
+ * e.g. the downtime worker's dispatching single-flight — prevent
+ * overlapping work once it settles). The timer is cleared when the run
+ * settles first so a bounded run never keeps the process alive.
+ */
+function runWithTimeout(
+  run: Promise<void> | void,
+  timeoutMs: number,
+  onTimeout: () => void,
+): Promise<void> {
+  const runPromise = Promise.resolve(run);
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      onTimeout();
+      resolve();
+    }, timeoutMs);
+    runPromise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
 }

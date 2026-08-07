@@ -86,6 +86,29 @@ export const DOWNTIME_AUDIT_RECENCY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
  */
 export const DOWNTIME_ERROR_STRIKE_LIMIT = 3;
 
+/**
+ * Timeout for the downtime worker's `wl` CLI invocations (`getNextItem` /
+ * `getNextAuditCandidate` in index.ts): a hung `wl` child must be killed
+ * and the lookup fail closed (a CLI-error strike) within a bounded time
+ * instead of wedging the dispatch task until the pane restarts
+ * (WL-0MSJIPHD0001L1J9). 10s is comfortably above the healthy ~0.15s wl
+ * latency and below the CLI's own 60s safety timeout (used as the upper
+ * bound for this value).
+ */
+export const DOWNTIME_WL_TIMEOUT_MS = 10_000;
+
+/**
+ * Scheduler-level watchdog bound for ONE downtime-worker tick run
+ * (WL-0MSJIPHD0001L1J9): the maximum wall-clock time a scheduler run may
+ * take before it is abandoned and the task's single-flight flag is reset so
+ * the next tick retries — a hung run can never permanently wedge the
+ * downtime task. Chosen comfortably above the worst-case bounded dispatch
+ * path (5s proxy poll + up to three 10s wl lookups + 3s claim + 5s dispatch
+ * comment ≈ 45s) so healthy runs never trip it, while a hung run still
+ * recovers within a minute instead of wedging until a pane restart.
+ */
+export const DOWNTIME_RUN_TIMEOUT_MS = 60_000;
+
 export const DEFAULT_DOWNTIME_PROXY_URL = 'http://192.168.0.199:8000';
 export const DEFAULT_DOWNTIME_MODEL = 'plan';
 

@@ -17,6 +17,7 @@ import {
   CAPTURE_TIMEOUT_MS,
 } from './index.js';
 import { DOWNTIME_LOG_FILE } from './downtime-log.js';
+import { DOWNTIME_WL_TIMEOUT_MS } from './downtime-worker.js';
 import {
   fetchItemsByStage,
   resetExecFileAsync,
@@ -560,6 +561,53 @@ describe('createDowntimeDeps', () => {
     expect(await deps.getNextItem('idea')).toEqual({ ok: false });
   });
 
+  it('getNextItem passes a bounded timeout so a hung wl fails closed', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ success: true, workItem: { id: 'WL-ABC', title: 'Some task' } }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.getNextItem('intake_complete');
+
+    // AC1: the invocation must carry the bounded timeout so a hung wl child
+    // is killed by execFile instead of wedging the dispatch task.
+    const [, , options] = mockExec.mock.calls[0];
+    expect(options).toMatchObject({ timeout: DOWNTIME_WL_TIMEOUT_MS });
+  });
+
+  it('getNextItem fails closed within the timeout when wl hangs (AC4 hang path)', async () => {
+    vi.useFakeTimers();
+    try {
+      // A hung wl child: the mock never resolves on its own — the bounded
+      // timeout (enforced by execFile in production) rejects the invocation
+      // after DOWNTIME_WL_TIMEOUT_MS, so the lookup fails closed to busy.
+      const hungExec = vi.fn(
+        (_bin: string, _args: string[], opts?: { timeout?: number }) =>
+          new Promise((_resolve, reject) => {
+            setTimeout(
+              () => reject(Object.assign(new Error('ETIMEDOUT'), { code: 'ETIMEDOUT' })),
+              opts?.timeout ?? DOWNTIME_WL_TIMEOUT_MS,
+            );
+          }),
+      );
+      setExecFileAsync(hungExec as never);
+      const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+
+      const resultPromise = deps.getNextItem('idea');
+      await vi.advanceTimersByTimeAsync(DOWNTIME_WL_TIMEOUT_MS - 1);
+      // Still pending just before the timeout — no premature resolution.
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(resultPromise).resolves.toEqual({ ok: false });
+
+      // The hung invocation received the bounded timeout option.
+      expect(hungExec.mock.calls[0][2]).toMatchObject({ timeout: DOWNTIME_WL_TIMEOUT_MS });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('getNextAuditCandidate runs wl list completed/in_review and selects the first stale-audit item', async () => {
     // Fixture times are relative to now so the 7-day recency filter passes
     // (selectAuditCandidate defaults to Date.now()).
@@ -610,6 +658,44 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
     expect(await deps.getNextAuditCandidate()).toBeNull();
+  });
+
+  it('getNextAuditCandidate passes a bounded timeout so a hung wl fails closed', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ success: true, count: 0, workItems: [] }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.getNextAuditCandidate();
+
+    // AC1: the audit-tier invocation must carry the bounded timeout too.
+    const [, , options] = mockExec.mock.calls[0];
+    expect(options).toMatchObject({ timeout: DOWNTIME_WL_TIMEOUT_MS });
+  });
+
+  it('getNextAuditCandidate fails closed (null) within the timeout when wl hangs', async () => {
+    vi.useFakeTimers();
+    try {
+      const hungExec = vi.fn(
+        (_bin: string, _args: string[], opts?: { timeout?: number }) =>
+          new Promise((_resolve, reject) => {
+            setTimeout(
+              () => reject(Object.assign(new Error('ETIMEDOUT'), { code: 'ETIMEDOUT' })),
+              opts?.timeout ?? DOWNTIME_WL_TIMEOUT_MS,
+            );
+          }),
+      );
+      setExecFileAsync(hungExec as never);
+      const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+
+      const resultPromise = deps.getNextAuditCandidate();
+      await vi.advanceTimersByTimeAsync(DOWNTIME_WL_TIMEOUT_MS);
+      await expect(resultPromise).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('getNextAuditCandidate fails closed (null) on malformed wl output', async () => {

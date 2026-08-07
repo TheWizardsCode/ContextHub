@@ -30,7 +30,7 @@ import {
 } from './icons.js';
 import { runSync, heartbeatTtlForInterval } from './auto-sync.js';
 import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
-import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, type DowntimeWorker } from './downtime-worker.js';
+import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
 import { showToast } from './notify.js';
 import { recordCommand, getLastCommand } from './command-log.js';
 import {
@@ -3203,11 +3203,17 @@ export async function runWorklistTui(
   // the worker runs while the worklist pane is open (parent Assumptions).
   // Single-flight: the poller and dispatch guards inside the worker prevent
   // overlapping work; the scheduler task itself is also single-flight.
+  // Scheduler-level watchdog (WL-0MSJIPHD0001L1J9): a tick run that hangs
+  // (e.g. an unbounded wl invocation) is abandoned after
+  // DOWNTIME_RUN_TIMEOUT_MS and the single-flight flag resets so the next
+  // tick retries — a hung run can never permanently wedge the downtime
+  // task until a pane restart.
   if (opts.downtimeWorker) {
     scheduler.addTask({
       id: 'downtime',
       intervalMs: opts.downtimePollIntervalMs,
       singleFlight: true,
+      runTimeoutMs: DOWNTIME_RUN_TIMEOUT_MS,
       run: async () => {
         await opts.downtimeWorker?.tick();
       },

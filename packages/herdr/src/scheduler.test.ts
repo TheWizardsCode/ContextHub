@@ -293,4 +293,126 @@ describe('TaskScheduler', () => {
   it('exposes DEFAULT_SCHEDULER_TICK_MS (1s)', () => {
     expect(DEFAULT_SCHEDULER_TICK_MS).toBe(1000);
   });
+
+  describe('run timeout watchdog (runTimeoutMs)', () => {
+    it('abandons a hung run after runTimeoutMs and retries on the next tick', async () => {
+      const hung = new Promise<void>(() => {}); // never resolves
+      const run = vi.fn(() => hung);
+      const scheduler = new TaskScheduler(1000);
+      scheduler.addTask({ id: 'a', intervalMs: 30_000, run, singleFlight: true, runTimeoutMs: 5_000 });
+      scheduler.start();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(run).toHaveBeenCalledTimes(1); // first run starts and hangs
+
+      // Watchdog fires: the run is abandoned and the in-flight flag resets,
+      // so the task is NOT permanently wedged (WL-0MSJIPHD0001L1J9).
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      // The next tick retries instead of skipping forever.
+      await vi.advanceTimersByTimeAsync(25_000); // t=60s
+      expect(run).toHaveBeenCalledTimes(2);
+
+      scheduler.stop();
+    });
+
+    it('settling the abandoned run late does not double-fire or disturb the cadence', async () => {
+      let release!: () => void;
+      const firstGate = new Promise<void>((r) => { release = r; });
+      const run = vi.fn()
+        .mockReturnValueOnce(firstGate) // first run hangs
+        .mockResolvedValue(undefined); // later runs settle immediately
+      const scheduler = new TaskScheduler(1000);
+      scheduler.addTask({ id: 'a', intervalMs: 30_000, run, singleFlight: true, runTimeoutMs: 5_000 });
+      scheduler.start();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(run).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(5_000); // watchdog abandons run 1
+      await vi.advanceTimersByTimeAsync(25_000); // t=60s: next tick retries
+      expect(run).toHaveBeenCalledTimes(2);
+
+      // The abandoned first run settles LATE (after run 2 completed): it
+      // must not trigger a spurious third invocation.
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(run).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(30_000); // t=90s: normal cadence
+      expect(run).toHaveBeenCalledTimes(3);
+
+      scheduler.stop();
+    });
+
+    it('does not trip on a run that settles within runTimeoutMs', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const run = vi.fn(() => gate);
+      const scheduler = new TaskScheduler(1000);
+      scheduler.addTask({ id: 'a', intervalMs: 30_000, run, singleFlight: true, runTimeoutMs: 5_000 });
+      scheduler.start();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(run).toHaveBeenCalledTimes(1);
+
+      release(); // settles well before the 5s watchdog
+      await vi.advanceTimersByTimeAsync(0);
+
+      await vi.advanceTimersByTimeAsync(30_000); // normal cadence continues
+      expect(run).toHaveBeenCalledTimes(2);
+      scheduler.stop();
+    });
+
+    it('keeps single-flight skipping during a bounded run (no overlap)', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const run = vi.fn(() => gate);
+      const scheduler = new TaskScheduler(1000);
+      // Watchdog window (60s) spans two 30s intervals: the tick at t=60s
+      // fires BEFORE the watchdog at t=90s, so the pending run is skipped.
+      scheduler.addTask({ id: 'a', intervalMs: 30_000, run, singleFlight: true, runTimeoutMs: 60_000 });
+      scheduler.start();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(run).toHaveBeenCalledTimes(1);
+
+      // Tick while the run is pending: skipped (not coalesced), watchdog
+      // has not fired yet.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(run).toHaveBeenCalledTimes(1);
+
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(run).toHaveBeenCalledTimes(2);
+      scheduler.stop();
+    });
+
+    it('logs an abandonment to stderr for observability', async () => {
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const hung = new Promise<void>(() => {});
+        const scheduler = new TaskScheduler(1000);
+        scheduler.addTask({
+          id: 'downtime',
+          intervalMs: 30_000,
+          run: vi.fn(() => hung),
+          singleFlight: true,
+          runTimeoutMs: 5_000,
+        });
+        scheduler.start();
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        await vi.advanceTimersByTimeAsync(5_000);
+
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining("[worklog-plugin] Task 'downtime'"),
+        );
+        scheduler.stop();
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+  });
 });

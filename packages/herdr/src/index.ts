@@ -57,6 +57,7 @@ import {
   type DowntimeSpawn,
   defaultDowntimeSpawn,
   buildDowntimeDispatchComment,
+  DOWNTIME_WL_TIMEOUT_MS,
 } from './downtime-worker.js';
 import { appendDowntimeLogEntry } from './downtime-log.js';
 
@@ -342,10 +343,13 @@ export function createDowntimeDeps(
         // (WL-0MSI7DQL10016QYX): the downtime worker must select candidates
         // from the SAME worklog root the worklist uses, not the plugin
         // process's own cwd. Without the override the vector is unchanged.
+        // The bounded timeout (WL-0MSJIPHD0001L1J9) kills a hung wl child
+        // so the lookup fails closed to a strike instead of wedging the
+        // dispatch task until the pane restarts.
         const { stdout } = await getExecFileAsync()(
           'wl',
           buildWlArgs(['next', '--stage', stage, '--json']),
-          { encoding: 'utf8' },
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
         );
         return { ok: true, candidate: parseNextItemOutput(stdout, stage) };
       } catch {
@@ -359,11 +363,12 @@ export function createDowntimeDeps(
         // Audit tier (WL-0MSI8H3HP000K0RG): select the first completed /
         // in_review item WITHOUT a valid audit so the producer-review queue
         // (the release gate) is drained during idle time. Same fail-closed
-        // semantics as getNextItem: a wl failure yields no candidate.
+        // semantics as getNextItem: a wl failure yields no candidate. The
+        // bounded timeout (WL-0MSJIPHD0001L1J9) applies here too.
         const { stdout } = await getExecFileAsync()(
           'wl',
           buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--json']),
-          { encoding: 'utf8' },
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
         );
         const candidates = parseAuditCandidatesOutput(stdout);
         const selected = candidates === null ? null : selectAuditCandidate(candidates);
