@@ -1638,12 +1638,20 @@ describe('buildMetaRows — Related Docs row (WL-0MSHWHRIF001YHF8)', () => {
     const item = makeItem('WL-PLAIN');
     const rows = new Map(buildMetaRows(item));
     expect(rows.has('Related Docs')).toBe(false);
+    const panel = formatMetadataPanel(item, 80, 20, 0, null).join('\n');
+    expect(panel).not.toContain('Related Docs');
+    const detail = formatDetailContent(item, 80).join('\n');
+    expect(detail).not.toContain('Related Docs');
   });
 
   it('omits the row when Key Files contains no .md files', () => {
     const item = makeKeyFilesItem('WL-NO-MD', ['src/app.ts', 'data.json']);
     const rows = new Map(buildMetaRows(item));
     expect(rows.has('Related Docs')).toBe(false);
+    const panel = formatMetadataPanel(item, 80, 20, 0, null).join('\n');
+    expect(panel).not.toContain('Related Docs');
+    const detail = formatDetailContent(item, 80).join('\n');
+    expect(detail).not.toContain('Related Docs');
   });
 
   it('includes only .md paths from a mixed Key Files list', () => {
