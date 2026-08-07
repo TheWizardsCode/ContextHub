@@ -29,6 +29,9 @@ import {
   buildDowntimeSpawnOptions,
   BLOCKED_QUESTIONS_INSTRUCTION,
   parseNextItemOutput,
+  parseAuditCandidatesOutput,
+  selectAuditCandidate,
+  toDowntimeCandidate,
   skillKindFromPrompt,
   buildDowntimeDispatchComment,
   clampDowntimePollInterval,
@@ -45,6 +48,7 @@ import {
   type DowntimeCandidate,
   type DowntimeWorkerDeps,
   type DowntimeSpawn,
+  type AuditCandidate,
 } from './downtime-worker.js';
 import {
   statusFixtures,
@@ -61,6 +65,7 @@ import {
 function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
   return {
     getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    getNextAuditCandidate: vi.fn().mockResolvedValue(null),
     claimItem: vi.fn().mockResolvedValue(undefined),
     spawnAgentPane: vi.fn().mockResolvedValue(undefined),
     recordDispatch: vi.fn().mockResolvedValue(undefined),
@@ -281,6 +286,210 @@ describe('dispatch selection', () => {
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('wl-error');
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+});
+
+// ── Audit-tier dispatch (WL-0MSI8H3HP000K0RG) ─────────────────────────
+
+describe('dispatch audit tier', () => {
+  const staleCandidate: DowntimeCandidate = {
+    id: 'WL-AUD',
+    title: 'Audit me',
+    stage: 'audit',
+  };
+
+  it('dispatches /skill:audit on the audit candidate as the first tier', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue(staleCandidate),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(outcome.candidate?.id).toBe('WL-AUD');
+    expect(deps.getNextItem).not.toHaveBeenCalled();
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:audit WL-AUD'),
+      { model: 'plan', cwd: '/repo' },
+    );
+  });
+
+  it('records the audit dispatch with kind audit', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue(staleCandidate),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    const event = (deps.recordDispatch as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(event.itemId).toBe('WL-AUD');
+    expect(event.kind).toBe('audit');
+    expect(event.cwd).toBe('/repo');
+  });
+
+  it('when no audit candidate, falls back to audit → plan → intake in order', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue(null),
+      getNextItem: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, candidate: null }) // intake_complete empty
+        .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-IDE', title: 'An idea', stage: 'idea' } }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.kind).toBe('intake');
+    expect(outcome.candidate?.id).toBe('WL-IDE');
+    expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea');
+  });
+
+  it('fails closed to no-candidate when getNextAuditCandidate returns null and no plan/intake candidate exists', async () => {
+    // getNextAuditCandidate is fail-closed at the deps boundary: a wl failure
+    // yields null (no candidate), and the dispatcher falls through to the
+    // plan/intake tiers. All empty -> no dispatch.
+    const deps = makeDeps(); // all three tiers empty
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('no-candidate');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+});
+
+describe('audit selection (selectAuditCandidate)', () => {
+  const fresh: AuditCandidate = {
+    id: 'FRESH',
+    title: 'fresh',
+    auditedAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:30.000Z',
+    sortIndex: 200,
+  };
+  const stale: AuditCandidate = {
+    id: 'STALE',
+    title: 'stale',
+    auditedAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:02:00.000Z', // >60s later -> stale
+    sortIndex: 300,
+  };
+  const unaudited: AuditCandidate = { id: 'NOAUDIT', title: 'no audit', sortIndex: 100 };
+
+  it('selects an item with a missing audit', () => {
+    expect(selectAuditCandidate([fresh, unaudited])?.id).toBe('NOAUDIT');
+  });
+
+  it('does not select an item with a fresh audit', () => {
+    expect(selectAuditCandidate([fresh])).toBeNull();
+  });
+
+  it('selects a stale item (audit older than the 60s buffer)', () => {
+    expect(selectAuditCandidate([fresh, stale])).toEqual(stale);
+  });
+
+  it('sorts ascending by sortIndex and returns the first', () => {
+    expect(selectAuditCandidate([stale, unaudited])?.id).toBe('NOAUDIT');
+    expect(selectAuditCandidate([{ ...unaudited, sortIndex: 500 }, stale])?.id).toBe('STALE');
+  });
+
+  it('returns null on an empty list', () => {
+    expect(selectAuditCandidate([])).toBeNull();
+  });
+
+  it('classifies the 60s freshness boundary correctly', () => {
+    // auditedAt exactly 60s before updatedAt -> stale (selected)
+    const boundaryStale: AuditCandidate = {
+      id: 'B1',
+      auditedAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:01:00.000Z',
+    };
+    // auditedAt just under 60s before updatedAt -> fresh (not selected)
+    const boundaryFresh: AuditCandidate = {
+      id: 'B2',
+      auditedAt: '2026-01-01T00:00:30.000Z',
+      updatedAt: '2026-01-01T00:01:00.000Z',
+    };
+    expect(selectAuditCandidate([boundaryStale])?.id).toBe('B1');
+    expect(selectAuditCandidate([boundaryFresh])).toBeNull();
+  });
+});
+
+describe('parseAuditCandidatesOutput', () => {
+  it('parses a { workItems: [...] } shape', () => {
+    const stdout = JSON.stringify({
+      success: true,
+      count: 1,
+      workItems: [{ id: 'WL-1', title: 'A', sortIndex: 100, auditedAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:30.000Z' }],
+    });
+    const parsed = parseAuditCandidatesOutput(stdout);
+    expect(parsed).not.toBeNull();
+    expect(parsed![0].id).toBe('WL-1');
+    expect(parsed![0].sortIndex).toBe(100);
+  });
+
+  it('parses a bare array shape', () => {
+    const stdout = JSON.stringify([{ id: 'WL-2', title: 'B' }]);
+    expect(parseAuditCandidatesOutput(stdout)?.[0].id).toBe('WL-2');
+  });
+
+  it('fails closed (null) on malformed JSON', () => {
+    expect(parseAuditCandidatesOutput('not json')).toBeNull();
+  });
+
+  it('fails closed (null) on output without a list', () => {
+    expect(parseAuditCandidatesOutput(JSON.stringify({ success: false }))).toBeNull();
+  });
+
+  it('skips items without an id but keeps valid ones', () => {
+    const stdout = JSON.stringify({ workItems: [{ title: 'no id' }, { id: 'WL-3', title: 'C' }] });
+    const parsed = parseAuditCandidatesOutput(stdout);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.length).toBe(1);
+    expect(parsed![0].id).toBe('WL-3');
+  });
+
+  it('returns an empty array for an empty workItems list', () => {
+    expect(parseAuditCandidatesOutput(JSON.stringify({ workItems: [] }))).toEqual([]);
+  });
+});
+
+describe('audit prompt & pane helpers', () => {
+  const candidate: DowntimeCandidate = { id: 'WL-AUD', title: 'Audit me', stage: 'audit' };
+
+  it('builds an /skill:audit prompt', () => {
+    const prompt = buildDowntimePrompt('audit', candidate);
+    expect(prompt).toContain('/skill:audit WL-AUD');
+  });
+
+  it('builds a Downtime audit pane name', () => {
+    const args = buildDowntimePaneArgs('audit', 'Run /skill:audit WL-AUD — Audit me.', {
+      model: 'plan',
+      cwd: '/repo',
+    });
+    expect(args).toContain('Downtime audit');
+    expect(args).toContain('--no-focus');
+  });
+
+  it('skillKindFromPrompt detects an audit prompt', () => {
+    expect(skillKindFromPrompt('Run /skill:audit WL-AUD — x.')).toBe('audit');
+    expect(skillKindFromPrompt('Run /skill:plan WL-1 — x.')).toBe('plan');
+    expect(skillKindFromPrompt('Run /skill:intake WL-2 — x.')).toBe('intake');
+  });
+
+  it('buildDowntimeDispatchComment renders /skill:audit', () => {
+    const comment = buildDowntimeDispatchComment('WL-AUD', 'audit', '2026-01-01T00:00:00.000Z');
+    expect(comment).toContain('/skill:audit WL-AUD');
+  });
+
+  it('toDowntimeCandidate produces a stage-audit candidate', () => {
+    expect(toDowntimeCandidate({ id: 'X', title: 'T' })).toEqual({
+      id: 'X',
+      title: 'T',
+      stage: 'audit',
+    });
   });
 });
 

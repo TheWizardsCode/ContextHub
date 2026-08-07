@@ -560,6 +560,62 @@ describe('createDowntimeDeps', () => {
     expect(await deps.getNextItem('idea')).toEqual({ ok: false });
   });
 
+  it('getNextAuditCandidate runs wl list completed/in_review and selects the first stale-audit item', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 2,
+        workItems: [
+          { id: 'WL-FRESH', title: 'Fresh audit', auditedAt: '2026-01-01T00:00:30.000Z', updatedAt: '2026-01-01T00:00:00.000Z', sortIndex: 100 },
+          { id: 'WL-STALE', title: 'Stale audit', auditedAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:02:00.000Z', sortIndex: 200 },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextAuditCandidate();
+
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      ['list', '--status', 'completed', '--stage', 'in_review', '--json'],
+      expect.anything(),
+    );
+    expect(result).toEqual({ id: 'WL-STALE', title: 'Stale audit', stage: 'audit' });
+  });
+
+  it('getNextAuditCandidate returns null when no stale/missing-audit item exists', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 1,
+        workItems: [
+          { id: 'WL-FRESH', title: 'Fresh audit', auditedAt: '2026-01-01T00:00:30.000Z', updatedAt: '2026-01-01T00:00:00.000Z', sortIndex: 100 },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getNextAuditCandidate()).toBeNull();
+  });
+
+  it('getNextAuditCandidate fails closed (null) when wl errors', async () => {
+    setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getNextAuditCandidate()).toBeNull();
+  });
+
+  it('getNextAuditCandidate fails closed (null) on malformed wl output', async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: 'not json', stderr: '' });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getNextAuditCandidate()).toBeNull();
+  });
+
   it('claimItem runs wl update --status in_progress --assignee', async () => {
     const mockExec = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
     setExecFileAsync(mockExec as never);
@@ -613,6 +669,22 @@ describe('createDowntimeDeps', () => {
     expect(spawnFn).toHaveBeenCalledWith(
       '/path/to/send-to-pi.sh',
       expect.arrayContaining(['--pane-name', 'Downtime intake']),
+      expect.anything(),
+    );
+  });
+
+  it('spawnAgentPane derives the audit pane name from the prompt', async () => {
+    const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
+
+    await deps.spawnAgentPane('Run /skill:audit WL-AUD — Audit me.', {
+      model: 'plan',
+      cwd: '/repo',
+    });
+
+    expect(spawnFn).toHaveBeenCalledWith(
+      '/path/to/send-to-pi.sh',
+      expect.arrayContaining(['--pane-name', 'Downtime audit']),
       expect.anything(),
     );
   });

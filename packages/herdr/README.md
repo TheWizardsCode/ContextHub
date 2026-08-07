@@ -178,9 +178,17 @@ Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings in
 When the local LLM (llama-server behind the llama-proxy) is idle, the plugin
 can use that compute to advance the worklog backlog automatically: after the
 proxy reports idle continuously for the configured threshold, it opens a
-visible (non-focus-stealing) pi agent pane that runs `/skill:plan` on the
-next `intake_complete` item — or falls back to `/skill:intake` on the next
-`idea` item (parent WL-0MSF49FMW009M06K).
+visible (non-focus-stealing) pi agent pane. Dispatch priority (WL-0MSI8H3HP000K0RG):
+first a completed/in_review item **without a valid audit** → `/skill:audit
+<id>`; else `/skill:plan` on the next `intake_complete` item; else falls back
+to `/skill:intake` on the next `idea` item (parent WL-0MSF49FMW009M06K).
+
+A "valid" audit is defined by the review-icon freshness rule: the audit is
+current — i.e. the review icon is **neither** the hourglass `⏳` (stale passed)
+**nor** the magnifying glass `🔍` (no audit / stale failed). Concretely,
+`isAuditFresh(auditedAt, updatedAt)` returns `true` (auditedAt within the 60s
+staleness buffer of updatedAt); missing audit timestamps are treated as
+not-fresh and therefore selected.
 
 Settings (all re-read each poll, so changes apply without a plugin restart):
 
@@ -208,12 +216,16 @@ timeouts, and ambiguous responses are treated as **busy** (no dispatch) and
 never crash the plugin. Each poll is single-flight with a per-poll timeout.
 
 **Dispatch behaviour** — once idle has been continuous for the threshold, the
-worker runs `wl next --stage intake_complete --json` and dispatches
-`/skill:plan <id>`; if no such item it runs `wl next --stage idea --json` and
-dispatches `/skill:intake <id>`; if both are empty nothing is dispatched.
+worker first runs `wl list --status completed --stage in_review --json` and
+selects the first completed/in_review item **without** a valid audit,
+dispatching `/skill:audit <id>` (pane named `Downtime audit`). If none, it
+runs `wl next --stage intake_complete --json` and dispatches `/skill:plan
+<id>`; if no such item it runs `wl next --stage idea --json` and
+dispatches `/skill:intake <id>`; if all three are empty nothing is dispatched.
 The item is claimed (`wl update <id> --status in_progress`) *before* the pane
 spawns, so it appears in-progress immediately and a second pane's `wl next`
-cannot select it. Panes are named `Downtime plan` / `Downtime intake`, opened
+cannot select it. Panes are named `Downtime audit` / `Downtime plan` /
+`Downtime intake`, opened
 with `--no-focus` (visible, never steals focus), `--cwd <worklog root>` and
 `--model <downtimeModel>`.
 

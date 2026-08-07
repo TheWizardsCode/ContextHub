@@ -14,9 +14,11 @@
  *    per-poll timeout and fail-closed parsing.
  *  - `createIdleTracker` — continuous idle-duration tracker (idleSince vs
  *    threshold).
- *  - `dispatchDowntimeWork` — dispatch orchestration: `wl next --stage
- *    intake_complete` → `/skill:plan <id>`, fallback `--stage idea` →
- *    `/skill:intake <id>`, pre-dispatch claim, per-process single-flight.
+ *  - `dispatchDowntimeWork` — dispatch orchestration: completed/in_review
+ *    items without a valid audit → `/skill:audit <id>` (audit tier,
+ *    WL-0MSI8H3HP000K0RG), then `wl next --stage intake_complete` →
+ *    `/skill:plan <id>`, fallback `--stage idea` → `/skill:intake <id>`,
+ *    pre-dispatch claim, per-process single-flight.
  *    `wl next` failures are reported as `{ok:false}` (fail closed to busy)
  *    and are never mistaken for an empty backlog.
  *  - `buildDowntimePaneArgs` / `spawnDowntimePane` — send-to-pi.sh
@@ -41,6 +43,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { isAuditFresh } from './icons.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -308,13 +311,25 @@ export function createDowntimePoller(
 
 // ── Dispatch (implemented — F3) ───────────────────────────────────────
 
-export type DowntimeStage = 'intake_complete' | 'idea';
-export type DowntimeSkillKind = 'plan' | 'intake';
+export type DowntimeStage = 'intake_complete' | 'idea' | 'audit';
+export type DowntimeSkillKind = 'plan' | 'intake' | 'audit';
 
 export interface DowntimeCandidate {
   id: string;
   title: string;
   stage: DowntimeStage;
+}
+
+/**
+ * A completed/in_review item candidate for the downtime audit tier.
+ * Parsed from `wl list --status completed --stage in_review --json`.
+ */
+export interface AuditCandidate {
+  id: string;
+  title: string;
+  auditedAt?: string | null;
+  updatedAt?: string;
+  sortIndex?: number;
 }
 
 /**
@@ -334,6 +349,12 @@ export type DowntimeNextResult =
 export interface DowntimeWorkerDeps {
   /** Runs `wl next --stage <stage> --json` and reports the first candidate (or a wl failure). */
   getNextItem(stage: DowntimeStage): Promise<DowntimeNextResult>;
+  /**
+   * Look up the next completed/in_review item WITHOUT a valid audit (the
+   * audit dispatch tier, which runs before the plan/intake tiers). Fail-closed:
+   * a wl failure yields no candidate (no dispatch).
+   */
+  getNextAuditCandidate(): Promise<DowntimeCandidate | null>;
   /** Claims the item (`wl update <id> --status in_progress`) before dispatch. */
   claimItem(itemId: string): Promise<void>;
   /** Opens a visible pi agent pane running the prompt (via send-to-pi.sh). */
@@ -372,14 +393,16 @@ export interface DowntimeDispatchOutcome {
 let dispatchInFlight = false;
 
 /**
- * Dispatch one downtime work item. Selection: `wl next --stage
- * intake_complete` → `/skill:plan <id>`; if none, `wl next --stage idea` →
- * `/skill:intake <id>`; if both are empty, no dispatch. The item is claimed
- * BEFORE the pane spawns so it appears in_progress immediately and a second
- * pane cannot select it. The caller must only invoke this once the idle
- * tracker reports the threshold met (AC1); a dispatch consumes the local
- * slot, so the proxy reports busy and the tracker requires a fresh full
- * idle period before the next dispatch.
+ * Dispatch one downtime work item. Selection priority (audit tier first,
+ * WL-0MSI8H3HP000K0RG): a completed/in_review item WITHOUT a valid audit →
+ * `/skill:audit <id>`; if none, `wl next --stage intake_complete` →
+ * `/skill:plan <id>`; if none, `wl next --stage idea` → `/skill:intake <id>`;
+ * if all three are empty, no dispatch. The item is claimed BEFORE the pane
+ * spawns so it appears in_progress immediately and a second pane cannot
+ * select it. The caller must only invoke this once the idle tracker reports
+ * the threshold met (AC1); a dispatch consumes the local slot, so the proxy
+ * reports busy and the tracker requires a fresh full idle period before the
+ * next dispatch.
  */
 export async function dispatchDowntimeWork(
   deps: DowntimeWorkerDeps,
@@ -390,6 +413,13 @@ export async function dispatchDowntimeWork(
   }
   dispatchInFlight = true;
   try {
+    const auditCandidate = await deps.getNextAuditCandidate();
+    if (auditCandidate !== null) {
+      await deps.claimItem(auditCandidate.id);
+      await deps.spawnAgentPane(buildDowntimePrompt('audit', auditCandidate), opts);
+      await recordDispatchAudit(deps, 'audit', auditCandidate, opts.cwd);
+      return { dispatched: true, candidate: auditCandidate, kind: 'audit' };
+    }
     const intakeComplete = await deps.getNextItem('intake_complete');
     if (!intakeComplete.ok) {
       // Transient wl/CLI failure: fail closed to busy — no dispatch, and the
@@ -661,7 +691,7 @@ export const BLOCKED_QUESTIONS_INSTRUCTION =
 
 /** Build the prompt dispatched to a pi agent pane for the given candidate. */
 export function buildDowntimePrompt(kind: DowntimeSkillKind, candidate: DowntimeCandidate): string {
-  const skill = kind === 'plan' ? '/skill:plan' : '/skill:intake';
+  const skill = kind === 'plan' ? '/skill:plan' : kind === 'audit' ? '/skill:audit' : '/skill:intake';
   return [
     `Run ${skill} ${candidate.id} — ${candidate.title}.`,
     BLOCKED_QUESTIONS_INSTRUCTION,
@@ -680,7 +710,7 @@ export function buildDowntimeDispatchComment(
   dispatchedAt: string,
   title?: string,
 ): string {
-  const skill = kind === 'plan' ? '/skill:plan' : '/skill:intake';
+  const skill = kind === 'plan' ? '/skill:plan' : kind === 'audit' ? '/skill:audit' : '/skill:intake';
   const suffix = title ? ` (${title.replace(/[\r\n]+/g, ' ')})` : '';
   return `Auto-dispatched by the herdr downtime worker at ${dispatchedAt} — running ${skill} ${itemId}${suffix}.`;
 }
@@ -712,10 +742,72 @@ export function parseNextItemOutput(stdout: string, stage: DowntimeStage): Downt
 
 /**
  * Derive the dispatch kind from a prompt built by `buildDowntimePrompt`
- * (the pane name is `Downtime plan` / `Downtime intake`).
+ * (the pane name is `Downtime plan` / `Downtime intake` / `Downtime audit`).
  */
 export function skillKindFromPrompt(prompt: string): DowntimeSkillKind {
+  if (prompt.includes('/skill:audit ')) return 'audit';
   return prompt.includes('/skill:plan ') ? 'plan' : 'intake';
+}
+
+// ── Audit-tier selection (WL-0MSI8H3HP000K0RG) ────────────────────────
+
+/**
+ * Parse the stdout of `wl list --status completed --stage in_review --json`
+ * into typed audit candidates. Accepts both the bare array shape and the
+ * `{ workItems: [...] }` wrapper. Malformed/empty output yields null
+ * (fail-closed).
+ */
+export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  const items = Array.isArray(parsed)
+    ? parsed
+    : parsed !== null && typeof parsed === 'object' && Array.isArray((parsed as { workItems?: unknown }).workItems)
+      ? (parsed as { workItems: unknown[] }).workItems
+      : null;
+  if (items === null) return null;
+
+  const candidates: AuditCandidate[] = [];
+  for (const raw of items) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const o = raw as Record<string, unknown>;
+    if (typeof o.id !== 'string' || o.id.length === 0) continue;
+    candidates.push({
+      id: o.id,
+      title: typeof o.title === 'string' ? o.title : '',
+      auditedAt: typeof o.auditedAt === 'string' ? o.auditedAt : undefined,
+      updatedAt: typeof o.updatedAt === 'string' ? o.updatedAt : undefined,
+      sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
+    });
+  }
+  return candidates;
+}
+
+/**
+ * Select the next audit candidate from parsed in_review items: the first
+ * item WITHOUT a valid audit, sorted ascending by `sortIndex` (heartbeat
+ * convention). "Valid audit" reuses `isAuditFresh` from icons.ts (fresh = a
+ * review icon that is neither ⏳ nor 🔍). Returns null when no candidate is
+ * unaudited/stale (or the list is empty). Missing auditedAt/updatedAt means
+ * not fresh → selected.
+ */
+export function selectAuditCandidate(candidates: AuditCandidate[]): AuditCandidate | null {
+  const target = candidates
+    .filter((c) => !isAuditFresh(c.auditedAt, c.updatedAt))
+    .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
+  return target[0] ?? null;
+}
+
+/**
+ * Turn a parsed audit candidate into a dispatachable `DowntimeCandidate`
+ * (stage `audit`) for the audit tier.
+ */
+export function toDowntimeCandidate(candidate: AuditCandidate): DowntimeCandidate {
+  return { id: candidate.id, title: candidate.title, stage: 'audit' };
 }
 
 // ── Settings clamps (implemented — wired into settings.ts by F2) ──────

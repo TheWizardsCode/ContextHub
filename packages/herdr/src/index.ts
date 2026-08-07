@@ -43,6 +43,9 @@ import {
   buildDowntimePaneArgs,
   spawnDowntimePane,
   parseNextItemOutput,
+  parseAuditCandidatesOutput,
+  selectAuditCandidate,
+  toDowntimeCandidate,
   skillKindFromPrompt,
   type DowntimeWorker,
   type DowntimeWorkerDeps,
@@ -348,6 +351,25 @@ export function createDowntimeDeps(
         // Transient wl failure → fail closed to busy: no dispatch, and the
         // worker must NOT treat it as an empty backlog (no cooldown).
         return { ok: false };
+      }
+    },
+    async getNextAuditCandidate(): Promise<DowntimeCandidate | null> {
+      try {
+        // Audit tier (WL-0MSI8H3HP000K0RG): select the first completed /
+        // in_review item WITHOUT a valid audit so the producer-review queue
+        // (the release gate) is drained during idle time. Same fail-closed
+        // semantics as getNextItem: a wl failure yields no candidate.
+        const { stdout } = await getExecFileAsync()(
+          'wl',
+          buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--json']),
+          { encoding: 'utf8' },
+        );
+        const candidates = parseAuditCandidatesOutput(stdout);
+        const selected = candidates === null ? null : selectAuditCandidate(candidates);
+        return selected === null ? null : toDowntimeCandidate(selected);
+      } catch {
+        // Fail-closed: a wl failure yields no candidate (no dispatch).
+        return null;
       }
     },
     async claimItem(itemId: string): Promise<void> {
