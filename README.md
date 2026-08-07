@@ -1,14 +1,14 @@
 # Worklog
 
-A lightweight, Git-friendly issue tracker designed for AI agents and development teams. Track hierarchical work items with a CLI, interactive TUI, or REST API -- all backed by SQLite with JSONL-based Git syncing.
+A lightweight, Git-friendly issue tracker designed for AI agents and development teams. Track hierarchical work items with a CLI or REST API -- all backed by SQLite with JSONL-based Git syncing.
 
 ## Features
 
-- **CLI + TUI + API**: Manage work items from the command line, an interactive terminal UI, or a REST API
+- **CLI + API**: Manage work items from the command line or a REST API
 - **Git-Friendly Syncing**: JSONL format enables seamless team collaboration via Git with automatic conflict resolution
 - **Hierarchical Work Items**: Parent-child relationships for organizing epics, features, and tasks
 - **Plugin System**: Extend the CLI with custom commands (see [Plugin Guide](PLUGIN_GUIDE.md))
-- **AI Agent Integration**: Built-in Pi agent with real-time streaming, interactive agent chat pane, and agent-driven action palette.
+- **AI Agent Integration**: Pi agent plugin modules that auto-load into every session — activity indicator, session health, model/provider display, guardrails, error recovery (`/retry`), and skill-path tool (see [Pi extension](packages/tui/extensions/README.md)).
 - **Heartbeat Skill**: Automated work item monitoring via the Pi agent — run `/skill:heartbeat` to flag items needing producer review or to audit completed items for closure readiness (see [skill/heartbeat/SKILL.md](skill/heartbeat/SKILL.md)).
 - **Multi-Project Support**: Custom prefixes for issue IDs per project
 
@@ -108,7 +108,6 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | Document | Description |
 |----------|-------------|
 | [Heartbeat Skill](skill/heartbeat/SKILL.md) | Automated work item monitoring and audit orchestration for the Pi agent |
-| [TUI.md](TUI.md) | Interactive terminal UI controls and features |
 | [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) | Plugin development guide and API reference |
 | [LOCAL_LLM.md](LOCAL_LLM.md) | Configure local LLM providers (Ollama, Foundry) |
 | [MULTI_PROJECT_GUIDE.md](MULTI_PROJECT_GUIDE.md) | Multi-project setup with custom prefixes |

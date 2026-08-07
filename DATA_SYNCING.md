@@ -44,7 +44,7 @@ Auto-sync is off by default to avoid unexpected git operations during local edit
 
 ### Auto-Sync Concurrency Guard (`wl sync --if-idle`)
 
-Interactive UIs (the Pi TUI worklog extension and Herdr worklist panes) run background auto-syncs on a timer. Multiple panes/TUI instances can fire syncs at the same time; without a guard they queue up waiting for the file lock, which can produce a self-sustaining "lock storm" of stuck `wl sync` processes (60+ observed).
+Interactive UIs (Herdr worklist panes) run background auto-syncs on a timer. Multiple panes can fire syncs at the same time; without a guard they queue up waiting for the file lock, which can produce a self-sustaining "lock storm" of stuck `wl sync` processes (60+ observed).
 
 To prevent this, auto-sync spawners pass `wl sync --if-idle`:
 

@@ -97,7 +97,6 @@ Worklog/
 ├── GIT_WORKFLOW.md       # Team collaboration guide
 ├── DATA_SYNCING.md       # Git sync and GitHub mirroring
 ├── PLUGIN_GUIDE.md       # Plugin development guide
-├── TUI.md                # Terminal UI documentation
 └── .gitignore            # Git ignore rules
 ```
 

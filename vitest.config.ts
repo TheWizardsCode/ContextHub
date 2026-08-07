@@ -9,8 +9,8 @@ export default defineConfig({
     // Run setup to inject mock git into PATH for spawn-based calls
     setupFiles: ['./tests/setup-tests.ts'],
     // Memory guardrails: limit worker count and enable OOM detection.
-    // The worklog-browse-extension.test.ts file (1700+ lines) can consume
-    // significant memory during module initialization.  These settings
+    // Some test files can consume significant memory during module
+    // initialization.  These settings
     // prevent unbounded memory growth and ensure OOM failures are caught
     // early rather than hanging the test runner.
     // Use 'forks' pool (child_process) instead of 'threads' (worker_threads)
