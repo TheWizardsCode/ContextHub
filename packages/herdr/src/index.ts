@@ -52,6 +52,7 @@ import {
   type DowntimeStage,
   type DowntimeCandidate,
   type DowntimeDispatchEvent,
+  type DowntimeErrorEvent,
   type DowntimeNextResult,
   type DowntimeSpawn,
   defaultDowntimeSpawn,
@@ -409,6 +410,16 @@ export function createDowntimeDeps(
         // fail-closed: audit logging must never crash the worker
       }
       // 2. Rolling local log (bounded JSONL under <cwd>/.worklog).
+      try {
+        await appendDowntimeLogEntry(event.cwd, JSON.stringify(event));
+      } catch {
+        // fail-closed
+      }
+    },
+    async recordError(event: DowntimeErrorEvent): Promise<void> {
+      // Persistent CLI-error trail (three-strike rule): rolling JSONL log
+      // under <cwd>/.worklog — the same bounded log as dispatch audit
+      // entries (WL-0MSGPI4AR000YOK8). Fail-closed: never crash the worker.
       try {
         await appendDowntimeLogEntry(event.cwd, JSON.stringify(event));
       } catch {

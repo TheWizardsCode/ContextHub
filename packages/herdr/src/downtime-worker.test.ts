@@ -69,6 +69,7 @@ function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     claimItem: vi.fn().mockResolvedValue(undefined),
     spawnAgentPane: vi.fn().mockResolvedValue(undefined),
     recordDispatch: vi.fn().mockResolvedValue(undefined),
+    recordError: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -256,16 +257,58 @@ describe('dispatch selection', () => {
     expect(deps.claimItem).not.toHaveBeenCalled();
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
-  it('fails closed to wl-error (no dispatch, no candidate) when the intake_complete lookup errors', async () => {
+  it('fails closed to wl-error when the intake_complete lookup errors AND the idea lookup errors', async () => {
     const deps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({ ok: false }),
     });
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
-    expect(deps.getNextItem).toHaveBeenCalledTimes(1);
-    expect(deps.getNextItem).toHaveBeenCalledWith('intake_complete');
+    // Tier 2 error does NOT short-circuit: tier 3 is still attempted.
+    expect(deps.getNextItem).toHaveBeenCalledTimes(2);
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea');
     expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('wl-error');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('still checks the idea tier after an intake_complete error and dispatches its candidate', async () => {
+    const deps = makeDeps({
+      getNextItem: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: false })
+        .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-IDE', title: 'An idea', stage: 'idea' } }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('intake');
+    expect(outcome.candidate?.id).toBe('WL-IDE');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-IDE');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:intake WL-IDE'),
+      expect.anything(),
+    );
+  });
+
+  it('fails closed to wl-error when the intake_complete lookup errors and idea answers empty', async () => {
+    const deps = makeDeps({
+      getNextItem: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: false })
+        .mockResolvedValueOnce({ ok: true, candidate: null }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    // Backlog is not provably empty (intake_complete state unknown) → the
+    // worker must NOT treat this as a genuine no-candidate (no cooldown).
     expect(outcome.reason).toBe('wl-error');
     expect(deps.claimItem).not.toHaveBeenCalled();
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
@@ -1302,8 +1345,10 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     const result = await worker.tick();
 
     expect(result.dispatched).toBe(false);
-    expect(worker.paused).toBe(false); // wl errors are NOT an empty backlog
+    expect(worker.paused).toBe(false); // a single error is NOT an empty backlog
+    expect(worker.errorStrikes).toBe(1); // ...but it IS the first strike
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.recordError).not.toHaveBeenCalled();
   });
 
   it('does not enter the cooldown when the dispatch guard reports in-flight', async () => {
@@ -1362,5 +1407,149 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     const resumed = await worker.tick();
     expect(resumed.polled).toBe(true);
     expect(worker.paused).toBe(false);
+  });
+});
+
+// ── Three-strike rule on CLI errors ───────────────────────────────────
+
+describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
+  /** Every dispatch attempt ends in a wl CLI error ({ok:false} both tiers). */
+  function makeErrorWorker(overrides: { deps?: Partial<DowntimeWorkerDeps> } = {}) {
+    const cfg = {
+      enabled: true,
+      thresholdMs: 240_000,
+      requiredFreeSlots: 0,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: 3_600_000,
+    };
+    const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({ ok: false }),
+      ...overrides.deps,
+    });
+    const worker = createDowntimeWorker({
+      poller,
+      deps,
+      config: () => ({ ...cfg }),
+    });
+    return { worker, deps, cfg, fetcher };
+  }
+
+  it('pauses and records the persistent error after 3 consecutive CLI errors', async () => {
+    const { worker, deps } = makeErrorWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick(); // idle run starts
+    vi.setSystemTime(start + 240_000); // threshold met
+
+    const s1 = await worker.tick(); // strike 1
+    expect(s1.dispatched).toBe(false);
+    expect(worker.paused).toBe(false);
+    expect(worker.errorStrikes).toBe(1);
+
+    const s2 = await worker.tick(); // strike 2
+    expect(s2.dispatched).toBe(false);
+    expect(worker.paused).toBe(false);
+    expect(worker.errorStrikes).toBe(2);
+
+    const s3 = await worker.tick(); // strike 3 → pause + log
+    expect(s3.dispatched).toBe(false);
+    expect(worker.paused).toBe(true);
+    expect(worker.errorStrikes).toBe(0); // counter reset once paused
+    expect(deps.recordError).toHaveBeenCalledTimes(1);
+    const event = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(event.cwd).toBe('/repo');
+    expect(event.message).toContain('3 consecutive');
+    expect(Number.isNaN(Date.parse(event.at))).toBe(false);
+  });
+
+  it('resumes with a fresh strike counter once the pause expires', async () => {
+    const { worker, deps } = makeErrorWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + 240_000);
+    await worker.tick(); // strike 1
+    await worker.tick(); // strike 2
+    await worker.tick(); // strike 3 → paused
+    expect(worker.paused).toBe(true);
+
+    vi.setSystemTime(start + 240_000 + 3_600_000); // pause expires
+    const resumed = await worker.tick();
+    expect(resumed.polled).toBe(true);
+    expect(worker.paused).toBe(false);
+    expect(worker.errorStrikes).toBe(0);
+
+    // A fresh error is strike 1 again — not a strike 4.
+    vi.setSystemTime(start + 240_000 + 3_600_000 + 240_000);
+    await worker.tick();
+    expect(worker.errorStrikes).toBe(1);
+    expect(worker.paused).toBe(false);
+  });
+
+  it('resets the strike counter on a successful dispatch', async () => {
+    const { worker, deps } = makeErrorWorker({
+      deps: {
+        getNextItem: vi
+          .fn()
+          .mockResolvedValueOnce({ ok: false }) // tier 2 error
+          .mockResolvedValueOnce({ ok: false }) // tier 3 error → strike 1
+          .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' } })
+          .mockResolvedValue({ ok: false }), // errors afterwards
+      },
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + 240_000);
+
+    await worker.tick(); // strike 1
+    expect(worker.errorStrikes).toBe(1);
+
+    await worker.tick(); // successful dispatch → strikes reset
+    expect(worker.errorStrikes).toBe(0);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+
+    // A fresh full idle period is required after the dispatch (AC5) before
+    // the next dispatch attempt.
+    vi.setSystemTime(start + 240_000 + 240_000); // fresh idle run starts
+    await worker.tick();
+    vi.setSystemTime(start + 240_000 + 480_000); // fresh threshold met
+    await worker.tick(); // strike 1 (fresh — not a strike 2)
+    expect(worker.errorStrikes).toBe(1);
+    await worker.tick(); // strike 2
+    expect(worker.paused).toBe(false);
+    expect(worker.errorStrikes).toBe(2);
+
+    await worker.tick(); // strike 3 → paused
+    expect(worker.paused).toBe(true);
+    expect(deps.recordError).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not strike on a no-candidate outcome (CLI answered — healthy)', async () => {
+    const { worker, deps } = makeErrorWorker({
+      deps: {
+        getNextItem: vi
+          .fn()
+          .mockResolvedValueOnce({ ok: false })
+          .mockResolvedValueOnce({ ok: false }) // strike 1
+          .mockResolvedValue({ ok: true, candidate: null }), // genuine empty backlog
+      },
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + 240_000);
+
+    await worker.tick(); // strike 1
+    expect(worker.errorStrikes).toBe(1);
+
+    const result = await worker.tick(); // no-candidate → cooldown, strikes reset
+    expect(result.dispatched).toBe(false);
+    expect(worker.paused).toBe(true); // genuine empty backlog pauses the worker
+    expect(worker.errorStrikes).toBe(0);
+    expect(deps.recordError).not.toHaveBeenCalled(); // no persistent-error log
   });
 });

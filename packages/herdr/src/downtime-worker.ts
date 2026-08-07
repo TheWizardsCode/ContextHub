@@ -18,9 +18,13 @@
  *    items without a valid audit (modified within the last 7 days) →
  *    `/skill:audit <id>` (audit tier, WL-0MSI8H3HP000K0RG), then `wl next --stage intake_complete` →
  *    `/skill:plan <id>`, fallback `--stage idea` → `/skill:intake <id>`,
- *    pre-dispatch claim, per-process single-flight.
+ *    pre-dispatch claim, per-process single-flight. A tier-2 CLI error does
+ *    NOT short-circuit: the idea tier is still attempted so a tier-3
+ *    candidate can still dispatch.
  *    `wl next` failures are reported as `{ok:false}` (fail closed to busy)
- *    and are never mistaken for an empty backlog.
+ *    and are never mistaken for an empty backlog; three consecutive error
+ *    outcomes pause the worker entirely after logging the persistent error
+ *    via `deps.recordError` (three-strike rule, `DOWNTIME_ERROR_STRIKE_LIMIT`).
  *  - `buildDowntimePaneArgs` / `spawnDowntimePane` — send-to-pi.sh
  *    invocation (`--pane-name Downtime <kind>`, `--no-focus`, `--cwd`,
  *    `--model`), detached and unref'd.
@@ -31,7 +35,9 @@
  *    `downtimeNoCandidateCooldownMs` (default 60 min) — no poll, no idle
  *    tracking, no dispatch — and resets the idle tracker so a fresh full
  *    idle period is required after the pause. Transient `wl` errors and the
- *    in-flight dispatch guard never trigger the cooldown.
+ *    in-flight dispatch guard never trigger the cooldown; three consecutive
+ *    CLI-error outcomes do (three-strike rule), after logging the
+ *    persistent error via `deps.recordError`.
  *  - `buildDowntimePrompt` / `BLOCKED_QUESTIONS_INSTRUCTION` — dispatched
  *    agent prompt, including the blocked-questions instruction.
  *  - `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` /
@@ -73,6 +79,12 @@ export const DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS = 3_600_000;
  * dispatched for audit when it was modified within the last 7 days.
  */
 export const DOWNTIME_AUDIT_RECENCY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Three-strike rule: this many consecutive CLI-error dispatch outcomes
+ * pause the worker entirely (after logging the persistent error).
+ */
+export const DOWNTIME_ERROR_STRIKE_LIMIT = 3;
 
 export const DEFAULT_DOWNTIME_PROXY_URL = 'http://192.168.0.199:8000';
 export const DEFAULT_DOWNTIME_MODEL = 'plan';
@@ -343,9 +355,10 @@ export interface AuditCandidate {
  *
  * `ok: true` means the CLI answered (candidate may still be null when the
  * stage is genuinely empty); `ok: false` means a transient wl/CLI failure
- * (fail-closed to busy — never a candidate and never a cooldown trigger).
- * The distinction matters: an empty backlog pauses the worker, while a
- * broken CLI must not (it would silently stop all idle dispatch for an hour).
+ * (fail-closed to busy — never a candidate). The distinction matters: an
+ * empty backlog pauses the worker immediately, while a CLI failure counts
+ * as one strike and only pauses after `DOWNTIME_ERROR_STRIKE_LIMIT`
+ * consecutive failures (three-strike rule).
  */
 export type DowntimeNextResult =
   | { ok: true; candidate: DowntimeCandidate | null }
@@ -370,6 +383,11 @@ export interface DowntimeWorkerDeps {
    * log entry under `.worklog`. Must never throw (fail-closed).
    */
   recordDispatch(event: DowntimeDispatchEvent): Promise<void>;
+  /**
+   * Record a persistent CLI-error event (three consecutive wl failures).
+   * Must never throw (fail-closed): logging must not crash the worker.
+   */
+  recordError(event: DowntimeErrorEvent): Promise<void>;
 }
 
 /** Audit event recorded for every successful downtime dispatch. */
@@ -381,6 +399,19 @@ export interface DowntimeDispatchEvent {
   /** Worklog root (the rolling log lives at `<cwd>/.worklog`). */
   cwd: string;
   title?: string;
+}
+
+/**
+ * Persistent-error event recorded when the wl CLI fails
+ * `DOWNTIME_ERROR_STRIKE_LIMIT` times consecutively. Written to the rolling
+ * `.worklog` log so the failure is auditable even though no dispatch occurs.
+ */
+export interface DowntimeErrorEvent {
+  /** Worklog root (the rolling log lives at `<cwd>/.worklog`). */
+  cwd: string;
+  /** ISO-8601 UTC timestamp of the error. */
+  at: string;
+  message: string;
 }
 
 export interface DowntimeDispatchOutcome {
@@ -403,12 +434,16 @@ let dispatchInFlight = false;
  * WL-0MSI8H3HP000K0RG): a completed/in_review item WITHOUT a valid audit →
  * `/skill:audit <id>`; if none, `wl next --stage intake_complete` →
  * `/skill:plan <id>`; if none, `wl next --stage idea` → `/skill:intake <id>`;
- * if all three are empty, no dispatch. The item is claimed BEFORE the pane
- * spawns so it appears in_progress immediately and a second pane cannot
- * select it. The caller must only invoke this once the idle tracker reports
- * the threshold met (AC1); a dispatch consumes the local slot, so the proxy
- * reports busy and the tracker requires a fresh full idle period before the
- * next dispatch.
+ * if all three are empty, no dispatch. A CLI error at the intake_complete
+ * tier does NOT short-circuit: the idea tier is still attempted, so a
+ * tier-3 candidate can still dispatch. A `wl-error` outcome (any CLI
+ * failure) is never a candidate and never a `no-candidate`; the caller's
+ * three-strike rule decides when consecutive errors pause the worker. The
+ * item is claimed BEFORE the pane spawns so it appears in_progress
+ * immediately and a second pane cannot select it. The caller must only
+ * invoke this once the idle tracker reports the threshold met (AC1); a
+ * dispatch consumes the local slot, so the proxy reports busy and the
+ * tracker requires a fresh full idle period before the next dispatch.
  */
 export async function dispatchDowntimeWork(
   deps: DowntimeWorkerDeps,
@@ -426,29 +461,48 @@ export async function dispatchDowntimeWork(
       await recordDispatchAudit(deps, 'audit', auditCandidate, opts.cwd);
       return { dispatched: true, candidate: auditCandidate, kind: 'audit' };
     }
+    // Tier 2 (intake_complete → /skill:plan). A CLI error here does NOT
+    // short-circuit: tier 3 is still attempted so a tier-3 candidate can
+    // still dispatch (operator refinement).
+    let tier2Error = false;
     const intakeComplete = await deps.getNextItem('intake_complete');
-    if (!intakeComplete.ok) {
-      // Transient wl/CLI failure: fail closed to busy — no dispatch, and the
-      // caller must NOT enter a cooldown (a broken CLI is not an empty backlog).
-      return { dispatched: false, reason: 'wl-error' };
+    if (intakeComplete.ok) {
+      if (intakeComplete.candidate !== null) {
+        await deps.claimItem(intakeComplete.candidate.id);
+        await deps.spawnAgentPane(buildDowntimePrompt('plan', intakeComplete.candidate), opts);
+        await recordDispatchAudit(deps, 'plan', intakeComplete.candidate, opts.cwd);
+        return { dispatched: true, candidate: intakeComplete.candidate, kind: 'plan' };
+      }
+    } else {
+      tier2Error = true;
     }
-    if (intakeComplete.candidate !== null) {
-      await deps.claimItem(intakeComplete.candidate.id);
-      await deps.spawnAgentPane(buildDowntimePrompt('plan', intakeComplete.candidate), opts);
-      await recordDispatchAudit(deps, 'plan', intakeComplete.candidate, opts.cwd);
-      return { dispatched: true, candidate: intakeComplete.candidate, kind: 'plan' };
-    }
+
+    // Tier 3 (idea → /skill:intake) is ALWAYS attempted when tier 2 produced
+    // no candidate — including when tier 2 errored.
     const idea = await deps.getNextItem('idea');
-    if (!idea.ok) {
-      return { dispatched: false, reason: 'wl-error' };
+    if (idea.ok) {
+      if (idea.candidate !== null) {
+        await deps.claimItem(idea.candidate.id);
+        await deps.spawnAgentPane(buildDowntimePrompt('intake', idea.candidate), opts);
+        await recordDispatchAudit(deps, 'intake', idea.candidate, opts.cwd);
+        return { dispatched: true, candidate: idea.candidate, kind: 'intake' };
+      }
+      if (tier2Error) {
+        // Tier 2 errored and tier 3 answered empty: the backlog is NOT
+        // provably empty (the intake_complete state is unknown) → fail
+        // closed to busy (a strike), never a no-candidate — partial
+        // information must not pause the worker.
+        return { dispatched: false, reason: 'wl-error' };
+      }
+      // Both tiers answered with no candidate → genuine empty backlog (the
+      // only outcome that triggers the no-candidate cooldown in the worker).
+      return { dispatched: false, reason: 'no-candidate' };
     }
-    if (idea.candidate !== null) {
-      await deps.claimItem(idea.candidate.id);
-      await deps.spawnAgentPane(buildDowntimePrompt('intake', idea.candidate), opts);
-      await recordDispatchAudit(deps, 'intake', idea.candidate, opts.cwd);
-      return { dispatched: true, candidate: idea.candidate, kind: 'intake' };
-    }
-    return { dispatched: false, reason: 'no-candidate' };
+    // Tier 3 errored (with or without a tier-2 error): fail closed to busy.
+    // The worker counts this as one CLI-error strike; the backlog is not
+    // provably empty so this is never `no-candidate` (the three-strike rule
+    // governs when consecutive errors pause the worker).
+    return { dispatched: false, reason: 'wl-error' };
   } finally {
     dispatchInFlight = false;
   }
@@ -590,6 +644,12 @@ export interface DowntimeWorker {
    * (WL-0MSI7DQL10016QYX).
    */
   readonly paused: boolean;
+  /**
+   * Count of consecutive CLI-error dispatch outcomes (three-strike rule).
+   * Reset to 0 on a successful dispatch, a genuine no-candidate outcome, or
+   * when a cooldown expires.
+   */
+  readonly errorStrikes: number;
 }
 
 /**
@@ -602,8 +662,11 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   let lastDispatchAt: number | null = null;
   // No-candidate cooldown (WL-0MSI7DQL10016QYX): timestamp until which the
   // worker is fully paused (no poll, no idle tracking, no dispatch) after a
-  // genuine empty backlog. null = not paused.
+  // genuine empty backlog OR three consecutive CLI errors. null = not paused.
   let cooldownUntil: number | null = null;
+  // Three-strike rule: consecutive CLI-error dispatch outcomes. A successful
+  // dispatch, a genuine no-candidate outcome, or an expired cooldown resets it.
+  let errorStrikes = 0;
 
   return {
     get idleSince(): number | null {
@@ -621,6 +684,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     get paused(): boolean {
       return cooldownUntil !== null && Date.now() < cooldownUntil;
     },
+    get errorStrikes(): number {
+      return errorStrikes;
+    },
     async tick(): Promise<DowntimeWorkerTickResult> {
       const cfg = opts.config();
       if (!cfg.enabled) return { polled: false, dispatched: false, idle: false };
@@ -634,6 +700,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           return { polled: false, dispatched: false, idle: false };
         }
         cooldownUntil = null; // pause expired — resume normal polling
+        errorStrikes = 0; // fresh strike counter after the pause
       }
       if (opts.poller.isPolling()) return { polled: false, dispatched: false, idle: tracker.idleSince !== null };
 
@@ -659,6 +726,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         });
         if (outcome.dispatched) {
           lastDispatchAt = Date.now();
+          errorStrikes = 0; // a successful dispatch proves the CLI is healthy
           // Belt-and-suspenders: even if the proxy does not immediately
           // report busy, require a fresh full idle period before the next
           // dispatch (AC5).
@@ -668,11 +736,35 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           // pause entirely so the worker stops burning cycles (proxy polling
           // + wl next spawns) for the configured cooldown. Reset the idle
           // tracker so a fresh full idle period is required after the pause.
+          errorStrikes = 0; // the CLI answered — it is healthy
           cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
           tracker.record(false);
+        } else if (outcome.reason === 'wl-error') {
+          // Three-strike rule on CLI errors: a dispatch attempt ending in a
+          // wl failure is one strike. Three consecutive strikes pause the
+          // worker entirely (no dispatch) AFTER logging the persistent error
+          // so the failure is auditable. A single transient error does NOT
+          // pause — it retries on the next idle period.
+          errorStrikes += 1;
+          if (errorStrikes >= DOWNTIME_ERROR_STRIKE_LIMIT) {
+            try {
+              await opts.deps.recordError({
+                cwd: cfg.cwd,
+                at: new Date().toISOString(),
+                message:
+                  `Downtime worker: ${DOWNTIME_ERROR_STRIKE_LIMIT} consecutive ` +
+                  `wl CLI errors — pausing dispatch for ${cfg.noCandidateCooldownMs}ms.`,
+              });
+            } catch {
+              // fail-closed: error logging must never crash the worker
+            }
+            cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
+            errorStrikes = 0;
+            tracker.record(false);
+          }
         }
-        // Any other non-dispatch outcome (wl-error, dispatch-in-flight) is
-        // fail-closed to busy — NO cooldown; the next idle period retries.
+        // Any other non-dispatch outcome (dispatch-in-flight) is neutral:
+        // no strike, no cooldown — the next idle period retries.
         return { polled: true, dispatched: outcome.dispatched, idle: true };
       } finally {
         dispatching = false;

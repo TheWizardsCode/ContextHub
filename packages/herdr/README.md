@@ -217,11 +217,15 @@ never crash the plugin. Each poll is single-flight with a per-poll timeout.
 
 **Dispatch behaviour** — once idle has been continuous for the threshold, the
 worker first runs `wl list --status completed --stage in_review --json` and
-selects the first completed/in_review item **without** a valid audit,
-dispatching `/skill:audit <id>` (pane named `Downtime audit`). If none, it
-runs `wl next --stage intake_complete --json` and dispatches `/skill:plan
-<id>`; if no such item it runs `wl next --stage idea --json` and
-dispatches `/skill:intake <id>`; if all three are empty nothing is dispatched.
+selects the first completed/in_review item **without** a valid audit that was
+**modified within the last 7 days** (`updatedAt` recency window; a candidate
+with a missing `updatedAt` is still selected — recency cannot be verified —
+while an unparseable one is skipped), dispatching `/skill:audit <id>` (pane
+named `Downtime audit`). If none, it runs `wl next --stage intake_complete
+--json` and dispatches `/skill:plan <id>`; if no such item it runs `wl next
+--stage idea --json` and dispatches `/skill:intake <id>`; if all three are
+empty nothing is dispatched. A `wl`/CLI error on the `intake_complete` lookup
+does **not** skip the `idea` lookup — a tier-3 candidate can still dispatch.
 The item is claimed (`wl update <id> --status in_progress`) *before* the pane
 spawns, so it appears in-progress immediately and a second pane's `wl next`
 cannot select it. Panes are named `Downtime audit` / `Downtime plan` /
@@ -236,10 +240,18 @@ proxy polling, no idle tracking, and no dispatch until the pause expires — so
 it stops burning cycles (proxy polling + `wl` spawns) during empty periods.
 Only a *genuine* empty backlog triggers the pause: transient `wl`/CLI errors
 and the in-flight dispatch guard fail closed to busy and never start a
-cooldown. When the pause expires the worker resumes polling and requires a
-fresh full idle period before the next dispatch (no stale idle credit). The
-worker re-reads the setting every tick, so a change applies from the next
-cooldown entry without a plugin restart.
+cooldown on their own. When the pause expires the worker resumes polling and
+requires a fresh full idle period before the next dispatch (no stale idle
+credit). The worker re-reads the setting every tick, so a change applies from
+the next cooldown entry without a plugin restart.
+
+**Three-strike rule on CLI errors** — a dispatch attempt that ends in a `wl`
+CLI error counts as one strike. Three **consecutive** strikes pause the
+worker entirely (same full pause as the empty-backlog cooldown) *after*
+logging the persistent error to the rolling downtime log, so a persistently
+broken `wl` CLI stops burning idle cycles instead of retrying forever. A
+successful dispatch, a genuine no-candidate outcome, or an expired pause
+resets the strike counter; a single transient error never pauses on its own.
 
 **Worklog-root routing** — the downtime worker's `wl next` selection and its
 `wl comment add` audit trail run through the same `--worklog-dir` override as
@@ -266,9 +278,11 @@ comment on the dispatched item (`wl comment add`, author
 UTC timestamp — this survives `wl sync` and is the durable trail; and (2) a
 bounded JSONL entry in `.worklog/downtime-dispatches.log` under the
 resolved worklog root (rolling — only the most recent 100 entries are
-kept). The `.worklog` log file is gitignored and local-only; both writes
-are fail-closed, so a comment or log failure never blocks or fails a
-dispatch.
+kept). A three-strike CLI-error pause additionally writes a JSONL entry to
+the same rolling log (with the `at` timestamp and an error message) so the
+persistent failure is auditable even though nothing was dispatched. The
+`.worklog` log file is gitignored and local-only; all writes are
+fail-closed, so a comment or log failure never blocks or fails a dispatch.
 
 The worker runs inside the plugin's single consolidated scheduler loop (one
 `setInterval`; no independent timers), uses unref'd timers, and is cleaned up

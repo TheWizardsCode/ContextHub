@@ -817,6 +817,43 @@ describe('createDowntimeDeps recordDispatch', () => {
   });
 });
 
+describe('createDowntimeDeps recordError', () => {
+  afterEach(() => {
+    for (const dir of tempDirs) {
+      try { rmSync(dir, { recursive: true }); } catch { /* ignore */ }
+    }
+    tempDirs.length = 0;
+  });
+
+  it('writes a JSONL entry to the rolling downtime log under the cwd', async () => {
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.recordError({
+      cwd,
+      at: '2026-01-01T00:00:00.000Z',
+      message: 'Downtime worker: 3 consecutive wl CLI errors',
+    });
+
+    const raw = readFileSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), 'utf8');
+    const lines = raw.split('\n').filter((l) => l.trim() !== '');
+    expect(lines).toHaveLength(1);
+    const entry = JSON.parse(lines[0]);
+    expect(entry.at).toBe('2026-01-01T00:00:00.000Z');
+    expect(entry.message).toContain('3 consecutive');
+  });
+
+  it('is fail-closed when the log write fails (e.g. .worklog path is a file)', async () => {
+    const cwd = makeTempDir();
+    writeFileSync(join(cwd, '.worklog'), 'not a directory', 'utf8');
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await expect(
+      deps.recordError({ cwd, at: '2026-01-01T00:00:00.000Z', message: 'boom' }),
+    ).resolves.toBeUndefined();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Agent-pane association capture (WL-0MSBQUJQX005RAT9)
 //
