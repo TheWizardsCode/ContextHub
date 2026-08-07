@@ -17,16 +17,24 @@
  *  - `dispatchDowntimeWork` — dispatch orchestration: `wl next --stage
  *    intake_complete` → `/skill:plan <id>`, fallback `--stage idea` →
  *    `/skill:intake <id>`, pre-dispatch claim, per-process single-flight.
+ *    `wl next` failures are reported as `{ok:false}` (fail closed to busy)
+ *    and are never mistaken for an empty backlog.
  *  - `buildDowntimePaneArgs` / `spawnDowntimePane` — send-to-pi.sh
  *    invocation (`--pane-name Downtime <kind>`, `--no-focus`, `--cwd`,
  *    `--model`), detached and unref'd.
  *  - `createDowntimeWorker` — per-tick orchestrator (poll → evaluate →
- *    track → dispatch) with settings re-read each tick.
+ *    track → dispatch) with settings re-read each tick, plus the
+ *    no-candidate cooldown (WL-0MSI7DQL10016QYX): a genuine empty backlog
+ *    in both stages pauses the worker entirely for
+ *    `downtimeNoCandidateCooldownMs` (default 60 min) — no poll, no idle
+ *    tracking, no dispatch — and resets the idle tracker so a fresh full
+ *    idle period is required after the pause. Transient `wl` errors and the
+ *    in-flight dispatch guard never trigger the cooldown.
  *  - `buildDowntimePrompt` / `BLOCKED_QUESTIONS_INSTRUCTION` — dispatched
  *    agent prompt, including the blocked-questions instruction.
  *  - `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` /
- *    `clampDowntimeRequiredFreeSlots` — settings clamps, wired into
- *    `settings.ts`.
+ *    `clampDowntimeRequiredFreeSlots` / `clampDowntimeNoCandidateCooldownMs`
+ *    — settings clamps, wired into `settings.ts`.
  *
  * Fail-closed behaviour (never dispatch, never throw) is the SAFE default
  * at every boundary.
@@ -50,6 +58,12 @@ export const DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS = 240_000;
 
 /** 0 = all slots must be free (default). Any positive integer N is accepted. */
 export const DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 0;
+
+/** Sane floor for the no-candidate cooldown (the pause cannot be disabled or set trivially small). */
+export const DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS = 60_000;
+
+/** Default pause after a genuine empty backlog: 60 minutes. */
+export const DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS = 3_600_000;
 
 export const DEFAULT_DOWNTIME_PROXY_URL = 'http://192.168.0.199:8000';
 export const DEFAULT_DOWNTIME_MODEL = 'plan';
@@ -303,10 +317,23 @@ export interface DowntimeCandidate {
   stage: DowntimeStage;
 }
 
+/**
+ * Outcome of one `wl next --stage <stage> --json` lookup.
+ *
+ * `ok: true` means the CLI answered (candidate may still be null when the
+ * stage is genuinely empty); `ok: false` means a transient wl/CLI failure
+ * (fail-closed to busy — never a candidate and never a cooldown trigger).
+ * The distinction matters: an empty backlog pauses the worker, while a
+ * broken CLI must not (it would silently stop all idle dispatch for an hour).
+ */
+export type DowntimeNextResult =
+  | { ok: true; candidate: DowntimeCandidate | null }
+  | { ok: false };
+
 /** External boundaries injected so the dispatch logic is testable. */
 export interface DowntimeWorkerDeps {
-  /** Runs `wl next --stage <stage> --json` and returns the first candidate or null. */
-  getNextItem(stage: DowntimeStage): Promise<DowntimeCandidate | null>;
+  /** Runs `wl next --stage <stage> --json` and reports the first candidate (or a wl failure). */
+  getNextItem(stage: DowntimeStage): Promise<DowntimeNextResult>;
   /** Claims the item (`wl update <id> --status in_progress`) before dispatch. */
   claimItem(itemId: string): Promise<void>;
   /** Opens a visible pi agent pane running the prompt (via send-to-pi.sh). */
@@ -364,18 +391,26 @@ export async function dispatchDowntimeWork(
   dispatchInFlight = true;
   try {
     const intakeComplete = await deps.getNextItem('intake_complete');
-    if (intakeComplete !== null) {
-      await deps.claimItem(intakeComplete.id);
-      await deps.spawnAgentPane(buildDowntimePrompt('plan', intakeComplete), opts);
-      await recordDispatchAudit(deps, 'plan', intakeComplete, opts.cwd);
-      return { dispatched: true, candidate: intakeComplete, kind: 'plan' };
+    if (!intakeComplete.ok) {
+      // Transient wl/CLI failure: fail closed to busy — no dispatch, and the
+      // caller must NOT enter a cooldown (a broken CLI is not an empty backlog).
+      return { dispatched: false, reason: 'wl-error' };
+    }
+    if (intakeComplete.candidate !== null) {
+      await deps.claimItem(intakeComplete.candidate.id);
+      await deps.spawnAgentPane(buildDowntimePrompt('plan', intakeComplete.candidate), opts);
+      await recordDispatchAudit(deps, 'plan', intakeComplete.candidate, opts.cwd);
+      return { dispatched: true, candidate: intakeComplete.candidate, kind: 'plan' };
     }
     const idea = await deps.getNextItem('idea');
-    if (idea !== null) {
-      await deps.claimItem(idea.id);
-      await deps.spawnAgentPane(buildDowntimePrompt('intake', idea), opts);
-      await recordDispatchAudit(deps, 'intake', idea, opts.cwd);
-      return { dispatched: true, candidate: idea, kind: 'intake' };
+    if (!idea.ok) {
+      return { dispatched: false, reason: 'wl-error' };
+    }
+    if (idea.candidate !== null) {
+      await deps.claimItem(idea.candidate.id);
+      await deps.spawnAgentPane(buildDowntimePrompt('intake', idea.candidate), opts);
+      await recordDispatchAudit(deps, 'intake', idea.candidate, opts.cwd);
+      return { dispatched: true, candidate: idea.candidate, kind: 'intake' };
     }
     return { dispatched: false, reason: 'no-candidate' };
   } finally {
@@ -491,6 +526,8 @@ export interface DowntimeWorkerConfig {
     requiredFreeSlots: number;
     model: string;
     cwd: string;
+    /** Pause duration after a genuine empty backlog (no-candidate), ms. */
+    noCandidateCooldownMs: number;
   };
 }
 
@@ -511,6 +548,12 @@ export interface DowntimeWorker {
   readonly lastDispatchAt: number | null;
   /** Whether the worker is enabled per the current settings (re-read). */
   readonly enabled: boolean;
+  /**
+   * True while the worker is paused in the no-candidate cooldown: no proxy
+   * polling, no idle tracking, and no dispatch until the pause expires
+   * (WL-0MSI7DQL10016QYX).
+   */
+  readonly paused: boolean;
 }
 
 /**
@@ -521,6 +564,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   const tracker = createIdleTracker();
   let dispatching = false;
   let lastDispatchAt: number | null = null;
+  // No-candidate cooldown (WL-0MSI7DQL10016QYX): timestamp until which the
+  // worker is fully paused (no poll, no idle tracking, no dispatch) after a
+  // genuine empty backlog. null = not paused.
+  let cooldownUntil: number | null = null;
 
   return {
     get idleSince(): number | null {
@@ -535,9 +582,23 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     get enabled(): boolean {
       return opts.config().enabled;
     },
+    get paused(): boolean {
+      return cooldownUntil !== null && Date.now() < cooldownUntil;
+    },
     async tick(): Promise<DowntimeWorkerTickResult> {
       const cfg = opts.config();
       if (!cfg.enabled) return { polled: false, dispatched: false, idle: false };
+      // Cooldown gate: while paused the worker performs NO proxy polling, NO
+      // idle tracking, and NO dispatch. The pause is a full stop (user
+      // confirmed "pause completely"); once it expires the idle tracker is
+      // empty, so a fresh full idle period is required before the next
+      // dispatch (no stale idle credit from before the pause).
+      if (cooldownUntil !== null) {
+        if (Date.now() < cooldownUntil) {
+          return { polled: false, dispatched: false, idle: false };
+        }
+        cooldownUntil = null; // pause expired — resume normal polling
+      }
       if (opts.poller.isPolling()) return { polled: false, dispatched: false, idle: tracker.idleSince !== null };
 
       const status = await opts.poller.poll();
@@ -566,7 +627,16 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           // report busy, require a fresh full idle period before the next
           // dispatch (AC5).
           tracker.record(false);
+        } else if (outcome.reason === 'no-candidate') {
+          // Genuine empty backlog (both stages answered with no candidate):
+          // pause entirely so the worker stops burning cycles (proxy polling
+          // + wl next spawns) for the configured cooldown. Reset the idle
+          // tracker so a fresh full idle period is required after the pause.
+          cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
+          tracker.record(false);
         }
+        // Any other non-dispatch outcome (wl-error, dispatch-in-flight) is
+        // fail-closed to busy — NO cooldown; the next idle period retries.
         return { polled: true, dispatched: outcome.dispatched, idle: true };
       } finally {
         dispatching = false;
@@ -676,4 +746,14 @@ export function clampDowntimeIdleThresholdMs(value: number): number {
 export function clampDowntimeRequiredFreeSlots(value: number): number {
   if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS;
   return Math.round(value);
+}
+
+/**
+ * Clamp the no-candidate cooldown: reject negative/non-finite (fall back to
+ * the 60-minute default) and floor at 60s so the pause cannot be disabled or
+ * set trivially small (WL-0MSI7DQL10016QYX).
+ */
+export function clampDowntimeNoCandidateCooldownMs(value: number): number {
+  if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS;
+  return Math.max(Math.round(value), DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS);
 }

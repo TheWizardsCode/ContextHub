@@ -72,6 +72,22 @@ export function getWorklogDir(): string | undefined {
 }
 
 /**
+ * Build the argument vector for a wl CLI invocation, prepending the
+ * `--worklog-dir` override when set (it is a global option that must appear
+ * BEFORE the subcommand). Callers that invoke wl directly via
+ * `getExecFileAsync()` (e.g. the downtime worker's `wl next` and
+ * `wl comment add`) use this so their commands resolve against the same
+ * worklog root as the worklist — without the override the argument vector is
+ * returned unchanged (current behavior preserved).
+ */
+export function buildWlArgs(args: string[]): string[] {
+  if (_worklogDir !== undefined) {
+    return ['--worklog-dir', _worklogDir, ...args];
+  }
+  return args;
+}
+
+/**
  * Reset the worklog directory override.
  */
 export function resetWorklogDir(): void {
@@ -332,11 +348,8 @@ async function runWlInner(args: string[], includeJson: boolean, timeoutMs?: numb
         fullArgs = args;
       }
 
-      // Prepend --worklog-dir when set (it's a global option that must
-      // appear before the subcommand).
-      if (_worklogDir !== undefined) {
-        fullArgs = ['--worklog-dir', _worklogDir, ...fullArgs];
-      }
+      // Prepend --worklog-dir when set (global option before the subcommand).
+      fullArgs = buildWlArgs(fullArgs);
 
       const result = await execFileAsync(binary, fullArgs, {
         maxBuffer: 1024 * 1024 * 5,

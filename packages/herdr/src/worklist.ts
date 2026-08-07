@@ -1728,7 +1728,8 @@ export function handleKeypress(
 /**
  * Render the inline downtime-worker status fragment appended to the list
  * header (AC3, WL-0MSF49FMW009M06K): `[⏳ downtime idle m:ss]`,
- * `[downtime busy]`, `[⏳ downtime dispatching]`, or `[downtime disabled]`.
+ * `[downtime busy]`, `[⏳ downtime dispatching]`, `[downtime disabled]`, or
+ * `[downtime paused]` (no-candidate cooldown, WL-0MSI7DQL10016QYX).
  * Inline-only — it never adds a row, so the pane-height budget is intact.
  */
 export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string {
@@ -1738,6 +1739,12 @@ export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string
   }
   if (!worker.enabled) {
     return ` ${ANSI.dim}[downtime disabled]${ANSI.reset}`;
+  }
+  if (worker.paused) {
+    // No-candidate cooldown: the worker is not polling, so `idleSince` is
+    // stale/empty — render the honest paused state instead of a stale idle
+    // duration (AC6, WL-0MSI7DQL10016QYX).
+    return ` ${ANSI.dim}[downtime paused]${ANSI.reset}`;
   }
   if (worker.idleSince !== null) {
     const elapsedSecs = Math.max(0, Math.floor((Date.now() - worker.idleSince) / 1000));

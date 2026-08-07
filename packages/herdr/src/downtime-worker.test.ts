@@ -34,9 +34,12 @@ import {
   clampDowntimePollInterval,
   clampDowntimeIdleThresholdMs,
   clampDowntimeRequiredFreeSlots,
+  clampDowntimeNoCandidateCooldownMs,
   DOWNTIME_POLL_INTERVAL_FLOOR_MS,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+  DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
+  DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS,
   type LlamaStatus,
   type LlamaStatusFetcher,
   type DowntimeCandidate,
@@ -57,7 +60,7 @@ import {
 /** Shared deps mock for dispatch tests. */
 function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
   return {
-    getNextItem: vi.fn().mockResolvedValue(null),
+    getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
     claimItem: vi.fn().mockResolvedValue(undefined),
     spawnAgentPane: vi.fn().mockResolvedValue(undefined),
     recordDispatch: vi.fn().mockResolvedValue(undefined),
@@ -181,9 +184,8 @@ describe('dispatch selection', () => {
   it('runs /skill:plan on the next intake_complete item', async () => {
     const deps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({
-        id: 'WL-ABC',
-        title: 'Some task',
-        stage: 'intake_complete',
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
       }),
     });
 
@@ -203,9 +205,8 @@ describe('dispatch selection', () => {
   it('claims the item BEFORE the pane spawns', async () => {
     const deps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({
-        id: 'WL-ABC',
-        title: 'Some task',
-        stage: 'intake_complete',
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
       }),
     });
 
@@ -221,8 +222,8 @@ describe('dispatch selection', () => {
     const deps = makeDeps({
       getNextItem: vi
         .fn()
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce({ id: 'WL-DEF', title: 'An idea', stage: 'idea' }),
+        .mockResolvedValueOnce({ ok: true, candidate: null })
+        .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-DEF', title: 'An idea', stage: 'idea' } }),
     });
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
@@ -250,6 +251,37 @@ describe('dispatch selection', () => {
     expect(deps.claimItem).not.toHaveBeenCalled();
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
+  it('fails closed to wl-error (no dispatch, no candidate) when the intake_complete lookup errors', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({ ok: false }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(deps.getNextItem).toHaveBeenCalledTimes(1);
+    expect(deps.getNextItem).toHaveBeenCalledWith('intake_complete');
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('wl-error');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('fails closed to wl-error when the idea lookup errors after an empty intake_complete stage', async () => {
+    const deps = makeDeps({
+      getNextItem: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, candidate: null })
+        .mockResolvedValueOnce({ ok: false }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea');
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('wl-error');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
 });
 
 // ── Dispatch audit trail (WL-0MSGPI4AR000YOK8) ────────────────────────
@@ -258,9 +290,8 @@ describe('dispatch audit trail', () => {
   it('records a plan dispatch with item id, kind, timestamp and cwd', async () => {
     const deps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({
-        id: 'WL-ABC',
-        title: 'Some task',
-        stage: 'intake_complete',
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
       }),
     });
 
@@ -279,8 +310,8 @@ describe('dispatch audit trail', () => {
     const deps = makeDeps({
       getNextItem: vi
         .fn()
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce({ id: 'WL-DEF', title: 'An idea', stage: 'idea' }),
+        .mockResolvedValueOnce({ ok: true, candidate: null })
+        .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-DEF', title: 'An idea', stage: 'idea' } }),
     });
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
@@ -302,9 +333,8 @@ describe('dispatch audit trail', () => {
   it('keeps the dispatch successful when recordDispatch fails (audit never blocks work)', async () => {
     const deps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({
-        id: 'WL-ABC',
-        title: 'Some task',
-        stage: 'intake_complete',
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
       }),
       recordDispatch: vi.fn().mockRejectedValue(new Error('audit boom')),
     });
@@ -340,9 +370,8 @@ describe('single-flight dispatch guard', () => {
     });
     const deps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({
-        id: 'WL-ABC',
-        title: 'Some task',
-        stage: 'intake_complete',
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
       }),
       spawnAgentPane: vi.fn().mockImplementation(() => gate),
     });
@@ -361,9 +390,8 @@ describe('single-flight dispatch guard', () => {
   it('allows a new dispatch once the previous one has completed', async () => {
     const deps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({
-        id: 'WL-ABC',
-        title: 'Some task',
-        stage: 'intake_complete',
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
       }),
     });
 
@@ -588,6 +616,18 @@ describe('downtime settings clamps', () => {
     expect(clampDowntimeRequiredFreeSlots(2.7)).toBe(3);
     expect(clampDowntimeRequiredFreeSlots(2)).toBe(2);
   });
+
+  it('clampDowntimeNoCandidateCooldownMs keeps valid values and floors at 60s', () => {
+    expect(clampDowntimeNoCandidateCooldownMs(3_600_000)).toBe(3_600_000);
+    expect(clampDowntimeNoCandidateCooldownMs(1_000)).toBe(DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS);
+    expect(clampDowntimeNoCandidateCooldownMs(60_000)).toBe(60_000);
+  });
+
+  it('clampDowntimeNoCandidateCooldownMs rejects negative and non-finite values', () => {
+    expect(clampDowntimeNoCandidateCooldownMs(-1)).toBe(DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS);
+    expect(clampDowntimeNoCandidateCooldownMs(Number.NaN)).toBe(DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS);
+    expect(clampDowntimeNoCandidateCooldownMs(Infinity)).toBe(DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS);
+  });
 });
 
 // ── Wiring helpers (F4) ───────────────────────────────────────────────
@@ -636,6 +676,7 @@ describe('downtime worker enabled state', () => {
         requiredFreeSlots: 0,
         model: 'plan',
         cwd: '/repo',
+        noCandidateCooldownMs: 3_600_000,
       }),
     });
     expect(worker.enabled).toBe(true);
@@ -703,6 +744,7 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
   function makeWorker(overrides: {
     enabled?: boolean;
     thresholdMs?: number;
+    cooldownMs?: number;
     status?: unknown;
     deps?: Partial<DowntimeWorkerDeps>;
   } = {}) {
@@ -712,6 +754,7 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
       requiredFreeSlots: 0,
       model: 'plan',
       cwd: '/repo',
+      noCandidateCooldownMs: overrides.cooldownMs ?? 3_600_000,
     };
     const fetcher = vi
       .fn()
@@ -719,9 +762,8 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
     const poller = createDowntimePoller('http://proxy:8000', fetcher);
     const deps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({
-        id: 'WL-ABC',
-        title: 'Some task',
-        stage: 'intake_complete',
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
       }),
       ...overrides.deps,
     });
@@ -859,5 +901,189 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
     const firstResult = await first;
     expect(firstResult.dispatched).toBe(true);
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── No-candidate cooldown (WL-0MSI7DQL10016QYX) ──────────────────────
+
+describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
+  /** Empty backlog in BOTH stages → the worker should pause. */
+  function makeEmptyBacklogWorker(overrides: {
+    cooldownMs?: number;
+    deps?: Partial<DowntimeWorkerDeps>;
+  } = {}) {
+    const cfg = {
+      enabled: true,
+      thresholdMs: 240_000,
+      requiredFreeSlots: 0,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: overrides.cooldownMs ?? 3_600_000,
+    };
+    const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      ...overrides.deps,
+    });
+    const worker = createDowntimeWorker({
+      poller,
+      deps,
+      config: () => ({ ...cfg }),
+    });
+    return { worker, deps, cfg, fetcher };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('enters the cooldown only after a genuine no-candidate outcome', async () => {
+    const { worker, deps } = makeEmptyBacklogWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick(); // idle run starts
+    vi.setSystemTime(start + 240_000); // threshold met → dispatch attempt
+
+    const result = await worker.tick();
+
+    expect(result.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(worker.paused).toBe(true);
+  });
+
+  it('performs no proxy polling, no idle tracking and no dispatch while paused', async () => {
+    const { worker, deps, fetcher } = makeEmptyBacklogWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + 240_000);
+    await worker.tick(); // enters cooldown
+    expect(worker.paused).toBe(true);
+
+    const pollsBefore = fetcher.mock.calls.length;
+    const idleBefore = worker.idleSince;
+    vi.setSystemTime(start + 240_000 + 60_000); // still within the pause
+    const result = await worker.tick();
+
+    expect(result).toEqual({ polled: false, dispatched: false, idle: false });
+    expect(fetcher.mock.calls.length).toBe(pollsBefore); // no poll
+    expect(worker.idleSince).toBe(idleBefore); // no idle tracking
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(worker.paused).toBe(true);
+  });
+
+  it('resumes polling once the cooldown expires and requires a fresh full idle period', async () => {
+    let backlogEmpty = true;
+    const { worker, deps } = makeEmptyBacklogWorker({
+      deps: {
+        getNextItem: vi.fn().mockImplementation(() =>
+          Promise.resolve(
+            backlogEmpty
+              ? { ok: true, candidate: null }
+              : { ok: true, candidate: { id: 'WL-NEW', title: 'New item', stage: 'intake_complete' } },
+          ),
+        ),
+      },
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + 240_000);
+    await worker.tick(); // empty backlog → cooldown
+    expect(worker.paused).toBe(true);
+
+    // The project's backlog fills back up while the worker is paused.
+    backlogEmpty = false;
+    vi.setSystemTime(start + 240_000 + 3_600_000); // pause expires
+    const resumed = await worker.tick();
+    expect(resumed.polled).toBe(true);
+    expect(resumed.dispatched).toBe(false); // fresh idle run — no stale credit
+    expect(worker.paused).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+
+    // A full new idle period must elapse before the next dispatch.
+    vi.setSystemTime(start + 240_000 + 3_600_000 + 240_000);
+    const afterFreshIdle = await worker.tick();
+    expect(afterFreshIdle.dispatched).toBe(true); // candidate now available
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not enter the cooldown on a transient wl error (fail closed to busy)', async () => {
+    const { worker, deps } = makeEmptyBacklogWorker({
+      deps: { getNextItem: vi.fn().mockResolvedValue({ ok: false }) },
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + 240_000);
+
+    const result = await worker.tick();
+
+    expect(result.dispatched).toBe(false);
+    expect(worker.paused).toBe(false); // wl errors are NOT an empty backlog
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('does not enter the cooldown when the dispatch guard reports in-flight', async () => {
+    // Hold the module-level dispatch single-flight guard with an outer
+    // in-flight dispatch; the worker's own dispatch call then returns
+    // `dispatch-in-flight`, which must NOT trigger the cooldown.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const outerDeps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-X', title: 'Outer', stage: 'intake_complete' },
+      }),
+      spawnAgentPane: vi.fn().mockImplementation(() => gate),
+    });
+    const outer = dispatchDowntimeWork(outerDeps, { model: 'plan', cwd: '/repo' });
+
+    const { worker } = makeEmptyBacklogWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + 240_000);
+    const result = await worker.tick();
+
+    expect(result.dispatched).toBe(false);
+    expect(worker.paused).toBe(false); // in-flight guard is not an empty backlog
+
+    release();
+    await outer;
+  });
+
+  it('re-reads the cooldown setting each tick so a change applies on the next cooldown entry', async () => {
+    const { worker, cfg } = makeEmptyBacklogWorker({ cooldownMs: 3_600_000 });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + 240_000);
+    await worker.tick(); // enters cooldown with 3_600_000 (expires at 4_840_000)
+    expect(worker.paused).toBe(true);
+
+    // Operator lowers the cooldown live; the in-progress pause keeps its
+    // original expiry, but the NEXT cooldown entry uses the new value.
+    cfg.noCandidateCooldownMs = 60_000;
+    vi.setSystemTime(start + 240_000 + 3_600_000); // original pause expires
+    await worker.tick(); // resumes, starts a fresh idle run
+
+    vi.setSystemTime(start + 240_000 + 3_600_000 + 240_000); // fresh threshold met
+    await worker.tick(); // empty backlog again → 60s cooldown (new value)
+    expect(worker.paused).toBe(true);
+
+    // With the NEW 60s value the pause expires long before the old 60-min
+    // default would have: at +61s the worker has resumed polling.
+    vi.setSystemTime(start + 240_000 + 3_600_000 + 240_000 + 61_000);
+    const resumed = await worker.tick();
+    expect(resumed.polled).toBe(true);
+    expect(worker.paused).toBe(false);
   });
 });

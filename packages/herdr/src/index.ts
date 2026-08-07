@@ -31,6 +31,7 @@ import {
   setWorklogDir,
   claimWorkItem,
   getExecFileAsync,
+  buildWlArgs,
 } from './fetcher.js';
 import { AgentTracker, AGENT_PANES_FILE, mergeAgentStates } from './agent-tracker.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
@@ -48,6 +49,7 @@ import {
   type DowntimeStage,
   type DowntimeCandidate,
   type DowntimeDispatchEvent,
+  type DowntimeNextResult,
   type DowntimeSpawn,
   defaultDowntimeSpawn,
   buildDowntimeDispatchComment,
@@ -330,14 +332,22 @@ export function createDowntimeDeps(
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
 ): DowntimeWorkerDeps {
   return {
-    async getNextItem(stage: DowntimeStage): Promise<DowntimeCandidate | null> {
+    async getNextItem(stage: DowntimeStage): Promise<DowntimeNextResult> {
       try {
-        const { stdout } = await getExecFileAsync()('wl', ['next', '--stage', stage, '--json'], {
-          encoding: 'utf8',
-        });
-        return parseNextItemOutput(stdout, stage);
+        // buildWlArgs() prepends the tab's resolved --worklog-dir override
+        // (WL-0MSI7DQL10016QYX): the downtime worker must select candidates
+        // from the SAME worklog root the worklist uses, not the plugin
+        // process's own cwd. Without the override the vector is unchanged.
+        const { stdout } = await getExecFileAsync()(
+          'wl',
+          buildWlArgs(['next', '--stage', stage, '--json']),
+          { encoding: 'utf8' },
+        );
+        return { ok: true, candidate: parseNextItemOutput(stdout, stage) };
       } catch {
-        return null; // wl failure → no dispatch (fail-closed)
+        // Transient wl failure → fail closed to busy: no dispatch, and the
+        // worker must NOT treat it as an empty backlog (no cooldown).
+        return { ok: false };
       }
     },
     async claimItem(itemId: string): Promise<void> {
@@ -355,10 +365,13 @@ export function createDowntimeDeps(
     },
     async recordDispatch(event: DowntimeDispatchEvent): Promise<void> {
       // 1. Durable trail: a comment on the item itself (survives wl sync).
+      // buildWlArgs() prepends the resolved --worklog-dir override so the
+      // comment lands on the item in ITS project's DB, not the plugin
+      // process's own cwd (WL-0MSI7DQL10016QYX).
       try {
         await getExecFileAsync()(
           'wl',
-          [
+          buildWlArgs([
             'comment',
             'add',
             event.itemId,
@@ -367,7 +380,7 @@ export function createDowntimeDeps(
             '--author',
             'herdr-downtime',
             '--json',
-          ],
+          ]),
           { timeout: 5000 },
         );
       } catch {
@@ -518,6 +531,7 @@ async function main(): Promise<void> {
             requiredFreeSlots: s.downtimeRequiredFreeSlots,
             model: s.downtimeModel,
             cwd: targetCwd,
+            noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
           };
         },
       })

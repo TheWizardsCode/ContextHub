@@ -22,6 +22,7 @@ import {
   resetExecFileAsync,
   resetWorklogDir,
   setExecFileAsync,
+  setWorklogDir,
 } from './fetcher.js';
 
 // ---------------------------------------------------------------------------
@@ -501,17 +502,48 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    const candidate = await deps.getNextItem('intake_complete');
+    const result = await deps.getNextItem('intake_complete');
 
     expect(mockExec).toHaveBeenCalledWith(
       'wl',
       ['next', '--stage', 'intake_complete', '--json'],
       expect.anything(),
     );
-    expect(candidate).toEqual({ id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' });
+    expect(result).toEqual({
+      ok: true,
+      candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+    });
   });
 
-  it('getNextItem returns null when wl reports no item', async () => {
+  it('getNextItem passes --worklog-dir when the tab resolved a worklog root', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ success: true, workItem: { id: 'SA-ABC', title: 'Sorra task' } }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+    setWorklogDir('/home/user/projects/SorraAgents/.worklog');
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextItem('intake_complete');
+
+    // The global option must appear BEFORE the subcommand, exactly as the
+    // worklist's runWl() prepends it (WL-0MSI7DQL10016QYX).
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      [
+        '--worklog-dir',
+        '/home/user/projects/SorraAgents/.worklog',
+        'next',
+        '--stage',
+        'intake_complete',
+        '--json',
+      ],
+      expect.anything(),
+    );
+    expect(result).toEqual({ ok: true, candidate: { id: 'SA-ABC', title: 'Sorra task', stage: 'intake_complete' } });
+  });
+
+  it('getNextItem reports ok:true with no candidate when wl reports no item', async () => {
     const mockExec = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({ success: false, workItem: null, reason: 'none' }),
       stderr: '',
@@ -519,13 +551,13 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextItem('idea')).toBeNull();
+    expect(await deps.getNextItem('idea')).toEqual({ ok: true, candidate: null });
   });
 
-  it('getNextItem fails closed (null) when wl errors', async () => {
+  it('getNextItem fails closed ({ok:false}) when wl errors', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextItem('idea')).toBeNull();
+    expect(await deps.getNextItem('idea')).toEqual({ ok: false });
   });
 
   it('claimItem runs wl update --status in_progress --assignee', async () => {
@@ -616,6 +648,39 @@ describe('createDowntimeDeps recordDispatch', () => {
         'WL-ABC',
         '--comment',
         expect.stringContaining('/skill:plan WL-ABC'),
+        '--author',
+        'herdr-downtime',
+        '--json',
+      ],
+      expect.anything(),
+    );
+  });
+
+  it('passes --worklog-dir to wl comment add when the tab resolved a worklog root', async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
+    setExecFileAsync(mockExec as never);
+    setWorklogDir('/home/user/projects/SorraAgents/.worklog');
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.recordDispatch({
+      itemId: 'SA-ABC',
+      kind: 'plan',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+      cwd: '/repo',
+    });
+
+    // The audit comment must land on the item in ITS project's DB, not the
+    // plugin process's cwd (WL-0MSI7DQL10016QYX).
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      [
+        '--worklog-dir',
+        '/home/user/projects/SorraAgents/.worklog',
+        'comment',
+        'add',
+        'SA-ABC',
+        '--comment',
+        expect.stringContaining('/skill:plan SA-ABC'),
         '--author',
         'herdr-downtime',
         '--json',

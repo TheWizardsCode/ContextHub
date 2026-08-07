@@ -9,10 +9,12 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { clampSyncInterval } from './auto-sync.js';
 import {
   clampDowntimeIdleThresholdMs,
+  clampDowntimeNoCandidateCooldownMs,
   clampDowntimePollInterval,
   clampDowntimeRequiredFreeSlots,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_MODEL,
+  DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_PROXY_URL,
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
@@ -50,6 +52,12 @@ export interface PluginSettings {
   downtimeProxyUrl: string;
   /** pi model pattern for dispatched agent panes (default `plan`). */
   downtimeModel: string;
+  /**
+   * Full pause (no proxy polling, no idle tracking, no dispatch) after the
+   * worker finds no candidate in either stage (genuine empty backlog).
+   * Floor 60s; default 3_600_000 ms (60 min).
+   */
+  downtimeNoCandidateCooldownMs: number;
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────
@@ -68,6 +76,7 @@ export const defaultSettings: PluginSettings = {
   downtimePollIntervalMs: DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   downtimeProxyUrl: DEFAULT_DOWNTIME_PROXY_URL,
   downtimeModel: DEFAULT_DOWNTIME_MODEL,
+  downtimeNoCandidateCooldownMs: DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
 };
 
 /** Minimum allowed browseItemCount. */
@@ -152,6 +161,9 @@ export function loadSettings(settingsPath?: string): PluginSettings {
         ? parsed.downtimeProxyUrl : defaultSettings.downtimeProxyUrl,
       downtimeModel: typeof parsed.downtimeModel === 'string' && parsed.downtimeModel.length > 0
         ? parsed.downtimeModel : defaultSettings.downtimeModel,
+      downtimeNoCandidateCooldownMs: typeof parsed.downtimeNoCandidateCooldownMs === 'number'
+        ? clampDowntimeNoCandidateCooldownMs(parsed.downtimeNoCandidateCooldownMs)
+        : defaultSettings.downtimeNoCandidateCooldownMs,
     };
   } catch {
     return { ...defaultSettings };

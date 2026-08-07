@@ -94,3 +94,24 @@ describe('clampBrowseItemCount', () => {
     expect(clampBrowseItemCount(Infinity)).toBe(20);
   });
 });
+
+describe('downtimeNoCandidateCooldownMs', () => {
+  it('defaults to 3_600_000 ms (60 minutes)', () => {
+    expect(defaultSettings.downtimeNoCandidateCooldownMs).toBe(3_600_000);
+  });
+
+  it('loads a persisted value and clamps below the 60s floor', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, downtimeNoCandidateCooldownMs: 1_000 });
+    expect(loadSettings(path).downtimeNoCandidateCooldownMs).toBe(60_000);
+
+    saveSettings(path, { ...defaultSettings, downtimeNoCandidateCooldownMs: 3_600_000 });
+    expect(loadSettings(path).downtimeNoCandidateCooldownMs).toBe(3_600_000);
+  });
+
+  it('falls back to the default when the persisted value is not a number', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeNoCandidateCooldownMs: 'soon' }), 'utf-8');
+    expect(loadSettings(path).downtimeNoCandidateCooldownMs).toBe(3_600_000);
+  });
+});

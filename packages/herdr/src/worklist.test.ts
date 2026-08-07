@@ -1334,6 +1334,18 @@ describe('renderDowntimeStatus', () => {
     expect(renderDowntimeStatus(worker)).toContain('downtime disabled');
   });
 
+  it('renders the paused state during the no-candidate cooldown (no stale idle duration)', () => {
+    const worker = {
+      idleSince: null,
+      dispatching: false,
+      enabled: true,
+      paused: true,
+    } as unknown as DowntimeWorker;
+    const status = renderDowntimeStatus(worker);
+    expect(status).toContain('downtime paused');
+    expect(status).not.toContain('downtime idle');
+  });
+
   it('renders busy when the proxy is not idle', () => {
     const worker = {
       idleSince: null,

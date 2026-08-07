@@ -196,6 +196,10 @@ identity data the worker fails closed to all-slots-free for `0 < N < total`;
 - `downtimeProxyUrl` — Base URL of the llama-proxy (default:
 `http://192.168.0.199:8000`)
 - `downtimeModel` — pi model pattern for dispatched panes (default: `plan`)
+- `downtimeNoCandidateCooldownMs` — Full pause (no proxy polling, no idle
+  tracking, no dispatch) after the worker finds no candidate in either
+  stage — a genuine empty backlog (default: `3600000` = 60 minutes, floor
+  60s so the pause cannot be disabled or set trivially small)
 
 The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
 Idle means: llama-server running, no active query, no model switch, no active
@@ -212,6 +216,24 @@ spawns, so it appears in-progress immediately and a second pane's `wl next`
 cannot select it. Panes are named `Downtime plan` / `Downtime intake`, opened
 with `--no-focus` (visible, never steals focus), `--cwd <worklog root>` and
 `--model <downtimeModel>`.
+
+**Empty-backlog cooldown** — when **both** `wl next` lookups genuinely return
+no candidate (the tab's project has nothing to dispatch), the worker enters a
+full **pause** for `downtimeNoCandidateCooldownMs` (default 60 minutes): no
+proxy polling, no idle tracking, and no dispatch until the pause expires — so
+it stops burning cycles (proxy polling + `wl` spawns) during empty periods.
+Only a *genuine* empty backlog triggers the pause: transient `wl`/CLI errors
+and the in-flight dispatch guard fail closed to busy and never start a
+cooldown. When the pause expires the worker resumes polling and requires a
+fresh full idle period before the next dispatch (no stale idle credit). The
+worker re-reads the setting every tick, so a change applies from the next
+cooldown entry without a plugin restart.
+
+**Worklog-root routing** — the downtime worker's `wl next` selection and its
+`wl comment add` audit trail run through the same `--worklog-dir` override as
+the worklist, so idle dispatch picks (and comments on) items from the tab's
+resolved project root (e.g. SorraAgents) rather than the plugin process's own
+directory.
 
 **Blocked-questions handling** — the dispatched prompt instructs the agent:
 if it cannot proceed because it needs answers, record the questions in a
@@ -240,7 +262,8 @@ The worker runs inside the plugin's single consolidated scheduler loop (one
 `setInterval`; no independent timers), uses unref'd timers, and is cleaned up
 when the pane exits. While the pane is open the list header shows the worker
 state, e.g. `[⏳ downtime idle 3:12]`, `[downtime busy]`,
-`[⏳ downtime dispatching]`, or `[downtime disabled]`.
+`[⏳ downtime dispatching]`, `[downtime disabled]`, or `[downtime paused]`
+(no-candidate cooldown).
 
 ### Pause-when-hidden (pane visibility gating)
 
