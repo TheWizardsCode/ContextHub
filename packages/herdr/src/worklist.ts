@@ -2302,10 +2302,11 @@ export interface PodcastTargetResolution {
 
 /**
  * Resolve podcast-progression command markers (`<podcast-target>`,
- * `<podcast-script>`) for the selected work item at dispatch time
- * (OSL-0MSKFXM380098LFL, folding in OSL-0MSHFQ51L009IUOS).
+ * `<podcast-script>`, `<podcast-review>`, `<podcast-both>`) for the selected
+ * work item at dispatch time (OSL-0MSKFXM380098LFL, folding in
+ * OSL-0MSHFQ51L009IUOS and the OSL-0MSKVB5K6008XFOQ w-chord split).
  *
- * The `w` write-script chord command
+ * The `w s` write-script sub-chord command
  * (`/skill:wiki-podcast-script <podcast-target>`) derives its mode from the
  * selected item's lifecycle context:
  * - stage `intake_complete` (sourced): author a new script from the source
@@ -2314,6 +2315,15 @@ export interface PodcastTargetResolution {
  *   script → `--rewrite <first .podcast.md Key File>`;
  * - otherwise: belt-and-braces guard — returns an error and does NOT
  *   dispatch (never authors a duplicate).
+ *
+ * The `w r` write-review sub-chord command
+ * (`/skill:wiki-podcast-script --review <podcast-review>`) runs the 6
+ * reviews on the existing script, and the `w b` write-both sub-chord
+ * command (`/skill:wiki-podcast-script --review-rewrite <podcast-both>`)
+ * runs reviews + rewrite in one pass (7 LLM calls). Both resolve
+ * `<podcast-review>`/`<podcast-both>` to the first `.podcast.md` Key File
+ * in raw form (same as the existing `--rewrite` resolution) with a
+ * belt-and-braces error when no script exists.
  *
  * The `t` TTS chord command
  * (`/skill:wiki-tts-generate --podcast-file <podcast-script>`) resolves
@@ -2337,7 +2347,9 @@ export async function resolvePodcastTarget(
 ): Promise<PodcastTargetResolution> {
   const hasTarget = command.includes('<podcast-target>');
   const hasScript = command.includes('<podcast-script>');
-  if (!hasTarget && !hasScript) {
+  const hasReview = command.includes('<podcast-review>');
+  const hasBoth = command.includes('<podcast-both>');
+  if (!hasTarget && !hasScript && !hasReview && !hasBoth) {
     return { command };
   }
   if (!item) {
@@ -2389,6 +2401,23 @@ export async function resolvePodcastTarget(
       ? script
       : `podcast/${script}`;
     resolved = resolved.replace(/<podcast-script>/g, podcastFile);
+  }
+
+  // `w r` write-review / `w b` write-both sub-chords: both require an
+  // existing script and resolve the marker to the raw first `.podcast.md`
+  // Key File (same raw form the `--rewrite` resolution uses). The chords
+  // are stage-gated to script-bearing stages, but a belt-and-braces guard
+  // still protects the unfiltered/edge case (OSL-0MSKVB5K6008XFOQ).
+  if (hasReview || hasBoth) {
+    if (!script) {
+      return { error: 'No podcast script found in Key Files: — author the script first (w)' };
+    }
+    if (hasReview) {
+      resolved = resolved.replace(/<podcast-review>/g, script);
+    }
+    if (hasBoth) {
+      resolved = resolved.replace(/<podcast-both>/g, script);
+    }
   }
 
   return { command: resolved };
@@ -2800,11 +2829,13 @@ export async function runWorklistTui(
         chordState.resolvedCommand = null;
         chordState.resolvedModel = null;
         if (command) {
-          // Podcast-progression markers (<podcast-target>/<podcast-script>)
-          // are resolved from the selected item's context BEFORE the generic
-          // modal-form check so they never fall through to the input form
-          // (OSL-0MSKFXM380098LFL, folding in OSL-0MSHFQ51L009IUOS).
-          if (command.includes('<podcast-target>') || command.includes('<podcast-script>')) {
+          // Podcast-progression markers (<podcast-target>/<podcast-script>/
+          // <podcast-review>/<podcast-both>) are resolved from the selected
+          // item's context BEFORE the generic modal-form check so they never
+          // fall through to the input form (OSL-0MSKFXM380098LFL, folding in
+          // OSL-0MSHFQ51L009IUOS; w-chord split OSL-0MSKVB5K6008XFOQ).
+          if (command.includes('<podcast-target>') || command.includes('<podcast-script>')
+              || command.includes('<podcast-review>') || command.includes('<podcast-both>')) {
             const podcast = await resolvePodcastTarget(command, state.getSelectedItem());
             if (podcast.error) {
               showToast('Error', { body: podcast.error });
@@ -2933,11 +2964,13 @@ export async function runWorklistTui(
       if (singleEntry) {
         let singleCmd = singleEntry.command;
         const singleModel = singleEntry.model ?? undefined;
-        // Podcast-progression markers (<podcast-target>/<podcast-script>)
-        // are resolved from the selected item's context BEFORE the generic
-        // modal-form check so they never fall through to the input form
-        // (OSL-0MSKFXM380098LFL, folding in OSL-0MSHFQ51L009IUOS).
-        if (singleCmd.includes('<podcast-target>') || singleCmd.includes('<podcast-script>')) {
+        // Podcast-progression markers (<podcast-target>/<podcast-script>/
+        // <podcast-review>/<podcast-both>) are resolved from the selected
+        // item's context BEFORE the generic modal-form check so they never
+        // fall through to the input form (OSL-0MSKFXM380098LFL, folding in
+        // OSL-0MSHFQ51L009IUOS; w-chord split OSL-0MSKVB5K6008XFOQ).
+        if (singleCmd.includes('<podcast-target>') || singleCmd.includes('<podcast-script>')
+            || singleCmd.includes('<podcast-review>') || singleCmd.includes('<podcast-both>')) {
           const podcast = await resolvePodcastTarget(singleCmd, state.getSelectedItem());
           if (podcast.error) {
             showToast('Error', { body: podcast.error });

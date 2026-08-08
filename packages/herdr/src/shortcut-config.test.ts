@@ -513,3 +513,92 @@ describe('loadShortcutConfig — project-local shortcuts.json overrides', () => 
     expect(JSON.stringify(a.getEntries())).toBe(JSON.stringify(b.getEntries()));
   });
 });
+
+// ── w chord split: per-sub-chord stage gating (OSL-0MSKVB5K6008XFOQ) ──
+// The single-key `w` write-script chord becomes a chord leader with three
+// sub-chords: w-r (write review), w-s (write script), w-b (write both).
+// w-r/w-b require an existing script, so they are gated to script-bearing
+// stages (plan_complete / in_review / done); w-s keeps today's four-stage
+// gate. All three stay gated to podcast-typed items.
+
+describe('loadShortcutConfig — w chord split stage gating', () => {
+  let tempRoots: string[] = [];
+
+  function makeLocalRoot(files: Record<string, string>): string {
+    const dir = mkdtempSync(join(tmpdir(), 'herdr-w-chord-'));
+    tempRoots.push(dir);
+    for (const [rel, content] of Object.entries(files)) {
+      writeFileSync(join(dir, rel), content);
+    }
+    return dir;
+  }
+
+  afterEach(() => {
+    for (const dir of tempRoots) {
+      try { rmSync(dir, { recursive: true }); } catch { /* ignore */ }
+    }
+    tempRoots = [];
+    vi.restoreAllMocks();
+  });
+
+  const wEntries = [
+    { chord: ['w', 'r'], command: '/skill:wiki-podcast-script --review <podcast-review>', view: 'both', label: 'write review', stages: ['plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+    { chord: ['w', 's'], command: '/skill:wiki-podcast-script <podcast-target>', view: 'both', label: 'write script', stages: ['intake_complete', 'plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+    { chord: ['w', 'b'], command: '/skill:wiki-podcast-script --review-rewrite <podcast-both>', view: 'both', label: 'write both', stages: ['plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+  ];
+
+  it('loads all three w sub-chords and no single-key w', () => {
+    const root = makeLocalRoot({ 'shortcuts.json': JSON.stringify(wEntries) });
+    const registry = loadShortcutConfig(root);
+    expect(registry.lookupChordEntry(['w'], 'list')).toBeUndefined();
+    expect(registry.lookupChordEntry(['w', 'r'], 'list')).toBeDefined();
+    expect(registry.lookupChordEntry(['w', 's'], 'list')).toBeDefined();
+    expect(registry.lookupChordEntry(['w', 'b'], 'list')).toBeDefined();
+  });
+
+  it('w-r and w-b are visible only at script-bearing stages (plan_complete, in_review, done)', () => {
+    const root = makeLocalRoot({ 'shortcuts.json': JSON.stringify(wEntries) });
+    const registry = loadShortcutConfig(root);
+    for (const chord of [['w', 'r'], ['w', 'b']]) {
+      for (const stage of ['plan_complete', 'in_review', 'done']) {
+        expect(registry.lookupChordEntry(chord as ['w', 'r'], 'list', stage)).toBeDefined();
+      }
+      for (const stage of ['idea', 'intake_complete', 'in_progress']) {
+        expect(registry.lookupChordEntry(chord as ['w', 'r'], 'list', stage)).toBeUndefined();
+      }
+    }
+  });
+
+  it('w-s keeps the four-stage gate (intake_complete through done)', () => {
+    const root = makeLocalRoot({ 'shortcuts.json': JSON.stringify(wEntries) });
+    const registry = loadShortcutConfig(root);
+    for (const stage of ['intake_complete', 'plan_complete', 'in_review', 'done']) {
+      expect(registry.lookupChordEntry(['w', 's'], 'list', stage)).toBeDefined();
+    }
+    for (const stage of ['idea', 'in_progress']) {
+      expect(registry.lookupChordEntry(['w', 's'], 'list', stage)).toBeUndefined();
+    }
+  });
+
+  it('all three sub-chords resolve at the script-bearing stages', () => {
+    const root = makeLocalRoot({ 'shortcuts.json': JSON.stringify(wEntries) });
+    const registry = loadShortcutConfig(root);
+    expect(registry.lookupChordEntry(['w', 'r'], 'list', 'plan_complete')?.command)
+      .toBe('/skill:wiki-podcast-script --review <podcast-review>');
+    expect(registry.lookupChordEntry(['w', 's'], 'list', 'plan_complete')?.command)
+      .toBe('/skill:wiki-podcast-script <podcast-target>');
+    expect(registry.lookupChordEntry(['w', 'b'], 'list', 'plan_complete')?.command)
+      .toBe('/skill:wiki-podcast-script --review-rewrite <podcast-both>');
+  });
+
+  it('all three w sub-chords stay gated to podcast-typed items', () => {
+    const root = makeLocalRoot({ 'shortcuts.json': JSON.stringify(wEntries) });
+    const registry = loadShortcutConfig(root);
+    for (const chord of [['w', 'r'], ['w', 's'], ['w', 'b']]) {
+      const entry = registry.lookupChordEntry(chord as ['w', 'r'], 'list');
+      expect(entry?.workItemTypes).toEqual(['podcast']);
+      // Hidden on non-podcast types.
+      expect(registry.lookupChordEntry(chord as ['w', 'r'], 'list', undefined, false, 'bug')).toBeUndefined();
+    }
+  });
+});

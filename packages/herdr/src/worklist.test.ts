@@ -37,7 +37,7 @@ import {
 import type { ChordState } from './worklist.js';
 import type { DowntimeWorker } from './downtime-worker.js';
 import { setLogPath, resetLogPath, recordCommand, getLastCommand } from './command-log.js';
-import { loadShortcutConfig, ShortcutRegistry } from './shortcut-config.js';
+import { loadShortcutConfig, ShortcutRegistry, type ShortcutEntry } from './shortcut-config.js';
 import { regroupWorkItems, extractFilePaths } from './grouping.js';
 import { setWorklogDir, resetWorklogDir, setExecFileAsync, resetExecFileAsync, type WorkItem } from './fetcher.js';
 
@@ -1051,6 +1051,101 @@ describe('resolvePodcastTarget — podcast-progression dispatch', () => {
     const synthItem: WorkItem = { ...sourcedItem, description: '## Key Files:\n- wiki/syntheses/foo.md\n' };
     const result = await resolvePodcastTarget('/skill:wiki-tts-generate --podcast-file <podcast-script>', synthItem);
     expect(result.error).toMatch(/no podcast script/i);
+  });
+
+  it('resolves <podcast-review> to the raw script path (w-r write-review chord)', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script --review <podcast-review>', draftedItem);
+    expect(result).toEqual({ command: '/skill:wiki-podcast-script --review foo/foo.podcast.md' });
+  });
+
+  it('belt-and-braces: errors on <podcast-review> when no script is in Key Files', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script --review <podcast-review>', sourcedItem);
+    expect(result.error).toMatch(/no podcast script/i);
+    expect(result.command).toBeUndefined();
+  });
+
+  it('resolves <podcast-both> to the raw script path (w-b write-both chord)', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script --review-rewrite <podcast-both>', draftedItem);
+    expect(result).toEqual({ command: '/skill:wiki-podcast-script --review-rewrite foo/foo.podcast.md' });
+  });
+
+  it('belt-and-braces: errors on <podcast-both> when no script is in Key Files', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script --review-rewrite <podcast-both>', sourcedItem);
+    expect(result.error).toMatch(/no podcast script/i);
+    expect(result.command).toBeUndefined();
+  });
+
+  it('resolves review markers on wiki-dir-relative script paths as-is (raw form)', async () => {
+    const wikiItem: WorkItem = { ...draftedItem, description: '## Key Files:\n- wiki/podcast/foo/foo.podcast.md\n' };
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script --review <podcast-review>', wikiItem);
+    expect(result).toEqual({ command: '/skill:wiki-podcast-script --review wiki/podcast/foo/foo.podcast.md' });
+  });
+
+  it('returns the command unchanged for a command with no podcast markers (review marker absent)', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script --review foo/foo.podcast.md', draftedItem);
+    expect(result).toEqual({ command: '/skill:wiki-podcast-script --review foo/foo.podcast.md' });
+  });
+});
+
+// ── w chord leader: sub-chord hints ──────────────────────────────────────
+// The `w` single-key write-script chord is split into w-r/w-s/w-b sub-chords
+// (OSL-0MSKVB5K6008XFOQ). Pressing `w` must collapse to `w:write...` and
+// expand to the per-sub-chord hints via the existing formatChordHintsForHelp
+// machinery, respecting per-stage visibility.
+
+describe('w chord leader — sub-chord hints and stage gating', () => {
+  const wChords: ShortcutEntry[] = [
+    {
+      chord: ['w', 'r'],
+      command: '/skill:wiki-podcast-script --review <podcast-review>',
+      view: 'both',
+      label: 'write review',
+      stages: ['plan_complete', 'in_review', 'done'],
+    },
+    {
+      chord: ['w', 's'],
+      command: '/skill:wiki-podcast-script <podcast-target>',
+      view: 'both',
+      label: 'write script',
+      stages: ['intake_complete', 'plan_complete', 'in_review', 'done'],
+    },
+    {
+      chord: ['w', 'b'],
+      command: '/skill:wiki-podcast-script --review-rewrite <podcast-both>',
+      view: 'both',
+      label: 'write both',
+      stages: ['plan_complete', 'in_review', 'done'],
+    },
+  ];
+
+  it('shows w as a chord leader hint in the footer (collapsed)', () => {
+    const registry = new ShortcutRegistry([...wChords]);
+    const hints = getChordHelpHints(registry);
+    expect(hints).toContain('[w] chords');
+  });
+
+  it('expands to r/s/b sub-chord hints at a script-bearing stage', () => {
+    const registry = new ShortcutRegistry([...wChords]);
+    const nextChords = registry.getChordByPrefix(['w'], 'list', 'plan_complete');
+    const hints = formatChordHintsForHelp(nextChords, ['w']);
+    expect(hints).toContain('r:review');
+    expect(hints).toContain('s:script');
+    expect(hints).toContain('b:both');
+  });
+
+  it('shows only the s sub-chord at intake_complete (w-r/w-b hidden)', () => {
+    const registry = new ShortcutRegistry([...wChords]);
+    const nextChords = registry.getChordByPrefix(['w'], 'list', 'intake_complete');
+    const hints = formatChordHintsForHelp(nextChords, ['w']);
+    expect(hints).toContain('s:script');
+    expect(hints).not.toContain('r:review');
+    expect(hints).not.toContain('b:both');
+  });
+
+  it('hides all w sub-chords at idea (no stage gate matches)', () => {
+    const registry = new ShortcutRegistry([...wChords]);
+    const nextChords = registry.getChordByPrefix(['w'], 'list', 'idea');
+    expect(nextChords).toHaveLength(0);
   });
 });
 
