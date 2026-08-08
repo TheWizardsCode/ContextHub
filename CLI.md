@@ -492,7 +492,7 @@ Options:
 `--stage <stage>` — Filter by stage: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` (optional).
 `--search <term>` (optional)
 `-n, --number <n>` — Number of items to return (optional; default: `1`).
-`-g, --groups <n>` — Number of parallel-safe groups to identify (optional; default: `3`). Only meaningful when `-n > 1`. Groups items by priority, stage and file-path conflicts extracted from their descriptions, placing items that affect different files in the same group and conflicting items in separate groups. Items with priority `critical` are partitioned into `Critical Group N` file-path conflict groups at the top. Items with unknown/other stages are grouped together in a single "Other" group. See "Parallel-safe grouping" below.
+`-g, --groups <n>` — Number of parallel-safe groups to identify (optional; default: `3`). Only meaningful when `-n > 1`. Groups items by priority, stage and file-path conflicts extracted from their descriptions, placing items that affect different files in the same group and conflicting items in separate groups. Items with priority `critical` are partitioned into `Critical Group N` file-path conflict groups at the top. Non-critical `in_progress`/`plan_complete`/`intake_complete` items are partitioned into `Group N` file-path conflict groups; items with unknown/custom stages are grouped together in a single "Other" group. See "Parallel-safe grouping" below.
 `--include-blocked` — Include dependency-blocked items (excluded by default).
 `--no-re-sort` — Skip automatic re-sort before selection, preserving current `sort_index` order (optional).
 `--re-sort-sync` — Force a synchronous (blocking) re-sort when automatic re-sort is triggered. By default automatic re-sorts are run asynchronously to avoid blocking interactive commands.
@@ -530,23 +530,23 @@ The grouping algorithm uses a greedy first-fit strategy:
 
 1. Extract file paths from each item's description using a `**Key Files:**` section convention (see [docs/FILE_PATH_CONVENTION.md](docs/FILE_PATH_CONVENTION.md) for the full specification).
 2. **Critical priority items** are partitioned first into `Critical Group N` file-path conflict groups at the very top.
-3. Non-critical items with stage `plan_complete` or `intake_complete` are partitioned into `Group N` file-path conflict groups.
+3. Non-critical items with stage `in_progress`, `plan_complete`, or `intake_complete` are partitioned into `Group N` file-path conflict groups.
 4. `idea` items are placed together in a single "Idea" group.
-5. Items with unknown/other stages (and not critical) are placed together in a single "Other" group (no file-overlap splitting).
+5. Items with unknown/custom stages (and not critical) are placed together in a single "Other" group (no file-overlap splitting). This is a safety net for unknown/custom stages; it is empty for all canonical stages in the default selection list.
 6. `in_review` items are placed in a single "In Review" group, last.
 
 The group display order is:
 1. **Critical Group N** — critical items partitioned by file-path conflicts (items sharing a file path land in different groups; items with unknown paths get singleton groups).
-2. **Group N** — plan_complete + intake_complete items partitioned by file-path conflicts. Within each group, `plan_complete` items appear first, then `intake_complete` items (no headings between the sub-groups), each sub-group sorted by priority (high → medium → low). The same stage sub-sort applies inside each Critical Group N.
+2. **Group N** — in_progress + plan_complete + intake_complete items partitioned by file-path conflicts. Within each group, `in_progress` items appear first, then `plan_complete`, then `intake_complete` items (no headings between the sub-groups), each sub-group sorted by priority (high → medium → low). The same within-group stage sub-sort applies inside each Critical Group N.
 3. **Idea** — single group, sorted by priority.
-4. **Other** — single group for items with unknown/other stages.
+4. **Other** — single group for items with unknown/custom stages.
 5. **In Review** — single group (last).
 
 In JSON output (`--json` with `-n > 1`), each result entry includes a `group` field (integer, 1-indexed) indicating the group assignment.
 
 In human-readable output, group headings (e.g., `── Critical Group 1 ──`, `── Group 1 ──`, `── Idea ──`, `── Other ──`, `── In Review ──`) are displayed between groups.
 
-The Pi TUI selection list renders group separator lines between items in different groups, helping you quickly identify items you can work on in parallel.
+The Herdr plugin's Worklog selection list renders group separator lines between items in different groups, helping you quickly identify items you can work on in parallel.
 
 To specify a custom number of groups:
 
@@ -1054,46 +1054,6 @@ Example:
 ```sh
 wl init
 wl init --project-name "My Project" --prefix PROJ --auto-export yes --auto-sync no
-```
-
-### `tui` [options]
-
-Launch the terminal UI for browsing and filtering work items.
-
-Options:
-
-- `--in-progress` — Show only in-progress items.
-- `--all` — Include completed/deleted items in the list.
-- `--prefix <prefix>` — Override the default prefix.
-
-Example:
-
-```sh
-wl tui --in-progress
-```
-
-Example (JSON):
-
-```sh
-wl --json init
-```
-
-### `piman` | `pi` [options]
-
-Launch the Pi-based TUI for browsing and managing work items with agent chat and action palette. This is the agent-centric TUI that replaces the legacy Opencode-based interface. All Worklog reads/writes use the wl CLI (no direct database access).
-
-Options:
-
-- `--in-progress` — Show only in-progress items.
-- `--all` — Include completed/deleted items in the list.
-- `--prefix <prefix>` — Override the default prefix.
-- `--perf` — Enable performance instrumentation.
-- `--headless` — Run in headless mode for CI scripting and automated tests.
-
-Example:
-
-```sh
-wl piman --in-progress
 ```
 
 ### `status` [options]

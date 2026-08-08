@@ -790,7 +790,7 @@ class TestErrorsAndCli:
         env["HERDR_SOCKET_PORT"] = str(os.environ["HERDR_SOCKET_PORT"])
         result = subprocess.run(
             [sys.executable, str(_SHARED_DIR / "grid.py"), "w1:p80"],
-            capture_output=True, text=True, env=env, cwd=str(_SHARED_DIR),
+            capture_output=True, text=True, env=env, cwd=str(_SHARED_DIR), check=False,
         )
         assert result.returncode == 0, result.stderr
         out = json.loads(result.stdout)
@@ -802,7 +802,7 @@ class TestErrorsAndCli:
         env["HERDR_SOCKET_PORT"] = "1"
         result = subprocess.run(
             [sys.executable, str(_SHARED_DIR / "grid.py"), "w1:p80"],
-            capture_output=True, text=True, env=env, cwd=str(_SHARED_DIR),
+            capture_output=True, text=True, env=env, cwd=str(_SHARED_DIR), check=False,
         )
         assert result.returncode != 0
         assert "Error" in result.stderr

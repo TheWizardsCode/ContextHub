@@ -36,8 +36,14 @@ The timeout uses:
 ## Debugging
 - **Mock git logs:** Set `WORKLOG_GIT_MOCK_DEBUG=1` to write debug traces to
   `/tmp/worklog-mock.log`.
-- **Timeout guard:** Set `WORKLOG_MOCK_TIMEOUT=0` to disable the timeout guard
-  (not recommended — may cause orphaned processes).
+- **Timeout guard:** `WORKLOG_MOCK_TIMEOUT=0` behaves differently per mock
+  implementation: the bash mocks (`git`, `gh`) treat `0` as an instantaneous
+  timeout — every execution exceeds the budget, so the dispatch guard
+  self-terminates with exit 124 immediately (this is what
+  `mock-timeout.test.ts` uses to verify the guard deterministically). The Node
+  `wl` mock treats `0` (and any non-positive value) as *disabled* — the guard
+  is not installed. A non-numeric value falls back to the 5s default in all
+  mocks.
 
 ## Notes & guidance
 - The mocks intentionally implement a tiny surface area. Extend them only for

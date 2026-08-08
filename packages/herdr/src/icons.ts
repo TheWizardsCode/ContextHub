@@ -92,6 +92,28 @@ const AUDIT_STALE_FAILED = '\u{26A0}';   // ⚠️
 const NEEDS_REVIEW_ICON = '\u{274C}';  // ❌
 const REVIEW_DONE_ICON = '\u{2705}';    // ✅
 
+// Agent-status icons (WL-0MSBQUJQX005RAT9). Glyph mapping confirmed by the
+// user: working → 🟢 (green circle), blocked → ⛔ (no-entry sign), idle → ⚪
+// (white circle). `done`/`unknown`/absent → no icon.
+const AGENT_STATE_ICONS: Record<string, string> = {
+  idle:    '\u{26AA}',   // ⚪
+  working: '\u{1F7E2}',  // 🟢
+  blocked: '\u{26D4}',   // ⛔
+};
+
+const AGENT_STATE_FALLBACK: Record<string, string> = {
+  idle:    '[IDLE]',
+  working: '[WORK]',
+  blocked: '[BLKD]',
+};
+
+/**
+ * Fixed display width (in terminal cells) of the reserved agent-status
+ * slot at the start of the icon prefix. Rows with and without an agent keep
+ * the remaining icons and the item-ID column at identical columns (AC3).
+ */
+export const AGENT_SLOT_WIDTH = 2;
+
 // ── Public API ─────────────────────────────────────────────────────────
 
 /**
@@ -168,6 +190,21 @@ export function auditStaleIcon(result: boolean | null | undefined, opts?: IconOp
 export function epicIcon(opts?: IconOptions): string {
   if (opts?.noIcons) return EPIC_FALLBACK;
   return EPIC_ICON;
+}
+
+/**
+ * Get the icon for a tracked agent's current state.
+ *
+ * `working → 🟢`, `blocked → ⛔`, `idle → ⚪`. `done`, `unknown`, or an
+ * absent state render no icon (the agent finished or the pane is gone).
+ * Text fallbacks follow the `[TEXT]` convention for noIcons mode.
+ */
+export function agentStatusIcon(state: string | undefined, opts?: IconOptions): string {
+  const key = (state || '').toLowerCase();
+  if (opts?.noIcons) {
+    return AGENT_STATE_FALLBACK[key] || '';
+  }
+  return AGENT_STATE_ICONS[key] || '';
 }
 
 /**
@@ -304,16 +341,24 @@ const ICON_PREFIX_WIDTH = 12;
  * regardless of how many icon fields are present.
  *
  * Column layout (left to right):
+ *   0. Agent status (fixed-width reserved slot, WL-0MSBQUJQX005RAT9)
  *   1. Status icon
  *   2. Stage icon (for in_review items, shows audit-aware icon instead)
  *   3. Producer review flag
  *   4. Optional epic icon + child count
  */
 export function getIconPrefix(
-  item: { status: string; stage?: string; priority?: string; auditResult?: boolean | null; auditedAt?: string | null; needsProducerReview?: boolean; updatedAt?: string; issueType?: string; childCount?: number },
+  item: { status: string; stage?: string; priority?: string; auditResult?: boolean | null; auditedAt?: string | null; needsProducerReview?: boolean; updatedAt?: string; issueType?: string; childCount?: number; agentState?: string },
   opts?: IconOptions,
 ): string {
   const noIcons = opts?.noIcons ?? false;
+
+  // Column 0: agent status — fixed-width reserved slot so rows with and
+  // without an agent keep the remaining icons and the item-ID column at
+  // identical columns (AC3, WL-0MSBQUJQX005RAT9).
+  const agentIcon = agentStatusIcon(item.agentState, { noIcons });
+  const agentSlot = agentIcon !== '' ? agentIcon : ' '.repeat(AGENT_SLOT_WIDTH);
+
   const sIcon = statusIcon(item.status, { noIcons });
 
   // Column 2: stage or audit-aware icon for in_review
@@ -344,8 +389,10 @@ export function getIconPrefix(
   // Column 4: epic icon (child count is no longer shown in prefix)
   const epicSuffix = item.issueType === 'epic' ? epicIcon({ noIcons }) : '';
 
-  // Build full prefix and pad to fixed width for alignment
-  let prefix = [coreIcons, epicSuffix].filter(Boolean).join('');
+  // Build full prefix and pad to fixed width for alignment. The agent slot
+  // is included in the total, so rows with and without an agent still land
+  // at exactly ICON_PREFIX_WIDTH cells.
+  let prefix = [agentSlot, coreIcons, epicSuffix].filter(Boolean).join('');
   const width = stringDisplayWidth(prefix);
   if (width < ICON_PREFIX_WIDTH) {
     const padCount = ICON_PREFIX_WIDTH - width;

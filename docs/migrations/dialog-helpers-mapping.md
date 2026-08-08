@@ -2,8 +2,9 @@
 
 > **DEPRECATED**: The Blessed TUI (including `src/tui/components/dialogs.ts`)
 > has been removed from the repository. This migration document is preserved
-> for historical reference only. See the `wl tui` command which now delegates
-> to the Pi-based TUI (`wl piman`).
+> for historical reference only. The Pi-based TUI that succeeded it (launched
+> via `wl tui` / `wl piman`) has also been removed — work item browsing and
+> management is now provided by the Herdr plugin.
 
 This one-page mapping documents how the private helper methods used in
 src/tui/components/dialogs.ts map to the new exported helpers in
@@ -31,4 +32,5 @@ src/tui/components/dialog-helpers.ts.
 - The extraction was intentionally additive; DialogsComponent retained its
   private helper implementations to avoid large refactors.
 - The Blessed TUI was removed in June 2026 and replaced by the Pi-based TUI
-  (`wl piman` / `wl tui`).
+  (`wl piman` / `wl tui`). The Pi-based TUI was itself removed later — work
+  item browsing is now provided by the Herdr plugin.

@@ -272,4 +272,73 @@ describe('CLI Init Tests', () => {
       cleanupTempDir(tempDir);
     }
   }, 45000);
+
+  // ---------------------------------------------------------------------
+  // Standalone workflow behavior (AC3 of WL-0MSIXMKOX0052514): without a
+  // SorraAgents global install, wl init's N/B/M workflow choices must keep
+  // their current behavior. These tests lock in the standalone path so the
+  // future delegation change cannot silently alter it.
+  // ---------------------------------------------------------------------
+  it('should inline WORKFLOW content into AGENTS.md with --workflow-inline yes (basic)', async () => {
+    const tempState = enterTempDir();
+    try {
+      const existing = '## Project Rules\n\n- Local rule\n';
+      fs.writeFileSync('AGENTS.md', existing, 'utf-8');
+
+      await execAsync(
+        `tsx ${cliPath} init --project-name "Test Project" --prefix TEST --auto-export yes --auto-sync no --workflow-inline yes --agents-template skip --stats-plugin-overwrite no`
+      );
+
+      const updated = fs.readFileSync('AGENTS.md', 'utf-8');
+      expect(updated).toContain('<!-- WORKFLOW: start -->');
+      expect(updated).toContain('<!-- WORKFLOW: end -->');
+      // Pre-existing content is preserved below the inlined workflow block.
+      expect(updated).toContain(existing.trim());
+      expect(updated.indexOf('<!-- WORKFLOW: start -->')).toBeLessThan(
+        updated.indexOf(existing.trim())
+      );
+    } finally {
+      leaveTempDir(tempState);
+    }
+  }, 45000);
+
+  it('should not write WORKFLOW content with --workflow-inline no (none)', async () => {
+    const tempState = enterTempDir();
+    try {
+      const existing = '## Project Rules\n\n- Local rule\n';
+      fs.writeFileSync('AGENTS.md', existing, 'utf-8');
+
+      await execAsync(
+        `tsx ${cliPath} init --project-name "Test Project" --prefix TEST --auto-export yes --auto-sync no --workflow-inline no --agents-template skip --stats-plugin-overwrite no`
+      );
+
+      const updated = fs.readFileSync('AGENTS.md', 'utf-8');
+      expect(updated).not.toContain('<!-- WORKFLOW: start -->');
+      expect(updated).not.toContain('<!-- WORKFLOW: end -->');
+      // Standalone 'none' leaves the project AGENTS.md untouched.
+      expect(updated).toBe(existing);
+    } finally {
+      leaveTempDir(tempState);
+    }
+  }, 45000);
+
+  it('should not duplicate the WORKFLOW marker when --workflow-inline yes is re-run', async () => {
+    const tempState = enterTempDir();
+    try {
+      const existing = '## Project Rules\n\n- Local rule\n';
+      fs.writeFileSync('AGENTS.md', existing, 'utf-8');
+
+      const cmd = `tsx ${cliPath} init --project-name "Test Project" --prefix TEST --auto-export yes --auto-sync no --workflow-inline yes --agents-template skip --stats-plugin-overwrite no`;
+      await execAsync(cmd);
+      await execAsync(cmd);
+
+      const updated = fs.readFileSync('AGENTS.md', 'utf-8');
+      const markers = updated
+        .split(/\r?\n/)
+        .filter(line => line.trim() === '<!-- WORKFLOW: start -->').length;
+      expect(markers).toBe(1);
+    } finally {
+      leaveTempDir(tempState);
+    }
+  }, 45000);
 });

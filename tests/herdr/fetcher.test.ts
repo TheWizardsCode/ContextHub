@@ -277,7 +277,9 @@ describe('fetchItemsByStage', () => {
     const calls = mockFn.mock.calls.map((c: any) => c[1]);
     expect(calls).toHaveLength(1);
     // runWl appends --json automatically.
-    expect(calls[0]).toEqual(['list', '--stage', 'in_progress', '--root-only', '--json']);
+    // Open items only (WL-0MSDT8X1V003206G): stage-filtered worklists show
+    // every open root item in the stage.
+    expect(calls[0]).toEqual(['list', '--status', 'open', '--stage', 'in_progress', '--root-only', '--json']);
   });
 });
 

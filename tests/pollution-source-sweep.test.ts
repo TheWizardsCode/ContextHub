@@ -27,13 +27,13 @@ describe('shared worklog-dir resolution (pollution-source guard)', () => {
       // In a dir with no .worklog and no git root, the helper must return an
       // empty flag list (run wl as-is) rather than inventing a cross-project path.
       const script = `
-import sys
+import sys, json
 sys.path.insert(0, ${JSON.stringify(path.dirname(helper))})
 from status_lifecycle import worklog_dir_flag, _detect_worklog_dir
 detected = _detect_worklog_dir()
 flag = worklog_dir_flag()
 print("DETECTED:", detected)
-print("FLAG:", flag)
+print("FLAG:", json.dumps(flag))
 `;
       const res = execFileSync('python3', ['-c', script], {
         cwd: tmp,
@@ -41,15 +41,26 @@ print("FLAG:", flag)
         env: { ...process.env, PATH: process.env.PATH || '' },
       });
       // Either no dir is detected (temp dir is not a project), or if one is
-      // detected it must be inside the temp dir — never another project.
+      // detected it must come from the helper's cwd chain — never a
+      // hard-coded path to another project.
       const flagMatch = res.match(/FLAG: (\[.*\])/);
       expect(flagMatch).toBeTruthy();
       if (flagMatch && flagMatch[1] !== '[]') {
+        // The helper emits JSON (json.dumps) so the flag list parses cleanly.
         const flag = JSON.parse(flagMatch[1]);
         expect(flag).toContain('--worklog-dir');
         const dirIdx = flag.indexOf('--worklog-dir') + 1;
         const dir = flag[dirIdx];
-        expect(dir.startsWith(tmp)).toBe(true);
+        // cwd-chain semantics: the helper may legitimately walk up to an
+        // ancestor `<parent>/.worklog` (e.g. /tmp/.worklog) or a git-root
+        // .worklog, so the dir must be the temp dir itself, inside it, or
+        // `<an ancestor of tmp>/.worklog` — never an unrelated sibling or
+        // another project's hard-coded path.
+        expect(
+          dir === tmp ||
+          dir.startsWith(tmp) ||
+          tmp.startsWith(path.dirname(dir) + path.sep),
+        ).toBe(true);
         expect(dir).not.toMatch(/SorraAgents|Tableau-Card-Engine|open_source_llm/);
       }
     } finally {

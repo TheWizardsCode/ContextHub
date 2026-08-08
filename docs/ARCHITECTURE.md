@@ -206,6 +206,124 @@ consumers agree because they share the same resolver.
 - **Git push**: Depends on network (typically 1-5s)
 - **Import**: ~100ms per 1000 items
 
+## Read Cache (src/read-cache.ts, src/read-cache-cli.ts)
+
+Pure-read commands (`list`, `next`, `show`, `search`, `status` in JSON mode)
+cache their results on disk so repeated, byte-identical queries are served
+without re-spawning work.
+
+### Cache layout
+
+- **Location**: XDG cache dir — `$WL_CACHE_DIR` if set, else
+  `$XDG_CACHE_HOME/wl`, else `~/.cache/wl`.
+- **Entry files**: `<cache-dir>/<64-hex-sha256>.json`, one per query.
+- **State counters**: `<cache-dir>/state/<64-hex-sha256>.json` — one
+  monotonic write counter per worklog dir (see below).
+- **Cache key**: SHA-256 over (wl version, resolved absolute worklog dir,
+  argv elements in order). The version is included so a wl upgrade with a
+  changed output schema never serves stale-shaped entries.
+- **Entry header** stores the key inputs plus a DB-state fingerprint captured
+  at write time.
+
+### Fingerprint model
+
+Two fingerprint providers exist; the CLI uses the counter-based one:
+
+- **File fingerprint (module default, `computeDbFingerprint`)**: `[mtimeMs,
+  size]` of `worklog.db`, `worklog.db-wal` and `worklog.db-shm`. This is
+  WAL-aware (writes land in the WAL before checkpoint) but **not stable
+  across processes**: the app's own `journal_mode = WAL` pragma + schema/FTS
+  init rewrite the DB header on every open/close, so consecutive read
+  processes see different file states.
+- **State counter (CLI, `counterFingerprint`)**: a monotonic per-worklog-dir
+  integer in the cache dir. It is stable across reads (reads never touch it)
+  and changes exactly when a write lands, so it is the CLI's fingerprint of
+  record. The file fingerprint remains available for direct module use.
+
+### Invalidation semantics (CLI wiring)
+
+- **Writes invalidate**: write commands (`create`, `update`, `close`,
+  `delete`, `comment`, `dep`, `import`, `sync`, `github`, …) bump the state
+  counter in a `preAction` hook *before* their action mutates the DB, and
+  drop entry files — so an identical read immediately after a write returns
+  fresh data.
+- **Sync invalidates again after success** (F3): a successful `wl sync`
+  bumps the counter a second time *after* the pull/merge/push completes
+  (`src/commands/sync.ts`), so entries cached by concurrent readers DURING
+  the sync window (at the post-preAction counter) are also never served —
+  post-pull reads always return the merged data. Skipped (lock-busy) and
+  failed syncs exit before this point and do not invalidate.
+- **Read write-byproducts count as writes**: `next`'s auto re-sort bumps the
+  counter after it lands (only when it actually changed sort indices), so
+  cached `next`/`list` results stay sound; `search --rebuild-index` is
+  excluded from caching outright and invalidates.
+- **Mid-action race guard**: a backfill is only stored if the state counter
+  is unchanged since the pre-action lookup (a concurrent write bumped it).
+- **TTL bounding safety net**: entries older than the TTL (default 30s,
+  aligned with the Herdr 30s refresh cadence) are never served. This also
+  bounds staleness from writes the counter misses (e.g. external tools
+  writing the DB directly).
+- **JSON mode only**: text output is env/TTY dependent and never cached.
+  `--semantic`/`--semantic-only` (external embedding API) are never cached.
+
+### CLI dispatch
+
+`src/cli.ts` checks the cache for cacheable read invocations *before*
+`program.parse()` — on a hit it prints the cached payload (byte-identical to
+`output.json` formatting) and exits without running any action or opening the
+DB. Misses run normally; the JSON payload emitted via `output.json` is routed
+through `ReadCacheCli.onJsonOutput` for backfill.
+
+### Cross-instance sync heartbeat (F3, herdr auto-sync)
+
+`wl sync` writes `<worklogDir>/last-sync-time` (ISO timestamp) only on
+success — this doubles as the per-worklog-dir sync heartbeat. Herdr's
+background auto-sync (`packages/herdr/src/auto-sync.ts`) checks the heartbeat
+before spawning `wl sync` and skips — without spawning a process — when a
+sync succeeded within the freshness window (`heartbeatTtlMs`).
+
+- The TTL is the sync interval minus a 15s margin
+  (`heartbeatTtlForInterval`), so the sync cadence still lands ~once per
+  interval across all panes while only the first pane per window spawns
+  (6 panes → 1 spawn, measured in `auto-sync.test.ts`).
+- Failed or skipped syncs never refresh the marker (the CLI writes it only on
+  success; dry-runs return before the write), so a stale heartbeat always
+  falls out of the window and a real sync eventually runs again (no
+  indefinite skip).
+- Manual user syncs (pane `S`) bypass the heartbeat check and always run.
+
+### In-process fetch memoization (F4, herdr fetcher)
+
+`packages/herdr/src/fetcher.ts` dedupes concurrent identical `runWl` READ
+fetches within one pane process via an in-flight promise memo keyed by
+(worklog-dir, args, json-mode): racing refresh ticks that issue the same
+query spawn `wl` once and share the result. Writes are never memoized — a
+write clears the memo so a read issued after it cannot share a pre-write
+in-flight result. The memo is per-process, bounded (64 in-flight entries),
+and cleared on `setWorklogDir`/`resetWorklogDir`.
+
+### Spawn instrumentation (spawn-reduction measurement)
+
+Env-gated counters (`src/spawn-counter.ts`): `WL_SPAWN_COUNT_FILE=<path>`
+appends one `<kind>\t<ts>\t<pid>` line per recorded spawn;
+`WL_SPAWN_COUNT=1` (no file) logs `[wl:spawn]` lines to stderr. A cache
+miss records `read-work`; a cache hit records `cache-hit`. With the cache
+disabled (`WL_CACHE_DISABLED=1`), cacheable reads record `read-work` too, so
+the baseline is measurable. `tests/cli/read-cache-spawn-reduction.test.ts`
+simulates a 6-pane refresh and asserts ≥60% fewer work spawns.
+
+### Concurrency & bounding
+
+- **Atomic writes**: entries are written to a temp file (`<key>.json.tmp-*`)
+  then renamed into place, so concurrent readers/writers across processes
+  never observe partial entries.
+- **LRU bound**: when the entry count exceeds `maxEntries` (default 1000),
+  TTL-expired entries are dropped first, then least-recently-accessed entries
+  are evicted.
+- **Observability**: set `WL_CACHE_DEBUG=1` to log cache hits/misses/reasons to
+  stderr (`[wl:cache]`). `ReadCache.stats()` exposes hit/miss counters for
+  spawn-reduction instrumentation.
+
 ## Future Considerations
 
 ### Potential Enhancements

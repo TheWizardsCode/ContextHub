@@ -40,7 +40,6 @@ import closeCommand from '../../src/commands/close.js';
 import recentCommand from '../../src/commands/recent.js';
 import pluginsCommand from '../../src/commands/plugins.js';
 import reviewedCommand from '../../src/commands/reviewed.js';
-import tuiCommand from '../../src/commands/tui.js';
 import migrateCommand from '../../src/commands/migrate.js';
 import depCommand from '../../src/commands/dep.js';
 import reSortCommand from '../../src/commands/re-sort.js';
@@ -70,7 +69,6 @@ const builtInCommands = [
   recentCommand,
   pluginsCommand,
   reviewedCommand,
-  tuiCommand,
   migrateCommand,
   depCommand,
   reSortCommand,

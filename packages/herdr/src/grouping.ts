@@ -5,10 +5,11 @@
  * algorithm (src/commands/grouping.ts) for the Herdr plugin, which has zero
  * npm dependencies and cannot import from src/commands/.
  *
- * The functions here are intentionally duplicated per TUI (decision Q2c in
- * WL-0MS8W5LTW006YZ4B): a copy lives in this plugin and another in the Pi
- * TUI Worklog extension (packages/tui/extensions/Worklog/lib/grouping.ts).
- * Keep the two copies and the core implementation in sync.
+ * The functions here are intentionally duplicated per plugin (decision Q2c in
+ * WL-0MS8W5LTW006YZ4B): this plugin copy and the core `wl next` implementation
+ * must be kept in sync. (A third copy in the Pi TUI Worklog extension,
+ * packages/tui/extensions/Worklog/lib/grouping.ts, was removed by
+ * WL-0MSGI7PV9004UD0N.)
  *
  * Why regrouping is needed: the worklist merges `wl next` results (which
  * carry `group`/`groupLabel` assignments) with mandatory subsets fetched via
@@ -192,10 +193,11 @@ export function groupItemsByFilePaths(
  * Group display order (most actionable first):
  * - **Critical Group N** — critical items partitioned by file-path conflicts
  *   (per-category label counter, no single all-inclusive "Critical" group).
- * - **Group N** — non-critical `plan_complete` + `intake_complete` items
- *   partitioned by file-path conflicts (no stage prefix in the label).
+ * - **Group N** — non-critical `in_progress` + `plan_complete` + `intake_complete`
+ *   items partitioned by file-path conflicts (no stage prefix in the label).
  * - **Idea** — single group for all `idea` items.
- * - **Other** — single group for all remaining non-critical items.
+ * - **Other** — single group for all remaining non-critical items (safety net
+ *   for unknown/custom stages, `done`, etc.).
  * - **In Review** — single group for all `in_review` items, placed last.
  *
  * Mirrors `assignItemGroups` in src/commands/grouping.ts.
@@ -233,15 +235,17 @@ export function assignItemGroups(
     nextGroup += count;
   }
 
-  // 1. Group N (plan_complete + intake_complete).
-  const planIntakeItems = items.filter(
-    item => item.priority !== 'critical' && (item.stage === 'plan_complete' || item.stage === 'intake_complete'),
+  // 1. Group N (in_progress + plan_complete + intake_complete).
+  const groupNItems = items.filter(
+    item =>
+      item.priority !== 'critical' &&
+      (item.stage === 'in_progress' || item.stage === 'plan_complete' || item.stage === 'intake_complete'),
   );
-  if (planIntakeItems.length > 0) {
-    const planIntakeGroups = groupItemsByFilePaths(planIntakeItems, maxFilePathGroups);
-    const { map: groupNumMap, count } = remapToSequential(planIntakeGroups, nextGroup);
-    const labelNumByFileGroup = buildLabelCounter(planIntakeGroups);
-    for (const [id, g] of planIntakeGroups) {
+  if (groupNItems.length > 0) {
+    const groupNGroups = groupItemsByFilePaths(groupNItems, maxFilePathGroups);
+    const { map: groupNumMap, count } = remapToSequential(groupNGroups, nextGroup);
+    const labelNumByFileGroup = buildLabelCounter(groupNGroups);
+    for (const [id, g] of groupNGroups) {
       const groupNum = groupNumMap.get(g)!;
       result.set(id, { group: groupNum, groupLabel: `Group ${labelNumByFileGroup.get(g)}` });
     }
@@ -262,6 +266,7 @@ export function assignItemGroups(
     item =>
       item.priority !== 'critical' &&
       item.stage !== 'in_review' &&
+      item.stage !== 'in_progress' &&
       item.stage !== 'plan_complete' &&
       item.stage !== 'intake_complete' &&
       item.stage !== 'idea',
@@ -299,14 +304,16 @@ function buildLabelCounter(fileGroups: Map<string, number>): Map<number, number>
 // ── Within-group ordering ─────────────────────────────────────────────
 
 /**
- * Stage sub-order within a group: plan_complete first, then intake_complete,
- * then all remaining stages. No headings are rendered between sub-groups.
+ * Stage sub-order within a group: in_progress first (actively being worked),
+ * then plan_complete, then intake_complete, then all remaining stages.
+ * No headings are rendered between sub-groups.
  */
 const WITHIN_GROUP_STAGE_ORDER: Record<string, number> = {
-  plan_complete: 0,
-  intake_complete: 1,
+  in_progress: 0,
+  plan_complete: 1,
+  intake_complete: 2,
 };
-const REMAINING_STAGE_ORDER = 2;
+const REMAINING_STAGE_ORDER = 3;
 
 /**
  * Priority order for within-group sorting: high → medium → low.
@@ -321,8 +328,9 @@ const DEFAULT_PRIORITY_ORDER = WITHIN_GROUP_PRIORITY_ORDER.medium;
 
 /**
  * Compare two items for within-group display order:
- * stage sub-sort (plan_complete → intake_complete → remaining stages), then
- * priority (high → medium → low), then id as a deterministic tie-break.
+ * stage sub-sort (in_progress → plan_complete → intake_complete → remaining
+ * stages), then priority (high → medium → low), then id as a deterministic
+ * tie-break.
  */
 export function compareGroupableItems(a: GroupableItem, b: GroupableItem): number {
   const stageA = WITHIN_GROUP_STAGE_ORDER[a.stage ?? ''] ?? REMAINING_STAGE_ORDER;

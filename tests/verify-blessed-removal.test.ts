@@ -95,12 +95,12 @@ describe('Current baseline: relocated files', () => {
     expect(projectPathExists('packages/tui/extensions/wl-integration.ts')).toBe(true);
   });
 
-  it('packages/tui/extensions/Worklog/chatPane.ts exists', () => {
-    expect(projectPathExists('packages/tui/extensions/Worklog/chatPane.ts')).toBe(true);
+  it('packages/tui/extensions/Worklog/chatPane.ts no longer exists (TUI removed)', () => {
+    expect(projectPathExists('packages/tui/extensions/Worklog/chatPane.ts')).toBe(false);
   });
 
-  it('packages/tui/extensions/Worklog/actionPalette.ts exists', () => {
-    expect(projectPathExists('packages/tui/extensions/Worklog/actionPalette.ts')).toBe(true);
+  it('packages/tui/extensions/Worklog/actionPalette.ts no longer exists (TUI removed)', () => {
+    expect(projectPathExists('packages/tui/extensions/Worklog/actionPalette.ts')).toBe(false);
   });
 
   it('cli-output.ts imports from new markdown-renderer path', () => {
@@ -169,22 +169,60 @@ describe('Current baseline: status-stage-validation works from new path', () => 
 });
 
 // ---------------------------------------------------------------------------
-// Current baseline: pi.json extension paths updated
+// Current baseline: pi.json and browse modules removed (TUI browse removed)
 // ---------------------------------------------------------------------------
-describe('Current baseline: pi.json paths updated', () => {
-  it('pi.json bin entry points to piman.js', () => {
-    const content = readProjectFile('packages/tui/pi.json');
-    expect(content).not.toBeNull();
-    const parsed = JSON.parse(content);
-    expect(parsed.bin['wl-piman']).toBe('../dist/commands/piman.js');
+describe('Current baseline: TUI browse removal', () => {
+  it('packages/tui/pi.json no longer exists (TUI manifest removed)', () => {
+    expect(projectPathExists('packages/tui/pi.json')).toBe(false);
   });
 
-  it('pi.json extensions point to new locations', () => {
-    const content = readProjectFile('packages/tui/pi.json');
+  it('packages/tui/tests directory no longer exists (TUI-only tests removed)', () => {
+    expect(projectPathExists('packages/tui/tests')).toBe(false);
+  });
+
+  it('src/commands/tui.ts no longer exists (alias removed)', () => {
+    expect(projectPathExists('src/commands/tui.ts')).toBe(false);
+  });
+
+  it('src/commands/piman.ts no longer exists (alias removed)', () => {
+    expect(projectPathExists('src/commands/piman.ts')).toBe(false);
+  });
+
+  it('browse/chat modules are removed from the extension', () => {
+    expect(projectPathExists('packages/tui/extensions/Worklog/lib/browse.ts')).toBe(false);
+    expect(projectPathExists('packages/tui/extensions/Worklog/lib/tools.ts')).toBe(false);
+    expect(projectPathExists('packages/tui/extensions/Worklog/lib/settings.ts')).toBe(false);
+    expect(projectPathExists('packages/tui/extensions/Worklog/settings-config.ts')).toBe(false);
+    expect(projectPathExists('packages/tui/extensions/Worklog/shortcut-config.ts')).toBe(false);
+    expect(projectPathExists('packages/tui/extensions/Worklog/shortcuts.json')).toBe(false);
+  });
+
+  it('retained agent-side plugin modules exist', () => {
+    expect(projectPathExists('packages/tui/extensions/Worklog/activity-indicator.ts')).toBe(true);
+    expect(projectPathExists('packages/tui/extensions/Worklog/session-health.ts')).toBe(true);
+    expect(projectPathExists('packages/tui/extensions/Worklog/model-display.ts')).toBe(true);
+    expect(projectPathExists('packages/tui/extensions/Worklog/lease-release.ts')).toBe(true);
+    expect(projectPathExists('packages/tui/extensions/Worklog/lib/guardrails.ts')).toBe(true);
+    expect(projectPathExists('packages/tui/extensions/Worklog/lib/skill-path.ts')).toBe(true);
+    expect(projectPathExists('packages/tui/extensions/Worklog/lib/recovery/register-recovery.ts')).toBe(true);
+    expect(projectPathExists('packages/tui/extensions/Worklog/terminal-utils.ts')).toBe(true);
+    expect(projectPathExists('packages/tui/extensions/wl-integration.ts')).toBe(true);
+  });
+
+  it('the extension entry point registers only retained modules (no /wl command)', () => {
+    const content = readProjectFile('packages/tui/extensions/Worklog/index.ts');
     expect(content).not.toBeNull();
-    const parsed = JSON.parse(content);
-    expect(parsed.pi.extensions).toContain('./extensions/Worklog/chatPane.ts');
-    expect(parsed.pi.extensions).toContain('./extensions/Worklog/actionPalette.ts');
+    expect(content).toContain('registerActivityIndicator');
+    expect(content).toContain('registerModelDisplay');
+    expect(content).toContain('registerSessionHealth');
+    expect(content).toContain('INSTALL_GUARDRAILS');
+    expect(content).toContain('registerSkillPathTool');
+    expect(content).toContain('registerRecoveryModule');
+    expect(content).toContain('registerLeaseRelease');
+    expect(content).not.toContain("registerCommand('wl'");
+    expect(content).not.toContain('registerShortcut');
+    expect(content).not.toContain('registerScheduler');
+    expect(content).not.toContain('registerAutoInject');
   });
 });
 
@@ -196,8 +234,8 @@ describe('Current baseline: Blessed TUI state after F3 (removed)', () => {
     expect(projectPathExists('src/tui')).toBe(false);
   });
 
-  it('src/commands/tui.ts still exists (now an alias to piman)', () => {
-    expect(projectPathExists('src/commands/tui.ts')).toBe(true);
+  it('src/commands/tui.ts no longer exists (alias removed)', () => {
+    expect(projectPathExists('src/commands/tui.ts')).toBe(false);
   });
 
   it('src/types/blessed.d.ts no longer exists', () => {
@@ -286,8 +324,23 @@ describe('Post-removal verification: F4 and F5 (completed)', () => {
     expect(checkDir(srcDir)).toBe(false);
   });
 
-  it('documentation references to Blessed TUI are removed', () => {
-    // F5 will handle documentation updates
-    expect(true).toBe(true);
+  it('documentation references to the Pi-based TUI are removed', () => {
+    // The Pi-based TUI browse docs have been removed (TUI.md,
+    // docs/tutorials/04-using-the-tui.md, docs/TUI_PROFILING.md,
+    // docs/ux/design-checklist.md). The retained README/CLI docs must not
+    // describe `wl tui`/`wl piman` as available commands.
+    expect(projectPathExists('TUI.md')).toBe(false);
+    expect(projectPathExists('docs/tutorials/04-using-the-tui.md')).toBe(false);
+    expect(projectPathExists('docs/TUI_PROFILING.md')).toBe(false);
+    expect(projectPathExists('docs/ux/design-checklist.md')).toBe(false);
+
+    const cli = readProjectFile('CLI.md');
+    expect(cli).not.toBeNull();
+    expect(cli).not.toContain('### `tui`');
+    expect(cli).not.toContain('### `piman`');
+
+    const readme = readProjectFile('README.md');
+    expect(readme).not.toBeNull();
+    expect(readme).not.toContain('wl tui');
   });
 });

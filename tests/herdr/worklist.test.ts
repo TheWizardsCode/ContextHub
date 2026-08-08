@@ -10,7 +10,6 @@ import {
   StageFilter,
   formatItemLine,
   formatDetailView,
-  formatFilterBar,
   handleKeypress,
   createListRenderer,
   STAGES,
@@ -393,19 +392,6 @@ describe('formatDetailView', () => {
   });
 });
 
-describe('formatFilterBar', () => {
-  it('shows current filter when active', () => {
-    const bar = formatFilterBar('in_progress', 80);
-    expect(bar).toContain('in_progress');
-    expect(bar).toContain('Filter');
-  });
-
-  it('shows no filter message when null', () => {
-    const bar = formatFilterBar(null, 80);
-    expect(bar).toContain('No filter');
-  });
-});
-
 describe('handleKeypress', () => {
   it('handles j/k navigation in list mode', () => {
     const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
@@ -542,10 +528,12 @@ describe('createListRenderer', () => {
     expect(output).not.toContain('Work Items');
   });
 
-  it('renders filter bar when filter is active', () => {
+  it('indicates an active stage filter in the header only (no filter bar)', () => {
     const renderer = createListRenderer();
     const output = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, 'in_progress', 'list', null);
-    expect(output).toContain('in_progress');
+    const firstLine = output.split('\n')[0];
+    expect(firstLine).toContain('(filtered: in_progress)');
+    expect(output).not.toMatch(/Filter: /);
   });
 
   it('shows total actionable count in header when totalCount > items.length', () => {

@@ -7,6 +7,9 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Module-level state for the mocked child_process.spawn
@@ -53,6 +56,11 @@ import {
   DEFAULT_SYNC_INTERVAL_MS,
   MIN_SYNC_INTERVAL_MS,
   SYNC_DISABLED,
+  DEFAULT_HEARTBEAT_TTL_MS,
+  heartbeatTtlForInterval,
+  isSyncHeartbeatFresh,
+  readSyncHeartbeatMs,
+  syncHeartbeatPath,
   _resetSyncInFlight,
 } from './auto-sync.js';
 
@@ -312,6 +320,117 @@ describe('runSync', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await p1;
     vi.useRealTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-instance sync heartbeat (F3 — WL-0MSGAEJQA005QG3W)
+// ---------------------------------------------------------------------------
+
+describe('sync heartbeat', () => {
+  let hbDir: string;
+  let worklogDir: string;
+
+  beforeEach(() => {
+    hbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-hb-'));
+    // herdr's worklog-dir override points at the .worklog/ subdirectory.
+    worklogDir = path.join(hbDir, '.worklog');
+  });
+
+  afterEach(() => {
+    fs.rmSync(hbDir, { recursive: true, force: true });
+  });
+
+  function writeHeartbeat(iso: string): void {
+    fs.mkdirSync(worklogDir, { recursive: true });
+    fs.writeFileSync(path.join(worklogDir, 'last-sync-time'), iso, 'utf-8');
+  }
+
+  it('readSyncHeartbeatMs parses the CLI-written ISO marker', () => {
+    writeHeartbeat('2026-06-25T12:00:00.000Z');
+    expect(readSyncHeartbeatMs(worklogDir)).toBe(Date.parse('2026-06-25T12:00:00.000Z'));
+  });
+
+  it('readSyncHeartbeatMs returns undefined when the marker is absent or unparseable', () => {
+    expect(readSyncHeartbeatMs(worklogDir)).toBeUndefined();
+    writeHeartbeat('not-a-timestamp');
+    expect(readSyncHeartbeatMs(worklogDir)).toBeUndefined();
+  });
+
+  it('isSyncHeartbeatFresh is true within the TTL window and false after it (AC3: no indefinite skip)', () => {
+    const now = Date.parse('2026-06-25T12:00:00.000Z');
+    writeHeartbeat(new Date(now - 10_000).toISOString()); // 10s ago
+    expect(isSyncHeartbeatFresh(worklogDir, DEFAULT_HEARTBEAT_TTL_MS, now)).toBe(true);
+    // 46s ago > 45s TTL → stale → a sync must spawn again.
+    writeHeartbeat(new Date(now - 46_000).toISOString());
+    expect(isSyncHeartbeatFresh(worklogDir, DEFAULT_HEARTBEAT_TTL_MS, now)).toBe(false);
+  });
+
+  it('isSyncHeartbeatFresh is false when no heartbeat exists (first sync must spawn)', () => {
+    expect(isSyncHeartbeatFresh(worklogDir, DEFAULT_HEARTBEAT_TTL_MS)).toBe(false);
+  });
+
+  it('heartbeatTtlForInterval keeps the cadence: interval minus a 15s margin', () => {
+    expect(heartbeatTtlForInterval(60_000)).toBe(45_000);
+    expect(heartbeatTtlForInterval(300_000)).toBe(285_000);
+    expect(heartbeatTtlForInterval(0)).toBe(SYNC_DISABLED);
+    expect(heartbeatTtlForInterval(30_000)).toBe(45_000); // clamped to MIN first
+  });
+
+  it('runSync with a fresh heartbeat skips WITHOUT spawning a process', async () => {
+    childEventToFire = 'close';
+    writeHeartbeat(new Date().toISOString());
+    const outcome = await runSync(worklogDir, { ifIdle: true, heartbeat: true });
+    expect(outcome.skipped).toBe(true);
+    expect(outcome.reason).toBe('heartbeat');
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('runSync with a stale heartbeat still spawns (TTL bounds the skip)', async () => {
+    childEventToFire = 'close';
+    writeHeartbeat(new Date(Date.now() - 2 * DEFAULT_HEARTBEAT_TTL_MS).toISOString());
+    const promise = runSync(worklogDir, { ifIdle: true, heartbeat: true });
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(mockSpawn).toHaveBeenCalledWith('wl', ['--worklog-dir', worklogDir, 'sync', '--if-idle'], expect.any(Object));
+    if (childEventCallback) childEventCallback();
+    await promise;
+  });
+
+  it('runSync with no heartbeat spawns (first sync of a session)', async () => {
+    childEventToFire = 'close';
+    const promise = runSync(worklogDir, { ifIdle: true, heartbeat: true });
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    if (childEventCallback) childEventCallback();
+    await promise;
+  });
+
+  it('runSync without heartbeat option ignores the marker (manual syncs always run)', async () => {
+    childEventToFire = 'close';
+    writeHeartbeat(new Date().toISOString());
+    const promise = runSync(worklogDir, { ifIdle: true }); // no heartbeat flag
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    if (childEventCallback) childEventCallback();
+    await promise;
+  });
+
+  it('AC2 (measured): 6 panes on one worklog → only the first spawns within the heartbeat window', async () => {
+    childEventToFire = 'close';
+    // Pane 1: no heartbeat yet → spawns (the sync will write the marker).
+    let promise = runSync(worklogDir, { ifIdle: true, heartbeat: true });
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    if (childEventCallback) childEventCallback();
+    await promise;
+
+    // The spawned wl sync succeeded → CLI wrote the heartbeat marker.
+    writeHeartbeat(new Date().toISOString());
+
+    // Panes 2-6 tick within the window → all skip without spawning.
+    for (let pane = 2; pane <= 6; pane++) {
+      const outcome = await runSync(worklogDir, { ifIdle: true, heartbeat: true });
+      expect(outcome.skipped).toBe(true);
+      expect(outcome.reason).toBe('heartbeat');
+    }
+    expect(mockSpawn).toHaveBeenCalledTimes(1); // 6 panes, 1 process spawned
   });
 });
 

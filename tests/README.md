@@ -14,9 +14,6 @@ npm run test:watch
 # Run tests with coverage report
 npm run test:coverage
 
-# Run TUI tests only (CI/headless)
-npm run test:tui
-
 # Generate per-test timings
 npm run test:timings
 # or
@@ -219,40 +216,19 @@ Running subsets of tests
 - Run integration tests only (tests under `test/`):
   - `npx vitest run test`
 
-- Run TUI/headless tests (CI helper):
-  - `npm run test:tui`
-
 ## E2E Tests
 
-End-to-end tests live under `tests/e2e/`. They exercise the real `wl` CLI and verify agent-driven flows:
+End-to-end tests exercise the real `wl` CLI and verify agent-driven flows:
 
 ```bash
 # Run all E2E tests
-npx vitest run tests/e2e/
-
-# Run a specific E2E test file
-npx vitest run tests/e2e/agent-flow.test.ts
+npx vitest run tests
 ```
 
-The E2E tests in `tests/e2e/agent-flow.test.ts` verify:
-
-- Chat pane natural language routing (list, next, show, create, update, close)
-- Action palette with default actions and filtering
-- `runWl` CLI integration layer with real `wl` commands
-- Full chat pane to wl CLI pipeline for create/update flows
-
-The E2E tests in `tests/e2e/headless-tui.test.ts` exercise the **built** CLI
-(`dist/cli.js`) with `wl list`/`next`/`show`, plus TUI module loading. They
-require a build first (`npm run build`) and self-initialize the worklog
-(`.worklog/initialized`) in a `beforeAll` hook so they can be run in isolation:
-
-```bash
-# Build, then run headless TUI E2E tests
-npm run build
-npx vitest run tests/e2e/headless-tui.test.ts
-```
-
-These tests are also gated in CI via `.github/workflows/install-and-smoke-test.yml`.
+The Pi-based TUI E2E tests (`tests/e2e/headless-tui.test.ts` — built-CLI
+`wl list`/`next`/`show` smoke tests, and `tests/e2e/agent-flow.test.ts` —
+chat-pane/action-palette routing) were removed together with the TUI; work
+item browsing now lives in the Herdr plugin (`packages/herdr/`).
 
 Guidance for authors
 

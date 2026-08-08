@@ -1,15 +1,19 @@
 # Opencode-to-Pi Migration Guide
 
-This guide documents the migration from the legacy OpenCode integration to the new Pi-based agent framework. It is intended for maintainers, reviewers, and anyone working on the TUI codebase.
+This guide documents the migration from the legacy OpenCode integration to the Pi-based agent framework. It is intended for maintainers, reviewers, and anyone working on the codebase.
+
+> **Note:** The Pi-based TUI (chat pane, action palette, `/wl` browse flow)
+> has since been removed from the repository — work item browsing and
+> management is now provided by the [Herdr plugin](../packages/herdr/). The
+> agent-side Pi extension modules (activity indicator, session health, model
+> display, guardrails, skill-path tool, error recovery, lease release)
+> remain and auto-load into every pi session.
 
 ## Overview
 
-The TUI previously relied on an OpenCode client for agent interactions (natural language chat, action palette, and agent-driven flows). This has been replaced with the Pi framework, which provides:
+The TUI previously relied on an OpenCode client for agent interactions (natural language chat, action palette, and agent-driven flows). This was replaced with the Pi framework, which provides:
 
-- **PiAdapter** (`packages/tui/extensions/index.ts` (Pi extension)): The core abstraction replacing `OpencodeClient`. Provides a clean interface for agent backend communication.
-- **ChatPane** (`packages/tui/extensions/Worklog/chatPane.ts`): A natural language chat interface with keyword-based routing for `wl` commands (list, next, show, create, update, close, search, claim).
-- **ActionPalette** (`packages/tui/extensions/Worklog/actionPalette.ts`): A keyboard-first action palette with default actions mapping to `wl` CLI commands.
-- **wl CLI Integration** (`packages/tui/extensions/wl-integration.ts`, `src/wl-integration/spawn.ts`): All work item reads/writes now go through the `wl` CLI via `child_process.spawn`, not direct database access.
+- **wl CLI Integration** (`packages/tui/extensions/wl-integration.ts`, `src/wl-integration/spawn.ts`): All work item reads/writes go through the `wl` CLI via `child_process.spawn`, not direct database access.
 
 ## What Changed
 
@@ -33,10 +37,10 @@ The TUI previously relied on an OpenCode client for agent interactions (natural 
 - `src/tui/controller.ts` — replaced `OpencodeClient` with `PiAdapter`, updated key handlers
 - `src/tui/constants.ts` — updated key descriptions and references
 - `packages/tui/extensions/index.ts` (Pi extension) — new PiAdapter implementation
-- `packages/tui/extensions/Worklog/chatPane.ts` — new ChatPane component
-- `packages/tui/extensions/Worklog/actionPalette.ts` — new ActionPalette component
+- `packages/tui/extensions/Worklog/chatPane.ts` — new ChatPane component (removed in the Pi TUI removal)
+- `packages/tui/extensions/Worklog/actionPalette.ts` — new ActionPalette component (removed in the Pi TUI removal)
 - `README.md` — added references to Pi agent features
-- `docs/tutorials/04-using-the-tui.md` — updated tutorial with Pi agent chat and action palette
+- `docs/tutorials/04-using-the-tui.md` — updated tutorial with Pi agent chat and action palette (removed in the Pi TUI removal)
 
 ### Files Retained (for reference)
 
@@ -107,11 +111,10 @@ All 157+ tests should pass. Tests that previously depended on `OpencodeClient` h
 
 ### E2E tests
 
-E2E tests for agent-driven flows are in `tests/e2e/agent-flow.test.ts`. They use mocked `child_process.spawn` for CI safety.
-
-```bash
-npx vitest run tests/e2e/agent-flow.test.ts
-```
+E2E tests for agent-driven flows lived in `tests/e2e/agent-flow.test.ts` (mocked
+`child_process.spawn` for CI safety). That file, together with
+`tests/e2e/headless-tui.test.ts`, was removed when the Pi-based TUI was
+removed — work item browsing moved to the Herdr plugin (`packages/herdr/`).
 
 ## FAQ
 
@@ -133,7 +136,6 @@ A: The PiAdapter uses the standard Pi framework configuration. Check the Pi docu
 
 ## Related Documentation
 
-- [Pi TUI Design Checklist](./ux/design-checklist.md)
-- [TUI.md](../TUI.md) — TUI controls and usage
 - [wl CLI Integration API](./wl-integration-api.md)
-- [Pi Adapter](../src/tui/pi-adapter.ts) — source code
+- [Herdr plugin](../packages/herdr/) — work item browsing and management
+- [Pi extension README](../packages/tui/extensions/README.md) — retained agent-side plugin modules
