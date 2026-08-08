@@ -861,6 +861,93 @@ describe('code-freeze shortcut filtering — worklist integration', () => {
   });
 });
 
+// ── Issue-type shortcut filtering — worklist integration (WL-0MSKH1J0R003BM2M)
+//
+// The selected work item's issueType is threaded into the shortcut lookup and
+// hint paths so a type-gated chord (e.g. a project-local `w` bound to
+// `wiki-podcast-script` for `podcast` items) is hidden on non-matching types,
+// and the bundled code-workflow chords n/p/i are hidden on podcast items.
+
+describe('issue-type shortcut filtering — worklist integration', () => {
+  let registry: ShortcutRegistry;
+
+  beforeEach(() => {
+    registry = loadShortcutConfig();
+  });
+
+  it('treats i as a chord leader only for code item types', () => {
+    expect(isChordLeader('i', registry, false, 'feature')).toBe(true);
+    expect(isChordLeader('i', registry, false, 'podcast')).toBe(false);
+    expect(isChordLeader('i', registry, false, 'docs')).toBe(false);
+  });
+
+  it('treats n and p as chord leaders only for code item types', () => {
+    expect(isChordLeader('n', registry, false, 'bug')).toBe(true);
+    expect(isChordLeader('n', registry, false, 'podcast')).toBe(false);
+    expect(isChordLeader('p', registry, false, 'task')).toBe(true);
+    expect(isChordLeader('p', registry, false, 'podcast')).toBe(false);
+  });
+
+  it('keeps generic chords as leaders on every type', () => {
+    expect(isChordLeader('r', registry, false, 'podcast')).toBe(true);
+    expect(isChordLeader('c', registry, false, 'podcast')).toBe(true);
+    expect(isChordLeader('s', registry, false, 'podcast')).toBe(true);
+    expect(isChordLeader('a', registry, false, 'podcast')).toBe(true);
+    expect(isChordLeader('u', registry, false, 'podcast')).toBe(true);
+  });
+
+  it('does not resolve the i chord via processChordInput on a podcast item', () => {
+    const chordState = createChordState();
+    chordState.pendingKeys = ['i'];
+    const result = processChordInput(chordState, 'i', registry, 'list', 'plan_complete', false, 'podcast');
+    expect(result).toBe('chord-cancel');
+    expect(chordState.resolvedCommand).toBeNull();
+  });
+
+  it('resolves the i chord via processChordInput on a code item', () => {
+    const chordState = createChordState();
+    const result = processChordInput(chordState, 'i', registry, 'list', 'plan_complete', false, 'feature');
+    expect(result).toBe('chord-complete');
+    expect(chordState.resolvedCommand).toBe('/skill:implement <id>');
+  });
+
+  it('omits code-workflow chords from stage entries used for footer hints on podcast items', () => {
+    const podcastEntries = registry.getEntriesForStage('plan_complete', false, 'podcast');
+    expect(podcastEntries.some(e => e.chord[0] === 'i')).toBe(false);
+    expect(podcastEntries.some(e => e.chord[0] === 'p')).toBe(false);
+    const codeEntries = registry.getEntriesForStage('plan_complete', false, 'feature');
+    expect(codeEntries.some(e => e.chord[0] === 'i')).toBe(true);
+  });
+
+  it('keeps generic housekeeping chords in footer hints on podcast items', () => {
+    const podcastEntries = registry.getEntriesForStage('in_review', false, 'podcast');
+    const chords = podcastEntries.map(e => e.chord.join(''));
+    expect(chords).toContain('aa');
+    expect(chords).toContain('ay');
+    expect(chords).toContain('ar');
+    expect(chords).toContain('r');
+  });
+
+  it('excludes a type-gated local chord on non-matching types via the merged registry', () => {
+    // A project-local podcast-gated chord merges over the bundled defaults;
+    // verify the merged registry honors the gating per item type.
+    const root = mkdtempSync(join(tmpdir(), 'herdr-issue-type-'));
+    try {
+      writeFileSync(join(root, 'shortcuts.json'), JSON.stringify([
+        { chord: ['w'], command: '/skill:wiki-podcast-script <id>', view: 'both', label: 'write script', work_item_types: ['podcast'] },
+      ]));
+      const merged = loadShortcutConfig(root);
+      expect(merged.lookupChord(['w'], 'list', undefined, false, 'podcast')).toBe('/skill:wiki-podcast-script <id>');
+      expect(merged.lookupChord(['w'], 'list', undefined, false, 'feature')).toBeUndefined();
+      // Bundled code chords still gated by type in the merged registry.
+      expect(merged.lookupChord(['i'], 'list', undefined, false, 'feature')).toBe('/skill:implement <id>');
+      expect(merged.lookupChord(['i'], 'list', undefined, false, 'podcast')).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 // ── Code Freeze: banner rendering ────────────────────────────────────────
 // The banner must appear only when freeze is active and must never break the
 // `rows - 1` line-count invariant (WL-0MSAAON63003N6LO).

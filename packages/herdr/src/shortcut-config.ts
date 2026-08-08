@@ -41,6 +41,16 @@ export interface ShortcutEntry {
    * logged and treated as omitted.
    */
   codeFreeze?: 'block' | 'allow';
+  /**
+   * Issue-type allowlist (WL-0MSKH1J0R003BM2M). When present, the shortcut
+   * is visible ONLY on work items whose issue type (e.g. `bug`, `feature`,
+   * `task`, `chore`, `epic`, `podcast`) is listed. Entries without an
+   * allowlist are available on all types (backward compatible).
+   * Parsed from the `work_item_types` key in shortcuts.json (snake_case in
+   * JSON, camelCase in TS — matching the `code_freeze`→`codeFreeze`
+   * convention); invalid values are logged and treated as omitted.
+   */
+  workItemTypes?: string[];
 }
 
 // ── Registry ──────────────────────────────────────────────────────────
@@ -62,19 +72,33 @@ export class ShortcutRegistry {
   }
 
   /**
+   * True when an entry is hidden by issue-type gating (WL-0MSKH1J0R003BM2M):
+   * the entry carries a `workItemTypes` allowlist AND the selected item's
+   * issueType is supplied AND the allowlist does not include it. When either
+   * the allowlist or the issueType is missing, the entry is always visible
+   * (backward compatible).
+   */
+  private isBlockedByIssueType(entry: ShortcutEntry, issueType?: string): boolean {
+    if (issueType === undefined) return false;
+    if (entry.workItemTypes === undefined || entry.workItemTypes.length === 0) return false;
+    return !entry.workItemTypes.includes(issueType);
+  }
+
+  /**
    * Look up a chord by its full key sequence (supports any length).
    */
-  lookupChord(chordKeys: string[], view: string, stage?: string, codeFreezeActive?: boolean): string | undefined {
-    return this.lookupChordEntry(chordKeys, view, stage, codeFreezeActive)?.command;
+  lookupChord(chordKeys: string[], view: string, stage?: string, codeFreezeActive?: boolean, issueType?: string): string | undefined {
+    return this.lookupChordEntry(chordKeys, view, stage, codeFreezeActive, issueType)?.command;
   }
 
   /**
    * Look up a chord by its full key sequence and return the matching entry
    * (command, model, label, ...). Returns undefined when no entry matches.
    */
-  lookupChordEntry(chordKeys: string[], view: string, stage?: string, codeFreezeActive?: boolean): ShortcutEntry | undefined {
+  lookupChordEntry(chordKeys: string[], view: string, stage?: string, codeFreezeActive?: boolean, issueType?: string): ShortcutEntry | undefined {
     return this.entries.find(entry => {
       if (this.isBlockedByFreeze(entry, codeFreezeActive)) return false;
+      if (this.isBlockedByIssueType(entry, issueType)) return false;
       const chord = entry.chord;
       if (chord.length !== chordKeys.length) return false;
       for (let i = 0; i < chord.length; i++) {
@@ -91,9 +115,10 @@ export class ShortcutRegistry {
   /**
    * Return all entries visible for the given stage.
    */
-  getEntriesForStage(stage?: string, codeFreezeActive?: boolean): ShortcutEntry[] {
+  getEntriesForStage(stage?: string, codeFreezeActive?: boolean, issueType?: string): ShortcutEntry[] {
     return this.entries.filter(entry => {
       if (this.isBlockedByFreeze(entry, codeFreezeActive)) return false;
+      if (this.isBlockedByIssueType(entry, issueType)) return false;
       if (entry.stages === undefined || entry.stages.length === 0) return true;
       if (stage === undefined) return false;
       return entry.stages.includes(stage);
@@ -110,17 +135,18 @@ export class ShortcutRegistry {
   /**
    * Get chord entries whose leader key matches.
    */
-  getChordByLeader(leaderKey: string, view?: string, codeFreezeActive?: boolean): ShortcutEntry[] {
-    return this.getChordByPrefix([leaderKey], view, undefined, codeFreezeActive);
+  getChordByLeader(leaderKey: string, view?: string, codeFreezeActive?: boolean, issueType?: string): ShortcutEntry[] {
+    return this.getChordByPrefix([leaderKey], view, undefined, codeFreezeActive, issueType);
   }
 
   /**
    * Get chord entries whose chord array starts with the given prefix.
    */
-  getChordByPrefix(prefix: string[], view?: string, stage?: string, codeFreezeActive?: boolean): ShortcutEntry[] {
+  getChordByPrefix(prefix: string[], view?: string, stage?: string, codeFreezeActive?: boolean, issueType?: string): ShortcutEntry[] {
     const result: ShortcutEntry[] = [];
     for (const entry of this.entries) {
       if (this.isBlockedByFreeze(entry, codeFreezeActive)) continue;
+      if (this.isBlockedByIssueType(entry, issueType)) continue;
       const chord = entry.chord;
       if (chord.length < prefix.length) continue;
 
@@ -143,11 +169,16 @@ export class ShortcutRegistry {
 
   /**
    * Return all entries (each has a chord, any length). When a freeze is
-   * active, entries marked `code_freeze: 'block'` are omitted.
+   * active, entries marked `code_freeze: 'block'` are omitted; when an
+   * issueType is supplied, entries whose `workItemTypes` allowlist does not
+   * include it are omitted too.
    */
-  getChordEntries(codeFreezeActive?: boolean): ShortcutEntry[] {
-    if (codeFreezeActive !== true) return this.entries;
-    return this.entries.filter(entry => !this.isBlockedByFreeze(entry, true));
+  getChordEntries(codeFreezeActive?: boolean, issueType?: string): ShortcutEntry[] {
+    return this.entries.filter(entry => {
+      if (this.isBlockedByFreeze(entry, codeFreezeActive)) return false;
+      if (this.isBlockedByIssueType(entry, issueType)) return false;
+      return true;
+    });
   }
 }
 
@@ -221,6 +252,16 @@ export function parseShortcutEntry(raw: unknown): ShortcutEntry | undefined {
     // Invalid values are logged and treated as omit (always shown) — a bad
     // value must never hide or break a shortcut (WL-0MSD81VEL009XHWA).
     console.error(`[shortcut-config] Invalid code_freeze value "${String(codeFreeze)}" for shortcut "${command}"; expected "block" or "allow", treating as omitted`);
+  }
+
+  const workItemTypes = entry.work_item_types;
+  if (Array.isArray(workItemTypes) && workItemTypes.length > 0 && workItemTypes.every(t => typeof t === 'string' && t.trim().length > 0)) {
+    shortcutEntry.workItemTypes = workItemTypes.map(String);
+  } else if (workItemTypes !== undefined) {
+    // Invalid values are logged and treated as omit (available on all types)
+    // — a bad value must never hide or break a shortcut
+    // (WL-0MSKH1J0R003BM2M).
+    console.error(`[shortcut-config] Invalid work_item_types value for shortcut "${command}"; expected a non-empty array of strings, treating as omitted`);
   }
 
   // Agent-bound commands without an explicit model run on the default

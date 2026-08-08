@@ -20,7 +20,8 @@
     ],
     "label": "intake",
     "description": "Ensure that the selected item is reasonably well defined in terms of objectives.",
-    "model": "plan"
+    "model": "plan",
+    "work_item_types": ["bug", "feature", "task", "chore", "epic"]
   },
   {
     "chord": [
@@ -33,7 +34,8 @@
     ],
     "label": "plan",
     "description": "Run the plan workflow on the selected work item",
-    "model": "plan"
+    "model": "plan",
+    "work_item_types": ["bug", "feature", "task", "chore", "epic"]
   },
   {
     "chord": [
@@ -49,7 +51,8 @@
     "label": "implement",
     "description": "Run the implement workflow on the selected work item",
     "model": "code",
-    "code_freeze": "block"
+    "code_freeze": "block",
+    "work_item_types": ["bug", "feature", "task", "chore", "epic"]
   },
   {
     "chord": [

@@ -552,7 +552,7 @@ packages/herdr/
 - **Correct project directory for new panes** — Panes created by `send-to-pi.sh`, `open-pi-agent.sh`, and `run-in-pane.sh` are started in the correct project root. Herdr's `follow` CWD policy would otherwise inherit the source pane's CWD (the plugin directory), so each script resolves a target CWD (`--cwd` arg > `HERDR_RESOLVED_CWD` > `$PWD`) and applies it in both launch modes: `--no-resize` passes it to `herdr pane split --cwd`, and the default resize mode forwards it to `grid.py --cwd` which includes it in the `pane.split` RPC params. The entry point passes the resolved worklog root (`wlRoot`) so skills, `wl` commands, and relative paths operate on the user's project rather than the plugin's installation directory.
 - **`<id>` placeholder resolution** — Before output, any `<id>` placeholders in the resolved command are replaced with the currently selected work item's ID. If no item is selected and the command requires `<id>`, the command is silently dropped (graceful no-op).
 - **Parameter input form** — Chord commands containing unknown `<identifier>` placeholders open a modal input form (`form-dialog.ts`) before dispatch. The dialog renders at 80% of the pane width (40-column minimum, centered), wraps the description and field values at its inner content width, and expands downward as content wraps — bounded by the terminal height. Every content line is padded to exactly the border width so the box borders stay aligned at any pane width (see WL-0MSAKRBOC005T320).
-- **Chord shortcut system** — Multi-key chord sequences are defined in `shortcuts.json` and resolved via `ShortcutRegistry`. Chords can be filtered by view (list/detail) and stage. Entries may carry an optional `model` field (see **Model selection per shortcut** above).
+- **Chord shortcut system** — Multi-key chord sequences are defined in `shortcuts.json` and resolved via `ShortcutRegistry`. Chords can be filtered by view (list/detail), stage, and work-item issue type. Entries may carry an optional `model` field (see **Model selection per shortcut** above).
 - **Project-local shortcut overrides** — A consumer project can add chords or override bundled defaults **without editing the plugin bundle** by placing a `shortcuts.json` at its **worklog root** (the project root resolved via `configureWorklogTarget`; the plugin reads `<worklog-root>/shortcuts.json` when it exists). Semantics:
   - The bundled `src/shortcuts.json` is loaded first and remains the base config; a local entry with the **same `chord` + `view`** replaces the bundled entry, while local entries with new chords are appended.
   - The merge is **deterministic and deduplicated** (dedup key = `view` + `chord`); within the local file, later entries win for the same `view`+`chord`.
@@ -602,6 +602,41 @@ Fail-open is deliberate: a broken or missing marker must never block browsing th
 - **Implement commands blocked** — Any implement command (`/skill:implement`, `/skill:implement-single`, `/skill:implementall`, via single-key `i`, chord, or typed dispatch) is **not** routed: no pi agent pane is spawned, no work item is claimed, and no `<id>` substitution happens. The marker is re-read at dispatch time, so a freeze that starts between refreshes is still enforced.
 - **Notice dialog** — When an implement command is attempted during a freeze, a modal dialog explains that implementation is blocked until the release finishes. Dismiss with `Esc`, `Enter`, or `q` to return to the list.
 - **Other commands unaffected** — Audit, intake, plan, review, priority, search, sync, and navigation continue to work normally during a freeze.
+
+### Shortcut filtering by work-item type
+
+Each entry in `shortcuts.json` may carry an optional `work_item_types` array
+limiting the shortcut to work items whose issue type is listed
+(WL-0MSKH1J0R003BM2M):
+
+| `work_item_types` value | Behaviour |
+|---|---|
+| `["podcast"]` | Shortcut visible only on `podcast`-typed work items |
+| `["bug","feature","task","chore","epic"]` | Shortcut visible only on code work item types |
+| omitted | Always shown (backward compatible) |
+
+Semantics:
+
+- The JSON key is snake_case (`work_item_types`); the parsed TS field is
+  camelCase (`workItemTypes`) — matching the `code_freeze`→`codeFreeze`
+  convention.
+- Any non-array / empty / non-string value is logged as invalid and treated
+  as omitted (always shown) — a bad value never hides or breaks a shortcut.
+- When the selected item's `issueType` is not available (or the entry has no
+  allowlist), behavior is exactly as before: all entries are candidates.
+- The registry methods `lookupChord()`, `lookupChordEntry()`,
+  `getEntriesForStage()`, `getChordByPrefix()`, `getChordByLeader()`, and
+  `getChordEntries()` accept an `issueType` parameter and exclude entries
+  whose allowlist misses it, so footer hints, chord hints, and dispatch
+  lookups all respect the gating automatically.
+- **Bundled restriction:** the code-workflow chords `n` (intake), `p` (plan),
+  and `i` (implement) carry `work_item_types: ["bug","feature","task",
+  "chore","epic"]`, so they are hidden on non-code types (e.g. `podcast`,
+  `docs`). All other bundled shortcuts (audit `a-*`, producer review `r`,
+  housekeeping `u-*`/`x-*`/`c`/`s`/`P-*`/`f-*`) remain untyped and are
+  available on all types. Consumer projects can add their own type-gated
+  chords (e.g. `w` → `wiki-podcast-script` for `podcast` items) via the
+  project-local `shortcuts.json` mechanism above.
 
 ### Shortcut filtering during a freeze
 

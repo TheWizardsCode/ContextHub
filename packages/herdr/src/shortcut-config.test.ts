@@ -47,6 +47,101 @@ const omittedEntry: ShortcutEntry = {
 
 // ── parseShortcutEntry ───────────────────────────────────────────────────
 
+describe('parseShortcutEntry — work_item_types field', () => {
+  it('parses work_item_types as a string array', () => {
+    const entry = parseShortcutEntry({
+      chord: ['w'],
+      command: '/skill:wiki-podcast-script <id>',
+      view: 'both',
+      work_item_types: ['podcast'],
+    });
+    expect(entry?.workItemTypes).toEqual(['podcast']);
+  });
+
+  it('treats a missing work_item_types as omit (backward compatible)', () => {
+    const entry = parseShortcutEntry({
+      chord: ['s'],
+      command: '!!wl search <search_term>',
+      view: 'both',
+    });
+    expect(entry?.workItemTypes).toBeUndefined();
+  });
+
+  it('logs and treats invalid work_item_types as omit', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const cases: unknown[] = [
+      'podcast',          // not an array
+      [],                 // empty array
+      ['podcast', 42],    // non-string element
+      [''],               // empty string element
+    ];
+    for (const bad of cases) {
+      const entry = parseShortcutEntry({
+        chord: ['x'],
+        command: '!!wl close <id>',
+        view: 'both',
+        work_item_types: bad,
+      });
+      expect(entry?.workItemTypes).toBeUndefined();
+    }
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('keeps other fields intact when work_item_types is present', () => {
+    const entry = parseShortcutEntry({
+      chord: ['w'],
+      command: '/skill:wiki-podcast-script <id>',
+      view: 'both',
+      label: 'write script',
+      stages: ['intake_complete'],
+      work_item_types: ['podcast'],
+    });
+    expect(entry).toMatchObject({
+      chord: ['w'],
+      command: '/skill:wiki-podcast-script <id>',
+      view: 'both',
+      label: 'write script',
+      stages: ['intake_complete'],
+      workItemTypes: ['podcast'],
+    });
+  });
+});
+
+// ── loadShortcutConfig ───────────────────────────────────────────────────
+
+describe('loadShortcutConfig — production shortcuts.json', () => {
+  it('marks the implement (i) shortcut with code_freeze "block"', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['i'], 'list', undefined, false);
+    expect(entry?.codeFreeze).toBe('block');
+    expect(entry?.command).toBe('/skill:implement <id>');
+  });
+
+  it('restricts the bundled code-workflow chords n/p/i to code issue types', () => {
+    const registry = loadShortcutConfig();
+    const codeTypes = ['bug', 'feature', 'task', 'chore', 'epic'];
+    for (const chord of ['n', 'p', 'i']) {
+      const entry = registry.lookupChordEntry([chord], 'list');
+      expect(entry?.workItemTypes).toEqual(codeTypes);
+    }
+    // Generic chords stay untyped.
+    expect(registry.lookupChordEntry(['r'], 'list')?.workItemTypes).toBeUndefined();
+    expect(registry.lookupChordEntry(['c'], 'list')?.workItemTypes).toBeUndefined();
+    expect(registry.lookupChordEntry(['a', 'a'], 'list')?.workItemTypes).toBeUndefined();
+  });
+
+  it('registers the f s sprint chord to return to the default view (WL-0MSGSE15000746F7)', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['f', 's'], 'list', undefined, false);
+    expect(entry).toBeDefined();
+    expect(entry?.command).toBe('/wl');
+    expect(entry?.label).toBe('sprint');
+  });
+});
+
+// ── parseShortcutEntry ───────────────────────────────────────────────────
+
 describe('parseShortcutEntry — code_freeze field', () => {
   it('parses code_freeze: "block"', () => {
     const entry = parseShortcutEntry({
@@ -105,25 +200,6 @@ describe('parseShortcutEntry — code_freeze field', () => {
       model: 'code',
       codeFreeze: 'block',
     });
-  });
-});
-
-// ── loadShortcutConfig ───────────────────────────────────────────────────
-
-describe('loadShortcutConfig — production shortcuts.json', () => {
-  it('marks the implement (i) shortcut with code_freeze "block"', () => {
-    const registry = loadShortcutConfig();
-    const entry = registry.lookupChordEntry(['i'], 'list', undefined, false);
-    expect(entry?.codeFreeze).toBe('block');
-    expect(entry?.command).toBe('/skill:implement <id>');
-  });
-
-  it('registers the f s sprint chord to return to the default view (WL-0MSGSE15000746F7)', () => {
-    const registry = loadShortcutConfig();
-    const entry = registry.lookupChordEntry(['f', 's'], 'list', undefined, false);
-    expect(entry).toBeDefined();
-    expect(entry?.command).toBe('/wl');
-    expect(entry?.label).toBe('sprint');
   });
 });
 
@@ -233,6 +309,99 @@ describe('ShortcutRegistry — codeFreezeActive filtering', () => {
       expect(registry.getChordEntries(false)).toHaveLength(3);
       expect(registry.getChordEntries()).toHaveLength(3);
     });
+  });
+});
+
+// ── Issue-type filtering (WL-0MSKH1J0R003BM2M) ─────────────────────────
+//
+// A shortcut entry carrying a `workItemTypes` allowlist is visible ONLY on
+// work items whose issue type is listed. Entries without an allowlist, and
+// lookups without a supplied issueType, behave exactly as before.
+
+describe('ShortcutRegistry — issue-type filtering', () => {
+  const podcastEntry: ShortcutEntry = {
+    chord: ['w'],
+    command: '/skill:wiki-podcast-script <id>',
+    view: 'both',
+    label: 'write script',
+    workItemTypes: ['podcast'],
+  };
+
+  const codeEntry: ShortcutEntry = {
+    chord: ['i'],
+    command: '/skill:implement <id>',
+    view: 'both',
+    label: 'implement',
+    workItemTypes: ['bug', 'feature', 'task', 'chore', 'epic'],
+  };
+
+  const untypedEntry: ShortcutEntry = {
+    chord: ['s'],
+    command: '!!wl search <search_term>',
+    view: 'both',
+    label: 'search',
+  };
+
+  let registry: ShortcutRegistry;
+
+  beforeEach(() => {
+    registry = new ShortcutRegistry([podcastEntry, codeEntry, untypedEntry]);
+  });
+
+  it('resolves a podcast-gated chord only for podcast items', () => {
+    expect(registry.lookupChord(['w'], 'list', undefined, false, 'podcast')).toBe('/skill:wiki-podcast-script <id>');
+    expect(registry.lookupChord(['w'], 'list', undefined, false, 'feature')).toBeUndefined();
+    expect(registry.lookupChord(['w'], 'list', undefined, false, 'docs')).toBeUndefined();
+  });
+
+  it('resolves a code-gated chord only for code item types', () => {
+    for (const t of ['bug', 'feature', 'task', 'chore', 'epic']) {
+      expect(registry.lookupChord(['i'], 'list', undefined, false, t)).toBe('/skill:implement <id>');
+    }
+    expect(registry.lookupChord(['i'], 'list', undefined, false, 'podcast')).toBeUndefined();
+    expect(registry.lookupChord(['i'], 'list', undefined, false, 'docs')).toBeUndefined();
+  });
+
+  it('keeps untyped chords available on every type', () => {
+    expect(registry.lookupChord(['s'], 'list', undefined, false, 'podcast')).toBe('!!wl search <search_term>');
+    expect(registry.lookupChord(['s'], 'list', undefined, false, 'feature')).toBe('!!wl search <search_term>');
+    expect(registry.lookupChord(['s'], 'list', undefined, false, 'docs')).toBe('!!wl search <search_term>');
+  });
+
+  it('keeps every chord visible when no issueType is supplied (backward compatible)', () => {
+    expect(registry.lookupChord(['w'], 'list')).toBe('/skill:wiki-podcast-script <id>');
+    expect(registry.lookupChord(['i'], 'list')).toBe('/skill:implement <id>');
+    expect(registry.lookupChord(['s'], 'list')).toBe('!!wl search <search_term>');
+    expect(registry.getEntries()).toHaveLength(3);
+  });
+
+  it('lookupChordEntry honors the allowlist', () => {
+    expect(registry.lookupChordEntry(['w'], 'list', undefined, false, 'podcast')?.label).toBe('write script');
+    expect(registry.lookupChordEntry(['w'], 'list', undefined, false, 'task')).toBeUndefined();
+  });
+
+  it('getEntriesForStage excludes entries whose allowlist misses the type', () => {
+    const forPodcast = registry.getEntriesForStage(undefined, false, 'podcast');
+    expect(forPodcast.map(e => e.label)).toEqual(['write script', 'search']);
+    const forCode = registry.getEntriesForStage(undefined, false, 'task');
+    expect(forCode.map(e => e.label)).toEqual(['implement', 'search']);
+  });
+
+  it('getChordByPrefix excludes entries whose allowlist misses the type', () => {
+    expect(registry.getChordByPrefix(['w'], 'list', undefined, false, 'podcast')).toHaveLength(1);
+    expect(registry.getChordByPrefix(['w'], 'list', undefined, false, 'chore')).toHaveLength(0);
+    expect(registry.getChordByPrefix(['i'], 'list', undefined, false, 'podcast')).toHaveLength(0);
+    expect(registry.getChordByPrefix(['i'], 'list', undefined, false, 'epic')).toHaveLength(1);
+  });
+
+  it('getChordByLeader honors the allowlist', () => {
+    expect(registry.getChordByLeader('w', 'list', false, 'podcast')).toHaveLength(1);
+    expect(registry.getChordByLeader('w', 'list', false, 'feature')).toHaveLength(0);
+  });
+
+  it('getChordEntries honors the allowlist', () => {
+    expect(registry.getChordEntries(false, 'podcast').map(e => e.label)).toEqual(['write script', 'search']);
+    expect(registry.getChordEntries(false, 'task').map(e => e.label)).toEqual(['implement', 'search']);
   });
 });
 

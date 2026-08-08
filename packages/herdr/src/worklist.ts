@@ -1318,8 +1318,8 @@ export function createChordState(): ChordState {
 /**
  * Check if a key matches any chord leader in the registry.
  */
-export function isChordLeader(key: string, registry: ShortcutRegistry, codeFreezeActive?: boolean): boolean {
-  const chords = registry.getChordEntries(codeFreezeActive);
+export function isChordLeader(key: string, registry: ShortcutRegistry, codeFreezeActive?: boolean, issueType?: string): boolean {
+  const chords = registry.getChordEntries(codeFreezeActive, issueType);
   return chords.some(c => {
     const chord = c.chord;
     return chord !== undefined && chord.length >= 1 && chord[0] === key;
@@ -1340,11 +1340,12 @@ export function processChordInput(
   view: string,
   stage?: string,
   codeFreezeActive?: boolean,
+  issueType?: string,
 ): 'chord-complete' | 'chord-cancel' | null {
   const pending = [...chordState.pendingKeys, key];
 
   // Check if this completes a chord
-  const entry = registry.lookupChordEntry(pending, view, stage, codeFreezeActive);
+  const entry = registry.lookupChordEntry(pending, view, stage, codeFreezeActive, issueType);
   if (entry) {
     chordState.pendingKeys = [];
     chordState.hints = '';
@@ -1354,7 +1355,7 @@ export function processChordInput(
   }
 
   // Check if this is a valid prefix for more chords
-  const nextChords = registry.getChordByPrefix(pending, view, stage, codeFreezeActive);
+  const nextChords = registry.getChordByPrefix(pending, view, stage, codeFreezeActive, issueType);
   if (nextChords.length > 0) {
     chordState.pendingKeys = pending;
     // Update hints
@@ -1437,9 +1438,9 @@ export function formatChordHintsForHelp(
  * Get chord hints for showing in the help bar when in list mode.
  * Shows leader keys and abbreviated labels for all chords.
  */
-export function getChordHelpHints(registry: ShortcutRegistry | undefined, codeFreezeActive?: boolean): string {
+export function getChordHelpHints(registry: ShortcutRegistry | undefined, codeFreezeActive?: boolean, issueType?: string): string {
   if (!registry) return '';
-  const chords = registry.getChordEntries(codeFreezeActive);
+  const chords = registry.getChordEntries(codeFreezeActive, issueType);
   // Group by leader key
   const byLeader = new Map<string, string[]>();
   for (const c of chords) {
@@ -2676,6 +2677,7 @@ export async function runWorklistTui(
         state.mode === 'detail' ? 'detail' : 'list',
         state.activeFilter ?? undefined,
         codeFreezeActive,
+        state.getSelectedItem()?.issueType,
       );
 
       if (chordResult === 'chord-complete') {
@@ -2793,13 +2795,14 @@ export async function runWorklistTui(
 
     // If key wasn't handled as navigation and chord registry exists,
     // check if it's a shortcut or part of a chord sequence
-    if (shortcutRegistry && (action === null || isChordLeader(key, shortcutRegistry as ShortcutRegistry, codeFreezeActive))) {
+    if (shortcutRegistry && (action === null || isChordLeader(key, shortcutRegistry as ShortcutRegistry, codeFreezeActive, state.getSelectedItem()?.issueType))) {
       // First: check if this key is a complete single-key shortcut
       const singleEntry = (shortcutRegistry as ShortcutRegistry).lookupChordEntry(
         [key],
         state.mode === 'detail' ? 'detail' : 'list',
         state.activeFilter ?? undefined,
         codeFreezeActive,
+        state.getSelectedItem()?.issueType,
       );
       if (singleEntry) {
         const singleCmd = singleEntry.command;
@@ -2879,11 +2882,12 @@ export async function runWorklistTui(
       }
 
       // Second: check if this key starts a multi-key chord sequence
-      if (isChordLeader(key, shortcutRegistry as ShortcutRegistry, codeFreezeActive)) {
+      if (isChordLeader(key, shortcutRegistry as ShortcutRegistry, codeFreezeActive, state.getSelectedItem()?.issueType)) {
         const nextChords = (shortcutRegistry as ShortcutRegistry).getChordByPrefix([key],
           state.mode === 'detail' ? 'detail' : 'list',
           state.activeFilter ?? undefined,
-          codeFreezeActive);
+          codeFreezeActive,
+          state.getSelectedItem()?.issueType);
         if (nextChords.length > 0) {
           chordState.pendingKeys = [key];
           chordState.hints = formatChordHintsForHelp(nextChords, [key]);
@@ -2994,12 +2998,14 @@ export async function runWorklistTui(
     if (shortcutRegistry && chordState.pendingKeys.length === 0) {
       const reg = shortcutRegistry as ShortcutRegistry;
       const selIdx = state.selectedIndex;
-      const selStage = displayItems.length > 0 && selIdx < displayItems.length
-        ? displayItems[selIdx]?.stage
+      const selItem = displayItems.length > 0 && selIdx < displayItems.length
+        ? displayItems[selIdx]
         : undefined;
+      const selStage = selItem?.stage;
+      const selIssueType = selItem?.issueType;
       const isEmpty = displayItems.length === 0;
 
-      const relevantEntries = reg.getEntriesForStage(selStage, codeFreezeActive)
+      const relevantEntries = reg.getEntriesForStage(selStage, codeFreezeActive, selIssueType)
         .filter(e => e.view === 'list' || e.view === 'both')
         .filter(e => {
           if (isEmpty && e.command.includes('<id>')) return false;
