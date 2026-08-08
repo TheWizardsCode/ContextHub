@@ -1797,6 +1797,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   detailToCIndex?: number,
   detailToCFocus?: boolean,
   detailRenderedIndex?: number,
+  showHelpText?: boolean,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -1825,6 +1826,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     detailToCIndex?: number,
     detailToCFocus?: boolean,
     detailRenderedIndex?: number,
+    showHelpText?: boolean,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -1968,9 +1970,15 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       output.push('');
     }
 
-    // Footer with keyboard hints (dynamic — includes chord hints if available)
+    // Footer with keyboard hints (dynamic — includes chord hints if available).
+    // Both the normal hint line and the chord-in-progress line are gated by
+    // `showHelpText` (default true), so `showHelpText: false` hides ALL shortcut
+    // hints, consistent with the pi browse widget's showHelpText handling
+    // (WL-0MSGJDSMJ004128E). Note: gating only affects rendering — chord key
+    // handling/accumulation in chordState continues regardless.
+    const helpEnabled = showHelpText ?? true;
     const isChordActive = chordState && chordState.pendingKeys.length > 0;
-    if (isChordActive) {
+    if (isChordActive && helpEnabled) {
       const pendingStr = chordState!.pendingKeys.join(' ');
       const hintStr = chordState!.hints
         ? `  ${ANSI.dim}${chordState!.hints}${ANSI.reset}`
@@ -3211,6 +3219,10 @@ export async function runWorklistTui(
       state.detailToCIndex,
       state.detailToCFocus,
       state.detailRenderedIndex,
+      // Gate the chord-in-progress footer behind showHelpText so `false` hides
+      // ALL shortcut hint lines (normal and chord-mode), matching the pi browse
+      // widget (WL-0MSGJDSMJ004128E). Chord key handling is unaffected.
+      opts.getShowHelpText(),
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

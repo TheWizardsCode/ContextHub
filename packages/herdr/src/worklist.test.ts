@@ -34,6 +34,7 @@ import {
   formatChordHintsForHelp,
   resolvePodcastTarget,
 } from './worklist.js';
+import type { ChordState } from './worklist.js';
 import type { DowntimeWorker } from './downtime-worker.js';
 import { setLogPath, resetLogPath, recordCommand, getLastCommand } from './command-log.js';
 import { loadShortcutConfig, ShortcutRegistry } from './shortcut-config.js';
@@ -1113,6 +1114,152 @@ describe('createListRenderer — code freeze banner', () => {
       true, // codeFreezeActive
     );
     expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+  });
+});
+
+// ── Chord-mode footer gating (WL-0MSGJDSMJ004128E) ─────────────────────
+// The chord-in-progress footer (`chord: <keys> _ <hints>`) must be gated by
+// `showHelpText` like the normal shortcut hint line, so `showHelpText: false`
+// hides ALL shortcut hint lines (consistent with the pi browse widget). The
+// gating must only affect rendering — chord state accumulation is untouched.
+
+describe('createListRenderer — chord-mode footer gating', () => {
+  const renderer = createListRenderer();
+
+  function chordStateWithPending(keys: string[], hints = 'update ...'): ChordState {
+    const state = createChordState();
+    state.pendingKeys = keys;
+    state.hints = hints;
+    return state;
+  }
+
+  it('suppresses the chord footer when showHelpText is false', () => {
+    const output = renderer(
+      [makeItem('A')],
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      chordStateWithPending(['u']),
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      false,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      0,
+      true,
+      0,
+      false, // showHelpText
+    );
+    expect(output).not.toContain('chord:');
+    expect(output).not.toContain('update ...');
+  });
+
+  it('renders the chord footer when showHelpText is true', () => {
+    const output = renderer(
+      [makeItem('A')],
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      chordStateWithPending(['u']),
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      false,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      0,
+      true,
+      0,
+      true, // showHelpText
+    );
+    expect(output).toContain('chord:');
+    expect(output).toContain('u _');
+    expect(output).toContain('update ...');
+  });
+
+  it('renders the chord footer when showHelpText is unset (default true)', () => {
+    // Backwards compatibility: existing positional callers that do not pass
+    // the trailing showHelpText argument keep the chord footer visible.
+    const output = renderer(
+      [makeItem('A')],
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      chordStateWithPending(['u']),
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      false,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      0,
+      true,
+      0,
+    );
+    expect(output).toContain('chord:');
+    expect(output).toContain('u _');
+  });
+
+  it('does not mutate chord state while rendering with showHelpText false', () => {
+    // The fix gates rendering only; the chord key handling state machine must
+    // keep accumulating even when the footer is hidden (WL-0MSGJDSMJ004128E).
+    const chordState = chordStateWithPending(['u', 'c']);
+    renderer(
+      [makeItem('A')],
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      chordState,
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      false,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      0,
+      true,
+      0,
+      false, // showHelpText
+    );
+    expect(chordState.pendingKeys).toEqual(['u', 'c']);
+    expect(chordState.hints).toBe('update ...');
   });
 });
 
