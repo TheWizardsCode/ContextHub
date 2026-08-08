@@ -32,6 +32,7 @@ import {
   formatDetailView,
   fetchItemsForView,
   formatChordHintsForHelp,
+  resolvePodcastTarget,
 } from './worklist.js';
 import type { DowntimeWorker } from './downtime-worker.js';
 import { setLogPath, resetLogPath, recordCommand, getLastCommand } from './command-log.js';
@@ -945,6 +946,110 @@ describe('issue-type shortcut filtering — worklist integration', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+// ── Podcast-progression dispatch (OSL-0MSKFXM380098LFL / OSL-0MSHFQ51L009IUOS)
+//
+// The project-local `w` (wiki-podcast-script) and `t` (wiki-tts-generate)
+// chords use `<podcast-target>` / `<podcast-script>` markers resolved from
+// the selected item's `Key Files:` + lifecycle context at dispatch time.
+
+describe('resolvePodcastTarget — podcast-progression dispatch', () => {
+  const sourcedItem: WorkItem = {
+    id: 'OSL-1',
+    title: 'Episode',
+    status: 'open',
+    stage: 'intake_complete',
+    issueType: 'podcast',
+    description: '## Key Files:\n- wiki/syntheses/foo.md\n',
+  };
+
+  const draftedItem: WorkItem = {
+    id: 'OSL-2',
+    title: 'Episode',
+    status: 'open',
+    stage: 'in_review',
+    issueType: 'podcast',
+    description: '## Key Files:\n- foo/foo.podcast.md\n',
+  };
+
+  const noKeyFilesItem: WorkItem = {
+    id: 'OSL-3',
+    title: 'Episode',
+    status: 'open',
+    stage: 'intake_complete',
+    issueType: 'podcast',
+    description: 'No key files here.',
+  };
+
+  it('returns the command unchanged when it carries no podcast markers', async () => {
+    const result = await resolvePodcastTarget('/skill:audit <id>', sourcedItem);
+    expect(result).toEqual({ command: '/skill:audit <id>' });
+  });
+
+  it('errors when no item is selected', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script <podcast-target>', null);
+    expect(result.error).toMatch(/no work item selected/i);
+    expect(result.command).toBeUndefined();
+  });
+
+  it('resolves <podcast-target> to --doc --force-single on sourced episodes', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script <podcast-target>', sourcedItem);
+    expect(result).toEqual({ command: '/skill:wiki-podcast-script --doc wiki/syntheses/foo.md --force-single' });
+  });
+
+  it('errors on a sourced episode with no synthesis in Key Files', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script <podcast-target>', noKeyFilesItem);
+    expect(result.error).toMatch(/no source synthesis/i);
+  });
+
+  it('resolves <podcast-target> to --rewrite when open note children exist', async () => {
+    const children = [
+      { id: 'OSL-2-N1', title: 'Note', status: 'open' } as WorkItem,
+      { id: 'OSL-2-N2', title: 'Done note', status: 'completed' } as WorkItem,
+    ];
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script <podcast-target>', draftedItem, async () => children);
+    expect(result).toEqual({ command: '/skill:wiki-podcast-script --rewrite foo/foo.podcast.md' });
+  });
+
+  it('belt-and-braces: errors when a script exists but there are no open notes', async () => {
+    const children = [
+      { id: 'OSL-2-N2', title: 'Done note', status: 'completed' } as WorkItem,
+    ];
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script <podcast-target>', draftedItem, async () => children);
+    expect(result.error).toMatch(/already present/);
+    expect(result.command).toBeUndefined();
+  });
+
+  it('errors when rewrite is requested but no script is in Key Files', async () => {
+    const noScriptItem: WorkItem = { ...draftedItem, description: '## Key Files:\n- wiki/syntheses/foo.md\n' };
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script <podcast-target>', noScriptItem, async () => [
+      { id: 'X', title: 'Note', status: 'open' } as WorkItem,
+    ]);
+    expect(result.error).toMatch(/no podcast script/i);
+  });
+
+  it('resolves <podcast-script> to a wiki-dir-relative podcast file path', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-tts-generate --podcast-file <podcast-script>', draftedItem);
+    expect(result).toEqual({ command: '/skill:wiki-tts-generate --podcast-file podcast/foo/foo.podcast.md' });
+  });
+
+  it('keeps an already-wiki-relative <podcast-script> path as-is', async () => {
+    const wikiItem: WorkItem = { ...draftedItem, description: '## Key Files:\n- wiki/podcast/foo/foo.podcast.md\n' };
+    const result = await resolvePodcastTarget('/skill:wiki-tts-generate --podcast-file <podcast-script>', wikiItem);
+    expect(result).toEqual({ command: '/skill:wiki-tts-generate --podcast-file wiki/podcast/foo/foo.podcast.md' });
+  });
+
+  it('errors on <podcast-script> when no script exists', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-tts-generate --podcast-file <podcast-script>', sourcedItem);
+    expect(result.error).toMatch(/no podcast script/i);
+  });
+
+  it('errors on <podcast-script> for a synthesis-only episode (script must exist first)', async () => {
+    const synthItem: WorkItem = { ...sourcedItem, description: '## Key Files:\n- wiki/syntheses/foo.md\n' };
+    const result = await resolvePodcastTarget('/skill:wiki-tts-generate --podcast-file <podcast-script>', synthItem);
+    expect(result.error).toMatch(/no podcast script/i);
   });
 });
 

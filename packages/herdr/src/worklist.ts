@@ -2282,6 +2282,111 @@ export function dispatchChordCommand(
 export type ExecuteResult = 'dispatched' | 'callback' | 'noop' | 'blocked';
 
 /**
+ * Result of resolving a podcast-progression command marker for the selected
+ * work item. Either a fully-resolved command (no markers remain) or an
+ * error message that must be surfaced WITHOUT dispatching (OSL-0MSHFQ51L009IUOS
+ * belt-and-braces guard).
+ */
+export interface PodcastTargetResolution {
+  command?: string;
+  error?: string;
+}
+
+/**
+ * Resolve podcast-progression command markers (`<podcast-target>`,
+ * `<podcast-script>`) for the selected work item at dispatch time
+ * (OSL-0MSKFXM380098LFL, folding in OSL-0MSHFQ51L009IUOS).
+ *
+ * The `w` write-script chord command
+ * (`/skill:wiki-podcast-script <podcast-target>`) derives its mode from the
+ * selected item's lifecycle context:
+ * - stage `intake_complete` (sourced): author a new script from the source
+ *   synthesis → `--doc <first .md Key File> --force-single`;
+ * - otherwise, when open editor-note children exist: rewrite the existing
+ *   script → `--rewrite <first .podcast.md Key File>`;
+ * - otherwise: belt-and-braces guard — returns an error and does NOT
+ *   dispatch (never authors a duplicate).
+ *
+ * The `t` TTS chord command
+ * (`/skill:wiki-tts-generate --podcast-file <podcast-script>`) resolves
+ * `<podcast-script>` to the first `.podcast.md` Key File, normalized to the
+ * wiki-dir-relative `podcast/...` form the TTS skill expects (a bare
+ * `<title>/<title>.podcast.md` Key File path is podcast-dir-relative).
+ *
+ * Markers are resolved BEFORE the generic modal-form check so they never
+ * fall through to the input form. Returns the input command unchanged when
+ * it carries no podcast markers.
+ *
+ * @param command - Resolved shortcut command (may contain markers).
+ * @param item - Selected work item (or null when nothing is selected).
+ * @param fetchChildren - Child fetcher (injectable for tests; defaults to
+ *   {@link fetchChildrenForItem}).
+ */
+export async function resolvePodcastTarget(
+  command: string,
+  item: WorkItem | null,
+  fetchChildren: (parentId: string) => Promise<WorkItem[]> = fetchChildrenForItem,
+): Promise<PodcastTargetResolution> {
+  const hasTarget = command.includes('<podcast-target>');
+  const hasScript = command.includes('<podcast-script>');
+  if (!hasTarget && !hasScript) {
+    return { command };
+  }
+  if (!item) {
+    return { error: 'No work item selected' };
+  }
+
+  const mdPaths = extractFilePaths(item.description ?? '').filter(p => p.endsWith('.md'));
+  const synthesis = mdPaths.find(p => !p.endsWith('.podcast.md')) ?? mdPaths[0];
+  const script = mdPaths.find(p => p.endsWith('.podcast.md'));
+  let resolved = command;
+
+  if (hasTarget) {
+    // `w` write-script chord: mode derives from stage + open notes.
+    if (item.stage === 'intake_complete') {
+      // Sourced episode — author a new script from the synthesis.
+      if (!synthesis) {
+        return { error: 'No source synthesis found in Key Files: — run wiki-ingest-batch/research first' };
+      }
+      resolved = resolved.replace(/<podcast-target>/g, `--doc ${synthesis} --force-single`);
+    } else {
+      // Drafted/written episode — rewrite only when open note children exist.
+      let children: WorkItem[] = [];
+      try {
+        children = await fetchChildren(item.id);
+      } catch {
+        children = [];
+      }
+      const openNotes = children.filter(c => {
+        const status = c.status ?? '';
+        return status !== 'completed' && status !== 'closed' && status !== 'deleted';
+      });
+      if (openNotes.length === 0) {
+        return { error: 'podcast script already present, review and edit that rather than author a new one' };
+      }
+      if (!script) {
+        return { error: 'No podcast script found in Key Files:' };
+      }
+      resolved = resolved.replace(/<podcast-target>/g, `--rewrite ${script}`);
+    }
+  }
+
+  if (hasScript) {
+    if (!script) {
+      return { error: 'No podcast script found in Key Files: — author the script first (w)' };
+    }
+    // The TTS skill resolves --podcast-file relative to the wiki dir;
+    // episode Key Files store the script podcast-dir-relative.
+    const podcastFile = script.startsWith('podcast/') || script.startsWith('wiki/')
+      ? script
+      : `podcast/${script}`;
+    resolved = resolved.replace(/<podcast-script>/g, podcastFile);
+  }
+
+  return { command: resolved };
+}
+
+/**
  * Execute a resolved chord command.
  *
  * Routing priority:
@@ -2682,11 +2787,24 @@ export async function runWorklistTui(
 
       if (chordResult === 'chord-complete') {
         // Chord resolved — execute the command
-        const command = chordState.resolvedCommand;
+        let command = chordState.resolvedCommand;
         const model = chordState.resolvedModel;
         chordState.resolvedCommand = null;
         chordState.resolvedModel = null;
         if (command) {
+          // Podcast-progression markers (<podcast-target>/<podcast-script>)
+          // are resolved from the selected item's context BEFORE the generic
+          // modal-form check so they never fall through to the input form
+          // (OSL-0MSKFXM380098LFL, folding in OSL-0MSHFQ51L009IUOS).
+          if (command.includes('<podcast-target>') || command.includes('<podcast-script>')) {
+            const podcast = await resolvePodcastTarget(command, state.getSelectedItem());
+            if (podcast.error) {
+              showToast('Error', { body: podcast.error });
+              render();
+              return;
+            }
+            command = podcast.command ?? command;
+          }
           // Check for unknown identifiers that need form input
           if (hasUnknownIdentifiers(command)) {
             // Look up description from shortcut entry
@@ -2805,8 +2923,21 @@ export async function runWorklistTui(
         state.getSelectedItem()?.issueType,
       );
       if (singleEntry) {
-        const singleCmd = singleEntry.command;
+        let singleCmd = singleEntry.command;
         const singleModel = singleEntry.model ?? undefined;
+        // Podcast-progression markers (<podcast-target>/<podcast-script>)
+        // are resolved from the selected item's context BEFORE the generic
+        // modal-form check so they never fall through to the input form
+        // (OSL-0MSKFXM380098LFL, folding in OSL-0MSHFQ51L009IUOS).
+        if (singleCmd.includes('<podcast-target>') || singleCmd.includes('<podcast-script>')) {
+          const podcast = await resolvePodcastTarget(singleCmd, state.getSelectedItem());
+          if (podcast.error) {
+            showToast('Error', { body: podcast.error });
+            render();
+            return;
+          }
+          singleCmd = podcast.command ?? singleCmd;
+        }
         // Single-key shortcut — check for unknown identifiers first
         if (hasUnknownIdentifiers(singleCmd)) {
           let description = '';

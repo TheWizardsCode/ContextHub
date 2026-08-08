@@ -638,6 +638,26 @@ Semantics:
   chords (e.g. `w` → `wiki-podcast-script` for `podcast` items) via the
   project-local `shortcuts.json` mechanism above.
 
+### Podcast-progression dispatch markers (OSL-0MSKFXM380098LFL)
+
+Consumer projects that produce podcasts via Worklog episode items (issue
+`podcast`) can define progression chords in their project-local
+`shortcuts.json` that dispatch the podcast pipeline skills. Two markers are
+resolved by the worklist **at dispatch time** from the selected item's
+`Key Files:` section and lifecycle context — they never fall through to the
+modal input form:
+
+| Marker | Resolution | Typical command |
+|---|---|---|
+| `<podcast-target>` | `w` write-script chord: stage `intake_complete` (sourced) → `--doc <first .md> --force-single`; otherwise with open editor-note children → `--rewrite <first .podcast.md>`; otherwise a belt-and-braces error is shown and nothing dispatches (never authors a duplicate) | `/skill:wiki-podcast-script <podcast-target>` |
+| `<podcast-script>` | `t` TTS chord: first `.podcast.md` Key File, normalized to the wiki-dir-relative `podcast/...` path the TTS skill expects (errors when no script exists yet) | `/skill:wiki-tts-generate --podcast-file <podcast-script>` |
+
+Both markers require the chord entry to carry `work_item_types: ["podcast"]`
+so it is only visible on podcast-typed items (see [Shortcut filtering by
+work-item type](#shortcut-filtering-by-work-item-type)); the `w` chord should
+additionally be stage-limited to the podcast lifecycle (`intake_complete`,
+`plan_complete`, `in_review`, `done`).
+
 ### Shortcut filtering during a freeze
 
 Each entry in `shortcuts.json` may carry an optional `code_freeze` field controlling its visibility while the project is frozen (WL-0MSD81VEL009XHWA):
