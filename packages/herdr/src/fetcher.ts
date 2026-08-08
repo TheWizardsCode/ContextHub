@@ -11,6 +11,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { selectWorkItems } from './smart-selection.js';
 import { regroupWorkItems } from './grouping.js';
+import type { AgentState } from './agent-tracker.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -57,6 +58,9 @@ let _worklogDir: string | undefined;
  */
 export function setWorklogDir(dir: string | undefined): void {
   _worklogDir = dir;
+  // Switching worklog dirs invalidates any in-flight fetch memo (F4): reads
+  // racing against the old dir must never be shared with the new one.
+  clearFetchMemo();
 }
 
 /**
@@ -68,10 +72,27 @@ export function getWorklogDir(): string | undefined {
 }
 
 /**
+ * Build the argument vector for a wl CLI invocation, prepending the
+ * `--worklog-dir` override when set (it is a global option that must appear
+ * BEFORE the subcommand). Callers that invoke wl directly via
+ * `getExecFileAsync()` (e.g. the downtime worker's `wl next` and
+ * `wl comment add`) use this so their commands resolve against the same
+ * worklog root as the worklist — without the override the argument vector is
+ * returned unchanged (current behavior preserved).
+ */
+export function buildWlArgs(args: string[]): string[] {
+  if (_worklogDir !== undefined) {
+    return ['--worklog-dir', _worklogDir, ...args];
+  }
+  return args;
+}
+
+/**
  * Reset the worklog directory override.
  */
 export function resetWorklogDir(): void {
   _worklogDir = undefined;
+  clearFetchMemo();
 }
 
 /**
@@ -129,6 +150,12 @@ export interface WorkItem {
   depth?: number;
   /** Internal: whether the expand icon should show collapsed state. */
   _expanded?: boolean;
+  /**
+   * Current agent status for the worklist-spawned agent pane associated
+   * with this item (merged by the agent tracker). `idle`/`working`/`blocked`
+   * render an icon; `done`/`unknown`/absent render none (WL-0MSBQUJQX005RAT9).
+   */
+  agentState?: AgentState;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -263,7 +290,53 @@ function extractItems(payload: unknown): WorkItem[] {
 
 const CLI_BINARIES = ['wl', 'worklog'];
 
-async function runWl(args: string[], includeJson = true, timeoutMs?: number): Promise<string> {
+// ── In-process fetch memoization (F4 — WL-0MSGAEPOJ002824S) ───────────
+
+/**
+ * Read commands whose results may be deduplicated in-process. Matches the
+ * wl CLI read-cache command set (F2). Writes (update/create/sync/…) are
+ * NEVER memoized — a deduped write would drop a mutation.
+ */
+const MEMOIZABLE_COMMANDS = new Set(['list', 'next', 'show', 'search', 'status']);
+
+/** Cap on in-flight memo entries (bounded: entries are removed on settle, so
+ * this caps only concurrent racing fetches, which is the dedupe window). */
+const MEMO_MAX_ENTRIES = 64;
+
+/**
+ * In-flight promise memo: key → shared promise for an identical read that is
+ * currently executing in this process. Racing identical fetches (overlapping
+ * refresh ticks, duplicate pane queries) share the SAME promise, so `wl` is
+ * spawned once instead of N times. Entries are deleted when the promise
+ * settles — the memo never serves a settled result, so reads that begin
+ * after a DB write always spawn fresh (never stale across writes).
+ */
+const inflightFetchMemo = new Map<string, Promise<string>>();
+
+function fetchMemoKey(args: string[], includeJson: boolean): string {
+  // Include the worklog-dir override so a dir change never cross-contaminates.
+  return `${_worklogDir ?? ''}\u0000${includeJson ? '1' : '0'}\u0000${args.join('\u0000')}`;
+}
+
+/**
+ * Drop all in-flight fetch memo entries (after a write or worklog-dir
+ * change). Reads that started before the write keep their own result; reads
+ * issued after the write will spawn fresh instead of sharing a pre-write
+ * in-flight read.
+ */
+export function clearFetchMemo(): void {
+  inflightFetchMemo.clear();
+}
+
+/**
+ * Test helper: current number of in-flight memo entries. Used to verify the
+ * memo stays bounded under many concurrent distinct fetches.
+ */
+export function _fetchMemoSize(): number {
+  return inflightFetchMemo.size;
+}
+
+async function runWlInner(args: string[], includeJson: boolean, timeoutMs?: number): Promise<string> {
   let lastError: unknown;
 
   for (const binary of CLI_BINARIES) {
@@ -275,11 +348,8 @@ async function runWl(args: string[], includeJson = true, timeoutMs?: number): Pr
         fullArgs = args;
       }
 
-      // Prepend --worklog-dir when set (it's a global option that must
-      // appear before the subcommand).
-      if (_worklogDir !== undefined) {
-        fullArgs = ['--worklog-dir', _worklogDir, ...fullArgs];
-      }
+      // Prepend --worklog-dir when set (global option before the subcommand).
+      fullArgs = buildWlArgs(fullArgs);
 
       const result = await execFileAsync(binary, fullArgs, {
         maxBuffer: 1024 * 1024 * 5,
@@ -301,6 +371,43 @@ async function runWl(args: string[], includeJson = true, timeoutMs?: number): Pr
   }
 
   throw new Error(`wl CLI not found: ${String(lastError)}`);
+}
+
+async function runWl(args: string[], includeJson = true, timeoutMs?: number): Promise<string> {
+  const command = args[0];
+
+  // Writes must never be deduplicated or share pre-write read results: drop
+  // any in-flight read memo so a read issued after this write spawns fresh.
+  if (!MEMOIZABLE_COMMANDS.has(command)) {
+    if (inflightFetchMemo.size > 0) inflightFetchMemo.clear();
+    return runWlInner(args, includeJson, timeoutMs);
+  }
+
+  // Read: dedupe concurrent identical fetches within this process (F4).
+  const key = fetchMemoKey(args, includeJson);
+  const inFlight = inflightFetchMemo.get(key);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const promise = runWlInner(args, includeJson, timeoutMs).finally(() => {
+    // Remove on settle: the memo only dedupes CONCURRENT fetches, so a
+    // later identical read always spawns fresh (never stale across writes).
+    if (inflightFetchMemo.get(key) === promise) {
+      inflightFetchMemo.delete(key);
+    }
+  });
+
+  // Bound: evict the oldest entry when over the cap (Map preserves insertion
+  // order, so the first key is the oldest).
+  if (inflightFetchMemo.size >= MEMO_MAX_ENTRIES) {
+    const oldest = inflightFetchMemo.keys().next().value;
+    if (oldest !== undefined) {
+      inflightFetchMemo.delete(oldest);
+    }
+  }
+  inflightFetchMemo.set(key, promise);
+  return promise;
 }
 
 // ── Public API ────────────────────────────────────────────────────────
@@ -392,12 +499,16 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
 }
 
 /**
- * Fetch work items filtered by stage (via `wl list --stage`).
+ * Fetch work items filtered by stage (via `wl list`).
+ * Open items only (WL-0MSDT8X1V003206G): the stage-filtered worklist shows
+ * every open root item in the stage — items with status `blocked`,
+ * `in-progress`, or `completed` are excluded even when their stage matches.
  * Root-only (WL-0MS964SIA0057ABR): stage-filtered top-level lists hide
  * child items; children remain reachable via expand (wl list --parent).
+ * Results are ordered by the standard list order (sortIndex).
  */
 export async function fetchItemsByStage(stage: string): Promise<WorkItem[]> {
-  const output = await runWl(['list', '--stage', stage, '--root-only']);
+  const output = await runWl(['list', '--status', 'open', '--stage', stage, '--root-only']);
   const payload = extractJson(output);
   return extractItems(payload);
 }

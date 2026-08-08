@@ -61,10 +61,8 @@ The following shell command patterns are detected and blocked:
 
 ## Configuration
 
-Guardrails can be enabled or disabled via the extension settings:
+Guardrails can be enabled or disabled via the settings file:
 
-- **Extension settings overlay**: Use `/wl settings` in the pi TUI and
-  toggle the "Data guardrails" option
 - **Settings file**: Set `guardrailsEnabled` in `.pi/settings.json` under
   the `context-hub` namespace:
 

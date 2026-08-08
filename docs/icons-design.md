@@ -159,10 +159,11 @@ fallback** is used instead. See §8 below.
 Every icon MUST carry an equivalent accessible label so that screen readers and
 tooling that parses CLI output can identify the icon's meaning.
 
-### 9.1 TUI Output
+### 9.1 CLI/Plugin Output
 
-The TUI uses the Pi-based rendering framework which supports accessible labels
-natively. Icons can be annotated via the framework's built-in label system.
+The retained Pi extension modules (session health footer) and CLI output
+use `chalk` for colour. Icons can be annotated via the framework's built-in
+label system where supported.
 
 ### 9.2 CLI Output
 
@@ -291,109 +292,33 @@ export function iconsEnabled(opts?: { noIcons?: boolean }): boolean;
 
 ## 13. Implementation Guide
 
-### 13.1 Pi TUI List Rendering (`packages/tui/extensions/index.ts`)
+### 13.1 CLI List Rendering
 
-The Pi TUI browse selection list renders status, stage (or audit-aware icon
-for `in_review`), and producer review flag icons before the title in each row.
-The third column (previously audit result) now shows the producer review flag
-for all stages. The layout is:
-
-- **Column 1**: Status icon (🔓 open, 🔄 in-progress, ✔️ completed, etc.)
-- **Column 2**: Stage icon (💡 idea, 📥 intake, 📋 plan, 🛠️ progress, 🏁 done)
-  For `in_review` stage, this column becomes audit-aware:
-  - 🟩 (stale-passed icon) — if the audit is stale but readyToClose === true
-    (auditedAt <= updatedAt - 60 seconds, but auditResult === true)
-  - 🔍 (stage icon) — if no audit exists, or the audit is stale
-    with readyToClose !== true
-  - ✅ — if a fresh audit exists and readyToClose === true
-  - ❌ — if a fresh audit exists and readyToClose === false
-- **Column 3**: Producer review flag (❌ needs review, ✅ review complete)
-  Replaces the audit result icon for all stages.
-- **Column 4 (optional)**: Epic icon + child count for epic items
-
-Examples:
+Icons are prepended before the title in CLI list output:
 
 ```
-🔄 🛠️ ✅ 🏰(5) Epic feature name     ← when icons enabled
-[INPR][PROG][PRODUCER_OK][EPIC](5) Epic feature name  ← when fallback
-
-🔄 🔍 ✅ 🏰 Epic feature name       ← in_review, no audit
-[INPR][REVIEW][PRODUCER_OK][EPIC] Epic feature name  ← when fallback
-
-🔄 🟩 ✅ 🏰 Epic feature name       ← in_review, stale audit but passed
-[INPR][YES_STALE][PRODUCER_OK][EPIC] Epic feature name  ← when fallback
-
-🔄 ✅ ❌ Regular task               ← in_review, fresh audit pass, needs producer review
-[INPR][YES][NEEDS_PRODUCER] Regular task  ← when fallback
+🔓 ✅ Set up CI pipeline  ← when icons enabled
+[OPEN][PRODUCER_OK] Set up CI pipeline  ← when fallback
 ```
 
-### Audit Staleness
+> The Pi-based TUI browse list (which rendered status/stage/producer-review/
+> epic icons via `getIconPrefix` in `packages/tui/extensions/Worklog/lib/browse.ts`)
+> has been removed — work item browsing is now provided by the Herdr plugin.
+> The `dist/icons.ts` functions remain in use by the CLI and the retained
+> session-health footer.
 
-The staleness check uses a 60-second buffer to prevent the audit's own
-timestamp from falsely appearing as "fresh":
+### 13.2 CLI Detail Output
 
-```
-audit is fresh when: auditedAt > updatedAt - 60000 (milliseconds)
-audit is stale when:  auditedAt <= updatedAt - 60000
-```
+File: `src/cli-output.ts`, `src/commands/helpers.ts` (`humanFormatWorkItem`)
 
-When no audit exists or the audit is stale without a pass result
-(`auditResult !== true`), column 2 shows the normal `in_review` stage icon
-(🔍 / `[REVIEW]`). When the audit is stale but `readyToClose === true`,
-column 2 shows the stale-passed icon (🟩 / `[YES_STALE]`).
-
-The `formatBrowseOption` function prepends the icons before the title.
-The icon prefix (status + stage/producer + optional epic icon/child count)
-is padded to a fixed visible width via per-list dynamic padding so that
-titles start at the same column position across all rows. The padding is
-computed as the maximum icon prefix width across all items in the current
-list, and each item's prefix is padded to that width with spaces.
-See `getIconPrefix()` in the same module for the prefix computation.
-The `buildSelectionWidget` preview uses a different format (ID/tags/GH/risk-effort)
-without the icon prefix. It shows a single-line summary with risk and effort
-icons appended as a final pipe-separated segment at the end:
-
-```
-WL-001 | tags: tui | GH #608 | 🐇 🌱      ← when icons enabled
-WL-001 | tags: tui | GH #608 | [S] [MED]   ← when fallback
-```
-
-When effort and/or risk are undefined, the corresponding icon is omitted.
-If both are missing, the final segment is omitted entirely.
-
-### 13.2 TUI List Rendering
-
-The Pi-based TUI renders list items via the `packages/tui/extensions/`
-folder. Icons are prepended before the title in the browse list.
-{white-fg}[OPEN]{/white-fg} Set up CI pipeline  ← when fallback
-```
-
-The `formatTitleOnlyTUI` helper in `src/commands/helpers.ts` may be extended
-or a new wrapper created that injects the icon before the title.
-
-### 13.3 TUI Detail Pane
-
-File: `src/tui/components/detail.ts`, `src/tui/components/metadata-pane.ts`
-
-The metadata pane already shows `Status:` and `Priority:` lines. These lines
-should be updated to include the icon:
+The status and priority display lines include the icon:
 
 ```
 Status:   🟢 [OPEN]
 Priority: 🔴 [CRIT]
 ```
 
-### 13.4 CLI Output
-
-File: `src/cli-output.ts`, `src/commands/helpers.ts` (`humanFormatWorkItem`)
-
-The status and priority display lines should include the icon:
-
-```
-Status: 🟢 Open | Priority: 🔴 Critical
-```
-
-### 13.5 Tests
+### 13.3 Tests
 
 Tests should verify:
 - Icon functions return expected emoji for valid inputs
@@ -413,9 +338,9 @@ const useIcons = iconsEnabled({ noIcons: opts.noIcons });
 
 // In a list renderer:
 const icon = priorityIcon(item.priority, { noIcons: !useIcons });
-const line = `${icon} ${formatTitleOnlyTUI(item)}`;
+const line = `${icon} ${item.title}`;
 
-// In a metadata pane:
+// In a detail view:
 const pIcon = priorityIcon(item.priority, { noIcons: !useIcons });
 const sIcon = statusIcon(item.status, { noIcons: !useIcons });
 lines.push(`Status:   ${sIcon} ${item.status}`);
@@ -431,8 +356,6 @@ lines.push(`Priority: ${pIcon} ${item.priority}`);
 | File | Change |
 |------|--------|
 | `src/icons.ts` | Core icon module with emoji, fallback, and label functions |
-| `src/tui/controller.ts` | Added icon rendering to TUI list rows |
-| `src/tui/components/metadata-pane.ts` | Added icon rendering to metadata pane |
 | `src/commands/helpers.ts` | Added icon formatting to CLI output (summary, concise, normal, full) |
 | `src/commands/list.ts` | Added `--no-icons` CLI flag |
 | `src/commands/show.ts` | Added `--no-icons` CLI flag |

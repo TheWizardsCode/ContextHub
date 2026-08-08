@@ -55,11 +55,14 @@ All requirements from the problem statement have been successfully implemented:
   - `GET /health` - Health check
 
 ### CLI Tool (`src/cli.ts`, `src/commands/*`)
-- Command modules for create, list, show, update, delete, close, search, next, in-progress, recent, comment, dep, reviewed, import/export, sync, github, doctor, re-sort, migrate, unlock, init, status, tui, and plugins
+- Command modules for create, list, show, update, delete, close, search, next, in-progress, recent, comment, dep, reviewed, import/export, sync, github, doctor, re-sort, migrate, unlock, init, status, and plugins
 - Shared helpers for ordering, filtering, tree rendering, and output formatting
 
-### TUI (`src/tui/*`)
-- Interactive terminal UI with tree view, details pane, and OpenCode integration
+### Pi extension (`packages/tui/extensions/Worklog/`)
+- Agent-side Pi plugin: activity indicator, session health/model display,
+  guardrails, skill-path tool, error recovery (`/retry`), lease release
+- The Pi-based TUI browse UI (chat pane, action palette, `/wl` command) was
+  removed; work item browsing is provided by the Herdr plugin
 
 ## File Structure
 
@@ -67,7 +70,6 @@ All requirements from the problem statement have been successfully implemented:
 Worklog/
 ├── src/
 │   ├── commands/         # CLI command implementations
-│   ├── tui/              # Terminal UI components
 │   ├── types.ts          # Type definitions
 │   ├── database.ts       # Worklog database facade
 │   ├── persistent-store.ts # SQLite persistence
@@ -95,7 +97,6 @@ Worklog/
 ├── GIT_WORKFLOW.md       # Team collaboration guide
 ├── DATA_SYNCING.md       # Git sync and GitHub mirroring
 ├── PLUGIN_GUIDE.md       # Plugin development guide
-├── TUI.md                # Terminal UI documentation
 └── .gitignore            # Git ignore rules
 ```
 

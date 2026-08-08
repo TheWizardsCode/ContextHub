@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Grid rebalance helper for the herdr even-completion grid algorithm.
 
 This module provides a Python helper for growing an even-completion grid of
@@ -497,7 +496,7 @@ def main() -> None:
             print("Error: herdr did not return a new pane id", file=sys.stderr)
             sys.exit(1)
         print(json.dumps({"pane_id": new_pane_id}))
-    except Exception as e:
+    except (OSError, ValueError, RuntimeError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 

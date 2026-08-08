@@ -2631,6 +2631,58 @@ describe('WorklogDatabase', () => {
         expect(result.workItem!.stage).toBe('done');
       });
 
+      // WL-0MSGRJWRX0068W3W: done items excluded from default wl next results
+      it('should exclude completed done items by default', () => {
+        db.create({ title: 'Done task', priority: 'critical', status: 'completed', stage: 'done' });
+        const openItem = db.create({ title: 'Open task', priority: 'low', status: 'open', stage: 'idea' });
+
+        const result = db.findNextWorkItem();
+        expect(result.workItem).not.toBeNull();
+        expect(result.workItem!.id).toBe(openItem.id);
+        expect(result.workItem!.stage).not.toBe('done');
+      });
+
+      it('should exclude done items even when status is not completed', () => {
+        db.create({ title: 'Open status done', priority: 'critical', status: 'open', stage: 'done' });
+        const openItem = db.create({ title: 'Open task', priority: 'low', status: 'open', stage: 'idea' });
+
+        const result = db.findNextWorkItem();
+        expect(result.workItem).not.toBeNull();
+        expect(result.workItem!.id).toBe(openItem.id);
+        expect(result.workItem!.stage).not.toBe('done');
+      });
+
+      it('should return null when only done items exist', () => {
+        db.create({ title: 'Done only', priority: 'critical', status: 'completed', stage: 'done' });
+
+        const result = db.findNextWorkItem();
+        expect(result.workItem).toBeNull();
+      });
+
+      it('should exclude done items from batch results (WL-0MSGRJWRX0068W3W)', () => {
+        db.create({ title: 'Done A', priority: 'critical', status: 'completed', stage: 'done' });
+        db.create({ title: 'Done B', priority: 'high', status: 'open', stage: 'done' });
+        const a = db.create({ title: 'Open A', priority: 'medium', status: 'open', stage: 'idea' });
+        const b = db.create({ title: 'Open B', priority: 'low', status: 'open', stage: 'idea' });
+
+        const results = db.findNextWorkItems(5);
+        const ids = results.map(r => r.workItem?.id).filter(Boolean);
+        expect(ids).toEqual([a.id, b.id]);
+        for (const r of results) {
+          if (r.workItem) {
+            expect(r.workItem.stage).not.toBe('done');
+          }
+        }
+      });
+
+      it('should still return done items with explicit --stage done opt-in', () => {
+        const doneItem = db.create({ title: 'Done opt-in', priority: 'low', status: 'completed', stage: 'done' });
+
+        const result = db.findNextWorkItem(undefined, undefined, false, 'done');
+        expect(result.workItem).not.toBeNull();
+        expect(result.workItem!.id).toBe(doneItem.id);
+      });
+
       it('should return null when no items match the stage filter', () => {
         db.create({ title: 'Idea task', priority: 'high', status: 'open', stage: 'idea' });
         db.create({ title: 'In progress task', priority: 'high', status: 'open', stage: 'in_progress' });

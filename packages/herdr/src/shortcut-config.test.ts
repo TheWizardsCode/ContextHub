@@ -14,6 +14,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ShortcutRegistry, parseShortcutEntry, loadShortcutConfig } from './shortcut-config.js';
 import type { ShortcutEntry } from './shortcut-config.js';
 
@@ -41,6 +44,101 @@ const omittedEntry: ShortcutEntry = {
   view: 'both',
   label: 'search',
 };
+
+// ── parseShortcutEntry ───────────────────────────────────────────────────
+
+describe('parseShortcutEntry — work_item_types field', () => {
+  it('parses work_item_types as a string array', () => {
+    const entry = parseShortcutEntry({
+      chord: ['w'],
+      command: '/skill:wiki-podcast-script <id>',
+      view: 'both',
+      work_item_types: ['podcast'],
+    });
+    expect(entry?.workItemTypes).toEqual(['podcast']);
+  });
+
+  it('treats a missing work_item_types as omit (backward compatible)', () => {
+    const entry = parseShortcutEntry({
+      chord: ['s'],
+      command: '!!wl search <search_term>',
+      view: 'both',
+    });
+    expect(entry?.workItemTypes).toBeUndefined();
+  });
+
+  it('logs and treats invalid work_item_types as omit', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const cases: unknown[] = [
+      'podcast',          // not an array
+      [],                 // empty array
+      ['podcast', 42],    // non-string element
+      [''],               // empty string element
+    ];
+    for (const bad of cases) {
+      const entry = parseShortcutEntry({
+        chord: ['x'],
+        command: '!!wl close <id>',
+        view: 'both',
+        work_item_types: bad,
+      });
+      expect(entry?.workItemTypes).toBeUndefined();
+    }
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('keeps other fields intact when work_item_types is present', () => {
+    const entry = parseShortcutEntry({
+      chord: ['w'],
+      command: '/skill:wiki-podcast-script <id>',
+      view: 'both',
+      label: 'write script',
+      stages: ['intake_complete'],
+      work_item_types: ['podcast'],
+    });
+    expect(entry).toMatchObject({
+      chord: ['w'],
+      command: '/skill:wiki-podcast-script <id>',
+      view: 'both',
+      label: 'write script',
+      stages: ['intake_complete'],
+      workItemTypes: ['podcast'],
+    });
+  });
+});
+
+// ── loadShortcutConfig ───────────────────────────────────────────────────
+
+describe('loadShortcutConfig — production shortcuts.json', () => {
+  it('marks the implement (i) shortcut with code_freeze "block"', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['i'], 'list', undefined, false);
+    expect(entry?.codeFreeze).toBe('block');
+    expect(entry?.command).toBe('/skill:implement <id>');
+  });
+
+  it('restricts the bundled code-workflow chords n/p/i to code issue types', () => {
+    const registry = loadShortcutConfig();
+    const codeTypes = ['bug', 'feature', 'task', 'chore', 'epic'];
+    for (const chord of ['n', 'p', 'i']) {
+      const entry = registry.lookupChordEntry([chord], 'list');
+      expect(entry?.workItemTypes).toEqual(codeTypes);
+    }
+    // Generic chords stay untyped.
+    expect(registry.lookupChordEntry(['r'], 'list')?.workItemTypes).toBeUndefined();
+    expect(registry.lookupChordEntry(['c'], 'list')?.workItemTypes).toBeUndefined();
+    expect(registry.lookupChordEntry(['a', 'a'], 'list')?.workItemTypes).toBeUndefined();
+  });
+
+  it('registers the f s sprint chord to return to the default view (WL-0MSGSE15000746F7)', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['f', 's'], 'list', undefined, false);
+    expect(entry).toBeDefined();
+    expect(entry?.command).toBe('/wl');
+    expect(entry?.label).toBe('sprint');
+  });
+});
 
 // ── parseShortcutEntry ───────────────────────────────────────────────────
 
@@ -102,17 +200,6 @@ describe('parseShortcutEntry — code_freeze field', () => {
       model: 'code',
       codeFreeze: 'block',
     });
-  });
-});
-
-// ── loadShortcutConfig ───────────────────────────────────────────────────
-
-describe('loadShortcutConfig — production shortcuts.json', () => {
-  it('marks the implement (i) shortcut with code_freeze "block"', () => {
-    const registry = loadShortcutConfig();
-    const entry = registry.lookupChordEntry(['i'], 'list', undefined, false);
-    expect(entry?.codeFreeze).toBe('block');
-    expect(entry?.command).toBe('/skill:implement <id>');
   });
 });
 
@@ -222,5 +309,207 @@ describe('ShortcutRegistry — codeFreezeActive filtering', () => {
       expect(registry.getChordEntries(false)).toHaveLength(3);
       expect(registry.getChordEntries()).toHaveLength(3);
     });
+  });
+});
+
+// ── Issue-type filtering (WL-0MSKH1J0R003BM2M) ─────────────────────────
+//
+// A shortcut entry carrying a `workItemTypes` allowlist is visible ONLY on
+// work items whose issue type is listed. Entries without an allowlist, and
+// lookups without a supplied issueType, behave exactly as before.
+
+describe('ShortcutRegistry — issue-type filtering', () => {
+  const podcastEntry: ShortcutEntry = {
+    chord: ['w'],
+    command: '/skill:wiki-podcast-script <id>',
+    view: 'both',
+    label: 'write script',
+    workItemTypes: ['podcast'],
+  };
+
+  const codeEntry: ShortcutEntry = {
+    chord: ['i'],
+    command: '/skill:implement <id>',
+    view: 'both',
+    label: 'implement',
+    workItemTypes: ['bug', 'feature', 'task', 'chore', 'epic'],
+  };
+
+  const untypedEntry: ShortcutEntry = {
+    chord: ['s'],
+    command: '!!wl search <search_term>',
+    view: 'both',
+    label: 'search',
+  };
+
+  let registry: ShortcutRegistry;
+
+  beforeEach(() => {
+    registry = new ShortcutRegistry([podcastEntry, codeEntry, untypedEntry]);
+  });
+
+  it('resolves a podcast-gated chord only for podcast items', () => {
+    expect(registry.lookupChord(['w'], 'list', undefined, false, 'podcast')).toBe('/skill:wiki-podcast-script <id>');
+    expect(registry.lookupChord(['w'], 'list', undefined, false, 'feature')).toBeUndefined();
+    expect(registry.lookupChord(['w'], 'list', undefined, false, 'docs')).toBeUndefined();
+  });
+
+  it('resolves a code-gated chord only for code item types', () => {
+    for (const t of ['bug', 'feature', 'task', 'chore', 'epic']) {
+      expect(registry.lookupChord(['i'], 'list', undefined, false, t)).toBe('/skill:implement <id>');
+    }
+    expect(registry.lookupChord(['i'], 'list', undefined, false, 'podcast')).toBeUndefined();
+    expect(registry.lookupChord(['i'], 'list', undefined, false, 'docs')).toBeUndefined();
+  });
+
+  it('keeps untyped chords available on every type', () => {
+    expect(registry.lookupChord(['s'], 'list', undefined, false, 'podcast')).toBe('!!wl search <search_term>');
+    expect(registry.lookupChord(['s'], 'list', undefined, false, 'feature')).toBe('!!wl search <search_term>');
+    expect(registry.lookupChord(['s'], 'list', undefined, false, 'docs')).toBe('!!wl search <search_term>');
+  });
+
+  it('keeps every chord visible when no issueType is supplied (backward compatible)', () => {
+    expect(registry.lookupChord(['w'], 'list')).toBe('/skill:wiki-podcast-script <id>');
+    expect(registry.lookupChord(['i'], 'list')).toBe('/skill:implement <id>');
+    expect(registry.lookupChord(['s'], 'list')).toBe('!!wl search <search_term>');
+    expect(registry.getEntries()).toHaveLength(3);
+  });
+
+  it('lookupChordEntry honors the allowlist', () => {
+    expect(registry.lookupChordEntry(['w'], 'list', undefined, false, 'podcast')?.label).toBe('write script');
+    expect(registry.lookupChordEntry(['w'], 'list', undefined, false, 'task')).toBeUndefined();
+  });
+
+  it('getEntriesForStage excludes entries whose allowlist misses the type', () => {
+    const forPodcast = registry.getEntriesForStage(undefined, false, 'podcast');
+    expect(forPodcast.map(e => e.label)).toEqual(['write script', 'search']);
+    const forCode = registry.getEntriesForStage(undefined, false, 'task');
+    expect(forCode.map(e => e.label)).toEqual(['implement', 'search']);
+  });
+
+  it('getChordByPrefix excludes entries whose allowlist misses the type', () => {
+    expect(registry.getChordByPrefix(['w'], 'list', undefined, false, 'podcast')).toHaveLength(1);
+    expect(registry.getChordByPrefix(['w'], 'list', undefined, false, 'chore')).toHaveLength(0);
+    expect(registry.getChordByPrefix(['i'], 'list', undefined, false, 'podcast')).toHaveLength(0);
+    expect(registry.getChordByPrefix(['i'], 'list', undefined, false, 'epic')).toHaveLength(1);
+  });
+
+  it('getChordByLeader honors the allowlist', () => {
+    expect(registry.getChordByLeader('w', 'list', false, 'podcast')).toHaveLength(1);
+    expect(registry.getChordByLeader('w', 'list', false, 'feature')).toHaveLength(0);
+  });
+
+  it('getChordEntries honors the allowlist', () => {
+    expect(registry.getChordEntries(false, 'podcast').map(e => e.label)).toEqual(['write script', 'search']);
+    expect(registry.getChordEntries(false, 'task').map(e => e.label)).toEqual(['implement', 'search']);
+  });
+});
+
+// ── Project-local overrides (WL-0MSHUMX5C004NC4O) ───────────────────────
+//
+// Merge contract for a project-local <worklog-root>/shortcuts.json loaded
+// over the bundled defaults: local-wins override on chord+view, new local
+// chords appended, deterministic and deduplicated, malformed local file
+// falls back to bundled-only with a logged error.
+
+describe('loadShortcutConfig — project-local shortcuts.json overrides', () => {
+  let tempRoots: string[] = [];
+
+  /** Create a temp worklog root; `files` maps relative path -> content. */
+  function makeLocalRoot(files: Record<string, string>): string {
+    const dir = mkdtempSync(join(tmpdir(), 'herdr-shortcut-override-'));
+    tempRoots.push(dir);
+    for (const [rel, content] of Object.entries(files)) {
+      writeFileSync(join(dir, rel), content);
+    }
+    return dir;
+  }
+
+  afterEach(() => {
+    for (const dir of tempRoots) {
+      try { rmSync(dir, { recursive: true }); } catch { /* ignore */ }
+    }
+    tempRoots = [];
+    vi.restoreAllMocks();
+  });
+
+  it('is byte-identical to bundled-only when no local file exists', () => {
+    const bundled = loadShortcutConfig();
+    const root = makeLocalRoot({}); // empty dir — no shortcuts.json
+    const registry = loadShortcutConfig(root);
+    expect(registry.getEntries()).toEqual(bundled.getEntries());
+  });
+
+  it('is byte-identical to bundled-only when worklogRoot is undefined', () => {
+    const bundled = loadShortcutConfig();
+    expect(loadShortcutConfig(undefined).getEntries()).toEqual(bundled.getEntries());
+  });
+
+  it('appends a local entry with a new chord and resolves it via lookupChord', () => {
+    const bundled = loadShortcutConfig();
+    const root = makeLocalRoot({
+      'shortcuts.json': JSON.stringify([
+        { chord: ['w'], command: '/prompt:Write a podcast script for <id>', view: 'both', label: 'podcast script' },
+      ]),
+    });
+    const registry = loadShortcutConfig(root);
+    const entries = registry.getEntries();
+    expect(entries).toHaveLength(bundled.getEntries().length + 1);
+    expect(registry.lookupChord(['w'], 'list')).toBe('/prompt:Write a podcast script for <id>');
+    // Bundled entries are unchanged.
+    expect(registry.lookupChord(['i'], 'list')).toBe(bundled.lookupChord(['i'], 'list'));
+  });
+
+  it('replaces a bundled entry when the local file overrides the same chord+view', () => {
+    const bundled = loadShortcutConfig();
+    const root = makeLocalRoot({
+      'shortcuts.json': JSON.stringify([
+        { chord: ['i'], command: '/prompt:overridden', view: 'both', label: 'overridden', model: 'author', stages: ['in_review'] },
+      ]),
+    });
+    const registry = loadShortcutConfig(root);
+    const entry = registry.lookupChordEntry(['i'], 'list');
+    expect(entry?.command).toBe('/prompt:overridden');
+    expect(entry?.label).toBe('overridden');
+    expect(entry?.model).toBe('author');
+    // The local entry's stages replace the bundled stages (full-entry replacement).
+    expect(entry?.stages).toEqual(['in_review']);
+    // Replaced, not appended: total count unchanged and no duplicate remains.
+    expect(registry.getEntries()).toHaveLength(bundled.getEntries().length);
+    const matches = registry.getEntries().filter(e => e.chord.join(',') === 'i' && e.view === 'both');
+    expect(matches).toHaveLength(1);
+  });
+
+  it('falls back to bundled-only and logs an error for a malformed local file', () => {
+    const bundled = loadShortcutConfig();
+    const cases: Array<[string, string]> = [
+      ['invalid JSON', '{ not json'],
+      ['non-array', '{"chord": ["x"]}'],
+      ['invalid entries', JSON.stringify([{ chord: ['x'], command: '', view: 'both' }])],
+    ];
+    for (const [name, content] of cases) {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const root = makeLocalRoot({ 'shortcuts.json': content });
+      const registry = loadShortcutConfig(root);
+      expect(registry.getEntries()).toEqual(bundled.getEntries());
+      expect(spy).toHaveBeenCalled();
+      spy.mockRestore();
+    }
+  });
+
+  it('deduplicates chord+view within the local file (last wins) deterministically', () => {
+    const root = makeLocalRoot({
+      'shortcuts.json': JSON.stringify([
+        { chord: ['w'], command: '/prompt:first', view: 'both', label: 'first' },
+        { chord: ['w'], command: '/prompt:second', view: 'both', label: 'second' },
+      ]),
+    });
+    const a = loadShortcutConfig(root);
+    const b = loadShortcutConfig(root);
+    const matches = a.getEntries().filter(e => e.chord.join(',') === 'w' && e.view === 'both');
+    expect(matches).toHaveLength(1);
+    expect(matches[0].command).toBe('/prompt:second');
+    // Merge order is stable across runs.
+    expect(JSON.stringify(a.getEntries())).toBe(JSON.stringify(b.getEntries()));
   });
 });

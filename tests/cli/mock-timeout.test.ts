@@ -33,18 +33,38 @@ describe('mock-bin/git timeout guard', () => {
     expect(result.stdout).toContain('git (mock): --help')
   }, 15000)
 
-  it('self-terminates when execution exceeds the configured timeout', async () => {
-    // Simulate a long-running command by asking git to do init (which creates a .git dir)
-    // Then run rev-parse with a very short timeout
+  it('does not trip the timeout guard during normal execution', async () => {
+    // Regression for the flake that motivated this suite: a NORMAL rev-parse
+    // under full-suite parallel load must never exceed the guard's budget and
+    // self-terminate (exit 124). Use a generous WORKLOG_MOCK_TIMEOUT so bash
+    // startup slowness alone can never trip the guard.
     const result = await execFile(gitMockPath, ['rev-parse', '--show-toplevel'], {
-      env: { ...process.env, WORKLOG_MOCK_TIMEOUT: '1' },
+      env: { ...process.env, WORKLOG_MOCK_TIMEOUT: '30' },
       timeout: 10000,
     })
-    // A timeout of 1s should be enough for normal execution, but the timeout
-    // mechanism must not cause premature exit. This test validates that basic
-    // operations work within the timeout window.
-    // Just verify it completes normally - no error
-    expect(result.status).not.toBe(124) // 124 = timeout from execFile wrapper
+    // A normal rev-parse resolves (execFile does not reject) and prints the
+    // repo root to stdout with nothing on stderr.
+    expect(result.stderr).toBe('')
+    expect(result.stdout.trim().length).toBeGreaterThan(0)
+  }, 15000)
+
+  it('self-terminates when execution exceeds the configured timeout', async () => {
+    // WORKLOG_MOCK_TIMEOUT=0 means every execution exceeds the configured
+    // budget instantly, so the bash dispatch guard self-terminates with exit
+    // code 124 before the mock performs any work. This deterministically
+    // verifies the guard's self-termination contract without depending on
+    // machine load (a 1s budget flaked under full-suite parallel load).
+    let captured: any = null
+    try {
+      await execFile(gitMockPath, ['--help'], {
+        env: { ...process.env, WORKLOG_MOCK_TIMEOUT: '0' },
+        timeout: 10000,
+      })
+    } catch (e: any) {
+      captured = e
+    }
+    expect(captured).toBeTruthy()
+    expect(captured.code).toBe(124) // 124 = guard self-termination exit code
   }, 15000)
 
   it('supports WORKLOG_MOCK_TIMEOUT environment variable with custom value', async () => {

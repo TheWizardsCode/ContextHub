@@ -28,8 +28,6 @@ import commentCommand from './commands/comment.js';
 import closeCommand from './commands/close.js';
 import recentCommand from './commands/recent.js';
 import pluginsCommand from './commands/plugins.js';
-import tuiCommand from './commands/tui.js';
-import pimanCommand from './commands/piman.js';
 import migrateCommand from './commands/migrate.js';
 import depCommand from './commands/dep.js';
 import reSortCommand from './commands/re-sort.js';
@@ -43,6 +41,8 @@ import completionCommand from './commands/completion.js';
 import cleanupWorktreeCommand from './commands/cleanup-worktree.js';
 import { detectWorktreeFromCwd, registerCurrentProcess } from './process-lifecycle.js';
 import { applyWorklogDirOverrideFromArgv, setWorklogDirOverride } from './worklog-paths.js';
+import { ReadCacheCli, shouldCacheReadInvocation, extractCommandFromArgv } from './read-cache-cli.js';
+import { recordSpawn } from './spawn-counter.js';
 
 // Watch flag parsing - supports -w, -wN, --watch, --watch=N
 function parseWatchFlag(argv: string[]) {
@@ -244,6 +244,51 @@ applyWorklogDirOverrideFromArgv(process.argv.slice(2));
 // Create shared plugin context
 const ctx = createPluginContext(program);
 
+// ── Read-cache wiring (F2 — WL-0MSGAEC5N006W5QA) ─────────────────────────
+// Serve repeat JSON read queries (list/next/show/search/status) from the
+// shared on-disk cache so herdr panes / pi-agent polling don't re-query the
+// SQLite DB for byte-identical invocations. Env-gated config:
+//   WL_CACHE_DISABLED=1     — bypass the cache entirely (baseline behaviour)
+//   WL_CACHE_TTL_MS=<n>     — override the TTL safety net (tests/ops)
+//   WL_CACHE_DIR=<path>     — override the cache dir (see read-cache.ts)
+//   WL_SPAWN_COUNT_FILE     — spawn instrumentation (see spawn-counter.ts)
+const readCacheEnabled = process.env.WL_CACHE_DISABLED !== '1';
+const _cacheTtl = parseInt(process.env.WL_CACHE_TTL_MS ?? '', 10);
+const readCacheCli = new ReadCacheCli({
+  ttlMs: Number.isFinite(_cacheTtl) && _cacheTtl > 0 ? _cacheTtl : undefined,
+});
+
+// Backfill: capture the JSON payload each command emits via output.json so
+// the next identical invocation can be served from cache. Wrapped once; the
+// wrapper is a no-op unless a cacheable read armed a backfill.
+{
+  const origJson = ctx.output.json;
+  ctx.output.json = (data: any) => {
+    if (readCacheEnabled) {
+      try {
+        readCacheCli.onJsonOutput(data);
+      } catch {
+        // The cache must never break the CLI.
+      }
+    }
+    origJson(data);
+  };
+}
+
+// Write commands (and non-cacheable reads, e.g. search --rebuild-index)
+// invalidate the cache for the worklog dir before their action mutates the
+// DB, so no stale result can be served after a write.
+program.hook('preAction', (thisCommand, actionCommand) => {
+  if (!readCacheEnabled) return;
+  const command = actionCommand.name();
+  if (shouldCacheReadInvocation(command, process.argv.slice(2))) return;
+  try {
+    readCacheCli.invalidateOnWrite();
+  } catch {
+    // Best-effort.
+  }
+});
+
 // If watch mode was requested we already handled spawning a watcher
 // earlier; commander should still expose the option on help, but the
 // watcher logic is implemented outside of the command registration so
@@ -268,8 +313,6 @@ const builtInCommands = [
   closeCommand,
   recentCommand,
   pluginsCommand,
-  tuiCommand,
-  pimanCommand,
   migrateCommand,
   depCommand,
   reSortCommand,
@@ -302,8 +345,6 @@ const builtInCommandNames = new Set([
   'close',
   'recent',
   'plugins',
-  'tui',
-  'piman',
   'migrate',
   'dep',
   're-sort',
@@ -475,5 +516,32 @@ if (worktreePath) {
   registerCurrentProcess(worktreePath);
 }
 
-// Parse command line arguments
-program.parse();
+// Read-cache serve: for a cacheable read invocation, try the cache BEFORE
+// commander dispatches. On a hit, print the cached payload (byte-identical
+// to output.json formatting) and exit without ever calling `program.parse()`
+// — so no action runs and no DB is opened. The write+callback exit guarantees
+// piped stdout is flushed before the process terminates. When the cache is
+// disabled (baseline), cacheable reads still record a work spawn so the
+// spawn-reduction metric has a denominator.
+let cacheServed = false;
+const cacheArgv = process.argv.slice(2);
+const cacheCommand = extractCommandFromArgv(cacheArgv);
+if (cacheCommand !== null && shouldCacheReadInvocation(cacheCommand, cacheArgv)) {
+  if (readCacheEnabled) {
+    const { served, value } = readCacheCli.lookup(cacheCommand, cacheArgv);
+    if (served) {
+      cacheServed = true;
+      const text = `${JSON.stringify(value, null, 2)}\n`;
+      process.stdout.write(text, () => process.exit(0));
+      // Safety net if the flush callback never fires.
+      setTimeout(() => process.exit(0), 2000).unref();
+    }
+  } else {
+    recordSpawn('read-work'); // baseline: every read does DB work
+  }
+}
+
+// Parse command line arguments (skipped entirely when served from cache).
+if (!cacheServed) {
+  program.parse();
+}

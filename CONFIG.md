@@ -62,16 +62,6 @@ The system loads configuration in this order:
 
 If no configuration exists at all, the system defaults to using `WI` as the prefix.
 
-## TUI Auto-Sync Settings
-
-Optional TUI auto-sync settings (edit `.worklog/config.yaml` or configure via `/wl settings`):
-
-- `autoSyncIntervalSeconds`: Number of seconds between automatic background syncs in the Pi TUI browse widget (default: `10`, range: 0–300, 0 = disabled).
-
-  When the TUI browse widget auto-refreshes (every 5 seconds), it checks if the time since the last successful sync exceeds this interval. If so, a background `wl sync` is triggered (fire-and-forget, non-blocking). An in-flight guard prevents concurrent syncs.
-
-  This setting is separate from the `autoSync` boolean config key, which controls automatic sync after database write operations.
-
 ## GitHub Settings
 
 Optional GitHub settings (edit `.worklog/config.yaml` manually):

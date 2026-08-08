@@ -324,7 +324,9 @@ exit 0
 ### 6.4 Where to put it
 
 - Repo-local: `scripts/wl-process-healthcheck.sh` + a systemd timer or cron
-  entry in the affected projects.
+  entry in the affected projects. **Implemented:** see
+  [wl-process-healthcheck.md](./wl-process-healthcheck.md) for the shipped
+  script, thresholds, and cron/systemd usage.
 - Framework-level (optional): a `pi` status footer showing current wl process
   count, or a periodic check in the herdr plugin.
 

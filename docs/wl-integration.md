@@ -2,7 +2,7 @@
 
 ## Overview
 
-The **wl CLI Integration Layer** provides a safe, reliable way for the TUI and Pi agents to execute `wl` commands via subprocess spawn. It handles:
+The **wl CLI Integration Layer** provides a safe, reliable way for Pi extension modules and CLI code to execute `wl` commands via subprocess spawn. It handles:
 
 - **Command spawning** – wraps `child_process.spawn` with configurable timeout, retries, and working directory.
 - **JSON parsing** – automatically parses `--json` output with robust recovery from partial/malformed output.
@@ -11,12 +11,17 @@ The **wl CLI Integration Layer** provides a safe, reliable way for the TUI and P
 - **Exponential backoff** – retry delays use exponential backoff with jitter to avoid thundering herd.
 - **Attempts tracking** – `CommandResult.attempts` reports how many attempts were made.
 
-## Quick Start
+## Usage in the Pi extension
+
+Retained Pi extension modules (`session-health.ts`, `activity-indicator.ts`,
+and the Pi extension wrapper `packages/tui/extensions/wl-integration.ts`) use
+`runWl` to fetch work item state for the session health footer. The
+CLI-level spawn layer lives at `src/wl-integration/spawn.ts`.
 
 ```ts
 import { runWlCommand, runWl, wlEvents } from './packages/tui/extensions/wl-integration.js';
 
-// Simple usage – TUI wrapper automatically appends --json
+// Simple usage – the wrapper automatically appends --json
 const items = await runWl('list');
 
 // Low-level usage – full control over args and options
@@ -79,9 +84,9 @@ shell wrappers, or environment interference) using three strategies:
 If all strategies fail, a `JSON_PARSE` error is returned and the command is
 retried (if retries are configured).
 
-## Migration Notes for Existing TUI Code
+## Migration Notes
 
-The old pattern in the TUI controller looked like this:
+The integration layer replaces raw `child_process.spawn` calls:
 
 ```ts
 // BEFORE: raw spawn
@@ -106,7 +111,7 @@ const payload = result.json;
 /* ... */
 ```
 
-The `runWl` convenience wrapper automatically appends `--json` and throws on error, making it ideal for TUI flows that expect JSON output:
+The `runWl` convenience wrapper automatically appends `--json` and throws on error, making it ideal for flows that expect JSON output:
 
 ```ts
 try {

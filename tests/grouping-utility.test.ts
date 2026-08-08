@@ -293,8 +293,9 @@ describe('assignItemGroups — new group order', () => {
       { id: 'WL-C1', stage: 'plan_complete', filePaths: ['src/c.ts'], priority: 'critical' },
       { id: 'WL-P1', stage: 'plan_complete', filePaths: ['src/p1.ts'], priority: 'high' },
       { id: 'WL-I1', stage: 'intake_complete', filePaths: ['src/i1.ts'], priority: 'medium' },
+      { id: 'WL-IP1', stage: 'in_progress', filePaths: ['src/ip1.ts'], priority: 'high' },
       { id: 'WL-idea', stage: 'idea', filePaths: [], priority: 'low' },
-      { id: 'WL-other', stage: 'in_progress', filePaths: [], priority: 'medium' },
+      { id: 'WL-other', stage: undefined, filePaths: [], priority: 'medium' },
       { id: 'WL-R1', stage: 'in_review', filePaths: [], priority: 'medium' },
     ];
     const groups = assignItemGroups(items, 3);
@@ -302,9 +303,10 @@ describe('assignItemGroups — new group order', () => {
     // Critical group comes first.
     expect(groups.get('WL-C1')!.groupLabel).toBe('Critical Group 1');
     expect(groupOf('WL-C1')).toBeLessThan(groupOf('WL-P1'));
-    // Plan/intake groups come before Idea.
+    // Plan/intake/in_progress items share Group N (no stage prefix in the label).
     expect(groups.get('WL-P1')!.groupLabel).toBe('Group 1');
     expect(groups.get('WL-I1')!.groupLabel).toBe('Group 1');
+    expect(groups.get('WL-IP1')!.groupLabel).toBe('Group 1');
     expect(groupOf('WL-P1')).toBeLessThan(groupOf('WL-idea'));
     // Idea before Other.
     expect(groupOf('WL-idea')).toBeLessThan(groupOf('WL-other'));
@@ -360,7 +362,7 @@ describe('assignItemGroups — Critical Group N', () => {
     const items = [
       { id: 'WL-C1', stage: 'idea', filePaths: [], priority: 'critical' },
       { id: 'WL-idea', stage: 'idea', filePaths: [], priority: 'medium' },
-      { id: 'WL-other', stage: 'in_progress', filePaths: [], priority: 'medium' },
+      { id: 'WL-other', stage: 'custom', filePaths: [], priority: 'medium' },
     ];
     const groups = assignItemGroups(items, 3);
     expect(groups.get('WL-C1')!.groupLabel).toBe('Critical Group 1');
@@ -372,7 +374,7 @@ describe('assignItemGroups — Critical Group N', () => {
   });
 });
 
-describe('assignItemGroups — Group N (plan_complete + intake_complete)', () => {
+describe('assignItemGroups — Group N (in_progress + plan_complete + intake_complete)', () => {
   it('partitions plan_complete and intake_complete items into Group N labels (no stage prefix)', () => {
     const items = [
       { id: 'WL-P1', stage: 'plan_complete', filePaths: ['src/a.ts'], priority: 'high' },
@@ -383,6 +385,21 @@ describe('assignItemGroups — Group N (plan_complete + intake_complete)', () =>
     expect(groups.get('WL-P1')!.groupLabel).toBe('Group 1');
     expect(groups.get('WL-I1')!.groupLabel).toBe('Group 1');
     expect(groups.get('WL-P2')!.groupLabel).toBe('Group 2');
+  });
+
+  it('includes in_progress items in Group N alongside plan_complete/intake_complete', () => {
+    const items = [
+      { id: 'WL-P1', stage: 'plan_complete', filePaths: ['src/a.ts'], priority: 'high' },
+      { id: 'WL-IP1', stage: 'in_progress', filePaths: ['src/b.ts'], priority: 'high' },
+      { id: 'WL-I1', stage: 'intake_complete', filePaths: ['src/c.ts'], priority: 'medium' },
+      // Conflicts with WL-P1 via src/a.ts → lands in a different Group N.
+      { id: 'WL-IP2', stage: 'in_progress', filePaths: ['src/a.ts'], priority: 'medium' },
+    ];
+    const groups = assignItemGroups(items, 3);
+    expect(groups.get('WL-P1')!.groupLabel).toBe('Group 1');
+    expect(groups.get('WL-IP1')!.groupLabel).toBe('Group 1');
+    expect(groups.get('WL-I1')!.groupLabel).toBe('Group 1');
+    expect(groups.get('WL-IP2')!.groupLabel).toBe('Group 2');
   });
 
   it('does not emit "Plan Complete Group" or "Intake Complete" labels', () => {
@@ -412,8 +429,9 @@ describe('assignItemGroups — Idea / Other / In Review', () => {
   });
 
   it('places all remaining items in a single "Other" group', () => {
+    // `done` and unknown/custom stages fall back to "Other" (safety net).
     const items = [
-      { id: 'WL-1', stage: 'in_progress', filePaths: [] },
+      { id: 'WL-1', stage: 'done', filePaths: [] },
       { id: 'WL-2', stage: undefined, filePaths: ['src/bar.ts'] },
     ];
     const groups = assignItemGroups(items, 3);
@@ -422,10 +440,37 @@ describe('assignItemGroups — Idea / Other / In Review', () => {
     expect(groups.get('WL-1')!.group).toBe(groups.get('WL-2')!.group);
   });
 
+  it('never places canonical stages in "Other" (in_progress joins Group N)', () => {
+    // Every canonical stage that can appear in the default selection list maps
+    // to a named group; "Other" is only the safety net for unknown/custom stages.
+    // (`done` items are excluded from the default list by smart selection, so
+    // they are not asserted here; when explicitly included they still fall back
+    // to "Other".)
+    const items = [
+      { id: 'WL-idea', stage: 'idea', filePaths: ['src/idea.ts'], priority: 'medium' },
+      { id: 'WL-intake', stage: 'intake_complete', filePaths: ['src/intake.ts'], priority: 'medium' },
+      { id: 'WL-plan', stage: 'plan_complete', filePaths: ['src/plan.ts'], priority: 'medium' },
+      { id: 'WL-progress', stage: 'in_progress', filePaths: ['src/progress.ts'], priority: 'medium' },
+      { id: 'WL-review', stage: 'in_review', filePaths: ['src/review.ts'], priority: 'medium' },
+    ];
+    const groups = assignItemGroups(items, 3);
+    for (const [, assignment] of groups) {
+      expect(assignment.groupLabel).not.toBe('Other');
+    }
+    // Unknown/custom stages and `done` (when explicitly included) still fall
+    // back to "Other" as the safety net.
+    const unknown = assignItemGroups([{ id: 'WL-x', stage: 'custom', filePaths: [], priority: 'medium' }], 3);
+    expect(unknown.get('WL-x')!.groupLabel).toBe('Other');
+    const noStage = assignItemGroups([{ id: 'WL-y', stage: undefined, filePaths: [], priority: 'medium' }], 3);
+    expect(noStage.get('WL-y')!.groupLabel).toBe('Other');
+    const done = assignItemGroups([{ id: 'WL-done', stage: 'done', filePaths: [], priority: 'medium' }], 3);
+    expect(done.get('WL-done')!.groupLabel).toBe('Other');
+  });
+
   it('places all in_review items in a single "In Review" group placed after Other', () => {
     const items = [
       { id: 'WL-R1', stage: 'in_review', filePaths: ['src/foo.ts'] },
-      { id: 'WL-other', stage: 'in_progress', filePaths: [] },
+      { id: 'WL-other', stage: 'done', filePaths: [] },
       { id: 'WL-R2', stage: 'in_review', filePaths: ['src/bar.ts'] },
     ];
     const groups = assignItemGroups(items, 3);
@@ -459,13 +504,15 @@ describe('assignItemGroups — Idea / Other / In Review', () => {
 // ── compareGroupableItems — within-group ordering ─────────────────────
 
 describe('compareGroupableItems — within-group ordering', () => {
-  it('orders plan_complete before intake_complete before remaining stages', () => {
+  it('orders in_progress before plan_complete before intake_complete before remaining stages', () => {
+    const progress = { id: 'IP', stage: 'in_progress', filePaths: [], priority: 'medium' };
     const plan = { id: 'P', stage: 'plan_complete', filePaths: [], priority: 'medium' };
     const intake = { id: 'I', stage: 'intake_complete', filePaths: [], priority: 'medium' };
-    const other = { id: 'O', stage: 'in_progress', filePaths: [], priority: 'medium' };
+    const other = { id: 'O', stage: 'done', filePaths: [], priority: 'medium' };
+    expect(compareGroupableItems(progress, plan)).toBeLessThan(0);
     expect(compareGroupableItems(plan, intake)).toBeLessThan(0);
     expect(compareGroupableItems(intake, other)).toBeLessThan(0);
-    expect(compareGroupableItems(plan, other)).toBeLessThan(0);
+    expect(compareGroupableItems(progress, other)).toBeLessThan(0);
   });
 
   it('orders by priority (high → medium → low) within the same stage sub-group', () => {
@@ -503,6 +550,18 @@ describe('compareGroupableItems — within-group ordering', () => {
     expect(sorted.map(i => i.id)).toEqual(['P-high', 'P-med', 'I-high', 'I-low']);
   });
 
+  it('sorts in_progress items to the top of a mixed group, then plan_complete, then intake_complete', () => {
+    const items = [
+      { id: 'I-low', stage: 'intake_complete', filePaths: [], priority: 'low' },
+      { id: 'P-med', stage: 'plan_complete', filePaths: [], priority: 'medium' },
+      { id: 'IP-high', stage: 'in_progress', filePaths: [], priority: 'high' },
+      { id: 'IP-low', stage: 'in_progress', filePaths: [], priority: 'low' },
+      { id: 'P-high', stage: 'plan_complete', filePaths: [], priority: 'high' },
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => i.id)).toEqual(['IP-high', 'IP-low', 'P-high', 'P-med', 'I-low']);
+  });
+
   it('sorts a critical group with the same stage sub-sort', () => {
     const items = [
       { id: 'C-other', stage: 'in_progress', filePaths: [], priority: 'critical' },
@@ -510,6 +569,6 @@ describe('compareGroupableItems — within-group ordering', () => {
       { id: 'C-plan', stage: 'plan_complete', filePaths: [], priority: 'critical' },
     ];
     const sorted = items.slice().sort(compareGroupableItems);
-    expect(sorted.map(i => i.id)).toEqual(['C-plan', 'C-intake', 'C-other']);
+    expect(sorted.map(i => i.id)).toEqual(['C-other', 'C-plan', 'C-intake']);
   });
 });

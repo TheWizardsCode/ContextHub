@@ -128,4 +128,20 @@ describe('setWorklogDir / runWl with --worklog-dir', () => {
     const callArgs = mockFn.mock.calls[0][1] as string[];
     expect(callArgs).not.toContain('--worklog-dir');
   });
+
+  it('filters fetchItemsByStage to open root items in the stage (--status open)', async () => {
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ workItems: [] }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    await fetchItemsByStage('in_progress');
+
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs).toContain('list');
+    expect(callArgs[callArgs.indexOf('--status') + 1]).toBe('open');
+    expect(callArgs[callArgs.indexOf('--stage') + 1]).toBe('in_progress');
+    expect(callArgs).toContain('--root-only');
+  });
 });

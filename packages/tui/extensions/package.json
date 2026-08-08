@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Worklog Pi TUI extension — Work item browser for Pi coding agent",
+  "description": "Worklog Pi extension — agent-side plugin (activity indicator, session health, model display, guardrails, skill-path tool, error recovery, lease release)",
   "pi": {
     "extensions": [
       "./Worklog/index.ts"

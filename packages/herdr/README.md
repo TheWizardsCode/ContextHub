@@ -4,8 +4,8 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 
 ## Features
 
-- **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list. The top-level list is root-only: child work items are hidden and appear only under their parent via expand.
-- **Filter by stage** — Press `f` followed by a chord key (`i`=idea, `n`=intake, `p`=plan, `r`=review) to filter items by stage
+- **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list. The top-level list is root-only: child work items are hidden and appear only under their parent via expand. Expanded parents **stay expanded across refreshes**: each auto/manual refresh re-fetches their children in parallel with the top-level list and swaps both in atomically, so the hierarchy never momentarily collapses or flickers (WL-0MSBVBNGH002RDP5).
+- **Filter by stage** — Press `f` followed by a chord key (`i`=idea, `n`=intake, `p`=plan, `r`=review, `s`=sprint back to the default view), or type `/wl <stage>` (shorthand alias or canonical stage name, e.g. `/wl intake_complete` or `/wl progress`), to filter items by stage. Stage-filtered views show **every open** root item in the selected stage — no `browseItemCount` cap and no `wl next` selection omission (WL-0MSDT8X1V003206G)
 - **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority, GitHub issue number, and audit status information such as audit result, review status, and last audit timestamp)
 - **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The detail view metadata section additionally shows the review status (❌ needs review / ✅ reviewed) and the last audit timestamp.
 - **Chord shortcuts** — Multi-key chord sequences provide quick actions like updating priorities, stage/status, title, closing/deleting items, running workflows, and toggling review status (configurable via `shortcuts.json`)
@@ -13,13 +13,15 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Command input form** — When a chord command contains unknown `<identifier>` placeholders (e.g. `!!wl update <id> --status <status> --stage <stage>`), the plugin shows a modal input form so you can fill in the values before the command runs. Known identifiers like `<id>` are still auto-substituted with the selected item's ID. The dialog is 80% of the pane width (40-column minimum), text wraps at the inner width, and the box grows downward as content is entered. See [Command input form](#command-input-form).
 - **Keyboard navigation** — Arrow keys or j/k to navigate (wraps at list boundaries), Page Up/Down, g/G for first/last, Enter to select, Escape to go back
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text.
+- **Agent status tracking** — When an agent command carrying a work-item ID is dispatched, the worklist records which pi agent pane is attached to that item (persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes). The list shows a live agent-status icon at the start of each row's icon prefix: 🟢 working, ⛔ blocked, ⚪ idle. Done/closed items (and items without an agent) show no icon. The icon is a fixed-width slot so the item-ID column never shifts. See [Agent status icons](#agent-status-icons).
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
+- **Podcast Editing tab** — The `open-podcast-editor-tab` action (bound to `prefix+l`) opens the worklist pane in a new tab and renames that tab to **`Podcast Editing`** so it is instantly recognisable in the tab row during podcast production. See [Podcast Editing tab](#podcast-editing-tab).
 - **Quit** — Press `q` to exit
 - **Metadata panel** — The bottom portion of the list view (roughly 20–40% of the pane height, responsive to terminal size) is reserved for the selected item's metadata: ID, title, status, stage, priority, type, risk, effort, tags, audit info, and more. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
 - **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` — no custom stage values). Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
-- **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, headings/lists/code shown) as a preview. See [Markdown viewer](#markdown-viewer).
+- **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, headings/lists/code shown) as a preview. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
 - **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. See [Inline note links](#inline-note-links).
 - **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
 
@@ -36,11 +38,32 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 # Clone the repository
 cd /path/to/worklog-repo
 
+# Build the repo — the postbuild hook automatically links the herdr plugin
+# and registers the prefix+l keybinding (idempotent; safe to re-run)
+npm run build
+
+# Build the plugin (also triggered by herdr's own [[build]] step)
+cd packages/herdr && npm run build
+```
+
+`npm run build` runs `scripts/install-herdr.sh` via the root `postbuild` hook. The script:
+
+- Links the plugin with `herdr plugin link packages/herdr/herdr-plugin.toml` (a no-op when already linked).
+- Inserts the `prefix+l` → `worklog-selection-list.open-podcast-editor-tab` keybinding into your herdr config (`~/.config/herdr/config.toml`, or `$HERDR_CONFIG_PATH` when set) **only if** it is not already present — re-running the build never creates duplicate keybindings.
+- Migrates a legacy `prefix+l` → `worklog-selection-list.open-worklist` binding in-place to the new action, so the Podcast Editing tab name takes effect without a manual config edit.
+- Warns (without failing the build) when `herdr` is not on PATH or the config cannot be written, so `npm run build` succeeds in CI/offline environments.
+
+Manual install (fallback, if you prefer not to run the build):
+
+```bash
 # Link the plugin in Herdr
 herdr plugin link packages/herdr/herdr-plugin.toml
 
-# Build the plugin
-cd packages/herdr && npm run build
+# Add the keybinding to ~/.config/herdr/config.toml if not already present
+# [[keys.command]]
+# key = "prefix+l"
+# command = "herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab"
+# description = "Open the Podcast Editing tab (Worklog work item selection pane)."
 ```
 
 The plugin pane will then be available via the Herdr plugin system.
@@ -50,7 +73,7 @@ The plugin pane will then be available via the Herdr plugin system.
 ### From the Herdr UI
 
 1. Open the worklist pane:
-   - Press `prefix+l` to open the worklist in a new tab
+   - Press `prefix+l` to open the Podcast Editing tab (worklist pane in a new tab named `Podcast Editing`)
    - Right-click in any pane → Plugins → Worklog Selection List → Open worklist
    - Or use the Herdr command palette: `herdr plugin action run worklog-selection-list open-worklist`
 
@@ -65,11 +88,15 @@ The plugin pane will then be available via the Herdr plugin system.
    - `Tab` — Toggle expand/collapse a parent item with children
    - `Escape` — Go back (from detail or filter mode); in a child list, return to the parent level at the previous scroll position. When inside a child list the footer shows a `[esc] back` hint (with `(N levels)` when nested deeper than one level).
 
-3. Filter by stage using chord shortcuts:
+3. Filter by stage using chord shortcuts (or type `/wl <stage>`):
    - Press `f` then `i` — Filter to idea-stage items
    - Press `f` then `n` — Filter to intake_complete items
    - Press `f` then `p` — Filter to plan_complete items
    - Press `f` then `r` — Filter to in_review items
+   - Press `f` then `s` (sprint) — Return to the default unfiltered browse list
+   - `/wl <stage>` accepts shorthand aliases (`idea`, `intake`, `plan`, `progress`, `review`) and canonical stage names (`intake_complete`, `plan_complete`, `in_progress`, `in_review`)
+   - `/wl` with no stage argument returns to the default unfiltered browse list
+   - Filtered views show **every open** item in the selected stage (see [Selection List Behaviour](#selection-list-behaviour))
    - Press `Escape` to cancel an incomplete chord
 
 4. Workflow shortcuts (single-key):
@@ -104,12 +131,33 @@ The plugin pane will then be available via the Herdr plugin system.
 10. Quit:
    - Press `q` to close the worklist pane
 
+### Agent status icons
+
+Rows that have a worklist-spawned pi agent pane attached show the agent's live status as the first icon in the row's icon prefix:
+
+| Icon | Meaning |
+|------|---------|
+| 🟢 | Agent is working on the item |
+| ⛔ | Agent is blocked |
+| ⚪ | Agent is idle (spawned but not currently active) |
+| *(none)* | No agent attached, or the agent finished (`done`/closed) |
+
+The icon occupies a fixed-width slot, so the remaining icons and the item-ID column stay perfectly aligned whether or not a row has an agent. State is refreshed from the herdr CLI on each worklist refresh (with a short TTL); if the CLI is unavailable the list renders without icons rather than failing.
 ### From the command line
 
 ```bash
 # Direct invocation (opens in a new tab)
 herdr plugin action run worklog-selection-list open-worklist
+
+# Open the Podcast Editing tab (worklist pane renamed to "Podcast Editing")
+herdr plugin action run worklog-selection-list open-podcast-editor-tab
 ```
+
+### Podcast Editing tab
+
+`herdr plugin pane open` has no tab-title option, so a worklist pane opened in a tab gets a generated numeric label. The `open-podcast-editor-tab` action (bound to `prefix+l`) fixes that: it opens the worklist pane in a new tab exactly like `open-worklist` (same flags and working-directory resolution) and then renames the created tab to **`Podcast Editing`** via `herdr tab rename`, so the podcast production tab is instantly recognisable among several open tabs. Each press opens a new tab — there is deliberately no focus-if-open toggle.
+
+The underlying script (`scripts/open-podcast-editor-tab.sh`) fails fast with a clear error and non-zero exit when the herdr CLI is unavailable, the pane open fails, or the created `tab_id` cannot be parsed — a missing rename is never silently skipped. The tab label can be overridden with the `TAB_LABEL` environment variable.
 
 ### Configuration
 
@@ -122,12 +170,142 @@ The plugin respects the following environment variables:
 Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings include:
 
 - `autoRefresh` — Enable periodic auto-refresh of the work item list (default: `true`)
-- `refreshIntervalMs` — Interval in ms between auto-refreshes (default: `30000`). Refresh cycles are single-flight: a tick that fires while the previous refresh is still awaiting its `wl` calls is skipped (no overlapping refresh cycles / wl spawn bursts from a pane), and the cadence resumes on the next tick (WL-0MSBVYBMD004007C).
+- `refreshIntervalMs` — Interval in ms between auto-refreshes (default: `30000`). Refresh cycles are single-flight: a tick that fires while the previous refresh is still awaiting its `wl` calls is skipped (no overlapping refresh cycles / wl spawn bursts from a pane), and the cadence resumes on the next tick (WL-0MSBVYBMD004007C). Each refresh is **atomic with respect to expanded state**: children of expanded parents are re-fetched in parallel with the top-level list and applied in one synchronous swap, so an expanded hierarchy never momentarily collapses mid-refresh (WL-0MSBVBNGH002RDP5).
 - `autoSync` — Enable periodic background `wl sync` before auto-refreshes (default: `true`). Background syncs use a single-flight in-process guard and pass `wl sync --if-idle`, so overlapping syncs (from this pane or other panes/TUI instances) are skipped instead of piling up — preventing wl sync lock storms (WL-0MSAB7ZUC004SK7E).
 - `syncIntervalMs` — Interval in ms between background `wl sync` calls (default: `60000`, minimum: `60000`; set to `0` to disable auto-sync)
-- `browseItemCount` — Max number of non-mandatory items to show in the list (default: `10`, range `1`–`50`; critical and completed/in_review items are always shown regardless)
+- `browseItemCount` — Max number of non-mandatory items to show in the list (default: `20`, range `1`–`50`; critical and completed/in_review items are always shown regardless)
 - `showHelpText` — Show the shortcut hint line at the bottom of the list (default: `true`); changes apply on the next render without a plugin restart
-- `showIcons` — Toggle icons in the list (default: `true`)
+- `showIcons` — Toggle icons in the list (default: `true`); changes apply on the next render without a plugin restart
+
+### Downtime worker (local-LLM idle dispatch)
+
+When the local LLM (llama-server behind the llama-proxy) is idle, the plugin
+can use that compute to advance the worklog backlog automatically: after the
+proxy reports idle continuously for the configured threshold, it opens a
+visible (non-focus-stealing) pi agent pane. Dispatch priority (WL-0MSI8H3HP000K0RG):
+first a completed/in_review item **without a valid audit** → `/skill:audit
+<id>`; else `/skill:plan` on the next `intake_complete` item; else falls back
+to `/skill:intake` on the next `idea` item (parent WL-0MSF49FMW009M06K).
+
+A "valid" audit is defined by the review-icon freshness rule: the audit is
+current — i.e. the review icon is **neither** the hourglass `⏳` (stale passed)
+**nor** the magnifying glass `🔍` (no audit / stale failed). Concretely,
+`isAuditFresh(auditedAt, updatedAt)` returns `true` (auditedAt within the 60s
+staleness buffer of updatedAt); missing audit timestamps are treated as
+not-fresh and therefore selected.
+
+Settings (all re-read each poll, so changes apply without a plugin restart):
+
+- `downtimeEnabled` — Enable the downtime worker (default: `true`)
+- `downtimeIdleThresholdMs` — Minimum continuous idle duration before a
+dispatch (default: `240000` = 4 minutes, floor 1s)
+- `downtimeRequiredFreeSlots` — Required free slots; `0` means **all** slots
+must be free (default). A positive integer N is accepted; without per-slot
+identity data the worker fails closed to all-slots-free for `0 < N < total`;
+`N > total` never dispatches.
+- `downtimePollIntervalMs` — Poll interval for the proxy status endpoint
+(default: `30000`, hard floor `10000`)
+- `downtimeProxyUrl` — Base URL of the llama-proxy (default:
+`http://192.168.0.199:8000`)
+- `downtimeModel` — pi model pattern for dispatched panes (default: `plan`)
+- `downtimeNoCandidateCooldownMs` — Full pause (no proxy polling, no idle
+  tracking, no dispatch) after the worker finds no candidate in either
+  stage — a genuine empty backlog (default: `3600000` = 60 minutes, floor
+  60s so the pause cannot be disabled or set trivially small)
+
+The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
+Idle means: llama-server running, no active query, no model switch, no active
+local lease, and the required free-slot condition met. Endpoint failures,
+timeouts, and ambiguous responses are treated as **busy** (no dispatch) and
+never crash the plugin. Each poll is single-flight with a per-poll timeout.
+
+**Dispatch behaviour** — once idle has been continuous for the threshold, the
+worker first runs `wl list --status completed --stage in_review --json` and
+selects the first completed/in_review item **without** a valid audit that was
+**modified within the last 7 days** (`updatedAt` recency window; a candidate
+with a missing `updatedAt` is still selected — recency cannot be verified —
+while an unparseable one is skipped), dispatching `/skill:audit <id>` (pane
+named `Downtime audit`). If none, it runs `wl next --stage intake_complete
+--json` and dispatches `/skill:plan <id>`; if no such item it runs `wl next
+--stage idea --json` and dispatches `/skill:intake <id>`; if all three are
+empty nothing is dispatched. A `wl`/CLI error on the `intake_complete` lookup
+does **not** skip the `idea` lookup — a tier-3 candidate can still dispatch.
+The item is claimed (`wl update <id> --status in_progress`) *before* the pane
+spawns, so it appears in-progress immediately and a second pane's `wl next`
+cannot select it. Panes are named `Downtime audit` / `Downtime plan` /
+`Downtime intake`, opened
+with `--no-focus` (visible, never steals focus), `--cwd <worklog root>` and
+`--model <downtimeModel>`.
+
+**Empty-backlog cooldown** — when **both** `wl next` lookups genuinely return
+no candidate (the tab's project has nothing to dispatch), the worker enters a
+full **pause** for `downtimeNoCandidateCooldownMs` (default 60 minutes): no
+proxy polling, no idle tracking, and no dispatch until the pause expires — so
+it stops burning cycles (proxy polling + `wl` spawns) during empty periods.
+Only a *genuine* empty backlog triggers the pause: transient `wl`/CLI errors
+and the in-flight dispatch guard fail closed to busy and never start a
+cooldown on their own. When the pause expires the worker resumes polling and
+requires a fresh full idle period before the next dispatch (no stale idle
+credit). The worker re-reads the setting every tick, so a change applies from
+the next cooldown entry without a plugin restart.
+
+**Three-strike rule on CLI errors** — a dispatch attempt that ends in a `wl`
+CLI error counts as one strike. Three **consecutive** strikes pause the
+worker entirely (same full pause as the empty-backlog cooldown) *after*
+logging the persistent error to the rolling downtime log, so a persistently
+broken `wl` CLI stops burning idle cycles instead of retrying forever. A
+successful dispatch, a genuine no-candidate outcome, or an expired pause
+resets the strike counter; a single transient error never pauses on its own.
+
+**Hang protection** — every downtime `wl` invocation (`wl next` and
+`wl list` selection lookups) runs with a bounded 10s timeout, so a hung `wl`
+child is killed and the lookup fails closed to a CLI-error strike within a
+bounded time instead of wedging the dispatch task until a pane restart
+(previously the two selection lookups had **no** timeout, so a single hang
+permanently stopped downtime dispatch — silently). As a belt-and-suspenders
+backstop, the scheduler also wraps each downtime-task run in a 60s watchdog:
+a tick run that hangs past the bound is abandoned and the task's
+single-flight flag resets, so the next scheduler tick retries. Healthy runs
+complete in well under a second and are unaffected (the watchdog timer is
+cleared when the run settles).
+
+**Worklog-root routing** — the downtime worker's `wl next` selection and its
+`wl comment add` audit trail run through the same `--worklog-dir` override as
+the worklist, so idle dispatch picks (and comments on) items from the tab's
+resolved project root (e.g. SorraAgents) rather than the plugin process's own
+directory.
+
+**Blocked-questions handling** — the dispatched prompt instructs the agent:
+if it cannot proceed because it needs answers, record the questions in a
+comment on the work item (`wl comment add <id> --comment ...`) and mark the
+item as needing producer review (`wl update <id> --needs-producer-review
+true`), then stop — it never blocks indefinitely.
+
+**No lock file (cross-pane decision Q5)** — concurrent panes are serialized
+by the idle→busy cadence (a dispatch consumes the local slot, so the proxy
+reports busy and the worker requires a fresh full idle period) and by the
+pre-dispatch claim; there is deliberately **no cross-pane lock file**. A
+small residual risk of two panes dispatching at the same idle boundary is
+accepted — the claim prevents duplicate work on the same item.
+
+**Audit trail** — every successful dispatch records two traces: (1) a
+comment on the dispatched item (`wl comment add`, author
+`herdr-downtime`) stating the automatic dispatch, the skill run, and the
+UTC timestamp — this survives `wl sync` and is the durable trail; and (2) a
+bounded JSONL entry in `.worklog/downtime-dispatches.log` under the
+resolved worklog root (rolling — only the most recent 100 entries are
+kept). A three-strike CLI-error pause additionally writes a JSONL entry to
+the same rolling log (with the `at` timestamp and an error message) so the
+persistent failure is auditable even though nothing was dispatched. The
+`.worklog` log file is gitignored and local-only; all writes are
+fail-closed, so a comment or log failure never blocks or fails a dispatch.
+
+The worker runs inside the plugin's single consolidated scheduler loop (one
+`setInterval`; no independent timers), uses unref'd timers, and is cleaned up
+when the pane exits. While the pane is open the list header shows the worker
+state, e.g. `[⏳ downtime idle 3:12]`, `[downtime busy]`,
+`[⏳ downtime dispatching]`, `[downtime disabled]`, or `[downtime paused]`
+(no-candidate cooldown).
 
 ### Pause-when-hidden (pane visibility gating)
 
@@ -183,8 +361,21 @@ Example: with `browseItemCount=15`, 2 critical + 3 completed/in_review +
 first 10 others (15 total). If there were 20 completed/in_review items
 instead of 3, all 22 mandatory items would be shown (22 > 15).
 
-The **stage-filtered** views (press `f` + stage chord) are unchanged: they
-show only items matching the selected stage.
+The **stage-filtered** views (press `f` + stage chord, or `/wl <stage>`) show
+**every open** root item in the selected stage (WL-0MSDT8X1V003206G):
+
+- All open items (`status=open`) in the stage are listed — no
+  `browseItemCount` cap and no `wl next` selection omission, so items the
+  priority algorithm deprioritises are still visible.
+- Items with status `blocked`, `in-progress`, or `completed` are excluded
+  even when their stage matches.
+- Children stay hidden in the top-level list and remain reachable via
+  expand (Tab), exactly as in the unfiltered view.
+- Results follow the standard list order (sortIndex), matching the
+  unfiltered view.
+
+The default (unfiltered) worklist is unaffected — `/wl` with no stage
+argument keeps the smart-selection behaviour described above.
 
 The "top N of M" header reflects the **actual displayed count** (N), which
 may exceed `browseItemCount` when the mandatory set is large.
@@ -201,6 +392,13 @@ clamped to a minimum of 3 rows so it is always usable.
   metadata (status, stage, priority, type, risk, effort, children/parent
   counts, tags, GitHub issue number, created/updated timestamps, and audit
   state).
+- When the item's description has a `Key Files:` section containing one or
+  more `.md` paths, the panel also shows a **`Related Docs`** row listing
+  every markdown path (joined with `, `; long values are truncated to the
+  pane width). Non-markdown Key Files (`.ts`, `.json`, …) are excluded, and
+  the row is omitted entirely when there are no `.md` Key Files. The row is
+  **display-only** — opening a document happens from the detail view's
+  Related Docs table of contents (see [Markdown viewer](#markdown-viewer)).
 - For items whose stage is `in_progress`, the panel additionally shows
   **`Last command:`** — the most recent command the plugin dispatched
   against that item (`none yet` until the first dispatch).
@@ -219,7 +417,10 @@ grouping, so podcast episode items group exactly as their frontmatter
 `pipeline_stage` maps 1:1 onto the Worklog stages (PRD §7.2). Groups render
 in the canonical order (Critical → Group N → Idea → Other → In Review) with
 group separators in the list; stage changes re-group items on the next
-refresh.
+refresh. Non-critical `in_progress` items join the file-path-partitioned
+`Group N` lists alongside `plan_complete`/`intake_complete` items and sort
+ahead of them (actively-worked items first); "Other" remains only as a
+safety net for unknown/custom stages.
 
 ## Markdown viewer
 
@@ -233,8 +434,36 @@ description. The viewer:
 - is preview-only (no notes editor);
 - falls back to the raw description when the file is missing/unreadable.
 
+Key Files paths are resolved against the **worklog root** (the directory
+containing `.worklog/`, from `HERDR_RESOLVED_CWD` / `configureWorklogTarget`)
+— never the plugin pane's process CWD, which is the plugin source dir — with
+fallback candidates tried in order: the worklog root, then the legacy
+podcast-relative base `<root>/.llm-wiki/wiki/podcast/` (older episode items
+wrote Key Files paths relative to the podcast dir rather than the wiki root),
+then `process.cwd()` as a last resort.
+
 The rendered lines appear under an `Episode file (md viewer)` heading in the
 detail view, scrollable with the usual `↑↓/j:k` keys.
+
+### Related Docs table of contents
+
+When the item has at least one `.md` Key File, the **top of the detail view**
+shows a persistent **`Related Docs`** table of contents listing every markdown
+Key File (numbered, with a focus indicator on the selected entry). This makes
+all associated documents visible — not just the first one — and lets you open
+any of them:
+
+- `↑`/`↓` and `j`/`k` move the ToC selection (clamped to its bounds).
+- **`Enter`** renders the selected document's content in the markdown viewer
+  (replacing the auto-rendered first file for that selection; the first file
+  remains the initial default).
+- The ToC stays **visible on all renders**: while the viewed document scrolls,
+  the ToC remains pinned at the top of the detail view.
+- Navigating **past the last ToC entry** transfers focus to document
+  scrolling (the usual `↑↓/j:k`, `g`/`G`, `pgup`/`pgdn` keys apply there);
+  navigating **up past the top of the document** returns focus to the ToC.
+- `esc`/`q` exit the detail view as usual. Items with no `.md` Key Files
+  render exactly as before (no ToC).
 
 ## Inline note links
 
@@ -298,6 +527,7 @@ packages/herdr/
 │   └── worklist.ts         # List state, rendering, keyboard handling, command output
 ├── scripts/
 │   ├── open.sh             # Open the worklist pane
+│   ├── open-podcast-editor-tab.sh  # Open the worklist pane in a tab renamed "Podcast Editing"
 │   ├── toggle.sh           # Toggle the worklist pane
 │   ├── send-to-pi.sh       # Split pane to right, launch pi with agent command
 │   ├── run-in-pane.sh      # Run a shell command visibly in a new pane (stays open for inspection)
@@ -309,19 +539,25 @@ packages/herdr/
 
 - **No direct database access** — The plugin uses the `wl` CLI as the backend data source, ensuring compatibility without duplicating data-access logic.
 - **Terminal UI via raw mode** — The TUI uses raw stdin mode and ANSI escape codes for rendering, making it compatible with any Herdr pane without additional dependencies.
-- **Fixed-height pane rendering** — The list renderer budgets its output to `rows - 1` lines (header + blank + filter bar + items + group separators + fill + footer), reserving the last row for the transient notification line (e.g. `[Synced]`, `[Refresh failed]`). Group separator lines count against the budget, so the pane never scrolls the header or top items off the top of the view regardless of item/group count (see WL-0MSAAON63003N6LO).
+- **Fixed-height pane rendering** — The list renderer budgets its output to `rows - 1` lines (header + items + group separators + fill + footer), reserving the last row for the transient notification line (e.g. `[Synced]`, `[Refresh failed]`). The active stage filter is shown in the header only (` (filtered: <stage>)`) — there is no standalone filter bar or blank chrome row. Group separator lines count against the budget, so the pane never scrolls the header or top items off the top of the view regardless of item/group count (see WL-0MSAAON63003N6LO, WL-0MSGTSPXK007POB1).
 - **Testable core** — All state management, formatting, and keyboard handling is pure logic in `worklist.ts`, fully testable without a terminal.
 - **Toast notifications instead of bottom-line status** — Transient status feedback (refresh outcomes, sync outcomes, sent/skipped command feedback, errors) is surfaced via Herdr toast notifications (`herdr notification show`) instead of being appended to the bottom of the pane output. This keeps the rendered pane within the terminal height budget, so the list header and top lines are never pushed off the top of the pane. Toast delivery requires `ui.toast.delivery = "herdr"` in `~/.config/herdr/config.toml`; toasts appear in the bottom-right corner by default. The helper lives in `notify.ts` and is fire-and-forget (failures are tolerated silently).
 - **Command routing via callback** — When a chord resolves to a non-`/wl` command, it is passed to an `onCommand` callback (set by the entry point) which routes it by prefix:
   - `!!`/`!` prefixed commands (shell-executed shortcuts such as audit approve/reject, priority updates, close/delete) are run **visibly in a new herdr pane** via `scripts/run-in-pane.sh` — the wrapper keeps the pane's process alive so the pane stays open (exit status reported; dismiss with Enter or close with `prefix+x`) so the user can inspect the command output.
   - Everything else is written to stdout with a `CMD:` prefix for the calling framework (Herdr) to execute.
 - **Pi agent dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are intercepted by the entry point and routed to a new pi agent pane. The `send-to-pi.sh` script splits the current pane to the right, creates a new pane, runs `pi` with the command as the initial prompt, and renames the pane to "Pi Agent". Agent commands are routed before any prefix handling, so they are unaffected by `!!`/`!` processing.
+- **Podcast Editing tab naming** — `herdr plugin pane open` creates tabs with generated numeric labels. The `open-podcast-editor-tab` action wraps the same pane-open command and renames the created tab to "Podcast Editing" via `herdr tab rename` (socket API, not session-state editing), so podcast production is instantly recognisable in the tab row. Each press still opens a new tab; only the label changes.
 - **Model selection per shortcut** — Each LLM-bound shortcut entry in `shortcuts.json` may carry an optional `model` field (a pi model pattern such as `plan`, `code`, or `author`). When the command is dispatched to the agent channel, `--model <pattern>` is forwarded to the spawned `pi` CLI (e.g. `pi --model code '/skill:implement <id>'`), so every workflow runs on an appropriately specialised model without manual model switching. Agent-bound entries without a `model` field default to `plan`; shell (`!!`) and `/wl` filter entries never carry a model and never receive a `--model` flag. The default mapping in `src/shortcuts.json`: `/plan`, `/intake`, `/skill:audit`, `/prompt:` → `plan`; `/skill:implement` → `code`.
 - **Free-form prompts via `/prompt:`** — Commands starting with `/prompt:` are also routed to the agent pane, but the `/prompt:` routing prefix is stripped before `send-to-pi.sh` runs, so pi receives only the bare prompt text (e.g. `pi "What are the audit gaps reported in the most recent audit for WL-123"`). This lets a chord shortcut open a new pi instance with an arbitrary injected prompt, not just a skill/workflow invocation. The `P-p` chord opens the command input form so you can type any free-form prompt, and `P-a` opens pi with `What are the audit gaps reported in the most recent audit for <id>` (the selected item's ID is substituted automatically). Edit `src/shortcuts.json` to bind your own prompt text to any free chord.
 - **Correct project directory for new panes** — Panes created by `send-to-pi.sh`, `open-pi-agent.sh`, and `run-in-pane.sh` are started in the correct project root. Herdr's `follow` CWD policy would otherwise inherit the source pane's CWD (the plugin directory), so each script resolves a target CWD (`--cwd` arg > `HERDR_RESOLVED_CWD` > `$PWD`) and applies it in both launch modes: `--no-resize` passes it to `herdr pane split --cwd`, and the default resize mode forwards it to `grid.py --cwd` which includes it in the `pane.split` RPC params. The entry point passes the resolved worklog root (`wlRoot`) so skills, `wl` commands, and relative paths operate on the user's project rather than the plugin's installation directory.
 - **`<id>` placeholder resolution** — Before output, any `<id>` placeholders in the resolved command are replaced with the currently selected work item's ID. If no item is selected and the command requires `<id>`, the command is silently dropped (graceful no-op).
 - **Parameter input form** — Chord commands containing unknown `<identifier>` placeholders open a modal input form (`form-dialog.ts`) before dispatch. The dialog renders at 80% of the pane width (40-column minimum, centered), wraps the description and field values at its inner content width, and expands downward as content wraps — bounded by the terminal height. Every content line is padded to exactly the border width so the box borders stay aligned at any pane width (see WL-0MSAKRBOC005T320).
-- **Chord shortcut system** — Multi-key chord sequences are defined in `shortcuts.json` and resolved via `ShortcutRegistry`. Chords can be filtered by view (list/detail) and stage. Entries may carry an optional `model` field (see **Model selection per shortcut** above).
+- **Chord shortcut system** — Multi-key chord sequences are defined in `shortcuts.json` and resolved via `ShortcutRegistry`. Chords can be filtered by view (list/detail), stage, and work-item issue type. Entries may carry an optional `model` field (see **Model selection per shortcut** above).
+- **Project-local shortcut overrides** — A consumer project can add chords or override bundled defaults **without editing the plugin bundle** by placing a `shortcuts.json` at its **worklog root** (the project root resolved via `configureWorklogTarget`; the plugin reads `<worklog-root>/shortcuts.json` when it exists). Semantics:
+  - The bundled `src/shortcuts.json` is loaded first and remains the base config; a local entry with the **same `chord` + `view`** replaces the bundled entry, while local entries with new chords are appended.
+  - The merge is **deterministic and deduplicated** (dedup key = `view` + `chord`); within the local file, later entries win for the same `view`+`chord`.
+  - Local entries are validated with the same rules as bundled entries: an invalid entry is **logged and skipped**, and a missing/malformed local file (bad JSON, non-array) falls back to bundled-only with an error logged — a broken local file never crashes the plugin.
+  - When no worklog root is resolved (uninitialized project) or no local file exists, the registry is exactly the bundled defaults and all dispatch behaviour is unchanged.
 - **Metadata panel** — The bottom of the list view is reserved for the selected item's metadata (`formatMetadataPanel` in `worklist.ts`). The panel height ramps linearly with pane height (20% → 40%, min 3 rows) via `computeMetadataPanelHeight`, and the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows`, so the two views never drift apart (see WL-0MSAYNVBY006LM9X).
 - **Command log** — Dispatched commands targeting a work item are recorded in `command-log.ts` before execution; the panel surfaces the last command for `in_progress` items. Recording is fire-and-forget (never breaks dispatch) and the log file is written atomically (see WL-0MSAYNVBY006LM9X).
 
@@ -366,6 +602,61 @@ Fail-open is deliberate: a broken or missing marker must never block browsing th
 - **Implement commands blocked** — Any implement command (`/skill:implement`, `/skill:implement-single`, `/skill:implementall`, via single-key `i`, chord, or typed dispatch) is **not** routed: no pi agent pane is spawned, no work item is claimed, and no `<id>` substitution happens. The marker is re-read at dispatch time, so a freeze that starts between refreshes is still enforced.
 - **Notice dialog** — When an implement command is attempted during a freeze, a modal dialog explains that implementation is blocked until the release finishes. Dismiss with `Esc`, `Enter`, or `q` to return to the list.
 - **Other commands unaffected** — Audit, intake, plan, review, priority, search, sync, and navigation continue to work normally during a freeze.
+
+### Shortcut filtering by work-item type
+
+Each entry in `shortcuts.json` may carry an optional `work_item_types` array
+limiting the shortcut to work items whose issue type is listed
+(WL-0MSKH1J0R003BM2M):
+
+| `work_item_types` value | Behaviour |
+|---|---|
+| `["podcast"]` | Shortcut visible only on `podcast`-typed work items |
+| `["bug","feature","task","chore","epic"]` | Shortcut visible only on code work item types |
+| omitted | Always shown (backward compatible) |
+
+Semantics:
+
+- The JSON key is snake_case (`work_item_types`); the parsed TS field is
+  camelCase (`workItemTypes`) — matching the `code_freeze`→`codeFreeze`
+  convention.
+- Any non-array / empty / non-string value is logged as invalid and treated
+  as omitted (always shown) — a bad value never hides or breaks a shortcut.
+- When the selected item's `issueType` is not available (or the entry has no
+  allowlist), behavior is exactly as before: all entries are candidates.
+- The registry methods `lookupChord()`, `lookupChordEntry()`,
+  `getEntriesForStage()`, `getChordByPrefix()`, `getChordByLeader()`, and
+  `getChordEntries()` accept an `issueType` parameter and exclude entries
+  whose allowlist misses it, so footer hints, chord hints, and dispatch
+  lookups all respect the gating automatically.
+- **Bundled restriction:** the code-workflow chords `n` (intake), `p` (plan),
+  and `i` (implement) carry `work_item_types: ["bug","feature","task",
+  "chore","epic"]`, so they are hidden on non-code types (e.g. `podcast`,
+  `docs`). All other bundled shortcuts (audit `a-*`, producer review `r`,
+  housekeeping `u-*`/`x-*`/`c`/`s`/`P-*`/`f-*`) remain untyped and are
+  available on all types. Consumer projects can add their own type-gated
+  chords (e.g. `w` → `wiki-podcast-script` for `podcast` items) via the
+  project-local `shortcuts.json` mechanism above.
+
+### Podcast-progression dispatch markers (OSL-0MSKFXM380098LFL)
+
+Consumer projects that produce podcasts via Worklog episode items (issue
+`podcast`) can define progression chords in their project-local
+`shortcuts.json` that dispatch the podcast pipeline skills. Two markers are
+resolved by the worklist **at dispatch time** from the selected item's
+`Key Files:` section and lifecycle context — they never fall through to the
+modal input form:
+
+| Marker | Resolution | Typical command |
+|---|---|---|
+| `<podcast-target>` | `w` write-script chord: stage `intake_complete` (sourced) → `--doc <first .md> --force-single`; otherwise with open editor-note children → `--rewrite <first .podcast.md>`; otherwise a belt-and-braces error is shown and nothing dispatches (never authors a duplicate) | `/skill:wiki-podcast-script <podcast-target>` |
+| `<podcast-script>` | `t` TTS chord: first `.podcast.md` Key File, normalized to the wiki-dir-relative `podcast/...` path the TTS skill expects (errors when no script exists yet) | `/skill:wiki-tts-generate --podcast-file <podcast-script>` |
+
+Both markers require the chord entry to carry `work_item_types: ["podcast"]`
+so it is only visible on podcast-typed items (see [Shortcut filtering by
+work-item type](#shortcut-filtering-by-work-item-type)); the `w` chord should
+additionally be stage-limited to the podcast lifecycle (`intake_complete`,
+`plan_complete`, `in_review`, `done`).
 
 ### Shortcut filtering during a freeze
 

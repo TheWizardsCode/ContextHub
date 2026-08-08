@@ -935,7 +935,26 @@ async function withTempWorktree<T>(
   const baseRef = hasRemote ? remoteTrackingRef : 'HEAD';
 
   try {
-    await execAsync(`git worktree add --detach ${escapeShellArg(worktreePath)} ${escapeShellArg(baseRef)}`);
+    try {
+      await execAsync(`git worktree add --detach ${escapeShellArg(worktreePath)} ${escapeShellArg(baseRef)}`);
+    } catch (err) {
+      // Unborn-HEAD translation (SA-0MSG57UNY009DE51): when the worktree
+      // would be created from local HEAD on a repo with no commits yet, git
+      // fails with a cryptic error. Surface an actionable message naming the
+      // cause and remedy instead.
+      if (baseRef === 'HEAD') {
+        const raw = (err as Error).message || '';
+        if (/HEAD/.test(raw) && /(not a commit|invalid reference|cannot be created from|not a valid object name)/i.test(raw)) {
+          throw new Error(
+            'Cannot sync: this repository has no commits yet, so git cannot create ' +
+            'a temporary worktree from HEAD. Create an initial commit first ' +
+            '(e.g. `git commit --allow-empty -m "chore: initial"`), or run ' +
+            '`wl sync --no-push` to keep worklog data local.'
+          );
+        }
+      }
+      throw err;
+    }
 
     // If remote branch doesn't exist, create an orphan branch in the temp worktree.
     if (!hasRemote) {

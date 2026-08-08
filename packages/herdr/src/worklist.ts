@@ -10,10 +10,10 @@
  * Herdr's pane-based model.
  */
 
-import { readFileSync } from 'node:fs';
-import { resolve as resolvePath } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve as resolvePath } from 'node:path';
 
-import { fetchChildrenForItem, fetchActionableCount, getWorklogDir, type WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, fetchActionableCount, fetchItemsByStage, getWorklogDir, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { readCodeFreezeState } from './code-freeze.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
@@ -25,11 +25,12 @@ import {
   needsProducerReviewIcon,
   getIconPrefix,
   applyStageColour,
-  iconsEnabled,
   stageColor,
   type IconOptions,
 } from './icons.js';
-import { runSync, createSyncTimer, clampSyncInterval } from './auto-sync.js';
+import { runSync, heartbeatTtlForInterval } from './auto-sync.js';
+import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
+import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
 import { showToast } from './notify.js';
 import { recordCommand, getLastCommand } from './command-log.js';
 import {
@@ -53,6 +54,23 @@ export const STAGES = [
 ] as const;
 
 export type Stage = (typeof STAGES)[number];
+
+// ── /wl <stage> argument map (WL-0MSDT8X1V003206G) ────────────────────
+// Maps every accepted /wl stage argument — shorthand aliases and canonical
+// stage names — to the internal stage name used for filtering. Matches the
+// Pi TUI extension's STAGE_MAP so `/wl <stage>` behaviour is identical.
+export const STAGE_MAP: Record<string, string> = {
+  intake: 'intake_complete',
+  plan: 'plan_complete',
+  progress: 'in_progress',
+  review: 'in_review',
+  // Canonical names mapped to themselves for validation
+  idea: 'idea',
+  intake_complete: 'intake_complete',
+  plan_complete: 'plan_complete',
+  in_progress: 'in_progress',
+  in_review: 'in_review',
+};
 
 // Re-export stage colors from icons for backward compatibility
 export const STAGE_COLORS: Record<string, number> = {
@@ -289,6 +307,22 @@ export class WorkItemListState {
   /** Scroll offset within the detail view. */
   detailScrollOffset = 0;
 
+  /** Selected Related Docs ToC entry (detail mode, 0-based). */
+  detailToCIndex = 0;
+
+  /**
+   * Keyboard focus in the detail view: true = ToC navigation, false =
+   * document scroll region (WL-0MSHWHULZ001FL8I).
+   */
+  detailToCFocus = true;
+
+  /**
+   * Which Key File's content is rendered in the md viewer (default 0 =
+   * first file, auto-render preserved). Enter on a ToC entry sets this to
+   * detailToCIndex.
+   */
+  detailRenderedIndex = 0;
+
   /**
    * Scroll offset within the metadata panel. Reset to 0 whenever the
    * selection changes so a stale position from a previous item never
@@ -448,6 +482,12 @@ export class WorkItemListState {
     this.detailItem = item;
     this.mode = 'detail';
     this.detailScrollOffset = 0;
+    // Reset ToC/focus state per item (WL-0MSHWHULZ001FL8I): first entry
+    // selected, keyboard focus on the ToC, auto-render of the first file
+    // remains the initial default.
+    this.detailToCIndex = 0;
+    this.detailToCFocus = true;
+    this.detailRenderedIndex = 0;
     this._resetMetaScroll();
   }
 
@@ -470,8 +510,12 @@ export class WorkItemListState {
   detailScrollDown(amount = 1): void {
     const maxCols = this.termSize.cols;
     const viewportHeight = Math.max(10, this.termSize.rows - 4);
+    // The ToC is pinned at the top of the detail view, so the scrollable
+    // region is the body below it (WL-0MSHWHULZ001FL8I).
     const allLines = formatDetailContent(this.detailItem, maxCols);
-    const maxScroll = Math.max(0, allLines.length - viewportHeight);
+    const tocLines = formatDetailToC(this.detailItem, maxCols).length;
+    const bodyLines = Math.max(0, allLines.length - tocLines);
+    const maxScroll = Math.max(0, bodyLines - viewportHeight);
     this.detailScrollOffset = Math.min(maxScroll, this.detailScrollOffset + amount);
   }
 
@@ -542,8 +586,34 @@ export class WorkItemListState {
     // Capture the currently selected item's ID before replacing items
     const prevSelectedId = this._captureSelectedId();
 
+    // The fetcher returns fresh top-level objects that never carry a
+    // `children` array (normalizeItem drops it), so a plain swap would
+    // momentarily collapse every expanded parent until doRefresh re-fetches
+    // children asynchronously — the reported flicker (WL-0MSBVBNGH002RDP5).
+    // Carry the previously fetched children over to the new objects by ID so
+    // the flattened view — and any selection pointing at a child — survives
+    // the swap atomically; doRefresh replaces the carried-over data with
+    // fresh children immediately afterwards.
+    const prevChildrenById = new Map<string, WorkItem[]>();
+    for (const item of this._allItems) {
+      if (item.children && item.children.length > 0) {
+        prevChildrenById.set(item.id, item.children);
+      }
+    }
+
     this._allItems = [...newItems];
     this._applyFilters();
+
+    // Attach carried-over children only where the new object has no children
+    // yet (fresh children attached by doRefresh are never clobbered).
+    for (const item of this._allItems) {
+      if (item.childCount && item.childCount > 0 && !item.children) {
+        const prev = prevChildrenById.get(item.id);
+        if (prev) {
+          item.children = prev;
+        }
+      }
+    }
 
     // Try to restore selection by ID; fall back to clamping if not found
     if (!this._restoreSelectionById(prevSelectedId)) {
@@ -609,9 +679,9 @@ export class WorkItemListState {
 
   /** Number of visible list rows (accounts for the metadata panel). */
   _listHeight(): number {
-    // Reserve 3 rows for header, 1 for filter bar, 1 for footer, 1 for status
+    // Reserve 3 rows for header, 1 for footer, 1 for status
     const panelHeight = computeMetadataPanelHeight(this.termSize.rows);
-    return Math.max(3, this.termSize.rows - 6 - panelHeight);
+    return Math.max(3, this.termSize.rows - 4 - panelHeight);
   }
 
   _adjustScroll(): void {
@@ -791,13 +861,16 @@ export function formatTimestamp(iso: string): string {
  *
  * Includes every tracked field: ID, Title, Status, Stage, Priority, Type,
  * Risk, Effort, Children, Parent, Tags, GitHub Issue, Created, Updated,
- * Audit, Reviewed, and Audited At. Fields that are unset are omitted.
+ * Audit, Reviewed, and Audited At. When the item's `Key Files:` section
+ * contains `.md` paths, a `Related Docs` row lists every one of them (joined
+ * with `, `); the row is omitted when there are no `.md` Key Files
+ * (WL-0MSGTLSUT002NF29). Fields that are unset are omitted.
  * Timestamps (Created, Updated, Audited At) are rendered in local time as
  * `DD/MM/YY HH:MM` via {@link formatTimestamp}.
  * Shared by the detail view and the list-mode metadata panel so both stay
  * consistent (WL-0MSAYNVBY006LM9X-FT4).
  */
-export function buildMetaRows(item: WorkItem): Array<[string, string]> {
+export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, string]> {
   const metaRows: Array<[string, string]> = [];
   const addMeta = (label: string, value: string | undefined | null): void => {
     if (value != null && value !== '') {
@@ -820,9 +893,20 @@ export function buildMetaRows(item: WorkItem): Array<[string, string]> {
   addMeta('GitHub Issue', item.githubIssueNumber ? `#${item.githubIssueNumber}` : undefined);
   addMeta('Created', item.createdAt ? formatTimestamp(item.createdAt) : undefined);
   addMeta('Updated', item.updatedAt ? formatTimestamp(item.updatedAt) : undefined);
-  addMeta('Audit', auditIcon(item.auditResult));
-  addMeta('Reviewed', needsProducerReviewIcon(item.needsProducerReview));
+  addMeta('Audit', auditIcon(item.auditResult, { noIcons }));
+  addMeta('Reviewed', needsProducerReviewIcon(item.needsProducerReview, { noIcons }));
   addMeta('Audited At', item.auditedAt ? formatTimestamp(item.auditedAt) : undefined);
+
+  // Related Docs — every .md path referenced in the item's `Key Files:`
+  // section, joined with a compact delimiter so multi-file values fit the
+  // existing label/value row format (WL-0MSGTLSUT002NF29). Display-only:
+  // paths are shown as written in the description, no file I/O at render
+  // time; resolution happens at open time via resolveKeyFilePath.
+  const mdPaths = extractFilePaths(item.description ?? '').filter(p => p.endsWith('.md'));
+  if (mdPaths.length > 0) {
+    metaRows.push(['Related Docs', mdPaths.join(', ')]);
+  }
+
   return metaRows;
 }
 
@@ -849,6 +933,7 @@ export function formatMetadataPanel(
   panelRows: number,
   metaScrollOffset = 0,
   lastCommand?: string | null,
+  noIcons = false,
 ): string[] {
   const lines: string[] = [];
   if (!item) {
@@ -863,7 +948,7 @@ export function formatMetadataPanel(
   lines.push(` ${ANSI.dim}── ${item.id} ──${ANSI.reset}`);
 
   // Metadata rows
-  const metaRows = buildMetaRows(item);
+  const metaRows = buildMetaRows(item, noIcons);
   if (metaRows.length > 0) {
     const fieldWidth = Math.max(...metaRows.map(([l]) => l.length), 6);
     for (const [label, value] of metaRows) {
@@ -908,6 +993,45 @@ export function formatMetadataPanel(
 }
 
 /**
+ * Build the Related Docs Table of Contents (ToC) lines for the detail view
+ * (WL-0MSHWHULZ001FL8I).
+ *
+ * Lists every `.md` Key File of the item, numbered, with a focus indicator
+ * (`▸`) on the selected entry. Returns [] when the item has no `.md` Key
+ * Files so the detail view renders exactly as before.
+ *
+ * @param item - Work item whose `Key Files:` section is scanned.
+ * @param maxCols - Terminal width.
+ * @param detailToCIndex - Selected ToC entry (0-based).
+ * @param detailToCFocus - Whether keyboard focus is on the ToC (unused for
+ *   rendering; kept for parity with the state and future dimming).
+ * @param noIcons - Icons gated off (focus indicator is a plain text marker).
+ * @returns ToC lines, or [] when the item has no `.md` Key Files.
+ */
+export function formatDetailToC(
+  item: WorkItem | null,
+  maxCols: number,
+  detailToCIndex = 0,
+  detailToCFocus = true,
+  noIcons = false,
+): string[] {
+  if (!item) return [];
+  const mdPaths = extractFilePaths(item.description ?? '').filter(p => p.endsWith('.md'));
+  if (mdPaths.length === 0) return [];
+
+  const lines: string[] = [];
+  lines.push('');
+  lines.push(` ${ANSI.underline}Related Docs${ANSI.reset}`);
+  lines.push('');
+  mdPaths.forEach((path, i) => {
+    const marker = i === detailToCIndex ? '▸' : ' ';
+    lines.push(` ${marker} ${i + 1}. ${path}`);
+  });
+  lines.push('');
+  return lines;
+}
+
+/**
  * Build the full content lines for a detail view (without scrolling).
  * Returns an array of lines ready for viewport rendering.
  *
@@ -917,11 +1041,20 @@ export function formatMetadataPanel(
  * (ISO timestamp). Rendered as a markdown table. ID and Title are shown in
  * the header (from the shared {@link buildMetaRows} set they are omitted
  * from the table to avoid duplication).
+ *
+ * When the item has ≥1 `.md` Key File, a pinned `Related Docs` ToC is
+ * rendered at the top (see {@link formatDetailToC}); the md viewer section
+ * below renders the file at `detailRenderedIndex` (default 0 = first file,
+ * preserving the existing auto-render behavior).
  */
 export function formatDetailContent(
   item: WorkItem | null,
   maxCols: number,
   readFile?: (filePath: string) => string | null,
+  noIcons = false,
+  detailToCIndex = 0,
+  detailToCFocus = true,
+  detailRenderedIndex = 0,
 ): string[] {
   if (!item) return [];
 
@@ -935,10 +1068,14 @@ export function formatDetailContent(
   lines.push(` ${ANSI.bold}${item.title}${ANSI.reset}`);
   lines.push(separator);
 
+  // Related Docs ToC — pinned at the top of the detail view
+  // (WL-0MSHWHULZ001FL8I).
+  lines.push(...formatDetailToC(item, maxCols, detailToCIndex, detailToCFocus, noIcons));
+
   // Metadata — rendered as a markdown table (shared row builder; ID and
   // Title are already shown in the header above, so they are filtered out
   // here to avoid duplicating them).
-  const metaRows = buildMetaRows(item).filter(([label]) => label !== 'ID' && label !== 'Title');
+  const metaRows = buildMetaRows(item, noIcons).filter(([label]) => label !== 'ID' && label !== 'Title');
 
   // Render the metadata as a markdown table
   if (metaRows.length > 0) {
@@ -983,8 +1120,13 @@ export function formatDetailContent(
   // (preview-only; no notes editor). When a readFile callback is provided
   // and the item references a readable .md file, render it in place of the
   // raw description so the producer sees the paragraph-format episode.
+  // Renders the file at detailRenderedIndex (default 0 = first file, the
+  // existing auto-render); Enter on a ToC entry selects another file
+  // (WL-0MSHWHULZ001FL8I).
   if (readFile) {
-    const mdViewerLines = renderFileViewer(item, maxCols, readFile);
+    const mdPaths = extractFilePaths(item.description ?? '').filter(p => p.endsWith('.md'));
+    const mdPath = mdPaths[detailRenderedIndex] ?? mdPaths[0];
+    const mdViewerLines = renderFileViewer(item, maxCols, readFile, mdPath);
     if (mdViewerLines.length > 0) {
       lines.push('');
       lines.push(` ${ANSI.underline}Episode file (md viewer)${ANSI.reset}`);
@@ -1013,17 +1155,20 @@ export function formatDetailContent(
  * @param item - The work item whose description carries a `Key Files:` path.
  * @param maxCols - Terminal width.
  * @param readFile - Synchronous file reader (path -> content or null).
+ * @param mdPath - Optional explicit .md path to render. When omitted,
+ *   falls back to the first .md Key File (existing auto-render behavior).
  * @returns Viewer lines, or [] when no readable .md file is referenced.
  */
 export function renderFileViewer(
   item: WorkItem | null,
   maxCols: number,
   readFile: (filePath: string) => string | null,
+  mdPath?: string,
 ): string[] {
   if (!item) return [];
-  const mdPath = firstMarkdownKeyFile(item.description);
-  if (!mdPath) return [];
-  const content = readFile(mdPath);
+  const path = mdPath ?? firstMarkdownKeyFile(item.description);
+  if (!path) return [];
+  const content = readFile(path);
   if (content == null) return [];
   return renderMarkdownViewer(content, maxCols);
 }
@@ -1043,6 +1188,47 @@ export function firstMarkdownKeyFile(description: string | undefined): string {
 }
 
 /**
+ * Resolve a `Key Files:` markdown path to an absolute filesystem path.
+ *
+ * Key Files paths are documented as relative to the worklog root, but the
+ * plugin pane's process CWD is the plugin source directory — NOT the worklog
+ * root — so resolving against `process.cwd()` alone is wrong
+ * (WL-0MSGEA9AY0080V4Q). Candidates are tried in order:
+ *
+ * 1. the resolved worklog root (the directory containing `.worklog/`,
+ *    derived from the configured worklog dir — see configureWorklogTarget /
+ *    HERDR_RESOLVED_CWD),
+ * 2. the legacy podcast-relative base `<root>/.llm-wiki/wiki/podcast/`
+ *    (older episode items wrote Key Files paths relative to the podcast dir
+ *    rather than the wiki root),
+ * 3. `process.cwd()` as a last resort (plain CWD-relative key paths).
+ *
+ * Fail-open: returns null when no candidate exists on disk, so the detail
+ * view falls back to the raw description.
+ */
+export function resolveKeyFilePath(filePath: string): string | null {
+  const bases: string[] = [];
+  const wlDir = getWorklogDir();
+  if (wlDir) {
+    const wlRoot = dirname(wlDir);
+    bases.push(wlRoot);
+    bases.push(join(wlRoot, '.llm-wiki', 'wiki', 'podcast'));
+  }
+  bases.push(process.cwd());
+  for (const base of bases) {
+    try {
+      const candidate = resolvePath(base, filePath);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    } catch {
+      // Ignore unreadable base and try the next candidate.
+    }
+  }
+  return null;
+}
+
+/**
  * Format the detail view for a single work item, with scrolling support.
  *
  * @param item - The work item to display
@@ -1057,17 +1243,28 @@ export function formatDetailView(
   scrollOffset = 0,
   viewportHeight = 20,
   readFile?: (filePath: string) => string | null,
+  noIcons = false,
+  detailToCIndex = 0,
+  detailToCFocus = true,
+  detailRenderedIndex = 0,
 ): string {
-  const allLines = formatDetailContent(item, maxCols, readFile);
+  // The Related Docs ToC is pinned at the top of the detail view; only the
+  // body below it scrolls (WL-0MSHWHULZ001FL8I).
+  const tocLines = formatDetailToC(item, maxCols, detailToCIndex, detailToCFocus, noIcons);
+  const allLines = formatDetailContent(item, maxCols, readFile, noIcons, detailToCIndex, detailToCFocus, detailRenderedIndex);
   if (allLines.length === 0) return '';
 
-  const totalLines = allLines.length;
+  const bodyLines = allLines.slice(tocLines.length);
+  const totalLines = bodyLines.length;
   const maxScroll = Math.max(0, totalLines - viewportHeight);
   const safeOffset = Math.min(scrollOffset, maxScroll);
 
-  const visible = allLines.slice(safeOffset, safeOffset + viewportHeight);
+  const visible = [
+    ...tocLines,
+    ...bodyLines.slice(safeOffset, safeOffset + viewportHeight),
+  ];
 
-  // Add scroll indicator if content is long
+  // Add scroll indicator if the body is long
   if (totalLines > viewportHeight && safeOffset <= maxScroll) {
     const percent = totalLines > 0
       ? Math.round(((safeOffset + viewportHeight) / totalLines) * 100)
@@ -1083,18 +1280,6 @@ export function formatDetailView(
   }
 
   return visible.join('\n');
-}
-
-/**
- * Format the filter status bar.
- */
-export function formatFilterBar(filter: string | null, maxCols: number): string {
-  if (filter) {
-    const color = STAGE_COLORS[filter] || 241;
-    const bar = ` ${ANSI.bg(color)}${ANSI.fg(16)} Filter: ${filter} ${ANSI.reset}`;
-    return bar.padEnd(maxCols, '─');
-  }
-  return ` ${ANSI.dim}No filter — press [f] then [i/n/p/r] to filter by stage${ANSI.reset}`.padEnd(maxCols, ' ');
 }
 
 /**
@@ -1133,8 +1318,8 @@ export function createChordState(): ChordState {
 /**
  * Check if a key matches any chord leader in the registry.
  */
-export function isChordLeader(key: string, registry: ShortcutRegistry, codeFreezeActive?: boolean): boolean {
-  const chords = registry.getChordEntries(codeFreezeActive);
+export function isChordLeader(key: string, registry: ShortcutRegistry, codeFreezeActive?: boolean, issueType?: string): boolean {
+  const chords = registry.getChordEntries(codeFreezeActive, issueType);
   return chords.some(c => {
     const chord = c.chord;
     return chord !== undefined && chord.length >= 1 && chord[0] === key;
@@ -1155,11 +1340,12 @@ export function processChordInput(
   view: string,
   stage?: string,
   codeFreezeActive?: boolean,
+  issueType?: string,
 ): 'chord-complete' | 'chord-cancel' | null {
   const pending = [...chordState.pendingKeys, key];
 
   // Check if this completes a chord
-  const entry = registry.lookupChordEntry(pending, view, stage, codeFreezeActive);
+  const entry = registry.lookupChordEntry(pending, view, stage, codeFreezeActive, issueType);
   if (entry) {
     chordState.pendingKeys = [];
     chordState.hints = '';
@@ -1169,7 +1355,7 @@ export function processChordInput(
   }
 
   // Check if this is a valid prefix for more chords
-  const nextChords = registry.getChordByPrefix(pending, view, stage, codeFreezeActive);
+  const nextChords = registry.getChordByPrefix(pending, view, stage, codeFreezeActive, issueType);
   if (nextChords.length > 0) {
     chordState.pendingKeys = pending;
     // Update hints
@@ -1252,9 +1438,9 @@ export function formatChordHintsForHelp(
  * Get chord hints for showing in the help bar when in list mode.
  * Shows leader keys and abbreviated labels for all chords.
  */
-export function getChordHelpHints(registry: ShortcutRegistry | undefined, codeFreezeActive?: boolean): string {
+export function getChordHelpHints(registry: ShortcutRegistry | undefined, codeFreezeActive?: boolean, issueType?: string): string {
   if (!registry) return '';
-  const chords = registry.getChordEntries(codeFreezeActive);
+  const chords = registry.getChordEntries(codeFreezeActive, issueType);
   // Group by leader key
   const byLeader = new Map<string, string[]>();
   for (const c of chords) {
@@ -1354,13 +1540,61 @@ export function handleKeypress(
       state.back();
       return 'back';
     }
-    // Detail scrolling
+
+    // Related Docs ToC navigation (WL-0MSHWHULZ001FL8I). When the item has
+    // ≥1 .md Key File and keyboard focus is on the ToC (detailToCFocus),
+    // j/k/arrows move the ToC selection; Enter renders the selected doc.
+    // Navigating past the last entry transfers focus to document scrolling.
+    const mdCount = state.detailItem
+      ? extractFilePaths(state.detailItem.description ?? '').filter(p => p.endsWith('.md')).length
+      : 0;
+    const hasToC = mdCount > 0;
+
+    if (hasToC && state.detailToCFocus) {
+      if (key === 'j' || key === '\x1b[B') {
+        if (state.detailToCIndex < mdCount - 1) {
+          state.detailToCIndex += 1;
+        } else {
+          // Past the last entry → document scrolling focus
+          state.detailToCFocus = false;
+        }
+        return null;
+      }
+      if (key === 'k' || key === '\x1b[A') {
+        if (state.detailToCIndex > 0) {
+          state.detailToCIndex -= 1;
+        }
+        return null;
+      }
+      if (key === '\r' || key === '\n') {
+        // Enter renders the selected document in the md viewer
+        state.detailRenderedIndex = state.detailToCIndex;
+        return null;
+      }
+      if (key === 'g') {
+        state.detailToCIndex = 0;
+        return null;
+      }
+      if (key === 'G') {
+        state.detailToCIndex = mdCount - 1;
+        return null;
+      }
+      return null;
+    }
+
+    // Detail scrolling — when the item has a ToC this branch runs while
+    // focus is on the document; k at the top of the document returns focus
+    // to the ToC (WL-0MSHWHULZ001FL8I).
     if (key === 'j' || key === '\x1b[B') {
       state.detailScrollDown(1);
       return null;
     }
     if (key === 'k' || key === '\x1b[A') {
-      state.detailScrollUp(1);
+      if (hasToC && state.detailScrollOffset <= 0) {
+        state.detailToCFocus = true;
+      } else {
+        state.detailScrollUp(1);
+      }
       return null;
     }
     if (key === '\x1b[6~') {
@@ -1509,7 +1743,37 @@ export function handleKeypress(
  * current state. The caller should write this to stdout and handle
  * terminal setup/teardown.
  */
-export function createListRenderer(): (
+/**
+ * Render the inline downtime-worker status fragment appended to the list
+ * header (AC3, WL-0MSF49FMW009M06K): `[⏳ downtime idle m:ss]`,
+ * `[downtime busy]`, `[⏳ downtime dispatching]`, `[downtime disabled]`, or
+ * `[downtime paused]` (no-candidate cooldown, WL-0MSI7DQL10016QYX).
+ * Inline-only — it never adds a row, so the pane-height budget is intact.
+ */
+export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string {
+  if (!worker) return '';
+  if (worker.dispatching) {
+    return ` ${ANSI.fg(208)}[⏳ downtime dispatching]${ANSI.reset}`;
+  }
+  if (!worker.enabled) {
+    return ` ${ANSI.dim}[downtime disabled]${ANSI.reset}`;
+  }
+  if (worker.paused) {
+    // No-candidate cooldown: the worker is not polling, so `idleSince` is
+    // stale/empty — render the honest paused state instead of a stale idle
+    // duration (AC6, WL-0MSI7DQL10016QYX).
+    return ` ${ANSI.dim}[downtime paused]${ANSI.reset}`;
+  }
+  if (worker.idleSince !== null) {
+    const elapsedSecs = Math.max(0, Math.floor((Date.now() - worker.idleSince) / 1000));
+    const minutes = Math.floor(elapsedSecs / 60);
+    const seconds = elapsedSecs % 60;
+    return ` ${ANSI.fg(34)}[⏳ downtime idle ${minutes}:${String(seconds).padStart(2, '0')}]${ANSI.reset}`;
+  }
+  return ` ${ANSI.dim}[downtime busy]${ANSI.reset}`;
+}
+
+export function createListRenderer(getShowIcons?: () => boolean): (
   items: WorkItem[],
   selectedIndex: number,
   scrollOffset: number,
@@ -1529,7 +1793,14 @@ export function createListRenderer(): (
   metaScrollOffset?: number,
   metaLastCommand?: string,
   readFile?: (filePath: string) => string | null,
+  downtimeStatus?: string,
+  detailToCIndex?: number,
+  detailToCFocus?: boolean,
+  detailRenderedIndex?: number,
 ) => string {
+  // Default to icons enabled when no getter is supplied (backwards
+  // compatible — callers/tests that render without options keep icons).
+  const showIconsGetter = getShowIcons ?? (() => true);
   return (
     items: WorkItem[],
     selectedIndex: number,
@@ -1550,19 +1821,37 @@ export function createListRenderer(): (
     metaScrollOffset?: number,
     metaLastCommand?: string,
     readFile?: (filePath: string) => string | null,
+    downtimeStatus?: string,
+    detailToCIndex?: number,
+    detailToCFocus?: boolean,
+    detailRenderedIndex?: number,
   ): string => {
     const { rows, cols } = termSize;
+    // Icons are gated by the getter for the whole frame (list lines, detail
+    // view, and metadata panel alike) so showIcons=false omits every item
+    // icon, including audit/review icons (AC1, WL-0MSBV4RYO008JL70).
+    const noIcons = !showIconsGetter();
     const output: string[] = [];
     // The metadata panel reserves 20–40% of the pane height below the list;
     // the list area is the remaining height minus the notification row.
     const panelHeight = computeMetadataPanelHeight(rows);
     const listArea = Math.max(1, rows - 1 - panelHeight);
-    const listHeight = Math.max(3, rows - 6 - panelHeight);
+    const listHeight = Math.max(3, rows - 4 - panelHeight);
 
     if (mode === 'detail' && detailItem) {
       const viewportHeight = Math.max(10, rows - 1);
       const offset = detailScrollOffset ?? 0;
-      return formatDetailView(detailItem, cols, offset, viewportHeight, readFile);
+      return formatDetailView(
+        detailItem,
+        cols,
+        offset,
+        viewportHeight,
+        readFile,
+        noIcons,
+        detailToCIndex ?? 0,
+        detailToCFocus ?? true,
+        detailRenderedIndex ?? 0,
+      );
     }
 
     if (mode === 'filter') {
@@ -1592,6 +1881,9 @@ export function createListRenderer(): (
     if (panePaused) {
       header += ` ${ANSI.fg(220)}[paused — hidden]${ANSI.reset}`;
     }
+    if (downtimeStatus) {
+      header += downtimeStatus;
+    }
     output.push(header);
 
     // Code Freeze banner — a prominent warning that implementation is
@@ -1603,23 +1895,20 @@ export function createListRenderer(): (
       const bannerLine = `${ANSI.bg(196)}${ANSI.fg(231)} ${bannerText} ${ANSI.reset}`;
       output.push(truncateLine(bannerLine, cols));
     }
-    output.push('');
-
-    // Filter bar
-    output.push(formatFilterBar(activeFilter, cols));
 
     // Items are already flattened by the caller (render callback in runWorklistTui
     // calls state.getFlattenedItems() before passing items here). Do NOT re-flatten.
     const flatItems = items;
 
     // Items with group separators. Each `── <Group> ──` separator consumes a
-    // row, so the visible window must be sized so header + blank + filter bar
-    // + items + separators + fill + footer fit in `rows - 1` lines (the last
-    // row is reserved for the notification line appended by render()). Without
-    // this accounting the output overflows the pane and the terminal scrolls
-    // the header/top items off the top (WL-0MSAAON63003N6LO).
+    // row, so the visible window must be sized so header + items + separators
+    // + fill + footer fit in `rows - 1` lines (the last row is reserved for
+    // the notification line appended by render()). Without this accounting the
+    // output overflows the pane and the terminal scrolls the header/top items
+    // off the top (WL-0MSAAON63003N6LO). The active stage filter is indicated
+    // in the header only (filterLabel) — no standalone filter bar is rendered.
     const bannerActive = codeFreezeActive === true;
-    const chromeLines = bannerActive ? 5 : 4; // header + banner + blank + filter bar + footer
+    const chromeLines = bannerActive ? 3 : 2; // header + banner + footer
     const budgetForItemsAndSeps = Math.max(0, listArea - chromeLines);
     // Count the group separators a window would render (same logic as the
     // render loop below) so the window can be trimmed when separators would
@@ -1665,7 +1954,6 @@ export function createListRenderer(): (
       const expandedItem = { ...item, _expanded: hasChildCount && isExpanded };
 
       const isSelected = actualIndex === selectedIndex;
-      const noIcons = !iconsEnabled();
       const line = formatItemLine(expandedItem, cols, isSelected, noIcons);
       if (isSelected) {
         output.push(`${ANSI.reverse}${line}${ANSI.reset}`);
@@ -1674,7 +1962,7 @@ export function createListRenderer(): (
       }
     }
 
-    // Fill remaining rows (header + blank + filter bar + items + separators)
+    // Fill remaining rows (header + items + separators)
     const used = chromeLines + visible.length + numSeparators;
     for (let i = used; i < listArea; i++) {
       output.push('');
@@ -1712,6 +2000,7 @@ export function createListRenderer(): (
       panelHeight,
       metaScrollOffset ?? 0,
       metaLastCommand,
+      noIcons,
     );
     for (const line of panelLines) {
       output.push(line);
@@ -1730,11 +2019,6 @@ export function createListRenderer(): (
 }
 
 // ── Main TUI loop ─────────────────────────────────────────────────────
-
-/**
- * Default renderer instance.
- */
-const defaultRenderer = createListRenderer();
 
 /**
  * Work-item ID format: a prefix (e.g. `WL`, `SA`) followed by a hash,
@@ -1893,6 +2177,39 @@ export function formatCodeFreezeDialog(maxCols: number, maxRows: number, reason?
 }
 
 /**
+ * Fetch the items for the current view.
+ *
+ * When a stage filter is active, the worklist shows EVERY open root item in
+ * that stage (`wl list --status open --stage <stage> --root-only`) — not
+ * just the `browseItemCount`-capped `wl next` subset — so stage-filtered
+ * views give a complete picture of the stage (WL-0MSDT8X1V003206G). Items
+ * with status `blocked`, `in-progress`, or `completed` are excluded; child
+ * items stay hidden and remain reachable via expand exactly as in the
+ * unfiltered view. Results follow the standard list order (sortIndex).
+ *
+ * Without an active filter the default fetcher is used unchanged (the
+ * default `/wl` view keeps its existing smart-selection behaviour). If the
+ * stage fetch fails, the default fetcher is used as a fallback so a `wl`
+ * error can never blank the list.
+ *
+ * @param activeFilter - The active stage filter (null = unfiltered view)
+ * @param defaultFetcher - The default fetcher for the unfiltered view
+ */
+export function fetchItemsForView(
+  activeFilter: string | null,
+  defaultFetcher: () => Promise<WorkItem[]>,
+): Promise<WorkItem[]> {
+  if (activeFilter) {
+    // Fail-open: a wl error must never blank the list — fall back to the
+    // default fetcher (which itself fails open in index.ts).
+    return fetchItemsByStage(activeFilter).catch(() => defaultFetcher());
+  }
+  // Unfiltered: delegate straight to the default fetcher so the refresh
+  // cadence is byte-for-byte unchanged (single-flight timing preserved).
+  return defaultFetcher();
+}
+
+/**
  * Dispatch a chord command by mapping it to the appropriate TUI action
  * or routing it through the stdout command output mechanism.
  *
@@ -1918,18 +2235,20 @@ export function dispatchChordCommand(
   const wlStageMatch = command.match(/^\/wl\s+(\S+)$/);
   if (wlStageMatch) {
     const wlStage = wlStageMatch[1];
-    // Map wl stage names to internal stage names
-    const stageMap: Record<string, string> = {
-      idea: 'idea',
-      intake: 'intake_complete',
-      plan: 'plan_complete',
-      review: 'in_review',
-    };
-    const internalStage = stageMap[wlStage];
+    const internalStage = STAGE_MAP[wlStage];
     if (internalStage) {
       state.applyFilter(internalStage);
       return true;
     }
+  }
+
+  // ── /wl (no arguments): return to the default unfiltered view ────
+  // Equivalent to the Pi TUI's `/wl` with no args (WL-0MSGSE15000746F7):
+  // clears the active stage filter so the next refresh shows the standard
+  // smart-selection list. No-op when no filter is active.
+  if (/^\/wl\s*$/.test(command)) {
+    state.clearFilter();
+    return true;
   }
 
   // ── Agent skill invocations ─────────────────────────────
@@ -1961,6 +2280,111 @@ export function dispatchChordCommand(
 }
 
 export type ExecuteResult = 'dispatched' | 'callback' | 'noop' | 'blocked';
+
+/**
+ * Result of resolving a podcast-progression command marker for the selected
+ * work item. Either a fully-resolved command (no markers remain) or an
+ * error message that must be surfaced WITHOUT dispatching (OSL-0MSHFQ51L009IUOS
+ * belt-and-braces guard).
+ */
+export interface PodcastTargetResolution {
+  command?: string;
+  error?: string;
+}
+
+/**
+ * Resolve podcast-progression command markers (`<podcast-target>`,
+ * `<podcast-script>`) for the selected work item at dispatch time
+ * (OSL-0MSKFXM380098LFL, folding in OSL-0MSHFQ51L009IUOS).
+ *
+ * The `w` write-script chord command
+ * (`/skill:wiki-podcast-script <podcast-target>`) derives its mode from the
+ * selected item's lifecycle context:
+ * - stage `intake_complete` (sourced): author a new script from the source
+ *   synthesis → `--doc <first .md Key File> --force-single`;
+ * - otherwise, when open editor-note children exist: rewrite the existing
+ *   script → `--rewrite <first .podcast.md Key File>`;
+ * - otherwise: belt-and-braces guard — returns an error and does NOT
+ *   dispatch (never authors a duplicate).
+ *
+ * The `t` TTS chord command
+ * (`/skill:wiki-tts-generate --podcast-file <podcast-script>`) resolves
+ * `<podcast-script>` to the first `.podcast.md` Key File, normalized to the
+ * wiki-dir-relative `podcast/...` form the TTS skill expects (a bare
+ * `<title>/<title>.podcast.md` Key File path is podcast-dir-relative).
+ *
+ * Markers are resolved BEFORE the generic modal-form check so they never
+ * fall through to the input form. Returns the input command unchanged when
+ * it carries no podcast markers.
+ *
+ * @param command - Resolved shortcut command (may contain markers).
+ * @param item - Selected work item (or null when nothing is selected).
+ * @param fetchChildren - Child fetcher (injectable for tests; defaults to
+ *   {@link fetchChildrenForItem}).
+ */
+export async function resolvePodcastTarget(
+  command: string,
+  item: WorkItem | null,
+  fetchChildren: (parentId: string) => Promise<WorkItem[]> = fetchChildrenForItem,
+): Promise<PodcastTargetResolution> {
+  const hasTarget = command.includes('<podcast-target>');
+  const hasScript = command.includes('<podcast-script>');
+  if (!hasTarget && !hasScript) {
+    return { command };
+  }
+  if (!item) {
+    return { error: 'No work item selected' };
+  }
+
+  const mdPaths = extractFilePaths(item.description ?? '').filter(p => p.endsWith('.md'));
+  const synthesis = mdPaths.find(p => !p.endsWith('.podcast.md')) ?? mdPaths[0];
+  const script = mdPaths.find(p => p.endsWith('.podcast.md'));
+  let resolved = command;
+
+  if (hasTarget) {
+    // `w` write-script chord: mode derives from stage + open notes.
+    if (item.stage === 'intake_complete') {
+      // Sourced episode — author a new script from the synthesis.
+      if (!synthesis) {
+        return { error: 'No source synthesis found in Key Files: — run wiki-ingest-batch/research first' };
+      }
+      resolved = resolved.replace(/<podcast-target>/g, `--doc ${synthesis} --force-single`);
+    } else {
+      // Drafted/written episode — rewrite only when open note children exist.
+      let children: WorkItem[] = [];
+      try {
+        children = await fetchChildren(item.id);
+      } catch {
+        children = [];
+      }
+      const openNotes = children.filter(c => {
+        const status = c.status ?? '';
+        return status !== 'completed' && status !== 'closed' && status !== 'deleted';
+      });
+      if (openNotes.length === 0) {
+        return { error: 'podcast script already present, review and edit that rather than author a new one' };
+      }
+      if (!script) {
+        return { error: 'No podcast script found in Key Files:' };
+      }
+      resolved = resolved.replace(/<podcast-target>/g, `--rewrite ${script}`);
+    }
+  }
+
+  if (hasScript) {
+    if (!script) {
+      return { error: 'No podcast script found in Key Files: — author the script first (w)' };
+    }
+    // The TTS skill resolves --podcast-file relative to the wiki dir;
+    // episode Key Files store the script podcast-dir-relative.
+    const podcastFile = script.startsWith('podcast/') || script.startsWith('wiki/')
+      ? script
+      : `podcast/${script}`;
+    resolved = resolved.replace(/<podcast-script>/g, podcastFile);
+  }
+
+  return { command: resolved };
+}
 
 /**
  * Execute a resolved chord command.
@@ -2052,7 +2476,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; onCommand?: (command: string, model?: string) => void },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void> },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -2062,7 +2486,12 @@ export async function runWorklistTui(
     browseItemCount: options?.browseItemCount ?? 10,
     showHelpText: options?.showHelpText ?? true,
     getShowHelpText: options?.getShowHelpText ?? (() => options?.showHelpText ?? true),
+    showIcons: options?.showIcons ?? true,
+    getShowIcons: options?.getShowIcons ?? (() => options?.showIcons ?? true),
     onCommand: options?.onCommand,
+    downtimeWorker: options?.downtimeWorker,
+    downtimePollIntervalMs: options?.downtimePollIntervalMs ?? DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
+    mergeAgentStates: options?.mergeAgentStates,
   };
 
   let termSize = getTermSize();
@@ -2084,7 +2513,10 @@ export async function runWorklistTui(
   });
 
   const state = new WorkItemListState(items, termSize);
-  const renderer = defaultRenderer;
+  // Icons are gated by the getShowIcons getter (re-read on every render so a
+  // showIcons setting change applies without a plugin restart — same pattern
+  // as getShowHelpText). The renderer is created per-TUI-run with the getter.
+  const renderer = createListRenderer(opts.getShowIcons);
   const chordState: ChordState = createChordState();
   let formState: FormState | null = null;
   /** Saved mode before entering form overlay (to restore on cancel) */
@@ -2177,27 +2609,56 @@ export async function runWorklistTui(
     refreshInFlight = true;
     try {
       try {
-        const newItems = await fetcher();
+        // Fetch the new top-level items and the children of currently
+        // expanded parents in PARALLEL, then apply both in one synchronous
+        // refreshItems step. The fetcher returns fresh top-level objects
+        // without `children`, so a swap followed by an async children
+        // re-fetch would render a collapsed intermediate state — the
+        // "momentary collapse" flicker (WL-0MSBVBNGH002RDP5). Fetching
+        // children up front removes that window entirely; refreshItems also
+        // carries over previously fetched children as a safety net when a
+        // children re-fetch fails.
+        const expanded = [...state.expandedItems];
+        const freshChildren = new Map<string, WorkItem[]>();
+        const fetchExpandedChildren = async (parentId: string): Promise<WorkItem[]> => {
+          try {
+            const children = await fetchChildrenForItem(parentId);
+            freshChildren.set(parentId, children);
+            return children;
+          } catch {
+            // Ignore: refreshItems carries over the previously fetched
+            // children when the re-fetch fails.
+            return [];
+          }
+        };
+        const [newItems] = await Promise.all([
+          fetchItemsForView(state.activeFilter, fetcher),
+          ...expanded.map(fetchExpandedChildren),
+        ]);
         const oldLen = state.items.length;
+
+        // Attach freshly fetched children to the new parent objects BEFORE
+        // the swap so the flattened view is complete at render time.
+        if (freshChildren.size > 0) {
+          const byId = new Map(newItems.map((it) => [it.id, it]));
+          for (const [parentId, children] of freshChildren) {
+            const parent = byId.get(parentId);
+            if (parent) {
+              parent.children = children;
+            }
+          }
+        }
         state.refreshItems(newItems);
         // Re-read the Code Freeze marker so a freeze that started (or ended)
         // since the last refresh is reflected in the banner promptly.
         refreshFreezeState();
-        // Re-fetch children for expanded parents so the hierarchy view stays
-        // fresh after an auto/manual refresh while inside a child context.
-        const expanded = [...state.expandedItems];
-        if (expanded.length > 0) {
-          const byId = new Map(newItems.map((it) => [it.id, it]));
-          await Promise.all(expanded.map(async (parentId) => {
-            const parent = byId.get(parentId);
-            if (!parent) return; // parent no longer exists
-            try {
-              const children = await fetchChildrenForItem(parentId);
-              parent.children = children;
-            } catch {
-              // ignore: keep previously fetched children on refresh failure
-            }
-          }));
+        // Merge agent-status state into the refreshed items (top-level +
+        // expanded children) so the agent icons reflect the latest tracker
+        // state (WL-0MSBQUJQX005RAT9). Fail-open: no herdr CLI → no icons.
+        try {
+          await opts.mergeAgentStates?.(newItems);
+        } catch {
+          // Fail-open: a merge failure must never break the refresh cycle.
         }
         if (showNotification && newItems.length !== oldLen) {
           const diff = newItems.length - oldLen;
@@ -2223,17 +2684,40 @@ export async function runWorklistTui(
     }
   };
 
+  /**
+   * True when the resolved command is a `/wl` view command — a stage filter
+   * (`/wl <stage>`, shorthand alias or canonical name) or the clear-filter
+   * `/wl` with no arguments. Used after dispatch to trigger a view refetch:
+   * filtered views show every open root item in the stage
+   * (WL-0MSDT8X1V003206G); clearing the filter restores the default view
+   * (WL-0MSGSE15000746F7).
+   */
+  const isWlViewCommand = (cmd: string): boolean => {
+    if (/^\/wl\s*$/.test(cmd)) return true;
+    const m = cmd.match(/^\/wl\s+(\S+)$/);
+    return m !== null && STAGE_MAP[m[1]] !== undefined;
+  };
+
   // Run `wl sync` and surface the outcome as a toast so sync status is
   // visible (success and graceful failure). Targets the resolved worklog
   // directory so sync operates on the tab project.
   //
   // With ifIdle=true (auto-sync timer path) runSync applies its single-flight
   // guard and passes --if-idle to the CLI, so overlapping syncs are skipped
-  // instead of piling up (lock-storm prevention). Manual 'S' syncs pass
-  // ifIdle=false and wait for the lock like a regular wl sync.
-  const doSync = async (ifIdle = false): Promise<void> => {
-    const outcome = await runSync(getWorklogDir(), { ifIdle });
+  // instead of piling up (lock-storm prevention). With a heartbeatTtlMs the
+  // auto-sync path ALSO skips without spawning when another pane synced
+  // recently (cross-instance coordination, F3 — WL-0MSGAEJQA005QG3W); such
+  // skips are silent because the data is already fresh. Manual 'S' syncs pass
+  // ifIdle=false and no heartbeat, so they always wait for the lock like a
+  // regular wl sync.
+  const doSync = async (ifIdle = false, heartbeatTtlMs?: number): Promise<void> => {
+    const outcome = await runSync(getWorklogDir(), {
+      ifIdle,
+      ...(heartbeatTtlMs !== undefined ? { heartbeat: true, heartbeatTtlMs } : {}),
+    });
     if (outcome.skipped) {
+      // Heartbeat skip: another pane synced within the window — silent.
+      if (outcome.reason === 'heartbeat') return;
       // Another sync is already in-flight / holding the lock — do not pile on.
       showToast('Sync in progress');
       return;
@@ -2298,15 +2782,29 @@ export async function runWorklistTui(
         state.mode === 'detail' ? 'detail' : 'list',
         state.activeFilter ?? undefined,
         codeFreezeActive,
+        state.getSelectedItem()?.issueType,
       );
 
       if (chordResult === 'chord-complete') {
         // Chord resolved — execute the command
-        const command = chordState.resolvedCommand;
+        let command = chordState.resolvedCommand;
         const model = chordState.resolvedModel;
         chordState.resolvedCommand = null;
         chordState.resolvedModel = null;
         if (command) {
+          // Podcast-progression markers (<podcast-target>/<podcast-script>)
+          // are resolved from the selected item's context BEFORE the generic
+          // modal-form check so they never fall through to the input form
+          // (OSL-0MSKFXM380098LFL, folding in OSL-0MSHFQ51L009IUOS).
+          if (command.includes('<podcast-target>') || command.includes('<podcast-script>')) {
+            const podcast = await resolvePodcastTarget(command, state.getSelectedItem());
+            if (podcast.error) {
+              showToast('Error', { body: podcast.error });
+              render();
+              return;
+            }
+            command = podcast.command ?? command;
+          }
           // Check for unknown identifiers that need form input
           if (hasUnknownIdentifiers(command)) {
             // Look up description from shortcut entry
@@ -2380,6 +2878,12 @@ export async function runWorklistTui(
               // Surface a brief toast, then continue
               showToast('Sent', { body: command.length > 60 ? command.substring(0, 57) + '...' : command });
             }
+            // Stage-filter dispatch (/wl <stage> or f-chord shortcut): refetch
+            // so the filtered view shows EVERY open root item in the stage,
+            // not just the already-loaded subset (WL-0MSDT8X1V003206G).
+            if (result === 'dispatched' && isWlViewCommand(command)) {
+              await doRefresh(true);
+            }
           } catch (e) {
             showToast('Error', { body: (e as Error).message });
             process.stderr.write(`[herdr] Command error: ${(e as Error).message}\n`);
@@ -2409,17 +2913,31 @@ export async function runWorklistTui(
 
     // If key wasn't handled as navigation and chord registry exists,
     // check if it's a shortcut or part of a chord sequence
-    if (shortcutRegistry && (action === null || isChordLeader(key, shortcutRegistry as ShortcutRegistry, codeFreezeActive))) {
+    if (shortcutRegistry && (action === null || isChordLeader(key, shortcutRegistry as ShortcutRegistry, codeFreezeActive, state.getSelectedItem()?.issueType))) {
       // First: check if this key is a complete single-key shortcut
       const singleEntry = (shortcutRegistry as ShortcutRegistry).lookupChordEntry(
         [key],
         state.mode === 'detail' ? 'detail' : 'list',
         state.activeFilter ?? undefined,
         codeFreezeActive,
+        state.getSelectedItem()?.issueType,
       );
       if (singleEntry) {
-        const singleCmd = singleEntry.command;
+        let singleCmd = singleEntry.command;
         const singleModel = singleEntry.model ?? undefined;
+        // Podcast-progression markers (<podcast-target>/<podcast-script>)
+        // are resolved from the selected item's context BEFORE the generic
+        // modal-form check so they never fall through to the input form
+        // (OSL-0MSKFXM380098LFL, folding in OSL-0MSHFQ51L009IUOS).
+        if (singleCmd.includes('<podcast-target>') || singleCmd.includes('<podcast-script>')) {
+          const podcast = await resolvePodcastTarget(singleCmd, state.getSelectedItem());
+          if (podcast.error) {
+            showToast('Error', { body: podcast.error });
+            render();
+            return;
+          }
+          singleCmd = podcast.command ?? singleCmd;
+        }
         // Single-key shortcut — check for unknown identifiers first
         if (hasUnknownIdentifiers(singleCmd)) {
           let description = '';
@@ -2479,6 +2997,12 @@ export async function runWorklistTui(
             // Surface a brief toast, then continue
             showToast('Sent', { body: singleCmd.length > 60 ? singleCmd.substring(0, 57) + '...' : singleCmd });
           }
+          // Stage-filter dispatch (/wl <stage> or f-chord shortcut): refetch
+          // so the filtered view shows EVERY open root item in the stage,
+          // not just the already-loaded subset (WL-0MSDT8X1V003206G).
+          if (result === 'dispatched' && isWlViewCommand(singleCmd)) {
+            await doRefresh(true);
+          }
           render();
         } catch (e) {
           showToast('Error', { body: (e as Error).message });
@@ -2489,11 +3013,12 @@ export async function runWorklistTui(
       }
 
       // Second: check if this key starts a multi-key chord sequence
-      if (isChordLeader(key, shortcutRegistry as ShortcutRegistry, codeFreezeActive)) {
+      if (isChordLeader(key, shortcutRegistry as ShortcutRegistry, codeFreezeActive, state.getSelectedItem()?.issueType)) {
         const nextChords = (shortcutRegistry as ShortcutRegistry).getChordByPrefix([key],
           state.mode === 'detail' ? 'detail' : 'list',
           state.activeFilter ?? undefined,
-          codeFreezeActive);
+          codeFreezeActive,
+          state.getSelectedItem()?.issueType);
         if (nextChords.length > 0) {
           chordState.pendingKeys = [key];
           chordState.hints = formatChordHintsForHelp(nextChords, [key]);
@@ -2530,6 +3055,13 @@ export async function runWorklistTui(
           render(); // immediate render while fetch is pending
           const children = await fetchChildrenForItem(selected.id);
           selected.children = children;
+          // Merge agent-status state into the freshly loaded children so
+          // their rows show agent icons too (WL-0MSBQUJQX005RAT9).
+          try {
+            await opts.mergeAgentStates?.([selected]);
+          } catch {
+            // Fail-open: a merge failure must never break expansion.
+          }
           state.toggleExpand(selected.id);
           render();
           return;
@@ -2548,14 +3080,17 @@ export async function runWorklistTui(
 
   /**
    * Read a Key Files: markdown document (e.g. an episode .podcast.md) for
-   * the generic md viewer in the detail pane. Paths are relative to the
-   * worklog root (the process CWD when the plugin runs in a pane).
-   * Fail-open: unreadable or missing files yield null and the detail view
-   * falls back to the raw description.
+   * the generic md viewer in the detail pane. Paths are resolved against
+   * the worklog root (via resolveKeyFilePath) — the plugin pane's process
+   * CWD is the plugin source dir, not the worklog root
+   * (WL-0MSGEA9AY0080V4Q). Fail-open: unreadable or missing files yield
+   * null and the detail view falls back to the raw description.
    */
   const readKeyFile = (filePath: string): string | null => {
+    const resolved = resolveKeyFilePath(filePath);
+    if (!resolved) return null;
     try {
-      return readFileSync(resolvePath(filePath, process.cwd()), 'utf-8');
+      return readFileSync(resolved, 'utf-8');
     } catch {
       return null;
     }
@@ -2594,12 +3129,14 @@ export async function runWorklistTui(
     if (shortcutRegistry && chordState.pendingKeys.length === 0) {
       const reg = shortcutRegistry as ShortcutRegistry;
       const selIdx = state.selectedIndex;
-      const selStage = displayItems.length > 0 && selIdx < displayItems.length
-        ? displayItems[selIdx]?.stage
+      const selItem = displayItems.length > 0 && selIdx < displayItems.length
+        ? displayItems[selIdx]
         : undefined;
+      const selStage = selItem?.stage;
+      const selIssueType = selItem?.issueType;
       const isEmpty = displayItems.length === 0;
 
-      const relevantEntries = reg.getEntriesForStage(selStage, codeFreezeActive)
+      const relevantEntries = reg.getEntriesForStage(selStage, codeFreezeActive, selIssueType)
         .filter(e => e.view === 'list' || e.view === 'both')
         .filter(e => {
           if (isEmpty && e.command.includes('<id>')) return false;
@@ -2670,6 +3207,10 @@ export async function runWorklistTui(
       state.metaScrollOffset,
       metaLastCommand,
       readKeyFile,
+      renderDowntimeStatus(opts.downtimeWorker),
+      state.detailToCIndex,
+      state.detailToCFocus,
+      state.detailRenderedIndex,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a
@@ -2698,66 +3239,36 @@ export async function runWorklistTui(
   // Read keypresses
   process.stdin.on('data', onData);
 
-  // Resume poll — while the pane is hidden, visibility is polled on a short
-  // interval so the hidden → visible transition triggers an immediate
-  // doRefresh instead of waiting for the next refreshIntervalMs tick. The
-  // poll uses only herdr pane get (via the PollGate memoizer, TTL aligned
-  // with the poll interval) — never wl — preserving the zero-wl-when-hidden
-  // guarantee.
-  const RESUME_POLL_INTERVAL_MS = DEFAULT_POLL_GATE_TTL_MS;
-  let resumePollTimer: ReturnType<typeof setInterval> | undefined;
+  // ── Consolidated scheduler loop (WL-0MSG4NMF0000YBRP) ──────────────
+  // All periodic plugin work — auto-refresh, auto-sync, visibility
+  // resume-poll, and future downtime-worker ticks — runs through ONE
+  // TaskScheduler interval. Tasks are dispatched by due-time deadline at a
+  // 1s base tick; each task applies its own visibility gate (refresh/sync
+  // skip when hidden, resume-poll only runs while hidden). Tick cadence,
+  // pause-when-hidden gating, and shutdown cleanup live in one place.
+  const scheduler = new TaskScheduler(DEFAULT_SCHEDULER_TICK_MS);
 
   const stopResumePoll = (): void => {
-    if (resumePollTimer !== undefined) {
-      clearInterval(resumePollTimer);
-      resumePollTimer = undefined;
-    }
+    scheduler.setDisabled('resume-poll', true);
   };
 
   /** Start the resume poll (no-op when already running). */
   const startResumePoll = (): void => {
-    if (resumePollTimer !== undefined) return;
-    resumePollTimer = setInterval(async () => {
-      if (await paneGate.visible()) {
-        // Hidden → visible transition: refresh immediately (with the
-        // "refreshed" notification) and let the normal cadence resume.
-        stopResumePoll();
-        panePaused = false;
-        doRefresh(true);
-      }
-    }, RESUME_POLL_INTERVAL_MS);
+    scheduler.setDisabled('resume-poll', false);
   };
 
-  // Auto-refresh timer — fetches fresh items on an interval. NOTE: this timer
-  // does NOT run `wl sync`; the dedicated SyncTimer below is the single sync
-  // source. Running sync from both timers caused a double-spawn per pane that
+  // Auto-refresh task — fetches fresh items on an interval. NOTE: this task
+  // does NOT run `wl sync`; the dedicated sync task below is the single sync
+  // source. Running sync from both tasks caused a double-spawn per pane that
   // amplified the wl sync lock storm (WL-0MSAB7ZUC004SK7E).
   // Visibility-gated: when the pane is hidden (not focused), ticks are
   // skipped so hidden panes spawn zero wl processes (pause-when-hidden).
-  let refreshTimer: ReturnType<typeof setInterval> | undefined;
   if (opts.autoRefresh) {
-    refreshTimer = setInterval(async () => {
-      if (!(await paneGate.visible())) {
-        panePaused = true;
-        startResumePoll();
-        return;
-      }
-      stopResumePoll();
-      panePaused = false;
-      doRefresh(false);
-    }, opts.refreshIntervalMs);
-  }
-
-  // Auto-sync timer (background wl sync) — the only auto-sync source. Uses the
-  // single-flight + lock-aware (--if-idle) guard so concurrent panes/TUI
-  // instances skip instead of piling up under lock contention.
-  // Visibility-gated like the refresh timer: hidden panes skip the sync
-  // (and its follow-up refresh) entirely.
-  let syncTimer: ReturnType<typeof createSyncTimer> | undefined;
-  if (opts.autoSync && opts.syncIntervalMs !== 0) {
-    syncTimer = createSyncTimer({
-      intervalMs: opts.syncIntervalMs,
-      onSync: async () => {
+    scheduler.addTask({
+      id: 'refresh',
+      intervalMs: opts.refreshIntervalMs,
+      singleFlight: true,
+      run: async () => {
         if (!(await paneGate.visible())) {
           panePaused = true;
           startResumePoll();
@@ -2765,22 +3276,92 @@ export async function runWorklistTui(
         }
         stopResumePoll();
         panePaused = false;
-        doSync(true); // ifIdle: skip when another sync is in-flight / lock held
         doRefresh(false);
       },
     });
-    syncTimer.start();
   }
+
+  // Auto-sync task (background wl sync) — the only auto-sync source. Uses
+  // the single-flight + lock-aware (--if-idle) guard so concurrent
+  // panes/TUI instances skip instead of piling up under lock contention,
+  // and the cross-instance heartbeat (F3) so only the first pane per window
+  // spawns `wl sync` at all. Visibility-gated like the refresh task: hidden
+  // panes skip the sync (and its follow-up refresh) entirely. Fires once
+  // immediately on start (as the previous SyncTimer did) so the first sync
+  // cycle is not delayed.
+  if (opts.autoSync && opts.syncIntervalMs !== 0) {
+    // Heartbeat window tied to the configured interval (interval minus a 15s
+    // margin) so the sync cadence still lands ~once per interval while only
+    // the first pane per window spawns a process.
+    const heartbeatTtlMs = heartbeatTtlForInterval(opts.syncIntervalMs);
+    scheduler.addTask({
+      id: 'sync',
+      intervalMs: opts.syncIntervalMs,
+      fireImmediately: true,
+      run: async () => {
+        if (!(await paneGate.visible())) {
+          panePaused = true;
+          startResumePoll();
+          return;
+        }
+        stopResumePoll();
+        panePaused = false;
+        doSync(true, heartbeatTtlMs); // ifIdle + heartbeat: skip when another sync is in-flight / fresh
+        doRefresh(false);
+      },
+    });
+  }
+
+  // Visibility resume-poll — runs only while the pane is hidden. Polls
+  // pane visibility on a short interval so the hidden → visible transition
+  // triggers an immediate doRefresh instead of waiting for the next
+  // refreshIntervalMs tick. The poll uses only herdr pane get (via the
+  // PollGate memoizer, TTL aligned with the poll interval) — never wl —
+  // preserving the zero-wl-when-hidden guarantee.
+  scheduler.addTask({
+    id: 'resume-poll',
+    intervalMs: DEFAULT_POLL_GATE_TTL_MS,
+    singleFlight: true,
+    disabled: true,
+    run: async () => {
+      if (await paneGate.visible()) {
+        // Hidden → visible transition: refresh immediately (with the
+        // "refreshed" notification) and let the normal cadence resume.
+        stopResumePoll();
+        panePaused = false;
+        doRefresh(true);
+      }
+    },
+  });
+
+  // Downtime-worker task — polls the llama-proxy for idle state and, after
+  // the configured idle threshold, dispatches a pi agent pane (parent
+  // WL-0MSF49FMW009M06K). Unlike refresh/sync it is NOT visibility-gated:
+  // the worker runs while the worklist pane is open (parent Assumptions).
+  // Single-flight: the poller and dispatch guards inside the worker prevent
+  // overlapping work; the scheduler task itself is also single-flight.
+  // Scheduler-level watchdog (WL-0MSJIPHD0001L1J9): a tick run that hangs
+  // (e.g. an unbounded wl invocation) is abandoned after
+  // DOWNTIME_RUN_TIMEOUT_MS and the single-flight flag resets so the next
+  // tick retries — a hung run can never permanently wedge the downtime
+  // task until a pane restart.
+  if (opts.downtimeWorker) {
+    scheduler.addTask({
+      id: 'downtime',
+      intervalMs: opts.downtimePollIntervalMs,
+      singleFlight: true,
+      runTimeoutMs: DOWNTIME_RUN_TIMEOUT_MS,
+      run: async () => {
+        await opts.downtimeWorker?.tick();
+      },
+    });
+  }
+
+  scheduler.start();
 
   // Cleanup on promise resolution
   promise.finally(() => {
-    if (refreshTimer !== undefined) {
-      clearInterval(refreshTimer);
-    }
-    if (syncTimer !== undefined) {
-      syncTimer.stop();
-    }
-    stopResumePoll();
+    scheduler.stop();
     cleanup();
     process.stdout.removeListener('resize', onResize);
     process.stdin.removeListener('data', onData);

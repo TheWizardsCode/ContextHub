@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import {
   WorkItemListState,
   getTermSize,
@@ -16,6 +17,7 @@ import {
   formatCodeFreezeDialog,
   ANSI,
   createListRenderer,
+  renderDowntimeStatus,
   isChordLeader,
   processChordInput,
   createChordState,
@@ -25,11 +27,18 @@ import {
   formatMetadataPanel,
   formatTimestamp,
   buildMetaRows,
+  resolveKeyFilePath,
+  formatDetailContent,
+  formatDetailView,
+  fetchItemsForView,
+  formatChordHintsForHelp,
+  resolvePodcastTarget,
 } from './worklist.js';
+import type { DowntimeWorker } from './downtime-worker.js';
 import { setLogPath, resetLogPath, recordCommand, getLastCommand } from './command-log.js';
 import { loadShortcutConfig, ShortcutRegistry } from './shortcut-config.js';
-import { regroupWorkItems } from './grouping.js';
-import type { WorkItem } from './fetcher.js';
+import { regroupWorkItems, extractFilePaths } from './grouping.js';
+import { setWorklogDir, resetWorklogDir, setExecFileAsync, resetExecFileAsync, type WorkItem } from './fetcher.js';
 
 // ── ANSI helpers ───────────────────────────────────────────────────────
 // Regression test: the sync-failed status indicator uses ANSI.yellow
@@ -117,7 +126,7 @@ describe('createListRenderer — line-count invariant', () => {
     const merged: WorkItem[] = [
       { ...makeItem('NEXT-PLAN'), stage: 'plan_complete', priority: 'high', group: 2, groupLabel: 'Group 1' },
       { ...makeItem('NEXT-REVIEW'), stage: 'in_review', priority: 'medium', status: 'in-progress', group: 5, groupLabel: 'In Review' },
-      { ...makeItem('NEXT-OTHER'), stage: 'in_progress', priority: 'medium', group: 3, groupLabel: 'Other' },
+      { ...makeItem('NEXT-OTHER'), stage: 'custom', priority: 'medium', group: 3, groupLabel: 'Other' },
       // Mandatory wl list subsets — no group metadata.
       { ...makeItem('LIST-CRIT'), stage: 'plan_complete', priority: 'critical' },
       { ...makeItem('LIST-REV'), stage: 'in_review', priority: 'medium', status: 'completed' },
@@ -129,6 +138,70 @@ describe('createListRenderer — line-count invariant', () => {
     // In Review separator appears after the Other separator in the rendered output.
     expect(output.indexOf('── Other ──')).toBeGreaterThan(-1);
     expect(output.indexOf('── In Review ──')).toBeGreaterThan(output.indexOf('── Other ──'));
+  });
+});
+
+// ── Filter chrome removal (WL-0MSGTSPXK007POB1) ────────────────────────
+// The list mode no longer emits a blank line after the header/banner nor a
+// standalone filter status bar; the active stage filter is indicated in the
+// header only (via filterLabel). The two freed rows are given back to the
+// item list (page size 11 → 13 on 80x24).
+
+describe('createListRenderer — no blank line, no filter bar', () => {
+  const renderer = createListRenderer();
+
+  it('does not render a blank line between the header and the first item', () => {
+    const output = renderer([makeItem('A'), makeItem('B'), makeItem('C')], 0, 0, TERM_80x24, null, 'list', null);
+    const lines = output.split('\n');
+    expect(lines[0]).toContain('Work Items');
+    expect(lines[1].trim()).not.toBe('');
+    expect(lines[1]).toContain('A');
+  });
+
+  it('does not render a blank line between the code-freeze banner and the first item', () => {
+    const output = renderer(
+      [makeItem('A'), makeItem('B')],
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      true, // codeFreezeActive
+    );
+    const lines = output.split('\n');
+    expect(lines[0]).toContain('Work Items');
+    expect(lines[1]).toContain('CODE FREEZE');
+    expect(lines[2].trim()).not.toBe('');
+    expect(lines[2]).toContain('A');
+  });
+
+  it('renders no standalone filter bar when unfiltered', () => {
+    const output = renderer([makeItem('A')], 0, 0, TERM_80x24, null, 'list', null);
+    expect(output).not.toContain('No filter');
+    expect(output).not.toContain('press [f]');
+  });
+
+  it('renders no standalone filter bar when filtered (header carries the indication)', () => {
+    const output = renderer([makeItem('A')], 0, 0, TERM_80x24, 'in_review', 'list', null);
+    expect(output).not.toMatch(/Filter: /);
+  });
+
+  it('still indicates an active stage filter in the header', () => {
+    const output = renderer([makeItem('A')], 0, 0, TERM_80x24, 'in_review', 'list', null);
+    const firstLine = output.split('\n')[0];
+    expect(firstLine).toContain('Work Items');
+    expect(firstLine).toContain('(filtered: in_review)');
+    const unfiltered = renderer([makeItem('A')], 0, 0, TERM_80x24, null, 'list', null);
+    expect(unfiltered.split('\n')[0]).not.toContain('filtered:');
   });
 });
 
@@ -286,6 +359,105 @@ describe('WorkItemListState.refreshItems — preserve selection by ID', () => {
     expect(state.getFlattenedItems()[state.selectedIndex].id).toBe('CHILD-A1');
   });
 
+  it('keeps expanded children visible when refresh supplies new objects without children (production fetcher shape)', () => {
+    // The production fetcher (normalizeItem) never populates `children` on
+    // top-level items — each refresh returns NEW object references that only
+    // carry childCount. This test models that shape (WL-0MSBVBNGH002RDP5).
+    const parentA = makeItem('PARENT-A', 'idea');
+    parentA.children = [makeItem('CHILD-A1'), makeItem('CHILD-A2')];
+    parentA.childCount = 2;
+
+    const parentB = makeItem('PARENT-B', 'in_progress');
+    parentB.children = [makeItem('CHILD-B1')];
+    parentB.childCount = 1;
+
+    const state = new WorkItemListState([parentA, parentB], TERM_80x24);
+    state.toggleExpand('PARENT-A');
+
+    // Flattened: [PARENT-A, CHILD-A1, CHILD-A2, PARENT-B]
+    expect(state.getFlattenedItems().length).toBe(4);
+    expect(state.getFlattenedItems()[1].id).toBe('CHILD-A1');
+
+    // Refresh with brand-new objects that LACK `children` — exactly what the
+    // fetcher returns (children are fetched separately for expanded parents).
+    const freshParentA = { ...makeItem('PARENT-A', 'idea'), childCount: 2 };
+    const freshParentB = { ...makeItem('PARENT-B', 'in_progress'), childCount: 1 };
+    state.refreshItems([freshParentB, freshParentA]);
+
+    // Expanded children must remain in the flattened view — no momentary
+    // collapse window after the swap.
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual([
+      'PARENT-B',
+      'PARENT-A',
+      'CHILD-A1',
+      'CHILD-A2',
+    ]);
+  });
+
+  it('restores selection on a child of an expanded parent after a children-less refresh', () => {
+    // A selected CHILD must survive a refresh that swaps in children-less
+    // objects (previously the new flattened list lost the child, so selection
+    // jumped to the top of the list) — WL-0MSBVBNGH002RDP5 AC-4.
+    const parentA = makeItem('PARENT-A', 'idea');
+    parentA.children = [makeItem('CHILD-A1'), makeItem('CHILD-A2')];
+    parentA.childCount = 2;
+
+    const parentB = makeItem('PARENT-B', 'in_progress');
+    parentB.childCount = 1;
+
+    const state = new WorkItemListState([parentA, parentB], TERM_80x24);
+    state.toggleExpand('PARENT-A');
+
+    // Select CHILD-A1 (flattened index 1).
+    state.selectedIndex = 1;
+    expect(state.getFlattenedItems()[1].id).toBe('CHILD-A1');
+
+    // Refresh with children-less NEW objects, reordered (B first).
+    const freshParentA = { ...makeItem('PARENT-A', 'idea'), childCount: 2 };
+    const freshParentB = { ...makeItem('PARENT-B', 'in_progress'), childCount: 1 };
+    state.refreshItems([freshParentB, freshParentA]);
+
+    // CHILD-A1 is still visible and selected (now flattened index 2 after
+    // the reorder) — the selection followed the child, not the top of the list.
+    expect(state.getFlattenedItems()[2].id).toBe('CHILD-A1');
+    expect(state.getFlattenedItems()[state.selectedIndex].id).toBe('CHILD-A1');
+  });
+
+  it('does not overwrite fresh children already attached to the new objects (carry-over only fills gaps)', () => {
+    // doRefresh attaches freshly fetched children to the new parent objects
+    // BEFORE refreshItems; the carry-over must never clobber fresh data with
+    // stale children (WL-0MSBVBNGH002RDP5 AC-3 freshness).
+    const parentA = makeItem('PARENT-A', 'idea');
+    parentA.children = [makeItem('CHILD-OLD')];
+    parentA.childCount = 1;
+
+    const state = new WorkItemListState([parentA], TERM_80x24);
+    state.toggleExpand('PARENT-A');
+
+    const freshParentA = { ...makeItem('PARENT-A', 'idea'), childCount: 1 };
+    freshParentA.children = [makeItem('CHILD-FRESH')];
+    state.refreshItems([freshParentA]);
+
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['PARENT-A', 'CHILD-FRESH']);
+  });
+
+  it('does not carry children over for a parent that no longer exists after refresh', () => {
+    const parentA = makeItem('PARENT-A', 'idea');
+    parentA.children = [makeItem('CHILD-A1')];
+    parentA.childCount = 1;
+
+    const state = new WorkItemListState([parentA], TERM_80x24);
+    state.toggleExpand('PARENT-A');
+    expect(state.getFlattenedItems().length).toBe(2);
+
+    // Refresh: PARENT-A is gone; only PARENT-B remains (no children).
+    const freshParentB = { ...makeItem('PARENT-B', 'in_progress'), childCount: 0 };
+    state.refreshItems([freshParentB]);
+
+    // No orphan children may leak into the flattened view.
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['PARENT-B']);
+  });
+
   it('prefers the selected item ID over the collapsed child position', () => {
     // Test that when parent is collapsed and then refreshed with expanded
     // children, the same child ID is found in the new flattened list
@@ -350,6 +522,25 @@ describe('executeResolvedCommand', () => {
     expect(state.activeFilter).toBe('idea');
   });
 
+  it('routes unknown /wl stage arguments to the callback (error notification, no crash)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/wl bogus', state, onCommand);
+    expect(result).toBe('callback');
+    expect(onCommand).toHaveBeenCalledWith('/wl bogus', undefined);
+    expect(state.activeFilter).toBeNull();
+  });
+
+  it('returns dispatched for /wl with no arguments and clears the filter (sprint)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    state.applyFilter('idea');
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/wl', state, onCommand);
+    expect(result).toBe('dispatched');
+    expect(state.activeFilter).toBeNull();
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
   it('returns dispatched for /skill:implement with resolved <id>', () => {
     const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
     state.selectedIndex = 0;
@@ -381,6 +572,41 @@ describe('dispatchChordCommand', () => {
     const result = dispatchChordCommand('/wl review', state);
     expect(result).toBe(true);
     expect(state.activeFilter).toBe('in_review');
+  });
+
+  it('accepts canonical stage names and the progress alias for /wl commands', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    expect(dispatchChordCommand('/wl progress', state)).toBe(true);
+    expect(state.activeFilter).toBe('in_progress');
+    expect(dispatchChordCommand('/wl intake_complete', state)).toBe(true);
+    expect(state.activeFilter).toBe('intake_complete');
+    expect(dispatchChordCommand('/wl plan_complete', state)).toBe(true);
+    expect(state.activeFilter).toBe('plan_complete');
+    expect(dispatchChordCommand('/wl in_review', state)).toBe(true);
+    expect(state.activeFilter).toBe('in_review');
+  });
+
+  it('leaves unknown /wl stage arguments unhandled (no crash, no filter)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    const result = dispatchChordCommand('/wl bogus', state);
+    expect(result).toBe(false);
+    expect(state.activeFilter).toBeNull();
+  });
+
+  it('clears the stage filter for /wl with no arguments (sprint, WL-0MSGSE15000746F7)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    state.applyFilter('idea');
+    expect(state.activeFilter).toBe('idea');
+    const result = dispatchChordCommand('/wl', state);
+    expect(result).toBe(true);
+    expect(state.activeFilter).toBeNull();
+  });
+
+  it('shows the sprint chord in the f-chord help line (WL-0MSGSE15000746F7)', () => {
+    const registry = loadShortcutConfig();
+    const chords = registry.getChordByPrefix(['f'], 'list', undefined, false);
+    const hints = formatChordHintsForHelp(chords, ['f']);
+    expect(hints).toContain('s:sprint');
   });
 
   it('routes agent commands through onCommand', () => {
@@ -445,6 +671,48 @@ describe('dispatchChordCommand', () => {
     state.selectedIndex = 0;
     const result = dispatchChordCommand('unknown command', state);
     expect(result).toBe(false);
+  });
+});
+
+describe('fetchItemsForView — stage-filtered fetch', () => {
+  beforeEach(() => {
+    resetExecFileAsync();
+  });
+
+  it('fetches all open root items in the stage when a filter is active', async () => {
+    const stageItems = [makeItem('A', 'idea'), makeItem('B', 'idea')];
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ workItems: stageItems }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
+
+    const items = await fetchItemsForView('idea', defaultFetcher);
+
+    expect(items.map((i) => i.id)).toEqual(['A', 'B']);
+    expect(defaultFetcher).not.toHaveBeenCalled();
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs).toContain('list');
+    expect(callArgs[callArgs.indexOf('--status') + 1]).toBe('open');
+    expect(callArgs[callArgs.indexOf('--stage') + 1]).toBe('idea');
+    expect(callArgs).toContain('--root-only');
+  });
+
+  it('uses the default fetcher when no filter is active', async () => {
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
+    const items = await fetchItemsForView(null, defaultFetcher);
+    expect(items.map((i) => i.id)).toEqual(['C']);
+    expect(defaultFetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the default fetcher when the stage fetch fails', async () => {
+    const mockFn = vi.fn().mockRejectedValue(new Error('wl failed'));
+    setExecFileAsync(mockFn as any);
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
+
+    const items = await fetchItemsForView('idea', defaultFetcher);
+    expect(items.map((i) => i.id)).toEqual(['C']);
   });
 });
 
@@ -591,6 +859,197 @@ describe('code-freeze shortcut filtering — worklist integration', () => {
     expect(entries.some(e => e.chord[0] === 'i')).toBe(false);
     const normalEntries = registry.getEntriesForStage('plan_complete', false);
     expect(normalEntries.some(e => e.chord[0] === 'i')).toBe(true);
+  });
+});
+
+// ── Issue-type shortcut filtering — worklist integration (WL-0MSKH1J0R003BM2M)
+//
+// The selected work item's issueType is threaded into the shortcut lookup and
+// hint paths so a type-gated chord (e.g. a project-local `w` bound to
+// `wiki-podcast-script` for `podcast` items) is hidden on non-matching types,
+// and the bundled code-workflow chords n/p/i are hidden on podcast items.
+
+describe('issue-type shortcut filtering — worklist integration', () => {
+  let registry: ShortcutRegistry;
+
+  beforeEach(() => {
+    registry = loadShortcutConfig();
+  });
+
+  it('treats i as a chord leader only for code item types', () => {
+    expect(isChordLeader('i', registry, false, 'feature')).toBe(true);
+    expect(isChordLeader('i', registry, false, 'podcast')).toBe(false);
+    expect(isChordLeader('i', registry, false, 'docs')).toBe(false);
+  });
+
+  it('treats n and p as chord leaders only for code item types', () => {
+    expect(isChordLeader('n', registry, false, 'bug')).toBe(true);
+    expect(isChordLeader('n', registry, false, 'podcast')).toBe(false);
+    expect(isChordLeader('p', registry, false, 'task')).toBe(true);
+    expect(isChordLeader('p', registry, false, 'podcast')).toBe(false);
+  });
+
+  it('keeps generic chords as leaders on every type', () => {
+    expect(isChordLeader('r', registry, false, 'podcast')).toBe(true);
+    expect(isChordLeader('c', registry, false, 'podcast')).toBe(true);
+    expect(isChordLeader('s', registry, false, 'podcast')).toBe(true);
+    expect(isChordLeader('a', registry, false, 'podcast')).toBe(true);
+    expect(isChordLeader('u', registry, false, 'podcast')).toBe(true);
+  });
+
+  it('does not resolve the i chord via processChordInput on a podcast item', () => {
+    const chordState = createChordState();
+    chordState.pendingKeys = ['i'];
+    const result = processChordInput(chordState, 'i', registry, 'list', 'plan_complete', false, 'podcast');
+    expect(result).toBe('chord-cancel');
+    expect(chordState.resolvedCommand).toBeNull();
+  });
+
+  it('resolves the i chord via processChordInput on a code item', () => {
+    const chordState = createChordState();
+    const result = processChordInput(chordState, 'i', registry, 'list', 'plan_complete', false, 'feature');
+    expect(result).toBe('chord-complete');
+    expect(chordState.resolvedCommand).toBe('/skill:implement <id>');
+  });
+
+  it('omits code-workflow chords from stage entries used for footer hints on podcast items', () => {
+    const podcastEntries = registry.getEntriesForStage('plan_complete', false, 'podcast');
+    expect(podcastEntries.some(e => e.chord[0] === 'i')).toBe(false);
+    expect(podcastEntries.some(e => e.chord[0] === 'p')).toBe(false);
+    const codeEntries = registry.getEntriesForStage('plan_complete', false, 'feature');
+    expect(codeEntries.some(e => e.chord[0] === 'i')).toBe(true);
+  });
+
+  it('keeps generic housekeeping chords in footer hints on podcast items', () => {
+    const podcastEntries = registry.getEntriesForStage('in_review', false, 'podcast');
+    const chords = podcastEntries.map(e => e.chord.join(''));
+    expect(chords).toContain('aa');
+    expect(chords).toContain('ay');
+    expect(chords).toContain('ar');
+    expect(chords).toContain('r');
+  });
+
+  it('excludes a type-gated local chord on non-matching types via the merged registry', () => {
+    // A project-local podcast-gated chord merges over the bundled defaults;
+    // verify the merged registry honors the gating per item type.
+    const root = mkdtempSync(join(tmpdir(), 'herdr-issue-type-'));
+    try {
+      writeFileSync(join(root, 'shortcuts.json'), JSON.stringify([
+        { chord: ['w'], command: '/skill:wiki-podcast-script <id>', view: 'both', label: 'write script', work_item_types: ['podcast'] },
+      ]));
+      const merged = loadShortcutConfig(root);
+      expect(merged.lookupChord(['w'], 'list', undefined, false, 'podcast')).toBe('/skill:wiki-podcast-script <id>');
+      expect(merged.lookupChord(['w'], 'list', undefined, false, 'feature')).toBeUndefined();
+      // Bundled code chords still gated by type in the merged registry.
+      expect(merged.lookupChord(['i'], 'list', undefined, false, 'feature')).toBe('/skill:implement <id>');
+      expect(merged.lookupChord(['i'], 'list', undefined, false, 'podcast')).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Podcast-progression dispatch (OSL-0MSKFXM380098LFL / OSL-0MSHFQ51L009IUOS)
+//
+// The project-local `w` (wiki-podcast-script) and `t` (wiki-tts-generate)
+// chords use `<podcast-target>` / `<podcast-script>` markers resolved from
+// the selected item's `Key Files:` + lifecycle context at dispatch time.
+
+describe('resolvePodcastTarget — podcast-progression dispatch', () => {
+  const sourcedItem: WorkItem = {
+    id: 'OSL-1',
+    title: 'Episode',
+    status: 'open',
+    stage: 'intake_complete',
+    issueType: 'podcast',
+    description: '## Key Files:\n- wiki/syntheses/foo.md\n',
+  };
+
+  const draftedItem: WorkItem = {
+    id: 'OSL-2',
+    title: 'Episode',
+    status: 'open',
+    stage: 'in_review',
+    issueType: 'podcast',
+    description: '## Key Files:\n- foo/foo.podcast.md\n',
+  };
+
+  const noKeyFilesItem: WorkItem = {
+    id: 'OSL-3',
+    title: 'Episode',
+    status: 'open',
+    stage: 'intake_complete',
+    issueType: 'podcast',
+    description: 'No key files here.',
+  };
+
+  it('returns the command unchanged when it carries no podcast markers', async () => {
+    const result = await resolvePodcastTarget('/skill:audit <id>', sourcedItem);
+    expect(result).toEqual({ command: '/skill:audit <id>' });
+  });
+
+  it('errors when no item is selected', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script <podcast-target>', null);
+    expect(result.error).toMatch(/no work item selected/i);
+    expect(result.command).toBeUndefined();
+  });
+
+  it('resolves <podcast-target> to --doc --force-single on sourced episodes', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script <podcast-target>', sourcedItem);
+    expect(result).toEqual({ command: '/skill:wiki-podcast-script --doc wiki/syntheses/foo.md --force-single' });
+  });
+
+  it('errors on a sourced episode with no synthesis in Key Files', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script <podcast-target>', noKeyFilesItem);
+    expect(result.error).toMatch(/no source synthesis/i);
+  });
+
+  it('resolves <podcast-target> to --rewrite when open note children exist', async () => {
+    const children = [
+      { id: 'OSL-2-N1', title: 'Note', status: 'open' } as WorkItem,
+      { id: 'OSL-2-N2', title: 'Done note', status: 'completed' } as WorkItem,
+    ];
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script <podcast-target>', draftedItem, async () => children);
+    expect(result).toEqual({ command: '/skill:wiki-podcast-script --rewrite foo/foo.podcast.md' });
+  });
+
+  it('belt-and-braces: errors when a script exists but there are no open notes', async () => {
+    const children = [
+      { id: 'OSL-2-N2', title: 'Done note', status: 'completed' } as WorkItem,
+    ];
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script <podcast-target>', draftedItem, async () => children);
+    expect(result.error).toMatch(/already present/);
+    expect(result.command).toBeUndefined();
+  });
+
+  it('errors when rewrite is requested but no script is in Key Files', async () => {
+    const noScriptItem: WorkItem = { ...draftedItem, description: '## Key Files:\n- wiki/syntheses/foo.md\n' };
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script <podcast-target>', noScriptItem, async () => [
+      { id: 'X', title: 'Note', status: 'open' } as WorkItem,
+    ]);
+    expect(result.error).toMatch(/no podcast script/i);
+  });
+
+  it('resolves <podcast-script> to a wiki-dir-relative podcast file path', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-tts-generate --podcast-file <podcast-script>', draftedItem);
+    expect(result).toEqual({ command: '/skill:wiki-tts-generate --podcast-file podcast/foo/foo.podcast.md' });
+  });
+
+  it('keeps an already-wiki-relative <podcast-script> path as-is', async () => {
+    const wikiItem: WorkItem = { ...draftedItem, description: '## Key Files:\n- wiki/podcast/foo/foo.podcast.md\n' };
+    const result = await resolvePodcastTarget('/skill:wiki-tts-generate --podcast-file <podcast-script>', wikiItem);
+    expect(result).toEqual({ command: '/skill:wiki-tts-generate --podcast-file wiki/podcast/foo/foo.podcast.md' });
+  });
+
+  it('errors on <podcast-script> when no script exists', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-tts-generate --podcast-file <podcast-script>', sourcedItem);
+    expect(result.error).toMatch(/no podcast script/i);
+  });
+
+  it('errors on <podcast-script> for a synthesis-only episode (script must exist first)', async () => {
+    const synthItem: WorkItem = { ...sourcedItem, description: '## Key Files:\n- wiki/syntheses/foo.md\n' };
+    const result = await resolvePodcastTarget('/skill:wiki-tts-generate --podcast-file <podcast-script>', synthItem);
+    expect(result.error).toMatch(/no podcast script/i);
   });
 });
 
@@ -895,10 +1354,11 @@ describe('handleKeypress — metadata scroll keys', () => {
     state.pageUp();
     expect(state.selectedIndex).toBe(0);
 
-    // pageDown advances by the list page size (11 rows on 80x24)
+    // pageDown advances by the list page size (13 rows on 80x24 — the
+    // freed blank + filter-bar chrome rows are given back to the list)
     state.selectedIndex = 0;
     state.pageDown();
-    expect(state.selectedIndex).toBe(11);
+    expect(state.selectedIndex).toBe(13);
 
     // pageDown clamps at the last item
     state.selectedIndex = 29;
@@ -908,7 +1368,7 @@ describe('handleKeypress — metadata scroll keys', () => {
     // pageUp moves back exactly one page
     state.selectedIndex = 23;
     state.pageUp();
-    expect(state.selectedIndex).toBe(12);
+    expect(state.selectedIndex).toBe(10);
   });
 
   it('goToFirst/goToLast jump to the ends via state', () => {
@@ -936,12 +1396,12 @@ describe('handleKeypress — metadata scroll keys', () => {
 
     // PgUp (\x1b[5~) → pageup
     expect(handleKeypress(state, '\x1b[5~', TERM_80x24)).toBe('pageup');
-    expect(state.selectedIndex).toBe(18); // 29 - 11
+    expect(state.selectedIndex).toBe(16); // 29 - 13
 
     // PgDn (\x1b[6~) → pagedown
     state.selectedIndex = 0;
     expect(handleKeypress(state, '\x1b[6~', TERM_80x24)).toBe('pagedown');
-    expect(state.selectedIndex).toBe(11);
+    expect(state.selectedIndex).toBe(13);
   });
 });
 
@@ -1125,5 +1585,465 @@ describe('buildMetaRows — timestamps rendered via formatTimestamp', () => {
     expect(rows.has('Created')).toBe(false);
     expect(rows.has('Updated')).toBe(false);
     expect(rows.has('Audited At')).toBe(false);
+  });
+});
+
+// ── Downtime status indicator (WL-0MSF49FMW009M06K, F4) ───────────────
+
+describe('renderDowntimeStatus', () => {
+  it('renders nothing when no worker is present', () => {
+    expect(renderDowntimeStatus(undefined)).toBe('');
+  });
+
+  it('renders the continuous idle duration as m:ss', () => {
+    const worker = {
+      idleSince: Date.now() - 192_000, // 3:12
+      dispatching: false,
+      enabled: true,
+    } as unknown as DowntimeWorker;
+    const status = renderDowntimeStatus(worker);
+    expect(status).toContain('downtime idle 3:12');
+    expect(status).toContain('⏳');
+  });
+
+  it('renders the dispatching state', () => {
+    const worker = {
+      idleSince: Date.now() - 60_000,
+      dispatching: true,
+      enabled: true,
+    } as unknown as DowntimeWorker;
+    expect(renderDowntimeStatus(worker)).toContain('downtime dispatching');
+  });
+
+  it('renders the disabled state', () => {
+    const worker = {
+      idleSince: null,
+      dispatching: false,
+      enabled: false,
+    } as unknown as DowntimeWorker;
+    expect(renderDowntimeStatus(worker)).toContain('downtime disabled');
+  });
+
+  it('renders the paused state during the no-candidate cooldown (no stale idle duration)', () => {
+    const worker = {
+      idleSince: null,
+      dispatching: false,
+      enabled: true,
+      paused: true,
+    } as unknown as DowntimeWorker;
+    const status = renderDowntimeStatus(worker);
+    expect(status).toContain('downtime paused');
+    expect(status).not.toContain('downtime idle');
+  });
+
+  it('renders busy when the proxy is not idle', () => {
+    const worker = {
+      idleSince: null,
+      dispatching: false,
+      enabled: true,
+    } as unknown as DowntimeWorker;
+    expect(renderDowntimeStatus(worker)).toContain('downtime busy');
+  });
+
+  it('appends the status inline to the list header without adding a row', () => {
+    const items = [makeItem('WL-1', 'open')];
+    const renderer = createListRenderer();
+    const output = renderer(
+      items, 0, 0, TERM_80x24, null, 'list', null,
+      undefined, null, 0, true, undefined, undefined, 0, false, false,
+      0, undefined, undefined,
+      ' [⏳ downtime idle 0:05]',
+    );
+    expect(output).toContain('Work Items');
+    expect(output).toContain('[⏳ downtime idle 0:05]');
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+  });
+});
+
+// ── showIcons gating (WL-0MSBV4RYO008JL70) ─────────────────────────────
+// The renderer consults the getShowIcons getter on EVERY render, so a
+// showIcons setting change applies without a plugin restart (same pattern
+// as getShowHelpText). When the getter returns false, item lines render
+// text fallbacks ([OPEN], [IDEA], ...) instead of emoji icons.
+
+const OPEN_ICON = '\u{1F513}'; // 🔓 — the open-status icon
+const AUDIT_UNKNOWN_ICON = '\u{2753}'; // ❓ — audit-unknown icon (metadata panel)
+
+describe('createListRenderer — showIcons gating', () => {
+  it('renders emoji icons by default (backwards compatible)', () => {
+    const renderer = createListRenderer();
+    const output = renderer([makeItem('A', 'idea')], 0, 0, TERM_80x24, null, 'list', null);
+    expect(output).toContain(OPEN_ICON);
+    expect(output).not.toContain('[OPEN]');
+  });
+
+  it('renders text fallbacks instead of icons when getShowIcons returns false', () => {
+    const renderer = createListRenderer(() => false);
+    const output = renderer([makeItem('A', 'idea')], 0, 0, TERM_80x24, null, 'list', null);
+    expect(output).not.toContain(OPEN_ICON);
+    expect(output).toContain('[OPEN]'); // status text fallback
+    expect(output).toContain('[IDEA]'); // stage text fallback
+    expect(output).not.toContain(AUDIT_UNKNOWN_ICON); // metadata panel audit icon
+    expect(output).toContain('[?]'); // audit text fallback
+  });
+
+  it('re-reads the getter on every render (settings re-read path)', () => {
+    let showIcons = true;
+    const renderer = createListRenderer(() => showIcons);
+
+    const withIcons = renderer([makeItem('A', 'idea')], 0, 0, TERM_80x24, null, 'list', null);
+    expect(withIcons).toContain(OPEN_ICON);
+
+    // Simulate the user editing the config: flip the flag, render again —
+    // the getter is consulted per-render, so the change applies immediately.
+    showIcons = false;
+    const withoutIcons = renderer([makeItem('A', 'idea')], 0, 0, TERM_80x24, null, 'list', null);
+    expect(withoutIcons).not.toContain(OPEN_ICON);
+    expect(withoutIcons).toContain('[OPEN]');
+  });
+});
+
+// ── Key Files md path resolution (WL-0MSGEA9AY0080V4Q) ─────────────────
+// Regression: readKeyFile resolved `Key Files:` paths against the plugin
+// pane's process.cwd() (the herdr plugin source dir), NOT the worklog root,
+// so episode .podcast.md files never rendered in the detail view.
+// resolveKeyFilePath must prefer the configured worklog root, then the
+// legacy podcast-relative base (.llm-wiki/wiki/podcast/), and only fall
+// back to process.cwd() as a last resort. Fail-open: no candidate on disk
+// yields null so the detail view falls back to the raw description.
+
+describe('resolveKeyFilePath (Key Files md resolution)', () => {
+  let root: string;
+  let originalCwd: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'herdr-keyfiles-'));
+    // Simulate configureWorklogTarget: the resolved worklog root is the
+    // parent of the configured .worklog dir
+    // (setWorklogDir(join(wlRoot, '.worklog'))).
+    setWorklogDir(join(root, '.worklog'));
+    originalCwd = process.cwd();
+  });
+
+  afterEach(() => {
+    resetWorklogDir();
+    process.chdir(originalCwd);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('resolves Key Files paths against the worklog root, not process.cwd()', () => {
+    writeFileSync(join(root, 'episode.podcast.md'), '# Episode');
+    const resolved = resolveKeyFilePath('episode.podcast.md');
+    expect(resolved).toBe(join(root, 'episode.podcast.md'));
+  });
+
+  it('falls back to the legacy podcast-relative base under the worklog root', () => {
+    const podcastDir = join(root, '.llm-wiki', 'wiki', 'podcast', 'irish-folklore-fine-tuning');
+    mkdirSync(podcastDir, { recursive: true });
+    writeFileSync(join(podcastDir, 'irish-folklore-fine-tuning.podcast.md'), '# Episode');
+    const resolved = resolveKeyFilePath('irish-folklore-fine-tuning/irish-folklore-fine-tuning.podcast.md');
+    expect(resolved).toBe(join(podcastDir, 'irish-folklore-fine-tuning.podcast.md'));
+  });
+
+  it('prefers the worklog root over the podcast base when both exist', () => {
+    const podcastDir = join(root, '.llm-wiki', 'wiki', 'podcast');
+    mkdirSync(podcastDir, { recursive: true });
+    writeFileSync(join(root, 'shared.podcast.md'), 'root copy');
+    writeFileSync(join(podcastDir, 'shared.podcast.md'), 'podcast copy');
+    const resolved = resolveKeyFilePath('shared.podcast.md');
+    expect(resolved).toBe(join(root, 'shared.podcast.md'));
+  });
+
+  it('falls back to process.cwd() as a last resort when no worklog dir is configured', () => {
+    resetWorklogDir();
+    const cwdDir = mkdtempSync(join(tmpdir(), 'herdr-keyfiles-cwd-'));
+    process.chdir(cwdDir);
+    try {
+      writeFileSync(join(cwdDir, 'notes.md'), '# Notes');
+      const resolved = resolveKeyFilePath('notes.md');
+      expect(resolved).toBe(join(cwdDir, 'notes.md'));
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(cwdDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null when no candidate exists on disk', () => {
+    expect(resolveKeyFilePath('missing/file.podcast.md')).toBeNull();
+  });
+
+  it('accepts absolute Key Files paths directly', () => {
+    writeFileSync(join(root, 'abs.podcast.md'), '# Abs');
+    const abs = join(root, 'abs.podcast.md');
+    expect(resolveKeyFilePath(abs)).toBe(abs);
+  });
+});
+
+// ── Related Docs row + detail ToC + open-in-viewer (WL-0MSGTLSUT002NF29) ─
+// Test-first contract (WL-0MSHWHP0S0036DDU): these tests are written BEFORE
+// the Related Docs row (WL-0MSHWHRIF001YHF8) and detail ToC
+// (WL-0MSHWHULZ001FL8I) implementations land. New-behavior assertions are
+// expected to be RED at creation time and turn GREEN once the row and ToC
+// features are implemented. Tests exercise the existing public API
+// (buildMetaRows / formatMetadataPanel / formatDetailContent /
+// formatDetailView / handleKeypress / WorkItemListState / resolveKeyFilePath)
+// plus the ToC state fields that the ToC feature adds to WorkItemListState:
+//   - detailToCIndex     : selected ToC entry (0-based; default 0)
+//   - detailToCFocus     : true when keyboard focus is on the ToC, false
+//                          when focus is on the document scroll region
+//   - detailRenderedIndex: which Key File's content is shown in the md
+//                          viewer (default 0 = first file, auto-render)
+//   - handleKeypress in detail mode: j/k and arrow keys move detailToCIndex
+//     when detailToCFocus is true; navigating past the last ToC entry
+//     transfers focus to document scrolling (detailToCFocus = false); k at
+//     the top of the document returns focus to the ToC. Enter (\r) renders
+//     mdPaths[detailToCIndex] by setting detailRenderedIndex.
+// formatDetailContent/formatDetailView accept optional trailing params:
+//   (…, detailToCIndex, detailToCFocus, detailRenderedIndex) and render a
+//   pinned "Related Docs" ToC at the top of the detail view when the item
+//   has ≥1 .md Key File.
+
+/** Build an item whose description carries a **Key Files:** section. */
+function makeKeyFilesItem(id: string, paths: string[]): WorkItem {
+  return {
+    ...makeItem(id),
+    description: [
+      `# ${id} title`,
+      '',
+      '**Key Files:**',
+      ...paths.map(p => `- \`${p}\``),
+      '',
+      '## Notes',
+      'Body text for the description section.',
+    ].join('\n'),
+  };
+}
+
+describe('buildMetaRows — Related Docs row (WL-0MSHWHRIF001YHF8)', () => {
+  it('emits a Related Docs row listing every .md path from Key Files, joined with ", "', () => {
+    const item = makeKeyFilesItem('WL-REL', ['docs/prd.md', 'docs/episode.podcast.md']);
+    const rows = new Map(buildMetaRows(item));
+    expect(rows.get('Related Docs')).toBe('docs/prd.md, docs/episode.podcast.md');
+  });
+
+  it('omits the row when the item has no Key Files section at all', () => {
+    const item = makeItem('WL-PLAIN');
+    const rows = new Map(buildMetaRows(item));
+    expect(rows.has('Related Docs')).toBe(false);
+    const panel = formatMetadataPanel(item, 80, 20, 0, null).join('\n');
+    expect(panel).not.toContain('Related Docs');
+    const detail = formatDetailContent(item, 80).join('\n');
+    expect(detail).not.toContain('Related Docs');
+  });
+
+  it('omits the row when Key Files contains no .md files', () => {
+    const item = makeKeyFilesItem('WL-NO-MD', ['src/app.ts', 'data.json']);
+    const rows = new Map(buildMetaRows(item));
+    expect(rows.has('Related Docs')).toBe(false);
+    const panel = formatMetadataPanel(item, 80, 20, 0, null).join('\n');
+    expect(panel).not.toContain('Related Docs');
+    const detail = formatDetailContent(item, 80).join('\n');
+    expect(detail).not.toContain('Related Docs');
+  });
+
+  it('includes only .md paths from a mixed Key Files list', () => {
+    const item = makeKeyFilesItem('WL-MIX', ['src/app.ts', 'docs/guide.md', 'data.json', 'docs/api.md']);
+    const rows = new Map(buildMetaRows(item));
+    expect(rows.get('Related Docs')).toBe('docs/guide.md, docs/api.md');
+  });
+
+  it('renders the row in the metadata panel (formatMetadataPanel)', () => {
+    const item = makeKeyFilesItem('WL-PANEL', ['docs/prd.md', 'docs/episode.podcast.md']);
+    const joined = formatMetadataPanel(item, 80, 20, 0, null).join('\n');
+    expect(joined).toContain('Related Docs');
+    expect(joined).toContain('docs/prd.md, docs/episode.podcast.md');
+  });
+
+  it('renders the row in the detail-view metadata table (formatDetailContent)', () => {
+    const item = makeKeyFilesItem('WL-DETAIL', ['docs/prd.md', 'docs/episode.podcast.md']);
+    const joined = formatDetailContent(item, 80).join('\n');
+    expect(joined).toContain('Related Docs');
+    expect(joined).toContain('docs/prd.md, docs/episode.podcast.md');
+  });
+
+  it('truncates very long Related Docs values to the terminal width', () => {
+    const paths = Array.from({ length: 10 }, (_, i) => `docs/very-long-document-name-${i}.md`);
+    const item = makeKeyFilesItem('WL-LONG', paths);
+    const joined = formatMetadataPanel(item, 40, 20, 0, null).join('\n');
+    for (const line of joined.split('\n')) {
+      const visible = line.replace(/\x1b\[[0-9;]*m/g, '');
+      expect(visible.length).toBeLessThanOrEqual(40);
+    }
+  });
+});
+
+describe('detail view ToC for Related Docs (WL-0MSHWHULZ001FL8I)', () => {
+  const twoMd = () => {
+    const item = makeKeyFilesItem('WL-TOC', ['docs/prd.md', 'docs/episode.podcast.md']);
+    // Long body so the document region is scrollable: the focus-transfer
+    // tests need maxScroll ≥ 2 (j,j scrolls down, k,k returns to the top,
+    // k returns focus to the ToC).
+    item.description += '\n\n' + Array.from({ length: 60 }, (_, i) => `lorem ipsum dolor line ${i}`).join('\n');
+    return item;
+  };
+
+  it('renders a ToC at the top listing every Related Doc when the item has .md Key Files', () => {
+    const joined = formatDetailContent(twoMd(), 80, undefined, true, 0, true, 0).join('\n');
+    expect(joined).toContain('Related Docs');
+    expect(joined).toContain('1. docs/prd.md');
+    expect(joined).toContain('2. docs/episode.podcast.md');
+  });
+
+  it('renders no ToC when the item has no .md Key Files', () => {
+    const item = makeKeyFilesItem('WL-NO-TOC', ['src/app.ts']);
+    const joined = formatDetailContent(item, 80, undefined, true, 0, true, 0).join('\n');
+    expect(joined).not.toContain('1. ');
+    expect(joined).not.toContain('Related Docs');
+  });
+
+  it('marks the focused ToC entry with a focus indicator', () => {
+    const focusedFirst = formatDetailContent(twoMd(), 80, undefined, true, 0, true, 0).join('\n');
+    expect(focusedFirst).toContain('▸ 1. docs/prd.md');
+    const focusedSecond = formatDetailContent(twoMd(), 80, undefined, true, 1, true, 0).join('\n');
+    expect(focusedSecond).toContain('▸ 2. docs/episode.podcast.md');
+  });
+
+  it('moves ToC selection with j/k and arrow keys via handleKeypress', () => {
+    const state = new WorkItemListState([twoMd()], TERM_80x24);
+    state.selectedIndex = 0;
+    state.selectItem();
+    expect(state.mode).toBe('detail');
+    expect(state.detailToCIndex).toBe(0);
+    expect(state.detailToCFocus).toBe(true);
+
+    handleKeypress(state, 'j', TERM_80x24);
+    expect(state.detailToCIndex).toBe(1);
+    handleKeypress(state, 'k', TERM_80x24);
+    expect(state.detailToCIndex).toBe(0);
+
+    handleKeypress(state, '\x1b[B', TERM_80x24); // ↓
+    expect(state.detailToCIndex).toBe(1);
+    handleKeypress(state, '\x1b[A', TERM_80x24); // ↑
+    expect(state.detailToCIndex).toBe(0);
+  });
+
+  it('clamps ToC selection at the bounds', () => {
+    const state = new WorkItemListState([twoMd()], TERM_80x24);
+    state.selectedIndex = 0;
+    state.selectItem();
+    handleKeypress(state, 'k', TERM_80x24); // above first entry — clamp at 0
+    expect(state.detailToCIndex).toBe(0);
+    handleKeypress(state, 'j', TERM_80x24);
+    handleKeypress(state, 'j', TERM_80x24); // at last entry — stays (focus moves to doc, see below)
+    expect(state.detailToCIndex).toBe(1);
+  });
+
+  it('navigating past the last ToC entry transfers focus to document scrolling', () => {
+    const state = new WorkItemListState([twoMd()], TERM_80x24);
+    state.selectedIndex = 0;
+    state.selectItem();
+    handleKeypress(state, 'j', TERM_80x24); // → entry 1
+    handleKeypress(state, 'j', TERM_80x24); // past last → doc focus
+    expect(state.detailToCFocus).toBe(false);
+    // j now scrolls the document
+    const before = state.detailScrollOffset;
+    handleKeypress(state, 'j', TERM_80x24);
+    expect(state.detailScrollOffset).toBe(before + 1);
+  });
+
+  it('navigating up past the top of the document returns focus to the ToC', () => {
+    const state = new WorkItemListState([twoMd()], TERM_80x24);
+    state.selectedIndex = 0;
+    state.selectItem();
+    handleKeypress(state, 'j', TERM_80x24); // → entry 1
+    handleKeypress(state, 'j', TERM_80x24); // past last → doc focus
+    expect(state.detailToCFocus).toBe(false);
+    // Scroll down a couple of lines then back up to the top.
+    handleKeypress(state, 'j', TERM_80x24);
+    handleKeypress(state, 'j', TERM_80x24);
+    handleKeypress(state, 'k', TERM_80x24);
+    handleKeypress(state, 'k', TERM_80x24);
+    expect(state.detailScrollOffset).toBe(0);
+    // k at the top returns focus to the ToC
+    handleKeypress(state, 'k', TERM_80x24);
+    expect(state.detailToCFocus).toBe(true);
+    expect(state.detailToCIndex).toBe(1);
+  });
+
+  it('keeps the ToC pinned at the top while the document scrolls', () => {
+    const item = twoMd();
+    // Make the document long enough to scroll well past the ToC.
+    item.description += '\n\n' + Array.from({ length: 60 }, (_, i) => `lorem ipsum dolor line ${i}`).join('\n');
+    const view = formatDetailView(item, 80, 40, 24, undefined, true, 1, false, 0);
+    const lines = view.split('\n');
+    const firstLines = lines.slice(0, 8).join('\n');
+    expect(firstLines).toContain('Related Docs');
+    expect(firstLines).toContain('1. docs/prd.md');
+  });
+});
+
+describe('Related Docs — open in markdown viewer (WL-0MSGTLSUT002NF29)', () => {
+  const readFileFor = (content: Record<string, string>) =>
+    (filePath: string): string | null => content[filePath] ?? null;
+
+  it('auto-renders the first .md Key File by default (existing behavior preserved)', () => {
+    const item = makeKeyFilesItem('WL-AUTO', ['docs/prd.md', 'docs/episode.podcast.md']);
+    const readFile = readFileFor({ 'docs/prd.md': '# PRD content' });
+    const joined = formatDetailContent(item, 80, readFile, true, 0, true, 0).join('\n');
+    expect(joined).toContain('PRD content');
+  });
+
+  it('Enter on a ToC entry renders that specific file in the markdown viewer', () => {
+    const item = makeKeyFilesItem('WL-OPEN', ['docs/prd.md', 'docs/episode.podcast.md']);
+    const state = new WorkItemListState([item], TERM_80x24);
+    state.selectedIndex = 0;
+    state.selectItem();
+    handleKeypress(state, 'j', TERM_80x24); // ToC → entry 1
+    handleKeypress(state, '\r', TERM_80x24); // Enter renders the selected doc
+    expect(state.detailRenderedIndex).toBe(1);
+
+    const readFile = readFileFor({
+      'docs/prd.md': '# PRD content',
+      'docs/episode.podcast.md': '# Episode content',
+    });
+    const joined = formatDetailContent(item, 80, readFile, true, 1, true, 1).join('\n');
+    expect(joined).toContain('Episode content');
+    expect(joined).not.toContain('PRD content');
+  });
+
+  it('unreadable or missing files fail open without crashing', () => {
+    const item = makeKeyFilesItem('WL-MISSING', ['docs/ghost.md']);
+    const joined = formatDetailContent(item, 80, readFileFor({}), true, 0, true, 0).join('\n');
+    // No crash; the raw description still renders.
+    expect(joined).toContain('Body text for the description section.');
+  });
+
+  it('resolves Key Files against the worklog root, never process.cwd()', () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-related-docs-'));
+    const originalCwd = process.cwd();
+    try {
+      setWorklogDir(join(root, '.worklog'));
+      mkdirSync(join(root, 'docs'), { recursive: true });
+      writeFileSync(join(root, 'docs', 'episode.podcast.md'), '# Worklog root content');
+
+      // Decoy: same relative path in the plugin CWD — must NOT win.
+      const cwdDir = mkdtempSync(join(tmpdir(), 'herdr-related-docs-cwd-'));
+      process.chdir(cwdDir);
+      mkdirSync(join(cwdDir, 'docs'), { recursive: true });
+      writeFileSync(join(cwdDir, 'docs', 'episode.podcast.md'), '# CWD decoy content');
+
+      const readFile = (filePath: string): string | null => {
+        const resolved = resolveKeyFilePath(filePath);
+        return resolved ? readFileSync(resolved, 'utf-8') : null;
+      };
+      const item = makeKeyFilesItem('WL-ROOT', ['docs/episode.podcast.md']);
+      const joined = formatDetailContent(item, 80, readFile, true, 0, true, 0).join('\n');
+      expect(joined).toContain('Worklog root content');
+      expect(joined).not.toContain('CWD decoy content');
+    } finally {
+      process.chdir(originalCwd);
+      resetWorklogDir();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

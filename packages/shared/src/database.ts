@@ -1488,11 +1488,14 @@ export class WorklogDatabase {
     // unless --include-in-progress is set.
     // Items in the in_review stage are preserved even if their status
     // is 'completed' since they need to appear in wl next for review.
+    // Items in the done stage are excluded (terminal, not actionable)
+    // (WL-0MSGRJWRX0068W3W).
     const criticalItems = allItems.filter(
       item =>
         item.priority === 'critical' &&
         item.status !== 'deleted' &&
         (item.status !== 'completed' || item.stage === 'in_review') &&
+        item.stage !== 'done' &&
         (includeInProgress || item.status !== 'in-progress')
     );
     this.debug(`${debugPrefix} critical items from full set=${criticalItems.length}`);
@@ -1866,11 +1869,15 @@ export class WorklogDatabase {
     //    explicitly filtering by stage and may want completed items in that stage).
     //    Also preserve items in the in_review stage - they need to appear in
     //    wl next for review even though their status is 'completed'.
+    //    Also exclude items in the done stage by default (WL-0MSGRJWRX0068W3W) -
+    //    done items are terminal and not actionable; explicit --stage done still works.
     if (!stage) {
       pool = pool.filter(
-        item => item.status !== 'completed' || item.stage === 'in_review'
+        item =>
+          (item.status !== 'completed' || item.stage === 'in_review') &&
+          item.stage !== 'done'
       );
-      this.debug(`${debugPrefix} filter: after completed=${pool.length}`);
+      this.debug(`${debugPrefix} filter: after completed/done=${pool.length}`);
     }
 
     // 4. Remove in-progress items by default (wl next recommends what to work on next,

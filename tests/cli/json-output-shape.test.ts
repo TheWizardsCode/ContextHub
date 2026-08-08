@@ -19,14 +19,16 @@ import { execAsync, enterTempDir, leaveTempDir, writeConfig, writeInitSemaphore,
 describe('JSON output shape consistency', () => {
   let state: { tempDir: string; originalCwd: string };
 
-  beforeEach(() => {
+  beforeEach(async () => {
     state = enterTempDir();
     writeConfig(state.tempDir, 'Test Project', 'TEST');
     writeInitSemaphore(state.tempDir);
-    // Seed a few work items for list/search/next tests
-    execAsync(`tsx ${cliPath} create -t "First item" -d "Description for first item"`).catch(() => {});
-    execAsync(`tsx ${cliPath} create -t "Second item" -d "Description for second item" -p high`).catch(() => {});
-    execAsync(`tsx ${cliPath} create -t "Third item" -d "Description for third item" -p low`).catch(() => {});
+    // Seed a few work items for list/search/next tests. These MUST be
+    // awaited: 'wl next' needs an item to exist, and fire-and-forget
+    // spawning raced the CLI startup (flaky workItem: null under load).
+    await execAsync(`tsx ${cliPath} create -t "First item" -d "Description for first item"`).catch(() => {});
+    await execAsync(`tsx ${cliPath} create -t "Second item" -d "Description for second item" -p high`).catch(() => {});
+    await execAsync(`tsx ${cliPath} create -t "Third item" -d "Description for third item" -p low`).catch(() => {});
   });
 
   afterEach(() => {
