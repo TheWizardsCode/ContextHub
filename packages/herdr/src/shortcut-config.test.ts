@@ -295,7 +295,7 @@ describe('loadShortcutConfig — project-local shortcuts.json overrides', () => 
     const bundled = loadShortcutConfig();
     const root = makeLocalRoot({
       'shortcuts.json': JSON.stringify([
-        { chord: ['i'], command: '/prompt:overridden', view: 'both', label: 'overridden', model: 'author' },
+        { chord: ['i'], command: '/prompt:overridden', view: 'both', label: 'overridden', model: 'author', stages: ['in_review'] },
       ]),
     });
     const registry = loadShortcutConfig(root);
@@ -303,6 +303,8 @@ describe('loadShortcutConfig — project-local shortcuts.json overrides', () => 
     expect(entry?.command).toBe('/prompt:overridden');
     expect(entry?.label).toBe('overridden');
     expect(entry?.model).toBe('author');
+    // The local entry's stages replace the bundled stages (full-entry replacement).
+    expect(entry?.stages).toEqual(['in_review']);
     // Replaced, not appended: total count unchanged and no duplicate remains.
     expect(registry.getEntries()).toHaveLength(bundled.getEntries().length);
     const matches = registry.getEntries().filter(e => e.chord.join(',') === 'i' && e.view === 'both');
