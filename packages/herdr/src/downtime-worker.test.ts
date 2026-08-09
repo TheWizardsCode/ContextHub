@@ -541,6 +541,66 @@ describe('audit selection 7-day recency (selectAuditCandidate)', () => {
   });
 });
 
+describe('audit selection dispatched-marker exclusion (selectAuditCandidate)', () => {
+  // Regression (WL-0MSGTLSUT002NF29): an item already dispatched for audit
+  // by the downtime worker must never be re-selected while it still lacks a
+  // fresh audit — even though it is completed/in_review (the dispatched run
+  // reverts the status without recording a fresh audit).
+  const NOW = new Date('2026-01-01T00:05:00.000Z').getTime();
+  const dispatchedUnaudited: AuditCandidate = {
+    id: 'WL-DUP',
+    title: 'already dispatched, no audit',
+    sortIndex: 100,
+  };
+  const otherUnaudited: AuditCandidate = {
+    id: 'WL-OTHER',
+    title: 'not dispatched',
+    sortIndex: 200,
+  };
+
+  it('excludes a candidate present in the dispatched set with no fresh audit (regression)', () => {
+    const dispatched = new Set(['WL-DUP']);
+    expect(selectAuditCandidate([dispatchedUnaudited], NOW, dispatched)).toBeNull();
+  });
+
+  it('selects another candidate when the first is excluded', () => {
+    const dispatched = new Set(['WL-DUP']);
+    expect(selectAuditCandidate([dispatchedUnaudited, otherUnaudited], NOW, dispatched)?.id).toBe(
+      'WL-OTHER',
+    );
+  });
+
+  it('composes with audit freshness: a fresh audit still excludes the item (unchanged)', () => {
+    const freshDispatched: AuditCandidate = {
+      id: 'WL-FRESH',
+      title: 'fresh audit since dispatch',
+      auditedAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:30.000Z',
+      sortIndex: 100,
+    };
+    const dispatched = new Set(['WL-FRESH']);
+    // isAuditFresh governs: fresh → not a candidate, even without the marker.
+    expect(selectAuditCandidate([freshDispatched], NOW)).toBeNull();
+    // Marker + fresh audit → still not a candidate (unchanged).
+    expect(selectAuditCandidate([freshDispatched], NOW, dispatched)).toBeNull();
+  });
+
+  it('a stale/absent audit plus an audit marker is excluded', () => {
+    const staleDispatched: AuditCandidate = {
+      id: 'WL-STALE',
+      title: 'stale audit since dispatch',
+      auditedAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:02:00.000Z', // >60s later -> stale
+      sortIndex: 100,
+    };
+    expect(selectAuditCandidate([staleDispatched], NOW, new Set(['WL-STALE']))).toBeNull();
+  });
+
+  it('an item without a marker is selected as before (empty set is a no-op)', () => {
+    expect(selectAuditCandidate([dispatchedUnaudited], NOW, new Set())?.id).toBe('WL-DUP');
+  });
+});
+
 describe('parseAuditCandidatesOutput', () => {
   it('parses a { workItems: [...] } shape', () => {
     const stdout = JSON.stringify({
