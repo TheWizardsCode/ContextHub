@@ -351,29 +351,38 @@ auto-sync timers pause so hidden panes stop spawning `wl` processes (~4–5 per
 30s tick per pane). With many open panes this previously caused heavy `wl`
 process churn and memory pressure (WL-0MSB1N0HB0007N6N).
 
-- **Visibility signal** — Herdr sets `HERDR_PANE_ID` for panes it spawns; a
-  hidden (non-focused) tab reports `result.pane.focused === false` from
-  `herdr pane get <id>`. The plugin checks this via `visibility.ts`.
-- **Fail-open** — when visibility cannot be determined (no `HERDR_PANE_ID`
+- **Visibility signal** — Herdr sets `HERDR_TAB_ID` for panes it spawns; a
+  hidden (non-focused) tab reports `result.tab.focused === false` from
+  `herdr tab get <id>`. The plugin checks this via `visibility.ts`. Tab
+  focus is the visibility signal: a pane is visible when its TAB is focused,
+  regardless of which pane in the tab holds keyboard focus (so a visible
+  worklist pane in a multi-pane split keeps refreshing while an adjacent
+  pane holds focus).
+- **Fail-open** — when visibility cannot be determined (no `HERDR_TAB_ID`
   env, herdr CLI missing/erroring, unparseable output) the pane is treated
   as visible and polling proceeds exactly as before. Standalone runs (outside
   Herdr) are unaffected.
-- **Cadence unchanged when visible** — while the pane is focused (or
+- **Cadence unchanged when visible** — while the pane's tab is focused (or
   fail-open), auto-refresh/auto-sync keep their existing intervals (30s /
   60s defaults).
-- **Header indicator** — while the pane is hidden the list header shows
-  `[paused — hidden]` so operators can tell gating is active; the indicator
-  clears as soon as the list refreshes after the pane becomes visible.
-- **Immediate refresh on resume** — while the pane is hidden a lightweight
-  resume poll (2s interval, `herdr pane get` only — never `wl`) watches for
-  the hidden → visible transition; the moment the tab regains focus the list
-  re-fetches immediately (with a "Refreshed" notification) instead of waiting
-  for the next 30s tick, then the normal cadence resumes.
+- **Header indicator** — while the pane's tab is hidden the list header
+  shows `[paused — hidden]` so operators can tell gating is active; the
+  indicator clears as soon as the list refreshes after the tab regains
+  focus.
+- **Immediate refresh on resume** — while the pane's tab is hidden a
+  lightweight resume poll (2s interval, `herdr tab get` only — never `wl`)
+  watches for the hidden → visible transition; the moment the tab regains
+  focus the list re-fetches immediately (with a "Refreshed" notification)
+  instead of waiting for the next 30s tick, then the normal cadence resumes.
 - **Never gated** — manual actions (navigation, `S` manual sync, shortcut
-  chords, the initial data load) work regardless of pane visibility.
+  chords, the initial data load) work regardless of tab visibility.
 - **Shared visibility check** — the `PollGate` TTL memoizer (~2s) makes the
-  refresh and sync ticks in one cycle share a single `herdr pane get` call
+  refresh and sync ticks in one cycle share a single `herdr tab get` call
   (≤1 visibility exec per cycle).
+- **Zoom-over limitation** — a pane zoomed-over within a focused tab is
+  treated as visible (tab focus is the sole signal; there is no pane-focus
+  fallback) and keeps refreshing. Zoom-over detection is out of scope for
+  the visibility gate (approved plan, WL-0MSJNJPRM009RM35).
 - **No settings toggle** — pause-when-hidden is always on.
 
 ### Selection List Behaviour

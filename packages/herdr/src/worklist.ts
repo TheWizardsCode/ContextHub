@@ -2585,9 +2585,10 @@ export async function runWorklistTui(
   // Pane-visibility gating (pause-when-hidden). When the pane's tab is not
   // focused, auto-refresh/auto-sync timer ticks are skipped so hidden panes
   // stop spawning wl processes. Fail-open: when visibility can't be
-  // determined (no HERDR_PANE_ID / CLI error) the pane is treated as visible
-  // and polling proceeds as today. PollGate memoizes the pane-get exec within
-  // a TTL so refresh+sync ticks in one cycle share a single `herdr pane get`.
+  // determined (no HERDR_TAB_ID / CLI error) the pane is treated as visible
+  // and polling proceeds as today. Tab focus is the signal (herdr tab get
+  // -> result.tab.focused); PollGate memoizes the tab-get exec within a
+  // TTL so refresh+sync ticks in one cycle share a single `herdr tab get`.
   const paneGate = new PollGate(isPaneVisible, DEFAULT_POLL_GATE_TTL_MS);
   // Whether the pane is currently hidden (drives the header indicator).
   // Updated by the gate check on each timer tick; fail-open defaults to false.
@@ -3367,10 +3368,10 @@ export async function runWorklistTui(
     });
   }
 
-  // Visibility resume-poll — runs only while the pane is hidden. Polls
-  // pane visibility on a short interval so the hidden → visible transition
+  // Visibility resume-poll — runs only while the pane's tab is hidden. Polls
+  // tab visibility on a short interval so the hidden → visible transition
   // triggers an immediate doRefresh instead of waiting for the next
-  // refreshIntervalMs tick. The poll uses only herdr pane get (via the
+  // refreshIntervalMs tick. The poll uses only herdr tab get (via the
   // PollGate memoizer, TTL aligned with the poll interval) — never wl —
   // preserving the zero-wl-when-hidden guarantee.
   scheduler.addTask({

@@ -21,7 +21,7 @@ Two pollers were fixed:
 | Poller | File | Cadence | Fix |
 |--------|------|---------|-----|
 | Pi extension browse selection widget | `packages/tui/extensions/Worklog/lib/browse.ts` | 5s interval (4–5 wl spawns/tick) | **Idle gating**: pause fetch + `wl sync --if-idle` after 30s without keypresses (`IDLE_PAUSE_MS`); resume immediately on the next keypress. |
-| Herdr worklist pane | `packages/herdr/src/worklist.ts` | 30s refresh + 60s sync timers (~4–5 wl spawns/tick per pane) | **Pane-focus gating**: skip timer ticks when the pane is hidden (`HERDR_PANE_ID` → `herdr pane get` → `result.pane.focused === false`); fail-open otherwise. |
+| Herdr worklist pane | `packages/herdr/src/worklist.ts` | 30s refresh + 60s sync timers (~4–5 wl spawns/tick per pane) | **Tab-focus gating**: skip timer ticks when the pane's tab is hidden (`HERDR_TAB_ID` → `herdr tab get` → `result.tab.focused === false`); fail-open otherwise. |
 
 ## Behavior summary
 
@@ -38,20 +38,25 @@ Two pollers were fixed:
 - Manual actions (navigation, shortcuts, `r`/`S`-style refreshes) are never
   gated; the detail-view widget (no interval) is unaffected.
 
-### Herdr worklist pane (pane-focus gating)
+### Herdr worklist pane (tab-focus gating)
 
-- Visibility signal: `HERDR_PANE_ID` → `herdr pane get <id>` →
-  `result.pane.focused`. A hidden (non-focused) tab reports `focused: false`.
-- When hidden, the auto-refresh and auto-sync timer ticks are skipped →
-  **zero fetcher / `wl sync --if-idle` spawns**.
-- Fail-open: no `HERDR_PANE_ID`, herdr CLI missing/erroring, or unparseable
+- Visibility signal: `HERDR_TAB_ID` → `herdr tab get <id>` →
+  `result.tab.focused`. A hidden (non-focused) tab reports `focused: false`.
+  Tab focus is the visibility signal — a pane is visible when its TAB is
+  focused, regardless of which pane in the tab holds keyboard focus (multi-
+  pane split fix, WL-0MSJNJPRM009RM35). There is no pane-focus fallback; a
+  pane zoomed-over within a focused tab is treated as visible (documented
+  limitation).
+- When the tab is hidden, the auto-refresh and auto-sync timer ticks are
+  skipped → **zero fetcher / `wl sync --if-idle` spawns**.
+- Fail-open: no `HERDR_TAB_ID`, herdr CLI missing/erroring, or unparseable
   output → the pane is treated as visible and polling continues as before.
   Standalone runs (outside Herdr) are unaffected.
-- Visible-pane cadence unchanged (30s refresh / 60s sync defaults).
+- Visible-tab cadence unchanged (30s refresh / 60s sync defaults).
 - The list header shows `[paused — hidden]` while gating is active.
 - Manual `S` (sync), navigation, chords, and the initial data load are never
   gated.
-- `PollGate` (TTL ~2s) shares one `herdr pane get` call across refresh+sync
+- `PollGate` (TTL ~2s) shares one `herdr tab get` call across refresh+sync
   ticks in a cycle (≤1 visibility exec per cycle).
 
 ## Verification procedure
@@ -69,7 +74,7 @@ ps -eo args | grep -E 'wl (next|list|sync)' | grep -v grep | wc -l
 Expected while **active/visible**:
 
 - Pi browse widget actively browsed: ~4–5 `wl` spawns per 5s tick (transient).
-- Herdr worklist pane focused: ~4–5 `wl` spawns per 30s tick (transient).
+- Herdr worklist pane tab focused: ~4–5 `wl` spawns per 30s tick (transient).
 
 Expected while **hidden/idle**:
 
@@ -91,14 +96,14 @@ Expected while **hidden/idle**:
 
 ### 3. Per-pane measurement (herdr worklist)
 
-1. Open the worklist pane (`prefix+l` or the plugin action). Note its pane id:
-   `echo $HERDR_PANE_ID` inside the pane, or `herdr pane current`.
-2. Focus the pane and confirm auto-refresh spawns:
+1. Open the worklist pane (`prefix+l` or the plugin action). Note its tab id:
+   `echo $HERDR_TAB_ID` inside the pane, or `herdr tab current`.
+2. Focus the tab and confirm auto-refresh spawns:
    `ps -eo args | grep -E 'wl (next|list|sync)' | wc -l` shows transient spawns
    every 30s, and the header shows no `[paused — hidden]` marker.
-3. Switch to another tab (hiding the worklist pane). Within ~2s the header
-   shows `[paused — hidden]` and the `wl` process count from that pane drops
-   to zero.
+3. Switch to another tab (hiding the worklist pane's tab). Within ~2s the
+   header shows `[paused — hidden]` and the `wl` process count from that pane
+   drops to zero.
 4. Switch back — the pane resumes its normal cadence.
 
 ### 4. System-level idle test

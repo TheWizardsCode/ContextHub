@@ -11,6 +11,8 @@
  *
  * Environment:
  *   HERDR_PANE_ID  - Set by Herdr when running in a pane (optional)
+ *   HERDR_TAB_ID   - Set by Herdr when running in a pane; the tab-focus
+ *                    visibility signal for pause-when-hidden (optional)
  *   WL_COUNT       - Number of items to fetch (default: 20, now superseded by browseItemCount setting)
  *
  * Exit codes:
