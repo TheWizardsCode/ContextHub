@@ -2187,11 +2187,16 @@ export function formatCodeFreezeDialog(maxCols: number, maxRows: number, reason?
 /**
  * Fetch the items for the current view.
  *
- * When a stage filter is active, the worklist shows EVERY open root item in
- * that stage (`wl list --status open --stage <stage> --root-only`) — not
- * just the `browseItemCount`-capped `wl next` subset — so stage-filtered
- * views give a complete picture of the stage (WL-0MSDT8X1V003206G). Items
- * with status `blocked`, `in-progress`, or `completed` are excluded; child
+ * When a stage filter is active, the worklist shows every root item in that
+ * stage matching the stage's status rule (`wl list --status <status> --stage
+ * <stage> --root-only`; see STAGE_STATUS in fetcher.ts) — not just the
+ * `browseItemCount`-capped `wl next` subset — so stage-filtered views give
+ * a complete picture of the stage (WL-0MSDT8X1V003206G). Most stages show
+ * `open`-status items only; the in_review stage additionally includes
+ * `completed` and `in-progress` items, because per the project workflow
+ * advancing an item to in_review sets its status to `completed` (or leaves
+ * it `in-progress` while being re-worked after review feedback)
+ * (WL-0MSKCRX730052IIW). Items with status `blocked` are excluded; child
  * items stay hidden and remain reachable via expand exactly as in the
  * unfiltered view. Results follow the standard list order (sortIndex).
  *
@@ -2918,8 +2923,9 @@ export async function runWorklistTui(
               showToast('Sent', { body: command.length > 60 ? command.substring(0, 57) + '...' : command });
             }
             // Stage-filter dispatch (/wl <stage> or f-chord shortcut): refetch
-            // so the filtered view shows EVERY open root item in the stage,
-            // not just the already-loaded subset (WL-0MSDT8X1V003206G).
+            // so the filtered view shows every root item in the stage matching
+            // the stage's status rule, not just the already-loaded subset
+            // (WL-0MSDT8X1V003206G).
             if (result === 'dispatched' && isWlViewCommand(command)) {
               await doRefresh(true);
             }
@@ -3039,8 +3045,9 @@ export async function runWorklistTui(
             showToast('Sent', { body: singleCmd.length > 60 ? singleCmd.substring(0, 57) + '...' : singleCmd });
           }
           // Stage-filter dispatch (/wl <stage> or f-chord shortcut): refetch
-          // so the filtered view shows EVERY open root item in the stage,
-          // not just the already-loaded subset (WL-0MSDT8X1V003206G).
+          // so the filtered view shows every root item in the stage matching
+          // the stage's status rule, not just the already-loaded subset
+          // (WL-0MSDT8X1V003206G).
           if (result === 'dispatched' && isWlViewCommand(singleCmd)) {
             await doRefresh(true);
           }
