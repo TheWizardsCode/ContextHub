@@ -5,7 +5,7 @@
 import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult } from './types.js';
+import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult, DemotedParent } from './types.js';
 import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions } from './persistent-store.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
 
@@ -1242,6 +1242,42 @@ export class WorklogDatabase {
       }
     }
     return downgraded;
+  }
+
+  /**
+   * Demote a parent work item when a child is added to it.
+   *
+   * A parent cannot be `completed` (status) or `in_review` (stage) while its
+   * subtree is not finished. When a new child is attached to such a parent
+   * (via `wl create --parent` or `wl update --parent`), the parent is moved
+   * back to `open` / `plan_complete` so its lifecycle state always reflects
+   * that it has uncompleted children.
+   *
+   * Only the direct parent is demoted; ancestors are left untouched.
+   *
+   * @param parentId - id of the parent that received the new child
+   * @returns the demotion details (parent, from status/stage, to status/stage)
+   *   or `null` when the parent is not in an eligible state (or does not exist)
+   */
+  demoteParentOnChildAdded(parentId: string): DemotedParent | null {
+    const parent = this.get(parentId);
+    if (!parent) {
+      return null;
+    }
+    const eligible = parent.status === 'completed' || parent.stage === 'in_review';
+    if (!eligible) {
+      return null;
+    }
+    const from = { status: parent.status, stage: parent.stage };
+    const updated = this.update(parentId, { status: 'open', stage: 'plan_complete' });
+    if (!updated) {
+      return null;
+    }
+    return {
+      parent: updated,
+      from,
+      to: { status: updated.status, stage: updated.stage },
+    };
   }
 
   /**

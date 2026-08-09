@@ -530,6 +530,78 @@ describe('WorklogDatabase', () => {
     });
   });
 
+  describe('demoteParentOnChildAdded', () => {
+    it('should demote a completed/in_review parent to open/plan_complete', () => {
+      const parent = db.create({ title: 'Parent', status: 'completed', stage: 'in_review' });
+
+      const demoted = db.demoteParentOnChildAdded(parent.id);
+
+      expect(demoted).not.toBeNull();
+      expect(demoted!.parent.id).toBe(parent.id);
+      expect(demoted!.from).toEqual({ status: 'completed', stage: 'in_review' });
+      expect(demoted!.to).toEqual({ status: 'open', stage: 'plan_complete' });
+      // Persisted in the DB
+      const refreshed = db.get(parent.id);
+      expect(refreshed?.status).toBe('open');
+      expect(refreshed?.stage).toBe('plan_complete');
+    });
+
+    it('should demote a completed/done parent to open/plan_complete', () => {
+      const parent = db.create({ title: 'Parent', status: 'completed', stage: 'done' });
+
+      const demoted = db.demoteParentOnChildAdded(parent.id);
+
+      expect(demoted).not.toBeNull();
+      expect(demoted!.from).toEqual({ status: 'completed', stage: 'done' });
+      expect(demoted!.to).toEqual({ status: 'open', stage: 'plan_complete' });
+      expect(db.get(parent.id)?.status).toBe('open');
+      expect(db.get(parent.id)?.stage).toBe('plan_complete');
+    });
+
+    it('should demote a parent in the in_review stage regardless of status', () => {
+      // in_review normally pairs with completed, but the rule keys on the
+      // stage axis too, so a parent stuck at stage in_review is demoted.
+      const parent = db.create({ title: 'Parent', status: 'completed', stage: 'in_review' });
+
+      const demoted = db.demoteParentOnChildAdded(parent.id);
+
+      expect(demoted).not.toBeNull();
+      expect(demoted!.to).toEqual({ status: 'open', stage: 'plan_complete' });
+    });
+
+    it('should be a no-op for parents that are not completed/in_review', () => {
+      const openParent = db.create({ title: 'Open parent', status: 'open', stage: 'plan_complete' });
+      const inProgressParent = db.create({ title: 'In-progress parent', status: 'in-progress', stage: 'in_progress' });
+      const ideaParent = db.create({ title: 'Idea parent', status: 'open', stage: 'idea' });
+
+      expect(db.demoteParentOnChildAdded(openParent.id)).toBeNull();
+      expect(db.demoteParentOnChildAdded(inProgressParent.id)).toBeNull();
+      expect(db.demoteParentOnChildAdded(ideaParent.id)).toBeNull();
+      // Untouched
+      expect(db.get(openParent.id)?.status).toBe('open');
+      expect(db.get(openParent.id)?.stage).toBe('plan_complete');
+      expect(db.get(inProgressParent.id)?.status).toBe('in-progress');
+      expect(db.get(ideaParent.id)?.stage).toBe('idea');
+    });
+
+    it('should return null for a missing parent', () => {
+      expect(db.demoteParentOnChildAdded('TEST-NONEXISTENT')).toBeNull();
+    });
+
+    it('should only demote the direct parent, leaving ancestors untouched', () => {
+      const grandparent = db.create({ title: 'Grandparent', status: 'completed', stage: 'done' });
+      const parent = db.create({ title: 'Parent', status: 'completed', stage: 'done', parentId: grandparent.id });
+
+      const demoted = db.demoteParentOnChildAdded(parent.id);
+
+      expect(demoted?.parent.id).toBe(parent.id);
+      expect(db.get(parent.id)?.status).toBe('open');
+      // Ancestor propagation is out of scope — grandparent stays completed
+      expect(db.get(grandparent.id)?.status).toBe('completed');
+      expect(db.get(grandparent.id)?.stage).toBe('done');
+    });
+  });
+
   describe('comments', () => {
     let workItemId: string;
 

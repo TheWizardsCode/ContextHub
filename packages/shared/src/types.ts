@@ -295,3 +295,20 @@ export interface ShowJsonOutput {
   // Optional error message used when success is false
   error?: string;
 }
+
+/**
+ * Result of demoting a parent work item after a child was added to it.
+ *
+ * A parent cannot stay `completed` (status) or `in_review` (stage) while it
+ * has uncompleted children, so adding a child to such a parent reopens it.
+ * This shape captures the lifecycle transition so callers can report it
+ * (e.g. `completed`/`in_review` → `open`/`plan_complete`).
+ */
+export interface DemotedParent {
+  /** The parent work item after the demotion */
+  parent: WorkItem;
+  /** The parent's status/stage before the demotion */
+  from: { status: string; stage: string };
+  /** The parent's status/stage after the demotion */
+  to: { status: string; stage: string };
+}

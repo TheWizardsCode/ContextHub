@@ -4,7 +4,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { CreateOptions } from '../cli-types.js';
-import type { WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel } from '../types.js';
+import type { WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel, DemotedParent } from '../types.js';
 import { humanFormatWorkItem, resolveFormat } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { promises as fs } from 'fs';
@@ -151,12 +151,14 @@ export default function register(ctx: PluginContext): void {
         };
       }
 
+      const parentId = utils.normalizeCliId(options.parent, options.prefix) || null;
+
       const item = db.createWithNextSortIndex({
         title: options.title,
         description: description,
         status: normalizedStatus as WorkItemStatus,
         priority: (options.priority || 'medium') as WorkItemPriority,
-        parentId: utils.normalizeCliId(options.parent, options.prefix) || null,
+        parentId,
         tags: options.tags ? options.tags.split(',').map((t: string) => t.trim()) : [],
         assignee: options.assignee || '',
         stage: normalizedStage,
@@ -177,6 +179,19 @@ export default function register(ctx: PluginContext): void {
         db.saveAuditResult(auditResultData);
       }
 
+      // A parent cannot stay `completed`/`in_review` while it gains a new,
+      // uncompleted child: demote it to `open`/`plan_complete` so its
+      // lifecycle state reflects that its subtree is not finished.
+      let demotedParent: DemotedParent | null = null;
+      if (parentId) {
+        try {
+          demotedParent = db.demoteParentOnChildAdded(parentId);
+        } catch (err) {
+          // Best-effort: a demotion failure must not abort the create.
+          console.error(`Warning: failed to demote parent ${parentId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
       const refreshed = db.get(item.id) || item;
 
       // Include audit data in JSON output when audit was provided
@@ -186,10 +201,17 @@ export default function register(ctx: PluginContext): void {
       }
       
       if (utils.isJsonMode()) {
-        output.json({ success: true, workItem: refreshed });
+        output.json({
+          success: true,
+          workItem: refreshed,
+          ...(demotedParent ? { demotedParent } : {}),
+        });
       } else {
         const format = resolveFormat(program);
         console.log(humanFormatWorkItem(refreshed, db, format));
+        if (demotedParent) {
+          console.log(`[Parent ${demotedParent.parent.id} demoted from ${demotedParent.from.status}/${demotedParent.from.stage} to ${demotedParent.to.status}/${demotedParent.to.stage}]`);
+        }
       }
       // Trigger re-sort after create only when the create modified one of the
       // impactful fields (status, priority, risk, effort, stage). Honor caller
