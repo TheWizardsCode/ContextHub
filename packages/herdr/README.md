@@ -5,7 +5,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 ## Features
 
 - **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list. The top-level list is root-only: child work items are hidden and appear only under their parent via expand. Expanded parents **stay expanded across refreshes**: each auto/manual refresh re-fetches their children in parallel with the top-level list and swaps both in atomically, so the hierarchy never momentarily collapses or flickers (WL-0MSBVBNGH002RDP5).
-- **Filter by stage** — Press `f` followed by a chord key (`i`=idea, `n`=intake, `p`=plan, `r`=review, `s`=sprint back to the default view), or type `/wl <stage>` (shorthand alias or canonical stage name, e.g. `/wl intake_complete` or `/wl progress`), to filter items by stage. Stage-filtered views show **every open** root item in the selected stage — no `browseItemCount` cap and no `wl next` selection omission (WL-0MSDT8X1V003206G)
+- **Filter by stage** — Press `f` followed by a chord key (`i`=idea, `n`=intake, `p`=plan, `r`=review, `s`=sprint back to the default view), or type `/wl <stage>` (shorthand alias or canonical stage name, e.g. `/wl intake_complete` or `/wl progress`), to filter items by stage. Stage-filtered views show every root item in the selected stage matching the stage's status rule (open items for most stages; `completed`/`in-progress`/`open` for the in_review stage) — no `browseItemCount` cap and no `wl next` selection omission (WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW)
 - **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority, GitHub issue number, and audit status information such as audit result, review status, and last audit timestamp)
 - **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The detail view metadata section additionally shows the review status (❌ needs review / ✅ reviewed) and the last audit timestamp.
 - **Chord shortcuts** — Multi-key chord sequences provide quick actions like updating priorities, stage/status, title, closing/deleting items, running workflows, and toggling review status (configurable via `shortcuts.json`)
@@ -96,7 +96,7 @@ The plugin pane will then be available via the Herdr plugin system.
    - Press `f` then `s` (sprint) — Return to the default unfiltered browse list
    - `/wl <stage>` accepts shorthand aliases (`idea`, `intake`, `plan`, `progress`, `review`) and canonical stage names (`intake_complete`, `plan_complete`, `in_progress`, `in_review`)
    - `/wl` with no stage argument returns to the default unfiltered browse list
-   - Filtered views show **every open** item in the selected stage (see [Selection List Behaviour](#selection-list-behaviour))
+   - Filtered views show every root item in the selected stage matching the stage's status rule (see [Selection List Behaviour](#selection-list-behaviour))
    - Press `Escape` to cancel an incomplete chord
 
 4. Workflow shortcuts (single-key):
@@ -366,13 +366,20 @@ first 10 others (15 total). If there were 20 completed/in_review items
 instead of 3, all 22 mandatory items would be shown (22 > 15).
 
 The **stage-filtered** views (press `f` + stage chord, or `/wl <stage>`) show
-**every open** root item in the selected stage (WL-0MSDT8X1V003206G):
+every root item in the selected stage matching the stage's status rule
+(WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW):
 
-- All open items (`status=open`) in the stage are listed — no
+- Most stages show **every open** item (`status=open`) in the stage — no
   `browseItemCount` cap and no `wl next` selection omission, so items the
-  priority algorithm deprioritises are still visible.
-- Items with status `blocked`, `in-progress`, or `completed` are excluded
-  even when their stage matches.
+  priority algorithm deprioritises are still visible. Items with status
+  `blocked`, `in-progress`, or `completed` are excluded even when their
+  stage matches.
+- The **in_review** stage (press `f` + `r`, or `/wl review`) is the
+  exception: it shows items with status `completed`, `in-progress`, or
+  `open`. Per the project workflow, advancing an item to `in_review` sets
+  its status to `completed` (or leaves it `in-progress` while being
+  re-worked after review feedback) — restricting the filter to
+  `status=open` would empty the review queue (WL-0MSKCRX730052IIW).
 - Children stay hidden in the top-level list and remain reachable via
   expand (Tab), exactly as in the unfiltered view.
 - Results follow the standard list order (sortIndex), matching the

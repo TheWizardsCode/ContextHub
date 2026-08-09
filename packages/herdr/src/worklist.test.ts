@@ -700,6 +700,35 @@ describe('fetchItemsForView — stage-filtered fetch', () => {
     expect(callArgs).toContain('--root-only');
   });
 
+  it('fetches completed/in-progress items for the in_review stage', async () => {
+    // in_review items carry status completed (submitted for review) or
+    // in-progress (being re-worked after review feedback) per the project
+    // workflow — restricting to status=open would empty the review queue
+    // (WL-0MSKCRX730052IIW).
+    const stageItems = [
+      { ...makeItem('A', 'in_review'), status: 'completed' },
+      { ...makeItem('B', 'in_review'), status: 'in-progress' },
+    ];
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ workItems: stageItems }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
+
+    const items = await fetchItemsForView('in_review', defaultFetcher);
+
+    expect(items.map((i) => i.id)).toEqual(['A', 'B']);
+    expect(defaultFetcher).not.toHaveBeenCalled();
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs).toContain('list');
+    const statusArg = callArgs[callArgs.indexOf('--status') + 1];
+    expect(statusArg).toContain('completed');
+    expect(statusArg).toContain('in-progress');
+    expect(callArgs[callArgs.indexOf('--stage') + 1]).toBe('in_review');
+    expect(callArgs).toContain('--root-only');
+  });
+
   it('uses the default fetcher when no filter is active', async () => {
     const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
     const items = await fetchItemsForView(null, defaultFetcher);
@@ -714,6 +743,20 @@ describe('fetchItemsForView — stage-filtered fetch', () => {
 
     const items = await fetchItemsForView('idea', defaultFetcher);
     expect(items.map((i) => i.id)).toEqual(['C']);
+  });
+
+  it('applies the in_review stage filter client-side regardless of status', () => {
+    // Client-side filter (_applyFilters) matches on stage only — items are
+    // already status-filtered at fetch time, so completed/in-progress
+    // in_review items must survive the client-side pass (WL-0MSKCRX730052IIW).
+    const items = [
+      { ...makeItem('A', 'in_review'), status: 'completed' },
+      { ...makeItem('B', 'in_review'), status: 'in-progress' },
+      makeItem('C', 'idea'),
+    ];
+    const state = new WorkItemListState(items, TERM_80x24);
+    state.applyFilter('in_review');
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['A', 'B']);
   });
 });
 
