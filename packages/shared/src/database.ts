@@ -1356,6 +1356,67 @@ export class WorklogDatabase {
   }
 
   /**
+   * Ordinal rank of a risk level on the canonical scale
+   * (Low < Medium < High < Severe/Critical). Both the type-level spelling
+   * ('Severe') and the icon-scale spelling ('critical') map to the top
+   * rank. Unset/unknown values map to null (fail-closed: they are never
+   * matched by an at-most risk filter).
+   */
+  private riskOrdinal(risk: string | undefined | null): number | null {
+    switch ((risk ?? '').trim().toLowerCase()) {
+      case 'low': return 1;
+      case 'medium': return 2;
+      case 'high': return 3;
+      case 'severe':
+      case 'critical': return 4;
+      default: return null;
+    }
+  }
+
+  /**
+   * Ordinal rank of an effort level on the canonical scale
+   * (Extra Small < Small < Medium < Large < Extra Large). Accepts both the
+   * short CLI spellings (XS/S/M/L/XL) and the long-form effort-and-risk
+   * skill spellings (extra small/small/medium/large/extra large),
+   * normalized case-insensitively. Unset/unknown values map to null
+   * (fail-closed: they are never matched by an at-most effort filter).
+   */
+  private effortOrdinal(effort: string | undefined | null): number | null {
+    switch ((effort ?? '').trim().toLowerCase().replace(/[\s-]+/g, '')) {
+      case 'xs':
+      case 'extrasmall': return 1;
+      case 's':
+      case 'small': return 2;
+      case 'm':
+      case 'medium': return 3;
+      case 'l':
+      case 'large': return 4;
+      case 'xl':
+      case 'extralarge': return 5;
+      default: return null;
+    }
+  }
+
+  /**
+   * True when an item satisfies the optional at-most risk/effort filters.
+   * Fail-closed: an unset/unknown risk or effort on the item (or an invalid
+   * filter level) never matches.
+   */
+  private matchesRiskEffort(item: WorkItem, risk?: string, effort?: string): boolean {
+    if (risk !== undefined && risk !== '') {
+      const level = this.riskOrdinal(risk);
+      const ord = this.riskOrdinal(item.risk);
+      if (level === null || ord === null || ord > level) return false;
+    }
+    if (effort !== undefined && effort !== '') {
+      const level = this.effortOrdinal(effort);
+      const ord = this.effortOrdinal(item.effort);
+      if (level === null || ord === null || ord > level) return false;
+    }
+    return true;
+  }
+
+  /**
    * Get numeric priority value for comparisons
    */
   private getPriorityValue(priority?: string): number {
@@ -1502,6 +1563,8 @@ export class WorklogDatabase {
     options: {
       assignee?: string;
       searchTerm?: string;
+      risk?: string;
+      effort?: string;
       excluded?: Set<string>;
       debugPrefix?: string;
       includeInProgress?: boolean;
@@ -1512,6 +1575,8 @@ export class WorklogDatabase {
     const {
       assignee,
       searchTerm,
+      risk,
+      effort,
       excluded,
       debugPrefix = '[critical]',
       includeInProgress = false,
@@ -1550,8 +1615,9 @@ export class WorklogDatabase {
 
     if (unblockedCriticals.length > 0) {
       // Apply assignee/search to unblocked criticals — only return items
-      // that match the caller's filters.
-      let selectable = this.applyFilters(unblockedCriticals, assignee, searchTerm);
+      // that match the caller's filters (including risk/effort).
+      let selectable = this.applyFilters(unblockedCriticals, assignee, searchTerm)
+        .filter(item => this.matchesRiskEffort(item, risk, effort));
       if (excluded && excluded.size > 0) {
         selectable = selectable.filter(item => !excluded.has(item.id));
       }
@@ -1624,7 +1690,7 @@ export class WorklogDatabase {
       // Apply assignee/search filters to the blockers only
       const filteredBlockingPairs = blockingPairs.filter(pair =>
         this.applyFilters([pair.blocking], assignee, searchTerm).length > 0
-      );
+      ).filter(pair => this.matchesRiskEffort(pair.blocking, risk, effort));
       this.debug(`${debugPrefix} blocking candidates=${blockingPairs.length} after filters=${filteredBlockingPairs.length}`);
 
       // Strict root-only (WL-0MS964SIA0057ABR): never surface child blockers.
@@ -1634,7 +1700,7 @@ export class WorklogDatabase {
       const rootBlockingPairs: { blocking: WorkItem; critical: WorkItem }[] = [];
       for (const pair of filteredBlockingPairs) {
         const resolved = this.resolveBlockerToRoot(pair.blocking, allItems, assignee, searchTerm, excluded);
-        if (resolved) {
+        if (resolved && this.matchesRiskEffort(resolved, risk, effort)) {
           rootBlockingPairs.push({ blocking: resolved, critical: pair.critical });
         }
       }
@@ -1652,7 +1718,8 @@ export class WorklogDatabase {
 
       // No actionable blocker found — return the blocked critical itself as a
       // last resort so the user is aware of the stuck critical item.
-      let selectableBlocked = this.applyFilters(blockedCriticals, assignee, searchTerm);
+      let selectableBlocked = this.applyFilters(blockedCriticals, assignee, searchTerm)
+        .filter(item => this.matchesRiskEffort(item, risk, effort));
       if (excluded && excluded.size > 0) {
         selectableBlocked = selectableBlocked.filter(item => !excluded.has(item.id));
       }
@@ -1871,6 +1938,8 @@ export class WorklogDatabase {
       assignee?: string;
       searchTerm?: string;
       stage?: string;
+      risk?: string;
+      effort?: string;
       excluded?: Set<string>;
       includeBlocked?: boolean;
       includeInProgress?: boolean;
@@ -1882,6 +1951,8 @@ export class WorklogDatabase {
       assignee,
       searchTerm,
       stage,
+      risk,
+      effort,
       excluded,
       includeBlocked = false,
       includeInProgress = false,
@@ -1935,6 +2006,38 @@ export class WorklogDatabase {
     // 7. Apply assignee and search filters
     pool = this.applyFilters(pool, assignee, searchTerm);
     this.debug(`${debugPrefix} filter: after assignee/search=${pool.length}`);
+
+    // 7b. Apply risk/effort at-most filters (ordinal, fail-closed on unset).
+    // An item is eligible only when its risk ≤ the filter level (Low < Medium
+    // < High < Severe) and its effort ≤ the filter level (Extra Small < Small
+    // < Medium < Large < Extra Large). Items with unset/empty risk or effort
+    // are NEVER matched — an absent estimate is not "≤ low/small" (AC2).
+    if (risk !== undefined && risk !== '') {
+      const riskLevel = this.riskOrdinal(risk);
+      if (riskLevel === null) {
+        // Invalid filter level → fail-closed: match nothing.
+        pool = [];
+      } else {
+        pool = pool.filter(item => {
+          const ord = this.riskOrdinal(item.risk);
+          return ord !== null && ord <= riskLevel;
+        });
+      }
+      this.debug(`${debugPrefix} filter: after risk=${risk}=${pool.length}`);
+    }
+    if (effort !== undefined && effort !== '') {
+      const effortLevel = this.effortOrdinal(effort);
+      if (effortLevel === null) {
+        // Invalid filter level → fail-closed: match nothing.
+        pool = [];
+      } else {
+        pool = pool.filter(item => {
+          const ord = this.effortOrdinal(item.effort);
+          return ord !== null && ord <= effortLevel;
+        });
+      }
+      this.debug(`${debugPrefix} filter: after effort=${effort}=${pool.length}`);
+    }
 
     // Snapshot for critical-path escalation (before dep-blocker removal)
     const criticalPool = pool;
@@ -2042,9 +2145,11 @@ export class WorklogDatabase {
     includeBlocked: boolean = false,
     stage?: string,
     includeInProgress: boolean = false,
-    edgeCache?: EdgeCache
+    edgeCache?: EdgeCache,
+    risk?: string,
+    effort?: string
   ): NextWorkItemResult {
-    this.debug(`${debugPrefix} assignee=${assignee || ''} search=${searchTerm || ''} stage=${stage || ''} excluded=${excluded?.size || 0}`);
+    this.debug(`${debugPrefix} assignee=${assignee || ''} search=${searchTerm || ''} stage=${stage || ''} excluded=${excluded?.size || 0} risk=${risk || ''} effort=${effort || ''}`);
 
     // Build the sort-order cache once from the pre-loaded items array.
     // This avoids an extra full-table scan of all work items from the database.
@@ -2059,6 +2164,8 @@ export class WorklogDatabase {
       assignee,
       searchTerm,
       stage,
+      risk,
+      effort,
       excluded,
       includeBlocked,
       includeInProgress,
@@ -2078,6 +2185,8 @@ export class WorklogDatabase {
         searchTerm,
         excluded,
         includeInProgress,
+        risk,
+        effort,
         debugPrefix: `${debugPrefix} [critical]`,
         edgeCache,
         sortOrderCache,
@@ -2148,7 +2257,7 @@ export class WorklogDatabase {
         // Apply assignee/search filters to blockers
         let filteredBlockers = blockingPairs.filter(pair =>
           this.applyFilters([pair.blocking], assignee, searchTerm).length > 0
-        );
+        ).filter(pair => this.matchesRiskEffort(pair.blocking, risk, effort));
 
         // Strict root-only (WL-0MS964SIA0057ABR): child blockers are never
         // surfaced by wl next.
@@ -2275,11 +2384,13 @@ export class WorklogDatabase {
     searchTerm?: string,
     includeBlocked: boolean = false,
     stage?: string,
-    includeInProgress: boolean = false
+    includeInProgress: boolean = false,
+    risk?: string,
+    effort?: string
   ): NextWorkItemResult {
     const items = this.store.getAllWorkItems();
     const edgeCache = this.buildEdgeCache(items);
-    return this.findNextWorkItemFromItems(items, assignee, searchTerm, undefined, '[next]', includeBlocked, stage, includeInProgress, edgeCache);
+    return this.findNextWorkItemFromItems(items, assignee, searchTerm, undefined, '[next]', includeBlocked, stage, includeInProgress, edgeCache, risk, effort);
   }
 
   /**
@@ -2292,7 +2403,9 @@ export class WorklogDatabase {
     searchTerm?: string,
     includeBlocked: boolean = false,
     stage?: string,
-    includeInProgress: boolean = false
+    includeInProgress: boolean = false,
+    risk?: string,
+    effort?: string
   ): NextWorkItemResult[] {
     const results: NextWorkItemResult[] = [];
     const excluded = new Set<string>();
@@ -2312,7 +2425,9 @@ export class WorklogDatabase {
         includeBlocked,
         stage,
         includeInProgress,
-        edgeCache
+        edgeCache,
+        risk,
+        effort
       );
 
       results.push(result);

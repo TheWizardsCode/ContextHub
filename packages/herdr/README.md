@@ -238,7 +238,18 @@ the item to completed/in_review without recording a fresh audit. The
 exclusion composes with the freshness rule: a *fresh* audit since the
 dispatch still governs (fresh → not a candidate). A missing or unreadable
 log is treated as empty (fail-safe), so audit dispatch keeps working on a
-fresh worklog. If none, it runs `wl next --stage intake_complete
+fresh worklog.
+
+> **Audit-tier selection note (WL-0MSMAIP5F003WAGG):** the audit tier keeps
+> its `wl list --status completed --stage in_review --json` selection rather
+> than converting to `wl next --stage in_review`. `wl next` is strictly
+> root-only, so converting would silently drop completed child items from
+> audit dispatch (32 children in the completed/in_review queue as of the
+> decision); the audit tier must audit the full completed/in_review set,
+> including children. The conversion was scoped to the implement tier only
+> (AC5 escape hatch — decision recorded).
+
+If none, it runs `wl next --stage intake_complete
 --json` and dispatches `/skill:plan <id>`; if no such item it runs `wl next
 --stage idea --json` and dispatches `/skill:intake <id>`; if all three are
 empty nothing is dispatched. A `wl`/CLI error on the `intake_complete` lookup
