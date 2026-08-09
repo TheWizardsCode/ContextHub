@@ -214,10 +214,14 @@ identity data the worker fails closed to all-slots-free for `0 < N < total`;
   60s so the pause cannot be disabled or set trivially small)
 
 The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
-Idle means: llama-server running, no active query, no model switch, no active
-local lease, and the required free-slot condition met. Endpoint failures,
-timeouts, and ambiguous responses are treated as **busy** (no dispatch) and
-never crash the plugin. Each poll is single-flight with a per-poll timeout.
+Idle means: llama-server running, no active **local** query (when the proxy
+serves `local_active_query` — preferred over the global `active_query`, so
+remote-only streams with free local slots do not block dispatch; absent on
+pre-fix proxies, the global `active_query` is used as the fallback), no model
+switch, no active local lease, and the required free-slot condition met.
+Endpoint failures, timeouts, and ambiguous responses are treated as **busy**
+(no dispatch) and never crash the plugin. Each poll is single-flight with a
+per-poll timeout.
 
 **Dispatch behaviour** — once idle has been continuous for the threshold, the
 worker first runs `wl list --status completed --stage in_review --json` and

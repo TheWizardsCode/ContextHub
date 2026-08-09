@@ -117,7 +117,22 @@ export const DEFAULT_DOWNTIME_MODEL = 'plan';
 /** Shape of `GET /llama/local/status` as served by the llama-proxy. */
 export interface LlamaStatus {
   llama_server_running: boolean;
+  /**
+   * GLOBAL query activity: any request in flight (local AND remote).
+   *
+   * Prefer `local_active_query` when present — remote provider streams keep
+   * this true while the local model is idle with free slots, so treating it
+   * as the busy signal would block downtime dispatch (RCA
+   * WL-0MSK9TUCA00206M7).
+   */
   active_query: boolean;
+  /**
+   * LOCAL-only query activity (served by proxies exposing the
+   * `local_active_queries` counter, LP-0MSL2ZLLS009RVKR). Optional: ABSENT on
+   * pre-fix proxies. When present, `isIdleStatus` prefers it over the global
+   * `active_query`; `local_active_query=true` implies `active_query=true`.
+   */
+  local_active_query?: boolean;
   model_switch_in_progress: boolean;
   local_lease_active: boolean;
   available_slots: number;
@@ -144,7 +159,14 @@ export interface LlamaStatus {
  */
 export function isIdleStatus(status: LlamaStatus, requiredFreeSlots: number): boolean {
   if (!status.llama_server_running) return false;
-  if (status.active_query) return false;
+  // Prefer the local-only signal when the proxy exposes it (LP-0MSL2ZLLS009RVKR):
+  // remote streams keep the GLOBAL active_query true while the local model is
+  // idle with free slots, so they must not block downtime dispatch. Fall back
+  // to the global active_query for pre-fix proxies that do not serve
+  // local_active_query (backward compatible).
+  const queryActive =
+    status.local_active_query !== undefined ? status.local_active_query : status.active_query;
+  if (queryActive) return false;
   if (status.model_switch_in_progress) return false;
   if (status.local_lease_active) return false;
 
@@ -245,6 +267,15 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
   if (typeof o.active_query !== 'boolean') return null;
   if (typeof o.model_switch_in_progress !== 'boolean') return null;
 
+  // Optional local-only signal (LP-0MSL2ZLLS009RVKR): absent on pre-fix
+  // proxies, in which case isIdleStatus falls back to the global
+  // active_query. A malformed (non-boolean) value is ambiguous → busy.
+  let localActiveQuery: boolean | undefined;
+  if (o.local_active_query !== undefined) {
+    if (typeof o.local_active_query !== 'boolean') return null;
+    localActiveQuery = o.local_active_query;
+  }
+
   const available = o.available_slots;
   const total = o.total_slots;
   if (typeof available !== 'number' || !Number.isFinite(available) || available < 0) return null;
@@ -265,6 +296,7 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
   return {
     llama_server_running: o.llama_server_running,
     active_query: o.active_query,
+    local_active_query: localActiveQuery,
     model_switch_in_progress: o.model_switch_in_progress,
     local_lease_active: localLeaseActive,
     available_slots: available,

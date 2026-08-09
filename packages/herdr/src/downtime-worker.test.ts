@@ -114,6 +114,17 @@ describe('idle detection (isIdleStatus)', () => {
     expect(isIdleStatus({ ...idle, active_query: true }, 0)).toBe(false);
   });
 
+  it('is idle during remote-only traffic when local_active_query=false (global active_query true)', () => {
+    // Remote provider streams keep the GLOBAL active_query true while the
+    // local model is idle with free slots; the proxy's local_active_query is
+    // the local-only signal (LP-0MSL2ZLLS009RVKR) and must not block dispatch.
+    expect(isIdleStatus({ ...idle, active_query: true, local_active_query: false }, 0)).toBe(true);
+  });
+
+  it('is busy when local_active_query=true (a local query is in flight)', () => {
+    expect(isIdleStatus({ ...idle, local_active_query: true }, 0)).toBe(false);
+  });
+
   it('is busy while a model switch is in progress', () => {
     expect(isIdleStatus({ ...idle, model_switch_in_progress: true }, 0)).toBe(false);
   });
@@ -841,6 +852,40 @@ describe('endpoint failures and poller', () => {
   });
 });
 
+// ── local_active_query parsing (WL-0MSL2ZQIF006QB4Q) ──────────────────
+
+describe('parseLlamaStatus local_active_query', () => {
+  const base = {
+    llama_server_running: true,
+    active_query: false,
+    model_switch_in_progress: false,
+    available_slots: 4,
+    total_slots: 4,
+  };
+
+  it('exposes local_active_query=false when the proxy serves it', () => {
+    const status = parseLlamaStatus({ ...base, local_active_query: false });
+    expect(status).not.toBeNull();
+    expect(status!.local_active_query).toBe(false);
+  });
+
+  it('exposes local_active_query=true when the proxy serves it', () => {
+    const status = parseLlamaStatus({ ...base, local_active_query: true });
+    expect(status).not.toBeNull();
+    expect(status!.local_active_query).toBe(true);
+  });
+
+  it('leaves local_active_query undefined when absent (pre-fix proxy, backward compatible)', () => {
+    const status = parseLlamaStatus(base);
+    expect(status).not.toBeNull();
+    expect(status!.local_active_query).toBeUndefined();
+  });
+
+  it('treats a malformed (non-boolean) local_active_query as ambiguous → busy', () => {
+    expect(parseLlamaStatus({ ...base, local_active_query: 'yes' })).toBeNull();
+  });
+});
+
 // ── Runtime idle evaluation (F2, AC5) ─────────────────────────────────
 
 describe('runtime idle evaluation (evaluateIdle)', () => {
@@ -1119,6 +1164,24 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
     expect(result.idle).toBe(false);
     expect(worker.idleSince).toBeNull();
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('treats remote-only traffic as idle and dispatches after the threshold (local_active_query=false)', async () => {
+    // Integration (AC2): a stub status with global active_query=true but
+    // local_active_query=false (remote streams in flight, local slots free)
+    // must be treated as idle and dispatch after the idle threshold.
+    const { worker, deps, cfg } = makeWorker({
+      status: { ...idleAllSlotsFree, active_query: true, local_active_query: false },
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    expect(worker.idleSince).toBe(start);
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    const at = await worker.tick();
+    expect(at.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
   });
 
   it('does not dispatch until the idle duration reaches the threshold (AC1)', async () => {
