@@ -391,7 +391,12 @@ export function createDowntimeDeps(
       }
     },
     async claimItem(itemId: string): Promise<void> {
-      // claimWorkItem never throws (failures are returned and logged).
+      // claimWorkItem never throws — failures are returned, but the result is
+      // deliberately discarded here: a failed claim must not block the
+      // dispatch. Note this path does NOT log the failure (unlike
+      // claimItemForAgentCommand), so a claim failure is silent and the
+      // dispatch is still recorded as a success (known silent path, follow-up
+      // WL-0MSLWJ310000ND0X; see README "Failure-path logging").
       await claimWorkItem(itemId, assignee);
     },
     async spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<void> {

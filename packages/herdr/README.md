@@ -318,6 +318,25 @@ persistent failure is auditable even though nothing was dispatched. The
 `.worklog` log file is gitignored and local-only; all writes are
 fail-closed, so a comment or log failure never blocks or fails a dispatch.
 
+**Failure-path logging** — a complete account of what each dispatch outcome
+leaves behind (documented for WL-0MSKUG2WW0058A7W, audit gap AC2):
+
+| Outcome | Trace in `.worklog/downtime-dispatches.log` | Notes |
+|---|---|---|
+| Successful dispatch | comment on the item + JSONL entry (`kind`, `itemId`, `dispatchedAt`) | the only fully-visible outcome |
+| Genuine empty backlog (no-candidate) | **none** — intentionally silent | full cooldown pause (default 60 min); worker stops polling |
+| 1–2 transient wl CLI errors (strikes) | **none** — silent | one strike per `wl-error` outcome; retries on the next idle window |
+| 3rd consecutive wl CLI error | `recordError` JSONL entry | three-strike pause; the only failure path that logs |
+| Audit-tier wl/parse failure | **none** — silent, and **no strike** | `getNextAuditCandidate` collapses the failure to `null` like an empty tier (index.ts:389-391); worker falls through to the plan tier and looks healthy — known silent path, follow-up WL-0MSLWJ2KP0002SV0 |
+| Claim failure (`wl update <id> --status in_progress`) | **none** — result discarded | dispatch proceeds and is still recorded as a success; the claim is the cross-pane serialization guard, so a failed claim leaves the item selectable by another pane — known silent path, follow-up WL-0MSLWJ310000ND0X |
+| Pane spawn failure (`send-to-pi.sh`) | **none** — invisible | spawn is detached/`stdio: ignore`/`unref`d with no `error`/`exit` handler; a failed spawn (or a script that exits non-zero) is never observed and the dispatch is still logged as a success — known silent path, follow-up WL-0MSLWJ3I70031Z8U |
+| `recordDispatch` / `recordError` write failure | **none** | fail-closed by design: logging must never crash or block the worker |
+
+Consequence: the log's *absence* of an entry is ambiguous — it cannot
+distinguish "no candidate (paused)" from "worker disabled" or from any of
+the silent failure paths above; only the three-strike and success paths leave
+entries. The follow-up items above close the three code-level silent paths.
+
 The worker runs inside the plugin's single consolidated scheduler loop (one
 `setInterval`; no independent timers), uses unref'd timers, and is cleaned up
 when the pane exits. While the pane is open the list header shows the worker
