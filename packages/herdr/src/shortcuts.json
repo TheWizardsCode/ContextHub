@@ -220,6 +220,17 @@
   },
   {
     "chord": [
+      "P",
+      "n"
+    ],
+    "command": "/prompt:",
+    "view": "both",
+    "label": "new session",
+    "description": "Open a new Pi agent session with a blank prompt.",
+    "model": "plan"
+  },
+  {
+    "chord": [
       "f",
       "i"
     ],

@@ -59,6 +59,16 @@ describe('buildSendToPiArgs', () => {
     ]);
   });
 
+  it('passes an empty prompt arg for a bare /prompt: command (blank session)', () => {
+    expect(buildSendToPiArgs('/prompt:', '/project', 'plan')).toEqual([
+      '--cwd',
+      '/project',
+      '--model',
+      'plan',
+      '',
+    ]);
+  });
+
   it('passes /plan with the plan model', () => {
     expect(buildSendToPiArgs('/plan <id>', '/project', 'plan')).toEqual([
       '--cwd',
@@ -249,7 +259,7 @@ describe('shortcuts.json command routing', () => {
     }
   });
 
-  it('binds P-p to the free-form prompt and P-a to the audit-gaps prompt', () => {
+  it('binds P-p to the free-form prompt, P-a to the audit-gaps prompt, and P-n to a blank session', () => {
     const freePrompt = entries.find((e) => e.chord.join(' ') === 'P p');
     expect(freePrompt).toBeDefined();
     expect(freePrompt!.command).toBe('/prompt:<prompt>');
@@ -265,6 +275,17 @@ describe('shortcuts.json command routing', () => {
     expect(auditPrompt!.view).toBe('both');
     expect(auditPrompt!.model).toBe('plan');
     expect(routeCommand(auditPrompt!.command)).toBe('agent');
+
+    const blankSession = entries.find((e) => e.chord.join(' ') === 'P n');
+    expect(blankSession).toBeDefined();
+    expect(blankSession!.command).toBe('/prompt:');
+    expect(blankSession!.view).toBe('both');
+    expect(blankSession!.model).toBe('plan');
+    // Empty /prompt: carries no placeholders: no command-input form, no
+    // work-item claim (AC2/AC3), and it routes to the agent channel.
+    expect(blankSession!.command).not.toContain('<id>');
+    expect(blankSession!.command).not.toContain('<prompt>');
+    expect(routeCommand(blankSession!.command)).toBe('agent');
   });
 
   it('keeps the single-key p chord bound to plan (P leader does not shadow it)', () => {
