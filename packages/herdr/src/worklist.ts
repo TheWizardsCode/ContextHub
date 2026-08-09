@@ -2730,9 +2730,12 @@ export async function runWorklistTui(
    * True when the resolved command is a `/wl` view command — a stage filter
    * (`/wl <stage>`, shorthand alias or canonical name) or the clear-filter
    * `/wl` with no arguments. Used after dispatch to trigger a view refetch:
-   * filtered views show every open root item in the stage
-   * (WL-0MSDT8X1V003206G); clearing the filter restores the default view
-   * (WL-0MSGSE15000746F7).
+   * filtered views show every root item in that stage matching the stage's
+   * status rule (`wl list --status <status> --stage <stage> --root-only`;
+   * see STAGE_STATUS in fetcher.ts) — most stages show `open`-status items
+   * only, while the in_review stage additionally includes `completed` and
+   * `in-progress` items (WL-0MSKCRX730052IIW); clearing the filter restores
+   * the default view (WL-0MSGSE15000746F7).
    */
   const isWlViewCommand = (cmd: string): boolean => {
     if (/^\/wl\s*$/.test(cmd)) return true;
