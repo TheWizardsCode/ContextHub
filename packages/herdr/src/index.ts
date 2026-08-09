@@ -59,7 +59,7 @@ import {
   buildDowntimeDispatchComment,
   DOWNTIME_WL_TIMEOUT_MS,
 } from './downtime-worker.js';
-import { appendDowntimeLogEntry } from './downtime-log.js';
+import { appendDowntimeLogEntry, auditDispatchedItemIds, readDowntimeLogEntries } from './downtime-log.js';
 
 // Resolve path to the send-to-pi.sh script (relative to this source file)
 // At runtime (tsx or dist), __dirname equivalent from import.meta.url
@@ -358,7 +358,7 @@ export function createDowntimeDeps(
         return { ok: false };
       }
     },
-    async getNextAuditCandidate(): Promise<DowntimeCandidate | null> {
+    async getNextAuditCandidate(cwd: string): Promise<DowntimeCandidate | null> {
       try {
         // Audit tier (WL-0MSI8H3HP000K0RG): select the first completed /
         // in_review item WITHOUT a valid audit so the producer-review queue
@@ -371,7 +371,19 @@ export function createDowntimeDeps(
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
         );
         const candidates = parseAuditCandidatesOutput(stdout);
-        const selected = candidates === null ? null : selectAuditCandidate(candidates);
+        if (candidates === null) return null;
+        // Dispatched-marker exclusion (WL-0MSLIY8ZR004QUSY): read the shared
+        // rolling dispatch log for THIS worklog root (the same <cwd> that
+        // recordDispatch writes) and exclude any candidate the downtime
+        // worker has already dispatched for /skill:audit unless a fresh
+        // audit exists since (the composition lives in selectAuditCandidate).
+        // Fail-safe: readDowntimeLogEntries never throws — a missing or
+        // unreadable log is treated as empty, so audit-tier dispatch still
+        // works on a fresh worklog (a corrupted log cannot silently disable
+        // the audit tier).
+        const entries = await readDowntimeLogEntries(cwd);
+        const dispatchedAuditIds = auditDispatchedItemIds(entries);
+        const selected = selectAuditCandidate(candidates, Date.now(), dispatchedAuditIds);
         return selected === null ? null : toDowntimeCandidate(selected);
       } catch {
         // Fail-closed: a wl failure yields no candidate (no dispatch).

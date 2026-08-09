@@ -18,7 +18,12 @@
  *    items without a valid audit (modified within the last 7 days) →
  *    `/skill:audit <id>` (audit tier, WL-0MSI8H3HP000K0RG), then `wl next --stage intake_complete` →
  *    `/skill:plan <id>`, fallback `--stage idea` → `/skill:intake <id>`,
- *    pre-dispatch claim, per-process single-flight. A tier-2 CLI error does
+ *    pre-dispatch claim, per-process single-flight. The audit tier
+ *    additionally excludes items the downtime worker has already dispatched
+ *    for `/skill:audit` (durable dispatched-marker exclusion,
+ *    WL-0MSLIY8ZR004QUSY) unless a fresh audit exists since, closing the
+ *    re-selection loop where a dispatched run reverts the item to
+ *    completed/in_review without recording a fresh audit. A tier-2 CLI error does
  *    NOT short-circuit: the idea tier is still attempted so a tier-3
  *    candidate can still dispatch.
  *    `wl next` failures are reported as `{ok:false}` (fail closed to busy)
@@ -426,9 +431,13 @@ export interface DowntimeWorkerDeps {
   /**
    * Look up the next completed/in_review item WITHOUT a valid audit (the
    * audit dispatch tier, which runs before the plan/intake tiers). Fail-closed:
-   * a wl failure yields no candidate (no dispatch).
+   * a wl failure yields no candidate (no dispatch). `cwd` is the worklog root
+   * whose `.worklog/downtime-dispatches.log` is consulted for the
+   * dispatched-marker exclusion (WL-0MSLIY8ZR004QUSY): items the downtime
+   * worker already dispatched for `/skill:audit` are never re-selected while
+   * they still lack a fresh audit.
    */
-  getNextAuditCandidate(): Promise<DowntimeCandidate | null>;
+  getNextAuditCandidate(cwd: string): Promise<DowntimeCandidate | null>;
   /** Claims the item (`wl update <id> --status in_progress`) before dispatch. */
   claimItem(itemId: string): Promise<void>;
   /** Opens a visible pi agent pane running the prompt (via send-to-pi.sh). */
@@ -485,9 +494,11 @@ export interface DowntimeDispatchOutcome {
 let dispatchInFlight = false;
 
 /**
- * Dispatch one downtime work item. Selection priority (audit tier first,
- * WL-0MSI8H3HP000K0RG): a completed/in_review item WITHOUT a valid audit →
- * `/skill:audit <id>`; if none, `wl next --stage intake_complete` →
+ * dispatch one downtime work item. Selection priority (audit tier first,
+ * WL-0MSI8H3HP000K0RG): a completed/in_review item WITHOUT a valid audit AND
+ * NOT already dispatched for audit by this worker →
+ * `/skill:audit <id>` (the dispatched-marker exclusion,
+ * WL-0MSLIY8ZR004QUSY, is applied by `deps.getNextAuditCandidate`); if none, `wl next --stage intake_complete` →
  * `/skill:plan <id>`; if none, `wl next --stage idea` → `/skill:intake <id>`;
  * if all three are empty, no dispatch. A CLI error at the intake_complete
  * tier does NOT short-circuit: the idea tier is still attempted, so a
@@ -509,7 +520,7 @@ export async function dispatchDowntimeWork(
   }
   dispatchInFlight = true;
   try {
-    const auditCandidate = await deps.getNextAuditCandidate();
+    const auditCandidate = await deps.getNextAuditCandidate(opts.cwd);
     if (auditCandidate !== null) {
       await deps.claimItem(auditCandidate.id);
       await deps.spawnAgentPane(buildDowntimePrompt('audit', auditCandidate), opts);
@@ -948,6 +959,16 @@ export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | n
  * unaudited/stale (or the list is empty). Missing auditedAt/updatedAt means
  * not fresh → selected.
  *
+ * Dispatched-marker exclusion (WL-0MSLIY8ZR004QUSY): candidates whose id is
+ * present in `dispatchedItemIds` (itemIds the downtime worker has already
+ * dispatched for `/skill:audit`) are excluded UNLESS they carry a fresh
+ * audit — the exclusion composes with `isAuditFresh` above, so an item
+ * whose most recent audit is fresh is governed by the existing freshness
+ * logic (fresh → not a candidate, unchanged) and an item with a
+ * stale/absent audit since its dispatch is never re-selected. This closes
+ * the re-selection loop where a dispatched audit run reverts the item to
+ * completed/in_review without recording a fresh audit.
+ *
  * 7-day recency filter: a candidate must have been modified within
  * `DOWNTIME_AUDIT_RECENCY_WINDOW_MS` (7 days) to be dispatched. A MISSING
  * `updatedAt` is still included (recency cannot be verified → include, per
@@ -958,10 +979,12 @@ export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | n
 export function selectAuditCandidate(
   candidates: AuditCandidate[],
   now: number = Date.now(),
+  dispatchedItemIds?: ReadonlySet<string>,
 ): AuditCandidate | null {
   const recencyCutoff = now - DOWNTIME_AUDIT_RECENCY_WINDOW_MS;
   const target = candidates
     .filter((c) => !isAuditFresh(c.auditedAt, c.updatedAt))
+    .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
     .filter((c) => {
       if (!c.updatedAt) return true; // missing → include
       const updated = new Date(c.updatedAt).getTime();

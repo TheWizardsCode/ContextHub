@@ -229,7 +229,16 @@ selects the first completed/in_review item **without** a valid audit that was
 **modified within the last 7 days** (`updatedAt` recency window; a candidate
 with a missing `updatedAt` is still selected — recency cannot be verified —
 while an unparseable one is skipped), dispatching `/skill:audit <id>` (pane
-named `Downtime audit`). If none, it runs `wl next --stage intake_complete
+named `Downtime audit`). The audit tier additionally applies the
+**dispatched-marker exclusion** (WL-0MSLIY8ZR004QUSY): an item the downtime
+worker has already dispatched for `/skill:audit` (a `kind:audit` entry in
+`.worklog/downtime-dispatches.log`) is never re-selected while it still
+lacks a fresh audit — closing the loop where a dispatched audit run reverts
+the item to completed/in_review without recording a fresh audit. The
+exclusion composes with the freshness rule: a *fresh* audit since the
+dispatch still governs (fresh → not a candidate). A missing or unreadable
+log is treated as empty (fail-safe), so audit dispatch keeps working on a
+fresh worklog. If none, it runs `wl next --stage intake_complete
 --json` and dispatches `/skill:plan <id>`; if no such item it runs `wl next
 --stage idea --json` and dispatches `/skill:intake <id>`; if all three are
 empty nothing is dispatched. A `wl`/CLI error on the `intake_complete` lookup
@@ -298,7 +307,12 @@ comment on the dispatched item (`wl comment add`, author
 UTC timestamp — this survives `wl sync` and is the durable trail; and (2) a
 bounded JSONL entry in `.worklog/downtime-dispatches.log` under the
 resolved worklog root (rolling — only the most recent 100 entries are
-kept). A three-strike CLI-error pause additionally writes a JSONL entry to
+kept). The `kind:audit` entries in this log double as the dispatched-marker
+exclusion source for the audit tier (WL-0MSLIY8ZR004QUSY): an item the
+worker already dispatched for `/skill:audit` is excluded from later audit
+tier selection while it still lacks a fresh audit (plan/intake markers are
+scoped to their own tiers and never suppress audit selection). A
+three-strike CLI-error pause additionally writes a JSONL entry to
 the same rolling log (with the `at` timestamp and an error message) so the
 persistent failure is auditable even though nothing was dispatched. The
 `.worklog` log file is gitignored and local-only; all writes are
