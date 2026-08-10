@@ -695,7 +695,7 @@ limiting the shortcut to work items whose issue type is listed
 | `work_item_types` value | Behaviour |
 |---|---|
 | `["podcast"]` | Shortcut visible only on `podcast`-typed work items |
-| `["bug","feature","task","chore","epic"]` | Shortcut visible only on code work item types |
+| `["bug","docs","feature","task","chore","epic"]` | Shortcut visible only on code and docs work item types |
 | omitted | Always shown (backward compatible) |
 
 Semantics:
@@ -713,10 +713,10 @@ Semantics:
   whose allowlist misses it, so footer hints, chord hints, and dispatch
   lookups all respect the gating automatically.
 - **Bundled restriction:** the code-workflow chords `n` (intake), `p` (plan),
-  and `i` (implement) carry `work_item_types: ["bug","feature","task",
-  "chore","epic"]`, so they are hidden on non-code types (e.g. `podcast`,
-  `docs`). All other bundled shortcuts (audit `a-*`, producer review `r`,
-  housekeeping `u-*`/`x-*`/`c`/`s`/`P-*`/`f-*`) remain untyped and are
+  and `i` (implement) carry `work_item_types: ["bug","docs","feature",
+  "task","chore","epic"]`, so they are hidden on non-code and non-docs types
+  (e.g. `podcast`). All other bundled shortcuts (audit `a-*`, producer review
+  `r`, housekeeping `u-*`/`x-*`/`c`/`s`/`P-*`/`f-*`) remain untyped and are
   available on all types. Consumer projects can add their own type-gated
   chords (e.g. a `w` chord leader → `wiki-podcast-script` for `podcast`
   items) via the project-local `shortcuts.json` mechanism above.

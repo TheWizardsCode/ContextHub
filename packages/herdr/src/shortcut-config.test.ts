@@ -118,9 +118,9 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     expect(entry?.command).toBe('/skill:implement <id>');
   });
 
-  it('restricts the bundled code-workflow chords n/p/i to code issue types', () => {
+  it('restricts the bundled code-workflow chords n/p/i to code and docs issue types', () => {
     const registry = loadShortcutConfig();
-    const codeTypes = ['bug', 'feature', 'task', 'chore', 'epic'];
+    const codeTypes = ['bug', 'docs', 'feature', 'task', 'chore', 'epic'];
     for (const chord of ['n', 'p', 'i']) {
       const entry = registry.lookupChordEntry([chord], 'list');
       expect(entry?.workItemTypes).toEqual(codeTypes);
@@ -332,7 +332,7 @@ describe('ShortcutRegistry — issue-type filtering', () => {
     command: '/skill:implement <id>',
     view: 'both',
     label: 'implement',
-    workItemTypes: ['bug', 'feature', 'task', 'chore', 'epic'],
+    workItemTypes: ['bug', 'docs', 'feature', 'task', 'chore', 'epic'],
   };
 
   const untypedEntry: ShortcutEntry = {
@@ -354,12 +354,11 @@ describe('ShortcutRegistry — issue-type filtering', () => {
     expect(registry.lookupChord(['w'], 'list', undefined, false, 'docs')).toBeUndefined();
   });
 
-  it('resolves a code-gated chord only for code item types', () => {
-    for (const t of ['bug', 'feature', 'task', 'chore', 'epic']) {
+  it('resolves a code-gated chord only for code and docs item types', () => {
+    for (const t of ['bug', 'docs', 'feature', 'task', 'chore', 'epic']) {
       expect(registry.lookupChord(['i'], 'list', undefined, false, t)).toBe('/skill:implement <id>');
     }
     expect(registry.lookupChord(['i'], 'list', undefined, false, 'podcast')).toBeUndefined();
-    expect(registry.lookupChord(['i'], 'list', undefined, false, 'docs')).toBeUndefined();
   });
 
   it('keeps untyped chords available on every type', () => {

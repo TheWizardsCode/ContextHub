@@ -920,10 +920,10 @@ describe('issue-type shortcut filtering — worklist integration', () => {
     registry = loadShortcutConfig();
   });
 
-  it('treats i as a chord leader only for code item types', () => {
+  it('treats i as a chord leader only for code and docs item types', () => {
     expect(isChordLeader('i', registry, false, 'feature')).toBe(true);
+    expect(isChordLeader('i', registry, false, 'docs')).toBe(true);
     expect(isChordLeader('i', registry, false, 'podcast')).toBe(false);
-    expect(isChordLeader('i', registry, false, 'docs')).toBe(false);
   });
 
   it('treats n and p as chord leaders only for code item types', () => {
