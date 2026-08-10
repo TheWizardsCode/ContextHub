@@ -46,8 +46,11 @@ import {
   spawnDowntimePane,
   parseNextItemOutput,
   parseAuditCandidatesOutput,
+  parseImplementCandidatesOutput,
   selectAuditCandidate,
+  selectImplementCandidate,
   toDowntimeCandidate,
+  toImplementCandidate,
   skillKindFromPrompt,
   type DowntimeWorker,
   type DowntimeWorkerDeps,
@@ -61,7 +64,12 @@ import {
   buildDowntimeDispatchComment,
   DOWNTIME_WL_TIMEOUT_MS,
 } from './downtime-worker.js';
-import { appendDowntimeLogEntry, auditDispatchedItemIds, readDowntimeLogEntries } from './downtime-log.js';
+import {
+  appendDowntimeLogEntry,
+  auditDispatchedItemIds,
+  implementDispatchedItemIds,
+  readDowntimeLogEntries,
+} from './downtime-log.js';
 
 // Resolve path to the send-to-pi.sh script (relative to this source file)
 // At runtime (tsx or dist), __dirname equivalent from import.meta.url
@@ -387,6 +395,51 @@ export function createDowntimeDeps(
         const dispatchedAuditIds = auditDispatchedItemIds(entries);
         const selected = selectAuditCandidate(candidates, Date.now(), dispatchedAuditIds);
         return selected === null ? null : toDowntimeCandidate(selected);
+      } catch {
+        // Fail-closed: a wl failure yields no candidate (no dispatch).
+        return null;
+      }
+    },
+    async getNextImplementCandidate(cwd: string): Promise<DowntimeCandidate | null> {
+      try {
+        // Implement tier (WL-0MSMAYPQP001FLR6): select the highest-priority
+        // open plan_complete item with risk Low / effort Small|XS. The wl
+        // next server-side at-most filters (--risk low --effort small,
+        // delivered by WL-0MSMAIP5F003WAGG) do the heavy lifting; a
+        // generous batch (-n 10) is fetched so completed epics (which wl
+        // next keeps under a stage filter) can be filtered out client-side
+        // without starving selection. The bounded timeout
+        // (WL-0MSJIPHD0001L1J9) kills a hung wl child. Fail-closed: a wl
+        // failure yields no candidate (no dispatch) and never short-circuits
+        // the plan/intake fallback (AC6).
+        const { stdout } = await getExecFileAsync()(
+          'wl',
+          buildWlArgs([
+            'next',
+            '--stage',
+            'plan_complete',
+            '--risk',
+            'low',
+            '--effort',
+            'small',
+            '-n',
+            '10',
+            '--json',
+          ]),
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+        );
+        const candidates = parseImplementCandidatesOutput(stdout);
+        if (candidates === null) return null;
+        // Dispatched-marker exclusion (AC6): read the shared rolling
+        // dispatch log for THIS worklog root and exclude any candidate the
+        // downtime worker has already dispatched for /skill:implement
+        // (kind implement markers). Fail-safe: readDowntimeLogEntries never
+        // throws — a missing or unreadable log is treated as empty, so
+        // implement-tier dispatch still works on a fresh worklog.
+        const entries = await readDowntimeLogEntries(cwd);
+        const dispatchedImplementIds = implementDispatchedItemIds(entries);
+        const selected = selectImplementCandidate(candidates, dispatchedImplementIds);
+        return selected === null ? null : toImplementCandidate(selected);
       } catch {
         // Fail-closed: a wl failure yields no candidate (no dispatch).
         return null;

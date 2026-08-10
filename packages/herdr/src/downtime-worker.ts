@@ -16,7 +16,10 @@
  *    threshold).
  *  - `dispatchDowntimeWork` — dispatch orchestration: completed/in_review
  *    items without a valid audit (modified within the last 7 days) →
- *    `/skill:audit <id>` (audit tier, WL-0MSI8H3HP000K0RG), then `wl next --stage intake_complete` →
+ *    `/skill:audit <id>` (audit tier, WL-0MSI8H3HP000K0RG), then the
+ *    implement tier (WL-0MSMAYPQP001FLR6): the highest-priority open
+ *    plan_complete item with risk Low / effort Small|XS →
+ *    `/skill:implement <id>`, then `wl next --stage intake_complete` →
  *    `/skill:plan <id>`, fallback `--stage idea` → `/skill:intake <id>`,
  *    pre-dispatch claim, per-process single-flight. The audit tier
  *    additionally excludes items the downtime worker has already dispatched
@@ -389,13 +392,30 @@ export function createDowntimePoller(
 
 // ── Dispatch (implemented — F3) ───────────────────────────────────────
 
-export type DowntimeStage = 'intake_complete' | 'idea' | 'audit';
-export type DowntimeSkillKind = 'plan' | 'intake' | 'audit';
+export type DowntimeStage = 'intake_complete' | 'idea' | 'audit' | 'implement';
+export type DowntimeSkillKind = 'plan' | 'intake' | 'audit' | 'implement';
 
 export interface DowntimeCandidate {
   id: string;
   title: string;
   stage: DowntimeStage;
+}
+
+/**
+ * A candidate for the implement tier, parsed from
+ * `wl next --stage plan_complete --risk low --effort small -n N --json`.
+ * The `status` field distinguishes open items from completed epics that
+ * `wl next` keeps under a stage filter (the implement tier must filter
+ * client-side to `status === 'open'`, AC2). `sortIndex` preserves wl next's
+ * priority order for deterministic selection.
+ */
+export interface ImplementCandidate {
+  id: string;
+  title: string;
+  status: string;
+  risk?: string;
+  effort?: string;
+  sortIndex?: number;
 }
 
 /**
@@ -438,6 +458,16 @@ export interface DowntimeWorkerDeps {
    * they still lack a fresh audit.
    */
   getNextAuditCandidate(cwd: string): Promise<DowntimeCandidate | null>;
+  /**
+   * Look up the next implement-tier candidate (WL-0MSMAYPQP001FLR6): the
+   * highest-priority open plan_complete item with risk Low / effort Small|XS,
+   * excluding dependency-blocked items (wl next default) and items already
+   * dispatched for `/skill:implement` (kind `implement` dispatched markers,
+   * AC6). Fail-closed: a wl failure yields null (no dispatch) — the
+   * plan/intake fallback still runs. `cwd` is the worklog root whose
+   * `.worklog/downtime-dispatches.log` is consulted for the marker set.
+   */
+  getNextImplementCandidate(cwd: string): Promise<DowntimeCandidate | null>;
   /** Claims the item (`wl update <id> --status in_progress`) before dispatch. */
   claimItem(itemId: string): Promise<void>;
   /** Opens a visible pi agent pane running the prompt (via send-to-pi.sh). */
@@ -498,9 +528,13 @@ let dispatchInFlight = false;
  * WL-0MSI8H3HP000K0RG): a completed/in_review item WITHOUT a valid audit AND
  * NOT already dispatched for audit by this worker →
  * `/skill:audit <id>` (the dispatched-marker exclusion,
- * WL-0MSLIY8ZR004QUSY, is applied by `deps.getNextAuditCandidate`); if none, `wl next --stage intake_complete` →
+ * WL-0MSLIY8ZR004QUSY, is applied by `deps.getNextAuditCandidate`); then the
+ * implement tier (WL-0MSMAYPQP001FLR6): the highest-priority open
+ * plan_complete item with risk Low / effort Small|XS → `/skill:implement <id>`
+ * (fail-closed null on wl error or no candidate — never short-circuits the
+ * fallback, AC5/AC6); if none, `wl next --stage intake_complete` →
  * `/skill:plan <id>`; if none, `wl next --stage idea` → `/skill:intake <id>`;
- * if all three are empty, no dispatch. A CLI error at the intake_complete
+ * if all four are empty, no dispatch. A CLI error at the intake_complete
  * tier does NOT short-circuit: the idea tier is still attempted, so a
  * tier-3 candidate can still dispatch. A `wl-error` outcome (any CLI
  * failure) is never a candidate and never a `no-candidate`; the caller's
@@ -526,6 +560,19 @@ export async function dispatchDowntimeWork(
       await deps.spawnAgentPane(buildDowntimePrompt('audit', auditCandidate), opts);
       await recordDispatchAudit(deps, 'audit', auditCandidate, opts.cwd);
       return { dispatched: true, candidate: auditCandidate, kind: 'audit' };
+    }
+    // Implement tier (WL-0MSMAYPQP001FLR6): after the audit gate, dispatch
+    // /skill:implement for the highest-priority open plan_complete item with
+    // risk Low / effort Small|XS. getNextImplementCandidate is fail-closed
+    // (null on wl failure or no candidate), so a null here means the tier is
+    // exhausted and the plan/intake tiers below still run (AC5/AC6 — a wl
+    // error at the implement tier does NOT short-circuit the fallback).
+    const implementCandidate = await deps.getNextImplementCandidate(opts.cwd);
+    if (implementCandidate !== null) {
+      await deps.claimItem(implementCandidate.id);
+      await deps.spawnAgentPane(buildDowntimePrompt('implement', implementCandidate), opts);
+      await recordDispatchAudit(deps, 'implement', implementCandidate, opts.cwd);
+      return { dispatched: true, candidate: implementCandidate, kind: 'implement' };
     }
     // Tier 2 (intake_complete → /skill:plan). A CLI error here does NOT
     // short-circuit: tier 3 is still attempted so a tier-3 candidate can
@@ -855,7 +902,11 @@ export const BLOCKED_QUESTIONS_INSTRUCTION =
 
 /** Build the prompt dispatched to a pi agent pane for the given candidate. */
 export function buildDowntimePrompt(kind: DowntimeSkillKind, candidate: DowntimeCandidate): string {
-  const skill = kind === 'plan' ? '/skill:plan' : kind === 'audit' ? '/skill:audit' : '/skill:intake';
+  const skill =
+    kind === 'plan' ? '/skill:plan'
+    : kind === 'audit' ? '/skill:audit'
+    : kind === 'implement' ? '/skill:implement'
+    : '/skill:intake';
   return [
     `Run ${skill} ${candidate.id} — ${candidate.title}.`,
     BLOCKED_QUESTIONS_INSTRUCTION,
@@ -874,7 +925,11 @@ export function buildDowntimeDispatchComment(
   dispatchedAt: string,
   title?: string,
 ): string {
-  const skill = kind === 'plan' ? '/skill:plan' : kind === 'audit' ? '/skill:audit' : '/skill:intake';
+  const skill =
+    kind === 'plan' ? '/skill:plan'
+    : kind === 'audit' ? '/skill:audit'
+    : kind === 'implement' ? '/skill:implement'
+    : '/skill:intake';
   const suffix = title ? ` (${title.replace(/[\r\n]+/g, ' ')})` : '';
   return `Auto-dispatched by the herdr downtime worker at ${dispatchedAt} — running ${skill} ${itemId}${suffix}.`;
 }
@@ -906,10 +961,12 @@ export function parseNextItemOutput(stdout: string, stage: DowntimeStage): Downt
 
 /**
  * Derive the dispatch kind from a prompt built by `buildDowntimePrompt`
- * (the pane name is `Downtime plan` / `Downtime intake` / `Downtime audit`).
+ * (the pane name is `Downtime plan` / `Downtime intake` / `Downtime audit` /
+ * `Downtime implement`).
  */
 export function skillKindFromPrompt(prompt: string): DowntimeSkillKind {
   if (prompt.includes('/skill:audit ')) return 'audit';
+  if (prompt.includes('/skill:implement ')) return 'implement';
   return prompt.includes('/skill:plan ') ? 'plan' : 'intake';
 }
 
@@ -1001,6 +1058,131 @@ export function selectAuditCandidate(
  */
 export function toDowntimeCandidate(candidate: AuditCandidate): DowntimeCandidate {
   return { id: candidate.id, title: candidate.title, stage: 'audit' };
+}
+
+// ── Implement-tier selection (WL-0MSMAYPQP001FLR6) ───────────────────
+
+/**
+ * Ordinal rank of a risk level on the canonical scale
+ * (Low < Medium < High < Severe/Critical), mirroring the wl next DB filter
+ * semantics (packages/shared riskOrdinal) for the belt-and-suspenders
+ * client-side guard. Unset/unknown values map to null (fail-closed).
+ */
+function riskOrdinal(risk: string | undefined | null): number | null {
+  switch ((risk ?? '').trim().toLowerCase()) {
+    case 'low': return 1;
+    case 'medium': return 2;
+    case 'high': return 3;
+    case 'severe':
+    case 'critical': return 4;
+    default: return null;
+  }
+}
+
+/**
+ * Ordinal rank of an effort level on the canonical scale
+ * (Extra Small < Small < Medium < Large < Extra Large), mirroring the wl
+ * next DB filter semantics (packages/shared effortOrdinal). Accepts both
+ * the short CLI spellings (XS/S/M/L/XL) and long-form spellings,
+ * normalized case-insensitively. Unset/unknown values map to null
+ * (fail-closed).
+ */
+function effortOrdinal(effort: string | undefined | null): number | null {
+  switch ((effort ?? '').trim().toLowerCase().replace(/[\s-]+/g, '')) {
+    case 'xs':
+    case 'extrasmall': return 1;
+    case 's':
+    case 'small': return 2;
+    case 'm':
+    case 'medium': return 3;
+    case 'l':
+    case 'large': return 4;
+    case 'xl':
+    case 'extralarge': return 5;
+    default: return null;
+  }
+}
+
+/**
+ * Parse the stdout of `wl next --stage plan_complete --risk low --effort
+ * small -n N --json` into typed implement candidates. Accepts the
+ * `{ workItems: [{ workItem: {...} }] }` shape the CLI emits for a batch
+ * (`-n N`); entries without an id are skipped. Malformed JSON or output
+ * without a workItems list yields null (fail-closed); an empty list yields
+ * `[]` (a genuine empty backlog).
+ */
+export function parseImplementCandidatesOutput(stdout: string): ImplementCandidate[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  const items =
+    parsed !== null &&
+    typeof parsed === 'object' &&
+    Array.isArray((parsed as { workItems?: unknown }).workItems)
+      ? (parsed as { workItems: unknown[] }).workItems
+      : null;
+  if (items === null) return null;
+
+  const candidates: ImplementCandidate[] = [];
+  for (const raw of items) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const entry = raw as { workItem?: Record<string, unknown> };
+    const o = entry.workItem;
+    if (typeof o !== 'object' || o === null) continue;
+    if (typeof o.id !== 'string' || o.id.length === 0) continue;
+    candidates.push({
+      id: o.id,
+      title: typeof o.title === 'string' ? o.title : '',
+      status: typeof o.status === 'string' ? o.status : '',
+      risk: typeof o.risk === 'string' ? o.risk : undefined,
+      effort: typeof o.effort === 'string' ? o.effort : undefined,
+      sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
+    });
+  }
+  return candidates;
+}
+
+/**
+ * Select the next implement candidate from parsed wl next output: the
+ * first candidate that is open (`status === 'open'`, AC2), carries risk
+ * exactly Low and effort Small/Extra Small (AC1 threshold boundaries,
+ * fail-closed on unset/unknown), is not in the dispatched-marker set
+ * (kind `implement`, AC6), sorted ascending by `sortIndex` (wl next
+ * priority order preserved). Returns null when no candidate qualifies
+ * (or the list is empty).
+ *
+ * Belt-and-suspenders client-side guard (AC1): even though `wl next
+ * --risk low --effort small` filters server-side, the herdr tier verifies
+ * the thresholds again so a malformed/absent server filter can never
+ * dispatch a Medium+/Large+ item.
+ */
+export function selectImplementCandidate(
+  candidates: ImplementCandidate[],
+  dispatchedItemIds?: ReadonlySet<string>,
+): ImplementCandidate | null {
+  const target = candidates
+    .filter((c) => c.status === 'open')
+    .filter((c) => {
+      const risk = riskOrdinal(c.risk);
+      if (risk === null || risk !== 1) return false; // only risk exactly Low
+      const effort = effortOrdinal(c.effort);
+      if (effort === null || effort > 2) return false; // Small (2) + Extra Small (1)
+      return true;
+    })
+    .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
+    .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
+  return target[0] ?? null;
+}
+
+/**
+ * Turn a parsed implement candidate into a dispatachable `DowntimeCandidate`
+ * (stage `implement`) for the implement tier.
+ */
+export function toImplementCandidate(candidate: ImplementCandidate): DowntimeCandidate {
+  return { id: candidate.id, title: candidate.title, stage: 'implement' };
 }
 
 // ── Settings clamps (implemented — wired into settings.ts by F2) ──────

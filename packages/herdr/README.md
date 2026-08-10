@@ -182,9 +182,12 @@ Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings in
 When the local LLM (llama-server behind the llama-proxy) is idle, the plugin
 can use that compute to advance the worklog backlog automatically: after the
 proxy reports idle continuously for the configured threshold, it opens a
-visible (non-focus-stealing) pi agent pane. Dispatch priority (WL-0MSI8H3HP000K0RG):
+visible (non-focus-stealing) pi agent pane. Dispatch priority
+(WL-0MSI8H3HP000K0RG, WL-0MSMAYPQP001FLR6):
 first a completed/in_review item **without a valid audit** → `/skill:audit
-<id>`; else `/skill:plan` on the next `intake_complete` item; else falls back
+<id>`; else the highest-priority open `plan_complete` item with risk `Low`
+and effort `Small`/`Extra Small` → `/skill:implement <id>`; else
+`/skill:plan` on the next `intake_complete` item; else falls back
 to `/skill:intake` on the next `idea` item (parent WL-0MSF49FMW009M06K).
 
 A "valid" audit is defined by the review-icon freshness rule: the audit is
@@ -251,19 +254,35 @@ fresh worklog.
 
 If none, it runs `wl next --stage intake_complete
 --json` and dispatches `/skill:plan <id>`; if no such item it runs `wl next
---stage idea --json` and dispatches `/skill:intake <id>`; if all three are
+--stage idea --json` and dispatches `/skill:intake <id>`; if all four are
 empty nothing is dispatched. A `wl`/CLI error on the `intake_complete` lookup
 does **not** skip the `idea` lookup — a tier-3 candidate can still dispatch.
 The item is claimed (`wl update <id> --status in_progress`) *before* the pane
 spawns, so it appears in-progress immediately and a second pane's `wl next`
-cannot select it. Panes are named `Downtime audit` / `Downtime plan` /
+cannot select it. Panes are named `Downtime audit` / `Downtime implement` /
+`Downtime plan` /
 `Downtime intake`, opened
 with `--no-focus` (visible, never steals focus), `--cwd <worklog root>` and
 `--model <downtimeModel>`.
 
-**Empty-backlog cooldown** — when **both** `wl next` lookups genuinely return
-no candidate (the tab's project has nothing to dispatch), the worker enters a
-full **pause** for `downtimeNoCandidateCooldownMs` (default 60 minutes): no
+**Implement tier (WL-0MSMAYPQP001FLR6)** — after the audit tier, the worker
+runs `wl next --stage plan_complete --risk low --effort small -n 10 --json`
+and selects the first candidate that is `status: open` (wl next keeps
+completed epics under a stage filter — the implement tier filters them out
+client-side), re-verifying the risk/effort thresholds fail-closed (only risk
+exactly `Low`; effort `Small`/`Extra Small`/`XS`; unset values never match),
+and excluding items already dispatched for `/skill:implement` (a `kind:
+implement` entry in `.worklog/downtime-dispatches.log` — AC6 dispatched-
+marker exclusion, same pattern as the audit tier). Dependency-blocked items
+are excluded by `wl next` itself. Dispatch is `/skill:implement <id>` (pane
+named `Downtime implement`). A `wl`/CLI error or empty result at the
+implement tier is fail-closed (never a candidate) and does **not**
+short-circuit the plan/intake fallback (AC5/AC6).
+
+**Empty-backlog cooldown** — when the implement, plan, and intake `wl next`
+lookups genuinely return no candidate (the tab's project has nothing to
+dispatch), the worker enters a full **pause** for `downtimeNoCandidateCooldownMs`
+(default 60 minutes): no
 proxy polling, no idle tracking, and no dispatch until the pause expires — so
 it stops burning cycles (proxy polling + `wl` spawns) during empty periods.
 Only a *genuine* empty backlog triggers the pause: transient `wl`/CLI errors

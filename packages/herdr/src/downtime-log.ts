@@ -93,6 +93,24 @@ export function auditDispatchedItemIds(entries: DowntimeLogEntry[]): Set<string>
 }
 
 /**
+ * Build the set of itemIds the downtime worker has already dispatched for
+ * `/skill:implement` (`kind === 'implement'` entries only). Audit/plan/
+ * intake markers are scoped to their own tiers and must NOT suppress
+ * implement-tier selection (implement-tier-only scope guard,
+ * WL-0MSMAYPQP001FLR6 AC6). Entries without an itemId (e.g. persistent-error
+ * events) are ignored.
+ */
+export function implementDispatchedItemIds(entries: DowntimeLogEntry[]): Set<string> {
+  const ids = new Set<string>();
+  for (const e of entries) {
+    if (e.kind === 'implement' && typeof e.itemId === 'string' && e.itemId.length > 0) {
+      ids.add(e.itemId);
+    }
+  }
+  return ids;
+}
+
+/**
  * Append one entry (a JSONL line) to `<cwd>/.worklog/downtime-dispatches.log`,
  * creating the `.worklog` directory if needed and trimming the file back to
  * the most recent DOWNTIME_LOG_MAX_ENTRIES entries. Throws on I/O failure —
