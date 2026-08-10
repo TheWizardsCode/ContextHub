@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import {
   appendDowntimeLogEntry,
   auditDispatchedItemIds,
+  implementDispatchedItemIds,
   readDowntimeLogEntries,
   DOWNTIME_LOG_FILE,
   DOWNTIME_LOG_MAX_ENTRIES,
@@ -129,5 +130,30 @@ describe('auditDispatchedItemIds (audit-tier-only scope guard)', () => {
 
   it('returns an empty set for empty input', () => {
     expect([...auditDispatchedItemIds([])]).toEqual([]);
+  });
+});
+
+describe('implementDispatchedItemIds (implement-tier-only scope guard)', () => {
+  it('collects only implement-kind entries that carry an itemId', () => {
+    const ids = implementDispatchedItemIds([
+      { itemId: 'WL-A', kind: 'implement' },
+      { itemId: 'WL-B', kind: 'plan' },
+      { itemId: 'WL-C', kind: 'audit' },
+      { kind: 'implement' }, // error-style entry without itemId → ignored
+      { itemId: 'WL-D', kind: 'implement' },
+    ]);
+    expect([...ids].sort()).toEqual(['WL-A', 'WL-D']);
+  });
+
+  it('does not collect audit markers (implement tier is scoped to kind implement only)', () => {
+    const ids = implementDispatchedItemIds([
+      { itemId: 'WL-AUD', kind: 'audit' },
+      { itemId: 'WL-IMP', kind: 'implement' },
+    ]);
+    expect([...ids]).toEqual(['WL-IMP']);
+  });
+
+  it('returns an empty set for empty input', () => {
+    expect([...implementDispatchedItemIds([])]).toEqual([]);
   });
 });

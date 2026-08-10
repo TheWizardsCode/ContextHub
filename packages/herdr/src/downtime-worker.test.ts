@@ -11,6 +11,13 @@
  * and fail-closed parsing from WL-0MSG80254005ZNE9, and the idle tracker,
  * dispatch orchestration, pane spawn and worker orchestrator from
  * WL-0MSG80AG700429M8).
+ *
+ * Implement-tier tests (WL-0MSMAYIKX005LLO4): test-first matrix for the
+ * implement dispatch tier — dispatch priority (audit → implement → plan →
+ * intake), status=open client-side filter, dispatched-marker exclusion,
+ * parseImplementCandidatesOutput / selectImplementCandidate, and
+ * implement prompt/pane helpers. Red phase: these fail until the implement
+ * tier lands (WL-0MSMAYPQP001FLR6).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -29,6 +36,8 @@ import {
   buildDowntimeSpawnOptions,
   BLOCKED_QUESTIONS_INSTRUCTION,
   parseNextItemOutput,
+  parseImplementCandidatesOutput,
+  selectImplementCandidate,
   parseAuditCandidatesOutput,
   selectAuditCandidate,
   toDowntimeCandidate,
@@ -49,6 +58,7 @@ import {
   type DowntimeWorkerDeps,
   type DowntimeSpawn,
   type AuditCandidate,
+  type ImplementCandidate,
 } from './downtime-worker.js';
 import {
   statusFixtures,
@@ -66,6 +76,7 @@ function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
   return {
     getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
     getNextAuditCandidate: vi.fn().mockResolvedValue(null),
+    getNextImplementCandidate: vi.fn().mockResolvedValue(null),
     claimItem: vi.fn().mockResolvedValue(undefined),
     spawnAgentPane: vi.fn().mockResolvedValue(undefined),
     recordDispatch: vi.fn().mockResolvedValue(undefined),
@@ -412,6 +423,317 @@ describe('dispatch audit tier', () => {
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('no-candidate');
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+});
+
+// ── Implement dispatch tier (WL-0MSMAYIKX005LLO4) ────────────────────
+
+describe('dispatch implement tier', () => {
+  const implementCandidate: DowntimeCandidate = {
+    id: 'WL-IMP',
+    title: 'Implement me',
+    stage: 'implement',
+  };
+
+  it('dispatches /skill:implement on the implement candidate after the audit tier', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue(null),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.candidate?.id).toBe('WL-IMP');
+    expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
+    expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
+    expect(deps.getNextImplementCandidate).toHaveBeenCalledWith('/repo');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-IMP');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:implement WL-IMP'),
+      { model: 'plan', cwd: '/repo' },
+    );
+  });
+
+  it('records the implement dispatch with kind implement', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue(null),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    const event = (deps.recordDispatch as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(event.itemId).toBe('WL-IMP');
+    expect(event.kind).toBe('implement');
+    expect(event.cwd).toBe('/repo');
+  });
+
+  it('dispatch priority is audit → implement → plan → intake (audit stays first)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ id: 'WL-AUD', title: 'Audit me', stage: 'audit' }),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: { id: 'WL-PLN', title: 'Plan me', stage: 'intake_complete' } }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // Audit wins — the implement tier is never consulted when an audit
+    // candidate exists (audit is the release gate).
+    expect(outcome.kind).toBe('audit');
+    expect(deps.getNextImplementCandidate).not.toHaveBeenCalled();
+    expect(deps.getNextItem).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the implement tier when no audit candidate exists, and audit runs first', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue(null),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.kind).toBe('implement');
+    expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
+    expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
+    expect(deps.getNextItem).not.toHaveBeenCalled();
+  });
+
+  it('falls back to plan (intake_complete) when no implement candidate exists', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue(null),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+      getNextItem: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-PLN', title: 'Plan me', stage: 'intake_complete' } }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.kind).toBe('plan');
+    expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
+    expect(deps.getNextItem).toHaveBeenCalledTimes(1);
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
+  });
+
+  it('falls back to intake (idea) when no implement or plan candidate exists', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue(null),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+      getNextItem: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, candidate: null }) // intake_complete empty
+        .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-IDE', title: 'An idea', stage: 'idea' } }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.kind).toBe('intake');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea');
+  });
+
+  it('a wl next CLI error at the implement tier does NOT short-circuit the plan/intake fallback', async () => {
+    // Mirrors the tier-2 (intake_complete) error handling: getNextImplementCandidate
+    // is fail-closed at the deps boundary (a wl failure yields null), so the
+    // plan/intake tiers still run. The implement tier itself never signals a
+    // hard error — null IS the fail-closed shape (AC6).
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue(null),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(null), // wl error → null
+      getNextItem: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-PLN', title: 'Plan me', stage: 'intake_complete' } }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.kind).toBe('plan');
+    expect(deps.getNextItem).toHaveBeenCalled();
+  });
+
+  it('no-candidate when all tiers (audit, implement, plan, intake) are empty', async () => {
+    const deps = makeDeps(); // all four tiers empty
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('no-candidate');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
+    expect(deps.getNextItem).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ── Implement candidate selection (WL-0MSMAYIKX005LLO4) ──────────────
+
+describe('implement selection (selectImplementCandidate)', () => {
+  const open: ImplementCandidate = {
+    id: 'WL-OPEN',
+    title: 'open item',
+    status: 'open',
+    risk: 'low',
+    effort: 'small',
+    sortIndex: 100,
+  };
+  const completed: ImplementCandidate = {
+    id: 'WL-DONE',
+    title: 'completed item',
+    status: 'completed',
+    risk: 'low',
+    effort: 'small',
+    sortIndex: 200,
+  };
+
+  it('selects the first open candidate in wl next priority order (ascending sortIndex)', () => {
+    expect(selectImplementCandidate([open, completed])?.id).toBe('WL-OPEN');
+  });
+
+  it('excludes completed candidates (status=open client-side filter, AC2)', () => {
+    expect(selectImplementCandidate([completed, { ...open, id: 'WL-OPEN2', sortIndex: 300 }])?.id).toBe('WL-OPEN2');
+  });
+
+  it('returns null when no open candidate exists', () => {
+    expect(selectImplementCandidate([completed])).toBeNull();
+  });
+
+  it('returns null on an empty list', () => {
+    expect(selectImplementCandidate([])).toBeNull();
+  });
+
+  it('sorts ascending by sortIndex (wl next priority order preserved)', () => {
+    const low = { ...open, id: 'WL-LOW', sortIndex: 50 };
+    const high = { ...open, id: 'WL-HIGH', sortIndex: 900 };
+    expect(selectImplementCandidate([high, low])?.id).toBe('WL-LOW');
+  });
+
+  it('excludes candidates present in the dispatched marker set (kind implement)', () => {
+    const dispatched = new Set(['WL-DUP']);
+    const dup = { ...open, id: 'WL-DUP', sortIndex: 10 };
+    const fresh = { ...open, id: 'WL-FRESH', sortIndex: 20 };
+    expect(selectImplementCandidate([dup, fresh], dispatched)?.id).toBe('WL-FRESH');
+  });
+
+  it('an empty dispatched set is a no-op', () => {
+    expect(selectImplementCandidate([open], new Set())?.id).toBe('WL-OPEN');
+  });
+
+  // ── Risk/effort threshold boundaries (AC1) ──────────────────────────
+  // Belt-and-suspenders client-side guard: even though `wl next --risk low
+  // --effort small` filters server-side, the herdr tier verifies the
+  // thresholds again so a malformed/absent server filter can never dispatch
+  // a Medium+/Large+ item (fail-closed).
+
+  it('only risk exactly Low is eligible (Medium/High/Critical excluded)', () => {
+    const medium = { ...open, id: 'WL-MED', risk: 'medium' as const };
+    const high = { ...open, id: 'WL-HIGH-R', risk: 'high' as const };
+    const critical = { ...open, id: 'WL-CRIT', risk: 'critical' as const };
+    expect(selectImplementCandidate([medium, high, critical, open])?.id).toBe('WL-OPEN');
+    expect(selectImplementCandidate([medium])).toBeNull();
+    expect(selectImplementCandidate([high])).toBeNull();
+    expect(selectImplementCandidate([critical])).toBeNull();
+  });
+
+  it('effort Small and Extra Small eligible (Medium/Large/Extra Large excluded)', () => {
+    const xs = { ...open, id: 'WL-XS', effort: 'xs' as const };
+    const medium = { ...open, id: 'WL-MED-E', effort: 'medium' as const };
+    const large = { ...open, id: 'WL-LARGE', effort: 'large' as const };
+    const xl = { ...open, id: 'WL-XL', effort: 'xl' as const };
+    expect(selectImplementCandidate([medium, large, xl, open])?.id).toBe('WL-OPEN');
+    expect(selectImplementCandidate([xs])?.id).toBe('WL-XS');
+    expect(selectImplementCandidate([medium])).toBeNull();
+    expect(selectImplementCandidate([large])).toBeNull();
+    expect(selectImplementCandidate([xl])).toBeNull();
+  });
+
+  it('unset/empty risk or effort items are excluded (fail-closed)', () => {
+    const noRisk = { ...open, id: 'WL-NORISK', risk: undefined };
+    const noEffort = { ...open, id: 'WL-NOEFFORT', effort: undefined };
+    expect(selectImplementCandidate([noRisk, open])?.id).toBe('WL-OPEN');
+    expect(selectImplementCandidate([noEffort, open])?.id).toBe('WL-OPEN');
+    expect(selectImplementCandidate([noRisk])).toBeNull();
+    expect(selectImplementCandidate([noEffort])).toBeNull();
+  });
+
+  it('recognizes long-form effort spellings (Small / Extra Small)', () => {
+    const small = { ...open, id: 'WL-S', effort: 'Small' as const };
+    const extraSmall = { ...open, id: 'WL-ES', effort: 'Extra Small' as const };
+    expect(selectImplementCandidate([small])?.id).toBe('WL-S');
+    expect(selectImplementCandidate([extraSmall])?.id).toBe('WL-ES');
+  });
+});
+
+describe('parseImplementCandidatesOutput', () => {
+  it('parses the wl next -n N { workItems: [{ workItem }] } shape', () => {
+    const stdout = JSON.stringify({
+      success: true,
+      count: 2,
+      requested: 10,
+      results: [
+        { workItem: { id: 'WL-A', title: 'A', status: 'open', risk: 'low', effort: 'small' } },
+        { workItem: { id: 'WL-B', title: 'B', status: 'open', risk: 'low', effort: 'xs' } },
+      ],
+      workItems: [
+        { workItem: { id: 'WL-A', title: 'A', status: 'open', risk: 'low', effort: 'small' } },
+        { workItem: { id: 'WL-B', title: 'B', status: 'open', risk: 'low', effort: 'xs' } },
+      ],
+    });
+    const parsed = parseImplementCandidatesOutput(stdout);
+    expect(parsed).not.toBeNull();
+    expect(parsed).toHaveLength(2);
+    expect(parsed?.[0]).toMatchObject({ id: 'WL-A', status: 'open', risk: 'low', effort: 'small' });
+    expect(parsed?.[1]).toMatchObject({ id: 'WL-B', status: 'open', effort: 'xs' });
+  });
+
+  it('fails closed (null) on malformed JSON', () => {
+    expect(parseImplementCandidatesOutput('not json')).toBeNull();
+  });
+
+  it('fails closed (null) on output without a workItems list', () => {
+    expect(parseImplementCandidatesOutput(JSON.stringify({ success: true }))).toBeNull();
+  });
+
+  it('returns an empty array for an empty workItems list', () => {
+    expect(parseImplementCandidatesOutput(JSON.stringify({ success: true, count: 0, workItems: [] }))).toEqual([]);
+  });
+
+  it('skips entries without an id but keeps valid ones', () => {
+    const stdout = JSON.stringify({
+      success: true,
+      workItems: [{ workItem: { title: 'no id' } }, { workItem: { id: 'WL-OK', title: 'ok' } }],
+    });
+    const parsed = parseImplementCandidatesOutput(stdout);
+    expect(parsed?.length).toBe(1);
+    expect(parsed?.[0].id).toBe('WL-OK');
+  });
+});
+
+describe('implement prompt & pane helpers', () => {
+  const candidate: DowntimeCandidate = { id: 'WL-IMP', title: 'Implement me', stage: 'implement' };
+
+  it('builds an /skill:implement prompt', () => {
+    const prompt = buildDowntimePrompt('implement', candidate);
+    expect(prompt).toContain('/skill:implement WL-IMP');
+  });
+
+  it('builds a Downtime implement pane name', () => {
+    const args = buildDowntimePaneArgs('implement', 'Run /skill:implement WL-IMP — Implement me.', {
+      model: 'plan',
+      cwd: '/repo',
+    });
+    expect(args).toContain('Downtime implement');
+    expect(args).toContain('--no-focus');
+  });
+
+  it('skillKindFromPrompt detects an implement prompt', () => {
+    expect(skillKindFromPrompt('Run /skill:implement WL-IMP — x.')).toBe('implement');
+  });
+
+  it('buildDowntimeDispatchComment renders /skill:implement', () => {
+    const comment = buildDowntimeDispatchComment('WL-IMP', 'implement', '2026-01-01T00:00:00.000Z');
+    expect(comment).toContain('/skill:implement WL-IMP');
   });
 });
 

@@ -834,6 +834,189 @@ describe('createDowntimeDeps', () => {
     expect(result).toEqual({ id: 'WL-OK', title: 'ok item', stage: 'audit' });
   });
 
+  it('getNextImplementCandidate runs wl next plan_complete risk/effort batch and selects the first open item', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 2,
+        requested: 10,
+        results: [
+          { workItem: { id: 'WL-OPEN', title: 'Open low-risk', status: 'open', risk: 'low', effort: 'small' } },
+          { workItem: { id: 'WL-DONE', title: 'Completed epic', status: 'completed', risk: 'low', effort: 'small' } },
+        ],
+        workItems: [
+          { workItem: { id: 'WL-OPEN', title: 'Open low-risk', status: 'open', risk: 'low', effort: 'small' } },
+          { workItem: { id: 'WL-DONE', title: 'Completed epic', status: 'completed', risk: 'low', effort: 'small' } },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextImplementCandidate('/repo');
+
+    // The invocation must carry the risk/effort filters and a generous batch
+    // count (-n) so completed items can be filtered out client-side without
+    // starving selection (WL-0MSMAYIKX005LLO4 AC2/AC3).
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      ['next', '--stage', 'plan_complete', '--risk', 'low', '--effort', 'small', '-n', expect.any(String), '--json'],
+      expect.anything(),
+    );
+    // wl next keeps completed items with a stage filter; the client-side
+    // status=open filter drops the completed epic and selects WL-OPEN.
+    expect(result).toEqual({ id: 'WL-OPEN', title: 'Open low-risk', stage: 'implement' });
+  });
+
+  it('getNextImplementCandidate returns null when no open candidate exists (all completed)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 1,
+        workItems: [
+          { workItem: { id: 'WL-DONE', title: 'Completed epic', status: 'completed', risk: 'low', effort: 'small' } },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getNextImplementCandidate('/repo')).toBeNull();
+  });
+
+  it('getNextImplementCandidate fails closed (null) when wl errors', async () => {
+    setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getNextImplementCandidate('/repo')).toBeNull();
+  });
+
+  it('getNextImplementCandidate fails closed (null) on malformed wl output', async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: 'not json', stderr: '' });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getNextImplementCandidate('/repo')).toBeNull();
+  });
+
+  it('getNextImplementCandidate passes a bounded timeout so a hung wl fails closed', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ success: true, count: 0, workItems: [] }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.getNextImplementCandidate('/repo');
+
+    const [, , options] = mockExec.mock.calls[0];
+    expect(options).toMatchObject({ timeout: DOWNTIME_WL_TIMEOUT_MS });
+  });
+
+  it('getNextImplementCandidate excludes an item already dispatched for implement (kind implement marker)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 2,
+        workItems: [
+          { workItem: { id: 'WL-DUP', title: 'already dispatched', status: 'open', risk: 'low', effort: 'small' } },
+          { workItem: { id: 'WL-FRESH', title: 'fresh slot', status: 'open', risk: 'low', effort: 'small' } },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+      JSON.stringify({ itemId: 'WL-DUP', kind: 'implement', dispatchedAt: new Date(Date.now() - 3_600_000).toISOString(), cwd }) + '\n',
+      'utf8',
+    );
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextImplementCandidate(cwd);
+    expect(result).toEqual({ id: 'WL-FRESH', title: 'fresh slot', stage: 'implement' });
+  });
+
+  it('getNextImplementCandidate does not exclude audit/plan/intake markers (implement-tier-only scope guard)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 1,
+        workItems: [
+          { workItem: { id: 'WL-IMP', title: 'implementable', status: 'open', risk: 'low', effort: 'small' } },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+      JSON.stringify({ itemId: 'WL-IMP', kind: 'audit', dispatchedAt: new Date(Date.now() - 3_600_000).toISOString(), cwd }) + '\n',
+      'utf8',
+    );
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextImplementCandidate(cwd);
+    expect(result).toEqual({ id: 'WL-IMP', title: 'implementable', stage: 'implement' });
+  });
+
+  it('getNextImplementCandidate treats a missing dispatch log as empty (fail-safe, dispatch still works)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 1,
+        workItems: [
+          { workItem: { id: 'WL-FRESHWORKLOG', title: 'fresh worklog', status: 'open', risk: 'low', effort: 'small' } },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const cwd = makeTempDir(); // no .worklog/downtime-dispatches.log
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextImplementCandidate(cwd);
+    expect(result).toEqual({ id: 'WL-FRESHWORKLOG', title: 'fresh worklog', stage: 'implement' });
+  });
+
+  it('getNextImplementCandidate applies --worklog-dir when the tab resolved a worklog root', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ success: true, count: 0, workItems: [] }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+    setWorklogDir('/home/user/projects/SorraAgents/.worklog');
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.getNextImplementCandidate('/repo');
+
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      [
+        '--worklog-dir',
+        '/home/user/projects/SorraAgents/.worklog',
+        'next',
+        '--stage',
+        'plan_complete',
+        '--risk',
+        'low',
+        '--effort',
+        'small',
+        '-n',
+        expect.any(String),
+        '--json',
+      ],
+      expect.anything(),
+    );
+  });
+
   it('end-to-end: two consecutive idle windows dispatch a single unaudited candidate exactly once', async () => {
     // AC5 (parent): with one unaudited completed/in_review candidate and two
     // consecutive idle windows (no audit recorded between), the worker
