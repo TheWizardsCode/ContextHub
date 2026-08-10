@@ -38,6 +38,12 @@ describe('wl next --risk/--effort CLI (WL-0MSMAIP5F003WAGG)', () => {
     }
   }
 
+  async function createItemGetId(args: string[]): Promise<string> {
+    const { stdout } = await execAsync(`tsx ${cliPath} --json create ${args.join(' ')}`, { cwd: tempDir });
+    const parsed = JSON.parse(stdout);
+    return parsed.workItem.id;
+  }
+
   async function runNext(args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
     try {
       const res = await execAsync(`tsx ${cliPath} --json next ${args.join(' ')}`, { cwd: tempDir });
@@ -92,5 +98,21 @@ describe('wl next --risk/--effort CLI (WL-0MSMAIP5F003WAGG)', () => {
     const { stdout } = await runNext([]);
     const parsed = JSON.parse(stdout);
     expect(parsed.workItem?.title).toBe('A');
+  });
+
+  it('dependency-blocked plan_complete Low/Small items are excluded by the implement-tier invocation', async () => {
+    // Fixture: an eligible blocker and an eligible item that depends on it.
+    // wl next excludes dependency-blocked items by default (includeBlocked=false),
+    // so the blocked item must never appear in the implement tier's candidate list.
+    const blockerId = await createItemGetId(['-t', '"Blocker"', '--stage', 'plan_complete', '--risk', 'Low', '--effort', 'Small', '--no-re-sort']);
+    const blockedId = await createItemGetId(['-t', '"Blocked"', '--stage', 'plan_complete', '--risk', 'Low', '--effort', 'Small', '--no-re-sort']);
+    await execAsync(`tsx ${cliPath} --json dep add ${blockedId} ${blockerId}`, { cwd: tempDir });
+
+    // Exact implement-tier invocation (packages/herdr/src/index.ts getNextImplementCandidate).
+    const { stdout } = await runNext(['--stage', 'plan_complete', '--risk', 'low', '--effort', 'small', '-n', '10']);
+    const parsed = JSON.parse(stdout);
+    const ids = parsed.workItems?.map((r: any) => r.workItem?.id) ?? [];
+    expect(ids).toContain(blockerId); // the blocker is itself eligible
+    expect(ids).not.toContain(blockedId); // blocked candidates never reach the dispatch layer
   });
 });

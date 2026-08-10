@@ -869,6 +869,29 @@ describe('createDowntimeDeps', () => {
     expect(result).toEqual({ id: 'WL-OPEN', title: 'Open low-risk', stage: 'implement' });
   });
 
+  it('getNextImplementCandidate relies on wl next default dependency-blocked exclusion (no --include-blocked)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 1,
+        workItems: [
+          { workItem: { id: 'WL-OPEN', title: 'Open low-risk', status: 'open', risk: 'low', effort: 'small' } },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.getNextImplementCandidate('/repo');
+
+    const [, args] = mockExec.mock.calls[0];
+    // Dependency-blocked exclusion is wl next's default (includeBlocked=false).
+    // The implement tier must never opt into --include-blocked, or blocked
+    // candidates would reach the dispatch layer (WL-0MSMAYIKX005LLO4 AC3).
+    expect(args).not.toContain('--include-blocked');
+  });
+
   it('getNextImplementCandidate returns null when no open candidate exists (all completed)', async () => {
     const mockExec = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({
