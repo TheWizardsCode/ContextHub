@@ -9,6 +9,7 @@
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
-    "@worklog/shared": "file:../../packages/shared"
+    "@worklog/shared": "file:../../packages/shared",
+    "marked": "^18.0.5"
   }
 }

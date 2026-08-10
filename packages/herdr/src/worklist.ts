@@ -40,7 +40,7 @@ import {
   substituteIdentifiers,
 } from './form-dialog.js';
 import { extractFilePaths } from './grouping.js';
-import { renderMarkdownViewer, renderNoteLinks } from './md-viewer.js';
+import { renderMarkdown, renderMarkdownViewer } from './md-viewer.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -1092,25 +1092,18 @@ export function formatDetailContent(
     lines.push('');
     lines.push(` ${ANSI.underline}Description${ANSI.reset}`);
     lines.push('');
-    const descLines = item.description.split('\n');
+    // Render the description as GFM (tables, bold/italic, inline code,
+    // links, lists, headings) via the shared markdown renderer; NOTE
+    // markers render as `<id>↗` links inside the rendered output. Wrap to
+    // the content width minus the 2-space indent.
+    const indent = 2;
+    const wrapWidth = contentWidth - indent - 2;
+    const descLines = renderMarkdown(item.description, Math.max(wrapWidth, 20));
     for (const dl of descLines) {
-      // Wrap long lines to fit width; NOTE markers render as links.
-      const indent = 2;
-      const wrapWidth = contentWidth - indent - 2;
-      const linked = renderNoteLinks(dl);
-      if (linked.length > wrapWidth && wrapWidth > 10) {
-        let remaining = linked;
-        while (remaining.length > 0) {
-          const seg = remaining.slice(0, wrapWidth);
-          remaining = remaining.slice(wrapWidth);
-          lines.push(`  ${seg}`);
-        }
-      } else {
-        lines.push(`  ${linked}`);
-      }
+      lines.push(`  ${dl}`);
       // Limit total lines
       if (lines.length > 500) {
-        lines.push(`  ... (truncated, ${descLines.length} total description lines)`);
+        lines.push(`  ... (truncated, ${item.description.split('\n').length} total description lines)`);
         break;
       }
     }

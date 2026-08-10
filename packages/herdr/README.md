@@ -21,7 +21,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Metadata panel** — The bottom portion of the list view (roughly 20–40% of the pane height, responsive to terminal size) is reserved for the selected item's metadata: ID, title, status, stage, priority, type, risk, effort, tags, audit info, and more. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
 - **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` — no custom stage values). Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
-- **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, headings/lists/code shown) as a preview. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
+- **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, full GFM rendering: headings, lists, tables, blockquotes, code, links) as a preview. The description section is rendered with the same markdown renderer. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
 - **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. See [Inline note links](#inline-note-links).
 - **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
 
@@ -513,9 +513,24 @@ that file with a generic markdown viewer instead of showing only the raw
 description. The viewer:
 
 - skips the YAML frontmatter block;
-- renders ATX headings, bullet lists, fenced code blocks, and paragraphs;
+- renders the full GFM construct set used in `.podcast.md` episode files and
+  work-item descriptions: ATX heading hierarchy (`#`…`######` with distinct
+  glyphs per level), ordered and nested bullet lists, blockquotes, GFM
+  tables (aligned columns), fenced and inline code, bold/italic/
+  strikethrough, links, horizontal rules, and paragraphs (word-wrapped to
+  the terminal width);
+- renders inline `[NOTE <id>: ...]` markers as `<id>↗` links (see
+  [Inline note links](#inline-note-links));
 - is preview-only (no notes editor);
 - falls back to the raw description when the file is missing/unreadable.
+
+The **description section** of the detail view is rendered with the same
+markdown renderer, so GFM-heavy descriptions (tables, bold/italic, inline
+code, links, lists) display properly instead of as raw text. Markdown is
+parsed with the [`marked`](https://github.com/markedjs/marked) library (a
+declared dependency of `packages/herdr`), which is also present in the pi
+agent dependency tree (`@earendil-works/pi-tui`), so the compatibility is
+proven.
 
 Key Files paths are resolved against the **worklog root** (the directory
 containing `.worklog/`, from `HERDR_RESOLVED_CWD` / `configureWorklogTarget`)
