@@ -1030,14 +1030,10 @@ export class WorklogDatabase {
       'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort',
       'needsProducerReview'
     ];
-    const hasChanged = fieldsToCompare.some(f => {
-      const oldVal = item[f];
-      const newVal = updated[f];
-      if (Array.isArray(oldVal) && Array.isArray(newVal)) {
-        return JSON.stringify(oldVal) !== JSON.stringify(newVal);
-      }
-      return oldVal !== newVal;
-    });
+    // Shared comparator: whitespace-only diffs in title/description are not
+    // semantic changes (WL-0MSORD6HC005QVZX). Same normalization as
+    // hasWorkItemChanged().
+    const hasChanged = this.compareTrackedFields(item, updated, fieldsToCompare);
 
     if (!hasChanged) {
       // Nothing changed — preserve original updatedAt and return early
@@ -2517,10 +2513,43 @@ export class WorklogDatabase {
   }
 
   /**
+   * Compare a set of tracked fields between two work items and return true if
+   * any of them has semantically changed.
+   *
+   * `title` and `description` are whitespace-normalized before comparison
+   * (leading/trailing whitespace, trailing newlines and blank-line runs are
+   * stripped) so that whitespace-only differences do NOT count as semantic
+   * changes — e.g. a second worklog store that strips trailing newlines from
+   * descriptions would otherwise re-timestamp every item on every `wl sync`
+   * (WL-0MSORD6HC005QVZX). All other fields use strict equality; arrays
+   * (tags) are compared by value.
+   *
+   * Shared by {@link hasWorkItemChanged} (16-field tracked set, used by
+   * import()/upsertItems()) and the no-op guard in {@link update} (13-field
+   * set, excluding the GitHub metadata fields).
+   */
+  private compareTrackedFields(oldItem: WorkItem, newItem: WorkItem, fields: (keyof WorkItem)[]): boolean {
+    return fields.some(f => {
+      const oldVal = oldItem[f];
+      const newVal = newItem[f];
+      if (f === 'title' || f === 'description') {
+        // Whitespace-only differences (trailing newline strip/normalization)
+        // are not semantic changes — compare normalized text only.
+        return String(oldVal ?? '').trim() !== String(newVal ?? '').trim();
+      }
+      if (Array.isArray(oldVal) && Array.isArray(newVal)) {
+        return JSON.stringify(oldVal) !== JSON.stringify(newVal);
+      }
+      return oldVal !== newVal;
+    });
+  }
+
+  /**
    * Compare an existing work item against a candidate and return true if any
    * tracked field has semantically changed.
    *
-   * Uses the same field set and comparison logic as the no-op guard in {@link update}.
+   * Uses the same field set and comparison logic as the no-op guard in {@link update}
+   * (via {@link compareTrackedFields}).
    */
   private hasWorkItemChanged(oldItem: WorkItem, newItem: WorkItem): boolean {
     const fieldsToCompare: (keyof WorkItem)[] = [
@@ -2529,14 +2558,7 @@ export class WorklogDatabase {
       'needsProducerReview', 'githubIssueNumber', 'githubIssueId',
       'githubIssueUpdatedAt'
     ];
-    return fieldsToCompare.some(f => {
-      const oldVal = oldItem[f];
-      const newVal = newItem[f];
-      if (Array.isArray(oldVal) && Array.isArray(newVal)) {
-        return JSON.stringify(oldVal) !== JSON.stringify(newVal);
-      }
-      return oldVal !== newVal;
-    });
+    return this.compareTrackedFields(oldItem, newItem, fieldsToCompare);
   }
 
   /**
@@ -2566,6 +2588,13 @@ export class WorklogDatabase {
    * `updatedAt` is preserved so that sync operations do not silently
    * re-timestamp unchanged items. Changed items get a new `updatedAt`;
    * entirely new items use the incoming value as-is.
+   *
+   * Comparison is whitespace-insensitive for `title` and `description`
+   * (via {@link compareTrackedFields}): trailing-newline strips / leading or
+   * trailing whitespace / blank-line runs do NOT count as semantic changes,
+   * so `wl sync` does not re-timestamp items whose meaningful content never
+   * changed (WL-0MSORD6HC005QVZX). The incoming (normalized) content is still
+   * persisted — only `updatedAt` is preserved.
    *
    * @param items - The full set of work items to store.
    * @param dependencyEdges - Optional full set of dependency edges. When
@@ -2624,10 +2653,10 @@ export class WorklogDatabase {
    * existing items not in the provided array are preserved.
    *
    * **No-op guard**: For each item that already exists in the store AND has
-   * identical tracked fields (same field set as {@link hasWorkItemChanged}),
-   * the save is entirely skipped — preserving the existing `updatedAt`.
-   * Items whose tracked fields differ, or that are new, get a fresh
-   * `updatedAt` timestamp.
+   * identical tracked fields (same field set as {@link hasWorkItemChanged},
+   * whitespace-insensitive for `title`/`description`), the save is entirely
+   * skipped — preserving the existing `updatedAt`. Items whose tracked fields
+   * differ, or that are new, get a fresh `updatedAt` timestamp.
    *
    * When `dependencyEdges` is provided, only edges whose `fromId` or `toId`
    * belongs to the provided items are upserted; all other edges are untouched.

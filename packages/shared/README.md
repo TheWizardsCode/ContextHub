@@ -99,3 +99,22 @@ db.close();
 
 The TUI extension's `closeWorklogDb()` function (in `wl-integration.ts`)
 wraps this with cache cleanup.
+
+## updatedAt preservation (no-op guards)
+
+`updatedAt` is only bumped when a tracked field has **semantically** changed:
+
+- `import()` (full-set replace, used by `wl sync`) and `upsertItems()`
+  preserve the existing `updatedAt` when an incoming item is unchanged.
+- `update()` returns early without writing (and without re-timestamping)
+  when the update is a no-op.
+
+Both paths share a single comparator, `compareTrackedFields()`, which is
+**whitespace-insensitive for `title` and `description`**: leading/trailing
+whitespace, trailing newlines and blank-line runs are stripped before
+comparison, so whitespace-only differences (e.g. a second worklog store that
+strips trailing newlines from descriptions) do NOT count as semantic changes
+and never re-timestamp items (WL-0MSORD6HC005QVZX). The incoming normalized
+content is still persisted — only `updatedAt` is preserved. All other fields
+(tags, status, priority, …) use strict comparison; genuine content changes
+still bump `updatedAt`.
