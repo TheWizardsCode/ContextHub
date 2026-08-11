@@ -2203,111 +2203,119 @@ export class WorklogDatabase {
     // be hidden from wl next results. The existing isInProgressSubtree()
     // filter in Stage 5 already ensures this for open items; Stage 3 must
     // apply the same filtering for blocker surfacing.
-    const nonCriticalBlocked = criticalPool.filter(
-      item => item.status === 'blocked' && item.priority !== 'critical'
-    ).filter(item => !this.isInProgressSubtree(item, items));
-    this.debug(`${debugPrefix} non-critical blocked=${nonCriticalBlocked.length}`);
-
+    //
+    // Skip non-critical blocker surfacing when a stage filter is specified —
+    // mirroring the Stage 2 guard above: the user is explicitly filtering by
+    // stage and blocker surfacing must not surface items at other stages
+    // (WL-0MSP1XJSO007LE3K). A blocker's own stage is not constrained by the
+    // stage-filtered candidate pool, so surfacing it would violate the filter.
     // Strict root-only (WL-0MS964SIA0057ABR): tracks whether any would-be
     // blocker was a hidden child whose parent is not selectable. If no blocker
     // can be surfaced and no root candidate remains in Stage 5, wl next
     // returns null with a clear reason rather than surfacing the child.
     let droppedHiddenChildBlocker = false;
 
-    if (nonCriticalBlocked.length > 0 && filteredItems.length > 0) {
-      // Find the highest priority value among open candidates
-      const bestCompetitorPriority = Math.max(
-        ...filteredItems.map(item => this.getPriorityValue(item.priority))
-      );
+    if (!stage) {
+      const nonCriticalBlocked = criticalPool.filter(
+        item => item.status === 'blocked' && item.priority !== 'critical'
+      ).filter(item => !this.isInProgressSubtree(item, items));
+      this.debug(`${debugPrefix} non-critical blocked=${nonCriticalBlocked.length}`);
 
-      // Sort blocked items by priority descending so we handle the most
-      // important blocked item first
-      const sortedBlocked = nonCriticalBlocked.slice().sort(
-        (a, b) => this.getPriorityValue(b.priority) - this.getPriorityValue(a.priority)
-      );
-
-      for (const blockedItem of sortedBlocked) {
-        const blockedPriority = this.getPriorityValue(blockedItem.priority);
-        if (blockedPriority < bestCompetitorPriority) {
-          // Blocked item is lower priority than best open candidate — skip
-          continue;
-        }
-
-        // Blocked item priority >= best competitor: surface its blocker
-        const blockingPairs: { blocking: WorkItem; blocked: WorkItem }[] = [];
-
-        // Check dependency blockers
-        const dependencyBlockers = this.getActiveDependencyBlockers(blockedItem.id, edgeCache);
-        for (const blocker of dependencyBlockers) {
-          if (excluded?.has(blocker.id)) continue;
-          blockingPairs.push({ blocking: blocker, blocked: blockedItem });
-        }
-
-        // Check child blockers
-        const blockingChildren = this.getNonClosedChildren(blockedItem.id, edgeCache);
-        for (const child of blockingChildren) {
-          if (excluded?.has(child.id)) continue;
-          blockingPairs.push({ blocking: child, blocked: blockedItem });
-        }
-
-        // Apply assignee/search filters to blockers
-        let filteredBlockers = blockingPairs.filter(pair =>
-          this.applyFilters([pair.blocking], assignee, searchTerm).length > 0
-        ).filter(pair => this.matchesRiskEffort(pair.blocking, risk, effort));
-
-        // Strict root-only (WL-0MS964SIA0057ABR): child blockers are never
-        // surfaced by wl next.
-        //  - A child blocker whose parent is a selectable actionable root
-        //    candidate is dropped — the parent competes in Stage 5 (open item
-        //    selection) and is the unit of work surfaced there.
-        //  - A child blocker whose parent is NOT selectable is hidden entirely
-        //    (no orphan promotion); if no surfacable blocker remains and no
-        //    root candidate exists, wl next returns null with a clear reason.
-        const rootOnlyBlockers: { blocking: WorkItem; blocked: WorkItem }[] = [];
-        for (const pair of filteredBlockers) {
-          if (!pair.blocking.parentId) {
-            // Root-level blocker — surfacing it is fine.
-            rootOnlyBlockers.push(pair);
+      if (nonCriticalBlocked.length > 0 && filteredItems.length > 0) {
+        // Find the highest priority value among open candidates
+        const bestCompetitorPriority = Math.max(
+          ...filteredItems.map(item => this.getPriorityValue(item.priority))
+        );
+  
+        // Sort blocked items by priority descending so we handle the most
+        // important blocked item first
+        const sortedBlocked = nonCriticalBlocked.slice().sort(
+          (a, b) => this.getPriorityValue(b.priority) - this.getPriorityValue(a.priority)
+        );
+  
+        for (const blockedItem of sortedBlocked) {
+          const blockedPriority = this.getPriorityValue(blockedItem.priority);
+          if (blockedPriority < bestCompetitorPriority) {
+            // Blocked item is lower priority than best open candidate — skip
             continue;
           }
-          // Child blocker: resolve to parent when selectable, else hidden.
-          const resolved = this.resolveBlockerToRoot(pair.blocking, items, assignee, searchTerm, excluded);
-          if (resolved) {
-            // Parent is selectable — it competes in Stage 5 (existing
-            // hierarchy awareness, WL-0MQF95NCC0024H61).
-            this.debug(`${debugPrefix}   drop child blocker ${pair.blocking.id} (selectable parent ${resolved.id} competes in Stage 5)`);
-          } else {
-            droppedHiddenChildBlocker = true;
+  
+          // Blocked item priority >= best competitor: surface its blocker
+          const blockingPairs: { blocking: WorkItem; blocked: WorkItem }[] = [];
+  
+          // Check dependency blockers
+          const dependencyBlockers = this.getActiveDependencyBlockers(blockedItem.id, edgeCache);
+          for (const blocker of dependencyBlockers) {
+            if (excluded?.has(blocker.id)) continue;
+            blockingPairs.push({ blocking: blocker, blocked: blockedItem });
           }
-        }
-        filteredBlockers = rootOnlyBlockers;
-
-        // Filter out blockers that belong to an in-progress parent subtree —
-        // children of in-progress parents must not appear as independent
-        // wl next results from any stage, including blocker surfacing.
-        // This complements the in-progress subtree filter above on the
-        // blocked item itself and the existing isInProgressSubtree() filter
-        // in Stage 5 (open item selection).
-        filteredBlockers = filteredBlockers.filter(pair =>
-          !this.isInProgressSubtree(pair.blocking, items)
-        );
-
-        this.debug(`${debugPrefix} blocker-surfacing: blockedItem=${blockedItem.id} pri=${blockedItem.priority} blockers=${filteredBlockers.length}`);
-
-        if (filteredBlockers.length > 0) {
-          // Select the best blocker by sort index
-          const orderedBlockers = this.orderBySortIndex(filteredBlockers.map(p => p.blocking), sortOrderCache);
-          const selectedBlocker = orderedBlockers[0];
-          if (selectedBlocker) {
-            const pair = filteredBlockers.find(p => p.blocking.id === selectedBlocker.id)!;
-            return {
-              workItem: selectedBlocker,
-              reason: `Blocking issue for ${pair.blocked.priority}-priority item ${pair.blocked.id} (${pair.blocked.title})`
-            };
+  
+          // Check child blockers
+          const blockingChildren = this.getNonClosedChildren(blockedItem.id, edgeCache);
+          for (const child of blockingChildren) {
+            if (excluded?.has(child.id)) continue;
+            blockingPairs.push({ blocking: child, blocked: blockedItem });
+          }
+  
+          // Apply assignee/search filters to blockers
+          let filteredBlockers = blockingPairs.filter(pair =>
+            this.applyFilters([pair.blocking], assignee, searchTerm).length > 0
+          ).filter(pair => this.matchesRiskEffort(pair.blocking, risk, effort));
+  
+          // Strict root-only (WL-0MS964SIA0057ABR): child blockers are never
+          // surfaced by wl next.
+          //  - A child blocker whose parent is a selectable actionable root
+          //    candidate is dropped — the parent competes in Stage 5 (open item
+          //    selection) and is the unit of work surfaced there.
+          //  - A child blocker whose parent is NOT selectable is hidden entirely
+          //    (no orphan promotion); if no surfacable blocker remains and no
+          //    root candidate exists, wl next returns null with a clear reason.
+          const rootOnlyBlockers: { blocking: WorkItem; blocked: WorkItem }[] = [];
+          for (const pair of filteredBlockers) {
+            if (!pair.blocking.parentId) {
+              // Root-level blocker — surfacing it is fine.
+              rootOnlyBlockers.push(pair);
+              continue;
+            }
+            // Child blocker: resolve to parent when selectable, else hidden.
+            const resolved = this.resolveBlockerToRoot(pair.blocking, items, assignee, searchTerm, excluded);
+            if (resolved) {
+              // Parent is selectable — it competes in Stage 5 (existing
+              // hierarchy awareness, WL-0MQF95NCC0024H61).
+              this.debug(`${debugPrefix}   drop child blocker ${pair.blocking.id} (selectable parent ${resolved.id} competes in Stage 5)`);
+            } else {
+              droppedHiddenChildBlocker = true;
+            }
+          }
+          filteredBlockers = rootOnlyBlockers;
+  
+          // Filter out blockers that belong to an in-progress parent subtree —
+          // children of in-progress parents must not appear as independent
+          // wl next results from any stage, including blocker surfacing.
+          // This complements the in-progress subtree filter above on the
+          // blocked item itself and the existing isInProgressSubtree() filter
+          // in Stage 5 (open item selection).
+          filteredBlockers = filteredBlockers.filter(pair =>
+            !this.isInProgressSubtree(pair.blocking, items)
+          );
+  
+          this.debug(`${debugPrefix} blocker-surfacing: blockedItem=${blockedItem.id} pri=${blockedItem.priority} blockers=${filteredBlockers.length}`);
+  
+          if (filteredBlockers.length > 0) {
+            // Select the best blocker by sort index
+            const orderedBlockers = this.orderBySortIndex(filteredBlockers.map(p => p.blocking), sortOrderCache);
+            const selectedBlocker = orderedBlockers[0];
+            if (selectedBlocker) {
+              const pair = filteredBlockers.find(p => p.blocking.id === selectedBlocker.id)!;
+              return {
+                workItem: selectedBlocker,
+                reason: `Blocking issue for ${pair.blocked.priority}-priority item ${pair.blocked.id} (${pair.blocked.title})`
+              };
+            }
           }
         }
       }
-    }
+    } // end if (!stage) — Stage 3 skipped under stage filter
 
     // ── Stage 5: Open item selection ──
     // Select among filtered candidates, returning the best root item
