@@ -119,11 +119,14 @@ describe('createListRenderer — line-count invariant', () => {
     expect(withNotification.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows);
   });
 
-  it('regression (WL-0MSAK8YLB0025EGW): renders exactly one In Review section, after Other', () => {
-    // Simulated merged list: wl next results carry group metadata (including a
-    // non-completed in_review item with an "In Review" label) while mandatory
-    // wl list items (completed/in_review) carry none. After regroupWorkItems
-    // the renderer must emit exactly one ── In Review ── separator, after Other.
+  it('regression (WL-0MSAK8YLB0025EGW): merged list renders exactly one section per priority bucket', () => {
+    // Simulated merged list: wl next results carry group metadata (including
+    // a non-completed in_review item with an "In Review" label) while
+    // mandatory wl list items (completed/in_review) carry none. After
+    // regroupWorkItems the renderer must emit exactly one ── <bucket> ──
+    // separator per priority bucket (Critical → High → Medium → Low), so no
+    // duplicate section headings can occur (the old duplicate "In Review"
+    // sections regression). Priority-first ordering is WL-0MSI1LVTJ001M9EY.
     const merged: WorkItem[] = [
       { ...makeItem('NEXT-PLAN'), stage: 'plan_complete', priority: 'high', group: 2, groupLabel: 'Group 1' },
       { ...makeItem('NEXT-REVIEW'), stage: 'in_review', priority: 'medium', status: 'in-progress', group: 5, groupLabel: 'In Review' },
@@ -134,11 +137,18 @@ describe('createListRenderer — line-count invariant', () => {
     ];
     const regrouped = regroupWorkItems(merged, 3);
     const output = renderer(regrouped, 0, 0, TERM_80x24, null, 'list', null);
-    const inReviewSeparators = (output.match(/── In Review ──/g) ?? []).length;
-    expect(inReviewSeparators).toBe(1);
-    // In Review separator appears after the Other separator in the rendered output.
-    expect(output.indexOf('── Other ──')).toBeGreaterThan(-1);
-    expect(output.indexOf('── In Review ──')).toBeGreaterThan(output.indexOf('── Other ──'));
+
+    // Exactly one separator per priority bucket present in the merged set.
+    for (const label of ['Critical', 'High', 'Medium']) {
+      expect((output.match(new RegExp(`── ${label} ──`, 'g')) ?? []).length).toBe(1);
+    }
+    // No stale group labels leak through regroup.
+    expect(output).not.toContain('── Other ──');
+    expect(output).not.toContain('── In Review ──');
+    // Sections appear in priority order: Critical before High before Medium.
+    expect(output.indexOf('── Critical ──')).toBeGreaterThan(-1);
+    expect(output.indexOf('── High ──')).toBeGreaterThan(output.indexOf('── Critical ──'));
+    expect(output.indexOf('── Medium ──')).toBeGreaterThan(output.indexOf('── High ──'));
   });
 });
 
