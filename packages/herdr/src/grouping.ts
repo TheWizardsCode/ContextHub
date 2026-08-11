@@ -1,15 +1,19 @@
 /**
  * packages/herdr/src/grouping.ts — Grouping for the Herdr worklist
  *
- * Pure, dependency-free duplication of the core `wl next --groups` grouping
- * algorithm (src/commands/grouping.ts) for the Herdr plugin, which has zero
- * npm dependencies and cannot import from src/commands/.
+ * Pure, dependency-free regrouping for the Herdr worklist. It mirrors the
+ * *concept* of the core `wl next --groups` grouping (src/commands/grouping.ts)
+ * but implements the Herdr-specific priority-first ordering described below.
+ * The plugin has zero npm dependencies and cannot import from src/commands/.
  *
  * The functions here are intentionally duplicated per plugin (decision Q2c in
  * WL-0MS8W5LTW006YZ4B): this plugin copy and the core `wl next` implementation
  * must be kept in sync. (A third copy in the Pi TUI Worklog extension,
  * packages/tui/extensions/Worklog/lib/grouping.ts, was removed by
- * WL-0MSGI7PV9004UD0N.)
+ * WL-0MSGI7PV9004UD0N.) Note: the Herdr copy intentionally diverges from the
+ * core CLI ordering (priority-first vs. file-path-conflict grouping); the
+ * divergence is tracked as a follow-up work item (scope guard,
+ * WL-0MSI1LVTJ001M9EY).
  *
  * Why regrouping is needed: the worklist merges `wl next` results (which
  * carry `group`/`groupLabel` assignments) with mandatory subsets fetched via

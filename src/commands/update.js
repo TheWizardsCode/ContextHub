@@ -1,0 +1,530 @@
+/**
+ * Update command - Update a work item
+ */
+import { promises as fs } from 'fs';
+import { humanFormatWorkItem, resolveFormat, extractFilePaths } from './helpers.js';
+import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
+import { normalizeActionArgs } from './cli-utils.js';
+import { buildAuditEntry, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
+import { submitToOpenBrain } from '../openbrain.js';
+import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
+export default function register(ctx) {
+    const { program, output, utils } = ctx;
+    program
+        .command('update <id...>')
+        .description('Update a work item')
+        .option('-t, --title <title>', 'New title')
+        .option('-d, --description <description>', 'New description')
+        .option('--description-file <file>', 'Read description from a file')
+        .option('-s, --status <status>', 'New status')
+        .option('-p, --priority <priority>', 'New priority')
+        .option('-P, --parent <parentId>', 'New parent ID')
+        .option('--tags <tags>', 'New tags (comma-separated)')
+        .option('-a, --assignee <assignee>', 'New assignee')
+        .option('--stage <stage>', 'New stage')
+        .option('--risk <risk>', 'New risk level (Low, Medium, High, Severe)')
+        .option('--effort <effort>', 'New effort level (XS, S, M, L, XL)')
+        .option('--issue-type <issueType>', 'New issue type (interoperability field)')
+        .option('--created-by <createdBy>', 'New created by (interoperability field)')
+        .option('--deleted-by <deletedBy>', 'New deleted by (interoperability field)')
+        .option('--delete-reason <deleteReason>', 'New delete reason (interoperability field)')
+        .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag (true|false|yes|no)')
+        .option('--audit <text>', 'Legacy alias for --audit-text')
+        .option('--audit-text <text>', 'Set structured audit text. First non-empty line must be "Ready to close: Yes" or "Ready to close: No" (see docs/AUDIT_STATUS.md)')
+        .option('--audit-file <file>', 'Read audit text from a file')
+        .option('--do-not-delegate <true|false>', 'Set or clear the do-not-delegate tag (true|false|yes|no)')
+        .option('--prefix <prefix>', 'Override the default prefix')
+        .option('--no-re-sort', 'Skip automatic re-sort after the update')
+        .option('--re-sort-sync', 'Force a synchronous re-sort after the update', false)
+        .action(async (...rawArgs) => {
+        // Accept re-sort flags to control automatic re-sort behavior after writes
+        // --no-re-sort: skip auto re-sort
+        // --re-sort-sync: force synchronous re-sort (blocking)
+        // Normalize re-sort flags from commander/options
+        const normalized = normalizeActionArgs(rawArgs, ['title', 'description', 'descriptionFile', 'status', 'priority', 'parent', 'tags', 'assignee', 'stage', 'risk', 'effort', 'issueType', 'createdBy', 'deletedBy', 'deleteReason', 'needsProducerReview', 'audit', 'auditText', 'auditFile', 'doNotDelegate', 'prefix', 'noReSort', 'reSortSync']);
+        // Robust detection of --no-re-sort that accepts multiple forms Commander
+        // may expose (`noReSort`, `reSort: false`) and also checks raw argv.
+        const cliNoReSort = process.argv.includes('--no-re-sort') || process.argv.includes('--noReSort');
+        const reSortNo = ((normalized.options?.noReSort === true) || (normalized.options?.reSort === false) || cliNoReSort);
+        const reSortSync = Boolean(normalized.options?.reSortSync);
+        const knownOptionKeys = [
+            'title', 'description', 'descriptionFile', 'status', 'priority', 'parent', 'tags', 'assignee', 'stage', 'risk', 'effort', 'issueType', 'createdBy', 'deletedBy', 'deleteReason', 'needsProducerReview', 'audit', 'auditText', 'doNotDelegate', 'prefix', 'noReSort', 'reSortSync'
+        ];
+        const argsHint = rawArgs.map(a => Array.isArray(a) ? `array(${a.length})` : `${typeof a}:${String(a).slice(0, 100)}`);
+        if (process.env.WL_DEBUG_UPDATE_ACTION) {
+            try {
+                console.error('WL_DEBUG_UPDATE_ACTION rawArgs:', JSON.stringify(argsHint));
+            }
+            catch (_e) { /* ignore */ }
+        }
+        let options = normalized.options || {};
+        utils.requireInitialized();
+        const db = utils.getDatabase(options.prefix);
+        const idsRaw = normalized.ids;
+        if (process.env.WL_DEBUG_SQL_BINDINGS) {
+            try {
+                console.error('WL_DEBUG_SQL_BINDINGS update: idsRaw', JSON.stringify(idsRaw));
+            }
+            catch (_) { }
+        }
+        if (idsRaw.length === 0) {
+            output.error('No work item id(s) provided', { success: false, error: 'missing-arg' });
+            process.exit(1);
+        }
+        // Precompute global candidates that don't require per-id state.
+        // Use normalized.provided to detect whether the user supplied a flag.
+        const hasProvided = (name) => normalized.provided.has(name);
+        // If caller supplied --audit-file, read the file contents once and
+        // present it as if --audit-text were provided. This mirrors the
+        // --description-file pattern and avoids needing to shell-escape user
+        // content when passing audit text to other commands.
+        if (hasProvided('auditFile')) {
+            try {
+                // Read relative to current working directory
+                options.auditText = await fs.readFile(String(options.auditFile), 'utf8');
+                // Mark auditText as provided so downstream checks pick it up
+                try {
+                    normalized.provided.add('auditText');
+                }
+                catch (_) { /* ignore */ }
+            }
+            catch (err) {
+                output.error(`Failed to read audit file: ${options.auditFile}`);
+                process.exit(1);
+            }
+        }
+        if (process.env.WL_DEBUG_UPDATE_ACTION) {
+            try {
+                console.error('WL_DEBUG_UPDATE_ACTION optionsOwnNames:', JSON.stringify(Object.getOwnPropertyNames(options)));
+                console.error('WL_DEBUG_UPDATE_ACTION optionsKeys:', JSON.stringify(Object.keys(options)));
+                console.error('WL_DEBUG_UPDATE_ACTION has descriptionFile own:', Object.prototype.hasOwnProperty.call(options, 'descriptionFile'));
+                console.error('WL_DEBUG_UPDATE_ACTION descriptionFile value:', String(options.descriptionFile));
+            }
+            catch (_e) { /* ignore */ }
+        }
+        const titleCandidate = hasProvided('title') ? options.title : undefined;
+        let descriptionCandidate = undefined;
+        if (hasProvided('description'))
+            descriptionCandidate = options.description;
+        if (hasProvided('descriptionFile')) {
+            try {
+                const contents = await fs.readFile(String(options.descriptionFile), 'utf8');
+                descriptionCandidate = contents;
+            }
+            catch (err) {
+                output.error(`Failed to read description file: ${options.descriptionFile}`);
+                process.exit(1);
+            }
+        }
+        const statusCandidate = hasProvided('status') ? options.status : undefined;
+        let priorityCandidate = hasProvided('priority') ? options.priority : undefined;
+        // Validate priority if provided: normalize case, reject P* and unknown tokens
+        if (priorityCandidate !== undefined) {
+            const np = normalizePriority(priorityCandidate);
+            if (!np) {
+                const allowed = CANONICAL_PRIORITIES.join(', ');
+                output.error(`Invalid priority: "${priorityCandidate}". Allowed values: ${allowed} (case-insensitive). P0-P3 values are not accepted for update; use "wl doctor" to migrate legacy data.`, { success: false, error: 'invalid-priority' });
+                process.exit(1);
+            }
+            priorityCandidate = np;
+        }
+        // Commander populates a `parent` property on option objects (the parent
+        // command), so we must check that the user actually provided the
+        // `--parent` flag. Use hasOwnProperty to detect presence of the option
+        // on the parsed options object.
+        const parentCandidate = hasProvided('parent')
+            ? (utils.normalizeCliId(String(options.parent), options.prefix) || null)
+            : undefined;
+        const tagsCandidate = hasProvided('tags') && options.tags ? String(options.tags).split(',').map((t) => t.trim()) : undefined;
+        const assigneeCandidate = hasProvided('assignee') ? options.assignee : undefined;
+        const stageCandidate = hasProvided('stage') ? options.stage : undefined;
+        const config = utils.getConfig();
+        const auditWriteEnabled = config?.auditWriteEnabled !== false;
+        const riskCandidate = hasProvided('risk') ? options.risk : undefined;
+        const effortCandidate = hasProvided('effort') ? options.effort : undefined;
+        const issueTypeCandidate = hasProvided('issueType') ? options.issueType : undefined;
+        const createdByCandidate = hasProvided('createdBy') ? options.createdBy : undefined;
+        const deletedByCandidate = hasProvided('deletedBy') ? options.deletedBy : undefined;
+        const deleteReasonCandidate = hasProvided('deleteReason') ? options.deleteReason : undefined;
+        const auditCandidate = hasProvided('auditText') ? options.auditText : (hasProvided('audit') ? options.audit : undefined);
+        let auditWritten = false;
+        let auditEntryForOutput = null;
+        if (auditCandidate !== undefined && !auditWriteEnabled) {
+            output.error('Audit writes are disabled by config (`auditWriteEnabled: false`).', {
+                success: false,
+                error: 'audit-write-disabled',
+            });
+            process.exit(1);
+        }
+        let needsProducerReviewCandidate;
+        if (hasProvided('needsProducerReview')) {
+            const raw = String(options.needsProducerReview).toLowerCase();
+            const truthy = ['true', 'yes', '1'];
+            const falsy = ['false', 'no', '0'];
+            if (truthy.includes(raw))
+                needsProducerReviewCandidate = true;
+            else if (falsy.includes(raw))
+                needsProducerReviewCandidate = false;
+            else {
+                output.error(`Invalid value for --needs-producer-review: ${options.needsProducerReview}`, { success: false, error: 'invalid-arg' });
+                process.exit(1);
+            }
+        }
+        let doNotDelegateRaw;
+        if (hasProvided('doNotDelegate')) {
+            doNotDelegateRaw = String(options.doNotDelegate).toLowerCase();
+            const truthy = ['true', 'yes', '1'];
+            const falsy = ['false', 'no', '0'];
+            if (!truthy.includes(doNotDelegateRaw) && !falsy.includes(doNotDelegateRaw)) {
+                output.error(`Invalid value for --do-not-delegate: ${options.doNotDelegate}`, { success: false, error: 'invalid-arg' });
+                process.exit(1);
+            }
+        }
+        const results = [];
+        // Track whether any update modified one of the impactful fields
+        // that should trigger an automatic re-sort when the update completes.
+        let impactfulChange = false;
+        for (const rawId of idsRaw) {
+            const normalizedId = utils.normalizeCliId(rawId, options.prefix) || rawId;
+            const updates = {};
+            if (titleCandidate)
+                updates.title = titleCandidate;
+            if (descriptionCandidate)
+                updates.description = descriptionCandidate;
+            if (priorityCandidate)
+                updates.priority = priorityCandidate;
+            if (parentCandidate !== undefined)
+                updates.parentId = parentCandidate;
+            if (tagsCandidate)
+                updates.tags = tagsCandidate;
+            if (assigneeCandidate !== undefined)
+                updates.assignee = assigneeCandidate;
+            if (riskCandidate !== undefined)
+                updates.risk = riskCandidate;
+            if (effortCandidate !== undefined)
+                updates.effort = effortCandidate;
+            if (issueTypeCandidate !== undefined)
+                updates.issueType = issueTypeCandidate;
+            if (createdByCandidate !== undefined)
+                updates.createdBy = createdByCandidate;
+            if (deletedByCandidate !== undefined)
+                updates.deletedBy = deletedByCandidate;
+            if (deleteReasonCandidate !== undefined)
+                updates.deleteReason = deleteReasonCandidate;
+            if (needsProducerReviewCandidate !== undefined)
+                updates.needsProducerReview = needsProducerReviewCandidate;
+            if (auditCandidate !== undefined) {
+                const current = db.get(normalizedId);
+                if (!current) {
+                    const message = `Work item not found: ${normalizedId}`;
+                    results.push({ id: normalizedId, success: false, error: message });
+                    continue;
+                }
+                // Validate audit first-line after redaction. Reject invalid writes and continue
+                // batch processing (single-id callers will observe a non-zero exit).
+                const redacted = redactAuditText(String(auditCandidate));
+                const inspection = inspectAuditFirstLine(redacted);
+                if (!inspection.isValid) {
+                    const message = formatInvalidAuditFirstLineMessage(inspection);
+                    results.push({
+                        id: normalizedId,
+                        success: false,
+                        error: 'audit-invalid-first-line',
+                        message,
+                        firstNonEmptyLine: inspection.trimmedFirstNonEmptyLine,
+                        indicators: {
+                            bom: inspection.hasBom,
+                            nonPrintable: inspection.hasNonPrintable,
+                            gutterChars: inspection.hasGutterChars,
+                        },
+                    });
+                    continue;
+                }
+                // Write to the audit_results table (sole source of truth for audit state)
+                const auditEntry = buildAuditEntry(String(auditCandidate));
+                // Preserve any existing rawOutput (e.g. from wl audit-set) so that
+                // --audit-text doesn't clobber the machine-readable audit payload.
+                const existingAudit = db.getAuditResult(normalizedId);
+                const prevRawOutput = existingAudit?.rawOutput ?? null;
+                try {
+                    db.saveAuditResult({
+                        workItemId: normalizedId,
+                        readyToClose: auditEntry.status === 'Complete',
+                        auditedAt: auditEntry.time,
+                        summary: auditEntry.text,
+                        rawOutput: prevRawOutput,
+                        author: auditEntry.author,
+                    });
+                    auditWritten = true;
+                    auditEntryForOutput = auditEntry;
+                }
+                catch (err) {
+                    auditWritten = false;
+                    results.push({
+                        id: normalizedId,
+                        success: false,
+                        error: err.message || 'audit-persistence-failed',
+                        message: `Audit result could not be persisted: ${err.message}`,
+                    });
+                    // Skip remaining validation and success push for this item
+                    continue;
+                }
+            }
+            // Validate status/stage per-id if needed.
+            if ((statusCandidate !== undefined || stageCandidate !== undefined) && canValidateStatusStage(config)) {
+                const current = db.get(normalizedId);
+                if (!current) {
+                    const message = `Work item not found: ${normalizedId}`;
+                    results.push({ id: normalizedId, success: false, error: message });
+                    // continue to next id without aborting
+                    continue;
+                }
+                let normalizedStatus = current.status;
+                let normalizedStage = current.stage;
+                let warnings = [];
+                try {
+                    const validation = validateStatusStageInput({
+                        status: statusCandidate ?? current.status,
+                        stage: stageCandidate ?? current.stage,
+                    }, config);
+                    normalizedStatus = validation.status;
+                    normalizedStage = validation.stage;
+                    warnings = validation.warnings;
+                    validateStatusStageCompatibility(normalizedStatus, normalizedStage, validation.rules);
+                }
+                catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    results.push({ id: normalizedId, success: false, error: message });
+                    continue;
+                }
+                for (const warning of warnings) {
+                    if (!utils.isJsonMode()) {
+                        console.error(warning);
+                    }
+                }
+                if (statusCandidate !== undefined)
+                    updates.status = normalizedStatus;
+                if (stageCandidate !== undefined)
+                    updates.stage = normalizedStage;
+                // Advisory file-paths check: when transitioning to an intake stage
+                // (intake_complete or prd_complete), warn if the description lacks
+                // a valid **Key Files:** section. This is advisory only — it does
+                // not block the transition.
+                const intakeStages = ['intake_complete', 'prd_complete'];
+                if (intakeStages.includes(normalizedStage)) {
+                    const desc = current.description || '';
+                    const paths = extractFilePaths(desc);
+                    if (paths.length === 0) {
+                        const filePathsWarning = `Warning: Work item ${normalizedId} is being moved to ${normalizedStage} ` +
+                            `but its description does not contain a valid "**Key Files:**" section ` +
+                            `with file paths. Adding file paths helps the grouping algorithm ` +
+                            `determine parallel-work safety. See docs/FILE_PATH_CONVENTION.md ` +
+                            `for the convention specification.`;
+                        if (!utils.isJsonMode()) {
+                            console.error(filePathsWarning);
+                        }
+                    }
+                }
+            }
+            // Handle do-not-delegate per-id
+            if (doNotDelegateRaw !== undefined) {
+                const current = db.get(normalizedId);
+                if (!current) {
+                    const message = `Work item not found: ${normalizedId}`;
+                    results.push({ id: normalizedId, success: false, error: message });
+                    continue;
+                }
+                const baseTags = updates.tags !== undefined ? updates.tags : (current.tags || []);
+                const truthy = ['true', 'yes', '1'];
+                let newTags;
+                if (truthy.includes(doNotDelegateRaw)) {
+                    newTags = Array.from(new Set([...baseTags, 'do-not-delegate']));
+                }
+                else {
+                    newTags = baseTags.filter(t => t !== 'do-not-delegate');
+                }
+                updates.tags = newTags;
+            }
+            if (process.env.WL_DEBUG_SQL_BINDINGS) {
+                try {
+                    const currentBefore = db.get(normalizedId);
+                    console.error('WL_DEBUG_SQL_BINDINGS update: preparing to update', normalizedId, 'updates:', JSON.stringify(updates));
+                    if (currentBefore) {
+                        const keys = {};
+                        for (const k of Object.keys(currentBefore)) {
+                            try {
+                                keys[k] = typeof currentBefore[k];
+                            }
+                            catch (_e) {
+                                keys[k] = 'unreadable';
+                            }
+                        }
+                        console.error('WL_DEBUG_SQL_BINDINGS update: current item types:', JSON.stringify(keys));
+                    }
+                }
+                catch (_e) {
+                    console.error('WL_DEBUG_SQL_BINDINGS update: failed to log update context');
+                }
+            }
+            // SAFETY: If no work-item fields changed (e.g. only --audit-text was
+            // provided, which is handled above via db.saveAuditResult), skip
+            // db.update() entirely to prevent any accidental stage/status
+            // transitions. The audit persistence handler above already called
+            // db.saveAuditResult() — there is nothing more to update on the
+            // work item record itself.
+            if (Object.keys(updates).length === 0) {
+                const current = db.get(normalizedId);
+                if (!current) {
+                    const message = `Work item not found: ${normalizedId}`;
+                    results.push({ id: normalizedId, success: false, error: message });
+                    continue;
+                }
+                // Include audit data in JSON output when audit was written
+                if (auditWritten && auditEntryForOutput) {
+                    current.auditResult = db.getAuditResult(normalizedId);
+                    current.audit = { time: auditEntryForOutput.time, author: auditEntryForOutput.author, text: auditEntryForOutput.text, status: auditEntryForOutput.status };
+                }
+                results.push({ id: normalizedId, success: true, workItem: current });
+                continue;
+            }
+            // Capture the previous priority before the update so we can detect a
+            // downgrade away from `critical` and cascade it to children.
+            const oldPriority = (db.get(normalizedId)?.priority);
+            const item = db.update(normalizedId, updates);
+            if (!item) {
+                const message = `Work item not found: ${normalizedId}`;
+                results.push({ id: normalizedId, success: false, error: message });
+                continue;
+            }
+            if (updates.status || updates.stage) {
+                db.reconcileDependentStatus(normalizedId);
+            }
+            // Cascade a priority downgrade: when the item's priority moves away
+            // from `critical`, any direct children still at `critical` are
+            // downgraded to `high` so a non-critical parent has no critical
+            // subtasks. Children already at high/medium/low are left untouched.
+            let downgradedChildren = [];
+            if (updates.priority && oldPriority === 'critical' && priorityCandidate !== 'critical') {
+                downgradedChildren = db.cascadePriorityDowngrade(normalizedId, priorityCandidate);
+            }
+            // Reparenting: a parent cannot stay `completed`/`in_review` while a
+            // new, uncompleted child is attached to it. Demote the target parent
+            // to `open`/`plan_complete` so its lifecycle state stays consistent.
+            let demotedParent = null;
+            if (updates.parentId) {
+                try {
+                    demotedParent = db.demoteParentOnChildAdded(updates.parentId);
+                }
+                catch (err) {
+                    // Best-effort: a demotion failure must not abort the update.
+                    console.error(`Warning: failed to demote parent ${updates.parentId}: ${err instanceof Error ? err.message : String(err)}`);
+                }
+            }
+            // Mark that an impactful change was made if any qualifying fields were
+            // included in this per-id update.
+            if (updates.status || updates.priority || updates.risk || updates.effort || updates.stage) {
+                impactfulChange = true;
+            }
+            // Fire-and-forget: submit a summary to OpenBrain when the item
+            // transitions to completed, if the feature is enabled.
+            if (updates.status === 'completed') {
+                const config = utils.getConfig();
+                if (config?.openBrainEnabled) {
+                    submitToOpenBrain(item).catch(() => {
+                        // Errors are already logged inside submitToOpenBrain; swallow here
+                        // so the update command is never blocked or aborted.
+                    });
+                }
+            }
+            // Include audit data in JSON output when audit was written
+            if (auditWritten && auditEntryForOutput) {
+                item.auditResult = db.getAuditResult(normalizedId);
+                item.audit = { time: auditEntryForOutput.time, author: auditEntryForOutput.author, text: auditEntryForOutput.text, status: auditEntryForOutput.status };
+            }
+            results.push({
+                id: normalizedId,
+                success: true,
+                workItem: item,
+                ...(downgradedChildren.length > 0 ? { downgradedChildren } : {}),
+                ...(demotedParent ? { demotedParent } : {}),
+            });
+        }
+        // Determine overall success
+        const anyFailures = results.some(r => !r.success);
+        if (utils.isJsonMode()) {
+            // Preserve legacy single-id output shape for callers/tests that expect
+            // `{ success, workItem }`. For batch updates return an array of
+            // per-id results.
+            if (results.length === 1) {
+                const r = results[0];
+                if (r.success) {
+                    const jsonOut = { success: true, workItem: r.workItem };
+                    if (r.downgradedChildren?.length) {
+                        jsonOut.downgradedChildren = r.downgradedChildren;
+                    }
+                    if (r.demotedParent) {
+                        jsonOut.demotedParent = r.demotedParent;
+                    }
+                    output.json(jsonOut);
+                }
+                else {
+                    const { success: _ignored, ...rest } = r;
+                    output.json({ success: false, ...rest });
+                }
+            }
+            else {
+                output.json({ success: !anyFailures, results });
+            }
+        }
+        else {
+            const format = resolveFormat(program);
+            for (const r of results) {
+                if (r.success) {
+                    console.log('Updated work item:');
+                    console.log(humanFormatWorkItem(r.workItem, db, format));
+                    if (r.downgradedChildren?.length) {
+                        console.log(`[Downgraded ${r.downgradedChildren.length} child(ren) from critical to high]`);
+                    }
+                    if (r.demotedParent) {
+                        console.log(`[Parent ${r.demotedParent.parent.id} demoted from ${r.demotedParent.from.status}/${r.demotedParent.from.stage} to ${r.demotedParent.to.status}/${r.demotedParent.to.stage}]`);
+                    }
+                }
+                else {
+                    output.error(r.error, { success: false, error: r.error });
+                }
+            }
+        }
+        if (anyFailures) {
+            // Ensure spawned CLI and in-process harness treat this as a failure.
+            // Set exitCode for spawn semantics and call process.exit(1) so the
+            // in-process runner (which replaces process.exit with a throwing
+            // trap) will surface a non-zero exit code to execAsync.
+            process.exitCode = 1;
+            // Run re-sort if impactful changes were made and re-sort is not
+            // explicitly disabled (do this before exit so external scripts can
+            // rely on ordering after a blocking update).
+            try {
+                if (impactfulChange && !reSortNo && typeof db.reSort === 'function') {
+                    if (reSortSync)
+                        db.reSort();
+                    else
+                        void Promise.resolve().then(() => db.reSort());
+                }
+            }
+            catch (_e) { }
+            process.exit(1);
+        }
+        // If reached here and not exiting, trigger re-sort if impactful changes
+        // were made and re-sort is not disabled.
+        try {
+            if (impactfulChange && !reSortNo && typeof db.reSort === 'function') {
+                if (reSortSync)
+                    db.reSort();
+                else
+                    void Promise.resolve().then(() => db.reSort());
+            }
+        }
+        catch (_e) { }
+    });
+}
+//# sourceMappingURL=update.js.map

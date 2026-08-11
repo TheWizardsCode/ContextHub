@@ -1,0 +1,1 @@
+{"version":3,"file":"markdown-renderer.d.ts","sourceRoot":"","sources":["markdown-renderer.ts"],"names":[],"mappings":"AAAA;;;;;;;;;;GAUG;AAIH,MAAM,WAAW,eAAe;IAC9B,OAAO,CAAC,EAAE,MAAM,CAAC;CAClB;AAED,wBAAgB,oBAAoB,CAAC,KAAK,EAAE,MAAM,EAAE,IAAI,CAAC,EAAE,eAAe,GAAG,MAAM,CAqClF;AAED,eAAe,oBAAoB,CAAC"}

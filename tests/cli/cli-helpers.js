@@ -1,0 +1,403 @@
+import * as childProcess from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
+import { cleanupTempDir, createTempDir } from '../test-utils.js';
+import { exportToJsonl } from '../../src/jsonl.js';
+import { runInProcess } from './cli-inproc.js';
+// ── Process lifecycle tracking ──────────────────────────────────────────
+// Track spawned child process PIDs so they can be cleaned up on shutdown.
+// Disable tracking per-invocation by setting WORKLOG_MOCK_PROCESS_TRACKING=0.
+/** Set of tracked child process PIDs */
+export const pidTrackingSet = new Set();
+/**
+ * Kill a PID and all its descendants (process tree).
+ *
+ * On POSIX systems children spawned via `child_process.spawn`/`exec` with a
+ * shell share the shell's process group. Killing the shell PID alone leaves
+ * the actual command (e.g. `tsx src/cli.ts --json create`) and its own
+ * children (e.g. the node CLI process) orphaned with ppid=1 — exactly the
+ * leak seen in WL-0MSB447TJ000R3N8. We therefore kill the process group
+ * (`-pid`) first, which terminates every member of the tree, and fall back
+ * to a plain PID kill when no process group exists.
+ */
+export function killProcessTree(pid, signal = 'SIGTERM') {
+    // Kill the whole process group (shell + command + grandchildren).
+    try {
+        process.kill(-pid, signal);
+        return;
+    }
+    catch {
+        // EPERM/ESRCH: no process group or already dead — fall through.
+    }
+    // Fallback: kill just the PID.
+    try {
+        process.kill(pid, signal);
+    }
+    catch {
+        // Process may already have exited; ignore.
+    }
+}
+/**
+ * Send SIGTERM to all tracked process trees and clear the tracking set.
+ * Safe to call multiple times; already-exited PIDs are silently ignored.
+ */
+export function killTrackedProcesses() {
+    for (const pid of pidTrackingSet) {
+        killProcessTree(pid, 'SIGTERM');
+    }
+    pidTrackingSet.clear();
+}
+// ── Signal handlers for graceful shutdown ───────────────────────────────
+// Install handlers once at module load time so that test infrastructure
+// cleans up orphaned mock processes on premature exit (SIGTERM, SIGINT,
+// SIGHUP) or normal process termination (beforeExit).
+let _signalHandlersInstalled = false;
+function _installSignalHandlers() {
+    if (_signalHandlersInstalled)
+        return;
+    _signalHandlersInstalled = true;
+    const cleanup = () => {
+        if (pidTrackingSet.size > 0) {
+            killTrackedProcesses();
+        }
+    };
+    process.on('SIGTERM', cleanup);
+    process.on('SIGINT', cleanup);
+    process.on('SIGHUP', cleanup);
+    process.on('beforeExit', cleanup);
+}
+_installSignalHandlers();
+/**
+ * Track a child process PID unless tracking is disabled for this invocation
+ * via process.env.WORKLOG_MOCK_PROCESS_TRACKING=0.
+ */
+function _trackChild(proc) {
+    const trackingDisabled = process.env.WORKLOG_MOCK_PROCESS_TRACKING === '0';
+    if (trackingDisabled)
+        return;
+    if (typeof proc.pid === 'number') {
+        pidTrackingSet.add(proc.pid);
+        // Remove from tracking set when the process exits
+        proc.on('exit', () => {
+            pidTrackingSet.delete(proc.pid);
+        });
+    }
+}
+/**
+ * Wrapper around child_process.exec that tracks the child PID and injects
+ * the test-local mock-bin directory into PATH.
+ *
+ * Spawns with `detached: true` (POSIX) so the child gets its own process
+ * group — this is what allows `killProcessTree` to kill the whole tree
+ * (shell + command + grandchildren) instead of orphaning descendants
+ * (WL-0MSB447TJ000R3N8).
+ */
+function _execTracked(command, options) {
+    return new Promise((resolve, reject) => {
+        const timeoutMs = options?.timeout ?? 30000;
+        const child = childProcess.spawn(command, {
+            shell: true,
+            cwd: options?.cwd,
+            env: options?.env,
+            detached: process.platform !== 'win32',
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        _trackChild(child);
+        let stdout = '';
+        let stderr = '';
+        let timedOut = false;
+        const timeoutId = setTimeout(() => {
+            timedOut = true;
+            if (child.pid)
+                killProcessTree(child.pid, 'SIGKILL');
+        }, timeoutMs);
+        child.stdout?.setEncoding('utf-8');
+        child.stderr?.setEncoding('utf-8');
+        child.stdout?.on('data', (d) => { stdout += d; });
+        child.stderr?.on('data', (d) => { stderr += d; });
+        const settle = () => {
+            clearTimeout(timeoutId);
+            if (timedOut) {
+                const err = new Error(`Command timed out after ${timeoutMs}ms: ${command}`);
+                err.stdout = stdout;
+                err.stderr = stderr;
+                reject(err);
+                return;
+            }
+            resolve({ stdout, stderr });
+        };
+        child.on('error', (err) => {
+            clearTimeout(timeoutId);
+            reject(err);
+        });
+        child.on('close', (code) => {
+            if (code === 0) {
+                settle();
+            }
+            else {
+                clearTimeout(timeoutId);
+                const err = new Error(`Command failed with exit code ${code ?? 'null'}: ${command}`);
+                err.stdout = stdout;
+                err.stderr = stderr;
+                err.code = code;
+                reject(err);
+            }
+        });
+    });
+}
+// Wrapper around child_process.exec that injects a test-local mock `git`
+// binary found at `tests/cli/mock-bin` by prefixing PATH. This allows tests
+// to run fast without invoking the real `git` executable while preserving
+// the same `exec` behaviour (returns { stdout, stderr }).
+export async function execAsync(command, options) {
+    const env = { ...process.env };
+    try {
+        const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+        const mockBin = path.join(projectRoot, 'tests', 'cli', 'mock-bin');
+        if (fs.existsSync(mockBin)) {
+            env.PATH = `${mockBin}:${env.PATH || ''}`;
+        }
+    }
+    catch (e) {
+        // ignore; fall back to process.env
+    }
+    const execOptions = { ...(options || {}), env };
+    // If the command invokes the local CLI via `tsx <cliPath>` run it in-process
+    const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+    const cliPath = path.join(projectRoot, 'src', 'cli.ts');
+    const isLocalCli = command.trim().startsWith('tsx') && command.includes(cliPath);
+    const isInitCommand = /\binit\b/.test(command);
+    if (isLocalCli) {
+        // Avoid in-process for init to preserve interactive behavior in tests.
+        if (isInitCommand) {
+            const result = await _execTracked(command, execOptions);
+            return result;
+        }
+        const originalCwd = process.cwd();
+        try {
+            if (options?.cwd)
+                process.chdir(options.cwd);
+            const res = await runInProcess(command, options?.timeout ?? 25000);
+            if (res.exitCode && res.exitCode !== 0) {
+                const error = new Error(`Command failed: ${command}`);
+                error.stdout = res.stdout ?? '';
+                error.stderr = res.stderr ?? '';
+                error.exitCode = res.exitCode;
+                // Re-throw so callers can handle CLI errors; do NOT fall back to spawning
+                throw error;
+            }
+            return { stdout: res.stdout ?? '', stderr: res.stderr ?? '' };
+        }
+        finally {
+            try {
+                process.chdir(originalCwd);
+            }
+            catch (_) { }
+        }
+    }
+    // reuse promisified exec for other commands
+    return await _execTracked(command, execOptions);
+}
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const projectRoot = path.resolve(__dirname, '../..');
+export const cliPath = path.join(projectRoot, 'src', 'cli.ts');
+export async function execWithInput(command, input, options) {
+    return await new Promise((resolve, reject) => {
+        // Ensure the mocked PATH is passed to spawned children so tests that use
+        // spawn (with shell) pick up the tests/cli/mock-bin git mock as well.
+        const env = { ...(options?.env || process.env) };
+        try {
+            const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+            const mockBin = path.join(projectRoot, 'tests', 'cli', 'mock-bin');
+            if (fs.existsSync(mockBin)) {
+                env.PATH = `${mockBin}${path.delimiter}${env.PATH || ''}`;
+            }
+        }
+        catch (e) {
+            // ignore
+        }
+        const child = childProcess.spawn(command, {
+            shell: true,
+            cwd: options?.cwd,
+            env,
+            detached: process.platform !== 'win32',
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+        _trackChild(child);
+        let stdout = '';
+        let stderr = '';
+        let timedOut = false;
+        const timeoutMs = options?.timeout ?? 30000;
+        const timeoutId = setTimeout(() => {
+            timedOut = true;
+            if (child.pid)
+                killProcessTree(child.pid, 'SIGKILL');
+        }, timeoutMs);
+        child.stdout.setEncoding('utf-8');
+        child.stderr.setEncoding('utf-8');
+        child.stdout.on('data', (chunk) => {
+            stdout += chunk;
+        });
+        child.stderr.on('data', (chunk) => {
+            stderr += chunk;
+        });
+        child.on('error', (err) => {
+            clearTimeout(timeoutId);
+            reject(err);
+        });
+        child.on('close', (code) => {
+            clearTimeout(timeoutId);
+            if (timedOut) {
+                reject(new Error(`Command timed out after ${timeoutMs}ms: ${command}`));
+                return;
+            }
+            resolve({ stdout, stderr, exitCode: code });
+        });
+        if (input) {
+            child.stdin.write(input);
+        }
+        child.stdin.end();
+    });
+}
+export function enterTempDir() {
+    const tempDir = createTempDir();
+    const originalCwd = process.cwd();
+    process.chdir(tempDir);
+    return { tempDir, originalCwd };
+}
+export function leaveTempDir(state) {
+    process.chdir(state.originalCwd);
+    cleanupTempDir(state.tempDir);
+}
+// ── Stale wl process cleanup (WL-0MSB447TJ000R3N8) ───────────────────
+/**
+ * Kill any stale `wl`/`worklog` CLI processes whose command line matches a
+ * substring (e.g. a test worktree slug like `init-pre-push-guards`).
+ *
+ * Test-spawned `wl create` processes can outlive the test worker when the
+ * worker is killed with SIGKILL (vitest timeout / worktree cleanup): the
+ * `tsx`/`node` grandchildren are reparented to init (ppid=1) with a deleted
+ * cwd and hang forever. This helper provides a belt-and-suspenders sweep for
+ * CI teardown and for manual cleanup of known test worktrees.
+ *
+ * @param match - Substring to match against the process command line.
+ * @param signal - Signal to send (default SIGKILL — hung processes may not
+ *                 handle SIGTERM; the CLI is stateless so SIGKILL is safe).
+ * @returns The number of processes killed.
+ */
+export function killStaleWlProcesses(match, signal = 'SIGKILL') {
+    const { execFileSync } = childProcess;
+    let killed = 0;
+    let stdout = '';
+    try {
+        stdout = execFileSync('pgrep', ['-f', `wl.*${match}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    }
+    catch {
+        return 0; // no matches (pgrep exits 1) or pgrep unavailable
+    }
+    for (const line of stdout.split(/\n/)) {
+        const pid = Number(line.trim());
+        if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid)
+            continue;
+        try {
+            killProcessTree(pid, signal);
+            killed += 1;
+        }
+        catch {
+            // already dead / no permission
+        }
+    }
+    return killed;
+}
+export function writeConfig(dir, projectName = 'Test Project', prefix = 'TEST') {
+    fs.mkdirSync(path.join(dir, '.worklog'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.worklog', 'config.yaml'), [
+        `projectName: ${projectName}`,
+        `prefix: ${prefix}`,
+        'statuses:',
+        '  - value: open',
+        '    label: Open',
+        '  - value: in-progress',
+        '    label: In Progress',
+        '  - value: blocked',
+        '    label: Blocked',
+        '  - value: completed',
+        '    label: Completed',
+        '  - value: deleted',
+        '    label: Deleted',
+        'stages:',
+        '  - value: ""',
+        '    label: Undefined',
+        '  - value: idea',
+        '    label: Idea',
+        '  - value: prd_complete',
+        '    label: PRD Complete',
+        '  - value: plan_complete',
+        '    label: Plan Complete',
+        '  - value: in_progress',
+        '    label: In Progress',
+        '  - value: in_review',
+        '    label: In Review',
+        '  - value: done',
+        '    label: Done',
+        'statusStageCompatibility:',
+        '  open: ["", idea, prd_complete, plan_complete, in_progress]',
+        '  in-progress: [in_progress]',
+        '  blocked: ["", idea, prd_complete, plan_complete, in_progress]',
+        '  completed: [in_review, done]',
+        '  deleted: [""]'
+    ].join('\n'), 'utf-8');
+}
+export function writeInitSemaphore(dir, version = undefined, initializedAt = '2024-01-23T12:00:00.000Z') {
+    fs.mkdirSync(path.join(dir, '.worklog'), { recursive: true });
+    const v = version ?? getPackageVersion();
+    fs.writeFileSync(path.join(dir, '.worklog', 'initialized'), JSON.stringify({ version: v, initializedAt }), 'utf-8');
+}
+/**
+ * Read the package.json version from the project root so tests use the
+ * same single source of truth as the application.
+ */
+export function getPackageVersion() {
+    try {
+        const pkgPath = path.join(projectRoot, 'package.json');
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+        return pkg.version ?? '0.0.0';
+    }
+    catch {
+        return '0.0.0';
+    }
+}
+export function seedWorkItems(dir, items, comments = [], auditResults) {
+    const now = new Date().toISOString();
+    const seeded = items.map((item, index) => ({
+        id: item.id ?? `TEST-${index + 1}`,
+        title: item.title,
+        description: item.description ?? '',
+        status: item.status ?? 'open',
+        priority: item.priority ?? 'medium',
+        sortIndex: 0,
+        parentId: item.parentId ?? null,
+        createdAt: now,
+        updatedAt: now,
+        tags: item.tags ?? [],
+        assignee: item.assignee ?? '',
+        stage: item.stage ?? '',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '',
+        effort: '',
+        githubIssueNumber: item.githubIssueNumber,
+        githubIssueId: item.githubIssueId,
+        githubIssueUpdatedAt: item.githubIssueUpdatedAt,
+        needsProducerReview: item.needsProducerReview ?? false,
+        audit: item.audit,
+    }));
+    const dataPath = path.join(dir, '.worklog', 'worklog-data.jsonl');
+    exportToJsonl(seeded, comments, dataPath, [], auditResults || []);
+    return seeded;
+}
+//# sourceMappingURL=cli-helpers.js.map

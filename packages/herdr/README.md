@@ -20,7 +20,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Quit** — Press `q` to exit
 - **Metadata panel** — The bottom portion of the list view (roughly 20–40% of the pane height, responsive to terminal size) is reserved for the selected item's metadata: ID, title, status, stage, priority, type, risk, effort, tags, audit info, and more. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
-- **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` — no custom stage values). Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
+- **Priority-first grouping** — Work items are grouped by priority, most actionable first: one section per bucket (`Critical` → `High` → `Medium` → `Low`) and within each section by Worklog stage in workflow order (`idea` → `intake_complete` → `plan_complete` → `in_progress` → `in_review` → `done`), then by id. See [Priority-first grouping](#priority-first-grouping).
 - **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, full GFM rendering: headings, lists, tables, blockquotes, code, links) as a preview. The description section is rendered with the same markdown renderer. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
 - **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. See [Inline note links](#inline-note-links).
 - **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
@@ -491,19 +491,25 @@ clamped to a minimum of 3 rows so it is always usable.
   list, filtering, or refreshing resets the panel scroll so the top of the
   panel is always visible again.
 
-## Stage grouping
+## Priority-first grouping
 
-Work items are grouped by their Worklog **stage** using the standard
-lifecycle stages only — `idea`, `intake_complete`, `plan_complete`,
-`in_progress`, `in_review`, `done`. No custom stage values are required for
-grouping, so podcast episode items group exactly as their frontmatter
-`pipeline_stage` maps 1:1 onto the Worklog stages (PRD §7.2). Groups render
-in the canonical order (Critical → Group N → Idea → Other → In Review) with
-group separators in the list; stage changes re-group items on the next
-refresh. Non-critical `in_progress` items join the file-path-partitioned
-`Group N` lists alongside `plan_complete`/`intake_complete` items and sort
-ahead of them (actively-worked items first); "Other" remains only as a
-safety net for unknown/custom stages.
+Work items in the selection list are grouped by **priority**, most actionable
+first: one section per priority bucket — `Critical` → `High` → `Medium` → `Low`
+— each rendered with a `── <label> ──` separator. Within a section, items
+sort by their Worklog **stage** in workflow order (`idea` → `intake_complete`
+→ `plan_complete` → `in_progress` → `in_review` → `done`; unknown stages
+last) and then by item id as a deterministic tie-break; no stage sub-headers
+are rendered. Items with an unknown/empty priority sort as `medium` (the
+`DEFAULT_PRIORITY` convention).
+
+Because the sort lives at the display step (regrouping), every rendered list
+inherits it: the default worklist, stage-filtered views (e.g. `/wl idea`),
+expanded child lists, and any list the plugin renders. The old file-path
+conflict partitioning (`Critical Group N` / `Group N` labels) was dropped:
+priority is the primary sort key, so a high-priority `in_progress` item no
+longer trails a medium-priority `plan_complete` item. The smart-selection
+guarantee is unchanged: all `critical` items and all `completed`/`in_review`
+items stay visible regardless of the `browseItemCount` setting.
 
 ## Markdown viewer
 
