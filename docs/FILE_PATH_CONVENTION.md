@@ -122,8 +122,6 @@ Section exists but no valid paths:
 
 `wl next -n N` displays groups in this order (WL-0MSAK8YLB0025EGW):
 
-> **Note (CLI-only):** this order applies to `wl next` (the CLI). The **Herdr plugin** selection list (`packages/herdr`) regroups by **priority first** — Critical → High → Medium → Low sections, then stage in workflow order — see WL-0MSI1LVTJ001M9EY. The CLI's file-path-conflict partitioning is unchanged.
-
 1. **Critical Group N** — `critical` priority items partitioned by file-path conflicts (items sharing a file path land in different groups; items with unknown paths get singleton groups).
 2. **Group N** — non-critical `in_progress` + `plan_complete` + `intake_complete` items partitioned by file-path conflicts. Within each group, `in_progress` items appear first, then `plan_complete`, then `intake_complete` items (no headings between sub-groups), each sorted by priority (high → medium → low). The same within-group stage sub-sort applies inside each `Critical Group N`.
 3. **Idea** — single group, sorted by priority.

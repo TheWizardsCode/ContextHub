@@ -246,33 +246,31 @@ function toGroupable(item: WorkItem): GroupableItem {
   };
 }
 
-describe('podcast item priority-bucket grouping', () => {
-  it('groups podcast items by priority buckets with no custom stage strings', () => {
+describe('podcast item stage grouping', () => {
+  it('groups podcast items by standard lifecycle stages with no custom values', () => {
     const items: WorkItem[] = [
-      makeItem('ep-idea', 'idea', 'high'),
-      makeItem('ep-drafted', 'plan_complete', 'high'),
-      makeItem('ep-written', 'in_review', 'low'),
-      makeItem('ep-produced', 'done', 'low'),
+      makeItem('ep-idea', 'idea'),
+      makeItem('ep-drafted', 'plan_complete'),
+      makeItem('ep-written', 'in_review'),
+      makeItem('ep-produced', 'done'),
     ];
     const groups = assignItemGroups(items.map(toGroupable));
 
-    // Group labels must come from the priority-bucket mapping; no custom
+    // Group labels must come from the standard stage mapping; no custom
     // stage strings appear in any label.
     const labels = [...groups.values()].map(g => g.groupLabel);
     const allLabels = labels.join(' ');
     expect(allLabels).not.toMatch(/sourced|drafted|written|produced/);
 
-    // high → 'High', low → 'Low' (priority-first ordering,
-    // WL-0MSI1LVTJ001M9EY); stage no longer drives the section label.
-    expect(groups.get('ep-idea')?.groupLabel).toBe('High');
-    expect(groups.get('ep-drafted')?.groupLabel).toBe('High');
-    expect(groups.get('ep-written')?.groupLabel).toBe('Low');
-    expect(groups.get('ep-produced')?.groupLabel).toBe('Low');
-    // High bucket precedes Low bucket.
-    expect(groups.get('ep-idea')!.group).toBeLessThan(groups.get('ep-written')!.group);
+    // Idea → 'Idea', plan_complete → 'Group N', in_review → 'In Review'.
+    expect(groups.get('ep-idea')?.groupLabel).toBe('Idea');
+    expect(groups.get('ep-drafted')?.groupLabel).toMatch(/^Group \d+$/);
+    expect(groups.get('ep-written')?.groupLabel).toBe('In Review');
+    // done is not one of the known buckets → 'Other'.
+    expect(groups.get('ep-produced')?.groupLabel).toBe('Other');
   });
 
-  it('regroupWorkItems keeps podcast items stable after reorder (priority buckets)', () => {
+  it('regroupWorkItems keeps podcast stage groups stable after reorder', () => {
     const items: WorkItem[] = [
       makeItem('ep-idea', 'idea'),
       makeItem('ep-drafted', 'plan_complete'),
@@ -283,13 +281,10 @@ describe('podcast item priority-bucket grouping', () => {
     const regrouped = regroupWorkItems(shuffled);
 
     const byId = new Map(regrouped.map(i => [i.id, i]));
-    // All medium priority → a single Medium bucket, ordered by stage
-    // (idea → plan_complete → in_review).
-    for (const id of ['ep-idea', 'ep-drafted', 'ep-written']) {
-      expect(byId.get(id)?.groupLabel).toBe('Medium');
-      expect(byId.get(id)?.group).toBe(1);
-    }
-    expect(regrouped.map(i => i.id)).toEqual(['ep-idea', 'ep-drafted', 'ep-written']);
+    // In Review must come last.
+    expect(byId.get('ep-written')?.groupLabel).toBe('In Review');
+    expect(byId.get('ep-idea')?.groupLabel).toBe('Idea');
+    expect(byId.get('ep-drafted')?.groupLabel).toMatch(/^Group \d+$/);
   });
 });
 

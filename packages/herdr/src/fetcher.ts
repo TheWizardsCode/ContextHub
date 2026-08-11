@@ -529,11 +529,7 @@ export async function fetchItemsByStage(stage: string): Promise<WorkItem[]> {
   const status = STAGE_STATUS[stage] ?? 'open';
   const output = await runWl(['list', '--status', status, '--stage', stage, '--root-only']);
   const payload = extractJson(output);
-  const items = extractItems(payload);
-  // Apply the same priority-first ordering as the default worklist
-  // (WL-0MSOPHLD1000EWNN, parent WL-0MSI1LVTJ001M9EY AC4): stage-filtered
-  // views must render priority buckets too, not the raw CLI list order.
-  return regroupWorkItems(items);
+  return extractItems(payload);
 }
 
 /**
@@ -591,11 +587,7 @@ export async function fetchChildrenForItem(parentId: string): Promise<WorkItem[]
   const output = await runWl(['list', '--parent', parentId]);
   const payload = extractJson(output);
   const items = extractItems(payload);
-  // Apply the same priority-first ordering as the default worklist
-  // (WL-0MSOPHLD1000EWNN, parent WL-0MSI1LVTJ001M9EY AC4): expanded child
-  // lists must render priority buckets too. regroupWorkItems never filters,
-  // so all children (including done ones) remain visible.
-  return regroupWorkItems(items.map((item) => ({ ...item, depth: 1 })));
+  return items.map((item) => ({ ...item, depth: 1 }));
 }
 
 // ── Work-item claiming ────────────────────────────────────────────────

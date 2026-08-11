@@ -547,8 +547,6 @@ When requesting multiple items (`-n <count>`), the output wraps results in:
 
 When `-n > 1`, `wl next` automatically groups items into parallel-safe groups based on priority, stage, and file-path conflicts extracted from each item's description. The `--groups/-g` option controls the number of file-path-based groups (default: `3`).
 
-> **Note (CLI-only):** the grouping below applies to `wl next --groups` (the CLI). The **Herdr plugin** selection list (`packages/herdr`) applies its own **priority-first** regrouping — one section per priority bucket (Critical → High → Medium → Low), then stage in workflow order — see WL-0MSI1LVTJ001M9EY. The CLI's file-path-conflict partitioning is unchanged.
-
 The grouping algorithm uses a greedy first-fit strategy:
 
 1. Extract file paths from each item's description using a `**Key Files:**` section convention (see [docs/FILE_PATH_CONVENTION.md](docs/FILE_PATH_CONVENTION.md) for the full specification).

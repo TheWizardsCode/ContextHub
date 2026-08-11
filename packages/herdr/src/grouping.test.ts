@@ -4,21 +4,9 @@
  *
  * The grouping algorithm is intentionally duplicated per TUI (decision Q2c
  * in WL-0MS8W5LTW006YZ4B) because Herdr has zero npm dependencies and cannot
- * import from src/commands/. This suite asserts the priority-first ordering
- * introduced by WL-0MSI1LVTJ001M9EY:
- *
- * - One section per priority bucket, ordered Critical → High → Medium → Low
- *   (labels are the priority names; no stage sub-headers are rendered).
- * - Within a bucket, items sort by stage in workflow order (idea →
- *   intake_complete → plan_complete → in_progress → in_review → done) then
- *   by id as a deterministic tie-break.
- * - Unknown/empty priority sorts as medium (DEFAULT_PRIORITY convention);
- *   unknown stages sort after all known stages.
- *
- * It also covers the merged-list regression for duplicate section headings
- * (WL-0MSAK8YLB0025EGW) and the smart-selection merge path guarantee
- * (WL-0MS8W5LTW006YZ4B): all critical + completed/in_review items remain
- * visible after select → regroup.
+ * import from src/commands/. This suite mirrors the core grouping-utility
+ * tests plus the merged-list regression for the duplicate "In Review"
+ * sections bug (WL-0MSAK8YLB0025EGW).
  *
  * Run: npx vitest run packages/herdr/src/grouping.test.ts
  */
@@ -31,7 +19,6 @@ import {
   extractFilePaths,
   type GroupableItem,
 } from './grouping.js';
-import { selectWorkItems } from './smart-selection.js';
 import type { WorkItem } from './fetcher.js';
 
 /**
@@ -49,184 +36,129 @@ function makeItem(id: string, overrides: Partial<WorkItem> = {}): WorkItem {
   };
 }
 
-describe('assignItemGroups — priority-bucket sections (WL-0MSI1LVTJ001M9EY)', () => {
-  it('produces one section per priority bucket in order Critical → High → Medium → Low', () => {
+describe('grouping.ts — duplicated algorithm mirrors core spec', () => {
+  it('produces the canonical group order: Critical Group N → Group N → Idea → Other → In Review', () => {
     const items: GroupableItem[] = [
-      { id: 'WL-L', stage: 'in_progress', filePaths: [], priority: 'low' },
-      { id: 'WL-H', stage: 'plan_complete', filePaths: [], priority: 'high' },
-      { id: 'WL-C', stage: 'idea', filePaths: [], priority: 'critical' },
-      { id: 'WL-M', stage: 'in_review', filePaths: [], priority: 'medium' },
+      { id: 'WL-C1', stage: 'plan_complete', filePaths: ['src/c.ts'], priority: 'critical' },
+      { id: 'WL-P1', stage: 'plan_complete', filePaths: ['src/p1.ts'], priority: 'high' },
+      { id: 'WL-I1', stage: 'intake_complete', filePaths: ['src/i1.ts'], priority: 'medium' },
+      { id: 'WL-IP1', stage: 'in_progress', filePaths: ['src/ip1.ts'], priority: 'high' },
+      { id: 'WL-idea', stage: 'idea', filePaths: [], priority: 'low' },
+      { id: 'WL-other', stage: 'custom', filePaths: [], priority: 'medium' },
+      { id: 'WL-R1', stage: 'in_review', filePaths: [], priority: 'medium' },
     ];
-    const groups = assignItemGroups(items);
-    // One section per priority bucket, labelled with the priority name.
-    expect(groups.get('WL-C')!.groupLabel).toBe('Critical');
-    expect(groups.get('WL-H')!.groupLabel).toBe('High');
-    expect(groups.get('WL-M')!.groupLabel).toBe('Medium');
-    expect(groups.get('WL-L')!.groupLabel).toBe('Low');
-    // No stage sub-headers: the set of labels is exactly the priority names.
-    expect(new Set([...groups.values()].map(g => g.groupLabel))).toEqual(
-      new Set(['Critical', 'High', 'Medium', 'Low']),
-    );
-    // Sections are numbered in priority order (Critical first).
-    expect(groups.get('WL-C')!.group).toBeLessThan(groups.get('WL-H')!.group);
-    expect(groups.get('WL-H')!.group).toBeLessThan(groups.get('WL-M')!.group);
-    expect(groups.get('WL-M')!.group).toBeLessThan(groups.get('WL-L')!.group);
-    expect([...groups.values()].map(g => g.group)).toEqual([1, 2, 3, 4]);
+    const groups = assignItemGroups(items, 3);
+    const groupOf = (id: string): number => groups.get(id)!.group;
+    expect(groups.get('WL-C1')!.groupLabel).toBe('Critical Group 1');
+    // Plan/intake/in_progress items share Group N (no stage prefix in the label).
+    expect(groups.get('WL-P1')!.groupLabel).toBe('Group 1');
+    expect(groups.get('WL-I1')!.groupLabel).toBe('Group 1');
+    expect(groups.get('WL-IP1')!.groupLabel).toBe('Group 1');
+    expect(groupOf('WL-C1')).toBeLessThan(groupOf('WL-P1'));
+    expect(groupOf('WL-P1')).toBeLessThan(groupOf('WL-idea'));
+    expect(groupOf('WL-idea')).toBeLessThan(groupOf('WL-other'));
+    expect(groupOf('WL-other')).toBeLessThan(groupOf('WL-R1'));
+    expect(groups.get('WL-R1')!.groupLabel).toBe('In Review');
   });
 
-  it('puts a high-priority in_progress item ahead of a medium-priority plan_complete item', () => {
-    // Regression for the reported bug: priority is the primary sort key, so
-    // a high-priority in_progress item must precede a medium-priority
-    // plan_complete item instead of trailing in a lower section.
+  it('partitions critical items into Critical Group N by file-path conflicts', () => {
     const items: GroupableItem[] = [
-      { id: 'WL-HIP', stage: 'in_progress', filePaths: [], priority: 'high' },
-      { id: 'WL-MPC', stage: 'plan_complete', filePaths: [], priority: 'medium' },
+      { id: 'WL-C1', stage: 'plan_complete', filePaths: ['src/foo.ts'], priority: 'critical' },
+      { id: 'WL-C2', stage: 'plan_complete', filePaths: ['src/foo.ts'], priority: 'critical' },
+      { id: 'WL-C3', stage: 'idea', filePaths: [], priority: 'critical' },
     ];
-    const groups = assignItemGroups(items);
-    expect(groups.get('WL-HIP')!.groupLabel).toBe('High');
-    expect(groups.get('WL-MPC')!.groupLabel).toBe('Medium');
-    expect(groups.get('WL-HIP')!.group).toBeLessThan(groups.get('WL-MPC')!.group);
-  });
-
-  it('treats unknown/empty priority as medium (DEFAULT_PRIORITY convention)', () => {
-    const items: GroupableItem[] = [
-      { id: 'WL-UNKNOWN', stage: 'in_progress', filePaths: [], priority: 'bogus' },
-      { id: 'WL-EMPTY', stage: 'plan_complete', filePaths: [], priority: undefined },
-      { id: 'WL-MED', stage: 'idea', filePaths: [], priority: 'medium' },
-    ];
-    const groups = assignItemGroups(items);
-    for (const id of ['WL-UNKNOWN', 'WL-EMPTY', 'WL-MED']) {
-      expect(groups.get(id)!.groupLabel).toBe('Medium');
-      expect(groups.get(id)!.group).toBe(1);
+    const groups = assignItemGroups(items, 3);
+    expect(groups.get('WL-C1')!.groupLabel).toBe('Critical Group 1');
+    expect(groups.get('WL-C2')!.groupLabel).toBe('Critical Group 2');
+    expect(groups.get('WL-C3')!.groupLabel).toBe('Critical Group 3');
+    for (const [, assignment] of groups) {
+      expect(assignment.groupLabel).not.toBe('Critical');
     }
   });
 
-  it('numbers buckets sequentially from the first non-empty priority', () => {
-    // No critical items → the first section is High (group 1).
-    const groups = assignItemGroups([
-      { id: 'WL-H', stage: 'idea', filePaths: [], priority: 'high' },
-      { id: 'WL-L', stage: 'idea', filePaths: [], priority: 'low' },
-    ]);
-    expect(groups.get('WL-H')!.groupLabel).toBe('High');
-    expect(groups.get('WL-H')!.group).toBe(1);
-    expect(groups.get('WL-L')!.groupLabel).toBe('Low');
-    expect(groups.get('WL-L')!.group).toBe(2);
+  it('sorts within a group by stage sub-order then priority', () => {
+    const items: GroupableItem[] = [
+      { id: 'I-low', stage: 'intake_complete', filePaths: [], priority: 'low' },
+      { id: 'P-med', stage: 'plan_complete', filePaths: [], priority: 'medium' },
+      { id: 'I-high', stage: 'intake_complete', filePaths: [], priority: 'high' },
+      { id: 'P-high', stage: 'plan_complete', filePaths: [], priority: 'high' },
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => i.id)).toEqual(['P-high', 'P-med', 'I-high', 'I-low']);
   });
 
-  it('assigns every item to exactly one bucket (no item dropped, no duplicate assignments)', () => {
+  it('never places canonical stages in "Other" (in_progress joins Group N)', () => {
     const items: GroupableItem[] = [
-      { id: 'WL-1', stage: 'idea', filePaths: [], priority: 'critical' },
-      { id: 'WL-2', stage: 'in_review', filePaths: [], priority: 'high' },
-      { id: 'WL-3', stage: 'done', filePaths: [], priority: 'low' },
-      { id: 'WL-4', stage: 'custom', filePaths: [], priority: undefined },
+      { id: 'WL-idea', stage: 'idea', filePaths: ['src/idea.ts'], priority: 'medium' },
+      { id: 'WL-intake', stage: 'intake_complete', filePaths: ['src/intake.ts'], priority: 'medium' },
+      { id: 'WL-plan', stage: 'plan_complete', filePaths: ['src/plan.ts'], priority: 'medium' },
+      { id: 'WL-progress', stage: 'in_progress', filePaths: ['src/progress.ts'], priority: 'medium' },
+      { id: 'WL-review', stage: 'in_review', filePaths: ['src/review.ts'], priority: 'medium' },
     ];
-    const groups = assignItemGroups(items);
-    expect(groups.size).toBe(items.length);
-    for (const item of items) {
-      expect(groups.has(item.id)).toBe(true);
+    const groups = assignItemGroups(items, 3);
+    for (const [, assignment] of groups) {
+      expect(assignment.groupLabel).not.toBe('Other');
     }
+    // Unknown/custom stages still fall back to "Other" as the safety net.
+    const unknown = assignItemGroups([{ id: 'WL-x', stage: 'custom', filePaths: [], priority: 'medium' }], 3);
+    expect(unknown.get('WL-x')!.groupLabel).toBe('Other');
+  });
+
+  it('sorts in_progress items first within a group (stage sub-order)', () => {
+    const items: GroupableItem[] = [
+      { id: 'I-low', stage: 'intake_complete', filePaths: [], priority: 'low' },
+      { id: 'IP-high', stage: 'in_progress', filePaths: [], priority: 'high' },
+      { id: 'P-med', stage: 'plan_complete', filePaths: [], priority: 'medium' },
+      { id: 'IP-low', stage: 'in_progress', filePaths: [], priority: 'low' },
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => i.id)).toEqual(['IP-high', 'IP-low', 'P-med', 'I-low']);
   });
 });
 
-describe('compareGroupableItems — priority first, then stage, then id', () => {
-  it('sorts by priority in descending order regardless of stage', () => {
-    const items: GroupableItem[] = [
-      { id: 'WL-M', stage: 'in_progress', filePaths: [], priority: 'medium' },
-      { id: 'WL-C', stage: 'idea', filePaths: [], priority: 'critical' },
-      { id: 'WL-H', stage: 'in_review', filePaths: [], priority: 'high' },
-      { id: 'WL-L', stage: 'plan_complete', filePaths: [], priority: 'low' },
-    ];
-    const sorted = items.slice().sort(compareGroupableItems);
-    expect(sorted.map(i => i.id)).toEqual(['WL-C', 'WL-H', 'WL-M', 'WL-L']);
-  });
-
-  it('sorts by stage in workflow order within equal priority', () => {
-    const items: GroupableItem[] = [
-      { id: 'WL-D', stage: 'done', filePaths: [], priority: 'high' },
-      { id: 'WL-I', stage: 'idea', filePaths: [], priority: 'high' },
-      { id: 'WL-R', stage: 'in_review', filePaths: [], priority: 'high' },
-      { id: 'WL-P', stage: 'in_progress', filePaths: [], priority: 'high' },
-      { id: 'WL-K', stage: 'intake_complete', filePaths: [], priority: 'high' },
-      { id: 'WL-PC', stage: 'plan_complete', filePaths: [], priority: 'high' },
-    ];
-    const sorted = items.slice().sort(compareGroupableItems);
-    expect(sorted.map(i => i.id)).toEqual([
-      'WL-I',   // idea
-      'WL-K',   // intake_complete
-      'WL-PC',  // plan_complete
-      'WL-P',   // in_progress
-      'WL-R',   // in_review
-      'WL-D',   // done
-    ]);
-  });
-
-  it('uses id as the deterministic tie-break for equal priority and stage', () => {
-    const items: GroupableItem[] = [
-      { id: 'WL-B', stage: 'idea', filePaths: [], priority: 'high' },
-      { id: 'WL-A', stage: 'idea', filePaths: [], priority: 'high' },
-      { id: 'WL-C', stage: 'idea', filePaths: [], priority: 'high' },
-    ];
-    const sorted = items.slice().sort(compareGroupableItems);
-    expect(sorted.map(i => i.id)).toEqual(['WL-A', 'WL-B', 'WL-C']);
-  });
-
-  it('sorts unknown stages after all known stages', () => {
-    const items: GroupableItem[] = [
-      { id: 'WL-custom', stage: 'custom', filePaths: [], priority: 'high' },
-      { id: 'WL-done', stage: 'done', filePaths: [], priority: 'high' },
-      { id: 'WL-idea', stage: 'idea', filePaths: [], priority: 'high' },
-    ];
-    const sorted = items.slice().sort(compareGroupableItems);
-    expect(sorted.map(i => i.id)).toEqual(['WL-idea', 'WL-done', 'WL-custom']);
-  });
-
-  it('treats unknown priority as medium in comparisons', () => {
-    const items: GroupableItem[] = [
-      { id: 'WL-MED', stage: 'idea', filePaths: [], priority: 'medium' },
-      { id: 'WL-UNK', stage: 'idea', filePaths: [], priority: 'bogus' },
-      { id: 'WL-UNDEF', stage: 'idea', filePaths: [], priority: undefined },
-    ];
-    const sorted = items.slice().sort(compareGroupableItems);
-    // All three are equal on priority (medium) and stage; id is the tie-break.
-    expect(sorted.map(i => i.id)).toEqual(['WL-MED', 'WL-UNDEF', 'WL-UNK']);
-  });
-});
-
-describe('regroupWorkItems — priority-first list order', () => {
-  it('orders the regrouped list by priority bucket then stage, stamping every item', () => {
+describe('regroupWorkItems — merged-list regression (WL-0MSAK8YLB0025EGW)', () => {
+  it('assigns group metadata to every displayed item (mandatory wl list items included)', () => {
+    // Simulated merged list: wl next items carry group metadata, mandatory
+    // wl list items (critical + completed/in_review) do NOT.
     const merged: WorkItem[] = [
-      makeItem('WL-LOW-IP', { stage: 'in_progress', priority: 'low' }),
-      makeItem('WL-CRIT-IDEA', { stage: 'idea', priority: 'critical' }),
-      makeItem('WL-HIGH-REV', { stage: 'in_review', priority: 'high' }),
-      makeItem('WL-MED-PLAN', { stage: 'plan_complete', priority: 'medium' }),
-      makeItem('WL-HIGH-IDEA', { stage: 'idea', priority: 'high' }),
+      // From wl next — already grouped by the CLI.
+      makeItem('WL-NEXT-1', { stage: 'plan_complete', priority: 'high', group: 2, groupLabel: 'Group 1' }),
+      makeItem('WL-NEXT-2', { stage: 'in_review', priority: 'medium', status: 'in-progress', group: 5, groupLabel: 'In Review' }),
+      // From wl list (mandatory subset) — NO group metadata.
+      makeItem('WL-LIST-CRIT', { stage: 'intake_complete', priority: 'critical' }),
+      makeItem('WL-LIST-REV', { stage: 'in_review', priority: 'medium', status: 'completed' }),
     ];
-    const regrouped = regroupWorkItems(merged);
-    expect(regrouped.map(i => i.id)).toEqual([
-      'WL-CRIT-IDEA',  // Critical bucket, idea stage
-      'WL-HIGH-IDEA',  // High bucket, idea before in_review
-      'WL-HIGH-REV',   // High bucket, in_review stage
-      'WL-MED-PLAN',   // Medium bucket
-      'WL-LOW-IP',     // Low bucket
-    ]);
-    // Every displayed item receives group metadata.
+
+    const regrouped = regroupWorkItems(merged, 3);
+
+    // Every item receives a group assignment.
     for (const item of regrouped) {
       expect(item.group).toBeDefined();
       expect(item.groupLabel).toBeDefined();
     }
+
+    // The merged mandatory in_review items (one non-completed from wl next,
+    // one completed from wl list) land in the SAME "In Review" group.
+    const inReviewItems = regrouped.filter(i => i.id === 'WL-NEXT-2' || i.id === 'WL-LIST-REV');
+    expect(inReviewItems.every(i => i.groupLabel === 'In Review')).toBe(true);
+    expect(inReviewItems[0].group).toBe(inReviewItems[1].group);
+    // Exactly one distinct In Review group number exists.
+    expect(new Set(regrouped.filter(i => i.groupLabel === 'In Review').map(i => i.group)).size).toBe(1);
   });
 
-  it('renders exactly one section per priority bucket (no duplicate headings)', () => {
-    // Merged list with stale group metadata (wl next) + ungrouped mandatory
-    // subsets (wl list): after regroup there must be exactly one section per
-    // priority bucket, in priority order.
+  it('regression: merged list renders exactly one In Review section, positioned after Other', () => {
     const merged: WorkItem[] = [
-      makeItem('WL-NEXT-H', { stage: 'plan_complete', priority: 'high', group: 2, groupLabel: 'Group 1' }),
-      makeItem('WL-NEXT-M', { stage: 'in_progress', priority: 'medium', status: 'in-progress', group: 3, groupLabel: 'Group 1' }),
+      // wl next results (grouped) — including a non-completed in_review item
+      // that previously fell into the "others" bucket while carrying its
+      // "In Review" group label, producing a second In Review section.
+      makeItem('WL-NEXT-PLAN', { stage: 'plan_complete', priority: 'high', group: 2, groupLabel: 'Group 1' }),
+      makeItem('WL-NEXT-REVIEW', { stage: 'in_review', priority: 'medium', status: 'in-progress', group: 5, groupLabel: 'In Review' }),
+      makeItem('WL-NEXT-OTHER', { stage: 'custom', priority: 'medium', group: 3, groupLabel: 'Other' }),
+      // Mandatory wl list subsets (no group metadata).
       makeItem('WL-LIST-CRIT', { stage: 'plan_complete', priority: 'critical' }),
       makeItem('WL-LIST-REV', { stage: 'in_review', priority: 'medium', status: 'completed' }),
-      makeItem('WL-LIST-LOW', { stage: 'idea', priority: 'low' }),
     ];
+
     const regrouped = regroupWorkItems(merged, 3);
 
     // Simulate the renderer: separator lines are emitted when the group
@@ -242,7 +174,16 @@ describe('regroupWorkItems — priority-first list order', () => {
       }
     }
 
-    expect(renderedSections).toEqual(['Critical', 'High', 'Medium', 'Low']);
+    // Exactly one "In Review" section.
+    const inReviewCount = renderedSections.filter(s => s === 'In Review').length;
+    expect(inReviewCount).toBe(1);
+    // "In Review" is the LAST section (after Other).
+    expect(renderedSections[renderedSections.length - 1]).toBe('In Review');
+    const otherIndex = renderedSections.indexOf('Other');
+    expect(otherIndex).toBeGreaterThan(-1);
+    expect(renderedSections.indexOf('In Review')).toBeGreaterThan(otherIndex);
+    // No duplicate section headings at all.
+    expect(new Set(renderedSections).size).toBe(renderedSections.length);
   });
 
   it('preserves every item across regroup (no filtering) — mandatory guarantee intact', () => {
@@ -250,64 +191,24 @@ describe('regroupWorkItems — priority-first list order', () => {
       makeItem('WL-A', { stage: 'plan_complete', priority: 'high' }),
       makeItem('WL-B', { stage: 'in_review', priority: 'medium', status: 'completed' }),
       makeItem('WL-C', { stage: 'idea', priority: 'low' }),
-      makeItem('WL-D', { stage: 'done', priority: 'critical' }),
     ];
     const regrouped = regroupWorkItems(merged, 3);
-    expect(regrouped.map(i => i.id).sort()).toEqual(['WL-A', 'WL-B', 'WL-C', 'WL-D']);
-  });
-});
-
-describe('smart-selection merge path (WL-0MS8W5LTW006YZ4B / parent AC 5)', () => {
-  it('keeps all critical and completed/in_review items visible through select → regroup', () => {
-    const merged: WorkItem[] = [
-      // wl next results (carry stale group metadata).
-      makeItem('WL-NEXT-1', { stage: 'plan_complete', priority: 'high', group: 2, groupLabel: 'Group 1' }),
-      makeItem('WL-NEXT-2', { stage: 'in_progress', priority: 'medium', status: 'in-progress', group: 3, groupLabel: 'Group 1' }),
-      // Mandatory wl list subsets (no group metadata).
-      makeItem('WL-CRIT-1', { stage: 'idea', priority: 'critical' }),
-      makeItem('WL-CRIT-2', { stage: 'plan_complete', priority: 'critical' }),
-      makeItem('WL-REV-1', { stage: 'in_review', priority: 'medium', status: 'completed' }),
-      // Non-mandatory "other" item.
-      makeItem('WL-OTHER-1', { stage: 'idea', priority: 'low' }),
-      // Excluded from the default list (stage=done, WL-0MS94VAII00054L9).
-      makeItem('WL-DONE-1', { stage: 'done', priority: 'high' }),
-    ];
-
-    const selected = selectWorkItems(merged, 3); // cap 3 → mandatory set only
-    const regrouped = regroupWorkItems(selected, 3);
-
-    const ids = new Set(regrouped.map(i => i.id));
-    // Mandatory set fully visible despite the small browseItemCount.
-    for (const id of ['WL-CRIT-1', 'WL-CRIT-2', 'WL-REV-1']) {
-      expect(ids.has(id)).toBe(true);
-    }
-    // "Other" items were trimmed by the cap; done items never enter the list.
-    expect(ids.has('WL-OTHER-1')).toBe(false);
-    expect(ids.has('WL-DONE-1')).toBe(false);
-
-    // After regroup, the mandatory items sit in their priority buckets.
-    const byId = new Map(regrouped.map(i => [i.id, i]));
-    expect(byId.get('WL-CRIT-1')!.groupLabel).toBe('Critical');
-    expect(byId.get('WL-CRIT-2')!.groupLabel).toBe('Critical');
-    expect(byId.get('WL-REV-1')!.groupLabel).toBe('Medium');
+    expect(regrouped.map(i => i.id).sort()).toEqual(['WL-A', 'WL-B', 'WL-C']);
   });
 
-  it('keeps the full mandatory set visible when it exceeds browseItemCount (no hard cap)', () => {
+  it('orders the regrouped list by group then within-group order', () => {
     const merged: WorkItem[] = [
-      makeItem('WL-CRIT-1', { stage: 'idea', priority: 'critical' }),
-      makeItem('WL-CRIT-2', { stage: 'idea', priority: 'critical' }),
-      makeItem('WL-REV-1', { stage: 'in_review', priority: 'medium', status: 'completed' }),
-      makeItem('WL-REV-2', { stage: 'in_review', priority: 'medium', status: 'completed' }),
-      makeItem('WL-REV-3', { stage: 'in_review', priority: 'medium', status: 'completed' }),
-      makeItem('WL-OTHER-1', { stage: 'idea', priority: 'low' }),
+      makeItem('WL-I-low', { stage: 'intake_complete', priority: 'low' }),
+      makeItem('WL-P-med', { stage: 'plan_complete', priority: 'medium' }),
+      makeItem('WL-idea', { stage: 'idea', priority: 'low' }),
+      makeItem('WL-R', { stage: 'in_review', priority: 'medium' }),
     ];
-    const selected = selectWorkItems(merged, 2); // mandatory set alone exceeds the cap
-    const regrouped = regroupWorkItems(selected, 3);
-    const ids = new Set(regrouped.map(i => i.id));
-    for (const id of ['WL-CRIT-1', 'WL-CRIT-2', 'WL-REV-1', 'WL-REV-2', 'WL-REV-3']) {
-      expect(ids.has(id)).toBe(true);
-    }
-    expect(ids.has('WL-OTHER-1')).toBe(false);
+    const regrouped = regroupWorkItems(merged, 3);
+    // plan_complete before intake_complete inside Group 1; Idea; In Review last.
+    const order = regrouped.map(i => i.id);
+    expect(order.indexOf('WL-P-med')).toBeLessThan(order.indexOf('WL-I-low'));
+    expect(order.indexOf('WL-I-low')).toBeLessThan(order.indexOf('WL-idea'));
+    expect(order.indexOf('WL-idea')).toBeLessThan(order.indexOf('WL-R'));
   });
 });
 
