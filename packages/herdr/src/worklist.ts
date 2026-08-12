@@ -911,12 +911,64 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
 }
 
 /**
+ * Maximum number of description preview lines shown in the metadata panel.
+ */
+const DESCRIPTION_PREVIEW_MAX_LINES = 3;
+
+/**
+ * Build the description preview lines for the metadata panel.
+ *
+ * Returns up to {@link DESCRIPTION_PREVIEW_MAX_LINES} non-empty lines from the
+ * item's description, each truncated to `maxCols`. The preview starts with a
+ * dimmed `Description` heading row. Returns an empty array when the description
+ * is missing or blank.
+ *
+ * @param description - The work item's description text.
+ * @param maxCols - Terminal width for truncation.
+ * @returns Preview lines ready to insert into the metadata panel.
+ */
+function buildDescriptionPreview(
+  description: string | undefined | null,
+  maxCols: number,
+): string[] {
+  if (!description || description.trim() === '') {
+    return [];
+  }
+
+  const preview: string[] = [];
+
+  // Heading row
+  preview.push(` ${ANSI.dim}${ANSI.underline}Description${ANSI.reset}`);
+
+  // First up-to-3 non-empty lines, so blank separator lines between markdown
+  // sections don't waste the limited preview space (WL-0MSFZKQL700381P3).
+  const lines = description.split('\n');
+  let shown = 0;
+  for (const line of lines) {
+    if (shown >= DESCRIPTION_PREVIEW_MAX_LINES) break;
+    if (line.trim() === '') continue;
+    preview.push(` ${line}`);
+    shown += 1;
+  }
+
+  // Truncate to fit the terminal width
+  for (let i = 0; i < preview.length; i++) {
+    if (preview[i].length > 0) {
+      preview[i] = truncateLine(preview[i], maxCols);
+    }
+  }
+
+  return preview;
+}
+
+/**
  * Format the metadata panel shown below the selection list.
  *
- * Renders the selected item's fields (via {@link buildMetaRows}) plus a last
- * command line when the item's stage is `in_progress`. The panel scrolls
- * independently with its own offset: when the content is taller than the
- * panel, `metaScrollOffset` selects the visible window and a `[m/M scroll]`
+ * Renders the selected item's fields (via {@link buildMetaRows}) plus a
+ * description preview (up to 3 lines) and a last command line when the item's
+ * stage is `in_progress`. The panel scrolls independently with its own offset:
+ * when the content is taller than the panel,
+ * `metaScrollOffset` selects the visible window and a `[m/M scroll]`
  * indicator is appended to the last line.
  *
  * @param item - Selected work item (or null for an empty panel).
@@ -955,6 +1007,13 @@ export function formatMetadataPanel(
       lines.push(` ${label.padEnd(fieldWidth)} ${value}`);
     }
   }
+
+  // Description preview — first few lines of the item's description so the
+  // user can see what the item is about without opening the detail view
+  // (WL-0MSFZKQL700381P3). Shown as-is (markdown source lines), placed after
+  // the metadata rows and before the last-command line.
+  const preview = buildDescriptionPreview(item.description, maxCols);
+  lines.push(...preview);
 
   // Last command — only meaningful while the item is being worked on
   if (item.stage === 'in_progress') {

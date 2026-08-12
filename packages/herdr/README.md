@@ -18,7 +18,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
 - **Podcast Editing tab** — The `open-podcast-editor-tab` action (bound to `prefix+l`) opens the worklist pane in a new tab and renames that tab to **`Podcast Editing`** so it is instantly recognisable in the tab row during podcast production. See [Podcast Editing tab](#podcast-editing-tab).
 - **Quit** — Press `q` to exit
-- **Metadata panel** — The bottom portion of the list view (roughly 20–40% of the pane height, responsive to terminal size) is reserved for the selected item's metadata: ID, title, status, stage, priority, type, risk, effort, tags, audit info, and more. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
+- **Metadata panel** — The bottom portion of the list view (roughly 20–40% of the pane height, responsive to terminal size) is reserved for the selected item's metadata: ID, title, status, stage, priority, type, risk, effort, tags, audit info, and more, plus a **description preview** (first up-to-3 lines of the item's description) so you can see what an item is about at a glance. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
 - **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` — no custom stage values). Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
 - **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, full GFM rendering: headings, lists, tables, blockquotes, code, links) as a preview. The description section is rendered with the same markdown renderer. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
@@ -485,6 +485,13 @@ clamped to a minimum of 3 rows so it is always usable.
 - For items whose stage is `in_progress`, the panel additionally shows
   **`Last command:`** — the most recent command the plugin dispatched
   against that item (`none yet` until the first dispatch).
+- When the item has a description, the panel shows a **`Description`**
+  preview: the first up-to-3 non-empty lines of the description (markdown
+  source as-is, each line truncated to the pane width), so you can see what
+  an item is about without opening the detail view. Items without a
+  description omit the section entirely. The preview sits between the
+  metadata rows and the last-command line and scrolls with the rest of the
+  panel content.
 - The panel scrolls **independently** of the list: press `m` to scroll the
   panel down and `M` to scroll it up. A `[m/M scroll N%]` indicator appears
   on the last panel line whenever the content overflows. Navigating the

@@ -1530,6 +1530,71 @@ describe('formatMetadataPanel — field rendering and scrolling', () => {
   });
 });
 
+describe('formatMetadataPanel — description preview (WL-0MSFZKQL700381P3)', () => {
+  it('renders a Description section for items with a description', () => {
+    const item = { ...makeRichItem(), description: '# Fix the bug\n\nMake it work better.' };
+    const joined = formatMetadataPanel(item, 80, 30, 0).join('\n');
+    expect(joined).toContain('Description');
+    expect(joined).toContain('# Fix the bug');
+    expect(joined).toContain('Make it work better.');
+  });
+
+  it('omits the preview when the description is missing or empty', () => {
+    const missing = formatMetadataPanel(makeRichItem(), 80, 20, 0).join('\n');
+    expect(missing).not.toContain('Description');
+    const blank = formatMetadataPanel({ ...makeRichItem(), description: '   \n\n  ' }, 80, 20, 0).join('\n');
+    expect(blank).not.toContain('Description');
+  });
+
+  it('shows at most the first 3 non-empty description lines', () => {
+    const item = { ...makeRichItem(), description: ['line 1', '', 'line 2', 'line 3', 'line 4'].join('\n') };
+    const joined = formatMetadataPanel(item, 80, 30, 0).join('\n');
+    expect(joined).toContain('line 1');
+    expect(joined).toContain('line 2');
+    expect(joined).toContain('line 3');
+    expect(joined).not.toContain('line 4');
+  });
+
+  it('truncates long description lines to the panel width', () => {
+    const item = { ...makeRichItem(), description: 'x'.repeat(200) };
+    const lines = formatMetadataPanel(item, 40, 30, 0);
+    for (const line of lines) {
+      expect(line.replace(/\x1b\[[0-9;]*m/g, '').length).toBeLessThanOrEqual(40);
+    }
+  });
+
+  it('tolerates markdown fences and long lines without corrupting rendering', () => {
+    const description = '```\nconst x = "y";\n```\n\nnormal line';
+    const item = { ...makeRichItem(), description };
+    const lines = formatMetadataPanel(item, 40, 30, 0);
+    const joined = lines.join('\n');
+    expect(joined).toContain('```');
+    expect(joined).toContain('const x = "y";');
+    for (const line of lines) {
+      expect(line.replace(/\x1b\[[0-9;]*m/g, '').length).toBeLessThanOrEqual(40);
+    }
+  });
+
+  it('places the preview after the metadata rows and before the last-command line', () => {
+    const item = { ...makeRichItem(), description: 'The description body' };
+    const joined = formatMetadataPanel(item, 80, 30, 0, '/skill:audit WL-RICH1').join('\n');
+    expect(joined.indexOf('Title')).toBeGreaterThanOrEqual(0);
+    expect(joined.indexOf('Title')).toBeLessThan(joined.indexOf('Description'));
+    expect(joined.indexOf('Description')).toBeLessThan(joined.indexOf('Last command:'));
+  });
+
+  it('scrolls with the rest of the panel content', () => {
+    const item = { ...makeRichItem(), description: ['p1', 'p2', 'p3'].join('\n') };
+    const top = formatMetadataPanel(item, 80, 3, 0).join('\n');
+    expect(top).not.toContain('p1');
+    const previewView = formatMetadataPanel(item, 80, 3, 19).join('\n');
+    expect(previewView).toContain('p1');
+    expect(previewView).toContain('p3');
+    // [m/M scroll] indicator still shown when content overflows
+    expect(previewView).toContain('[m/M scroll');
+  });
+});
+
 describe('createListRenderer — metadata panel in list mode', () => {
   const renderer = createListRenderer();
 
