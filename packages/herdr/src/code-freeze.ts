@@ -21,6 +21,13 @@
  * The plugin only READS the marker; writing/clearing it is the ship skill's
  * job (tracked in SorraAgents). Fail-open is deliberate: a broken or missing
  * marker must never block browsing the worklist.
+ *
+ * For fail-closed consumers (the downtime dispatcher, the ambiguous-marker
+ * banner — WL-0MSQ0RPQP00636JY) the module also exposes a tri-state read
+ * (`readCodeFreezeStatus`): frozen / not-frozen / ambiguous. A marker that
+ * cannot be trusted (unreadable, corrupt, wrong shape) is 'ambiguous', which
+ * the dispatcher treats as frozen — never dispatch implement/audit work
+ * during a release just because the marker cannot be parsed.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -107,4 +114,79 @@ export function readCodeFreezeState(worklogDir?: string): CodeFreezeState {
  */
 export function isCodeFreezeActive(worklogDir?: string): boolean {
   return readCodeFreezeState(worklogDir).active;
+}
+
+// ── Tri-state read (WL-0MSQ0RPQP00636JY) ─────────────────────────────
+
+/**
+ * Tri-state interpretation of the code-freeze marker:
+ *
+ *  - `'frozen'`     — marker present with `active: true` (project frozen).
+ *  - `'not-frozen'` — marker absent, or present with `active: false`.
+ *  - `'ambiguous'`  — marker present but cannot be trusted: unreadable
+ *                     file, corrupt JSON, or wrong shape (non-object, or
+ *                     missing/non-boolean `active`). Callers that must fail
+ *                     closed (the downtime dispatcher, the ambiguous-marker
+ *                     banner) treat this as frozen.
+ */
+export type CodeFreezeStatus = 'frozen' | 'not-frozen' | 'ambiguous';
+
+/**
+ * Read the code-freeze marker as a tri-state status.
+ *
+ * `readCodeFreezeState` / `isCodeFreezeActive` keep their fail-open
+ * semantics (everything not provably frozen reads as not-frozen) for
+ * worklist browsing and shortcut blocking — this read ADDS the ability to
+ * distinguish "not frozen" from "cannot tell", so fail-closed consumers
+ * (the downtime dispatcher, the ambiguous-marker banner) can act on
+ * ambiguity without changing any existing caller's behavior.
+ *
+ * @param worklogDir - Optional explicit worklog directory (defaults to the
+ *                     configured worklog dir).
+ * @returns 'frozen' when the marker is active, 'not-frozen' when it is
+ *          absent or inactive, 'ambiguous' when it cannot be parsed.
+ */
+export function readCodeFreezeStatus(worklogDir?: string): CodeFreezeStatus {
+  const markerPath = codeFreezeMarkerPath(worklogDir);
+  if (!markerPath) {
+    return 'not-frozen';
+  }
+
+  let raw: string;
+  try {
+    if (!existsSync(markerPath)) {
+      return 'not-frozen';
+    }
+    raw = readFileSync(markerPath, 'utf8');
+  } catch {
+    // Unreadable file → cannot tell → ambiguous (fail-closed for dispatch).
+    return 'ambiguous';
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return 'ambiguous'; // corrupt JSON
+  }
+  if (typeof parsed !== 'object' || parsed === null) {
+    return 'ambiguous'; // wrong shape: array, string, number, null...
+  }
+  const active = (parsed as Record<string, unknown>).active;
+  if (typeof active !== 'boolean') {
+    return 'ambiguous'; // wrong shape: `active` missing or not a boolean
+  }
+  return active ? 'frozen' : 'not-frozen';
+}
+
+/**
+ * Read the code-freeze tri-state for a worklog ROOT directory (the project
+ * root that contains `.worklog/`) — e.g. the downtime worker's `cwd`. The
+ * marker lives at `<root>/.worklog/code-freeze.json`.
+ *
+ * @param root - Worklog root directory (contains `.worklog/`).
+ * @returns The tri-state freeze status for the root's marker.
+ */
+export function readCodeFreezeStatusForRoot(root: string): CodeFreezeStatus {
+  return readCodeFreezeStatus(join(root, '.worklog'));
 }

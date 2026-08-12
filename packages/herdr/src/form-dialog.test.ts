@@ -4,11 +4,11 @@
  * Run: npx vitest run packages/herdr/src/form-dialog.test.ts
  *
  * Covers the rendering contract of `FormState.render(maxCols, maxRows)`:
- *   - dialog width = 80% of pane width (with min/max clamps)
- *   - every box content line is exactly as wide as the border lines
- *   - long descriptions and field values wrap at the inner content width
- *   - the dialog grows downward with wrapped content, bounded by `maxRows`
- *   - interactions (Tab/↑↓ navigation, Enter submit, Esc cancel) are preserved
+ *   - No border box decoration (no ┌, ┐, └, ┘, │, ─ edges)
+ *   - Content starts at top-left (no centering, no leading blank lines)
+ *   - Text wraps at the full pane width (maxCols)
+ *   - Output is bounded by maxRows
+ *   - Interactions (Tab/↑↓ navigation, Enter submit, Esc cancel) are preserved
  */
 
 import { describe, it, expect } from 'vitest';
@@ -19,9 +19,6 @@ import {
   substituteIdentifiers,
 } from './form-dialog.js';
 
-// ── Helpers ─────────────────────────────────────────────────────────────
-
-/** Strip ANSI SGR codes so visible width/length checks work. */
 const visible = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
 
 interface FieldOpts {
@@ -54,158 +51,155 @@ function makeForm(opts: {
   return state;
 }
 
-/** The dialog box lines (top border .. bottom border, inclusive). */
-function boxLines(out: string): string[] {
-  const lines = out.split('\n');
-  const top = lines.findIndex((l) => visible(l).includes('┌'));
-  const bottom = lines.findIndex((l) => visible(l).includes('└'));
-  return lines.slice(top, bottom + 1);
-}
+// ── No border box decoration ────────────────────────────────────────────
 
-/** Visible width of the dialog box (excluding leading centering padding). */
-function boxWidth(out: string): number {
-  const top = out.split('\n').find((l) => visible(l).includes('┌'));
-  if (!top) throw new Error('no dialog top border in output');
-  return visible(top).trimStart().length;
-}
-
-// ── Dialog width: 80% of pane width ─────────────────────────────────────
-
-describe('FormState.render — dialog width', () => {
-  it('uses 80% of the pane width (no 60-column cap)', () => {
-    expect(boxWidth(makeForm().render(100, 30))).toBe(80);
-    expect(boxWidth(makeForm().render(120, 30))).toBe(96);
-    expect(boxWidth(makeForm().render(200, 30))).toBe(160);
-  });
-
-  it('clamps to the 40-column minimum on narrow panes', () => {
-    expect(boxWidth(makeForm().render(50, 30))).toBe(40);
-    expect(boxWidth(makeForm().render(44, 30))).toBe(40);
-  });
-
-  it('never exceeds the pane width (box and full line incl. padding)', () => {
-    for (const cols of [44, 50, 60, 80, 100, 140, 200]) {
-      const out = makeForm().render(cols, 30);
-      expect(boxWidth(out)).toBeLessThanOrEqual(cols);
-      const top = out.split('\n').find((l) => visible(l).includes('┌'));
-      expect(visible(top!).length).toBeLessThanOrEqual(cols);
+describe('FormState.render — no border box', () => {
+  it('does not render any box-drawing characters', () => {
+    const out = makeForm().render(100, 30);
+    const vis = visible(out);
+    expect(vis).not.toContain('┌');
+    expect(vis).not.toContain('┐');
+    expect(vis).not.toContain('└');
+    expect(vis).not.toContain('┘');
+    expect(vis).not.toContain('│');
+    const lines = out.split('\n');
+    for (const line of lines) {
+      const visLine = visible(line).trim();
+      expect(visLine).not.toMatch(/^─+$/);
     }
   });
 });
 
-// ── Border alignment: all box lines equal width ─────────────────────────
+// ── Top-left alignment ──────────────────────────────────────────────────
 
-describe('FormState.render — border alignment', () => {
-  it('renders every box line exactly as wide as the borders', () => {
-    for (const cols of [44, 50, 60, 80, 100, 140]) {
-      const widths = boxLines(makeForm().render(cols, 40)).map((l) => visible(l).length);
-      expect(new Set(widths).size, `cols=${cols}`).toBe(1);
-    }
+describe('FormState.render — top-left alignment', () => {
+  it('starts content on the first line (no leading blank lines)', () => {
+    const out = makeForm().render(100, 30);
+    const firstLine = out.split('\n')[0];
+    expect(visible(firstLine)).toMatch(/Command Input/);
   });
 
-  it('keeps all lines aligned with a long description and long values', () => {
-    const form = makeForm({
-      description: 'A very long description that exceeds the dialog width. '.repeat(3).trim(),
-      fields: [
-        { name: 'status', value: 'this is a long status value '.repeat(4).trim() },
-        { name: 'stage', value: '' },
-      ],
-    });
-    const widths = boxLines(form.render(80, 40)).map((l) => visible(l).length);
-    expect(new Set(widths).size).toBe(1);
+  it('content is not center-padded', () => {
+    const out = makeForm().render(100, 30);
+    const firstNonBlank = out.split('\n').find((l) => visible(l).trim().length > 0);
+    expect(firstNonBlank).toBeDefined();
+    expect(visible(firstNonBlank!).charAt(0)).not.toBe(' ');
   });
 });
 
-// ── Text wrapping ───────────────────────────────────────────────────────
+// ── Full-width wrapping ─────────────────────────────────────────────────
 
-describe('FormState.render — text wrapping', () => {
-  /** Inner region between the two │ border chars of a content line. */
-  const region = (l: string): string => {
-    const v = visible(l);
-    return v.slice(v.indexOf('│') + 1, v.lastIndexOf('│'));
-  };
-
-  /** Assert every box line is exactly border width with a padded inner region. */
-  const assertAligned = (box: string[]): void => {
-    const borderLineLen = visible(box[0]).length; // full line incl. leftPad
-    const innerLen = region(box.find((l) => visible(l).includes('│'))!).length;
-    for (const l of box) {
-      const v = visible(l);
-      expect(v.length).toBe(borderLineLen);
-      if (v.includes('│')) expect(region(l).length).toBe(innerLen);
-    }
-  };
-
-  it('wraps a long description onto multiple lines within the inner width', () => {
-    const desc = 'word '.repeat(50).trim(); // ~250 chars
-    const out = makeForm({ description: desc }).render(100, 40);
-    const box = boxLines(out);
-    const descLines = box.filter((l) => /word/.test(visible(l)));
+describe('FormState.render — full-width wrapping', () => {
+  it('wraps description at full pane width (maxCols)', () => {
+    const longDesc = 'word '.repeat(50).trim();
+    const out = makeForm({ description: longDesc }).render(40, 30);
+    const lines = out.split('\n').map(visible);
+    const descLines = lines.filter((l) => /word/.test(l));
     expect(descLines.length).toBeGreaterThan(1);
-    assertAligned(box);
-    // no single line packs more than the inner width of description text
-    const wordsPerLine = descLines.map(
-      (l) => (visible(l).match(/word/g) ?? []).length,
-    );
-    expect(Math.max(...wordsPerLine)).toBeLessThanOrEqual(15);
+    for (const dl of descLines) {
+      expect(dl.length).toBeLessThanOrEqual(40);
+    }
   });
 
-  it('wraps a long field value onto multiple lines within the inner width', () => {
+  it('wraps field values at full pane width', () => {
     const out = makeForm({
-      fields: [{ name: 'status', value: 'x'.repeat(300) }],
-    }).render(100, 40);
-    const box = boxLines(out);
-    const valueLines = box.filter((l) => /x{4,}/.test(visible(l)));
+      fields: [{ name: 'status', value: 'x'.repeat(200) }],
+    }).render(50, 30);
+    const lines = out.split('\n').map(visible);
+    const valueLines = lines.filter((l) => /x{4,}/.test(l));
     expect(valueLines.length).toBeGreaterThan(1);
-    assertAligned(box);
-    // no spurious truncation markers when there is plenty of room
-    expect(visible(out)).not.toContain('…');
-    // wrapped lines fill the inner width (minus indent and cursor column)
-    const innerWidth = boxWidth(out) - 4;
-    for (const l of valueLines) {
-      const xs = visible(l).match(/x+/g) ?? [''];
-      expect(Math.max(...xs.map((x) => x.length))).toBeLessThanOrEqual(
-        innerWidth,
-      );
+    for (const vl of valueLines) {
+      expect(vl.length).toBeLessThanOrEqual(50);
     }
-    expect(Math.max(...valueLines.map((l) => (visible(l).match(/x+/g) ?? ['']).map((x) => x.length)).flat())).toBe(
-      innerWidth - 3,
-    );
+  });
+
+  it('more wrapping at narrower width', () => {
+    const longDesc = 'a '.repeat(100).trim();
+    const out80 = makeForm({ description: longDesc }).render(80, 30);
+    const out100 = makeForm({ description: longDesc }).render(100, 30);
+    const aLines80 = out80.split('\n').map(visible).filter((l) => /a/.test(l));
+    const aLines100 = out100.split('\n').map(visible).filter((l) => /a/.test(l));
+    expect(aLines80.length).toBeGreaterThan(aLines100.length);
+    for (const l of out80.split('\n').map(visible)) expect(l.length).toBeLessThanOrEqual(80);
+    for (const l of out100.split('\n').map(visible)) expect(l.length).toBeLessThanOrEqual(100);
   });
 });
 
-// ── Downward expansion within maxRows ───────────────────────────────────
+// ── Content within pane bounds ──────────────────────────────────────────
 
-describe('FormState.render — downward expansion within maxRows', () => {
-  it('grows the dialog as a value wraps to more lines', () => {
-    const short = makeForm({ fields: [{ name: 'status', value: 'short' }] }).render(100, 40);
-    const long = makeForm({ fields: [{ name: 'status', value: 'x'.repeat(300) }] }).render(100, 40);
-    expect(boxLines(long).length).toBeGreaterThan(boxLines(short).length);
-  });
-
-  it('never exceeds maxRows even with overflowing content', () => {
+describe('FormState.render — pane bounds', () => {
+  it('never exceeds maxRows lines', () => {
     const out = makeForm({
       description: 'd '.repeat(500).trim(),
       fields: [{ name: 'status', value: 'x'.repeat(500) }],
     }).render(80, 12);
-    expect(out.split('\n').length).toBe(12);
-    expect(visible(out)).toContain('└');
+    expect(out.split('\n').length).toBeLessThanOrEqual(12);
   });
 
-  it('keeps the cursor indicator on the last value line when it wraps', () => {
-    const out = makeForm({
-      fields: [{ name: 'status', value: 'a'.repeat(120) }],
-      activeField: 0,
-    }).render(100, 40);
-    const box = boxLines(out);
-    const valueLines = box.filter((l) => /a{4,}/.test(visible(l)));
-    expect(valueLines.length).toBeGreaterThan(1);
-    // cursor (reversed space) sits on the final wrapped value line
-    const last = valueLines[valueLines.length - 1];
-    expect(last).toContain('\x1b[7m');
-    for (const l of valueLines.slice(0, -1)) {
-      expect(l).not.toContain('\x1b[7m');
+  it('never has a line whose visible width exceeds maxCols', () => {
+    for (const cols of [20, 30, 40, 50, 80, 100, 140, 200]) {
+      const out = makeForm({
+        description: 'very long description text '.repeat(10),
+        fields: [{ name: 'status', value: 'y'.repeat(200) }],
+      }).render(cols, 30);
+      for (const line of out.split('\n')) {
+        const vis = visible(line);
+        expect(vis.length).toBeLessThanOrEqual(cols);
+      }
     }
+  });
+});
+
+// ── Content retained ───────────────────────────────────────────────────
+
+describe('FormState.render — content retained', () => {
+  it('renders the Command Input heading', () => {
+    const out = makeForm().render(100, 30);
+    expect(visible(out)).toContain('Command Input');
+  });
+
+  it('renders the description text', () => {
+    const out = makeForm({ description: 'My custom description' }).render(100, 30);
+    expect(visible(out)).toContain('My custom description');
+  });
+
+  it('renders field labels', () => {
+    const out = makeForm({ fields: [{ name: 'myField' }] }).render(100, 30);
+    expect(visible(out)).toContain('myField');
+  });
+
+  it('renders field values', () => {
+    const out = makeForm({ fields: [{ name: 'status', value: 'in_progress' }] }).render(100, 30);
+    expect(visible(out)).toContain('in_progress');
+  });
+
+  it('renders action hints', () => {
+    const out = makeForm().render(100, 30);
+    expect(visible(out)).toContain('navigate');
+    expect(visible(out)).toContain('submit');
+    expect(visible(out)).toContain('cancel');
+  });
+
+  it('shows the cursor indicator on the active field', () => {
+    const out = makeForm({ fields: [{ name: 'status' }], activeField: 0 }).render(100, 30);
+    expect(out).toContain('\x1b[7m');
+  });
+
+  it('places a space between icon glyphs and adjacent text', () => {
+    const out = makeForm().render(100, 30);
+    expect(visible(out)).toMatch(/⌨ Command/);
+  });
+});
+
+// ── Downward expansion ──────────────────────────────────────────────────
+
+describe('FormState.render — downward expansion', () => {
+  it('grows the page as a value wraps to more lines', () => {
+    const short = makeForm({ fields: [{ name: 'status', value: 'short' }] }).render(100, 40);
+    const long = makeForm({ fields: [{ name: 'status', value: 'x'.repeat(300) }] }).render(100, 40);
+    const sNonBlank = short.split('\n').filter((l) => visible(l).trim().length > 0).length;
+    const lNonBlank = long.split('\n').filter((l) => visible(l).trim().length > 0).length;
+    expect(lNonBlank).toBeGreaterThan(sNonBlank);
   });
 });
 
@@ -218,9 +212,7 @@ describe('FormState interactions', () => {
       'wl update <id> --status <status> --stage <stage>',
       'd',
       [{ name: 'status', default: '' }, { name: 'stage', default: '' }],
-      (r) => {
-        result = r;
-      },
+      (r) => { result = r; },
       () => {},
     );
     for (const ch of 'in') state.handleInput(ch);
@@ -239,7 +231,7 @@ describe('FormState interactions', () => {
     expect(cancelled).toBe(true);
   });
 
-  it('navigates fields with Tab and arrow keys (with wrap-around)', () => {
+  it('navigates fields with Tab and arrow keys', () => {
     const state = new FormState(
       'cmd <a> <b> <c>',
       'd',
@@ -278,7 +270,6 @@ describe('FormState interactions', () => {
     );
     expect(state.fields[0].value).toBe('');
     expect(state.fields[1].value).toBe('medium');
-    // Submitting without edits uses the default (empty description stays empty)
     expect(state.getResult()).toBe('wl create  --priority medium');
   });
 
@@ -291,38 +282,31 @@ describe('FormState interactions', () => {
       () => {},
     );
     state.handleInput('\t');
-    // Clear the pre-filled default before typing a replacement
     for (let i = 0; i < 'medium'.length; i++) state.handleInput('\x7f');
     for (const ch of 'high') state.handleInput(ch);
     expect(state.getResult()).toBe('wl create  --priority high');
   });
 });
 
-// ── Identifier helpers (auto-substitution contract) ─────────────────────
+// ── Identifier helpers ──────────────────────────────────────────────────
 
 describe('identifier helpers', () => {
   it('extracts unique identifiers in order', () => {
-    expect(
-      extractIdentifiers('wl update <id> --status <status> --status <status>'),
-    ).toEqual([
+    expect(extractIdentifiers('wl update <id> --status <status> --status <status>')).toEqual([
       { name: 'id', default: '' },
       { name: 'status', default: '' },
     ]);
   });
 
   it('extracts inline defaults alongside identifiers', () => {
-    expect(
-      extractIdentifiers('wl create <description> --priority <priority default="medium">'),
-    ).toEqual([
+    expect(extractIdentifiers('wl create <description> --priority <priority default="medium">')).toEqual([
       { name: 'description', default: '' },
       { name: 'priority', default: 'medium' },
     ]);
   });
 
   it('supports single-quoted defaults', () => {
-    expect(
-      extractIdentifiers('wl create <description> --priority <priority default=\'medium\'>'),
-    ).toEqual([
+    expect(extractIdentifiers("wl create <description> --priority <priority default='medium'>")).toEqual([
       { name: 'description', default: '' },
       { name: 'priority', default: 'medium' },
     ]);
@@ -335,18 +319,16 @@ describe('identifier helpers', () => {
   });
 
   it('reports defaults on unknown identifiers', () => {
-    expect(
-      getUnknownIdentifiers('wl create <description> --priority <priority default="medium">'),
-    ).toEqual([
+    expect(getUnknownIdentifiers('wl create <description> --priority <priority default="medium">')).toEqual([
       { name: 'description', default: '' },
       { name: 'priority', default: 'medium' },
     ]);
   });
 
   it('substitutes provided values and leaves unknown placeholders intact', () => {
-    expect(
-      substituteIdentifiers('wl update <id> --status <status>', { status: 'in_progress' }),
-    ).toBe('wl update <id> --status in_progress');
+    expect(substituteIdentifiers('wl update <id> --status <status>', { status: 'in_progress' })).toBe(
+      'wl update <id> --status in_progress',
+    );
   });
 
   it('substitutes the inline default when no explicit value is given', () => {

@@ -4,7 +4,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { UpdateOptions } from '../cli-types.js';
-import type { UpdateWorkItemInput, WorkItem, WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel } from '../types.js';
+import type { UpdateWorkItemInput, WorkItem, WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel, DemotedParent } from '../types.js';
 import { promises as fs } from 'fs';
 import { humanFormatWorkItem, resolveFormat, extractFilePaths } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
@@ -403,6 +403,19 @@ export default function register(ctx: PluginContext): void {
           downgradedChildren = db.cascadePriorityDowngrade(normalizedId, priorityCandidate as WorkItemPriority);
         }
 
+        // Reparenting: a parent cannot stay `completed`/`in_review` while a
+        // new, uncompleted child is attached to it. Demote the target parent
+        // to `open`/`plan_complete` so its lifecycle state stays consistent.
+        let demotedParent: DemotedParent | null = null;
+        if (updates.parentId) {
+          try {
+            demotedParent = db.demoteParentOnChildAdded(updates.parentId);
+          } catch (err) {
+            // Best-effort: a demotion failure must not abort the update.
+            console.error(`Warning: failed to demote parent ${updates.parentId}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+
         // Mark that an impactful change was made if any qualifying fields were
         // included in this per-id update.
         if (updates.status || updates.priority || updates.risk || updates.effort || updates.stage) {
@@ -432,6 +445,7 @@ export default function register(ctx: PluginContext): void {
           success: true,
           workItem: item,
           ...(downgradedChildren.length > 0 ? { downgradedChildren } : {}),
+          ...(demotedParent ? { demotedParent } : {}),
         });
       }
 
@@ -447,6 +461,9 @@ export default function register(ctx: PluginContext): void {
             const jsonOut: any = { success: true, workItem: r.workItem };
             if (r.downgradedChildren?.length) {
               jsonOut.downgradedChildren = r.downgradedChildren;
+            }
+            if (r.demotedParent) {
+              jsonOut.demotedParent = r.demotedParent;
             }
             output.json(jsonOut);
           }
@@ -465,6 +482,9 @@ export default function register(ctx: PluginContext): void {
             console.log(humanFormatWorkItem(r.workItem, db, format));
             if (r.downgradedChildren?.length) {
               console.log(`[Downgraded ${r.downgradedChildren.length} child(ren) from critical to high]`);
+            }
+            if (r.demotedParent) {
+              console.log(`[Parent ${r.demotedParent.parent.id} demoted from ${r.demotedParent.from.status}/${r.demotedParent.from.stage} to ${r.demotedParent.to.status}/${r.demotedParent.to.stage}]`);
             }
           } else {
             output.error(r.error, { success: false, error: r.error });

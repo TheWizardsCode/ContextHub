@@ -177,3 +177,16 @@ __pycache__/
 
 # Effort-and-risk skill output dumps written to repo root
 final-WL-*.json
+
+# Stray tsc emissions next to TypeScript sources (regression: b3f0bead
+# committed 328 of these). .js import specifiers resolve to .ts sources at
+# build/test time, so compiled artifacts in source trees are never tracked.
+src/**/*.js
+src/**/*.d.ts
+src/**/*.map
+tests/**/*.js
+tests/**/*.d.ts
+tests/**/*.map
+packages/*/src/**/*.js
+packages/*/src/**/*.d.ts
+packages/*/src/**/*.map

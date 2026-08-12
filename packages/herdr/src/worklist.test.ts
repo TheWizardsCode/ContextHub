@@ -34,9 +34,10 @@ import {
   formatChordHintsForHelp,
   resolvePodcastTarget,
 } from './worklist.js';
+import type { ChordState } from './worklist.js';
 import type { DowntimeWorker } from './downtime-worker.js';
 import { setLogPath, resetLogPath, recordCommand, getLastCommand } from './command-log.js';
-import { loadShortcutConfig, ShortcutRegistry } from './shortcut-config.js';
+import { loadShortcutConfig, ShortcutRegistry, type ShortcutEntry } from './shortcut-config.js';
 import { regroupWorkItems, extractFilePaths } from './grouping.js';
 import { setWorklogDir, resetWorklogDir, setExecFileAsync, resetExecFileAsync, type WorkItem } from './fetcher.js';
 
@@ -672,6 +673,44 @@ describe('dispatchChordCommand', () => {
     const result = dispatchChordCommand('unknown command', state);
     expect(result).toBe(false);
   });
+
+  it('routes /skill:ship release through onCommand with no <id> substitution (WL-0MSGG5N5Z0074TLY)', () => {
+    const state = new WorkItemListState([makeItem('WL-TEST-1')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = dispatchChordCommand('/skill:ship release', state, onCommand);
+    expect(result).toBe(true);
+    // The release command is a global dev→main release — the command is
+    // routed verbatim, never rewritten with the selected item's id.
+    expect(onCommand).toHaveBeenCalledWith('/skill:ship release', undefined);
+    expect(onCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes /skill:ship release even with no item selected (global command)', () => {
+    const state = new WorkItemListState([], TERM_80x24);
+    const onCommand = vi.fn();
+    const result = dispatchChordCommand('/skill:ship release', state, onCommand);
+    expect(result).toBe(true);
+    expect(onCommand).toHaveBeenCalledWith('/skill:ship release', undefined);
+  });
+
+  it('executeResolvedCommand dispatches /skill:ship release via the standard path', () => {
+    const state = new WorkItemListState([makeItem('WL-TEST-1')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/skill:ship release', state, onCommand);
+    expect(result).toBe('dispatched');
+    expect(onCommand).toHaveBeenCalledWith('/skill:ship release', undefined);
+  });
+
+  it('does not block /skill:ship release during a Code Freeze (ship skill gates itself)', () => {
+    const state = new WorkItemListState([makeItem('WL-TEST-1')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/skill:ship release', state, onCommand, true);
+    expect(result).toBe('dispatched');
+    expect(onCommand).toHaveBeenCalledWith('/skill:ship release', undefined);
+  });
 });
 
 describe('fetchItemsForView — stage-filtered fetch', () => {
@@ -699,6 +738,35 @@ describe('fetchItemsForView — stage-filtered fetch', () => {
     expect(callArgs).toContain('--root-only');
   });
 
+  it('fetches completed/in-progress items for the in_review stage', async () => {
+    // in_review items carry status completed (submitted for review) or
+    // in-progress (being re-worked after review feedback) per the project
+    // workflow — restricting to status=open would empty the review queue
+    // (WL-0MSKCRX730052IIW).
+    const stageItems = [
+      { ...makeItem('A', 'in_review'), status: 'completed' },
+      { ...makeItem('B', 'in_review'), status: 'in-progress' },
+    ];
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ workItems: stageItems }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
+
+    const items = await fetchItemsForView('in_review', defaultFetcher);
+
+    expect(items.map((i) => i.id)).toEqual(['A', 'B']);
+    expect(defaultFetcher).not.toHaveBeenCalled();
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs).toContain('list');
+    const statusArg = callArgs[callArgs.indexOf('--status') + 1];
+    expect(statusArg).toContain('completed');
+    expect(statusArg).toContain('in-progress');
+    expect(callArgs[callArgs.indexOf('--stage') + 1]).toBe('in_review');
+    expect(callArgs).toContain('--root-only');
+  });
+
   it('uses the default fetcher when no filter is active', async () => {
     const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
     const items = await fetchItemsForView(null, defaultFetcher);
@@ -713,6 +781,20 @@ describe('fetchItemsForView — stage-filtered fetch', () => {
 
     const items = await fetchItemsForView('idea', defaultFetcher);
     expect(items.map((i) => i.id)).toEqual(['C']);
+  });
+
+  it('applies the in_review stage filter client-side regardless of status', () => {
+    // Client-side filter (_applyFilters) matches on stage only — items are
+    // already status-filtered at fetch time, so completed/in-progress
+    // in_review items must survive the client-side pass (WL-0MSKCRX730052IIW).
+    const items = [
+      { ...makeItem('A', 'in_review'), status: 'completed' },
+      { ...makeItem('B', 'in_review'), status: 'in-progress' },
+      makeItem('C', 'idea'),
+    ];
+    const state = new WorkItemListState(items, TERM_80x24);
+    state.applyFilter('in_review');
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['A', 'B']);
   });
 });
 
@@ -876,10 +958,10 @@ describe('issue-type shortcut filtering — worklist integration', () => {
     registry = loadShortcutConfig();
   });
 
-  it('treats i as a chord leader only for code item types', () => {
+  it('treats i as a chord leader only for code and docs item types', () => {
     expect(isChordLeader('i', registry, false, 'feature')).toBe(true);
+    expect(isChordLeader('i', registry, false, 'docs')).toBe(true);
     expect(isChordLeader('i', registry, false, 'podcast')).toBe(false);
-    expect(isChordLeader('i', registry, false, 'docs')).toBe(false);
   });
 
   it('treats n and p as chord leaders only for code item types', () => {
@@ -1051,6 +1133,101 @@ describe('resolvePodcastTarget — podcast-progression dispatch', () => {
     const result = await resolvePodcastTarget('/skill:wiki-tts-generate --podcast-file <podcast-script>', synthItem);
     expect(result.error).toMatch(/no podcast script/i);
   });
+
+  it('resolves <podcast-review> to the raw script path (w-r write-review chord)', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script --review <podcast-review>', draftedItem);
+    expect(result).toEqual({ command: '/skill:wiki-podcast-script --review foo/foo.podcast.md' });
+  });
+
+  it('belt-and-braces: errors on <podcast-review> when no script is in Key Files', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script --review <podcast-review>', sourcedItem);
+    expect(result.error).toMatch(/no podcast script/i);
+    expect(result.command).toBeUndefined();
+  });
+
+  it('resolves <podcast-both> to the raw script path (w-b write-both chord)', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script --review-rewrite <podcast-both>', draftedItem);
+    expect(result).toEqual({ command: '/skill:wiki-podcast-script --review-rewrite foo/foo.podcast.md' });
+  });
+
+  it('belt-and-braces: errors on <podcast-both> when no script is in Key Files', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script --review-rewrite <podcast-both>', sourcedItem);
+    expect(result.error).toMatch(/no podcast script/i);
+    expect(result.command).toBeUndefined();
+  });
+
+  it('resolves review markers on wiki-dir-relative script paths as-is (raw form)', async () => {
+    const wikiItem: WorkItem = { ...draftedItem, description: '## Key Files:\n- wiki/podcast/foo/foo.podcast.md\n' };
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script --review <podcast-review>', wikiItem);
+    expect(result).toEqual({ command: '/skill:wiki-podcast-script --review wiki/podcast/foo/foo.podcast.md' });
+  });
+
+  it('returns the command unchanged for a command with no podcast markers (review marker absent)', async () => {
+    const result = await resolvePodcastTarget('/skill:wiki-podcast-script --review foo/foo.podcast.md', draftedItem);
+    expect(result).toEqual({ command: '/skill:wiki-podcast-script --review foo/foo.podcast.md' });
+  });
+});
+
+// ── w chord leader: sub-chord hints ──────────────────────────────────────
+// The `w` single-key write-script chord is split into w-r/w-s/w-b sub-chords
+// (OSL-0MSKVB5K6008XFOQ). Pressing `w` must collapse to `w:write...` and
+// expand to the per-sub-chord hints via the existing formatChordHintsForHelp
+// machinery, respecting per-stage visibility.
+
+describe('w chord leader — sub-chord hints and stage gating', () => {
+  const wChords: ShortcutEntry[] = [
+    {
+      chord: ['w', 'r'],
+      command: '/skill:wiki-podcast-script --review <podcast-review>',
+      view: 'both',
+      label: 'write review',
+      stages: ['plan_complete', 'in_review', 'done'],
+    },
+    {
+      chord: ['w', 's'],
+      command: '/skill:wiki-podcast-script <podcast-target>',
+      view: 'both',
+      label: 'write script',
+      stages: ['intake_complete', 'plan_complete', 'in_review', 'done'],
+    },
+    {
+      chord: ['w', 'b'],
+      command: '/skill:wiki-podcast-script --review-rewrite <podcast-both>',
+      view: 'both',
+      label: 'write both',
+      stages: ['plan_complete', 'in_review', 'done'],
+    },
+  ];
+
+  it('shows w as a chord leader hint in the footer (collapsed)', () => {
+    const registry = new ShortcutRegistry([...wChords]);
+    const hints = getChordHelpHints(registry);
+    expect(hints).toContain('[w] chords');
+  });
+
+  it('expands to r/s/b sub-chord hints at a script-bearing stage', () => {
+    const registry = new ShortcutRegistry([...wChords]);
+    const nextChords = registry.getChordByPrefix(['w'], 'list', 'plan_complete');
+    const hints = formatChordHintsForHelp(nextChords, ['w']);
+    expect(hints).toContain('r:review');
+    expect(hints).toContain('s:script');
+    expect(hints).toContain('b:both');
+  });
+
+  it('shows only the s sub-chord at intake_complete (w-r/w-b hidden)', () => {
+    const registry = new ShortcutRegistry([...wChords]);
+    const nextChords = registry.getChordByPrefix(['w'], 'list', 'intake_complete');
+    const hints = formatChordHintsForHelp(nextChords, ['w']);
+    expect(hints).toContain('s:script');
+    expect(hints).not.toContain('r:review');
+    expect(hints).not.toContain('b:both');
+  });
+
+  it('hides all w sub-chords at idea (no stage gate matches)', () => {
+    const registry = new ShortcutRegistry([...wChords]);
+    const nextChords = registry.getChordByPrefix(['w'], 'list', 'idea');
+    expect(nextChords).toHaveLength(0);
+  });
 });
 
 // ── Code Freeze: banner rendering ────────────────────────────────────────
@@ -1113,6 +1290,228 @@ describe('createListRenderer — code freeze banner', () => {
       true, // codeFreezeActive
     );
     expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+  });
+
+  it('renders the Ambiguous Codefreeze marker banner when the marker is ambiguous', () => {
+    const output = renderer(
+      [makeItem('A')],
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      false, // codeFreezeActive (fail-open: browsing stays unblocked)
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true, // showHelpText
+      true, // codeFreezeAmbiguous
+    );
+    expect(output).toContain('Ambiguous Codefreeze marker');
+    // The ambiguous banner is distinct from the active-freeze banner: an
+    // ambiguous marker must NOT show the red CODE FREEZE banner (browsing
+    // and shortcut blocking keep their fail-open semantics).
+    expect(output).not.toContain('CODE FREEZE');
+  });
+
+  it('does not render the ambiguous banner when the marker is unambiguous (default)', () => {
+    const output = renderer([makeItem('A')], 0, 0, TERM_80x24, null, 'list', null);
+    expect(output).not.toContain('Ambiguous Codefreeze marker');
+  });
+
+  it('keeps the rows - 1 line-count invariant with the ambiguous banner', () => {
+    const grouped: WorkItem[] = Array.from({ length: 30 }, (_, i) => ({
+      ...makeItem(`G${i}`),
+      group: i,
+      groupLabel: `Group ${i}`,
+    }));
+    const output = renderer(
+      grouped,
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      true, // codeFreezeAmbiguous
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+  });
+});
+
+// ── Chord-mode footer gating (WL-0MSGJDSMJ004128E) ─────────────────────
+// The chord-in-progress footer (`chord: <keys> _ <hints>`) must be gated by
+// `showHelpText` like the normal shortcut hint line, so `showHelpText: false`
+// hides ALL shortcut hint lines (consistent with the pi browse widget). The
+// gating must only affect rendering — chord state accumulation is untouched.
+
+describe('createListRenderer — chord-mode footer gating', () => {
+  const renderer = createListRenderer();
+
+  function chordStateWithPending(keys: string[], hints = 'update ...'): ChordState {
+    const state = createChordState();
+    state.pendingKeys = keys;
+    state.hints = hints;
+    return state;
+  }
+
+  it('suppresses the chord footer when showHelpText is false', () => {
+    const output = renderer(
+      [makeItem('A')],
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      chordStateWithPending(['u']),
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      false,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      0,
+      true,
+      0,
+      false, // showHelpText
+    );
+    expect(output).not.toContain('chord:');
+    expect(output).not.toContain('update ...');
+  });
+
+  it('renders the chord footer when showHelpText is true', () => {
+    const output = renderer(
+      [makeItem('A')],
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      chordStateWithPending(['u']),
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      false,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      0,
+      true,
+      0,
+      true, // showHelpText
+    );
+    expect(output).toContain('chord:');
+    expect(output).toContain('u _');
+    expect(output).toContain('update ...');
+  });
+
+  it('renders the chord footer when showHelpText is unset (default true)', () => {
+    // Backwards compatibility: existing positional callers that do not pass
+    // the trailing showHelpText argument keep the chord footer visible.
+    const output = renderer(
+      [makeItem('A')],
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      chordStateWithPending(['u']),
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      false,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      0,
+      true,
+      0,
+    );
+    expect(output).toContain('chord:');
+    expect(output).toContain('u _');
+  });
+
+  it('does not mutate chord state while rendering with showHelpText false', () => {
+    // The fix gates rendering only; the chord key handling state machine must
+    // keep accumulating even when the footer is hidden (WL-0MSGJDSMJ004128E).
+    const chordState = chordStateWithPending(['u', 'c']);
+    renderer(
+      [makeItem('A')],
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      chordState,
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      false,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      0,
+      true,
+      0,
+      false, // showHelpText
+    );
+    expect(chordState.pendingKeys).toEqual(['u', 'c']);
+    expect(chordState.hints).toBe('update ...');
   });
 });
 
@@ -1242,6 +1641,71 @@ describe('formatMetadataPanel — field rendering and scrolling', () => {
     for (const line of lines) {
       expect(line.replace(/\x1b\[[0-9;]*m/g, '').length).toBeLessThanOrEqual(40);
     }
+  });
+});
+
+describe('formatMetadataPanel — description preview (WL-0MSFZKQL700381P3)', () => {
+  it('renders a Description section for items with a description', () => {
+    const item = { ...makeRichItem(), description: '# Fix the bug\n\nMake it work better.' };
+    const joined = formatMetadataPanel(item, 80, 30, 0).join('\n');
+    expect(joined).toContain('Description');
+    expect(joined).toContain('# Fix the bug');
+    expect(joined).toContain('Make it work better.');
+  });
+
+  it('omits the preview when the description is missing or empty', () => {
+    const missing = formatMetadataPanel(makeRichItem(), 80, 20, 0).join('\n');
+    expect(missing).not.toContain('Description');
+    const blank = formatMetadataPanel({ ...makeRichItem(), description: '   \n\n  ' }, 80, 20, 0).join('\n');
+    expect(blank).not.toContain('Description');
+  });
+
+  it('shows at most the first 3 non-empty description lines', () => {
+    const item = { ...makeRichItem(), description: ['line 1', '', 'line 2', 'line 3', 'line 4'].join('\n') };
+    const joined = formatMetadataPanel(item, 80, 30, 0).join('\n');
+    expect(joined).toContain('line 1');
+    expect(joined).toContain('line 2');
+    expect(joined).toContain('line 3');
+    expect(joined).not.toContain('line 4');
+  });
+
+  it('truncates long description lines to the panel width', () => {
+    const item = { ...makeRichItem(), description: 'x'.repeat(200) };
+    const lines = formatMetadataPanel(item, 40, 30, 0);
+    for (const line of lines) {
+      expect(line.replace(/\x1b\[[0-9;]*m/g, '').length).toBeLessThanOrEqual(40);
+    }
+  });
+
+  it('tolerates markdown fences and long lines without corrupting rendering', () => {
+    const description = '```\nconst x = "y";\n```\n\nnormal line';
+    const item = { ...makeRichItem(), description };
+    const lines = formatMetadataPanel(item, 40, 30, 0);
+    const joined = lines.join('\n');
+    expect(joined).toContain('```');
+    expect(joined).toContain('const x = "y";');
+    for (const line of lines) {
+      expect(line.replace(/\x1b\[[0-9;]*m/g, '').length).toBeLessThanOrEqual(40);
+    }
+  });
+
+  it('places the preview after the metadata rows and before the last-command line', () => {
+    const item = { ...makeRichItem(), description: 'The description body' };
+    const joined = formatMetadataPanel(item, 80, 30, 0, '/skill:audit WL-RICH1').join('\n');
+    expect(joined.indexOf('Title')).toBeGreaterThanOrEqual(0);
+    expect(joined.indexOf('Title')).toBeLessThan(joined.indexOf('Description'));
+    expect(joined.indexOf('Description')).toBeLessThan(joined.indexOf('Last command:'));
+  });
+
+  it('scrolls with the rest of the panel content', () => {
+    const item = { ...makeRichItem(), description: ['p1', 'p2', 'p3'].join('\n') };
+    const top = formatMetadataPanel(item, 80, 3, 0).join('\n');
+    expect(top).not.toContain('p1');
+    const previewView = formatMetadataPanel(item, 80, 3, 19).join('\n');
+    expect(previewView).toContain('p1');
+    expect(previewView).toContain('p3');
+    // [m/M scroll] indicator still shown when content overflows
+    expect(previewView).toContain('[m/M scroll');
   });
 });
 
@@ -1402,6 +1866,28 @@ describe('handleKeypress — metadata scroll keys', () => {
     state.selectedIndex = 0;
     expect(handleKeypress(state, '\x1b[6~', TERM_80x24)).toBe('pagedown');
     expect(state.selectedIndex).toBe(13);
+  });
+});
+
+// ── Ship It / manual-sync removal (WL-0MSGG5N5Z0074TLY) ────────────────
+// The manual `wl sync` binding on `S` is removed; `S` now resolves through
+// the ShortcutRegistry (Ship It dialog) like every other shortcut, and stays
+// distinct from lowercase `s` (Search).
+
+describe('keyToAction — manual sync binding removed', () => {
+  it('does not map S to the sync action anymore', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    // No registry passed: S is not a navigation key, so handleKeypress
+    // must return null (previously 'sync').
+    expect(handleKeypress(state, 'S', TERM_80x24)).toBeNull();
+  });
+
+  it('keeps s and other navigation keys unchanged', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    // s is not a navigation key either (resolved via registry → Search form).
+    expect(handleKeypress(state, 's', TERM_80x24)).toBeNull();
+    expect(handleKeypress(state, 'q', TERM_80x24)).toBe('quit');
+    expect(handleKeypress(state, 'j', TERM_80x24)).toBe('down');
   });
 });
 

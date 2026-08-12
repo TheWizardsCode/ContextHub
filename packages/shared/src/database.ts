@@ -5,7 +5,7 @@
 import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult } from './types.js';
+import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult, DemotedParent } from './types.js';
 import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions } from './persistent-store.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
 
@@ -1030,14 +1030,10 @@ export class WorklogDatabase {
       'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort',
       'needsProducerReview'
     ];
-    const hasChanged = fieldsToCompare.some(f => {
-      const oldVal = item[f];
-      const newVal = updated[f];
-      if (Array.isArray(oldVal) && Array.isArray(newVal)) {
-        return JSON.stringify(oldVal) !== JSON.stringify(newVal);
-      }
-      return oldVal !== newVal;
-    });
+    // Shared comparator: whitespace-only diffs in title/description are not
+    // semantic changes (WL-0MSORD6HC005QVZX). Same normalization as
+    // hasWorkItemChanged().
+    const hasChanged = this.compareTrackedFields(item, updated, fieldsToCompare);
 
     if (!hasChanged) {
       // Nothing changed — preserve original updatedAt and return early
@@ -1245,6 +1241,42 @@ export class WorklogDatabase {
   }
 
   /**
+   * Demote a parent work item when a child is added to it.
+   *
+   * A parent cannot be `completed` (status) or `in_review` (stage) while its
+   * subtree is not finished. When a new child is attached to such a parent
+   * (via `wl create --parent` or `wl update --parent`), the parent is moved
+   * back to `open` / `plan_complete` so its lifecycle state always reflects
+   * that it has uncompleted children.
+   *
+   * Only the direct parent is demoted; ancestors are left untouched.
+   *
+   * @param parentId - id of the parent that received the new child
+   * @returns the demotion details (parent, from status/stage, to status/stage)
+   *   or `null` when the parent is not in an eligible state (or does not exist)
+   */
+  demoteParentOnChildAdded(parentId: string): DemotedParent | null {
+    const parent = this.get(parentId);
+    if (!parent) {
+      return null;
+    }
+    const eligible = parent.status === 'completed' || parent.stage === 'in_review';
+    if (!eligible) {
+      return null;
+    }
+    const from = { status: parent.status, stage: parent.stage };
+    const updated = this.update(parentId, { status: 'open', stage: 'plan_complete' });
+    if (!updated) {
+      return null;
+    }
+    return {
+      parent: updated,
+      from,
+      to: { status: updated.status, stage: updated.stage },
+    };
+  }
+
+  /**
    * Get the number of direct children for each work item.
    * Returns a Map<itemId, count>.
    * If items is provided, only counts within that subset; otherwise uses all items.
@@ -1317,6 +1349,67 @@ export class WorklogDatabase {
     }
 
     return depth;
+  }
+
+  /**
+   * Ordinal rank of a risk level on the canonical scale
+   * (Low < Medium < High < Severe/Critical). Both the type-level spelling
+   * ('Severe') and the icon-scale spelling ('critical') map to the top
+   * rank. Unset/unknown values map to null (fail-closed: they are never
+   * matched by an at-most risk filter).
+   */
+  private riskOrdinal(risk: string | undefined | null): number | null {
+    switch ((risk ?? '').trim().toLowerCase()) {
+      case 'low': return 1;
+      case 'medium': return 2;
+      case 'high': return 3;
+      case 'severe':
+      case 'critical': return 4;
+      default: return null;
+    }
+  }
+
+  /**
+   * Ordinal rank of an effort level on the canonical scale
+   * (Extra Small < Small < Medium < Large < Extra Large). Accepts both the
+   * short CLI spellings (XS/S/M/L/XL) and the long-form effort-and-risk
+   * skill spellings (extra small/small/medium/large/extra large),
+   * normalized case-insensitively. Unset/unknown values map to null
+   * (fail-closed: they are never matched by an at-most effort filter).
+   */
+  private effortOrdinal(effort: string | undefined | null): number | null {
+    switch ((effort ?? '').trim().toLowerCase().replace(/[\s-]+/g, '')) {
+      case 'xs':
+      case 'extrasmall': return 1;
+      case 's':
+      case 'small': return 2;
+      case 'm':
+      case 'medium': return 3;
+      case 'l':
+      case 'large': return 4;
+      case 'xl':
+      case 'extralarge': return 5;
+      default: return null;
+    }
+  }
+
+  /**
+   * True when an item satisfies the optional at-most risk/effort filters.
+   * Fail-closed: an unset/unknown risk or effort on the item (or an invalid
+   * filter level) never matches.
+   */
+  private matchesRiskEffort(item: WorkItem, risk?: string, effort?: string): boolean {
+    if (risk !== undefined && risk !== '') {
+      const level = this.riskOrdinal(risk);
+      const ord = this.riskOrdinal(item.risk);
+      if (level === null || ord === null || ord > level) return false;
+    }
+    if (effort !== undefined && effort !== '') {
+      const level = this.effortOrdinal(effort);
+      const ord = this.effortOrdinal(item.effort);
+      if (level === null || ord === null || ord > level) return false;
+    }
+    return true;
   }
 
   /**
@@ -1466,6 +1559,8 @@ export class WorklogDatabase {
     options: {
       assignee?: string;
       searchTerm?: string;
+      risk?: string;
+      effort?: string;
       excluded?: Set<string>;
       debugPrefix?: string;
       includeInProgress?: boolean;
@@ -1476,6 +1571,8 @@ export class WorklogDatabase {
     const {
       assignee,
       searchTerm,
+      risk,
+      effort,
       excluded,
       debugPrefix = '[critical]',
       includeInProgress = false,
@@ -1514,8 +1611,9 @@ export class WorklogDatabase {
 
     if (unblockedCriticals.length > 0) {
       // Apply assignee/search to unblocked criticals — only return items
-      // that match the caller's filters.
-      let selectable = this.applyFilters(unblockedCriticals, assignee, searchTerm);
+      // that match the caller's filters (including risk/effort).
+      let selectable = this.applyFilters(unblockedCriticals, assignee, searchTerm)
+        .filter(item => this.matchesRiskEffort(item, risk, effort));
       if (excluded && excluded.size > 0) {
         selectable = selectable.filter(item => !excluded.has(item.id));
       }
@@ -1588,7 +1686,7 @@ export class WorklogDatabase {
       // Apply assignee/search filters to the blockers only
       const filteredBlockingPairs = blockingPairs.filter(pair =>
         this.applyFilters([pair.blocking], assignee, searchTerm).length > 0
-      );
+      ).filter(pair => this.matchesRiskEffort(pair.blocking, risk, effort));
       this.debug(`${debugPrefix} blocking candidates=${blockingPairs.length} after filters=${filteredBlockingPairs.length}`);
 
       // Strict root-only (WL-0MS964SIA0057ABR): never surface child blockers.
@@ -1598,7 +1696,7 @@ export class WorklogDatabase {
       const rootBlockingPairs: { blocking: WorkItem; critical: WorkItem }[] = [];
       for (const pair of filteredBlockingPairs) {
         const resolved = this.resolveBlockerToRoot(pair.blocking, allItems, assignee, searchTerm, excluded);
-        if (resolved) {
+        if (resolved && this.matchesRiskEffort(resolved, risk, effort)) {
           rootBlockingPairs.push({ blocking: resolved, critical: pair.critical });
         }
       }
@@ -1616,7 +1714,8 @@ export class WorklogDatabase {
 
       // No actionable blocker found — return the blocked critical itself as a
       // last resort so the user is aware of the stuck critical item.
-      let selectableBlocked = this.applyFilters(blockedCriticals, assignee, searchTerm);
+      let selectableBlocked = this.applyFilters(blockedCriticals, assignee, searchTerm)
+        .filter(item => this.matchesRiskEffort(item, risk, effort));
       if (excluded && excluded.size > 0) {
         selectableBlocked = selectableBlocked.filter(item => !excluded.has(item.id));
       }
@@ -1835,6 +1934,8 @@ export class WorklogDatabase {
       assignee?: string;
       searchTerm?: string;
       stage?: string;
+      risk?: string;
+      effort?: string;
       excluded?: Set<string>;
       includeBlocked?: boolean;
       includeInProgress?: boolean;
@@ -1846,6 +1947,8 @@ export class WorklogDatabase {
       assignee,
       searchTerm,
       stage,
+      risk,
+      effort,
       excluded,
       includeBlocked = false,
       includeInProgress = false,
@@ -1899,6 +2002,38 @@ export class WorklogDatabase {
     // 7. Apply assignee and search filters
     pool = this.applyFilters(pool, assignee, searchTerm);
     this.debug(`${debugPrefix} filter: after assignee/search=${pool.length}`);
+
+    // 7b. Apply risk/effort at-most filters (ordinal, fail-closed on unset).
+    // An item is eligible only when its risk ≤ the filter level (Low < Medium
+    // < High < Severe) and its effort ≤ the filter level (Extra Small < Small
+    // < Medium < Large < Extra Large). Items with unset/empty risk or effort
+    // are NEVER matched — an absent estimate is not "≤ low/small" (AC2).
+    if (risk !== undefined && risk !== '') {
+      const riskLevel = this.riskOrdinal(risk);
+      if (riskLevel === null) {
+        // Invalid filter level → fail-closed: match nothing.
+        pool = [];
+      } else {
+        pool = pool.filter(item => {
+          const ord = this.riskOrdinal(item.risk);
+          return ord !== null && ord <= riskLevel;
+        });
+      }
+      this.debug(`${debugPrefix} filter: after risk=${risk}=${pool.length}`);
+    }
+    if (effort !== undefined && effort !== '') {
+      const effortLevel = this.effortOrdinal(effort);
+      if (effortLevel === null) {
+        // Invalid filter level → fail-closed: match nothing.
+        pool = [];
+      } else {
+        pool = pool.filter(item => {
+          const ord = this.effortOrdinal(item.effort);
+          return ord !== null && ord <= effortLevel;
+        });
+      }
+      this.debug(`${debugPrefix} filter: after effort=${effort}=${pool.length}`);
+    }
 
     // Snapshot for critical-path escalation (before dep-blocker removal)
     const criticalPool = pool;
@@ -2006,9 +2141,11 @@ export class WorklogDatabase {
     includeBlocked: boolean = false,
     stage?: string,
     includeInProgress: boolean = false,
-    edgeCache?: EdgeCache
+    edgeCache?: EdgeCache,
+    risk?: string,
+    effort?: string
   ): NextWorkItemResult {
-    this.debug(`${debugPrefix} assignee=${assignee || ''} search=${searchTerm || ''} stage=${stage || ''} excluded=${excluded?.size || 0}`);
+    this.debug(`${debugPrefix} assignee=${assignee || ''} search=${searchTerm || ''} stage=${stage || ''} excluded=${excluded?.size || 0} risk=${risk || ''} effort=${effort || ''}`);
 
     // Build the sort-order cache once from the pre-loaded items array.
     // This avoids an extra full-table scan of all work items from the database.
@@ -2023,6 +2160,8 @@ export class WorklogDatabase {
       assignee,
       searchTerm,
       stage,
+      risk,
+      effort,
       excluded,
       includeBlocked,
       includeInProgress,
@@ -2042,6 +2181,8 @@ export class WorklogDatabase {
         searchTerm,
         excluded,
         includeInProgress,
+        risk,
+        effort,
         debugPrefix: `${debugPrefix} [critical]`,
         edgeCache,
         sortOrderCache,
@@ -2062,111 +2203,119 @@ export class WorklogDatabase {
     // be hidden from wl next results. The existing isInProgressSubtree()
     // filter in Stage 5 already ensures this for open items; Stage 3 must
     // apply the same filtering for blocker surfacing.
-    const nonCriticalBlocked = criticalPool.filter(
-      item => item.status === 'blocked' && item.priority !== 'critical'
-    ).filter(item => !this.isInProgressSubtree(item, items));
-    this.debug(`${debugPrefix} non-critical blocked=${nonCriticalBlocked.length}`);
-
+    //
+    // Skip non-critical blocker surfacing when a stage filter is specified —
+    // mirroring the Stage 2 guard above: the user is explicitly filtering by
+    // stage and blocker surfacing must not surface items at other stages
+    // (WL-0MSP1XJSO007LE3K). A blocker's own stage is not constrained by the
+    // stage-filtered candidate pool, so surfacing it would violate the filter.
     // Strict root-only (WL-0MS964SIA0057ABR): tracks whether any would-be
     // blocker was a hidden child whose parent is not selectable. If no blocker
     // can be surfaced and no root candidate remains in Stage 5, wl next
     // returns null with a clear reason rather than surfacing the child.
     let droppedHiddenChildBlocker = false;
 
-    if (nonCriticalBlocked.length > 0 && filteredItems.length > 0) {
-      // Find the highest priority value among open candidates
-      const bestCompetitorPriority = Math.max(
-        ...filteredItems.map(item => this.getPriorityValue(item.priority))
-      );
+    if (!stage) {
+      const nonCriticalBlocked = criticalPool.filter(
+        item => item.status === 'blocked' && item.priority !== 'critical'
+      ).filter(item => !this.isInProgressSubtree(item, items));
+      this.debug(`${debugPrefix} non-critical blocked=${nonCriticalBlocked.length}`);
 
-      // Sort blocked items by priority descending so we handle the most
-      // important blocked item first
-      const sortedBlocked = nonCriticalBlocked.slice().sort(
-        (a, b) => this.getPriorityValue(b.priority) - this.getPriorityValue(a.priority)
-      );
-
-      for (const blockedItem of sortedBlocked) {
-        const blockedPriority = this.getPriorityValue(blockedItem.priority);
-        if (blockedPriority < bestCompetitorPriority) {
-          // Blocked item is lower priority than best open candidate — skip
-          continue;
-        }
-
-        // Blocked item priority >= best competitor: surface its blocker
-        const blockingPairs: { blocking: WorkItem; blocked: WorkItem }[] = [];
-
-        // Check dependency blockers
-        const dependencyBlockers = this.getActiveDependencyBlockers(blockedItem.id, edgeCache);
-        for (const blocker of dependencyBlockers) {
-          if (excluded?.has(blocker.id)) continue;
-          blockingPairs.push({ blocking: blocker, blocked: blockedItem });
-        }
-
-        // Check child blockers
-        const blockingChildren = this.getNonClosedChildren(blockedItem.id, edgeCache);
-        for (const child of blockingChildren) {
-          if (excluded?.has(child.id)) continue;
-          blockingPairs.push({ blocking: child, blocked: blockedItem });
-        }
-
-        // Apply assignee/search filters to blockers
-        let filteredBlockers = blockingPairs.filter(pair =>
-          this.applyFilters([pair.blocking], assignee, searchTerm).length > 0
+      if (nonCriticalBlocked.length > 0 && filteredItems.length > 0) {
+        // Find the highest priority value among open candidates
+        const bestCompetitorPriority = Math.max(
+          ...filteredItems.map(item => this.getPriorityValue(item.priority))
         );
-
-        // Strict root-only (WL-0MS964SIA0057ABR): child blockers are never
-        // surfaced by wl next.
-        //  - A child blocker whose parent is a selectable actionable root
-        //    candidate is dropped — the parent competes in Stage 5 (open item
-        //    selection) and is the unit of work surfaced there.
-        //  - A child blocker whose parent is NOT selectable is hidden entirely
-        //    (no orphan promotion); if no surfacable blocker remains and no
-        //    root candidate exists, wl next returns null with a clear reason.
-        const rootOnlyBlockers: { blocking: WorkItem; blocked: WorkItem }[] = [];
-        for (const pair of filteredBlockers) {
-          if (!pair.blocking.parentId) {
-            // Root-level blocker — surfacing it is fine.
-            rootOnlyBlockers.push(pair);
+  
+        // Sort blocked items by priority descending so we handle the most
+        // important blocked item first
+        const sortedBlocked = nonCriticalBlocked.slice().sort(
+          (a, b) => this.getPriorityValue(b.priority) - this.getPriorityValue(a.priority)
+        );
+  
+        for (const blockedItem of sortedBlocked) {
+          const blockedPriority = this.getPriorityValue(blockedItem.priority);
+          if (blockedPriority < bestCompetitorPriority) {
+            // Blocked item is lower priority than best open candidate — skip
             continue;
           }
-          // Child blocker: resolve to parent when selectable, else hidden.
-          const resolved = this.resolveBlockerToRoot(pair.blocking, items, assignee, searchTerm, excluded);
-          if (resolved) {
-            // Parent is selectable — it competes in Stage 5 (existing
-            // hierarchy awareness, WL-0MQF95NCC0024H61).
-            this.debug(`${debugPrefix}   drop child blocker ${pair.blocking.id} (selectable parent ${resolved.id} competes in Stage 5)`);
-          } else {
-            droppedHiddenChildBlocker = true;
+  
+          // Blocked item priority >= best competitor: surface its blocker
+          const blockingPairs: { blocking: WorkItem; blocked: WorkItem }[] = [];
+  
+          // Check dependency blockers
+          const dependencyBlockers = this.getActiveDependencyBlockers(blockedItem.id, edgeCache);
+          for (const blocker of dependencyBlockers) {
+            if (excluded?.has(blocker.id)) continue;
+            blockingPairs.push({ blocking: blocker, blocked: blockedItem });
           }
-        }
-        filteredBlockers = rootOnlyBlockers;
-
-        // Filter out blockers that belong to an in-progress parent subtree —
-        // children of in-progress parents must not appear as independent
-        // wl next results from any stage, including blocker surfacing.
-        // This complements the in-progress subtree filter above on the
-        // blocked item itself and the existing isInProgressSubtree() filter
-        // in Stage 5 (open item selection).
-        filteredBlockers = filteredBlockers.filter(pair =>
-          !this.isInProgressSubtree(pair.blocking, items)
-        );
-
-        this.debug(`${debugPrefix} blocker-surfacing: blockedItem=${blockedItem.id} pri=${blockedItem.priority} blockers=${filteredBlockers.length}`);
-
-        if (filteredBlockers.length > 0) {
-          // Select the best blocker by sort index
-          const orderedBlockers = this.orderBySortIndex(filteredBlockers.map(p => p.blocking), sortOrderCache);
-          const selectedBlocker = orderedBlockers[0];
-          if (selectedBlocker) {
-            const pair = filteredBlockers.find(p => p.blocking.id === selectedBlocker.id)!;
-            return {
-              workItem: selectedBlocker,
-              reason: `Blocking issue for ${pair.blocked.priority}-priority item ${pair.blocked.id} (${pair.blocked.title})`
-            };
+  
+          // Check child blockers
+          const blockingChildren = this.getNonClosedChildren(blockedItem.id, edgeCache);
+          for (const child of blockingChildren) {
+            if (excluded?.has(child.id)) continue;
+            blockingPairs.push({ blocking: child, blocked: blockedItem });
+          }
+  
+          // Apply assignee/search filters to blockers
+          let filteredBlockers = blockingPairs.filter(pair =>
+            this.applyFilters([pair.blocking], assignee, searchTerm).length > 0
+          ).filter(pair => this.matchesRiskEffort(pair.blocking, risk, effort));
+  
+          // Strict root-only (WL-0MS964SIA0057ABR): child blockers are never
+          // surfaced by wl next.
+          //  - A child blocker whose parent is a selectable actionable root
+          //    candidate is dropped — the parent competes in Stage 5 (open item
+          //    selection) and is the unit of work surfaced there.
+          //  - A child blocker whose parent is NOT selectable is hidden entirely
+          //    (no orphan promotion); if no surfacable blocker remains and no
+          //    root candidate exists, wl next returns null with a clear reason.
+          const rootOnlyBlockers: { blocking: WorkItem; blocked: WorkItem }[] = [];
+          for (const pair of filteredBlockers) {
+            if (!pair.blocking.parentId) {
+              // Root-level blocker — surfacing it is fine.
+              rootOnlyBlockers.push(pair);
+              continue;
+            }
+            // Child blocker: resolve to parent when selectable, else hidden.
+            const resolved = this.resolveBlockerToRoot(pair.blocking, items, assignee, searchTerm, excluded);
+            if (resolved) {
+              // Parent is selectable — it competes in Stage 5 (existing
+              // hierarchy awareness, WL-0MQF95NCC0024H61).
+              this.debug(`${debugPrefix}   drop child blocker ${pair.blocking.id} (selectable parent ${resolved.id} competes in Stage 5)`);
+            } else {
+              droppedHiddenChildBlocker = true;
+            }
+          }
+          filteredBlockers = rootOnlyBlockers;
+  
+          // Filter out blockers that belong to an in-progress parent subtree —
+          // children of in-progress parents must not appear as independent
+          // wl next results from any stage, including blocker surfacing.
+          // This complements the in-progress subtree filter above on the
+          // blocked item itself and the existing isInProgressSubtree() filter
+          // in Stage 5 (open item selection).
+          filteredBlockers = filteredBlockers.filter(pair =>
+            !this.isInProgressSubtree(pair.blocking, items)
+          );
+  
+          this.debug(`${debugPrefix} blocker-surfacing: blockedItem=${blockedItem.id} pri=${blockedItem.priority} blockers=${filteredBlockers.length}`);
+  
+          if (filteredBlockers.length > 0) {
+            // Select the best blocker by sort index
+            const orderedBlockers = this.orderBySortIndex(filteredBlockers.map(p => p.blocking), sortOrderCache);
+            const selectedBlocker = orderedBlockers[0];
+            if (selectedBlocker) {
+              const pair = filteredBlockers.find(p => p.blocking.id === selectedBlocker.id)!;
+              return {
+                workItem: selectedBlocker,
+                reason: `Blocking issue for ${pair.blocked.priority}-priority item ${pair.blocked.id} (${pair.blocked.title})`
+              };
+            }
           }
         }
       }
-    }
+    } // end if (!stage) — Stage 3 skipped under stage filter
 
     // ── Stage 5: Open item selection ──
     // Select among filtered candidates, returning the best root item
@@ -2239,11 +2388,13 @@ export class WorklogDatabase {
     searchTerm?: string,
     includeBlocked: boolean = false,
     stage?: string,
-    includeInProgress: boolean = false
+    includeInProgress: boolean = false,
+    risk?: string,
+    effort?: string
   ): NextWorkItemResult {
     const items = this.store.getAllWorkItems();
     const edgeCache = this.buildEdgeCache(items);
-    return this.findNextWorkItemFromItems(items, assignee, searchTerm, undefined, '[next]', includeBlocked, stage, includeInProgress, edgeCache);
+    return this.findNextWorkItemFromItems(items, assignee, searchTerm, undefined, '[next]', includeBlocked, stage, includeInProgress, edgeCache, risk, effort);
   }
 
   /**
@@ -2256,7 +2407,9 @@ export class WorklogDatabase {
     searchTerm?: string,
     includeBlocked: boolean = false,
     stage?: string,
-    includeInProgress: boolean = false
+    includeInProgress: boolean = false,
+    risk?: string,
+    effort?: string
   ): NextWorkItemResult[] {
     const results: NextWorkItemResult[] = [];
     const excluded = new Set<string>();
@@ -2276,7 +2429,9 @@ export class WorklogDatabase {
         includeBlocked,
         stage,
         includeInProgress,
-        edgeCache
+        edgeCache,
+        risk,
+        effort
       );
 
       results.push(result);
@@ -2366,10 +2521,43 @@ export class WorklogDatabase {
   }
 
   /**
+   * Compare a set of tracked fields between two work items and return true if
+   * any of them has semantically changed.
+   *
+   * `title` and `description` are whitespace-normalized before comparison
+   * (leading/trailing whitespace, trailing newlines and blank-line runs are
+   * stripped) so that whitespace-only differences do NOT count as semantic
+   * changes — e.g. a second worklog store that strips trailing newlines from
+   * descriptions would otherwise re-timestamp every item on every `wl sync`
+   * (WL-0MSORD6HC005QVZX). All other fields use strict equality; arrays
+   * (tags) are compared by value.
+   *
+   * Shared by {@link hasWorkItemChanged} (16-field tracked set, used by
+   * import()/upsertItems()) and the no-op guard in {@link update} (13-field
+   * set, excluding the GitHub metadata fields).
+   */
+  private compareTrackedFields(oldItem: WorkItem, newItem: WorkItem, fields: (keyof WorkItem)[]): boolean {
+    return fields.some(f => {
+      const oldVal = oldItem[f];
+      const newVal = newItem[f];
+      if (f === 'title' || f === 'description') {
+        // Whitespace-only differences (trailing newline strip/normalization)
+        // are not semantic changes — compare normalized text only.
+        return String(oldVal ?? '').trim() !== String(newVal ?? '').trim();
+      }
+      if (Array.isArray(oldVal) && Array.isArray(newVal)) {
+        return JSON.stringify(oldVal) !== JSON.stringify(newVal);
+      }
+      return oldVal !== newVal;
+    });
+  }
+
+  /**
    * Compare an existing work item against a candidate and return true if any
    * tracked field has semantically changed.
    *
-   * Uses the same field set and comparison logic as the no-op guard in {@link update}.
+   * Uses the same field set and comparison logic as the no-op guard in {@link update}
+   * (via {@link compareTrackedFields}).
    */
   private hasWorkItemChanged(oldItem: WorkItem, newItem: WorkItem): boolean {
     const fieldsToCompare: (keyof WorkItem)[] = [
@@ -2378,14 +2566,7 @@ export class WorklogDatabase {
       'needsProducerReview', 'githubIssueNumber', 'githubIssueId',
       'githubIssueUpdatedAt'
     ];
-    return fieldsToCompare.some(f => {
-      const oldVal = oldItem[f];
-      const newVal = newItem[f];
-      if (Array.isArray(oldVal) && Array.isArray(newVal)) {
-        return JSON.stringify(oldVal) !== JSON.stringify(newVal);
-      }
-      return oldVal !== newVal;
-    });
+    return this.compareTrackedFields(oldItem, newItem, fieldsToCompare);
   }
 
   /**
@@ -2415,6 +2596,13 @@ export class WorklogDatabase {
    * `updatedAt` is preserved so that sync operations do not silently
    * re-timestamp unchanged items. Changed items get a new `updatedAt`;
    * entirely new items use the incoming value as-is.
+   *
+   * Comparison is whitespace-insensitive for `title` and `description`
+   * (via {@link compareTrackedFields}): trailing-newline strips / leading or
+   * trailing whitespace / blank-line runs do NOT count as semantic changes,
+   * so `wl sync` does not re-timestamp items whose meaningful content never
+   * changed (WL-0MSORD6HC005QVZX). The incoming (normalized) content is still
+   * persisted — only `updatedAt` is preserved.
    *
    * @param items - The full set of work items to store.
    * @param dependencyEdges - Optional full set of dependency edges. When
@@ -2473,10 +2661,10 @@ export class WorklogDatabase {
    * existing items not in the provided array are preserved.
    *
    * **No-op guard**: For each item that already exists in the store AND has
-   * identical tracked fields (same field set as {@link hasWorkItemChanged}),
-   * the save is entirely skipped — preserving the existing `updatedAt`.
-   * Items whose tracked fields differ, or that are new, get a fresh
-   * `updatedAt` timestamp.
+   * identical tracked fields (same field set as {@link hasWorkItemChanged},
+   * whitespace-insensitive for `title`/`description`), the save is entirely
+   * skipped — preserving the existing `updatedAt`. Items whose tracked fields
+   * differ, or that are new, get a fresh `updatedAt` timestamp.
    *
    * When `dependencyEdges` is provided, only edges whose `fromId` or `toId`
    * belongs to the provided items are upserted; all other edges are untouched.

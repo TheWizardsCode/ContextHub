@@ -11,6 +11,8 @@
  *
  * Environment:
  *   HERDR_PANE_ID  - Set by Herdr when running in a pane (optional)
+ *   HERDR_TAB_ID   - Set by Herdr when running in a pane; the tab-focus
+ *                    visibility signal for pause-when-hidden (optional)
  *   WL_COUNT       - Number of items to fetch (default: 20, now superseded by browseItemCount setting)
  *
  * Exit codes:
@@ -36,6 +38,7 @@ import {
 import { AgentTracker, AGENT_PANES_FILE, mergeAgentStates } from './agent-tracker.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
+import { readCodeFreezeStatusForRoot } from './code-freeze.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
 import {
   createDowntimeWorker,
@@ -44,8 +47,11 @@ import {
   spawnDowntimePane,
   parseNextItemOutput,
   parseAuditCandidatesOutput,
+  parseImplementCandidatesOutput,
   selectAuditCandidate,
+  selectImplementCandidate,
   toDowntimeCandidate,
+  toImplementCandidate,
   skillKindFromPrompt,
   type DowntimeWorker,
   type DowntimeWorkerDeps,
@@ -59,7 +65,12 @@ import {
   buildDowntimeDispatchComment,
   DOWNTIME_WL_TIMEOUT_MS,
 } from './downtime-worker.js';
-import { appendDowntimeLogEntry } from './downtime-log.js';
+import {
+  appendDowntimeLogEntry,
+  auditDispatchedItemIds,
+  implementDispatchedItemIds,
+  readDowntimeLogEntries,
+} from './downtime-log.js';
 
 // Resolve path to the send-to-pi.sh script (relative to this source file)
 // At runtime (tsx or dist), __dirname equivalent from import.meta.url
@@ -358,7 +369,13 @@ export function createDowntimeDeps(
         return { ok: false };
       }
     },
-    async getNextAuditCandidate(): Promise<DowntimeCandidate | null> {
+    // Code-freeze gate (WL-0MSQ0RPQP00636JY): fresh tri-state read of the
+    // ship-it marker at `<cwd>/.worklog/code-freeze.json` on EVERY dispatch
+    // (never cached). The dispatcher treats 'frozen' and 'ambiguous'
+    // (fail-closed) identically: no audit/implement dispatch during a
+    // release; plan/intake continue.
+    readCodeFreezeStatus: (cwd: string) => readCodeFreezeStatusForRoot(cwd),
+    async getNextAuditCandidate(cwd: string): Promise<DowntimeCandidate | null> {
       try {
         // Audit tier (WL-0MSI8H3HP000K0RG): select the first completed /
         // in_review item WITHOUT a valid audit so the producer-review queue
@@ -371,15 +388,77 @@ export function createDowntimeDeps(
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
         );
         const candidates = parseAuditCandidatesOutput(stdout);
-        const selected = candidates === null ? null : selectAuditCandidate(candidates);
+        if (candidates === null) return null;
+        // Dispatched-marker exclusion (WL-0MSLIY8ZR004QUSY): read the shared
+        // rolling dispatch log for THIS worklog root (the same <cwd> that
+        // recordDispatch writes) and exclude any candidate the downtime
+        // worker has already dispatched for /skill:audit unless a fresh
+        // audit exists since (the composition lives in selectAuditCandidate).
+        // Fail-safe: readDowntimeLogEntries never throws — a missing or
+        // unreadable log is treated as empty, so audit-tier dispatch still
+        // works on a fresh worklog (a corrupted log cannot silently disable
+        // the audit tier).
+        const entries = await readDowntimeLogEntries(cwd);
+        const dispatchedAuditIds = auditDispatchedItemIds(entries);
+        const selected = selectAuditCandidate(candidates, Date.now(), dispatchedAuditIds);
         return selected === null ? null : toDowntimeCandidate(selected);
       } catch {
         // Fail-closed: a wl failure yields no candidate (no dispatch).
         return null;
       }
     },
+    async getNextImplementCandidate(cwd: string): Promise<DowntimeCandidate | null> {
+      try {
+        // Implement tier (WL-0MSMAYPQP001FLR6): select the highest-priority
+        // open plan_complete item with risk Low / effort Small|XS. The wl
+        // next server-side at-most filters (--risk low --effort small,
+        // delivered by WL-0MSMAIP5F003WAGG) do the heavy lifting; a
+        // generous batch (-n 10) is fetched so completed epics (which wl
+        // next keeps under a stage filter) can be filtered out client-side
+        // without starving selection. The bounded timeout
+        // (WL-0MSJIPHD0001L1J9) kills a hung wl child. Fail-closed: a wl
+        // failure yields no candidate (no dispatch) and never short-circuits
+        // the plan/intake fallback (AC6).
+        const { stdout } = await getExecFileAsync()(
+          'wl',
+          buildWlArgs([
+            'next',
+            '--stage',
+            'plan_complete',
+            '--risk',
+            'low',
+            '--effort',
+            'small',
+            '-n',
+            '10',
+            '--json',
+          ]),
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+        );
+        const candidates = parseImplementCandidatesOutput(stdout);
+        if (candidates === null) return null;
+        // Dispatched-marker exclusion (AC6): read the shared rolling
+        // dispatch log for THIS worklog root and exclude any candidate the
+        // downtime worker has already dispatched for /skill:implement
+        // (kind implement markers). Fail-safe: readDowntimeLogEntries never
+        // throws — a missing or unreadable log is treated as empty, so
+        // implement-tier dispatch still works on a fresh worklog.
+        const entries = await readDowntimeLogEntries(cwd);
+        const dispatchedImplementIds = implementDispatchedItemIds(entries);
+        const selected = selectImplementCandidate(candidates, dispatchedImplementIds);
+        return selected === null ? null : toImplementCandidate(selected);
+      } catch {
+        // Fail-closed: a wl failure yields no candidate (no dispatch).
+        return null;
+      }
+    },
     async claimItem(itemId: string): Promise<void> {
-      // claimWorkItem never throws (failures are returned and logged).
+      // claimWorkItem never throws — failures are returned, but the result is
+      // deliberately discarded here: a failed claim must not block the
+      // dispatch. Note this path does NOT log the failure (unlike
+      // claimItemForAgentCommand), so a claim failure is silent and the
+      // dispatch is still recorded as a success (known silent path, follow-up
+      // WL-0MSLWJ310000ND0X; see README "Failure-path logging").
       await claimWorkItem(itemId, assignee);
     },
     async spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<void> {

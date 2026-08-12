@@ -461,6 +461,27 @@ In blocker-surfacing and critical-escalation paths, child blockers are never ret
 
 In batch mode (`-n <count>`), children of returned parents are also excluded from subsequent results, ensuring the batch never contains items from the same subtree.
 
+#### Risk / effort filters
+
+`--risk <level>` and `--effort <level>` restrict candidates with **at-most** ordinal
+semantics (WL-0MSMAIP5F003WAGG):
+
+- Risk: `low` < `medium` < `high` < `severe` (alias `critical`). `--risk low` matches only
+  Low-risk items; `--risk medium` matches Low and Medium; and so on.
+- Effort: `extra-small`/`xs` < `small`/`s` < `medium`/`m` < `large`/`l` <
+  `extra-large`/`xl`. `--effort small` matches Extra Small and Small items;
+  both the short (`XS`, `S`, …) and long-form (`Extra Small`, `Small`, …)
+  spellings are recognized, case-insensitively.
+- **Fail-closed:** items with unset/empty risk or effort never match — an
+  absent estimate is not "≤ low/small".
+- Filters compose with `--stage`, priority selection, and the existing
+  dependency-blocked exclusion, and apply to surfaced blockers too.
+
+```sh
+wl next --stage plan_complete --risk low --effort small
+wl next --stage plan_complete --risk low --effort small -n 10
+```
+
 #### Automatic re-sort
 
 By default, `wl next` re-sorts all active items by score before selecting candidates. This ensures that recently created or re-prioritized items are immediately reflected in the selection order without requiring a manual `wl re-sort`. The re-sort uses the same scoring logic as `wl re-sort` (priority weight, age, and optional recency policy).
@@ -563,6 +584,8 @@ wl next -n 10 -g 4
 wl next -a alice --search "bug"
 wl next --stage idea
 wl next --stage in_progress
+wl next --risk low --effort small
+wl next --stage plan_complete --risk low --effort small -n 10
 wl next --include-blocked
 wl next --no-re-sort
 wl next --recency-policy prefer

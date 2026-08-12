@@ -24,6 +24,7 @@ vi.mock('./auto-sync.js', () => ({
   runSync: vi.fn().mockResolvedValue({ success: true }),
   createSyncTimer: vi.fn(() => ({ start: vi.fn(), stop: vi.fn() })),
   clampSyncInterval: vi.fn((v: number) => v),
+  heartbeatTtlForInterval: vi.fn(() => 45_000),
 }));
 
 vi.mock('./notify.js', () => ({
@@ -94,7 +95,7 @@ function tick(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 describe('runWorklistTui toast dispatch', () => {
-  it('dispatches a Synced toast on manual sync (S) and writes no bottom line', async () => {
+  it('does not sync on S (manual sync removed) and writes no bottom line', async () => {
     const p = runWorklistTui(async () => [], [], undefined, {
       autoRefresh: false,
       autoSync: false,
@@ -103,13 +104,14 @@ describe('runWorklistTui toast dispatch', () => {
     // Let initial render settle
     await tick();
 
-    // Manual sync
+    // Manual sync was removed (WL-0MSGG5N5Z0074TLY): pressing S must NOT
+    // spawn `wl sync` (auto-sync on the timer is the only sync source).
     dataHandler?.(Buffer.from('S'));
     await tick();
     await tick();
 
-    expect(mockRunSync).toHaveBeenCalled();
-    expect(mockShowToast).toHaveBeenCalledWith('Synced');
+    expect(mockRunSync).not.toHaveBeenCalled();
+    expect(mockShowToast).not.toHaveBeenCalled();
 
     // Quit
     dataHandler?.(Buffer.from('q'));
@@ -121,17 +123,18 @@ describe('runWorklistTui toast dispatch', () => {
     expect(rendered).not.toContain('[Refreshed');
   });
 
-  it('dispatches a Sync failed toast with the error body on sync failure', async () => {
+  it('dispatches a Sync failed toast with the error body on auto-sync failure', async () => {
     mockRunSync.mockResolvedValueOnce({ success: false, error: 'lock held' });
     const p = runWorklistTui(async () => [], [], undefined, {
       autoRefresh: false,
-      autoSync: false,
+      autoSync: true,
+      syncIntervalMs: 60_000,
       showHelpText: false,
     });
     await tick();
-
-    dataHandler?.(Buffer.from('S'));
-    await tick();
+    // The auto-sync task fires immediately on scheduler start
+    // (fireImmediately), so the failing sync surfaces its toast without
+    // waiting for the full interval.
     await tick();
 
     expect(mockShowToast).toHaveBeenCalledWith('Sync failed', { body: 'lock held' });

@@ -15,7 +15,7 @@ import { dirname, join, resolve as resolvePath } from 'node:path';
 
 import { fetchChildrenForItem, fetchActionableCount, fetchItemsByStage, getWorklogDir, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
-import { readCodeFreezeState } from './code-freeze.js';
+import { readCodeFreezeState, readCodeFreezeStatus } from './code-freeze.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
   statusIcon,
@@ -39,10 +39,19 @@ import {
   FormState,
   substituteIdentifiers,
 } from './form-dialog.js';
+import { ShipItDialogState, overlayShipItDialog } from './ship-it-dialog.js';
 import { extractFilePaths } from './grouping.js';
-import { renderMarkdownViewer, renderNoteLinks } from './md-viewer.js';
+import { renderMarkdown, renderMarkdownViewer } from './md-viewer.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
+
+/**
+ * The dev→main release command dispatched by the Ship It shortcut (`S`,
+ * WL-0MSGG5N5Z0074TLY). Global release — receives NO work item id. The
+ * command must be typed as `ship` + Enter in the confirmation dialog
+ * before it is dispatched via the standard command-routing path.
+ */
+export const SHIP_IT_COMMAND = '/skill:ship release';
 
 export const STAGES = [
   'idea',
@@ -911,12 +920,64 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
 }
 
 /**
+ * Maximum number of description preview lines shown in the metadata panel.
+ */
+const DESCRIPTION_PREVIEW_MAX_LINES = 3;
+
+/**
+ * Build the description preview lines for the metadata panel.
+ *
+ * Returns up to {@link DESCRIPTION_PREVIEW_MAX_LINES} non-empty lines from the
+ * item's description, each truncated to `maxCols`. The preview starts with a
+ * dimmed `Description` heading row. Returns an empty array when the description
+ * is missing or blank.
+ *
+ * @param description - The work item's description text.
+ * @param maxCols - Terminal width for truncation.
+ * @returns Preview lines ready to insert into the metadata panel.
+ */
+function buildDescriptionPreview(
+  description: string | undefined | null,
+  maxCols: number,
+): string[] {
+  if (!description || description.trim() === '') {
+    return [];
+  }
+
+  const preview: string[] = [];
+
+  // Heading row
+  preview.push(` ${ANSI.dim}${ANSI.underline}Description${ANSI.reset}`);
+
+  // First up-to-3 non-empty lines, so blank separator lines between markdown
+  // sections don't waste the limited preview space (WL-0MSFZKQL700381P3).
+  const lines = description.split('\n');
+  let shown = 0;
+  for (const line of lines) {
+    if (shown >= DESCRIPTION_PREVIEW_MAX_LINES) break;
+    if (line.trim() === '') continue;
+    preview.push(` ${line}`);
+    shown += 1;
+  }
+
+  // Truncate to fit the terminal width
+  for (let i = 0; i < preview.length; i++) {
+    if (preview[i].length > 0) {
+      preview[i] = truncateLine(preview[i], maxCols);
+    }
+  }
+
+  return preview;
+}
+
+/**
  * Format the metadata panel shown below the selection list.
  *
- * Renders the selected item's fields (via {@link buildMetaRows}) plus a last
- * command line when the item's stage is `in_progress`. The panel scrolls
- * independently with its own offset: when the content is taller than the
- * panel, `metaScrollOffset` selects the visible window and a `[m/M scroll]`
+ * Renders the selected item's fields (via {@link buildMetaRows}) plus a
+ * description preview (up to 3 lines) and a last command line when the item's
+ * stage is `in_progress`. The panel scrolls independently with its own offset:
+ * when the content is taller than the panel,
+ * `metaScrollOffset` selects the visible window and a `[m/M scroll]`
  * indicator is appended to the last line.
  *
  * @param item - Selected work item (or null for an empty panel).
@@ -955,6 +1016,13 @@ export function formatMetadataPanel(
       lines.push(` ${label.padEnd(fieldWidth)} ${value}`);
     }
   }
+
+  // Description preview — first few lines of the item's description so the
+  // user can see what the item is about without opening the detail view
+  // (WL-0MSFZKQL700381P3). Shown as-is (markdown source lines), placed after
+  // the metadata rows and before the last-command line.
+  const preview = buildDescriptionPreview(item.description, maxCols);
+  lines.push(...preview);
 
   // Last command — only meaningful while the item is being worked on
   if (item.stage === 'in_progress') {
@@ -1092,25 +1160,18 @@ export function formatDetailContent(
     lines.push('');
     lines.push(` ${ANSI.underline}Description${ANSI.reset}`);
     lines.push('');
-    const descLines = item.description.split('\n');
+    // Render the description as GFM (tables, bold/italic, inline code,
+    // links, lists, headings) via the shared markdown renderer; NOTE
+    // markers render as `<id>↗` links inside the rendered output. Wrap to
+    // the content width minus the 2-space indent.
+    const indent = 2;
+    const wrapWidth = contentWidth - indent - 2;
+    const descLines = renderMarkdown(item.description, Math.max(wrapWidth, 20));
     for (const dl of descLines) {
-      // Wrap long lines to fit width; NOTE markers render as links.
-      const indent = 2;
-      const wrapWidth = contentWidth - indent - 2;
-      const linked = renderNoteLinks(dl);
-      if (linked.length > wrapWidth && wrapWidth > 10) {
-        let remaining = linked;
-        while (remaining.length > 0) {
-          const seg = remaining.slice(0, wrapWidth);
-          remaining = remaining.slice(wrapWidth);
-          lines.push(`  ${seg}`);
-        }
-      } else {
-        lines.push(`  ${linked}`);
-      }
+      lines.push(`  ${dl}`);
       // Limit total lines
       if (lines.length > 500) {
-        lines.push(`  ... (truncated, ${descLines.length} total description lines)`);
+        lines.push(`  ... (truncated, ${item.description.split('\n').length} total description lines)`);
         break;
       }
     }
@@ -1459,7 +1520,7 @@ export function getChordHelpHints(registry: ShortcutRegistry | undefined, codeFr
 // ── Keyboard handling ─────────────────────────────────────────────────
 
 export type KeyAction = 'up' | 'down' | 'pageup' | 'pagedown' | 'select'
-  | 'back' | 'filter' | 'refresh' | 'sync' | 'quit' | 'first' | 'last'
+  | 'back' | 'filter' | 'refresh' | 'quit' | 'first' | 'last'
   | 'meta-up' | 'meta-down'
   | 'chord-start' | 'chord-complete' | 'chord-cancel'
   | 'toggle-expand' | null;
@@ -1504,14 +1565,15 @@ export function keyToAction(key: string): KeyAction {
       return 'back';
     // '/' filter prompt removed — use f-* chords instead
     // 'r' is a single-key Producer Review shortcut — resolved via ShortcutRegistry
+    // 'S' is the Ship It shortcut — resolved via ShortcutRegistry (opens the
+    // typed-confirmation dialog, WL-0MSGG5N5Z0074TLY). The manual-sync 'S'
+    // binding was removed; auto-sync on the timer is unaffected.
     case 'q':
       return 'quit';
     case 'g':
       return 'first';
     case 'G':
       return 'last';
-    case 'S':
-      return 'sync';
     case 'm':
       return 'meta-down';
     case 'M':
@@ -1797,6 +1859,8 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   detailToCIndex?: number,
   detailToCFocus?: boolean,
   detailRenderedIndex?: number,
+  showHelpText?: boolean,
+  codeFreezeAmbiguous?: boolean,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -1825,6 +1889,8 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     detailToCIndex?: number,
     detailToCFocus?: boolean,
     detailRenderedIndex?: number,
+    showHelpText?: boolean,
+    codeFreezeAmbiguous?: boolean,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -1886,14 +1952,26 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     }
     output.push(header);
 
-    // Code Freeze banner — a prominent warning that implementation is
-    // blocked while a ship release is in progress. The banner consumes one
-    // chrome row (chromeLines accounts for it) so the `rows - 1` pane
+    // Code Freeze banners — a prominent warning that implementation is
+    // blocked while a ship release is in progress (active marker), plus a
+    // DISTINCT warning when the marker is ambiguous (unreadable file,
+    // corrupt JSON, wrong shape): the downtime dispatcher treats ambiguity
+    // as frozen (fail-closed), so the operator sees why implement/audit
+    // dispatch is disabled (WL-0MSQ0RPQP00636JY). Each banner consumes one
+    // chrome row (chromeLines accounts for them) so the `rows - 1` pane
     // line-count invariant still holds (WL-0MSAAON63003N6LO).
+    let bannerCount = 0;
     if (codeFreezeActive) {
       const bannerText = `⛔ CODE FREEZE — ship release in progress; implement actions blocked`;
       const bannerLine = `${ANSI.bg(196)}${ANSI.fg(231)} ${bannerText} ${ANSI.reset}`;
       output.push(truncateLine(bannerLine, cols));
+      bannerCount++;
+    }
+    if (codeFreezeAmbiguous) {
+      const bannerText = `⚠ Ambiguous Codefreeze marker — implement/audit dispatch disabled`;
+      const bannerLine = `${ANSI.bg(220)}${ANSI.fg(0)} ${bannerText} ${ANSI.reset}`;
+      output.push(truncateLine(bannerLine, cols));
+      bannerCount++;
     }
 
     // Items are already flattened by the caller (render callback in runWorklistTui
@@ -1907,8 +1985,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     // output overflows the pane and the terminal scrolls the header/top items
     // off the top (WL-0MSAAON63003N6LO). The active stage filter is indicated
     // in the header only (filterLabel) — no standalone filter bar is rendered.
-    const bannerActive = codeFreezeActive === true;
-    const chromeLines = bannerActive ? 3 : 2; // header + banner + footer
+    const chromeLines = 2 + bannerCount; // header + banner(s) + footer
     const budgetForItemsAndSeps = Math.max(0, listArea - chromeLines);
     // Count the group separators a window would render (same logic as the
     // render loop below) so the window can be trimmed when separators would
@@ -1968,9 +2045,15 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       output.push('');
     }
 
-    // Footer with keyboard hints (dynamic — includes chord hints if available)
+    // Footer with keyboard hints (dynamic — includes chord hints if available).
+    // Both the normal hint line and the chord-in-progress line are gated by
+    // `showHelpText` (default true), so `showHelpText: false` hides ALL shortcut
+    // hints, consistent with the pi browse widget's showHelpText handling
+    // (WL-0MSGJDSMJ004128E). Note: gating only affects rendering — chord key
+    // handling/accumulation in chordState continues regardless.
+    const helpEnabled = showHelpText ?? true;
     const isChordActive = chordState && chordState.pendingKeys.length > 0;
-    if (isChordActive) {
+    if (isChordActive && helpEnabled) {
       const pendingStr = chordState!.pendingKeys.join(' ');
       const hintStr = chordState!.hints
         ? `  ${ANSI.dim}${chordState!.hints}${ANSI.reset}`
@@ -2179,11 +2262,16 @@ export function formatCodeFreezeDialog(maxCols: number, maxRows: number, reason?
 /**
  * Fetch the items for the current view.
  *
- * When a stage filter is active, the worklist shows EVERY open root item in
- * that stage (`wl list --status open --stage <stage> --root-only`) — not
- * just the `browseItemCount`-capped `wl next` subset — so stage-filtered
- * views give a complete picture of the stage (WL-0MSDT8X1V003206G). Items
- * with status `blocked`, `in-progress`, or `completed` are excluded; child
+ * When a stage filter is active, the worklist shows every root item in that
+ * stage matching the stage's status rule (`wl list --status <status> --stage
+ * <stage> --root-only`; see STAGE_STATUS in fetcher.ts) — not just the
+ * `browseItemCount`-capped `wl next` subset — so stage-filtered views give
+ * a complete picture of the stage (WL-0MSDT8X1V003206G). Most stages show
+ * `open`-status items only; the in_review stage additionally includes
+ * `completed` and `in-progress` items, because per the project workflow
+ * advancing an item to in_review sets its status to `completed` (or leaves
+ * it `in-progress` while being re-worked after review feedback)
+ * (WL-0MSKCRX730052IIW). Items with status `blocked` are excluded; child
  * items stay hidden and remain reachable via expand exactly as in the
  * unfiltered view. Results follow the standard list order (sortIndex).
  *
@@ -2258,6 +2346,13 @@ export function dispatchChordCommand(
   if (command.startsWith('/skill:audit')) {
     return resolveAndRouteCommand(command, state, onCommand, model);
   }
+  if (command.startsWith('/skill:ship')) {
+    // Dev→main release (Ship It shortcut, WL-0MSGG5N5Z0074TLY). Global
+    // release — no <id> substitution; routed to the agent channel like
+    // other /skill:* commands. NOT blocked during a Code Freeze (the ship
+    // skill gates itself); only the confirmation dialog precedes dispatch.
+    return resolveAndRouteCommand(command, state, onCommand, model);
+  }
 
   // ── Agent workflow commands ─────────────────────────────
   if (command.startsWith('/intake')) {
@@ -2294,10 +2389,11 @@ export interface PodcastTargetResolution {
 
 /**
  * Resolve podcast-progression command markers (`<podcast-target>`,
- * `<podcast-script>`) for the selected work item at dispatch time
- * (OSL-0MSKFXM380098LFL, folding in OSL-0MSHFQ51L009IUOS).
+ * `<podcast-script>`, `<podcast-review>`, `<podcast-both>`) for the selected
+ * work item at dispatch time (OSL-0MSKFXM380098LFL, folding in
+ * OSL-0MSHFQ51L009IUOS and the OSL-0MSKVB5K6008XFOQ w-chord split).
  *
- * The `w` write-script chord command
+ * The `w s` write-script sub-chord command
  * (`/skill:wiki-podcast-script <podcast-target>`) derives its mode from the
  * selected item's lifecycle context:
  * - stage `intake_complete` (sourced): author a new script from the source
@@ -2306,6 +2402,15 @@ export interface PodcastTargetResolution {
  *   script → `--rewrite <first .podcast.md Key File>`;
  * - otherwise: belt-and-braces guard — returns an error and does NOT
  *   dispatch (never authors a duplicate).
+ *
+ * The `w r` write-review sub-chord command
+ * (`/skill:wiki-podcast-script --review <podcast-review>`) runs the 6
+ * reviews on the existing script, and the `w b` write-both sub-chord
+ * command (`/skill:wiki-podcast-script --review-rewrite <podcast-both>`)
+ * runs reviews + rewrite in one pass (7 LLM calls). Both resolve
+ * `<podcast-review>`/`<podcast-both>` to the first `.podcast.md` Key File
+ * in raw form (same as the existing `--rewrite` resolution) with a
+ * belt-and-braces error when no script exists.
  *
  * The `t` TTS chord command
  * (`/skill:wiki-tts-generate --podcast-file <podcast-script>`) resolves
@@ -2329,7 +2434,9 @@ export async function resolvePodcastTarget(
 ): Promise<PodcastTargetResolution> {
   const hasTarget = command.includes('<podcast-target>');
   const hasScript = command.includes('<podcast-script>');
-  if (!hasTarget && !hasScript) {
+  const hasReview = command.includes('<podcast-review>');
+  const hasBoth = command.includes('<podcast-both>');
+  if (!hasTarget && !hasScript && !hasReview && !hasBoth) {
     return { command };
   }
   if (!item) {
@@ -2383,6 +2490,23 @@ export async function resolvePodcastTarget(
     resolved = resolved.replace(/<podcast-script>/g, podcastFile);
   }
 
+  // `w r` write-review / `w b` write-both sub-chords: both require an
+  // existing script and resolve the marker to the raw first `.podcast.md`
+  // Key File (same raw form the `--rewrite` resolution uses). The chords
+  // are stage-gated to script-bearing stages, but a belt-and-braces guard
+  // still protects the unfiltered/edge case (OSL-0MSKVB5K6008XFOQ).
+  if (hasReview || hasBoth) {
+    if (!script) {
+      return { error: 'No podcast script found in Key Files: — author the script first (w)' };
+    }
+    if (hasReview) {
+      resolved = resolved.replace(/<podcast-review>/g, script);
+    }
+    if (hasBoth) {
+      resolved = resolved.replace(/<podcast-both>/g, script);
+    }
+  }
+
   return { command: resolved };
 }
 
@@ -2391,9 +2515,9 @@ export async function resolvePodcastTarget(
  *
  * Routing priority:
  * 1. {@link dispatchChordCommand} — handles `/wl <stage>` (internal filter),
- *    `/skill:implement`, `/skill:audit`, `/intake`, `/plan`, `!!wl reviewed`,
- *    and compound `&& wl audit-set` commands (resolves `<id>` and routes to
- *    `onCommand`). Returns 'dispatched'.
+ *    `/skill:implement`, `/skill:audit`, `/skill:ship`, `/intake`, `/plan`,
+ *    `!!wl reviewed`, and compound `&& wl audit-set` commands (resolves
+ *    `<id>` and routes to `onCommand`). Returns 'dispatched'.
  * 2. Code Freeze guard — when `codeFreezeActive` is true and the command is
  *    an implement command, the command is NOT routed; returns 'blocked' so
  *    the caller can show the Code Freeze dialog instead of spawning a pane.
@@ -2521,6 +2645,12 @@ export async function runWorklistTui(
   let formState: FormState | null = null;
   /** Saved mode before entering form overlay (to restore on cancel) */
   let preFormMode: ViewMode = 'list';
+  /**
+   * Ship It confirmation dialog (WL-0MSGG5N5Z0074TLY). Non-null while the
+   * dialog is open; its buffer holds the typed confirmation input. The
+   * dialog is bottom-anchored — the selection list stays visible above it.
+   */
+  let shipItDialog: ShipItDialogState | null = null;
 
   let totalActionableCount: number | undefined;
 
@@ -2528,13 +2658,27 @@ export async function runWorklistTui(
   // the Code Freeze notice dialog is currently showing. The banner state is
   // refreshed on each data refresh; the command-dispatch path re-reads the
   // marker fresh so a freeze that starts between refreshes is still enforced
-  // at dispatch time (fail-safe client-side blocking).
+  // at dispatch time (fail-safe client-side blocking). `codeFreezeAmbiguous`
+  // drives the separate "Ambiguous Codefreeze marker" banner
+  // (WL-0MSQ0RPQP00636JY): a marker that cannot be parsed disables
+  // implement/audit downtime dispatch (fail-closed) and the operator must
+  // see why. Browsing/shortcut blocking keep their fail-open semantics —
+  // `codeFreezeActive` stays false for an ambiguous marker.
   let codeFreezeActive = false;
+  let codeFreezeAmbiguous = false;
   let codeFreezeNotice = false;
 
-  /** Re-read the code-freeze marker (fail-open: errors => not frozen). */
+  /**
+   * Re-read the code-freeze marker tri-state. Fail-open for browsing: an
+   * ambiguous marker keeps `codeFreezeActive` false (browsing and shortcut
+   * blocking are unchanged); only the ambiguous-marker banner state and the
+   * downtime dispatcher's fail-closed gate are affected
+   * (WL-0MSQ0RPQP00636JY).
+   */
   const refreshFreezeState = (): void => {
-    codeFreezeActive = readCodeFreezeState().active;
+    const status = readCodeFreezeStatus();
+    codeFreezeActive = status === 'frozen';
+    codeFreezeAmbiguous = status === 'ambiguous';
   };
 
   // Initial Code Freeze state read (fail-open: no marker => not frozen).
@@ -2543,9 +2687,10 @@ export async function runWorklistTui(
   // Pane-visibility gating (pause-when-hidden). When the pane's tab is not
   // focused, auto-refresh/auto-sync timer ticks are skipped so hidden panes
   // stop spawning wl processes. Fail-open: when visibility can't be
-  // determined (no HERDR_PANE_ID / CLI error) the pane is treated as visible
-  // and polling proceeds as today. PollGate memoizes the pane-get exec within
-  // a TTL so refresh+sync ticks in one cycle share a single `herdr pane get`.
+  // determined (no HERDR_TAB_ID / CLI error) the pane is treated as visible
+  // and polling proceeds as today. Tab focus is the signal (herdr tab get
+  // -> result.tab.focused); PollGate memoizes the tab-get exec within a
+  // TTL so refresh+sync ticks in one cycle share a single `herdr tab get`.
   const paneGate = new PollGate(isPaneVisible, DEFAULT_POLL_GATE_TTL_MS);
   // Whether the pane is currently hidden (drives the header indicator).
   // Updated by the gate check on each timer tick; fail-open defaults to false.
@@ -2688,9 +2833,12 @@ export async function runWorklistTui(
    * True when the resolved command is a `/wl` view command — a stage filter
    * (`/wl <stage>`, shorthand alias or canonical name) or the clear-filter
    * `/wl` with no arguments. Used after dispatch to trigger a view refetch:
-   * filtered views show every open root item in the stage
-   * (WL-0MSDT8X1V003206G); clearing the filter restores the default view
-   * (WL-0MSGSE15000746F7).
+   * filtered views show every root item in that stage matching the stage's
+   * status rule (`wl list --status <status> --stage <stage> --root-only`;
+   * see STAGE_STATUS in fetcher.ts) — most stages show `open`-status items
+   * only, while the in_review stage additionally includes `completed` and
+   * `in-progress` items (WL-0MSKCRX730052IIW); clearing the filter restores
+   * the default view (WL-0MSGSE15000746F7).
    */
   const isWlViewCommand = (cmd: string): boolean => {
     if (/^\/wl\s*$/.test(cmd)) return true;
@@ -2707,9 +2855,9 @@ export async function runWorklistTui(
   // instead of piling up (lock-storm prevention). With a heartbeatTtlMs the
   // auto-sync path ALSO skips without spawning when another pane synced
   // recently (cross-instance coordination, F3 — WL-0MSGAEJQA005QG3W); such
-  // skips are silent because the data is already fresh. Manual 'S' syncs pass
-  // ifIdle=false and no heartbeat, so they always wait for the lock like a
-  // regular wl sync.
+  // skips are silent because the data is already fresh. The manual 'S' sync
+  // binding was removed (WL-0MSGG5N5Z0074TLY) — doSync is now reached only
+  // from the auto-sync timer path.
   const doSync = async (ifIdle = false, heartbeatTtlMs?: number): Promise<void> => {
     const outcome = await runSync(getWorklogDir(), {
       ifIdle,
@@ -2727,6 +2875,46 @@ export async function runWorklistTui(
     } else {
       showToast('Sync failed', { body: outcome.error ?? 'unknown error' });
     }
+  };
+
+  /**
+   * Open the Ship It confirmation dialog (WL-0MSGG5N5Z0074TLY).
+   *
+   * The dev→main release shortcut requires the user to type `ship`
+   * (case-insensitive) and press Enter before the command is dispatched.
+   * Dispatch (on confirm) goes through the SAME standard command-routing
+   * path as every other shortcut — executeResolvedCommand →
+   * dispatchChordCommand (which recognizes the `/skill:ship` family) →
+   * onCommand — with NO `<id>` substitution (global release). Esc cancels
+   * without dispatching.
+   */
+  const openShipItDialog = (model?: string): void => {
+    shipItDialog = new ShipItDialogState(
+      // onConfirm — typed 'ship' + Enter: dispatch via the standard path.
+      () => {
+        try {
+          // Fresh marker read at dispatch time (fail-safe client-side).
+          const frozen = readCodeFreezeState().active;
+          if (frozen) {
+            codeFreezeActive = true;
+          }
+          const result = executeResolvedCommand(SHIP_IT_COMMAND, state, opts.onCommand, frozen, model);
+          if (result === 'noop') {
+            showToast('Skipped', { body: `${SHIP_IT_COMMAND} (no item)` });
+          } else {
+            showToast('Sent', { body: SHIP_IT_COMMAND });
+          }
+        } catch (e) {
+          showToast('Error', { body: (e as Error).message });
+          process.stderr.write(`[herdr] Command error: ${(e as Error).message}\n`);
+        }
+      },
+      // onCancel — Esc: nothing is dispatched.
+      () => {
+        // no-op: dialog state is cleared by the onData handler.
+      },
+    );
+    render();
   };
 
   const onData = async (chunk: Buffer): Promise<void> => {
@@ -2766,6 +2954,21 @@ export async function runWorklistTui(
       return;
     }
 
+    // ── Ship It confirmation dialog handling (WL-0MSGG5N5Z0074TLY) ────
+    // While the dialog is open, all keys are consumed by the dialog:
+    // printable characters append to the typed buffer, Backspace deletes,
+    // Enter submits (dispatching only when the buffer matches `ship`
+    // case-insensitively), Esc cancels. The list stays visible beneath the
+    // bottom-anchored overlay.
+    if (shipItDialog !== null) {
+      const result = shipItDialog.handleInput(key);
+      if (result === 'submitted' || result === 'cancelled') {
+        shipItDialog = null;
+      }
+      render();
+      return;
+    }
+
     if (key === 'q' && state.mode !== 'filter') {
       cleanup();
       resolve(undefined);
@@ -2792,11 +2995,13 @@ export async function runWorklistTui(
         chordState.resolvedCommand = null;
         chordState.resolvedModel = null;
         if (command) {
-          // Podcast-progression markers (<podcast-target>/<podcast-script>)
-          // are resolved from the selected item's context BEFORE the generic
-          // modal-form check so they never fall through to the input form
-          // (OSL-0MSKFXM380098LFL, folding in OSL-0MSHFQ51L009IUOS).
-          if (command.includes('<podcast-target>') || command.includes('<podcast-script>')) {
+          // Podcast-progression markers (<podcast-target>/<podcast-script>/
+          // <podcast-review>/<podcast-both>) are resolved from the selected
+          // item's context BEFORE the generic modal-form check so they never
+          // fall through to the input form (OSL-0MSKFXM380098LFL, folding in
+          // OSL-0MSHFQ51L009IUOS; w-chord split OSL-0MSKVB5K6008XFOQ).
+          if (command.includes('<podcast-target>') || command.includes('<podcast-script>')
+              || command.includes('<podcast-review>') || command.includes('<podcast-both>')) {
             const podcast = await resolvePodcastTarget(command, state.getSelectedItem());
             if (podcast.error) {
               showToast('Error', { body: podcast.error });
@@ -2804,6 +3009,14 @@ export async function runWorklistTui(
               return;
             }
             command = podcast.command ?? command;
+          }
+          // Ship It confirmation (WL-0MSGG5N5Z0074TLY): the dev→main
+          // release command, however it reaches this path, requires a typed
+          // 'ship' confirmation before dispatch. Esc cancels, the dialog
+          // stays bottom-anchored over the list.
+          if (command === SHIP_IT_COMMAND) {
+            openShipItDialog(model ?? undefined);
+            return;
           }
           // Check for unknown identifiers that need form input
           if (hasUnknownIdentifiers(command)) {
@@ -2879,8 +3092,9 @@ export async function runWorklistTui(
               showToast('Sent', { body: command.length > 60 ? command.substring(0, 57) + '...' : command });
             }
             // Stage-filter dispatch (/wl <stage> or f-chord shortcut): refetch
-            // so the filtered view shows EVERY open root item in the stage,
-            // not just the already-loaded subset (WL-0MSDT8X1V003206G).
+            // so the filtered view shows every root item in the stage matching
+            // the stage's status rule, not just the already-loaded subset
+            // (WL-0MSDT8X1V003206G).
             if (result === 'dispatched' && isWlViewCommand(command)) {
               await doRefresh(true);
             }
@@ -2925,11 +3139,13 @@ export async function runWorklistTui(
       if (singleEntry) {
         let singleCmd = singleEntry.command;
         const singleModel = singleEntry.model ?? undefined;
-        // Podcast-progression markers (<podcast-target>/<podcast-script>)
-        // are resolved from the selected item's context BEFORE the generic
-        // modal-form check so they never fall through to the input form
-        // (OSL-0MSKFXM380098LFL, folding in OSL-0MSHFQ51L009IUOS).
-        if (singleCmd.includes('<podcast-target>') || singleCmd.includes('<podcast-script>')) {
+        // Podcast-progression markers (<podcast-target>/<podcast-script>/
+        // <podcast-review>/<podcast-both>) are resolved from the selected
+        // item's context BEFORE the generic modal-form check so they never
+        // fall through to the input form (OSL-0MSKFXM380098LFL, folding in
+        // OSL-0MSHFQ51L009IUOS; w-chord split OSL-0MSKVB5K6008XFOQ).
+        if (singleCmd.includes('<podcast-target>') || singleCmd.includes('<podcast-script>')
+            || singleCmd.includes('<podcast-review>') || singleCmd.includes('<podcast-both>')) {
           const podcast = await resolvePodcastTarget(singleCmd, state.getSelectedItem());
           if (podcast.error) {
             showToast('Error', { body: podcast.error });
@@ -2937,6 +3153,15 @@ export async function runWorklistTui(
             return;
           }
           singleCmd = podcast.command ?? singleCmd;
+        }
+        // Ship It (S) — typed-confirmation dialog (WL-0MSGG5N5Z0074TLY):
+        // the dev→main release shortcut does NOT dispatch immediately. It
+        // opens a bottom-anchored confirmation dialog that keeps the
+        // selection list visible; the user must type `ship` + Enter to
+        // dispatch, Esc to cancel.
+        if (singleCmd === SHIP_IT_COMMAND) {
+          openShipItDialog(singleModel);
+          return;
         }
         // Single-key shortcut — check for unknown identifiers first
         if (hasUnknownIdentifiers(singleCmd)) {
@@ -2998,8 +3223,9 @@ export async function runWorklistTui(
             showToast('Sent', { body: singleCmd.length > 60 ? singleCmd.substring(0, 57) + '...' : singleCmd });
           }
           // Stage-filter dispatch (/wl <stage> or f-chord shortcut): refetch
-          // so the filtered view shows EVERY open root item in the stage,
-          // not just the already-loaded subset (WL-0MSDT8X1V003206G).
+          // so the filtered view shows every root item in the stage matching
+          // the stage's status rule, not just the already-loaded subset
+          // (WL-0MSDT8X1V003206G).
           if (result === 'dispatched' && isWlViewCommand(singleCmd)) {
             await doRefresh(true);
           }
@@ -3032,11 +3258,6 @@ export async function runWorklistTui(
 
     if (action === 'refresh') {
       await doRefresh(true);
-      return;
-    }
-
-    if (action === 'sync') {
-      await doSync();
       return;
     }
 
@@ -3211,17 +3432,34 @@ export async function runWorklistTui(
       state.detailToCIndex,
       state.detailToCFocus,
       state.detailRenderedIndex,
+      // Gate the chord-in-progress footer behind showHelpText so `false` hides
+      // ALL shortcut hint lines (normal and chord-mode), matching the pi browse
+      // widget (WL-0MSGJDSMJ004128E). Chord key handling is unaffected.
+      opts.getShowHelpText(),
+      // Ambiguous code-freeze marker banner state (WL-0MSQ0RPQP00636JY):
+      // distinct from the active-freeze banner; both can render (defensive)
+      // but the tri-state read guarantees at most one is true.
+      codeFreezeAmbiguous,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a
     // bottom line — the pane output must stay within the terminal budget.
     const rendered = output;
 
+    // ── Ship It confirmation dialog overlay (WL-0MSGG5N5Z0074TLY) ─────
+    // Bottom-anchored: the selection list is rendered normally and the
+    // dialog replaces only the lower rows, so the list stays visible above
+    // it (contrast: FormState full-screen, Code Freeze notice centered
+    // full-pane box). The overlay never exceeds the `rows - 1` budget.
+    const finalOutput = shipItDialog !== null
+      ? overlayShipItDialog(rendered, termSize.cols, termSize.rows, shipItDialog.buffer)
+      : rendered;
+
     // Clear from cursor to end of screen to remove leftover content
     // from previous renders of different heights
     process.stdout.write(ANSI.clear);
     process.stdout.write(ANSI.cursorHome);
-    process.stdout.write(rendered);
+    process.stdout.write(finalOutput);
   };
 
   // Initial render
@@ -3312,10 +3550,10 @@ export async function runWorklistTui(
     });
   }
 
-  // Visibility resume-poll — runs only while the pane is hidden. Polls
-  // pane visibility on a short interval so the hidden → visible transition
+  // Visibility resume-poll — runs only while the pane's tab is hidden. Polls
+  // tab visibility on a short interval so the hidden → visible transition
   // triggers an immediate doRefresh instead of waiting for the next
-  // refreshIntervalMs tick. The poll uses only herdr pane get (via the
+  // refreshIntervalMs tick. The poll uses only herdr tab get (via the
   // PollGate memoizer, TTL aligned with the poll interval) — never wl —
   // preserving the zero-wl-when-hidden guarantee.
   scheduler.addTask({

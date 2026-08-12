@@ -3,10 +3,12 @@
  * visibility-gated auto-refresh/auto-sync in the worklist TUI
  * (WL-0MSB446N4009FFT5).
  *
- * Verifies that when the herdr pane is hidden (not focused), the
+ * Verifies that when the herdr pane's TAB is hidden (not focused), the
  * auto-refresh and auto-sync timers skip their ticks (zero fetcher /
  * `wl sync` invocations), while visible panes (and the fail-open path)
  * keep the existing cadence. Manual actions are never gated.
+ * Visibility signal: tab focus (HERDR_TAB_ID + `herdr tab get`), no
+ * pane-focus fallback (WL-0MSJNJPRM009RM35).
  *
  * Run: npx vitest run packages/herdr/src/worklist-visibility.test.ts
  */
@@ -36,6 +38,7 @@ vi.mock('./notify.js', () => ({
 }));
 
 import { runWorklistTui } from './worklist.js';
+import { loadShortcutConfig } from './shortcut-config.js';
 import { setExecFileAsync, resetExecFileAsync, getExecFileAsync } from './fetcher.js';
 import { runSync } from './auto-sync.js';
 import { showToast } from './notify.js';
@@ -85,6 +88,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetExecFileAsync();
+  delete process.env.HERDR_TAB_ID;
   delete process.env.HERDR_PANE_ID;
   delete process.env.HERDR_BIN_PATH;
   vi.useRealTimers();
@@ -97,30 +101,30 @@ function tick(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Exec-mock helper: dispatch herdr pane-get vs wl CLI calls.
+// Exec-mock helper: dispatch herdr tab-get vs wl CLI calls.
 // ---------------------------------------------------------------------------
 
 /**
- * Build an execFileAsync mock that returns a herdr pane-get envelope for
- * `herdr pane get` calls and a benign wl response for everything else.
+ * Build an execFileAsync mock that returns a herdr tab-get envelope for
+ * `herdr tab get` calls and a benign wl response for everything else.
  *
- * @param paneFocused - The focused flag for `herdr pane get` responses.
- * @param paneGetCalls - Optional array collecting pane-get call counts.
+ * @param tabFocused - The focused flag for `herdr tab get` responses.
+ * @param tabGetCalls - Optional array collecting tab-get call counts.
  */
 function makeExecMock(
-  paneFocused: boolean | undefined,
-  paneGetCalls?: { count: number },
+  tabFocused: boolean | undefined,
+  tabGetCalls?: { count: number },
 ): Mock {
   return vi.fn(async (bin: string, args: string[]) => {
-    if (bin === 'herdr' && args[0] === 'pane' && args[1] === 'get') {
-      if (paneGetCalls) paneGetCalls.count += 1;
-      if (paneFocused === undefined) {
-        throw new Error('herdr: pane not found');
+    if (bin === 'herdr' && args[0] === 'tab' && args[1] === 'get') {
+      if (tabGetCalls) tabGetCalls.count += 1;
+      if (tabFocused === undefined) {
+        throw new Error('herdr: tab not found');
       }
       return {
         stdout: JSON.stringify({
-          id: 'cli:pane:get',
-          result: { pane: { focused: paneFocused } },
+          id: 'cli:tab:get',
+          result: { tab: { focused: tabFocused } },
         }),
         stderr: '',
       };
@@ -133,10 +137,10 @@ function makeExecMock(
   });
 }
 
-/** Count how many pane-get execs were made through the mock. */
-function countPaneGetCalls(mockFn: Mock): number {
+/** Count how many tab-get execs were made through the mock. */
+function countTabGetCalls(mockFn: Mock): number {
   return mockFn.mock.calls.filter(
-    (c) => c[0] === 'herdr' && c[1]?.[0] === 'pane' && c[1]?.[1] === 'get',
+    (c) => c[0] === 'herdr' && c[1]?.[0] === 'tab' && c[1]?.[1] === 'get',
   ).length;
 }
 
@@ -153,7 +157,7 @@ async function quit(p: Promise<unknown>): Promise<void> {
 describe('worklist TUI visibility gating', () => {
   it('hidden pane: refreshTimer ticks do NOT invoke the fetcher (zero wl spawns)', async () => {
     vi.useFakeTimers();
-    process.env.HERDR_PANE_ID = 'w1:pCM';
+    process.env.HERDR_TAB_ID = 'w1:t11';
     setExecFileAsync(makeExecMock(false) as any);
 
     const fetcher = vi.fn().mockResolvedValue([]);
@@ -175,7 +179,7 @@ describe('worklist TUI visibility gating', () => {
 
   it('hidden pane: syncTimer ticks do NOT invoke runSync or the fetcher', async () => {
     vi.useFakeTimers();
-    process.env.HERDR_PANE_ID = 'w1:pCM';
+    process.env.HERDR_TAB_ID = 'w1:t11';
     setExecFileAsync(makeExecMock(false) as any);
 
     const fetcher = vi.fn().mockResolvedValue([]);
@@ -199,7 +203,7 @@ describe('worklist TUI visibility gating', () => {
 
   it('visible pane: refreshTimer and syncTimer ticks invoke the fetcher / runSync as today', async () => {
     vi.useFakeTimers();
-    process.env.HERDR_PANE_ID = 'w1:pCM';
+    process.env.HERDR_TAB_ID = 'w1:t11';
     setExecFileAsync(makeExecMock(true) as any);
 
     const fetcher = vi.fn().mockResolvedValue([]);
@@ -226,9 +230,9 @@ describe('worklist TUI visibility gating', () => {
     await quit(p);
   });
 
-  it('fail-open: no HERDR_PANE_ID env → ticks invoke the fetcher as today (standalone runs unaffected)', async () => {
+  it('fail-open: no HERDR_TAB_ID env → ticks invoke the fetcher as today (standalone runs unaffected)', async () => {
     vi.useFakeTimers();
-    delete process.env.HERDR_PANE_ID;
+    delete process.env.HERDR_TAB_ID;
     setExecFileAsync(makeExecMock(undefined) as any);
 
     const fetcher = vi.fn().mockResolvedValue([]);
@@ -249,7 +253,7 @@ describe('worklist TUI visibility gating', () => {
 
   it('fail-open: herdr CLI error → pane treated as visible, polling continues', async () => {
     vi.useFakeTimers();
-    process.env.HERDR_PANE_ID = 'w1:pCM';
+    process.env.HERDR_TAB_ID = 'w1:t11';
     setExecFileAsync(makeExecMock(undefined) as any); // CLI throws
 
     const fetcher = vi.fn().mockResolvedValue([]);
@@ -268,13 +272,13 @@ describe('worklist TUI visibility gating', () => {
     await quit(p);
   });
 
-  it('manual S (sync) is never gated — works even when the pane is hidden', async () => {
+  it('manual S (Ship It dialog) is never gated — works even when the pane is hidden', async () => {
     vi.useFakeTimers();
-    process.env.HERDR_PANE_ID = 'w1:pCM';
+    process.env.HERDR_TAB_ID = 'w1:t11';
     setExecFileAsync(makeExecMock(false) as any);
 
     const fetcher = vi.fn().mockResolvedValue([]);
-    const p = runWorklistTui(fetcher, [], undefined, {
+    const p = runWorklistTui(fetcher, [], loadShortcutConfig(), {
       autoRefresh: true,
       refreshIntervalMs: 30_000,
       autoSync: true,
@@ -285,18 +289,22 @@ describe('worklist TUI visibility gating', () => {
     fetcher.mockClear();
     mockRunSync.mockClear();
 
-    // Hidden pane + manual S → sync still runs.
+    // Hidden pane + manual S → the Ship It confirmation dialog still opens:
+    // manual actions are never visibility-gated (WL-0MSGG5N5Z0074TLY). The
+    // manual-sync binding was removed, so NO `wl sync` is spawned.
     dataHandler?.(Buffer.from('S'));
     await vi.advanceTimersByTimeAsync(0);
-    expect(mockRunSync).toHaveBeenCalled();
-    expect(mockShowToast).toHaveBeenCalledWith('Synced');
+    const render = writes[writes.length - 1] ?? '';
+    expect(render).toContain("Type 'ship' to confirm, Esc to cancel");
+    expect(mockRunSync).not.toHaveBeenCalled();
 
+    dataHandler?.(Buffer.from('\x1b')); // cancel the dialog
     await quit(p);
   });
 
   it('manual actions are never gated — a fresh TUI load fetches items even while hidden', async () => {
     vi.useFakeTimers();
-    process.env.HERDR_PANE_ID = 'w1:pCM';
+    process.env.HERDR_TAB_ID = 'w1:t11';
     setExecFileAsync(makeExecMock(false) as any);
 
     // Initial data load (which happens regardless of visibility) still works
@@ -313,11 +321,11 @@ describe('worklist TUI visibility gating', () => {
     await quit(p2);
   });
 
-  it('PollGate TTL: refresh+sync ticks in one cycle share a single herdr pane get call', async () => {
+  it('PollGate TTL: refresh+sync ticks in one cycle share a single herdr tab get call', async () => {
     vi.useFakeTimers();
-    process.env.HERDR_PANE_ID = 'w1:pCM';
-    const paneGetCalls = { count: 0 };
-    setExecFileAsync(makeExecMock(true, paneGetCalls) as any);
+    process.env.HERDR_TAB_ID = 'w1:t11';
+    const tabGetCalls = { count: 0 };
+    setExecFileAsync(makeExecMock(true, tabGetCalls) as any);
 
     const fetcher = vi.fn().mockResolvedValue([]);
     const p = runWorklistTui(fetcher, [], undefined, {
@@ -329,25 +337,25 @@ describe('worklist TUI visibility gating', () => {
     });
     await vi.advanceTimersByTimeAsync(0);
 
-    const execsAfterStart = paneGetCalls.count;
+    const execsAfterStart = tabGetCalls.count;
 
-    // One refresh cycle (t=30s): exactly one pane-get for the refresh tick.
+    // One refresh cycle (t=30s): exactly one tab-get for the refresh tick.
     await vi.advanceTimersByTimeAsync(30_000);
-    const execsAfterRefresh = paneGetCalls.count;
+    const execsAfterRefresh = tabGetCalls.count;
     expect(execsAfterRefresh - execsAfterStart).toBe(1);
 
     // One sync cycle boundary (t=60s): refresh + sync fire together; the
     // sync tick reuses the refresh tick's cached result (TTL) → no extra exec.
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(paneGetCalls.count - execsAfterRefresh).toBe(1);
-    expect(paneGetCalls.count - execsAfterStart).toBeLessThanOrEqual(3);
+    expect(tabGetCalls.count - execsAfterRefresh).toBe(1);
+    expect(tabGetCalls.count - execsAfterStart).toBeLessThanOrEqual(3);
 
     await quit(p);
   });
 
   it('header shows the [paused — hidden] indicator when the pane is hidden', async () => {
     vi.useFakeTimers();
-    process.env.HERDR_PANE_ID = 'w1:pCM';
+    process.env.HERDR_TAB_ID = 'w1:t11';
     setExecFileAsync(makeExecMock(false) as any);
 
     const fetcher = vi.fn().mockResolvedValue([]);
@@ -376,7 +384,7 @@ describe('worklist TUI visibility gating', () => {
 describe('worklist TUI visibility gating — getExecFileAsync seam', () => {
   it('visibility checks go through the same injectable exec seam as the fetcher', async () => {
     vi.useFakeTimers();
-    process.env.HERDR_PANE_ID = 'w1:pCM';
+    process.env.HERDR_TAB_ID = 'w1:t11';
     const mockFn = makeExecMock(false);
     setExecFileAsync(mockFn as any);
 
@@ -388,12 +396,12 @@ describe('worklist TUI visibility gating — getExecFileAsync seam', () => {
       showHelpText: false,
     });
     await vi.advanceTimersByTimeAsync(0);
-    // Fire the refresh tick so the gate runs its pane-get check.
+    // Fire the refresh tick so the gate runs its tab-get check.
     await vi.advanceTimersByTimeAsync(30_000);
 
-    // The gate's pane-get check must have gone through getExecFileAsync().
+    // The gate's tab-get check must have gone through getExecFileAsync().
     expect(getExecFileAsync).toBeDefined();
-    expect(countPaneGetCalls(mockFn)).toBeGreaterThanOrEqual(1);
+    expect(countTabGetCalls(mockFn)).toBeGreaterThanOrEqual(1);
 
     await quit(p);
   });
@@ -401,19 +409,19 @@ describe('worklist TUI visibility gating — getExecFileAsync seam', () => {
 
 describe('worklist TUI visibility gating — hidden → visible transition (WL-0MSBVS4AS006ZQEZ)', () => {
   /**
-   * Exec mock with a dynamic focused flag (read per pane-get call), so a
-   * test can flip the pane from hidden to visible mid-run.
+   * Exec mock with a dynamic focused flag (read per tab-get call), so a
+   * test can flip the tab from hidden to visible mid-run.
    */
-  function makeDynamicExecMock(getFocused: () => boolean | undefined, paneGetCalls?: { count: number }): Mock {
+  function makeDynamicExecMock(getFocused: () => boolean | undefined, tabGetCalls?: { count: number }): Mock {
     return vi.fn(async (bin: string, args: string[]) => {
-      if (bin === 'herdr' && args[0] === 'pane' && args[1] === 'get') {
-        if (paneGetCalls) paneGetCalls.count += 1;
+      if (bin === 'herdr' && args[0] === 'tab' && args[1] === 'get') {
+        if (tabGetCalls) tabGetCalls.count += 1;
         const focused = getFocused();
         if (focused === undefined) {
-          throw new Error('herdr: pane not found');
+          throw new Error('herdr: tab not found');
         }
         return {
-          stdout: JSON.stringify({ id: 'cli:pane:get', result: { pane: { focused } } }),
+          stdout: JSON.stringify({ id: 'cli:tab:get', result: { tab: { focused } } }),
           stderr: '',
         };
       }
@@ -426,9 +434,9 @@ describe('worklist TUI visibility gating — hidden → visible transition (WL-0
 
   it('hidden → visible transition triggers an immediate fetch outside the normal tick', async () => {
     vi.useFakeTimers();
-    process.env.HERDR_PANE_ID = 'w1:pCM';
-    let paneFocused = false;
-    setExecFileAsync(makeDynamicExecMock(() => paneFocused) as any);
+    process.env.HERDR_TAB_ID = 'w1:t11';
+    let tabFocused = false;
+    setExecFileAsync(makeDynamicExecMock(() => tabFocused) as any);
 
     const fetcher = vi.fn().mockResolvedValue([]);
     const p = runWorklistTui(fetcher, [], undefined, {
@@ -440,24 +448,24 @@ describe('worklist TUI visibility gating — hidden → visible transition (WL-0
     await vi.advanceTimersByTimeAsync(0);
     fetcher.mockClear();
 
-    // First refresh tick while hidden: skipped, pane pauses.
+    // First refresh tick while hidden: skipped, tab pauses.
     await vi.advanceTimersByTimeAsync(30_000);
     expect(fetcher).not.toHaveBeenCalled();
 
-    // Pane regains focus → the resume poll catches the transition and the
+    // Tab regains focus → the resume poll catches the transition and the
     // list re-fetches immediately (t=32s, outside the 30s tick at t=60s).
-    paneFocused = true;
+    tabFocused = true;
     await vi.advanceTimersByTimeAsync(2_000);
     expect(fetcher).toHaveBeenCalledTimes(1);
 
     await quit(p);
   });
 
-  it('while hidden the resume poll spawns only herdr pane get — never the fetcher', async () => {
+  it('while hidden the resume poll spawns only herdr tab get — never the fetcher', async () => {
     vi.useFakeTimers();
-    process.env.HERDR_PANE_ID = 'w1:pCM';
-    const paneGetCalls = { count: 0 };
-    setExecFileAsync(makeDynamicExecMock(() => false, paneGetCalls) as any);
+    process.env.HERDR_TAB_ID = 'w1:t11';
+    const tabGetCalls = { count: 0 };
+    setExecFileAsync(makeDynamicExecMock(() => false, tabGetCalls) as any);
 
     const fetcher = vi.fn().mockResolvedValue([]);
     const p = runWorklistTui(fetcher, [], undefined, {
@@ -471,20 +479,20 @@ describe('worklist TUI visibility gating — hidden → visible transition (WL-0
 
     // Hidden tick starts the resume poll; run several polls while still hidden.
     await vi.advanceTimersByTimeAsync(30_000);
-    const execsAfterFirstTick = paneGetCalls.count;
+    const execsAfterFirstTick = tabGetCalls.count;
     await vi.advanceTimersByTimeAsync(10_000);
 
     expect(fetcher).not.toHaveBeenCalled();
-    expect(paneGetCalls.count).toBeGreaterThan(execsAfterFirstTick); // pane-get polls only
+    expect(tabGetCalls.count).toBeGreaterThan(execsAfterFirstTick); // tab-get polls only
 
     await quit(p);
   });
 
   it('after the immediate transition refresh, refreshes follow the normal refreshIntervalMs cadence', async () => {
     vi.useFakeTimers();
-    process.env.HERDR_PANE_ID = 'w1:pCM';
-    let paneFocused = false;
-    setExecFileAsync(makeDynamicExecMock(() => paneFocused) as any);
+    process.env.HERDR_TAB_ID = 'w1:t11';
+    let tabFocused = false;
+    setExecFileAsync(makeDynamicExecMock(() => tabFocused) as any);
 
     const fetcher = vi.fn().mockResolvedValue([]);
     const p = runWorklistTui(fetcher, [], undefined, {
@@ -502,7 +510,7 @@ describe('worklist TUI visibility gating — hidden → visible transition (WL-0
     expect(fetcher).not.toHaveBeenCalled();
 
     // Become visible: immediate fetch via the resume poll (t=62s).
-    paneFocused = true;
+    tabFocused = true;
     await vi.advanceTimersByTimeAsync(2_000);
     expect(fetcher).toHaveBeenCalledTimes(1);
 
@@ -519,9 +527,9 @@ describe('worklist TUI visibility gating — hidden → visible transition (WL-0
 
   it('the [paused — hidden] header indicator clears once the transition refresh completes', async () => {
     vi.useFakeTimers();
-    process.env.HERDR_PANE_ID = 'w1:pCM';
-    let paneFocused = false;
-    setExecFileAsync(makeDynamicExecMock(() => paneFocused) as any);
+    process.env.HERDR_TAB_ID = 'w1:t11';
+    let tabFocused = false;
+    setExecFileAsync(makeDynamicExecMock(() => tabFocused) as any);
 
     const fetcher = vi.fn().mockResolvedValue([]);
     const p = runWorklistTui(fetcher, [], undefined, {
@@ -532,7 +540,7 @@ describe('worklist TUI visibility gating — hidden → visible transition (WL-0
     });
     await vi.advanceTimersByTimeAsync(0);
 
-    // Hidden tick pauses the pane; a navigation render shows the indicator.
+    // Hidden tick pauses the tab; a navigation render shows the indicator.
     await vi.advanceTimersByTimeAsync(30_000);
     writes.length = 0;
     dataHandler?.(Buffer.from('j'));
@@ -540,7 +548,7 @@ describe('worklist TUI visibility gating — hidden → visible transition (WL-0
     expect(writes.join('')).toContain('[paused — hidden]');
 
     // Regain focus: the immediate transition refresh re-renders without it.
-    paneFocused = true;
+    tabFocused = true;
     writes.length = 0;
     await vi.advanceTimersByTimeAsync(2_000);
     expect(fetcher).toHaveBeenCalledTimes(1);

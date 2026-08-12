@@ -13,6 +13,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   appendDowntimeLogEntry,
+  auditDispatchedItemIds,
+  implementDispatchedItemIds,
+  readDowntimeLogEntries,
   DOWNTIME_LOG_FILE,
   DOWNTIME_LOG_MAX_ENTRIES,
 } from './downtime-log.js';
@@ -75,5 +78,82 @@ describe('downtime rolling log', () => {
     expect(lines).toHaveLength(DOWNTIME_LOG_MAX_ENTRIES);
     expect(JSON.parse(lines[0])).toEqual({ n: total - DOWNTIME_LOG_MAX_ENTRIES });
     expect(JSON.parse(lines[lines.length - 1])).toEqual({ n: total - 1 });
+  });
+});
+
+describe('readDowntimeLogEntries (fail-safe lookup)', () => {
+  it('returns [] when the log file does not exist', async () => {
+    const cwd = makeTempCwd();
+    expect(await readDowntimeLogEntries(cwd)).toEqual([]);
+  });
+
+  it('returns [] when the log file is unreadable', async () => {
+    const cwd = makeTempCwd();
+    // A directory at the log path cannot be read as a file (EISDIR).
+    mkdirSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), { recursive: true });
+    expect(await readDowntimeLogEntries(cwd)).toEqual([]);
+  });
+
+  it('skips malformed JSONL lines and parses the valid ones', async () => {
+    const cwd = makeTempCwd();
+    mkdirSync(join(cwd, '.worklog'));
+    writeFileSync(
+      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+      '{"itemId":"WL-A","kind":"audit"}\nnot-json\n{"itemId":"WL-B","kind":"plan"}\n\n',
+      'utf8',
+    );
+    expect(await readDowntimeLogEntries(cwd)).toEqual([
+      { itemId: 'WL-A', kind: 'audit' },
+      { itemId: 'WL-B', kind: 'plan' },
+    ]);
+  });
+
+  it('round-trips entries written by appendDowntimeLogEntry', async () => {
+    const cwd = makeTempCwd();
+    const entry = { itemId: 'WL-A', kind: 'audit', dispatchedAt: '2026-01-01T00:00:00.000Z', cwd };
+    await appendDowntimeLogEntry(cwd, JSON.stringify(entry));
+    expect(await readDowntimeLogEntries(cwd)).toEqual([entry]);
+  });
+});
+
+describe('auditDispatchedItemIds (audit-tier-only scope guard)', () => {
+  it('collects only audit-kind entries that carry an itemId', () => {
+    const ids = auditDispatchedItemIds([
+      { itemId: 'WL-A', kind: 'audit' },
+      { itemId: 'WL-B', kind: 'plan' },
+      { itemId: 'WL-C', kind: 'intake' },
+      { kind: 'audit' }, // error-style entry without itemId → ignored
+      { itemId: 'WL-D', kind: 'audit' },
+    ]);
+    expect([...ids].sort()).toEqual(['WL-A', 'WL-D']);
+  });
+
+  it('returns an empty set for empty input', () => {
+    expect([...auditDispatchedItemIds([])]).toEqual([]);
+  });
+});
+
+describe('implementDispatchedItemIds (implement-tier-only scope guard)', () => {
+  it('collects only implement-kind entries that carry an itemId', () => {
+    const ids = implementDispatchedItemIds([
+      { itemId: 'WL-A', kind: 'implement' },
+      { itemId: 'WL-B', kind: 'plan' },
+      { itemId: 'WL-C', kind: 'audit' },
+      { kind: 'implement' }, // error-style entry without itemId → ignored
+      { itemId: 'WL-D', kind: 'implement' },
+    ]);
+    expect([...ids].sort()).toEqual(['WL-A', 'WL-D']);
+  });
+
+  it('does not collect audit markers (implement tier is scoped to kind implement only)', () => {
+    const ids = implementDispatchedItemIds([
+      { itemId: 'WL-AUD', kind: 'audit' },
+      { itemId: 'WL-IMP', kind: 'implement' },
+    ]);
+    expect([...ids]).toEqual(['WL-IMP']);
+  });
+
+  it('returns an empty set for empty input', () => {
+    expect([...implementDispatchedItemIds([])]).toEqual([]);
   });
 });

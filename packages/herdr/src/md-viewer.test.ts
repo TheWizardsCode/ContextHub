@@ -98,8 +98,8 @@ describe('renderMarkdownViewer', () => {
     // Frontmatter is not rendered.
     expect(joined).not.toContain('pipeline_stage');
     expect(joined).not.toContain('version:');
-    // Heading rendered.
-    expect(joined).toContain('█ Episode One');
+    // Heading rendered (h1 glyph; bold ANSI wraps the heading text).
+    expect(visibleOf(lines)).toContain('██ Episode One');
     // Dialogue paragraphs rendered.
     expect(joined).toContain('Nova:');
     expect(joined).toContain('Sorra:');
@@ -124,6 +124,101 @@ describe('renderMarkdownViewer', () => {
     const long = 'Nova: ' + 'word '.repeat(100);
     const lines = renderMarkdownViewer(long, 40);
     expect(lines[0].length).toBeLessThanOrEqual(40);
+  });
+});
+
+// ── GFM rendering (WL-0MSKFFJWD002BQJ5) ───────────────────────────────
+
+/** Strip ANSI SGR codes so tests assert on visible text. */
+function visibleOf(lines: string[]): string {
+  return lines.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+describe('renderMarkdownViewer — GFM constructs', () => {
+  it('renders heading hierarchy with distinct glyphs per depth', () => {
+    const joined = visibleOf(renderMarkdownViewer('# One\n\n## Two\n\n### Three\n\n###### Six', 80));
+    expect(joined).toContain('██ One');
+    expect(joined).toContain('█ Two');
+    expect(joined).toContain('▌ Three');
+    expect(joined).toContain('▌ Six');
+  });
+
+  it('renders ordered and nested bullet lists', () => {
+    const md = [
+      '1. first',
+      '2. second',
+      '',
+      '- top',
+      '  - nested one',
+      '    - deep two',
+      '- bottom',
+    ].join('\n');
+    const joined = visibleOf(renderMarkdownViewer(md, 80));
+    expect(joined).toContain('1. first');
+    expect(joined).toContain('2. second');
+    expect(joined).toContain('• top');
+    expect(joined).toContain('  • nested one');
+    expect(joined).toContain('    • deep two');
+    expect(joined).toContain('• bottom');
+  });
+
+  it('renders blockquotes indented with a quote glyph', () => {
+    const joined = visibleOf(renderMarkdownViewer('> quoted line one\n> quoted line two', 80));
+    expect(joined).toContain('▌ quoted line one');
+    expect(joined).toContain('▌ quoted line two');
+  });
+
+  it('renders GFM tables as aligned columns with a header row', () => {
+    const md = [
+      '| Left | Center | Right |',
+      '|:-----|:------:|------:|',
+      '| a    | b      | c     |',
+      '| long | mid    | x     |',
+    ].join('\n');
+    const visible = visibleOf(renderMarkdownViewer(md, 80));
+    // Header row and alignment (center column padded both sides, right
+    // column right-aligned) render with column separators.
+    expect(visible).toContain('│ Left │');
+    expect(visible).toContain('│ a    │   b    │     c │');
+    expect(visible).toContain('│ long │  mid   │     x │');
+    // Separator row between header and body.
+    expect(visible).toMatch(/├.*┼.*┤/);
+  });
+
+  it('renders bold, italic, strikethrough, and inline code with styling', () => {
+    const md = 'Para **bold** *italic* ~~struck~~ `inline code`.';
+    const joined = renderMarkdownViewer(md, 80).join('\n');
+    // Visible text survives styling.
+    expect(joined).toContain('bold');
+    expect(joined).toContain('italic');
+    expect(joined).toContain('struck');
+    // Styles applied: ANSI bold around bold text, italic around italic,
+    // strikethrough around struck, cyan inside backticks for code.
+    expect(joined).toContain(`\x1b[1mbold\x1b[0m`);
+    expect(joined).toContain(`\x1b[3mitalic\x1b[0m`);
+    expect(joined).toContain(`\x1b[9mstruck\x1b[0m`);
+    expect(joined).toContain('`\x1b[36minline code\x1b[0m`');
+  });
+
+  it('renders links underlined/colored with the href shown dimmed', () => {
+    const joined = renderMarkdownViewer('See [the docs](https://example.com/guide).', 80).join('\n');
+    expect(joined).toContain(`\x1b[4m\x1b[34mthe docs\x1b[0m`);
+    expect(joined).toContain(`\x1b[2m (https://example.com/guide)\x1b[0m`);
+  });
+
+  it('renders horizontal rules as a line of dashes', () => {
+    const joined = visibleOf(renderMarkdownViewer('before\n\n---\n\nafter', 80));
+    expect(joined).toContain('before');
+    expect(joined).toContain('after');
+    expect(joined).toMatch(/\n─{3,}\n/);
+  });
+
+  it('renders NOTE markers as links inside GFM content', () => {
+    const md = '# H\n\nA line with [NOTE OSL-CCC: hidden note text] inside.';
+    const joined = renderMarkdownViewer(md, 120).join('\n');
+    expect(joined).toContain('OSL-CCC↗');
+    expect(joined).not.toContain('[NOTE');
+    expect(joined).not.toContain('hidden note text');
   });
 });
 
@@ -246,6 +341,33 @@ describe('detail-view wiring', () => {
     const joined = formatDetailContent(item, 120).join('\n');
     expect(joined).toContain('OSL-0MSG7Y0C6005QFES↗');
     expect(joined).not.toContain('[NOTE');
+  });
+
+  it('formatDetailContent renders the description as GFM (table, bold, italic, code, links, lists)', () => {
+    const item = makeEpisodeItem(
+      [
+        '**Bold** and *italic* and `code` and [a link](https://example.com).',
+        '',
+        '| A | B |',
+        '|---|---|',
+        '| 1 | 2 |',
+        '',
+        '- one',
+        '- two',
+      ].join('\n'),
+    );
+    const visible = formatDetailContent(item, 120).join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+    // Bold/italic/code/link text renders.
+    expect(visible).toContain('Bold');
+    expect(visible).toContain('italic');
+    expect(visible).toContain('`code`');
+    expect(visible).toContain('a link');
+    // Table renders with aligned columns.
+    expect(visible).toContain('│ A │ B │');
+    expect(visible).toContain('│ 1 │ 2 │');
+    // Lists render as bullets.
+    expect(visible).toContain('• one');
+    expect(visible).toContain('• two');
   });
 
   it('formatDetailContent embeds the md viewer section when readFile is provided', () => {

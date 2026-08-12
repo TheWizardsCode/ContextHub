@@ -621,6 +621,16 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
             modelPart = '—';
           }
 
+          // Cap the model identifier at a fixed maximum so the command
+          // preview gets as much of the line as possible. truncateToTerminalWidth
+          // appends an ellipsis when the model part exceeds the cap.
+          const modelPartMaxWidth = 30;
+          const cappedModelPart = truncateToTerminalWidth(modelPart, modelPartMaxWidth);
+
+          // Separator between the command preview (left) and the model
+          // identifier (right).
+          const separator = '  │  ';
+
           // Build initial prompt portion — unquoted preview with generous
           // space allocation. The line is ultimately truncated to `width` by
           // truncateToTerminalWidth, so we use a dynamic limit.
@@ -629,18 +639,21 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
             // Truncate work item IDs to compact form (e.g., WL-0MQL0T5TR0060AEH
             // → WL...68HD) before applying length truncation.
             const compacted = truncateWorkItemId(initialPrompt);
-            // Reserve space for model part (up to ~30 chars), separator (4),
-            // and a small buffer. Then clip at the end.
-            const reserved = 38;
-            const maxLen = Math.max(15, width - reserved);
+            // Reserve only what the (capped) model part and separator need;
+            // everything else goes to the command preview. The final
+            // truncateToTerminalWidth(…, width) clamp below still guards
+            // against overflow at very narrow widths.
+            const separatorWidth = visibleWidth(separator);
+            const modelWidth = visibleWidth(cappedModelPart);
+            const maxLen = Math.max(0, width - modelWidth - separatorWidth);
             const preview =
-              compacted.length > maxLen
+              compacted.length > maxLen && maxLen > 3
                 ? `${compacted.slice(0, maxLen - 3)}...`
                 : compacted;
             promptPart = preview;
           }
 
-          const label = promptPart ? `${modelPart}  │  ${promptPart}` : modelPart;
+          const label = promptPart ? `${promptPart}${separator}${cappedModelPart}` : modelPart;
           lines.push(truncateToTerminalWidth(theme.fg('dim', label), width));
 
           return lines;

@@ -16,8 +16,8 @@ import {
   parsePaneIdFile,
   CAPTURE_TIMEOUT_MS,
 } from './index.js';
-import { DOWNTIME_LOG_FILE } from './downtime-log.js';
-import { DOWNTIME_WL_TIMEOUT_MS } from './downtime-worker.js';
+import { DOWNTIME_LOG_FILE, readDowntimeLogEntries } from './downtime-log.js';
+import { DOWNTIME_WL_TIMEOUT_MS, dispatchDowntimeWork } from './downtime-worker.js';
 import {
   fetchItemsByStage,
   resetExecFileAsync,
@@ -56,6 +56,16 @@ describe('buildSendToPiArgs', () => {
       '--model',
       'author',
       'Review the item',
+    ]);
+  });
+
+  it('passes an empty prompt arg for a bare /prompt: command (blank session)', () => {
+    expect(buildSendToPiArgs('/prompt:', '/project', 'plan')).toEqual([
+      '--cwd',
+      '/project',
+      '--model',
+      'plan',
+      '',
     ]);
   });
 
@@ -249,7 +259,7 @@ describe('shortcuts.json command routing', () => {
     }
   });
 
-  it('binds P-p to the free-form prompt and P-a to the audit-gaps prompt', () => {
+  it('binds P-p to the free-form prompt, P-a to the audit-gaps prompt, and P-n to a blank session', () => {
     const freePrompt = entries.find((e) => e.chord.join(' ') === 'P p');
     expect(freePrompt).toBeDefined();
     expect(freePrompt!.command).toBe('/prompt:<prompt>');
@@ -265,6 +275,17 @@ describe('shortcuts.json command routing', () => {
     expect(auditPrompt!.view).toBe('both');
     expect(auditPrompt!.model).toBe('plan');
     expect(routeCommand(auditPrompt!.command)).toBe('agent');
+
+    const blankSession = entries.find((e) => e.chord.join(' ') === 'P n');
+    expect(blankSession).toBeDefined();
+    expect(blankSession!.command).toBe('/prompt:');
+    expect(blankSession!.view).toBe('both');
+    expect(blankSession!.model).toBe('plan');
+    // Empty /prompt: carries no placeholders: no command-input form, no
+    // work-item claim (AC2/AC3), and it routes to the agent channel.
+    expect(blankSession!.command).not.toContain('<id>');
+    expect(blankSession!.command).not.toContain('<prompt>');
+    expect(routeCommand(blankSession!.command)).toBe('agent');
   });
 
   it('keeps the single-key p chord bound to plan (P leader does not shadow it)', () => {
@@ -627,7 +648,7 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    const result = await deps.getNextAuditCandidate();
+    const result = await deps.getNextAuditCandidate('/repo');
 
     expect(mockExec).toHaveBeenCalledWith(
       'wl',
@@ -651,13 +672,13 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextAuditCandidate()).toBeNull();
+    expect(await deps.getNextAuditCandidate('/repo')).toBeNull();
   });
 
   it('getNextAuditCandidate fails closed (null) when wl errors', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextAuditCandidate()).toBeNull();
+    expect(await deps.getNextAuditCandidate('/repo')).toBeNull();
   });
 
   it('getNextAuditCandidate passes a bounded timeout so a hung wl fails closed', async () => {
@@ -668,7 +689,7 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    await deps.getNextAuditCandidate();
+    await deps.getNextAuditCandidate('/repo');
 
     // AC1: the audit-tier invocation must carry the bounded timeout too.
     const [, , options] = mockExec.mock.calls[0];
@@ -690,7 +711,7 @@ describe('createDowntimeDeps', () => {
       setExecFileAsync(hungExec as never);
       const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
 
-      const resultPromise = deps.getNextAuditCandidate();
+      const resultPromise = deps.getNextAuditCandidate('/repo');
       await vi.advanceTimersByTimeAsync(DOWNTIME_WL_TIMEOUT_MS);
       await expect(resultPromise).resolves.toBeNull();
     } finally {
@@ -703,7 +724,367 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextAuditCandidate()).toBeNull();
+    expect(await deps.getNextAuditCandidate('/repo')).toBeNull();
+  });
+
+  it('getNextAuditCandidate excludes an item already dispatched for audit (marker in the log, no fresh audit)', async () => {
+    // Regression (WL-0MSGTLSUT002NF29): a completed/in_review item present in
+    // the shared dispatch log with kind:audit and no fresh audit is excluded
+    // from audit-tier selection even though it is otherwise selectable.
+    const now = Date.now();
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 2,
+        workItems: [
+          { id: 'WL-DUP', title: 'already dispatched', auditedAt: null, updatedAt: new Date(now - 60_000).toISOString(), sortIndex: 100 },
+          { id: 'WL-OTHER', title: 'fresh slot', auditedAt: null, updatedAt: new Date(now - 60_000).toISOString(), sortIndex: 200 },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    // A real dispatch log under a temp worklog root with an audit marker.
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+      JSON.stringify({ itemId: 'WL-DUP', kind: 'audit', dispatchedAt: new Date(now - 3_600_000).toISOString(), cwd }) + '\n',
+      'utf8',
+    );
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextAuditCandidate(cwd);
+    expect(result).toEqual({ id: 'WL-OTHER', title: 'fresh slot', stage: 'audit' });
+  });
+
+  it('getNextAuditCandidate does not exclude plan/intake markers (audit-tier-only scope guard)', async () => {
+    const now = Date.now();
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 1,
+        workItems: [
+          { id: 'WL-PLANNED', title: 'planned before', auditedAt: null, updatedAt: new Date(now - 60_000).toISOString(), sortIndex: 100 },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+      JSON.stringify({ itemId: 'WL-PLANNED', kind: 'plan', dispatchedAt: new Date(now - 3_600_000).toISOString(), cwd }) + '\n',
+      'utf8',
+    );
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextAuditCandidate(cwd);
+    expect(result).toEqual({ id: 'WL-PLANNED', title: 'planned before', stage: 'audit' });
+  });
+
+  it('getNextAuditCandidate treats a missing dispatch log as empty (fail-safe, dispatch still works)', async () => {
+    const now = Date.now();
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 1,
+        workItems: [
+          { id: 'WL-FRESHWORKLOG', title: 'fresh worklog', auditedAt: null, updatedAt: new Date(now - 60_000).toISOString(), sortIndex: 100 },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    // cwd with no .worklog/downtime-dispatches.log at all.
+    const cwd = makeTempDir();
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextAuditCandidate(cwd);
+    expect(result).toEqual({ id: 'WL-FRESHWORKLOG', title: 'fresh worklog', stage: 'audit' });
+  });
+
+  it('getNextAuditCandidate skips malformed log lines without failing the lookup', async () => {
+    const now = Date.now();
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 1,
+        workItems: [
+          { id: 'WL-OK', title: 'ok item', auditedAt: null, updatedAt: new Date(now - 60_000).toISOString(), sortIndex: 100 },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+      'not-json\n{"broken":\n' + JSON.stringify({ itemId: 'WL-DUP', kind: 'audit', dispatchedAt: new Date(now - 3_600_000).toISOString(), cwd }) + '\n',
+      'utf8',
+    );
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextAuditCandidate(cwd);
+    expect(result).toEqual({ id: 'WL-OK', title: 'ok item', stage: 'audit' });
+  });
+
+  it('getNextImplementCandidate runs wl next plan_complete risk/effort batch and selects the first open item', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 2,
+        requested: 10,
+        results: [
+          { workItem: { id: 'WL-OPEN', title: 'Open low-risk', status: 'open', risk: 'low', effort: 'small' } },
+          { workItem: { id: 'WL-DONE', title: 'Completed epic', status: 'completed', risk: 'low', effort: 'small' } },
+        ],
+        workItems: [
+          { workItem: { id: 'WL-OPEN', title: 'Open low-risk', status: 'open', risk: 'low', effort: 'small' } },
+          { workItem: { id: 'WL-DONE', title: 'Completed epic', status: 'completed', risk: 'low', effort: 'small' } },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextImplementCandidate('/repo');
+
+    // The invocation must carry the risk/effort filters and a generous batch
+    // count (-n) so completed items can be filtered out client-side without
+    // starving selection (WL-0MSMAYIKX005LLO4 AC2/AC3).
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      ['next', '--stage', 'plan_complete', '--risk', 'low', '--effort', 'small', '-n', expect.any(String), '--json'],
+      expect.anything(),
+    );
+    // wl next keeps completed items with a stage filter; the client-side
+    // status=open filter drops the completed epic and selects WL-OPEN.
+    expect(result).toEqual({ id: 'WL-OPEN', title: 'Open low-risk', stage: 'implement' });
+  });
+
+  it('getNextImplementCandidate relies on wl next default dependency-blocked exclusion (no --include-blocked)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 1,
+        workItems: [
+          { workItem: { id: 'WL-OPEN', title: 'Open low-risk', status: 'open', risk: 'low', effort: 'small' } },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.getNextImplementCandidate('/repo');
+
+    const [, args] = mockExec.mock.calls[0];
+    // Dependency-blocked exclusion is wl next's default (includeBlocked=false).
+    // The implement tier must never opt into --include-blocked, or blocked
+    // candidates would reach the dispatch layer (WL-0MSMAYIKX005LLO4 AC3).
+    expect(args).not.toContain('--include-blocked');
+  });
+
+  it('getNextImplementCandidate returns null when no open candidate exists (all completed)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 1,
+        workItems: [
+          { workItem: { id: 'WL-DONE', title: 'Completed epic', status: 'completed', risk: 'low', effort: 'small' } },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getNextImplementCandidate('/repo')).toBeNull();
+  });
+
+  it('getNextImplementCandidate fails closed (null) when wl errors', async () => {
+    setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getNextImplementCandidate('/repo')).toBeNull();
+  });
+
+  it('getNextImplementCandidate fails closed (null) on malformed wl output', async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: 'not json', stderr: '' });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getNextImplementCandidate('/repo')).toBeNull();
+  });
+
+  it('getNextImplementCandidate passes a bounded timeout so a hung wl fails closed', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ success: true, count: 0, workItems: [] }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.getNextImplementCandidate('/repo');
+
+    const [, , options] = mockExec.mock.calls[0];
+    expect(options).toMatchObject({ timeout: DOWNTIME_WL_TIMEOUT_MS });
+  });
+
+  it('getNextImplementCandidate excludes an item already dispatched for implement (kind implement marker)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 2,
+        workItems: [
+          { workItem: { id: 'WL-DUP', title: 'already dispatched', status: 'open', risk: 'low', effort: 'small' } },
+          { workItem: { id: 'WL-FRESH', title: 'fresh slot', status: 'open', risk: 'low', effort: 'small' } },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+      JSON.stringify({ itemId: 'WL-DUP', kind: 'implement', dispatchedAt: new Date(Date.now() - 3_600_000).toISOString(), cwd }) + '\n',
+      'utf8',
+    );
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextImplementCandidate(cwd);
+    expect(result).toEqual({ id: 'WL-FRESH', title: 'fresh slot', stage: 'implement' });
+  });
+
+  it('getNextImplementCandidate does not exclude audit/plan/intake markers (implement-tier-only scope guard)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 1,
+        workItems: [
+          { workItem: { id: 'WL-IMP', title: 'implementable', status: 'open', risk: 'low', effort: 'small' } },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+      JSON.stringify({ itemId: 'WL-IMP', kind: 'audit', dispatchedAt: new Date(Date.now() - 3_600_000).toISOString(), cwd }) + '\n',
+      'utf8',
+    );
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextImplementCandidate(cwd);
+    expect(result).toEqual({ id: 'WL-IMP', title: 'implementable', stage: 'implement' });
+  });
+
+  it('getNextImplementCandidate treats a missing dispatch log as empty (fail-safe, dispatch still works)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 1,
+        workItems: [
+          { workItem: { id: 'WL-FRESHWORKLOG', title: 'fresh worklog', status: 'open', risk: 'low', effort: 'small' } },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const cwd = makeTempDir(); // no .worklog/downtime-dispatches.log
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextImplementCandidate(cwd);
+    expect(result).toEqual({ id: 'WL-FRESHWORKLOG', title: 'fresh worklog', stage: 'implement' });
+  });
+
+  it('getNextImplementCandidate applies --worklog-dir when the tab resolved a worklog root', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ success: true, count: 0, workItems: [] }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+    setWorklogDir('/home/user/projects/SorraAgents/.worklog');
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.getNextImplementCandidate('/repo');
+
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      [
+        '--worklog-dir',
+        '/home/user/projects/SorraAgents/.worklog',
+        'next',
+        '--stage',
+        'plan_complete',
+        '--risk',
+        'low',
+        '--effort',
+        'small',
+        '-n',
+        expect.any(String),
+        '--json',
+      ],
+      expect.anything(),
+    );
+  });
+
+  it('end-to-end: two consecutive idle windows dispatch a single unaudited candidate exactly once', async () => {
+    // AC5 (parent): with one unaudited completed/in_review candidate and two
+    // consecutive idle windows (no audit recorded between), the worker
+    // dispatches exactly once. The first dispatch writes the durable marker
+    // (kind:audit) to the shared log; the second window's candidate selection
+    // reads the marker back and excludes the item, so no second dispatch.
+    const now = Date.now();
+    const candidate = {
+      id: 'WL-ONCE',
+      title: 'dispatch me once',
+      auditedAt: null,
+      updatedAt: new Date(now - 60_000).toISOString(),
+      sortIndex: 100,
+    };
+    // wl list always returns the same single candidate; wl next returns no
+    // candidate so a second (wrong) audit dispatch would be the only path.
+    const mockExec = vi.fn((_bin: string, args: string[]) => {
+      if (args[0] === 'list') {
+        return Promise.resolve({
+          stdout: JSON.stringify({ success: true, count: 1, workItems: [candidate] }),
+          stderr: '',
+        });
+      }
+      return Promise.resolve({ stdout: JSON.stringify({ success: true, workItem: null }), stderr: '' });
+    });
+    setExecFileAsync(mockExec as never);
+    const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
+    const cwd = makeTempDir();
+
+    // Idle window 1: audit candidate selected and dispatched.
+    const first = await dispatchDowntimeWork(deps, { model: 'plan', cwd });
+    expect(first.dispatched).toBe(true);
+    expect(first.kind).toBe('audit');
+    expect(first.candidate?.id).toBe('WL-ONCE');
+
+    // The durable marker landed in the shared log (kind:audit).
+    const entries = await readDowntimeLogEntries(cwd);
+    expect(entries.some((e) => e.itemId === 'WL-ONCE' && e.kind === 'audit')).toBe(true);
+
+    // Idle window 2: the marker excludes the item; nothing else to dispatch.
+    const second = await dispatchDowntimeWork(deps, { model: 'plan', cwd });
+    expect(second.dispatched).toBe(false);
+    expect(second.reason).toBe('no-candidate');
+    expect(spawnFn).toHaveBeenCalledTimes(1);
   });
 
   it('claimItem runs wl update --status in_progress --assignee', async () => {
