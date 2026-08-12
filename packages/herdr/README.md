@@ -292,6 +292,20 @@ requires a fresh full idle period before the next dispatch (no stale idle
 credit). The worker re-reads the setting every tick, so a change applies from
 the next cooldown entry without a plugin restart.
 
+**Code-freeze gate (WL-0MSQ0RPQP00636JY)** — the dispatcher honours the
+ship-it code-freeze marker (see [Code Freeze](#code-freeze)): the marker is
+re-read **fresh on every dispatch attempt** (never cached), so a freeze that
+starts or ends mid-idle-period is honored on the next dispatch. While the
+marker is **frozen or ambiguous** (fail-closed), the audit and implement tiers
+are skipped — no new audits or implementation work starts during a release —
+and dispatch continues with the plan/intake tiers, which are low-risk prep
+work. A freeze skip is never treated as an empty backlog: it reports reason
+`code-freeze` (never `no-candidate`), so it does **not** trigger the
+no-candidate cooldown — polling continues and implement/audit dispatch
+resumes immediately when the freeze lifts. The implement skill's own
+freeze enforcement remains the backstop for the TOCTOU window between the
+dispatcher's marker read and the pane spawn.
+
 **Three-strike rule on CLI errors** — a dispatch attempt that ends in a `wl`
 CLI error counts as one strike. Three **consecutive** strikes pause the
 worker entirely (same full pause as the empty-backlog cooldown) *after*
@@ -695,17 +709,19 @@ Semantics:
 |---|---|
 | File present with `active: true` | **ON** — implementation blocked |
 | File absent | OFF |
-| `active: false` (or missing) | OFF |
-| Corrupt / unreadable file | OFF (fail-open) |
+| `active: false` | OFF |
+| Corrupt / unreadable file / wrong shape (non-object, missing or non-boolean `active`) | **Ambiguous** — banner shown; the downtime dispatcher treats it as ON (fail-closed) |
 
-Fail-open is deliberate: a broken or missing marker must never block browsing the worklist.
+Fail-open is deliberate: a broken or missing marker must never block browsing the worklist. The module exposes two reads: `isCodeFreezeActive()` / `readCodeFreezeState()` keep the fail-open semantics for browsing and shortcut blocking, while `readCodeFreezeStatus()` adds a third **ambiguous** state for fail-closed consumers (the downtime dispatcher, the ambiguous-marker banner — WL-0MSQ0RPQP00636JY).
 
 ### Plugin behaviour while frozen
 
 - **Banner** — The selection list renders a prominent red `⛔ CODE FREEZE` banner above the header, warning that implementation is blocked. The banner respects the `rows - 1` pane-height budget (see WL-0MSAAON63003N6LO).
+- **Ambiguous marker banner** — When the marker is present but cannot be trusted (unreadable file, corrupt JSON, wrong shape), the selection list renders a distinct amber `⚠ Ambiguous Codefreeze marker` banner. Browsing and all non-implement commands keep working (fail-open unchanged), but the downtime dispatcher treats the project as frozen until the marker is fixed, so the operator sees why implement/audit dispatch is disabled.
 - **Implement shortcut hidden** — The `i` / `/skill:implement` shortcut in `shortcuts.json` carries `"code_freeze": "block"`, so while a freeze is active it is filtered out of the shortcut registry: it does not appear in the footer/chord help hints and pressing it does nothing (no dialog, no dispatch). See [Shortcut filtering during a freeze](#shortcut-filtering-during-a-freeze).
 - **Implement commands blocked** — Any implement command (`/skill:implement`, `/skill:implement-single`, `/skill:implementall`, via single-key `i`, chord, or typed dispatch) is **not** routed: no pi agent pane is spawned, no work item is claimed, and no `<id>` substitution happens. The marker is re-read at dispatch time, so a freeze that starts between refreshes is still enforced.
 - **Notice dialog** — When an implement command is attempted during a freeze, a modal dialog explains that implementation is blocked until the release finishes. Dismiss with `Esc`, `Enter`, or `q` to return to the list.
+- **Downtime dispatcher freeze gate** — While the marker is frozen **or ambiguous**, the downtime worker skips its audit and implement dispatch tiers (no new audits/implementations during a release); the plan/intake tiers continue. See [Downtime worker](#downtime-worker-local-llm-idle-dispatch).
 - **Other commands unaffected** — Audit, intake, plan, review, priority, search, sync, and navigation continue to work normally during a freeze.
 
 ### Shortcut filtering by work-item type

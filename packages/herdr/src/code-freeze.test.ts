@@ -12,13 +12,15 @@
  */
 
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   CODE_FREEZE_MARKER_FILENAME,
   codeFreezeMarkerPath,
   readCodeFreezeState,
+  readCodeFreezeStatus,
+  readCodeFreezeStatusForRoot,
   isCodeFreezeActive,
   type CodeFreezeState,
 } from './code-freeze.js';
@@ -124,6 +126,77 @@ describe('isCodeFreezeActive', () => {
   it('is false for a corrupt marker', () => {
     writeMarker('garbage');
     expect(isCodeFreezeActive(tmpDir)).toBe(false);
+  });
+});
+
+// ── Tri-state read (WL-0MSQ0RPQP00636JY) ─────────────────────────────
+// The downtime dispatcher must distinguish "not frozen" from "cannot tell":
+// an ambiguous marker (unreadable file, corrupt JSON, wrong shape) is
+// treated as frozen (fail-closed) so no implement/audit work starts during
+// a release. `readCodeFreezeState` / `isCodeFreezeActive` keep their
+// fail-open semantics for browsing — only the new tri-state read changes.
+
+describe('readCodeFreezeStatus (tri-state)', () => {
+  it('is frozen for an active marker', () => {
+    writeMarker(JSON.stringify({ active: true, reason: 'ship release' }));
+    expect(readCodeFreezeStatus(tmpDir)).toBe('frozen');
+  });
+
+  it('is not-frozen when the marker file is absent', () => {
+    expect(readCodeFreezeStatus(tmpDir)).toBe('not-frozen');
+  });
+
+  it('is not-frozen when active is false', () => {
+    writeMarker(JSON.stringify({ active: false, reason: 'released' }));
+    expect(readCodeFreezeStatus(tmpDir)).toBe('not-frozen');
+  });
+
+  it('is ambiguous for corrupt JSON (fail-closed)', () => {
+    writeMarker('{ not json !!!');
+    expect(readCodeFreezeStatus(tmpDir)).toBe('ambiguous');
+  });
+
+  it('is ambiguous when the marker path is unreadable (e.g. a directory)', () => {
+    const markerAsDir = join(tmpDir, CODE_FREEZE_MARKER_FILENAME);
+    mkdirSync(markerAsDir); // marker path exists as a dir → readFileSync throws EISDIR
+    expect(readCodeFreezeStatus(tmpDir)).toBe('ambiguous');
+  });
+
+  it('is ambiguous for a non-object marker (array / string / number)', () => {
+    writeMarker('[1, 2, 3]');
+    expect(readCodeFreezeStatus(tmpDir)).toBe('ambiguous');
+    writeMarker('"hello"');
+    expect(readCodeFreezeStatus(tmpDir)).toBe('ambiguous');
+    writeMarker('42');
+    expect(readCodeFreezeStatus(tmpDir)).toBe('ambiguous');
+  });
+
+  it('is ambiguous when active is missing (wrong shape)', () => {
+    writeMarker(JSON.stringify({ reason: 'oops' }));
+    expect(readCodeFreezeStatus(tmpDir)).toBe('ambiguous');
+  });
+
+  it('is ambiguous when active is not a boolean (wrong shape)', () => {
+    writeMarker(JSON.stringify({ active: 'yes' }));
+    expect(readCodeFreezeStatus(tmpDir)).toBe('ambiguous');
+    writeMarker(JSON.stringify({ active: null }));
+    expect(readCodeFreezeStatus(tmpDir)).toBe('ambiguous');
+  });
+});
+
+describe('readCodeFreezeStatusForRoot', () => {
+  it('resolves the marker under <root>/.worklog', () => {
+    mkdirSync(join(tmpDir, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(tmpDir, '.worklog', CODE_FREEZE_MARKER_FILENAME),
+      JSON.stringify({ active: true, reason: 'ship release' }),
+      'utf8',
+    );
+    expect(readCodeFreezeStatusForRoot(tmpDir)).toBe('frozen');
+  });
+
+  it('is not-frozen when the root has no marker', () => {
+    expect(readCodeFreezeStatusForRoot(join(tmpDir, 'no-marker-root'))).toBe('not-frozen');
   });
 });
 

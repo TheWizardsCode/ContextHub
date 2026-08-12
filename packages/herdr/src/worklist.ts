@@ -15,7 +15,7 @@ import { dirname, join, resolve as resolvePath } from 'node:path';
 
 import { fetchChildrenForItem, fetchActionableCount, fetchItemsByStage, getWorklogDir, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
-import { readCodeFreezeState } from './code-freeze.js';
+import { readCodeFreezeState, readCodeFreezeStatus } from './code-freeze.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
   statusIcon,
@@ -1850,6 +1850,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   detailToCFocus?: boolean,
   detailRenderedIndex?: number,
   showHelpText?: boolean,
+  codeFreezeAmbiguous?: boolean,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -1879,6 +1880,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     detailToCFocus?: boolean,
     detailRenderedIndex?: number,
     showHelpText?: boolean,
+    codeFreezeAmbiguous?: boolean,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -1940,14 +1942,26 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     }
     output.push(header);
 
-    // Code Freeze banner — a prominent warning that implementation is
-    // blocked while a ship release is in progress. The banner consumes one
-    // chrome row (chromeLines accounts for it) so the `rows - 1` pane
+    // Code Freeze banners — a prominent warning that implementation is
+    // blocked while a ship release is in progress (active marker), plus a
+    // DISTINCT warning when the marker is ambiguous (unreadable file,
+    // corrupt JSON, wrong shape): the downtime dispatcher treats ambiguity
+    // as frozen (fail-closed), so the operator sees why implement/audit
+    // dispatch is disabled (WL-0MSQ0RPQP00636JY). Each banner consumes one
+    // chrome row (chromeLines accounts for them) so the `rows - 1` pane
     // line-count invariant still holds (WL-0MSAAON63003N6LO).
+    let bannerCount = 0;
     if (codeFreezeActive) {
       const bannerText = `⛔ CODE FREEZE — ship release in progress; implement actions blocked`;
       const bannerLine = `${ANSI.bg(196)}${ANSI.fg(231)} ${bannerText} ${ANSI.reset}`;
       output.push(truncateLine(bannerLine, cols));
+      bannerCount++;
+    }
+    if (codeFreezeAmbiguous) {
+      const bannerText = `⚠ Ambiguous Codefreeze marker — implement/audit dispatch disabled`;
+      const bannerLine = `${ANSI.bg(220)}${ANSI.fg(0)} ${bannerText} ${ANSI.reset}`;
+      output.push(truncateLine(bannerLine, cols));
+      bannerCount++;
     }
 
     // Items are already flattened by the caller (render callback in runWorklistTui
@@ -1961,8 +1975,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     // output overflows the pane and the terminal scrolls the header/top items
     // off the top (WL-0MSAAON63003N6LO). The active stage filter is indicated
     // in the header only (filterLabel) — no standalone filter bar is rendered.
-    const bannerActive = codeFreezeActive === true;
-    const chromeLines = bannerActive ? 3 : 2; // header + banner + footer
+    const chromeLines = 2 + bannerCount; // header + banner(s) + footer
     const budgetForItemsAndSeps = Math.max(0, listArea - chromeLines);
     // Count the group separators a window would render (same logic as the
     // render loop below) so the window can be trimmed when separators would
@@ -2622,13 +2635,27 @@ export async function runWorklistTui(
   // the Code Freeze notice dialog is currently showing. The banner state is
   // refreshed on each data refresh; the command-dispatch path re-reads the
   // marker fresh so a freeze that starts between refreshes is still enforced
-  // at dispatch time (fail-safe client-side blocking).
+  // at dispatch time (fail-safe client-side blocking). `codeFreezeAmbiguous`
+  // drives the separate "Ambiguous Codefreeze marker" banner
+  // (WL-0MSQ0RPQP00636JY): a marker that cannot be parsed disables
+  // implement/audit downtime dispatch (fail-closed) and the operator must
+  // see why. Browsing/shortcut blocking keep their fail-open semantics —
+  // `codeFreezeActive` stays false for an ambiguous marker.
   let codeFreezeActive = false;
+  let codeFreezeAmbiguous = false;
   let codeFreezeNotice = false;
 
-  /** Re-read the code-freeze marker (fail-open: errors => not frozen). */
+  /**
+   * Re-read the code-freeze marker tri-state. Fail-open for browsing: an
+   * ambiguous marker keeps `codeFreezeActive` false (browsing and shortcut
+   * blocking are unchanged); only the ambiguous-marker banner state and the
+   * downtime dispatcher's fail-closed gate are affected
+   * (WL-0MSQ0RPQP00636JY).
+   */
   const refreshFreezeState = (): void => {
-    codeFreezeActive = readCodeFreezeState().active;
+    const status = readCodeFreezeStatus();
+    codeFreezeActive = status === 'frozen';
+    codeFreezeAmbiguous = status === 'ambiguous';
   };
 
   // Initial Code Freeze state read (fail-open: no marker => not frozen).
@@ -3319,6 +3346,10 @@ export async function runWorklistTui(
       // ALL shortcut hint lines (normal and chord-mode), matching the pi browse
       // widget (WL-0MSGJDSMJ004128E). Chord key handling is unaffected.
       opts.getShowHelpText(),
+      // Ambiguous code-freeze marker banner state (WL-0MSQ0RPQP00636JY):
+      // distinct from the active-freeze banner; both can render (defensive)
+      // but the tri-state read guarantees at most one is true.
+      codeFreezeAmbiguous,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

@@ -38,6 +38,7 @@ import {
 import { AgentTracker, AGENT_PANES_FILE, mergeAgentStates } from './agent-tracker.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
+import { readCodeFreezeStatusForRoot } from './code-freeze.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
 import {
   createDowntimeWorker,
@@ -368,6 +369,12 @@ export function createDowntimeDeps(
         return { ok: false };
       }
     },
+    // Code-freeze gate (WL-0MSQ0RPQP00636JY): fresh tri-state read of the
+    // ship-it marker at `<cwd>/.worklog/code-freeze.json` on EVERY dispatch
+    // (never cached). The dispatcher treats 'frozen' and 'ambiguous'
+    // (fail-closed) identically: no audit/implement dispatch during a
+    // release; plan/intake continue.
+    readCodeFreezeStatus: (cwd: string) => readCodeFreezeStatusForRoot(cwd),
     async getNextAuditCandidate(cwd: string): Promise<DowntimeCandidate | null> {
       try {
         // Audit tier (WL-0MSI8H3HP000K0RG): select the first completed /

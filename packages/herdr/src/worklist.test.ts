@@ -1253,6 +1253,82 @@ describe('createListRenderer — code freeze banner', () => {
     );
     expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
   });
+
+  it('renders the Ambiguous Codefreeze marker banner when the marker is ambiguous', () => {
+    const output = renderer(
+      [makeItem('A')],
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      false, // codeFreezeActive (fail-open: browsing stays unblocked)
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true, // showHelpText
+      true, // codeFreezeAmbiguous
+    );
+    expect(output).toContain('Ambiguous Codefreeze marker');
+    // The ambiguous banner is distinct from the active-freeze banner: an
+    // ambiguous marker must NOT show the red CODE FREEZE banner (browsing
+    // and shortcut blocking keep their fail-open semantics).
+    expect(output).not.toContain('CODE FREEZE');
+  });
+
+  it('does not render the ambiguous banner when the marker is unambiguous (default)', () => {
+    const output = renderer([makeItem('A')], 0, 0, TERM_80x24, null, 'list', null);
+    expect(output).not.toContain('Ambiguous Codefreeze marker');
+  });
+
+  it('keeps the rows - 1 line-count invariant with the ambiguous banner', () => {
+    const grouped: WorkItem[] = Array.from({ length: 30 }, (_, i) => ({
+      ...makeItem(`G${i}`),
+      group: i,
+      groupLabel: `Group ${i}`,
+    }));
+    const output = renderer(
+      grouped,
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      true, // codeFreezeAmbiguous
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+  });
 });
 
 // ── Chord-mode footer gating (WL-0MSGJDSMJ004128E) ─────────────────────

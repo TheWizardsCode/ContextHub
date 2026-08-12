@@ -21,7 +21,14 @@
  *    plan_complete item with risk Low / effort Small|XS →
  *    `/skill:implement <id>`, then `wl next --stage intake_complete` →
  *    `/skill:plan <id>`, fallback `--stage idea` → `/skill:intake <id>`,
- *    pre-dispatch claim, per-process single-flight. The audit tier
+ *    pre-dispatch claim, per-process single-flight. Code-freeze gate
+ *    (WL-0MSQ0RPQP00636JY): the ship-it marker is re-read fresh on every
+ *    dispatch; while frozen OR ambiguous (fail-closed) the audit and
+ *    implement tiers are skipped (no new implementations/audits during a
+ *    release) and plan/intake still dispatch; an empty plan/intake backlog
+ *    during a freeze reports reason 'code-freeze' (never 'no-candidate'),
+ *    so the freeze never triggers the no-candidate cooldown and dispatch
+ *    resumes immediately when it lifts. The audit tier
  *    additionally excludes items the downtime worker has already dispatched
  *    for `/skill:audit` (durable dispatched-marker exclusion,
  *    WL-0MSLIY8ZR004QUSY) unless a fresh audit exists since, closing the
@@ -58,6 +65,7 @@
 
 import { spawn } from 'node:child_process';
 import { isAuditFresh } from './icons.js';
+import type { CodeFreezeStatus } from './code-freeze.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -468,6 +476,17 @@ export interface DowntimeWorkerDeps {
    * `.worklog/downtime-dispatches.log` is consulted for the marker set.
    */
   getNextImplementCandidate(cwd: string): Promise<DowntimeCandidate | null>;
+  /**
+   * Read the current code-freeze marker status (tri-state: 'frozen' /
+   * 'not-frozen' / 'ambiguous'). `cwd` is the worklog root; the marker
+   * lives at `<cwd>/.worklog/code-freeze.json`. Read fresh on EVERY
+   * dispatch (never cached) so a freeze that starts or ends between idle
+   * periods is honored on the next dispatch attempt (WL-0MSQ0RPQP00636JY).
+   * Fail-closed: an 'ambiguous' marker is treated as frozen by the
+   * dispatcher — no implement/audit dispatch while the marker cannot be
+   * trusted.
+   */
+  readCodeFreezeStatus(cwd: string): CodeFreezeStatus;
   /** Claims the item (`wl update <id> --status in_progress`) before dispatch. */
   claimItem(itemId: string): Promise<void>;
   /** Opens a visible pi agent pane running the prompt (via send-to-pi.sh). */
@@ -534,16 +553,27 @@ let dispatchInFlight = false;
  * (fail-closed null on wl error or no candidate — never short-circuits the
  * fallback, AC5/AC6); if none, `wl next --stage intake_complete` →
  * `/skill:plan <id>`; if none, `wl next --stage idea` → `/skill:intake <id>`;
- * if all four are empty, no dispatch. A CLI error at the intake_complete
- * tier does NOT short-circuit: the idea tier is still attempted, so a
- * tier-3 candidate can still dispatch. A `wl-error` outcome (any CLI
- * failure) is never a candidate and never a `no-candidate`; the caller's
- * three-strike rule decides when consecutive errors pause the worker. The
- * item is claimed BEFORE the pane spawns so it appears in_progress
- * immediately and a second pane cannot select it. The caller must only
- * invoke this once the idle tracker reports the threshold met (AC1); a
- * dispatch consumes the local slot, so the proxy reports busy and the
- * tracker requires a fresh full idle period before the next dispatch.
+ * if all four are empty, no dispatch.
+ *
+ * Code-freeze gate (WL-0MSQ0RPQP00636JY): the marker is re-read fresh on
+ * EVERY dispatch (never cached). While the marker is frozen OR ambiguous
+ * (fail-closed), the audit and implement tiers are skipped — no new
+ * implementation work (or audits) starts during a release freeze — and
+ * dispatch continues with the plan/intake tiers, which are low-risk prep
+ * and still allowed. A freeze skip with an empty plan/intake backlog is
+ * reported as reason 'code-freeze' (NEVER 'no-candidate'), so it never
+ * triggers the worker's no-candidate cooldown: polling continues and
+ * implement/audit dispatch resumes immediately when the freeze lifts.
+ *
+ * A CLI error at the intake_complete tier does NOT short-circuit: the idea
+ * tier is still attempted, so a tier-3 candidate can still dispatch. A
+ * `wl-error` outcome (any CLI failure) is never a candidate and never a
+ * `no-candidate`; the caller's three-strike rule decides when consecutive
+ * errors pause the worker. The item is claimed BEFORE the pane spawns so it
+ * appears in_progress immediately and a second pane cannot select it. The
+ * caller must only invoke this once the idle tracker reports the threshold
+ * met (AC1); a dispatch consumes the local slot, so the proxy reports busy
+ * and the tracker requires a fresh full idle period before the next dispatch.
  */
 export async function dispatchDowntimeWork(
   deps: DowntimeWorkerDeps,
@@ -554,25 +584,35 @@ export async function dispatchDowntimeWork(
   }
   dispatchInFlight = true;
   try {
-    const auditCandidate = await deps.getNextAuditCandidate(opts.cwd);
-    if (auditCandidate !== null) {
-      await deps.claimItem(auditCandidate.id);
-      await deps.spawnAgentPane(buildDowntimePrompt('audit', auditCandidate), opts);
-      await recordDispatchAudit(deps, 'audit', auditCandidate, opts.cwd);
-      return { dispatched: true, candidate: auditCandidate, kind: 'audit' };
-    }
-    // Implement tier (WL-0MSMAYPQP001FLR6): after the audit gate, dispatch
-    // /skill:implement for the highest-priority open plan_complete item with
-    // risk Low / effort Small|XS. getNextImplementCandidate is fail-closed
-    // (null on wl failure or no candidate), so a null here means the tier is
-    // exhausted and the plan/intake tiers below still run (AC5/AC6 — a wl
-    // error at the implement tier does NOT short-circuit the fallback).
-    const implementCandidate = await deps.getNextImplementCandidate(opts.cwd);
-    if (implementCandidate !== null) {
-      await deps.claimItem(implementCandidate.id);
-      await deps.spawnAgentPane(buildDowntimePrompt('implement', implementCandidate), opts);
-      await recordDispatchAudit(deps, 'implement', implementCandidate, opts.cwd);
-      return { dispatched: true, candidate: implementCandidate, kind: 'implement' };
+    // Code-freeze gate (WL-0MSQ0RPQP00636JY): re-read the marker fresh on
+    // every dispatch — never cached, so a freeze that starts or ends
+    // mid-idle-period is honored on the next dispatch attempt. Frozen OR
+    // ambiguous (fail-closed) → the audit and implement tiers are skipped
+    // and dispatch falls through to the plan/intake tiers below.
+    const freezeStatus = deps.readCodeFreezeStatus(opts.cwd);
+    const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
+
+    if (!frozen) {
+      const auditCandidate = await deps.getNextAuditCandidate(opts.cwd);
+      if (auditCandidate !== null) {
+        await deps.claimItem(auditCandidate.id);
+        await deps.spawnAgentPane(buildDowntimePrompt('audit', auditCandidate), opts);
+        await recordDispatchAudit(deps, 'audit', auditCandidate, opts.cwd);
+        return { dispatched: true, candidate: auditCandidate, kind: 'audit' };
+      }
+      // Implement tier (WL-0MSMAYPQP001FLR6): after the audit gate, dispatch
+      // /skill:implement for the highest-priority open plan_complete item with
+      // risk Low / effort Small|XS. getNextImplementCandidate is fail-closed
+      // (null on wl failure or no candidate), so a null here means the tier is
+      // exhausted and the plan/intake tiers below still run (AC5/AC6 — a wl
+      // error at the implement tier does NOT short-circuit the fallback).
+      const implementCandidate = await deps.getNextImplementCandidate(opts.cwd);
+      if (implementCandidate !== null) {
+        await deps.claimItem(implementCandidate.id);
+        await deps.spawnAgentPane(buildDowntimePrompt('implement', implementCandidate), opts);
+        await recordDispatchAudit(deps, 'implement', implementCandidate, opts.cwd);
+        return { dispatched: true, candidate: implementCandidate, kind: 'implement' };
+      }
     }
     // Tier 2 (intake_complete → /skill:plan). A CLI error here does NOT
     // short-circuit: tier 3 is still attempted so a tier-3 candidate can
@@ -607,9 +647,15 @@ export async function dispatchDowntimeWork(
         // information must not pause the worker.
         return { dispatched: false, reason: 'wl-error' };
       }
-      // Both tiers answered with no candidate → genuine empty backlog (the
-      // only outcome that triggers the no-candidate cooldown in the worker).
-      return { dispatched: false, reason: 'no-candidate' };
+      // Both tiers answered with no candidate → genuine empty backlog. The
+      // freeze gate must NOT pause the worker on an empty plan/intake
+      // backlog: during a freeze that is a freeze skip (reason
+      // 'code-freeze'), never the no-candidate cooldown — polling continues
+      // so implement/audit dispatch resumes immediately when the freeze
+      // lifts (WL-0MSQ0RPQP00636JY).
+      return frozen
+        ? { dispatched: false, reason: 'code-freeze' }
+        : { dispatched: false, reason: 'no-candidate' };
     }
     // Tier 3 errored (with or without a tier-2 error): fail closed to busy.
     // The worker counts this as one CLI-error strike; the backlog is not
@@ -876,8 +922,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
             tracker.record(false);
           }
         }
-        // Any other non-dispatch outcome (dispatch-in-flight) is neutral:
-        // no strike, no cooldown — the next idle period retries.
+        // Any other non-dispatch outcome (dispatch-in-flight, code-freeze
+        // skip) is neutral: no strike, no cooldown — the next idle period
+        // retries (a freeze skip keeps polling so implement/audit dispatch
+        // resumes immediately when the freeze lifts, WL-0MSQ0RPQP00636JY).
         return { polled: true, dispatched: outcome.dispatched, idle: true };
       } finally {
         dispatching = false;

@@ -81,6 +81,9 @@ function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     spawnAgentPane: vi.fn().mockResolvedValue(undefined),
     recordDispatch: vi.fn().mockResolvedValue(undefined),
     recordError: vi.fn().mockResolvedValue(undefined),
+    // Code-freeze gate (WL-0MSQ0RPQP00636JY): not frozen by default, so
+    // existing dispatch tests exercise the unchanged audit/implement tiers.
+    readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
     ...overrides,
   };
 }
@@ -564,6 +567,143 @@ describe('dispatch implement tier', () => {
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
     expect(deps.getNextItem).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ── Code-freeze gate (WL-0MSQ0RPQP00636JY) ──────────────────────────
+// The dispatcher must honour the ship-it code-freeze marker: while frozen
+// (or ambiguous — fail-closed), the audit and implement tiers are skipped
+// (no new implementation work / audits during a release) and the plan/intake
+// tiers still dispatch (low-risk prep). The marker is re-read on EVERY
+// dispatch (never cached) so a freeze that starts or ends mid-idle-period is
+// honored on the next dispatch attempt. A freeze skip is reason
+// 'code-freeze' — never 'no-candidate' — so it cannot trigger the worker's
+// no-candidate cooldown: polling continues and resume is immediate.
+
+describe('dispatch code-freeze gate', () => {
+  const auditCandidate: DowntimeCandidate = { id: 'WL-AUD', title: 'Audit me', stage: 'audit' };
+  const implementCandidate: DowntimeCandidate = { id: 'WL-IMP', title: 'Implement me', stage: 'implement' };
+  const planCandidate: DowntimeCandidate = { id: 'WL-PLAN', title: 'Prep task', stage: 'intake_complete' };
+
+  it('skips the audit and implement tiers while frozen and still dispatches plan', async () => {
+    const deps = makeDeps({
+      readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+      getNextAuditCandidate: vi.fn().mockResolvedValue(auditCandidate),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // Frozen → the audit/implement tiers are never consulted.
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(deps.getNextImplementCandidate).not.toHaveBeenCalled();
+    // Plan/intake tiers still dispatch.
+    expect(deps.getNextItem).toHaveBeenCalledWith('intake_complete');
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-PLAN');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-PLAN'),
+      expect.anything(),
+    );
+  });
+
+  it('treats an ambiguous marker as frozen (fail-closed): no audit/implement, plan still dispatches', async () => {
+    const deps = makeDeps({
+      readCodeFreezeStatus: vi.fn().mockReturnValue('ambiguous'),
+      getNextAuditCandidate: vi.fn().mockResolvedValue(auditCandidate),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(deps.getNextImplementCandidate).not.toHaveBeenCalled();
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+
+  it('frozen with an empty plan/intake backlog reports code-freeze (never no-candidate)', async () => {
+    const deps = makeDeps({
+      readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    // The freeze itself must never look like a genuine empty backlog: the
+    // worker must NOT enter the no-candidate cooldown (polling continues).
+    expect(outcome.reason).toBe('code-freeze');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('ambiguous with an empty plan/intake backlog also reports code-freeze', async () => {
+    const deps = makeDeps({
+      readCodeFreezeStatus: vi.fn().mockReturnValue('ambiguous'),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('code-freeze');
+  });
+
+  it('frozen still surfaces wl CLI errors as wl-error (a strike, not hidden by the freeze)', async () => {
+    const deps = makeDeps({
+      readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+      getNextItem: vi.fn().mockResolvedValue({ ok: false }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('wl-error');
+  });
+
+  it('re-reads the marker on every dispatch: implement/audit resume immediately when the freeze lifts', async () => {
+    // First dispatch: frozen → no audit/implement, empty plan/intake → code-freeze.
+    const freezeStatus = vi.fn().mockReturnValue('frozen');
+    const deps = makeDeps({
+      readCodeFreezeStatus: freezeStatus,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    const frozenOutcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+    expect(frozenOutcome.reason).toBe('code-freeze');
+    expect(deps.getNextImplementCandidate).not.toHaveBeenCalled();
+
+    // The freeze lifts (marker now reads not-frozen): the SAME deps object is
+    // re-read on the next dispatch — no caching — and the implement tier
+    // dispatches again.
+    freezeStatus.mockReturnValue('not-frozen');
+    deps.getNextImplementCandidate = vi.fn().mockResolvedValue(implementCandidate);
+
+    const resumed = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+    expect(resumed.dispatched).toBe(true);
+    expect(resumed.kind).toBe('implement');
+    expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:implement WL-IMP'),
+      expect.anything(),
+    );
+  });
+
+  it('not-frozen behaves as before: the audit tier still runs', async () => {
+    const deps = makeDeps({
+      readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
+      getNextAuditCandidate: vi.fn().mockResolvedValue(auditCandidate),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(deps.getNextAuditCandidate).toHaveBeenCalledWith('/repo');
   });
 });
 
@@ -1827,6 +1967,28 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
 
     release();
     await outer;
+  });
+
+  it('does not enter the cooldown on a code-freeze skip (the freeze never pauses the worker)', async () => {
+    // Frozen + empty plan/intake backlog → reason 'code-freeze' (never
+    // 'no-candidate'): the worker must keep polling so implement/audit
+    // dispatch resumes immediately when the freeze lifts (WL-0MSQ0RPQP00636JY).
+    const { worker, deps } = makeEmptyBacklogWorker({
+      deps: {
+        readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+      },
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + 240_000);
+
+    const result = await worker.tick();
+
+    expect(result.dispatched).toBe(false);
+    expect(worker.paused).toBe(false); // a freeze skip is NOT an empty backlog
+    expect(worker.errorStrikes).toBe(0); // ...and not a CLI-error strike either
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 
   it('re-reads the cooldown setting each tick so a change applies on the next cooldown entry', async () => {
