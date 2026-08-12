@@ -1090,6 +1090,158 @@ describe('Sync Operations', () => {
       expect(merged.stage).toBe('done');
       expect(merged.updatedAt).toBe('2024-06-02T12:00:00.000Z');
     });
+
+    describe('in_review close preservation (WL-0MSPZP7FE009YXPG)', () => {
+      // completed + stage=in_review is a terminal 'ready for review' state
+      // (standard after pi audit). It must be protected from stale remote
+      // clobber just like completed + stage=done.
+
+      const baseItem = (overrides: Partial<WorkItem>): WorkItem => ({
+        id: 'WI-IRV-001',
+        title: 'In review item',
+        description: '',
+        status: 'open',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-06-01T12:00:00.000Z',
+        tags: [],
+        assignee: '',
+        stage: 'idea',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+        ...overrides,
+      });
+
+      describe('different-timestamp merge', () => {
+        it('(a) preserves local completed/in_review when remote open/idea has an older timestamp', () => {
+          const localClosed = baseItem({
+            status: 'completed',
+            stage: 'in_review',
+            updatedAt: '2024-06-01T12:00:00.000Z', // close is the newest change
+          });
+          const remoteStale = baseItem({
+            status: 'open',
+            stage: 'idea',
+            updatedAt: '2024-01-01T00:00:00.000Z', // stale pre-close copy
+          });
+
+          const result = mergeWorkItems([localClosed], [remoteStale]);
+
+          expect(result.merged).toHaveLength(1);
+          expect(result.merged[0].status).toBe('completed');
+          expect(result.merged[0].stage).toBe('in_review');
+        });
+
+        it('(b) preserves remote completed/in_review when local open/idea has an older timestamp', () => {
+          const localStale = baseItem({
+            status: 'open',
+            stage: 'idea',
+            updatedAt: '2024-01-01T00:00:00.000Z', // stale pre-close copy
+          });
+          const remoteClosed = baseItem({
+            status: 'completed',
+            stage: 'in_review',
+            updatedAt: '2024-06-01T12:00:00.000Z', // close is the newest change
+          });
+
+          const result = mergeWorkItems([localStale], [remoteClosed]);
+
+          expect(result.merged).toHaveLength(1);
+          expect(result.merged[0].status).toBe('completed');
+          expect(result.merged[0].stage).toBe('in_review');
+        });
+
+        it('(c) preserves local completed/in_review even when a stale remote open/idea has a NEWER timestamp (the clobber bug)', () => {
+          // Regression for WL-0MSKFFJWD002BQJ5: a stale remote copy of an
+          // item whose updatedAt advanced (e.g. an unrelated edit on another
+          // client) must not silently revert the local in_review close.
+          const localClosed = baseItem({
+            status: 'completed',
+            stage: 'in_review',
+            updatedAt: '2024-06-01T12:00:00.000Z', // older than the stale remote edit
+          });
+          const remoteStaleNewer = baseItem({
+            status: 'open',
+            stage: 'idea',
+            updatedAt: '2024-06-02T09:00:00.000Z', // newer timestamp but never saw the close
+          });
+
+          const result = mergeWorkItems([localClosed], [remoteStaleNewer]);
+
+          expect(result.merged).toHaveLength(1);
+          expect(result.merged[0].status).toBe('completed');
+          expect(result.merged[0].stage).toBe('in_review');
+        });
+
+        it('still respects an intentional reopen: newer local open/idea beats older remote completed/in_review', () => {
+          const localReopened = baseItem({
+            status: 'open',
+            stage: 'idea',
+            updatedAt: '2024-06-02T12:00:00.000Z', // intentional reopen is the newest change
+          });
+          const remoteClosed = baseItem({
+            status: 'completed',
+            stage: 'in_review',
+            updatedAt: '2024-06-01T12:00:00.000Z',
+          });
+
+          const result = mergeWorkItems([localReopened], [remoteClosed]);
+
+          expect(result.merged).toHaveLength(1);
+          expect(result.merged[0].status).toBe('open');
+          expect(result.merged[0].stage).toBe('idea');
+          expect(result.merged[0].updatedAt).toBe('2024-06-02T12:00:00.000Z');
+        });
+      });
+
+      describe('same-timestamp merge', () => {
+        it('(a) preserves local completed/in_review over remote open/idea at the same timestamp', () => {
+          const sameTimestamp = '2024-06-01T12:00:00.000Z';
+          const localClosed = baseItem({
+            status: 'completed',
+            stage: 'in_review',
+            updatedAt: sameTimestamp,
+          });
+          const remoteOpen = baseItem({
+            status: 'open',
+            stage: 'idea',
+            updatedAt: sameTimestamp,
+          });
+
+          const result = mergeWorkItems([localClosed], [remoteOpen]);
+
+          expect(result.merged).toHaveLength(1);
+          expect(result.merged[0].status).toBe('completed');
+          expect(result.merged[0].stage).toBe('in_review');
+        });
+
+        it('(b) preserves remote completed/in_review over local open/idea at the same timestamp', () => {
+          const sameTimestamp = '2024-06-01T12:00:00.000Z';
+          const localOpen = baseItem({
+            status: 'open',
+            stage: 'idea',
+            updatedAt: sameTimestamp,
+          });
+          const remoteClosed = baseItem({
+            status: 'completed',
+            stage: 'in_review',
+            updatedAt: sameTimestamp,
+          });
+
+          const result = mergeWorkItems([localOpen], [remoteClosed]);
+
+          expect(result.merged).toHaveLength(1);
+          expect(result.merged[0].status).toBe('completed');
+          expect(result.merged[0].stage).toBe('in_review');
+        });
+      });
+    });
   });
 
   describe('merge utils', () => {
