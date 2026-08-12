@@ -21,6 +21,8 @@ export default function register(ctx: PluginContext): void {
     .description('Find the next work item to work on based on priority and status (excludes dependency-blocked items by default)')
     .option('-a, --assignee <assignee>', 'Filter by assignee')
     .option('--stage <stage>', 'Filter by stage (idea, intake_complete, plan_complete, in_progress, in_review, done)')
+    .option('--risk <level>', 'Filter by risk level, at-most semantics (low, medium, high, severe). Items with unset risk never match.')
+    .option('--effort <level>', 'Filter by effort level, at-most semantics (xs/extra-small, s/small, m/medium, l/large, xl/extra-large). Items with unset effort never match.')
     .option('--search <term>', 'Search term for fuzzy matching against title, description, and comments')
     .option('-n, --number <n>', 'Number of items to return (default: 1)', '1')
     .option('--prefix <prefix>', 'Override the default prefix')
@@ -32,7 +34,7 @@ export default function register(ctx: PluginContext): void {
     .option('-g, --groups <n>', 'Number of parallel-safe groups to identify (default: 3, only meaningful when -n > 1)', '3')
     .action(async (...rawArgs: any[]) => {
       // Normalize incoming args: commander may pass a Command instance
-      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'stage', 'search', 'number', 'prefix', 'includeBlocked', 'includeInProgress', 'reSort', 'reSortSync', 'recencyPolicy', 'groups']);
+      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'stage', 'search', 'number', 'prefix', 'includeBlocked', 'includeInProgress', 'reSort', 'reSortSync', 'recencyPolicy', 'groups', 'risk', 'effort']);
       let options: any = normalized.options || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
@@ -51,6 +53,26 @@ export default function register(ctx: PluginContext): void {
           process.exit(1);
         }
         options.stage = normalizedStage;
+      }
+
+      // Validate risk/effort levels (at-most ordinal filters). Invalid levels
+      // fail closed at the CLI boundary — the shared filterCandidates pipeline
+      // also fails closed (matches nothing) as a belt-and-suspenders guard.
+      const VALID_RISK_LEVELS = new Set(['low', 'medium', 'high', 'severe', 'critical']);
+      const VALID_EFFORT_LEVELS = new Set(['xs', 'extra-small', 'extrasmall', 's', 'small', 'm', 'medium', 'l', 'large', 'xl', 'extra-large', 'extralarge']);
+      if (options.risk) {
+        const normalizedRisk = options.risk.toLowerCase().trim();
+        if (!VALID_RISK_LEVELS.has(normalizedRisk)) {
+          output.error(`Invalid risk: "${options.risk}". Valid levels: low, medium, high, severe, critical.`, { success: false, error: `Invalid risk: "${options.risk}"` });
+          process.exit(1);
+        }
+      }
+      if (options.effort) {
+        const normalizedEffort = options.effort.toLowerCase().trim().replace(/\s+/g, '-');
+        if (!VALID_EFFORT_LEVELS.has(normalizedEffort)) {
+          output.error(`Invalid effort: "${options.effort}". Valid levels: xs/extra-small, s/small, m/medium, l/large, xl/extra-large.`, { success: false, error: `Invalid effort: "${options.effort}"` });
+          process.exit(1);
+        }
       }
 
       // Auto re-sort unless --no-re-sort is passed. Commander exposes
@@ -89,8 +111,8 @@ export default function register(ctx: PluginContext): void {
       }
 
       const results = (db as any).findNextWorkItems 
-        ? (db as any).findNextWorkItems(count, options.assignee, options.search, includeBlocked, options.stage, includeInProgress) 
-        : [db.findNextWorkItem(options.assignee, options.search, includeBlocked, options.stage, includeInProgress)];
+        ? (db as any).findNextWorkItems(count, options.assignee, options.search, includeBlocked, options.stage, includeInProgress, options.risk, options.effort) 
+        : [db.findNextWorkItem(options.assignee, options.search, includeBlocked, options.stage, includeInProgress, options.risk, options.effort)];
 
       const availableResults = results.filter((result: any) => Boolean(result.workItem));
       const missingCount = Math.max(0, count - availableResults.length);

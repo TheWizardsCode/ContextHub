@@ -261,6 +261,21 @@ export function filterRemoteDataByPrefix(
   };
 }
 
+/**
+ * Terminal (closed) workflow stages. An item with `completed` status and a
+ * terminal stage is a protected close state: it must never be silently
+ * reverted by a stale remote `open`/`in_progress` copy during merge.
+ *
+ * `in_review` is the standard 'ready for review' state after a pi audit — a
+ * closed state until manually reopened (WL-0MSPZP7FE009YXPG).
+ *
+ * Whitelist per approved plan: {done, in_review}. Custom stages are NOT
+ * protected and fall back to normal timestamp/lexicographic resolution.
+ */
+export function isTerminalStage(stage: string | undefined): boolean {
+  return stage === 'done' || stage === 'in_review';
+}
+
 function mergeSameTimestampItems(
   localItem: WorkItem,
   remoteItem: WorkItem,
@@ -299,13 +314,13 @@ function mergeSameTimestampItems(
     const localIsDefault = isDefaultValue(localValue, field, options);
     const remoteIsDefault = isDefaultValue(remoteValue, field, options);
 
-    // Special handling for close state (status=completed + stage=done):
+    // Special handling for close state (status=completed + terminal stage):
     // When one version has a close and the other has a different non-close status/stage,
     // prefer the close values. This prevents an unrelated field change on a different
     // client from silently reverting a close operation.
     if (field === 'status') {
-      const localIsClose = localValue === 'completed' && (localItem.stage === 'done' || remoteItem.stage === 'done');
-      const remoteIsClose = remoteValue === 'completed' && (remoteItem.stage === 'done' || localItem.stage === 'done');
+      const localIsClose = localValue === 'completed' && (isTerminalStage(localItem.stage) || isTerminalStage(remoteItem.stage));
+      const remoteIsClose = remoteValue === 'completed' && (isTerminalStage(remoteItem.stage) || isTerminalStage(localItem.stage));
       if (localIsClose && !remoteIsClose) {
         (merged as any)[field] = localValue;
         mergedFields.push(`${field} (close preserved from local)`);
@@ -334,8 +349,8 @@ function mergeSameTimestampItems(
       }
     }
     if (field === 'stage') {
-      const localIsCloseStage = localValue === 'done' && (localItem.status === 'completed' || remoteItem.status === 'completed');
-      const remoteIsCloseStage = remoteValue === 'done' && (remoteItem.status === 'completed' || localItem.status === 'completed');
+      const localIsCloseStage = isTerminalStage(localValue as string) && (localItem.status === 'completed' || remoteItem.status === 'completed');
+      const remoteIsCloseStage = isTerminalStage(remoteValue as string) && (remoteItem.status === 'completed' || localItem.status === 'completed');
       if (localIsCloseStage && !remoteIsCloseStage) {
         (merged as any)[field] = localValue;
         mergedFields.push(`${field} (close preserved from local)`);
@@ -486,7 +501,7 @@ function mergeDifferentTimestampItems(
         continue;
       }
 
-      // Special handling for close state (status=completed + stage=done):
+      // Special handling for close state (status=completed + terminal stage):
       // When one version has a close and the other has a different non-close status/stage,
       // prefer the close values. This prevents an unrelated field change on a different
       // client from silently reverting a close operation.
@@ -495,8 +510,8 @@ function mergeDifferentTimestampItems(
       // only applied when isRemoteNewer is true. If local is newer, the local intent
       // (e.g., reopening a closed item) is respected rather than the remote close.
       if (field === 'status') {
-        const localIsClose = localValue === 'completed' && (localItem.stage === 'done' || remoteItem.stage === 'done');
-        const remoteIsClose = remoteValue === 'completed' && (remoteItem.stage === 'done' || localItem.stage === 'done');
+        const localIsClose = localValue === 'completed' && (isTerminalStage(localItem.stage) || isTerminalStage(remoteItem.stage));
+        const remoteIsClose = remoteValue === 'completed' && (isTerminalStage(remoteItem.stage) || isTerminalStage(localItem.stage));
         if (localIsClose && !remoteIsClose) {
           (merged as any)[field] = localValue;
           mergedFields.push(`${field} (close preserved from local)`);
@@ -531,8 +546,8 @@ function mergeDifferentTimestampItems(
         }
       }
       if (field === 'stage') {
-        const localIsCloseStage = localValue === 'done' && (localItem.status === 'completed' || remoteItem.status === 'completed');
-        const remoteIsCloseStage = remoteValue === 'done' && (remoteItem.status === 'completed' || localItem.status === 'completed');
+        const localIsCloseStage = isTerminalStage(localValue as string) && (localItem.status === 'completed' || remoteItem.status === 'completed');
+        const remoteIsCloseStage = isTerminalStage(remoteValue as string) && (remoteItem.status === 'completed' || localItem.status === 'completed');
         if (localIsCloseStage && !remoteIsCloseStage) {
           (merged as any)[field] = localValue;
           mergedFields.push(`${field} (close preserved from local)`);

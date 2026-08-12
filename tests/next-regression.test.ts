@@ -2004,4 +2004,109 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
       }
     });
   });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Regression: Stage filter skips blocker surfacing (WL-0MSP1XJSO007LE3K)
+  // RCA of RW-0MSAD6FX7001AAV9: the herdr plan tier dispatches /skill:plan
+  // on whatever `wl next --stage intake_complete --json` returns. Stage 3
+  // (non-critical blocker surfacing) ran even with a stage filter and
+  // surfaced a plan_complete epic as the dependency blocker of an
+  // intake_complete/blocked child, so /skill:plan was dispatched on the
+  // epic every downtime cycle. Stage 2 (critical escalation) already has a
+  // `!stage` guard; Stage 3 must mirror it.
+  // ─────────────────────────────────────────────────────────────────────
+  describe('stage filter skips blocker surfacing (WL-0MSP1XJSO007LE3K)', () => {
+    it('should NOT surface a plan_complete epic blocker under --stage intake_complete', () => {
+      // 6abcb44e-like RCA state (RW-0MSAD6FX7001AAV9): a plan_complete/open
+      // epic (sortIndex 200) is the dependency blocker of an
+      // intake_complete/blocked high-priority child that also depends on an
+      // open intake_complete item. The open intake_complete item keeps Stage
+      // 3's `filteredItems.length > 0` gate satisfied, so previously the epic
+      // was surfaced with 'Blocking issue for high-priority item ...' — the
+      // epic must never be returned by a stage-filtered next.
+      const epic = db.create({
+        title: 'Plan complete epic',
+        status: 'open',
+        stage: 'plan_complete',
+        issueType: 'epic',
+        sortIndex: 200,
+      });
+      const blockedChild = db.create({
+        title: 'Intake child blocked',
+        status: 'blocked',
+        stage: 'intake_complete',
+        priority: 'high',
+        parentId: epic.id,
+      });
+      const otherDep = db.create({
+        title: 'Other dependency (intake open)',
+        status: 'open',
+        stage: 'intake_complete',
+        priority: 'medium',
+        sortIndex: 400,
+      });
+      db.addDependencyEdge(blockedChild.id, epic.id);
+      db.addDependencyEdge(blockedChild.id, otherDep.id);
+
+      const result = db.findNextWorkItem(undefined, undefined, false, 'intake_complete');
+      // The plan_complete epic must never be surfaced by a stage-filtered next;
+      // the only intake_complete open candidate is otherDep.
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(otherDep.id);
+      expect(result.workItem!.stage).toBe('intake_complete');
+    });
+
+    it('should return an intake_complete item, not the out-of-stage blocker', () => {
+      // Same epic/blocked-child shape as the RCA, plus a real intake_complete
+      // open item. The stage filter must select the intake_complete item
+      // rather than surfacing the plan_complete epic as a blocker.
+      const epic = db.create({
+        title: 'Plan complete epic',
+        status: 'open',
+        stage: 'plan_complete',
+        issueType: 'epic',
+        sortIndex: 200,
+      });
+      const blockedChild = db.create({
+        title: 'Intake child blocked',
+        status: 'blocked',
+        stage: 'intake_complete',
+        priority: 'high',
+        parentId: epic.id,
+      });
+      db.addDependencyEdge(blockedChild.id, epic.id);
+      const intakeItem = db.create({
+        title: 'Intake open item',
+        status: 'open',
+        stage: 'intake_complete',
+        priority: 'low',
+      });
+
+      const result = db.findNextWorkItem(undefined, undefined, false, 'intake_complete');
+      expect(result.workItem).not.toBeNull();
+      expect(result.workItem!.id).toBe(intakeItem.id);
+      expect(result.workItem!.stage).toBe('intake_complete');
+    });
+
+    it('should skip critical escalation when stage filter is active (existing behavior)', () => {
+      // AC: critical escalation is already skipped with --stage (Stage 2
+      // guard). Lock it in: a critical intake_complete item whose blocker is
+      // at another stage must not surface that blocker under a stage filter.
+      const blocker = db.create({
+        title: 'Critical blocker',
+        status: 'open',
+        stage: 'plan_complete',
+      });
+      const criticalBlocked = db.create({
+        title: 'Critical blocked intake',
+        status: 'blocked',
+        stage: 'intake_complete',
+        priority: 'critical',
+      });
+      db.addDependencyEdge(criticalBlocked.id, blocker.id);
+
+      const result = db.findNextWorkItem(undefined, undefined, false, 'intake_complete');
+      expect(result.workItem).toBeNull();
+    });
+  });
 });

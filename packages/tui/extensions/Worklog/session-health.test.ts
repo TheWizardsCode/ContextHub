@@ -1119,11 +1119,76 @@ describe('session-health', () => {
       );
 
       expect(lines.length).toBe(2);
-      // Format: "<alias> → <provider/model>  │  <preview>" (no quotes)
-      expect(lines[1]).toContain('code → openai/gpt-4');
+      // Format: "<preview>  │  <alias> → <provider/model>" — command preview on
+      // the left, model identifier on the right (no quotes).
       expect(lines[1]).toContain('Fix the bug by adding validation');
+      expect(lines[1]).toContain('code → openai/gpt-4');
+      expect(lines[1]).toContain('Fix the bug by adding validation  │  code → openai/gpt-4');
       expect(lines[1]).not.toContain('"');
       expect(lines[1]).toContain('[dim');
+    });
+
+    it('gives the command preview the majority of the line width', () => {
+      mocks.mockGetResolvedModel.mockReturnValue('openai/gpt-4');
+      mocks.mockGetSelectedModel.mockReturnValue('code');
+
+      const longPrompt =
+        'Implement the authentication flow with refresh token rotation and session persistence across restarts';
+      const lines = fabricateFooterLines(
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } },
+        longPrompt,
+        500,
+      );
+
+      expect(lines.length).toBe(2);
+      // Command budget = width(500) − model(17) − separator(5) = 478, so the
+      // prompt fits untruncated and the model sits after the separator at the
+      // end of the line.
+      expect(lines[1]).toContain(`${longPrompt}  │  code → openai/gpt-4`);
+
+      // Measure the two parts around the │ separator: the command part must
+      // be (a) the full untruncated prompt and (b) longer than the model part.
+      // (The mock theme wraps the label as `[dim` + label + `]`.)
+      const content = lines[1].replace(/^\[dim/, '').replace(/\]$/, '');
+      const sepIndex = content.indexOf('│');
+      const commandPart = content.slice(0, sepIndex).trim();
+      const modelPart = content.slice(sepIndex + 1).trim();
+      expect(commandPart).toBe(longPrompt);
+      expect(modelPart).toBe('code → openai/gpt-4');
+      expect(commandPart.length).toBeGreaterThan(modelPart.length);
+    });
+
+    it('caps the model identifier width so the command preview gets the space', () => {
+      mocks.mockGetResolvedModel.mockReturnValue('openai/gpt-4-abcdefghijklmnopqrstuvwxyz');
+      mocks.mockGetSelectedModel.mockReturnValue('code');
+
+      const lines = fabricateFooterLines(
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } },
+        'Fix the bug',
+        500,
+      );
+
+      // modelPart = "code → openai/gpt-4-abcdefghijklmnopqrstuvwxyz" (46 cols)
+      // → capped to 30 visible columns; the rest of the line goes to the prompt.
+      expect(lines.length).toBe(2);
+      expect(lines[1]).toContain('Fix the bug  │  code → openai/gpt-4-abcdefghij');
+      expect(lines[1]).not.toContain('qrstuvwxyz');
+    });
+
+    it('never overflows the line at very narrow widths', () => {
+      mocks.mockGetResolvedModel.mockReturnValue('openai/gpt-4-abcdefghijklmnopqrstuvwxyz');
+      mocks.mockGetSelectedModel.mockReturnValue('code');
+
+      // Width 20 < model cap (30) + separator (5): the command budget is 0,
+      // the label overflows, and the final clamp keeps the line at 20 cols.
+      const lines = fabricateFooterLines(
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } },
+        'Fix the bug by adding validation',
+        20,
+      );
+
+      expect(lines.length).toBe(2);
+      expect(lines[1].length).toBeLessThanOrEqual(20);
     });
 
     it('truncates long initial prompt preview', () => {
@@ -1132,7 +1197,8 @@ describe('session-health', () => {
 
       const longPrompt = 'Write a comprehensive test suite for the authentication module including all edge cases like token expiry and refresh';
       // Use a narrow terminal width (120) to trigger truncation
-      // With width=120, reserved=38, available=max(15, 120-38)=82, prompt length=151 > 82
+      // With width=120, model="code → (resolving)" (19 cols), separator=5,
+      // available=max(15, 120-19-5)=96, prompt length=151 > 96
       const lines = fabricateFooterLines(
         { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } },
         longPrompt,
@@ -1140,9 +1206,11 @@ describe('session-health', () => {
       );
 
       expect(lines.length).toBe(2);
-      // Should show alias + truncated prompt with ...
-      expect(lines[1]).toContain('code');
-      expect(lines[1]).toContain('...');
+      // Truncated prompt with ... followed by the model identifier after the
+      // separator; the final clamp keeps the line at most `width` columns
+      // (may clip the model tail at very narrow widths — documented edge case).
+      expect(lines[1]).toContain('...  │  code →');
+      expect(lines[1].length).toBeLessThanOrEqual(120);
       expect(lines[1]).toContain('[dim');
     });
 

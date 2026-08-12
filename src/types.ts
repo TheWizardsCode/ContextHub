@@ -24,4 +24,5 @@ export {
   type ConflictDetail,
   type NextWorkItemResult,
   type ShowJsonOutput,
+  type DemotedParent,
 } from '@worklog/shared/types';

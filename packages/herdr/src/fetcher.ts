@@ -499,16 +499,35 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
 }
 
 /**
+ * Status set used per stage by the stage-filtered worklist fetch.
+ *
+ * Most stages show only open items (`status=open`) — the "every open item
+ * in the stage" rule from WL-0MSDT8X1V003206G. The in_review stage is the
+ * exception (WL-0MSKCRX730052IIW): per the project workflow, advancing an
+ * item to in_review sets its status to `completed` (or leaves it
+ * `in-progress` while it is being re-worked after review feedback), so
+ * restricting to `status=open` would hide the entire review queue. `open`
+ * is included for robustness (no in_review item carries it today).
+ */
+const STAGE_STATUS: Record<string, string> = {
+  in_review: 'completed,in-progress,open',
+};
+
+/**
  * Fetch work items filtered by stage (via `wl list`).
- * Open items only (WL-0MSDT8X1V003206G): the stage-filtered worklist shows
- * every open root item in the stage — items with status `blocked`,
- * `in-progress`, or `completed` are excluded even when their stage matches.
+ * Status per stage (WL-0MSKCRX730052IIW): the in_review stage fetches items
+ * with status `completed`, `in-progress`, or `open` — in_review items carry
+ * `completed`/`in-progress` status per the project workflow. All other
+ * stages fetch open items only (WL-0MSDT8X1V003206G): items with status
+ * `blocked`, `in-progress`, or `completed` are excluded even when their
+ * stage matches.
  * Root-only (WL-0MS964SIA0057ABR): stage-filtered top-level lists hide
  * child items; children remain reachable via expand (wl list --parent).
  * Results are ordered by the standard list order (sortIndex).
  */
 export async function fetchItemsByStage(stage: string): Promise<WorkItem[]> {
-  const output = await runWl(['list', '--status', 'open', '--stage', stage, '--root-only']);
+  const status = STAGE_STATUS[stage] ?? 'open';
+  const output = await runWl(['list', '--status', status, '--stage', stage, '--root-only']);
   const payload = extractJson(output);
   return extractItems(payload);
 }

@@ -8,6 +8,13 @@
  * is bounded — only the most recent DOWNTIME_LOG_MAX_ENTRIES entries are
  * kept — so it rolls instead of growing unbounded over a long-lived plugin
  * pane. Callers must treat failures as fail-closed (never crash the worker).
+ *
+ * The log doubles as the dispatched-marker source for the audit tier
+ * (WL-0MSLIY8ZR004QUSY): `readDowntimeLogEntries` + `auditDispatchedItemIds`
+ * let the audit-tier selection exclude items the downtime worker has already
+ * dispatched for `/skill:audit`, closing the re-selection loop where a
+ * dispatched run reverts the item to completed/in_review without a fresh
+ * audit.
  */
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -18,6 +25,90 @@ export const DOWNTIME_LOG_FILE = 'downtime-dispatches.log';
 
 /** Rolling bound: keep at most this many entries in the log file. */
 export const DOWNTIME_LOG_MAX_ENTRIES = 100;
+
+/**
+ * One parsed line of the downtime dispatch log: either a dispatch event
+ * (itemId/kind/dispatchedAt/title) or a persistent-error event
+ * (cwd/at/message, three-strike trail). All fields optional so malformed
+ * or foreign lines never break parsing.
+ */
+export interface DowntimeLogEntry {
+  itemId?: string;
+  kind?: string;
+  dispatchedAt?: string;
+  cwd?: string;
+  title?: string;
+  at?: string;
+  message?: string;
+}
+
+/**
+ * Read the bounded rolling dispatch log at `<cwd>/.worklog/downtime-dispatches.log`.
+ *
+ * FAIL-SAFE by contract (WL-0MSLIY8ZR004QUSY): a missing or unreadable log
+ * yields `[]` (a missing log is the normal first-run state — treating it as
+ * empty keeps audit-tier dispatch working on a fresh worklog, and a
+ * corrupted log must not silently disable the audit tier either), and
+ * malformed JSONL lines are skipped without throwing. This function never
+ * throws.
+ */
+export async function readDowntimeLogEntries(cwd: string): Promise<DowntimeLogEntry[]> {
+  const file = join(cwd, '.worklog', DOWNTIME_LOG_FILE);
+  let raw: string;
+  try {
+    raw = await readFile(file, 'utf8');
+  } catch {
+    return []; // missing or unreadable → empty (fail-safe)
+  }
+  const entries: DowntimeLogEntry[] = [];
+  for (const line of raw.split('\n')) {
+    if (line.trim() === '') continue;
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (typeof parsed === 'object' && parsed !== null) {
+        entries.push(parsed as DowntimeLogEntry);
+      }
+    } catch {
+      // malformed line → skip (fail-safe)
+    }
+  }
+  return entries;
+}
+
+/**
+ * Build the set of itemIds the downtime worker has already dispatched for
+ * `/skill:audit` (`kind === 'audit'` entries only). Plan/intake markers are
+ * scoped to their own tiers and must NOT suppress audit-tier selection
+ * (audit-tier-only scope guard, WL-0MSLIY8ZR004QUSY). Entries without an
+ * itemId (e.g. persistent-error events) are ignored.
+ */
+export function auditDispatchedItemIds(entries: DowntimeLogEntry[]): Set<string> {
+  const ids = new Set<string>();
+  for (const e of entries) {
+    if (e.kind === 'audit' && typeof e.itemId === 'string' && e.itemId.length > 0) {
+      ids.add(e.itemId);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Build the set of itemIds the downtime worker has already dispatched for
+ * `/skill:implement` (`kind === 'implement'` entries only). Audit/plan/
+ * intake markers are scoped to their own tiers and must NOT suppress
+ * implement-tier selection (implement-tier-only scope guard,
+ * WL-0MSMAYPQP001FLR6 AC6). Entries without an itemId (e.g. persistent-error
+ * events) are ignored.
+ */
+export function implementDispatchedItemIds(entries: DowntimeLogEntry[]): Set<string> {
+  const ids = new Set<string>();
+  for (const e of entries) {
+    if (e.kind === 'implement' && typeof e.itemId === 'string' && e.itemId.length > 0) {
+      ids.add(e.itemId);
+    }
+  }
+  return ids;
+}
 
 /**
  * Append one entry (a JSONL line) to `<cwd>/.worklog/downtime-dispatches.log`,

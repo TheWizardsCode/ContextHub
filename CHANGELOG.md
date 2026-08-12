@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.0.10 (2026-08-12)
+### Features
+- Idle detection now only counts local activity, so remote-only traffic won't block downtime dispatch. (WL-0MSL2ZQIF006QB4Q)
+- Press P n to instantly open a fresh Pi session with a blank prompt. (WL-0MSKIL6P00045UOC)
+- Show a preview of the selected work item's description in the list panel. (WL-0MSFZKQL700381P3)
+- Work items now show a Related Docs row listing all linked markdown files, and you can open any of them from the detail view. (WL-0MSGTLSUT002NF29)
+- Worklist rows now show an agent status icon so you can see at a glance which items have active agents. (WL-0MSBQUJQX005RAT9)
+- Command input forms now display as a full-width page instead of a dialog box. (WL-0MSFZUS4Z006IRI3)
+- Press S in the worklist to start a release — type "ship" to confirm, Esc to cancel. (WL-0MSGG5N5Z0074TLY)
+- Markdown descriptions and episode files now display with full formatting, including tables, lists, and styled text. (WL-0MSKFFJWD002BQJ5)
+- Footer now shows the command on the left and model on the right, giving the command more space. (WL-0MSHENVKR002HZT5)
+- Docs work items can now be implemented with the "i" shortcut. (WL-0MSNMPCHZ002SIQJ)
+### Bug Fixes
+- Work list now stays live when you're working in another pane of the same tab. (WL-0MSJNJPRM009RM35)
+- The in_review filter now shows all items awaiting review instead of none. (WL-0MSKCRX730052IIW)
+- Fixed a crash when opening the worklist pane. (WL-0MSNULGSM00018I4)
+- Whitespace-only edits no longer reset item timestamps. (WL-0MSORD6HC005QVZX)
+- `wl next --stage` now only returns items at that stage, even when blockers exist. (WL-0MSP1XJSO007LE3K)
+- Fixed duplicate audit sessions by preventing the same work item from being auto-dispatched twice. (WL-0MSLIY8ZR004QUSY)
+- Sync no longer reverts completed items awaiting review to open status. (WL-0MSPZP7FE009YXPG)
+- Downtime tasks now pause new code and audits during release freezes, resuming automatically when the freeze lifts. (WL-0MSQ0RPQP00636JY)
+- Fixed cases where completed audits didn't update the stage/status. (WL-0MSN7OUOI005F6CE)
+### Other
+- Fixed overnight downtime dispatches not firing during idle windows. (WL-0MSK9TUCA00206M7)
+- Cleaned up stray build files so the game runs smoother and updates install correctly. (WL-0MSOKOI4J0046GE5)
+
 ## v1.0.9 (2026-08-08)
 ### Features
 - Herdr to consume local LLM in downtime (WL-0MSF49FMW009M06K)

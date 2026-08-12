@@ -171,13 +171,14 @@ describe('handleKeypress edge cases', () => {
     expect(state.detailItem?.id).toBe('WL-001');
   });
 
-  it('maps uppercase S to the sync action', () => {
+  it('does not map uppercase S to the sync action anymore (manual sync removed, WL-0MSGG5N5Z0074TLY)', () => {
     const items = [makeItem('WL-001')];
     const state = new WorkItemListState(items, defaultTermSize);
-    // 'S' (uppercase) triggers a manual sync; must not be treated as quit or
-    // an unrecognized key.
+    // The manual-sync 'S' binding was removed; S now resolves via the
+    // ShortcutRegistry (Ship It confirmation dialog). Without a registry it
+    // is an unrecognized key (null), never 'sync' and never quit.
     const action = handleKeypress(state, 'S', defaultTermSize);
-    expect(action).toBe('sync');
+    expect(action).toBeNull();
   });
 });
 

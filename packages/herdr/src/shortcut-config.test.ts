@@ -118,9 +118,9 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     expect(entry?.command).toBe('/skill:implement <id>');
   });
 
-  it('restricts the bundled code-workflow chords n/p/i to code issue types', () => {
+  it('restricts the bundled code-workflow chords n/p/i to code and docs issue types', () => {
     const registry = loadShortcutConfig();
-    const codeTypes = ['bug', 'feature', 'task', 'chore', 'epic'];
+    const codeTypes = ['bug', 'docs', 'feature', 'task', 'chore', 'epic'];
     for (const chord of ['n', 'p', 'i']) {
       const entry = registry.lookupChordEntry([chord], 'list');
       expect(entry?.workItemTypes).toEqual(codeTypes);
@@ -137,6 +137,29 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     expect(entry).toBeDefined();
     expect(entry?.command).toBe('/wl');
     expect(entry?.label).toBe('sprint');
+  });
+
+  it('registers the S ship-it chord to /skill:ship release (WL-0MSGG5N5Z0074TLY)', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['S'], 'list', undefined, false);
+    expect(entry).toBeDefined();
+    expect(entry?.command).toBe('/skill:ship release');
+    expect(entry?.label).toBe('ship it');
+    expect(entry?.view).toBe('both');
+    // NOT code_freeze-blocked: the ship skill gates itself, so the
+    // shortcut stays available during a freeze (confirmed decision).
+    expect(entry?.codeFreeze).toBeUndefined();
+    // S is distinct from lowercase s (Search) — case-sensitive matching.
+    const search = registry.lookupChordEntry(['s'], 'list', undefined, false);
+    expect(search?.command).toBe('!!wl search <search_term>');
+    expect(registry.lookupChordEntry(['s'], 'list', undefined, false)?.command)
+      .not.toBe('/skill:ship release');
+  });
+
+  it('keeps the S ship-it chord visible during a Code Freeze', () => {
+    const registry = loadShortcutConfig();
+    expect(registry.lookupChordEntry(['S'], 'list', undefined, true)).toBeDefined();
+    expect(registry.getEntriesForStage(undefined, true).some(e => e.chord[0] === 'S')).toBe(true);
   });
 });
 
@@ -332,7 +355,7 @@ describe('ShortcutRegistry — issue-type filtering', () => {
     command: '/skill:implement <id>',
     view: 'both',
     label: 'implement',
-    workItemTypes: ['bug', 'feature', 'task', 'chore', 'epic'],
+    workItemTypes: ['bug', 'docs', 'feature', 'task', 'chore', 'epic'],
   };
 
   const untypedEntry: ShortcutEntry = {
@@ -354,12 +377,11 @@ describe('ShortcutRegistry — issue-type filtering', () => {
     expect(registry.lookupChord(['w'], 'list', undefined, false, 'docs')).toBeUndefined();
   });
 
-  it('resolves a code-gated chord only for code item types', () => {
-    for (const t of ['bug', 'feature', 'task', 'chore', 'epic']) {
+  it('resolves a code-gated chord only for code and docs item types', () => {
+    for (const t of ['bug', 'docs', 'feature', 'task', 'chore', 'epic']) {
       expect(registry.lookupChord(['i'], 'list', undefined, false, t)).toBe('/skill:implement <id>');
     }
     expect(registry.lookupChord(['i'], 'list', undefined, false, 'podcast')).toBeUndefined();
-    expect(registry.lookupChord(['i'], 'list', undefined, false, 'docs')).toBeUndefined();
   });
 
   it('keeps untyped chords available on every type', () => {
@@ -511,5 +533,94 @@ describe('loadShortcutConfig — project-local shortcuts.json overrides', () => 
     expect(matches[0].command).toBe('/prompt:second');
     // Merge order is stable across runs.
     expect(JSON.stringify(a.getEntries())).toBe(JSON.stringify(b.getEntries()));
+  });
+});
+
+// ── w chord split: per-sub-chord stage gating (OSL-0MSKVB5K6008XFOQ) ──
+// The single-key `w` write-script chord becomes a chord leader with three
+// sub-chords: w-r (write review), w-s (write script), w-b (write both).
+// w-r/w-b require an existing script, so they are gated to script-bearing
+// stages (plan_complete / in_review / done); w-s keeps today's four-stage
+// gate. All three stay gated to podcast-typed items.
+
+describe('loadShortcutConfig — w chord split stage gating', () => {
+  let tempRoots: string[] = [];
+
+  function makeLocalRoot(files: Record<string, string>): string {
+    const dir = mkdtempSync(join(tmpdir(), 'herdr-w-chord-'));
+    tempRoots.push(dir);
+    for (const [rel, content] of Object.entries(files)) {
+      writeFileSync(join(dir, rel), content);
+    }
+    return dir;
+  }
+
+  afterEach(() => {
+    for (const dir of tempRoots) {
+      try { rmSync(dir, { recursive: true }); } catch { /* ignore */ }
+    }
+    tempRoots = [];
+    vi.restoreAllMocks();
+  });
+
+  const wEntries = [
+    { chord: ['w', 'r'], command: '/skill:wiki-podcast-script --review <podcast-review>', view: 'both', label: 'write review', stages: ['plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+    { chord: ['w', 's'], command: '/skill:wiki-podcast-script <podcast-target>', view: 'both', label: 'write script', stages: ['intake_complete', 'plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+    { chord: ['w', 'b'], command: '/skill:wiki-podcast-script --review-rewrite <podcast-both>', view: 'both', label: 'write both', stages: ['plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+  ];
+
+  it('loads all three w sub-chords and no single-key w', () => {
+    const root = makeLocalRoot({ 'shortcuts.json': JSON.stringify(wEntries) });
+    const registry = loadShortcutConfig(root);
+    expect(registry.lookupChordEntry(['w'], 'list')).toBeUndefined();
+    expect(registry.lookupChordEntry(['w', 'r'], 'list')).toBeDefined();
+    expect(registry.lookupChordEntry(['w', 's'], 'list')).toBeDefined();
+    expect(registry.lookupChordEntry(['w', 'b'], 'list')).toBeDefined();
+  });
+
+  it('w-r and w-b are visible only at script-bearing stages (plan_complete, in_review, done)', () => {
+    const root = makeLocalRoot({ 'shortcuts.json': JSON.stringify(wEntries) });
+    const registry = loadShortcutConfig(root);
+    for (const chord of [['w', 'r'], ['w', 'b']]) {
+      for (const stage of ['plan_complete', 'in_review', 'done']) {
+        expect(registry.lookupChordEntry(chord as ['w', 'r'], 'list', stage)).toBeDefined();
+      }
+      for (const stage of ['idea', 'intake_complete', 'in_progress']) {
+        expect(registry.lookupChordEntry(chord as ['w', 'r'], 'list', stage)).toBeUndefined();
+      }
+    }
+  });
+
+  it('w-s keeps the four-stage gate (intake_complete through done)', () => {
+    const root = makeLocalRoot({ 'shortcuts.json': JSON.stringify(wEntries) });
+    const registry = loadShortcutConfig(root);
+    for (const stage of ['intake_complete', 'plan_complete', 'in_review', 'done']) {
+      expect(registry.lookupChordEntry(['w', 's'], 'list', stage)).toBeDefined();
+    }
+    for (const stage of ['idea', 'in_progress']) {
+      expect(registry.lookupChordEntry(['w', 's'], 'list', stage)).toBeUndefined();
+    }
+  });
+
+  it('all three sub-chords resolve at the script-bearing stages', () => {
+    const root = makeLocalRoot({ 'shortcuts.json': JSON.stringify(wEntries) });
+    const registry = loadShortcutConfig(root);
+    expect(registry.lookupChordEntry(['w', 'r'], 'list', 'plan_complete')?.command)
+      .toBe('/skill:wiki-podcast-script --review <podcast-review>');
+    expect(registry.lookupChordEntry(['w', 's'], 'list', 'plan_complete')?.command)
+      .toBe('/skill:wiki-podcast-script <podcast-target>');
+    expect(registry.lookupChordEntry(['w', 'b'], 'list', 'plan_complete')?.command)
+      .toBe('/skill:wiki-podcast-script --review-rewrite <podcast-both>');
+  });
+
+  it('all three w sub-chords stay gated to podcast-typed items', () => {
+    const root = makeLocalRoot({ 'shortcuts.json': JSON.stringify(wEntries) });
+    const registry = loadShortcutConfig(root);
+    for (const chord of [['w', 'r'], ['w', 's'], ['w', 'b']]) {
+      const entry = registry.lookupChordEntry(chord as ['w', 'r'], 'list');
+      expect(entry?.workItemTypes).toEqual(['podcast']);
+      // Hidden on non-podcast types.
+      expect(registry.lookupChordEntry(chord as ['w', 'r'], 'list', undefined, false, 'bug')).toBeUndefined();
+    }
   });
 });
