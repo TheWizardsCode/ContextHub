@@ -673,6 +673,44 @@ describe('dispatchChordCommand', () => {
     const result = dispatchChordCommand('unknown command', state);
     expect(result).toBe(false);
   });
+
+  it('routes /skill:ship release through onCommand with no <id> substitution (WL-0MSGG5N5Z0074TLY)', () => {
+    const state = new WorkItemListState([makeItem('WL-TEST-1')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = dispatchChordCommand('/skill:ship release', state, onCommand);
+    expect(result).toBe(true);
+    // The release command is a global dev→main release — the command is
+    // routed verbatim, never rewritten with the selected item's id.
+    expect(onCommand).toHaveBeenCalledWith('/skill:ship release', undefined);
+    expect(onCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes /skill:ship release even with no item selected (global command)', () => {
+    const state = new WorkItemListState([], TERM_80x24);
+    const onCommand = vi.fn();
+    const result = dispatchChordCommand('/skill:ship release', state, onCommand);
+    expect(result).toBe(true);
+    expect(onCommand).toHaveBeenCalledWith('/skill:ship release', undefined);
+  });
+
+  it('executeResolvedCommand dispatches /skill:ship release via the standard path', () => {
+    const state = new WorkItemListState([makeItem('WL-TEST-1')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/skill:ship release', state, onCommand);
+    expect(result).toBe('dispatched');
+    expect(onCommand).toHaveBeenCalledWith('/skill:ship release', undefined);
+  });
+
+  it('does not block /skill:ship release during a Code Freeze (ship skill gates itself)', () => {
+    const state = new WorkItemListState([makeItem('WL-TEST-1')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/skill:ship release', state, onCommand, true);
+    expect(result).toBe('dispatched');
+    expect(onCommand).toHaveBeenCalledWith('/skill:ship release', undefined);
+  });
 });
 
 describe('fetchItemsForView — stage-filtered fetch', () => {
@@ -1828,6 +1866,28 @@ describe('handleKeypress — metadata scroll keys', () => {
     state.selectedIndex = 0;
     expect(handleKeypress(state, '\x1b[6~', TERM_80x24)).toBe('pagedown');
     expect(state.selectedIndex).toBe(13);
+  });
+});
+
+// ── Ship It / manual-sync removal (WL-0MSGG5N5Z0074TLY) ────────────────
+// The manual `wl sync` binding on `S` is removed; `S` now resolves through
+// the ShortcutRegistry (Ship It dialog) like every other shortcut, and stays
+// distinct from lowercase `s` (Search).
+
+describe('keyToAction — manual sync binding removed', () => {
+  it('does not map S to the sync action anymore', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    // No registry passed: S is not a navigation key, so handleKeypress
+    // must return null (previously 'sync').
+    expect(handleKeypress(state, 'S', TERM_80x24)).toBeNull();
+  });
+
+  it('keeps s and other navigation keys unchanged', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    // s is not a navigation key either (resolved via registry → Search form).
+    expect(handleKeypress(state, 's', TERM_80x24)).toBeNull();
+    expect(handleKeypress(state, 'q', TERM_80x24)).toBe('quit');
+    expect(handleKeypress(state, 'j', TERM_80x24)).toBe('down');
   });
 });
 

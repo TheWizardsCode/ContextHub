@@ -39,10 +39,19 @@ import {
   FormState,
   substituteIdentifiers,
 } from './form-dialog.js';
+import { ShipItDialogState, overlayShipItDialog } from './ship-it-dialog.js';
 import { extractFilePaths } from './grouping.js';
 import { renderMarkdown, renderMarkdownViewer } from './md-viewer.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
+
+/**
+ * The dev→main release command dispatched by the Ship It shortcut (`S`,
+ * WL-0MSGG5N5Z0074TLY). Global release — receives NO work item id. The
+ * command must be typed as `ship` + Enter in the confirmation dialog
+ * before it is dispatched via the standard command-routing path.
+ */
+export const SHIP_IT_COMMAND = '/skill:ship release';
 
 export const STAGES = [
   'idea',
@@ -1511,7 +1520,7 @@ export function getChordHelpHints(registry: ShortcutRegistry | undefined, codeFr
 // ── Keyboard handling ─────────────────────────────────────────────────
 
 export type KeyAction = 'up' | 'down' | 'pageup' | 'pagedown' | 'select'
-  | 'back' | 'filter' | 'refresh' | 'sync' | 'quit' | 'first' | 'last'
+  | 'back' | 'filter' | 'refresh' | 'quit' | 'first' | 'last'
   | 'meta-up' | 'meta-down'
   | 'chord-start' | 'chord-complete' | 'chord-cancel'
   | 'toggle-expand' | null;
@@ -1556,14 +1565,15 @@ export function keyToAction(key: string): KeyAction {
       return 'back';
     // '/' filter prompt removed — use f-* chords instead
     // 'r' is a single-key Producer Review shortcut — resolved via ShortcutRegistry
+    // 'S' is the Ship It shortcut — resolved via ShortcutRegistry (opens the
+    // typed-confirmation dialog, WL-0MSGG5N5Z0074TLY). The manual-sync 'S'
+    // binding was removed; auto-sync on the timer is unaffected.
     case 'q':
       return 'quit';
     case 'g':
       return 'first';
     case 'G':
       return 'last';
-    case 'S':
-      return 'sync';
     case 'm':
       return 'meta-down';
     case 'M':
@@ -2336,6 +2346,13 @@ export function dispatchChordCommand(
   if (command.startsWith('/skill:audit')) {
     return resolveAndRouteCommand(command, state, onCommand, model);
   }
+  if (command.startsWith('/skill:ship')) {
+    // Dev→main release (Ship It shortcut, WL-0MSGG5N5Z0074TLY). Global
+    // release — no <id> substitution; routed to the agent channel like
+    // other /skill:* commands. NOT blocked during a Code Freeze (the ship
+    // skill gates itself); only the confirmation dialog precedes dispatch.
+    return resolveAndRouteCommand(command, state, onCommand, model);
+  }
 
   // ── Agent workflow commands ─────────────────────────────
   if (command.startsWith('/intake')) {
@@ -2498,9 +2515,9 @@ export async function resolvePodcastTarget(
  *
  * Routing priority:
  * 1. {@link dispatchChordCommand} — handles `/wl <stage>` (internal filter),
- *    `/skill:implement`, `/skill:audit`, `/intake`, `/plan`, `!!wl reviewed`,
- *    and compound `&& wl audit-set` commands (resolves `<id>` and routes to
- *    `onCommand`). Returns 'dispatched'.
+ *    `/skill:implement`, `/skill:audit`, `/skill:ship`, `/intake`, `/plan`,
+ *    `!!wl reviewed`, and compound `&& wl audit-set` commands (resolves
+ *    `<id>` and routes to `onCommand`). Returns 'dispatched'.
  * 2. Code Freeze guard — when `codeFreezeActive` is true and the command is
  *    an implement command, the command is NOT routed; returns 'blocked' so
  *    the caller can show the Code Freeze dialog instead of spawning a pane.
@@ -2628,6 +2645,12 @@ export async function runWorklistTui(
   let formState: FormState | null = null;
   /** Saved mode before entering form overlay (to restore on cancel) */
   let preFormMode: ViewMode = 'list';
+  /**
+   * Ship It confirmation dialog (WL-0MSGG5N5Z0074TLY). Non-null while the
+   * dialog is open; its buffer holds the typed confirmation input. The
+   * dialog is bottom-anchored — the selection list stays visible above it.
+   */
+  let shipItDialog: ShipItDialogState | null = null;
 
   let totalActionableCount: number | undefined;
 
@@ -2832,9 +2855,9 @@ export async function runWorklistTui(
   // instead of piling up (lock-storm prevention). With a heartbeatTtlMs the
   // auto-sync path ALSO skips without spawning when another pane synced
   // recently (cross-instance coordination, F3 — WL-0MSGAEJQA005QG3W); such
-  // skips are silent because the data is already fresh. Manual 'S' syncs pass
-  // ifIdle=false and no heartbeat, so they always wait for the lock like a
-  // regular wl sync.
+  // skips are silent because the data is already fresh. The manual 'S' sync
+  // binding was removed (WL-0MSGG5N5Z0074TLY) — doSync is now reached only
+  // from the auto-sync timer path.
   const doSync = async (ifIdle = false, heartbeatTtlMs?: number): Promise<void> => {
     const outcome = await runSync(getWorklogDir(), {
       ifIdle,
@@ -2852,6 +2875,46 @@ export async function runWorklistTui(
     } else {
       showToast('Sync failed', { body: outcome.error ?? 'unknown error' });
     }
+  };
+
+  /**
+   * Open the Ship It confirmation dialog (WL-0MSGG5N5Z0074TLY).
+   *
+   * The dev→main release shortcut requires the user to type `ship`
+   * (case-insensitive) and press Enter before the command is dispatched.
+   * Dispatch (on confirm) goes through the SAME standard command-routing
+   * path as every other shortcut — executeResolvedCommand →
+   * dispatchChordCommand (which recognizes the `/skill:ship` family) →
+   * onCommand — with NO `<id>` substitution (global release). Esc cancels
+   * without dispatching.
+   */
+  const openShipItDialog = (model?: string): void => {
+    shipItDialog = new ShipItDialogState(
+      // onConfirm — typed 'ship' + Enter: dispatch via the standard path.
+      () => {
+        try {
+          // Fresh marker read at dispatch time (fail-safe client-side).
+          const frozen = readCodeFreezeState().active;
+          if (frozen) {
+            codeFreezeActive = true;
+          }
+          const result = executeResolvedCommand(SHIP_IT_COMMAND, state, opts.onCommand, frozen, model);
+          if (result === 'noop') {
+            showToast('Skipped', { body: `${SHIP_IT_COMMAND} (no item)` });
+          } else {
+            showToast('Sent', { body: SHIP_IT_COMMAND });
+          }
+        } catch (e) {
+          showToast('Error', { body: (e as Error).message });
+          process.stderr.write(`[herdr] Command error: ${(e as Error).message}\n`);
+        }
+      },
+      // onCancel — Esc: nothing is dispatched.
+      () => {
+        // no-op: dialog state is cleared by the onData handler.
+      },
+    );
+    render();
   };
 
   const onData = async (chunk: Buffer): Promise<void> => {
@@ -2888,6 +2951,21 @@ export async function runWorklistTui(
       } else {
         render();
       }
+      return;
+    }
+
+    // ── Ship It confirmation dialog handling (WL-0MSGG5N5Z0074TLY) ────
+    // While the dialog is open, all keys are consumed by the dialog:
+    // printable characters append to the typed buffer, Backspace deletes,
+    // Enter submits (dispatching only when the buffer matches `ship`
+    // case-insensitively), Esc cancels. The list stays visible beneath the
+    // bottom-anchored overlay.
+    if (shipItDialog !== null) {
+      const result = shipItDialog.handleInput(key);
+      if (result === 'submitted' || result === 'cancelled') {
+        shipItDialog = null;
+      }
+      render();
       return;
     }
 
@@ -2931,6 +3009,14 @@ export async function runWorklistTui(
               return;
             }
             command = podcast.command ?? command;
+          }
+          // Ship It confirmation (WL-0MSGG5N5Z0074TLY): the dev→main
+          // release command, however it reaches this path, requires a typed
+          // 'ship' confirmation before dispatch. Esc cancels, the dialog
+          // stays bottom-anchored over the list.
+          if (command === SHIP_IT_COMMAND) {
+            openShipItDialog(model ?? undefined);
+            return;
           }
           // Check for unknown identifiers that need form input
           if (hasUnknownIdentifiers(command)) {
@@ -3068,6 +3154,15 @@ export async function runWorklistTui(
           }
           singleCmd = podcast.command ?? singleCmd;
         }
+        // Ship It (S) — typed-confirmation dialog (WL-0MSGG5N5Z0074TLY):
+        // the dev→main release shortcut does NOT dispatch immediately. It
+        // opens a bottom-anchored confirmation dialog that keeps the
+        // selection list visible; the user must type `ship` + Enter to
+        // dispatch, Esc to cancel.
+        if (singleCmd === SHIP_IT_COMMAND) {
+          openShipItDialog(singleModel);
+          return;
+        }
         // Single-key shortcut — check for unknown identifiers first
         if (hasUnknownIdentifiers(singleCmd)) {
           let description = '';
@@ -3163,11 +3258,6 @@ export async function runWorklistTui(
 
     if (action === 'refresh') {
       await doRefresh(true);
-      return;
-    }
-
-    if (action === 'sync') {
-      await doSync();
       return;
     }
 
@@ -3356,11 +3446,20 @@ export async function runWorklistTui(
     // bottom line — the pane output must stay within the terminal budget.
     const rendered = output;
 
+    // ── Ship It confirmation dialog overlay (WL-0MSGG5N5Z0074TLY) ─────
+    // Bottom-anchored: the selection list is rendered normally and the
+    // dialog replaces only the lower rows, so the list stays visible above
+    // it (contrast: FormState full-screen, Code Freeze notice centered
+    // full-pane box). The overlay never exceeds the `rows - 1` budget.
+    const finalOutput = shipItDialog !== null
+      ? overlayShipItDialog(rendered, termSize.cols, termSize.rows, shipItDialog.buffer)
+      : rendered;
+
     // Clear from cursor to end of screen to remove leftover content
     // from previous renders of different heights
     process.stdout.write(ANSI.clear);
     process.stdout.write(ANSI.cursorHome);
-    process.stdout.write(rendered);
+    process.stdout.write(finalOutput);
   };
 
   // Initial render

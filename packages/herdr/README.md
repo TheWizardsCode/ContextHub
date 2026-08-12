@@ -105,6 +105,7 @@ The plugin pane will then be available via the Herdr plugin system.
    - Press `n` — Run the intake workflow on the selected item (idea stage)
    - Press `p` — Run the plan workflow on the selected item (intake_complete stage)
    - Press `s` — Insert a search command
+   - Press `S` (Shift+s) — **Ship It**: run the dev→main release. A typed-confirmation dialog anchored to the bottom of the list (the list stays visible above it) asks you to type `ship` (case-insensitive) and press Enter to dispatch `/skill:ship release`; Esc cancels. The release is a global command — no work item id is involved. `S` is distinct from lowercase `s` (Search). See [Ship It confirmation dialog](#ship-it-confirmation-dialog).
 
 5. Producer review shortcut:
    - Press `r` — Toggle 'Needs Producer Review' flag and add a comment to the selected item
@@ -418,8 +419,8 @@ process churn and memory pressure (WL-0MSB1N0HB0007N6N).
   watches for the hidden → visible transition; the moment the tab regains
   focus the list re-fetches immediately (with a "Refreshed" notification)
   instead of waiting for the next 30s tick, then the normal cadence resumes.
-- **Never gated** — manual actions (navigation, `S` manual sync, shortcut
-  chords, the initial data load) work regardless of tab visibility.
+- **Never gated** — manual actions (navigation, shortcut chords, the initial
+  data load) work regardless of tab visibility.
 - **Shared visibility check** — the `PollGate` TTL memoizer (~2s) makes the
   refresh and sync ticks in one cycle share a single `herdr tab get` call
   (≤1 visibility exec per cycle).
@@ -625,6 +626,20 @@ When a chord shortcut resolves to a command that contains **unknown identifiers*
 
 Rendering is ANSI-aware: visible width is measured by stripping SGR escape sequences (no external width/wrap dependencies).
 
+## Ship It confirmation dialog
+
+The Ship It shortcut (`S`, Shift+s) triggers a **dev→main release** via the ship skill (`/skill:ship release`), so it must never fire on a stray keypress. Pressing `S` opens a typed-confirmation dialog anchored to the **bottom** of the selection list — the list stays visible above it (no full-screen takeover, unlike the command input form and the centered Code Freeze notice):
+
+- The dialog shows a prompt ("Ship it? Type 'ship' to confirm, Esc to cancel") and reflects your typed input with a block cursor.
+- Type `ship` (case-insensitive: `ship`, `Ship`, `SHIP`, …) and press **Enter** to dispatch `/skill:ship release` via the standard command-routing path — a global release, so **no work item id** is substituted. A "Sent" toast confirms.
+- Typing anything else and pressing **Enter** clears the input buffer and keeps the dialog open so you can retry — nothing is dispatched.
+- **Esc** dismisses the dialog and returns to the selection list without dispatching anything.
+- While the dialog is open all keys are consumed by it (modal input); navigation resumes after Esc.
+
+Implementation: `ship-it-dialog.ts` holds the dialog state (`ShipItDialogState`), renders the box (`formatShipItDialog`), and composes it over the list output (`overlayShipItDialog` — bottom-anchored, within the pane height budget). The `S` entry in `src/shortcuts.json` is a single-key chord with `code_freeze` omitted, so it stays available during a Code Freeze (the ship skill gates itself).
+
+> **Behavior change:** the former manual-sync `S` binding (immediate `wl sync` with a toast) was removed; background auto-sync on the timer is unchanged.
+
 ## Architecture
 
 ```
@@ -640,6 +655,7 @@ packages/herdr/
 │   ├── icons.ts            # Icon and colour helpers
 │   ├── code-freeze.ts      # Code Freeze marker detection (fail-open)
 │   ├── form-dialog.ts      # Form state + rendering for parameter input (unknown <identifiers>)
+│   ├── ship-it-dialog.ts   # Ship It typed-confirmation dialog (bottom-anchored, S shortcut)
 │   ├── md-viewer.ts        # Generic markdown viewer + inline [NOTE <id>: ...] link rendering
 │   ├── command-log.ts      # Command log: record/get last command per work item
 │   ├── settings.ts         # User settings management
@@ -722,7 +738,12 @@ Fail-open is deliberate: a broken or missing marker must never block browsing th
 - **Implement commands blocked** — Any implement command (`/skill:implement`, `/skill:implement-single`, `/skill:implementall`, via single-key `i`, chord, or typed dispatch) is **not** routed: no pi agent pane is spawned, no work item is claimed, and no `<id>` substitution happens. The marker is re-read at dispatch time, so a freeze that starts between refreshes is still enforced.
 - **Notice dialog** — When an implement command is attempted during a freeze, a modal dialog explains that implementation is blocked until the release finishes. Dismiss with `Esc`, `Enter`, or `q` to return to the list.
 - **Downtime dispatcher freeze gate** — While the marker is frozen **or ambiguous**, the downtime worker skips its audit and implement dispatch tiers (no new audits/implementations during a release); the plan/intake tiers continue. See [Downtime worker](#downtime-worker-local-llm-idle-dispatch).
-- **Other commands unaffected** — Audit, intake, plan, review, priority, search, sync, and navigation continue to work normally during a freeze.
+- **Other commands unaffected** — Audit, intake, plan, review, priority,
+  search, and navigation continue to work normally during a freeze. The Ship
+  It shortcut (`S`) also stays available during a freeze: the release
+  command is NOT `code_freeze: "block"` — the ship skill gates itself, so
+  the confirmation dialog still opens and the user can consciously dispatch
+  the release even while a freeze is active.
 
 ### Shortcut filtering by work-item type
 

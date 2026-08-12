@@ -134,7 +134,7 @@ const IS_SGR_RE = /^\x1b\[[0-9;]*m$/;
  * sequences. Consistent with the convention used elsewhere in this package
  * (e.g. `worklist.ts`) — no external width/wrap dependencies.
  */
-function visibleWidth(content: string): number {
+export function visibleWidth(content: string): number {
   return content.replace(SGR_RE, '').length;
 }
 
@@ -214,8 +214,9 @@ function wrapContent(content: string, width: number): string[] {
  * Truncate content to a maximum visible width, preserving ANSI styling and
  * appending '…' when truncated. Used as a defensive guard so no rendered
  * line can ever exceed the pane width.
+ * Exported for reuse by ship-it-dialog.ts (WL-0MSGG5N5Z0074TLY).
  */
-function truncateToWidth(content: string, maxWidth: number): string {
+export function truncateToWidth(content: string, maxWidth: number): string {
   if (visibleWidth(content) <= maxWidth) return content;
   const segments = content.split(/(\x1b\[[0-9;]*m)/g).filter((s) => s !== '');
   let out = '';

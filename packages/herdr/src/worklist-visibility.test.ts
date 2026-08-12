@@ -38,6 +38,7 @@ vi.mock('./notify.js', () => ({
 }));
 
 import { runWorklistTui } from './worklist.js';
+import { loadShortcutConfig } from './shortcut-config.js';
 import { setExecFileAsync, resetExecFileAsync, getExecFileAsync } from './fetcher.js';
 import { runSync } from './auto-sync.js';
 import { showToast } from './notify.js';
@@ -271,13 +272,13 @@ describe('worklist TUI visibility gating', () => {
     await quit(p);
   });
 
-  it('manual S (sync) is never gated — works even when the pane is hidden', async () => {
+  it('manual S (Ship It dialog) is never gated — works even when the pane is hidden', async () => {
     vi.useFakeTimers();
     process.env.HERDR_TAB_ID = 'w1:t11';
     setExecFileAsync(makeExecMock(false) as any);
 
     const fetcher = vi.fn().mockResolvedValue([]);
-    const p = runWorklistTui(fetcher, [], undefined, {
+    const p = runWorklistTui(fetcher, [], loadShortcutConfig(), {
       autoRefresh: true,
       refreshIntervalMs: 30_000,
       autoSync: true,
@@ -288,12 +289,16 @@ describe('worklist TUI visibility gating', () => {
     fetcher.mockClear();
     mockRunSync.mockClear();
 
-    // Hidden pane + manual S → sync still runs.
+    // Hidden pane + manual S → the Ship It confirmation dialog still opens:
+    // manual actions are never visibility-gated (WL-0MSGG5N5Z0074TLY). The
+    // manual-sync binding was removed, so NO `wl sync` is spawned.
     dataHandler?.(Buffer.from('S'));
     await vi.advanceTimersByTimeAsync(0);
-    expect(mockRunSync).toHaveBeenCalled();
-    expect(mockShowToast).toHaveBeenCalledWith('Synced');
+    const render = writes[writes.length - 1] ?? '';
+    expect(render).toContain("Type 'ship' to confirm, Esc to cancel");
+    expect(mockRunSync).not.toHaveBeenCalled();
 
+    dataHandler?.(Buffer.from('\x1b')); // cancel the dialog
     await quit(p);
   });
 

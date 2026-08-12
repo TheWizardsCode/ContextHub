@@ -74,6 +74,15 @@
   },
   {
     "chord": [
+      "S"
+    ],
+    "command": "/skill:ship release",
+    "view": "both",
+    "label": "ship it",
+    "description": "Run the dev-to-main release (ship skill)"
+  },
+  {
+    "chord": [
       "a",
       "a"
     ],

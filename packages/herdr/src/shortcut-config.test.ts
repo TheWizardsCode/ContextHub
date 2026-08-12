@@ -138,6 +138,29 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     expect(entry?.command).toBe('/wl');
     expect(entry?.label).toBe('sprint');
   });
+
+  it('registers the S ship-it chord to /skill:ship release (WL-0MSGG5N5Z0074TLY)', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['S'], 'list', undefined, false);
+    expect(entry).toBeDefined();
+    expect(entry?.command).toBe('/skill:ship release');
+    expect(entry?.label).toBe('ship it');
+    expect(entry?.view).toBe('both');
+    // NOT code_freeze-blocked: the ship skill gates itself, so the
+    // shortcut stays available during a freeze (confirmed decision).
+    expect(entry?.codeFreeze).toBeUndefined();
+    // S is distinct from lowercase s (Search) — case-sensitive matching.
+    const search = registry.lookupChordEntry(['s'], 'list', undefined, false);
+    expect(search?.command).toBe('!!wl search <search_term>');
+    expect(registry.lookupChordEntry(['s'], 'list', undefined, false)?.command)
+      .not.toBe('/skill:ship release');
+  });
+
+  it('keeps the S ship-it chord visible during a Code Freeze', () => {
+    const registry = loadShortcutConfig();
+    expect(registry.lookupChordEntry(['S'], 'list', undefined, true)).toBeDefined();
+    expect(registry.getEntriesForStage(undefined, true).some(e => e.chord[0] === 'S')).toBe(true);
+  });
 });
 
 // ── parseShortcutEntry ───────────────────────────────────────────────────
