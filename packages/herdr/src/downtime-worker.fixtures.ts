@@ -38,6 +38,43 @@ export const ambiguousZeroTotalSlots: LlamaStatus = {
   total_slots: 0,
 };
 
+// ── Per-slot status payloads (WL-0MSG7P9N8009PCKG) ────────────────────
+
+/** All 4 slots free, with per-slot identity served (LP-0MSG5TA7Y002GN39). */
+export const perSlotAllFree: LlamaStatus = {
+  ...idleAllSlotsFree,
+  slots: [
+    { slot_id: 'slot-1', is_processing: false },
+    { slot_id: 'slot-2', is_processing: false },
+    { slot_id: 'slot-3', is_processing: false },
+    { slot_id: 'slot-4', is_processing: false },
+  ],
+};
+
+/** Only 2 of 4 slots free (slot-3, slot-4 processing) with per-slot identity. */
+export const perSlotTwoFree: LlamaStatus = {
+  ...idleAllSlotsFree,
+  available_slots: 2,
+  slots: [
+    { slot_id: 'slot-1', is_processing: false },
+    { slot_id: 'slot-2', is_processing: false },
+    { slot_id: 'slot-3', is_processing: true },
+    { slot_id: 'slot-4', is_processing: true },
+  ],
+};
+
+/** 3 of 4 slots free — only slot-1 processing. */
+export const perSlotOneProcessing: LlamaStatus = {
+  ...idleAllSlotsFree,
+  available_slots: 3,
+  slots: [
+    { slot_id: 'slot-1', is_processing: true },
+    { slot_id: 'slot-2', is_processing: false },
+    { slot_id: 'slot-3', is_processing: false },
+    { slot_id: 'slot-4', is_processing: false },
+  ],
+};
+
 /** Raw (unparsed) response missing the numeric slot fields → ambiguous. */
 export const ambiguousMissingFieldsRaw: Record<string, unknown> = {
   llama_server_running: true,

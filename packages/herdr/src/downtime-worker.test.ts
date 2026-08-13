@@ -18,6 +18,16 @@
  * parseImplementCandidatesOutput / selectImplementCandidate, and
  * implement prompt/pane helpers. Red phase: these fail until the implement
  * tier lands (WL-0MSMAYPQP001FLR6).
+ *
+ * Per-slot idle-tracking tests (WL-0MSP28F5Z008DAUA, parent
+ * WL-0MSG7P9N8009PCKG): test-first suite for same-slot idle tracking —
+ * optional `slots` parsing (LP-0MSG5TA7Y002GN39), fail-closed malformed
+ * slots, the per-slot idle tracker (Map<slot_id, idleSince> with
+ * record()/thresholdMetCount() semantics), per-slot evaluateIdle mode, and
+ * worker routing (per-slot mode only when slots present AND 0 < N < total;
+ * global-busy resets all slot timers; all-slots-free fallback without
+ * per-slot data). Red phase: these fail until the implementation lands
+ * (WL-0MSP28LSY007NDYX).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -28,6 +38,7 @@ import {
   fetchLocalStatus,
   createDowntimePoller,
   createIdleTracker,
+  createPerSlotIdleTracker,
   dispatchDowntimeWork,
   createDowntimeWorker,
   buildDowntimePrompt,
@@ -55,6 +66,7 @@ import {
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS,
   type LlamaStatus,
+  type LlamaSlot,
   type LlamaStatusFetcher,
   type DowntimeCandidate,
   type DowntimeWorkerDeps,
@@ -67,6 +79,9 @@ import {
   statusFixtures,
   ambiguousMissingFieldsRaw,
   idleAllSlotsFree,
+  perSlotAllFree,
+  perSlotTwoFree,
+  perSlotOneProcessing,
   networkErrorFixture,
   timeoutErrorFixture,
   httpErrorResponseFixture,
@@ -2434,5 +2449,418 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
     expect(worker.paused).toBe(true); // genuine empty backlog pauses the worker
     expect(worker.errorStrikes).toBe(0);
     expect(deps.recordError).not.toHaveBeenCalled(); // no persistent-error log
+  });
+});
+
+// ── Per-slot idle tracking (WL-0MSP28F5Z008DAUA, parent WL-0MSG7P9N8009PCKG) ──
+// Test-first suite for same-slot idle tracking, deferred follow-up Q7 of
+// WL-0MSF49FMW009M06K. The proxy feature LP-0MSG5TA7Y002GN39 serves per-slot
+// details (`slots: [{slot_id, is_processing}]`) in GET /llama/local/status;
+// when `downtimeRequiredFreeSlots` N < total slots, the worker must track idle
+// duration PER SLOT IDENTITY so the SAME N slots are free for the full
+// threshold — never any-N transient availability.
+//
+// Red phase: all tests in this section fail against the current
+// implementation (which has no per-slot parsing, no per-slot tracker, and no
+// per-slot evaluateIdle/worker routing) until the implementation feature
+// WL-0MSP28LSY007NDYX lands.
+
+// ── parseLlamaStatus: optional per-slot fields (AC1/AC2) ───────────────
+
+describe('parseLlamaStatus per-slot slots array', () => {
+  const base = {
+    llama_server_running: true,
+    active_query: false,
+    model_switch_in_progress: false,
+    available_slots: 4,
+    total_slots: 4,
+  };
+
+  it('exposes the slots array when the payload serves it', () => {
+    const status = parseLlamaStatus({
+      ...base,
+      slots: [
+        { slot_id: 'slot-1', is_processing: false },
+        { slot_id: 'slot-2', is_processing: true },
+      ],
+    });
+    expect(status).not.toBeNull();
+    expect(status!.slots).toEqual([
+      { slot_id: 'slot-1', is_processing: false },
+      { slot_id: 'slot-2', is_processing: true },
+    ]);
+  });
+
+  it('leaves slots undefined when the payload does not serve it (backward compatible)', () => {
+    const status = parseLlamaStatus(base);
+    expect(status).not.toBeNull();
+    expect(status!.slots).toBeUndefined();
+  });
+
+  it('parses an empty slots array as valid (zero free slots — never dispatches)', () => {
+    const status = parseLlamaStatus({ ...base, slots: [] });
+    expect(status).not.toBeNull();
+    expect(status!.slots).toEqual([]);
+  });
+
+  it('treats a non-array slots field as ambiguous → null (busy, fail-closed)', () => {
+    expect(parseLlamaStatus({ ...base, slots: 'not-an-array' })).toBeNull();
+    expect(parseLlamaStatus({ ...base, slots: { slot_id: 'x', is_processing: false } })).toBeNull();
+  });
+
+  it('treats an entry missing slot_id as malformed → null', () => {
+    expect(parseLlamaStatus({ ...base, slots: [{ is_processing: false }] })).toBeNull();
+  });
+
+  it('treats a non-string or empty slot_id as malformed → null', () => {
+    expect(parseLlamaStatus({ ...base, slots: [{ slot_id: '', is_processing: false }] })).toBeNull();
+    expect(parseLlamaStatus({ ...base, slots: [{ slot_id: 42, is_processing: false }] })).toBeNull();
+  });
+
+  it('treats a non-boolean or missing is_processing as malformed → null', () => {
+    expect(parseLlamaStatus({ ...base, slots: [{ slot_id: 'slot-1', is_processing: 'yes' }] })).toBeNull();
+    expect(parseLlamaStatus({ ...base, slots: [{ slot_id: 'slot-1' }] })).toBeNull();
+  });
+
+  it('treats duplicate slot_ids as malformed → null', () => {
+    expect(
+      parseLlamaStatus({
+        ...base,
+        slots: [
+          { slot_id: 'slot-1', is_processing: false },
+          { slot_id: 'slot-1', is_processing: true },
+        ],
+      }),
+    ).toBeNull();
+  });
+});
+
+// ── Per-slot idle tracker (AC3/AC4) ───────────────────────────────────
+
+describe('per-slot idle tracker (createPerSlotIdleTracker)', () => {
+  const a: LlamaSlot = { slot_id: 'a', is_processing: false };
+  const b: LlamaSlot = { slot_id: 'b', is_processing: false };
+
+  it('starts a slot timer on its first free poll and continues it across free polls', () => {
+    const tracker = createPerSlotIdleTracker();
+    const start = 1_000_000;
+
+    tracker.record([a, b], start);
+    expect(tracker.idleSince.get('a')).toBe(start);
+    expect(tracker.idleSince.get('b')).toBe(start);
+
+    tracker.record([a, b], start + 30_000);
+    expect(tracker.idleSince.get('a')).toBe(start); // run start stays fixed
+    expect(tracker.idleSince.get('b')).toBe(start);
+  });
+
+  it('a slot starting processing resets ONLY its own timer (other timers continue)', () => {
+    const tracker = createPerSlotIdleTracker();
+    const start = 1_000_000;
+
+    tracker.record([a, b], start);
+    tracker.record([{ slot_id: 'a', is_processing: true }, b], start + 10_000);
+
+    expect(tracker.idleSince.get('a')).toBeNull(); // own timer reset
+    expect(tracker.idleSince.get('b')).toBe(start); // other timer continues
+  });
+
+  it('a slot absent from the payload is fail-closed to busy (its timer resets)', () => {
+    const tracker = createPerSlotIdleTracker();
+    const start = 1_000_000;
+
+    tracker.record([a, b], start);
+    tracker.record([a], start + 10_000); // b absent
+
+    expect(tracker.idleSince.get('a')).toBe(start);
+    expect(tracker.idleSince.get('b')).toBeNull();
+  });
+
+  it('an empty record resets every slot timer (global-busy reset path)', () => {
+    const tracker = createPerSlotIdleTracker();
+    const start = 1_000_000;
+
+    tracker.record([a, b], start);
+    tracker.record([], start + 10_000);
+
+    expect(tracker.idleSince.get('a')).toBeNull();
+    expect(tracker.idleSince.get('b')).toBeNull();
+  });
+
+  it('thresholdMetCount counts only slots continuously free for the full threshold', () => {
+    const tracker = createPerSlotIdleTracker();
+    const start = 1_000_000;
+
+    tracker.record([a, b], start);
+    expect(tracker.thresholdMetCount(240_000, start + 239_999)).toBe(0);
+    expect(tracker.thresholdMetCount(240_000, start + 240_000)).toBe(2);
+    expect(tracker.thresholdMetCount(240_000, start + 500_000)).toBe(2);
+  });
+
+  it('a reset slot needs a fresh full run before it counts toward the threshold again', () => {
+    const tracker = createPerSlotIdleTracker();
+    const start = 1_000_000;
+
+    tracker.record([a, b], start);
+    // a goes processing at +10s (own timer reset) and free again at +20s.
+    tracker.record([{ slot_id: 'a', is_processing: true }, b], start + 10_000);
+    tracker.record([a, b], start + 20_000);
+
+    // Only b has a full continuous run at start+threshold+5s.
+    expect(tracker.thresholdMetCount(240_000, start + 240_000 + 5_000)).toBe(1);
+    // a completes its fresh run at start+20s+threshold → both count.
+    expect(tracker.thresholdMetCount(240_000, start + 20_000 + 240_000)).toBe(2);
+  });
+});
+
+// ── evaluateIdle: per-slot mode (AC5 + per-slot free count) ───────────
+
+describe('evaluateIdle per-slot mode (0 < N < total with slots present)', () => {
+  const free = (id: string): LlamaSlot => ({ slot_id: id, is_processing: false });
+  const busy = (id: string): LlamaSlot => ({ slot_id: id, is_processing: true });
+  const perSlot = (slots: LlamaSlot[], available: number, total: number): LlamaStatus => ({
+    llama_server_running: true,
+    active_query: false,
+    model_switch_in_progress: false,
+    local_lease_active: false,
+    available_slots: available,
+    total_slots: total,
+    slots,
+  });
+  // 4 slots, 2 free (slot-1, slot-2).
+  const twoFree = perSlot([free('s1'), free('s2'), busy('s3'), busy('s4')], 2, 4);
+
+  it('uses the per-slot free count when per-slot data is present and 0 < N < total', () => {
+    expect(evaluateIdle(twoFree, 2)).toBe(true); // 2 of 4 free — enough
+    expect(evaluateIdle(twoFree, 3)).toBe(false); // needs 3 — not enough
+  });
+
+  it('per-slot mode still requires the base idle checks (global busy → false)', () => {
+    expect(evaluateIdle({ ...twoFree, active_query: true }, 2)).toBe(false);
+    expect(evaluateIdle({ ...twoFree, model_switch_in_progress: true }, 2)).toBe(false);
+    expect(evaluateIdle({ ...twoFree, local_lease_active: true }, 2)).toBe(false);
+    expect(evaluateIdle({ ...twoFree, llama_server_running: false }, 2)).toBe(false);
+  });
+
+  it('N=0 (default) still requires ALL slots free even when per-slot data is present', () => {
+    expect(evaluateIdle(twoFree, 0)).toBe(false); // 2 < 4 → busy
+    expect(evaluateIdle(perSlot([free('s1'), free('s2'), free('s3'), free('s4')], 4, 4), 0)).toBe(true);
+  });
+
+  it('N == total still requires ALL slots free even when per-slot data is present', () => {
+    expect(evaluateIdle(perSlot([free('s1'), free('s2'), free('s3'), free('s4')], 4, 4), 4)).toBe(true);
+    expect(evaluateIdle(perSlot([free('s1'), free('s2'), busy('s3'), free('s4')], 3, 4), 4)).toBe(false);
+  });
+
+  it('N > total never idles even with per-slot data', () => {
+    expect(evaluateIdle(perSlot([free('s1'), free('s2'), free('s3'), free('s4')], 4, 4), 5)).toBe(false);
+  });
+});
+
+// ── Worker routing: per-slot mode vs fallback (WL-0MSG7P9N8009PCKG AC) ─
+
+describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
+  function makePerSlotWorker(overrides: {
+    requiredFreeSlots?: number;
+    thresholdMs?: number;
+    status?: unknown;
+    deps?: Partial<DowntimeWorkerDeps>;
+  } = {}) {
+    const cfg = {
+      enabled: true,
+      thresholdMs: overrides.thresholdMs ?? 240_000,
+      requiredFreeSlots: overrides.requiredFreeSlots ?? 2,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: 3_600_000,
+    };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(jsonResponseFixture(overrides.status ?? perSlotTwoFree));
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+      ...overrides.deps,
+    });
+    const worker = createDowntimeWorker({
+      poller,
+      deps,
+      config: () => ({ ...cfg }),
+    });
+    return { worker, deps, cfg, fetcher };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('routes to per-slot mode: dispatches with only N of total slots free (same slots, full threshold)', async () => {
+    // perSlotTwoFree: 2 of 4 slots free. Legacy all-slots-free mode would
+    // NEVER dispatch (available 2 < 4); per-slot mode dispatches after the
+    // threshold because the SAME 2 slots have been free throughout.
+    const { worker, deps, cfg } = makePerSlotWorker({ requiredFreeSlots: 2 });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    expect(worker.idleSince ?? null).not.toBeNull(); // idle run starts
+
+    vi.setSystemTime(start + cfg.thresholdMs - 1);
+    const before = await worker.tick();
+    expect(before.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    const at = await worker.tick();
+    expect(at.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('a slot starting processing resets only its own timer: other slots keep their run and can dispatch', async () => {
+    // N=1. slot-1 goes processing at +10s while slot-2 stays free. The poll
+    // stays per-slot idle (free count 3 ≥ 1), slot-2's timer continues, and
+    // dispatch fires at the original threshold — not delayed by slot-1.
+    const { worker, deps, cfg, fetcher } = makePerSlotWorker({ requiredFreeSlots: 1 });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick(); // all 4 free → timers start
+
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(perSlotOneProcessing));
+    vi.setSystemTime(start + 10_000);
+    const mid = await worker.tick();
+    expect(mid.idle).toBe(true); // free count 3 ≥ N=1 → still idle
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    const at = await worker.tick();
+    expect(at.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('a processing slot that must count toward N delays dispatch by its own fresh run', async () => {
+    // N=2 with exactly 2 slots. slot-1 is processing from +10s to +20s: its
+    // timer resets, so dispatch cannot fire at the original threshold (only
+    // slot-2 has a full run); it fires only after slot-1's fresh run.
+    const { worker, deps, cfg, fetcher } = makePerSlotWorker({ requiredFreeSlots: 2 });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick(); // slot-1, slot-2 free → timers start
+
+    const twoSlots = (s1: boolean, s2: boolean): LlamaStatus => ({
+      ...perSlotAllFree,
+      available_slots: (s1 ? 0 : 1) + (s2 ? 0 : 1),
+      total_slots: 2,
+      slots: [
+        { slot_id: 'slot-1', is_processing: s1 },
+        { slot_id: 'slot-2', is_processing: s2 },
+      ],
+    });
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(twoSlots(true, false)));
+    vi.setSystemTime(start + 10_000);
+    await worker.tick(); // slot-1 processing → its timer resets
+
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(twoSlots(false, false)));
+    vi.setSystemTime(start + 20_000);
+    await worker.tick(); // both free again → slot-1 restarts its run
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    const at = await worker.tick();
+    expect(at.dispatched).toBe(false); // only slot-2 has a full continuous run
+
+    vi.setSystemTime(start + 20_000 + cfg.thresholdMs);
+    const after = await worker.tick();
+    expect(after.dispatched).toBe(true); // slot-1 completed its fresh run
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('a global busy poll resets ALL per-slot timers (fresh full idle period required)', async () => {
+    const { worker, deps, cfg, fetcher } = makePerSlotWorker({ requiredFreeSlots: 2 });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick(); // all free → timers start
+
+    fetcher.mockResolvedValueOnce(jsonResponseFixture({ ...perSlotAllFree, active_query: true }));
+    vi.setSystemTime(start + 10_000);
+    await worker.tick(); // global busy → every slot timer reset
+
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(perSlotAllFree));
+    vi.setSystemTime(start + 20_000);
+    await worker.tick(); // free again → timers restart at +20s
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    const at = await worker.tick();
+    expect(at.dispatched).toBe(false); // no slot has a full run since +20s
+
+    vi.setSystemTime(start + 20_000 + cfg.thresholdMs);
+    const after = await worker.tick();
+    expect(after.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('an ambiguous poll (null status) resets ALL per-slot timers (fail-closed)', async () => {
+    const { worker, deps, cfg, fetcher } = makePerSlotWorker({ requiredFreeSlots: 2 });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick(); // all free → timers start
+
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(null));
+    vi.setSystemTime(start + 10_000);
+    await worker.tick(); // ambiguous → busy → every slot timer reset
+
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(perSlotAllFree));
+    vi.setSystemTime(start + 20_000);
+    await worker.tick(); // free again → timers restart at +20s
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    const at = await worker.tick();
+    expect(at.dispatched).toBe(false);
+
+    vi.setSystemTime(start + 20_000 + cfg.thresholdMs);
+    const after = await worker.tick();
+    expect(after.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('without per-slot data and 0 < N < total, falls back to all-slots-free (never any N slots)', async () => {
+    // No slots array: evaluateIdle degrades to all-slots-free, so 2 of 4
+    // free is BUSY even though N=2 — the worker never dispatches on
+    // any-N availability without per-slot identity.
+    const { worker, deps, cfg, fetcher } = makePerSlotWorker({
+      requiredFreeSlots: 2,
+      status: { ...idleAllSlotsFree, available_slots: 2 },
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    const first = await worker.tick();
+    expect(first.idle).toBe(false); // 2 of 4 free without identity → busy
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    const at = await worker.tick();
+    expect(at.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(fetcher).toHaveBeenCalled(); // still polling — never any-N dispatch
+  });
+
+  it('with per-slot data but N=0, falls back to all-slots-free (per-slot mode only when 0 < N < total)', async () => {
+    // Slots are present but N=0 (all slots): per-slot mode is NOT active —
+    // all-slots-free applies, so 2 of 4 free is busy and never dispatches.
+    const { worker, deps, cfg } = makePerSlotWorker({
+      requiredFreeSlots: 0,
+      status: perSlotTwoFree,
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    const first = await worker.tick();
+    expect(first.idle).toBe(false);
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    const at = await worker.tick();
+    expect(at.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 });
