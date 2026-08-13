@@ -180,13 +180,23 @@ Confirmed example: the recent `docs` issue-type addition had to be applied to
   `AGENTS.md` now starts with a short pointer to the global file instead of
   duplicating the full content. ContextHub's template has **not** followed.
 
-## Recommendation pointer
+## Recommendation
 
-The full install-model recommendation is the deliverable of the parent item
-WL-0MSKEJK4G008BMS0; implementation is tracked separately in
-WL-0MSIXMKOX0052514 ("Align wl init with SorraAgents install: delegate
-agent-guidance/workflow setup instead of duplicating"). This document only
-describes the current model.
+**Adopt the single-source-of-truth model: delegate agent-guidance/workflow setup to the SorraAgents global install** (the reference-global pattern), with implementation tracked in WL-0MSIXMKOX0052514. The current duplicated model should be retired.
+
+### Evidence
+
+1. **Confirmed duplication.** `templates/AGENTS.md` (258 lines) and `AGENTS_GLOBAL.md` both carry CRITICAL RULES, work-item Types, priorities, and workflow guidance. The pointer line acknowledges the global file but the full template content is still installed — the pointer defers, the content duplicates.
+2. **Confirmed drift in practice.** The `docs` issue-type change had to be applied to both files. Any future guidance change carries the same two-file maintenance burden (or worse, is applied to only one, silently diverging behavior between projects and machines).
+3. **SorraAgents already adopted the model.** SA-0MSITKHPW002XG4G, SA-0MSIUUYRD002GC8W, SA-0MSITKOXI007XD4N (completed) moved SorraAgents to reference-global: its project `AGENTS.md` now starts with a short pointer to `~/.pi/agent/AGENTS.md` instead of duplicating content. ContextHub's template has not followed.
+4. **ContextHub's own project AGENTS.md already uses the pattern.** The installed `<projectRoot>/AGENTS.md` starts with a "Global agent guidance" section referencing `~/.pi/agent/AGENTS.md` — the template is out of step with the repo's own practice.
+5. **Delegation has no downsides for the global environment.** When the SorraAgents install is present, the global file carries the canonical workflow; the project file only needs project-specific rules plus a reference line. This matches what `wl init`'s pointer line already half-intends.
+
+### What the change looks like (scope boundary — NOT implemented here)
+
+- When the SorraAgents global install is detected (`~/.pi/agent/AGENTS.md` resolves to a SorraAgents symlink), `wl init` should emit the canonical reference structure (a `## Global agent guidance` section referencing `~/.pi/agent/AGENTS.md`, plus a `## Project-specific guidance` section), rather than installing the full 258-line template.
+- Standalone environments (no global install) keep a self-contained `AGENTS.md` so Worklog remains usable without SorraAgents.
+- **No behavioral change is made as part of this item (WL-0MSKEJK4G008BMS0)** — the investigation only documents and recommends. Implementation lands in WL-0MSIXMKOX0052514.
 
 ## Related
 
