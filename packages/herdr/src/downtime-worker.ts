@@ -156,9 +156,43 @@ export interface LlamaStatus {
   current_model?: string;
   local_owner_session_id?: string | null;
   local_owner_lease_remaining_seconds?: number | null;
+  /**
+   * Per-slot identity (LP-0MSG5TA7Y002GN39): served by proxies that expose
+   * slot-level detail. ABSENT on pre-feature proxies — the worker then
+   * falls back to the count-based all-slots-free logic. When present, the
+   * downtime worker tracks idle duration PER SLOT ID so a configured N
+   * requires the SAME N slots continuously free.
+   */
+  slots?: LlamaSlot[];
+}
+
+/** Per-slot detail served inside `LlamaStatus.slots`. */
+export interface LlamaSlot {
+  slot_id: string;
+  is_processing: boolean;
 }
 
 // ── Idle detection (implemented) ──────────────────────────────────────
+
+/**
+ * The global (slot-count-independent) idle checks shared by `isIdleStatus`
+ * and the per-slot branch of `evaluateIdle`: llama-server up, no active
+ * query (local signal preferred), no model switch, no local lease.
+ */
+function globalIdleChecks(status: LlamaStatus): boolean {
+  if (!status.llama_server_running) return false;
+  // Prefer the local-only signal when the proxy exposes it (LP-0MSL2ZLLS009RVKR):
+  // remote streams keep the GLOBAL active_query true while the local model is
+  // idle with free slots, so they must not block downtime dispatch. Fall back
+  // to the global active_query for pre-fix proxies that do not serve
+  // local_active_query (backward compatible).
+  const queryActive =
+    status.local_active_query !== undefined ? status.local_active_query : status.active_query;
+  if (queryActive) return false;
+  if (status.model_switch_in_progress) return false;
+  if (status.local_lease_active) return false;
+  return true;
+}
 
 /**
  * True when the proxy reports an idle state for the required free-slot
@@ -174,17 +208,7 @@ export interface LlamaStatus {
  *    busy (fail-closed).
  */
 export function isIdleStatus(status: LlamaStatus, requiredFreeSlots: number): boolean {
-  if (!status.llama_server_running) return false;
-  // Prefer the local-only signal when the proxy exposes it (LP-0MSL2ZLLS009RVKR):
-  // remote streams keep the GLOBAL active_query true while the local model is
-  // idle with free slots, so they must not block downtime dispatch. Fall back
-  // to the global active_query for pre-fix proxies that do not serve
-  // local_active_query (backward compatible).
-  const queryActive =
-    status.local_active_query !== undefined ? status.local_active_query : status.active_query;
-  if (queryActive) return false;
-  if (status.model_switch_in_progress) return false;
-  if (status.local_lease_active) return false;
+  if (!globalIdleChecks(status)) return false;
 
   const total = status.total_slots;
   if (!Number.isFinite(total) || total <= 0) return false; // ambiguous → busy
@@ -204,10 +228,32 @@ export function isIdleStatus(status: LlamaStatus, requiredFreeSlots: number): bo
  * 0 < N < total slots degrades to requiring ALL slots free — stricter than
  * configured, never "any N slots" without same-slot identity. N > total
  * slots never dispatches (carried through `isIdleStatus`).
+ *
+ * Per-slot mode (LP-0MSG5TA7Y002GN39): when the payload serves per-slot
+ * identity AND 0 < N < total, the free count comes from the slots array
+ * (which identifies WHICH slots are free) so the same N slots can be
+ * required; the count-based logic is unchanged for N ≤ 0 / N ≥ total.
  */
 export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): boolean {
   const total = status.total_slots;
   if (!Number.isFinite(total) || total <= 0) return false; // ambiguous → busy
+
+  // Per-slot mode: per-slot identity present AND 0 < N < total. Base global
+  // checks still apply; the slot requirement is the per-slot free count.
+  if (
+    Array.isArray(status.slots) &&
+    requiredFreeSlots > 0 &&
+    requiredFreeSlots < total
+  ) {
+    if (!globalIdleChecks(status)) return false;
+    // Fail-closed counting: an entry without an explicit boolean
+    // `is_processing` is treated as processing (busy), never free.
+    const free = status.slots.filter(
+      (s) => typeof s.is_processing === 'boolean' && !s.is_processing,
+    ).length;
+    return free >= requiredFreeSlots;
+  }
+
   const effective = requiredFreeSlots > 0 && requiredFreeSlots < total
     ? total
     : requiredFreeSlots;
@@ -250,6 +296,68 @@ export function createIdleTracker(): IdleTracker {
     isThresholdMet(thresholdMs: number, now: number = Date.now()): boolean {
       if (idleSince === null) return false;
       return now - idleSince >= thresholdMs;
+    },
+  };
+}
+
+// ── Per-slot idle tracker (WL-0MSG7P9N8009PCKG) ───────────────────────
+
+/**
+ * Per-slot idle-duration tracker: one timer per `slot_id` so a configured
+ * N < total requires the SAME N slots continuously free for the full
+ * threshold (LP-0MSG5TA7Y002GN39) — never transient any-N availability.
+ */
+export interface PerSlotIdleTracker {
+  /** idle-since timestamp per slot_id; null = slot busy / timer reset. */
+  readonly idleSince: ReadonlyMap<string, number | null>;
+  /**
+   * Record one per-slot poll. A free slot starts (first free poll) or
+   * continues (subsequent free polls) its OWN timer; a processing slot
+   * resets ONLY its own timer; a slot absent from the payload is
+   * fail-closed to busy (its timer resets). An empty payload resets every
+   * known slot timer (the global-busy reset path).
+   */
+  record(slots: LlamaSlot[], now?: number): void;
+  /**
+   * Number of slots continuously free for `thresholdMs` or longer.
+   */
+  thresholdMetCount(thresholdMs: number, now?: number): number;
+}
+
+/**
+ * Map-backed per-slot idle tracker. `idleSince` is set on each slot's first
+ * free poll and kept fixed across consecutive free polls; the slot's own
+ * timer resets (null) when it reports processing or disappears from a poll.
+ */
+export function createPerSlotIdleTracker(): PerSlotIdleTracker {
+  const idleSince = new Map<string, number | null>();
+  return {
+    get idleSince(): ReadonlyMap<string, number | null> {
+      return idleSince;
+    },
+    record(slots: LlamaSlot[], now: number = Date.now()): void {
+      const reported = new Set<string>();
+      for (const slot of slots) {
+        reported.add(slot.slot_id);
+        if (slot.is_processing) {
+          idleSince.set(slot.slot_id, null); // own timer reset only
+        } else {
+          idleSince.set(slot.slot_id, idleSince.get(slot.slot_id) ?? now);
+        }
+      }
+      // Fail-closed: any known slot not reported this poll is treated as
+      // busy (its timer resets) — a slot is only ever considered free when
+      // the proxy explicitly says so.
+      for (const slotId of [...idleSince.keys()]) {
+        if (!reported.has(slotId)) idleSince.set(slotId, null);
+      }
+    },
+    thresholdMetCount(thresholdMs: number, now: number = Date.now()): number {
+      let count = 0;
+      for (const since of idleSince.values()) {
+        if (since !== null && now - since >= thresholdMs) count += 1;
+      }
+      return count;
     },
   };
 }
@@ -309,6 +417,29 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
       (typeof leaseSeconds === 'number' && Number.isFinite(leaseSeconds) && leaseSeconds > 0);
   }
 
+  // Optional per-slot identity (LP-0MSG5TA7Y002GN39): absent on pre-feature
+  // proxies (slots stays undefined — backward compatible). A malformed
+  // array (non-array, entry missing/empty/non-string slot_id, non-boolean
+  // is_processing, duplicate slot_ids) is ambiguous → null (busy,
+  // fail-closed): per-slot tracking must never run on identity it cannot
+  // trust. An empty array is valid (zero slots reported free).
+  let slots: LlamaSlot[] | undefined;
+  if (o.slots !== undefined) {
+    if (!Array.isArray(o.slots)) return null;
+    const parsed: LlamaSlot[] = [];
+    const seen = new Set<string>();
+    for (const entry of o.slots) {
+      if (typeof entry !== 'object' || entry === null) return null;
+      const slot = entry as Record<string, unknown>;
+      if (typeof slot.slot_id !== 'string' || slot.slot_id.length === 0) return null;
+      if (typeof slot.is_processing !== 'boolean') return null;
+      if (seen.has(slot.slot_id)) return null; // duplicate identity → ambiguous
+      seen.add(slot.slot_id);
+      parsed.push({ slot_id: slot.slot_id, is_processing: slot.is_processing });
+    }
+    slots = parsed;
+  }
+
   return {
     llama_server_running: o.llama_server_running,
     active_query: o.active_query,
@@ -324,6 +455,7 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
       typeof o.local_owner_lease_remaining_seconds === 'number'
         ? o.local_owner_lease_remaining_seconds
         : undefined,
+    slots,
   };
 }
 
@@ -954,6 +1086,7 @@ export interface DowntimeWorker {
  */
 export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker {
   const tracker = createIdleTracker();
+  const perSlotTracker = createPerSlotIdleTracker();
   let dispatching = false;
   let lastDispatchAt: number | null = null;
   // No-candidate cooldown (WL-0MSI7DQL10016QYX): timestamp until which the
@@ -1003,15 +1136,46 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       const status = await opts.poller.poll();
       if (status === null) {
         tracker.record(false); // endpoint failure/ambiguity → busy
+        perSlotTracker.record([]); // fail-closed: ambiguous poll resets every slot timer
         return { polled: true, dispatched: false, idle: false };
       }
 
-      const idle = evaluateIdle(status, cfg.requiredFreeSlots);
-      tracker.record(idle);
-      if (!idle) return { polled: true, dispatched: false, idle: false };
-      if (!tracker.isThresholdMet(cfg.thresholdMs)) {
-        return { polled: true, dispatched: false, idle: true };
+      // Per-slot routing (LP-0MSG5TA7Y002GN39): when the proxy serves
+      // per-slot identity AND the config asks for 0 < N < total, idle
+      // duration is tracked PER SLOT so dispatch requires the SAME N slots
+      // continuously free for the full threshold. Any global busy condition
+      // (query / model switch / lease / server down / ambiguous) resets ALL
+      // slot timers; a slot reporting processing resets only its own.
+      const perSlotMode =
+        Array.isArray(status.slots) &&
+        cfg.requiredFreeSlots > 0 &&
+        cfg.requiredFreeSlots < status.total_slots;
+
+      let idle: boolean;
+      let ready: boolean;
+      if (perSlotMode && Array.isArray(status.slots)) {
+        const globalIdle = globalIdleChecks(status);
+        // Keep the worker's idleSince view in sync with the run state.
+        tracker.record(globalIdle);
+        if (globalIdle) {
+          perSlotTracker.record(status.slots);
+          idle = true;
+          ready =
+            perSlotTracker.thresholdMetCount(cfg.thresholdMs) >= cfg.requiredFreeSlots;
+        } else {
+          perSlotTracker.record([]); // global busy → reset every slot timer
+          idle = false;
+          ready = false;
+        }
+      } else {
+        // Single global tracker (no per-slot data, or N ≤ 0 / N ≥ total):
+        // unchanged all-slots-free behaviour (parent AC2 parity).
+        idle = evaluateIdle(status, cfg.requiredFreeSlots);
+        tracker.record(idle);
+        ready = idle && tracker.isThresholdMet(cfg.thresholdMs);
       }
+      if (!idle) return { polled: true, dispatched: false, idle: false };
+      if (!ready) return { polled: true, dispatched: false, idle: true };
       if (dispatching) return { polled: true, dispatched: false, idle: true };
 
       dispatching = true;
@@ -1027,6 +1191,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           // report busy, require a fresh full idle period before the next
           // dispatch (AC5).
           tracker.record(false);
+          perSlotTracker.record([]);
         } else if (outcome.reason === 'no-candidate') {
           // Genuine empty backlog (both stages answered with no candidate):
           // pause entirely so the worker stops burning cycles (proxy polling
@@ -1035,6 +1200,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           errorStrikes = 0; // the CLI answered — it is healthy
           cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
           tracker.record(false);
+          perSlotTracker.record([]);
         } else if (outcome.reason === 'wl-error') {
           // Three-strike rule on CLI errors: a dispatch attempt ending in a
           // wl failure is one strike. Three consecutive strikes pause the
@@ -1057,6 +1223,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
             cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
             errorStrikes = 0;
             tracker.record(false);
+            perSlotTracker.record([]);
           }
         }
         // Any other non-dispatch outcome (dispatch-in-flight, code-freeze

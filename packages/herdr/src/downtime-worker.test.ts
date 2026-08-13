@@ -2743,30 +2743,33 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
   });
 
   it('a processing slot that must count toward N delays dispatch by its own fresh run', async () => {
-    // N=2 with exactly 2 slots. slot-1 is processing from +10s to +20s: its
-    // timer resets, so dispatch cannot fire at the original threshold (only
-    // slot-2 has a full run); it fires only after slot-1's fresh run.
+    // Per-slot mode with 4 slots, N=2: slot-1 is processing from +10s to
+    // +20s while slot-2 stays free. slot-1's OWN timer resets, so dispatch
+    // cannot fire at the original threshold (only slot-2 has a full
+    // continuous run); it fires only after slot-1's fresh run completes.
     const { worker, deps, cfg, fetcher } = makePerSlotWorker({ requiredFreeSlots: 2 });
     const start = 1_000_000;
     vi.setSystemTime(start);
-    await worker.tick(); // slot-1, slot-2 free → timers start
+    await worker.tick(); // slot-1, slot-2 free → their timers start
 
-    const twoSlots = (s1: boolean, s2: boolean): LlamaStatus => ({
+    const fourSlots = (s1: boolean): LlamaStatus => ({
       ...perSlotAllFree,
-      available_slots: (s1 ? 0 : 1) + (s2 ? 0 : 1),
-      total_slots: 2,
+      available_slots: (s1 ? 0 : 1) + 1, // slot-2 free + slot-1 free
+      total_slots: 4,
       slots: [
         { slot_id: 'slot-1', is_processing: s1 },
-        { slot_id: 'slot-2', is_processing: s2 },
+        { slot_id: 'slot-2', is_processing: false },
+        { slot_id: 'slot-3', is_processing: true },
+        { slot_id: 'slot-4', is_processing: true },
       ],
     });
-    fetcher.mockResolvedValueOnce(jsonResponseFixture(twoSlots(true, false)));
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(fourSlots(true)));
     vi.setSystemTime(start + 10_000);
-    await worker.tick(); // slot-1 processing → its timer resets
+    await worker.tick(); // slot-1 processing → its own timer resets
 
-    fetcher.mockResolvedValueOnce(jsonResponseFixture(twoSlots(false, false)));
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(fourSlots(false)));
     vi.setSystemTime(start + 20_000);
-    await worker.tick(); // both free again → slot-1 restarts its run
+    await worker.tick(); // slot-1 free again → restarts its run
 
     vi.setSystemTime(start + cfg.thresholdMs);
     const at = await worker.tick();
