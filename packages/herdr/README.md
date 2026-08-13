@@ -204,8 +204,10 @@ Settings (all re-read each poll, so changes apply without a plugin restart):
 - `downtimeIdleThresholdMs` — Minimum continuous idle duration before a
 dispatch (default: `240000` = 4 minutes, floor 1s)
 - `downtimeRequiredFreeSlots` — Required free slots; `0` means **all** slots
-must be free (default). A positive integer N is accepted; without per-slot
-identity data the worker fails closed to all-slots-free for `0 < N < total`;
+must be free (default). A positive integer N is accepted; with per-slot
+identity data the worker requires the **same N slots** continuously free (see
+per-slot idle tracking below) for `0 < N < total`; without per-slot data it
+fails closed to all-slots-free for `0 < N < total` (never any-N dispatch);
 `N > total` never dispatches.
 - `downtimePollIntervalMs` — Poll interval for the proxy status endpoint
 (default: `30000`, hard floor `10000`)
@@ -226,6 +228,23 @@ switch, no active local lease, and the required free-slot condition met.
 Endpoint failures, timeouts, and ambiguous responses are treated as **busy**
 (no dispatch) and never crash the plugin. Each poll is single-flight with a
 per-poll timeout.
+
+**Per-slot idle tracking** (LP-0MSG5TA7Y002GN39) — when the proxy serves
+per-slot detail (`slots: [{slot_id, is_processing}]`) in the status payload
+AND `downtimeRequiredFreeSlots` is `0 < N < total`, the worker tracks the
+idle duration of **each slot individually** and dispatches only when the
+**same N slots** have each been continuously free for the full
+`downtimeIdleThresholdMs` — a slot that starts processing resets only its
+*own* idle timer, so transient any-N availability never counts. Any *global*
+busy condition (active query, model switch, local lease, server down, or an
+ambiguous/unparseable poll) resets **all** slot timers, requiring a fresh
+full idle period. This assumes `slot_id` values are stable across polls
+(they identify the physical slots on the llama-server). Malformed per-slot
+data (non-array, missing/empty `slot_id`, non-boolean `is_processing`, or
+duplicate ids) is treated as busy (fail-closed). Without per-slot data — or
+when N is `0` or ≥ `total` — the worker falls back to the count-based
+all-slots-free logic: N of `total` slots free never dispatches without
+per-slot identity.
 
 **Dispatch behaviour** — once idle has been continuous for the threshold, the
 worker first runs `wl list --status completed --stage in_review --json` and
