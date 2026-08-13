@@ -6,7 +6,12 @@
 # the box after `npm run build` (invoked via the root `postbuild` hook).
 #
 # Safe to run on every build:
-#   - Re-linking the plugin is a no-op (herdr's own idempotence).
+#   - The plugin is always linked from the MAIN checkout, even when the
+#     build runs inside a linked git worktree (WL-0MSRG481O007QVEA):
+#     linking from a worktree leaves a dangling registry entry once the
+#     worktree is deleted, silently breaking the prefix+l keybinding.
+#     `herdr plugin link` updates an existing link in place, so a stale
+#     worktree link is corrected automatically on the next build.
 #   - The keybinding block is inserted only when a binding for
 #     `worklog-selection-list.open-podcast-editor-tab` is not already present.
 #   - A legacy `open-worklist` prefix+l binding is migrated in-place to the
@@ -17,6 +22,24 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# ── Main-checkout resolution (worktree-safe) ────────────────────────────
+# During /skill:implement the postbuild hook runs from a linked git
+# worktree, so REPO_ROOT would resolve to the worktree path. Linking the
+# global herdr plugin from a worktree leaves a dangling registry entry once
+# implement.py finish deletes the worktree — the prefix+l keybinding then
+# invokes a non-existent action and silently does nothing. Resolve the main
+# checkout (always listed first by `git worktree list --porcelain`) and
+# link from there instead. Falls back to REPO_ROOT when not inside a git
+# repo or git is unavailable.
+if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  MAIN_CHECKOUT="$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print; exit}')"
+  if [ -n "${MAIN_CHECKOUT}" ] && [ -d "${MAIN_CHECKOUT}" ]; then
+    REPO_ROOT="${MAIN_CHECKOUT}"
+  fi
+fi
+
+MANIFEST_PATH="${REPO_ROOT}/packages/herdr/herdr-plugin.toml"
 
 # Config resolution matches herdr itself: HERDR_CONFIG_PATH overrides,
 # otherwise ~/.config/herdr/config.toml.
@@ -34,10 +57,10 @@ description = "Open the Podcast Editing tab (Worklog work item selection pane)."
 LEGACY_BINDING='herdr plugin action invoke worklog-selection-list.open-worklist'
 NEW_BINDING='herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab'
 
-# ── 1. Link the plugin (no-op when already linked) ──────────────────────
+# ── 1. Link the plugin (updates an existing link in place) ───────────────
 if command -v herdr >/dev/null 2>&1; then
-  if herdr plugin link "${REPO_ROOT}/packages/herdr/herdr-plugin.toml"; then
-    echo "Linked herdr plugin: worklog-selection-list"
+  if herdr plugin link "${MANIFEST_PATH}"; then
+    echo "Linked herdr plugin: worklog-selection-list (${MANIFEST_PATH})"
   else
     echo "Warning: 'herdr plugin link' failed (plugin may already be linked, or herdr is busy)." >&2
   fi
