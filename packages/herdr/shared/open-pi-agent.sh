@@ -145,7 +145,17 @@ if [ -z "$np" ]; then
 fi
 
 # ── Start pi interactively in the new pane ──────────────────────────
-"$herdr_bin" pane run "$np" exec pi
+# The pi session is launched via run-pi-agent.sh so the pane's pi session
+# id is deterministic (--session-id) and the Local Proxy model lease is
+# released when the session ends (normal exit or pane close).
+# (WL-0MSGI7UIH008USVB)
+wrapper_script="$(cd "$(dirname "$0")" && pwd)/run-pi-agent.sh"
+# Session id must match pi's session-id rules (alphanumeric, '-', '_', '.').
+# Unique per launch: timestamp + launcher pid + random suffix.
+lease_session_id="herdr-$(date +%s)-$$-$RANDOM"
+quoted_wrapper="$(printf '%q' "$wrapper_script")"
+quoted_lease_id="$(printf '%q' "$lease_session_id")"
+"$herdr_bin" pane run "$np" exec bash "$quoted_wrapper" "$quoted_lease_id"
 
 # ── Rename the pane ────────────────────────────────────────────────
 "$herdr_bin" pane rename "$np" "$pane_name" >/dev/null 2>&1 || true

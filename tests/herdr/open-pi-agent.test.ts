@@ -150,9 +150,13 @@ describe('open-pi-agent.sh --cwd propagation', () => {
     expect(split).toContain(cwd);
   });
 
-  it('starts pi interactively in the new pane', () => {
+  it('starts pi interactively in the new pane via the lease-release wrapper', () => {
     const { status, log } = runScript(['--no-resize', '--cwd', '/tmp/project-root']);
     expect(status).toBe(0);
-    expect(log.some((line) => line.includes('pane run') && line.includes('pi'))).toBe(true);
+    // The pane runs the lease-release wrapper (run-pi-agent.sh) with a
+    // deterministic --session-id so the Local Proxy lease can be released
+    // when the interactive pi session ends (WL-0MSGI7UIH008USVB).
+    expect(log.some((line) => line.includes('pane run') && line.includes('run-pi-agent.sh'))).toBe(true);
+    expect(log.some((line) => line.includes('pane run') && /herdr-\d+-\d+-\d+/.test(line))).toBe(true);
   });
 });

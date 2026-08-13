@@ -275,6 +275,11 @@ The extension includes a **proactive lease release** module that automatically
 releases the previous session's model lease when a new Pi session is created
 (via `/new`). This speeds up model reclamation on the Local Proxy provider.
 
+The release logic lives in the **shared module** `@worklog/shared/lease-release`
+(`packages/shared/src/lease-release.ts`) so the Pi extension and the Herdr
+plugin's pane-close release executor share a single implementation and never
+drift (WL-0MSGI7UIH008USVB).
+
 ### How It Works
 
 1. When Pi fires a `session_start` event with reason `"new"` (indicating a
@@ -299,8 +304,13 @@ releases the previous session's model lease when a new Pi session is created
 
 ### Technical Notes
 
-- Implemented in `Worklog/lease-release.ts`.
-- The proxy configuration is read at runtime from `~/.pi/agent/models.json`.
-- Results are cached per-extension-lifecycle to avoid repeated filesystem reads.
+- The release logic is implemented in the shared module
+  `packages/shared/src/lease-release.ts` and re-exported by
+  `Worklog/lease-release.ts`.
+- The proxy configuration is read at runtime from `~/.pi/agent/models.json`
+  and cached at module level (a single filesystem read per process).
 - Registered in `Worklog/index.ts` via `registerLeaseRelease(pi)`.
-- Tests are in `Worklog/lease-release.test.ts`.
+- Tests are in `Worklog/lease-release.test.ts` (extension wiring) and
+  `packages/shared/src/lease-release.test.ts` (shared HTTP behavior).
+- The Herdr plugin runs the same release on pi-pane close — see
+  `packages/herdr/README.md` ("Pi agent dispatch").

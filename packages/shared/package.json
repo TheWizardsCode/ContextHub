@@ -17,6 +17,10 @@
     "./worklog-paths": {
       "types": "./dist/worklog-paths.d.ts",
       "import": "./dist/worklog-paths.js"
+    },
+    "./lease-release": {
+      "types": "./dist/lease-release.d.ts",
+      "import": "./dist/lease-release.js"
     }
   },
   "files": [
