@@ -255,6 +255,28 @@ The module registers a `/retry` command with the following subcommands:
   error messages, is-retrying flags, continuation count
 - `/retry reset` — Resets all retry counters and state
 
+### Mid-Session Compaction Auto-Continue
+
+When Pi performs a **mid-session** compaction (threshold auto-compaction while the
+agent still has work in flight), the module automatically resumes the agent via
+the invisible-continue loop (`agent.prompt([])`) — no manual "continue" needed.
+
+- **Auto-continues when**: queued messages are pending (`ctx.hasPendingMessages()`),
+  the last assistant turn was interrupted (`stopReason` `length`/`error`), or the
+  agent was still running when compaction started.
+- **Does not auto-continue when**: the compaction is overflow recovery
+  (`willRetry: true` — Pi retries the aborted turn natively, continuing again
+  would double-continue) or an end-of-session compaction (agent settled, nothing
+  pending — e.g. manual `/compact` after a completed turn). Manual `/compact`
+  auto-continues only when demonstrably mid-session (pending work).
+- **Safety guards**: user abort (ESC), session switches, the retry-loop mutex, and
+  the continuation-in-flight flag are all respected — no continuation starts when
+  the user has aborted, the session changed, or another continuation/retry is
+  already running.
+
+The classification lives in `shouldAutoContinueAfterCompaction()` in
+`recovery.ts`; the `session_compact` handler is wired in `register-recovery.ts`.
+
 ### Architecture
 
 The recovery module is implemented in `Worklog/lib/recovery/` and consists of:
@@ -265,7 +287,7 @@ The recovery module is implemented in `Worklog/lib/recovery/` and consists of:
 | `retry-logic.ts` | Exponential backoff, state managers, interruptible sleep |
 | `recovery.ts` | Compact-and-continue and checkpoint-and-terminate handlers |
 | `retry-command.ts` | `/retry` command interface (status, reset, manual-trigger) |
-| `register-recovery.ts` | Extension lifecycle wiring (agent_end, turn_end, session_start) |
+| `register-recovery.ts` | Extension lifecycle wiring (agent_end, turn_end, session_start, session_compact) |
 
 The module is auto-registered during extension initialization in `index.ts`.
 

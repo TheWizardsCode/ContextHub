@@ -6,11 +6,12 @@
  * - agent_end → error detection → category dispatch
  * - turn_end → state management (reset on success, abort flag)
  * - session_start → state reset
+ * - session_compact → auto-continue after mid-session compaction
  * - Built-in retry suppression (monkey-patching _prepareRetry)
  * - /retry command registration
  */
 
-import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionCommandContext, SessionCompactEvent } from '@earendil-works/pi-coding-agent';
 
 import { classifyError, ErrorCategory } from './error-patterns.js';
 import {
@@ -22,6 +23,10 @@ import {
   type RetryCommandOptions,
 } from './retry-command.js';
 import { calculateDelay, formatDuration } from './retry-logic.js';
+import {
+  shouldAutoContinueAfterCompaction,
+  shouldTriggerCompactionContinue,
+} from './recovery.js';
 
 let _recoveryRegistered = false;
 
@@ -146,6 +151,28 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
         }
         break;
     }
+  });
+
+  // ── session_compact: auto-continue after mid-session compaction ──
+  // Pi auto-continues only overflow recovery (willRetry) natively; threshold
+  // compaction stops. When a compaction is demonstrably mid-session (queued
+  // messages pending, an interrupted turn with stopReason length/error, or the
+  // agent still streaming), reuse the invisible-continue loop so the agent
+  // resumes without the user typing "continue".
+  pi.on('session_compact', async (event: SessionCompactEvent, ctx) => {
+    _notifyFn = (message, level) => ctx.ui.notify(message, level);
+
+    const entries = ctx.sessionManager.getEntries();
+    const lastAssistant = findLastAssistantMessage(entries);
+
+    const signals = {
+      hasPendingMessages: ctx.hasPendingMessages(),
+      isIdle: ctx.isIdle(),
+      lastAssistantStopReason: lastAssistant?.stopReason,
+    };
+
+    if (!shouldAutoContinueAfterCompaction(event, signals)) return;
+    void triggerCompactionContinue();
   });
 
   // ── turn_end: manage state on successful turns ─────────────────
@@ -344,6 +371,31 @@ async function triggerInvisibleContinue(): Promise<void> {
     }
     _lastInvisibleContinueTime = Date.now();
   }
+}
+
+/**
+ * Auto-continue the agent after a mid-session compaction.
+ *
+ * Applies the entry-point guards (user abort, retry-loop mutex, and
+ * continuation-in-flight so this path never double-triggers with the
+ * CONTEXT_LENGTH path), then fires the invisible-continue loop
+ * (`agent.prompt([])`) that the CONTEXT_LENGTH branch already uses.
+ * The loop itself re-verifies abort/session-change throughout.
+ */
+async function triggerCompactionContinue(): Promise<void> {
+  if (!shouldTriggerCompactionContinue({
+    userAborted: interruptibleState.userAborted,
+    continueInProgress: _continueInProgress,
+    continuationInFlight: continuationState.getIsContinuing() || continuationState.getCount() > 0,
+  })) return;
+
+  continuationState.startContinuation();
+  if (_notifyFn) {
+    _notifyFn('Compaction complete — continuing automatically...', 'info');
+  }
+  continuationState.endContinuation();
+
+  void triggerInvisibleContinue();
 }
 
 /** Notify user about a retry attempt */
