@@ -602,6 +602,12 @@ export async function fetchChildrenForItem(parentId: string, depth = 1): Promise
  */
 export interface ClaimResult {
   success: boolean;
+  /**
+   * True when the claim failed because the item no longer matched the
+   * `--if-status`/`--if-stage` guard (another pane won the CAS race). The
+   * wl CLI answered correctly — this is NOT a CLI error.
+   */
+  stale?: boolean;
   error?: string;
 }
 
@@ -617,18 +623,41 @@ const CLAIM_TIMEOUT_MS = 3000;
  * documented in AGENTS.md. Targets the configured worklog database via
  * `--worklog-dir` when set.
  *
+ * With `expected` (status/stage), the claim is a compare-and-swap (RCA
+ * WL-0MSRBFFLN005W3VT design point 1): `--if-status`/`--if-stage` are
+ * passed to `wl update`, so the transition only applies while the item is
+ * still in the state the tier selected it in. Exactly one concurrent pane
+ * wins; a loser gets `{success:false, stale:true}` and the caller aborts
+ * the dispatch. A stale result is detected from the wl CLI's `"error":
+ * "stale"` JSON payload on stderr.
+ *
  * Never throws — failures are returned so callers can log them without
  * blocking the agent pane from opening.
  */
-export async function claimWorkItem(id: string, assignee: string): Promise<ClaimResult> {
+export async function claimWorkItem(
+  id: string,
+  assignee: string,
+  expected?: { status?: string; stage?: string },
+): Promise<ClaimResult> {
   try {
-    await runWl(
-      ['update', id, '--status', 'in_progress', '--assignee', assignee],
-      true,
-      CLAIM_TIMEOUT_MS,
-    );
+    const args = ['update', id, '--status', 'in_progress', '--assignee', assignee];
+    if (expected?.status) {
+      args.push('--if-status', expected.status);
+    }
+    if (expected?.stage) {
+      args.push('--if-stage', expected.stage);
+    }
+    await runWl(args, true, CLAIM_TIMEOUT_MS);
     return { success: true };
   } catch (err: any) {
-    return { success: false, error: err.message ?? String(err) };
+    const message = err.message ?? String(err);
+    // Lost CAS race: the wl CLI exits non-zero with `{"success":false,
+    // "error":"stale", ...}` on stderr (runWl surfaces stderr first).
+    const stale =
+      message.includes('"error":"stale"') ||
+      message.includes('"error": "stale"') ||
+      message.includes("'stale'") ||
+      message.includes('Conditional update skipped');
+    return { success: false, stale, error: message };
   }
 }

@@ -30,6 +30,18 @@ export interface GitTarget {
 }
 
 /**
+ * Result of a conditional update (`updateIfMatches`, the CAS claim).
+ * `ok:true` carries the updated item; `ok:false` distinguishes "no such
+ * item" from "item no longer in the expected status/stage" (another
+ * process won the race).
+ */
+export interface UpdateIfMatchesResult {
+  ok: boolean;
+  reason?: 'not-found' | 'stale';
+  item?: WorkItem;
+}
+
+/**
  * Optional CLI-specific services injected into WorklogDatabase.
  * When not provided, features that depend on them become no-ops or throw
  * appropriate errors. This allows the class to be used in contexts (like the
@@ -991,6 +1003,45 @@ export class WorklogDatabase {
    */
   get(id: string): WorkItem | null {
     return this.store.getWorkItem(id);
+  }
+
+  /**
+   * Conditional update (compare-and-swap, RCA WL-0MSRBFFLN005W3VT design
+   * point 1): apply `input` ONLY if the item's current status/stage match the
+   * expected guard. Runs the check and the write inside a single `BEGIN
+   * IMMEDIATE` transaction (see `PersistentStore.transactionImmediate`), so
+   * two concurrent `wl update --if-status/--if-stage` processes serialize on
+   * the SQLite write lock: exactly one observes the expected state and wins;
+   * the loser observes the winner's committed transition and fails `stale`
+   * without writing.
+   *
+   * @returns `{ok:true, item}` on success; `{ok:false, reason:'not-found'}`
+   * when the id is absent; `{ok:false, reason:'stale'}` when the guard
+   * mismatch means another process already changed the item.
+   */
+  updateIfMatches(
+    id: string,
+    input: UpdateWorkItemInput,
+    expected: { status?: string; stage?: string } = {},
+  ): UpdateIfMatchesResult {
+    return this.store.transactionImmediate(() => {
+      const current = this.store.getWorkItem(id);
+      if (!current) {
+        return { ok: false, reason: 'not-found' };
+      }
+      if (expected.status !== undefined) {
+        const want = normalizeStatusValue(expected.status) ?? expected.status;
+        const have = normalizeStatusValue(current.status) ?? current.status;
+        if (want !== have) {
+          return { ok: false, reason: 'stale' };
+        }
+      }
+      if (expected.stage !== undefined && current.stage !== expected.stage) {
+        return { ok: false, reason: 'stale' };
+      }
+      const updated = this.update(id, input);
+      return updated ? { ok: true, item: updated } : { ok: false, reason: 'not-found' };
+    });
   }
 
   /**

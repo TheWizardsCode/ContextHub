@@ -71,6 +71,10 @@ export interface UpdateOptions {
   description?: string;
   descriptionFile?: string;
   status?: WorkItemStatus;
+  /** CAS guard: only apply the update if the current status matches */
+  ifStatus?: string;
+  /** CAS guard: only apply the update if the current stage matches */
+  ifStage?: string;
   priority?: WorkItemPriority;
   parent?: string;
   tags?: string;

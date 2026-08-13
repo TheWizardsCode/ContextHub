@@ -342,9 +342,14 @@ true`), then stop — it never blocks indefinitely.
 **No lock file (cross-pane decision Q5)** — concurrent panes are serialized
 by the idle→busy cadence (a dispatch consumes the local slot, so the proxy
 reports busy and the worker requires a fresh full idle period) and by the
-pre-dispatch claim; there is deliberately **no cross-pane lock file**. A
-small residual risk of two panes dispatching at the same idle boundary is
-accepted — the claim prevents duplicate work on the same item.
+pre-dispatch claim, which is a **compare-and-swap** (`wl update <id>
+--status in_progress --if-status <expected> [--if-stage <expected>]`, RCA
+WL-0MSRBFFLN005W3VT design point 1): the transition only applies while the
+item is still in the exact state the tier selected it in, so exactly one
+concurrent pane wins and a losing pane aborts its dispatch (no pane, no
+marker, no success record). There is deliberately **no cross-pane lock
+file** — the CAS claim is the serialization point, and it is atomic at the
+SQLite layer (`BEGIN IMMEDIATE`).
 
 **Audit trail** — every successful dispatch records two traces: (1) a
 comment on the dispatched item (`wl comment add`, author
@@ -352,61 +357,67 @@ comment on the dispatched item (`wl comment add`, author
 UTC timestamp — this survives `wl sync` and is the durable trail; and (2) a
 bounded JSONL entry in `.worklog/downtime-dispatches.log` under the
 resolved worklog root (rolling — only the most recent 100 entries are
-kept). The `kind:audit` entries in this log double as the dispatched-marker
-exclusion source for the audit tier (WL-0MSLIY8ZR004QUSY): an item the
-worker already dispatched for `/skill:audit` is excluded from later audit
-tier selection while it still lacks a fresh audit (plan/intake markers are
-scoped to their own tiers and never suppress audit selection). A
-three-strike CLI-error pause additionally writes a JSONL entry to
-the same rolling log (with the `at` timestamp and an error message) so the
-persistent failure is auditable even though nothing was dispatched. The
-`.worklog` log file is gitignored and local-only; all writes are
-fail-closed, so a comment or log failure never blocks or fails a dispatch.
+kept). The marker is written **before** the pane spawns (fail-closed: an
+unmarked item is never dispatched). The `kind:audit` entries double as the
+dispatched-marker exclusion source for the audit tier (WL-0MSLIY8ZR004QUSY);
+`kind:implement` entries for the implement tier; and `kind:plan` /
+`kind:intake` entries (which also record the item's `stage` at dispatch)
+for the plan/intake change-guard — an item already dispatched for its tier
+is excluded while it is still at its dispatched-at stage, and a stage
+advancement releases it (RCA WL-0MSRBFFLN005W3VT design point 3). Plan /
+intake markers are scoped to their own tiers and never suppress audit
+selection. A three-strike CLI-error pause additionally writes a JSONL entry
+to the same rolling log (with the `at` timestamp and an error message) so
+the persistent failure is auditable even though nothing was dispatched. The
+`.worklog` log file is gitignored and local-only.
 
 **Failure-path logging** — a complete account of what each dispatch outcome
 leaves behind (documented for WL-0MSKUG2WW0058A7W, audit gap AC2):
 
 | Outcome | Trace in `.worklog/downtime-dispatches.log` | Notes |
 |---|---|---|
-| Successful dispatch | comment on the item + JSONL entry (`kind`, `itemId`, `dispatchedAt`) | the only fully-visible outcome |
+| Successful dispatch | comment on the item + JSONL entry (`kind`, `itemId`, `dispatchedAt`, `stage` for plan/intake) | the only fully-visible success outcome |
 | Genuine empty backlog (no-candidate) | **none** — intentionally silent | full cooldown pause (default 60 min); worker stops polling |
 | 1–2 transient wl CLI errors (strikes) | **none** — silent | one strike per `wl-error` outcome; retries on the next idle window |
 | 3rd consecutive wl CLI error | `recordError` JSONL entry | three-strike pause; the only failure path that logs |
-| Audit-tier wl/parse failure | **none** — silent, and **no strike** | `getNextAuditCandidate` collapses the failure to `null` like an empty tier (index.ts:389-391); worker falls through to the plan tier and looks healthy — known silent path, follow-up WL-0MSLWJ2KP0002SV0 |
-| Claim failure (`wl update <id> --status in_progress`) | **none** — result discarded | dispatch proceeds and is still recorded as a success; the claim is the cross-pane serialization guard, so a failed claim leaves the item selectable by another pane — known silent path, follow-up WL-0MSLWJ310000ND0X |
-| Pane spawn failure (`send-to-pi.sh`) | **none** — invisible | spawn is detached/`stdio: ignore`/`unref`d with no `error`/`exit` handler; a failed spawn (or a script that exits non-zero) is never observed and the dispatch is still logged as a success — known silent path, follow-up WL-0MSLWJ3I70031Z8U |
-| `recordDispatch` / `recordError` write failure | **none** | fail-closed by design: logging must never crash or block the worker |
+| Audit-tier wl/parse failure | **none** — silent, and **no strike** | `getNextAuditCandidate` collapses the failure to `null` like an empty tier; worker falls through to the plan tier and looks healthy — known silent path, follow-up WL-0MSLWJ2KP0002SV0 |
+| Lost CAS claim race (`--if-status`/`--if-stage` stale) | **none** — and **no marker, no pane, no success record** | the dispatch ABORTS with reason `claim-failed` (neutral — another pane won); the failure is observable via the outcome and a stderr line, never silently discarded (WL-0MSLWJ310000ND0X absorbed) |
+| Claim wl CLI failure (non-stale) | **none** — counts as a `wl-error` strike | dispatch aborts; three consecutive such failures pause the worker |
+| Marker write failure | **none** — the item stays claimed (`in_progress`) | dispatch ABORTS **before** the pane spawns with reason `marker-write-failed` (fail-closed: an unmarked item is never dispatched; the claim still removes it from `wl next`, so no other pane selects it) |
+| Pane spawn failure (`send-to-pi.sh`) | marker already written (pre-spawn) | a spawn `error` is handled (no unhandled-exception crash) and the outcome is **not** success (`spawn-failed`); the marker stands so the item is not re-dispatched (WL-0MSLWJ3I70031Z8U absorbed) |
+| `recordError` write failure | **none** | fail-closed by design: logging must never crash or block the worker |
 
-Consequence: the log's *absence* of an entry is ambiguous — it cannot
-distinguish "no candidate (paused)" from "worker disabled" or from any of
-the silent failure paths above; only the three-strike and success paths leave
-entries. The follow-up items above close the three code-level silent paths.
+Consequence: the log's *absence* of an entry is still ambiguous (it cannot
+distinguish "no candidate (paused)" from "worker disabled" or from a
+lost claim race), but the code-level silent failure paths are closed: a
+failed claim or spawn can no longer produce a false success record.
 
 **Known re-dispatch gaps** (RCA WL-0MSRBFFLN005W3VT, evidence reproduced by
 `packages/herdr/scripts/scan_duplicate_dispatches.py`; see
 [docs/downtime-redispatch-rca-2026-08-13.md](docs/downtime-redispatch-rca-2026-08-13.md)):
 
-- **Same-instant cross-pane race** — two panes can select the same candidate
-  before either claims it: selection precedes claim, and the pre-dispatch
-  claim (`wl update --status in_progress`) is idempotent, so both panes
-  proceed. Observed post-fix: a `kind:audit` pair 14 ms apart
-  (SA-0MSN4AXIQ007IZG2, 2026-08-10). The dispatched-marker exclusion is
-  read-then-write and written after spawn, so it cannot prevent this. Fix
-  design (follow-up): atomic conditional claim (`--if-status`/`--if-stage`)
-  — a losing pane aborts the dispatch.
-- **Plan/intake tiers have no dispatched-marker exclusion** — the audit and
-  implement tiers exclude already-dispatched items; the plan
-  (`--stage intake_complete`) and intake (`--stage idea`) tiers do not, and
-  `wl next` keeps `completed` items under a stage filter, so a plan run whose
-  error/abort path resets status only (stage left at `intake_complete`)
-  leaves the item selectable for re-dispatch. Observed: `kind:plan` ×2 on
-  SA-0MSMAZP6T007NM0O and SA-0MSN04X2S006ONH0 (2026-08-12/13), `kind:plan` ×7
-  in ~7 h pre-fix (SA-0MSJI53RX006E2PS). Fix design (follow-up): kind-scoped
-  plan/intake markers with a change-guard plus a client-side `status ===
-  'open'` filter.
+These were closed by WL-0MSRDEWES0059TZN (implement RCA fix design):
 
-These are documented as design candidates in the RCA; implementation is a
-follow-up work item.
+- **Same-instant cross-pane race (closed)** — the pre-dispatch claim is now a
+  compare-and-swap (`--if-status`/`--if-stage`) executed atomically at the
+  SQLite layer, so exactly one pane wins; a losing pane aborts with no pane,
+  no marker, no success record. (Formerly: selection preceded an idempotent
+  claim, so two panes could both proceed — observed as a `kind:audit` pair
+  14 ms apart, SA-0MSN4AXIQ007IZG2, 2026-08-10.)
+- **Plan/intake tiers had no dispatched-marker exclusion (closed)** — the
+  plan (`--stage intake_complete`) and intake (`--stage idea`) tiers now
+  exclude items already dispatched for their tier while the item is still at
+  its dispatched-at stage (kind-scoped `plan`/`intake` markers carrying the
+  stage at dispatch; a stage advancement releases the item), and both tiers
+  filter client-side to `status === 'open'` so a `completed`/`in_review`
+  item whose stage matches is never dispatched. (Formerly: a plan run whose
+  error/abort path reset status only — stage left at `intake_complete` —
+  left the item selectable; observed `kind:plan` ×2 on
+  SA-0MSMAZP6T007NM0O and SA-0MSN04X2S006ONH0, `kind:plan` ×7 in ~7 h
+  pre-fix, SA-0MSJI53RX006E2PS.)
+
+The remaining residual risk is the 100-entry log roll: a very long-unaudited
+item can have its marker rolled out of the log, allowing one re-dispatch.
 
 The worker runs inside the plugin's single consolidated scheduler loop (one
 `setInterval`; no independent timers), uses unref'd timers, and is cleaned up

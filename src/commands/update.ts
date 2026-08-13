@@ -10,6 +10,7 @@ import { humanFormatWorkItem, resolveFormat, extractFilePaths } from './helpers.
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { normalizeActionArgs } from './cli-utils.js';
 import { buildAuditEntry, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
+import { normalizeStatusValue } from '../status-stage-rules.js';
 import { submitToOpenBrain } from '../openbrain.js';
 import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
 
@@ -23,6 +24,8 @@ export default function register(ctx: PluginContext): void {
     .option('-d, --description <description>', 'New description')
     .option('--description-file <file>', 'Read description from a file')
     .option('-s, --status <status>', 'New status')
+    .option('--if-status <status>', 'Only apply the update if the current status matches (CAS guard)')
+    .option('--if-stage <stage>', 'Only apply the update if the current stage matches (CAS guard)')
     .option('-p, --priority <priority>', 'New priority')
     .option('-P, --parent <parentId>', 'New parent ID')
     .option('--tags <tags>', 'New tags (comma-separated)')
@@ -47,14 +50,14 @@ export default function register(ctx: PluginContext): void {
       // --no-re-sort: skip auto re-sort
       // --re-sort-sync: force synchronous re-sort (blocking)
       // Normalize re-sort flags from commander/options
-      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','doNotDelegate','prefix','noReSort','reSortSync']);
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','ifStatus','ifStage','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','doNotDelegate','prefix','noReSort','reSortSync']);
       // Robust detection of --no-re-sort that accepts multiple forms Commander
       // may expose (`noReSort`, `reSort: false`) and also checks raw argv.
       const cliNoReSort = process.argv.includes('--no-re-sort') || process.argv.includes('--noReSort');
       const reSortNo = (((normalized.options as any)?.noReSort === true) || ((normalized.options as any)?.reSort === false) || cliNoReSort);
       const reSortSync = Boolean((normalized.options as any)?.reSortSync);
       const knownOptionKeys = [
-        'title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','doNotDelegate','prefix','noReSort','reSortSync'
+        'title','description','descriptionFile','status','ifStatus','ifStage','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','doNotDelegate','prefix','noReSort','reSortSync'
       ];
       const argsHint = rawArgs.map(a => Array.isArray(a) ? `array(${a.length})` : `${typeof a}:${String(a).slice(0,100)}`);
       if (process.env.WL_DEBUG_UPDATE_ACTION) {
@@ -117,6 +120,25 @@ export default function register(ctx: PluginContext): void {
         }
       }
       const statusCandidate = hasProvided('status') ? options.status : undefined;
+      // CAS guards (compare-and-swap claim, RCA WL-0MSRBFFLN005W3VT design
+      // point 1): --if-status/--if-stage make the update conditional on the
+      // item's CURRENT status/stage. A mismatch fails per-id with error
+      // `stale` (no write), which the herdr downtime worker treats as "another
+      // pane won the claim race". Status values are normalized the same way
+      // stored statuses are (underscore → hyphen) so `in_progress` matches
+      // the stored `in-progress`.
+      const ifStatusCandidate = hasProvided('ifStatus') ? options.ifStatus : undefined;
+      const ifStageCandidate = hasProvided('ifStage') ? options.ifStage : undefined;
+      if (ifStatusCandidate !== undefined) {
+        const normalized = normalizeStatusValue(String(ifStatusCandidate));
+        const valid =
+          normalized !== undefined &&
+          (['open', 'in-progress', 'completed', 'blocked', 'deleted', 'input-needed'].includes(normalized));
+        if (!valid) {
+          output.error(`Invalid --if-status: "${ifStatusCandidate}". Allowed: open, in_progress, completed, blocked, deleted, input_needed (case-insensitive).`, { success: false, error: 'invalid-arg' });
+          process.exit(1);
+        }
+      }
       let priorityCandidate = hasProvided('priority') ? options.priority : undefined;
       // Validate priority if provided: normalize case, reject P* and unknown tokens
       if (priorityCandidate !== undefined) {
@@ -383,7 +405,42 @@ export default function register(ctx: PluginContext): void {
         // Capture the previous priority before the update so we can detect a
         // downgrade away from `critical` and cascade it to children.
         const oldPriority = (db.get(normalizedId)?.priority) as WorkItemPriority | undefined;
-        const item = db.update(normalizedId, updates);
+        // CAS claim path (RCA WL-0MSRBFFLN005W3VT design point 1): when
+        // --if-status/--if-stage are provided the update applies ONLY if the
+        // item still matches — the check and the write run in one immediate
+        // transaction so exactly one concurrent claimer wins. A guard
+        // mismatch fails per-id with error `stale` (no write); the herdr
+        // downtime worker maps that to an aborted dispatch (no pane, no
+        // marker, no success record).
+        let item: WorkItem | null = null;
+        if (ifStatusCandidate !== undefined || ifStageCandidate !== undefined) {
+          const cas = db.updateIfMatches(normalizedId, updates, {
+            ...(ifStatusCandidate !== undefined
+              ? { status: String(ifStatusCandidate) }
+              : {}),
+            ...(ifStageCandidate !== undefined ? { stage: String(ifStageCandidate) } : {}),
+          });
+          if (!cas.ok) {
+            if (cas.reason === 'not-found') {
+              const message = `Work item not found: ${normalizedId}`;
+              results.push({ id: normalizedId, success: false, error: message });
+            } else {
+              // Guard mismatch — another process (e.g. another herdr pane)
+              // already claimed or changed the item. Report a distinct error
+              // code so callers can distinguish a lost race from a real CLI
+              // failure.
+              const message =
+                `Conditional update skipped: ${normalizedId} no longer matches ` +
+                `--if-status${ifStageCandidate !== undefined ? '/--if-stage' : ''} ` +
+                `(another process may have claimed it)`;
+              results.push({ id: normalizedId, success: false, error: 'stale', message });
+            }
+            continue;
+          }
+          item = cas.item ?? null;
+        } else {
+          item = db.update(normalizedId, updates);
+        }
         if (!item) {
           const message = `Work item not found: ${normalizedId}`;
           results.push({ id: normalizedId, success: false, error: message });
@@ -487,7 +544,7 @@ export default function register(ctx: PluginContext): void {
               console.log(`[Parent ${r.demotedParent.parent.id} demoted from ${r.demotedParent.from.status}/${r.demotedParent.from.stage} to ${r.demotedParent.to.status}/${r.demotedParent.to.stage}]`);
             }
           } else {
-            output.error(r.error, { success: false, error: r.error });
+            output.error(r.message ?? r.error, { success: false, error: r.error });
           }
         }
       }

@@ -45,11 +45,12 @@ import {
   createDowntimePoller,
   buildDowntimePaneArgs,
   spawnDowntimePane,
-  parseNextItemOutput,
+  parseNextCandidatesOutput,
   parseAuditCandidatesOutput,
   parseImplementCandidatesOutput,
   selectAuditCandidate,
   selectImplementCandidate,
+  selectNextCandidate,
   toDowntimeCandidate,
   toImplementCandidate,
   skillKindFromPrompt,
@@ -60,6 +61,8 @@ import {
   type DowntimeDispatchEvent,
   type DowntimeErrorEvent,
   type DowntimeNextResult,
+  type DowntimeClaimExpected,
+  type DowntimeClaimResult,
   type DowntimeSpawn,
   defaultDowntimeSpawn,
   buildDowntimeDispatchComment,
@@ -69,6 +72,8 @@ import {
   appendDowntimeLogEntry,
   auditDispatchedItemIds,
   implementDispatchedItemIds,
+  planDispatchedItemStages,
+  intakeDispatchedItemStages,
   readDowntimeLogEntries,
 } from './downtime-log.js';
 
@@ -348,21 +353,41 @@ export function createDowntimeDeps(
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
 ): DowntimeWorkerDeps {
   return {
-    async getNextItem(stage: DowntimeStage): Promise<DowntimeNextResult> {
+    async getNextItem(stage: DowntimeStage, cwd: string): Promise<DowntimeNextResult> {
       try {
         // buildWlArgs() prepends the tab's resolved --worklog-dir override
         // (WL-0MSI7DQL10016QYX): the downtime worker must select candidates
         // from the SAME worklog root the worklist uses, not the plugin
         // process's own cwd. Without the override the vector is unchanged.
-        // The bounded timeout (WL-0MSJIPHD0001L1J9) kills a hung wl child
-        // so the lookup fails closed to a strike instead of wedging the
-        // dispatch task until the pane restarts.
+        // A generous batch (-n 10) is fetched so a marker-excluded top
+        // candidate does not starve selection of the next one. The bounded
+        // timeout (WL-0MSJIPHD0001L1J9) kills a hung wl child so the lookup
+        // fails closed to a strike instead of wedging the dispatch task
+        // until the pane restarts.
         const { stdout } = await getExecFileAsync()(
           'wl',
-          buildWlArgs(['next', '--stage', stage, '--json']),
+          buildWlArgs(['next', '--stage', stage, '-n', '10', '--json']),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
         );
-        return { ok: true, candidate: parseNextItemOutput(stdout, stage) };
+        const candidates = parseNextCandidatesOutput(stdout, stage);
+        if (candidates === null) return { ok: false };
+        // Plan/intake dispatched-marker exclusion with change-guard (RCA
+        // WL-0MSRBFFLN005W3VT design point 3, RC-2): read the shared rolling
+        // dispatch log for THIS worklog root and exclude any candidate the
+        // downtime worker already dispatched for its tier (kind plan at
+        // intake_complete / kind intake at idea) while the item is still at
+        // its dispatched-at stage. A stage advancement releases it (the item
+        // leaves the stage filter anyway). Fail-safe: readDowntimeLogEntries
+        // never throws — a missing or unreadable log is treated as empty.
+        const entries = await readDowntimeLogEntries(cwd);
+        const dispatched =
+          stage === 'intake_complete'
+            ? planDispatchedItemStages(entries)
+            : stage === 'idea'
+              ? intakeDispatchedItemStages(entries)
+              : new Map<string, string>();
+        const selected = selectNextCandidate(candidates, dispatched);
+        return { ok: true, candidate: selected };
       } catch {
         // Transient wl failure → fail closed to busy: no dispatch, and the
         // worker must NOT treat it as an empty backlog (no cooldown).
@@ -452,29 +477,42 @@ export function createDowntimeDeps(
         return null;
       }
     },
-    async claimItem(itemId: string): Promise<void> {
-      // claimWorkItem never throws — failures are returned, but the result is
-      // deliberately discarded here: a failed claim must not block the
-      // dispatch. Note this path does NOT log the failure (unlike
-      // claimItemForAgentCommand), so a claim failure is silent and the
-      // dispatch is still recorded as a success (known silent path, follow-up
-      // WL-0MSLWJ310000ND0X; see README "Failure-path logging").
-      await claimWorkItem(itemId, assignee);
+    async claimItem(itemId: string, expected: DowntimeClaimExpected): Promise<DowntimeClaimResult> {
+      // CAS claim (RCA WL-0MSRBFFLN005W3VT design point 1): the transition
+      // only applies while the item is still in the state the tier selected
+      // it in — exactly one concurrent pane wins. A stale result (another
+      // pane claimed first) or any other claim failure ABORTS the dispatch
+      // (no pane, no marker, no success record) and is never silently
+      // discarded (WL-0MSLWJ310000ND0X absorbed): the outcome reason
+      // ('claim-failed' / 'wl-error') is the durable observable, and the
+      // failure detail is written to stderr like claimItemForAgentCommand.
+      const result = await claimWorkItem(itemId, assignee, expected);
+      if (result.success) return { ok: true };
+      process.stderr.write(
+        `[worklog-plugin] Downtime claim failed for ${itemId}: ` +
+          `${result.error ?? 'unknown error'}` +
+          `${result.stale ? ' (another pane won the claim race — dispatch aborted)' : ''}\n`,
+      );
+      return result.stale
+        ? { ok: false, reason: 'stale' }
+        : { ok: false, reason: 'error' };
     },
-    async spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<void> {
+    async spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<boolean> {
       const kind = skillKindFromPrompt(prompt);
-      spawnDowntimePane(
+      return spawnDowntimePane(
         scriptPath,
         buildDowntimePaneArgs(kind, prompt, opts),
         { cwd: opts.cwd },
         spawnFn,
       );
     },
-    async recordDispatch(event: DowntimeDispatchEvent): Promise<void> {
+    async recordDispatch(event: DowntimeDispatchEvent): Promise<boolean> {
       // 1. Durable trail: a comment on the item itself (survives wl sync).
       // buildWlArgs() prepends the resolved --worklog-dir override so the
       // comment lands on the item in ITS project's DB, not the plugin
-      // process's own cwd (WL-0MSI7DQL10016QYX).
+      // process's own cwd (WL-0MSI7DQL10016QYX). A comment failure is
+      // tolerated — the comment is the durable cross-machine trail, not the
+      // marker.
       try {
         await getExecFileAsync()(
           'wl',
@@ -493,11 +531,16 @@ export function createDowntimeDeps(
       } catch {
         // fail-closed: audit logging must never crash the worker
       }
-      // 2. Rolling local log (bounded JSONL under <cwd>/.worklog).
+      // 2. Rolling local log (bounded JSONL under <cwd>/.worklog) — the
+      // dispatched MARKER. Written BEFORE the pane spawns (RCA design point
+      // 2): a write failure resolves false so the dispatcher aborts rather
+      // than dispatching an unmarked item.
       try {
         await appendDowntimeLogEntry(event.cwd, JSON.stringify(event));
+        return true;
       } catch {
-        // fail-closed
+        // fail-closed: the marker could not be written → abort the dispatch
+        return false;
       }
     },
     async recordError(event: DowntimeErrorEvent): Promise<void> {

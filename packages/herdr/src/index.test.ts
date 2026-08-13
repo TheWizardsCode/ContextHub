@@ -16,7 +16,7 @@ import {
   parsePaneIdFile,
   CAPTURE_TIMEOUT_MS,
 } from './index.js';
-import { DOWNTIME_LOG_FILE, readDowntimeLogEntries } from './downtime-log.js';
+import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE, readDowntimeLogEntries } from './downtime-log.js';
 import { DOWNTIME_WL_TIMEOUT_MS, dispatchDowntimeWork } from './downtime-worker.js';
 import {
   fetchItemsByStage,
@@ -516,37 +516,91 @@ describe('createDowntimeDeps', () => {
     resetWorklogDir();
   });
 
-  it('getNextItem runs wl next --stage and parses the first workItem', async () => {
+  it('getNextItem runs wl next --stage -n 10 and parses the first workItem', async () => {
     const mockExec = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify({ success: true, workItem: { id: 'WL-ABC', title: 'Some task' } }),
+      stdout: JSON.stringify({ success: true, workItem: { id: 'WL-ABC', title: 'Some task', status: 'open' } }),
       stderr: '',
     });
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    const result = await deps.getNextItem('intake_complete');
+    const result = await deps.getNextItem('intake_complete', '/repo');
 
     expect(mockExec).toHaveBeenCalledWith(
       'wl',
-      ['next', '--stage', 'intake_complete', '--json'],
+      ['next', '--stage', 'intake_complete', '-n', '10', '--json'],
       expect.anything(),
     );
     expect(result).toEqual({
       ok: true,
-      candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open', sortIndex: undefined },
+    });
+  });
+
+  it('getNextItem parses the batch shape (wl next -n N) and preserves priority order', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        workItems: [
+          { workItem: { id: 'WL-1', title: 'Second', status: 'open', sortIndex: 20 } },
+          { workItem: { id: 'WL-2', title: 'First', status: 'open', sortIndex: 10 } },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextItem('idea', '/repo');
+
+    // selectNextCandidate: open-status guard + sortIndex ascending (wl next
+    // priority order preserved).
+    expect(result).toEqual({
+      ok: true,
+      candidate: { id: 'WL-2', title: 'First', stage: 'idea', status: 'open', sortIndex: 10 },
+    });
+  });
+
+  it('getNextItem excludes a plan-dispatched candidate still at its dispatched stage (change-guard)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        workItems: [
+          { workItem: { id: 'WL-ONCE', title: 'Marked', status: 'open', sortIndex: 5 } },
+          { workItem: { id: 'WL-NEXT', title: 'Next', status: 'open', sortIndex: 20 } },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+    const cwd = makeTempDir();
+    // Pre-write a plan marker for WL-ONCE at stage intake_complete (the same
+    // stage the plan tier selects at).
+    await appendDowntimeLogEntry(
+      cwd,
+      JSON.stringify({ itemId: 'WL-ONCE', kind: 'plan', stage: 'intake_complete', dispatchedAt: '2026-01-01T00:00:00.000Z' }),
+    );
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextItem('intake_complete', cwd);
+
+    // The marked candidate is excluded; the next one is selected.
+    expect(result).toEqual({
+      ok: true,
+      candidate: { id: 'WL-NEXT', title: 'Next', stage: 'intake_complete', status: 'open', sortIndex: 20 },
     });
   });
 
   it('getNextItem passes --worklog-dir when the tab resolved a worklog root', async () => {
     const mockExec = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify({ success: true, workItem: { id: 'SA-ABC', title: 'Sorra task' } }),
+      stdout: JSON.stringify({ success: true, workItem: { id: 'SA-ABC', title: 'Sorra task', status: 'open' } }),
       stderr: '',
     });
     setExecFileAsync(mockExec as never);
     setWorklogDir('/home/user/projects/SorraAgents/.worklog');
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    const result = await deps.getNextItem('intake_complete');
+    const result = await deps.getNextItem('intake_complete', '/repo');
 
     // The global option must appear BEFORE the subcommand, exactly as the
     // worklist's runWl() prepends it (WL-0MSI7DQL10016QYX).
@@ -558,11 +612,13 @@ describe('createDowntimeDeps', () => {
         'next',
         '--stage',
         'intake_complete',
+        '-n',
+        '10',
         '--json',
       ],
       expect.anything(),
     );
-    expect(result).toEqual({ ok: true, candidate: { id: 'SA-ABC', title: 'Sorra task', stage: 'intake_complete' } });
+    expect(result).toEqual({ ok: true, candidate: { id: 'SA-ABC', title: 'Sorra task', stage: 'intake_complete', status: 'open', sortIndex: undefined } });
   });
 
   it('getNextItem reports ok:true with no candidate when wl reports no item', async () => {
@@ -573,24 +629,24 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextItem('idea')).toEqual({ ok: true, candidate: null });
+    expect(await deps.getNextItem('idea', '/repo')).toEqual({ ok: true, candidate: null });
   });
 
   it('getNextItem fails closed ({ok:false}) when wl errors', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextItem('idea')).toEqual({ ok: false });
+    expect(await deps.getNextItem('idea', '/repo')).toEqual({ ok: false });
   });
 
   it('getNextItem passes a bounded timeout so a hung wl fails closed', async () => {
     const mockExec = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify({ success: true, workItem: { id: 'WL-ABC', title: 'Some task' } }),
+      stdout: JSON.stringify({ success: true, workItem: { id: 'WL-ABC', title: 'Some task', status: 'open' } }),
       stderr: '',
     });
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    await deps.getNextItem('intake_complete');
+    await deps.getNextItem('intake_complete', '/repo');
 
     // AC1: the invocation must carry the bounded timeout so a hung wl child
     // is killed by execFile instead of wedging the dispatch task.
@@ -616,7 +672,7 @@ describe('createDowntimeDeps', () => {
       setExecFileAsync(hungExec as never);
       const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
 
-      const resultPromise = deps.getNextItem('idea');
+      const resultPromise = deps.getNextItem('idea', '/repo');
       await vi.advanceTimersByTimeAsync(DOWNTIME_WL_TIMEOUT_MS - 1);
       // Still pending just before the timeout — no premature resolution.
       await vi.advanceTimersByTimeAsync(1);
@@ -1066,7 +1122,7 @@ describe('createDowntimeDeps', () => {
       return Promise.resolve({ stdout: JSON.stringify({ success: true, workItem: null }), stderr: '' });
     });
     setExecFileAsync(mockExec as never);
-    const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
+    const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
     const cwd = makeTempDir();
 
@@ -1087,22 +1143,56 @@ describe('createDowntimeDeps', () => {
     expect(spawnFn).toHaveBeenCalledTimes(1);
   });
 
-  it('claimItem runs wl update --status in_progress --assignee', async () => {
+  it('claimItem runs wl update --status in_progress --assignee with CAS guards', async () => {
     const mockExec = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    await deps.claimItem('WL-ABC');
+    const result = await deps.claimItem('WL-ABC', { status: 'open', stage: 'intake_complete' });
 
     expect(mockExec).toHaveBeenCalledWith(
       'wl',
-      ['update', 'WL-ABC', '--status', 'in_progress', '--assignee', 'Map', '--json'],
+      [
+        'update',
+        'WL-ABC',
+        '--status',
+        'in_progress',
+        '--assignee',
+        'Map',
+        '--if-status',
+        'open',
+        '--if-stage',
+        'intake_complete',
+        '--json',
+      ],
       expect.anything(),
     );
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('claimItem resolves stale when the CAS guard fails (another pane won the race)', async () => {
+    const mockExec = vi
+      .fn()
+      .mockRejectedValue(new Error('{"success":false,"error":"stale","message":"Conditional update skipped"}'));
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.claimItem('WL-ABC', { status: 'open', stage: 'idea' });
+
+    expect(result).toEqual({ ok: false, reason: 'stale' });
+  });
+
+  it('claimItem resolves error (a strike) when wl fails for any other reason', async () => {
+    setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.claimItem('WL-ABC', { status: 'open', stage: 'idea' });
+
+    expect(result).toEqual({ ok: false, reason: 'error' });
   });
 
   it('spawnAgentPane spawns send-to-pi.sh with the derived pane name and args', async () => {
-    const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
+    const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
 
     await deps.spawnAgentPane('Run /skill:plan WL-ABC — Some task.', {
@@ -1129,7 +1219,7 @@ describe('createDowntimeDeps', () => {
   });
 
   it('spawnAgentPane derives the intake pane name from the prompt', async () => {
-    const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
+    const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
 
     await deps.spawnAgentPane('Run /skill:intake WL-DEF — An idea.', {
@@ -1145,7 +1235,7 @@ describe('createDowntimeDeps', () => {
   });
 
   it('spawnAgentPane derives the audit pane name from the prompt', async () => {
-    const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
+    const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
 
     await deps.spawnAgentPane('Run /skill:audit WL-AUD — Audit me.', {
@@ -1253,21 +1343,28 @@ describe('createDowntimeDeps recordDispatch', () => {
     expect(entry.dispatchedAt).toBe('2026-01-01T00:00:00.000Z');
   });
 
-  it('is fail-closed when wl comment add fails (no throw, dispatch unaffected)', async () => {
+  it('resolves true even when wl comment add fails (comment is not the marker)', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
+    const cwd = makeTempDir();
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
 
+    // The comment write failing must NOT abort the dispatch — the rolling-log
+    // marker is the dispatch-suppression source. The log write succeeds, so
+    // recordDispatch resolves true (no throw, dispatch proceeds).
     await expect(
       deps.recordDispatch({
         itemId: 'WL-ABC',
         kind: 'plan',
         dispatchedAt: '2026-01-01T00:00:00.000Z',
-        cwd: '/repo',
+        cwd,
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(true);
+    // The marker still landed even though the comment failed.
+    const raw = readFileSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), 'utf8');
+    expect(raw).toContain('WL-ABC');
   });
 
-  it('is fail-closed when the log write fails (e.g. .worklog path is a file)', async () => {
+  it('resolves false (marker write failed → dispatch aborts) when the log write fails', async () => {
     setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
     const cwd = makeTempDir();
     writeFileSync(join(cwd, '.worklog'), 'not a directory', 'utf8');
@@ -1280,7 +1377,7 @@ describe('createDowntimeDeps recordDispatch', () => {
         dispatchedAt: '2026-01-01T00:00:00.000Z',
         cwd,
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
   });
 });
 

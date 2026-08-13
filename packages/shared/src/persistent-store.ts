@@ -966,6 +966,22 @@ export class SqlitePersistentStore {
   }
 
   /**
+   * Execute a function inside a `BEGIN IMMEDIATE` transaction.
+   *
+   * The write lock is acquired BEFORE any read inside `fn` (deferred
+   * transactions acquire it at the first write). This serializes
+   * check-then-write sequences against OTHER processes' connections: a
+   * concurrent writer blocks at `BEGIN IMMEDIATE` until this transaction
+   * commits (busy_timeout), then observes the committed state — which is
+   * exactly the atomicity the CAS claim (compare-and-swap, RCA
+   * WL-0MSRBFFLN005W3VT design point 1) needs across herdr panes.
+   */
+  transactionImmediate<T>(fn: () => T): T {
+    const tx = this.db.transaction(fn);
+    return tx.immediate();
+  }
+
+  /**
    * Create or update a dependency edge
    */
   saveDependencyEdge(edge: DependencyEdge): void {

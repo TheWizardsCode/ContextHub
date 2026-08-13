@@ -407,6 +407,17 @@ export interface DowntimeCandidate {
   id: string;
   title: string;
   stage: DowntimeStage;
+  /**
+   * Worklog status of the candidate (`open` for selectable plan/intake/
+   * implement items; `completed` for audit candidates). The plan/intake tiers
+   * filter client-side to `status === 'open'` (RCA WL-0MSRBFFLN005W3VT
+   * amplifier fix): `wl next --stage X` keeps completed items under a stage
+   * filter, so without this guard a completed/in_review item whose stage
+   * matches could be dispatched for /skill:plan or /skill:intake.
+   */
+  status?: string;
+  /** wl next priority order preserved for deterministic selection. */
+  sortIndex?: number;
 }
 
 /**
@@ -452,10 +463,41 @@ export type DowntimeNextResult =
   | { ok: true; candidate: DowntimeCandidate | null }
   | { ok: false };
 
+/**
+ * Expected state for the pre-dispatch claim (compare-and-swap, RCA
+ * WL-0MSRBFFLN005W3VT design point 1): the claim transition to
+ * `in_progress` only applies while the item is still in the state the tier
+ * selected it in. `status` matches the stored hyphenated status
+ * (`open`/`completed`/...); `stage` matches the worklog stage.
+ */
+export interface DowntimeClaimExpected {
+  status?: string;
+  stage?: string;
+}
+
+/**
+ * Outcome of a pre-dispatch claim. `ok:true` means THIS pane won the
+ * claim; `ok:false` with reason `stale` means another pane claimed the item
+ * first (or its state changed since selection) — the dispatch MUST abort;
+ * `ok:false` with reason `error` is a wl CLI failure (counted as a
+ * wl-error strike).
+ */
+export type DowntimeClaimResult =
+  | { ok: true }
+  | { ok: false; reason: 'stale' | 'error' };
+
 /** External boundaries injected so the dispatch logic is testable. */
 export interface DowntimeWorkerDeps {
-  /** Runs `wl next --stage <stage> --json` and reports the first candidate (or a wl failure). */
-  getNextItem(stage: DowntimeStage): Promise<DowntimeNextResult>;
+  /**
+   * Runs `wl next --stage <stage> -n 10 --json` and reports the first
+   * selectable candidate (or a wl failure). `cwd` is the worklog root whose
+   * `.worklog/downtime-dispatches.log` is consulted for the plan/intake
+   * dispatched-marker change-guard (RCA WL-0MSRBFFLN005W3VT design point 3):
+   * a candidate already dispatched for its tier while still at its
+   * dispatched-at stage is excluded. A batch is fetched so excluding the
+   * top candidate does not starve selection of the next one.
+   */
+  getNextItem(stage: DowntimeStage, cwd: string): Promise<DowntimeNextResult>;
   /**
    * Look up the next completed/in_review item WITHOUT a valid audit (the
    * audit dispatch tier, which runs before the plan/intake tiers). Fail-closed:
@@ -487,15 +529,30 @@ export interface DowntimeWorkerDeps {
    * trusted.
    */
   readCodeFreezeStatus(cwd: string): CodeFreezeStatus;
-  /** Claims the item (`wl update <id> --status in_progress`) before dispatch. */
-  claimItem(itemId: string): Promise<void>;
-  /** Opens a visible pi agent pane running the prompt (via send-to-pi.sh). */
-  spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<void>;
+  /**
+   * Claim the item (CAS: `wl update <id> --status in_progress --if-status
+   * <expected.status> [--if-stage <expected.stage>]`) BEFORE anything else.
+   * Exactly one concurrent pane wins; a loser resolves `{ok:false,
+   * reason:'stale'}` and the dispatcher aborts (no pane, no marker, no
+   * success record). A `{ok:false, reason:'error'}` is a wl CLI failure
+   * (a strike, never silently discarded — WL-0MSLWJ310000ND0X absorbed).
+   */
+  claimItem(itemId: string, expected: DowntimeClaimExpected): Promise<DowntimeClaimResult>;
+  /**
+   * Open a visible pi agent pane running the prompt (via send-to-pi.sh).
+   * Resolves true when the spawn started; false on a handled spawn `error`
+   * event (no unhandled-exception crash, WL-0MSLWJ3I70031Z8U absorbed).
+   */
+  spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<boolean>;
   /**
    * Audit trail for a successful dispatch: comment on the item + rolling
-   * log entry under `.worklog`. Must never throw (fail-closed).
+   * log entry under `.worklog`. Resolves TRUE only when the rolling-log
+   * MARKER was written (the dispatched-marker source); a comment failure is
+   * tolerated (the comment is a durable cross-machine trail, not the
+   * marker). A false result makes the dispatcher ABORT before spawning — an
+   * unmarked item is never dispatched (fail-closed, RCA design point 2).
    */
-  recordDispatch(event: DowntimeDispatchEvent): Promise<void>;
+  recordDispatch(event: DowntimeDispatchEvent): Promise<boolean>;
   /**
    * Record a persistent CLI-error event (three consecutive wl failures).
    * Must never throw (fail-closed): logging must not crash the worker.
@@ -512,6 +569,13 @@ export interface DowntimeDispatchEvent {
   /** Worklog root (the rolling log lives at `<cwd>/.worklog`). */
   cwd: string;
   title?: string;
+  /**
+   * Worklog stage of the item at dispatch (plan/intake change-guard, RCA
+   * WL-0MSRBFFLN005W3VT design point 3): a candidate is excluded while it is
+   * still at its dispatched-at stage; a stage advancement releases it.
+   * Backward compatible — absent on legacy entries.
+   */
+  stage?: string;
 }
 
 /**
@@ -531,6 +595,13 @@ export interface DowntimeDispatchOutcome {
   dispatched: boolean;
   candidate?: DowntimeCandidate;
   kind?: DowntimeSkillKind;
+  /**
+   * Non-dispatch reasons: 'dispatch-in-flight' | 'no-candidate' |
+   * 'wl-error' | 'code-freeze' | 'claim-failed' (lost the CAS race —
+   * another pane won; neutral) | 'marker-write-failed' (fail-closed abort
+   * BEFORE spawn) | 'spawn-failed' (handled spawn error; outcome is not
+   * success).
+   */
   reason?: string;
 }
 
@@ -538,9 +609,84 @@ export interface DowntimeDispatchOutcome {
  * Per-process single-flight guard: at most one dispatch can be in flight at
  * a time (concurrent calls are refused, not queued). Cross-pane
  * serialization is handled by the pre-dispatch claim (Q5 — no lock file):
- * the claimed item leaves `wl next`'s selection set for other panes.
+ * the CAS claim atomically moves the item out of `wl next`'s selection set
+ * for other panes.
  */
 let dispatchInFlight = false;
+
+/**
+ * Expected claim state per tier (RCA WL-0MSRBFFLN005W3VT design point 1):
+ * the pre-dispatch claim only applies while the item is still in the exact
+ * state the tier selected it in. The audit tier selects `completed` /
+ * `in_review` items; every other tier selects `open` items at their stage.
+ */
+const TIER_EXPECTED: Record<DowntimeSkillKind, DowntimeClaimExpected> = {
+  audit: { status: 'completed', stage: 'in_review' },
+  implement: { status: 'open', stage: 'plan_complete' },
+  plan: { status: 'open', stage: 'intake_complete' },
+  intake: { status: 'open', stage: 'idea' },
+};
+
+/**
+ * Dispatch one already-selected candidate through the fixed pipeline:
+ * CAS claim → marker write (before spawn) → spawn.
+ *
+ *  - Claim (compare-and-swap): exactly one concurrent pane wins; a loser
+ *    (or a wl claim failure) ABORTS the dispatch — no pane, no marker, no
+ *    success record. A lost race resolves reason 'claim-failed' (neutral,
+ *    the winner's pane will busy the proxy); a wl claim failure resolves
+ *    'wl-error' (counts toward the three-strike rule). Neither is ever
+ *    silently discarded (WL-0MSLWJ310000ND0X absorbed).
+ *  - Marker write BEFORE the pane spawns: if the marker cannot be written
+ *    the dispatch aborts BEFORE spawning (fail-closed — an unmarked item is
+ *    never dispatched). The item stays claimed (in_progress), so no other
+ *    pane can select it (RCA design point 2).
+ *  - Spawn: a handled spawn `error` resolves reason 'spawn-failed' — the
+ *    outcome is NOT success (WL-0MSLWJ3I70031Z8U absorbed); the marker
+ *    stands so the item is not re-dispatched.
+ */
+async function dispatchClaimedTier(
+  deps: DowntimeWorkerDeps,
+  kind: DowntimeSkillKind,
+  candidate: DowntimeCandidate,
+  opts: { model: string; cwd: string },
+): Promise<DowntimeDispatchOutcome> {
+  const expected = TIER_EXPECTED[kind];
+  const claim = await deps.claimItem(candidate.id, expected);
+  if (!claim.ok) {
+    return claim.reason === 'stale'
+      ? { dispatched: false, reason: 'claim-failed' }
+      : { dispatched: false, reason: 'wl-error' };
+  }
+
+  let marked = false;
+  try {
+    marked = await deps.recordDispatch({
+      itemId: candidate.id,
+      kind,
+      dispatchedAt: new Date().toISOString(),
+      cwd: opts.cwd,
+      title: candidate.title,
+      // The worklog stage at dispatch powers the plan/intake change-guard
+      // (exclude while the item is still at this stage; release on advancement).
+      stage: expected.stage,
+    });
+  } catch {
+    // Fail-closed: a throwing recordDispatch (stub or regression) is a marker
+    // write failure — abort before spawn.
+    marked = false;
+  }
+  if (!marked) {
+    return { dispatched: false, reason: 'marker-write-failed' };
+  }
+
+  const spawned = await deps.spawnAgentPane(buildDowntimePrompt(kind, candidate), opts);
+  if (!spawned) {
+    return { dispatched: false, reason: 'spawn-failed' };
+  }
+
+  return { dispatched: true, candidate, kind };
+}
 
 /**
  * dispatch one downtime work item. Selection priority (audit tier first,
@@ -569,8 +715,10 @@ let dispatchInFlight = false;
  * tier is still attempted, so a tier-3 candidate can still dispatch. A
  * `wl-error` outcome (any CLI failure) is never a candidate and never a
  * `no-candidate`; the caller's three-strike rule decides when consecutive
- * errors pause the worker. The item is claimed BEFORE the pane spawns so it
- * appears in_progress immediately and a second pane cannot select it. The
+ * errors pause the worker. Every tier runs its candidate through
+ * `dispatchClaimedTier` (CAS claim → marker → spawn), so the item is
+ * claimed BEFORE the pane spawns and a losing pane aborts with no pane, no
+ * marker, no success record (the same-instant race, RC-1, is closed). The
  * caller must only invoke this once the idle tracker reports the threshold
  * met (AC1); a dispatch consumes the local slot, so the proxy reports busy
  * and the tracker requires a fresh full idle period before the next dispatch.
@@ -595,10 +743,7 @@ export async function dispatchDowntimeWork(
     if (!frozen) {
       const auditCandidate = await deps.getNextAuditCandidate(opts.cwd);
       if (auditCandidate !== null) {
-        await deps.claimItem(auditCandidate.id);
-        await deps.spawnAgentPane(buildDowntimePrompt('audit', auditCandidate), opts);
-        await recordDispatchAudit(deps, 'audit', auditCandidate, opts.cwd);
-        return { dispatched: true, candidate: auditCandidate, kind: 'audit' };
+        return await dispatchClaimedTier(deps, 'audit', auditCandidate, opts);
       }
       // Implement tier (WL-0MSMAYPQP001FLR6): after the audit gate, dispatch
       // /skill:implement for the highest-priority open plan_complete item with
@@ -608,23 +753,17 @@ export async function dispatchDowntimeWork(
       // error at the implement tier does NOT short-circuit the fallback).
       const implementCandidate = await deps.getNextImplementCandidate(opts.cwd);
       if (implementCandidate !== null) {
-        await deps.claimItem(implementCandidate.id);
-        await deps.spawnAgentPane(buildDowntimePrompt('implement', implementCandidate), opts);
-        await recordDispatchAudit(deps, 'implement', implementCandidate, opts.cwd);
-        return { dispatched: true, candidate: implementCandidate, kind: 'implement' };
+        return await dispatchClaimedTier(deps, 'implement', implementCandidate, opts);
       }
     }
     // Tier 2 (intake_complete → /skill:plan). A CLI error here does NOT
     // short-circuit: tier 3 is still attempted so a tier-3 candidate can
     // still dispatch (operator refinement).
     let tier2Error = false;
-    const intakeComplete = await deps.getNextItem('intake_complete');
+    const intakeComplete = await deps.getNextItem('intake_complete', opts.cwd);
     if (intakeComplete.ok) {
       if (intakeComplete.candidate !== null) {
-        await deps.claimItem(intakeComplete.candidate.id);
-        await deps.spawnAgentPane(buildDowntimePrompt('plan', intakeComplete.candidate), opts);
-        await recordDispatchAudit(deps, 'plan', intakeComplete.candidate, opts.cwd);
-        return { dispatched: true, candidate: intakeComplete.candidate, kind: 'plan' };
+        return await dispatchClaimedTier(deps, 'plan', intakeComplete.candidate, opts);
       }
     } else {
       tier2Error = true;
@@ -632,13 +771,10 @@ export async function dispatchDowntimeWork(
 
     // Tier 3 (idea → /skill:intake) is ALWAYS attempted when tier 2 produced
     // no candidate — including when tier 2 errored.
-    const idea = await deps.getNextItem('idea');
+    const idea = await deps.getNextItem('idea', opts.cwd);
     if (idea.ok) {
       if (idea.candidate !== null) {
-        await deps.claimItem(idea.candidate.id);
-        await deps.spawnAgentPane(buildDowntimePrompt('intake', idea.candidate), opts);
-        await recordDispatchAudit(deps, 'intake', idea.candidate, opts.cwd);
-        return { dispatched: true, candidate: idea.candidate, kind: 'intake' };
+        return await dispatchClaimedTier(deps, 'intake', idea.candidate, opts);
       }
       if (tier2Error) {
         // Tier 2 errored and tier 3 answered empty: the backlog is NOT
@@ -668,30 +804,6 @@ export async function dispatchDowntimeWork(
 }
 
 /**
- * Record the audit event for a successful dispatch. Wrapped so a failing
- * audit implementation (or a stub that rejects) can never fail or block the
- * dispatch itself — the audit trail is best-effort (AC4).
- */
-async function recordDispatchAudit(
-  deps: DowntimeWorkerDeps,
-  kind: DowntimeSkillKind,
-  candidate: DowntimeCandidate,
-  cwd: string,
-): Promise<void> {
-  try {
-    await deps.recordDispatch({
-      itemId: candidate.id,
-      kind,
-      dispatchedAt: new Date().toISOString(),
-      cwd,
-      title: candidate.title,
-    });
-  } catch {
-    // fail-closed: audit logging must never crash or block the worker
-  }
-}
-
-/**
  * Argument vector for spawning `send-to-pi.sh`: visible pane named
  * `Downtime <kind>`, `--no-focus` (visible but never steals focus),
  * `--cwd <wlRoot>`, `--model <downtimeModel>`, then the prompt.
@@ -713,9 +825,14 @@ export function buildDowntimePaneArgs(
   ];
 }
 
-/** Minimal spawn handle: the caller unrefs so the parent can exit first. */
+/**
+ * Minimal spawn handle: the caller unrefs so the parent can exit first, and
+ * registers an `error` listener so a spawn failure is observable instead of
+ * crashing the plugin process (WL-0MSLWJ3I70031Z8U absorbed).
+ */
 export interface DowntimeSpawnHandle {
   unref(): void;
+  once(event: 'error', listener: (err: Error) => void): void;
 }
 
 /** Injectable spawn boundary (matches the repo's injectable-seam pattern). */
@@ -748,18 +865,38 @@ export const defaultDowntimeSpawn: DowntimeSpawn = (scriptPath, args, opts) =>
   spawn(scriptPath, args, buildDowntimeSpawnOptions(opts.cwd));
 
 /**
+ * How long to wait for a spawn-level `error` event before assuming the pane
+ * started (an ENOENT/EACCES error fires on the next event-loop tick). The
+ * probe keeps the failure observable without delaying the poll loop.
+ */
+export const DOWNTIME_SPAWN_PROBE_MS = 500;
+
+/**
  * Spawn `send-to-pi.sh` detached with stdio ignored, then unref so the
  * parent (plugin) process can exit independently — same pattern as the
- * TUI's existing agent dispatches.
+ * TUI's existing agent dispatches. An `error` listener is ALWAYS attached
+ * (a spawn failure must not crash the plugin with an unhandled 'error'
+ * event, WL-0MSLWJ3I70031Z8U); a spawn error resolves `false` so the
+ * dispatch outcome is not a false success.
  */
-export function spawnDowntimePane(
+export async function spawnDowntimePane(
   scriptPath: string,
   args: string[],
   opts: { cwd: string },
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
-): void {
+): Promise<boolean> {
   const child = spawnFn(scriptPath, args, opts);
   child.unref();
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(true), DOWNTIME_SPAWN_PROBE_MS);
+    child.once('error', (err: Error) => {
+      clearTimeout(timer);
+      process.stderr.write(
+        `[worklog-plugin] Downtime pane spawn failed: ${err.message}\n`,
+      );
+      resolve(false);
+    });
+  });
 }
 
 // ── Worker orchestrator (implemented — F3) ────────────────────────────
@@ -985,9 +1122,71 @@ export function buildDowntimeDispatchComment(
 // ── Wiring helpers (implemented — F4) ─────────────────────────────────
 
 /**
+ * Parse the stdout of `wl next --stage <stage> -n N --json` into typed
+ * plan/intake candidates. Accepts both the batch shape the CLI emits for
+ * `-n N` (`{ workItems: [{ workItem: {...} }] }`) and the legacy single-item
+ * shape (`{ workItem: {...} }`) for backward compatibility. Each candidate
+ * carries the query `stage`, the worklog `status` (for the client-side
+ * `open` guard) and `sortIndex` (wl next priority order). Malformed JSON or
+ * output without any parseable entry yields null (fail-closed); an empty
+ * result list yields `[]` (a genuine empty backlog).
+ */
+export function parseNextCandidatesOutput(
+  stdout: string,
+  stage: DowntimeStage,
+): DowntimeCandidate[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+
+  let rawItems: unknown[] | null = null;
+  if (parsed !== null && typeof parsed === 'object') {
+    const o = parsed as Record<string, unknown>;
+    if (Array.isArray(o.workItems)) {
+      rawItems = o.workItems;
+    } else if (typeof o.workItem === 'object' && o.workItem !== null) {
+      rawItems = [o]; // legacy single-item shape with a candidate
+    } else if ('workItem' in o) {
+      rawItems = []; // legacy single-item shape answered no item → empty backlog
+    }
+  }
+  if (rawItems === null) return null;
+
+  const candidates: DowntimeCandidate[] = [];
+  for (const entry of rawItems) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const nested =
+      (entry as { workItem?: unknown }).workItem !== undefined
+        ? (entry as { workItem: Record<string, unknown> }).workItem
+        : (entry as Record<string, unknown>);
+    if (typeof nested !== 'object' || nested === null) continue;
+    if (typeof nested.id !== 'string' || nested.id.length === 0) continue;
+    candidates.push({
+      id: nested.id,
+      title: typeof nested.title === 'string' ? nested.title : '',
+      stage,
+      status: typeof nested.status === 'string' ? nested.status : undefined,
+      sortIndex:
+        typeof nested.sortIndex === 'number' && Number.isFinite(nested.sortIndex)
+          ? nested.sortIndex
+          : undefined,
+    });
+  }
+  return candidates;
+}
+
+/**
  * Parse the stdout of `wl next --stage <stage> --json` into the first
  * candidate. Returns null (no dispatch) for empty output, a null
  * `workItem`, missing ids, or malformed JSON.
+ *
+ * Superseded by `parseNextCandidatesOutput` for production selection (the
+ * downtime worker fetches a batch so marker-excluded candidates do not
+ * starve selection); kept exported for callers/tests that use the
+ * single-item shape.
  */
 export function parseNextItemOutput(stdout: string, stage: DowntimeStage): DowntimeCandidate | null {
   try {
@@ -1231,6 +1430,39 @@ export function selectImplementCandidate(
  */
 export function toImplementCandidate(candidate: ImplementCandidate): DowntimeCandidate {
   return { id: candidate.id, title: candidate.title, stage: 'implement' };
+}
+
+// ── Plan/intake selection (RCA WL-0MSRBFFLN005W3VT RC-2 + amplifier) ──
+
+/**
+ * Select the next plan/intake candidate from parsed `wl next` batch output:
+ * the first candidate that is `status === 'open'` (client-side guard — `wl
+ * next --stage X` keeps completed items under a stage filter, so without it
+ * a completed/in_review item whose stage matches could be dispatched),
+ * excluding candidates in the dispatched-marker change-guard map (id →
+ * stage at dispatch): a candidate is excluded while it is still at its
+ * dispatched-at stage; a stage advancement (or any stage differing from the
+ * recorded one) releases it. Sorted ascending by `sortIndex` (wl next
+ * priority order preserved). Returns null when no candidate qualifies.
+ *
+ * Missing `status` never qualifies (fail-closed: an item whose state cannot
+ * be verified is not dispatched) — `parseNextCandidatesOutput` always
+ * carries the status from the enriched workItem.
+ */
+export function selectNextCandidate(
+  candidates: DowntimeCandidate[],
+  dispatchedStages?: ReadonlyMap<string, string>,
+): DowntimeCandidate | null {
+  const target = candidates
+    .filter((c) => c.status === 'open')
+    .filter((c) => {
+      const dispatchedAt = dispatchedStages?.get(c.id);
+      // Exclude while still at the dispatched-at stage; a missing recorded
+      // stage (legacy entry) never suppresses selection.
+      return dispatchedAt === undefined || dispatchedAt !== c.stage;
+    })
+    .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
+  return target[0] ?? null;
 }
 
 // ── Settings clamps (implemented — wired into settings.ts by F2) ──────

@@ -114,6 +114,19 @@ export interface UpdateWorkItemInput {
   effort?: WorkItemEffortLevel | '';
   /** When present, sets the needsProducerReview flag */
   needsProducerReview?: boolean;
+  /**
+   * CAS guard (compare-and-swap claim, RCA WL-0MSRBFFLN005W3VT design point 1):
+   * when present, the update only applies if the item's CURRENT status matches
+   * (normalized hyphenated form). On mismatch the update fails with a `stale`
+   * result and no row is written — the losing pane of a concurrent claim race
+   * aborts its dispatch instead of double-claiming.
+   */
+  ifStatus?: WorkItemStatus;
+  /**
+   * CAS guard: when present, the update only applies if the item's CURRENT
+   * stage matches. Composes with `ifStatus` (both must match).
+   */
+  ifStage?: string;
 }
 export interface WorkItemQuery {
   status?: WorkItemStatus[];

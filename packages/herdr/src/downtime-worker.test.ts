@@ -36,8 +36,10 @@ import {
   buildDowntimeSpawnOptions,
   BLOCKED_QUESTIONS_INSTRUCTION,
   parseNextItemOutput,
+  parseNextCandidatesOutput,
   parseImplementCandidatesOutput,
   selectImplementCandidate,
+  selectNextCandidate,
   parseAuditCandidatesOutput,
   selectAuditCandidate,
   toDowntimeCandidate,
@@ -57,6 +59,7 @@ import {
   type DowntimeCandidate,
   type DowntimeWorkerDeps,
   type DowntimeSpawn,
+  type DowntimeStage,
   type AuditCandidate,
   type ImplementCandidate,
 } from './downtime-worker.js';
@@ -77,9 +80,9 @@ function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
     getNextAuditCandidate: vi.fn().mockResolvedValue(null),
     getNextImplementCandidate: vi.fn().mockResolvedValue(null),
-    claimItem: vi.fn().mockResolvedValue(undefined),
-    spawnAgentPane: vi.fn().mockResolvedValue(undefined),
-    recordDispatch: vi.fn().mockResolvedValue(undefined),
+    claimItem: vi.fn().mockResolvedValue({ ok: true }),
+    spawnAgentPane: vi.fn().mockResolvedValue(true),
+    recordDispatch: vi.fn().mockResolvedValue(true),
     recordError: vi.fn().mockResolvedValue(undefined),
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): not frozen by default, so
     // existing dispatch tests exercise the unchanged audit/implement tiers.
@@ -216,13 +219,13 @@ describe('dispatch selection', () => {
     const deps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({
         ok: true,
-        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
       }),
     });
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
-    expect(deps.getNextItem).toHaveBeenCalledWith('intake_complete');
+    expect(deps.getNextItem).toHaveBeenCalledWith('intake_complete', '/repo');
     expect(deps.getNextItem).toHaveBeenCalledTimes(1);
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
@@ -233,17 +236,19 @@ describe('dispatch selection', () => {
     );
   });
 
-  it('claims the item BEFORE the pane spawns', async () => {
+  it('claims the item BEFORE the pane spawns with the tier CAS guard', async () => {
     const deps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({
         ok: true,
-        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
       }),
     });
 
     await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-ABC');
+    // The claim carries the expected state the tier selected the item in
+    // (RCA WL-0MSRBFFLN005W3VT design point 1 — compare-and-swap).
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-ABC', { status: 'open', stage: 'intake_complete' });
     const claimOrder = (deps.claimItem as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     const spawnOrder = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     expect(claimOrder).toBeLessThan(spawnOrder);
@@ -254,16 +259,16 @@ describe('dispatch selection', () => {
       getNextItem: vi
         .fn()
         .mockResolvedValueOnce({ ok: true, candidate: null })
-        .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-DEF', title: 'An idea', stage: 'idea' } }),
+        .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-DEF', title: 'An idea', stage: 'idea', status: 'open' } }),
     });
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
-    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
-    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
     expect(outcome.kind).toBe('intake');
     expect(outcome.candidate?.id).toBe('WL-DEF');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-DEF');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-DEF', { status: 'open', stage: 'idea' });
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:intake WL-DEF'),
       expect.anything(),
@@ -275,8 +280,8 @@ describe('dispatch selection', () => {
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
-    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
-    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('no-candidate');
     expect(deps.claimItem).not.toHaveBeenCalled();
@@ -291,8 +296,8 @@ describe('dispatch selection', () => {
 
     // Tier 2 error does NOT short-circuit: tier 3 is still attempted.
     expect(deps.getNextItem).toHaveBeenCalledTimes(2);
-    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
-    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('wl-error');
     expect(deps.claimItem).not.toHaveBeenCalled();
@@ -304,7 +309,7 @@ describe('dispatch selection', () => {
       getNextItem: vi
         .fn()
         .mockResolvedValueOnce({ ok: false })
-        .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-IDE', title: 'An idea', stage: 'idea' } }),
+        .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-IDE', title: 'An idea', stage: 'idea', status: 'open' } }),
     });
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
@@ -312,9 +317,9 @@ describe('dispatch selection', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('intake');
     expect(outcome.candidate?.id).toBe('WL-IDE');
-    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
-    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-IDE');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-IDE', { status: 'open', stage: 'idea' });
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:intake WL-IDE'),
       expect.anything(),
@@ -349,8 +354,8 @@ describe('dispatch selection', () => {
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
-    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
-    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('wl-error');
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
@@ -377,7 +382,7 @@ describe('dispatch audit tier', () => {
     expect(outcome.kind).toBe('audit');
     expect(outcome.candidate?.id).toBe('WL-AUD');
     expect(deps.getNextItem).not.toHaveBeenCalled();
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', { status: 'completed', stage: 'in_review' });
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:audit WL-AUD'),
       { model: 'plan', cwd: '/repo' },
@@ -411,8 +416,8 @@ describe('dispatch audit tier', () => {
     expect(outcome.kind).toBe('intake');
     expect(outcome.candidate?.id).toBe('WL-IDE');
     expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
-    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
-    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
   });
 
   it('fails closed to no-candidate when getNextAuditCandidate returns null and no plan/intake candidate exists', async () => {
@@ -452,7 +457,7 @@ describe('dispatch implement tier', () => {
     expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
     expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
     expect(deps.getNextImplementCandidate).toHaveBeenCalledWith('/repo');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-IMP');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-IMP', { status: 'open', stage: 'plan_complete' });
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:implement WL-IMP'),
       { model: 'plan', cwd: '/repo' },
@@ -518,7 +523,7 @@ describe('dispatch implement tier', () => {
     expect(outcome.kind).toBe('plan');
     expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
     expect(deps.getNextItem).toHaveBeenCalledTimes(1);
-    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
   });
 
   it('falls back to intake (idea) when no implement or plan candidate exists', async () => {
@@ -534,8 +539,8 @@ describe('dispatch implement tier', () => {
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
     expect(outcome.kind).toBe('intake');
-    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete');
-    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
+    expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
   });
 
   it('a wl next CLI error at the implement tier does NOT short-circuit the plan/intake fallback', async () => {
@@ -599,10 +604,10 @@ describe('dispatch code-freeze gate', () => {
     expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
     expect(deps.getNextImplementCandidate).not.toHaveBeenCalled();
     // Plan/intake tiers still dispatch.
-    expect(deps.getNextItem).toHaveBeenCalledWith('intake_complete');
+    expect(deps.getNextItem).toHaveBeenCalledWith('intake_complete', '/repo');
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-PLAN');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-PLAN', { status: 'open', stage: 'intake_complete' });
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-PLAN'),
       expect.anything(),
@@ -1185,18 +1190,272 @@ describe('dispatch audit trail', () => {
     expect(deps.recordDispatch).not.toHaveBeenCalled();
   });
 
-  it('keeps the dispatch successful when recordDispatch fails (audit never blocks work)', async () => {
+  it('aborts the dispatch (marker-write-failed) when recordDispatch fails — fail-closed', async () => {
     const deps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({
         ok: true,
         candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
       }),
+      // A rejecting marker write (or a stub that throws) must abort BEFORE
+      // the pane spawns: an unmarked item is never dispatched (RCA
+      // WL-0MSRBFFLN005W3VT design point 2 — marker-before-spawn fail-closed).
       recordDispatch: vi.fn().mockRejectedValue(new Error('audit boom')),
     });
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
-    expect(outcome.dispatched).toBe(true);
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('marker-write-failed');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('aborts the dispatch (marker-write-failed) when recordDispatch resolves false', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+      recordDispatch: vi.fn().mockResolvedValue(false),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('marker-write-failed');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('writes the marker BEFORE the pane spawns (marker-before-spawn ordering)', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    const markerOrder = (deps.recordDispatch as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const spawnOrder = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    expect(markerOrder).toBeLessThan(spawnOrder);
+  });
+
+  it('records the dispatched-at stage on plan/intake markers (change-guard input)', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    const event = (deps.recordDispatch as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(event.stage).toBe('intake_complete');
+  });
+});
+
+// ── CAS claim race + fail-closed paths (RCA WL-0MSRBFFLN005W3VT) ───────
+
+describe('dispatch CAS claim race', () => {
+  it('a losing pane (stale claim) aborts with no pane, no marker, no success record', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
+      }),
+      // Another pane claimed the item first: the CAS guard fails stale.
+      claimItem: vi.fn().mockResolvedValue({ ok: false, reason: 'stale' }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('claim-failed');
+    // No pane, no marker, no success record — the loser aborts entirely.
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+  });
+
+  it('a claim wl failure is a wl-error (a strike, never silently discarded)', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
+      }),
+      claimItem: vi.fn().mockResolvedValue({ ok: false, reason: 'error' }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('wl-error');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+  });
+
+  it('a stale audit-tier claim also aborts (no fall-through to other tiers)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({
+        id: 'WL-AUD',
+        title: 'Audit me',
+        stage: 'audit',
+      }),
+      claimItem: vi.fn().mockResolvedValue({ ok: false, reason: 'stale' }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('claim-failed');
+    // The loser does NOT fall through to plan/intake — exactly one dispatch
+    // per idle window across panes.
+    expect(deps.getNextItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('a spawn error makes the outcome not-success (spawn-failed) with the marker already written', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
+      }),
+      spawnAgentPane: vi.fn().mockResolvedValue(false),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('spawn-failed');
+    // The marker stands (fail-closed — no re-dispatch of the same item), but
+    // the outcome is NOT a success (WL-0MSLWJ3I70031Z8U absorbed).
+    expect(deps.recordDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('claim → marker → spawn ordering is fixed (claim first, marker before spawn)', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
+      }),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    const claimOrder = (deps.claimItem as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const markerOrder = (deps.recordDispatch as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const spawnOrder = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    expect(claimOrder).toBeLessThan(markerOrder);
+    expect(markerOrder).toBeLessThan(spawnOrder);
+  });
+});
+
+// ── Plan/intake selection (RCA WL-0MSRBFFLN005W3VT RC-2 + amplifier) ──
+
+describe('plan/intake selection (selectNextCandidate)', () => {
+  const openCandidate = (id: string, sortIndex = 0, stage: DowntimeStage = 'intake_complete') => ({
+    id,
+    title: id,
+    stage,
+    status: 'open',
+    sortIndex,
+  });
+
+  it('selects the first open candidate in wl next priority order (ascending sortIndex)', () => {
+    const selected = selectNextCandidate([
+      openCandidate('WL-2', 20),
+      openCandidate('WL-1', 10),
+    ]);
+    expect(selected?.id).toBe('WL-1');
+  });
+
+  it('excludes a candidate still at its dispatched-at stage (change-guard)', () => {
+    const selected = selectNextCandidate(
+      [openCandidate('WL-ONCE', 5), openCandidate('WL-NEXT', 20)],
+      new Map([['WL-ONCE', 'intake_complete']]),
+    );
+    // WL-ONCE was dispatched for /skill:plan at intake_complete and is still
+    // at intake_complete → excluded; the next candidate is selected.
+    expect(selected?.id).toBe('WL-NEXT');
+  });
+
+  it('releases a candidate whose stage advanced past its dispatched-at stage', () => {
+    // The marker recorded intake_complete but the candidate is now at idea
+    // (a different stage) → not suppressed.
+    const selected = selectNextCandidate(
+      [openCandidate('WL-FREE', 5, 'idea')],
+      new Map([['WL-FREE', 'intake_complete']]),
+    );
+    expect(selected?.id).toBe('WL-FREE');
+  });
+
+  it('a legacy marker without a recorded stage never suppresses selection', () => {
+    const selected = selectNextCandidate(
+      [openCandidate('WL-LEGACY', 5)],
+      new Map([['WL-LEGACY', '']]),
+    );
+    expect(selected?.id).toBe('WL-LEGACY');
+  });
+
+  it('excludes completed candidates (client-side open-status guard, amplifier fix)', () => {
+    const selected = selectNextCandidate([
+      { ...openCandidate('WL-DONE', 5), status: 'completed' },
+      openCandidate('WL-OPEN', 10),
+    ]);
+    expect(selected?.id).toBe('WL-OPEN');
+  });
+
+  it('a candidate without a verifiable status is never selected (fail-closed)', () => {
+    const selected = selectNextCandidate([
+      { id: 'WL-NO-STATUS', title: 'x', stage: 'intake_complete' },
+    ]);
+    expect(selected).toBeNull();
+  });
+
+  it('returns null on an empty list', () => {
+    expect(selectNextCandidate([])).toBeNull();
+  });
+});
+
+describe('parseNextCandidatesOutput', () => {
+  it('parses the batch shape (wl next -n N) preserving status and sortIndex', () => {
+    const candidates = parseNextCandidatesOutput(
+      JSON.stringify({
+        success: true,
+        workItems: [
+          { workItem: { id: 'WL-1', title: 'One', status: 'open', sortIndex: 7 } },
+          { workItem: { id: 'WL-2', title: 'Two', status: 'completed', sortIndex: 3 } },
+        ],
+      }),
+      'idea',
+    );
+    expect(candidates).toEqual([
+      { id: 'WL-1', title: 'One', stage: 'idea', status: 'open', sortIndex: 7 },
+      { id: 'WL-2', title: 'Two', stage: 'idea', status: 'completed', sortIndex: 3 },
+    ]);
+  });
+
+  it('parses the legacy single-item shape', () => {
+    const candidates = parseNextCandidatesOutput(
+      JSON.stringify({ success: true, workItem: { id: 'WL-1', title: 'One', status: 'open' } }),
+      'intake_complete',
+    );
+    expect(candidates).toEqual([
+      { id: 'WL-1', title: 'One', stage: 'intake_complete', status: 'open', sortIndex: undefined },
+    ]);
+  });
+
+  it('treats workItem:null as an empty backlog (not a parse failure)', () => {
+    const candidates = parseNextCandidatesOutput(
+      JSON.stringify({ success: false, workItem: null, reason: 'none' }),
+      'idea',
+    );
+    expect(candidates).toEqual([]);
+  });
+
+  it('returns null on malformed JSON (fail-closed)', () => {
+    expect(parseNextCandidatesOutput('not json', 'idea')).toBeNull();
+    expect(parseNextCandidatesOutput(JSON.stringify({}), 'idea')).toBeNull();
   });
 });
 
@@ -1220,8 +1479,8 @@ describe('buildDowntimeDispatchComment', () => {
 describe('single-flight dispatch guard', () => {
   it('does not dispatch a second time while one dispatch is in flight', async () => {
     let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
+    const gate = new Promise<boolean>((resolve) => {
+      release = () => resolve(true);
     });
     const deps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({
@@ -1604,16 +1863,32 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
     expect(args).not.toContain('Downtime plan');
   });
 
-  it('spawns via the injectable spawn and unrefs the child', () => {
-    const spawnFn = vi.fn(() => ({ unref: vi.fn() })) as unknown as DowntimeSpawn;
+  it('spawns via the injectable spawn and unrefs the child', async () => {
+    const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() })) as unknown as DowntimeSpawn;
 
-    spawnDowntimePane('/path/to/send-to-pi.sh', ['--no-focus', 'prompt'], { cwd: '/repo' }, spawnFn);
+    const spawned = await spawnDowntimePane('/path/to/send-to-pi.sh', ['--no-focus', 'prompt'], { cwd: '/repo' }, spawnFn);
 
     expect(spawnFn).toHaveBeenCalledWith('/path/to/send-to-pi.sh', ['--no-focus', 'prompt'], {
       cwd: '/repo',
     });
     const handle = (spawnFn as ReturnType<typeof vi.fn>).mock.results[0].value;
     expect(handle.unref).toHaveBeenCalled();
+    expect(spawned).toBe(true);
+  });
+
+  it('resolves false on a handled spawn error (no unhandled-exception crash)', async () => {
+    const handle = {
+      unref: vi.fn(),
+      once: vi.fn((_event: string, listener: (err: Error) => void) => {
+        listener(new Error('ENOENT: send-to-pi.sh'));
+      }),
+    };
+    const spawnFn = vi.fn(() => handle) as unknown as DowntimeSpawn;
+
+    const spawned = await spawnDowntimePane('/path/to/missing.sh', [], { cwd: '/repo' }, spawnFn);
+
+    expect(spawned).toBe(false);
+    expect(handle.once).toHaveBeenCalledWith('error', expect.any(Function));
   });
 
   it('buildDowntimeSpawnOptions uses detached/ignore options with the resolved cwd', () => {
@@ -1789,8 +2064,8 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
 
   it('does not start a second dispatch while one is in flight (worker single-flight)', async () => {
     let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
+    const gate = new Promise<boolean>((resolve) => {
+      release = () => resolve(true);
     });
     const { worker, deps } = makeWorker({
       deps: { spawnAgentPane: vi.fn().mockImplementation(() => gate) },
@@ -1943,8 +2218,8 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     // in-flight dispatch; the worker's own dispatch call then returns
     // `dispatch-in-flight`, which must NOT trigger the cooldown.
     let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
+    const gate = new Promise<boolean>((resolve) => {
+      release = () => resolve(true);
     });
     const outerDeps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({
@@ -1961,7 +2236,6 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     await worker.tick();
     vi.setSystemTime(start + 240_000);
     const result = await worker.tick();
-
     expect(result.dispatched).toBe(false);
     expect(worker.paused).toBe(false); // in-flight guard is not an empty backlog
 
