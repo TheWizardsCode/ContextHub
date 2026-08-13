@@ -221,6 +221,7 @@ configuration.
 | `quotaExhausted` | NOT retried | Checkpoint saved + terminal error displayed |
 | `timeout` | Retried | Exponential backoff with configurable delay |
 | `terminated` | NOT retried | Checkpoint saved + terminal error displayed |
+| `parseError` (JSON) | Single-shot continue | One plain "continue" prompt, no backoff loop |
 
 ### Configuration
 
@@ -250,7 +251,7 @@ Recovery behaviour is driven by `DEFAULT_RECOVERY_CONFIG` in
 The module registers a `/retry` command with the following subcommands:
 
 - `/retry` — Manual trigger: auto-detects the last error and applies the correct
-  recovery strategy (retry, compact+continue, or warning)
+  recovery strategy (retry, compact+continue, single-shot continue, or warning)
 - `/retry status` — Displays diagnostics: per-category attempt counts, last
   error messages, is-retrying flags, continuation count
 - `/retry reset` — Resets all retry counters and state
@@ -283,9 +284,9 @@ The recovery module is implemented in `Worklog/lib/recovery/` and consists of:
 
 | File | Purpose |
 |------|---------|
-| `error-patterns.ts` | Error classification patterns for all 7 categories |
+| `error-patterns.ts` | Error classification patterns for all 8 categories |
 | `retry-logic.ts` | Exponential backoff, state managers, interruptible sleep |
-| `recovery.ts` | Compact-and-continue and checkpoint-and-terminate handlers |
+| `recovery.ts` | Compact-and-continue, checkpoint-and-terminate, and single-shot parse-error continue handlers |
 | `retry-command.ts` | `/retry` command interface (status, reset, manual-trigger) |
 | `register-recovery.ts` | Extension lifecycle wiring (agent_end, turn_end, session_start, session_compact) |
 

@@ -13,11 +13,12 @@ import { DEFAULT_RECOVERY_CONFIG, type RecoveryConfig, type RecoveryCategoryConf
 // ── RecoveryConfig defaults ───────────────────────────────────────────
 
 describe('DEFAULT_RECOVERY_CONFIG', () => {
-  it('has all 7 error categories', () => {
+  it('has all 8 error categories', () => {
     const keys = Object.keys(DEFAULT_RECOVERY_CONFIG);
     expect(keys.sort()).toEqual([
       'authError',
       'contextLength',
+      'parseError',
       'quotaExhausted',
       'rateLimit',
       'serverError',
@@ -61,6 +62,15 @@ describe('DEFAULT_RECOVERY_CONFIG', () => {
     expect(DEFAULT_RECOVERY_CONFIG.terminated.enabled).toBe(false);
   });
 
+  it('parse error defaults to enabled (single-shot continue)', () => {
+    expect(DEFAULT_RECOVERY_CONFIG.parseError.enabled).toBe(true);
+    expect(DEFAULT_RECOVERY_CONFIG.parseError.patterns.length).toBeGreaterThan(0);
+    expect(DEFAULT_RECOVERY_CONFIG.parseError.continuationPrompt).toBe('continue');
+    // No backoff for the single-shot category
+    expect(DEFAULT_RECOVERY_CONFIG.parseError.baseDelayMs).toBe(0);
+    expect(DEFAULT_RECOVERY_CONFIG.parseError.maxDelayMs).toBe(0);
+  });
+
   it('each category has patterns array', () => {
     for (const [key, cat] of Object.entries(DEFAULT_RECOVERY_CONFIG)) {
       expect(Array.isArray((cat as RecoveryCategoryConfig).patterns)).toBe(true);
@@ -70,8 +80,17 @@ describe('DEFAULT_RECOVERY_CONFIG', () => {
 
   it('each category has valid baseDelayMs and maxDelayMs', () => {
     for (const cat of Object.values(DEFAULT_RECOVERY_CONFIG)) {
-      expect(cat.baseDelayMs).toBeGreaterThanOrEqual(100);
+      expect(cat.baseDelayMs).toBeGreaterThanOrEqual(0);
       expect(cat.maxDelayMs).toBeGreaterThanOrEqual(cat.baseDelayMs);
+    }
+  });
+
+  it('backoff-based categories have a positive base delay', () => {
+    for (const cat of Object.values(DEFAULT_RECOVERY_CONFIG)) {
+      // Single-shot categories (e.g. parseError) legitimately use 0ms
+      // delays because they never back off.
+      if (cat.baseDelayMs === 0) continue;
+      expect(cat.baseDelayMs).toBeGreaterThanOrEqual(100);
     }
   });
 });

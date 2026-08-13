@@ -292,3 +292,69 @@ export async function executeCompactAndContinue(
     };
   }
 }
+
+// ── Parse-error continue handler ─────────────────────────────────────
+
+/**
+ * Result of a single-shot parse-error continue operation.
+ */
+export interface ParseErrorContinueResult {
+  /** Whether the continue prompt was sent */
+  success: boolean;
+  /**
+   * Number of continue prompts sent (always 1 on success — single-shot;
+   * 0 when skipped or failed).
+   */
+  promptCount: number;
+  /** Optional error message if the operation failed */
+  error?: string;
+}
+
+/**
+ * Execute the single-shot continue flow for JSON parse errors.
+ *
+ * Per operator decision, a JSON parse error resumes the session with
+ * exactly one plain "continue" prompt — no exponential-backoff retry
+ * loop. The error message stays in agent state so the agent can decide
+ * how to proceed (e.g., skip the malformed record). A repeated parse
+ * error on the next `agent_end` triggers a new single-shot continue
+ * (one prompt per occurrence, never an unbounded loop within a turn).
+ *
+ * This is a pure-logic harness — it takes the functions it needs as
+ * parameters so it can be tested without a live agent.
+ *
+ * @param options.waitForIdle - Optional; waits for the agent to become idle
+ * @param options.sendContinue - Sends the plain "continue" prompt
+ * @param options.shouldAbort - Optional; checked before/after idle wait;
+ *   returns true when the continue should be skipped (e.g. user abort)
+ * @returns Promise with the result
+ */
+export async function executeParseErrorContinue(
+  options: {
+    waitForIdle?: () => Promise<void>;
+    sendContinue: () => Promise<void>;
+    shouldAbort?: () => boolean;
+  },
+): Promise<ParseErrorContinueResult> {
+  try {
+    if (options.shouldAbort?.()) {
+      return { success: false, promptCount: 0, error: 'aborted' };
+    }
+    if (options.waitForIdle) {
+      await options.waitForIdle();
+    }
+    if (options.shouldAbort?.()) {
+      return { success: false, promptCount: 0, error: 'aborted' };
+    }
+    // Single-shot: exactly one continue prompt, then return. No backoff,
+    // no loop — a persistent parse error re-triggers on the next agent_end.
+    await options.sendContinue();
+    return { success: true, promptCount: 1 };
+  } catch (err) {
+    return {
+      success: false,
+      promptCount: 0,
+      error: err instanceof Error ? err.message : 'Unknown error during parse-error continue',
+    };
+  }
+}

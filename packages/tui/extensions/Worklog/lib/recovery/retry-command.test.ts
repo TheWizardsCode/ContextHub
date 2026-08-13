@@ -34,6 +34,7 @@ describe('formatRetryStatus', () => {
     expect(status).toContain('quotaExhausted');
     expect(status).toContain('timeout');
     expect(status).toContain('terminated');
+    expect(status).toContain('parseError');
     expect(status).toContain('Continuation');
   });
 
@@ -151,6 +152,7 @@ describe('executeRetryCommand', () => {
     mockOptions = {
       triggerRetry: vi.fn(),
       triggerCompactContinue: vi.fn(),
+      triggerParseErrorContinue: vi.fn(),
       triggerCheckpointTerminate: vi.fn(),
     };
   });
@@ -284,6 +286,29 @@ describe('executeRetryCommand', () => {
     expect(mockOptions.triggerCompactContinue).toHaveBeenCalled();
   });
 
+  // /retry with JSON parse error
+  it('/retry with JSON parse error triggers single-shot continue', async () => {
+    mockCtx.sessionManager.getEntries = vi.fn().mockReturnValue([
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage: "Unexpected end of JSON input",
+        },
+      },
+    ]);
+
+    await executeRetryCommand('', mockCtx, mockOptions);
+
+    expect(mockCtx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining('JSON parse error'),
+      'info',
+    );
+    expect(mockOptions.triggerParseErrorContinue).toHaveBeenCalled();
+    expect(mockOptions.triggerRetry).not.toHaveBeenCalled();
+  });
+
   // /retry with unknown error
   it('/retry with unknown error shows warning', async () => {
     mockCtx.sessionManager.getEntries = vi.fn().mockReturnValue([
@@ -356,6 +381,12 @@ describe('getRetryStateForCategory', () => {
 
   it('returns RetryState for serverError category', () => {
     const state = getRetryStateForCategory(ErrorCategory.SERVER_ERROR);
+    expect(state).toBeDefined();
+    expect(state?.getAttempt()).toBe(0);
+  });
+
+  it('returns RetryState for parseError category', () => {
+    const state = getRetryStateForCategory(ErrorCategory.PARSE_ERROR);
     expect(state).toBeDefined();
     expect(state?.getAttempt()).toBe(0);
   });
