@@ -1060,7 +1060,7 @@ Other commands cover repository bootstrap and local system status. Use these to 
 
 ### `init`
 
-Initialize Worklog configuration in the repository (creates `.worklog` and default config). `wl init` also installs `AGENTS.md` in the project root with a pointer line to the global `AGENTS.md`. If `AGENTS.md` already exists, it prompts before inserting the pointer and preserves the existing content (unless you pass `--agents-template` for unattended runs). When workflow templates are available, `wl init` prompts you to choose between no formal workflow, a basic Worklog-aware workflow, or manual management (unless you pass `--workflow-inline` for unattended runs).
+Initialize Worklog configuration in the repository (creates `.worklog` and default config). `wl init` also installs `AGENTS.md` in the project root, prefixed with a pointer line to the global `AGENTS.md`. If `AGENTS.md` already contains the pointer line, installation is skipped (idempotent, no prompt). If `AGENTS.md` exists without the pointer, it prompts O/A/M — **O**verwrite (destructive), **A**dd pointer (keeps existing content), **M**anual (skip) — unless you pass `--agents-template` for unattended runs. When workflow templates are available, `wl init` prompts you to choose between no formal workflow, a basic Worklog-aware workflow, or manual management (unless you pass `--workflow-inline` for unattended runs). See [AGENTS.md Install Model](docs/AGENTS-INSTALL.md) for the full install flow.
 
 Options:
 
