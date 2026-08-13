@@ -491,6 +491,158 @@ describe('WorkItemListState.refreshItems — preserve selection by ID', () => {
   });
 });
 
+describe('nested expansion — 3+ level hierarchies (WL-0MSQ3FH1K000MMJW)', () => {
+  /**
+   * Build a 3-level hierarchy: EPIC → FEATURE → TASK. Children carry the
+   * depth the fetcher assigns (fetchChildrenForItem), mirroring production
+   * shape where grandchildren are fetched with depth = parent depth + 1.
+   */
+  function makeThreeLevelTree(): WorkItem[] {
+    const epic = makeItem('EPIC', 'in_progress');
+    const feature = {
+      ...makeItem('FEATURE', 'in_progress'),
+      depth: 1,
+      childCount: 1,
+      children: [{ ...makeItem('TASK', 'in_progress'), depth: 2 }],
+    };
+    epic.childCount = 1;
+    epic.children = [feature];
+    return [epic];
+  }
+
+  it('recursively flattens 3+ level hierarchies with correct depths', () => {
+    const state = new WorkItemListState(makeThreeLevelTree(), TERM_80x24);
+
+    // Only EPIC visible initially.
+    expect(state.getFlattenedItems().map((i) => [i.id, i.depth])).toEqual([
+      ['EPIC', undefined],
+    ]);
+
+    // Expand EPIC → FEATURE appears at depth 1; TASK stays hidden (FEATURE
+    // not expanded yet).
+    state.toggleExpand('EPIC');
+    expect(state.getFlattenedItems().map((i) => [i.id, i.depth])).toEqual([
+      ['EPIC', undefined],
+      ['FEATURE', 1],
+    ]);
+
+    // Expand FEATURE → TASK appears at depth 2.
+    state.toggleExpand('FEATURE');
+    expect(state.getFlattenedItems().map((i) => [i.id, i.depth])).toEqual([
+      ['EPIC', undefined],
+      ['FEATURE', 1],
+      ['TASK', 2],
+    ]);
+  });
+
+  it('collapsing a child removes its grandchildren from the flattened list', () => {
+    const state = new WorkItemListState(makeThreeLevelTree(), TERM_80x24);
+    state.toggleExpand('EPIC');
+    state.toggleExpand('FEATURE');
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['EPIC', 'FEATURE', 'TASK']);
+
+    state.toggleExpand('FEATURE');
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['EPIC', 'FEATURE']);
+  });
+
+  it('collapsing an ancestor removes the entire nested subtree', () => {
+    const state = new WorkItemListState(makeThreeLevelTree(), TERM_80x24);
+    state.toggleExpand('EPIC');
+    state.toggleExpand('FEATURE');
+
+    state.toggleExpand('EPIC');
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['EPIC']);
+  });
+
+  it('Enter (select) on a child with children toggles expansion instead of opening the detail view', () => {
+    const state = new WorkItemListState(makeThreeLevelTree(), TERM_80x24);
+    state.toggleExpand('EPIC');
+    // Select FEATURE (flattened index 1).
+    state.selectedIndex = 1;
+    expect(state.getFlattenedItems()[1].id).toBe('FEATURE');
+
+    const action = handleKeypress(state, '\r', TERM_80x24);
+
+    // Enter toggles expansion — never opens the detail view.
+    expect(action).toBe('toggle-expand');
+    expect(state.mode).toBe('list');
+    expect(state.isExpanded('FEATURE')).toBe(true);
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['EPIC', 'FEATURE', 'TASK']);
+  });
+
+  it('Enter on a child toggles back to collapsed on the second press', () => {
+    const state = new WorkItemListState(makeThreeLevelTree(), TERM_80x24);
+    state.toggleExpand('EPIC');
+    state.selectedIndex = 1; // FEATURE
+    handleKeypress(state, '\r', TERM_80x24); // expand
+    handleKeypress(state, '\r', TERM_80x24); // collapse
+    expect(state.isExpanded('FEATURE')).toBe(false);
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['EPIC', 'FEATURE']);
+  });
+
+  it('Tab on a child with childCount > 0 returns toggle-expand even when children not yet loaded', () => {
+    // FEATURE has childCount but NO children array yet (production shape:
+    // grandchildren are fetched on demand when first expanded).
+    const epic = makeItem('EPIC');
+    epic.childCount = 1;
+    epic.children = [{ ...makeItem('FEATURE'), depth: 1, childCount: 2 }];
+    const state = new WorkItemListState([epic], TERM_80x24);
+    state.toggleExpand('EPIC');
+    state.selectedIndex = 1; // FEATURE
+
+    const action = handleKeypress(state, '\t', TERM_80x24);
+    expect(action).toBe('toggle-expand');
+  });
+
+  it('Tab on an item without children returns null (no toggle, no crash)', () => {
+    const epic = makeItem('EPIC');
+    epic.childCount = 1;
+    epic.children = [{ ...makeItem('FEATURE'), depth: 1 }]; // no childCount
+    const state = new WorkItemListState([epic], TERM_80x24);
+    state.toggleExpand('EPIC');
+    state.selectedIndex = 1; // FEATURE
+
+    expect(handleKeypress(state, '\t', TERM_80x24)).toBeNull();
+  });
+
+  it('getItemDepth reports the hierarchy position (0 = top-level)', () => {
+    const state = new WorkItemListState(makeThreeLevelTree(), TERM_80x24);
+    expect(state.getItemDepth('EPIC')).toBe(0);
+    expect(state.getItemDepth('FEATURE')).toBe(1);
+    expect(state.getItemDepth('TASK')).toBe(2);
+    // Unknown IDs default to 0 (safe fetch depth).
+    expect(state.getItemDepth('UNKNOWN')).toBe(0);
+  });
+
+  it('attachChildren attaches fetched children to the live tree object at any depth', () => {
+    const state = new WorkItemListState(makeThreeLevelTree(), TERM_80x24);
+    const freshGrandchild = { ...makeItem('TASK2'), depth: 2 };
+    state.attachChildren('FEATURE', [freshGrandchild]);
+
+    // The tree object (not a flattened copy) received the children.
+    const epic = state.items[0];
+    const feature = epic.children![0];
+    expect(feature.children).toEqual([freshGrandchild]);
+    // And the flattened view renders them once FEATURE is expanded.
+    state.toggleExpand('EPIC');
+    state.toggleExpand('FEATURE');
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['EPIC', 'FEATURE', 'TASK2']);
+  });
+
+  it('nested expanded state survives refreshItems (carry-over restores the subtree)', () => {
+    const state = new WorkItemListState(makeThreeLevelTree(), TERM_80x24);
+    state.toggleExpand('EPIC');
+    state.toggleExpand('FEATURE');
+
+    // Refresh with a children-less EPIC (production fetcher shape): the
+    // carried-over subtree must keep TASK visible.
+    const freshEpic = { ...makeItem('EPIC'), childCount: 1 };
+    state.refreshItems([freshEpic]);
+
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['EPIC', 'FEATURE', 'TASK']);
+  });
+});
+
 describe('executeResolvedCommand', () => {
   it('returns noop when command has <id> but no items', () => {
     const state = new WorkItemListState([], TERM_80x24);

@@ -581,13 +581,18 @@ export async function runWlSync(): Promise<{ success: boolean; error?: string }>
 
 /**
  * Fetch child work items for a given parent ID (via `wl list --parent`).
- * Child items are returned with depth=1 for hierarchical display.
+ *
+ * Child items are returned with the given hierarchy `depth` for display
+ * (default 1 = direct children of a top-level item). Nested expansion
+ * passes the parent's depth + 1 so grandchildren render at depth 2, etc.
+ * (WL-0MSQ3FH1K000MMJW) — depth is derived from the fetch path, never
+ * hardcoded.
  */
-export async function fetchChildrenForItem(parentId: string): Promise<WorkItem[]> {
+export async function fetchChildrenForItem(parentId: string, depth = 1): Promise<WorkItem[]> {
   const output = await runWl(['list', '--parent', parentId]);
   const payload = extractJson(output);
   const items = extractItems(payload);
-  return items.map((item) => ({ ...item, depth: 1 }));
+  return items.map((item) => ({ ...item, depth }));
 }
 
 // ── Work-item claiming ────────────────────────────────────────────────

@@ -470,18 +470,78 @@ export class WorkItemListState {
 
   /**
    * Get the flattened item list, inserting children of expanded parents.
+   *
+   * Recurses into any depth (WL-0MSQ3FH1K000MMJW): after inserting a child
+   * of an expanded item, the child's own children are inserted too when the
+   * child is itself expanded. Depth is derived from the hierarchy position
+   * (top-level = no depth, each nested level = parent's depth + 1), so
+   * items fetched at any level render at the correct indentation.
    */
   getFlattenedItems(): WorkItem[] {
     const result: WorkItem[] = [];
-    for (const item of this.items) {
-      result.push(item);
+    const appendItem = (item: WorkItem, depth: number): void => {
+      // Top-level items are pushed as-is (no depth field, matching the
+      // pre-hierarchy shape). Nested items keep their object reference when
+      // their stored depth already matches the hierarchy position (so
+      // on-demand child fetches mutate the live tree object), otherwise the
+      // depth is corrected with a shallow copy.
+      if (depth === 0) {
+        result.push(item);
+      } else {
+        result.push(item.depth === depth ? item : { ...item, depth });
+      }
       if (item.childCount && item.children && item.children.length > 0 && this.expandedItems.has(item.id)) {
         for (const child of item.children) {
-          result.push({ ...child, depth: child.depth ?? 1 });
+          appendItem(child, depth + 1);
         }
       }
+    };
+    for (const item of this.items) {
+      appendItem(item, 0);
     }
     return result;
+  }
+
+  /**
+   * Compute the hierarchy depth of an item in the current tree
+   * (0 = top-level, 1 = child, …). Returns 0 for unknown IDs — the safe
+   * default used when fetching their children at depth 1 (WL-0MSQ3FH1K000MMJW).
+   */
+  getItemDepth(id: string): number {
+    const walk = (items: WorkItem[], depth: number): number => {
+      for (const item of items) {
+        if (item.id === id) return depth;
+        if (item.children && item.children.length > 0) {
+          const found = walk(item.children, depth + 1);
+          if (found >= 0) return found;
+        }
+      }
+      return -1;
+    };
+    const depth = walk(this.items, 0);
+    return depth >= 0 ? depth : 0;
+  }
+
+  /**
+   * Attach fetched children to the item in the live tree (walking nested
+   * levels), never to a flattened copy. Ensures an on-demand fetch for a
+   * child at any depth lands on the object the flatten recursion walks, so
+   * the grandchildren actually render (WL-0MSQ3FH1K000MMJW).
+   */
+  attachChildren(id: string, children: WorkItem[]): void {
+    const walk = (items: WorkItem[]): boolean => {
+      for (const item of items) {
+        if (item.id === id) {
+          item.children = children;
+          return true;
+        }
+        if (item.children && item.children.length > 0 && walk(item.children)) {
+          return true;
+        }
+      }
+      return false;
+    };
+    walk(this.items);
   }
 
   selectItem(): void {
@@ -1716,8 +1776,11 @@ export function handleKeypress(
         const flat = state.getFlattenedItems();
         if (state.selectedIndex < flat.length) {
           const selected = flat[state.selectedIndex];
-          // Toggle expand/collapse for items with actual children data
-          if (selected.children && selected.children.length > 0 && selected.depth === undefined) {
+          // Toggle expand/collapse for items with actual children data at
+          // ANY depth (WL-0MSQ3FH1K000MMJW): Enter on a child with children
+          // expands it like a top-level parent, instead of opening the
+          // detail view.
+          if (selected.children && selected.children.length > 0) {
             if (state.isExpanded(selected.id)) {
               // Collapsing — remove the matching navigation-stack entry so
               // a later Escape does not pop back into a collapsed parent.
@@ -1773,8 +1836,10 @@ export function handleKeypress(
         const flat = state.getFlattenedItems();
         if (state.selectedIndex < flat.length) {
           const selected = flat[state.selectedIndex];
-          // Only top-level items with children can be expanded/collapsed
-          if (selected.depth === undefined && selected.childCount && selected.childCount > 0) {
+          // Any item with children — at ANY depth — can be expanded/
+          // collapsed with Tab (WL-0MSQ3FH1K000MMJW). Children data is
+          // fetched on demand by the caller when not yet loaded.
+          if (selected.childCount && selected.childCount > 0) {
             // Track hierarchy: push parent state before expanding so Escape
             // can return to it; drop the entry when collapsing.
             if (state.isExpanded(selected.id)) {
@@ -2767,7 +2832,10 @@ export async function runWorklistTui(
         const freshChildren = new Map<string, WorkItem[]>();
         const fetchExpandedChildren = async (parentId: string): Promise<WorkItem[]> => {
           try {
-            const children = await fetchChildrenForItem(parentId);
+            // Depth derived from the item's hierarchy position so nested
+            // expanded items re-fetch their children at the correct depth
+            // (WL-0MSQ3FH1K000MMJW).
+            const children = await fetchChildrenForItem(parentId, state.getItemDepth(parentId) + 1);
             freshChildren.set(parentId, children);
             return children;
           } catch {
@@ -2784,13 +2852,25 @@ export async function runWorklistTui(
 
         // Attach freshly fetched children to the new parent objects BEFORE
         // the swap so the flattened view is complete at render time.
+        // Walks the whole tree (top-level + nested children) because
+        // expandedItems may contain items at any depth: a nested parent is
+        // not in the top-level id→item map, so without the walk its fresh
+        // grandchildren would be dropped and the nested expansion would
+        // collapse on refresh (WL-0MSQ3FH1K000MMJW AC-4).
         if (freshChildren.size > 0) {
-          const byId = new Map(newItems.map((it) => [it.id, it]));
-          for (const [parentId, children] of freshChildren) {
-            const parent = byId.get(parentId);
-            if (parent) {
-              parent.children = children;
+          const attachFresh = (list: WorkItem[]): void => {
+            for (const item of list) {
+              const fresh = freshChildren.get(item.id);
+              if (fresh) {
+                item.children = fresh;
+              }
+              if (item.children && item.children.length > 0) {
+                attachFresh(item.children);
+              }
             }
+          };
+          for (const topLevel of newItems) {
+            attachFresh([topLevel]);
           }
         }
         state.refreshItems(newItems);
@@ -3274,8 +3354,14 @@ export async function runWorklistTui(
         // If children data not yet loaded, fetch them on demand
         if (selected.childCount && selected.childCount > 0 && (!selected.children || selected.children.length === 0)) {
           render(); // immediate render while fetch is pending
-          const children = await fetchChildrenForItem(selected.id);
-          selected.children = children;
+          // Depth derived from the selected item's hierarchy position so
+          // grandchildren of a nested item fetch at depth N+1, not 1
+          // (WL-0MSQ3FH1K000MMJW).
+          const children = await fetchChildrenForItem(selected.id, (selected.depth ?? 0) + 1);
+          // Attach to the live tree object so the fetched grandchildren
+          // survive the flatten (which may hold a copy with a corrected
+          // depth) — see WorkItemListState.attachChildren.
+          state.attachChildren(selected.id, children);
           // Merge agent-status state into the freshly loaded children so
           // their rows show agent icons too (WL-0MSBQUJQX005RAT9).
           try {
