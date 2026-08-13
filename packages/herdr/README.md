@@ -382,6 +382,32 @@ distinguish "no candidate (paused)" from "worker disabled" or from any of
 the silent failure paths above; only the three-strike and success paths leave
 entries. The follow-up items above close the three code-level silent paths.
 
+**Known re-dispatch gaps** (RCA WL-0MSRBFFLN005W3VT, evidence reproduced by
+`packages/herdr/scripts/scan_duplicate_dispatches.py`; see
+[docs/downtime-redispatch-rca-2026-08-13.md](docs/downtime-redispatch-rca-2026-08-13.md)):
+
+- **Same-instant cross-pane race** — two panes can select the same candidate
+  before either claims it: selection precedes claim, and the pre-dispatch
+  claim (`wl update --status in_progress`) is idempotent, so both panes
+  proceed. Observed post-fix: a `kind:audit` pair 14 ms apart
+  (SA-0MSN4AXIQ007IZG2, 2026-08-10). The dispatched-marker exclusion is
+  read-then-write and written after spawn, so it cannot prevent this. Fix
+  design (follow-up): atomic conditional claim (`--if-status`/`--if-stage`)
+  — a losing pane aborts the dispatch.
+- **Plan/intake tiers have no dispatched-marker exclusion** — the audit and
+  implement tiers exclude already-dispatched items; the plan
+  (`--stage intake_complete`) and intake (`--stage idea`) tiers do not, and
+  `wl next` keeps `completed` items under a stage filter, so a plan run whose
+  error/abort path resets status only (stage left at `intake_complete`)
+  leaves the item selectable for re-dispatch. Observed: `kind:plan` ×2 on
+  SA-0MSMAZP6T007NM0O and SA-0MSN04X2S006ONH0 (2026-08-12/13), `kind:plan` ×7
+  in ~7 h pre-fix (SA-0MSJI53RX006E2PS). Fix design (follow-up): kind-scoped
+  plan/intake markers with a change-guard plus a client-side `status ===
+  'open'` filter.
+
+These are documented as design candidates in the RCA; implementation is a
+follow-up work item.
+
 The worker runs inside the plugin's single consolidated scheduler loop (one
 `setInterval`; no independent timers), uses unref'd timers, and is cleaned up
 when the pane exits. While the pane is open the list header shows the worker
