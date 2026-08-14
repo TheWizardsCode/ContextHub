@@ -10,7 +10,7 @@
  * Herdr's pane-based model.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
 import { fetchChildrenForItem, fetchActionableCount, fetchItemsByStage, getWorklogDir, type WorkItem } from './fetcher.js';
@@ -42,6 +42,16 @@ import {
 import { ShipItDialogState, overlayShipItDialog } from './ship-it-dialog.js';
 import { extractFilePaths } from './grouping.js';
 import { renderMarkdown, renderMarkdownViewer } from './md-viewer.js';
+import {
+  findNoteInParagraph,
+  insertNoteMarker,
+  updateNoteMarker,
+  removeNoteMarker,
+  splitParagraphs,
+  mapCursorToParagraph,
+  mapParagraphToMarker,
+  type NoteEditResult,
+} from './md-note-edit.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -331,6 +341,14 @@ export class WorkItemListState {
    * detailToCIndex.
    */
   detailRenderedIndex = 0;
+
+  /**
+   * Paragraph cursor in the md viewer (WL-0MSKV6SKK008MMXR): the index
+   * (into `splitParagraphs` of the rendered file) that note-edit chords
+   * operate on. Defaults to the first paragraph; the viewer integration
+   * moves it as the user scrolls the document region.
+   */
+  detailNoteCursor = 0;
 
   /**
    * Scroll offset within the metadata panel. Reset to 0 whenever the
@@ -1292,6 +1310,65 @@ export function renderFileViewer(
   const content = readFile(path);
   if (content == null) return [];
   return renderMarkdownViewer(content, maxCols);
+}
+
+// ── Note-edit write-back (WL-0MSKV6SKK008MMXR) ────────────────────────
+
+/** A note-edit operation to apply to a markdown file. */
+export interface NoteEditAction {
+  kind: 'insert' | 'update' | 'remove';
+  /** Paragraph index (into `splitParagraphs`) for insert. */
+  paragraphIndex?: number;
+  /** New note body (insert/update). */
+  text?: string;
+  /** Marker id to update/remove. */
+  noteId?: string;
+  /** Mark DONE (§7.3) on update. */
+  done?: boolean;
+}
+
+/**
+ * Read a markdown file, apply an inline-note edit, and write it back.
+ *
+ * Pure with respect to the document text (via `md-note-edit.ts`): every
+ * byte outside the edited paragraph is preserved.  The file reader/writer
+ * are dependency-injected so the flow is side-effect-free and testable
+ * (the viewer passes `readKeyFile` / a `writeKeyFile` bound to
+ * `resolveKeyFilePath`).
+ *
+ * @param item - The work item whose Key Files carry the document.
+ * @param mdPath - The Key Files path of the markdown document.
+ * @param action - The edit to apply.
+ * @param readFile - Reads the file content (path -> content or null).
+ * @param writeFile - Persists the updated content (path, content).
+ * @returns The edit result (doc, byteOffset, newNoteId for inserts).
+ */
+export async function applyNoteEditToFile(
+  item: WorkItem | null,
+  mdPath: string,
+  action: NoteEditAction,
+  readFile: (filePath: string) => string | null | Promise<string | null>,
+  writeFile: (filePath: string, content: string) => void | Promise<void>,
+): Promise<NoteEditResult> {
+  if (!item) return { doc: '', byteOffset: -1 };
+  const content = await readFile(mdPath);
+  if (content == null) return { doc: '', byteOffset: -1 };
+
+  let result: NoteEditResult;
+  if (action.kind === 'insert') {
+    result = insertNoteMarker(content, action.paragraphIndex ?? 0, action.text ?? '');
+  } else if (action.kind === 'update') {
+    result = updateNoteMarker(content, action.noteId ?? '', {
+      text: action.text ?? '',
+      done: action.done,
+    });
+  } else {
+    result = removeNoteMarker(content, action.noteId ?? '');
+  }
+  if (result.byteOffset >= 0) {
+    await writeFile(mdPath, result.doc);
+  }
+  return result;
 }
 
 /**
@@ -3098,6 +3175,99 @@ export async function runWorklistTui(
             openShipItDialog(model ?? undefined);
             return;
           }
+          // Inline note-edit chords (WL-0MSKV6SKK008MMXR): add/edit/delete
+          // `[NOTE ...]` markers in the md viewer. Scoped to the detail
+          // view via shortcuts.json (view: 'detail'), so the `<note_text>`
+          // placeholder only reaches this branch from the viewer.
+          if (command === '/herdr:note-edit <note_text>'
+              || command === '/herdr:note-delete') {
+            const mdPaths = state.detailItem
+              ? extractFilePaths(state.detailItem.description ?? '')
+                  .filter(p => p.endsWith('.md'))
+              : [];
+            const mdPath = mdPaths[state.detailRenderedIndex] ?? mdPaths[0];
+            if (!mdPath) {
+              showToast('Note', { body: 'No markdown document in this view.' });
+              render();
+              return;
+            }
+            const content = readKeyFile(mdPath);
+            if (content == null) {
+              showToast('Note', { body: 'Markdown document unreadable.' });
+              render();
+              return;
+            }
+            // The visible cursor line (scroll offset) maps to the source
+            // paragraph the user has scrolled to.
+            const paragraphIndex = mapCursorToParagraph(content, state.detailScrollOffset);
+            state.detailNoteCursor = Math.max(0, paragraphIndex);
+            const marker = mapParagraphToMarker(content, state.detailNoteCursor);
+
+            if (command === '/herdr:note-delete') {
+              if (!marker) {
+                showToast('Note', { body: 'No note on this paragraph.' });
+                render();
+                return;
+              }
+              await applyNoteEditToFile(
+                state.detailItem,
+                mdPath,
+                { kind: 'remove', noteId: marker.noteId },
+                readKeyFile,
+                writeKeyFile,
+              );
+              showToast('Note deleted', { body: `${marker.noteId} removed.` });
+              render();
+              return;
+            }
+
+            // Add/edit: open the note-text form, pre-filled in edit mode.
+            const existing = marker ? findNoteInParagraph(
+              splitParagraphs(content)[state.detailNoteCursor]?.text ?? '',
+            ) : null;
+            const prefill = existing ? existing.body : '';
+            const template = existing
+              ? `/herdr:note-edit <note_text default="${prefill.replace(/"/g, '&quot;')}">`
+              : '/herdr:note-edit <note_text>';
+            const noteId = existing?.id ?? undefined;
+            preFormMode = state.mode;
+            state.mode = 'form';
+            formState = new FormState(
+              template,
+              'Note text (inline [NOTE <id>: ...] marker, PRD §7.1)',
+              getUnknownIdentifiers(template),
+              // onSubmit: apply the edit and re-render.
+              async (resolved: string) => {
+                const textMatch = resolved.match(/note_text[= >]*([\s\S]*)$/);
+                const text = (textMatch ? textMatch[1] : resolved).trim();
+                formState = null;
+                state.mode = preFormMode;
+                const action = noteId
+                  ? { kind: 'update' as const, noteId, text }
+                  : { kind: 'insert' as const, paragraphIndex: state.detailNoteCursor, text };
+                const result = await applyNoteEditToFile(
+                  state.detailItem,
+                  mdPath,
+                  action,
+                  readKeyFile,
+                  writeKeyFile,
+                );
+                if (result.byteOffset < 0) {
+                  showToast('Note', { body: 'Edit did not apply.' });
+                } else {
+                  showToast('Note saved', { body: `${result.newNoteId ?? noteId ?? 'marker'} written.` });
+                }
+                render();
+              },
+              // onCancel
+              () => {
+                formState = null;
+                state.mode = preFormMode;
+              },
+            );
+            render();
+            return;
+          }
           // Check for unknown identifiers that need form input
           if (hasUnknownIdentifiers(command)) {
             // Look up description from shortcut entry
@@ -3400,6 +3570,22 @@ export async function runWorklistTui(
       return readFileSync(resolved, 'utf-8');
     } catch {
       return null;
+    }
+  };
+
+  /**
+   * Write a Key Files: markdown document back to disk (WL-0MSKV6SKK008MMXR
+   * note-edit write-back). Path resolution mirrors `readKeyFile`
+   * (resolveKeyFilePath against the worklog root); a missing resolved path
+   * is a silent no-op so the TUI never crashes on a stale Key Files entry.
+   */
+  const writeKeyFile = (filePath: string, content: string): void => {
+    const resolved = resolveKeyFilePath(filePath);
+    if (!resolved) return;
+    try {
+      writeFileSync(resolved, content, 'utf-8');
+    } catch (error) {
+      process.stderr.write(`[herdr] Note write-back failed: ${String(error)}\n`);
     }
   };
 
