@@ -1258,11 +1258,13 @@ export function formatDetailContent(
   }
 
   // Generic md-document viewer for a Key Files: .podcast.md episode file
-  // (preview-only; no notes editor). When a readFile callback is provided
-  // and the item references a readable .md file, render it in place of the
-  // raw description so the producer sees the paragraph-format episode.
-  // Renders the file at detailRenderedIndex (default 0 = first file, the
-  // existing auto-render); Enter on a ToC entry selects another file
+  // (any .md Key File). When a readFile callback is provided and the item
+  // references a readable .md file, render it in place of the raw
+  // description so the producer sees the paragraph-format episode.
+  // Inline-note markers can be edited from the viewer via the n,e / n,d
+  // chords (WL-0MSKV6SKK008MMXR). Renders the file at detailRenderedIndex
+  // (default 0 = first file, the existing auto-render); Enter on a ToC
+  // entry selects another file
   // (WL-0MSHWHULZ001FL8I).
   if (readFile) {
     const mdPaths = extractFilePaths(item.description ?? '').filter(p => p.endsWith('.md'));

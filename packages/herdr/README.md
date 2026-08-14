@@ -22,7 +22,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
 - **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` — no custom stage values). Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
 - **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, full GFM rendering: headings, lists, tables, blockquotes, code, links) as a preview. The description section is rendered with the same markdown renderer. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
-- **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. See [Inline note links](#inline-note-links).
+- **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. Any markdown document opened in the viewer can also be annotated in place (`n,e` add/edit, `n,d` delete); podcast scripts sync notes to the worklog as child work items (PRD §7.3). See [Inline note links](#inline-note-links).
 - **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
 
 ## Requirements
@@ -615,7 +615,8 @@ description. The viewer:
   the terminal width);
 - renders inline `[NOTE <id>: ...]` markers as `<id>↗` links (see
   [Inline note links](#inline-note-links));
-- is preview-only (no notes editor);
+- supports **interactive inline-note editing** on the paragraph under the
+  cursor (`n,e` add/edit, `n,d` delete — see [Inline note links](#inline-note-links));
 - falls back to the raw description when the file is missing/unreadable.
 
 The **description section** of the detail view is rendered with the same
@@ -635,7 +636,10 @@ wrote Key Files paths relative to the podcast dir rather than the wiki root),
 then `process.cwd()` as a last resort.
 
 The rendered lines appear under an `Episode file (md viewer)` heading in the
-detail view, scrollable with the usual `↑↓/j:k` keys.
+detail view, scrollable with the usual `↑↓/j:k` keys.  Scrolling the
+document moves the **note cursor** onto the paragraph under the visible
+line, which the inline-note chords operate on (see
+[Inline note links](#inline-note-links)).
 
 ### Related Docs table of contents
 
@@ -665,6 +669,62 @@ the note work items: the marker is displayed as `<id>↗` and the note text is
 never shown in the viewer (notes are internal review notes, not dialogue).
 This applies to both the description section and the markdown viewer in the
 detail view.
+
+### Interactive note editing
+
+Any markdown document opened in the viewer (podcast scripts **and** generic
+`.md` Key Files) can be annotated in place — no notes editor is needed
+outside Herdr.  Two chords, scoped to the detail view, drive the feature:
+
+- **`n,e` — add/edit note** — opens the command-input form for the note
+  text.  On a paragraph that already carries a `[NOTE <id>: ...]` marker the
+  form is **pre-filled with the existing note text** (edit mode); otherwise
+  it is empty (add mode).  Submitting writes the marker inline at the start
+  of the paragraph and the viewer reflects the change.
+- **`n,d` — delete note** — removes the marker from the paragraph under the
+  cursor (or, for podcast scripts, marks it `DONE` and posts a resolution
+  comment — see [Podcast note-child lifecycle](#podcast-note-child-lifecycle)).
+
+The paragraph the chords act on is the one under the **visible cursor
+line** (the document scroll position).  Write-back is a **surgical
+paragraph-level edit**: every byte outside the edited paragraph is preserved
+byte-for-byte, and files are resolved against the worklog root via the same
+`resolveKeyFilePath` convention as reads.
+
+### Local placeholder ids (`LOCAL-<seq>`)
+
+Generic markdown documents (no resolvable podcast episode) use a documented
+**`LOCAL-<seq>`** placeholder scheme: the id is a stable hash of the document
+text plus the paragraph index, so the same paragraph in an unchanged
+document gets the same id across re-opens.  Local notes are never synced to
+the worklog — no `wl` calls are made for them.
+
+### Podcast note-child lifecycle (PRD §7.3)
+
+On a podcast script whose frontmatter (`podcast_title` / `source_doc`)
+resolves to an episode work item, notes are synced to the worklog:
+
+- **Add** — the note is created as a **child work item** of the episode
+  (`wl create --parent <episode>`), and the real note-child id is written
+  into the marker `[NOTE <child-id>: ...]`.
+- **Delete/resolve** — the marker is rewritten in the addressed form
+  `[NOTE <id>: DONE ...]` and a **resolution comment** is posted on the
+  note child (`wl comment add`).
+- **Unresolvable episode** — when a script carries note markers but no
+  episode can be resolved, a **prominent warning** is shown (never a silent
+  skip) and the note falls back to a `LOCAL-<seq>` placeholder.
+
+Episode resolution follows the podcast-script skill convention: the script
+frontmatter `podcast_title` / `source_doc` is matched against the title (or
+id) of the selected work item and the loaded worklist items.
+
+### Marker-parsing limitation
+
+`NOTE_MARKER_RE` is **non-greedy**: the note text runs to the **first `]`**
+(and may span multiple lines).  Consequently, a `]` or a nested `[NOTE`
+inside note text would terminate/start a new marker and mis-parse.  Keep
+note text free of `]` characters; the editor does not yet escape them
+(recorded as a known limitation of the marker format, PRD §7.1).
 
 ## Command log
 
@@ -729,6 +789,7 @@ packages/herdr/
 │   ├── form-dialog.ts      # Form state + rendering for parameter input (unknown <identifiers>)
 │   ├── ship-it-dialog.ts   # Ship It typed-confirmation dialog (bottom-anchored, S shortcut)
 │   ├── md-viewer.ts        # Generic markdown viewer + inline [NOTE <id>: ...] link rendering
+│   ├── md-note-edit.ts     # Inline-note marker edit helpers (insert/update/remove, LOCAL-<seq>, §7.3 sync)
 │   ├── command-log.ts      # Command log: record/get last command per work item
 │   ├── settings.ts         # User settings management
 │   └── worklist.ts         # List state, rendering, keyboard handling, command output
