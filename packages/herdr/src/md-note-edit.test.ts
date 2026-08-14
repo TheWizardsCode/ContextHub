@@ -59,7 +59,7 @@ const MULTI_MARKER_DOC = 'a [NOTE AAA: first] b [NOTE BBB: second] c';
 
 const UTF8_DOC = `# Title
 
-UTF-8 content: café naïve 🎵 [NOTE AAA: note with emoji 🚀]
+UTF-8 content: café naïve 🎵 [NOTE AAA: note] 🚀
 
 More café.`;
 
