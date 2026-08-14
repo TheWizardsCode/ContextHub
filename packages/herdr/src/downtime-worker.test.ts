@@ -93,7 +93,9 @@ import {
 function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
   return {
     getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
-    getNextAuditCandidate: vi.fn().mockResolvedValue(null),
+    // Audit tier answers a GENUINELY empty tier by default ({ok:true,
+    // candidate:null}); a wl/parse failure is {ok:false} (WL-0MSLWJ2KP0002SV0).
+    getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
     getNextImplementCandidate: vi.fn().mockResolvedValue(null),
     claimItem: vi.fn().mockResolvedValue({ ok: true }),
     spawnAgentPane: vi.fn().mockResolvedValue(true),
@@ -388,7 +390,7 @@ describe('dispatch audit tier', () => {
 
   it('dispatches /skill:audit on the audit candidate as the first tier', async () => {
     const deps = makeDeps({
-      getNextAuditCandidate: vi.fn().mockResolvedValue(staleCandidate),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: staleCandidate }),
     });
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
@@ -406,7 +408,7 @@ describe('dispatch audit tier', () => {
 
   it('records the audit dispatch with kind audit', async () => {
     const deps = makeDeps({
-      getNextAuditCandidate: vi.fn().mockResolvedValue(staleCandidate),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: staleCandidate }),
     });
 
     await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
@@ -419,7 +421,7 @@ describe('dispatch audit tier', () => {
 
   it('when no audit candidate, falls back to audit → plan → intake in order', async () => {
     const deps = makeDeps({
-      getNextAuditCandidate: vi.fn().mockResolvedValue(null),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
       getNextItem: vi
         .fn()
         .mockResolvedValueOnce({ ok: true, candidate: null }) // intake_complete empty
@@ -435,10 +437,11 @@ describe('dispatch audit tier', () => {
     expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
   });
 
-  it('fails closed to no-candidate when getNextAuditCandidate returns null and no plan/intake candidate exists', async () => {
-    // getNextAuditCandidate is fail-closed at the deps boundary: a wl failure
-    // yields null (no candidate), and the dispatcher falls through to the
-    // plan/intake tiers. All empty -> no dispatch.
+  it('fails closed to no-candidate when the audit tier answers empty and no plan/intake candidate exists', async () => {
+    // The audit tier distinguishes a GENUINELY empty tier ({ok:true,
+    // candidate:null}) from a wl failure ({ok:false}, WL-0MSLWJ2KP0002SV0):
+    // only the former falls through — all tiers empty -> no dispatch, the
+    // no-candidate cooldown unchanged.
     const deps = makeDeps(); // all three tiers empty
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
@@ -446,6 +449,45 @@ describe('dispatch audit tier', () => {
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('no-candidate');
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('fails closed to wl-error when the audit-tier lookup errors (a strike, never a silent fall-through)', async () => {
+    // WL-0MSLWJ2KP0002SV0: a wl/parse failure in getNextAuditCandidate must
+    // NOT fall through to the implement/plan/intake tiers looking healthy —
+    // it is a CLI-error strike exactly like the plan/intake tiers' {ok:false}.
+    // The audit query state is UNKNOWN, so no lower tier is consulted this
+    // cycle (fail-closed to busy; the three-strike rule governs retries).
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: false }),
+      getNextImplementCandidate: vi.fn().mockResolvedValue({ id: 'WL-IMP', title: 'Implement me', stage: 'implement' }),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: { id: 'WL-PLN', title: 'Plan me', stage: 'intake_complete' } }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('wl-error');
+    expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
+    // No fall-through: the implement/plan/intake tiers are never consulted.
+    expect(deps.getNextImplementCandidate).not.toHaveBeenCalled();
+    expect(deps.getNextItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+  });
+
+  it('falls through to the implement tier when the audit tier answers a genuinely empty set', async () => {
+    // {ok:true, candidate:null} (genuinely empty audit tier) falls through to
+    // the implement tier — only {ok:false} (wl failure) strikes.
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      getNextImplementCandidate: vi.fn().mockResolvedValue({ id: 'WL-IMP', title: 'Implement me', stage: 'implement' }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -460,7 +502,7 @@ describe('dispatch implement tier', () => {
 
   it('dispatches /skill:implement on the implement candidate after the audit tier', async () => {
     const deps = makeDeps({
-      getNextAuditCandidate: vi.fn().mockResolvedValue(null),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
       getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
     });
 
@@ -481,7 +523,7 @@ describe('dispatch implement tier', () => {
 
   it('records the implement dispatch with kind implement', async () => {
     const deps = makeDeps({
-      getNextAuditCandidate: vi.fn().mockResolvedValue(null),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
       getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
     });
 
@@ -495,7 +537,7 @@ describe('dispatch implement tier', () => {
 
   it('dispatch priority is audit → implement → plan → intake (audit stays first)', async () => {
     const deps = makeDeps({
-      getNextAuditCandidate: vi.fn().mockResolvedValue({ id: 'WL-AUD', title: 'Audit me', stage: 'audit' }),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: { id: 'WL-AUD', title: 'Audit me', stage: 'audit' } }),
       getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
       getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: { id: 'WL-PLN', title: 'Plan me', stage: 'intake_complete' } }),
     });
@@ -511,7 +553,7 @@ describe('dispatch implement tier', () => {
 
   it('falls back to the implement tier when no audit candidate exists, and audit runs first', async () => {
     const deps = makeDeps({
-      getNextAuditCandidate: vi.fn().mockResolvedValue(null),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
       getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
       getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
     });
@@ -526,7 +568,7 @@ describe('dispatch implement tier', () => {
 
   it('falls back to plan (intake_complete) when no implement candidate exists', async () => {
     const deps = makeDeps({
-      getNextAuditCandidate: vi.fn().mockResolvedValue(null),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
       getNextImplementCandidate: vi.fn().mockResolvedValue(null),
       getNextItem: vi
         .fn()
@@ -543,7 +585,7 @@ describe('dispatch implement tier', () => {
 
   it('falls back to intake (idea) when no implement or plan candidate exists', async () => {
     const deps = makeDeps({
-      getNextAuditCandidate: vi.fn().mockResolvedValue(null),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
       getNextImplementCandidate: vi.fn().mockResolvedValue(null),
       getNextItem: vi
         .fn()
@@ -564,7 +606,7 @@ describe('dispatch implement tier', () => {
     // plan/intake tiers still run. The implement tier itself never signals a
     // hard error — null IS the fail-closed shape (AC6).
     const deps = makeDeps({
-      getNextAuditCandidate: vi.fn().mockResolvedValue(null),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
       getNextImplementCandidate: vi.fn().mockResolvedValue(null), // wl error → null
       getNextItem: vi
         .fn()
@@ -608,7 +650,7 @@ describe('dispatch code-freeze gate', () => {
   it('skips the audit and implement tiers while frozen and still dispatches plan', async () => {
     const deps = makeDeps({
       readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
-      getNextAuditCandidate: vi.fn().mockResolvedValue(auditCandidate),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
       getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
       getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
     });
@@ -632,7 +674,7 @@ describe('dispatch code-freeze gate', () => {
   it('treats an ambiguous marker as frozen (fail-closed): no audit/implement, plan still dispatches', async () => {
     const deps = makeDeps({
       readCodeFreezeStatus: vi.fn().mockReturnValue('ambiguous'),
-      getNextAuditCandidate: vi.fn().mockResolvedValue(auditCandidate),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
       getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
       getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
     });
@@ -716,7 +758,7 @@ describe('dispatch code-freeze gate', () => {
   it('not-frozen behaves as before: the audit tier still runs', async () => {
     const deps = makeDeps({
       readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
-      getNextAuditCandidate: vi.fn().mockResolvedValue(auditCandidate),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
     });
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
@@ -1312,9 +1354,12 @@ describe('dispatch CAS claim race', () => {
   it('a stale audit-tier claim also aborts (no fall-through to other tiers)', async () => {
     const deps = makeDeps({
       getNextAuditCandidate: vi.fn().mockResolvedValue({
-        id: 'WL-AUD',
-        title: 'Audit me',
-        stage: 'audit',
+        ok: true,
+        candidate: {
+          id: 'WL-AUD',
+          title: 'Audit me',
+          stage: 'audit',
+        },
       }),
       claimItem: vi.fn().mockResolvedValue({ ok: false, reason: 'stale' }),
     });
@@ -2361,6 +2406,44 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
     expect(event.cwd).toBe('/repo');
     expect(event.message).toContain('3 consecutive');
     expect(Number.isNaN(Date.parse(event.at))).toBe(false);
+  });
+
+  it('an audit-tier wl failure counts toward the three-strike rule (WL-0MSLWJ2KP0002SV0)', async () => {
+    // The wl-error comes from the AUDIT tier ({ok:false}) while the
+    // plan/intake tiers are GENUINELY empty ({ok:true, candidate:null}): the
+    // only possible strike source is the audit lookup, proving a broken
+    // audit query cannot silently pass as "no audit candidates" forever —
+    // three consecutive failures pause the worker and log recordError.
+    const { worker, deps } = makeErrorWorker({
+      deps: {
+        getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: false }),
+        getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      },
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + 240_000);
+
+    const s1 = await worker.tick();
+    expect(s1.dispatched).toBe(false);
+    expect(worker.errorStrikes).toBe(1);
+    expect(worker.paused).toBe(false);
+    expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
+
+    const s2 = await worker.tick();
+    expect(s2.dispatched).toBe(false);
+    expect(worker.errorStrikes).toBe(2);
+    expect(deps.recordError).not.toHaveBeenCalled();
+
+    const s3 = await worker.tick(); // strike 3 → pause + durable trace
+    expect(s3.dispatched).toBe(false);
+    expect(worker.paused).toBe(true);
+    expect(worker.errorStrikes).toBe(0);
+    expect(deps.recordError).toHaveBeenCalledTimes(1);
+    expect(deps.recordError).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: '/repo' }),
+    );
   });
 
   it('resumes with a fresh strike counter once the pause expires', async () => {

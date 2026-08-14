@@ -400,20 +400,23 @@ export function createDowntimeDeps(
     // (fail-closed) identically: no audit/implement dispatch during a
     // release; plan/intake continue.
     readCodeFreezeStatus: (cwd: string) => readCodeFreezeStatusForRoot(cwd),
-    async getNextAuditCandidate(cwd: string): Promise<DowntimeCandidate | null> {
+    async getNextAuditCandidate(cwd: string): Promise<DowntimeNextResult> {
       try {
         // Audit tier (WL-0MSI8H3HP000K0RG): select the first completed /
         // in_review item WITHOUT a valid audit so the producer-review queue
         // (the release gate) is drained during idle time. Same fail-closed
-        // semantics as getNextItem: a wl failure yields no candidate. The
-        // bounded timeout (WL-0MSJIPHD0001L1J9) applies here too.
+        // semantics as getNextItem, with the same error channel
+        // (WL-0MSLWJ2KP0002SV0): a wl/parse failure resolves {ok:false} — a
+        // CLI-error strike — NOT a null that is indistinguishable from a
+        // genuinely empty audit tier. The bounded timeout
+        // (WL-0MSJIPHD0001L1J9) applies here too.
         const { stdout } = await getExecFileAsync()(
           'wl',
           buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--json']),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
         );
         const candidates = parseAuditCandidatesOutput(stdout);
-        if (candidates === null) return null;
+        if (candidates === null) return { ok: false };
         // Dispatched-marker exclusion (WL-0MSLIY8ZR004QUSY): read the shared
         // rolling dispatch log for THIS worklog root (the same <cwd> that
         // recordDispatch writes) and exclude any candidate the downtime
@@ -426,10 +429,16 @@ export function createDowntimeDeps(
         const entries = await readDowntimeLogEntries(cwd);
         const dispatchedAuditIds = auditDispatchedItemIds(entries);
         const selected = selectAuditCandidate(candidates, Date.now(), dispatchedAuditIds);
-        return selected === null ? null : toDowntimeCandidate(selected);
+        // Genuinely empty audit tier → ok:true with no candidate (unchanged
+        // empty behaviour); a selected item → ok:true with the candidate.
+        return selected === null
+          ? { ok: true, candidate: null }
+          : { ok: true, candidate: toDowntimeCandidate(selected) };
       } catch {
-        // Fail-closed: a wl failure yields no candidate (no dispatch).
-        return null;
+        // Fail-closed: a wl failure yields a CLI-error outcome, never a
+        // candidate and never a null that looks like an empty tier — the
+        // caller counts it as a strike (WL-0MSLWJ2KP0002SV0).
+        return { ok: false };
       }
     },
     async getNextImplementCandidate(cwd: string): Promise<DowntimeCandidate | null> {

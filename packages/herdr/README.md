@@ -263,6 +263,17 @@ dispatch still governs (fresh → not a candidate). A missing or unreadable
 log is treated as empty (fail-safe), so audit dispatch keeps working on a
 fresh worklog.
 
+> **Audit-tier error channel (WL-0MSLWJ2KP0002SV0):** the audit lookup
+> resolves through the same `DowntimeNextResult` error channel as the
+> plan/intake tiers. A `wl`/CLI failure or unparseable output is `{ok:false}`
+> — a CLI-error strike, never a `null` that is indistinguishable from a
+> genuinely empty audit tier — so a persistently broken audit query fails
+> closed to busy (the three-strike rule pauses the worker and logs the
+> error) instead of silently falling through to the plan tier looking
+> healthy with audit dispatch disabled forever. A genuinely empty audit
+> tier (`{ok:true, candidate:null}`) falls through to the implement tier
+> exactly as before.
+
 > **Audit-tier selection note (WL-0MSMAIP5F003WAGG):** the audit tier keeps
 > its `wl list --status completed --stage in_review --json` selection rather
 > than converting to `wl next --stage in_review`. `wl next` is strictly
@@ -399,7 +410,7 @@ leaves behind (documented for WL-0MSKUG2WW0058A7W, audit gap AC2):
 | Genuine empty backlog (no-candidate) | **none** — intentionally silent | full cooldown pause (default 60 min); worker stops polling |
 | 1–2 transient wl CLI errors (strikes) | **none** — silent | one strike per `wl-error` outcome; retries on the next idle window |
 | 3rd consecutive wl CLI error | `recordError` JSONL entry | three-strike pause; the only failure path that logs |
-| Audit-tier wl/parse failure | **none** — silent, and **no strike** | `getNextAuditCandidate` collapses the failure to `null` like an empty tier; worker falls through to the plan tier and looks healthy — known silent path, follow-up WL-0MSLWJ2KP0002SV0 |
+| Audit-tier wl/parse failure | **none** — silent, but **counts as a `wl-error` strike** | `getNextAuditCandidate` resolves `{ok:false}` (never a `null` that looks like an empty tier, WL-0MSLWJ2KP0002SV0); the dispatch fails closed to busy — no fall-through to the implement/plan tiers — and the three-strike rule pauses + logs it after 3 consecutive failures |
 | Lost CAS claim race (`--if-status`/`--if-stage` stale) | **none** — and **no marker, no pane, no success record** | the dispatch ABORTS with reason `claim-failed` (neutral — another pane won); the failure is observable via the outcome and a stderr line, never silently discarded (WL-0MSLWJ310000ND0X absorbed) |
 | Claim wl CLI failure (non-stale) | **none** — counts as a `wl-error` strike | dispatch aborts; three consecutive such failures pause the worker |
 | Marker write failure | **none** — the item stays claimed (`in_progress`) | dispatch ABORTS **before** the pane spawns with reason `marker-write-failed` (fail-closed: an unmarked item is never dispatched; the claim still removes it from `wl next`, so no other pane selects it) |

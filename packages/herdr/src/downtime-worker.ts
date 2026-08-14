@@ -632,14 +632,19 @@ export interface DowntimeWorkerDeps {
   getNextItem(stage: DowntimeStage, cwd: string): Promise<DowntimeNextResult>;
   /**
    * Look up the next completed/in_review item WITHOUT a valid audit (the
-   * audit dispatch tier, which runs before the plan/intake tiers). Fail-closed:
-   * a wl failure yields no candidate (no dispatch). `cwd` is the worklog root
-   * whose `.worklog/downtime-dispatches.log` is consulted for the
-   * dispatched-marker exclusion (WL-0MSLIY8ZR004QUSY): items the downtime
-   * worker already dispatched for `/skill:audit` are never re-selected while
-   * they still lack a fresh audit.
+   * audit dispatch tier, which runs before the implement/plan/intake tiers).
+   * Uses the same `DowntimeNextResult` error channel as `getNextItem`
+   * (WL-0MSLWJ2KP0002SV0): `{ok:false}` is a wl/parse failure (a CLI-error
+   * strike — never a candidate), while `{ok:true, candidate:null}` is a
+   * GENUINELY empty audit tier. The distinction matters: a broken audit
+   * lookup must never silently look like "no audit candidates" (which would
+   * disable the audit dispatch tier forever without any observable trace).
+   * `cwd` is the worklog root whose `.worklog/downtime-dispatches.log` is
+   * consulted for the dispatched-marker exclusion (WL-0MSLIY8ZR004QUSY):
+   * items the downtime worker already dispatched for `/skill:audit` are
+   * never re-selected while they still lack a fresh audit.
    */
-  getNextAuditCandidate(cwd: string): Promise<DowntimeCandidate | null>;
+  getNextAuditCandidate(cwd: string): Promise<DowntimeNextResult>;
   /**
    * Look up the next implement-tier candidate (WL-0MSMAYPQP001FLR6): the
    * highest-priority open plan_complete item with risk Low / effort Small|XS,
@@ -833,6 +838,14 @@ async function dispatchClaimedTier(
  * `/skill:plan <id>`; if none, `wl next --stage idea` → `/skill:intake <id>`;
  * if all four are empty, no dispatch.
  *
+ * The audit tier resolves through the same `DowntimeNextResult` error
+ * channel as the plan/intake tiers (WL-0MSLWJ2KP0002SV0): a GENUINELY empty
+ * audit tier (`{ok:true, candidate:null}`) falls through to the implement
+ * tier, but an audit-tier wl/parse failure (`{ok:false}`) is a `wl-error`
+ * outcome — a CLI-error strike that never falls through looking healthy — so
+ * a persistently broken audit lookup can never silently disable audit
+ * dispatch (the caller's three-strike rule pauses and logs it).
+ *
  * Code-freeze gate (WL-0MSQ0RPQP00636JY): the marker is re-read fresh on
  * EVERY dispatch (never cached). While the marker is frozen OR ambiguous
  * (fail-closed), the audit and implement tiers are skipped — no new
@@ -873,9 +886,21 @@ export async function dispatchDowntimeWork(
     const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
 
     if (!frozen) {
-      const auditCandidate = await deps.getNextAuditCandidate(opts.cwd);
-      if (auditCandidate !== null) {
-        return await dispatchClaimedTier(deps, 'audit', auditCandidate, opts);
+      // Audit tier (WL-0MSI8H3HP000K0RG): dispatch /skill:audit for the
+      // first completed/in_review item without a valid audit. The lookup
+      // resolves through the DowntimeNextResult error channel
+      // (WL-0MSLWJ2KP0002SV0): {ok:true, candidate:null} is a GENUINELY
+      // empty audit tier and falls through to the implement tier below;
+      // {ok:false} is a wl/parse failure — fail closed to busy (a strike),
+      // never a silent fall-through, so a broken audit query cannot look
+      // like "no audit candidates" and silently disable the audit tier.
+      const audit = await deps.getNextAuditCandidate(opts.cwd);
+      if (audit.ok) {
+        if (audit.candidate !== null) {
+          return await dispatchClaimedTier(deps, 'audit', audit.candidate, opts);
+        }
+      } else {
+        return { dispatched: false, reason: 'wl-error' };
       }
       // Implement tier (WL-0MSMAYPQP001FLR6): after the audit gate, dispatch
       // /skill:implement for the highest-priority open plan_complete item with

@@ -711,10 +711,10 @@ describe('createDowntimeDeps', () => {
       ['list', '--status', 'completed', '--stage', 'in_review', '--json'],
       expect.anything(),
     );
-    expect(result).toEqual({ id: 'WL-STALE', title: 'Stale audit', stage: 'audit' });
+    expect(result).toEqual({ ok: true, candidate: { id: 'WL-STALE', title: 'Stale audit', stage: 'audit' } });
   });
 
-  it('getNextAuditCandidate returns null when no stale/missing-audit item exists', async () => {
+  it('getNextAuditCandidate returns ok:true with no candidate when no stale/missing-audit item exists', async () => {
     const mockExec = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({
         success: true,
@@ -728,13 +728,13 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextAuditCandidate('/repo')).toBeNull();
+    expect(await deps.getNextAuditCandidate('/repo')).toEqual({ ok: true, candidate: null });
   });
 
-  it('getNextAuditCandidate fails closed (null) when wl errors', async () => {
+  it('getNextAuditCandidate resolves ok:false when wl errors (a strike, never a null empty tier)', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextAuditCandidate('/repo')).toBeNull();
+    expect(await deps.getNextAuditCandidate('/repo')).toEqual({ ok: false });
   });
 
   it('getNextAuditCandidate passes a bounded timeout so a hung wl fails closed', async () => {
@@ -752,7 +752,7 @@ describe('createDowntimeDeps', () => {
     expect(options).toMatchObject({ timeout: DOWNTIME_WL_TIMEOUT_MS });
   });
 
-  it('getNextAuditCandidate fails closed (null) within the timeout when wl hangs', async () => {
+  it('getNextAuditCandidate resolves ok:false within the timeout when wl hangs', async () => {
     vi.useFakeTimers();
     try {
       const hungExec = vi.fn(
@@ -769,18 +769,18 @@ describe('createDowntimeDeps', () => {
 
       const resultPromise = deps.getNextAuditCandidate('/repo');
       await vi.advanceTimersByTimeAsync(DOWNTIME_WL_TIMEOUT_MS);
-      await expect(resultPromise).resolves.toBeNull();
+      await expect(resultPromise).resolves.toEqual({ ok: false });
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('getNextAuditCandidate fails closed (null) on malformed wl output', async () => {
+  it('getNextAuditCandidate resolves ok:false on malformed wl output', async () => {
     const mockExec = vi.fn().mockResolvedValue({ stdout: 'not json', stderr: '' });
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextAuditCandidate('/repo')).toBeNull();
+    expect(await deps.getNextAuditCandidate('/repo')).toEqual({ ok: false });
   });
 
   it('getNextAuditCandidate excludes an item already dispatched for audit (marker in the log, no fresh audit)', async () => {
@@ -812,7 +812,7 @@ describe('createDowntimeDeps', () => {
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
     const result = await deps.getNextAuditCandidate(cwd);
-    expect(result).toEqual({ id: 'WL-OTHER', title: 'fresh slot', stage: 'audit' });
+    expect(result).toEqual({ ok: true, candidate: { id: 'WL-OTHER', title: 'fresh slot', stage: 'audit' } });
   });
 
   it('getNextAuditCandidate does not exclude plan/intake markers (audit-tier-only scope guard)', async () => {
@@ -839,7 +839,7 @@ describe('createDowntimeDeps', () => {
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
     const result = await deps.getNextAuditCandidate(cwd);
-    expect(result).toEqual({ id: 'WL-PLANNED', title: 'planned before', stage: 'audit' });
+    expect(result).toEqual({ ok: true, candidate: { id: 'WL-PLANNED', title: 'planned before', stage: 'audit' } });
   });
 
   it('getNextAuditCandidate treats a missing dispatch log as empty (fail-safe, dispatch still works)', async () => {
@@ -860,7 +860,7 @@ describe('createDowntimeDeps', () => {
     const cwd = makeTempDir();
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
     const result = await deps.getNextAuditCandidate(cwd);
-    expect(result).toEqual({ id: 'WL-FRESHWORKLOG', title: 'fresh worklog', stage: 'audit' });
+    expect(result).toEqual({ ok: true, candidate: { id: 'WL-FRESHWORKLOG', title: 'fresh worklog', stage: 'audit' } });
   });
 
   it('getNextAuditCandidate skips malformed log lines without failing the lookup', async () => {
@@ -887,7 +887,7 @@ describe('createDowntimeDeps', () => {
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
     const result = await deps.getNextAuditCandidate(cwd);
-    expect(result).toEqual({ id: 'WL-OK', title: 'ok item', stage: 'audit' });
+    expect(result).toEqual({ ok: true, candidate: { id: 'WL-OK', title: 'ok item', stage: 'audit' } });
   });
 
   it('getNextImplementCandidate runs wl next plan_complete risk/effort batch and selects the first open item', async () => {
