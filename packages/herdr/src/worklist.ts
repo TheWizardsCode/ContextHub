@@ -50,6 +50,8 @@ import {
   splitParagraphs,
   mapCursorToParagraph,
   mapParagraphToMarker,
+  addNoteWithSync,
+  resolveNoteWithSync,
   type NoteEditResult,
 } from './md-note-edit.js';
 
@@ -1341,6 +1343,14 @@ export interface NoteEditAction {
  * @param action - The edit to apply.
  * @param readFile - Reads the file content (path -> content or null).
  * @param writeFile - Persists the updated content (path, content).
+ * @param episodeItems - Optional candidate episode work items (PRD §7.3
+ *   note-child sync). When provided, inserts on a podcast script with a
+ *   resolvable episode create a note child via `wl create --parent
+ *   <episode>` and write the real note-child id into the marker (via
+ *   `addNoteWithSync`); removes of a real (non-LOCAL) note id mark the
+ *   marker `DONE` and post a resolution comment on the child (via
+ *   `resolveNoteWithSync`). Omit (or pass []) for generic markdown — the
+ *   local-only path never invokes `wl`.
  * @returns The edit result (doc, byteOffset, newNoteId for inserts).
  */
 export async function applyNoteEditToFile(
@@ -1349,6 +1359,7 @@ export async function applyNoteEditToFile(
   action: NoteEditAction,
   readFile: (filePath: string) => string | null | Promise<string | null>,
   writeFile: (filePath: string, content: string) => void | Promise<void>,
+  episodeItems?: WorkItem[],
 ): Promise<NoteEditResult> {
   if (!item) return { doc: '', byteOffset: -1 };
   const content = await readFile(mdPath);
@@ -1356,14 +1367,41 @@ export async function applyNoteEditToFile(
 
   let result: NoteEditResult;
   if (action.kind === 'insert') {
-    result = insertNoteMarker(content, action.paragraphIndex ?? 0, action.text ?? '');
+    if (episodeItems && episodeItems.length > 0) {
+      // Podcast path: create the note child and write the real id (PRD
+      // §7.3); unresolvable episode → LOCAL placeholder + warning.
+      result = await addNoteWithSync(
+        content,
+        action.paragraphIndex ?? 0,
+        action.text ?? '',
+        episodeItems,
+      );
+    } else {
+      // Generic markdown: local placeholder ids only — never invokes wl.
+      result = insertNoteMarker(content, action.paragraphIndex ?? 0, action.text ?? '');
+    }
   } else if (action.kind === 'update') {
     result = updateNoteMarker(content, action.noteId ?? '', {
       text: action.text ?? '',
       done: action.done,
     });
+  } else if (action.kind === 'remove') {
+    const noteId = action.noteId ?? '';
+    const isLocal = noteId.startsWith('LOCAL-');
+    if (episodeItems && episodeItems.length > 0 && noteId && !isLocal) {
+      // Podcast delete/resolve: DONE marker + resolution comment on the
+      // note child (PRD §7.3).
+      result = await resolveNoteWithSync(
+        content,
+        noteId,
+        action.text ?? 'Resolved via Herdr',
+        episodeItems,
+      );
+    } else {
+      result = removeNoteMarker(content, noteId);
+    }
   } else {
-    result = removeNoteMarker(content, action.noteId ?? '');
+    result = { doc: content, byteOffset: -1 };
   }
   if (result.byteOffset >= 0) {
     await writeFile(mdPath, result.doc);
@@ -1371,6 +1409,29 @@ export async function applyNoteEditToFile(
   return result;
 }
 
+/**
+ * Build the candidate episode work items for PRD §7.3 note-child sync.
+ *
+ * The selected work item (an episode's Key Files include the script) plus
+ * the loaded worklist items, deduplicated by id.  Used to resolve the
+ * episode for a podcast script via `resolveEpisodeId`; generic markdown
+ * yields an empty candidate set and stays local-only (never invokes `wl`).
+ */
+function buildEpisodeCandidates(state: WorkItemListState): WorkItem[] {
+  const seen = new Set<string>();
+  const candidates: WorkItem[] = [];
+  const add = (item: WorkItem | null | undefined): void => {
+    if (!item) return;
+    if (seen.has(item.id)) return;
+    seen.add(item.id);
+    candidates.push(item);
+  };
+  add(state.detailItem);
+  for (const item of state.getFlattenedItems()) {
+    add(item);
+  }
+  return candidates;
+}
 /**
  * Return the first `Key Files:` path ending in `.md` (or empty).
  *
@@ -3203,20 +3264,33 @@ export async function runWorklistTui(
             state.detailNoteCursor = Math.max(0, paragraphIndex);
             const marker = mapParagraphToMarker(content, state.detailNoteCursor);
 
+            // Candidate episodes for PRD §7.3 note-child sync: the selected
+            // item (an episode's Key Files include the script) plus the
+            // loaded worklist items, deduplicated by id. Empty for generic
+            // markdown never invokes `wl` (local placeholder ids only).
+            const episodeItems = buildEpisodeCandidates(state);
+
             if (command === '/herdr:note-delete') {
               if (!marker) {
                 showToast('Note', { body: 'No note on this paragraph.' });
                 render();
                 return;
               }
-              await applyNoteEditToFile(
+              const result = await applyNoteEditToFile(
                 state.detailItem,
                 mdPath,
                 { kind: 'remove', noteId: marker.noteId },
                 readKeyFile,
                 writeKeyFile,
+                episodeItems,
               );
-              showToast('Note deleted', { body: `${marker.noteId} removed.` });
+              if (result.byteOffset < 0) {
+                showToast('Note', { body: 'Delete did not apply.' });
+              } else if (result.warning) {
+                showToast('Warning', { body: result.warning });
+              } else {
+                showToast('Note deleted', { body: `${marker.noteId} removed.` });
+              }
               render();
               return;
             }
@@ -3251,9 +3325,12 @@ export async function runWorklistTui(
                   action,
                   readKeyFile,
                   writeKeyFile,
+                  episodeItems,
                 );
                 if (result.byteOffset < 0) {
                   showToast('Note', { body: 'Edit did not apply.' });
+                } else if (result.warning) {
+                  showToast('Warning', { body: result.warning });
                 } else {
                   showToast('Note saved', { body: `${result.newNoteId ?? noteId ?? 'marker'} written.` });
                 }

@@ -2773,4 +2773,122 @@ describe('inline-note editing — viewer integration (WL-0MSKV6SKK008MMXR)', () 
 
     expect(result.newNoteId).toMatch(/^LOCAL-/);
   });
+
+  it('applyNoteEditToFile creates the note child on a podcast script with a resolvable episode (mocked wl)', async () => {
+    const wl = await import('./worklist.js');
+    const mockExec = vi.fn(async (_bin: string, args: string[]) => {
+      if (args.includes('create')) {
+        return { stdout: JSON.stringify({ success: true, workItem: { id: 'OSL-NOTE9' } }), stderr: '' };
+      }
+      return { stdout: JSON.stringify({ success: true }), stderr: '' };
+    });
+    setExecFileAsync(mockExec as any);
+
+    const script = `---\npodcast_title: Episode One\n---\n\nNova: Line one.\n\nSorra: Line two.`;
+    const readFile = vi.fn(() => Promise.resolve(script));
+    const writeFile = vi.fn(() => Promise.resolve());
+    const episodes = [
+      { id: 'OSL-EP1', title: 'Episode One', status: 'open', stage: 'in_review', priority: 'medium', description: 'ep' },
+    ];
+
+    const result = await wl.applyNoteEditToFile(
+      makeKeyFilesItem('WL-EP', ['episode.podcast.md']),
+      'episode.podcast.md',
+      { kind: 'insert', paragraphIndex: 1, text: 'fact check' },
+      readFile,
+      writeFile,
+      episodes as any,
+    );
+
+    expect(result.newNoteId).toBe('OSL-NOTE9');
+    expect(result.warning).toBeUndefined();
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      expect.arrayContaining(['create', '--parent', 'OSL-EP1']),
+    );
+    const written = writeFile.mock.calls[0]?.[1] as string;
+    expect(written).toContain('[NOTE OSL-NOTE9: fact check]');
+  });
+
+  it('applyNoteEditToFile uses a LOCAL id + warning on an unresolvable episode and never calls wl (mocked wl)', async () => {
+    const wl = await import('./worklist.js');
+    const mockExec = vi.fn(async (_bin: string, _args: string[]) =>
+      ({ stdout: JSON.stringify({ success: true }), stderr: '' }));
+    setExecFileAsync(mockExec as any);
+
+    const script = '# Doc\n\nPara one. [NOTE LOCAL-abc: existing local note]';
+    const readFile = vi.fn(() => Promise.resolve(script));
+    const writeFile = vi.fn(() => Promise.resolve());
+
+    const result = await wl.applyNoteEditToFile(
+      makeKeyFilesItem('WL-NOTES', ['notes.md']),
+      'notes.md',
+      { kind: 'insert', paragraphIndex: 1, text: 'another note' },
+      readFile,
+      writeFile,
+      [{ id: 'OSL-EP1', title: 'Episode One', status: 'open', stage: 'in_review', priority: 'medium', description: 'ep' }] as any,
+    );
+
+    expect(result.newNoteId).toMatch(/^LOCAL-/);
+    expect(result.warning).toBeTruthy();
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it('applyNoteEditToFile marks a podcast note DONE and comments on the child on delete (mocked wl)', async () => {
+    const wl = await import('./worklist.js');
+    const mockExec = vi.fn(async (_bin: string, args: string[]) => {
+      if (args.includes('comment')) {
+        return { stdout: JSON.stringify({ success: true }), stderr: '' };
+      }
+      return { stdout: JSON.stringify({ success: true }), stderr: '' };
+    });
+    setExecFileAsync(mockExec as any);
+
+    const script = 'text [NOTE OSL-0MSG7Y0C6005QFES: original] more';
+    const readFile = vi.fn(() => Promise.resolve(script));
+    const writeFile = vi.fn(() => Promise.resolve());
+    const episodes = [
+      { id: 'OSL-EP1', title: 'Episode One', status: 'open', stage: 'in_review', priority: 'medium', description: 'ep' },
+    ];
+
+    const result = await wl.applyNoteEditToFile(
+      makeKeyFilesItem('WL-EP', ['episode.podcast.md']),
+      'episode.podcast.md',
+      { kind: 'remove', noteId: 'OSL-0MSG7Y0C6005QFES', text: 'Resolved' },
+      readFile,
+      writeFile,
+      episodes as any,
+    );
+
+    expect(result.doc).toContain('[NOTE OSL-0MSG7Y0C6005QFES: DONE Resolved]');
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      expect.arrayContaining(['comment', 'add', 'OSL-0MSG7Y0C6005QFES']),
+    );
+    const written = writeFile.mock.calls[0]?.[1] as string;
+    expect(written).toContain('DONE Resolved');
+  });
+
+  it('applyNoteEditToFile removes a LOCAL marker without any wl call (generic markdown delete)', async () => {
+    const wl = await import('./worklist.js');
+    const mockExec = vi.fn(async (_bin: string, _args: string[]) =>
+      ({ stdout: JSON.stringify({ success: true }), stderr: '' }));
+    setExecFileAsync(mockExec as any);
+
+    const script = 'para one [NOTE LOCAL-abc: note] more';
+    const readFile = vi.fn(() => Promise.resolve(script));
+    const writeFile = vi.fn(() => Promise.resolve());
+
+    const result = await wl.applyNoteEditToFile(
+      makeKeyFilesItem('WL-NOTES', ['notes.md']),
+      'notes.md',
+      { kind: 'remove', noteId: 'LOCAL-abc' },
+      readFile,
+      writeFile,
+      [{ id: 'OSL-EP1', title: 'Episode One', status: 'open', stage: 'in_review', priority: 'medium', description: 'ep' }] as any,
+    );
+
+    expect(result.doc).not.toContain('[NOTE');
+    expect(mockExec).not.toHaveBeenCalled();
+  });
 });
