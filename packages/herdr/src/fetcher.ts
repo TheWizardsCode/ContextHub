@@ -523,13 +523,16 @@ const STAGE_STATUS: Record<string, string> = {
  * stage matches.
  * Root-only (WL-0MS964SIA0057ABR): stage-filtered top-level lists hide
  * child items; children remain reachable via expand (wl list --parent).
- * Results are ordered by the standard list order (sortIndex).
+ * Results are regrouped priority-first (WL-0MSOPHLD1000EWNN): priority
+ * bucket sections, then stage, then id — same ordering as the default
+ * worklist. Within a single stage view the stage tie-break is a no-op, so
+ * priority buckets + id tie-break apply.
  */
 export async function fetchItemsByStage(stage: string): Promise<WorkItem[]> {
   const status = STAGE_STATUS[stage] ?? 'open';
   const output = await runWl(['list', '--status', status, '--stage', stage, '--root-only']);
   const payload = extractJson(output);
-  return extractItems(payload);
+  return regroupWorkItems(extractItems(payload));
 }
 
 /**
@@ -587,12 +590,16 @@ export async function runWlSync(): Promise<{ success: boolean; error?: string }>
  * passes the parent's depth + 1 so grandchildren render at depth 2, etc.
  * (WL-0MSQ3FH1K000MMJW) — depth is derived from the fetch path, never
  * hardcoded.
+ *
+ * Results are regrouped priority-first (WL-0MSOPHLD1000EWNN): priority
+ * bucket sections, then stage, then id — same ordering as the default
+ * worklist.
  */
 export async function fetchChildrenForItem(parentId: string, depth = 1): Promise<WorkItem[]> {
   const output = await runWl(['list', '--parent', parentId]);
   const payload = extractJson(output);
   const items = extractItems(payload);
-  return items.map((item) => ({ ...item, depth }));
+  return regroupWorkItems(items.map((item) => ({ ...item, depth })));
 }
 
 // ── Work-item claiming ────────────────────────────────────────────────
