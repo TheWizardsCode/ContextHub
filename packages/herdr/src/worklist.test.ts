@@ -2685,3 +2685,92 @@ describe('Related Docs — open in markdown viewer (WL-0MSGTLSUT002NF29)', () =>
     }
   });
 });
+
+// ── Inline-note editing: viewer integration (WL-0MSKV6SKK008MMXR) ─────
+// Red-phase: these tests pin the note-edit chord wiring, the paragraph
+// cursor state, and the write-back path that children #2/#3 implement.
+// New-module symbols are accessed via dynamic imports so this file stays
+// loadable — pre-existing tests remain green while these are RED.
+
+describe('inline-note editing — viewer integration (WL-0MSKV6SKK008MMXR)', () => {
+  it('registers a note-edit chord for the detail view in shortcuts.json', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['n', 'e'], 'detail');
+    expect(entry).toBeDefined();
+    expect(entry?.command).toContain('note-edit');
+  });
+
+  it('registers a note-delete chord for the detail view in shortcuts.json', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['n', 'd'], 'detail');
+    expect(entry).toBeDefined();
+    expect(entry?.command).toContain('note-delete');
+  });
+
+  it('note chords are not active in list mode', () => {
+    const registry = loadShortcutConfig();
+    expect(registry.lookupChordEntry(['n', 'e'], 'list')).toBeUndefined();
+    expect(registry.lookupChordEntry(['n', 'd'], 'list')).toBeUndefined();
+  });
+
+  it('processChordInput resolves the note-edit chord into a command', () => {
+    const registry = loadShortcutConfig();
+    const chordState = createChordState();
+    // Real flow: detail view on a non-idea item — 'n' alone must not
+    // resolve the intake chord (stages ['idea']), so it becomes a leader.
+    const step1 = processChordInput(chordState, 'n', registry, 'detail', 'in_review');
+    const step2 = processChordInput(chordState, 'e', registry, 'detail', 'in_review');
+    expect(step1).toBeNull(); // still collecting
+    expect(step2).toBe('chord-complete');
+    expect(chordState.resolvedCommand).toContain('note-edit');
+  });
+
+  it('tracks a paragraph cursor in the md viewer (detailNoteCursor)', async () => {
+    // Child #3 adds a cursor-over-paragraphs state field to the detail
+    // viewer. It must default to the first paragraph (index 0) and be
+    // exposed on the state object for chord handlers to mutate.
+    const wl = await import('./worklist.js');
+    const state = new wl.WorkItemListState(
+      [makeKeyFilesItem('WL-NOTES', ['notes.md'])],
+      TERM_80x24,
+    );
+    expect(state.detailNoteCursor).toBe(0);
+  });
+
+  it('applyNoteEditToFile reads, edits, and writes back via injected reader/writer', async () => {
+    const wl = await import('./worklist.js');
+    const { insertNoteMarker } = await import('./md-note-edit.js');
+    const readFile = vi.fn(() => Promise.resolve('# Doc\n\nPara one.\n\nPara two.'));
+    const writeFile = vi.fn(() => Promise.resolve());
+
+    const result = await wl.applyNoteEditToFile(
+      makeKeyFilesItem('WL-NOTES', ['notes.md']),
+      'notes.md',
+      { kind: 'insert', paragraphIndex: 1, text: 'new note' },
+      readFile,
+      writeFile,
+    );
+
+    expect(result).toBeDefined();
+    expect(writeFile).toHaveBeenCalledWith(
+      'notes.md',
+      expect.stringContaining('[NOTE'),
+    );
+  });
+
+  it('applyNoteEditToFile surfaces the new note id for sync', async () => {
+    const wl = await import('./worklist.js');
+    const readFile = vi.fn(() => Promise.resolve('# Doc\n\nPara one.'));
+    const writeFile = vi.fn(() => Promise.resolve());
+
+    const result = await wl.applyNoteEditToFile(
+      makeKeyFilesItem('WL-NOTES', ['notes.md']),
+      'notes.md',
+      { kind: 'insert', paragraphIndex: 1, text: 'note text' },
+      readFile,
+      writeFile,
+    );
+
+    expect(result.newNoteId).toMatch(/^LOCAL-/);
+  });
+});

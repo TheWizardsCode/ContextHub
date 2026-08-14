@@ -384,3 +384,45 @@ describe('detail-view wiring', () => {
     expect(joined).toContain('OSL-AAA↗');
   });
 });
+
+// ── Inline-note editing: viewer cursor ↔ paragraph mapping (WL-0MSKV6SKK008MMXR)
+// Red-phase: these tests pin the md-note-edit cursor mapping contract used
+// by the viewer cursor (child #3). The module does not exist yet, so these
+// tests are expected to FAIL (RED) until child #2 lands. Dynamic imports
+// keep this file loadable so pre-existing tests stay green.
+
+describe('inline-note cursor mapping (WL-0MSKV6SKK008MMXR)', () => {
+  const viewerDoc = `# Title
+
+Paragraph one with some text.
+
+Paragraph two here.`;
+
+  it('mapCursorToParagraph maps a source cursor line to its paragraph index', async () => {
+    const { mapCursorToParagraph } = await import('./md-note-edit.js');
+    // Cursor on "Paragraph one." (source line 2) → paragraph index 1.
+    expect(mapCursorToParagraph(viewerDoc, 2)).toBe(1);
+  });
+
+  it('mapCursorToParagraph maps the first source line to paragraph 0', async () => {
+    const { mapCursorToParagraph } = await import('./md-note-edit.js');
+    expect(mapCursorToParagraph(viewerDoc, 0)).toBe(0);
+  });
+
+  it('mapParagraphToMarker locates the marker of the paragraph under the cursor', async () => {
+    const { mapParagraphToMarker } = await import('./md-note-edit.js');
+    const doc = '# Title\n\nParagraph one. [NOTE AAA: note]\n\nParagraph two.';
+    const marker = mapParagraphToMarker(doc, 1);
+    expect(marker).not.toBeNull();
+    expect(marker?.noteId).toBe('AAA');
+  });
+
+  it('the md viewer renders NOTE markers identically for generic markdown (not just podcast scripts)', () => {
+    // Guard: existing inline-note link rendering must keep working for any
+    // .md file opened in the viewer (PRD §7.1/§7.3).
+    const genericMd = '# Notes\n\nAction item: fix the flaky test [NOTE LOCAL-a1b2c3: investigate]\n';
+    const joined = renderMarkdownViewer(genericMd, 80).join('\n');
+    expect(joined).toContain('LOCAL-a1b2c3↗');
+    expect(joined).not.toContain('[NOTE');
+  });
+});
