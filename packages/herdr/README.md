@@ -388,8 +388,13 @@ UTC timestamp — this survives `wl sync` and is the durable trail; and (2) a
 bounded JSONL entry in `.worklog/downtime-dispatches.log` under the
 resolved worklog root (rolling — only the most recent 100 entries are
 kept). The marker is written **before** the pane spawns (fail-closed: an
-unmarked item is never dispatched). The `kind:audit` entries double as the
-dispatched-marker exclusion source for the audit tier (WL-0MSLIY8ZR004QUSY);
+unmarked item is never dispatched). A failed pane spawn (spawn `error` or
+non-zero script exit) additionally appends a **failure trace** entry
+(`outcome: 'spawn-failed'`, mirroring the marker's `itemId`/`kind`/`stage`
+fields plus the `error`/`exitCode` details) so the log distinguishes
+**attempted** from **opened** — it never claims success for a pane that
+never appeared (WL-0MSLWJ3I70031Z8U). The `kind:audit` entries double as
+the dispatched-marker exclusion source for the audit tier (WL-0MSLIY8ZR004QUSY);
 `kind:implement` entries for the implement tier; and `kind:plan` /
 `kind:intake` entries (which also record the item's `stage` at dispatch)
 for the plan/intake change-guard — an item already dispatched for its tier
@@ -414,7 +419,7 @@ leaves behind (documented for WL-0MSKUG2WW0058A7W, audit gap AC2):
 | Lost CAS claim race (`--if-status`/`--if-stage` stale) | **none** — and **no marker, no pane, no success record** | the dispatch ABORTS with reason `claim-failed` (neutral — another pane won); the failure is observable via the outcome and a stderr line, never silently discarded (WL-0MSLWJ310000ND0X absorbed) |
 | Claim wl CLI failure (non-stale) | **none** — counts as a `wl-error` strike | dispatch aborts; three consecutive such failures pause the worker |
 | Marker write failure | **none** — the item stays claimed (`in_progress`) | dispatch ABORTS **before** the pane spawns with reason `marker-write-failed` (fail-closed: an unmarked item is never dispatched; the claim still removes it from `wl next`, so no other pane selects it) |
-| Pane spawn failure (`send-to-pi.sh`) | marker already written (pre-spawn) | a spawn `error` is handled (no unhandled-exception crash) and the outcome is **not** success (`spawn-failed`); the marker stands so the item is not re-dispatched (WL-0MSLWJ3I70031Z8U absorbed) |
+| Pane spawn failure / non-zero script exit (`send-to-pi.sh`) | marker already written (pre-spawn) + a `recordDispatchFailure` JSONL entry (`outcome: 'spawn-failed'` with the `error`/`exitCode` trace) | a spawn `error` (ENOENT/EACCES) or a non-zero script exit within the 500 ms probe window is handled (no unhandled-exception crash) and the outcome is **not** success (`spawn-failed`, carrying the error/exit trace); the log distinguishes **attempted** from **opened**, and the marker stands so the item is not re-dispatched (WL-0MSLWJ3I70031Z8U absorbed) |
 | `recordError` write failure | **none** | fail-closed by design: logging must never crash or block the worker |
 
 Consequence: the log's *absence* of an entry is still ambiguous (it cannot

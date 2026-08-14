@@ -28,9 +28,11 @@ export const DOWNTIME_LOG_MAX_ENTRIES = 100;
 
 /**
  * One parsed line of the downtime dispatch log: either a dispatch event
- * (itemId/kind/dispatchedAt/title) or a persistent-error event
- * (cwd/at/message, three-strike trail). All fields optional so malformed
- * or foreign lines never break parsing.
+ * (itemId/kind/dispatchedAt/title), a spawn-failure trace
+ * (itemId/kind/stage + outcome:'spawn-failed' with error/exitCode —
+ * WL-0MSLWJ3I70031Z8U), or a persistent-error event (cwd/at/message,
+ * three-strike trail). All fields optional so malformed or foreign lines
+ * never break parsing.
  */
 export interface DowntimeLogEntry {
   itemId?: string;
@@ -48,6 +50,17 @@ export interface DowntimeLogEntry {
   stage?: string;
   at?: string;
   message?: string;
+  /**
+   * Dispatch outcome of a failed pane spawn ('spawn-failed'): the rolling
+   * log distinguishes "attempted" from "opened" (WL-0MSLWJ3I70031Z8U AC2).
+   * Absent on success markers and legacy entries (backward compatible —
+   * marker readers ignore it).
+   */
+  outcome?: string;
+  /** Spawn-level error message (spawn-failed trace, e.g. ENOENT). */
+  error?: string;
+  /** send-to-pi.sh exit code (non-zero spawn-failed trace; null = signal). */
+  exitCode?: number | null;
 }
 
 /**

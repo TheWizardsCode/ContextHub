@@ -42,7 +42,9 @@
  *    via `deps.recordError` (three-strike rule, `DOWNTIME_ERROR_STRIKE_LIMIT`).
  *  - `buildDowntimePaneArgs` / `spawnDowntimePane` — send-to-pi.sh
  *    invocation (`--pane-name Downtime <kind>`, `--no-focus`, `--cwd`,
- *    `--model`), detached and unref'd.
+ *    `--model`), detached and unref'd; `error`/`exit` handlers capture a
+ *    spawn failure or non-zero script exit so a failed pane is never
+ *    logged as a successful dispatch (WL-0MSLWJ3I70031Z8U).
  *  - `createDowntimeWorker` — per-tick orchestrator (poll → evaluate →
  *    track → dispatch) with settings re-read each tick, plus the
  *    no-candidate cooldown (WL-0MSI7DQL10016QYX): a genuine empty backlog
@@ -677,10 +679,12 @@ export interface DowntimeWorkerDeps {
   claimItem(itemId: string, expected: DowntimeClaimExpected): Promise<DowntimeClaimResult>;
   /**
    * Open a visible pi agent pane running the prompt (via send-to-pi.sh).
-   * Resolves true when the spawn started; false on a handled spawn `error`
-   * event (no unhandled-exception crash, WL-0MSLWJ3I70031Z8U absorbed).
+   * Resolves `{ok:true}` when the pane opened (or the probe window elapsed
+   * with no failure — fire-and-forget); `{ok:false, error|exitCode}` on a
+   * handled spawn `error` event or a non-zero script exit within the probe
+   * window (no unhandled-exception crash, WL-0MSLWJ3I70031Z8U absorbed).
    */
-  spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<boolean>;
+  spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<DowntimeSpawnResult>;
   /**
    * Audit trail for a successful dispatch: comment on the item + rolling
    * log entry under `.worklog`. Resolves TRUE only when the rolling-log
@@ -690,6 +694,15 @@ export interface DowntimeWorkerDeps {
    * unmarked item is never dispatched (fail-closed, RCA design point 2).
    */
   recordDispatch(event: DowntimeDispatchEvent): Promise<boolean>;
+  /**
+   * Record a spawn-failure trace for an attempted dispatch (audit-log
+   * integrity, WL-0MSLWJ3I70031Z8U AC2): a failed pane spawn appends an
+   * `outcome: 'spawn-failed'` entry with the error/exit trace to the
+   * rolling log, so the log distinguishes "attempted" from "opened" and
+   * never claims success for a pane that never appeared. Must never throw
+   * (fail-closed): audit logging must not crash the worker.
+   */
+  recordDispatchFailure(event: DowntimeDispatchFailureEvent): Promise<void>;
   /**
    * Record a persistent CLI-error event (three consecutive wl failures).
    * Must never throw (fail-closed): logging must not crash the worker.
@@ -716,6 +729,22 @@ export interface DowntimeDispatchEvent {
 }
 
 /**
+ * Spawn-failure trace appended to the rolling dispatch log when a pane
+ * spawn errors or the script exits non-zero (WL-0MSLWJ3I70031Z8U AC2).
+ * Mirrors the dispatch marker's fields (including `stage`, so the marker
+ * readers keep excluding the item exactly as the standing marker does) and
+ * carries the failure details; the written entry adds
+ * `outcome: 'spawn-failed'` so the log distinguishes "attempted" (failed
+ * spawn) from "opened" (success marker).
+ */
+export interface DowntimeDispatchFailureEvent extends DowntimeDispatchEvent {
+  /** Spawn-level error message (e.g. ENOENT), when the spawn errored. */
+  error?: string;
+  /** send-to-pi.sh exit code (null = killed by a signal). */
+  exitCode?: number | null;
+}
+
+/**
  * Persistent-error event recorded when the wl CLI fails
  * `DOWNTIME_ERROR_STRIKE_LIMIT` times consecutively. Written to the rolling
  * `.worklog` log so the failure is auditable even though no dispatch occurs.
@@ -736,10 +765,20 @@ export interface DowntimeDispatchOutcome {
    * Non-dispatch reasons: 'dispatch-in-flight' | 'no-candidate' |
    * 'wl-error' | 'code-freeze' | 'claim-failed' (lost the CAS race —
    * another pane won; neutral) | 'marker-write-failed' (fail-closed abort
-   * BEFORE spawn) | 'spawn-failed' (handled spawn error; outcome is not
-   * success).
+   * BEFORE spawn) | 'spawn-failed' (handled spawn error or non-zero script
+   * exit; outcome is not success).
    */
   reason?: string;
+  /**
+   * Spawn-level error message ('spawn-failed' trace, e.g. ENOENT on
+   * send-to-pi.sh — WL-0MSLWJ3I70031Z8U AC2).
+   */
+  error?: string;
+  /**
+   * send-to-pi.sh exit code ('spawn-failed' trace; null = killed by a
+   * signal — WL-0MSLWJ3I70031Z8U AC2).
+   */
+  exitCode?: number | null;
 }
 
 /**
@@ -778,8 +817,11 @@ const TIER_EXPECTED: Record<DowntimeSkillKind, DowntimeClaimExpected> = {
  *    the dispatch aborts BEFORE spawning (fail-closed — an unmarked item is
  *    never dispatched). The item stays claimed (in_progress), so no other
  *    pane can select it (RCA design point 2).
- *  - Spawn: a handled spawn `error` resolves reason 'spawn-failed' — the
- *    outcome is NOT success (WL-0MSLWJ3I70031Z8U absorbed); the marker
+ *  - Spawn: a handled spawn `error` or non-zero script exit resolves reason
+ *    'spawn-failed' — the outcome is NOT success, and a failure trace
+ *    (`outcome: 'spawn-failed'` entry with the error/exit details) is
+ *    appended to the rolling audit log so the log never claims success for
+ *    a pane that never appeared (WL-0MSLWJ3I70031Z8U absorbed); the marker
  *    stands so the item is not re-dispatched.
  */
 async function dispatchClaimedTier(
@@ -817,9 +859,34 @@ async function dispatchClaimedTier(
     return { dispatched: false, reason: 'marker-write-failed' };
   }
 
-  const spawned = await deps.spawnAgentPane(buildDowntimePrompt(kind, candidate), opts);
-  if (!spawned) {
-    return { dispatched: false, reason: 'spawn-failed' };
+  const spawn = await deps.spawnAgentPane(buildDowntimePrompt(kind, candidate), opts);
+  if (!spawn.ok) {
+    // Failure trace (WL-0MSLWJ3I70031Z8U AC2): the audit log distinguishes
+    // "attempted" (failed spawn) from "opened" (success marker) — append
+    // an outcome:'spawn-failed' entry with the error/exit trace. Fail-
+    // closed: audit logging must never crash the worker, so a throwing
+    // trace is swallowed (the stderr line in spawnDowntimePane is the
+    // transient trail; the marker already stands).
+    try {
+      await deps.recordDispatchFailure({
+        itemId: candidate.id,
+        kind,
+        dispatchedAt: new Date().toISOString(),
+        cwd: opts.cwd,
+        title: candidate.title,
+        stage: expected.stage,
+        error: spawn.error,
+        exitCode: spawn.exitCode,
+      });
+    } catch {
+      // fail-closed: audit logging must never crash the worker
+    }
+    return {
+      dispatched: false,
+      reason: 'spawn-failed',
+      error: spawn.error,
+      exitCode: spawn.exitCode,
+    };
   }
 
   return { dispatched: true, candidate, kind };
@@ -984,13 +1051,28 @@ export function buildDowntimePaneArgs(
 
 /**
  * Minimal spawn handle: the caller unrefs so the parent can exit first, and
- * registers an `error` listener so a spawn failure is observable instead of
- * crashing the plugin process (WL-0MSLWJ3I70031Z8U absorbed).
+ * registers `error` + `exit` listeners so a spawn failure or non-zero script
+ * exit is observable instead of crashing the plugin process with an
+ * unhandled 'error' event (WL-0MSLWJ3I70031Z8U absorbed).
  */
 export interface DowntimeSpawnHandle {
   unref(): void;
   once(event: 'error', listener: (err: Error) => void): void;
+  once(event: 'exit', listener: (code: number | null) => void): void;
 }
+
+/**
+ * Result of one pane-spawn attempt. `ok: true` means the pane opened (or
+ * the probe window elapsed with no failure — fire-and-forget); `ok: false`
+ * means the spawn errored (`error`, e.g. ENOENT) or the script exited
+ * non-zero (`exitCode`, null when killed by a signal) within the probe
+ * window. The failure details are the error/exit trace recorded in the
+ * dispatch audit log (WL-0MSLWJ3I70031Z8U AC2) so a pane that never
+ * appeared is never logged as a success.
+ */
+export type DowntimeSpawnResult =
+  | { ok: true }
+  | { ok: false; error?: string; exitCode?: number | null };
 
 /** Injectable spawn boundary (matches the repo's injectable-seam pattern). */
 export type DowntimeSpawn = (
@@ -1022,36 +1104,62 @@ export const defaultDowntimeSpawn: DowntimeSpawn = (scriptPath, args, opts) =>
   spawn(scriptPath, args, buildDowntimeSpawnOptions(opts.cwd));
 
 /**
- * How long to wait for a spawn-level `error` event before assuming the pane
- * started (an ENOENT/EACCES error fires on the next event-loop tick). The
- * probe keeps the failure observable without delaying the poll loop.
+ * How long to wait for a spawn-level `error` event or an immediate
+ * non-zero script `exit` before assuming the pane started (an
+ * ENOENT/EACCES error fires on the next event-loop tick; a failing script
+ * exits within milliseconds). The probe keeps the failure observable
+ * without delaying the poll loop.
  */
 export const DOWNTIME_SPAWN_PROBE_MS = 500;
 
 /**
  * Spawn `send-to-pi.sh` detached with stdio ignored, then unref so the
  * parent (plugin) process can exit independently — same pattern as the
- * TUI's existing agent dispatches. An `error` listener is ALWAYS attached
- * (a spawn failure must not crash the plugin with an unhandled 'error'
- * event, WL-0MSLWJ3I70031Z8U); a spawn error resolves `false` so the
- * dispatch outcome is not a false success.
+ * TUI's existing agent dispatches. `error` and `exit` listeners are ALWAYS
+ * attached (a spawn failure must not crash the plugin with an unhandled
+ * 'error' event, WL-0MSLWJ3I70031Z8U): a spawn `error` (ENOENT/EACCES) or a
+ * non-zero script exit within the probe window resolves `{ok:false}` with
+ * the failure trace so the dispatch outcome is not a false success; exit 0
+ * (script ran to completion — pane opened) and the probe timeout (pane
+ * still alive) resolve `{ok:true}`.
  */
 export async function spawnDowntimePane(
   scriptPath: string,
   args: string[],
   opts: { cwd: string },
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
-): Promise<boolean> {
+): Promise<DowntimeSpawnResult> {
   const child = spawnFn(scriptPath, args, opts);
   child.unref();
-  return new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => resolve(true), DOWNTIME_SPAWN_PROBE_MS);
+  return new Promise<DowntimeSpawnResult>((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (result: DowntimeSpawnResult) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      resolve(result);
+    };
+    timer = setTimeout(() => settle({ ok: true }), DOWNTIME_SPAWN_PROBE_MS);
     child.once('error', (err: Error) => {
-      clearTimeout(timer);
       process.stderr.write(
         `[worklog-plugin] Downtime pane spawn failed: ${err.message}\n`,
       );
-      resolve(false);
+      settle({ ok: false, error: err.message });
+    });
+    child.once('exit', (code: number | null) => {
+      // A non-zero exit (or null — killed by a signal) within the probe
+      // window means the script failed to open the pane (e.g. send-to-pi.sh
+      // errored); exit 0 means it ran to completion — the pane opened.
+      if (code !== 0) {
+        process.stderr.write(
+          `[worklog-plugin] Downtime pane script exited non-zero ` +
+            `(code ${String(code)}) before the probe window elapsed\n`,
+        );
+        settle({ ok: false, exitCode: code });
+      } else {
+        settle({ ok: true });
+      }
     });
   });
 }

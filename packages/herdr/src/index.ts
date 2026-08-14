@@ -59,11 +59,13 @@ import {
   type DowntimeStage,
   type DowntimeCandidate,
   type DowntimeDispatchEvent,
+  type DowntimeDispatchFailureEvent,
   type DowntimeErrorEvent,
   type DowntimeNextResult,
   type DowntimeClaimExpected,
   type DowntimeClaimResult,
   type DowntimeSpawn,
+  type DowntimeSpawnResult,
   defaultDowntimeSpawn,
   buildDowntimeDispatchComment,
   DOWNTIME_WL_TIMEOUT_MS,
@@ -506,7 +508,7 @@ export function createDowntimeDeps(
         ? { ok: false, reason: 'stale' }
         : { ok: false, reason: 'error' };
     },
-    async spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<boolean> {
+    async spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<DowntimeSpawnResult> {
       const kind = skillKindFromPrompt(prompt);
       return spawnDowntimePane(
         scriptPath,
@@ -560,6 +562,23 @@ export function createDowntimeDeps(
         await appendDowntimeLogEntry(event.cwd, JSON.stringify(event));
       } catch {
         // fail-closed
+      }
+    },
+    async recordDispatchFailure(event: DowntimeDispatchFailureEvent): Promise<void> {
+      // Spawn-failure trace (WL-0MSLWJ3I70031Z8U AC2): append an
+      // outcome:'spawn-failed' entry with the error/exit details to the
+      // rolling dispatch log, so the log distinguishes "attempted" (failed
+      // spawn) from "opened" (success marker) and never claims success for
+      // a pane that never appeared. Mirrors the marker's fields (itemId,
+      // kind, stage) so the marker readers keep excluding the item exactly
+      // as the standing marker does. Fail-closed: never crash the worker.
+      try {
+        await appendDowntimeLogEntry(
+          event.cwd,
+          JSON.stringify({ ...event, outcome: 'spawn-failed' }),
+        );
+      } catch {
+        // fail-closed: audit logging must never crash the worker
       }
     },
   };

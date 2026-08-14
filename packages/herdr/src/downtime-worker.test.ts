@@ -98,8 +98,9 @@ function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
     getNextImplementCandidate: vi.fn().mockResolvedValue(null),
     claimItem: vi.fn().mockResolvedValue({ ok: true }),
-    spawnAgentPane: vi.fn().mockResolvedValue(true),
+    spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
     recordDispatch: vi.fn().mockResolvedValue(true),
+    recordDispatchFailure: vi.fn().mockResolvedValue(undefined),
     recordError: vi.fn().mockResolvedValue(undefined),
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): not frozen by default, so
     // existing dispatch tests exercise the unchanged audit/implement tiers.
@@ -1380,16 +1381,65 @@ describe('dispatch CAS claim race', () => {
         ok: true,
         candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
       }),
-      spawnAgentPane: vi.fn().mockResolvedValue(false),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: false, error: 'ENOENT: send-to-pi.sh' }),
     });
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('spawn-failed');
+    expect(outcome.error).toBe('ENOENT: send-to-pi.sh');
     // The marker stands (fail-closed — no re-dispatch of the same item), but
     // the outcome is NOT a success (WL-0MSLWJ3I70031Z8U absorbed).
     expect(deps.recordDispatch).toHaveBeenCalledTimes(1);
+    // A failure trace is appended so the audit log distinguishes
+    // "attempted" from "opened" (AC2) — it never logs success for a pane
+    // that never appeared.
+    expect(deps.recordDispatchFailure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        itemId: 'WL-ABC',
+        kind: 'plan',
+        cwd: '/repo',
+        error: 'ENOENT: send-to-pi.sh',
+      }),
+    );
+  });
+
+  it('a non-zero script exit makes the outcome not-success (spawn-failed) with the exit trace recorded', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
+      }),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: false, exitCode: 1 }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('spawn-failed');
+    expect(outcome.exitCode).toBe(1);
+    // The failure trace carries the exit code for the audit log (AC2).
+    expect(deps.recordDispatchFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ itemId: 'WL-ABC', kind: 'plan', exitCode: 1 }),
+    );
+  });
+
+  it('a throwing recordDispatchFailure never crashes the dispatch (fail-closed)', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
+      }),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: false, exitCode: 1 }),
+      recordDispatchFailure: vi.fn().mockRejectedValue(new Error('log io boom')),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('spawn-failed');
+    expect(outcome.exitCode).toBe(1);
   });
 
   it('claim → marker → spawn ordering is fixed (claim first, marker before spawn)', async () => {
@@ -1539,8 +1589,8 @@ describe('buildDowntimeDispatchComment', () => {
 describe('single-flight dispatch guard', () => {
   it('does not dispatch a second time while one dispatch is in flight', async () => {
     let release!: () => void;
-    const gate = new Promise<boolean>((resolve) => {
-      release = () => resolve(true);
+    const gate = new Promise<{ ok: true }>((resolve) => {
+      release = () => resolve({ ok: true });
     });
     const deps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({
@@ -1933,22 +1983,68 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
     });
     const handle = (spawnFn as ReturnType<typeof vi.fn>).mock.results[0].value;
     expect(handle.unref).toHaveBeenCalled();
-    expect(spawned).toBe(true);
+    expect(handle.once).toHaveBeenCalledWith('error', expect.any(Function));
+    expect(handle.once).toHaveBeenCalledWith('exit', expect.any(Function));
+    // No error/exit within the probe window → the pane is assumed opened.
+    expect(spawned).toEqual({ ok: true });
   });
 
-  it('resolves false on a handled spawn error (no unhandled-exception crash)', async () => {
+  it('resolves {ok:false} with the error trace on a handled spawn error (no unhandled-exception crash)', async () => {
     const handle = {
       unref: vi.fn(),
-      once: vi.fn((_event: string, listener: (err: Error) => void) => {
-        listener(new Error('ENOENT: send-to-pi.sh'));
+      once: vi.fn((event: string, listener: (arg: unknown) => void) => {
+        if (event === 'error') listener(new Error('ENOENT: send-to-pi.sh'));
       }),
     };
     const spawnFn = vi.fn(() => handle) as unknown as DowntimeSpawn;
 
     const spawned = await spawnDowntimePane('/path/to/missing.sh', [], { cwd: '/repo' }, spawnFn);
 
-    expect(spawned).toBe(false);
+    expect(spawned).toEqual({ ok: false, error: 'ENOENT: send-to-pi.sh' });
     expect(handle.once).toHaveBeenCalledWith('error', expect.any(Function));
+    expect(handle.once).toHaveBeenCalledWith('exit', expect.any(Function));
+  });
+
+  it('resolves {ok:false} with the exit trace on a non-zero script exit within the probe window', async () => {
+    const handle = {
+      unref: vi.fn(),
+      once: vi.fn((event: string, listener: (arg: unknown) => void) => {
+        if (event === 'exit') listener(1);
+      }),
+    };
+    const spawnFn = vi.fn(() => handle) as unknown as DowntimeSpawn;
+
+    const spawned = await spawnDowntimePane('/path/to/send-to-pi.sh', [], { cwd: '/repo' }, spawnFn);
+
+    expect(spawned).toEqual({ ok: false, exitCode: 1 });
+  });
+
+  it('treats a signal-killed child (exit code null) as a failure', async () => {
+    const handle = {
+      unref: vi.fn(),
+      once: vi.fn((event: string, listener: (arg: unknown) => void) => {
+        if (event === 'exit') listener(null);
+      }),
+    };
+    const spawnFn = vi.fn(() => handle) as unknown as DowntimeSpawn;
+
+    const spawned = await spawnDowntimePane('/path/to/send-to-pi.sh', [], { cwd: '/repo' }, spawnFn);
+
+    expect(spawned).toEqual({ ok: false, exitCode: null });
+  });
+
+  it('resolves {ok:true} when the script exits 0 (pane opened — success path unchanged)', async () => {
+    const handle = {
+      unref: vi.fn(),
+      once: vi.fn((event: string, listener: (arg: unknown) => void) => {
+        if (event === 'exit') listener(0);
+      }),
+    };
+    const spawnFn = vi.fn(() => handle) as unknown as DowntimeSpawn;
+
+    const spawned = await spawnDowntimePane('/path/to/send-to-pi.sh', [], { cwd: '/repo' }, spawnFn);
+
+    expect(spawned).toEqual({ ok: true });
   });
 
   it('buildDowntimeSpawnOptions uses detached/ignore options with the resolved cwd', () => {
@@ -2124,8 +2220,8 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
 
   it('does not start a second dispatch while one is in flight (worker single-flight)', async () => {
     let release!: () => void;
-    const gate = new Promise<boolean>((resolve) => {
-      release = () => resolve(true);
+    const gate = new Promise<{ ok: true }>((resolve) => {
+      release = () => resolve({ ok: true });
     });
     const { worker, deps } = makeWorker({
       deps: { spawnAgentPane: vi.fn().mockImplementation(() => gate) },
@@ -2278,8 +2374,8 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     // in-flight dispatch; the worker's own dispatch call then returns
     // `dispatch-in-flight`, which must NOT trigger the cooldown.
     let release!: () => void;
-    const gate = new Promise<boolean>((resolve) => {
-      release = () => resolve(true);
+    const gate = new Promise<{ ok: true }>((resolve) => {
+      release = () => resolve({ ok: true });
     });
     const outerDeps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({

@@ -1418,6 +1418,80 @@ describe('createDowntimeDeps recordError', () => {
   });
 });
 
+describe('createDowntimeDeps recordDispatchFailure', () => {
+  afterEach(() => {
+    for (const dir of tempDirs) {
+      try { rmSync(dir, { recursive: true }); } catch { /* ignore */ }
+    }
+    tempDirs.length = 0;
+  });
+
+  it('writes an outcome:spawn-failed JSONL entry with the error trace under the cwd', async () => {
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.recordDispatchFailure({
+      itemId: 'WL-ABC',
+      kind: 'plan',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+      cwd,
+      stage: 'intake_complete',
+      error: 'ENOENT: send-to-pi.sh',
+    });
+
+    const raw = readFileSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), 'utf8');
+    const lines = raw.split('\n').filter((l) => l.trim() !== '');
+    expect(lines).toHaveLength(1);
+    const entry = JSON.parse(lines[0]);
+    // The failure entry mirrors the marker fields (so the marker readers keep
+    // excluding the item exactly as the standing marker does) and adds the
+    // outcome + trace so the log distinguishes "attempted" from "opened"
+    // (WL-0MSLWJ3I70031Z8U AC2).
+    expect(entry).toEqual({
+      itemId: 'WL-ABC',
+      kind: 'plan',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+      cwd,
+      stage: 'intake_complete',
+      error: 'ENOENT: send-to-pi.sh',
+      outcome: 'spawn-failed',
+    });
+  });
+
+  it('records the exit-code trace for a non-zero script exit', async () => {
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.recordDispatchFailure({
+      itemId: 'WL-ABC',
+      kind: 'implement',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+      cwd,
+      exitCode: 1,
+    });
+
+    const raw = readFileSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), 'utf8');
+    const entry = JSON.parse(raw.split('\n').filter((l) => l.trim() !== '')[0]);
+    expect(entry.outcome).toBe('spawn-failed');
+    expect(entry.exitCode).toBe(1);
+  });
+
+  it('is fail-closed when the log write fails (never crashes the worker)', async () => {
+    const cwd = makeTempDir();
+    writeFileSync(join(cwd, '.worklog'), 'not a directory', 'utf8');
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await expect(
+      deps.recordDispatchFailure({
+        itemId: 'WL-ABC',
+        kind: 'plan',
+        dispatchedAt: '2026-01-01T00:00:00.000Z',
+        cwd,
+      }),
+    ).resolves.toBeUndefined();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Agent-pane association capture (WL-0MSBQUJQX005RAT9)
 //
