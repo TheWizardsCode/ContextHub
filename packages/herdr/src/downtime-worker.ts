@@ -45,6 +45,11 @@
  *    `--model`), detached and unref'd; `error`/`exit` handlers capture a
  *    spawn failure or non-zero script exit so a failed pane is never
  *    logged as a successful dispatch (WL-0MSLWJ3I70031Z8U).
+ *    `buildDowntimeSpawnOptions` bounds the dispatched audit fan-out:
+ *    `AUDIT_PHASE2_PARALLELISM=1` makes the audit skill's Phase 2 child
+ *    deep-analysis strictly sequential so a parent audit needs exactly
+ *    2 local slots (parent + one child), fitting cheap mode's capacity
+ *    (WL-0MSORQ1RG005DGUS).
  *  - `createDowntimeWorker` — per-tick orchestrator (poll → evaluate →
  *    track → dispatch) with settings re-read each tick, plus the
  *    no-candidate cooldown (WL-0MSI7DQL10016QYX): a genuine empty backlog
@@ -1095,7 +1100,14 @@ export function buildDowntimeSpawnOptions(cwd: string): {
     detached: true,
     stdio: 'ignore',
     cwd,
-    env: { ...process.env, HERDR_RESOLVED_CWD: cwd },
+    // AUDIT_PHASE2_PARALLELISM=1 bounds the dispatched audit's Phase 2 child
+    // deep-analysis fan-out to strictly sequential (parent runs first, then
+    // one child at a time — the audit skill's documented historical mode), so
+    // a child-heavy parent audit needs exactly 2 local slots and fits cheap
+    // mode's full capacity (WL-0MSORQ1RG005DGUS). The audit skill honours
+    // this env var (legacy fallback, integer >= 1); no audit-skill change
+    // needed. Interactive (non-downtime) panes are unaffected.
+    env: { ...process.env, HERDR_RESOLVED_CWD: cwd, AUDIT_PHASE2_PARALLELISM: '1' },
   };
 }
 

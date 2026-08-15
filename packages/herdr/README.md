@@ -263,6 +263,18 @@ dispatch still governs (fresh → not a candidate). A missing or unreadable
 log is treated as empty (fail-safe), so audit dispatch keeps working on a
 fresh worklog.
 
+> **Bounded audit fan-out (WL-0MSORQ1RG005DGUS):** dispatched panes run
+> with `AUDIT_PHASE2_PARALLELISM=1` in the pane environment (inherited by
+> the pi process via `send-to-pi.sh`). The audit skill's Phase 2 deep
+> analysis (`audit_runner.py`) honours this env var (legacy fallback,
+> integer ≥ 1), so a parent audit's child deep-analysis calls run strictly
+> sequentially — the skill's documented historical mode. A parent audit
+> therefore needs exactly **2 local slots** (parent + at most one child),
+> fitting cheap mode's full capacity (2 × 262144 ctx) where the default
+> fan-out of 2 would need 3 and spill children to remote. Wall-clock
+> tradeoff: child-heavy audits take longer — acceptable for overnight
+> downtime work. Interactive (non-downtime) panes are unaffected.
+
 > **Audit-tier error channel (WL-0MSLWJ2KP0002SV0):** the audit lookup
 > resolves through the same `DowntimeNextResult` error channel as the
 > plan/intake tiers. A `wl`/CLI failure or unparseable output is `{ok:false}`

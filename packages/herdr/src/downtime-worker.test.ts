@@ -2056,6 +2056,13 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
       env: expect.objectContaining({ HERDR_RESOLVED_CWD: '/repo' }),
     });
   });
+
+  it('buildDowntimeSpawnOptions bounds the dispatched audit fan-out (AUDIT_PHASE2_PARALLELISM=1)', () => {
+    const options = buildDowntimeSpawnOptions('/repo');
+    // Parent audit + at most one sequential child deep-analysis call fits
+    // cheap mode's 2 local slots (WL-0MSORQ1RG005DGUS).
+    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
+  });
 });
 
 // ── Worker orchestrator (AC1/AC5) ─────────────────────────────────────
