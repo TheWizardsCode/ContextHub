@@ -262,6 +262,126 @@ export function filterRemoteDataByPrefix(
 }
 
 /**
+ * Sync author-identity gate (WL-0MSOYWWS4009HTCB).
+ *
+ * Refuses to merge worklog data when the remote ref contains commits authored
+ * by an identity other than the store's configured identity — a second store
+ * with an empty/foreign git identity can otherwise silently overwrite work
+ * items and invalidate audits. Pure + deterministic: the same input always
+ * yields the same result, so dry-run and normal syncs report the same refusal.
+ */
+
+export interface IncomingCommit {
+  hash: string;         // short commit hash (e.g. '5fc880a')
+  authorEmail: string;  // may be '' when the commit has an empty author email
+}
+
+export interface AuthorIdentityOptions {
+  remoteTrackingRef: string;     // e.g. refs/worklog/remotes/origin/worklog/data
+  expectedAuthorEmail?: string;  // repo `git config user.email`; undefined = not configured
+  allowForeignAuthor?: boolean;  // `wl sync --allow-foreign-author`
+}
+
+export interface AuthorIdentityViolation {
+  commit: string;
+  authorEmail: string;
+  reason: 'empty-email' | 'foreign-email';
+}
+
+export interface AuthorIdentityResult {
+  allowed: boolean;
+  violations: AuthorIdentityViolation[];
+  message: string;   // refusal message naming the offending commit(s) + remote ref; '' when allowed
+}
+
+/**
+ * Inspect the author emails of commits on the remote tracking ref since the
+ * last-known sync point (parent AC1):
+ *
+ *   git log <remoteTrackingRef> --format=%h%x09%ae [--not <lastSyncedRef>]
+ *
+ * The combined `%h%x09%ae` format carries both the short hash and the author
+ * email per line (a superset of `--format=%ae`) so the gate can name offending
+ * commits in its refusal message. When `lastSyncedRef` is absent/invalid the
+ * whole remote ref history is scanned (no `--not` exclusion).
+ */
+export async function getRemoteAuthorCommits(
+  remoteTrackingRef: string,
+  lastSyncedRef?: string
+): Promise<IncomingCommit[]> {
+  const args = ['log', remoteTrackingRef, '--format=%h%x09%ae'];
+  if (lastSyncedRef && lastSyncedRef.trim()) {
+    args.push('--not', lastSyncedRef.trim());
+  }
+
+  let stdout: string;
+  try {
+    stdout = await execGitCaptureStdout(args);
+  } catch {
+    // Unreadable/missing ref → no incoming commits to gate.
+    return [];
+  }
+
+  const commits: IncomingCommit[] = [];
+  for (const line of stdout.split('\n')) {
+    if (!line.trim()) continue;
+    const [hash, email] = line.split('\t');
+    commits.push({ hash: hash || '', authorEmail: email ?? '' });
+  }
+  return commits;
+}
+
+/**
+ * Pure gate decision over the incoming commits (parent AC2/AC3 + plan Q2/Q3):
+ *
+ *   - EMPTY author email → unconditional refusal. `allowForeignAuthor` never
+ *     bypasses the empty-email gate (Q3).
+ *   - email differs from `expectedAuthorEmail` → refused by default; allowed
+ *     when `allowForeignAuthor=true`.
+ *   - `expectedAuthorEmail` undefined (user.email unset) → only the
+ *     empty-email gate applies; the foreign-email comparison is skipped (Q2).
+ *
+ * The refusal message names the offending commit(s) and the remote ref.
+ */
+export function checkAuthorIdentity(
+  commits: IncomingCommit[],
+  options: AuthorIdentityOptions
+): AuthorIdentityResult {
+  const { remoteTrackingRef, expectedAuthorEmail, allowForeignAuthor = false } = options;
+  const violations: AuthorIdentityViolation[] = [];
+
+  for (const commit of commits) {
+    const email = (commit.authorEmail || '').trim();
+    if (email === '') {
+      violations.push({ commit: commit.hash, authorEmail: '', reason: 'empty-email' });
+    } else if (expectedAuthorEmail !== undefined && email !== expectedAuthorEmail && !allowForeignAuthor) {
+      violations.push({ commit: commit.hash, authorEmail: email, reason: 'foreign-email' });
+    }
+  }
+
+  const allowed = violations.length === 0;
+  const message = allowed ? '' : buildIdentityRefusalMessage(remoteTrackingRef, violations, expectedAuthorEmail);
+  return { allowed, violations, message };
+}
+
+function buildIdentityRefusalMessage(
+  remoteTrackingRef: string,
+  violations: AuthorIdentityViolation[],
+  expectedAuthorEmail: string | undefined
+): string {
+  const detailLines = violations.map(v =>
+    v.reason === 'empty-email'
+      ? `- ${v.commit}: empty author email`
+      : `- ${v.commit}: author email '${v.authorEmail}' does not match configured user.email '${expectedAuthorEmail}'`
+  );
+  return (
+    `Refusing to merge worklog data from ${remoteTrackingRef}: ` +
+    `${violations.length} incoming commit(s) fail the author-identity gate.\n` +
+    detailLines.join('\n')
+  );
+}
+
+/**
  * Terminal (closed) workflow stages. An item with `completed` status and a
  * terminal stage is a protected close state: it must never be silently
  * reverted by a stale remote `open`/`in_progress` copy during merge.

@@ -54,9 +54,16 @@
  * and combined `--format=%h%x09%ae` shapes plus `--not <ref>`.
  */
 
-import { describe, it, expect } from 'vitest';
-import { checkAuthorIdentity } from '../src/sync.js';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import { fileURLToPath } from 'url';
+import { checkAuthorIdentity, getRemoteAuthorCommits } from '../src/sync.js';
 import type { IncomingCommit, AuthorIdentityOptions } from '../src/sync.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const mockBinDir = path.join(__dirname, 'cli', 'mock-bin');
 
 const REMOTE_REF = 'refs/worklog/remotes/origin/worklog/data';
 const OWN_EMAIL = 'ross@example.com';
@@ -225,5 +232,84 @@ describe('checkAuthorIdentity (WL-0MSOYWWS4009HTCB)', () => {
     const namedCommits = result.violations.map(v => v.commit);
     expect(namedCommits).toEqual(['5fc880a']);
     expect(namedCommits).not.toContain('a1b2c3d');
+  });
+});
+
+// ── getRemoteAuthorCommits: git log invocation shape (parent AC1) ────────
+// Runs against the mock git (tests/cli/mock-bin/git): `log` reads the seeded
+// commit store (.git/worklog-log-commits, lines "<hash> <email|-> <state>",
+// state "synced" excluded when --not <ref> is present) and `config user.email`
+// reads the seeded .git/user-email value.
+
+describe('getRemoteAuthorCommits (WL-0MSOYWWS4009HTCB)', () => {
+  let tmp: string;
+  let repo: string;
+  let oldCwd: string;
+  let oldPath: string | undefined;
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-sync-gate-'));
+    repo = path.join(tmp, 'repo');
+    fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+    fs.writeFileSync(path.join(repo, '.git', 'remote_origin'), path.join(tmp, 'remote'), 'utf8');
+    fs.mkdirSync(path.join(repo, '.worklog'), { recursive: true });
+
+    oldCwd = process.cwd();
+    oldPath = process.env.PATH;
+    process.chdir(repo);
+    process.env.PATH = `${mockBinDir}${path.delimiter}${oldPath || ''}`;
+  });
+
+  afterEach(() => {
+    process.chdir(oldCwd);
+    process.env.PATH = oldPath;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  function seedLogCommits(lines: Array<[hash: string, email: string, state: 'new' | 'synced']>): void {
+    const content = lines
+      .map(([hash, email, state]) => `${hash} ${email === '' ? '-' : email} ${state}`)
+      .join('\n');
+    fs.writeFileSync(path.join(repo, '.git', 'worklog-log-commits'), `${content}\n`, 'utf8');
+  }
+
+  it('returns hash + authorEmail per incoming commit (AC1: git log --format=%h%x09%ae)', async () => {
+    seedLogCommits([
+      ['a1b2c3d', OWN_EMAIL, 'new'],
+      ['5fc880a', '', 'new'],
+    ]);
+
+    const commits = await getRemoteAuthorCommits(REMOTE_REF);
+    expect(commits).toEqual([
+      { hash: 'a1b2c3d', authorEmail: OWN_EMAIL },
+      { hash: '5fc880a', authorEmail: '' },
+    ]);
+  });
+
+  it('excludes already-synced commits when lastSyncedRef is provided (AC1: --not <lastSyncedRef>)', async () => {
+    seedLogCommits([
+      ['5fc880a', '', 'synced'],       // empty email but already merged → excluded
+      ['a1b2c3d', OWN_EMAIL, 'new'],   // own new commit → inspected
+    ]);
+
+    const commits = await getRemoteAuthorCommits(REMOTE_REF, 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391');
+    expect(commits).toEqual([{ hash: 'a1b2c3d', authorEmail: OWN_EMAIL }]);
+  });
+
+  it('scans the full remote ref history when lastSyncedRef is absent or invalid', async () => {
+    seedLogCommits([
+      ['5fc880a', '', 'synced'],
+      ['6b9e493', FOREIGN_EMAIL, 'new'],
+    ]);
+
+    // absent
+    expect((await getRemoteAuthorCommits(REMOTE_REF)).length).toBe(2);
+    // whitespace-only → treated as absent
+    expect((await getRemoteAuthorCommits(REMOTE_REF, '   ')).length).toBe(2);
+  });
+
+  it('returns [] when the remote ref has no commits (mock log store absent)', async () => {
+    const commits = await getRemoteAuthorCommits(REMOTE_REF);
+    expect(commits).toEqual([]);
   });
 });
