@@ -205,12 +205,16 @@ export default function register(ctx: PluginContext): void {
         if (existing) {
           if (utils.isJsonMode()) {
             output.json({
+              id: existing.id,
               success: true,
               duplicate: true,
               duplicateOf: existing.id,
               workItem: existing,
             });
           } else {
+            // ID first so output trimming (tail / E2BIG) cannot hide it
+            // (RCA fix #2, WL-0MSU8E2YA0059GEA).
+            console.log(`ID: ${existing.id}`);
             console.log(`Duplicate of ${existing.id} (title matched)`);
             console.log(humanFormatWorkItem(existing, db, resolveFormat(program)));
           }
@@ -266,13 +270,17 @@ export default function register(ctx: PluginContext): void {
       }
       
       if (utils.isJsonMode()) {
+        // Top-level `id` first so output trimming cannot hide the created ID
+        // (RCA fix #2, WL-0MSU8E2YA0059GEA).
         output.json({
+          id: item.id,
           success: true,
           workItem: refreshed,
           ...(demotedParent ? { demotedParent } : {}),
         });
       } else {
         const format = resolveFormat(program);
+        console.log(`ID: ${refreshed.id}`);
         console.log(humanFormatWorkItem(refreshed, db, format));
         if (demotedParent) {
           console.log(`[Parent ${demotedParent.parent.id} demoted from ${demotedParent.from.status}/${demotedParent.from.stage} to ${demotedParent.to.status}/${demotedParent.to.stage}]`);
