@@ -114,6 +114,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | [API.md](API.md) | REST API endpoints and usage |
 | [docs/FILE_PATH_CONVENTION.md](docs/FILE_PATH_CONVENTION.md) | File path convention for work item descriptions |
 | [docs/CROSS_PROJECT_POLLUTION_CLEANUP.md](docs/CROSS_PROJECT_POLLUTION_CLEANUP.md) | Detecting and removing cross-project worklog pollution (`wl doctor foreign-items`) |
+| [docs/SYNC_IDENTITY_GATE.md](docs/SYNC_IDENTITY_GATE.md) | Refusing foreign/empty-author commits on sync (`--allow-foreign-author`, polluted-ref recovery) |
 | [docs/AGENTS-INSTALL.md](docs/AGENTS-INSTALL.md) | How `wl init` installs AGENTS.md / workflow guidance and how local rules relate to the global agent file |
 
 ### Reference
