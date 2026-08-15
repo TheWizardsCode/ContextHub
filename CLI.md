@@ -121,7 +121,13 @@ Options:
 - `--audit-text <text>` — Set structured audit text when creating an item. The audit result is stored in the `audit_results` table (the sole source of truth for audit state). Prefer `--audit-file` for file-based input to avoid shell-escaping issues (see docs/AUDIT_STATUS.md).
 - `--audit-file <file>` — Read audit text from a file (recommended for large or shell-sensitive content).
 - `--prefix <prefix>` — Override default ID prefix (repo-local scope) (optional).
+- `--allow-duplicate` — Bypass the dedup guard: create a new item even when a recent non-terminal item with the same title exists (optional).
+- `--dedup-window <duration>` — Dedup match window, e.g. `30s`, `5m`, `1h` or raw milliseconds (optional; default: `5m`).
 - `--json` — Output JSON (optional).
+
+Dedup guard:
+
+- Retrying an identical `wl create` (common when agents lose the tool result to output trimming) returns the existing recent non-terminal item with a `duplicateOf` marker instead of creating a byte-identical twin. Only items created within the `--dedup-window` (default 5 minutes) whose title matches case- and whitespace-insensitively are reused; completed/deleted items are never matched. Pass `--allow-duplicate` when a genuinely new item is needed. In JSON mode the response carries a top-level `id` field first and a `duplicateOf` field on a dedup hit; human mode prints an `ID: <id>` line first.
 
 Examples:
 
