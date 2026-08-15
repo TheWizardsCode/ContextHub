@@ -41,6 +41,10 @@ export interface CreateOptions {
   noReSort?: boolean;
   /** Force a synchronous re-sort when run (blocks until complete) */
   reSortSync?: boolean;
+  /** Bypass the dedup guard: create a new item even when a recent non-terminal same-title item exists */
+  allowDuplicate?: boolean;
+  /** Dedup match window duration (e.g. "30s", "5m", "1h", or raw ms); default "5m" */
+  dedupWindow?: string;
 }
 
 export interface ListOptions {

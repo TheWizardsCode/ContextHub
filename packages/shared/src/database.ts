@@ -141,6 +141,18 @@ const UNIQUE_RANDOM_LENGTH = 5;
 const UNIQUE_ID_LENGTH = UNIQUE_TIME_LENGTH + UNIQUE_SEQUENCE_LENGTH + UNIQUE_RANDOM_LENGTH;
 const MAX_ID_GENERATION_ATTEMPTS = 10;
 
+/**
+ * Normalize a title into a canonical dedup-comparison key: case-folded with
+ * ALL whitespace removed (tabs/newlines collapse away too). `"Same Title"`,
+ * `"same  title"` and `" same\ttitle "` all normalize to `"sametitle"` so
+ * retried create commands with cosmetic title differences still match
+ * (WL-0MSTNG2QF0049B97). The SQL side of `getRecentDuplicate` applies the
+ * same transformation to stored titles.
+ */
+export function normalizeTitleForMatch(title: string): string {
+  return title.replace(/\s+/g, '').toLowerCase();
+}
+
 export class WorklogDatabase {
   private store: SqlitePersistentStore;
   private prefix: string;
@@ -996,6 +1008,34 @@ export class WorklogDatabase {
       const maxSortIndex = ordered.reduce((max, item) => Math.max(max, item.sortIndex ?? 0), 0);
     const sortIndex = maxSortIndex + gap;
     return this.create({ ...input, sortIndex });
+  }
+
+  /**
+   * Find the most recent non-terminal work item whose title matches `title`
+   * under case/whitespace normalization and was created within `windowMs`.
+   *
+   * Backs the `wl create` dedup guard (WL-0MSTNG2QF0049B97): retrying an
+   * identical create command (common when agents lose the tool result to
+   * output trimming) must return the existing item instead of creating a
+   * byte-identical twin. Only non-terminal items (open/in-progress/blocked)
+   * within the recent window are considered — completed items and stale
+   * same-title items are deliberately unrelated.
+   *
+   * @param title - The candidate title (compared case- and whitespace-
+   *   insensitively against stored titles).
+   * @param windowMs - Look-back window in milliseconds; only items created
+   *   strictly after `now - windowMs` match.
+   * @param prefix - Prefix scope; defaults to this database's prefix. Only
+   *   items whose id starts with `<prefix>-` are considered.
+   * @returns The newest matching item, or null when no match exists.
+   */
+  getRecentDuplicate(title: string, windowMs: number, prefix?: string): WorkItem | null {
+    const effectivePrefix = (prefix ?? this.prefix).toUpperCase();
+    return this.store.getRecentDuplicateByNormalizedTitle(
+      normalizeTitleForMatch(title),
+      windowMs,
+      effectivePrefix,
+    );
   }
 
   /**
