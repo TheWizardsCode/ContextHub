@@ -183,6 +183,14 @@ export interface WorklogConfig {
   auditWriteEnabled?: boolean;
   syncRemote?: string;
   syncBranch?: string;
+  /**
+   * Allow `wl sync` to merge commits authored by a different identity than
+   * the store's configured `user.email` (identity gate WL-0MSOYWWS4009HTCB).
+   * Default false — the sync refuses foreign-author commits. The CLI flag
+   * `--allow-foreign-author` takes precedence over this config value.
+   * Never bypasses the empty-author-email gate.
+   */
+  syncAllowForeignAuthor?: boolean;
   githubRepo?: string;
   githubLabelPrefix?: string;
   githubImportCreateNew?: boolean;

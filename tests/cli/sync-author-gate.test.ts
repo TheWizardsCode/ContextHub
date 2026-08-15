@@ -207,4 +207,36 @@ describe('sync author-identity gate — CLI (WL-0MSOYWWS4009HTCB)', () => {
     expect(exitCode, output).toBe(0);
     expect(await listIds()).toContain(REMOTE_ITEM_ID);
   }, 90000);
+
+  it('(AC3) syncAllowForeignAuthor config flag allows foreign commits; CLI flag wins over config (real CLI)', async () => {
+    writeLogCommits(repoA, [['6b9e493', 'other@example.com', 'new']]);
+
+    // config.yaml sets syncAllowForeignAuthor: true → foreign commit allowed.
+    const configPath = path.join(repoA, '.worklog', 'config.yaml');
+    const base = fs.readFileSync(configPath, 'utf8');
+    fs.writeFileSync(configPath, `${base}\nsyncAllowForeignAuthor: true\n`, 'utf8');
+    const viaConfig = await sync();
+    expect(viaConfig.exitCode, `${viaConfig.stdout}\n${viaConfig.stderr}`).toBe(0);
+
+    // CLI flag wins over config: with --allow-foreign-author the gate is
+    // overridden even when config says refuse (default).
+    writeLogCommits(repoA, [['6b9e493', 'other@example.com', 'new']]);
+    fs.writeFileSync(configPath, base, 'utf8');
+    const viaFlag = await sync('--allow-foreign-author');
+    expect(viaFlag.exitCode, `${viaFlag.stdout}\n${viaFlag.stderr}`).toBe(0);
+  }, 120000);
+
+  it('(AC5) writes .worklog/last-synced-ref after a successful non-dry-run sync (real CLI)', async () => {
+    writeLogCommits(repoA, [['a1b2c3d', OWN_EMAIL, 'new']]);
+
+    const { stdout, stderr, exitCode } = await sync();
+    const output = `${stdout}\n${stderr}`;
+    expect(exitCode, output).toBe(0);
+
+    // The tracking ref tip sha was persisted for the next gate scan.
+    const lastSyncedRefPath = path.join(repoA, '.worklog', 'last-synced-ref');
+    expect(fs.existsSync(lastSyncedRefPath)).toBe(true);
+    const sha = fs.readFileSync(lastSyncedRefPath, 'utf8').trim();
+    expect(sha).toMatch(/^[0-9a-f]{40}$/);
+  }, 90000);
 });

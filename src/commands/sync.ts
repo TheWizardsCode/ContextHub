@@ -6,7 +6,7 @@ import type { PluginContext } from '../plugin-types.js';
 import type { SyncOptions, SyncDebugOptions } from '../cli-types.js';
 import type { WorkItem, Comment, DependencyEdge } from '../types.js';
 import type { GitTarget, SyncResult } from '../sync.js';
-import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, assertDataFileInCwdRepo, filterRemoteDataByPrefix } from '../sync.js';
+import { getRemoteDataFileContent, getRemoteDataFileContentWithRef, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, assertDataFileInCwdRepo, filterRemoteDataByPrefix, enforceAuthorIdentityGate, getConfiguredUserEmail, getRemoteTrackingRefSha, writeLastSyncedRef } from '../sync.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
 import { importFromJsonlContent } from '../jsonl.js';
 import { mergeAuditResults } from '../sync.js';
@@ -27,6 +27,7 @@ export function getSyncDefaults(config?: ReturnType<typeof loadConfig>) {
   return {
     gitRemote: config?.syncRemote || DEFAULT_GIT_REMOTE,
     gitBranch: config?.syncBranch || DEFAULT_GIT_BRANCH,
+    allowForeignAuthor: config?.syncAllowForeignAuthor === true,
   };
 }
 
@@ -43,6 +44,7 @@ export async function performSync(
     silent?: boolean;
     isJsonMode?: boolean;
     isVerbose?: boolean;
+    allowForeignAuthor?: boolean;
   }
 ): Promise<SyncResult> {
   const isJsonMode = options.isJsonMode ?? false;
@@ -89,8 +91,23 @@ export async function performSync(
   let remoteEdges: DependencyEdge[] = [];
 
   const localAudits = db.getAllAuditResults();
-  
-  const remoteContent = await getRemoteDataFileContent(options.file, gitTarget);
+
+  const remoteContentResult = await getRemoteDataFileContentWithRef(options.file, gitTarget);
+  const remoteContent = remoteContentResult.content;
+
+  // Author-identity gate (WL-0MSOYWWS4009HTCB): before any merge/import
+  // side-effect, refuse when the remote tracking ref contains commits whose
+  // author email is empty or differs from the store's configured user.email.
+  // Runs after the remote fetch; dry-run and normal modes report the same
+  // refusal deterministically (AC4). An absent remote (no ref) is allowed.
+  if (remoteContentResult.remoteTrackingRef) {
+    const expectedAuthorEmail = await getConfiguredUserEmail();
+    await enforceAuthorIdentityGate(remoteContentResult.remoteTrackingRef, options.file, {
+      expectedAuthorEmail,
+      allowForeignAuthor: options.allowForeignAuthor,
+    });
+  }
+
   let remoteAudits: any[] = [];
   if (remoteContent) {
     const remoteData = importFromJsonlContent(remoteContent);
@@ -316,6 +333,21 @@ export async function performSync(
     }
   }
 
+  // Persist the last-known sync point (remote tracking ref tip) so the next
+  // sync only inspects commits since this point (identity gate, AC5). Written
+  // only after a successful NON-dry-run sync — a refused sync never reaches
+  // here, so the state file still points at the last accepted ref.
+  if (!options.dryRun && remoteContentResult.remoteTrackingRef) {
+    try {
+      const refSha = await getRemoteTrackingRefSha(remoteContentResult.remoteTrackingRef);
+      if (refSha) {
+        writeLastSyncedRef(options.file, refSha);
+      }
+    } catch {
+      // Non-critical: absent state file just widens the next scan.
+    }
+  }
+
   logConflictDetails(result, itemMergeResult.merged, logLine);
   finalizeLog();
   
@@ -371,6 +403,7 @@ export default function register(ctx: PluginContext): void {
     .option('--git-branch <ref>', 'Git ref to store worklog data (use refs/worklog/data to avoid GitHub PR banners)', DEFAULT_GIT_BRANCH)
     .option('--no-push', 'Skip pushing changes back to git')
     .option('--dry-run', 'Show what would be synced without making changes')
+    .option('--allow-foreign-author', 'Allow merging commits authored by a different identity than the store user.email (never bypasses the empty-author-email gate) — overrides syncAllowForeignAuthor config')
     .option('--if-idle', 'Skip (exit 0) if another sync is already in progress — lock-aware guard for auto-sync spawners; prevents process pile-up under lock contention')
     .option('--no-re-sort', 'Skip automatic re-sort after sync')
     .option('--re-sort-sync', 'Force a synchronous re-sort after sync', false)
@@ -382,6 +415,8 @@ export default function register(ctx: PluginContext): void {
       const defaults = getSyncDefaults(config || undefined);
       const gitRemote = options.gitRemote || defaults.gitRemote;
       const gitBranch = options.gitBranch || defaults.gitBranch;
+      // Author-identity gate override: CLI flag wins over config (default false).
+      const allowForeignAuthor = options.allowForeignAuthor ?? defaults.allowForeignAuthor;
       
       // Re-sort control options (apply once after batch completes)
       const reSortNo = Boolean((options as any).noReSort) || false;
@@ -402,7 +437,8 @@ export default function register(ctx: PluginContext): void {
               dryRun: options.dryRun ?? false,
               silent: false,
               isJsonMode,
-              isVerbose
+              isVerbose,
+              allowForeignAuthor
             }),
           options.ifIdle ? { skipIfLocked: true } : undefined
         );

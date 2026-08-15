@@ -152,6 +152,8 @@ export interface SyncOptions {
   reSortSync?: boolean;
   /** Lock-aware guard: skip (exit 0) if another sync is already in progress */
   ifIdle?: boolean;
+  /** Override the author-identity gate for foreign-email commits (never bypasses the empty-email gate) */
+  allowForeignAuthor?: boolean;
 }
 
 export interface SyncDebugOptions {
