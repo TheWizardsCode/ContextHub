@@ -4,7 +4,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 
 ## Features
 
-- **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list. The top-level list is root-only: child work items are hidden and appear only under their parent via expand. Expanded parents **stay expanded across refreshes**: each auto/manual refresh re-fetches their children in parallel with the top-level list and swaps both in atomically, so the hierarchy never momentarily collapses or flickers (WL-0MSBVBNGH002RDP5).
+- **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list. The top-level list is root-only: child work items are hidden and appear only under their parent via expand — **at any depth** (epic → feature → task and deeper): any item with children (its `childCount > 0`) can be expanded with Tab/Enter, its children fetched on demand via `wl list --parent` and shown indented at their hierarchy depth (WL-0MSQ3FH1K000MMJW). Expanded parents **stay expanded across refreshes**: each auto/manual refresh re-fetches their children in parallel with the top-level list and swaps both in atomically, so the hierarchy never momentarily collapses or flickers (WL-0MSBVBNGH002RDP5).
 - **Filter by stage** — Press `f` followed by a chord key (`i`=idea, `n`=intake, `p`=plan, `r`=review, `s`=sprint back to the default view), or type `/wl <stage>` (shorthand alias or canonical stage name, e.g. `/wl intake_complete` or `/wl progress`), to filter items by stage. Stage-filtered views show every root item in the selected stage matching the stage's status rule (open items for most stages; `completed`/`in-progress`/`open` for the in_review stage) — no `browseItemCount` cap and no `wl next` selection omission (WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW)
 - **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority, GitHub issue number, and audit status information such as audit result, review status, and last audit timestamp)
 - **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The detail view metadata section additionally shows the review status (❌ needs review / ✅ reviewed) and the last audit timestamp.
@@ -22,7 +22,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
 - **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` — no custom stage values). Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
 - **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, full GFM rendering: headings, lists, tables, blockquotes, code, links) as a preview. The description section is rendered with the same markdown renderer. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
-- **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. See [Inline note links](#inline-note-links).
+- **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. Any markdown document opened in the viewer can also be annotated in place (`n,e` add/edit, `n,d` delete); podcast scripts sync notes to the worklog as child work items (PRD §7.3). See [Inline note links](#inline-note-links).
 - **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
 
 ## Requirements
@@ -48,7 +48,7 @@ cd packages/herdr && npm run build
 
 `npm run build` runs `scripts/install-herdr.sh` via the root `postbuild` hook. The script:
 
-- Links the plugin with `herdr plugin link packages/herdr/herdr-plugin.toml` (a no-op when already linked).
+- Links the plugin from the **main checkout** with `herdr plugin link <main-checkout>/packages/herdr/herdr-plugin.toml`. When the build runs inside a linked git worktree (as happens during `/skill:implement`), the main checkout is resolved via `git worktree list` so the global herdr plugin is never registered against a transient worktree path — a worktree-based link would dangle once the worktree is cleaned up and silently break `prefix+l` (WL-0MSRG481O007QVEA). `herdr plugin link` updates an existing link in place, so a stale link from an older build is corrected automatically.
 - Inserts the `prefix+l` → `worklog-selection-list.open-podcast-editor-tab` keybinding into your herdr config (`~/.config/herdr/config.toml`, or `$HERDR_CONFIG_PATH` when set) **only if** it is not already present — re-running the build never creates duplicate keybindings.
 - Migrates a legacy `prefix+l` → `worklog-selection-list.open-worklist` binding in-place to the new action, so the Podcast Editing tab name takes effect without a manual config edit.
 - Warns (without failing the build) when `herdr` is not on PATH or the config cannot be written, so `npm run build` succeeds in CI/offline environments.
@@ -84,8 +84,8 @@ The plugin pane will then be available via the Herdr plugin system.
    - `PgDn` — Page down
    - `g` — Go to first item
    - `G` — Go to last item (last visible item in expanded hierarchy)
-   - `Enter` — View item details, or expand a parent item with children
-   - `Tab` — Toggle expand/collapse a parent item with children
+   - `Enter` — View item details, or expand a parent item with children (at any depth)
+   - `Tab` — Toggle expand/collapse a parent item with children (at any depth)
    - `Escape` — Go back (from detail or filter mode); in a child list, return to the parent level at the previous scroll position. When inside a child list the footer shows a `[esc] back` hint (with `(N levels)` when nested deeper than one level).
 
 3. Filter by stage using chord shortcuts (or type `/wl <stage>`):
@@ -204,8 +204,10 @@ Settings (all re-read each poll, so changes apply without a plugin restart):
 - `downtimeIdleThresholdMs` — Minimum continuous idle duration before a
 dispatch (default: `240000` = 4 minutes, floor 1s)
 - `downtimeRequiredFreeSlots` — Required free slots; `0` means **all** slots
-must be free (default). A positive integer N is accepted; without per-slot
-identity data the worker fails closed to all-slots-free for `0 < N < total`;
+must be free (default). A positive integer N is accepted; with per-slot
+identity data the worker requires the **same N slots** continuously free (see
+per-slot idle tracking below) for `0 < N < total`; without per-slot data it
+fails closed to all-slots-free for `0 < N < total` (never any-N dispatch);
 `N > total` never dispatches.
 - `downtimePollIntervalMs` — Poll interval for the proxy status endpoint
 (default: `30000`, hard floor `10000`)
@@ -227,6 +229,23 @@ Endpoint failures, timeouts, and ambiguous responses are treated as **busy**
 (no dispatch) and never crash the plugin. Each poll is single-flight with a
 per-poll timeout.
 
+**Per-slot idle tracking** (LP-0MSG5TA7Y002GN39) — when the proxy serves
+per-slot detail (`slots: [{slot_id, is_processing}]`) in the status payload
+AND `downtimeRequiredFreeSlots` is `0 < N < total`, the worker tracks the
+idle duration of **each slot individually** and dispatches only when the
+**same N slots** have each been continuously free for the full
+`downtimeIdleThresholdMs` — a slot that starts processing resets only its
+*own* idle timer, so transient any-N availability never counts. Any *global*
+busy condition (active query, model switch, local lease, server down, or an
+ambiguous/unparseable poll) resets **all** slot timers, requiring a fresh
+full idle period. This assumes `slot_id` values are stable across polls
+(they identify the physical slots on the llama-server). Malformed per-slot
+data (non-array, missing/empty `slot_id`, non-boolean `is_processing`, or
+duplicate ids) is treated as busy (fail-closed). Without per-slot data — or
+when N is `0` or ≥ `total` — the worker falls back to the count-based
+all-slots-free logic: N of `total` slots free never dispatches without
+per-slot identity.
+
 **Dispatch behaviour** — once idle has been continuous for the threshold, the
 worker first runs `wl list --status completed --stage in_review --json` and
 selects the first completed/in_review item **without** a valid audit that was
@@ -243,6 +262,29 @@ exclusion composes with the freshness rule: a *fresh* audit since the
 dispatch still governs (fresh → not a candidate). A missing or unreadable
 log is treated as empty (fail-safe), so audit dispatch keeps working on a
 fresh worklog.
+
+> **Bounded audit fan-out (WL-0MSORQ1RG005DGUS):** dispatched panes run
+> with `AUDIT_PHASE2_PARALLELISM=1` in the pane environment (inherited by
+> the pi process via `send-to-pi.sh`). The audit skill's Phase 2 deep
+> analysis (`audit_runner.py`) honours this env var (legacy fallback,
+> integer ≥ 1), so a parent audit's child deep-analysis calls run strictly
+> sequentially — the skill's documented historical mode. A parent audit
+> therefore needs exactly **2 local slots** (parent + at most one child),
+> fitting cheap mode's full capacity (2 × 262144 ctx) where the default
+> fan-out of 2 would need 3 and spill children to remote. Wall-clock
+> tradeoff: child-heavy audits take longer — acceptable for overnight
+> downtime work. Interactive (non-downtime) panes are unaffected.
+
+> **Audit-tier error channel (WL-0MSLWJ2KP0002SV0):** the audit lookup
+> resolves through the same `DowntimeNextResult` error channel as the
+> plan/intake tiers. A `wl`/CLI failure or unparseable output is `{ok:false}`
+> — a CLI-error strike, never a `null` that is indistinguishable from a
+> genuinely empty audit tier — so a persistently broken audit query fails
+> closed to busy (the three-strike rule pauses the worker and logs the
+> error) instead of silently falling through to the plan tier looking
+> healthy with audit dispatch disabled forever. A genuinely empty audit
+> tier (`{ok:true, candidate:null}`) falls through to the implement tier
+> exactly as before.
 
 > **Audit-tier selection note (WL-0MSMAIP5F003WAGG):** the audit tier keeps
 > its `wl list --status completed --stage in_review --json` selection rather
@@ -342,9 +384,14 @@ true`), then stop — it never blocks indefinitely.
 **No lock file (cross-pane decision Q5)** — concurrent panes are serialized
 by the idle→busy cadence (a dispatch consumes the local slot, so the proxy
 reports busy and the worker requires a fresh full idle period) and by the
-pre-dispatch claim; there is deliberately **no cross-pane lock file**. A
-small residual risk of two panes dispatching at the same idle boundary is
-accepted — the claim prevents duplicate work on the same item.
+pre-dispatch claim, which is a **compare-and-swap** (`wl update <id>
+--status in_progress --if-status <expected> [--if-stage <expected>]`, RCA
+WL-0MSRBFFLN005W3VT design point 1): the transition only applies while the
+item is still in the exact state the tier selected it in, so exactly one
+concurrent pane wins and a losing pane aborts its dispatch (no pane, no
+marker, no success record). There is deliberately **no cross-pane lock
+file** — the CAS claim is the serialization point, and it is atomic at the
+SQLite layer (`BEGIN IMMEDIATE`).
 
 **Audit trail** — every successful dispatch records two traces: (1) a
 comment on the dispatched item (`wl comment add`, author
@@ -352,35 +399,72 @@ comment on the dispatched item (`wl comment add`, author
 UTC timestamp — this survives `wl sync` and is the durable trail; and (2) a
 bounded JSONL entry in `.worklog/downtime-dispatches.log` under the
 resolved worklog root (rolling — only the most recent 100 entries are
-kept). The `kind:audit` entries in this log double as the dispatched-marker
-exclusion source for the audit tier (WL-0MSLIY8ZR004QUSY): an item the
-worker already dispatched for `/skill:audit` is excluded from later audit
-tier selection while it still lacks a fresh audit (plan/intake markers are
-scoped to their own tiers and never suppress audit selection). A
-three-strike CLI-error pause additionally writes a JSONL entry to
-the same rolling log (with the `at` timestamp and an error message) so the
-persistent failure is auditable even though nothing was dispatched. The
-`.worklog` log file is gitignored and local-only; all writes are
-fail-closed, so a comment or log failure never blocks or fails a dispatch.
+kept). The marker is written **before** the pane spawns (fail-closed: an
+unmarked item is never dispatched). A failed pane spawn (spawn `error` or
+non-zero script exit) additionally appends a **failure trace** entry
+(`outcome: 'spawn-failed'`, mirroring the marker's `itemId`/`kind`/`stage`
+fields plus the `error`/`exitCode` details) so the log distinguishes
+**attempted** from **opened** — it never claims success for a pane that
+never appeared (WL-0MSLWJ3I70031Z8U). The `kind:audit` entries double as
+the dispatched-marker exclusion source for the audit tier (WL-0MSLIY8ZR004QUSY);
+`kind:implement` entries for the implement tier; and `kind:plan` /
+`kind:intake` entries (which also record the item's `stage` at dispatch)
+for the plan/intake change-guard — an item already dispatched for its tier
+is excluded while it is still at its dispatched-at stage, and a stage
+advancement releases it (RCA WL-0MSRBFFLN005W3VT design point 3). Plan /
+intake markers are scoped to their own tiers and never suppress audit
+selection. A three-strike CLI-error pause additionally writes a JSONL entry
+to the same rolling log (with the `at` timestamp and an error message) so
+the persistent failure is auditable even though nothing was dispatched. The
+`.worklog` log file is gitignored and local-only.
 
 **Failure-path logging** — a complete account of what each dispatch outcome
 leaves behind (documented for WL-0MSKUG2WW0058A7W, audit gap AC2):
 
 | Outcome | Trace in `.worklog/downtime-dispatches.log` | Notes |
 |---|---|---|
-| Successful dispatch | comment on the item + JSONL entry (`kind`, `itemId`, `dispatchedAt`) | the only fully-visible outcome |
+| Successful dispatch | comment on the item + JSONL entry (`kind`, `itemId`, `dispatchedAt`, `stage` for plan/intake) | the only fully-visible success outcome |
 | Genuine empty backlog (no-candidate) | **none** — intentionally silent | full cooldown pause (default 60 min); worker stops polling |
 | 1–2 transient wl CLI errors (strikes) | **none** — silent | one strike per `wl-error` outcome; retries on the next idle window |
 | 3rd consecutive wl CLI error | `recordError` JSONL entry | three-strike pause; the only failure path that logs |
-| Audit-tier wl/parse failure | **none** — silent, and **no strike** | `getNextAuditCandidate` collapses the failure to `null` like an empty tier (index.ts:389-391); worker falls through to the plan tier and looks healthy — known silent path, follow-up WL-0MSLWJ2KP0002SV0 |
-| Claim failure (`wl update <id> --status in_progress`) | **none** — result discarded | dispatch proceeds and is still recorded as a success; the claim is the cross-pane serialization guard, so a failed claim leaves the item selectable by another pane — known silent path, follow-up WL-0MSLWJ310000ND0X |
-| Pane spawn failure (`send-to-pi.sh`) | **none** — invisible | spawn is detached/`stdio: ignore`/`unref`d with no `error`/`exit` handler; a failed spawn (or a script that exits non-zero) is never observed and the dispatch is still logged as a success — known silent path, follow-up WL-0MSLWJ3I70031Z8U |
-| `recordDispatch` / `recordError` write failure | **none** | fail-closed by design: logging must never crash or block the worker |
+| Audit-tier wl/parse failure | **none** — silent, but **counts as a `wl-error` strike** | `getNextAuditCandidate` resolves `{ok:false}` (never a `null` that looks like an empty tier, WL-0MSLWJ2KP0002SV0); the dispatch fails closed to busy — no fall-through to the implement/plan tiers — and the three-strike rule pauses + logs it after 3 consecutive failures |
+| Lost CAS claim race (`--if-status`/`--if-stage` stale) | **none** — and **no marker, no pane, no success record** | the dispatch ABORTS with reason `claim-failed` (neutral — another pane won); the failure is observable via the outcome and a stderr line, never silently discarded (WL-0MSLWJ310000ND0X absorbed) |
+| Claim wl CLI failure (non-stale) | **none** — counts as a `wl-error` strike | dispatch aborts; three consecutive such failures pause the worker |
+| Marker write failure | **none** — the item stays claimed (`in_progress`) | dispatch ABORTS **before** the pane spawns with reason `marker-write-failed` (fail-closed: an unmarked item is never dispatched; the claim still removes it from `wl next`, so no other pane selects it) |
+| Pane spawn failure / non-zero script exit (`send-to-pi.sh`) | marker already written (pre-spawn) + a `recordDispatchFailure` JSONL entry (`outcome: 'spawn-failed'` with the `error`/`exitCode` trace) | a spawn `error` (ENOENT/EACCES) or a non-zero script exit within the 500 ms probe window is handled (no unhandled-exception crash) and the outcome is **not** success (`spawn-failed`, carrying the error/exit trace); the log distinguishes **attempted** from **opened**, and the marker stands so the item is not re-dispatched (WL-0MSLWJ3I70031Z8U absorbed) |
+| `recordError` write failure | **none** | fail-closed by design: logging must never crash or block the worker |
 
-Consequence: the log's *absence* of an entry is ambiguous — it cannot
-distinguish "no candidate (paused)" from "worker disabled" or from any of
-the silent failure paths above; only the three-strike and success paths leave
-entries. The follow-up items above close the three code-level silent paths.
+Consequence: the log's *absence* of an entry is still ambiguous (it cannot
+distinguish "no candidate (paused)" from "worker disabled" or from a
+lost claim race), but the code-level silent failure paths are closed: a
+failed claim or spawn can no longer produce a false success record.
+
+**Known re-dispatch gaps** (RCA WL-0MSRBFFLN005W3VT, evidence reproduced by
+`packages/herdr/scripts/scan_duplicate_dispatches.py`; see
+[docs/downtime-redispatch-rca-2026-08-13.md](docs/downtime-redispatch-rca-2026-08-13.md)):
+
+These were closed by WL-0MSRDEWES0059TZN (implement RCA fix design):
+
+- **Same-instant cross-pane race (closed)** — the pre-dispatch claim is now a
+  compare-and-swap (`--if-status`/`--if-stage`) executed atomically at the
+  SQLite layer, so exactly one pane wins; a losing pane aborts with no pane,
+  no marker, no success record. (Formerly: selection preceded an idempotent
+  claim, so two panes could both proceed — observed as a `kind:audit` pair
+  14 ms apart, SA-0MSN4AXIQ007IZG2, 2026-08-10.)
+- **Plan/intake tiers had no dispatched-marker exclusion (closed)** — the
+  plan (`--stage intake_complete`) and intake (`--stage idea`) tiers now
+  exclude items already dispatched for their tier while the item is still at
+  its dispatched-at stage (kind-scoped `plan`/`intake` markers carrying the
+  stage at dispatch; a stage advancement releases the item), and both tiers
+  filter client-side to `status === 'open'` so a `completed`/`in_review`
+  item whose stage matches is never dispatched. (Formerly: a plan run whose
+  error/abort path reset status only — stage left at `intake_complete` —
+  left the item selectable; observed `kind:plan` ×2 on
+  SA-0MSMAZP6T007NM0O and SA-0MSN04X2S006ONH0, `kind:plan` ×7 in ~7 h
+  pre-fix, SA-0MSJI53RX006E2PS.)
+
+The remaining residual risk is the 100-entry log roll: a very long-unaudited
+item can have its marker rolled out of the log, allowing one re-dispatch.
 
 The worker runs inside the plugin's single consolidated scheduler loop (one
 `setInterval`; no independent timers), uses unref'd timers, and is cleaned up
@@ -543,7 +627,8 @@ description. The viewer:
   the terminal width);
 - renders inline `[NOTE <id>: ...]` markers as `<id>↗` links (see
   [Inline note links](#inline-note-links));
-- is preview-only (no notes editor);
+- supports **interactive inline-note editing** on the paragraph under the
+  cursor (`n,e` add/edit, `n,d` delete — see [Inline note links](#inline-note-links));
 - falls back to the raw description when the file is missing/unreadable.
 
 The **description section** of the detail view is rendered with the same
@@ -563,7 +648,10 @@ wrote Key Files paths relative to the podcast dir rather than the wiki root),
 then `process.cwd()` as a last resort.
 
 The rendered lines appear under an `Episode file (md viewer)` heading in the
-detail view, scrollable with the usual `↑↓/j:k` keys.
+detail view, scrollable with the usual `↑↓/j:k` keys.  Scrolling the
+document moves the **note cursor** onto the paragraph under the visible
+line, which the inline-note chords operate on (see
+[Inline note links](#inline-note-links)).
 
 ### Related Docs table of contents
 
@@ -593,6 +681,62 @@ the note work items: the marker is displayed as `<id>↗` and the note text is
 never shown in the viewer (notes are internal review notes, not dialogue).
 This applies to both the description section and the markdown viewer in the
 detail view.
+
+### Interactive note editing
+
+Any markdown document opened in the viewer (podcast scripts **and** generic
+`.md` Key Files) can be annotated in place — no notes editor is needed
+outside Herdr.  Two chords, scoped to the detail view, drive the feature:
+
+- **`n,e` — add/edit note** — opens the command-input form for the note
+  text.  On a paragraph that already carries a `[NOTE <id>: ...]` marker the
+  form is **pre-filled with the existing note text** (edit mode); otherwise
+  it is empty (add mode).  Submitting writes the marker inline at the start
+  of the paragraph and the viewer reflects the change.
+- **`n,d` — delete note** — removes the marker from the paragraph under the
+  cursor (or, for podcast scripts, marks it `DONE` and posts a resolution
+  comment — see [Podcast note-child lifecycle](#podcast-note-child-lifecycle)).
+
+The paragraph the chords act on is the one under the **visible cursor
+line** (the document scroll position).  Write-back is a **surgical
+paragraph-level edit**: every byte outside the edited paragraph is preserved
+byte-for-byte, and files are resolved against the worklog root via the same
+`resolveKeyFilePath` convention as reads.
+
+### Local placeholder ids (`LOCAL-<seq>`)
+
+Generic markdown documents (no resolvable podcast episode) use a documented
+**`LOCAL-<seq>`** placeholder scheme: the id is a stable hash of the document
+text plus the paragraph index, so the same paragraph in an unchanged
+document gets the same id across re-opens.  Local notes are never synced to
+the worklog — no `wl` calls are made for them.
+
+### Podcast note-child lifecycle (PRD §7.3)
+
+On a podcast script whose frontmatter (`podcast_title` / `source_doc`)
+resolves to an episode work item, notes are synced to the worklog:
+
+- **Add** — the note is created as a **child work item** of the episode
+  (`wl create --parent <episode>`), and the real note-child id is written
+  into the marker `[NOTE <child-id>: ...]`.
+- **Delete/resolve** — the marker is rewritten in the addressed form
+  `[NOTE <id>: DONE ...]` and a **resolution comment** is posted on the
+  note child (`wl comment add`).
+- **Unresolvable episode** — when a script carries note markers but no
+  episode can be resolved, a **prominent warning** is shown (never a silent
+  skip) and the note falls back to a `LOCAL-<seq>` placeholder.
+
+Episode resolution follows the podcast-script skill convention: the script
+frontmatter `podcast_title` / `source_doc` is matched against the title (or
+id) of the selected work item and the loaded worklist items.
+
+### Marker-parsing limitation
+
+`NOTE_MARKER_RE` is **non-greedy**: the note text runs to the **first `]`**
+(and may span multiple lines).  Consequently, a `]` or a nested `[NOTE`
+inside note text would terminate/start a new marker and mis-parse.  Keep
+note text free of `]` characters; the editor does not yet escape them
+(recorded as a known limitation of the marker format, PRD §7.1).
 
 ## Command log
 
@@ -657,6 +801,7 @@ packages/herdr/
 │   ├── form-dialog.ts      # Form state + rendering for parameter input (unknown <identifiers>)
 │   ├── ship-it-dialog.ts   # Ship It typed-confirmation dialog (bottom-anchored, S shortcut)
 │   ├── md-viewer.ts        # Generic markdown viewer + inline [NOTE <id>: ...] link rendering
+│   ├── md-note-edit.ts     # Inline-note marker edit helpers (insert/update/remove, LOCAL-<seq>, §7.3 sync)
 │   ├── command-log.ts      # Command log: record/get last command per work item
 │   ├── settings.ts         # User settings management
 │   └── worklist.ts         # List state, rendering, keyboard handling, command output
@@ -664,9 +809,9 @@ packages/herdr/
 │   ├── open.sh             # Open the worklist pane
 │   ├── open-podcast-editor-tab.sh  # Open the worklist pane in a tab renamed "Podcast Editing"
 │   ├── toggle.sh           # Toggle the worklist pane
-│   ├── send-to-pi.sh       # Split pane to right, launch pi with agent command
+│   ├── send-to-pi.sh       # Split pane to right, launch pi with agent command (via run-pi-agent.sh)
 │   ├── run-in-pane.sh      # Run a shell command visibly in a new pane (stays open for inspection)
-│   └── open-pi-agent.sh    # Open a fresh interactive pi agent pane
+│   └── open-pi-agent.sh    # Open a fresh interactive pi agent pane (via run-pi-agent.sh)
 └── tests/herdr/            # Test files
 ```
 
@@ -681,6 +826,7 @@ packages/herdr/
   - `!!`/`!` prefixed commands (shell-executed shortcuts such as audit approve/reject, priority updates, close/delete) are run **visibly in a new herdr pane** via `scripts/run-in-pane.sh` — the wrapper keeps the pane's process alive so the pane stays open (exit status reported; dismiss with Enter or close with `prefix+x`) so the user can inspect the command output.
   - Everything else is written to stdout with a `CMD:` prefix for the calling framework (Herdr) to execute.
 - **Pi agent dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are intercepted by the entry point and routed to a new pi agent pane. The `send-to-pi.sh` script splits the current pane to the right, creates a new pane, runs `pi` with the command as the initial prompt, and renames the pane to "Pi Agent". Agent commands are routed before any prefix handling, so they are unaffected by `!!`/`!` processing.
+- **Model lease release on pane close** — Pi agent panes launched by `send-to-pi.sh` or `open-pi-agent.sh` run pi via `shared/run-pi-agent.sh`, which gives the session a deterministic id (`pi --session-id herdr-<timestamp>-<pid>-<rand>`) and registers EXIT/TERM/HUP/INT traps. When the pi session ends — normal exit or pane close (`prefix+x`) — the wrapper runs `shared/release-lease-on-exit.mjs`, which posts to the Local Proxy's `POST {baseUrl}/leases/release` using the **same shared implementation** as the Pi extension (`@worklog/shared/lease-release`), so the proxy's dispatch lease is reclaimed promptly instead of lingering until timeout. The release is strictly best-effort: failures (unreachable proxy, missing `~/.pi/agent/models.json`, unconfigured provider) are silently discarded, a 5s request timeout bounds the pane-close path, and the wrapper always propagates pi's exit status (WL-0MSGI7UIH008USVB).
 - **Podcast Editing tab naming** — `herdr plugin pane open` creates tabs with generated numeric labels. The `open-podcast-editor-tab` action wraps the same pane-open command and renames the created tab to "Podcast Editing" via `herdr tab rename` (socket API, not session-state editing), so podcast production is instantly recognisable in the tab row. Each press still opens a new tab; only the label changes.
 - **Model selection per shortcut** — Each LLM-bound shortcut entry in `shortcuts.json` may carry an optional `model` field (a pi model pattern such as `plan`, `code`, or `author`). When the command is dispatched to the agent channel, `--model <pattern>` is forwarded to the spawned `pi` CLI (e.g. `pi --model code '/skill:implement <id>'`), so every workflow runs on an appropriately specialised model without manual model switching. Agent-bound entries without a `model` field default to `plan`; shell (`!!`) and `/wl` filter entries never carry a model and never receive a `--model` flag. The default mapping in `src/shortcuts.json`: `/plan`, `/intake`, `/skill:audit`, `/prompt:` → `plan`; `/skill:implement` → `code`.
 - **Free-form prompts via `/prompt:`** — Commands starting with `/prompt:` are also routed to the agent pane, but the `/prompt:` routing prefix is stripped before `send-to-pi.sh` runs, so pi receives only the bare prompt text (e.g. `pi "What are the audit gaps reported in the most recent audit for WL-123"`). This lets a chord shortcut open a new pi instance with an arbitrary injected prompt, not just a skill/workflow invocation. The `P-p` chord opens the command input form so you can type any free-form prompt, `P-a` opens pi with `What are the audit gaps reported in the most recent audit for <id>` (the selected item's ID is substituted automatically), and `P-n` opens a brand-new blank session (`/prompt:` with an empty prompt — no form dialog, no injected text, and no work-item association). Edit `src/shortcuts.json` to bind your own prompt text to any free chord.

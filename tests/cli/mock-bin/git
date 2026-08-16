@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Minimal git mock used in tests to avoid running the real git binary.
-# This mock supports a few commands used by tests: rev-parse, init, clone, add, commit, remote, push
+# This mock supports a few commands used by tests: rev-parse, init, clone, add, commit, remote, push,
+# fetch, show, show-ref, ls-remote, ls-files, worktree, log (author-identity gate seed),
+# config user.email (get form, author-identity gate seed)
 
 # Timeout guard: self-terminate after WORKLOG_MOCK_TIMEOUT seconds (default 5s).
 # This prevents orphaned processes from running indefinitely.
@@ -113,6 +115,16 @@ case "$1" in
     if [ "$2" = "--git-path" ]; then
       _check_timeout
       echo "hooks"
+      exit 0
+    fi
+    # Resolve a bare ref (e.g. refs/worklog/remotes/origin/worklog/data) from
+    # .git/<ref> — used by the sync identity gate to persist the last-known
+    # sync point (WL-0MSOYWWS4009HTCB). Mirrors real git's ref file layout
+    # (.git/refs/... is where `git fetch` writes the tracking ref).
+    refClean=$(echo "$2" | sed "s/^'//;s/'$//")
+    if [ -n "$refClean" ] && [ -f ".git/$refClean" ]; then
+      _check_timeout
+      cat ".git/$refClean"
       exit 0
     fi
     ;;
@@ -562,7 +574,86 @@ case "$1" in
     exit 0
     ;;
   config)
-    # accept config commands silently
+    # Support the GET form for user.email (used by the sync author-identity
+    # gate, WL-0MSOYWWS4009HTCB): `git config user.email` / `git config
+    # --get user.email` prints the seeded value (.git/user-email) and exits 0,
+    # or exits 1 when the key is unset (mirroring real git's behaviour for a
+    # missing key).
+    # Set form (`git config user.email <value>`) and all other keys remain
+    # silent no-ops.
+    last="${!#}"
+    if [ "$last" = "user.email" ]; then
+      _check_timeout
+      if [ -f .git/user-email ]; then
+        cat .git/user-email
+        exit 0
+      fi
+      exit 1
+    fi
+    exit 0
+    ;;
+  log)
+    # git log <ref> [--not <excludeRef>] [--format=<fmt>]
+    # Reads seed store .git/worklog-log-commits (lines "<hash> <email> <state>")
+    # where email "-" means an empty author email and state is "new" (default)
+    # or "synced". `--not <excludeRef>` filters out commits marked "synced"
+    # (already merged as of the last-known sync point), mirroring
+    # `git log A --not B` semantics.
+    # --format supports %h/%H (hash), %ae (author email), and %x09 (tab); a
+    # combined shape like %h%x09%ae emits "hash<TAB>email" per line.
+    ref=""
+    exclude=""
+    fmt=""
+    i=2
+    while [ $i -le $# ]; do
+      eval "arg=\$$i"
+      case "$arg" in
+        --not)
+          i=$((i+1))
+          eval "exclude=\$$i"
+          ;;
+        --format=*)
+          fmt="${arg#--format=}"
+          ;;
+        --*)
+          :
+          ;;
+        *)
+          if [ -z "$ref" ]; then ref="$arg"; fi
+          ;;
+      esac
+      i=$((i+1))
+    done
+    seed=".git/worklog-log-commits"
+    if [ ! -f "$seed" ]; then
+      exit 0
+    fi
+    while read -r hash email state; do
+      _check_timeout
+      [ -z "$hash" ] && continue
+      state="${state:-new}"
+      if [ -n "$exclude" ] && [ "$state" = "synced" ]; then
+        continue
+      fi
+      if [ "$email" = "-" ]; then email=""; fi
+      want_hash=0
+      want_email=0
+      case "$fmt" in
+        *%ae*) want_email=1 ;;
+      esac
+      case "$fmt" in
+        *%h*|*%H*) want_hash=1 ;;
+      esac
+      if [ $want_hash -eq 1 ] && [ $want_email -eq 1 ]; then
+        printf '%s\t%s\n' "$hash" "$email"
+      elif [ $want_hash -eq 1 ]; then
+        printf '%s\n' "$hash"
+      elif [ $want_email -eq 1 ]; then
+        printf '%s\n' "$email"
+      else
+        printf '%s %s\n' "$hash" "$email"
+      fi
+    done < "$seed"
     exit 0
     ;;
   *)

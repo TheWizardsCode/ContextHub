@@ -121,7 +121,13 @@ Options:
 - `--audit-text <text>` — Set structured audit text when creating an item. The audit result is stored in the `audit_results` table (the sole source of truth for audit state). Prefer `--audit-file` for file-based input to avoid shell-escaping issues (see docs/AUDIT_STATUS.md).
 - `--audit-file <file>` — Read audit text from a file (recommended for large or shell-sensitive content).
 - `--prefix <prefix>` — Override default ID prefix (repo-local scope) (optional).
+- `--allow-duplicate` — Bypass the dedup guard: create a new item even when a recent non-terminal item with the same title exists (optional).
+- `--dedup-window <duration>` — Dedup match window, e.g. `30s`, `5m`, `1h` or raw milliseconds (optional; default: `5m`).
 - `--json` — Output JSON (optional).
+
+Dedup guard:
+
+- Retrying an identical `wl create` (common when agents lose the tool result to output trimming) returns the existing recent non-terminal item with a `duplicateOf` marker instead of creating a byte-identical twin. Only items created within the `--dedup-window` (default 5 minutes) whose title matches case- and whitespace-insensitively are reused; completed/deleted items are never matched. Pass `--allow-duplicate` when a genuinely new item is needed. In JSON mode the response carries a top-level `id` field first and a `duplicateOf` field on a dedup hit; human mode prints an `ID: <id>` line first.
 
 Examples:
 
@@ -1060,7 +1066,7 @@ Other commands cover repository bootstrap and local system status. Use these to 
 
 ### `init`
 
-Initialize Worklog configuration in the repository (creates `.worklog` and default config). `wl init` also installs `AGENTS.md` in the project root with a pointer line to the global `AGENTS.md`. If `AGENTS.md` already exists, it prompts before inserting the pointer and preserves the existing content (unless you pass `--agents-template` for unattended runs). When workflow templates are available, `wl init` prompts you to choose between no formal workflow, a basic Worklog-aware workflow, or manual management (unless you pass `--workflow-inline` for unattended runs).
+Initialize Worklog configuration in the repository (creates `.worklog` and default config). `wl init` also installs `AGENTS.md` in the project root, prefixed with a pointer line to the global `AGENTS.md`. If `AGENTS.md` already contains the pointer line, installation is skipped (idempotent, no prompt). If `AGENTS.md` exists without the pointer, it prompts O/A/M — **O**verwrite (destructive), **A**dd pointer (keeps existing content), **M**anual (skip) — unless you pass `--agents-template` for unattended runs. When workflow templates are available, `wl init` prompts you to choose between no formal workflow, a basic Worklog-aware workflow, or manual management (unless you pass `--workflow-inline` for unattended runs). See [AGENTS.md Install Model](docs/AGENTS-INSTALL.md) for the full install flow.
 
 Options:
 

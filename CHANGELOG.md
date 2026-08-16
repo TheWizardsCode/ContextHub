@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.0.11 (2026-08-16)
+### Features
+- Idle tracking now requires the same slots to stay free, not just any slots. (WL-0MSG7P9N8009PCKG)
+- Add, edit, or remove notes directly on any markdown document while reviewing it. (WL-0MSKV6SKK008MMXR)
+- Idle time now automatically implements small, low-risk planned tasks. (WL-0MSM9HEH8001A55I)
+- Agent now auto-resumes after mid-session compaction instead of waiting for you to say "continue". (WL-0MSMGGPWR000MZ0O)
+- Downtime audits now run one analysis at a time, so they fit in cheap mode's 2-slot capacity. (WL-0MSORQ1RG005DGUS)
+- Closing a pi agent session now frees up its model lease right away. (WL-0MSGI7UIH008USVB)
+- Stage-filtered and child lists now sort by priority first, matching your main worklist. (WL-0MSOPHLD1000EWNN)
+### Bug Fixes
+- Fixed downtime claiming so failed claims no longer log as successful dispatches. (WL-0MSLWJ310000ND0X)
+- Downtime dispatches now correctly report failures instead of falsely logging success. (WL-0MSLWJ3I70031Z8U)
+- Audits with a "Yes" verdict now properly advance items even when some checks used fallback evidence. (WL-0MSN7XAUS008WOPQ)
+- Audits now auto-recover from JSON errors instead of stopping. (WL-0MSNKWLER003EGE0)
+- Sync now blocks merges from unknown authors to protect your worklog data. (WL-0MSOYWWS4009HTCB)
+- Fixed an issue where items deeper than two levels couldn't be expanded in the work list. (WL-0MSQ3FH1K000MMJW)
+- Fixed downtime jobs being dispatched twice by ensuring only one worker claims each job. (WL-0MSRDEWES0059TZN)
+- Retrying a create command now returns the existing item instead of making a duplicate. (WL-0MSTNG2QF0049B97)
+- Audit tier failures now count as strikes instead of being silently ignored. (WL-0MSLWJ2KP0002SV0)
+- Fixed plugin link breaking after worktree cleanup, so prefix+l keeps working. (WL-0MSRG481O007QVEA)
+- Fixed the build so the herdr package compiles correctly again. (WL-0MSNSZ4R6009AU0N)
+### Other
+- Improved game stability and performance through code quality enhancements. (WL-0MS87KJZU006XM5M)
+- Fixed duplicate downtime work: audit and plan tasks can now be dispatched twice, wasting idle time on repeat panes. (WL-0MSRBFFLN005W3VT)
+- Clarified how agent setup files are installed and how local and global guidance relate. (WL-0MSKEJK4G008BMS0)
+
 ## v1.0.10 (2026-08-12)
 ### Features
 - Idle detection now only counts local activity, so remote-only traffic won't block downtime dispatch. (WL-0MSL2ZQIF006QB4Q)

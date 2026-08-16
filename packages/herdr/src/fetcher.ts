@@ -523,13 +523,16 @@ const STAGE_STATUS: Record<string, string> = {
  * stage matches.
  * Root-only (WL-0MS964SIA0057ABR): stage-filtered top-level lists hide
  * child items; children remain reachable via expand (wl list --parent).
- * Results are ordered by the standard list order (sortIndex).
+ * Results are regrouped priority-first (WL-0MSOPHLD1000EWNN): priority
+ * bucket sections, then stage, then id — same ordering as the default
+ * worklist. Within a single stage view the stage tie-break is a no-op, so
+ * priority buckets + id tie-break apply.
  */
 export async function fetchItemsByStage(stage: string): Promise<WorkItem[]> {
   const status = STAGE_STATUS[stage] ?? 'open';
   const output = await runWl(['list', '--status', status, '--stage', stage, '--root-only']);
   const payload = extractJson(output);
-  return extractItems(payload);
+  return regroupWorkItems(extractItems(payload));
 }
 
 /**
@@ -581,13 +584,22 @@ export async function runWlSync(): Promise<{ success: boolean; error?: string }>
 
 /**
  * Fetch child work items for a given parent ID (via `wl list --parent`).
- * Child items are returned with depth=1 for hierarchical display.
+ *
+ * Child items are returned with the given hierarchy `depth` for display
+ * (default 1 = direct children of a top-level item). Nested expansion
+ * passes the parent's depth + 1 so grandchildren render at depth 2, etc.
+ * (WL-0MSQ3FH1K000MMJW) — depth is derived from the fetch path, never
+ * hardcoded.
+ *
+ * Results are regrouped priority-first (WL-0MSOPHLD1000EWNN): priority
+ * bucket sections, then stage, then id — same ordering as the default
+ * worklist.
  */
-export async function fetchChildrenForItem(parentId: string): Promise<WorkItem[]> {
+export async function fetchChildrenForItem(parentId: string, depth = 1): Promise<WorkItem[]> {
   const output = await runWl(['list', '--parent', parentId]);
   const payload = extractJson(output);
   const items = extractItems(payload);
-  return items.map((item) => ({ ...item, depth: 1 }));
+  return regroupWorkItems(items.map((item) => ({ ...item, depth })));
 }
 
 // ── Work-item claiming ────────────────────────────────────────────────
@@ -597,6 +609,12 @@ export async function fetchChildrenForItem(parentId: string): Promise<WorkItem[]
  */
 export interface ClaimResult {
   success: boolean;
+  /**
+   * True when the claim failed because the item no longer matched the
+   * `--if-status`/`--if-stage` guard (another pane won the CAS race). The
+   * wl CLI answered correctly — this is NOT a CLI error.
+   */
+  stale?: boolean;
   error?: string;
 }
 
@@ -612,18 +630,41 @@ const CLAIM_TIMEOUT_MS = 3000;
  * documented in AGENTS.md. Targets the configured worklog database via
  * `--worklog-dir` when set.
  *
+ * With `expected` (status/stage), the claim is a compare-and-swap (RCA
+ * WL-0MSRBFFLN005W3VT design point 1): `--if-status`/`--if-stage` are
+ * passed to `wl update`, so the transition only applies while the item is
+ * still in the state the tier selected it in. Exactly one concurrent pane
+ * wins; a loser gets `{success:false, stale:true}` and the caller aborts
+ * the dispatch. A stale result is detected from the wl CLI's `"error":
+ * "stale"` JSON payload on stderr.
+ *
  * Never throws — failures are returned so callers can log them without
  * blocking the agent pane from opening.
  */
-export async function claimWorkItem(id: string, assignee: string): Promise<ClaimResult> {
+export async function claimWorkItem(
+  id: string,
+  assignee: string,
+  expected?: { status?: string; stage?: string },
+): Promise<ClaimResult> {
   try {
-    await runWl(
-      ['update', id, '--status', 'in_progress', '--assignee', assignee],
-      true,
-      CLAIM_TIMEOUT_MS,
-    );
+    const args = ['update', id, '--status', 'in_progress', '--assignee', assignee];
+    if (expected?.status) {
+      args.push('--if-status', expected.status);
+    }
+    if (expected?.stage) {
+      args.push('--if-stage', expected.stage);
+    }
+    await runWl(args, true, CLAIM_TIMEOUT_MS);
     return { success: true };
   } catch (err: any) {
-    return { success: false, error: err.message ?? String(err) };
+    const message = err.message ?? String(err);
+    // Lost CAS race: the wl CLI exits non-zero with `{"success":false,
+    // "error":"stale", ...}` on stderr (runWl surfaces stderr first).
+    const stale =
+      message.includes('"error":"stale"') ||
+      message.includes('"error": "stale"') ||
+      message.includes("'stale'") ||
+      message.includes('Conditional update skipped');
+    return { success: false, stale, error: message };
   }
 }

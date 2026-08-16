@@ -91,6 +91,35 @@ describe('claimWorkItem (fetcher)', () => {
     expect(callArgs).toContain('--json');
   });
 
+  it('passes --if-status/--if-stage when an expected state is given (CAS claim)', async () => {
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: '{"success":true}',
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    const result = await claimWorkItem('WL-ABC', 'Map', { status: 'open', stage: 'idea' });
+
+    expect(result.success).toBe(true);
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs).toContain('--if-status');
+    expect(callArgs[callArgs.indexOf('--if-status') + 1]).toBe('open');
+    expect(callArgs).toContain('--if-stage');
+    expect(callArgs[callArgs.indexOf('--if-stage') + 1]).toBe('idea');
+  });
+
+  it('marks a lost CAS race as stale (another pane won)', async () => {
+    const mockFn = vi
+      .fn()
+      .mockRejectedValue(new Error('{"success":false,"error":"stale","message":"Conditional update skipped"}'));
+    setExecFileAsync(mockFn as any);
+
+    const result = await claimWorkItem('WL-ABC', 'Map', { status: 'completed', stage: 'in_review' });
+
+    expect(result.success).toBe(false);
+    expect(result.stale).toBe(true);
+  });
+
   it('includes --worklog-dir when the fetcher is configured', async () => {
     const mockFn = vi.fn().mockResolvedValue({
       stdout: '{"success":true}',
@@ -116,6 +145,8 @@ describe('claimWorkItem (fetcher)', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toBeDefined();
+    // A non-stale failure is NOT a lost race.
+    expect(result.stale).toBeFalsy();
   });
 });
 

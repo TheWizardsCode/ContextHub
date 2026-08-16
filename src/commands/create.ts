@@ -12,6 +12,38 @@ import { normalizeActionArgs } from './cli-utils.js';
 import { buildAuditEntry, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
 import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
 
+/**
+ * Default dedup match window for `wl create` (WL-0MSTNG2QF0049B97): retried
+ * creates are caught within this look-back; genuinely re-created same-title
+ * items older than this are left alone. The 1–30s retry signature seen in
+ * the RCA sits comfortably inside 5 minutes.
+ */
+export const DEFAULT_DEDUP_WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * Parse a `--dedup-window` duration string into milliseconds.
+ *
+ * Accepts a bare number (raw milliseconds) or a number with a unit suffix:
+ * `ms`, `s`, `m`, `h`, `d` (e.g. `30s`, `5m`, `1h`, `300000`). Returns NaN
+ * for invalid input so the caller can surface a clear error.
+ */
+export function parseDedupWindowMs(value: string | number): number {
+  const trimmed = String(value).trim();
+  if (trimmed === '') return Number.NaN;
+  const match = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)?$/i.exec(trimmed);
+  if (!match) return Number.NaN;
+  const amount = Number(match[1]);
+  const unit = (match[2] || 'ms').toLowerCase();
+  const multipliers: Record<string, number> = {
+    ms: 1,
+    s: 1000,
+    m: 60_000,
+    h: 3_600_000,
+    d: 86_400_000,
+  };
+  return amount * multipliers[unit];
+}
+
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
   
@@ -40,8 +72,10 @@ export default function register(ctx: PluginContext): void {
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--no-re-sort', 'Skip automatic re-sort after creating the item')
     .option('--re-sort-sync', 'Force a synchronous re-sort after creating the item', false)
+    .option('--allow-duplicate', 'Allow creating a new item even when a recent non-terminal item with the same title exists (bypasses the dedup guard)')
+    .option('--dedup-window <duration>', 'Dedup match window: recent non-terminal same-title items created within this window are reused instead of creating a twin (e.g. 30s, 5m, 1h; default 5m)')
     .action(async (...rawArgs: any[]) => {
-      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','prefix','noReSort','reSortSync']);
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','prefix','noReSort','reSortSync','allowDuplicate','dedupWindow']);
       let options: CreateOptions = normalized.options as any || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
@@ -153,6 +187,41 @@ export default function register(ctx: PluginContext): void {
 
       const parentId = utils.normalizeCliId(options.parent, options.prefix) || null;
 
+      // ── Dedup guard (WL-0MSTNG2QF0049B97) ──────────────────────────
+      // Retrying an identical `wl create` (common when agents lose the tool
+      // result to output trimming) must return the existing recent
+      // non-terminal same-title item instead of creating a byte-identical
+      // twin. Only the title is compared (case/whitespace-insensitive) — a
+      // match is reused regardless of other flags. Bypass with
+      // `--allow-duplicate` when a genuinely new item is needed.
+      const dedupWindowMs = parseDedupWindowMs(options.dedupWindow ?? DEFAULT_DEDUP_WINDOW_MS);
+      if (Number.isNaN(dedupWindowMs) || dedupWindowMs < 0) {
+        const message = `Invalid --dedup-window value "${options.dedupWindow}". Expected a duration like "30s", "5m", "1h" or raw milliseconds.`;
+        output.error(message, { success: false, error: 'invalid-dedup-window' });
+        process.exit(1);
+      }
+      if (!options.allowDuplicate) {
+        const existing = db.getRecentDuplicate(options.title, dedupWindowMs);
+        if (existing) {
+          if (utils.isJsonMode()) {
+            output.json({
+              id: existing.id,
+              success: true,
+              duplicate: true,
+              duplicateOf: existing.id,
+              workItem: existing,
+            });
+          } else {
+            // ID first so output trimming (tail / E2BIG) cannot hide it
+            // (RCA fix #2, WL-0MSU8E2YA0059GEA).
+            console.log(`ID: ${existing.id}`);
+            console.log(`Duplicate of ${existing.id} (title matched)`);
+            console.log(humanFormatWorkItem(existing, db, resolveFormat(program)));
+          }
+          return;
+        }
+      }
+
       const item = db.createWithNextSortIndex({
         title: options.title,
         description: description,
@@ -201,13 +270,17 @@ export default function register(ctx: PluginContext): void {
       }
       
       if (utils.isJsonMode()) {
+        // Top-level `id` first so output trimming cannot hide the created ID
+        // (RCA fix #2, WL-0MSU8E2YA0059GEA).
         output.json({
+          id: item.id,
           success: true,
           workItem: refreshed,
           ...(demotedParent ? { demotedParent } : {}),
         });
       } else {
         const format = resolveFormat(program);
+        console.log(`ID: ${refreshed.id}`);
         console.log(humanFormatWorkItem(refreshed, db, format));
         if (demotedParent) {
           console.log(`[Parent ${demotedParent.parent.id} demoted from ${demotedParent.from.status}/${demotedParent.from.stage} to ${demotedParent.to.status}/${demotedParent.to.stage}]`);

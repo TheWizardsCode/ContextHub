@@ -30,6 +30,7 @@ export const retryStates: Record<string, RetryState> = {
   quotaExhausted: new RetryState(),
   timeout: new RetryState(),
   terminated: new RetryState(),
+  parseError: new RetryState(),
 };
 
 export const continuationState = new ContinuationState();
@@ -57,6 +58,8 @@ export interface RetryCommandOptions {
   triggerCompactContinue: () => void;
   /** Called to trigger checkpoint-and-terminate */
   triggerCheckpointTerminate: (category: string, errorDetail: string) => void;
+  /** Called to trigger a single-shot continue after a JSON parse error */
+  triggerParseErrorContinue: () => void;
 }
 
 /**
@@ -162,6 +165,11 @@ export async function executeRetryCommand(
     case ErrorCategory.CONTEXT_LENGTH:
       ctx.ui.notify('Manual continue after context-length...', 'info');
       options.triggerCompactContinue();
+      break;
+
+    case ErrorCategory.PARSE_ERROR:
+      ctx.ui.notify('Manual continue after JSON parse error...', 'info');
+      options.triggerParseErrorContinue();
       break;
 
     case ErrorCategory.UNKNOWN:

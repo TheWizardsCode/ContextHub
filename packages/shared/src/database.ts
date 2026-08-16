@@ -30,6 +30,18 @@ export interface GitTarget {
 }
 
 /**
+ * Result of a conditional update (`updateIfMatches`, the CAS claim).
+ * `ok:true` carries the updated item; `ok:false` distinguishes "no such
+ * item" from "item no longer in the expected status/stage" (another
+ * process won the race).
+ */
+export interface UpdateIfMatchesResult {
+  ok: boolean;
+  reason?: 'not-found' | 'stale';
+  item?: WorkItem;
+}
+
+/**
  * Optional CLI-specific services injected into WorklogDatabase.
  * When not provided, features that depend on them become no-ops or throw
  * appropriate errors. This allows the class to be used in contexts (like the
@@ -128,6 +140,18 @@ const UNIQUE_RANDOM_BYTES = 3;
 const UNIQUE_RANDOM_LENGTH = 5;
 const UNIQUE_ID_LENGTH = UNIQUE_TIME_LENGTH + UNIQUE_SEQUENCE_LENGTH + UNIQUE_RANDOM_LENGTH;
 const MAX_ID_GENERATION_ATTEMPTS = 10;
+
+/**
+ * Normalize a title into a canonical dedup-comparison key: case-folded with
+ * ALL whitespace removed (tabs/newlines collapse away too). `"Same Title"`,
+ * `"same  title"` and `" same\ttitle "` all normalize to `"sametitle"` so
+ * retried create commands with cosmetic title differences still match
+ * (WL-0MSTNG2QF0049B97). The SQL side of `getRecentDuplicate` applies the
+ * same transformation to stored titles.
+ */
+export function normalizeTitleForMatch(title: string): string {
+  return title.replace(/\s+/g, '').toLowerCase();
+}
 
 export class WorklogDatabase {
   private store: SqlitePersistentStore;
@@ -987,10 +1011,77 @@ export class WorklogDatabase {
   }
 
   /**
+   * Find the most recent non-terminal work item whose title matches `title`
+   * under case/whitespace normalization and was created within `windowMs`.
+   *
+   * Backs the `wl create` dedup guard (WL-0MSTNG2QF0049B97): retrying an
+   * identical create command (common when agents lose the tool result to
+   * output trimming) must return the existing item instead of creating a
+   * byte-identical twin. Only non-terminal items (open/in-progress/blocked)
+   * within the recent window are considered — completed items and stale
+   * same-title items are deliberately unrelated.
+   *
+   * @param title - The candidate title (compared case- and whitespace-
+   *   insensitively against stored titles).
+   * @param windowMs - Look-back window in milliseconds; only items created
+   *   strictly after `now - windowMs` match.
+   * @param prefix - Prefix scope; defaults to this database's prefix. Only
+   *   items whose id starts with `<prefix>-` are considered.
+   * @returns The newest matching item, or null when no match exists.
+   */
+  getRecentDuplicate(title: string, windowMs: number, prefix?: string): WorkItem | null {
+    const effectivePrefix = (prefix ?? this.prefix).toUpperCase();
+    return this.store.getRecentDuplicateByNormalizedTitle(
+      normalizeTitleForMatch(title),
+      windowMs,
+      effectivePrefix,
+    );
+  }
+
+  /**
    * Get a work item by ID
    */
   get(id: string): WorkItem | null {
     return this.store.getWorkItem(id);
+  }
+
+  /**
+   * Conditional update (compare-and-swap, RCA WL-0MSRBFFLN005W3VT design
+   * point 1): apply `input` ONLY if the item's current status/stage match the
+   * expected guard. Runs the check and the write inside a single `BEGIN
+   * IMMEDIATE` transaction (see `PersistentStore.transactionImmediate`), so
+   * two concurrent `wl update --if-status/--if-stage` processes serialize on
+   * the SQLite write lock: exactly one observes the expected state and wins;
+   * the loser observes the winner's committed transition and fails `stale`
+   * without writing.
+   *
+   * @returns `{ok:true, item}` on success; `{ok:false, reason:'not-found'}`
+   * when the id is absent; `{ok:false, reason:'stale'}` when the guard
+   * mismatch means another process already changed the item.
+   */
+  updateIfMatches(
+    id: string,
+    input: UpdateWorkItemInput,
+    expected: { status?: string; stage?: string } = {},
+  ): UpdateIfMatchesResult {
+    return this.store.transactionImmediate(() => {
+      const current = this.store.getWorkItem(id);
+      if (!current) {
+        return { ok: false, reason: 'not-found' };
+      }
+      if (expected.status !== undefined) {
+        const want = normalizeStatusValue(expected.status) ?? expected.status;
+        const have = normalizeStatusValue(current.status) ?? current.status;
+        if (want !== have) {
+          return { ok: false, reason: 'stale' };
+        }
+      }
+      if (expected.stage !== undefined && current.stage !== expected.stage) {
+        return { ok: false, reason: 'stale' };
+      }
+      const updated = this.update(id, input);
+      return updated ? { ok: true, item: updated } : { ok: false, reason: 'not-found' };
+    });
   }
 
   /**

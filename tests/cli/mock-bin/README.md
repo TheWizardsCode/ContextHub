@@ -8,8 +8,17 @@ used by the CLI integration tests to simulate external commands deterministicall
 ## How it works
 - `git` — A POSIX bash script implementing the git subcommands used by the test-suite
   (e.g., `init`, `clone`, `remote add`, `fetch`, `push`, `show`, `worktree add`,
-  `ls-files`, `ls-remote`, `show-ref`). It keeps a small `fetch_store` under
-  `.git/fetch_store/` so `git show <ref>:<path>` can be satisfied deterministically.
+  `ls-files`, `ls-remote`, `show-ref`, `log`, `config user.email`). It keeps a small
+  `fetch_store` under `.git/fetch_store/` so `git show <ref>:<path>` can be satisfied
+  deterministically.
+  - `log` (sync author-identity gate, WL-0MSOYWWS4009HTCB): reads a seeded commit
+    store at `.git/worklog-log-commits` (lines `<hash> <email|-> <state>` where `-`
+    means an empty author email and state is `new`|`synced`). Supports `--format=%ae`,
+    `--format=%h`, combined `--format=%h%x09%ae` (emits `hash<TAB>email`), and
+    `--not <ref>` (excludes `synced` commits, mirroring `git log A --not B`).
+  - `config user.email` (get form): reads a seeded value at `.git/user-email` and
+    exits 0, or exits 1 when the seed is absent (mimics an unset key). Set-form
+    (`git config user.email <value>`) and all other keys remain silent no-ops.
 - `gh` — A POSIX bash script that intercepts `gh` issue view, edit, create, and API
   calls, seeded from a JSONL file.
 - `wl` — A Node.js script returning predefined test data for common `wl` commands.

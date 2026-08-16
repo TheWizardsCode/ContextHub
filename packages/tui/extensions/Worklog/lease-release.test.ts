@@ -57,9 +57,15 @@ describe('lease-release', () => {
   });
 
   // ── releaseLease() function tests ─────────────────────────────────
+  //
+  // The HTTP behavior is implemented in (and fully covered by) the shared
+  // module `@worklog/shared/lease-release` (packages/shared/src/lease-
+  // release.test.ts). This extension entry point merely re-exports it, so
+  // a single smoke test verifies the re-export path stays wired and the
+  // remaining tests focus on the extension-specific registerLeaseRelease().
 
   describe('releaseLease', () => {
-    it('reads models.json and sends POST to correct endpoint with session ID', async () => {
+    it('re-exports the shared releaseLease (reads models.json, POSTs to the proxy)', async () => {
       mockReadFile.mockResolvedValue(JSON.stringify({
         providers: {
           'Local Proxy': { baseUrl: 'http://192.168.0.199:8000/v1' },
@@ -81,110 +87,6 @@ describe('lease-release', () => {
           body: JSON.stringify({ session_id: 'session-abc-123' }),
         }),
       );
-    });
-
-    it('does not throw on network failure (fetch rejects)', async () => {
-      mockReadFile.mockResolvedValue(JSON.stringify({
-        providers: {
-          'Local Proxy': { baseUrl: 'http://192.168.0.199:8000/v1' },
-        },
-      }));
-      mockFetch.mockRejectedValue(new Error('Network error'));
-
-      await expect(mod.releaseLease('session-abc-123')).resolves.toBeUndefined();
-      expect(mockConsoleDebug).toHaveBeenCalled();
-    });
-
-    it('does not throw on non-2xx response', async () => {
-      mockReadFile.mockResolvedValue(JSON.stringify({
-        providers: {
-          'Local Proxy': { baseUrl: 'http://192.168.0.199:8000/v1' },
-        },
-      }));
-      mockFetch.mockResolvedValue({ ok: false, status: 500 });
-
-      await expect(mod.releaseLease('session-abc-123')).resolves.toBeUndefined();
-    });
-
-    it('does not send request when "Local Proxy" provider is missing', async () => {
-      mockReadFile.mockResolvedValue(JSON.stringify({
-        providers: {
-          'Other Provider': { baseUrl: 'http://other:8000/v1' },
-        },
-      }));
-
-      await mod.releaseLease('session-abc-123');
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
-    it('does not send request when models.json cannot be read', async () => {
-      mockReadFile.mockRejectedValue(new Error('ENOENT: file not found'));
-
-      await mod.releaseLease('session-abc-123');
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
-    it('does not send request when Local Proxy provider has no baseUrl', async () => {
-      mockReadFile.mockResolvedValue(JSON.stringify({
-        providers: {
-          'Local Proxy': {},
-        },
-      }));
-
-      await mod.releaseLease('session-abc-123');
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
-    it('passes the session ID as-is to the proxy', async () => {
-      mockReadFile.mockResolvedValue(JSON.stringify({
-        providers: {
-          'Local Proxy': { baseUrl: 'http://192.168.0.199:8000/v1' },
-        },
-      }));
-      mockFetch.mockResolvedValue({ ok: true, status: 200 });
-
-      await mod.releaseLease('/home/test-user/.pi/sessions/session-xyz.json');
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({
-          body: JSON.stringify({ session_id: '/home/test-user/.pi/sessions/session-xyz.json' }),
-        }),
-      );
-    });
-
-    it('still sends request when session_id is empty string (proxy handles validation)', async () => {
-      mockReadFile.mockResolvedValue(JSON.stringify({
-        providers: {
-          'Local Proxy': { baseUrl: 'http://192.168.0.199:8000/v1' },
-        },
-      }));
-      mockFetch.mockResolvedValue({ ok: true, status: 200 });
-
-      await expect(mod.releaseLease('')).resolves.toBeUndefined();
-      expect(mockFetch).toHaveBeenCalled();
-    });
-
-    it('only calls console.debug on error (not console.error or console.warn)', async () => {
-      mockReadFile.mockResolvedValue(JSON.stringify({
-        providers: {
-          'Local Proxy': { baseUrl: 'http://192.168.0.199:8000/v1' },
-        },
-      }));
-      mockFetch.mockRejectedValue(new Error('Network error'));
-
-      await mod.releaseLease('session-abc-123');
-
-      expect(mockConsoleDebug).toHaveBeenCalled();
-    });
-
-    it('survives missing Local Proxy in models.json (no crash)', async () => {
-      mockReadFile.mockResolvedValue(JSON.stringify({
-        providers: {},
-      }));
-
-      await expect(mod.releaseLease('session-abc-123')).resolves.toBeUndefined();
-      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 

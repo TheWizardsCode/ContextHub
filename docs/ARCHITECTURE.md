@@ -342,3 +342,4 @@ simulates a 6-pane refresh and asserts ≥60% fewer work spawns.
 - [Data Syncing Guide](../DATA_SYNCING.md)
 - [CLI Reference](../CLI.md)
 - [Migration Guide](./migrations.md)
+- [AGENTS.md Install Model](./AGENTS-INSTALL.md) — how `wl init` installs project agent guidance and its relationship to the global agent file

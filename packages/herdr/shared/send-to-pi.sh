@@ -201,13 +201,22 @@ if [ -n "$pane_id_file" ]; then
 fi
 
 # ── Run pi with the command in the new pane ──────────────────────────
+# The pi session is launched via run-pi-agent.sh so the pane's pi session
+# id is deterministic (--session-id) and the Local Proxy model lease is
+# released when the session ends (normal exit or pane close).
+# (WL-0MSGI7UIH008USVB)
+wrapper_script="$(cd "$(dirname "$0")" && pwd)/run-pi-agent.sh"
+# Session id must match pi's session-id rules (alphanumeric, '-', '_', '.').
+# Unique per launch: timestamp + launcher pid + random suffix.
+lease_session_id="herdr-$(date +%s)-$$-$RANDOM"
+quoted_wrapper="$(printf '%q' "$wrapper_script")"
+quoted_lease_id="$(printf '%q' "$lease_session_id")"
 quoted_cmd="$(printf '%q' "$COMMAND")"
 if [ -n "$model_arg" ]; then
-  # Forward the model pattern so the pi CLI opens with the requested model
-  # (e.g. `pi --model code '/skill:implement <id>'`).
-  "$herdr_bin" pane run "$np" exec pi --model "$model_arg" "$quoted_cmd"
+  quoted_model="$(printf '%q' "$model_arg")"
+  "$herdr_bin" pane run "$np" exec bash "$quoted_wrapper" "$quoted_lease_id" --model "$quoted_model" "$quoted_cmd"
 else
-  "$herdr_bin" pane run "$np" exec pi "$quoted_cmd"
+  "$herdr_bin" pane run "$np" exec bash "$quoted_wrapper" "$quoted_lease_id" "$quoted_cmd"
 fi
 
 # ── Rename the pane ────────────────────────────────────────────────

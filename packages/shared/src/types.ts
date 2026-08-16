@@ -114,6 +114,19 @@ export interface UpdateWorkItemInput {
   effort?: WorkItemEffortLevel | '';
   /** When present, sets the needsProducerReview flag */
   needsProducerReview?: boolean;
+  /**
+   * CAS guard (compare-and-swap claim, RCA WL-0MSRBFFLN005W3VT design point 1):
+   * when present, the update only applies if the item's CURRENT status matches
+   * (normalized hyphenated form). On mismatch the update fails with a `stale`
+   * result and no row is written — the losing pane of a concurrent claim race
+   * aborts its dispatch instead of double-claiming.
+   */
+  ifStatus?: WorkItemStatus;
+  /**
+   * CAS guard: when present, the update only applies if the item's CURRENT
+   * stage matches. Composes with `ifStatus` (both must match).
+   */
+  ifStage?: string;
 }
 export interface WorkItemQuery {
   status?: WorkItemStatus[];
@@ -170,6 +183,14 @@ export interface WorklogConfig {
   auditWriteEnabled?: boolean;
   syncRemote?: string;
   syncBranch?: string;
+  /**
+   * Allow `wl sync` to merge commits authored by a different identity than
+   * the store's configured `user.email` (identity gate WL-0MSOYWWS4009HTCB).
+   * Default false — the sync refuses foreign-author commits. The CLI flag
+   * `--allow-foreign-author` takes precedence over this config value.
+   * Never bypasses the empty-author-email gate.
+   */
+  syncAllowForeignAuthor?: boolean;
   githubRepo?: string;
   githubLabelPrefix?: string;
   githubImportCreateNew?: boolean;

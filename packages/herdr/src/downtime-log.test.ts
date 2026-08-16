@@ -15,6 +15,9 @@ import {
   appendDowntimeLogEntry,
   auditDispatchedItemIds,
   implementDispatchedItemIds,
+  planDispatchedItemStages,
+  intakeDispatchedItemStages,
+  dispatchedItemStages,
   readDowntimeLogEntries,
   DOWNTIME_LOG_FILE,
   DOWNTIME_LOG_MAX_ENTRIES,
@@ -155,5 +158,47 @@ describe('implementDispatchedItemIds (implement-tier-only scope guard)', () => {
 
   it('returns an empty set for empty input', () => {
     expect([...implementDispatchedItemIds([])]).toEqual([]);
+  });
+});
+
+describe('plan/intake dispatched-item stages (change-guard maps)', () => {
+  it('planDispatchedItemStages maps plan markers to their dispatched-at stage', () => {
+    const stages = planDispatchedItemStages([
+      { itemId: 'WL-A', kind: 'plan', stage: 'intake_complete' },
+      { itemId: 'WL-B', kind: 'intake', stage: 'idea' },
+      { itemId: 'WL-C', kind: 'plan' }, // legacy entry without stage → ''
+      { kind: 'plan' }, // no itemId → ignored
+    ]);
+    expect(stages.get('WL-A')).toBe('intake_complete');
+    expect(stages.get('WL-C')).toBe('');
+    expect(stages.has('WL-B')).toBe(false); // intake markers are scoped out
+  });
+
+  it('intakeDispatchedItemStages maps intake markers to their dispatched-at stage', () => {
+    const stages = intakeDispatchedItemStages([
+      { itemId: 'WL-A', kind: 'intake', stage: 'idea' },
+      { itemId: 'WL-B', kind: 'plan', stage: 'intake_complete' },
+    ]);
+    expect(stages.get('WL-A')).toBe('idea');
+    expect(stages.has('WL-B')).toBe(false);
+  });
+
+  it('dispatchedItemStages is kind-scoped and tolerant of malformed entries', () => {
+    const stages = dispatchedItemStages(
+      [
+        { itemId: 'WL-A', kind: 'plan', stage: 'intake_complete' },
+        { itemId: 'WL-B', kind: 'plan', stage: 42 as unknown as string }, // non-string stage → ''
+        { itemId: 'WL-C', kind: 'plan' },
+      ],
+      'plan',
+    );
+    expect(stages.get('WL-A')).toBe('intake_complete');
+    expect(stages.get('WL-B')).toBe('');
+    expect(stages.get('WL-C')).toBe('');
+  });
+
+  it('returns an empty map for empty input', () => {
+    expect(planDispatchedItemStages([]).size).toBe(0);
+    expect(intakeDispatchedItemStages([]).size).toBe(0);
   });
 });

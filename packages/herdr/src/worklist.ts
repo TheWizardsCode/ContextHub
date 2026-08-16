@@ -10,7 +10,7 @@
  * Herdr's pane-based model.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
 import { fetchChildrenForItem, fetchActionableCount, fetchItemsByStage, getWorklogDir, type WorkItem } from './fetcher.js';
@@ -42,6 +42,18 @@ import {
 import { ShipItDialogState, overlayShipItDialog } from './ship-it-dialog.js';
 import { extractFilePaths } from './grouping.js';
 import { renderMarkdown, renderMarkdownViewer } from './md-viewer.js';
+import {
+  findNoteInParagraph,
+  insertNoteMarker,
+  updateNoteMarker,
+  removeNoteMarker,
+  splitParagraphs,
+  mapCursorToParagraph,
+  mapParagraphToMarker,
+  addNoteWithSync,
+  resolveNoteWithSync,
+  type NoteEditResult,
+} from './md-note-edit.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -333,6 +345,14 @@ export class WorkItemListState {
   detailRenderedIndex = 0;
 
   /**
+   * Paragraph cursor in the md viewer (WL-0MSKV6SKK008MMXR): the index
+   * (into `splitParagraphs` of the rendered file) that note-edit chords
+   * operate on. Defaults to the first paragraph; the viewer integration
+   * moves it as the user scrolls the document region.
+   */
+  detailNoteCursor = 0;
+
+  /**
    * Scroll offset within the metadata panel. Reset to 0 whenever the
    * selection changes so a stale position from a previous item never
    * leaves the panel blank (WL-0MSAYNVBY006LM9X-FT4).
@@ -470,18 +490,78 @@ export class WorkItemListState {
 
   /**
    * Get the flattened item list, inserting children of expanded parents.
+   *
+   * Recurses into any depth (WL-0MSQ3FH1K000MMJW): after inserting a child
+   * of an expanded item, the child's own children are inserted too when the
+   * child is itself expanded. Depth is derived from the hierarchy position
+   * (top-level = no depth, each nested level = parent's depth + 1), so
+   * items fetched at any level render at the correct indentation.
    */
   getFlattenedItems(): WorkItem[] {
     const result: WorkItem[] = [];
-    for (const item of this.items) {
-      result.push(item);
+    const appendItem = (item: WorkItem, depth: number): void => {
+      // Top-level items are pushed as-is (no depth field, matching the
+      // pre-hierarchy shape). Nested items keep their object reference when
+      // their stored depth already matches the hierarchy position (so
+      // on-demand child fetches mutate the live tree object), otherwise the
+      // depth is corrected with a shallow copy.
+      if (depth === 0) {
+        result.push(item);
+      } else {
+        result.push(item.depth === depth ? item : { ...item, depth });
+      }
       if (item.childCount && item.children && item.children.length > 0 && this.expandedItems.has(item.id)) {
         for (const child of item.children) {
-          result.push({ ...child, depth: child.depth ?? 1 });
+          appendItem(child, depth + 1);
         }
       }
+    };
+    for (const item of this.items) {
+      appendItem(item, 0);
     }
     return result;
+  }
+
+  /**
+   * Compute the hierarchy depth of an item in the current tree
+   * (0 = top-level, 1 = child, …). Returns 0 for unknown IDs — the safe
+   * default used when fetching their children at depth 1 (WL-0MSQ3FH1K000MMJW).
+   */
+  getItemDepth(id: string): number {
+    const walk = (items: WorkItem[], depth: number): number => {
+      for (const item of items) {
+        if (item.id === id) return depth;
+        if (item.children && item.children.length > 0) {
+          const found = walk(item.children, depth + 1);
+          if (found >= 0) return found;
+        }
+      }
+      return -1;
+    };
+    const depth = walk(this.items, 0);
+    return depth >= 0 ? depth : 0;
+  }
+
+  /**
+   * Attach fetched children to the item in the live tree (walking nested
+   * levels), never to a flattened copy. Ensures an on-demand fetch for a
+   * child at any depth lands on the object the flatten recursion walks, so
+   * the grandchildren actually render (WL-0MSQ3FH1K000MMJW).
+   */
+  attachChildren(id: string, children: WorkItem[]): void {
+    const walk = (items: WorkItem[]): boolean => {
+      for (const item of items) {
+        if (item.id === id) {
+          item.children = children;
+          return true;
+        }
+        if (item.children && item.children.length > 0 && walk(item.children)) {
+          return true;
+        }
+      }
+      return false;
+    };
+    walk(this.items);
   }
 
   selectItem(): void {
@@ -1178,11 +1258,13 @@ export function formatDetailContent(
   }
 
   // Generic md-document viewer for a Key Files: .podcast.md episode file
-  // (preview-only; no notes editor). When a readFile callback is provided
-  // and the item references a readable .md file, render it in place of the
-  // raw description so the producer sees the paragraph-format episode.
-  // Renders the file at detailRenderedIndex (default 0 = first file, the
-  // existing auto-render); Enter on a ToC entry selects another file
+  // (any .md Key File). When a readFile callback is provided and the item
+  // references a readable .md file, render it in place of the raw
+  // description so the producer sees the paragraph-format episode.
+  // Inline-note markers can be edited from the viewer via the n,e / n,d
+  // chords (WL-0MSKV6SKK008MMXR). Renders the file at detailRenderedIndex
+  // (default 0 = first file, the existing auto-render); Enter on a ToC
+  // entry selects another file
   // (WL-0MSHWHULZ001FL8I).
   if (readFile) {
     const mdPaths = extractFilePaths(item.description ?? '').filter(p => p.endsWith('.md'));
@@ -1234,6 +1316,124 @@ export function renderFileViewer(
   return renderMarkdownViewer(content, maxCols);
 }
 
+// ── Note-edit write-back (WL-0MSKV6SKK008MMXR) ────────────────────────
+
+/** A note-edit operation to apply to a markdown file. */
+export interface NoteEditAction {
+  kind: 'insert' | 'update' | 'remove';
+  /** Paragraph index (into `splitParagraphs`) for insert. */
+  paragraphIndex?: number;
+  /** New note body (insert/update). */
+  text?: string;
+  /** Marker id to update/remove. */
+  noteId?: string;
+  /** Mark DONE (§7.3) on update. */
+  done?: boolean;
+}
+
+/**
+ * Read a markdown file, apply an inline-note edit, and write it back.
+ *
+ * Pure with respect to the document text (via `md-note-edit.ts`): every
+ * byte outside the edited paragraph is preserved.  The file reader/writer
+ * are dependency-injected so the flow is side-effect-free and testable
+ * (the viewer passes `readKeyFile` / a `writeKeyFile` bound to
+ * `resolveKeyFilePath`).
+ *
+ * @param item - The work item whose Key Files carry the document.
+ * @param mdPath - The Key Files path of the markdown document.
+ * @param action - The edit to apply.
+ * @param readFile - Reads the file content (path -> content or null).
+ * @param writeFile - Persists the updated content (path, content).
+ * @param episodeItems - Optional candidate episode work items (PRD §7.3
+ *   note-child sync). When provided, inserts on a podcast script with a
+ *   resolvable episode create a note child via `wl create --parent
+ *   <episode>` and write the real note-child id into the marker (via
+ *   `addNoteWithSync`); removes of a real (non-LOCAL) note id mark the
+ *   marker `DONE` and post a resolution comment on the child (via
+ *   `resolveNoteWithSync`). Omit (or pass []) for generic markdown — the
+ *   local-only path never invokes `wl`.
+ * @returns The edit result (doc, byteOffset, newNoteId for inserts).
+ */
+export async function applyNoteEditToFile(
+  item: WorkItem | null,
+  mdPath: string,
+  action: NoteEditAction,
+  readFile: (filePath: string) => string | null | Promise<string | null>,
+  writeFile: (filePath: string, content: string) => void | Promise<void>,
+  episodeItems?: WorkItem[],
+): Promise<NoteEditResult> {
+  if (!item) return { doc: '', byteOffset: -1 };
+  const content = await readFile(mdPath);
+  if (content == null) return { doc: '', byteOffset: -1 };
+
+  let result: NoteEditResult;
+  if (action.kind === 'insert') {
+    if (episodeItems && episodeItems.length > 0) {
+      // Podcast path: create the note child and write the real id (PRD
+      // §7.3); unresolvable episode → LOCAL placeholder + warning.
+      result = await addNoteWithSync(
+        content,
+        action.paragraphIndex ?? 0,
+        action.text ?? '',
+        episodeItems,
+      );
+    } else {
+      // Generic markdown: local placeholder ids only — never invokes wl.
+      result = insertNoteMarker(content, action.paragraphIndex ?? 0, action.text ?? '');
+    }
+  } else if (action.kind === 'update') {
+    result = updateNoteMarker(content, action.noteId ?? '', {
+      text: action.text ?? '',
+      done: action.done,
+    });
+  } else if (action.kind === 'remove') {
+    const noteId = action.noteId ?? '';
+    const isLocal = noteId.startsWith('LOCAL-');
+    if (episodeItems && episodeItems.length > 0 && noteId && !isLocal) {
+      // Podcast delete/resolve: DONE marker + resolution comment on the
+      // note child (PRD §7.3).
+      result = await resolveNoteWithSync(
+        content,
+        noteId,
+        action.text ?? 'Resolved via Herdr',
+        episodeItems,
+      );
+    } else {
+      result = removeNoteMarker(content, noteId);
+    }
+  } else {
+    result = { doc: content, byteOffset: -1 };
+  }
+  if (result.byteOffset >= 0) {
+    await writeFile(mdPath, result.doc);
+  }
+  return result;
+}
+
+/**
+ * Build the candidate episode work items for PRD §7.3 note-child sync.
+ *
+ * The selected work item (an episode's Key Files include the script) plus
+ * the loaded worklist items, deduplicated by id.  Used to resolve the
+ * episode for a podcast script via `resolveEpisodeId`; generic markdown
+ * yields an empty candidate set and stays local-only (never invokes `wl`).
+ */
+function buildEpisodeCandidates(state: WorkItemListState): WorkItem[] {
+  const seen = new Set<string>();
+  const candidates: WorkItem[] = [];
+  const add = (item: WorkItem | null | undefined): void => {
+    if (!item) return;
+    if (seen.has(item.id)) return;
+    seen.add(item.id);
+    candidates.push(item);
+  };
+  add(state.detailItem);
+  for (const item of state.getFlattenedItems()) {
+    add(item);
+  }
+  return candidates;
+}
 /**
  * Return the first `Key Files:` path ending in `.md` (or empty).
  *
@@ -1716,8 +1916,11 @@ export function handleKeypress(
         const flat = state.getFlattenedItems();
         if (state.selectedIndex < flat.length) {
           const selected = flat[state.selectedIndex];
-          // Toggle expand/collapse for items with actual children data
-          if (selected.children && selected.children.length > 0 && selected.depth === undefined) {
+          // Toggle expand/collapse for items with actual children data at
+          // ANY depth (WL-0MSQ3FH1K000MMJW): Enter on a child with children
+          // expands it like a top-level parent, instead of opening the
+          // detail view.
+          if (selected.children && selected.children.length > 0) {
             if (state.isExpanded(selected.id)) {
               // Collapsing — remove the matching navigation-stack entry so
               // a later Escape does not pop back into a collapsed parent.
@@ -1773,8 +1976,10 @@ export function handleKeypress(
         const flat = state.getFlattenedItems();
         if (state.selectedIndex < flat.length) {
           const selected = flat[state.selectedIndex];
-          // Only top-level items with children can be expanded/collapsed
-          if (selected.depth === undefined && selected.childCount && selected.childCount > 0) {
+          // Any item with children — at ANY depth — can be expanded/
+          // collapsed with Tab (WL-0MSQ3FH1K000MMJW). Children data is
+          // fetched on demand by the caller when not yet loaded.
+          if (selected.childCount && selected.childCount > 0) {
             // Track hierarchy: push parent state before expanding so Escape
             // can return to it; drop the entry when collapsing.
             if (state.isExpanded(selected.id)) {
@@ -2767,7 +2972,10 @@ export async function runWorklistTui(
         const freshChildren = new Map<string, WorkItem[]>();
         const fetchExpandedChildren = async (parentId: string): Promise<WorkItem[]> => {
           try {
-            const children = await fetchChildrenForItem(parentId);
+            // Depth derived from the item's hierarchy position so nested
+            // expanded items re-fetch their children at the correct depth
+            // (WL-0MSQ3FH1K000MMJW).
+            const children = await fetchChildrenForItem(parentId, state.getItemDepth(parentId) + 1);
             freshChildren.set(parentId, children);
             return children;
           } catch {
@@ -2784,13 +2992,25 @@ export async function runWorklistTui(
 
         // Attach freshly fetched children to the new parent objects BEFORE
         // the swap so the flattened view is complete at render time.
+        // Walks the whole tree (top-level + nested children) because
+        // expandedItems may contain items at any depth: a nested parent is
+        // not in the top-level id→item map, so without the walk its fresh
+        // grandchildren would be dropped and the nested expansion would
+        // collapse on refresh (WL-0MSQ3FH1K000MMJW AC-4).
         if (freshChildren.size > 0) {
-          const byId = new Map(newItems.map((it) => [it.id, it]));
-          for (const [parentId, children] of freshChildren) {
-            const parent = byId.get(parentId);
-            if (parent) {
-              parent.children = children;
+          const attachFresh = (list: WorkItem[]): void => {
+            for (const item of list) {
+              const fresh = freshChildren.get(item.id);
+              if (fresh) {
+                item.children = fresh;
+              }
+              if (item.children && item.children.length > 0) {
+                attachFresh(item.children);
+              }
             }
+          };
+          for (const topLevel of newItems) {
+            attachFresh([topLevel]);
           }
         }
         state.refreshItems(newItems);
@@ -3016,6 +3236,115 @@ export async function runWorklistTui(
           // stays bottom-anchored over the list.
           if (command === SHIP_IT_COMMAND) {
             openShipItDialog(model ?? undefined);
+            return;
+          }
+          // Inline note-edit chords (WL-0MSKV6SKK008MMXR): add/edit/delete
+          // `[NOTE ...]` markers in the md viewer. Scoped to the detail
+          // view via shortcuts.json (view: 'detail'), so the `<note_text>`
+          // placeholder only reaches this branch from the viewer.
+          if (command === '/herdr:note-edit <note_text>'
+              || command === '/herdr:note-delete') {
+            const mdPaths = state.detailItem
+              ? extractFilePaths(state.detailItem.description ?? '')
+                  .filter(p => p.endsWith('.md'))
+              : [];
+            const mdPath = mdPaths[state.detailRenderedIndex] ?? mdPaths[0];
+            if (!mdPath) {
+              showToast('Note', { body: 'No markdown document in this view.' });
+              render();
+              return;
+            }
+            const content = readKeyFile(mdPath);
+            if (content == null) {
+              showToast('Note', { body: 'Markdown document unreadable.' });
+              render();
+              return;
+            }
+            // The visible cursor line (scroll offset) maps to the source
+            // paragraph the user has scrolled to.
+            const paragraphIndex = mapCursorToParagraph(content, state.detailScrollOffset);
+            state.detailNoteCursor = Math.max(0, paragraphIndex);
+            const marker = mapParagraphToMarker(content, state.detailNoteCursor);
+
+            // Candidate episodes for PRD §7.3 note-child sync: the selected
+            // item (an episode's Key Files include the script) plus the
+            // loaded worklist items, deduplicated by id. Empty for generic
+            // markdown never invokes `wl` (local placeholder ids only).
+            const episodeItems = buildEpisodeCandidates(state);
+
+            if (command === '/herdr:note-delete') {
+              if (!marker) {
+                showToast('Note', { body: 'No note on this paragraph.' });
+                render();
+                return;
+              }
+              const result = await applyNoteEditToFile(
+                state.detailItem,
+                mdPath,
+                { kind: 'remove', noteId: marker.noteId },
+                readKeyFile,
+                writeKeyFile,
+                episodeItems,
+              );
+              if (result.byteOffset < 0) {
+                showToast('Note', { body: 'Delete did not apply.' });
+              } else if (result.warning) {
+                showToast('Warning', { body: result.warning });
+              } else {
+                showToast('Note deleted', { body: `${marker.noteId} removed.` });
+              }
+              render();
+              return;
+            }
+
+            // Add/edit: open the note-text form, pre-filled in edit mode.
+            const existing = marker ? findNoteInParagraph(
+              splitParagraphs(content)[state.detailNoteCursor]?.text ?? '',
+            ) : null;
+            const prefill = existing ? existing.body : '';
+            const template = existing
+              ? `/herdr:note-edit <note_text default="${prefill.replace(/"/g, '&quot;')}">`
+              : '/herdr:note-edit <note_text>';
+            const noteId = existing?.id ?? undefined;
+            preFormMode = state.mode;
+            state.mode = 'form';
+            formState = new FormState(
+              template,
+              'Note text (inline [NOTE <id>: ...] marker, PRD §7.1)',
+              getUnknownIdentifiers(template),
+              // onSubmit: apply the edit and re-render.
+              async (resolved: string) => {
+                const textMatch = resolved.match(/note_text[= >]*([\s\S]*)$/);
+                const text = (textMatch ? textMatch[1] : resolved).trim();
+                formState = null;
+                state.mode = preFormMode;
+                const action = noteId
+                  ? { kind: 'update' as const, noteId, text }
+                  : { kind: 'insert' as const, paragraphIndex: state.detailNoteCursor, text };
+                const result = await applyNoteEditToFile(
+                  state.detailItem,
+                  mdPath,
+                  action,
+                  readKeyFile,
+                  writeKeyFile,
+                  episodeItems,
+                );
+                if (result.byteOffset < 0) {
+                  showToast('Note', { body: 'Edit did not apply.' });
+                } else if (result.warning) {
+                  showToast('Warning', { body: result.warning });
+                } else {
+                  showToast('Note saved', { body: `${result.newNoteId ?? noteId ?? 'marker'} written.` });
+                }
+                render();
+              },
+              // onCancel
+              () => {
+                formState = null;
+                state.mode = preFormMode;
+              },
+            );
+            render();
             return;
           }
           // Check for unknown identifiers that need form input
@@ -3274,8 +3603,14 @@ export async function runWorklistTui(
         // If children data not yet loaded, fetch them on demand
         if (selected.childCount && selected.childCount > 0 && (!selected.children || selected.children.length === 0)) {
           render(); // immediate render while fetch is pending
-          const children = await fetchChildrenForItem(selected.id);
-          selected.children = children;
+          // Depth derived from the selected item's hierarchy position so
+          // grandchildren of a nested item fetch at depth N+1, not 1
+          // (WL-0MSQ3FH1K000MMJW).
+          const children = await fetchChildrenForItem(selected.id, (selected.depth ?? 0) + 1);
+          // Attach to the live tree object so the fetched grandchildren
+          // survive the flatten (which may hold a copy with a corrected
+          // depth) — see WorkItemListState.attachChildren.
+          state.attachChildren(selected.id, children);
           // Merge agent-status state into the freshly loaded children so
           // their rows show agent icons too (WL-0MSBQUJQX005RAT9).
           try {
@@ -3314,6 +3649,22 @@ export async function runWorklistTui(
       return readFileSync(resolved, 'utf-8');
     } catch {
       return null;
+    }
+  };
+
+  /**
+   * Write a Key Files: markdown document back to disk (WL-0MSKV6SKK008MMXR
+   * note-edit write-back). Path resolution mirrors `readKeyFile`
+   * (resolveKeyFilePath against the worklog root); a missing resolved path
+   * is a silent no-op so the TUI never crashes on a stale Key Files entry.
+   */
+  const writeKeyFile = (filePath: string, content: string): void => {
+    const resolved = resolveKeyFilePath(filePath);
+    if (!resolved) return;
+    try {
+      writeFileSync(resolved, content, 'utf-8');
+    } catch (error) {
+      process.stderr.write(`[herdr] Note write-back failed: ${String(error)}\n`);
     }
   };
 

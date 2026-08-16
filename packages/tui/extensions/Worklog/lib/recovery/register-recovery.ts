@@ -6,13 +6,15 @@
  * - agent_end → error detection → category dispatch
  * - turn_end → state management (reset on success, abort flag)
  * - session_start → state reset
+ * - session_compact → auto-continue after mid-session compaction
  * - Built-in retry suppression (monkey-patching _prepareRetry)
  * - /retry command registration
  */
 
-import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionCommandContext, SessionCompactEvent } from '@earendil-works/pi-coding-agent';
 
-import { classifyError, ErrorCategory } from './error-patterns.js';
+import { classifyError, DEFAULT_RECOVERY_CONFIG, ErrorCategory } from './error-patterns.js';
+import { executeParseErrorContinue } from './recovery.js';
 import {
   retryStates,
   continuationState,
@@ -22,6 +24,10 @@ import {
   type RetryCommandOptions,
 } from './retry-command.js';
 import { calculateDelay, formatDuration } from './retry-logic.js';
+import {
+  shouldAutoContinueAfterCompaction,
+  shouldTriggerCompactionContinue,
+} from './recovery.js';
 
 let _recoveryRegistered = false;
 
@@ -135,6 +141,27 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
         break;
       }
 
+      case ErrorCategory.PARSE_ERROR: {
+        // Parse errors: single-shot auto-continue with a plain "continue"
+        // prompt. Per operator decision there is NO exponential-backoff
+        // loop — one "continue" per detected parse error. The error message
+        // stays in agent state so the agent decides how to proceed (e.g.,
+        // skip the malformed record). A repeated parse error triggers a new
+        // continue on the next agent_end (single-shot per occurrence).
+        const errorMsg = lastAssistant.errorMessage || 'Unknown error';
+        const state = retryStates[category as string];
+        if (state) {
+          state.startRetry(errorMsg);
+          state.endRetry();
+        }
+        ctx.ui.notify(
+          `JSON parse error — auto-continuing: ${errorMsg.substring(0, 100)}...`,
+          'info',
+        );
+        void triggerParseErrorContinue();
+        break;
+      }
+
       case ErrorCategory.UNKNOWN:
       default:
         // Unknown errors: show message, no retry
@@ -146,6 +173,28 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
         }
         break;
     }
+  });
+
+  // ── session_compact: auto-continue after mid-session compaction ──
+  // Pi auto-continues only overflow recovery (willRetry) natively; threshold
+  // compaction stops. When a compaction is demonstrably mid-session (queued
+  // messages pending, an interrupted turn with stopReason length/error, or the
+  // agent still streaming), reuse the invisible-continue loop so the agent
+  // resumes without the user typing "continue".
+  pi.on('session_compact', async (event: SessionCompactEvent, ctx) => {
+    _notifyFn = (message, level) => ctx.ui.notify(message, level);
+
+    const entries = ctx.sessionManager.getEntries();
+    const lastAssistant = findLastAssistantMessage(entries);
+
+    const signals = {
+      hasPendingMessages: ctx.hasPendingMessages(),
+      isIdle: ctx.isIdle(),
+      lastAssistantStopReason: lastAssistant?.stopReason,
+    };
+
+    if (!shouldAutoContinueAfterCompaction(event, signals)) return;
+    void triggerCompactionContinue();
   });
 
   // ── turn_end: manage state on successful turns ─────────────────
@@ -200,6 +249,9 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
         },
         triggerCompactContinue: () => {
           ctx.ui.notify('Continuing after context-length...', 'info');
+        },
+        triggerParseErrorContinue: () => {
+          ctx.ui.notify('Continuing after JSON parse error...', 'info');
         },
         triggerCheckpointTerminate: (_category: string, _errorDetail: string) => {
           ctx.ui.notify(`${_category}: ${_errorDetail.substring(0, 100)}`, 'error');
@@ -343,6 +395,70 @@ async function triggerInvisibleContinue(): Promise<void> {
       _continueInProgress = false;
     }
     _lastInvisibleContinueTime = Date.now();
+  }
+}
+
+/**
+ * Auto-continue the agent after a mid-session compaction.
+ *
+ * Applies the entry-point guards (user abort, retry-loop mutex, and
+ * continuation-in-flight so this path never double-triggers with the
+ * CONTEXT_LENGTH path), then fires the invisible-continue loop
+ * (`agent.prompt([])`) that the CONTEXT_LENGTH branch already uses.
+ * The loop itself re-verifies abort/session-change throughout.
+ */
+async function triggerCompactionContinue(): Promise<void> {
+  if (!shouldTriggerCompactionContinue({
+    userAborted: interruptibleState.userAborted,
+    continueInProgress: _continueInProgress,
+    continuationInFlight: continuationState.getIsContinuing() || continuationState.getCount() > 0,
+  })) return;
+
+  continuationState.startContinuation();
+  if (_notifyFn) {
+    _notifyFn('Compaction complete — continuing automatically...', 'info');
+  }
+  continuationState.endContinuation();
+
+  void triggerInvisibleContinue();
+}
+
+/**
+ * Single-shot invisible continue for JSON parse errors.
+ *
+ * Waits for the agent to become idle, then sends exactly one plain
+ * "continue" prompt. No exponential backoff and no error-message removal —
+ * a deterministic parse error simply triggers another continue on the next
+ * agent_end (single-shot per occurrence). Guards against user abort and
+ * session switches; the mutex prevents concurrent continues.
+ */
+async function triggerParseErrorContinue(): Promise<void> {
+  if (!_agent) return;
+
+  // Guard: if user aborted, don't start
+  if (interruptibleState.userAborted) return;
+
+  // Guard: mutex — only one continue at a time
+  if (_continueInProgress) return;
+  _continueInProgress = true;
+
+  const sessionGenerationAtStart = interruptibleState.sessionGeneration;
+
+  try {
+    await executeParseErrorContinue({
+      waitForIdle: () => _agent?.waitForIdle?.(),
+      // Plain "continue" prompt per operator decision; text is
+      // settings-driven via the parseError category config.
+      sendContinue: () => _agent.prompt([DEFAULT_RECOVERY_CONFIG.parseError.continuationPrompt ?? 'continue']),
+      shouldAbort: () =>
+        interruptibleState.userAborted ||
+        interruptibleState.sessionGeneration !== sessionGenerationAtStart,
+    });
+  } finally {
+    // Only reset mutex if session hasn't changed
+    if (interruptibleState.sessionGeneration === sessionGenerationAtStart) {
+      _continueInProgress = false;
+    }
   }
 }
 

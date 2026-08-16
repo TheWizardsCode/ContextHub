@@ -281,6 +281,28 @@ describe('fetchItemsByStage', () => {
     // every open root item in the stage.
     expect(calls[0]).toEqual(['list', '--status', 'open', '--stage', 'in_progress', '--root-only', '--json']);
   });
+
+  it('regroups results priority-first before display (WL-0MSOPHLD1000EWNN)', async () => {
+    // CLI order is NOT priority-first: a low-priority plan_complete item
+    // precedes a critical one. The regroup wiring must reorder to the
+    // canonical bucket order (Critical Group → Group) and stamp metadata.
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        workItems: [
+          { id: 'WL-STAGE-LOW', title: 'Low plan item', stage: 'plan_complete', priority: 'low' },
+          { id: 'WL-STAGE-CRIT', title: 'Critical plan item', stage: 'plan_complete', priority: 'critical' },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    const items = await fetchItemsByStage('plan_complete');
+    expect(items.map((i) => i.id)).toEqual(['WL-STAGE-CRIT', 'WL-STAGE-LOW']);
+    expect(items[0].groupLabel).toBe('Critical Group 1');
+    expect(items[1].groupLabel).toBe('Group 1');
+    expect(items[0].group).toBeLessThan(items[1].group!);
+  });
 });
 
 describe('fetchChildrenForItem', () => {
@@ -331,6 +353,30 @@ describe('fetchChildrenForItem', () => {
     setExecFileAsync(mockFn as any);
 
     await expect(fetchChildrenForItem('WL-001')).rejects.toThrow();
+  });
+
+  it('regroups child items priority-first, preserving depth (WL-0MSOPHLD1000EWNN)', async () => {
+    // CLI order is NOT priority-first: a medium in_progress child precedes a
+    // critical one. The regroup wiring must reorder children to the
+    // canonical bucket order while keeping the hierarchy `depth` intact.
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        workItems: [
+          { id: 'WL-001-C1', title: 'In progress child', stage: 'in_progress', priority: 'medium' },
+          { id: 'WL-001-C2', title: 'Critical child', stage: 'plan_complete', priority: 'critical' },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    const children = await fetchChildrenForItem('WL-001', 1);
+    expect(children.map((c) => c.id)).toEqual(['WL-001-C2', 'WL-001-C1']);
+    expect(children[0].groupLabel).toBe('Critical Group 1');
+    expect(children[1].groupLabel).toBe('Group 1');
+    // Depth must survive regrouping — the expand hierarchy still renders.
+    expect(children[0].depth).toBe(1);
+    expect(children[1].depth).toBe(1);
   });
 });
 
