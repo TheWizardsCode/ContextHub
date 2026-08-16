@@ -573,6 +573,55 @@ export class SqlitePersistentStore {
   }
 
   /**
+   * Find the most recent non-terminal work item whose *normalized* title
+   * equals `normalizedTitle` and whose creation time is strictly after
+   * `now - windowMs`. Used by the `wl create` dedup guard
+   * (WL-0MSTNG2QF0049B97) — see `WorklogDatabase.getRecentDuplicate`.
+   *
+   * The stored title is normalized in SQL the same way
+   * `normalizeTitleForMatch` normalizes the query side: case-folded with
+   * tab/CR/LF/space removed, so `"Same Title"` vs `"same  title"` compare
+   * equal. A direct SQL query (rather than filtering `getAllWorkItems()` in
+   * memory) keeps the guard cheap and always reads the freshest rows.
+   *
+   * @param normalizedTitle - Canonical key from `normalizeTitleForMatch()`.
+   * @param windowMs - Look-back window in milliseconds.
+   * @param prefix - Prefix scope; only ids starting with `<prefix>-` match.
+   * @returns The newest matching `WorkItem`, or null when none matches.
+   */
+  getRecentDuplicateByNormalizedTitle(
+    normalizedTitle: string,
+    windowMs: number,
+    prefix: string,
+  ): WorkItem | null {
+    const cutoff = new Date(Date.now() - windowMs).toISOString();
+    const stmt = this.db.prepare(`
+      SELECT * FROM workitems
+      WHERE status IN ('open', 'in-progress', 'blocked')
+        AND createdAt > ?
+        AND LOWER(REPLACE(REPLACE(REPLACE(REPLACE(title, char(9), ''), char(10), ''), char(13), ''), ' ', '')) = ?
+        AND id LIKE ? ESCAPE '\\'
+      ORDER BY createdAt DESC
+      LIMIT 1
+    `);
+    const row = stmt.get(
+      cutoff,
+      normalizedTitle,
+      `${this.escapeLikePattern(prefix)}-%`,
+    ) as any;
+    if (!row) return null;
+    return this.rowToWorkItem(row);
+  }
+
+  /**
+   * Escape LIKE wildcards (`%`, `_`) and the escape character itself so a
+   * user-supplied prefix cannot act as a wildcard in an `id LIKE ?` clause.
+   */
+  private escapeLikePattern(value: string): string {
+    return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+  }
+
+  /**
    * Get all work items
    */
   getAllWorkItems(): WorkItem[] {
@@ -963,6 +1012,22 @@ export class SqlitePersistentStore {
   transaction<T>(fn: () => T): T {
     const tx = this.db.transaction(fn);
     return tx();
+  }
+
+  /**
+   * Execute a function inside a `BEGIN IMMEDIATE` transaction.
+   *
+   * The write lock is acquired BEFORE any read inside `fn` (deferred
+   * transactions acquire it at the first write). This serializes
+   * check-then-write sequences against OTHER processes' connections: a
+   * concurrent writer blocks at `BEGIN IMMEDIATE` until this transaction
+   * commits (busy_timeout), then observes the committed state — which is
+   * exactly the atomicity the CAS claim (compare-and-swap, RCA
+   * WL-0MSRBFFLN005W3VT design point 1) needs across herdr panes.
+   */
+  transactionImmediate<T>(fn: () => T): T {
+    const tx = this.db.transaction(fn);
+    return tx.immediate();
   }
 
   /**

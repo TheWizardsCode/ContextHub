@@ -28,9 +28,11 @@ export const DOWNTIME_LOG_MAX_ENTRIES = 100;
 
 /**
  * One parsed line of the downtime dispatch log: either a dispatch event
- * (itemId/kind/dispatchedAt/title) or a persistent-error event
- * (cwd/at/message, three-strike trail). All fields optional so malformed
- * or foreign lines never break parsing.
+ * (itemId/kind/dispatchedAt/title), a spawn-failure trace
+ * (itemId/kind/stage + outcome:'spawn-failed' with error/exitCode —
+ * WL-0MSLWJ3I70031Z8U), or a persistent-error event (cwd/at/message,
+ * three-strike trail). All fields optional so malformed or foreign lines
+ * never break parsing.
  */
 export interface DowntimeLogEntry {
   itemId?: string;
@@ -38,8 +40,27 @@ export interface DowntimeLogEntry {
   dispatchedAt?: string;
   cwd?: string;
   title?: string;
+  /**
+   * Worklog stage of the item AT dispatch (set on plan/intake markers,
+   * RCA WL-0MSRBFFLN005W3VT design point 3). Powers the change-guard: a
+   * candidate is excluded while it is still at its dispatched-at stage; a
+   * stage advancement releases it. Absent on legacy entries (backward
+   * compatible — a missing stage never suppresses selection).
+   */
+  stage?: string;
   at?: string;
   message?: string;
+  /**
+   * Dispatch outcome of a failed pane spawn ('spawn-failed'): the rolling
+   * log distinguishes "attempted" from "opened" (WL-0MSLWJ3I70031Z8U AC2).
+   * Absent on success markers and legacy entries (backward compatible —
+   * marker readers ignore it).
+   */
+  outcome?: string;
+  /** Spawn-level error message (spawn-failed trace, e.g. ENOENT). */
+  error?: string;
+  /** send-to-pi.sh exit code (non-zero spawn-failed trace; null = signal). */
+  exitCode?: number | null;
 }
 
 /**
@@ -77,19 +98,29 @@ export async function readDowntimeLogEntries(cwd: string): Promise<DowntimeLogEn
 
 /**
  * Build the set of itemIds the downtime worker has already dispatched for
+ * the given kind (kind-scoped). Entries without an itemId (e.g.
+ * persistent-error events) are ignored. Shared by the audit/implement/plan/
+ * intake marker readers so every tier's scope guard stays identical.
+ */
+function dispatchedItemIds(entries: DowntimeLogEntry[], kind: string): Set<string> {
+  const ids = new Set<string>();
+  for (const e of entries) {
+    if (e.kind === kind && typeof e.itemId === 'string' && e.itemId.length > 0) {
+      ids.add(e.itemId);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Build the set of itemIds the downtime worker has already dispatched for
  * `/skill:audit` (`kind === 'audit'` entries only). Plan/intake markers are
  * scoped to their own tiers and must NOT suppress audit-tier selection
  * (audit-tier-only scope guard, WL-0MSLIY8ZR004QUSY). Entries without an
  * itemId (e.g. persistent-error events) are ignored.
  */
 export function auditDispatchedItemIds(entries: DowntimeLogEntry[]): Set<string> {
-  const ids = new Set<string>();
-  for (const e of entries) {
-    if (e.kind === 'audit' && typeof e.itemId === 'string' && e.itemId.length > 0) {
-      ids.add(e.itemId);
-    }
-  }
-  return ids;
+  return dispatchedItemIds(entries, 'audit');
 }
 
 /**
@@ -101,13 +132,45 @@ export function auditDispatchedItemIds(entries: DowntimeLogEntry[]): Set<string>
  * events) are ignored.
  */
 export function implementDispatchedItemIds(entries: DowntimeLogEntry[]): Set<string> {
-  const ids = new Set<string>();
+  return dispatchedItemIds(entries, 'implement');
+}
+
+/**
+ * Build the kind-scoped id → dispatched-at-stage map used by the plan/intake
+ * change-guard (RCA WL-0MSRBFFLN005W3VT design point 3): entries of the
+ * given kind map itemId to the worklog stage the item had when it was
+ * dispatched. Selection excludes a candidate while it is still at its
+ * dispatched-at stage; a stage advancement (or any stage differing from the
+ * recorded one) releases it. Entries without a recorded stage map to '' — a
+ * missing stage never suppresses selection (legacy pre-fix entries stay
+ * valid and do not freeze an item).
+ */
+export function dispatchedItemStages(entries: DowntimeLogEntry[], kind: string): Map<string, string> {
+  const stages = new Map<string, string>();
   for (const e of entries) {
-    if (e.kind === 'implement' && typeof e.itemId === 'string' && e.itemId.length > 0) {
-      ids.add(e.itemId);
+    if (e.kind === kind && typeof e.itemId === 'string' && e.itemId.length > 0) {
+      stages.set(e.itemId, typeof e.stage === 'string' ? e.stage : '');
     }
   }
-  return ids;
+  return stages;
+}
+
+/**
+ * Plan-tier marker map (`kind === 'plan'` entries only): itemId → stage at
+ * dispatch. A plan candidate (`intake_complete`) is excluded while a plan
+ * marker records the same stage; advancing the item releases it.
+ */
+export function planDispatchedItemStages(entries: DowntimeLogEntry[]): Map<string, string> {
+  return dispatchedItemStages(entries, 'plan');
+}
+
+/**
+ * Intake-tier marker map (`kind === 'intake'` entries only): itemId → stage
+ * at dispatch. An intake candidate (`idea`) is excluded while an intake
+ * marker records the same stage; advancing the item releases it.
+ */
+export function intakeDispatchedItemStages(entries: DowntimeLogEntry[]): Map<string, string> {
+  return dispatchedItemStages(entries, 'intake');
 }
 
 /**

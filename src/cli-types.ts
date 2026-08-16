@@ -41,6 +41,10 @@ export interface CreateOptions {
   noReSort?: boolean;
   /** Force a synchronous re-sort when run (blocks until complete) */
   reSortSync?: boolean;
+  /** Bypass the dedup guard: create a new item even when a recent non-terminal same-title item exists */
+  allowDuplicate?: boolean;
+  /** Dedup match window duration (e.g. "30s", "5m", "1h", or raw ms); default "5m" */
+  dedupWindow?: string;
 }
 
 export interface ListOptions {
@@ -71,6 +75,10 @@ export interface UpdateOptions {
   description?: string;
   descriptionFile?: string;
   status?: WorkItemStatus;
+  /** CAS guard: only apply the update if the current status matches */
+  ifStatus?: string;
+  /** CAS guard: only apply the update if the current stage matches */
+  ifStage?: string;
   priority?: WorkItemPriority;
   parent?: string;
   tags?: string;
@@ -144,6 +152,8 @@ export interface SyncOptions {
   reSortSync?: boolean;
   /** Lock-aware guard: skip (exit 0) if another sync is already in progress */
   ifIdle?: boolean;
+  /** Override the author-identity gate for foreign-email commits (never bypasses the empty-email gate) */
+  allowForeignAuthor?: boolean;
 }
 
 export interface SyncDebugOptions {

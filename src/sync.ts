@@ -262,6 +262,214 @@ export function filterRemoteDataByPrefix(
 }
 
 /**
+ * Sync author-identity gate (WL-0MSOYWWS4009HTCB).
+ *
+ * Refuses to merge worklog data when the remote ref contains commits authored
+ * by an identity other than the store's configured identity — a second store
+ * with an empty/foreign git identity can otherwise silently overwrite work
+ * items and invalidate audits. Pure + deterministic: the same input always
+ * yields the same result, so dry-run and normal syncs report the same refusal.
+ */
+
+export interface IncomingCommit {
+  hash: string;         // short commit hash (e.g. '5fc880a')
+  authorEmail: string;  // may be '' when the commit has an empty author email
+}
+
+export interface AuthorIdentityOptions {
+  remoteTrackingRef: string;     // e.g. refs/worklog/remotes/origin/worklog/data
+  expectedAuthorEmail?: string;  // repo `git config user.email`; undefined = not configured
+  allowForeignAuthor?: boolean;  // `wl sync --allow-foreign-author`
+}
+
+export interface AuthorIdentityViolation {
+  commit: string;
+  authorEmail: string;
+  reason: 'empty-email' | 'foreign-email';
+}
+
+export interface AuthorIdentityResult {
+  allowed: boolean;
+  violations: AuthorIdentityViolation[];
+  message: string;   // refusal message naming the offending commit(s) + remote ref; '' when allowed
+}
+
+/**
+ * Inspect the author emails of commits on the remote tracking ref since the
+ * last-known sync point (parent AC1):
+ *
+ *   git log <remoteTrackingRef> --format=%h%x09%ae [--not <lastSyncedRef>]
+ *
+ * The combined `%h%x09%ae` format carries both the short hash and the author
+ * email per line (a superset of `--format=%ae`) so the gate can name offending
+ * commits in its refusal message. When `lastSyncedRef` is absent/invalid the
+ * whole remote ref history is scanned (no `--not` exclusion).
+ */
+export async function getRemoteAuthorCommits(
+  remoteTrackingRef: string,
+  lastSyncedRef?: string
+): Promise<IncomingCommit[]> {
+  const args = ['log', remoteTrackingRef, '--format=%h%x09%ae'];
+  if (lastSyncedRef && lastSyncedRef.trim()) {
+    args.push('--not', lastSyncedRef.trim());
+  }
+
+  let stdout: string;
+  try {
+    stdout = await execGitCaptureStdout(args);
+  } catch {
+    // Unreadable/missing ref → no incoming commits to gate.
+    return [];
+  }
+
+  const commits: IncomingCommit[] = [];
+  for (const line of stdout.split('\n')) {
+    if (!line.trim()) continue;
+    const [hash, email] = line.split('\t');
+    commits.push({ hash: hash || '', authorEmail: email ?? '' });
+  }
+  return commits;
+}
+
+/**
+ * Pure gate decision over the incoming commits (parent AC2/AC3 + plan Q2/Q3):
+ *
+ *   - EMPTY author email → unconditional refusal. `allowForeignAuthor` never
+ *     bypasses the empty-email gate (Q3).
+ *   - email differs from `expectedAuthorEmail` → refused by default; allowed
+ *     when `allowForeignAuthor=true`.
+ *   - `expectedAuthorEmail` undefined (user.email unset) → only the
+ *     empty-email gate applies; the foreign-email comparison is skipped (Q2).
+ *
+ * The refusal message names the offending commit(s) and the remote ref.
+ */
+export function checkAuthorIdentity(
+  commits: IncomingCommit[],
+  options: AuthorIdentityOptions
+): AuthorIdentityResult {
+  const { remoteTrackingRef, expectedAuthorEmail, allowForeignAuthor = false } = options;
+  const violations: AuthorIdentityViolation[] = [];
+
+  for (const commit of commits) {
+    const email = (commit.authorEmail || '').trim();
+    if (email === '') {
+      violations.push({ commit: commit.hash, authorEmail: '', reason: 'empty-email' });
+    } else if (expectedAuthorEmail !== undefined && email !== expectedAuthorEmail && !allowForeignAuthor) {
+      violations.push({ commit: commit.hash, authorEmail: email, reason: 'foreign-email' });
+    }
+  }
+
+  const allowed = violations.length === 0;
+  const message = allowed ? '' : buildIdentityRefusalMessage(remoteTrackingRef, violations, expectedAuthorEmail);
+  return { allowed, violations, message };
+}
+
+function buildIdentityRefusalMessage(
+  remoteTrackingRef: string,
+  violations: AuthorIdentityViolation[],
+  expectedAuthorEmail: string | undefined
+): string {
+  const detailLines = violations.map(v =>
+    v.reason === 'empty-email'
+      ? `- ${v.commit}: empty author email`
+      : `- ${v.commit}: author email '${v.authorEmail}' does not match configured user.email '${expectedAuthorEmail}'`
+  );
+  return (
+    `Refusing to merge worklog data from ${remoteTrackingRef}: ` +
+    `${violations.length} incoming commit(s) fail the author-identity gate.\n` +
+    detailLines.join('\n')
+  );
+}
+
+/**
+ * Read the repo's configured `user.email` (the store identity the gate
+ * compares incoming commit authors against). Returns undefined when the key
+ * is unset or git is unavailable — the caller then skips the foreign-email
+ * comparison entirely (plan Q2) while still enforcing the empty-email gate.
+ */
+export async function getConfiguredUserEmail(): Promise<string | undefined> {
+  try {
+    const { stdout } = await gitExecAsync('git config user.email');
+    const email = stdout.trim();
+    return email || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Path of the last-synced-ref state file (mirrors the last-sync-time
+ * pattern). Persists the remote tracking ref tip after each successful
+ * non-dry-run sync so the next sync only inspects commits since that point.
+ */
+export function getLastSyncedRefPath(dataFilePath: string): string {
+  return path.join(path.dirname(dataFilePath), 'last-synced-ref');
+}
+
+/**
+ * Read the last-known sync point (remote tracking ref tip). Returns undefined
+ * when the state file is absent, empty, or unreadable — the gate then scans
+ * the whole remote ref history.
+ */
+export function readLastSyncedRef(dataFilePath: string): string | undefined {
+  try {
+    const raw = fs.readFileSync(getLastSyncedRefPath(dataFilePath), 'utf8').trim();
+    return raw || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Persist the last-known sync point after a successful non-dry-run sync.
+ */
+export function writeLastSyncedRef(dataFilePath: string, refSha: string): void {
+  try {
+    fs.writeFileSync(getLastSyncedRefPath(dataFilePath), `${refSha}\n`, 'utf8');
+  } catch {
+    // Non-critical state file; a failed write only means the next sync scans
+    // more history than necessary (the gate still runs).
+  }
+}
+
+/**
+ * Resolve the tip SHA of the remote tracking ref (used to persist
+ * last-synced-ref). Returns undefined when the ref cannot be resolved.
+ */
+export async function getRemoteTrackingRefSha(remoteTrackingRef: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await gitExecAsync(`git rev-parse ${escapeShellArg(remoteTrackingRef)}`);
+    return stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Wire the author-identity gate into a sync flow (parent AC4): inspect the
+ * incoming commits on the remote tracking ref since the last sync point and
+ * throw a refusal error naming the offending commit(s) + remote ref when the
+ * gate fails. Runs after the remote fetch, before any merge/import
+ * side-effects. Dry-run and normal modes report the refusal identically.
+ */
+export async function enforceAuthorIdentityGate(
+  remoteTrackingRef: string,
+  dataFilePath: string,
+  options: { expectedAuthorEmail?: string; allowForeignAuthor?: boolean }
+): Promise<void> {
+  const lastSyncedRef = readLastSyncedRef(dataFilePath);
+  const commits = await getRemoteAuthorCommits(remoteTrackingRef, lastSyncedRef);
+  const result = checkAuthorIdentity(commits, {
+    remoteTrackingRef,
+    expectedAuthorEmail: options.expectedAuthorEmail,
+    allowForeignAuthor: options.allowForeignAuthor,
+  });
+  if (!result.allowed) {
+    throw new Error(result.message);
+  }
+}
+
+/**
  * Terminal (closed) workflow stages. An item with `completed` status and a
  * terminal stage is a protected close state: it must never be silently
  * reverted by a stale remote `open`/`in_progress` copy during merge.
@@ -887,7 +1095,15 @@ function getRepoRelativePath(repoRootPath: string, filePath: string): { absolute
   return { absolutePath, relativePath };
 }
 
-export async function getRemoteDataFileContent(dataFilePath: string, target: GitTarget): Promise<string | null> {
+/**
+ * Fetch the remote worklog ref and return both its content and the remote
+ * tracking ref that was materialized. The tracking ref is what the
+ * author-identity gate (WL-0MSOYWWS4009HTCB) inspects.
+ */
+export async function getRemoteDataFileContentWithRef(
+  dataFilePath: string,
+  target: GitTarget
+): Promise<{ content: string | null; remoteTrackingRef: string }> {
   // Cross-project safety guard: never read the remote worklog ref of a
   // different repository than the one owning the data file.
   await assertDataFileInCwdRepo(dataFilePath);
@@ -900,16 +1116,20 @@ export async function getRemoteDataFileContent(dataFilePath: string, target: Git
 
   const { hasRemote, remoteTrackingRef } = await fetchTargetRef(target);
   if (!hasRemote) {
-    return null;
+    return { content: null, remoteTrackingRef };
   }
 
   const refAndPath = `${remoteTrackingRef}:${relativePath}`;
   try {
     // Avoid exec() maxBuffer issues for large JSONL.
-    return await execGitCaptureStdout(['show', refAndPath]);
+    return { content: await execGitCaptureStdout(['show', refAndPath]), remoteTrackingRef };
   } catch {
-    return null;
+    return { content: null, remoteTrackingRef };
   }
+}
+
+export async function getRemoteDataFileContent(dataFilePath: string, target: GitTarget): Promise<string | null> {
+  return (await getRemoteDataFileContentWithRef(dataFilePath, target)).content;
 }
 
 function removeWorktreeFiles(worktreePath: string): void {

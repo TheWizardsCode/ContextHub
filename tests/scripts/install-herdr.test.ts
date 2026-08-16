@@ -47,6 +47,41 @@ function makeTempDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
+/**
+ * Run a git command, asserting success. Identity and HOME are pinned so the
+ * temp repo is fully hermetic (no dependency on the developer's global git
+ * config). `gitBin` is the REAL git binary — see {@link realGitBin}.
+ */
+function git(gitBin: string, args: string[], cwd: string, tempHome: string) {
+  const result = spawnSync(gitBin, args, {
+    cwd,
+    encoding: 'utf8',
+    env: { ...process.env, HOME: tempHome },
+  });
+  expect(result.status, `git ${args.join(' ')} failed: ${result.stderr}`).toBe(0);
+  return result;
+}
+
+/**
+ * The vitest setup (tests/setup-tests.ts) prepends tests/cli/mock-bin to
+ * PATH, which ships a git mock that does NOT implement `worktree list`.
+ * The worktree-scenario test needs REAL git worktree mechanics, so resolve
+ * the real git binary by searching PATH with the mock-bin entries removed.
+ */
+function realGitBin(): string {
+  const mockBinDir = path.resolve(__dirname, '..', 'cli', 'mock-bin');
+  const candidates = (process.env.PATH ?? '')
+    .split(path.delimiter)
+    .filter((dir) => dir !== '' && path.resolve(dir) !== mockBinDir);
+  for (const dir of candidates) {
+    const candidate = path.join(dir, 'git');
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error('real git binary not found on PATH (needed for worktree-scenario test)');
+}
+
 describe('install-herdr script', () => {
   it('inserts the keybinding block exactly once when run twice (idempotent)', () => {
     const tempDir = makeTempDir('worklog-herdr-idempotent-');
@@ -153,5 +188,80 @@ describe('install-herdr script', () => {
     expect(countOccurrences(content, COMMAND_MARKER)).toBe(1);
     expect(countOccurrences(content, '[[keys.command]]')).toBe(1);
     expect(content).toContain('command = "herdr plugin action invoke ' + COMMAND_MARKER + '"');
+  });
+
+  it('links the plugin from the main checkout when run inside a linked worktree', () => {
+    // Reproduce the /skill:implement build: the postbuild hook runs
+    // scripts/install-herdr.sh from a linked git worktree. The script must
+    // register the global herdr plugin from the MAIN checkout, never the
+    // worktree — a worktree-based link dangles once implement.py finish
+    // deletes the worktree (WL-0MSRG481O007QVEA), silently breaking the
+    // prefix+l keybinding.
+    const tempBase = makeTempDir('worklog-herdr-wt-');
+    const repoDir = path.join(tempBase, 'repo');
+    const wtDir = path.join(tempBase, 'worktree');
+    fs.mkdirSync(path.join(repoDir, 'scripts'), { recursive: true });
+    fs.mkdirSync(path.join(repoDir, 'packages', 'herdr'), { recursive: true });
+
+    // Minimal repo layout mirroring this repository: the script plus the
+    // plugin manifest it links.
+    const repoRoot = path.resolve(__dirname, '..', '..');
+    fs.writeFileSync(
+      path.join(repoDir, 'scripts', 'install-herdr.sh'),
+      fs.readFileSync(path.join(repoRoot, 'scripts', 'install-herdr.sh'), 'utf8'),
+    );
+    fs.writeFileSync(
+      path.join(repoDir, 'packages', 'herdr', 'herdr-plugin.toml'),
+      'id = "worklog-selection-list"\n',
+    );
+
+    const gitBin = realGitBin();
+    git(gitBin, ['init', '-q', repoDir], tempBase, tempBase);
+    git(gitBin, ['-C', repoDir, 'config', 'user.email', 'test@example.com'], tempBase, tempBase);
+    git(gitBin, ['-C', repoDir, 'config', 'user.name', 'Worklog Test'], tempBase, tempBase);
+    git(gitBin, ['-C', repoDir, 'add', '-A'], tempBase, tempBase);
+    git(gitBin, ['-C', repoDir, 'commit', '-q', '-m', 'init'], tempBase, tempBase);
+    git(gitBin, ['-C', repoDir, 'worktree', 'add', '--detach', wtDir, 'HEAD'], tempBase, tempBase);
+
+    // Fake herdr CLI that records the manifest path it is asked to link.
+    const fakeBinDir = path.join(tempBase, 'bin');
+    fs.mkdirSync(fakeBinDir);
+    const linkLog = path.join(tempBase, 'herdr-link.log');
+    fs.writeFileSync(
+      path.join(fakeBinDir, 'herdr'),
+      '#!/usr/bin/env bash\necho "$@" >> "' + linkLog + '"\nexit 0\n',
+    );
+    fs.chmodSync(path.join(fakeBinDir, 'herdr'), 0o755);
+
+    // The script must see the REAL git (not the test-suite mock, which does
+    // not implement `worktree list`) so its main-checkout resolution runs
+    // against genuine worktree metadata. Build a PATH that has the fake
+    // herdr first, then the real git's directory, with mock-bin removed.
+    const realGitDir = path.dirname(gitBin);
+    const mockBinDir = path.resolve(__dirname, '..', 'cli', 'mock-bin');
+    const cleanPath = (process.env.PATH ?? '')
+      .split(path.delimiter)
+      .filter((dir) => dir !== '' && path.resolve(dir) !== mockBinDir);
+    const scriptPath = `${fakeBinDir}${path.delimiter}${realGitDir}${path.delimiter}${cleanPath.join(path.delimiter)}`;
+
+    const configPath = path.join(tempBase, 'herdr', 'config.toml');
+    const result = spawnSync('bash', [path.join(wtDir, 'scripts', 'install-herdr.sh')], {
+      cwd: wtDir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: scriptPath,
+        HERDR_CONFIG_PATH: configPath,
+      },
+    });
+    expect(result.status, `script failed: ${result.stderr}`).toBe(0);
+
+    // The fake herdr must have been asked to link the MAIN checkout's
+    // manifest — never the worktree's (the worktree may be deleted at any
+    // time, which is exactly the regression this guards against).
+    const log = fs.readFileSync(linkLog, 'utf8').trim();
+    const expectedManifest = path.join(repoDir, 'packages', 'herdr', 'herdr-plugin.toml');
+    expect(log).toContain(expectedManifest);
+    expect(log).not.toContain(wtDir);
   });
 });

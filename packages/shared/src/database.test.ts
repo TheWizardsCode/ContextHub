@@ -184,6 +184,74 @@ describe('update() no-op guard (WL-0MSORD6HC005QVZX)', () => {
   });
 });
 
+describe('updateIfMatches() CAS claim (RCA WL-0MSRBFFLN005W3VT design point 1)', () => {
+  function seed(status: string = 'open', stage: string = 'intake_complete'): WorkItem {
+    const item = makeItem({ id: 'WI-CAS1', status: status as WorkItem['status'], stage });
+    db.import([item]);
+    return item;
+  }
+
+  it('applies the update when status and stage both match', () => {
+    const seeded = seed('open', 'intake_complete');
+    const result = db.updateIfMatches(seeded.id, { status: 'in-progress', assignee: 'Map' }, {
+      status: 'open',
+      stage: 'intake_complete',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.item?.status).toBe('in-progress');
+    expect(result.item?.assignee).toBe('Map');
+  });
+
+  it('fails stale (no write) when the status no longer matches', () => {
+    const seeded = seed('completed', 'in_review');
+    // Another pane already claimed it: the guard expects completed, but the
+    // stored status is in-progress.
+    db.update(seeded.id, { status: 'in-progress' });
+    const result = db.updateIfMatches(seeded.id, { status: 'in-progress', assignee: 'Map' }, {
+      status: 'completed',
+      stage: 'in_review',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('stale');
+    // No write happened: the item is unchanged (still the other pane's claim).
+    expect(db.get(seeded.id)?.assignee).not.toBe('Map');
+  });
+
+  it('fails stale when the stage no longer matches', () => {
+    const seeded = seed('open', 'intake_complete');
+    db.update(seeded.id, { stage: 'plan_complete' });
+    const result = db.updateIfMatches(seeded.id, { status: 'in-progress' }, {
+      status: 'open',
+      stage: 'intake_complete',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('stale');
+    expect(db.get(seeded.id)?.status).toBe('open'); // unchanged
+  });
+
+  it('normalizes status spelling (in_progress matches stored in-progress)', () => {
+    const seeded = seed('open', 'idea');
+    const result = db.updateIfMatches(seeded.id, { status: 'in-progress' }, { status: 'open' });
+    expect(result.ok).toBe(true);
+    // And the guard itself is spelling-insensitive on the stored value too.
+    const r2 = db.updateIfMatches(seeded.id, { assignee: 'Map' }, { status: 'in_progress' });
+    expect(r2.ok).toBe(true);
+  });
+
+  it('fails not-found for an unknown id', () => {
+    const result = db.updateIfMatches('WI-NOPE', { status: 'in-progress' }, { status: 'open' });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('not-found');
+  });
+
+  it('applies without a guard when no expected state is given', () => {
+    const seeded = seed('open', 'idea');
+    const result = db.updateIfMatches(seeded.id, { status: 'in-progress' });
+    expect(result.ok).toBe(true);
+    expect(result.item?.status).toBe('in-progress');
+  });
+});
+
 describe('upsertItems() no-op guard (WL-0MSORD6HC005QVZX)', () => {
   it('preserves updatedAt when only description differs by a trailing newline', () => {
     const original = makeItem();

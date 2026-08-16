@@ -287,5 +287,21 @@
     "view": "both",
     "label": "sprint",
     "description": "Return to the default unfiltered browse list (WL-0MSGSE15000746F7)."
+  },
+  {
+    "chord": ["n", "e"],
+    "command": "/herdr:note-edit <note_text>",
+    "view": "detail",
+    "label": "note edit",
+    "description": "Add or edit the inline [NOTE ...] marker on the paragraph under the md-viewer cursor.",
+    "work_item_types": ["bug", "docs", "feature", "task", "chore", "epic"]
+  },
+  {
+    "chord": ["n", "d"],
+    "command": "/herdr:note-delete",
+    "view": "detail",
+    "label": "note delete",
+    "description": "Delete the inline [NOTE ...] marker from the paragraph under the md-viewer cursor.",
+    "work_item_types": ["bug", "docs", "feature", "task", "chore", "epic"]
   }
 ]

@@ -221,6 +221,7 @@ configuration.
 | `quotaExhausted` | NOT retried | Checkpoint saved + terminal error displayed |
 | `timeout` | Retried | Exponential backoff with configurable delay |
 | `terminated` | NOT retried | Checkpoint saved + terminal error displayed |
+| `parseError` (JSON) | Single-shot continue | One plain "continue" prompt, no backoff loop |
 
 ### Configuration
 
@@ -250,10 +251,32 @@ Recovery behaviour is driven by `DEFAULT_RECOVERY_CONFIG` in
 The module registers a `/retry` command with the following subcommands:
 
 - `/retry` — Manual trigger: auto-detects the last error and applies the correct
-  recovery strategy (retry, compact+continue, or warning)
+  recovery strategy (retry, compact+continue, single-shot continue, or warning)
 - `/retry status` — Displays diagnostics: per-category attempt counts, last
   error messages, is-retrying flags, continuation count
 - `/retry reset` — Resets all retry counters and state
+
+### Mid-Session Compaction Auto-Continue
+
+When Pi performs a **mid-session** compaction (threshold auto-compaction while the
+agent still has work in flight), the module automatically resumes the agent via
+the invisible-continue loop (`agent.prompt([])`) — no manual "continue" needed.
+
+- **Auto-continues when**: queued messages are pending (`ctx.hasPendingMessages()`),
+  the last assistant turn was interrupted (`stopReason` `length`/`error`), or the
+  agent was still running when compaction started.
+- **Does not auto-continue when**: the compaction is overflow recovery
+  (`willRetry: true` — Pi retries the aborted turn natively, continuing again
+  would double-continue) or an end-of-session compaction (agent settled, nothing
+  pending — e.g. manual `/compact` after a completed turn). Manual `/compact`
+  auto-continues only when demonstrably mid-session (pending work).
+- **Safety guards**: user abort (ESC), session switches, the retry-loop mutex, and
+  the continuation-in-flight flag are all respected — no continuation starts when
+  the user has aborted, the session changed, or another continuation/retry is
+  already running.
+
+The classification lives in `shouldAutoContinueAfterCompaction()` in
+`recovery.ts`; the `session_compact` handler is wired in `register-recovery.ts`.
 
 ### Architecture
 
@@ -261,11 +284,11 @@ The recovery module is implemented in `Worklog/lib/recovery/` and consists of:
 
 | File | Purpose |
 |------|---------|
-| `error-patterns.ts` | Error classification patterns for all 7 categories |
+| `error-patterns.ts` | Error classification patterns for all 8 categories |
 | `retry-logic.ts` | Exponential backoff, state managers, interruptible sleep |
-| `recovery.ts` | Compact-and-continue and checkpoint-and-terminate handlers |
+| `recovery.ts` | Compact-and-continue, checkpoint-and-terminate, and single-shot parse-error continue handlers |
 | `retry-command.ts` | `/retry` command interface (status, reset, manual-trigger) |
-| `register-recovery.ts` | Extension lifecycle wiring (agent_end, turn_end, session_start) |
+| `register-recovery.ts` | Extension lifecycle wiring (agent_end, turn_end, session_start, session_compact) |
 
 The module is auto-registered during extension initialization in `index.ts`.
 
@@ -274,6 +297,11 @@ The module is auto-registered during extension initialization in `index.ts`.
 The extension includes a **proactive lease release** module that automatically
 releases the previous session's model lease when a new Pi session is created
 (via `/new`). This speeds up model reclamation on the Local Proxy provider.
+
+The release logic lives in the **shared module** `@worklog/shared/lease-release`
+(`packages/shared/src/lease-release.ts`) so the Pi extension and the Herdr
+plugin's pane-close release executor share a single implementation and never
+drift (WL-0MSGI7UIH008USVB).
 
 ### How It Works
 
@@ -299,8 +327,13 @@ releases the previous session's model lease when a new Pi session is created
 
 ### Technical Notes
 
-- Implemented in `Worklog/lease-release.ts`.
-- The proxy configuration is read at runtime from `~/.pi/agent/models.json`.
-- Results are cached per-extension-lifecycle to avoid repeated filesystem reads.
+- The release logic is implemented in the shared module
+  `packages/shared/src/lease-release.ts` and re-exported by
+  `Worklog/lease-release.ts`.
+- The proxy configuration is read at runtime from `~/.pi/agent/models.json`
+  and cached at module level (a single filesystem read per process).
 - Registered in `Worklog/index.ts` via `registerLeaseRelease(pi)`.
-- Tests are in `Worklog/lease-release.test.ts`.
+- Tests are in `Worklog/lease-release.test.ts` (extension wiring) and
+  `packages/shared/src/lease-release.test.ts` (shared HTTP behavior).
+- The Herdr plugin runs the same release on pi-pane close — see
+  `packages/herdr/README.md` ("Pi agent dispatch").

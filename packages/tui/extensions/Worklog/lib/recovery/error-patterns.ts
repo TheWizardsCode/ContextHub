@@ -5,7 +5,7 @@
  * per-category detection with configurable regex patterns that can be
  * overridden via settings.
  *
- * Seven error categories are defined:
+ * Eight error categories are defined:
  * - Rate limits (429)        → NOT retried (informative error)
  * - Server errors (5xx)      → retried with configurable backoff
  * - Auth errors (401/403)    → NOT retried (checkpoint + terminal)
@@ -13,6 +13,7 @@
  * - Quota exhausted          → NOT retried (checkpoint + terminal)
  * - Timeout                  → retried with configurable backoff
  * - Terminated               → NOT retried (checkpoint + terminal)
+ * - Parse errors (JSON)      → single-shot continue (no backoff)
  */
 
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
@@ -27,6 +28,7 @@ export enum ErrorCategory {
   QUOTA_EXHAUSTED = 'quotaExhausted',
   TIMEOUT = 'timeout',
   TERMINATED = 'terminated',
+  PARSE_ERROR = 'parseError',
   UNKNOWN = 'unknown',
 }
 
@@ -62,6 +64,7 @@ export interface RecoveryConfig {
   quotaExhausted: RecoveryCategoryConfig;
   timeout: RecoveryCategoryConfig;
   terminated: RecoveryCategoryConfig;
+  parseError: RecoveryCategoryConfig;
 }
 
 // ── Type guard ─────────────────────────────────────────────────────────
@@ -154,6 +157,31 @@ const DEFAULT_TERMINATED_PATTERNS: RegExp[] = [
   /no\s*such\s*model/i,
 ];
 
+const DEFAULT_PARSE_ERROR_PATTERNS: RegExp[] = [
+  // V8 / Node.js JSON.parse messages
+  /expected\s+['\"]|['\"]\s+after\s+property\s+value/i,
+  /unexpected\s+end\s+of\s+json\s+input/i,
+  /unexpected\s+token/i,
+  /unexpected\s+number\s+in\s+json/i,
+  /unexpected\s+string\s+in\s+json/i,
+  /unexpected\s+non-whitespace\s+character\s+after\s+json/i,
+  /unterminated\s+string\s+in\s+json/i,
+  /bad\s+control\s+character\s+in\s+string\s+literal\s+in\s+json/i,
+  /json\s+parse\s+error/i,
+  // Python json.JSONDecodeError texts
+  /expecting\s+value/i,
+  /expecting\s+','\s*delimiter/i,
+  /expecting\s+':'\s*delimiter/i,
+  /expecting\s+property\s+name\s+enclosed\s+in\s+double\s+quotes/i,
+  /unterminated\s+string\s+starting\s+at/i,
+  /invalid\s+control\s+character\s+at/i,
+  /extra\s+data/i,
+  /json\s+decode\s+error/i,
+  // Generic JSON parse mentions
+  /invalid\s+json/i,
+  /json\.parse/i,
+];
+
 // ── Default config ────────────────────────────────────────────────────
 
 export const DEFAULT_RECOVERY_CONFIG: RecoveryConfig = {
@@ -199,6 +227,13 @@ export const DEFAULT_RECOVERY_CONFIG: RecoveryConfig = {
     patterns: DEFAULT_TERMINATED_PATTERNS,
     baseDelayMs: 1000,
     maxDelayMs: 30000,
+  },
+  parseError: {
+    enabled: true,
+    patterns: DEFAULT_PARSE_ERROR_PATTERNS,
+    baseDelayMs: 0,
+    maxDelayMs: 0,
+    continuationPrompt: 'continue',
   },
 };
 
@@ -262,6 +297,11 @@ export function isTerminated(message: unknown): boolean {
   return matchesAny(message.errorMessage, DEFAULT_TERMINATED_PATTERNS);
 }
 
+export function isParseError(message: unknown): boolean {
+  if (!isAssistantMessage(message)) return false;
+  return matchesAny(message.errorMessage, DEFAULT_PARSE_ERROR_PATTERNS);
+}
+
 // ── Unified classifier ────────────────────────────────────────────────
 
 /**
@@ -287,6 +327,7 @@ export function classifyError(message: unknown): ErrorCategory {
     if (isTimeout(message)) return ErrorCategory.TIMEOUT;
     if (isServerError(message)) return ErrorCategory.SERVER_ERROR;
     if (isTerminated(message)) return ErrorCategory.TERMINATED;
+    if (isParseError(message)) return ErrorCategory.PARSE_ERROR;
 
     return ErrorCategory.UNKNOWN;
   } catch {
@@ -309,6 +350,7 @@ export function getDefaultPatterns(category: ErrorCategory): RegExp[] {
     case ErrorCategory.QUOTA_EXHAUSTED: return DEFAULT_QUOTA_PATTERNS;
     case ErrorCategory.TIMEOUT: return DEFAULT_TIMEOUT_PATTERNS;
     case ErrorCategory.TERMINATED: return DEFAULT_TERMINATED_PATTERNS;
+    case ErrorCategory.PARSE_ERROR: return DEFAULT_PARSE_ERROR_PATTERNS;
     default: return [];
   }
 }

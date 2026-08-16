@@ -32,8 +32,11 @@ describe('update priority cascade', () => {
   });
 
   async function createItem(flags = ''): Promise<string> {
+    // --allow-duplicate: the dedup guard (WL-0MSTNG2QF0049B97) would
+    // otherwise return the first item for subsequent same-title creates,
+    // collapsing the parent+children setup this test needs.
     const { stdout } = await execAsync(
-      `tsx ${cliPath} --json create -t "Cascade item" ${flags}`
+      `tsx ${cliPath} --json create -t "Cascade item" --allow-duplicate ${flags}`
     );
     return JSON.parse(stdout).workItem.id;
   }

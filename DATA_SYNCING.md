@@ -64,6 +64,43 @@ Set in `.worklog/config.yaml` (local) or `.worklog/config.defaults.yaml` (team d
   - Git remote used for sync
 - `syncBranch` (string, default `refs/worklog/data`)
   - Git ref used for the canonical JSONL file
+- `syncAllowForeignAuthor` (boolean, default false)
+  - Allow merging commits authored by a different identity than the store's
+    configured `user.email` (see [Author-Identity Gate](#author-identity-gate)).
+    The CLI flag `wl sync --allow-foreign-author` takes precedence over this
+    config value.
+
+### Author-Identity Gate
+
+Before importing anything, `wl sync` inspects the author emails of the commits
+on the remote worklog ref since the last-known sync point
+(`git log <remoteTrackingRef> --format=%h%x09%ae --not <lastSyncedRef>`). If any
+incoming commit fails the gate, the sync refuses with a non-zero exit code, a
+clear error naming the offending commit(s) and the remote ref, and leaves the
+local database untouched:
+
+- **Empty author email** → unconditional refusal. A commit with no author email
+  (e.g. a store whose git `user.email` is unset) is never merged, even with
+  `--allow-foreign-author`.
+- **Foreign author email** → refused by default when it differs from the repo's
+  configured `user.email`; allowed when `wl sync --allow-foreign-author` is
+  passed or `syncAllowForeignAuthor: true` is set in config.
+- **`user.email` unset** → the foreign-email comparison is skipped (only the
+  empty-email gate applies).
+
+Example refusal:
+
+```
+✗ Sync failed: Refusing to merge worklog data from refs/worklog/remotes/origin/worklog/data: 1 incoming commit(s) fail the author-identity gate.
+- 5fc880a: empty author email
+```
+
+The gate exists because a second worklog store with an empty/foreign git
+identity can silently overwrite work items and invalidate audits (see
+[Refused Sync / Polluted Ref Recovery](docs/SYNC_IDENTITY_GATE.md)). The
+last-known sync point is persisted in `.worklog/last-synced-ref` after each
+successful non-dry-run sync; when the file is absent, the whole remote ref
+history is scanned.
 
 ### Troubleshooting
 

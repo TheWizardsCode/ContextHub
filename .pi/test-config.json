@@ -1,0 +1,6 @@
+{
+  "suiteCommands": [
+    "npm --silent test -- tests/cli",
+    "npm --silent test -- tests/unit"
+  ]
+}

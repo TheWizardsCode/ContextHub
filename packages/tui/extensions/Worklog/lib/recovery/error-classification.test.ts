@@ -17,6 +17,7 @@ import {
   isQuotaExhausted,
   isTimeout,
   isTerminated,
+  isParseError,
   ErrorCategory,
   type RecoveryConfig,
 } from './error-patterns.js';
@@ -224,6 +225,53 @@ describe('isTerminated', () => {
   });
 });
 
+// ── Parse Error (JSON) ────────────────────────────────────────────────
+
+describe('isParseError', () => {
+  it('detects V8/Node JSON.parse messages', () => {
+    expect(isParseError(makeErrorMsg('Expected \'"\' or \'}\' after property value in JSON at position 123'))).toBe(true);
+    expect(isParseError(makeErrorMsg('Unexpected end of JSON input'))).toBe(true);
+    expect(isParseError(makeErrorMsg("Unexpected token '}' ... is not valid JSON"))).toBe(true);
+    expect(isParseError(makeErrorMsg('Unexpected number in JSON'))).toBe(true);
+    expect(isParseError(makeErrorMsg('Unexpected string in JSON at position 42'))).toBe(true);
+    expect(isParseError(makeErrorMsg('Unexpected non-whitespace character after JSON at position 7'))).toBe(true);
+    expect(isParseError(makeErrorMsg('Unterminated string in JSON at position 10'))).toBe(true);
+    expect(isParseError(makeErrorMsg('Bad control character in string literal in JSON'))).toBe(true);
+  });
+
+  it('detects Python JSONDecodeError texts', () => {
+    expect(isParseError(makeErrorMsg('Expecting value: line 1 column 123 (char 122)'))).toBe(true);
+    expect(isParseError(makeErrorMsg("Expecting ',' delimiter: line 1 column 5 (char 4)"))).toBe(true);
+    expect(isParseError(makeErrorMsg("Expecting ':' delimiter: line 1 column 9 (char 8)"))).toBe(true);
+    expect(isParseError(makeErrorMsg('Expecting property name enclosed in double quotes: line 2'))).toBe(true);
+    expect(isParseError(makeErrorMsg('Unterminated string starting at: line 1 column 3 (char 2)'))).toBe(true);
+    expect(isParseError(makeErrorMsg('Invalid control character at: line 1 column 3 (char 2)'))).toBe(true);
+    expect(isParseError(makeErrorMsg('Extra data: line 2 column 1 (line 1)'))).toBe(true);
+  });
+
+  it('detects generic JSON parse mentions', () => {
+    expect(isParseError(makeErrorMsg('JSON parse error: Unexpected token o'))).toBe(true);
+    expect(isParseError(makeErrorMsg('Invalid JSON received from provider'))).toBe(true);
+    expect(isParseError(makeErrorMsg('SyntaxError: JSON.parse: unexpected character at line 1'))).toBe(true);
+  });
+
+  it('returns false for unrelated errors', () => {
+    expect(isParseError(makeErrorMsg('500 Internal Server Error'))).toBe(false);
+    expect(isParseError(makeErrorMsg('Request timed out'))).toBe(false);
+    expect(isParseError(makeErrorMsg('429 Too Many Requests'))).toBe(false);
+    expect(isParseError(makeErrorMsg('context length exceeded'))).toBe(false);
+  });
+
+  it('returns false for non-error messages', () => {
+    expect(isParseError(makeErrorMsg('', 'stop'))).toBe(false);
+    expect(isParseError({ role: 'assistant', stopReason: 'stop' } as any)).toBe(false);
+  });
+
+  it('returns false when errorMessage is missing', () => {
+    expect(isParseError({ role: 'assistant', stopReason: 'error' } as any)).toBe(false);
+  });
+});
+
 // ── classifyError (unified dispatch) ──────────────────────────────────
 
 describe('classifyError', () => {
@@ -261,6 +309,14 @@ describe('classifyError', () => {
   it('classifies terminated errors', () => {
     expect(classifyError(makeErrorMsg('content_filter'))).toBe(ErrorCategory.TERMINATED);
     expect(classifyError(makeErrorMsg('Response terminated by content policy'))).toBe(ErrorCategory.TERMINATED);
+  });
+
+  it('classifies JSON parse errors', () => {
+    expect(classifyError(makeErrorMsg('Expected \'"\' or \'}\' after property value'))).toBe(ErrorCategory.PARSE_ERROR);
+    expect(classifyError(makeErrorMsg('Unexpected end of JSON input'))).toBe(ErrorCategory.PARSE_ERROR);
+    expect(classifyError(makeErrorMsg('Expecting value: line 1 column 5'))).toBe(ErrorCategory.PARSE_ERROR);
+    expect(classifyError(makeErrorMsg('JSON parse error: unexpected token'))).toBe(ErrorCategory.PARSE_ERROR);
+    expect(classifyError(makeErrorMsg('Invalid JSON'))).toBe(ErrorCategory.PARSE_ERROR);
   });
 
   it('returns UNKNOWN for unrecognized errors', () => {
@@ -305,12 +361,14 @@ describe('configurable error patterns', () => {
       quotaExhausted: { enabled: false, patterns: [/credit/i, /quota/i], baseDelayMs: 1000, maxDelayMs: 30000 },
       timeout: { enabled: true, patterns: [/timeout/i, /timed out/i], baseDelayMs: 2000, maxDelayMs: 60000 },
       terminated: { enabled: false, patterns: [/terminated/i, /content.filter/i], baseDelayMs: 1000, maxDelayMs: 30000 },
+      parseError: { enabled: true, patterns: [/unexpected end of json/i, /expecting value/i], baseDelayMs: 0, maxDelayMs: 0 },
     };
 
     expect(fullConfig.rateLimit.enabled).toBe(false);
     expect(fullConfig.serverError.enabled).toBe(true);
     expect(fullConfig.serverError.baseDelayMs).toBe(2000);
     expect(fullConfig.contextLength.enabled).toBe(true);
+    expect(fullConfig.parseError.enabled).toBe(true);
   });
 });
 

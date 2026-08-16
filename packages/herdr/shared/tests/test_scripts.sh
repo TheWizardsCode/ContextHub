@@ -237,7 +237,7 @@ fi
 echo ""
 echo "=== Test: existing options still work (--pane-name, --focus, --no-focus, --cwd, --model) ==="
 out="$(run_send --pane-name "My Agent" --focus --cwd /tmp/proj --model code "hello")" || true
-if grep -q "pane run grid-pane-5 exec pi --model code" "$HERDR_LOG" 2>/dev/null; then
+if grep -q "pane run grid-pane-5 exec bash .*run-pi-agent.sh herdr-.* --model code" "$HERDR_LOG" 2>/dev/null; then
   pass "--model forwarded to pi invocation"
 else
   fail "--model should be forwarded to pi"
@@ -292,7 +292,7 @@ else
   fail "send-to-pi should tolerate an unwritable --pane-id-file path"
 fi
 
-if grep -q "pane run grid-pane-5 exec pi" "$HERDR_LOG" 2>/dev/null; then
+if grep -q "pane run grid-pane-5 exec bash .*run-pi-agent.sh herdr-" "$HERDR_LOG" 2>/dev/null; then
   pass "send-to-pi --pane-id-file still spawns pi after writing the file"
 else
   fail "send-to-pi --pane-id-file should still spawn pi"

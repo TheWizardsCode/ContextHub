@@ -491,6 +491,158 @@ describe('WorkItemListState.refreshItems — preserve selection by ID', () => {
   });
 });
 
+describe('nested expansion — 3+ level hierarchies (WL-0MSQ3FH1K000MMJW)', () => {
+  /**
+   * Build a 3-level hierarchy: EPIC → FEATURE → TASK. Children carry the
+   * depth the fetcher assigns (fetchChildrenForItem), mirroring production
+   * shape where grandchildren are fetched with depth = parent depth + 1.
+   */
+  function makeThreeLevelTree(): WorkItem[] {
+    const epic = makeItem('EPIC', 'in_progress');
+    const feature = {
+      ...makeItem('FEATURE', 'in_progress'),
+      depth: 1,
+      childCount: 1,
+      children: [{ ...makeItem('TASK', 'in_progress'), depth: 2 }],
+    };
+    epic.childCount = 1;
+    epic.children = [feature];
+    return [epic];
+  }
+
+  it('recursively flattens 3+ level hierarchies with correct depths', () => {
+    const state = new WorkItemListState(makeThreeLevelTree(), TERM_80x24);
+
+    // Only EPIC visible initially.
+    expect(state.getFlattenedItems().map((i) => [i.id, i.depth])).toEqual([
+      ['EPIC', undefined],
+    ]);
+
+    // Expand EPIC → FEATURE appears at depth 1; TASK stays hidden (FEATURE
+    // not expanded yet).
+    state.toggleExpand('EPIC');
+    expect(state.getFlattenedItems().map((i) => [i.id, i.depth])).toEqual([
+      ['EPIC', undefined],
+      ['FEATURE', 1],
+    ]);
+
+    // Expand FEATURE → TASK appears at depth 2.
+    state.toggleExpand('FEATURE');
+    expect(state.getFlattenedItems().map((i) => [i.id, i.depth])).toEqual([
+      ['EPIC', undefined],
+      ['FEATURE', 1],
+      ['TASK', 2],
+    ]);
+  });
+
+  it('collapsing a child removes its grandchildren from the flattened list', () => {
+    const state = new WorkItemListState(makeThreeLevelTree(), TERM_80x24);
+    state.toggleExpand('EPIC');
+    state.toggleExpand('FEATURE');
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['EPIC', 'FEATURE', 'TASK']);
+
+    state.toggleExpand('FEATURE');
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['EPIC', 'FEATURE']);
+  });
+
+  it('collapsing an ancestor removes the entire nested subtree', () => {
+    const state = new WorkItemListState(makeThreeLevelTree(), TERM_80x24);
+    state.toggleExpand('EPIC');
+    state.toggleExpand('FEATURE');
+
+    state.toggleExpand('EPIC');
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['EPIC']);
+  });
+
+  it('Enter (select) on a child with children toggles expansion instead of opening the detail view', () => {
+    const state = new WorkItemListState(makeThreeLevelTree(), TERM_80x24);
+    state.toggleExpand('EPIC');
+    // Select FEATURE (flattened index 1).
+    state.selectedIndex = 1;
+    expect(state.getFlattenedItems()[1].id).toBe('FEATURE');
+
+    const action = handleKeypress(state, '\r', TERM_80x24);
+
+    // Enter toggles expansion — never opens the detail view.
+    expect(action).toBe('toggle-expand');
+    expect(state.mode).toBe('list');
+    expect(state.isExpanded('FEATURE')).toBe(true);
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['EPIC', 'FEATURE', 'TASK']);
+  });
+
+  it('Enter on a child toggles back to collapsed on the second press', () => {
+    const state = new WorkItemListState(makeThreeLevelTree(), TERM_80x24);
+    state.toggleExpand('EPIC');
+    state.selectedIndex = 1; // FEATURE
+    handleKeypress(state, '\r', TERM_80x24); // expand
+    handleKeypress(state, '\r', TERM_80x24); // collapse
+    expect(state.isExpanded('FEATURE')).toBe(false);
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['EPIC', 'FEATURE']);
+  });
+
+  it('Tab on a child with childCount > 0 returns toggle-expand even when children not yet loaded', () => {
+    // FEATURE has childCount but NO children array yet (production shape:
+    // grandchildren are fetched on demand when first expanded).
+    const epic = makeItem('EPIC');
+    epic.childCount = 1;
+    epic.children = [{ ...makeItem('FEATURE'), depth: 1, childCount: 2 }];
+    const state = new WorkItemListState([epic], TERM_80x24);
+    state.toggleExpand('EPIC');
+    state.selectedIndex = 1; // FEATURE
+
+    const action = handleKeypress(state, '\t', TERM_80x24);
+    expect(action).toBe('toggle-expand');
+  });
+
+  it('Tab on an item without children returns null (no toggle, no crash)', () => {
+    const epic = makeItem('EPIC');
+    epic.childCount = 1;
+    epic.children = [{ ...makeItem('FEATURE'), depth: 1 }]; // no childCount
+    const state = new WorkItemListState([epic], TERM_80x24);
+    state.toggleExpand('EPIC');
+    state.selectedIndex = 1; // FEATURE
+
+    expect(handleKeypress(state, '\t', TERM_80x24)).toBeNull();
+  });
+
+  it('getItemDepth reports the hierarchy position (0 = top-level)', () => {
+    const state = new WorkItemListState(makeThreeLevelTree(), TERM_80x24);
+    expect(state.getItemDepth('EPIC')).toBe(0);
+    expect(state.getItemDepth('FEATURE')).toBe(1);
+    expect(state.getItemDepth('TASK')).toBe(2);
+    // Unknown IDs default to 0 (safe fetch depth).
+    expect(state.getItemDepth('UNKNOWN')).toBe(0);
+  });
+
+  it('attachChildren attaches fetched children to the live tree object at any depth', () => {
+    const state = new WorkItemListState(makeThreeLevelTree(), TERM_80x24);
+    const freshGrandchild = { ...makeItem('TASK2'), depth: 2 };
+    state.attachChildren('FEATURE', [freshGrandchild]);
+
+    // The tree object (not a flattened copy) received the children.
+    const epic = state.items[0];
+    const feature = epic.children![0];
+    expect(feature.children).toEqual([freshGrandchild]);
+    // And the flattened view renders them once FEATURE is expanded.
+    state.toggleExpand('EPIC');
+    state.toggleExpand('FEATURE');
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['EPIC', 'FEATURE', 'TASK2']);
+  });
+
+  it('nested expanded state survives refreshItems (carry-over restores the subtree)', () => {
+    const state = new WorkItemListState(makeThreeLevelTree(), TERM_80x24);
+    state.toggleExpand('EPIC');
+    state.toggleExpand('FEATURE');
+
+    // Refresh with a children-less EPIC (production fetcher shape): the
+    // carried-over subtree must keep TASK visible.
+    const freshEpic = { ...makeItem('EPIC'), childCount: 1 };
+    state.refreshItems([freshEpic]);
+
+    expect(state.getFlattenedItems().map((i) => i.id)).toEqual(['EPIC', 'FEATURE', 'TASK']);
+  });
+});
+
 describe('executeResolvedCommand', () => {
   it('returns noop when command has <id> but no items', () => {
     const state = new WorkItemListState([], TERM_80x24);
@@ -2531,5 +2683,212 @@ describe('Related Docs — open in markdown viewer (WL-0MSGTLSUT002NF29)', () =>
       resetWorklogDir();
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+// ── Inline-note editing: viewer integration (WL-0MSKV6SKK008MMXR) ─────
+// Red-phase: these tests pin the note-edit chord wiring, the paragraph
+// cursor state, and the write-back path that children #2/#3 implement.
+// New-module symbols are accessed via dynamic imports so this file stays
+// loadable — pre-existing tests remain green while these are RED.
+
+describe('inline-note editing — viewer integration (WL-0MSKV6SKK008MMXR)', () => {
+  it('registers a note-edit chord for the detail view in shortcuts.json', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['n', 'e'], 'detail');
+    expect(entry).toBeDefined();
+    expect(entry?.command).toContain('note-edit');
+  });
+
+  it('registers a note-delete chord for the detail view in shortcuts.json', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['n', 'd'], 'detail');
+    expect(entry).toBeDefined();
+    expect(entry?.command).toContain('note-delete');
+  });
+
+  it('note chords are not active in list mode', () => {
+    const registry = loadShortcutConfig();
+    expect(registry.lookupChordEntry(['n', 'e'], 'list')).toBeUndefined();
+    expect(registry.lookupChordEntry(['n', 'd'], 'list')).toBeUndefined();
+  });
+
+  it('processChordInput resolves the note-edit chord into a command', () => {
+    const registry = loadShortcutConfig();
+    const chordState = createChordState();
+    // Real flow: detail view on a non-idea item — 'n' alone must not
+    // resolve the intake chord (stages ['idea']), so it becomes a leader.
+    const step1 = processChordInput(chordState, 'n', registry, 'detail', 'in_review');
+    const step2 = processChordInput(chordState, 'e', registry, 'detail', 'in_review');
+    expect(step1).toBeNull(); // still collecting
+    expect(step2).toBe('chord-complete');
+    expect(chordState.resolvedCommand).toContain('note-edit');
+  });
+
+  it('tracks a paragraph cursor in the md viewer (detailNoteCursor)', async () => {
+    // Child #3 adds a cursor-over-paragraphs state field to the detail
+    // viewer. It must default to the first paragraph (index 0) and be
+    // exposed on the state object for chord handlers to mutate.
+    const wl = await import('./worklist.js');
+    const state = new wl.WorkItemListState(
+      [makeKeyFilesItem('WL-NOTES', ['notes.md'])],
+      TERM_80x24,
+    );
+    expect(state.detailNoteCursor).toBe(0);
+  });
+
+  it('applyNoteEditToFile reads, edits, and writes back via injected reader/writer', async () => {
+    const wl = await import('./worklist.js');
+    const { insertNoteMarker } = await import('./md-note-edit.js');
+    const readFile = vi.fn(() => Promise.resolve('# Doc\n\nPara one.\n\nPara two.'));
+    const writeFile = vi.fn(() => Promise.resolve());
+
+    const result = await wl.applyNoteEditToFile(
+      makeKeyFilesItem('WL-NOTES', ['notes.md']),
+      'notes.md',
+      { kind: 'insert', paragraphIndex: 1, text: 'new note' },
+      readFile,
+      writeFile,
+    );
+
+    expect(result).toBeDefined();
+    expect(writeFile).toHaveBeenCalledWith(
+      'notes.md',
+      expect.stringContaining('[NOTE'),
+    );
+  });
+
+  it('applyNoteEditToFile surfaces the new note id for sync', async () => {
+    const wl = await import('./worklist.js');
+    const readFile = vi.fn(() => Promise.resolve('# Doc\n\nPara one.'));
+    const writeFile = vi.fn(() => Promise.resolve());
+
+    const result = await wl.applyNoteEditToFile(
+      makeKeyFilesItem('WL-NOTES', ['notes.md']),
+      'notes.md',
+      { kind: 'insert', paragraphIndex: 1, text: 'note text' },
+      readFile,
+      writeFile,
+    );
+
+    expect(result.newNoteId).toMatch(/^LOCAL-/);
+  });
+
+  it('applyNoteEditToFile creates the note child on a podcast script with a resolvable episode (mocked wl)', async () => {
+    const wl = await import('./worklist.js');
+    const mockExec = vi.fn(async (_bin: string, args: string[]) => {
+      if (args.includes('create')) {
+        return { stdout: JSON.stringify({ success: true, workItem: { id: 'OSL-NOTE9' } }), stderr: '' };
+      }
+      return { stdout: JSON.stringify({ success: true }), stderr: '' };
+    });
+    setExecFileAsync(mockExec as any);
+
+    const script = `---\npodcast_title: Episode One\n---\n\nNova: Line one.\n\nSorra: Line two.`;
+    const readFile = vi.fn(() => Promise.resolve(script));
+    const writeFile = vi.fn(() => Promise.resolve());
+    const episodes = [
+      { id: 'OSL-EP1', title: 'Episode One', status: 'open', stage: 'in_review', priority: 'medium', description: 'ep' },
+    ];
+
+    const result = await wl.applyNoteEditToFile(
+      makeKeyFilesItem('WL-EP', ['episode.podcast.md']),
+      'episode.podcast.md',
+      { kind: 'insert', paragraphIndex: 1, text: 'fact check' },
+      readFile,
+      writeFile,
+      episodes as any,
+    );
+
+    expect(result.newNoteId).toBe('OSL-NOTE9');
+    expect(result.warning).toBeUndefined();
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      expect.arrayContaining(['create', '--parent', 'OSL-EP1']),
+    );
+    const written = writeFile.mock.calls[0]?.[1] as string;
+    expect(written).toContain('[NOTE OSL-NOTE9: fact check]');
+  });
+
+  it('applyNoteEditToFile uses a LOCAL id + warning on an unresolvable episode and never calls wl (mocked wl)', async () => {
+    const wl = await import('./worklist.js');
+    const mockExec = vi.fn(async (_bin: string, _args: string[]) =>
+      ({ stdout: JSON.stringify({ success: true }), stderr: '' }));
+    setExecFileAsync(mockExec as any);
+
+    const script = '# Doc\n\nPara one. [NOTE LOCAL-abc: existing local note]';
+    const readFile = vi.fn(() => Promise.resolve(script));
+    const writeFile = vi.fn(() => Promise.resolve());
+
+    const result = await wl.applyNoteEditToFile(
+      makeKeyFilesItem('WL-NOTES', ['notes.md']),
+      'notes.md',
+      { kind: 'insert', paragraphIndex: 1, text: 'another note' },
+      readFile,
+      writeFile,
+      [{ id: 'OSL-EP1', title: 'Episode One', status: 'open', stage: 'in_review', priority: 'medium', description: 'ep' }] as any,
+    );
+
+    expect(result.newNoteId).toMatch(/^LOCAL-/);
+    expect(result.warning).toBeTruthy();
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it('applyNoteEditToFile marks a podcast note DONE and comments on the child on delete (mocked wl)', async () => {
+    const wl = await import('./worklist.js');
+    const mockExec = vi.fn(async (_bin: string, args: string[]) => {
+      if (args.includes('comment')) {
+        return { stdout: JSON.stringify({ success: true }), stderr: '' };
+      }
+      return { stdout: JSON.stringify({ success: true }), stderr: '' };
+    });
+    setExecFileAsync(mockExec as any);
+
+    const script = 'text [NOTE OSL-0MSG7Y0C6005QFES: original] more';
+    const readFile = vi.fn(() => Promise.resolve(script));
+    const writeFile = vi.fn(() => Promise.resolve());
+    const episodes = [
+      { id: 'OSL-EP1', title: 'Episode One', status: 'open', stage: 'in_review', priority: 'medium', description: 'ep' },
+    ];
+
+    const result = await wl.applyNoteEditToFile(
+      makeKeyFilesItem('WL-EP', ['episode.podcast.md']),
+      'episode.podcast.md',
+      { kind: 'remove', noteId: 'OSL-0MSG7Y0C6005QFES', text: 'Resolved' },
+      readFile,
+      writeFile,
+      episodes as any,
+    );
+
+    expect(result.doc).toContain('[NOTE OSL-0MSG7Y0C6005QFES: DONE Resolved]');
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      expect.arrayContaining(['comment', 'add', 'OSL-0MSG7Y0C6005QFES']),
+    );
+    const written = writeFile.mock.calls[0]?.[1] as string;
+    expect(written).toContain('DONE Resolved');
+  });
+
+  it('applyNoteEditToFile removes a LOCAL marker without any wl call (generic markdown delete)', async () => {
+    const wl = await import('./worklist.js');
+    const mockExec = vi.fn(async (_bin: string, _args: string[]) =>
+      ({ stdout: JSON.stringify({ success: true }), stderr: '' }));
+    setExecFileAsync(mockExec as any);
+
+    const script = 'para one [NOTE LOCAL-abc: note] more';
+    const readFile = vi.fn(() => Promise.resolve(script));
+    const writeFile = vi.fn(() => Promise.resolve());
+
+    const result = await wl.applyNoteEditToFile(
+      makeKeyFilesItem('WL-NOTES', ['notes.md']),
+      'notes.md',
+      { kind: 'remove', noteId: 'LOCAL-abc' },
+      readFile,
+      writeFile,
+      [{ id: 'OSL-EP1', title: 'Episode One', status: 'open', stage: 'in_review', priority: 'medium', description: 'ep' }] as any,
+    );
+
+    expect(result.doc).not.toContain('[NOTE');
+    expect(mockExec).not.toHaveBeenCalled();
   });
 });
