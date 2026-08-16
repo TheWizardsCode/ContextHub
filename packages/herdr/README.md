@@ -12,6 +12,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is executed **visibly in a new herdr pane** (see `scripts/run-in-pane.sh`) so the user sees the command line and its output; the wrapper keeps the pane's process alive so the pane stays open for inspection — dismiss it with Enter or close it with `prefix+x`
 - **Command input form** — When a chord command contains unknown `<identifier>` placeholders (e.g. `!!wl update <id> --status <status> --stage <stage>`), the plugin shows a modal input form so you can fill in the values before the command runs. Known identifiers like `<id>` are still auto-substituted with the selected item's ID. The form is a full-pane page (no border/centering) that wraps text at the pane width and grows downward as content is entered. See [Command input form](#command-input-form).
 - **Keyboard navigation** — Arrow keys or j/k to navigate (wraps at list boundaries), Page Up/Down, g/G for first/last, Enter to select, Escape to go back
+- **Fold indicators** — When the worklist has more items than fit the visible list area, the list shows dim `▼ more` / `▲ more` markers so you always know when items are hidden below the fold or above the current scroll position (WL-0MSG8YXYJ008PWJJ). See [Selection List Behaviour](#selection-list-behaviour).
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text.
 - **Agent status tracking** — When an agent command carrying a work-item ID is dispatched, the worklist records which pi agent pane is attached to that item (persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes). The list shows a live agent-status icon at the start of each row's icon prefix: 🟢 working, ⛔ blocked, ⚪ idle. Done/closed items (and items without an agent) show no icon. The icon is a fixed-width slot so the item-ID column never shifts. See [Agent status icons](#agent-status-icons).
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
@@ -562,6 +563,35 @@ argument keeps the smart-selection behaviour described above.
 The "top N of M" header reflects the **actual displayed count** (N), which
 may exceed `browseItemCount` when the mandatory set is large.
 
+### Fold indicators (below-the-fold / above-the-fold markers)
+
+When the flattened item list has more rows than fit in the visible list
+area (header + items + separators + footer), the renderer shows two dim
+markers so you can tell the list is truncated or scrolled
+(WL-0MSG8YXYJ008PWJJ):
+
+- **`▼ more`** — shown at the bottom of the items region whenever items
+exist below the fold (the visible window does not reach the end of the
+list). At scroll position 0 with a long list, this marker always appears.
+- **`▲ more`** — shown at the top of the items region whenever the list is
+scrolled down (`scrollOffset > 0`), i.e. items exist above the current
+viewport.
+
+Both markers are **display-only rows**: they are dim-styled (consistent
+with other non-interactive chrome such as footer hints and the filter
+indication), are never selectable, and do not consume navigation state,
+selection index, or hierarchy scroll offset — `j`/`k` scrolling behaves
+exactly as before. The marker wording is intentionally generic ("more")
+rather than an exact count because group-separator rows make exact counts
+unreliable.
+
+Indicator rows are included in the render budget, so the `rows - 1`
+line-count invariant (the notification line always fits, the header never
+scrolls off the top) holds with indicators active. Edge case: when the
+bottom indicator row reservation trims the window so the list fully fits,
+the `▼ more` marker is omitted — the list then shows every remaining item
+without an indicator.
+
 ## Metadata panel
 
 The list view reserves the bottom rows of the pane for a metadata panel
@@ -819,7 +849,7 @@ packages/herdr/
 
 - **No direct database access** — The plugin uses the `wl` CLI as the backend data source, ensuring compatibility without duplicating data-access logic.
 - **Terminal UI via raw mode** — The TUI uses raw stdin mode and ANSI escape codes for rendering, making it compatible with any Herdr pane without additional dependencies.
-- **Fixed-height pane rendering** — The list renderer budgets its output to `rows - 1` lines (header + items + group separators + fill + footer), reserving the last row for the transient notification line (e.g. `[Synced]`, `[Refresh failed]`). The active stage filter is shown in the header only (` (filtered: <stage>)`) — there is no standalone filter bar or blank chrome row. Group separator lines count against the budget, so the pane never scrolls the header or top items off the top of the view regardless of item/group count (see WL-0MSAAON63003N6LO, WL-0MSGTSPXK007POB1).
+- **Fixed-height pane rendering** — The list renderer budgets its output to `rows - 1` lines (header + items + group separators + fill + footer), reserving the last row for the transient notification line (e.g. `[Synced]`, `[Refresh failed]`). The active stage filter is shown in the header only (` (filtered: <stage>)`) — there is no standalone filter bar or blank chrome row. Group separator lines count against the budget, and the below/above-the-fold `▼ more`/`▲ more` indicator rows (WL-0MSG8YXYJ008PWJJ) are reserved in the budget before the visible window is trimmed, so the pane never scrolls the header or top items off the top of the view regardless of item/group count (see WL-0MSAAON63003N6LO, WL-0MSGTSPXK007POB1).
 - **Testable core** — All state management, formatting, and keyboard handling is pure logic in `worklist.ts`, fully testable without a terminal.
 - **Toast notifications instead of bottom-line status** — Transient status feedback (refresh outcomes, sync outcomes, sent/skipped command feedback, errors) is surfaced via Herdr toast notifications (`herdr notification show`) instead of being appended to the bottom of the pane output. This keeps the rendered pane within the terminal height budget, so the list header and top lines are never pushed off the top of the pane. Toast delivery requires `ui.toast.delivery = "herdr"` in `~/.config/herdr/config.toml`; toasts appear in the bottom-right corner by default. The helper lives in `notify.ts` and is fire-and-forget (failures are tolerated silently).
 - **Command routing via callback** — When a chord resolves to a non-`/wl` command, it is passed to an `onCommand` callback (set by the entry point) which routes it by prefix:

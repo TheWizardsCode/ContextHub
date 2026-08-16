@@ -142,6 +142,101 @@ describe('createListRenderer — line-count invariant', () => {
   });
 });
 
+// ── Fold indicators (WL-0MSG8YXYJ008PWJJ) ─────────────────────────────
+// When the flattened item list overflows the visible list area, the renderer
+// emits dim `▲ more` / `▼ more` markers so users know items are hidden above
+// or below the fold. Indicators are display-only rows: they consume no
+// navigation state or selection index, and they are included in the render
+// budget so the `rows - 1` invariant still holds.
+
+describe('createListRenderer — fold indicators', () => {
+  const renderer = createListRenderer();
+
+  it('shows ▼ more when items exist below the fold at scroll offset 0', () => {
+    const items: WorkItem[] = Array.from({ length: 30 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    expect(output).toContain('▼ more');
+    expect(output).not.toContain('▲ more');
+  });
+
+  it('shows ▲ more when scrolled down (items above the viewport)', () => {
+    const items: WorkItem[] = Array.from({ length: 30 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 5, 5, TERM_80x24, null, 'list', null);
+    expect(output).toContain('▲ more');
+  });
+
+  it('shows both ▲ more and ▼ more when scrolled with items remaining below', () => {
+    const items: WorkItem[] = Array.from({ length: 30 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 5, 5, TERM_80x24, null, 'list', null);
+    expect(output).toContain('▲ more');
+    expect(output).toContain('▼ more');
+  });
+
+  it('renders no indicators when all items fit in the visible area', () => {
+    const items: WorkItem[] = [makeItem('A'), makeItem('B'), makeItem('C')];
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    expect(output).not.toContain('▼ more');
+    expect(output).not.toContain('▲ more');
+  });
+
+  it('renders no ▼ more at the last scroll position (nothing below the fold)', () => {
+    const items: WorkItem[] = Array.from({ length: 20 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 19, 19, TERM_80x24, null, 'list', null);
+    expect(output).not.toContain('▼ more');
+  });
+
+  it('preserves the rows - 1 line-count invariant with both indicators active', () => {
+    const items: WorkItem[] = Array.from({ length: 30 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 5, 5, TERM_80x24, null, 'list', null);
+    expect(output).toContain('▲ more');
+    expect(output).toContain('▼ more');
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    // Simulate render()'s notification append: still fits within the pane.
+    const withNotification =
+      output.split('\n').slice(0, TERM_80x24.rows - 1).join('\n') + '\n' + ' [Synced]';
+    expect(withNotification.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows);
+  });
+
+  it('preserves the line-count invariant with indicators and group separators', () => {
+    const grouped: WorkItem[] = Array.from({ length: 30 }, (_, i) => ({
+      ...makeItem(`G${i}`),
+      group: i % 3,
+      groupLabel: `Group ${i % 3}`,
+    }));
+    const output = renderer(grouped, 5, 5, TERM_80x24, null, 'list', null);
+    expect(output).toContain('▲ more');
+    expect(output).toContain('▼ more');
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+  });
+
+  it('renders indicators as dim, non-selectable display-only rows', () => {
+    const items: WorkItem[] = Array.from({ length: 30 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 3, 3, TERM_80x24, null, 'list', null);
+    expect(output).toContain('▲ more');
+    expect(output).toContain('▼ more');
+    const lines = output.split('\n');
+    // Indicators are dim-styled and carry no selection marker.
+    const topLine = lines.find((l) => l.includes('▲ more'))!;
+    expect(topLine).toContain(ANSI.dim);
+    expect(topLine).not.toContain('▸');
+    const bottomLine = lines.find((l) => l.includes('▼ more'))!;
+    expect(bottomLine).toContain(ANSI.dim);
+    expect(bottomLine).not.toContain('▸');
+    // The selected item (index 3) is still rendered with the selection marker.
+    expect(output).toContain('▸');
+  });
+
+  it('does not change getVisibleItems semantics (indicators are renderer-only)', () => {
+    const items: WorkItem[] = Array.from({ length: 30 }, (_, i) => makeItem(`I${i}`));
+    const state = new WorkItemListState(items, TERM_80x24);
+    // Unchanged: the visible window is the first listHeight items, no
+    // indicator rows are consumed from navigation state.
+    expect(state.getVisibleItems()).toHaveLength(13);
+    expect(state.getVisibleItems()[0].id).toBe('I0');
+    expect(state.getVisibleItems()[12].id).toBe('I12');
+  });
+});
+
 // ── Filter chrome removal (WL-0MSGTSPXK007POB1) ────────────────────────
 // The list mode no longer emits a blank line after the header/banner nor a
 // standalone filter status bar; the active stage filter is indicated in the

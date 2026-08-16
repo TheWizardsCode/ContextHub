@@ -2213,6 +2213,26 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       // Drop trailing items until items + separators fit the pane height.
       visible = visible.slice(0, -1);
     }
+
+    // ── Fold indicators (WL-0MSG8YXYJ008PWJJ) ─────────────────────
+    // Show dim `▲ more` / `▼ more` markers so users can tell the list
+    // is scrolled or truncated.  Indicator rows consume budget so the
+    // `rows - 1` invariant still holds.
+    const hasTopIndicator = scrollOffset > 0;
+    const hasBottomIndicator = scrollOffset + visible.length < flatItems.length;
+    const indicatorRows = (hasTopIndicator ? 1 : 0) + (hasBottomIndicator ? 1 : 0);
+    const effectiveBudget = budgetForItemsAndSeps - indicatorRows;
+    while (visible.length > 0 && visible.length + countSeparators(visible) > effectiveBudget) {
+      // Drop trailing items until items + separators + indicators fit.
+      visible = visible.slice(0, -1);
+    }
+    // Edge case: the trim may have made the list fully fit — the bottom
+    // indicator is then omitted. This terminates in a single pass (no loop).
+    const bottomIndicatorActive = scrollOffset + visible.length < flatItems.length;
+    // Top indicator — first row of the items region when scrolled down.
+    if (hasTopIndicator) {
+      output.push(` ${ANSI.dim}▲ more${ANSI.reset}`);
+    }
     let lastDisplayedGroup: number | undefined;
     let numSeparators = 0;
     for (let i = 0; i < visible.length; i++) {
@@ -2244,8 +2264,14 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       }
     }
 
-    // Fill remaining rows (header + items + separators)
-    const used = chromeLines + visible.length + numSeparators;
+    // Bottom indicator — last row of the items region when items remain
+    // below the fold (after the trimming edge case is resolved).
+    if (bottomIndicatorActive) {
+      output.push(` ${ANSI.dim}▼ more${ANSI.reset}`);
+    }
+
+    // Fill remaining rows (header + indicators + items + separators)
+    const used = chromeLines + (hasTopIndicator ? 1 : 0) + (bottomIndicatorActive ? 1 : 0) + visible.length + numSeparators;
     for (let i = used; i < listArea; i++) {
       output.push('');
     }
