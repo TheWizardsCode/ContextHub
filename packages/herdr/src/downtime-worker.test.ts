@@ -2646,10 +2646,11 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
 // duration PER SLOT IDENTITY so the SAME N slots are free for the full
 // threshold — never any-N transient availability.
 //
-// Red phase: all tests in this section fail against the current
-// implementation (which has no per-slot parsing, no per-slot tracker, and no
-// per-slot evaluateIdle/worker routing) until the implementation feature
-// WL-0MSP28LSY007NDYX lands.
+// The proxy (observability.py) serves `slot_id` as an INTEGER
+// (`slot.get("id", i)`); `parseLlamaStatus` coerces numeric ids to strings
+// and clamps negatives to 0 (WL-0MSVRMAWM007QNR5 — the Aug 15-16
+// zero-dispatch regression fix). Regression tests mirror the live payload
+// at parse level and end-to-end through the worker tick.
 
 // ── parseLlamaStatus: optional per-slot fields (AC1/AC2) ───────────────
 
@@ -2698,9 +2699,65 @@ describe('parseLlamaStatus per-slot slots array', () => {
     expect(parseLlamaStatus({ ...base, slots: [{ is_processing: false }] })).toBeNull();
   });
 
-  it('treats a non-string or empty slot_id as malformed → null', () => {
+  it('treats an empty-string slot_id as malformed → null (zero-length guard preserved)', () => {
     expect(parseLlamaStatus({ ...base, slots: [{ slot_id: '', is_processing: false }] })).toBeNull();
-    expect(parseLlamaStatus({ ...base, slots: [{ slot_id: 42, is_processing: false }] })).toBeNull();
+  });
+
+  it('coerces numeric slot_ids to strings (proxy contract: int, WL-0MSVRMAWM007QNR5)', () => {
+    const status = parseLlamaStatus({
+      ...base,
+      slots: [
+        { slot_id: 0, is_processing: false },
+        { slot_id: 3, is_processing: true },
+      ],
+    });
+    expect(status).not.toBeNull();
+    expect(status!.slots).toEqual([
+      { slot_id: '0', is_processing: false },
+      { slot_id: '3', is_processing: true },
+    ]);
+  });
+
+  it('clamps negative numeric slot_ids to 0 (WL-0MSVRMAWM007QNR5)', () => {
+    const status = parseLlamaStatus({
+      ...base,
+      slots: [{ slot_id: -2, is_processing: false }],
+    });
+    expect(status).not.toBeNull();
+    expect(status!.slots).toEqual([{ slot_id: '0', is_processing: false }]);
+  });
+
+  it('treats a non-finite or non-integer numeric slot_id as malformed → null (fail-closed)', () => {
+    expect(parseLlamaStatus({ ...base, slots: [{ slot_id: Number.NaN, is_processing: false }] })).toBeNull();
+    expect(parseLlamaStatus({ ...base, slots: [{ slot_id: Number.POSITIVE_INFINITY, is_processing: false }] })).toBeNull();
+    expect(parseLlamaStatus({ ...base, slots: [{ slot_id: 1.5, is_processing: false }] })).toBeNull();
+  });
+
+  it('regression: parses the live proxy payload (integer slot_ids, WL-0MSVRMAWM007QNR5)', () => {
+    // observability.py serves `"slot_id": slot.get("id", i)` — an integer —
+    // per slot. Before the fix, parseLlamaStatus rejected the numeric
+    // slot_id and every 30s poll failed closed to busy — the Aug 15-16
+    // zero-dispatch regression. Mirror the live payload exactly.
+    const livePayload = {
+      llama_server_running: true,
+      active_query: false,
+      model_switch_in_progress: false,
+      available_slots: 4,
+      total_slots: 4,
+      slots: [
+        { slot_id: 0, is_processing: false },
+        { slot_id: 1, is_processing: false },
+        { slot_id: 2, is_processing: false },
+        { slot_id: 3, is_processing: false },
+      ],
+    };
+    const status = parseLlamaStatus(livePayload);
+    expect(status).not.toBeNull();
+    expect(status!.slots!.map((s) => s.slot_id)).toEqual(['0', '1', '2', '3']);
+    // The coerced payload is a valid idle status for the default N=0 AND
+    // for per-slot mode (0 < N < total) — dispatch can resume.
+    expect(evaluateIdle(status!, 0)).toBe(true);
+    expect(evaluateIdle(status!, 2)).toBe(true);
   });
 
   it('treats a non-boolean or missing is_processing as malformed → null', () => {
@@ -2901,6 +2958,37 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     const before = await worker.tick();
     expect(before.dispatched).toBe(false);
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    const at = await worker.tick();
+    expect(at.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('regression: a live proxy payload (integer slot_ids) idles and dispatches (WL-0MSVRMAWM007QNR5)', async () => {
+    // observability.py serves `"slot_id": slot.get("id", i)` — an integer —
+    // for each slot. Before the fix, parseLlamaStatus rejected the numeric
+    // slot_id, so every poll failed closed to busy and the worker never
+    // dispatched (the Aug 15-16 zero-dispatch regression). This mirrors the
+    // live payload end-to-end: poll → parse → idle run → threshold → dispatch.
+    const livePayload = {
+      llama_server_running: true,
+      active_query: false,
+      model_switch_in_progress: false,
+      available_slots: 4,
+      total_slots: 4,
+      slots: [
+        { slot_id: 0, is_processing: false },
+        { slot_id: 1, is_processing: false },
+        { slot_id: 2, is_processing: false },
+        { slot_id: 3, is_processing: false },
+      ],
+    };
+    const { worker, deps, cfg } = makePerSlotWorker({ status: livePayload });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    expect(worker.idleSince ?? null).not.toBeNull(); // idle run starts
 
     vi.setSystemTime(start + cfg.thresholdMs);
     const at = await worker.tick();

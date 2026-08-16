@@ -175,7 +175,14 @@ export interface LlamaStatus {
   slots?: LlamaSlot[];
 }
 
-/** Per-slot detail served inside `LlamaStatus.slots`. */
+/**
+ * Per-slot detail served inside `LlamaStatus.slots` (NORMALIZED by
+ * `parseLlamaStatus`). The proxy (observability.py) serves `slot_id` as an
+ * INTEGER (`slot.get("id", i)`); the parser coerces numeric ids to strings
+ * and clamps negatives to 0 (WL-0MSVRMAWM007QNR5), so the normalized
+ * `slot_id` is always a non-empty string — the per-slot idle tracker keys
+ * its timers by it.
+ */
 export interface LlamaSlot {
   slot_id: string;
   is_processing: boolean;
@@ -428,10 +435,14 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
 
   // Optional per-slot identity (LP-0MSG5TA7Y002GN39): absent on pre-feature
   // proxies (slots stays undefined — backward compatible). A malformed
-  // array (non-array, entry missing/empty/non-string slot_id, non-boolean
+  // array (non-array, entry missing/empty slot_id, non-boolean
   // is_processing, duplicate slot_ids) is ambiguous → null (busy,
   // fail-closed): per-slot tracking must never run on identity it cannot
-  // trust. An empty array is valid (zero slots reported free).
+  // trust. slot_id accepts BOTH the string contract and the proxy's
+  // integer contract (`slot.get("id", i)` in observability.py): numeric
+  // ids are coerced to strings and negatives clamped to 0
+  // (WL-0MSVRMAWM007QNR5 — the Aug 15-16 zero-dispatch regression). An
+  // empty array is valid (zero slots reported free).
   let slots: LlamaSlot[] | undefined;
   if (o.slots !== undefined) {
     if (!Array.isArray(o.slots)) return null;
@@ -440,11 +451,25 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     for (const entry of o.slots) {
       if (typeof entry !== 'object' || entry === null) return null;
       const slot = entry as Record<string, unknown>;
-      if (typeof slot.slot_id !== 'string' || slot.slot_id.length === 0) return null;
+      // slot_id: string contract preserves the existing zero-length
+      // rejection guard (empty identity is ambiguous); the proxy's
+      // integer contract is accepted and coerced to string with negative
+      // values clamped to 0 (WL-0MSVRMAWM007QNR5). A non-finite or
+      // non-integer number is ambiguous → null (busy, fail-closed).
+      let slotId: string;
+      if (typeof slot.slot_id === 'string') {
+        if (slot.slot_id.length === 0) return null;
+        slotId = slot.slot_id;
+      } else if (typeof slot.slot_id === 'number') {
+        if (!Number.isFinite(slot.slot_id) || !Number.isInteger(slot.slot_id)) return null;
+        slotId = String(Math.max(0, slot.slot_id));
+      } else {
+        return null;
+      }
       if (typeof slot.is_processing !== 'boolean') return null;
-      if (seen.has(slot.slot_id)) return null; // duplicate identity → ambiguous
-      seen.add(slot.slot_id);
-      parsed.push({ slot_id: slot.slot_id, is_processing: slot.is_processing });
+      if (seen.has(slotId)) return null; // duplicate identity → ambiguous
+      seen.add(slotId);
+      parsed.push({ slot_id: slotId, is_processing: slot.is_processing });
     }
     slots = parsed;
   }
