@@ -76,6 +76,33 @@ describe('wl list --root-only', () => {
     expect(ids).toEqual(['TEST-1']);
   });
 
+  it('excludes children from the audit-tier selection command (completed/in_review, WL-0MSTLFW14000KPEC)', async () => {
+    // AC3 (WL-0MSTLFW14000KPEC): the herdr downtime worker's audit tier
+    // runs `wl list --status completed --stage in_review --root-only --json`
+    // (packages/herdr/src/index.ts getNextAuditCandidate) so child items in
+    // completed/in_review are never returned as audit candidates — only
+    // parent (root) items are dispatched for /skill:audit.
+    seedWorkItems(state.tempDir, [
+      { id: 'TEST-1', title: 'Root epic', status: 'completed', stage: 'in_review' },
+      { id: 'TEST-2', title: 'Child of epic', parentId: 'TEST-1', status: 'completed', stage: 'in_review' },
+      { id: 'TEST-3', title: 'Standalone root', status: 'completed', stage: 'in_review' },
+    ]);
+
+    const { stdout } = await execAsync(
+      `tsx ${cliPath} list --status completed --stage in_review --root-only --json`
+    );
+    const result = JSON.parse(stdout);
+    expect(result.success).toBe(true);
+    const ids = result.workItems.map((wi: any) => wi.id);
+    expect(ids).toContain('TEST-1');
+    expect(ids).toContain('TEST-3');
+    expect(ids).not.toContain('TEST-2');
+    // Every returned item is a root item (no parent).
+    for (const wi of result.workItems) {
+      expect(wi.parentId).toBeNull();
+    }
+  });
+
   it('rejects combining --parent with --root-only with a clear error', async () => {
     seedWorkItems(state.tempDir, [
       { id: 'TEST-1', title: 'Root epic' },

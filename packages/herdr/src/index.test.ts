@@ -706,12 +706,52 @@ describe('createDowntimeDeps', () => {
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
     const result = await deps.getNextAuditCandidate('/repo');
 
+    // AC1 (WL-0MSTLFW14000KPEC): the audit tier must request --root-only so
+    // completed/in_review CHILDREN are excluded server-side and only parent
+    // items are audit candidates.
     expect(mockExec).toHaveBeenCalledWith(
       'wl',
-      ['list', '--status', 'completed', '--stage', 'in_review', '--json'],
+      ['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json'],
       expect.anything(),
     );
     expect(result).toEqual({ ok: true, candidate: { id: 'WL-STALE', title: 'Stale audit', stage: 'audit' } });
+  });
+
+  it('getNextAuditCandidate requests root-only items so child items never enter the audit tier (WL-0MSTLFW14000KPEC)', async () => {
+    // AC3: child items in completed/in_review must never be dispatched as
+    // audit candidates — only parent (root) items belong in the producer
+    // review queue. The exclusion is delegated to the wl server filter
+    // (`--root-only`, WL-0MS964SIA0057ABR), so the client contract is that
+    // the `wl list` invocation carries --root-only; the mock output below
+    // simulates what `wl list --root-only` returns (the child with a
+    // parentId is filtered out server-side and never reaches selection).
+    const now = Date.now();
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 2,
+        workItems: [
+          { id: 'WL-PARENT', title: 'Parent epic', auditedAt: null, updatedAt: new Date(now - 60_000).toISOString(), sortIndex: 100 },
+          { id: 'WL-ROOT', title: 'Standalone root', auditedAt: null, updatedAt: new Date(now - 60_000).toISOString(), sortIndex: 200 },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextAuditCandidate('/repo');
+
+    // AC1/AC3: the invocation MUST carry --root-only — without it, a child
+    // item sitting in completed/in_review would be returned by `wl list` and
+    // dispatched independently, which is exactly the bug being fixed.
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      ['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json'],
+      expect.anything(),
+    );
+    // Only root-level items (no parentId) can ever be candidates.
+    expect(result).toEqual({ ok: true, candidate: { id: 'WL-PARENT', title: 'Parent epic', stage: 'audit' } });
   });
 
   it('getNextAuditCandidate returns ok:true with no candidate when no stale/missing-audit item exists', async () => {

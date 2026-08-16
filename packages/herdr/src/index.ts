@@ -406,15 +406,19 @@ export function createDowntimeDeps(
       try {
         // Audit tier (WL-0MSI8H3HP000K0RG): select the first completed /
         // in_review item WITHOUT a valid audit so the producer-review queue
-        // (the release gate) is drained during idle time. Same fail-closed
-        // semantics as getNextItem, with the same error channel
+        // (the release gate) is drained during idle time. --root-only
+        // (WL-0MSTLFW14000KPEC): only PARENT items are audit candidates —
+        // completed/in_review children (sub-tasks) are never dispatched
+        // independently; the producer reviews deliverable units (parents),
+        // whose audits cover their children. Same fail-closed semantics as
+        // getNextItem, with the same error channel
         // (WL-0MSLWJ2KP0002SV0): a wl/parse failure resolves {ok:false} — a
         // CLI-error strike — NOT a null that is indistinguishable from a
         // genuinely empty audit tier. The bounded timeout
         // (WL-0MSJIPHD0001L1J9) applies here too.
         const { stdout } = await getExecFileAsync()(
           'wl',
-          buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--json']),
+          buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
         );
         const candidates = parseAuditCandidatesOutput(stdout);

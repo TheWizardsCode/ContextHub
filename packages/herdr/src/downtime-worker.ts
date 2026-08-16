@@ -16,7 +16,9 @@
  *    threshold).
  *  - `dispatchDowntimeWork` — dispatch orchestration: completed/in_review
  *    items without a valid audit (modified within the last 7 days) →
- *    `/skill:audit <id>` (audit tier, WL-0MSI8H3HP000K0RG), then the
+ *    `/skill:audit <id>` (audit tier, WL-0MSI8H3HP000K0RG; ROOT-ONLY —
+ *    children are never dispatched independently,
+ *    WL-0MSTLFW14000KPEC), then the
  *    implement tier (WL-0MSMAYPQP001FLR6): the highest-priority open
  *    plan_complete item with risk Low / effort Small|XS →
  *    `/skill:implement <id>`, then `wl next --stage intake_complete` →
@@ -578,7 +580,10 @@ export interface ImplementCandidate {
 
 /**
  * A completed/in_review item candidate for the downtime audit tier.
- * Parsed from `wl list --status completed --stage in_review --json`.
+ * Parsed from `wl list --status completed --stage in_review --root-only
+ * --json` — root-only (WL-0MSTLFW14000KPEC): only parent items (no
+ * parentId) can be audit candidates; children are never dispatched
+ * independently.
  */
 export interface AuditCandidate {
   id: string;
@@ -640,6 +645,11 @@ export interface DowntimeWorkerDeps {
   /**
    * Look up the next completed/in_review item WITHOUT a valid audit (the
    * audit dispatch tier, which runs before the implement/plan/intake tiers).
+   * ROOT-ONLY (WL-0MSTLFW14000KPEC): the `wl list` lookup carries
+   * `--root-only`, so completed/in_review children (items with a parentId)
+   * are excluded server-side and are never dispatched independently — only
+   * parent items are audit candidates (the producer reviews deliverable
+   * units, whose audits cover their children).
    * Uses the same `DowntimeNextResult` error channel as `getNextItem`
    * (WL-0MSLWJ2KP0002SV0): `{ok:false}` is a wl/parse failure (a CLI-error
    * strike — never a candidate), while `{ok:true, candidate:null}` is a
@@ -902,7 +912,10 @@ async function dispatchClaimedTier(
  * WL-0MSI8H3HP000K0RG): a completed/in_review item WITHOUT a valid audit AND
  * NOT already dispatched for audit by this worker →
  * `/skill:audit <id>` (the dispatched-marker exclusion,
- * WL-0MSLIY8ZR004QUSY, is applied by `deps.getNextAuditCandidate`); then the
+ * WL-0MSLIY8ZR004QUSY, is applied by `deps.getNextAuditCandidate`). The
+ * audit tier is ROOT-ONLY (WL-0MSTLFW14000KPEC): `wl list --root-only`
+ * excludes completed/in_review children, so only parent items are ever
+ * dispatched for audit — sub-tasks are never audited independently; then the
  * implement tier (WL-0MSMAYPQP001FLR6): the highest-priority open
  * plan_complete item with risk Low / effort Small|XS → `/skill:implement <id>`
  * (fail-closed null on wl error or no candidate — never short-circuits the
@@ -959,7 +972,10 @@ export async function dispatchDowntimeWork(
 
     if (!frozen) {
       // Audit tier (WL-0MSI8H3HP000K0RG): dispatch /skill:audit for the
-      // first completed/in_review item without a valid audit. The lookup
+      // first completed/in_review item without a valid audit. Root-only
+      // (WL-0MSTLFW14000KPEC): only PARENT items are candidates —
+      // completed/in_review children are excluded server-side and never
+      // dispatched independently. The lookup
       // resolves through the DowntimeNextResult error channel
       // (WL-0MSLWJ2KP0002SV0): {ok:true, candidate:null} is a GENUINELY
       // empty audit tier and falls through to the implement tier below;
@@ -1532,10 +1548,11 @@ export function skillKindFromPrompt(prompt: string): DowntimeSkillKind {
 // ── Audit-tier selection (WL-0MSI8H3HP000K0RG) ────────────────────────
 
 /**
- * Parse the stdout of `wl list --status completed --stage in_review --json`
- * into typed audit candidates. Accepts both the bare array shape and the
- * `{ workItems: [...] }` wrapper. Malformed/empty output yields null
- * (fail-closed).
+ * Parse the stdout of `wl list --status completed --stage in_review
+ * --root-only --json` (root-only, WL-0MSTLFW14000KPEC: only parent items
+ * are audit candidates) into typed audit candidates. Accepts both the bare
+ * array shape and the `{ workItems: [...] }` wrapper. Malformed/empty
+ * output yields null (fail-closed).
  */
 export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | null {
   let parsed: unknown;

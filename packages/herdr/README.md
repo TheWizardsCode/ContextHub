@@ -248,8 +248,11 @@ all-slots-free logic: N of `total` slots free never dispatches without
 per-slot identity.
 
 **Dispatch behaviour** — once idle has been continuous for the threshold, the
-worker first runs `wl list --status completed --stage in_review --json` and
-selects the first completed/in_review item **without** a valid audit that was
+worker first runs `wl list --status completed --stage in_review --root-only
+--json` and selects the first completed/in_review **root** item (no parent —
+child/sub-task items are excluded server-side by `--root-only`, so only
+parent items are ever dispatched for audit; WL-0MSTLFW14000KPEC) **without**
+a valid audit that was
 **modified within the last 7 days** (`updatedAt` recency window; a candidate
 with a missing `updatedAt` is still selected — recency cannot be verified —
 while an unparseable one is skipped), dispatching `/skill:audit <id>` (pane
@@ -287,14 +290,15 @@ fresh worklog.
 > tier (`{ok:true, candidate:null}`) falls through to the implement tier
 > exactly as before.
 
-> **Audit-tier selection note (WL-0MSMAIP5F003WAGG):** the audit tier keeps
+> **Audit-tier selection note (WL-0MSTLFW14000KPEC):** the audit tier keeps
 > its `wl list --status completed --stage in_review --json` selection rather
-> than converting to `wl next --stage in_review`. `wl next` is strictly
-> root-only, so converting would silently drop completed child items from
-> audit dispatch (32 children in the completed/in_review queue as of the
-> decision); the audit tier must audit the full completed/in_review set,
-> including children. The conversion was scoped to the implement tier only
-> (AC5 escape hatch — decision recorded).
+> than converting to `wl next --stage in_review`, but now applies
+> `--root-only` so only **parent** items are audit candidates — completed
+> children are never dispatched for `/skill:audit` independently (the
+> producer reviews deliverable units, and a parent audit covers its
+> children). This reverses the earlier WL-0MSMAIP5F003WAGG decision to
+> include completed children in the audit tier. `wl next` conversion remains
+> scoped to the implement tier only (AC5 escape hatch — decision recorded).
 
 If none, it runs `wl next --stage intake_complete
 --json` and dispatches `/skill:plan <id>`; if no such item it runs `wl next
