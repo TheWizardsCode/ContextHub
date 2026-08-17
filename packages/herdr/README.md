@@ -185,10 +185,11 @@ When the local LLM (llama-server behind the llama-proxy) is idle, the plugin
 can use that compute to advance the worklog backlog automatically: after the
 proxy reports idle continuously for the configured threshold, it opens a
 visible (non-focus-stealing) pi agent pane. Dispatch priority
-(WL-0MSI8H3HP000K0RG, WL-0MSMAYPQP001FLR6):
-first a completed/in_review item **without a valid audit** → `/skill:audit
-<id>`; else the highest-priority open `plan_complete` item with risk `Low`
-and effort `Small`/`Extra Small` → `/skill:implement <id>`; else
+(WL-0MSS1Q5ER007QDKX, WL-0MSI8H3HP000K0RG, WL-0MSMAYPQP001FLR6):
+first a due **scheduled prompt** (see *Scheduled prompts* below) dispatches
+its prompt text; else a completed/in_review item **without a valid audit** →
+`/skill:audit <id>`; else the highest-priority open `plan_complete` item with
+risk `Low` and effort `Small`/`Extra Small` → `/skill:implement <id>`; else
 `/skill:plan` on the next `intake_complete` item; else falls back
 to `/skill:intake` on the next `idea` item (parent WL-0MSF49FMW009M06K).
 
@@ -300,7 +301,7 @@ fresh worklog.
 > include completed children in the audit tier. `wl next` conversion remains
 > scoped to the implement tier only (AC5 escape hatch — decision recorded).
 
-If none, it runs `wl next --stage intake_complete
+If no scheduled prompt is due, it runs `wl next --stage intake_complete
 --json` and dispatches `/skill:plan <id>`; if no such item it runs `wl next
 --stage idea --json` and dispatches `/skill:intake <id>`; if all four are
 empty nothing is dispatched. A `wl`/CLI error on the `intake_complete` lookup
@@ -309,7 +310,7 @@ The item is claimed (`wl update <id> --status in_progress`) *before* the pane
 spawns, so it appears in-progress immediately and a second pane's `wl next`
 cannot select it. Panes are named `Downtime audit` / `Downtime implement` /
 `Downtime plan` /
-`Downtime intake`, opened
+`Downtime intake` (scheduled prompts: `Downtime <entry id>`), opened
 with `--no-focus` (visible, never steals focus), `--cwd <worklog root>` and
 `--model <downtimeModel>`.
 
@@ -326,6 +327,56 @@ are excluded by `wl next` itself. Dispatch is `/skill:implement <id>` (pane
 named `Downtime implement`). A `wl`/CLI error or empty result at the
 implement tier is fail-closed (never a candidate) and does **not**
 short-circuit the plan/intake fallback (AC5/AC6).
+
+**Scheduled prompts (WL-0MSS1Q5ER007QDKX)** — the FIRST dispatch stage: a
+project-local config file `.worklog/scheduled-prompts.json` (provisioned by
+`wl init` from `templates/scheduled-prompts.json`, create-if-absent) carries
+periodic maintenance prompts with a best-effort frequency. The base set is a
+single `/skill:refactor` entry (`intervalDays: 3`, `lastTriggeredAt: null`),
+so refactoring runs automatically at most every three days during idle time
+without manual triggering. Each entry has:
+
+- `id` — stable entry id (pane name `Downtime <id>` and rolling-log marker
+  `itemId`),
+- `prompt` — any text the pi agent pane can run (e.g. `/skill:refactor`),
+- `intervalDays` — best-effort frequency in whole days,
+- `lastTriggeredAt` — ISO-8601 UTC datetime of the last dispatch
+  (`null` = never run; a missing field is treated as due).
+
+While the proxy is idle long enough, the dispatcher checks scheduled prompts
+FIRST (before the audit/implement/plan/intake tiers). An entry is **due** iff
+`lastTriggeredAt` is `null` or `now - lastTriggeredAt >= intervalDays` — best
+effort: a dispatch may be delayed (no idle slot, cooldown, freeze) but never
+happens more often than the frequency. A due prompt dispatches a pi agent
+pane named `Downtime <id>` via the same send-to-pi.sh path as the tiers
+(`--no-focus`, `--cwd <worklog root>`, `--model <downtimeModel>`) running the
+prompt text. Multiple due entries dispatch one per idle slot in config order
+(the single-flight guard prevents overlap).
+
+Fail-closed at every boundary: an **absent** config is an empty set (logged
+notice — `wl init` is the provisioning path, no defaults are synthesized),
+and a **malformed** config (unreadable, corrupt JSON, no `entries` list) is an
+empty set (logged error) — in both cases no scheduled dispatch occurs and the
+existing tiers are unaffected. Invalid entries (missing/empty id or prompt,
+missing/non-finite/≤ 0 `intervalDays`, unparseable `lastTriggeredAt`) are
+skipped with a logged warning — never a crash.
+
+Before the pane spawns, `lastTriggeredAt` is persisted to the config (atomic
+tmp+rename write, re-reading the file first) and a `kind: scheduled` marker is
+written to `.worklog/downtime-dispatches.log` (no work-item comment or claim
+— there is no work item). If either write fails, the dispatch ABORTS before
+the spawn (an unrecorded dispatch never runs) and the entry stays due for the
+next idle slot. A failed pane spawn appends an `outcome: 'spawn-failed'`
+trace like the other tiers (the marker + persisted trigger stand; the entry
+is not re-selected until its frequency elapses).
+
+Scheduled prompts respect the same **code-freeze gate** as the audit/implement
+tiers: while the marker is frozen **or ambiguous** (fail-closed), scheduled
+prompts are skipped — no new code changes land mid-release — and dispatch
+falls through to the plan/intake tiers unchanged. A due prompt dispatches
+instead of reaching the backlog tiers, so it never triggers the no-candidate
+cooldown; when none are due and the backlog is genuinely empty, the existing
+no-candidate cooldown applies unchanged.
 
 **Empty-backlog cooldown** — when the implement, plan, and intake `wl next`
 lookups genuinely return no candidate (the tab's project has nothing to
@@ -401,7 +452,9 @@ SQLite layer (`BEGIN IMMEDIATE`).
 **Audit trail** — every successful dispatch records two traces: (1) a
 comment on the dispatched item (`wl comment add`, author
 `herdr-downtime`) stating the automatic dispatch, the skill run, and the
-UTC timestamp — this survives `wl sync` and is the durable trail; and (2) a
+UTC timestamp — this survives `wl sync` and is the durable trail (scheduled
+prompts have no work item, so their trace is the rolling-log marker only —
+AC4, WL-0MSS1Q5ER007QDKX); and (2) a
 bounded JSONL entry in `.worklog/downtime-dispatches.log` under the
 resolved worklog root (rolling — only the most recent 100 entries are
 kept). The marker is written **before** the pane spawns (fail-closed: an
@@ -418,6 +471,8 @@ for the plan/intake change-guard — an item already dispatched for its tier
 is excluded while it is still at its dispatched-at stage, and a stage
 advancement releases it (RCA WL-0MSRBFFLN005W3VT design point 3). Plan /
 intake markers are scoped to their own tiers and never suppress audit
+selection. `kind: scheduled` entries are log-only (no work item) and are
+scoped to the scheduled-prompts tier — they never suppress any worklog-tier
 selection. A three-strike CLI-error pause additionally writes a JSONL entry
 to the same rolling log (with the `at` timestamp and an error message) so
 the persistent failure is auditable even though nothing was dispatched. The

@@ -74,6 +74,7 @@ import {
   type DowntimeStage,
   type AuditCandidate,
   type ImplementCandidate,
+  type ScheduledPrompt,
 } from './downtime-worker.js';
 import {
   statusFixtures,
@@ -102,6 +103,10 @@ function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     recordDispatch: vi.fn().mockResolvedValue(true),
     recordDispatchFailure: vi.fn().mockResolvedValue(undefined),
     recordError: vi.fn().mockResolvedValue(undefined),
+    // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): no due prompt by
+    // default, so existing tier tests exercise the unchanged backlog tiers.
+    getDueScheduledPrompt: vi.fn().mockResolvedValue(null),
+    recordScheduledPromptTrigger: vi.fn().mockResolvedValue(true),
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): not frozen by default, so
     // existing dispatch tests exercise the unchanged audit/implement tiers.
     readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
@@ -767,6 +772,228 @@ describe('dispatch code-freeze gate', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('audit');
     expect(deps.getNextAuditCandidate).toHaveBeenCalledWith('/repo');
+  });
+});
+
+// ── Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX) ─────────────────────
+
+describe('dispatch scheduled-prompts tier', () => {
+  const duePrompt: ScheduledPrompt = {
+    id: 'refactor',
+    prompt: '/skill:refactor',
+    intervalDays: 3,
+    lastTriggeredAt: null,
+  };
+
+  it('dispatches a due scheduled prompt FIRST (before audit/implement/plan/intake)', async () => {
+    const deps = makeDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
+      // The backlog tiers must never be consulted — the prompt dispatches
+      // instead of reaching them (AC6).
+      getNextAuditCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-AUD', title: 'Audit me', stage: 'audit' },
+      }),
+      getNextImplementCandidate: vi.fn().mockResolvedValue({
+        id: 'WL-IMP',
+        title: 'Implement me',
+        status: 'open',
+        risk: 'low',
+        effort: 'small',
+      } as ImplementCandidate),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-PLAN', title: 'Prep task', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(deps.getDueScheduledPrompt).toHaveBeenCalledWith('/repo');
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('scheduled');
+    // The prompt text is the dispatch payload — not a skill+work-item wrap.
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith('/skill:refactor', {
+      model: 'plan',
+      cwd: '/repo',
+      paneName: 'Downtime refactor',
+    });
+    // No pre-dispatch claim — there is no work item (AC4).
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    // The backlog tiers are never reached (AC6).
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(deps.getNextImplementCandidate).not.toHaveBeenCalled();
+    expect(deps.getNextItem).not.toHaveBeenCalled();
+  });
+
+  it('persists lastTriggeredAt and writes the scheduled log marker before the spawn (AC4)', async () => {
+    const deps = makeDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // The trigger timestamp is persisted (atomic config update) and the
+    // rolling log marker is written with kind scheduled + noItemComment.
+    expect(deps.recordScheduledPromptTrigger).toHaveBeenCalledWith(
+      '/repo',
+      'refactor',
+      expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+    );
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        itemId: 'refactor',
+        kind: 'scheduled',
+        cwd: '/repo',
+        noItemComment: true,
+      }),
+    );
+    // Marker + persist before spawn: the dispatch is recorded before the
+    // pane opens (fail-closed: an unrecorded dispatch never runs).
+    const persistOrder =
+      (deps.recordScheduledPromptTrigger as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const markerOrder =
+      (deps.recordDispatch as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const spawnOrder =
+      (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    expect(persistOrder).toBeLessThan(markerOrder);
+    expect(markerOrder).toBeLessThan(spawnOrder);
+  });
+
+  it('falls through to the existing tiers when no prompt is due', async () => {
+    const deps = makeDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(null),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-AUD', title: 'Audit me', stage: 'audit' },
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(deps.getDueScheduledPrompt).toHaveBeenCalledWith('/repo');
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+  });
+
+  it('skips the scheduled tier while frozen (frozen OR ambiguous are fail-closed, AC5)', async () => {
+    for (const freezeStatus of ['frozen', 'ambiguous'] as const) {
+      const deps = makeDeps({
+        readCodeFreezeStatus: vi.fn().mockReturnValue(freezeStatus),
+        getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
+        getNextItem: vi.fn().mockResolvedValue({
+          ok: true,
+          candidate: { id: 'WL-PLAN', title: 'Prep task', stage: 'intake_complete' },
+        }),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      // Scheduled prompts are held by the same freeze gate as audit/implement
+      // (no new code changes during a release) — the tier is never consulted.
+      expect(deps.getDueScheduledPrompt).not.toHaveBeenCalled();
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('plan');
+      expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+        expect.stringContaining('/skill:plan WL-PLAN'),
+        expect.anything(),
+      );
+    }
+  });
+
+  it('a frozen+empty plan/intake backlog reports code-freeze even when a prompt is due (AC5)', async () => {
+    const deps = makeDeps({
+      readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(deps.getDueScheduledPrompt).not.toHaveBeenCalled();
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('code-freeze');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('aborts before spawn when the lastTriggeredAt persist fails (fail-closed, AC4)', async () => {
+    const deps = makeDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
+      recordScheduledPromptTrigger: vi.fn().mockResolvedValue(false),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('marker-write-failed');
+    // No log record, no pane: an unrecorded dispatch never runs; the entry
+    // stays due for the next idle slot.
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('aborts before spawn when the log marker cannot be written (fail-closed, AC4)', async () => {
+    const deps = makeDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
+      recordDispatch: vi.fn().mockResolvedValue(false),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('marker-write-failed');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('records a spawn-failure trace and resolves spawn-failed when the pane fails (AC4)', async () => {
+    const deps = makeDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: false, error: 'ENOENT' }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('spawn-failed');
+    expect(outcome.error).toBe('ENOENT');
+    expect(deps.recordDispatchFailure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        itemId: 'refactor',
+        kind: 'scheduled',
+        error: 'ENOENT',
+        noItemComment: true,
+      }),
+    );
+  });
+
+  it('reports no-candidate (the cooldown trigger) when no prompt is due and the backlog is empty (AC6)', async () => {
+    const deps = makeDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(null),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('no-candidate');
+  });
+
+  it('buildDowntimePaneArgs honours an explicit paneName (Downtime <id> for scheduled prompts)', () => {
+    const args = buildDowntimePaneArgs('plan', '/skill:refactor', {
+      model: 'plan',
+      cwd: '/repo',
+      paneName: 'Downtime refactor',
+    });
+    expect(args).toEqual([
+      '--pane-name',
+      'Downtime refactor',
+      '--no-focus',
+      '--cwd',
+      '/repo',
+      '--model',
+      'plan',
+      '/skill:refactor',
+    ]);
   });
 });
 
@@ -2299,6 +2526,36 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     expect(result.dispatched).toBe(false);
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     expect(worker.paused).toBe(true);
+  });
+
+  it('dispatches a due scheduled prompt instead of entering the no-candidate cooldown (AC6)', async () => {
+    // Scheduled tier first (WL-0MSS1Q5ER007QDKX): even with a genuinely
+    // empty backlog behind it, a DUE prompt dispatches — it never reaches
+    // the backlog tiers, so it never triggers the no-candidate cooldown.
+    const { worker, deps } = makeEmptyBacklogWorker({
+      deps: {
+        getDueScheduledPrompt: vi.fn().mockResolvedValue({
+          id: 'refactor',
+          prompt: '/skill:refactor',
+          intervalDays: 3,
+          lastTriggeredAt: null,
+        }),
+      },
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick(); // idle run starts
+    vi.setSystemTime(start + 240_000); // threshold met → dispatch attempt
+
+    const result = await worker.tick();
+
+    expect(result.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      '/skill:refactor',
+      expect.objectContaining({ paneName: 'Downtime refactor' }),
+    );
+    expect(worker.paused).toBe(false); // a dispatch — not the empty-backlog pause
+    expect(worker.errorStrikes).toBe(0);
   });
 
   it('performs no proxy polling, no idle tracking and no dispatch while paused', async () => {

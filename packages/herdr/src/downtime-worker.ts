@@ -75,6 +75,9 @@
 import { spawn } from 'node:child_process';
 import { isAuditFresh } from './icons.js';
 import type { CodeFreezeStatus } from './code-freeze.js';
+import type { ScheduledPrompt } from './scheduled-prompts.js';
+
+export type { ScheduledPrompt } from './scheduled-prompts.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -569,6 +572,13 @@ export function createDowntimePoller(
 export type DowntimeStage = 'intake_complete' | 'idea' | 'audit' | 'implement';
 export type DowntimeSkillKind = 'plan' | 'intake' | 'audit' | 'implement';
 
+/**
+ * Every dispatch kind recorded in the rolling audit log: the worklog tiers
+ * plus the scheduled-prompts tier (WL-0MSS1Q5ER007QDKX), which has no work
+ * item (kind `scheduled`, log-only markers).
+ */
+export type DowntimeDispatchKind = DowntimeSkillKind | 'scheduled';
+
 export interface DowntimeCandidate {
   id: string;
   title: string;
@@ -723,8 +733,13 @@ export interface DowntimeWorkerDeps {
    * with no failure — fire-and-forget); `{ok:false, error|exitCode}` on a
    * handled spawn `error` event or a non-zero script exit within the probe
    * window (no unhandled-exception crash, WL-0MSLWJ3I70031Z8U absorbed).
+   * `paneName` overrides the default `Downtime <kind>` pane name — the
+   * scheduled-prompts tier passes `Downtime <entryId>` (WL-0MSS1Q5ER007QDKX).
    */
-  spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<DowntimeSpawnResult>;
+  spawnAgentPane(
+    prompt: string,
+    opts: { model: string; cwd: string; paneName?: string },
+  ): Promise<DowntimeSpawnResult>;
   /**
    * Audit trail for a successful dispatch: comment on the item + rolling
    * log entry under `.worklog`. Resolves TRUE only when the rolling-log
@@ -732,8 +747,28 @@ export interface DowntimeWorkerDeps {
    * tolerated (the comment is a durable cross-machine trail, not the
    * marker). A false result makes the dispatcher ABORT before spawning — an
    * unmarked item is never dispatched (fail-closed, RCA design point 2).
+   * Scheduled-prompt dispatches pass `noItemComment: true` — there is no
+   * work item, so only the rolling-log marker is written (no wl comment).
    */
   recordDispatch(event: DowntimeDispatchEvent): Promise<boolean>;
+  /**
+   * Look up the first DUE scheduled prompt (WL-0MSS1Q5ER007QDKX): reads the
+   * project-local config at `<cwd>/.worklog/scheduled-prompts.json` and
+   * returns the first entry whose frequency threshold is met, in config
+   * order. Absent or malformed config → null (fail-closed, logged): no
+   * scheduled dispatch and the existing tiers are unaffected (`wl init` is
+   * the provisioning path). A due entry resolves non-null — the caller
+   * dispatches it instead of reaching the backlog tiers.
+   */
+  getDueScheduledPrompt(cwd: string): Promise<ScheduledPrompt | null>;
+  /**
+   * Persist a scheduled prompt's `lastTriggeredAt` (atomic tmp+rename) so a
+   * delayed dispatch never fires more often than its frequency. Resolves
+   * false on any failure — the dispatcher ABORTS the spawn (an unrecorded
+   * dispatch never runs) and the entry stays due for the next idle slot.
+   * Must never throw (fail-closed).
+   */
+  recordScheduledPromptTrigger(cwd: string, promptId: string, at: string): Promise<boolean>;
   /**
    * Record a spawn-failure trace for an attempted dispatch (audit-log
    * integrity, WL-0MSLWJ3I70031Z8U AC2): a failed pane spawn appends an
@@ -753,12 +788,19 @@ export interface DowntimeWorkerDeps {
 /** Audit event recorded for every successful downtime dispatch. */
 export interface DowntimeDispatchEvent {
   itemId: string;
-  kind: DowntimeSkillKind;
+  kind: DowntimeDispatchKind;
   /** ISO-8601 UTC timestamp of the dispatch. */
   dispatchedAt: string;
   /** Worklog root (the rolling log lives at `<cwd>/.worklog`). */
   cwd: string;
   title?: string;
+  /**
+   * When true, `recordDispatch` skips the work-item comment (scheduled-prompt
+   * dispatches have no work item — there is no item to comment; the rolling
+   * log marker is the only trace, WL-0MSS1Q5ER007QDKX AC4). Absent/false on
+   * normal tier dispatches (comment added, unchanged).
+   */
+  noItemComment?: boolean;
   /**
    * Worklog stage of the item at dispatch (plan/intake change-guard, RCA
    * WL-0MSRBFFLN005W3VT design point 3): a candidate is excluded while it is
@@ -800,13 +842,14 @@ export interface DowntimeErrorEvent {
 export interface DowntimeDispatchOutcome {
   dispatched: boolean;
   candidate?: DowntimeCandidate;
-  kind?: DowntimeSkillKind;
+  kind?: DowntimeDispatchKind;
   /**
    * Non-dispatch reasons: 'dispatch-in-flight' | 'no-candidate' |
    * 'wl-error' | 'code-freeze' | 'claim-failed' (lost the CAS race —
    * another pane won; neutral) | 'marker-write-failed' (fail-closed abort
-   * BEFORE spawn) | 'spawn-failed' (handled spawn error or non-zero script
-   * exit; outcome is not success).
+   * BEFORE spawn — includes the scheduled-prompt persist failure) |
+   * 'spawn-failed' (handled spawn error or non-zero script exit; outcome is
+   * not success).
    */
   reason?: string;
   /**
@@ -933,8 +976,105 @@ async function dispatchClaimedTier(
 }
 
 /**
- * dispatch one downtime work item. Selection priority (audit tier first,
- * WL-0MSI8H3HP000K0RG): a completed/in_review item WITHOUT a valid audit AND
+ * Dispatch one due scheduled prompt (WL-0MSS1Q5ER007QDKX). Unlike the
+ * worklog tiers there is NO work item: no pre-dispatch claim, no wl item
+ * comment. Fixed pipeline, fail-closed at every boundary:
+ *
+ *  1. PERSIST first: `lastTriggeredAt` is written to the config (atomic
+ *     tmp+rename) BEFORE anything else. A persist failure ABORTS the
+ *     dispatch — an unrecorded dispatch never runs (AC4) — and the entry
+ *     stays due for the next idle slot.
+ *  2. Rolling-log MARKER (kind `scheduled`) before the pane spawns: a
+ *     marker failure ALSO aborts before the spawn (fail-closed).
+ *  3. SPAWN the pane through the existing send-to-pi.sh path running the
+ *     prompt text, named `Downtime <entryId>` (--no-focus, --cwd, --model).
+ *     A handled spawn failure appends an outcome:'spawn-failed' trace and
+ *     resolves 'spawn-failed' (the outcome is NOT success); the marker and
+ *     the persisted lastTriggeredAt stand (the entry is not re-selected
+ *     until its frequency elapses — a best-effort cadence tolerates the
+ *     failed run).
+ */
+async function dispatchScheduledPrompt(
+  deps: DowntimeWorkerDeps,
+  prompt: ScheduledPrompt,
+  opts: { model: string; cwd: string },
+): Promise<DowntimeDispatchOutcome> {
+  const at = new Date().toISOString();
+
+  // 1. Persist lastTriggeredAt (atomic tmp+rename). A failure aborts BEFORE
+  // the log marker or the spawn — an unrecorded dispatch never runs and the
+  // entry remains due (AC4 fail-closed).
+  const persisted = await deps.recordScheduledPromptTrigger(opts.cwd, prompt.id, at);
+  if (!persisted) {
+    return { dispatched: false, reason: 'marker-write-failed' };
+  }
+
+  // 2. Rolling-log marker (kind `scheduled`, noItemComment — there is no
+  // work item to comment). A marker failure aborts BEFORE the spawn.
+  let marked = false;
+  try {
+    marked = await deps.recordDispatch({
+      itemId: prompt.id,
+      kind: 'scheduled',
+      dispatchedAt: at,
+      cwd: opts.cwd,
+      title: `Scheduled prompt: ${prompt.prompt}`,
+      noItemComment: true,
+    });
+  } catch {
+    // Fail-closed: a throwing recordDispatch (stub or regression) is a
+    // marker write failure — abort before spawn.
+    marked = false;
+  }
+  if (!marked) {
+    return { dispatched: false, reason: 'marker-write-failed' };
+  }
+
+  // 3. Spawn the pane running the prompt text, named `Downtime <entryId>`.
+  const spawn = await deps.spawnAgentPane(prompt.prompt, {
+    model: opts.model,
+    cwd: opts.cwd,
+    paneName: `Downtime ${prompt.id}`,
+  });
+  if (!spawn.ok) {
+    // Failure trace (WL-0MSLWJ3I70031Z8U AC2 pattern): the audit log
+    // distinguishes "attempted" (failed spawn) from "opened" (success
+    // marker). Fail-closed: audit logging must never crash the worker, so a
+    // throwing trace is swallowed (the marker + persisted trigger already
+    // stand).
+    try {
+      await deps.recordDispatchFailure({
+        itemId: prompt.id,
+        kind: 'scheduled',
+        dispatchedAt: new Date().toISOString(),
+        cwd: opts.cwd,
+        title: `Scheduled prompt: ${prompt.prompt}`,
+        noItemComment: true,
+        error: spawn.error,
+        exitCode: spawn.exitCode,
+      });
+    } catch {
+      // fail-closed: audit logging must never crash the worker
+    }
+    return {
+      dispatched: false,
+      reason: 'spawn-failed',
+      error: spawn.error,
+      exitCode: spawn.exitCode,
+    };
+  }
+
+  return { dispatched: true, kind: 'scheduled' };
+}
+
+/**
+ * dispatch one downtime work item. Selection priority: FIRST the
+ * scheduled-prompts tier (WL-0MSS1Q5ER007QDKX) — a due scheduled prompt
+ * (e.g. `/skill:refactor` every 3 days) dispatches its prompt text before
+ * any backlog tier, gated by the same code-freeze marker as audit/implement
+ * (frozen OR ambiguous ⇒ skipped, plan/intake still run) and never
+ * triggering the no-candidate cooldown; then the audit tier
+ * (WL-0MSI8H3HP000K0RG): a completed/in_review item WITHOUT a valid audit AND
  * NOT already dispatched for audit by this worker →
  * `/skill:audit <id>` (the dispatched-marker exclusion,
  * WL-0MSLIY8ZR004QUSY, is applied by `deps.getNextAuditCandidate`). The
@@ -994,6 +1134,23 @@ export async function dispatchDowntimeWork(
     // and dispatch falls through to the plan/intake tiers below.
     const freezeStatus = deps.readCodeFreezeStatus(opts.cwd);
     const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
+
+    if (!frozen) {
+      // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): FIRST dispatch stage,
+      // gated by the SAME fresh-read code-freeze marker as the audit/
+      // implement tiers (AC5) — while frozen OR ambiguous (fail-closed)
+      // scheduled prompts are skipped so no new code changes land mid-
+      // release, and dispatch falls through to the plan/intake tiers below.
+      // A due prompt dispatches its prompt text immediately — it never
+      // reaches the backlog tiers, so it never triggers the no-candidate
+      // cooldown (AC6). Absent or malformed config resolves null (fail-
+      // closed, logged by the dep): no scheduled dispatch and the tiers
+      // below are unaffected (AC2).
+      const duePrompt = await deps.getDueScheduledPrompt(opts.cwd);
+      if (duePrompt !== null) {
+        return await dispatchScheduledPrompt(deps, duePrompt, opts);
+      }
+    }
 
     if (!frozen) {
       // Audit tier (WL-0MSI8H3HP000K0RG): dispatch /skill:audit for the
@@ -1075,17 +1232,19 @@ export async function dispatchDowntimeWork(
 
 /**
  * Argument vector for spawning `send-to-pi.sh`: visible pane named
- * `Downtime <kind>`, `--no-focus` (visible but never steals focus),
- * `--cwd <wlRoot>`, `--model <downtimeModel>`, then the prompt.
+ * `Downtime <kind>` (`paneName` overrides it — the scheduled-prompts tier
+ * passes `Downtime <entryId>`, WL-0MSS1Q5ER007QDKX), `--no-focus` (visible but
+ * never steals focus), `--cwd <wlRoot>`, `--model <downtimeModel>`, then the
+ * prompt.
  */
 export function buildDowntimePaneArgs(
   kind: DowntimeSkillKind,
   prompt: string,
-  opts: { model: string; cwd: string },
+  opts: { model: string; cwd: string; paneName?: string },
 ): string[] {
   return [
     '--pane-name',
-    `Downtime ${kind}`,
+    opts.paneName ?? `Downtime ${kind}`,
     '--no-focus',
     '--cwd',
     opts.cwd,
@@ -1459,7 +1618,7 @@ export function buildDowntimePrompt(kind: DowntimeSkillKind, candidate: Downtime
  */
 export function buildDowntimeDispatchComment(
   itemId: string,
-  kind: DowntimeSkillKind,
+  kind: DowntimeDispatchKind,
   dispatchedAt: string,
   title?: string,
 ): string {
@@ -1467,6 +1626,7 @@ export function buildDowntimeDispatchComment(
     kind === 'plan' ? '/skill:plan'
     : kind === 'audit' ? '/skill:audit'
     : kind === 'implement' ? '/skill:implement'
+    : kind === 'scheduled' ? 'scheduled prompt'
     : '/skill:intake';
   const suffix = title ? ` (${title.replace(/[\r\n]+/g, ' ')})` : '';
   return `Auto-dispatched by the herdr downtime worker at ${dispatchedAt} — running ${skill} ${itemId}${suffix}.`;

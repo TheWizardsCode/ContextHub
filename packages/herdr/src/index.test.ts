@@ -17,7 +17,8 @@ import {
   CAPTURE_TIMEOUT_MS,
 } from './index.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE, readDowntimeLogEntries } from './downtime-log.js';
-import { DOWNTIME_WL_TIMEOUT_MS, dispatchDowntimeWork } from './downtime-worker.js';
+import { DOWNTIME_WL_TIMEOUT_MS, dispatchDowntimeWork, type ScheduledPrompt } from './downtime-worker.js';
+import { SCHEDULED_PROMPTS_FILE, scheduledPromptsPath } from './scheduled-prompts.js';
 import {
   fetchItemsByStage,
   resetExecFileAsync,
@@ -379,7 +380,7 @@ describe('stripAgentPromptPrefix', () => {
 // Temp-dir helpers (shared by the configureWorklogTarget tests below)
 // ---------------------------------------------------------------------------
 
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 const tempDirs: string[] = [];
@@ -1289,6 +1290,32 @@ describe('createDowntimeDeps', () => {
       expect.anything(),
     );
   });
+
+  it('spawnAgentPane honours an explicit paneName (scheduled prompts run as Downtime <id>)', async () => {
+    const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
+
+    await deps.spawnAgentPane('/skill:refactor', {
+      model: 'plan',
+      cwd: '/repo',
+      paneName: 'Downtime refactor',
+    });
+
+    expect(spawnFn).toHaveBeenCalledWith(
+      '/path/to/send-to-pi.sh',
+      [
+        '--pane-name',
+        'Downtime refactor',
+        '--no-focus',
+        '--cwd',
+        '/repo',
+        '--model',
+        'plan',
+        '/skill:refactor',
+      ],
+      { cwd: '/repo' },
+    );
+  });
 });
 
 describe('createDowntimeDeps recordDispatch', () => {
@@ -1419,6 +1446,32 @@ describe('createDowntimeDeps recordDispatch', () => {
       }),
     ).resolves.toBe(false);
   });
+
+  it('skips the wl comment for scheduled-prompt dispatches (noItemComment, AC4)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
+    setExecFileAsync(mockExec as never);
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.recordDispatch({
+      itemId: 'refactor',
+      kind: 'scheduled',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+      cwd,
+      noItemComment: true,
+    });
+
+    // There is no work item — no wl comment is attempted; the rolling-log
+    // marker is the only trace.
+    expect(mockExec).not.toHaveBeenCalled();
+    const raw = readFileSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), 'utf8');
+    const entry = JSON.parse(raw.split('\n').filter((l) => l.trim() !== '')[0]) as {
+      kind?: string;
+      itemId?: string;
+    };
+    expect(entry.kind).toBe('scheduled');
+    expect(entry.itemId).toBe('refactor');
+  });
 });
 
 describe('createDowntimeDeps recordError', () => {
@@ -1529,6 +1582,158 @@ describe('createDowntimeDeps recordDispatchFailure', () => {
         cwd,
       }),
     ).resolves.toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createDowntimeDeps scheduled-prompts wiring (WL-0MSS1Q5ER007QDKX)
+//
+// The scheduled-prompts tier reads the project-local config at
+// <cwd>/.worklog/scheduled-prompts.json through getDueScheduledPrompt and
+// persists lastTriggeredAt through recordScheduledPromptTrigger (atomic
+// tmp+rename). Both are fail-closed: absent/malformed config ⇒ no dispatch.
+// ---------------------------------------------------------------------------
+
+describe('createDowntimeDeps getDueScheduledPrompt', () => {
+  afterEach(() => {
+    resetExecFileAsync();
+    resetWorklogDir();
+    for (const dir of tempDirs) {
+      try { rmSync(dir, { recursive: true }); } catch { /* ignore */ }
+    }
+    tempDirs.length = 0;
+  });
+
+  const refactor: ScheduledPrompt = {
+    id: 'refactor',
+    prompt: '/skill:refactor',
+    intervalDays: 3,
+    lastTriggeredAt: null,
+  };
+
+  it('reads the config and returns the first due entry (null lastTriggeredAt = due)', async () => {
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      scheduledPromptsPath(cwd),
+      JSON.stringify({ entries: [refactor] }),
+      'utf8',
+    );
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const due = await deps.getDueScheduledPrompt(cwd);
+
+    expect(due).toEqual(refactor);
+  });
+
+  it('returns null when the only entries are not yet due', async () => {
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      scheduledPromptsPath(cwd),
+      JSON.stringify({
+        entries: [
+          {
+            ...refactor,
+            lastTriggeredAt: new Date(Date.now() - 86_400_000).toISOString(), // 1 day ago, due in 2
+          },
+        ],
+      }),
+      'utf8',
+    );
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getDueScheduledPrompt(cwd)).toBeNull();
+  });
+
+  it('returns null for an absent config (fail-closed, logged)' , async () => {
+    const cwd = makeTempDir();
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getDueScheduledPrompt(cwd)).toBeNull();
+  });
+
+  it('returns null for a malformed config (fail-closed, logged)', async () => {
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(scheduledPromptsPath(cwd), '{broken json', 'utf8');
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getDueScheduledPrompt(cwd)).toBeNull();
+  });
+
+  it('skips invalid entries (fail-closed) and still returns the first valid due one', async () => {
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      scheduledPromptsPath(cwd),
+      JSON.stringify({
+        entries: [
+          { id: 'broken', prompt: '', intervalDays: 0, lastTriggeredAt: null },
+          refactor,
+        ],
+      }),
+      'utf8',
+    );
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getDueScheduledPrompt(cwd)).toEqual(refactor);
+  });
+});
+
+describe('createDowntimeDeps recordScheduledPromptTrigger', () => {
+  afterEach(() => {
+    for (const dir of tempDirs) {
+      try { rmSync(dir, { recursive: true }); } catch { /* ignore */ }
+    }
+    tempDirs.length = 0;
+  });
+
+  const refactor: ScheduledPrompt = {
+    id: 'refactor',
+    prompt: '/skill:refactor',
+    intervalDays: 3,
+    lastTriggeredAt: null,
+  };
+  const at = '2026-08-17T12:00:00.000Z';
+
+  it('persists lastTriggeredAt atomically and preserves the other entries', async () => {
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      scheduledPromptsPath(cwd),
+      JSON.stringify({ entries: [refactor, { ...refactor, id: 'weekly', intervalDays: 7 }] }),
+      'utf8',
+    );
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await expect(deps.recordScheduledPromptTrigger(cwd, 'refactor', at)).resolves.toBe(true);
+
+    const parsed = JSON.parse(readFileSync(scheduledPromptsPath(cwd), 'utf8')) as {
+      entries: ScheduledPrompt[];
+    };
+    expect(parsed.entries.find((e) => e.id === 'refactor')?.lastTriggeredAt).toBe(at);
+    expect(parsed.entries.find((e) => e.id === 'weekly')?.lastTriggeredAt).toBeNull();
+    // No tmp file left behind (atomic tmp+rename).
+    expect(readdirSync(join(cwd, '.worklog'))).toEqual([SCHEDULED_PROMPTS_FILE]);
+  });
+
+  it('resolves false when the config is absent or malformed (fail-closed, never throws)', async () => {
+    const cwd = makeTempDir();
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await expect(deps.recordScheduledPromptTrigger(cwd, 'refactor', at)).resolves.toBe(false);
+
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(scheduledPromptsPath(cwd), '{broken', 'utf8');
+    await expect(deps.recordScheduledPromptTrigger(cwd, 'refactor', at)).resolves.toBe(false);
+  });
+
+  it('resolves false for an unknown entry id (fail-closed)', async () => {
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(scheduledPromptsPath(cwd), JSON.stringify({ entries: [refactor] }), 'utf8');
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await expect(deps.recordScheduledPromptTrigger(cwd, 'nope', at)).resolves.toBe(false);
   });
 });
 

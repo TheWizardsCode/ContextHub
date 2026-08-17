@@ -66,6 +66,7 @@ import {
   type DowntimeClaimResult,
   type DowntimeSpawn,
   type DowntimeSpawnResult,
+  type ScheduledPrompt,
   defaultDowntimeSpawn,
   buildDowntimeDispatchComment,
   DOWNTIME_WL_TIMEOUT_MS,
@@ -78,6 +79,11 @@ import {
   intakeDispatchedItemStages,
   readDowntimeLogEntries,
 } from './downtime-log.js';
+import {
+  getDueScheduledPrompt as getFirstDuePrompt,
+  loadScheduledPrompts,
+  updateScheduledPromptLastTriggered,
+} from './scheduled-prompts.js';
 
 // Resolve path to the send-to-pi.sh script (relative to this source file)
 // At runtime (tsx or dist), __dirname equivalent from import.meta.url
@@ -492,6 +498,25 @@ export function createDowntimeDeps(
         return null;
       }
     },
+    // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): read the project-local
+    // config at <cwd>/.worklog/scheduled-prompts.json and select the first
+    // DUE entry in config order. Fail-closed: an absent or malformed config
+    // resolves null (logged notice/error inside loadScheduledPrompts) — no
+    // scheduled dispatch and the existing tiers are unaffected; `wl init` is
+    // the provisioning path (AC2).
+    async getDueScheduledPrompt(cwd: string): Promise<ScheduledPrompt | null> {
+      const { entries } = loadScheduledPrompts(cwd);
+      return getFirstDuePrompt(entries);
+    },
+    // Scheduled-prompts persist (WL-0MSS1Q5ER007QDKX): atomic tmp+rename
+    // write of the prompt's lastTriggeredAt AFTER a successful dispatch so a
+    // delayed dispatch never fires more often than its frequency. Resolves
+    // false on any failure (absent/malformed file, unknown id, I/O error) —
+    // the dispatcher ABORTS the spawn (an unrecorded dispatch never runs)
+    // and the entry stays due for the next idle slot (AC4). Never throws.
+    async recordScheduledPromptTrigger(cwd: string, promptId: string, at: string): Promise<boolean> {
+      return updateScheduledPromptLastTriggered(cwd, promptId, at);
+    },
     async claimItem(itemId: string, expected: DowntimeClaimExpected): Promise<DowntimeClaimResult> {
       // CAS claim (RCA WL-0MSRBFFLN005W3VT design point 1): the transition
       // only applies while the item is still in the state the tier selected
@@ -512,7 +537,10 @@ export function createDowntimeDeps(
         ? { ok: false, reason: 'stale' }
         : { ok: false, reason: 'error' };
     },
-    async spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<DowntimeSpawnResult> {
+    async spawnAgentPane(
+      prompt: string,
+      opts: { model: string; cwd: string; paneName?: string },
+    ): Promise<DowntimeSpawnResult> {
       const kind = skillKindFromPrompt(prompt);
       return spawnDowntimePane(
         scriptPath,
@@ -527,24 +555,28 @@ export function createDowntimeDeps(
       // comment lands on the item in ITS project's DB, not the plugin
       // process's own cwd (WL-0MSI7DQL10016QYX). A comment failure is
       // tolerated — the comment is the durable cross-machine trail, not the
-      // marker.
-      try {
-        await getExecFileAsync()(
-          'wl',
-          buildWlArgs([
-            'comment',
-            'add',
-            event.itemId,
-            '--comment',
-            buildDowntimeDispatchComment(event.itemId, event.kind, event.dispatchedAt),
-            '--author',
-            'herdr-downtime',
-            '--json',
-          ]),
-          { timeout: 5000 },
-        );
-      } catch {
-        // fail-closed: audit logging must never crash the worker
+      // marker. Scheduled-prompt dispatches (noItemComment, AC4) have no
+      // work item — the comment is skipped entirely (there is no item to
+      // comment on).
+      if (!event.noItemComment) {
+        try {
+          await getExecFileAsync()(
+            'wl',
+            buildWlArgs([
+              'comment',
+              'add',
+              event.itemId,
+              '--comment',
+              buildDowntimeDispatchComment(event.itemId, event.kind, event.dispatchedAt),
+              '--author',
+              'herdr-downtime',
+              '--json',
+            ]),
+            { timeout: 5000 },
+          );
+        } catch {
+          // fail-closed: audit logging must never crash the worker
+        }
       }
       // 2. Rolling local log (bounded JSONL under <cwd>/.worklog) — the
       // dispatched MARKER. Written BEFORE the pane spawns (RCA design point

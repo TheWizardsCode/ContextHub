@@ -30,6 +30,16 @@ const WORKFLOW_DESTINATION_FILENAME = 'WORKFLOW.md';
 const WORKLOG_GITIGNORE_TEMPLATE_RELATIVE_PATH = 'templates/GITIGNORE_WORKLOG.txt';
 const WORKLOG_AGENT_POINTER_LINE = 'Follow the global AGENTS.md in addition to the rules below. The local rules below take priority in the event of a conflict.';
 
+/**
+ * Scheduled-prompts provisioning (WL-0MSS1Q5ER007QDKX AC1): `wl init` copies
+ * templates/scheduled-prompts.json into .worklog/scheduled-prompts.json when
+ * the file is absent (create-if-absent — never clobbers user edits or
+ * lastTriggeredAt state). The file is consumed by the herdr downtime
+ * worker's scheduled-prompts dispatch tier.
+ */
+const SCHEDULED_PROMPTS_TEMPLATE_RELATIVE_PATH = 'templates/scheduled-prompts.json';
+const SCHEDULED_PROMPTS_DESTINATION_FILENAME = 'scheduled-prompts.json';
+
 const DEFAULT_COMMITTED_HOOKS_DIR = '.githooks';
 
 type NormalizedInitOptions = {
@@ -633,6 +643,44 @@ function locateGitignoreTemplate(): string | null {
   return fs.existsSync(candidate) ? candidate : null;
 }
 
+function locateScheduledPromptsTemplate(): string | null {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const packageRoot = path.resolve(moduleDir, '..', '..');
+  const candidate = path.join(packageRoot, SCHEDULED_PROMPTS_TEMPLATE_RELATIVE_PATH);
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * Provision the scheduled-prompts config (WL-0MSS1Q5ER007QDKX AC1): copy
+ * templates/scheduled-prompts.json into `<worklog-dir>/scheduled-prompts.json`
+ * CREATE-IF-ABSENT — an existing file (user edits or runtime lastTriggeredAt
+ * state) is never clobbered. A missing template is skipped (never fatal).
+ */
+function ensureScheduledPromptsInstalled(options: {
+  silent: boolean;
+}): { installed: boolean; skipped: boolean; destinationPath?: string; reason?: string } {
+  const templatePath = locateScheduledPromptsTemplate();
+  if (!templatePath) {
+    return { installed: false, skipped: true, reason: 'scheduled-prompts template not found' };
+  }
+  const worklogDir = resolveWorklogDir();
+  const destinationPath = path.join(worklogDir, SCHEDULED_PROMPTS_DESTINATION_FILENAME);
+  try {
+    if (fs.existsSync(destinationPath)) {
+      // Create-if-absent: never clobber user edits or lastTriggeredAt state.
+      return { installed: false, skipped: true, reason: 'already in place', destinationPath };
+    }
+    fs.mkdirSync(worklogDir, { recursive: true });
+    fs.copyFileSync(templatePath, destinationPath);
+    if (!options.silent) {
+      console.log(`✓ Provisioned scheduled prompts at ${destinationPath}`);
+    }
+    return { installed: true, skipped: false, destinationPath };
+  } catch (e) {
+    return { installed: false, skipped: true, reason: (e as Error).message, destinationPath };
+  }
+}
+
 function hasWorklogGitignoreSection(content: string): boolean {
   return content.includes(WORKLOG_GITIGNORE_SECTION_START) && content.includes(WORKLOG_GITIGNORE_SECTION_END);
 }
@@ -1031,6 +1079,7 @@ export default function register(ctx: PluginContext): void {
             }
           }
           const statsPluginResult = await ensureStatsPluginInstalled({ silent: true, overwrite: normalizedOptions.statsPluginOverwrite });
+          const scheduledPromptsResult = ensureScheduledPromptsInstalled({ silent: true });
           output.json({
             success: true,
             message: 'Configuration already exists',
@@ -1045,7 +1094,8 @@ export default function register(ctx: PluginContext): void {
             postPullHooks: postPullResult,
             committedHooks: committedHooksResult,
             agentTemplate: agentTemplateResult,
-            statsPlugin: statsPluginResult
+            statsPlugin: statsPluginResult,
+            scheduledPrompts: scheduledPromptsResult
           });
           return;
         } else {
@@ -1259,6 +1309,15 @@ export default function register(ctx: PluginContext): void {
             } else if (statsPluginResult.skipped) {
               console.log(` - Stats plugin: skipped${statsPluginResult.reason ? `: ${statsPluginResult.reason}` : ''}`);
             }
+            // scheduled prompts (WL-0MSS1Q5ER007QDKX AC1)
+            const scheduledPromptsResult = ensureScheduledPromptsInstalled({ silent: true });
+            if (scheduledPromptsResult.installed) {
+              console.log(` - Scheduled prompts: provisioned at ${scheduledPromptsResult.destinationPath} (base set: /skill:refactor every 3 days)`);
+            } else if (scheduledPromptsResult.skipped && scheduledPromptsResult.reason === 'already in place') {
+              console.log(' - Scheduled prompts: already in place (not overwritten)');
+            } else if (scheduledPromptsResult.skipped) {
+              console.log(` - Scheduled prompts: skipped${scheduledPromptsResult.reason ? `: ${scheduledPromptsResult.reason}` : ''}`);
+            }
 
             console.log('\nNote: `wl init` is idempotent and can safely be run again if any options need to be changed.');
             return;
@@ -1307,6 +1366,7 @@ export default function register(ctx: PluginContext): void {
             }
           }
           const statsPluginResult = await ensureStatsPluginInstalled({ silent: true, overwrite: normalizedOptions.statsPluginOverwrite });
+          const scheduledPromptsResult = ensureScheduledPromptsInstalled({ silent: true });
           output.json({
             success: true,
             message: 'Configuration initialized',
@@ -1321,7 +1381,8 @@ export default function register(ctx: PluginContext): void {
             postPullHooks: postPullResult,
             committedHooks: committedHooksResult,
             agentTemplate: agentTemplateResult,
-            statsPlugin: statsPluginResult
+            statsPlugin: statsPluginResult,
+            scheduledPrompts: scheduledPromptsResult
           });
         }
         
@@ -1479,6 +1540,18 @@ export default function register(ctx: PluginContext): void {
             console.log('Stats plugin installation skipped by user.');
           } else if (statsPluginResult.skipped && statsPluginResult.reason) {
             console.log(`Stats plugin: ${statsPluginResult.reason}`);
+          }
+
+          // Scheduled-prompts provisioning (WL-0MSS1Q5ER007QDKX AC1):
+          // create-if-absent — never clobber user edits or lastTriggeredAt
+          // state on re-init.
+          const scheduledPromptsResult = ensureScheduledPromptsInstalled({ silent: false });
+          if (scheduledPromptsResult.installed) {
+            console.log(`✓ Provisioned scheduled prompts at ${scheduledPromptsResult.destinationPath} (base set: /skill:refactor every 3 days)`);
+          } else if (scheduledPromptsResult.skipped && scheduledPromptsResult.reason === 'already in place') {
+            console.log('Scheduled prompts config already present (not overwritten).');
+          } else if (scheduledPromptsResult.skipped && scheduledPromptsResult.reason) {
+            console.log(`Scheduled prompts: ${scheduledPromptsResult.reason}`);
           }
         }
       } catch (error) {

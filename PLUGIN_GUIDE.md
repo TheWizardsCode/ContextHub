@@ -647,3 +647,24 @@ You can also use Node.js debugging:
 ```bash
 node --inspect-brk $(which worklog) my-command
 ```
+
+## Worklog-root config files
+
+`wl init` provisions configuration files under `.worklog/` that plugins can
+consume (in addition to the plugin files in `.worklog/plugins/`). One example
+is `.worklog/scheduled-prompts.json` (WL-0MSS1Q5ER007QDKX): `wl init` copies
+`templates/scheduled-prompts.json` there on first init (create-if-absent —
+re-running `wl init` never clobbers user edits or runtime state). The herdr
+downtime worker reads the file to dispatch periodic maintenance prompts
+(e.g. `/skill:refactor` every three days) during local-LLM idle time; the
+worker updates each entry's `lastTriggeredAt` in place after a dispatch.
+Plugins should follow the same rules as the CLI when consuming such files:
+
+- Treat an absent file as an empty/default set (never synthesize state into
+  the user's project on a read),
+- Fail closed on malformed content (log the error, never crash the host),
+- Write atomically (tmp + rename) when persisting runtime state so readers
+  never observe a partial write.
+
+See `CONFIG.md` and `packages/herdr/README.md` for the file format and the
+worker's dispatch semantics.

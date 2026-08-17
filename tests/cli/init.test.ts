@@ -341,4 +341,69 @@ describe('CLI Init Tests', () => {
       leaveTempDir(tempState);
     }
   }, 45000);
+
+  // ---------------------------------------------------------------------
+  // Scheduled-prompts provisioning (WL-0MSS1Q5ER007QDKX AC1): `wl init`
+  // copies templates/scheduled-prompts.json into
+  // .worklog/scheduled-prompts.json on first init (create-if-absent) and
+  // never clobbers an existing file on re-run — user edits and
+  // lastTriggeredAt state are preserved.
+  // ---------------------------------------------------------------------
+  it('should provision .worklog/scheduled-prompts.json with the base set on first init', async () => {
+    const tempState = enterTempDir();
+    try {
+      await execAsync(
+        `tsx ${cliPath} init --project-name "Test Project" --prefix TEST --auto-export yes --auto-sync no --workflow-inline no --agents-template skip --stats-plugin-overwrite no`
+      );
+
+      const configPath = path.join('.worklog', 'scheduled-prompts.json');
+      expect(fs.existsSync(configPath)).toBe(true);
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(Array.isArray(config.entries)).toBe(true);
+      // The base set starts with a single /skill:refactor entry
+      // (intervalDays 3, lastTriggeredAt null).
+      expect(config.entries).toEqual([
+        {
+          id: 'refactor',
+          prompt: '/skill:refactor',
+          intervalDays: 3,
+          lastTriggeredAt: null,
+        },
+      ]);
+    } finally {
+      leaveTempDir(tempState);
+    }
+  }, 45000);
+
+  it('should never clobber an existing scheduled-prompts.json on re-init (create-if-absent)', async () => {
+    const tempState = enterTempDir();
+    try {
+      const cmd = `tsx ${cliPath} init --project-name "Test Project" --prefix TEST --auto-export yes --auto-sync no --workflow-inline no --agents-template skip --stats-plugin-overwrite no`;
+      await execAsync(cmd);
+
+      // Simulate operator edits + runtime state: a new entry and a set
+      // lastTriggeredAt on the base entry.
+      const configPath = path.join('.worklog', 'scheduled-prompts.json');
+      const edited = {
+        entries: [
+          {
+            id: 'refactor',
+            prompt: '/skill:refactor',
+            intervalDays: 3,
+            lastTriggeredAt: '2026-08-17T12:00:00.000Z',
+          },
+          { id: 'custom', prompt: '/skill:code-review', intervalDays: 1, lastTriggeredAt: null },
+        ],
+      };
+      fs.writeFileSync(configPath, JSON.stringify(edited, null, 2), 'utf-8');
+
+      // Re-running init must NOT overwrite the edited file.
+      await execAsync(cmd);
+
+      const after = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(after).toEqual(edited);
+    } finally {
+      leaveTempDir(tempState);
+    }
+  }, 45000);
 });
