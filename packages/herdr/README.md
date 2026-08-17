@@ -7,7 +7,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list. The top-level list is root-only: child work items are hidden and appear only under their parent via expand — **at any depth** (epic → feature → task and deeper): any item with children (its `childCount > 0`) can be expanded with Tab/Enter, its children fetched on demand via `wl list --parent` and shown indented at their hierarchy depth (WL-0MSQ3FH1K000MMJW). Expanded parents **stay expanded across refreshes**: each auto/manual refresh re-fetches their children in parallel with the top-level list and swaps both in atomically, so the hierarchy never momentarily collapses or flickers (WL-0MSBVBNGH002RDP5).
 - **Filter by stage** — Press `f` followed by a chord key (`i`=idea, `n`=intake, `p`=plan, `r`=review, `s`=sprint back to the default view), or type `/wl <stage>` (shorthand alias or canonical stage name, e.g. `/wl intake_complete` or `/wl progress`), to filter items by stage. Stage-filtered views show every root item in the selected stage matching the stage's status rule (open items for most stages; `completed`/`in-progress`/`open` for the in_review stage) — no `browseItemCount` cap and no `wl next` selection omission (WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW)
 - **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority, GitHub issue number, and audit status information such as audit result, review status, and last audit timestamp)
-- **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The detail view metadata section additionally shows the review status (❌ needs review / ✅ reviewed) and the last audit timestamp.
+- **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The metadata section (list-mode panel and detail view) mirrors the list's icons with text labels — the selected item's Stage row uses the same audit-aware `in_review` icon (✅/❌/❓ fresh, ⏳ stale-passed, 🔍 otherwise), and the Audit/Reviewed rows pair their icons with text (e.g. `✅ ready to close`, `❌ needs review`). The detail view additionally shows the last audit timestamp.
 - **Chord shortcuts** — Multi-key chord sequences provide quick actions like updating priorities, stage/status, title, closing/deleting items, running workflows, and toggling review status (configurable via `shortcuts.json`)
 - **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is executed **visibly in a new herdr pane** (see `scripts/run-in-pane.sh`) so the user sees the command line and its output; the wrapper keeps the pane's process alive so the pane stays open for inspection — dismiss it with Enter or close it with `prefix+x`
 - **Command input form** — When a chord command contains unknown `<identifier>` placeholders (e.g. `!!wl update <id> --status <status> --stage <stage>`), the plugin shows a modal input form so you can fill in the values before the command runs. Known identifiers like `<id>` are still auto-substituted with the selected item's ID. The form is a full-pane page (no border/centering) that wraps text at the pane width and grows downward as content is entered. See [Command input form](#command-input-form).
@@ -177,7 +177,7 @@ Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings in
 - `syncIntervalMs` — Interval in ms between background `wl sync` calls (default: `60000`, minimum: `60000`; set to `0` to disable auto-sync)
 - `browseItemCount` — Max number of non-mandatory items to show in the list (default: `20`, range `1`–`50`; critical and completed/in_review items are always shown regardless)
 - `showHelpText` — Show the shortcut hint line at the bottom of the list (default: `true`). When `false`, **all** shortcut hint lines are hidden — including the chord-in-progress footer (`chord: <keys> _ <hints>`) — consistent with the pi browse widget (WL-0MSGJDSMJ004128E). Chord key *handling* still works while hints are hidden; only rendering is affected. Changes apply on the next render without a plugin restart
-- `showIcons` — Toggle icons in the list (default: `true`); changes apply on the next render without a plugin restart
+- `showIcons` — Toggle icons in the list and metadata (default: `true`); changes apply on the next render without a plugin restart. When disabled, list rows use text fallbacks (`[OPEN]`, `[IDEA]`, …) and metadata values fall back to plain text (no emoji)
 
 ### Downtime worker (local-LLM idle dispatch)
 
@@ -608,6 +608,16 @@ clamped to a minimum of 3 rows so it is always usable.
   metadata (status, stage, priority, type, risk, effort, children/parent
   counts, tags, GitHub issue number, created/updated timestamps, and audit
   state).
+- Metadata values are rendered as **icon + text label** using the same icon
+  helpers as the list rows, so the two sections can never diverge: e.g.
+  `🔄 in_progress`, `⭐ high`, `📥 intake_complete`. The Stage row mirrors
+  the list's audit-aware `in_review` icon (✅/❌/❓ when the audit is fresh,
+  ⏳ when stale-but-passed, 🔍 otherwise); the Type row shows the epic icon
+  (⊙) for `epic` items only (other types stay text-only); and the Audit and
+  Reviewed rows pair their icons with text labels (`✅ ready to close`,
+  `❌ needs review`, …). When icons are disabled (`showIcons: false`) every
+  metadata value falls back to **plain text** — no emoji and no bracketed
+  fallbacks (unlike the list rows, which use `[OPEN]`-style labels).
 - When the item's description has a `Key Files:` section containing one or
   more `.md` paths, the panel also shows a **`Related Docs`** row listing
   every markdown path (joined with `, `; long values are truncated to the

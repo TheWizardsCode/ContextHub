@@ -15,6 +15,7 @@ import {
   agentStatusIcon,
   getIconPrefix,
   iconsEnabled,
+  stageDisplayIcon,
   stringDisplayWidth,
 } from './icons.js';
 import { formatItemLine } from './worklist.js';
@@ -64,6 +65,37 @@ describe('agentStatusIcon', () => {
     expect(agentStatusIcon('blocked', { noIcons: true })).toBe('[BLKD]');
     expect(agentStatusIcon('idle', { noIcons: true })).toBe('[IDLE]');
     expect(agentStatusIcon('done', { noIcons: true })).toBe('');
+  });
+});
+
+describe('stageDisplayIcon — audit-aware stage icon shared by list and metadata (WL-0MSGIXHHI009KFW9)', () => {
+  const item = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    stage: 'in_review',
+    auditResult: null,
+    auditedAt: null,
+    updatedAt: '2026-08-02T10:00:00.000Z',
+    ...over,
+  });
+
+  it('shows the audit-result icon for a fresh audit (✅/❌/❓)', () => {
+    expect(stageDisplayIcon(item({ auditResult: true, auditedAt: '2026-08-02T10:00:30.000Z' }))).toBe('\u{2705}');
+    expect(stageDisplayIcon(item({ auditResult: false, auditedAt: '2026-08-02T10:00:30.000Z' }))).toBe('\u{274C}');
+    expect(stageDisplayIcon(item({ auditedAt: '2026-08-02T10:00:30.000Z' }))).toBe('\u{2753}');
+  });
+
+  it('shows the stale-passed hourglass when the audit is stale but passed', () => {
+    expect(stageDisplayIcon(item({ auditResult: true, auditedAt: '2026-08-01T10:00:00.000Z' }))).toBe('\u{23F3}');
+  });
+
+  it('falls back to the plain stage icon otherwise (stale/no audit, non-in_review stages)', () => {
+    expect(stageDisplayIcon(item())).toBe('\u{1F50D}'); // 🔍 no audit
+    expect(stageDisplayIcon(item({ stage: 'idea' }))).toBe('\u{1F4A1}'); // 💡
+    expect(stageDisplayIcon({ stage: 'in_progress' })).toBe('\u{1F6E0}\u{FE0F}'); // 🛠️
+  });
+
+  it('honours the noIcons flag like the other icon helpers', () => {
+    expect(stageDisplayIcon(item({ stage: 'idea' }), { noIcons: true })).toBe('[IDEA]');
+    expect(stageDisplayIcon(item({ auditResult: true, auditedAt: '2026-08-02T10:00:30.000Z' }), { noIcons: true })).toBe('[ready]');
   });
 });
 
