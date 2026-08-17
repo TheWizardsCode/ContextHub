@@ -11,6 +11,7 @@ import {
   routeCommand,
   stripAgentPromptPrefix,
   buildSendToPiArgs,
+  buildRunInPaneArgs,
   createDowntimeDeps,
   capturePaneIdFromFile,
   parsePaneIdFile,
@@ -32,8 +33,13 @@ import {
 // ---------------------------------------------------------------------------
 
 describe('buildSendToPiArgs', () => {
+  // Selection-list agent dispatch must NOT steal focus from the list
+  // (WL-0MSHIA53D009DJOT): every agent-pane spawn passes --no-focus so
+  // shared/send-to-pi.sh skips its final zoom. The flag is emitted before
+  // --cwd, mirroring buildDowntimePaneArgs.
   it('includes --model <model> for agent commands with a model', () => {
     expect(buildSendToPiArgs('/skill:implement <id>', '/project', 'code')).toEqual([
+      '--no-focus',
       '--cwd',
       '/project',
       '--model',
@@ -42,8 +48,9 @@ describe('buildSendToPiArgs', () => {
     ]);
   });
 
-  it('omits --model when no model is provided', () => {
+  it('omits --model when no model is provided (--no-focus retained)', () => {
     expect(buildSendToPiArgs('/skill:implement <id>', '/project')).toEqual([
+      '--no-focus',
       '--cwd',
       '/project',
       '/skill:implement <id>',
@@ -52,6 +59,7 @@ describe('buildSendToPiArgs', () => {
 
   it('strips the /prompt: prefix and keeps the model', () => {
     expect(buildSendToPiArgs('/prompt:Review the item', '/project', 'author')).toEqual([
+      '--no-focus',
       '--cwd',
       '/project',
       '--model',
@@ -62,6 +70,7 @@ describe('buildSendToPiArgs', () => {
 
   it('passes an empty prompt arg for a bare /prompt: command (blank session)', () => {
     expect(buildSendToPiArgs('/prompt:', '/project', 'plan')).toEqual([
+      '--no-focus',
       '--cwd',
       '/project',
       '--model',
@@ -72,12 +81,45 @@ describe('buildSendToPiArgs', () => {
 
   it('passes /plan with the plan model', () => {
     expect(buildSendToPiArgs('/plan <id>', '/project', 'plan')).toEqual([
+      '--no-focus',
       '--cwd',
       '/project',
       '--model',
       'plan',
       '/plan <id>',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildRunInPaneArgs tests (WL-0MSHIA53D009DJOT) — the pane and stdout
+// dispatch routes share this helper, so a single unit-test group covers both
+// AC2 (!!/! prefixed) and AC3 (plain shell) no-focus behavior.
+// ---------------------------------------------------------------------------
+
+describe('buildRunInPaneArgs', () => {
+  it('passes --no-focus + --cwd before a !!-prefixed command (pane route)', () => {
+    expect(buildRunInPaneArgs('wl update <id> --priority high', '/project')).toEqual([
+      '--no-focus',
+      '--cwd',
+      '/project',
+      'wl update <id> --priority high',
+    ]);
+  });
+
+  it('passes --no-focus + --cwd before a plain shell command (stdout route)', () => {
+    expect(buildRunInPaneArgs('ls -la && pwd', '/project')).toEqual([
+      '--no-focus',
+      '--cwd',
+      '/project',
+      'ls -la && pwd',
+    ]);
+  });
+
+  it('keeps the full command intact after the options', () => {
+    const args = buildRunInPaneArgs("echo 'quoted arg' --flag", '/project');
+    expect(args.slice(0, 3)).toEqual(['--no-focus', '--cwd', '/project']);
+    expect(args[3]).toBe("echo 'quoted arg' --flag");
   });
 });
 
@@ -1747,10 +1789,11 @@ describe('createDowntimeDeps recordScheduledPromptTrigger', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildSendToPiArgs — pane-id capture flag', () => {
-  it('forwards --pane-id-file when provided', () => {
+  it('forwards --pane-id-file when provided (with --no-focus)', () => {
     expect(
       buildSendToPiArgs('/skill:implement <id>', '/project', 'code', '/tmp/pane.json'),
     ).toEqual([
+      '--no-focus',
       '--cwd',
       '/project',
       '--model',
@@ -1761,8 +1804,9 @@ describe('buildSendToPiArgs — pane-id capture flag', () => {
     ]);
   });
 
-  it('omits --pane-id-file when not provided (backward compatible)', () => {
+  it('omits --pane-id-file when not provided (backward compatible, --no-focus retained)', () => {
     expect(buildSendToPiArgs('/skill:implement <id>', '/project')).toEqual([
+      '--no-focus',
       '--cwd',
       '/project',
       '/skill:implement <id>',

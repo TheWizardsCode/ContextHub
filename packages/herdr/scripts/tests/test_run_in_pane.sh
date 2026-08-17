@@ -4,6 +4,10 @@
 # Covers the --exec wrapper mode:
 #   - non-TTY + HERDR_PANE_ID: stays alive with ~0% CPU (not busy-looping)
 #   - non-TTY + no HERDR_PANE_ID: exits immediately with command status
+# Covers the --no-focus main-mode flag (WL-0MSHIA53D009DJOT):
+#   - --no-focus skips the final pane zoom (selection list keeps focus)
+#   - omitting --no-focus preserves the current focus/zoom behavior
+#   - --no-focus does not affect pane creation / command execution
 #
 # Run from the repo root (or anywhere):
 #   bash packages/herdr/scripts/tests/test_run_in_pane.sh
@@ -82,6 +86,72 @@ if [ "$RC" -ne 0 ]; then
 else
   fail "should exit non-zero with no command"
 fi
+
+# ── Main-mode tests: zoom/focus behavior (WL-0MSHIA53D009DJOT) ─────┐
+# └── Uses a mock herdr CLI so no live herdr session is required ─────┘
+echo ""
+echo "=== Test: no-focus flag (main mode, mock herdr CLI) ==="
+
+SANDBOX="$(mktemp -d)"
+HERDR_LOG="$SANDBOX/herdr-log.txt"
+
+MOCK_HERDR="$SANDBOX/mock-herdr"
+cat > "$MOCK_HERDR" <<MOCK
+#!/usr/bin/env bash
+echo "herdr:\$*" >> "$HERDR_LOG"
+case "\$1" in
+  pane)
+    case "\$2" in
+      split)
+        echo '{"pane_id":"test-pane-main","success":true}'
+        ;;
+      run)
+        echo "mock: ran"
+        ;;
+      rename|zoom)
+        ;;
+      *)
+        echo "mock: unknown pane subcommand \$2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "mock: unknown command \$1" >&2
+    exit 1
+    ;;
+esac
+MOCK
+chmod +x "$MOCK_HERDR"
+
+# --no-focus skips the final zoom entirely
+rm -f "$HERDR_LOG"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --no-focus --cwd /tmp "echo hi" < /dev/null >/dev/null 2>&1
+if [ -f "$HERDR_LOG" ] && ! grep -q "zoom" "$HERDR_LOG"; then
+  pass "--no-focus skips the final pane zoom"
+else
+  fail "--no-focus should skip the final pane zoom (log: $(cat "$HERDR_LOG" 2>/dev/null))"
+fi
+
+# Without the flag the zoom still happens (backward compatible)
+rm -f "$HERDR_LOG"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --cwd /tmp "echo hi" < /dev/null >/dev/null 2>&1
+if grep -q "zoom" "$HERDR_LOG" 2>/dev/null; then
+  pass "omitting --no-focus keeps the focus/zoom behavior"
+else
+  fail "without --no-focus the zoom must still run (log: $(cat "$HERDR_LOG" 2>/dev/null))"
+fi
+
+# --cwd is still honoured alongside --no-focus (the command still runs)
+rm -f "$HERDR_LOG"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --no-focus --cwd /tmp "echo hi" < /dev/null >/dev/null 2>&1
+if grep -q "pane run" "$HERDR_LOG" 2>/dev/null; then
+  pass "--no-focus does not affect pane creation / command execution"
+else
+  fail "--no-focus must not skip pane run (log: $(cat "$HERDR_LOG" 2>/dev/null))"
+fi
+
+rm -rf "$SANDBOX"
 
 echo ""
 echo "========================================"

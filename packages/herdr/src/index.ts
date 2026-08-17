@@ -169,6 +169,11 @@ export function stripAgentPromptPrefix(command: string): string {
  * WL-0MSBQUJQX005RAT9), `--pane-id-file <path>` is forwarded so the script
  * writes the new pane ID immediately after the split succeeds — the plugin
  * reads it back to record the work-item ↔ pane association.
+ *
+ * Every selection-list agent dispatch passes `--no-focus` (WL-0MSHIA53D009DJOT)
+ * so shared/send-to-pi.sh skips its final zoom and the selection list keeps
+ * focus while the pi agent pane opens in the background. The shared script's
+ * own default (focus on) is unchanged for its other consumers.
  */
 export function buildSendToPiArgs(
   command: string,
@@ -177,7 +182,7 @@ export function buildSendToPiArgs(
   paneIdFile?: string,
 ): string[] {
   const agentPrompt = stripAgentPromptPrefix(command);
-  const args = ['--cwd', targetCwd];
+  const args = ['--no-focus', '--cwd', targetCwd];
   if (model) {
     args.push('--model', model);
   }
@@ -186,6 +191,19 @@ export function buildSendToPiArgs(
   }
   args.push(agentPrompt);
   return args;
+}
+
+/**
+ * Build the argument vector for spawning `scripts/run-in-pane.sh` for a
+ * command-output pane (`!!`/`!`-prefixed pane route and plain shell stdout
+ * route). Mirrors `buildSendToPiArgs`: `--no-focus` (WL-0MSHIA53D009DJOT) is
+ * always passed so opening the command-output pane does not steal focus from
+ * the selection list, followed by `--cwd <targetCwd>` so the pane starts in
+ * the resolved project root. `run-in-pane.sh` parses both options at the
+ * head of argv; everything else is the command itself.
+ */
+export function buildRunInPaneArgs(command: string, targetCwd: string): string[] {
+  return ['--no-focus', '--cwd', targetCwd, command];
 }
 
 /**
@@ -845,11 +863,14 @@ async function main(): Promise<void> {
           }
         } else if (route === 'pane') {
           // Strip `!!` / `!` bash history-expansion prefixes, then run the
-          // command visibly in a new herdr pane via run-in-pane.sh.
+          // command visibly in a new herdr pane via run-in-pane.sh. The pane
+          // opens WITHOUT stealing focus from the selection list (--no-focus,
+          // WL-0MSHIA53D009DJOT) so the user can keep browsing/dispatching;
+          // command-send feedback is surfaced via toast notifications.
           const clean = stripCommandPrefix(command);
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            ['--cwd', targetCwd, clean],
+            buildRunInPaneArgs(clean, targetCwd),
             {
               detached: true,
               stdio: 'ignore',
@@ -862,10 +883,12 @@ async function main(): Promise<void> {
           // Plain (non-!!) shell commands: run them visibly in a new herdr pane
           // from the resolved project root so they always execute in the tab's
           // working directory (herdr v0.7.5 has no CMD: handling, so the stdout
-          // CMD: protocol is not a reliable execution path).
+          // CMD: protocol is not a reliable execution path). Like the pane
+          // route, the command-output pane opens without stealing focus
+          // (--no-focus, WL-0MSHIA53D009DJOT).
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            ['--cwd', targetCwd, command],
+            buildRunInPaneArgs(command, targetCwd),
             {
               detached: true,
               stdio: 'ignore',
