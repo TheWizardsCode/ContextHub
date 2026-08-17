@@ -2321,6 +2321,126 @@ describe('buildMetaRows — timestamps rendered via formatTimestamp', () => {
   });
 });
 
+// ── Icon + text metadata values (WL-0MSGIXHHI009KFW9) ──────────────────
+// The metadata section (list-mode panel and detail view) renders the same
+// icons as the list rows, paired with their text label (icon + text, e.g.
+// `🔄 in_progress`, `⭐ high`, `📥 intake_complete`). The Stage row mirrors
+// the list's audit-aware in_review icon via the shared stageDisplayIcon
+// helper; the Type row shows the epic icon for epic items only; Audit and
+// Reviewed rows pair their icons with text labels. With icons disabled the
+// values fall back to plain text — no emoji, no bracketed fallbacks.
+
+describe('buildMetaRows — icon + text metadata values (WL-0MSGIXHHI009KFW9)', () => {
+  it('prefixes Status, Stage, Priority, Risk and Effort with the list icons', () => {
+    const rows = new Map(buildMetaRows(makeRichItem()));
+    // makeRichItem: status in_progress, stage in_progress, priority high,
+    // risk medium, effort 3 (free-form — no icon key).
+    expect(rows.get('Status')).toBe('\u{1F504} in_progress'); // 🔄
+    expect(rows.get('Stage')).toBe('\u{1F6E0}\u{FE0F} in_progress'); // 🛠️
+    expect(rows.get('Priority')).toBe('\u{2B50} high'); // ⭐
+    expect(rows.get('Risk')).toBe('\u{1F7E1} medium'); // 🟡
+  });
+
+  it('keeps unknown free-form Effort values text-only (consistent with the list)', () => {
+    const rows = new Map(buildMetaRows(makeRichItem())); // effort: '3'
+    expect(rows.get('Effort')).toBe('3');
+  });
+
+  it('shows the epic icon on the Type row for epic items only', () => {
+    const epic = { ...makeRichItem(), issueType: 'epic' };
+    expect(new Map(buildMetaRows(epic)).get('Type')).toBe('\u{2299} epic'); // ⊙
+    expect(new Map(buildMetaRows(makeRichItem())).get('Type')).toBe('feature');
+  });
+
+  it('pairs Audit and Reviewed icons with text labels', () => {
+    // makeRichItem: auditResult true → `✅ ready to close`,
+    // needsProducerReview true → `❌ needs review`.
+    const rows = new Map(buildMetaRows(makeRichItem()));
+    expect(rows.get('Audit')).toBe('\u{2705} ready to close'); // ✅
+    expect(rows.get('Reviewed')).toBe('\u{274C} needs review'); // ❌
+    const reviewed = new Map(buildMetaRows({ ...makeRichItem(), needsProducerReview: false }));
+    expect(reviewed.get('Reviewed')).toBe('\u{2705} reviewed'); // ✅
+  });
+
+  it('renders plain text values when icons are disabled (no emoji, no [BRACKET] fallbacks)', () => {
+    const rows = new Map(buildMetaRows(makeRichItem(), true));
+    expect(rows.get('Status')).toBe('in_progress');
+    expect(rows.get('Stage')).toBe('in_progress');
+    expect(rows.get('Priority')).toBe('high');
+    expect(rows.get('Type')).toBe('feature');
+    expect(rows.get('Risk')).toBe('medium');
+    expect(rows.get('Effort')).toBe('3');
+    expect(rows.get('Audit')).toBe('ready to close');
+    expect(rows.get('Reviewed')).toBe('needs review');
+    // No icon glyphs leak into the noIcons values.
+    for (const [label, value] of rows) {
+      if (['Status', 'Stage', 'Priority', 'Type', 'Risk', 'Effort', 'Audit', 'Reviewed'].includes(label)) {
+        expect(value).not.toMatch(/[\u{1F300}-\u{1FAFF}\u{2700}-\u{27BF}\u{2600}-\u{26FF}\u{2299}]/u);
+        expect(value).not.toMatch(/^\[/);
+      }
+    }
+  });
+});
+
+describe('buildMetaRows — audit-aware in_review Stage row (WL-0MSGIXHHI009KFW9 AC2)', () => {
+  const base = (over: Partial<WorkItem> = {}): WorkItem => ({
+    ...makeRichItem(),
+    stage: 'in_review',
+    auditResult: null,
+    auditedAt: null,
+    updatedAt: '2026-08-02T10:00:00.000Z',
+    ...over,
+  });
+
+  it('shows the fresh audit result icon (✅/❌/❓) when the audit is fresh', () => {
+    const updatedAt = '2026-08-02T10:00:00.000Z';
+    const freshPass = base({ auditResult: true, auditedAt: '2026-08-02T10:00:30.000Z', updatedAt });
+    expect(new Map(buildMetaRows(freshPass)).get('Stage')).toBe('\u{2705} in_review'); // ✅
+    const freshFail = base({ auditResult: false, auditedAt: '2026-08-02T10:00:30.000Z', updatedAt });
+    expect(new Map(buildMetaRows(freshFail)).get('Stage')).toBe('\u{274C} in_review'); // ❌
+    const freshUnknown = base({ auditResult: null, auditedAt: '2026-08-02T10:00:30.000Z', updatedAt });
+    expect(new Map(buildMetaRows(freshUnknown)).get('Stage')).toBe('\u{2753} in_review'); // ❓
+  });
+
+  it('shows the stale-passed hourglass when the audit is stale but passed', () => {
+    const stalePass = base({ auditResult: true, auditedAt: '2026-08-01T10:00:00.000Z' });
+    expect(new Map(buildMetaRows(stalePass)).get('Stage')).toBe('\u{23F3} in_review'); // ⏳
+  });
+
+  it('falls back to the plain in_review stage icon otherwise (no audit / stale fail)', () => {
+    const noAudit = base();
+    expect(new Map(buildMetaRows(noAudit)).get('Stage')).toBe('\u{1F50D} in_review'); // 🔍
+  });
+});
+
+describe('metadata panel and detail view — icon + text values (WL-0MSGIXHHI009KFW9 AC6)', () => {
+  it('renders icon+text in the list-mode metadata panel', () => {
+    const joined = formatMetadataPanel(makeRichItem(), 80, 20, 0).join('\n');
+    expect(joined).toContain('\u{1F504} in_progress'); // 🔄 status
+    expect(joined).toContain('\u{2B50} high'); // ⭐ priority
+    expect(joined).toContain('\u{2705} ready to close'); // ✅ audit
+  });
+
+  it('renders icon+text in the detail-view metadata table', () => {
+    const joined = formatDetailContent(makeRichItem(), 80).join('\n');
+    expect(joined).toContain('\u{1F504} in_progress');
+    expect(joined).toContain('\u{2B50} high');
+    expect(joined).toContain('\u{2705} ready to close');
+  });
+
+  it('renders plain text in both views when icons are disabled', () => {
+    const panel = formatMetadataPanel(makeRichItem(), 80, 20, 0, undefined, true).join('\n');
+    expect(panel).toContain(' in_progress');
+    expect(panel).toContain(' ready to close');
+    expect(panel).not.toContain('\u{1F504}');
+    expect(panel).not.toContain('[INPR]');
+    const detail = formatDetailContent(makeRichItem(), 80, undefined, true).join('\n');
+    expect(detail).toContain('in_progress');
+    expect(detail).toContain('ready to close');
+    expect(detail).not.toContain('\u{1F504}');
+  });
+});
+
 // ── Downtime status indicator (WL-0MSF49FMW009M06K, F4) ───────────────
 
 describe('renderDowntimeStatus', () => {
@@ -2417,7 +2537,7 @@ describe('createListRenderer — showIcons gating', () => {
     expect(output).toContain('[OPEN]'); // status text fallback
     expect(output).toContain('[IDEA]'); // stage text fallback
     expect(output).not.toContain(AUDIT_UNKNOWN_ICON); // metadata panel audit icon
-    expect(output).toContain('[?]'); // audit text fallback
+    expect(output).toContain('unknown'); // audit text label (metadata falls back to plain text, WL-0MSGIXHHI009KFW9)
   });
 
   it('re-reads the getter on every render (settings re-read path)', () => {

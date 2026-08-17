@@ -155,7 +155,7 @@ describe('worklist — showIcons gating through runWorklistTui', () => {
     expect(output).toContain('[OPEN]'); // status text fallback
     expect(output).toContain('WL-1');
     expect(output).not.toContain(AUDIT_UNKNOWN_ICON); // metadata panel audit icon
-    expect(output).toContain('[?]'); // audit text fallback
+    expect(output).toContain('unknown'); // audit text label (metadata falls back to plain text, WL-0MSGIXHHI009KFW9)
 
     await quit(p);
   });

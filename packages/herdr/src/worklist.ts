@@ -21,8 +21,12 @@ import {
   statusIcon,
   stageIcon,
   priorityIcon,
+  epicIcon,
+  riskIcon,
+  effortIcon,
   auditIcon,
   needsProducerReviewIcon,
+  stageDisplayIcon,
   getIconPrefix,
   applyStageColour,
   stageColor,
@@ -956,6 +960,14 @@ export function formatTimestamp(iso: string): string {
  * (WL-0MSGTLSUT002NF29). Fields that are unset are omitted.
  * Timestamps (Created, Updated, Audited At) are rendered in local time as
  * `DD/MM/YY HH:MM` via {@link formatTimestamp}.
+ *
+ * Icon-bearing fields (Status, Stage, Priority, Type, Risk, Effort, Audit,
+ * Reviewed) render as **icon + text label**, using the same icon helpers as
+ * the list rows (statusIcon, stageDisplayIcon, priorityIcon, epicIcon,
+ * riskIcon, effortIcon, auditIcon, needsProducerReviewIcon) so the metadata
+ * section and the list can never diverge (WL-0MSGIXHHI009KFW9). With icons
+ * disabled the values fall back to plain text — the metadata deliberately
+ * does NOT use the list's `[BRACKET]` fallbacks.
  * Shared by the detail view and the list-mode metadata panel so both stay
  * consistent (WL-0MSAYNVBY006LM9X-FT4).
  */
@@ -966,14 +978,40 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
       metaRows.push([label, value]);
     }
   };
+
+  // Prefix a display value with its icon (`icon + text`, e.g. `🔄
+  // in_progress`). Unknown icon keys return '' (e.g. free-form effort `3`),
+  // so those rows stay text-only — consistent with the list
+  // (WL-0MSGIXHHI009KFW9). When icons are disabled the icon is omitted
+  // entirely: plain text only, no emoji, no [BRACKET] fallbacks.
+  const iconText = (icon: string, text: string | undefined | null): string | undefined => {
+    if (text == null || text === '') return undefined;
+    return icon ? `${icon} ${text}` : text;
+  };
+
+  // Text labels paired with the Audit/Reviewed icons (AC5).
+  const auditLabel = (result: boolean | null | undefined): string | undefined => {
+    if (result === true) return 'ready to close';
+    if (result === false) return 'not ready';
+    return 'unknown';
+  };
+  const reviewLabel = (needsReview: boolean | undefined): string | undefined => {
+    if (needsReview === undefined) return undefined;
+    return needsReview ? 'needs review' : 'reviewed';
+  };
+
   addMeta('ID', item.id);
   addMeta('Title', item.title);
-  addMeta('Status', item.status);
-  addMeta('Stage', item.stage);
-  addMeta('Priority', item.priority);
-  addMeta('Type', item.issueType);
-  addMeta('Risk', item.risk);
-  addMeta('Effort', item.effort);
+  addMeta('Status', iconText(noIcons ? '' : statusIcon(item.status), item.status));
+  // Stage mirrors the list's audit-aware in_review icon via the shared
+  // stageDisplayIcon helper (AC2).
+  addMeta('Stage', iconText(noIcons ? '' : stageDisplayIcon(item), item.stage));
+  addMeta('Priority', iconText(noIcons ? '' : priorityIcon(item.priority), item.priority));
+  // Type shows the epic icon (⊙) for epic items only, matching the list;
+  // non-epic types remain text-only (AC3).
+  addMeta('Type', iconText(noIcons ? '' : (item.issueType === 'epic' ? epicIcon() : ''), item.issueType));
+  addMeta('Risk', iconText(noIcons ? '' : riskIcon(item.risk), item.risk));
+  addMeta('Effort', iconText(noIcons ? '' : effortIcon(item.effort), item.effort));
   addMeta('Children', item.childCount !== undefined ? String(item.childCount) : undefined);
   addMeta('Parent', item.parentId);
   if (item.tags && item.tags.length > 0) {
@@ -982,8 +1020,8 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
   addMeta('GitHub Issue', item.githubIssueNumber ? `#${item.githubIssueNumber}` : undefined);
   addMeta('Created', item.createdAt ? formatTimestamp(item.createdAt) : undefined);
   addMeta('Updated', item.updatedAt ? formatTimestamp(item.updatedAt) : undefined);
-  addMeta('Audit', auditIcon(item.auditResult, { noIcons }));
-  addMeta('Reviewed', needsProducerReviewIcon(item.needsProducerReview, { noIcons }));
+  addMeta('Audit', iconText(noIcons ? '' : auditIcon(item.auditResult), auditLabel(item.auditResult)));
+  addMeta('Reviewed', iconText(noIcons ? '' : needsProducerReviewIcon(item.needsProducerReview), reviewLabel(item.needsProducerReview)));
   addMeta('Audited At', item.auditedAt ? formatTimestamp(item.auditedAt) : undefined);
 
   // Related Docs — every .md path referenced in the item's `Key Files:`
@@ -1185,8 +1223,10 @@ export function formatDetailToC(
  *
  * Metadata section includes: Status, Priority, Stage, Type, Risk, Effort,
  * Children, Tags, GitHub Issue (number), Created, Updated, Audit
- * (auditResult icon), Reviewed (needsProducerReview icon), and Audited At
- * (ISO timestamp). Rendered as a markdown table. ID and Title are shown in
+ * (auditResult icon + text label), Reviewed (needsProducerReview icon +
+ * text label), and Audited At (ISO timestamp). Rendered as a markdown
+ * table; icon-bearing values are `icon + text` via the shared
+ * {@link buildMetaRows} (WL-0MSGIXHHI009KFW9). ID and Title are shown in
  * the header (from the shared {@link buildMetaRows} set they are omitted
  * from the table to avoid duplication).
  *

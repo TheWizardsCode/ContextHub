@@ -258,6 +258,33 @@ export function isAuditFresh(
   return auditTime > updateTime - 60000;
 }
 
+/**
+ * Get the display icon for an item's stage with the list's audit-aware
+ * `in_review` handling: a fresh audit shows the audit-result icon
+ * (✅/❌/❓), a stale-but-passed audit shows the stale-passed hourglass
+ * (⏳), a stale or missing audit on an `in_review` item falls back to the
+ * plain stage icon (🔍), and every other stage shows the plain stage icon.
+ *
+ * Shared by the list row prefix (`getIconPrefix`) and the metadata Stage
+ * row so the two sections can never diverge (WL-0MSGIXHHI009KFW9 AC2).
+ */
+export function stageDisplayIcon(
+  item: { stage?: string; auditResult?: boolean | null; auditedAt?: string | null; updatedAt?: string },
+  opts?: IconOptions,
+): string {
+  const noIcons = opts?.noIcons ?? false;
+  if (item.stage === 'in_review') {
+    const fresh = isAuditFresh(item.auditedAt, item.updatedAt);
+    if (fresh) {
+      return auditIcon(item.auditResult, { noIcons });
+    }
+    if (item.auditResult === true) {
+      return auditStaleIcon(item.auditResult, { noIcons });
+    }
+  }
+  return stageIcon(item.stage, { noIcons });
+}
+
 // ── Stage colour ──────────────────────────────────────────────────────
 
 /**
@@ -361,24 +388,10 @@ export function getIconPrefix(
 
   const sIcon = statusIcon(item.status, { noIcons });
 
-  // Column 2: stage or audit-aware icon for in_review
-  let secondIcon: string;
-  if (item.stage === 'in_review') {
-    const fresh = isAuditFresh(item.auditedAt, item.updatedAt);
-    if (fresh) {
-      // Fresh audit: show based on audit result
-      secondIcon = auditIcon(item.auditResult, { noIcons });
-    } else {
-      // No audit or stale audit: show stale-passed icon if passed, else stage icon
-      if (item.auditResult === true) {
-        secondIcon = auditStaleIcon(item.auditResult, { noIcons });
-      } else {
-        secondIcon = stageIcon(item.stage, { noIcons });
-      }
-    }
-  } else {
-    secondIcon = stageIcon(item.stage, { noIcons });
-  }
+  // Column 2: stage or audit-aware icon for in_review — via the shared
+  // stageDisplayIcon helper so the list prefix and the metadata Stage row
+  // can never diverge (WL-0MSGIXHHI009KFW9).
+  const secondIcon = stageDisplayIcon(item, { noIcons });
 
   // Column 3: producer review flag
   const prIcon = needsProducerReviewIcon(item.needsProducerReview, { noIcons });
