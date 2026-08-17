@@ -190,6 +190,11 @@ export const ANSI = {
   hideCursor: '\x1b[?25l',
   showCursor: '\x1b[?25h',
   scrollRegion: (top: number, bottom: number) => `\x1b[${top};${bottom}r`,
+  // SGR mouse tracking (WL-0MSGHM5BQ0096BNJ AC1): enable/disable sequences
+  // for button-event (1000), button-event-motion (1002) and SGR-encoded
+  // (1006) reporting, emitted on raw-mode entry / cleanup respectively.
+  mouseEnable: '\x1b[?1000h\x1b[?1002h\x1b[?1006h',
+  mouseDisable: '\x1b[?1000l\x1b[?1002l\x1b[?1006l',
 };
 
 // ── Navigation Stack ──────────────────────────────────────────────────
@@ -2041,6 +2046,290 @@ export function handleKeypress(
   return action;
 }
 
+// ── Mouse / touch input (WL-0MSGHM5BQ0096BNJ) ─────────────────────────
+// SGR mouse-event parsing, split-chunk buffering, and click/wheel/filter
+// row mapping for the selection list. Implements the contract pinned by the
+// test-first suite packages/herdr/src/worklist-mouse.test.ts
+// (WL-0MSI720DX002E9WC): ANSI mouseEnable/mouseDisable lifecycle constants
+// (on the ANSI object), the pure SGR parser, the chunk consumer, and the
+// state-aware action mapper.
+
+/** Raw SGR mouse sequence: ESC [ < b ; x ; y M|m (M = press, m = release). */
+const SGR_MOUSE_RE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
+
+/** A plausible partial SGR body: the ESC prefix plus digits/semicolons only
+ * (e.g. '\x1b[<0;10;') — still awaiting its terminating M/m. */
+const SGR_PARTIAL_RE = /^\x1b\[<[0-9;]*$/;
+
+/**
+ * A parsed SGR mouse event with 1-based terminal coordinates.
+ */
+export interface ParsedMouseEvent {
+  /** Raw SGR button code: 0=left, 1=middle, 2=right, 64=wheel up,
+   * 65=wheel down; bit 32 = motion. */
+  button: number;
+  /** 1-based column. */
+  x: number;
+  /** 1-based row. */
+  y: number;
+  /** True for '\x1b[<...m' (release), false for '\x1b[<...M' (press). */
+  release: boolean;
+}
+
+/** Double-click window in ms (WL-0MSGHM5BQ0096BNJ AC3); boundary
+ * inclusive (<=). */
+export const DOUBLE_CLICK_WINDOW_MS = 400;
+
+/** Prior left-press coordinates plus an injectable clock for deterministic
+ * double-click tests. */
+export interface MouseClickState {
+  /** The previous left-press position/time, or null when none. */
+  lastClick: { x: number; y: number; at: number } | null;
+  /** Current clock (ms) — injected for deterministic tests. */
+  now: number;
+}
+
+/** Dispatchable mouse action — mirrors the list/detail/filter key paths. */
+export type MouseAction =
+  | { type: 'select-row'; index: number } // list: click/tap an item row
+  | { type: 'open-detail' } // list: double-click (Enter-equivalent)
+  | { type: 'back' } // detail: double-click (to the list)
+  | { type: 'wheel-up' } // list: wheel/touch-scroll up
+  | { type: 'wheel-down' } // list: wheel/touch-scroll down
+  | { type: 'scroll-detail-up' } // detail: wheel up (k-equivalent)
+  | { type: 'scroll-detail-down' } // detail: wheel down (j-equivalent)
+  | { type: 'filter-stage'; index: number } // filter: tap a stage option
+  | null; // inert: chrome rows, motion, releases, unknown buttons
+
+/**
+ * Parse a COMPLETE SGR mouse sequence ('\x1b[<b;x;yM' press or
+ * '\x1b[<b;x;y m' release). Pure: returns null for any non-mouse input and
+ * never buffers — split sequences are handled by {@link consumeMouseChunk}.
+ */
+export function parseMouseEvent(key: string): ParsedMouseEvent | null {
+  const m = SGR_MOUSE_RE.exec(key);
+  if (!m) return null;
+  return {
+    button: parseInt(m[1], 10),
+    x: parseInt(m[2], 10),
+    y: parseInt(m[3], 10),
+    release: m[4] === 'm',
+  };
+}
+
+/** Module-level buffer holding a partial SGR prefix across stdin chunks. */
+let mouseChunkBuffer = '';
+
+/**
+ * Feed a stdin chunk to the SGR parser, holding a partial prefix
+ * ('\x1b[<0;10;') in a module-level buffer until the terminating M/m
+ * arrives in a later chunk (AC1 risk mitigation). Foreign escape sequences
+ * (cursor moves, screen clears) leave a pending partial untouched; plain
+ * input clears any stale pending partial so a stale tail can never complete
+ * later.
+ */
+export function consumeMouseChunk(chunk: string): ParsedMouseEvent | null {
+  if (chunk.startsWith('\x1b')) {
+    // Escape-sequence chunk: a complete SGR parses and clears; a partial
+    // SGR prefix starts buffering; any other control sequence is ignored.
+    const complete = parseMouseEvent(chunk);
+    if (complete) {
+      mouseChunkBuffer = '';
+      return complete;
+    }
+    if (mouseChunkBuffer === '' && SGR_PARTIAL_RE.test(chunk)) {
+      mouseChunkBuffer = chunk;
+    }
+    return null;
+  }
+  // Non-escape chunk: the tail of a split sequence, or plain input.
+  const combined = mouseChunkBuffer + chunk;
+  const complete = parseMouseEvent(combined);
+  if (complete) {
+    mouseChunkBuffer = '';
+    return complete;
+  }
+  if (SGR_PARTIAL_RE.test(combined)) {
+    // Still a plausible partial body — keep buffering.
+    mouseChunkBuffer = combined;
+    return null;
+  }
+  // Plain input clears any stale pending partial.
+  mouseChunkBuffer = '';
+  return null;
+}
+
+/**
+ * The list-mode row budget the renderer uses for the visible item window —
+ * the header, fold indicators, group separators, footer and metadata panel
+ * are chrome rows and never map to items. Mirrors createListRenderer's
+ * window computation (trimming for separators and indicators) so click
+ * mapping can never diverge from what is drawn.
+ */
+interface ListRowLayout {
+  topIndicator: boolean;
+  bottomIndicator: boolean;
+  visibleStart: number;
+  visibleCount: number;
+  /** separatorBefore[i]: a group separator row precedes visible item i. */
+  separatorBefore: boolean[];
+}
+
+function computeListRowLayout(state: WorkItemListState, termSize: TermSize): ListRowLayout {
+  const rows = termSize.rows;
+  const panelHeight = computeMetadataPanelHeight(rows);
+  const listArea = Math.max(1, rows - 1 - panelHeight);
+  const listHeight = Math.max(3, rows - 4 - panelHeight);
+  const flatItems = state.getFlattenedItems();
+  const chromeLines = 2; // header + footer (no banners in this path)
+  const budgetForItemsAndSeps = Math.max(0, listArea - chromeLines);
+
+  const countSeparators = (window: WorkItem[]): number => {
+    let count = 0;
+    let lastGroup: number | undefined;
+    for (const item of window) {
+      if (item.group !== undefined && item.id !== '..') {
+        if (lastGroup === undefined || item.group !== lastGroup) {
+          count++;
+        }
+        lastGroup = item.group;
+      }
+    }
+    return count;
+  };
+
+  let visible = flatItems.slice(state.scrollOffset, state.scrollOffset + listHeight);
+  while (visible.length > 0 && visible.length + countSeparators(visible) > budgetForItemsAndSeps) {
+    visible = visible.slice(0, -1);
+  }
+  const hasTopIndicator = state.scrollOffset > 0;
+  const hasBottomIndicator = state.scrollOffset + visible.length < flatItems.length;
+  const indicatorRows = (hasTopIndicator ? 1 : 0) + (hasBottomIndicator ? 1 : 0);
+  const effectiveBudget = budgetForItemsAndSeps - indicatorRows;
+  while (visible.length > 0 && visible.length + countSeparators(visible) > effectiveBudget) {
+    visible = visible.slice(0, -1);
+  }
+  const bottomIndicator = state.scrollOffset + visible.length < flatItems.length;
+
+  const separatorBefore: boolean[] = [];
+  let lastGroup: number | undefined;
+  for (const item of visible) {
+    let sep = false;
+    if (item.group !== undefined && item.id !== '..') {
+      if (lastGroup === undefined || item.group !== lastGroup) {
+        sep = true;
+      }
+      lastGroup = item.group;
+    }
+    separatorBefore.push(sep);
+  }
+  return {
+    topIndicator: hasTopIndicator,
+    bottomIndicator,
+    visibleStart: state.scrollOffset,
+    visibleCount: visible.length,
+    separatorBefore,
+  };
+}
+
+/** Map a 1-based list row to the flat item index under it, or null when the
+ * row is chrome (header, fold indicator, separator, footer, panel). */
+function mapListRowToIndex(state: WorkItemListState, y: number, termSize: TermSize): number | null {
+  if (y <= 1) return null; // header
+  const listArea = Math.max(1, termSize.rows - 1 - computeMetadataPanelHeight(termSize.rows));
+  if (y > 1 + listArea) return null; // footer, metadata panel, notification
+  const layout = computeListRowLayout(state, termSize);
+  let row = 2;
+  if (layout.topIndicator) {
+    if (y === 2) return null; // '▲ more'
+    row = 3;
+  }
+  for (let i = 0; i < layout.visibleCount; i++) {
+    if (layout.separatorBefore[i]) {
+      if (y === row) return null; // group separator
+      row++;
+    }
+    if (y === row) return layout.visibleStart + i;
+    row++;
+  }
+  return null; // '▼ more' or blank fill
+}
+
+/** Map a tapped column on the filter-prompt options row (y=3) to a stage
+ * index — the option spans '[i] name' (AC5). */
+function filterStageIndexForColumn(x: number): number | null {
+  let col = 1; // leading space — '[i]' starts at column 2
+  for (let i = 0; i < STAGES.length; i++) {
+    const start = col + 1;
+    const span = `[${i}] ${STAGES[i]}`.length;
+    if (x >= start && x < start + span) return i;
+    col += span + 2; // two-space separator
+  }
+  return null;
+}
+
+/**
+ * Map a parsed SGR mouse event to a dispatchable action for the current
+ * state. Gate rules (WL-0MSGHM5BQ0096BNJ AC2–AC6): release events and
+ * motion (button & 32) are inert; wheel 64/65 navigate (list) or scroll the
+ * detail (detail) and are ignored in filter mode; only the left button
+ * selects; two left presses on the same row within
+ * {@link DOUBLE_CLICK_WINDOW_MS} open the detail view (list mode) or go
+ * back (detail mode); filter-mode taps on the stage-options row select a
+ * stage.
+ */
+export function mapMouseToAction(
+  state: WorkItemListState,
+  ev: ParsedMouseEvent,
+  termSize: TermSize,
+  clickState?: MouseClickState,
+): MouseAction {
+  // Release events are consumed but inert — presses drive selection (AC6).
+  if (ev.release) return null;
+  // Drag-motion guard: motion events never navigate (AC6).
+  if ((ev.button & 32) !== 0) return null;
+  // Wheel buttons 64/65 (AC4).
+  if (ev.button === 64) {
+    if (state.mode === 'list') return { type: 'wheel-up' };
+    if (state.mode === 'detail') return { type: 'scroll-detail-up' };
+    return null; // filter mode: wheel ignored (plan A2)
+  }
+  if (ev.button === 65) {
+    if (state.mode === 'list') return { type: 'wheel-down' };
+    if (state.mode === 'detail') return { type: 'scroll-detail-down' };
+    return null;
+  }
+  // Only the left button (0) selects/taps; middle/right are inert.
+  if (ev.button !== 0) return null;
+
+  // Double-click: same coordinates within DOUBLE_CLICK_WINDOW_MS (AC3,
+  // inclusive boundary), mirroring the previous press.
+  const isDoubleClick = clickState !== undefined
+    && clickState.lastClick !== null
+    && clickState.lastClick.x === ev.x
+    && clickState.lastClick.y === ev.y
+    && clickState.now - clickState.lastClick.at <= DOUBLE_CLICK_WINDOW_MS;
+
+  if (isDoubleClick) {
+    if (state.mode === 'detail') return { type: 'back' };
+    if (state.mode === 'list') {
+      const index = mapListRowToIndex(state, ev.y, termSize);
+      // Repeated clicks on inert rows stay inert (AC3).
+      return index !== null ? { type: 'open-detail' } : null;
+    }
+    // filter mode: fall through to the single-tap mapping below.
+  }
+
+  if (state.mode === 'detail') return null; // single clicks are inert
+  if (state.mode === 'filter') {
+    if (ev.y !== 3) return null; // AC5: only the options row is tappable
+    const index = filterStageIndexForColumn(ev.x);
+    return index !== null ? { type: 'filter-stage', index } : null;
+  }
+  const index = mapListRowToIndex(state, ev.y, termSize);
+  return index !== null ? { type: 'select-row', index } : null;
+}
+
 // ── Renderer ──────────────────────────────────────────────────────────
 
 /**
@@ -2976,6 +3265,10 @@ export async function runWorklistTui(
       process.stdin.setRawMode?.(true);
       process.stdin.resume();
       rawMode = true;
+      // SGR mouse tracking (WL-0MSGHM5BQ0096BNJ AC1): emit the enable
+      // sequences when raw mode is entered so the terminal starts
+      // delivering mouse events to stdin.
+      process.stdout.write(ANSI.mouseEnable);
     } catch {
       // Not a TTY, use line-buffered mode
     }
@@ -2992,6 +3285,9 @@ export async function runWorklistTui(
       } catch {
         // ignore
       }
+      // Disable SGR mouse tracking on exit (AC1) — only when raw mode was
+      // entered.
+      process.stdout.write(ANSI.mouseDisable);
     }
     process.stdin.pause();
     process.stdout.write(ANSI.showCursor);
