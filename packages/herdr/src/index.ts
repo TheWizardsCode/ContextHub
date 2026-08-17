@@ -456,8 +456,8 @@ export function createDowntimeDeps(
     async getNextImplementCandidate(cwd: string): Promise<DowntimeCandidate | null> {
       try {
         // Implement tier (WL-0MSMAYPQP001FLR6): select the highest-priority
-        // open plan_complete item with risk Low / effort Small|XS. The wl
-        // next server-side at-most filters (--risk low --effort small,
+        // open plan_complete item with risk ≤ Medium / effort ≤ Medium. The wl
+        // next server-side at-most filters (--risk medium --effort medium,
         // delivered by WL-0MSMAIP5F003WAGG) do the heavy lifting; a
         // generous batch (-n 10) is fetched so completed epics (which wl
         // next keeps under a stage filter) can be filtered out client-side
@@ -472,9 +472,9 @@ export function createDowntimeDeps(
             '--stage',
             'plan_complete',
             '--risk',
-            'low',
+            'medium',
             '--effort',
-            'small',
+            'medium',
             '-n',
             '10',
             '--json',

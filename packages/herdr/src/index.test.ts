@@ -958,7 +958,7 @@ describe('createDowntimeDeps', () => {
     // starving selection (WL-0MSMAYIKX005LLO4 AC2/AC3).
     expect(mockExec).toHaveBeenCalledWith(
       'wl',
-      ['next', '--stage', 'plan_complete', '--risk', 'low', '--effort', 'small', '-n', expect.any(String), '--json'],
+      ['next', '--stage', 'plan_complete', '--risk', 'medium', '--effort', 'medium', '-n', expect.any(String), '--json'],
       expect.anything(),
     );
     // wl next keeps completed items with a stage filter; the client-side
@@ -1126,9 +1126,9 @@ describe('createDowntimeDeps', () => {
         '--stage',
         'plan_complete',
         '--risk',
-        'low',
+        'medium',
         '--effort',
-        'small',
+        'medium',
         '-n',
         expect.any(String),
         '--json',

@@ -1056,24 +1056,30 @@ describe('implement selection (selectImplementCandidate)', () => {
   // thresholds again so a malformed/absent server filter can never dispatch
   // a Medium+/Large+ item (fail-closed).
 
-  it('only risk exactly Low is eligible (Medium/High/Critical excluded)', () => {
+  it('risk ≤ Medium eligible (High/Critical excluded)', () => {
+    const low = { ...open, id: 'WL-LOW', risk: 'low' as const };
     const medium = { ...open, id: 'WL-MED', risk: 'medium' as const };
     const high = { ...open, id: 'WL-HIGH-R', risk: 'high' as const };
     const critical = { ...open, id: 'WL-CRIT', risk: 'critical' as const };
-    expect(selectImplementCandidate([medium, high, critical, open])?.id).toBe('WL-OPEN');
-    expect(selectImplementCandidate([medium])).toBeNull();
+    // medium is first eligible in input order (all share sortIndex 100)
+    expect(selectImplementCandidate([medium, low, high, critical, open])?.id).toBe('WL-MED');
+    expect(selectImplementCandidate([medium])?.id).toBe('WL-MED');
+    expect(selectImplementCandidate([low])?.id).toBe('WL-LOW');
     expect(selectImplementCandidate([high])).toBeNull();
     expect(selectImplementCandidate([critical])).toBeNull();
   });
 
-  it('effort Small and Extra Small eligible (Medium/Large/Extra Large excluded)', () => {
+  it('effort ≤ Medium eligible (Large/Extra Large excluded)', () => {
     const xs = { ...open, id: 'WL-XS', effort: 'xs' as const };
+    const small = { ...open, id: 'WL-S', effort: 'small' as const };
     const medium = { ...open, id: 'WL-MED-E', effort: 'medium' as const };
     const large = { ...open, id: 'WL-LARGE', effort: 'large' as const };
     const xl = { ...open, id: 'WL-XL', effort: 'xl' as const };
-    expect(selectImplementCandidate([medium, large, xl, open])?.id).toBe('WL-OPEN');
+    // medium is first eligible in input order (all share sortIndex 100)
+    expect(selectImplementCandidate([medium, large, xl, open])?.id).toBe('WL-MED-E');
     expect(selectImplementCandidate([xs])?.id).toBe('WL-XS');
-    expect(selectImplementCandidate([medium])).toBeNull();
+    expect(selectImplementCandidate([small])?.id).toBe('WL-S');
+    expect(selectImplementCandidate([medium])?.id).toBe('WL-MED-E');
     expect(selectImplementCandidate([large])).toBeNull();
     expect(selectImplementCandidate([xl])).toBeNull();
   });
@@ -1087,10 +1093,12 @@ describe('implement selection (selectImplementCandidate)', () => {
     expect(selectImplementCandidate([noEffort])).toBeNull();
   });
 
-  it('recognizes long-form effort spellings (Small / Extra Small)', () => {
+  it('recognizes long-form effort spellings (Small / Medium / Extra Small)', () => {
     const small = { ...open, id: 'WL-S', effort: 'Small' as const };
+    const medium = { ...open, id: 'WL-M', effort: 'Medium' as const };
     const extraSmall = { ...open, id: 'WL-ES', effort: 'Extra Small' as const };
     expect(selectImplementCandidate([small])?.id).toBe('WL-S');
+    expect(selectImplementCandidate([medium])?.id).toBe('WL-M');
     expect(selectImplementCandidate([extraSmall])?.id).toBe('WL-ES');
   });
 });

@@ -20,7 +20,7 @@
  *    children are never dispatched independently,
  *    WL-0MSTLFW14000KPEC), then the
  *    implement tier (WL-0MSMAYPQP001FLR6): the highest-priority open
- *    plan_complete item with risk Low / effort Small|XS →
+ *    plan_complete item with risk ≤ Medium / effort ≤ Medium →
  *    `/skill:implement <id>`, then `wl next --stage intake_complete` →
  *    `/skill:plan <id>`, fallback `--stage idea` → `/skill:intake <id>`,
  *    pre-dispatch claim, per-process single-flight. Code-freeze gate
@@ -699,7 +699,7 @@ export interface DowntimeWorkerDeps {
   getNextAuditCandidate(cwd: string): Promise<DowntimeNextResult>;
   /**
    * Look up the next implement-tier candidate (WL-0MSMAYPQP001FLR6): the
-   * highest-priority open plan_complete item with risk Low / effort Small|XS,
+   * highest-priority open plan_complete item with risk ≤ Medium / effort ≤ Medium,
    * excluding dependency-blocked items (wl next default) and items already
    * dispatched for `/skill:implement` (kind `implement` dispatched markers,
    * AC6). Fail-closed: a wl failure yields null (no dispatch) — the
@@ -1082,7 +1082,7 @@ async function dispatchScheduledPrompt(
  * excludes completed/in_review children, so only parent items are ever
  * dispatched for audit — sub-tasks are never audited independently; then the
  * implement tier (WL-0MSMAYPQP001FLR6): the highest-priority open
- * plan_complete item with risk Low / effort Small|XS → `/skill:implement <id>`
+ * plan_complete item with risk ≤ Medium / effort ≤ Medium → `/skill:implement <id>`
  * (fail-closed null on wl error or no candidate — never short-circuits the
  * fallback, AC5/AC6); if none, `wl next --stage intake_complete` →
  * `/skill:plan <id>`; if none, `wl next --stage idea` → `/skill:intake <id>`;
@@ -1174,7 +1174,7 @@ export async function dispatchDowntimeWork(
       }
       // Implement tier (WL-0MSMAYPQP001FLR6): after the audit gate, dispatch
       // /skill:implement for the highest-priority open plan_complete item with
-      // risk Low / effort Small|XS. getNextImplementCandidate is fail-closed
+      // risk ≤ Medium / effort ≤ Medium. getNextImplementCandidate is fail-closed
       // (null on wl failure or no candidate), so a null here means the tier is
       // exhausted and the plan/intake tiers below still run (AC5/AC6 — a wl
       // error at the implement tier does NOT short-circuit the fallback).
@@ -1909,14 +1909,14 @@ export function parseImplementCandidatesOutput(stdout: string): ImplementCandida
 /**
  * Select the next implement candidate from parsed wl next output: the
  * first candidate that is open (`status === 'open'`, AC2), carries risk
- * exactly Low and effort Small/Extra Small (AC1 threshold boundaries,
+ * risk ≤ Medium and effort ≤ Medium (AC1 threshold boundaries,
  * fail-closed on unset/unknown), is not in the dispatched-marker set
  * (kind `implement`, AC6), sorted ascending by `sortIndex` (wl next
  * priority order preserved). Returns null when no candidate qualifies
  * (or the list is empty).
  *
  * Belt-and-suspenders client-side guard (AC1): even though `wl next
- * --risk low --effort small` filters server-side, the herdr tier verifies
+ * --risk medium --effort medium` filters server-side, the herdr tier verifies
  * the thresholds again so a malformed/absent server filter can never
  * dispatch a Medium+/Large+ item.
  */
@@ -1928,9 +1928,9 @@ export function selectImplementCandidate(
     .filter((c) => c.status === 'open')
     .filter((c) => {
       const risk = riskOrdinal(c.risk);
-      if (risk === null || risk !== 1) return false; // only risk exactly Low
+      if (risk === null || risk > 2) return false; // risk ≤ Medium (1=Low, 2=Medium)
       const effort = effortOrdinal(c.effort);
-      if (effort === null || effort > 2) return false; // Small (2) + Extra Small (1)
+      if (effort === null || effort > 3) return false; // effort ≤ Medium (1=XS, 2=S, 3=M)
       return true;
     })
     .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
