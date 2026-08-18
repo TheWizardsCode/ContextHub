@@ -3499,8 +3499,86 @@ export async function runWorklistTui(
     render();
   };
 
+  // Double-click state tracker — persists across onData calls for the TUI
+  // lifetime. Updated on every left-press so mapMouseToAction can detect
+  // double-clicks within {@link DOUBLE_CLICK_WINDOW_MS}. (WL-0MSGHM5BQ0096BNJ AC3)
+  let clickState: MouseClickState = { lastClick: null, now: 0 };
+
+  // ── Mouse event dispatch (WL-0MSGHM5BQ0096BNJ AC2–AC6) ─────────
+  // Parse SGR mouse events from the raw chunk BEFORE the keypress path.
+  // Mouse-shaped sequences are fully consumed; unknown sequences fall
+  // through to the keyboard handler untouched (AC6). (parent AC2–AC6)
+  const dispatchMouse = (key: string): boolean => {
+    const mouseEvent = consumeMouseChunk(key);
+    if (mouseEvent === null) return false; // not a mouse event — fall through to keys
+    // Track coordinates/timestamp for double-click detection.
+    clickState.lastClick = { x: mouseEvent.x, y: mouseEvent.y, at: Date.now() };
+    clickState.now = clickState.lastClick.at;
+    const action = mapMouseToAction(state, mouseEvent, termSize, clickState);
+    if (action === null) return true; // consumed but inert (motion, release, chrome)
+    // Dispatch mouse actions (mirrors handleKeypress action handling below).
+    switch (action.type) {
+      case 'select-row': {
+        const flat = state.getFlattenedItems();
+        if (action.index >= 0 && action.index < flat.length) {
+          state.selectedIndex = action.index;
+        }
+        break;
+      }
+      case 'open-detail': {
+        const flat = state.getFlattenedItems();
+        if (state.selectedIndex >= 0 && state.selectedIndex < flat.length) {
+          const selected = flat[state.selectedIndex];
+          // Toggle expand/collapse for items with actual children data
+          if (selected.children && selected.children.length > 0) {
+            if (state.isExpanded(selected.id)) {
+              state.clearNavigationStateFor(selected.id);
+            } else {
+              state.pushNavigationState(selected.id);
+            }
+            state.toggleExpand(selected.id);
+          } else {
+            state.selectItem();
+          }
+        }
+        break;
+      }
+      case 'back':
+        state.back();
+        break;
+      case 'wheel-up':
+        state.moveUp();
+        break;
+      case 'wheel-down':
+        state.moveDown();
+        break;
+      case 'scroll-detail-up':
+        if (state.detailItem) state.detailScrollUp(1);
+        break;
+      case 'scroll-detail-down':
+        if (state.detailItem) state.detailScrollDown(1);
+        break;
+      case 'filter-stage':
+        if (action.index >= 0 && action.index < STAGES.length) {
+          state.applyFilter(STAGES[action.index]);
+        }
+        break;
+    }
+    return true; // consumed a mouse event
+  };
+
   const onData = async (chunk: Buffer): Promise<void> => {
     const key = chunk.toString();
+
+    // Try mouse event dispatch first — only runs when the pane is not in a
+    // modal state (code-freeze notice, form, ship-it dialog), matching the
+    // keyboard path. Mouse input is ignored during those modal states.
+    if (!codeFreezeNotice && formState === null && shipItDialog === null) {
+      if (dispatchMouse(key)) {
+        render();
+        return;
+      }
+    }
 
     // ── Code Freeze notice handling ─────────────────────────────
     // While the notice is showing, Esc/Enter/q dismiss it and return to the
