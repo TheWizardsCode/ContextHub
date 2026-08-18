@@ -1331,7 +1331,7 @@ export function formatDetailContent(
   }
 
   lines.push(separator);
-  lines.push(` ${ANSI.dim}[↑↓/j:k] scroll  [g/G] top/bot  [esc] back  [q] quit${ANSI.reset}`);
+  lines.push(` ${ANSI.dim}[↑↓/j:k] scroll  [g/G] top/bot  [esc] back  [q] quit  [click] select  [dbl-click] open  [wheel] scroll${ANSI.reset}`);
 
   return lines;
 }
