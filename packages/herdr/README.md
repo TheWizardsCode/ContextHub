@@ -105,6 +105,7 @@ The plugin pane will then be available via the Herdr plugin system.
 
 4. Workflow shortcuts (single-key):
    - Press `c` — Create a new work item
+   - Press `d` — **Toggle downtime dispatch for the current pane** (per-instance in-memory; the header shows `[Downtime Off]` while off, the live status when on; other panes and the shared settings file are unaffected — see [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
    - Press `i` — Run the implement workflow on the selected item (intake_complete, plan_complete, in_progress)
    - Press `n` — Run the intake workflow on the selected item (idea stage)
    - Press `p` — Run the plan workflow on the selected item (intake_complete stage)
@@ -236,6 +237,16 @@ switch, no active local lease, and the required free-slot condition met.
 Endpoint failures, timeouts, and ambiguous responses are treated as **busy**
 (no dispatch) and never crash the plugin. Each poll is single-flight with a
 per-poll timeout.
+
+**Per-pane toggle** (parent WL-0MSZ4NSOE007AQEF) — pressing `d` in the
+worklist toggles downtime dispatch for the **current pane only**: a
+per-instance in-memory override flips the worker's effective enabled state
+(override takes precedence over the global `downtimeEnabled` setting, so `d`
+can also force dispatch on for one pane when the setting is off). While
+overridden off, the worker performs no proxy polling, idle tracking, or
+dispatch (identical to the settings-disabled path); the override is
+forgotten when the plugin restarts and never touches the shared settings
+file, so other panes are unaffected.
 
 **Per-slot idle tracking** (LP-0MSG5TA7Y002GN39) — when the proxy serves
 per-slot detail (`slots: [{slot_id, is_processing}]`) in the status payload
@@ -536,8 +547,9 @@ The worker runs inside the plugin's single consolidated scheduler loop (one
 `setInterval`; no independent timers), uses unref'd timers, and is cleaned up
 when the pane exits. While the pane is open the list header shows the worker
 state, e.g. `[⏳ downtime idle 3:12]`, `[downtime busy]`,
-`[⏳ downtime dispatching]`, `[downtime disabled]`, or `[downtime paused]`
-(no-candidate cooldown).
+`[⏳ downtime dispatching]`, `[Downtime Off]` (dispatch disabled for the
+pane — toggled off via `d` or the global setting off), or
+`[downtime paused]` (no-candidate cooldown).
 
 ### Pause-when-hidden (pane visibility gating)
 
