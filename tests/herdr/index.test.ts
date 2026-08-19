@@ -22,6 +22,7 @@ import { buildSendToPiArgs, routeCommand, stripAgentPromptPrefix, stripCommandPr
 describe('buildSendToPiArgs', () => {
   it('forwards --cwd and the command when no model is provided', () => {
     expect(buildSendToPiArgs('/skill:audit WL-123', '/tmp/proj')).toEqual([
+      '--no-focus',
       '--cwd',
       '/tmp/proj',
       '/skill:audit WL-123',
@@ -30,6 +31,7 @@ describe('buildSendToPiArgs', () => {
 
   it('appends --model <pattern> after --cwd when a model is provided', () => {
     expect(buildSendToPiArgs('/skill:implement WL-123', '/tmp/proj', 'code')).toEqual([
+      '--no-focus',
       '--cwd',
       '/tmp/proj',
       '--model',
@@ -50,6 +52,7 @@ describe('buildSendToPiArgs', () => {
 
   it('strips the /prompt: routing prefix so pi receives the bare prompt', () => {
     expect(buildSendToPiArgs('/prompt:Review the current work item', '/tmp/proj', 'author')).toEqual([
+      '--no-focus',
       '--cwd',
       '/tmp/proj',
       '--model',
