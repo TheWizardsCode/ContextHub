@@ -75,6 +75,12 @@ Install the extension globally:
 npm run install:pi-extension
 ```
 
+For a single-command install of all integrations (herdr plugin + Pi extension):
+
+```bash
+npm run install
+```
+
 Then start (or restart) `pi` and run:
 
 ```text

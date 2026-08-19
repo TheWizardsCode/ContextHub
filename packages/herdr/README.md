@@ -55,6 +55,8 @@ cd packages/herdr && npm run build
 - Migrates a legacy `prefix+l` → `worklog-selection-list.open-worklist` binding in-place to the new action, so the Podcast Editing tab name takes effect without a manual config edit.
 - Warns (without failing the build) when `herdr` is not on PATH or the config cannot be written, so `npm run build` succeeds in CI/offline environments.
 
+Alternatively, `npm run install` (or `npm run install:plugin` for the herdr step alone) runs the same install script outside of a build context.
+
 Manual install (fallback, if you prefer not to run the build):
 
 ```bash
