@@ -53,6 +53,7 @@ import {
   selectNextCandidate,
   parseAuditCandidatesOutput,
   selectAuditCandidate,
+  selectWithRotation,
   toDowntimeCandidate,
   skillKindFromPrompt,
   buildDowntimeDispatchComment,
@@ -76,6 +77,7 @@ import {
   type ImplementCandidate,
   type ScheduledPrompt,
 } from './downtime-worker.js';
+import { createRoundRobinRegistry } from './downtime-round-robin.js';
 import {
   statusFixtures,
   ambiguousMissingFieldsRaw,
@@ -3510,5 +3512,101 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     const at = await worker.tick();
     expect(at.dispatched).toBe(false);
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+});
+
+// ── Rotation-aware selection (WL-0MSSRED76008LGB6 / WL-0MSW6CKBY007RB7O) ──
+
+describe('selectWithRotation (round-robin tie-break)', () => {
+  const mk = (id: string, priority: string, sortIndex: number) => ({
+    id, priority, sortIndex,
+  });
+
+  it('empty list → null', () => {
+    expect(selectWithRotation([])).toBeNull();
+  });
+
+  it('single candidate → that candidate (no rotation)', () => {
+    const c = mk('a', 'high', 1);
+    expect(selectWithRotation([c])?.id).toBe('a');
+  });
+
+  it('no registry → first by sortIndex (fail-open pre-rotation behaviour)', () => {
+    const items = [mk('a', 'high', 2), mk('b', 'high', 1)];
+    expect(selectWithRotation(items)?.id).toBe('b'); // lowest sortIndex
+  });
+
+  it('candidates without priority → first by sortIndex (fail-open)', () => {
+    const items = [{ id: 'x', sortIndex: 5 }, { id: 'y', sortIndex: 3 }];
+    expect(selectWithRotation(items)?.id).toBe('y');
+  });
+
+  it('rotates through tied top-priority group, skipping lower priority', () => {
+        const registry = createRoundRobinRegistry({ worklogDir: '/tmp/rr-worker-rotation', rng: () => 0.5 });
+    const items = [
+      mk('low1', 'low', 10),
+      mk('high1', 'high', 1),
+      mk('high2', 'high', 2),
+      mk('medium1', 'medium', 5),
+    ];
+    // Cursor starts at 0 → selects high1; advances to 1 → high2; then back to high1
+    expect(selectWithRotation(items, registry)?.id).toBe('high1');
+    expect(selectWithRotation(items, registry)?.id).toBe('high2');
+    expect(selectWithRotation(items, registry)?.id).toBe('high1');
+  });
+
+  it('single-member top group → no rotation (higher priority still wins)', () => {
+        const registry = createRoundRobinRegistry({ worklogDir: '/tmp/rr-worker-single', rng: () => 0.5 });
+    const items = [mk('crit1', 'critical', 1), mk('high1', 'high', 2), mk('high2', 'high', 3)];
+    // critical group has 1 member → always crit1, regardless of cursor
+    expect(selectWithRotation(items, registry)?.id).toBe('crit1');
+    expect(selectWithRotation(items, registry)?.id).toBe('crit1');
+  });
+
+  it('priority-first preserved: lower-priority candidate never selected while higher tier has members', () => {
+        const registry = createRoundRobinRegistry({ worklogDir: '/tmp/rr-worker-priority', rng: () => 0.5 });
+    const items = [
+      mk('med1', 'medium', 10),
+      mk('med2', 'medium', 11),
+      mk('low1', 'low', 20),
+    ];
+    // Only medium group has members → rotation within medium only
+    expect(selectWithRotation(items, registry)?.id).toBe('med1');
+    expect(selectWithRotation(items, registry)?.id).toBe('med2');
+    expect(selectWithRotation(items, registry)?.id).toBe('med1');
+  });
+});
+
+describe('rotation-aware selection wired into tiers', () => {
+  it('selectImplementCandidate rotates within tied priority when registry given', () => {
+        const registry = createRoundRobinRegistry({ worklogDir: '/tmp/rr-implement', rng: () => 0.5 });
+    const candidates: ImplementCandidate[] = [
+      { id: 'A', title: 'A', status: 'open', priority: 'high', sortIndex: 1, risk: 'low', effort: 'small' },
+      { id: 'B', title: 'B', status: 'open', priority: 'high', sortIndex: 2, risk: 'low', effort: 'small' },
+    ];
+    expect(selectImplementCandidate(candidates, undefined, registry)?.id).toBe('A');
+    expect(selectImplementCandidate(candidates, undefined, registry)?.id).toBe('B');
+    expect(selectImplementCandidate(candidates, undefined, registry)?.id).toBe('A');
+  });
+
+  it('selectNextCandidate rotates within tied priority when registry given', () => {
+        const registry = createRoundRobinRegistry({ worklogDir: '/tmp/rr-next', rng: () => 0.5 });
+    const candidates: DowntimeCandidate[] = [
+      { id: 'X', title: 'X', stage: 'plan', status: 'open', priority: 'high', sortIndex: 1 },
+      { id: 'Y', title: 'Y', stage: 'plan', status: 'open', priority: 'high', sortIndex: 2 },
+    ];
+    expect(selectNextCandidate(candidates, undefined, registry)?.id).toBe('X');
+    expect(selectNextCandidate(candidates, undefined, registry)?.id).toBe('Y');
+  });
+
+  it('selectAuditCandidate rotates within tied priority when registry given', () => {
+        const registry = createRoundRobinRegistry({ worklogDir: '/tmp/rr-audit', rng: () => 0.5 });
+    const now = Date.now();
+    const candidates: AuditCandidate[] = [
+      { id: 'P', title: 'P', priority: 'high', sortIndex: 1, updatedAt: new Date(now).toISOString() },
+      { id: 'Q', title: 'Q', priority: 'high', sortIndex: 2, updatedAt: new Date(now).toISOString() },
+    ];
+    expect(selectAuditCandidate(candidates, now, undefined, registry)?.id).toBe('P');
+    expect(selectAuditCandidate(candidates, now, undefined, registry)?.id).toBe('Q');
   });
 });

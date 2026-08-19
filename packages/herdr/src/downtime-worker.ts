@@ -76,6 +76,7 @@ import { spawn } from 'node:child_process';
 import { isAuditFresh } from './icons.js';
 import type { CodeFreezeStatus } from './code-freeze.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
+import type { RoundRobinRegistry } from './downtime-round-robin.js';
 
 export type { ScheduledPrompt } from './scheduled-prompts.js';
 
@@ -594,6 +595,8 @@ export interface DowntimeCandidate {
   status?: string;
   /** wl next priority order preserved for deterministic selection. */
   sortIndex?: number;
+  /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
+  priority?: string;
 }
 
 /**
@@ -611,6 +614,8 @@ export interface ImplementCandidate {
   risk?: string;
   effort?: string;
   sortIndex?: number;
+  /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
+  priority?: string;
 }
 
 /**
@@ -626,6 +631,8 @@ export interface AuditCandidate {
   auditedAt?: string | null;
   updatedAt?: string;
   sortIndex?: number;
+  /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
+  priority?: string;
 }
 
 /**
@@ -1739,6 +1746,7 @@ export function parseNextCandidatesOutput(
         typeof nested.sortIndex === 'number' && Number.isFinite(nested.sortIndex)
           ? nested.sortIndex
           : undefined,
+      priority: typeof nested.priority === 'string' ? nested.priority : undefined,
     });
   }
   return candidates;
@@ -1783,6 +1791,64 @@ export function skillKindFromPrompt(prompt: string): DowntimeSkillKind {
   return prompt.includes('/skill:plan ') ? 'plan' : 'intake';
 }
 
+// ── Rotation-aware selection (WL-0MSSRED76008LGB6) ────────────────────
+
+/**
+ * A candidate carrying the fields needed for rotation-aware selection:
+ * a stable id, an optional priority level (the round-robin grouping key),
+ * and an optional sortIndex (wl next priority order preserved).
+ */
+export interface RotatableCandidate {
+  id: string;
+  priority?: string;
+  sortIndex?: number;
+}
+
+/**
+ * Apply round-robin rotation within the highest-priority group of a
+ * candidate list. Fail-open design (WL-0MSSRED76008LGB6):
+ *
+ * - No registry (or an empty/closed registry) → fall back to the plain
+ *   sortIndex order (first candidate wins) — the pre-rotation behaviour.
+ * - Candidates with no `priority` field → fall back to sortIndex order
+ *   (rotation needs the priority grouping key).
+ * - The highest-priority group with multiple members rotates through a
+ *   shared durable cursor (`advanceCursor` persists the advance).
+ * - A single-member group needs no rotation → sortIndex order stands.
+ *
+ * Candidates are sorted ascending by sortIndex (wl next priority order)
+ * before grouping, so the first group always holds the top priority.
+ *
+ * @param candidates Candidates already filtered/validated by the caller.
+ * @param registry Optional shared round-robin registry. When absent,
+ *   rotation is skipped entirely (fail-open).
+ * @returns The selected candidate, or null when the list is empty.
+ */
+export function selectWithRotation<T extends RotatableCandidate>(
+  candidates: T[],
+  registry?: RoundRobinRegistry,
+): T | null {
+  if (candidates.length === 0) return null;
+  const sorted = [...candidates].sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
+  if (sorted.length === 1) return sorted[0] ?? null;
+  if (!registry) return sorted[0] ?? null;
+
+  // Group by priority level; only rotate within the highest-priority group
+  // (candidates are sorted ascending by sortIndex, so the first group holds
+  // the top priority). Missing priority on the leader → no rotation
+  // possible (fail-open).
+  const topPriority = sorted[0]?.priority;
+  if (!topPriority) return sorted[0] ?? null;
+
+  const topGroup = sorted.filter((c) => c.priority === topPriority);
+  if (topGroup.length <= 1) return sorted[0] ?? null;
+
+  // Rotate: the cursor selects the next member of the tied group and
+  // persists the advance (write-then-spawn ordering handled by callers).
+  const index = registry.advanceCursor(topPriority, topGroup.length);
+  return topGroup[index] ?? topGroup[0] ?? null;
+}
+
 // ── Audit-tier selection (WL-0MSI8H3HP000K0RG) ────────────────────────
 
 /**
@@ -1817,6 +1883,7 @@ export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | n
       auditedAt: typeof o.auditedAt === 'string' ? o.auditedAt : undefined,
       updatedAt: typeof o.updatedAt === 'string' ? o.updatedAt : undefined,
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
+      priority: typeof o.priority === 'string' ? o.priority : undefined,
     });
   }
   return candidates;
@@ -1851,9 +1918,10 @@ export function selectAuditCandidate(
   candidates: AuditCandidate[],
   now: number = Date.now(),
   dispatchedItemIds?: ReadonlySet<string>,
+  registry?: RoundRobinRegistry,
 ): AuditCandidate | null {
   const recencyCutoff = now - DOWNTIME_AUDIT_RECENCY_WINDOW_MS;
-  const target = candidates
+  const filtered = candidates
     .filter((c) => !isAuditFresh(c.auditedAt, c.updatedAt))
     .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
     .filter((c) => {
@@ -1863,7 +1931,7 @@ export function selectAuditCandidate(
       return updated >= recencyCutoff;
     })
     .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
-  return target[0] ?? null;
+  return selectWithRotation(filtered, registry);
 }
 
 /**
@@ -1954,6 +2022,7 @@ export function parseImplementCandidatesOutput(stdout: string): ImplementCandida
       risk: typeof o.risk === 'string' ? o.risk : undefined,
       effort: typeof o.effort === 'string' ? o.effort : undefined,
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
+      priority: typeof o.priority === 'string' ? o.priority : undefined,
     });
   }
   return candidates;
@@ -1976,8 +2045,9 @@ export function parseImplementCandidatesOutput(stdout: string): ImplementCandida
 export function selectImplementCandidate(
   candidates: ImplementCandidate[],
   dispatchedItemIds?: ReadonlySet<string>,
+  registry?: RoundRobinRegistry,
 ): ImplementCandidate | null {
-  const target = candidates
+  const filtered = candidates
     .filter((c) => c.status === 'open')
     .filter((c) => {
       const risk = riskOrdinal(c.risk);
@@ -1988,7 +2058,7 @@ export function selectImplementCandidate(
     })
     .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
     .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
-  return target[0] ?? null;
+  return selectWithRotation(filtered, registry);
 }
 
 /**
@@ -2019,8 +2089,9 @@ export function toImplementCandidate(candidate: ImplementCandidate): DowntimeCan
 export function selectNextCandidate(
   candidates: DowntimeCandidate[],
   dispatchedStages?: ReadonlyMap<string, string>,
+  registry?: RoundRobinRegistry,
 ): DowntimeCandidate | null {
-  const target = candidates
+  const filtered = candidates
     .filter((c) => c.status === 'open')
     .filter((c) => {
       const dispatchedAt = dispatchedStages?.get(c.id);
@@ -2029,7 +2100,7 @@ export function selectNextCandidate(
       return dispatchedAt === undefined || dispatchedAt !== c.stage;
     })
     .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
-  return target[0] ?? null;
+  return selectWithRotation(filtered, registry);
 }
 
 // ── Settings clamps (implemented — wired into settings.ts by F2) ──────
