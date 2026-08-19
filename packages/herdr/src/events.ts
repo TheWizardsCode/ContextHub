@@ -303,15 +303,22 @@ export class HerdrEventSubscriber {
         // Connected successfully — clear timeout
         this.socket!.setTimeout(0);
 
-        // Send the subscribe request and wait for response
+        // Send the subscribe request and wait for response.
+        // CRITICAL (WL-0MSZXB3OF009V5IQ): the `error` listener MUST stay
+        // attached after a successful subscribe. Removing it (as a previous
+        // version did) left the socket with NO 'error' handler, so a later
+        // socket reset (ECONNRESET) from herdr emitted an unhandled 'error'
+        // event and crashed the whole plugin process (exit code 1), taking
+        // the pane down within seconds of `prefix+l`. The persistent listener
+        // routes post-subscribe errors through handleSocketError() so the
+        // subscriber reconnects with backoff (fail-open) instead of crashing.
+        // Only the timeout listener is removed once the connection settles.
         this.sendSubscribeRequest()
           .then(() => {
-            this.socket!.removeListener('error', onError);
             this.socket!.removeListener('timeout', onTimeout);
             resolve({ type: 'subscribed', subscriptions: this.getSubscriptionCount() });
           })
           .catch((err) => {
-            this.socket!.removeListener('error', onError);
             this.socket!.removeListener('timeout', onTimeout);
             resolve({ type: 'error', error: err.message });
           });
@@ -667,6 +674,15 @@ export class HerdrEventSubscriber {
    */
   getTrackedPaneIds(): string[] {
     return [...this.trackedPaneIds];
+  }
+
+  /**
+   * Test-only hook: expose the live socket so tests can inject errors and
+   * verify the subscriber still holds an `'error'` handler after subscribe.
+   * Returns null when no socket is currently connected.
+   */
+  testSocket(): net.Socket | null {
+    return this.socket;
   }
 }
 

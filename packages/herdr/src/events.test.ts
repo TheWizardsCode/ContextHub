@@ -441,6 +441,58 @@ describe('HerdrEventSubscriber — mock socket', () => {
 
       await subscriber.close();
     });
+
+    it('keeps an error handler on the socket after subscribe (no unhandled ECONNRESET crash)', async () => {
+      // Regression test (WL-0MSZXB3OF009V5IQ): the `prefix+l` plugin
+      // pane crashed with exit code 1 seconds after opening because the
+      // subscriber removed its only socket `'error'` listener once the
+      // initial subscribe succeeded. When herdr later reset the connection
+      // (ECONNRESET), Node emitted an unhandled `'error'` event and killed
+      // the whole process. The socket must keep an `'error'` handler so a
+      // post-subscribe error is routed to handleSocketError() (fail-open
+      // reconnect) instead of crashing.
+      const onError = vi.fn();
+      const subscriber = new HerdrEventSubscriber({
+        socketPath: mockServer.getAddress(),
+        callbacks: { onError },
+        maxReconnectAttempts: 3,
+        reconnectBaseDelayMs: 50,
+      });
+
+      const result = await subscriber.connect();
+      expect(result.type).toBe('subscribed');
+      expect(subscriber.health().status).toBe('active');
+
+      const socket = subscriber.testSocket();
+      expect(socket).not.toBeNull();
+      // The socket MUST retain an 'error' listener after subscribe.
+      const errorListeners = socket!.listeners('error');
+      expect(errorListeners.length).toBeGreaterThan(0);
+
+      // Simulate herdr resetting the connection after subscribe. Directly
+      // emitting an 'error' event with no listener would throw an unhandled
+      // 'error' and crash the process (the pre-fix bug). With the fix the
+      // listener routes it to handleSocketError → fail-open recovery, and
+      // onError is invoked. The subscriber must stay alive (health is one of
+      // the live states, never crashed): it may have already reconnected
+      // back to 'active' (best case) or still be recovering.
+      socket!.emit('error', Object.assign(new Error('read ECONNRESET'), {
+        errno: -104,
+        code: 'ECONNRESET',
+        syscall: 'read',
+      }));
+
+      await new Promise((r) => setTimeout(r, 150));
+
+      // onError proves the socket error handler ran instead of crashing.
+      expect(onError).toHaveBeenCalled();
+      // The subscriber did not die — it is either back up (active), or
+      // still in fail-open recovery. It must never be 'closed'.
+      const health = subscriber.health();
+      expect(['active', 'unavailable', 'reconnecting'].includes(health.status)).toBe(true);
+
+      await subscriber.close();
+    });
   });
 
   // ── F2: Constants ──────────────────────────────────────────────────
