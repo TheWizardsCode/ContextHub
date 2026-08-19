@@ -610,12 +610,14 @@ export class WorkItemListState {
   detailScrollDown(amount = 1): void {
     const maxCols = this.termSize.cols;
     const viewportHeight = Math.max(10, this.termSize.rows - 4);
-    // The ToC is pinned at the top of the detail view, so the scrollable
-    // region is the body below it (WL-0MSHWHULZ001FL8I).
+    // The header + ToC block is pinned at the top; only the body below
+    // scrolls (WL-0MSHWHULZ001FL8I / WL-0MSI28AP80002F5S).
     const allLines = formatDetailContent(this.detailItem, maxCols);
     const tocLines = formatDetailToC(this.detailItem, maxCols).length;
-    const bodyLines = Math.max(0, allLines.length - tocLines);
-    const maxScroll = Math.max(0, bodyLines - viewportHeight);
+    const pinnedHeight = DETAIL_HEADER_LINES + tocLines;
+    const bodyLines = Math.max(0, allLines.length - pinnedHeight);
+    const bodyViewport = Math.max(1, viewportHeight - pinnedHeight);
+    const maxScroll = Math.max(0, bodyLines - bodyViewport);
     this.detailScrollOffset = Math.min(maxScroll, this.detailScrollOffset + amount);
   }
 
@@ -1545,6 +1547,9 @@ export function resolveKeyFilePath(filePath: string): string | null {
  * @param viewportHeight - Number of visible lines (default: terminal rows - 4)
  * @returns The rendered detail view string
  */
+/** Fixed height of the detail-view header block (blank, id, title, separator). */
+const DETAIL_HEADER_LINES = 4;
+
 export function formatDetailView(
   item: WorkItem | null,
   maxCols: number,
@@ -1562,22 +1567,24 @@ export function formatDetailView(
   const allLines = formatDetailContent(item, maxCols, readFile, noIcons, detailToCIndex, detailToCFocus, detailRenderedIndex);
   if (allLines.length === 0) return '';
 
-  const bodyLines = allLines.slice(tocLines.length);
-  const totalLines = bodyLines.length;
-  const maxScroll = Math.max(0, totalLines - viewportHeight);
+  const pinnedHeight = DETAIL_HEADER_LINES + tocLines.length;
+  const bodyLines = allLines.slice(pinnedHeight);
+  const bodyViewport = Math.max(1, viewportHeight - pinnedHeight);
+  const totalBodyLines = bodyLines.length;
+  const maxScroll = Math.max(0, totalBodyLines - bodyViewport);
   const safeOffset = Math.min(scrollOffset, maxScroll);
 
   const visible = [
-    ...tocLines,
-    ...bodyLines.slice(safeOffset, safeOffset + viewportHeight),
+    ...allLines.slice(0, pinnedHeight),
+    ...bodyLines.slice(safeOffset, safeOffset + bodyViewport),
   ];
 
   // Add scroll indicator if the body is long
-  if (totalLines > viewportHeight && safeOffset <= maxScroll) {
-    const percent = totalLines > 0
-      ? Math.round(((safeOffset + viewportHeight) / totalLines) * 100)
+  if (totalBodyLines > bodyViewport && safeOffset <= maxScroll) {
+    const percent = totalBodyLines > 0
+      ? Math.round(((safeOffset + bodyViewport) / totalBodyLines) * 100)
       : 0;
-    const scrollInfo = ` ${ANSI.dim}Lines ${safeOffset + 1}-${Math.min(safeOffset + viewportHeight, totalLines)} of ${totalLines} (${percent}%)  ` +
+    const scrollInfo = ` ${ANSI.dim}Lines ${safeOffset + 1}-${Math.min(safeOffset + bodyViewport, totalBodyLines)} of ${totalBodyLines} (${percent}%)  ` +
       `[↑↓/j:k scroll  g/G top/bot]${ANSI.reset}`;
     visible[visible.length - 1] = scrollInfo;
   }

@@ -219,11 +219,11 @@ describe('formatDetailView (scrollable)', () => {
     expect(result).toContain('Test Work Item');
   });
 
-  it('scrolls content by offset', () => {
+  it('scrolls content by offset — header stays pinned (WL-0MSI28AP80002F5S)', () => {
     const item = makeItem({ description: 'line\n'.repeat(100) });
-    // At scroll offset 50, the content should be shifted (header is gone)
+    // At scroll offset 50, the body is shifted but the header stays pinned
     const result = formatDetailView(item, 80, 50, 20);
-    expect(result).not.toContain('WL-TEST001');
+    expect(result).toContain('WL-TEST001');  // header always visible
     expect(result).toContain('scroll');
     // The viewport shows description lines starting from line 50
     const lines = result.split('\n');

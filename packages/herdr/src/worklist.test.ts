@@ -2833,6 +2833,53 @@ describe('detail view ToC for Related Docs (WL-0MSHWHULZ001FL8I)', () => {
     expect(firstLines).toContain('Related Docs');
     expect(firstLines).toContain('1. docs/prd.md');
   });
+
+  // ── Overflow regression: header+ToC pinned, body scrolls (WL-0MSI28AP80002F5S) ──
+
+  const LONG_ITEM = (): WorkItem => {
+    const item = makeKeyFilesItem('WL-OVF', ['docs/prd.md', 'docs/episode.podcast.md']);
+    item.description += '\n\n' + Array.from({ length: 60 }, (_, i) => `lorem ipsum dolor line ${i}`).join('\n');
+    return item;
+  };
+
+  it('formatDetailView with ToC respects the line-count invariant (≤ viewportHeight lines)', () => {
+    const item = LONG_ITEM();
+    // viewportHeight = 24 → output must be exactly 24 lines
+    const view = formatDetailView(item, 80, 0, 24, undefined, true, 0, false, 0);
+    const lines = view.split('\n');
+    expect(lines.length).toBe(24);
+  });
+
+  it('formatDetailView at scroll 0 shows header id, title, and full ToC', () => {
+    const item = LONG_ITEM();
+    const view = formatDetailView(item, 80, 0, 24, undefined, true, 0, false, 0);
+    const lines = view.split('\n');
+    const all = lines.join('\n');
+    // Header id and title must be visible
+    expect(all).toContain('WL-OVF');
+    expect(all).toMatch(/title/i);
+    // Full ToC must be visible (both entries)
+    expect(all).toContain('1. docs/prd.md');
+    expect(all).toContain('2. docs/episode.podcast.md');
+  });
+
+  it('ToC is rendered exactly once — no duplication', () => {
+    const item = LONG_ITEM();
+    const view = formatDetailView(item, 80, 0, 24, undefined, true, 0, false, 0);
+    const lines = view.split('\n');
+    const tocEntryCount = lines.filter(l => l.includes('1. docs/prd.md')).length;
+    expect(tocEntryCount).toBe(1);
+  });
+
+  it('no-ToC items retain full-scroll behavior unchanged', () => {
+    const item = makeItem('WL-PLAIN');
+    item.description = Array.from({ length: 50 }, (_, i) => `line ${i}`).join('\n');
+    const view = formatDetailView(item, 80, 0, 24, undefined, true);
+    const lines = view.split('\n');
+    expect(lines.length).toBe(24);
+    // No ToC markers should appear
+    expect(lines.join('\n')).not.toContain('Related Docs');
+  });
 });
 
 describe('Related Docs — open in markdown viewer (WL-0MSGTLSUT002NF29)', () => {
