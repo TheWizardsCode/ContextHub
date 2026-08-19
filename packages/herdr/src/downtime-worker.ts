@@ -1378,10 +1378,23 @@ export async function spawnDowntimePane(
 
 // ── Worker orchestrator (implemented — F3) ────────────────────────────
 
-/** Per-tick configuration; re-read every tick so settings apply live. */
+/**
+ * Per-tick configuration; re-read every tick so settings apply live.
+ *
+ * `override` (optional) is the per-instance in-memory enabled-state override:
+ * `null` (default) follows the global setting; `true`/`false` force dispatch
+ * on/off for THIS worker regardless of the global config. The override is
+ * purely in-memory — it resets on plugin restart and never touches the shared
+ * settings file (per-instance scoping, parent WL-0MSZ4NSOE007AQEF).
+ */
 export interface DowntimeWorkerConfig {
   poller: DowntimePoller;
   deps: DowntimeWorkerDeps;
+  /**
+   * Per-instance in-memory enabled override. `null` (default) = follow the
+   * global setting; `true`/`false` force dispatch on/off for this worker.
+   */
+  override?: boolean | null;
   /** Re-read each tick so settings changes apply without a restart. */
   config(): {
     enabled: boolean;
@@ -1409,8 +1422,26 @@ export interface DowntimeWorker {
   readonly dispatching: boolean;
   /** Timestamp of the last successful dispatch (null until the first). */
   readonly lastDispatchAt: number | null;
-  /** Whether the worker is enabled per the current settings (re-read). */
+  /**
+   * Whether the worker is enabled per the current settings (re-read) AND the
+   * per-instance in-memory override: effective enabled = `override ??
+   * cfg.enabled` (the override takes precedence when set). The getter re-reads
+   * the global setting each call, so a settings change applies live while the
+   * override stays in force.
+   */
   readonly enabled: boolean;
+  /**
+   * The current per-instance in-memory override (`null` = follow settings;
+   * `true`/`false` = force dispatch on/off for this instance).
+   */
+  readonly override: boolean | null;
+  /**
+   * Flip the per-instance in-memory override: `null` → `false` (disable
+   * dispatch for this instance) → `true` (force dispatch on for this
+   * instance) → `null` (return to following the global setting), and so on.
+   * In-memory only — never written to the settings file, never persisted.
+   */
+  toggle(): void;
   /**
    * True while the worker is paused in the no-candidate cooldown: no proxy
    * polling, no idle tracking, and no dispatch until the pause expires
@@ -1441,6 +1472,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // Three-strike rule: consecutive CLI-error dispatch outcomes. A successful
   // dispatch, a genuine no-candidate outcome, or an expired cooldown resets it.
   let errorStrikes = 0;
+  // Per-instance in-memory enabled override (parent WL-0MSZ4NSOE007AQEF):
+  // null (default) = follow the global setting; true/false force dispatch
+  // on/off for THIS instance. In-memory only — resets on plugin restart,
+  // never written to the shared settings file. Initialized from the optional
+  // config so callers can construct a pre-toggled worker.
+  let override: boolean | null = opts.override ?? null;
 
   return {
     get idleSince(): number | null {
@@ -1453,7 +1490,20 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       return lastDispatchAt;
     },
     get enabled(): boolean {
-      return opts.config().enabled;
+      // Effective enabled = override ?? cfg.enabled: the per-instance
+      // override takes precedence when set (so `d` can force dispatch on
+      // for one pane even when the global setting is off); with no override
+      // the worker follows the global setting exactly as before.
+      return override ?? opts.config().enabled;
+    },
+    get override(): boolean | null {
+      return override;
+    },
+    toggle(): void {
+      // null → false → true → null cycle: pressing `d` while enabled
+      // disables dispatch for this instance; pressing again re-enables it;
+      // a third press returns to following the global setting.
+      override = override === null ? false : override === false ? true : null;
     },
     get paused(): boolean {
       return cooldownUntil !== null && Date.now() < cooldownUntil;
@@ -1463,7 +1513,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     },
     async tick(): Promise<DowntimeWorkerTickResult> {
       const cfg = opts.config();
-      if (!cfg.enabled) return { polled: false, dispatched: false, idle: false };
+      // Short-circuit on the EFFECTIVE enabled state (override ?? settings):
+      // while toggled off the worker performs no proxy polling, no idle
+      // tracking, and no dispatch — exactly the settings-disabled path.
+      if (!(override ?? cfg.enabled)) return { polled: false, dispatched: false, idle: false };
       // Cooldown gate: while paused the worker performs NO proxy polling, NO
       // idle tracking, and NO dispatch. The pause is a full stop (user
       // confirmed "pause completely"); once it expires the idle tracker is

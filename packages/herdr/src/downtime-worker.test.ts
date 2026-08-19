@@ -2178,6 +2178,112 @@ describe('downtime worker enabled state', () => {
   });
 });
 
+// ── Per-instance toggle override (parent WL-0MSZ4NSOE007AQEF) ─────────
+
+describe('downtime worker per-instance override', () => {
+  function makeWorker(
+    override: boolean | null = null,
+    globalEnabled: boolean = true,
+  ) {
+    const cfg = {
+      enabled: globalEnabled,
+      thresholdMs: 240_000,
+      requiredFreeSlots: 0,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: 3_600_000,
+    };
+    const worker = createDowntimeWorker({
+      poller: createDowntimePoller('http://proxy:8000'),
+      deps: makeDeps(),
+      config: () => ({ ...cfg }),
+      override,
+    });
+    return { worker, cfg };
+  }
+
+  it('defaults to null (follows global settings)', () => {
+    const { worker } = makeWorker();
+    expect(worker.override).toBe(null);
+    expect(worker.enabled).toBe(true);
+  });
+
+  it('toggle() cycles null → false → true → null', () => {
+    const { worker } = makeWorker();
+    expect(worker.override).toBe(null);
+    worker.toggle();
+    expect(worker.override).toBe(false);
+    worker.toggle();
+    expect(worker.override).toBe(true);
+    worker.toggle();
+    expect(worker.override).toBe(null);
+  });
+
+  it('enabled returns override ?? cfg.enabled (null)', () => {
+    const { worker, cfg } = makeWorker();
+    // null override → follows global
+    expect(worker.enabled).toBe(true);
+    cfg.enabled = false;
+    expect(worker.enabled).toBe(false);
+    cfg.enabled = true;
+    // back to follow settings
+    worker.toggle(); // → false
+    expect(worker.override).toBe(false);
+    expect(worker.enabled).toBe(false);
+    worker.toggle(); // → true
+    expect(worker.override).toBe(true);
+    expect(worker.enabled).toBe(true);
+    worker.toggle(); // → null again
+    expect(worker.override).toBe(null);
+    expect(worker.enabled).toBe(true);
+  });
+
+  it('tick() short-circuits when override is false (even if global is true)', async () => {
+    const { worker } = makeWorker(false, true);
+    const result = await worker.tick();
+    expect(result).toEqual({ polled: false, dispatched: false, idle: false });
+  });
+
+  it('tick() behaves normally when override is null (follows global)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { worker } = makeWorker(null, true);
+      // Busy global → still busy
+      const result = await worker.tick();
+      expect(result.idle).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('two workers with independent overrides toggle independently', () => {
+    const { worker: w1 } = makeWorker();
+    const { worker: w2 } = makeWorker();
+    w1.toggle();
+    expect(w1.override).toBe(false);
+    expect(w2.override).toBe(null);
+    expect(w1.enabled).toBe(false);
+    expect(w2.enabled).toBe(true);
+    w2.toggle();
+    w2.toggle();
+    expect(w2.override).toBe(true);
+    expect(w2.enabled).toBe(true);
+  });
+
+  it('override forces dispatch on when global setting is false', () => {
+    const { worker } = makeWorker(true, false);
+    expect(worker.override).toBe(true);
+    expect(worker.enabled).toBe(true); // override takes precedence
+    expect(worker.tick).toBeDefined();
+  });
+
+  it('override set via config is respected (pre-toggled worker)', () => {
+    const { worker } = makeWorker(false, true);
+    expect(worker.override).toBe(false);
+    expect(worker.enabled).toBe(false);
+  });
+});
+
 // ── Pane spawn (AC4) ──────────────────────────────────────────────────
 
 describe('downtime pane spawn (send-to-pi.sh)', () => {
