@@ -1412,6 +1412,13 @@ export interface DowntimeWorkerConfig {
     /** Pause duration after a genuine empty backlog (no-candidate), ms. */
     noCandidateCooldownMs: number;
   };
+  /**
+   * Optional shared round-robin registry (WL-0MSSRED76008LGB6) used for
+   * rotation-aware selection and probe jitter. When absent, selection falls
+   * back to the pre-rotation sortIndex order and probes use the static
+   * interval (fail-open).
+   */
+  registry?: RoundRobinRegistry;
 }
 
 export interface DowntimeWorkerTickResult {
@@ -1449,6 +1456,14 @@ export interface DowntimeWorker {
    * In-memory only — never written to the settings file, never persisted.
    */
   toggle(): void;
+  /**
+   * Compute a jittered probe interval (WL-0MSSRED76008LGB6): the effective
+   * poll interval is jittered ±50% of the configured `downtimePollIntervalMs`
+   * per call (random, injectable RNG via the worker's registry) so instances
+   * with identical configuration do not probe in lockstep. Returns the
+   * clamped interval for the NEXT probe.
+   */
+  jitterPollIntervalMs(baseIntervalMs: number): number;
   /**
    * True while the worker is paused in the no-candidate cooldown: no proxy
    * polling, no idle tracking, and no dispatch until the pause expires
@@ -1511,6 +1526,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // disables dispatch for this instance; pressing again re-enables it;
       // a third press returns to following the global setting.
       override = override === null ? false : override === false ? true : null;
+    },
+    jitterPollIntervalMs(baseIntervalMs: number): number {
+      // Fail-open: no registry → static interval (no jitter).
+      return opts.registry
+        ? opts.registry.getEffectivePollInterval(baseIntervalMs)
+        : baseIntervalMs;
     },
     get paused(): boolean {
       return cooldownUntil !== null && Date.now() < cooldownUntil;

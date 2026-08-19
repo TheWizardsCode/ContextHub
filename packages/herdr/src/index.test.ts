@@ -1915,3 +1915,64 @@ describe('capturePaneIdFromFile — dispatch-time association capture', () => {
     expect(record).not.toHaveBeenCalled();
   });
 });
+
+describe('createDowntimeDeps rotation wiring (WL-0MSSRED76008LGB6)', () => {
+  afterEach(() => {
+    resetExecFileAsync();
+    resetWorklogDir();
+  });
+
+  it('getNextItem rotates within a tied-priority group via the shared cursor file', async () => {
+    const cwd = makeTempDir();
+    const worklogDir = join(cwd, '.worklog');
+    mkdirSync(worklogDir, { recursive: true });
+    // Two same-priority candidates; a pre-advanced cursor file selects the second first.
+    writeFileSync(
+      join(worklogDir, 'downtime-round-robin.json'),
+      JSON.stringify({ high: { cursor: 1, version: 2 } }),
+    );
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        workItems: [
+          { workItem: { id: 'WL-A', title: 'A', status: 'open', priority: 'high', sortIndex: 10 } },
+          { workItem: { id: 'WL-B', title: 'B', status: 'open', priority: 'high', sortIndex: 20 } },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    // Cursor 1 % 2 = 1 → selects WL-B first
+    const result = await deps.getNextItem('intake_complete', cwd);
+    expect(result).toEqual({
+      ok: true,
+      candidate: { id: 'WL-B', title: 'B', stage: 'intake_complete', status: 'open', sortIndex: 20, priority: 'high' },
+    });
+  });
+
+  it('getNextItem persists the cursor advance so a second call rotates to the next tied item', async () => {
+    const cwd = makeTempDir();
+    const worklogDir = join(cwd, '.worklog');
+    mkdirSync(worklogDir, { recursive: true });
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        workItems: [
+          { workItem: { id: 'WL-A', title: 'A', status: 'open', priority: 'high', sortIndex: 10 } },
+          { workItem: { id: 'WL-B', title: 'B', status: 'open', priority: 'high', sortIndex: 20 } },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const first = await deps.getNextItem('intake_complete', cwd);
+    expect(first.ok && first.candidate?.id).toBe('WL-A'); // cursor 0 % 2 = 0
+
+    const second = await deps.getNextItem('intake_complete', cwd);
+    expect(second.ok && second.candidate?.id).toBe('WL-B'); // cursor advanced → 1 % 2 = 1
+  });
+});

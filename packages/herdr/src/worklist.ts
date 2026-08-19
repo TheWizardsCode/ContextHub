@@ -4612,6 +4612,15 @@ export async function runWorklistTui(
     scheduler.addTask({
       id: 'downtime',
       intervalMs: opts.downtimePollIntervalMs,
+      // Probe jitter (WL-0MSSRED76008LGB6): the effective poll interval is
+      // jittered ±50% of the configured downtimePollIntervalMs per tick
+      // (random, injectable via the registry's RNG) so instances with
+      // identical configuration do not probe in lockstep — the jittered
+      // interval is recomputed fresh on EVERY reschedule. Fallback: when
+      // the worker's registry is unavailable, the static interval stands.
+      getIntervalMs: opts.downtimeWorker
+        ? () => opts.downtimeWorker!.jitterPollIntervalMs(opts.downtimePollIntervalMs)
+        : undefined,
       singleFlight: true,
       runTimeoutMs: DOWNTIME_RUN_TIMEOUT_MS,
       run: async () => {

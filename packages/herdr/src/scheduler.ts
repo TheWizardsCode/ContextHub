@@ -48,6 +48,14 @@ export interface SchedulerTask {
   id: string;
   /** Period between runs in milliseconds (must be > 0). */
   intervalMs: number;
+  /**
+   * Optional per-schedule interval override (WL-0MSSRED76008LGB6): when
+   * set, each reschedule computes a FRESH interval from this hook (e.g.
+   * jittered ±50% of the base) instead of reusing the static `intervalMs`.
+   * The first arm uses `intervalMs`; every subsequent reschedule asks the
+   * hook. Returns the effective interval for the NEXT run.
+   */
+  getIntervalMs?: () => number;
   /** The work to run when the task is due. May be async. */
   run: () => Promise<void> | void;
   /**
@@ -101,6 +109,10 @@ export class TaskScheduler {
 
   constructor(private readonly tickMs: number) {}
 
+  private static intervalFor(entry: TaskEntry): number {
+    return entry.task.getIntervalMs ? entry.task.getIntervalMs() : entry.task.intervalMs;
+  }
+
   /**
    * Register a periodic task. Tasks with `intervalMs <= 0` are treated as
    * disabled and never fire. Adding a task while the scheduler is running
@@ -128,7 +140,7 @@ export class TaskScheduler {
     entry.task.disabled = disabled;
     if (!disabled) {
       // (Re)arm from now — mirrors starting a fresh interval.
-      entry.dueAt = Date.now() + entry.task.intervalMs;
+      entry.dueAt = Date.now() + TaskScheduler.intervalFor(entry);
     }
   }
 
@@ -176,7 +188,7 @@ export class TaskScheduler {
       if (now < entry.dueAt) continue;
       if (entry.task.singleFlight && entry.inFlight) {
         // Skipped tick is not coalesced — reschedule to the next interval.
-        entry.dueAt = now + entry.task.intervalMs;
+        entry.dueAt = now + TaskScheduler.intervalFor(entry);
         continue;
       }
       await this.runTask(entry, now);
@@ -197,7 +209,7 @@ export class TaskScheduler {
    * permanently wedge the task, WL-0MSJIPHD0001L1J9).
    */
   private async runTask(entry: TaskEntry, now: number): Promise<void> {
-    entry.dueAt = now + entry.task.intervalMs;
+    entry.dueAt = now + TaskScheduler.intervalFor(entry);
     entry.inFlight = true;
     try {
       const timeoutMs = entry.task.runTimeoutMs;

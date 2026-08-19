@@ -72,6 +72,7 @@ import {
   buildDowntimeDispatchComment,
   DOWNTIME_WL_TIMEOUT_MS,
 } from './downtime-worker.js';
+import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
 import {
   appendDowntimeLogEntry,
   auditDispatchedItemIds,
@@ -379,6 +380,21 @@ export function createDowntimeDeps(
   assignee: string,
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
 ): DowntimeWorkerDeps {
+  // Shared round-robin registry (WL-0MSSRED76008LGB6): one per worklog root
+  // (`<cwd>/.worklog/downtime-round-robin.json`), created lazily so each
+  // selection re-reads the durable cursor from disk — cross-instance
+  // rotation works because the file is the source of truth. Fail-open: a
+  // missing/unreadable file degrades to no rotation (cursor 0).
+  const registries = new Map<string, RoundRobinRegistry>();
+  const registryFor = (cwd: string): RoundRobinRegistry => {
+    const worklogDir = join(cwd, '.worklog');
+    let registry = registries.get(worklogDir);
+    if (!registry) {
+      registry = createRoundRobinRegistry({ worklogDir });
+      registries.set(worklogDir, registry);
+    }
+    return registry;
+  };
   return {
     async getNextItem(stage: DowntimeStage, cwd: string): Promise<DowntimeNextResult> {
       try {
@@ -413,7 +429,7 @@ export function createDowntimeDeps(
             : stage === 'idea'
               ? intakeDispatchedItemStages(entries)
               : new Map<string, string>();
-        const selected = selectNextCandidate(candidates, dispatched);
+        const selected = selectNextCandidate(candidates, dispatched, registryFor(cwd));
         return { ok: true, candidate: selected };
       } catch {
         // Transient wl failure → fail closed to busy: no dispatch, and the
@@ -459,7 +475,7 @@ export function createDowntimeDeps(
         // the audit tier).
         const entries = await readDowntimeLogEntries(cwd);
         const dispatchedAuditIds = auditDispatchedItemIds(entries);
-        const selected = selectAuditCandidate(candidates, Date.now(), dispatchedAuditIds);
+        const selected = selectAuditCandidate(candidates, Date.now(), dispatchedAuditIds, registryFor(cwd));
         // Genuinely empty audit tier → ok:true with no candidate (unchanged
         // empty behaviour); a selected item → ok:true with the candidate.
         return selected === null
@@ -510,7 +526,7 @@ export function createDowntimeDeps(
         // implement-tier dispatch still works on a fresh worklog.
         const entries = await readDowntimeLogEntries(cwd);
         const dispatchedImplementIds = implementDispatchedItemIds(entries);
-        const selected = selectImplementCandidate(candidates, dispatchedImplementIds);
+        const selected = selectImplementCandidate(candidates, dispatchedImplementIds, registryFor(cwd));
         return selected === null ? null : toImplementCandidate(selected);
       } catch {
         // Fail-closed: a wl failure yields no candidate (no dispatch).
@@ -787,6 +803,9 @@ async function main(): Promise<void> {
   const downtimeWorker: DowntimeWorker = createDowntimeWorker({
     poller: createDowntimePoller(runSettings.downtimeProxyUrl),
     deps: createDowntimeDeps(SEND_TO_PI_SCRIPT, AGENT_ASSIGNEE),
+    registry: createRoundRobinRegistry({
+      worklogDir: join(targetCwd, '.worklog'),
+    }),
     config: () => {
       const s = loadSettings();
       return {

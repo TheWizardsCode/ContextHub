@@ -3610,3 +3610,67 @@ describe('rotation-aware selection wired into tiers', () => {
     expect(selectAuditCandidate(candidates, now, undefined, registry)?.id).toBe('Q');
   });
 });
+
+// ── Probe jitter (WL-0MSSRED76008LGB6 / WL-0MSW6DEI9005XH8Q) ──────────
+
+describe('worker probe jitter (jitterPollIntervalMs)', () => {
+  it('returns jittered interval within ±50% when a registry is provided', () => {
+    const registry = createRoundRobinRegistry({ worklogDir: '/tmp/rr-jitter-deps', rng: () => 0.75 });
+    const { worker } = (() => {
+      const cfg = {
+        enabled: true,
+        thresholdMs: 240_000,
+        requiredFreeSlots: 0,
+        model: 'plan',
+        cwd: '/repo',
+        noCandidateCooldownMs: 3_600_000,
+      };
+      const w = createDowntimeWorker({
+        poller: createDowntimePoller('http://proxy:8000'),
+        deps: makeDeps(),
+        registry,
+        config: () => ({ ...cfg }),
+      });
+      return { worker: w };
+    })();
+    // rng 0.75 → factor 1.25 → 30_000 * 1.25 = 37_500
+    expect(worker.jitterPollIntervalMs(30_000)).toBe(37_500);
+  });
+
+  it('returns the static interval when no registry is provided (fail-open)', () => {
+    const { worker } = (() => {
+      const cfg = {
+        enabled: true,
+        thresholdMs: 240_000,
+        requiredFreeSlots: 0,
+        model: 'plan',
+        cwd: '/repo',
+        noCandidateCooldownMs: 3_600_000,
+      };
+      const w = createDowntimeWorker({
+        poller: createDowntimePoller('http://proxy:8000'),
+        deps: makeDeps(),
+        config: () => ({ ...cfg }),
+      });
+      return { worker: w };
+    })();
+    expect(worker.jitterPollIntervalMs(30_000)).toBe(30_000);
+  });
+
+  it('two workers with different RNG produce different jitter values', () => {
+    const r1 = createRoundRobinRegistry({ worklogDir: '/tmp/rr-jitter-a', rng: () => 0.1 });
+    const r2 = createRoundRobinRegistry({ worklogDir: '/tmp/rr-jitter-b', rng: () => 0.9 });
+    const mk = (registry: typeof r1) => createDowntimeWorker({
+      poller: createDowntimePoller('http://proxy:8000'),
+      deps: makeDeps(),
+      registry,
+      config: () => ({ enabled: true, thresholdMs: 240_000, requiredFreeSlots: 0, model: 'plan', cwd: '/repo', noCandidateCooldownMs: 3_600_000 }),
+    });
+    const w1 = mk(r1);
+    const w2 = mk(r2);
+    // rng 0.1 → 0.6× = 18_000; rng 0.9 → 1.4× = 42_000
+    expect(w1.jitterPollIntervalMs(30_000)).toBe(18_000);
+    expect(w2.jitterPollIntervalMs(30_000)).toBe(42_000);
+    expect(w1.jitterPollIntervalMs(30_000)).not.toBe(w2.jitterPollIntervalMs(30_000));
+  });
+});
