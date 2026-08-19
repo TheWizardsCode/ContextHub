@@ -29,7 +29,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 
 ## Requirements
 
-- [Herdr](https://herdr.dev) v0.7.0 or later
+- [Herdr](https://herdr.dev) v0.7.0 or later (the plugin loads on 0.7.0–0.7.4 with polling-only behavior; the event-driven status path — immediate agent-status icons and focus/visibility updates — requires herdr ≥ 0.7.5 and degrades to polling on older versions)
 - [Worklog CLI (`wl`)](https://github.com/your-org/worklog) installed and on PATH
 
 ## Installation
@@ -148,6 +148,8 @@ Rows that have a worklist-spawned pi agent pane attached show the agent's live s
 | *(none)* | No agent attached, or the agent finished (`done`/closed) |
 
 The icon occupies a fixed-width slot, so the remaining icons and the item-ID column stay perfectly aligned whether or not a row has an agent. State is refreshed from the herdr CLI on each worklist refresh (with a short TTL); if the CLI is unavailable the list renders without icons rather than failing.
+
+**Event-driven updates (herdr ≥ 0.7.5, WL-0MSHB7DHO004RHBJ)** — when the herdr event subscription is active, a `pane_agent_status_changed` event updates the icon **immediately** (within one render cycle, no `herdr agent list` exec). `pane_agent_detected` re-reads the shared `.worklog/agent-panes.json` so agents spawned by any herdr instance in the same session (including late-spawned ones) are picked up; `pane_closed`/`pane_exited` prune associations so icons clear instantly. Rapid status changes are coalesced per render cycle (no render thrash). `herdr agent list` remains the one-time initial snapshot and the fail-open poll fallback when events are unavailable.
 ### From the command line
 
 ```bash
@@ -169,6 +171,7 @@ The underlying script (`scripts/open-podcast-editor-tab.sh`) fails fast with a c
 The plugin respects the following environment variables:
 
 - `WL_COUNT` — Number of work items to fetch (default: 20, now superseded by `browseItemCount` in settings)
+- `HERDR_SOCKET_PATH` — Path to the herdr Unix socket used by the event subscription (default `~/.config/herdr/herdr.sock`). When unset/unreachable the plugin falls back to polling.
 
 #### Plugin Settings (config file)
 
@@ -550,10 +553,19 @@ process churn and memory pressure (WL-0MSB1N0HB0007N6N).
   regardless of which pane in the tab holds keyboard focus (so a visible
   worklist pane in a multi-pane split keeps refreshing while an adjacent
   pane holds focus).
+- **Event-driven path (herdr ≥ 0.7.5, WL-0MSHB7DHO004RHBJ)** — when the
+  herdr socket is reachable, the plugin subscribes to window events
+  (`pane.focused`, `pane.agent_status_changed`, `pane.agent_detected`,
+  `pane.closed`, `pane.exited`) via `events.ts`. A `pane_focused` event for
+  the current pane updates the visibility gate **immediately** (no `herdr
+  tab get` exec) and triggers an instant refresh on the hidden → visible
+  transition. The 2s resume-poll becomes a fallback that runs only while
+  the event path is unavailable.
 - **Fail-open** — when visibility cannot be determined (no `HERDR_TAB_ID`
-  env, herdr CLI missing/erroring, unparseable output) the pane is treated
-  as visible and polling proceeds exactly as before. Standalone runs (outside
-  Herdr) are unaffected.
+  env, herdr CLI missing/erroring, unparseable output, or the event
+  subscription unavailable) the pane is treated as visible and polling
+  proceeds exactly as before. Standalone runs (outside Herdr) are
+  unaffected. Socket errors never crash the TUI.
 - **Cadence unchanged when visible** — while the pane's tab is focused (or
   fail-open), auto-refresh/auto-sync keep their existing intervals (30s /
   60s defaults).
@@ -561,16 +573,18 @@ process churn and memory pressure (WL-0MSB1N0HB0007N6N).
   shows `[paused — hidden]` so operators can tell gating is active; the
   indicator clears as soon as the list refreshes after the tab regains
   focus.
-- **Immediate refresh on resume** — while the pane's tab is hidden a
-  lightweight resume poll (2s interval, `herdr tab get` only — never `wl`)
-  watches for the hidden → visible transition; the moment the tab regains
-  focus the list re-fetches immediately (with a "Refreshed" notification)
-  instead of waiting for the next 30s tick, then the normal cadence resumes.
+- **Immediate refresh on resume** — while the pane's tab is hidden and the
+  event path is unavailable, a lightweight resume poll (2s interval,
+  `herdr tab get` only — never `wl`) watches for the hidden → visible
+  transition; the moment the tab regains focus the list re-fetches
+  immediately (with a "Refreshed" notification) instead of waiting for the
+  next 30s tick, then the normal cadence resumes.
 - **Never gated** — manual actions (navigation, shortcut chords, the initial
   data load) work regardless of tab visibility.
 - **Shared visibility check** — the `PollGate` TTL memoizer (~2s) makes the
   refresh and sync ticks in one cycle share a single `herdr tab get` call
-  (≤1 visibility exec per cycle).
+  (≤1 visibility exec per cycle). Event-driven updates reuse the same gate
+  via `PollGate.setVisibleFromEvent()`.
 - **Zoom-over limitation** — a pane zoomed-over within a focused tab is
   treated as visible (tab focus is the sole signal; there is no pane-focus
   fallback) and keeps refreshing. Zoom-over detection is out of scope for

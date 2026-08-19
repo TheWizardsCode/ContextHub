@@ -21,6 +21,7 @@ import {
   AgentTracker,
   normalizeAgentState,
   parseAgentListOutput,
+  mergeAgentStatesCached,
   type AgentState,
 } from './agent-tracker.js';
 import {
@@ -321,5 +322,183 @@ describe('AgentTracker — refreshStates', () => {
     const states = await tabB.refreshStates();
     expect(states.get('WL-ABC')).toBe('working');
     expect(states.get('WL-DEF')).toBe('blocked');
+  });
+});
+
+describe('AgentTracker — event-applied path (WL-0MSHB7DHO004RHBJ F5)', () => {
+  beforeEach(() => {
+    resetExecFileAsync();
+    delete process.env.HERDR_BIN_PATH;
+  });
+
+  afterEach(() => {
+    resetExecFileAsync();
+    delete process.env.HERDR_BIN_PATH;
+  });
+
+  it('applyAgentStatusChanged updates the cached state without any herdr exec', async () => {
+    const stateFile = makeStateFile();
+    const tracker = new AgentTracker({ stateFile, ttlMs: 60_000 });
+    await tracker.recordAgentForWorkItem('WL-ABC', 'p1');
+    await tracker.recordAgentForWorkItem('WL-DEF', 'p2');
+
+    // Seed the cache via a normal refresh (one herdr exec).
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: agentListEnvelope([
+        { pane_id: 'p1', agent_status: 'idle' },
+        { pane_id: 'p2', agent_status: 'idle' },
+      ]),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+    const states = await tracker.refreshStates();
+    expect(states.get('WL-ABC')).toBe('idle');
+    expect(mockFn).toHaveBeenCalledTimes(1);
+
+    // A pane_agent_status_changed event flips the state with NO exec.
+    const affected = tracker.applyAgentStatusChanged('p1', 'working');
+    expect(affected).toEqual(['WL-ABC']);
+    expect(tracker.snapshotStates().get('WL-ABC')).toBe('working');
+    expect(tracker.snapshotStates().get('WL-DEF')).toBe('idle');
+    expect(mockFn).toHaveBeenCalledTimes(1);
+
+    // The memo window was extended: refreshStates returns the event-applied
+    // states without re-polling within the TTL.
+    const refreshed = await tracker.refreshStates();
+    expect(refreshed.get('WL-ABC')).toBe('working');
+    expect(mockFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('applyAgentStatusChanged with done prunes the entry (icon disappears)', async () => {
+    const stateFile = makeStateFile();
+    const tracker = new AgentTracker({ stateFile, ttlMs: 60_000 });
+    await tracker.recordAgentForWorkItem('WL-ABC', 'p1');
+
+    const affected = tracker.applyAgentStatusChanged('p1', 'done');
+    expect(affected).toEqual(['WL-ABC']);
+    expect(tracker.getPaneId('WL-ABC')).toBeUndefined();
+    expect(tracker.snapshotStates().has('WL-ABC')).toBe(false);
+  });
+
+  it('applyAgentStatusChanged for an untracked pane is a no-op (empty affected)', () => {
+    const tracker = new AgentTracker({ stateFile: makeStateFile() });
+    expect(tracker.applyAgentStatusChanged('unknown-pane', 'working')).toEqual([]);
+  });
+
+  it('applyAgentDetected re-reads the shared file (cross-instance, late-spawned agents)', async () => {
+    const stateFile = makeStateFile();
+    const tracker = new AgentTracker({ stateFile, ttlMs: 60_000 });
+
+    // Another plugin instance records an association after we started.
+    const other = new AgentTracker({ stateFile });
+    await other.recordAgentForWorkItem('WL-LATE', 'p9');
+
+    // Our tracker has no in-memory knowledge of the new association.
+    expect(tracker.getPaneId('WL-LATE')).toBeUndefined();
+
+    // A pane_agent_detected event triggers a re-read → the late entry is
+    // picked up and the pane set grew.
+    const grew = tracker.applyAgentDetected();
+    expect(grew).toBe(true);
+    expect(tracker.getPaneId('WL-LATE')).toBe('p9');
+  });
+
+  it('applyPaneGone prunes associations for the closed pane and persists', async () => {
+    const stateFile = makeStateFile();
+    const tracker = new AgentTracker({ stateFile, ttlMs: 60_000 });
+    await tracker.recordAgentForWorkItem('WL-ABC', 'p1');
+    await tracker.recordAgentForWorkItem('WL-DEF', 'p2');
+
+    const affected = tracker.applyPaneGone('p1');
+    expect(affected).toEqual(['WL-ABC']);
+    expect(tracker.getPaneId('WL-ABC')).toBeUndefined();
+    expect(tracker.getPaneId('WL-DEF')).toBe('p2');
+
+    // Persisted: a fresh tracker instance sees the prune.
+    const reloaded = new AgentTracker({ stateFile });
+    expect(reloaded.getPaneId('WL-ABC')).toBeUndefined();
+    expect(reloaded.getPaneId('WL-DEF')).toBe('p2');
+  });
+
+  it('snapshotStates returns a copy (mutating it does not affect the tracker)', async () => {
+    const tracker = new AgentTracker({ stateFile: makeStateFile() });
+    await tracker.recordAgentForWorkItem('WL-ABC', 'p1');
+    tracker.applyAgentStatusChanged('p1', 'blocked');
+
+    const snap = tracker.snapshotStates();
+    expect(snap.get('WL-ABC')).toBe('blocked');
+    snap.delete('WL-ABC');
+    expect(tracker.snapshotStates().get('WL-ABC')).toBe('blocked');
+  });
+
+  it('normalizes unknown statuses to unknown on the event path', async () => {
+    const tracker = new AgentTracker({ stateFile: makeStateFile() });
+    await tracker.recordAgentForWorkItem('WL-ABC', 'p1');
+    tracker.applyAgentStatusChanged('p1', 'weird-status');
+    expect(tracker.snapshotStates().get('WL-ABC')).toBe('unknown');
+  });
+});
+
+describe('mergeAgentStatesCached (WL-0MSHB7DHO004RHBJ F5)', () => {
+  beforeEach(() => resetExecFileAsync());
+  afterEach(() => resetExecFileAsync());
+
+  it('stamps icon-eligible states and clears no-longer-eligible ones without exec', async () => {
+    const tracker = new AgentTracker({ stateFile: makeStateFile() });
+    await tracker.recordAgentForWorkItem('WL-ABC', 'p1');
+    await tracker.recordAgentForWorkItem('WL-DEF', 'p2');
+
+    // First apply an event state, then merge into items.
+    tracker.applyAgentStatusChanged('p1', 'working');
+    tracker.applyAgentStatusChanged('p2', 'blocked');
+
+    const items = [
+      { id: 'WL-ABC', title: 'a', status: 'open' } as any,
+      { id: 'WL-DEF', title: 'b', status: 'open' } as any,
+      { id: 'WL-GHI', title: 'c', status: 'open' } as any,
+    ];
+    mergeAgentStatesCached(items, tracker);
+    expect(items[0].agentState).toBe('working');
+    expect(items[1].agentState).toBe('blocked');
+    expect(items[2].agentState).toBeUndefined();
+  });
+
+  it('clears a previously stamped icon when the state becomes ineligible', async () => {
+    const tracker = new AgentTracker({ stateFile: makeStateFile() });
+    await tracker.recordAgentForWorkItem('WL-ABC', 'p1');
+    tracker.applyAgentStatusChanged('p1', 'working');
+
+    const items = [{ id: 'WL-ABC', title: 'a', status: 'open', agentState: 'working' } as any];
+    mergeAgentStatesCached(items, tracker);
+    expect(items[0].agentState).toBe('working');
+
+    // Agent reports done → prune → icon must clear.
+    tracker.applyAgentStatusChanged('p1', 'done');
+    mergeAgentStatesCached(items, tracker);
+    expect(items[0].agentState).toBeUndefined();
+  });
+
+  it('applies states recursively into children', async () => {
+    const tracker = new AgentTracker({ stateFile: makeStateFile() });
+    await tracker.recordAgentForWorkItem('WL-CHILD', 'p1');
+    tracker.applyAgentStatusChanged('p1', 'blocked');
+
+    const items = [
+      {
+        id: 'WL-PARENT',
+        title: 'p',
+        status: 'open',
+        children: [{ id: 'WL-CHILD', title: 'c', status: 'open' }],
+      },
+    ] as any;
+    mergeAgentStatesCached(items, tracker);
+    expect(items[0].children[0].agentState).toBe('blocked');
+  });
+
+  it('never throws when the tracker has no states', async () => {
+    const tracker = new AgentTracker({ stateFile: makeStateFile() });
+    const items = [{ id: 'WL-X', title: 'x', status: 'open' } as any];
+    expect(() => mergeAgentStatesCached(items, tracker)).not.toThrow();
+    expect(items[0].agentState).toBeUndefined();
   });
 });

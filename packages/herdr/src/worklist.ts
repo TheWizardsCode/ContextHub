@@ -15,6 +15,8 @@ import { dirname, join, resolve as resolvePath } from 'node:path';
 
 import { fetchChildrenForItem, fetchActionableCount, fetchItemsByStage, getWorklogDir, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
+import { HerdrEventSubscriber } from './events.js';
+import { AgentTracker, mergeAgentStatesCached } from './agent-tracker.js';
 import { readCodeFreezeState, readCodeFreezeStatus } from './code-freeze.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
@@ -3265,7 +3267,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void> },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -3281,6 +3283,8 @@ export async function runWorklistTui(
     downtimeWorker: options?.downtimeWorker,
     downtimePollIntervalMs: options?.downtimePollIntervalMs ?? DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
     mergeAgentStates: options?.mergeAgentStates,
+    subscriber: options?.subscriber ?? null,
+    agentTracker: options?.agentTracker ?? null,
   };
 
   let termSize = getTermSize();
@@ -3361,6 +3365,134 @@ export async function runWorklistTui(
   // Updated by the gate check on each timer tick; fail-open defaults to false.
   let panePaused = false;
 
+  // ── Event-driven window status (WL-0MSHB7DHO004RHBJ) ──────────────
+  // The herdr event subscriber (when available) replaces the polling paths:
+  //  - `pane_focused` for the CURRENT pane → immediate visibility update
+  //    + refresh (replaces the 2s resume-poll for hidden→visible).
+  //  - `pane_agent_status_changed` / `pane_agent_detected` / `pane_closed` /
+  //    `pane_exited` → immediate icon updates (replaces the agent-list poll).
+  // Polling stays the fail-open fallback whenever events are unavailable.
+  const subscriber = opts.subscriber;
+  const agentTracker = opts.agentTracker;
+
+  /** True while the event subscription is healthy (drives resume-poll gating). */
+  let eventsActive = false;
+
+  /**
+   * Sync the subscriber's per-pane subscriptions with the tracker's pane
+   * set (from the shared `.worklog/agent-panes.json`). Per-pane
+   * `pane.agent_status_changed` subscriptions must exist for every tracked
+   * pane so status events are received (AC1/AC3). Late-spawned agents are
+   * covered by `pane_agent_detected` + re-reading the shared file.
+   * Best-effort: subscription failures never break the event loop.
+   */
+  const syncPaneSubscriptions = async (): Promise<void> => {
+    if (!subscriber || !agentTracker) return;
+    try {
+      const current = new Set(subscriber.getTrackedPaneIds());
+      for (const entry of agentTracker.snapshot()) {
+        if (!current.has(entry.paneId)) {
+          await subscriber.addPaneSubscription(entry.paneId);
+        }
+      }
+    } catch {
+      // Fail-open: a subscription sync failure keeps polling as fallback.
+    }
+  };
+
+  /**
+   * Re-apply the tracker's cached states to the live items and re-render
+   * (coalesced per microtask so event storms do not thrash the TUI).
+   */
+  let agentEventRenderPending = false;
+  const scheduleAgentEventRender = (): void => {
+    if (agentEventRenderPending) return;
+    agentEventRenderPending = true;
+    Promise.resolve().then(() => {
+      agentEventRenderPending = false;
+      try {
+        if (agentTracker) {
+          mergeAgentStatesCached(state.items, agentTracker);
+        }
+        render();
+      } catch {
+        // Fail-open: render failures never crash the TUI.
+      }
+    });
+  };
+
+  if (subscriber) {
+    subscriber.setCallbacks({
+      // A pane_focused event for the CURRENT pane means its tab is focused
+      // (a pane cannot hold focus while its tab is hidden) → visible.
+      // Applies the event value to the gate (no `herdr tab get` exec),
+      // clears the paused indicator, and refreshes immediately — replacing
+      // the 2s resume-poll for the hidden → visible transition.
+      onPaneFocused: (data) => {
+        const currentPaneId = process.env.HERDR_PANE_ID;
+        if (!currentPaneId || data.pane_id !== currentPaneId) return;
+        if (data.focused === false) {
+          paneGate.setVisibleFromEvent(false);
+          panePaused = true;
+          return;
+        }
+        paneGate.setVisibleFromEvent(true);
+        panePaused = false;
+        stopResumePoll();
+        doRefresh(true);
+      },
+      // Agent-status events update the tracker's cached state map and
+      // re-render the icons immediately (no `herdr agent list` exec).
+      onAgentStatusChanged: (data) => {
+        if (!agentTracker) return;
+        agentTracker.applyAgentStatusChanged(data.pane_id, data.agent_status);
+        scheduleAgentEventRender();
+      },
+      // A new agent pane appeared (possibly from another herdr instance):
+      // re-read the shared file for late associations and add the pane to
+      // the per-pane subscription set (AC3).
+      onAgentDetected: (data) => {
+        if (!agentTracker || !subscriber) return;
+        const grew = agentTracker.applyAgentDetected();
+        if (grew) void syncPaneSubscriptions();
+        void subscriber.addPaneSubscription(data.pane_id).catch(() => {});
+        scheduleAgentEventRender();
+      },
+      // A pane closed/exited: prune its associations so its icons disappear
+      // immediately and drop the per-pane subscription (best-effort).
+      onPaneClosed: (data) => {
+        if (!agentTracker || !subscriber) return;
+        agentTracker.applyPaneGone(data.pane_id);
+        void subscriber.removePaneSubscription(data.pane_id).catch(() => {});
+        scheduleAgentEventRender();
+      },
+      onPaneExited: (data) => {
+        if (!agentTracker || !subscriber) return;
+        agentTracker.applyPaneGone(data.pane_id);
+        void subscriber.removePaneSubscription(data.pane_id).catch(() => {});
+        scheduleAgentEventRender();
+      },
+      onError: () => {
+        // Socket errors are already handled by the subscriber's reconnect
+        // logic; no TUI action needed (fail-open).
+      },
+    });
+
+    // Start the subscription (fail-open: an unreachable socket keeps the
+    // existing polling cadence and the resume-poll fallback).
+    subscriber.connect().then((result) => {
+      eventsActive = result.type === 'subscribed';
+      if (eventsActive) {
+        // The event path now handles hidden → visible transitions; stop the
+        // resume-poll fallback (it may have started during the connect
+        // window while eventsActive was still false).
+        stopResumePoll();
+        void syncPaneSubscriptions();
+      }
+    });
+  }
+
+
   // Check if we're in raw mode (stdin is a TTY)
   const isInteractive = process.stdin.isTTY;
   let rawMode = false;
@@ -3397,6 +3529,15 @@ export async function runWorklistTui(
     process.stdin.pause();
     process.stdout.write(ANSI.showCursor);
     process.stdout.write(ANSI.reset);
+  };
+
+  // Event-subscriber teardown on TUI exit (WL-0MSHB7DHO004RHBJ F6): close
+  // the socket and cancel reconnect timers so no connection leaks when the
+  // plugin pane exits. Fail-open: a close failure is swallowed.
+  const closeEventSubscriber = (): void => {
+    if (subscriber) {
+      subscriber.close().catch(() => {});
+    }
   };
 
   // Data reading callback
@@ -4338,6 +4479,14 @@ export async function runWorklistTui(
     scheduler.setDisabled('resume-poll', false);
   };
 
+  /**
+   * Whether the resume-poll fallback should run. The resume-poll is only
+   * the FALLBACK for the hidden → visible transition — when the event
+   * subscription is active, `pane_focused` events handle it instead, so the
+   * polling task stays disabled (WL-0MSHB7DHO004RHBJ F3).
+   */
+  const resumePollEnabled = (): boolean => !eventsActive;
+
   // Auto-refresh task — fetches fresh items on an interval. NOTE: this task
   // does NOT run `wl sync`; the dedicated sync task below is the single sync
   // source. Running sync from both tasks caused a double-spawn per pane that
@@ -4352,7 +4501,7 @@ export async function runWorklistTui(
       run: async () => {
         if (!(await paneGate.visible())) {
           panePaused = true;
-          startResumePoll();
+          if (resumePollEnabled()) startResumePoll();
           return;
         }
         stopResumePoll();
@@ -4382,7 +4531,7 @@ export async function runWorklistTui(
       run: async () => {
         if (!(await paneGate.visible())) {
           panePaused = true;
-          startResumePoll();
+          if (resumePollEnabled()) startResumePoll();
           return;
         }
         stopResumePoll();
@@ -4443,6 +4592,7 @@ export async function runWorklistTui(
   // Cleanup on promise resolution
   promise.finally(() => {
     scheduler.stop();
+    closeEventSubscriber();
     cleanup();
     process.stdout.removeListener('resize', onResize);
     process.stdin.removeListener('data', onData);

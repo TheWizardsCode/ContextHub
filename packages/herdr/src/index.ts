@@ -36,6 +36,7 @@ import {
   buildWlArgs,
 } from './fetcher.js';
 import { AgentTracker, AGENT_PANES_FILE, mergeAgentStates } from './agent-tracker.js';
+import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { readCodeFreezeStatusForRoot } from './code-freeze.js';
@@ -723,6 +724,24 @@ async function main(): Promise<void> {
     stateFile: wlRoot ? join(wlRoot, '.worklog', AGENT_PANES_FILE) : undefined,
   });
 
+  // Event subscriber (WL-0MSHB7DHO004RHBJ): subscribes to herdr window
+  // events (pane focus/visibility + agent status) over the herdr socket so
+  // the worklist reacts immediately instead of polling. Fail-open: an
+  // unreachable socket keeps today's polling cadence (the worklist gates
+  // the resume-poll and icon updates behind the events-health flag). The
+  // subscriber is constructed here (once per plugin instance) and handed to
+  // the worklist, which wires the event callbacks to its internal state and
+  // closes it on TUI exit. Initial per-pane subscriptions are synced from
+  // the tracker's shared state file when the subscription starts.
+  const socketPath = resolveSocketPath();
+  const eventSubscriber = socketPath
+    ? new HerdrEventSubscriber({
+        socketPath,
+        callbacks: {},
+        trackedPaneIds: agentTracker.snapshot().map((e) => e.paneId),
+      })
+    : null;
+
   // Create a fetcher that loads items using the current browseItemCount setting
   // Each call reads from settings so changes take effect on next auto-refresh
   // Smart selection (see fetchNextItems) guarantees all critical and
@@ -801,6 +820,8 @@ async function main(): Promise<void> {
       // expanded children) on every refresh cycle (WL-0MSBQUJQX005RAT9).
       // Fail-open: herdr errors yield no icons; the list keeps working.
       mergeAgentStates: (items) => mergeAgentStates(items, agentTracker),
+      subscriber: eventSubscriber,
+      agentTracker,
       onCommand: async (command: string, model?: string) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
