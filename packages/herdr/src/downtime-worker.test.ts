@@ -203,7 +203,7 @@ describe('idle detection (isIdleStatus)', () => {
 // ── Threshold timing (AC1/AC3) ────────────────────────────────────────
 
 describe('threshold timing (idle-duration tracker)', () => {
-  const thresholdMs = 240_000;
+  const thresholdMs = DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS;
 
   it('dispatches only after idle has lasted the full threshold continuously', () => {
     const tracker = createIdleTracker();
@@ -229,10 +229,10 @@ describe('threshold timing (idle-duration tracker)', () => {
     const tracker = createIdleTracker();
     const start = 1_000_000;
     tracker.record(true, start);
-    tracker.record(true, start + 30_000);
-    tracker.record(true, start + 60_000);
+    tracker.record(true, start + DEFAULT_DOWNTIME_POLL_INTERVAL_MS);
+    tracker.record(true, start + 2 * DEFAULT_DOWNTIME_POLL_INTERVAL_MS);
     expect(tracker.idleSince).toBe(start);
-    expect(tracker.isThresholdMet(thresholdMs, start + 60_000)).toBe(false);
+    expect(tracker.isThresholdMet(thresholdMs, start + thresholdMs - 1_000)).toBe(false);
     expect(tracker.isThresholdMet(thresholdMs, start + thresholdMs)).toBe(true);
   });
 });
@@ -2101,7 +2101,7 @@ describe('downtime settings clamps', () => {
   });
 
   it('clampDowntimeIdleThresholdMs keeps valid values and floors at 1s', () => {
-    expect(clampDowntimeIdleThresholdMs(240_000)).toBe(240_000);
+    expect(clampDowntimeIdleThresholdMs(DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS)).toBe(DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
     expect(clampDowntimeIdleThresholdMs(0)).toBe(1_000);
   });
 
@@ -2167,7 +2167,7 @@ describe('downtime worker enabled state', () => {
       deps: makeDeps(),
       config: () => ({
         enabled: cfg.enabled,
-        thresholdMs: 240_000,
+        thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
         requiredFreeSlots: 0,
         model: 'plan',
         cwd: '/repo',
@@ -2189,7 +2189,7 @@ describe('downtime worker per-instance override', () => {
   ) {
     const cfg = {
       enabled: globalEnabled,
-      thresholdMs: 240_000,
+      thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
       requiredFreeSlots: 0,
       model: 'plan',
       cwd: '/repo',
@@ -2420,7 +2420,7 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
   } = {}) {
     const cfg = {
       enabled: overrides.enabled ?? true,
-      thresholdMs: overrides.thresholdMs ?? 240_000,
+      thresholdMs: overrides.thresholdMs ?? DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
       requiredFreeSlots: 0,
       model: 'plan',
       cwd: '/repo',
@@ -2517,13 +2517,13 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
 
     // Still idle at the next tick: the tracker was reset after dispatch, so
     // no second dispatch until another full idle period has elapsed.
-    vi.setSystemTime(start + cfg.thresholdMs + 30_000);
+    vi.setSystemTime(start + cfg.thresholdMs + DEFAULT_DOWNTIME_POLL_INTERVAL_MS);
     const next = await worker.tick();
     expect(next.dispatched).toBe(false);
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
-    expect(worker.idleSince).toBe(start + cfg.thresholdMs + 30_000);
+    expect(worker.idleSince).toBe(start + cfg.thresholdMs + DEFAULT_DOWNTIME_POLL_INTERVAL_MS);
 
-    vi.setSystemTime(start + cfg.thresholdMs + 30_000 + cfg.thresholdMs);
+    vi.setSystemTime(start + cfg.thresholdMs + DEFAULT_DOWNTIME_POLL_INTERVAL_MS + cfg.thresholdMs);
     const after = await worker.tick();
     expect(after.dispatched).toBe(true);
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(2);
@@ -2539,7 +2539,7 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
 
     fetcher.mockResolvedValueOnce(jsonResponseFixture({ ...idleAllSlotsFree, active_query: true }));
-    vi.setSystemTime(start + cfg.thresholdMs + 30_000);
+    vi.setSystemTime(start + cfg.thresholdMs + DEFAULT_DOWNTIME_POLL_INTERVAL_MS);
     const busy = await worker.tick();
     expect(busy.idle).toBe(false);
     expect(worker.idleSince).toBeNull();
@@ -2579,7 +2579,7 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
     const start = 1_000_000;
     vi.setSystemTime(start);
     await worker.tick();
-    vi.setSystemTime(start + 240_000);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
 
     const first = worker.tick();
     const second = await worker.tick();
@@ -2602,7 +2602,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
   } = {}) {
     const cfg = {
       enabled: true,
-      thresholdMs: 240_000,
+      thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
       requiredFreeSlots: 0,
       model: 'plan',
       cwd: '/repo',
@@ -2635,7 +2635,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     const start = 1_000_000;
     vi.setSystemTime(start);
     await worker.tick(); // idle run starts
-    vi.setSystemTime(start + 240_000); // threshold met → dispatch attempt
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS); // threshold met → dispatch attempt
 
     const result = await worker.tick();
 
@@ -2661,7 +2661,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     const start = 1_000_000;
     vi.setSystemTime(start);
     await worker.tick(); // idle run starts
-    vi.setSystemTime(start + 240_000); // threshold met → dispatch attempt
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS); // threshold met → dispatch attempt
 
     const result = await worker.tick();
 
@@ -2679,13 +2679,13 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     const start = 1_000_000;
     vi.setSystemTime(start);
     await worker.tick();
-    vi.setSystemTime(start + 240_000);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
     await worker.tick(); // enters cooldown
     expect(worker.paused).toBe(true);
 
     const pollsBefore = fetcher.mock.calls.length;
     const idleBefore = worker.idleSince;
-    vi.setSystemTime(start + 240_000 + 60_000); // still within the pause
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 60_000); // still within the pause
     const result = await worker.tick();
 
     expect(result).toEqual({ polled: false, dispatched: false, idle: false });
@@ -2711,13 +2711,13 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     const start = 1_000_000;
     vi.setSystemTime(start);
     await worker.tick();
-    vi.setSystemTime(start + 240_000);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
     await worker.tick(); // empty backlog → cooldown
     expect(worker.paused).toBe(true);
 
     // The project's backlog fills back up while the worker is paused.
     backlogEmpty = false;
-    vi.setSystemTime(start + 240_000 + 3_600_000); // pause expires
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 3_600_000); // pause expires
     const resumed = await worker.tick();
     expect(resumed.polled).toBe(true);
     expect(resumed.dispatched).toBe(false); // fresh idle run — no stale credit
@@ -2725,7 +2725,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
 
     // A full new idle period must elapse before the next dispatch.
-    vi.setSystemTime(start + 240_000 + 3_600_000 + 240_000);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 3_600_000 + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
     const afterFreshIdle = await worker.tick();
     expect(afterFreshIdle.dispatched).toBe(true); // candidate now available
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
@@ -2738,7 +2738,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     const start = 1_000_000;
     vi.setSystemTime(start);
     await worker.tick();
-    vi.setSystemTime(start + 240_000);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
 
     const result = await worker.tick();
 
@@ -2770,7 +2770,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     const start = 1_000_000;
     vi.setSystemTime(start);
     await worker.tick();
-    vi.setSystemTime(start + 240_000);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
     const result = await worker.tick();
     expect(result.dispatched).toBe(false);
     expect(worker.paused).toBe(false); // in-flight guard is not an empty backlog
@@ -2791,7 +2791,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     const start = 1_000_000;
     vi.setSystemTime(start);
     await worker.tick();
-    vi.setSystemTime(start + 240_000);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
 
     const result = await worker.tick();
 
@@ -2806,23 +2806,23 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     const start = 1_000_000;
     vi.setSystemTime(start);
     await worker.tick();
-    vi.setSystemTime(start + 240_000);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
     await worker.tick(); // enters cooldown with 3_600_000 (expires at 4_840_000)
     expect(worker.paused).toBe(true);
 
     // Operator lowers the cooldown live; the in-progress pause keeps its
     // original expiry, but the NEXT cooldown entry uses the new value.
     cfg.noCandidateCooldownMs = 60_000;
-    vi.setSystemTime(start + 240_000 + 3_600_000); // original pause expires
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 3_600_000); // original pause expires
     await worker.tick(); // resumes, starts a fresh idle run
 
-    vi.setSystemTime(start + 240_000 + 3_600_000 + 240_000); // fresh threshold met
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 3_600_000 + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS); // fresh threshold met
     await worker.tick(); // empty backlog again → 60s cooldown (new value)
     expect(worker.paused).toBe(true);
 
     // With the NEW 60s value the pause expires long before the old 60-min
     // default would have: at +61s the worker has resumed polling.
-    vi.setSystemTime(start + 240_000 + 3_600_000 + 240_000 + 61_000);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 3_600_000 + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 61_000);
     const resumed = await worker.tick();
     expect(resumed.polled).toBe(true);
     expect(worker.paused).toBe(false);
@@ -2836,7 +2836,7 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
   function makeErrorWorker(overrides: { deps?: Partial<DowntimeWorkerDeps> } = {}) {
     const cfg = {
       enabled: true,
-      thresholdMs: 240_000,
+      thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
       requiredFreeSlots: 0,
       model: 'plan',
       cwd: '/repo',
@@ -2861,7 +2861,7 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
     const start = 1_000_000;
     vi.setSystemTime(start);
     await worker.tick(); // idle run starts
-    vi.setSystemTime(start + 240_000); // threshold met
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS); // threshold met
 
     const s1 = await worker.tick(); // strike 1
     expect(s1.dispatched).toBe(false);
@@ -2899,7 +2899,7 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
     const start = 1_000_000;
     vi.setSystemTime(start);
     await worker.tick();
-    vi.setSystemTime(start + 240_000);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
 
     const s1 = await worker.tick();
     expect(s1.dispatched).toBe(false);
@@ -2927,20 +2927,20 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
     const start = 1_000_000;
     vi.setSystemTime(start);
     await worker.tick();
-    vi.setSystemTime(start + 240_000);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
     await worker.tick(); // strike 1
     await worker.tick(); // strike 2
     await worker.tick(); // strike 3 → paused
     expect(worker.paused).toBe(true);
 
-    vi.setSystemTime(start + 240_000 + 3_600_000); // pause expires
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 3_600_000); // pause expires
     const resumed = await worker.tick();
     expect(resumed.polled).toBe(true);
     expect(worker.paused).toBe(false);
     expect(worker.errorStrikes).toBe(0);
 
     // A fresh error is strike 1 again — not a strike 4.
-    vi.setSystemTime(start + 240_000 + 3_600_000 + 240_000);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 3_600_000 + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
     await worker.tick();
     expect(worker.errorStrikes).toBe(1);
     expect(worker.paused).toBe(false);
@@ -2960,7 +2960,7 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
     const start = 1_000_000;
     vi.setSystemTime(start);
     await worker.tick();
-    vi.setSystemTime(start + 240_000);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
 
     await worker.tick(); // strike 1
     expect(worker.errorStrikes).toBe(1);
@@ -2971,9 +2971,9 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
 
     // A fresh full idle period is required after the dispatch (AC5) before
     // the next dispatch attempt.
-    vi.setSystemTime(start + 240_000 + 240_000); // fresh idle run starts
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS); // fresh idle run starts
     await worker.tick();
-    vi.setSystemTime(start + 240_000 + 480_000); // fresh threshold met
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 480_000); // fresh threshold met
     await worker.tick(); // strike 1 (fresh — not a strike 2)
     expect(worker.errorStrikes).toBe(1);
     await worker.tick(); // strike 2
@@ -2998,7 +2998,7 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
     const start = 1_000_000;
     vi.setSystemTime(start);
     await worker.tick();
-    vi.setSystemTime(start + 240_000);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
 
     await worker.tick(); // strike 1
     expect(worker.errorStrikes).toBe(1);
@@ -3208,9 +3208,9 @@ describe('per-slot idle tracker (createPerSlotIdleTracker)', () => {
     const start = 1_000_000;
 
     tracker.record([a, b], start);
-    expect(tracker.thresholdMetCount(240_000, start + 239_999)).toBe(0);
-    expect(tracker.thresholdMetCount(240_000, start + 240_000)).toBe(2);
-    expect(tracker.thresholdMetCount(240_000, start + 500_000)).toBe(2);
+    expect(tracker.thresholdMetCount(DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS, start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS - 1)).toBe(0);
+    expect(tracker.thresholdMetCount(DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS, start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS)).toBe(2);
+    expect(tracker.thresholdMetCount(DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS, start + 500_000)).toBe(2);
   });
 
   it('a reset slot needs a fresh full run before it counts toward the threshold again', () => {
@@ -3223,9 +3223,9 @@ describe('per-slot idle tracker (createPerSlotIdleTracker)', () => {
     tracker.record([a, b], start + 20_000);
 
     // Only b has a full continuous run at start+threshold+5s.
-    expect(tracker.thresholdMetCount(240_000, start + 240_000 + 5_000)).toBe(1);
+    expect(tracker.thresholdMetCount(DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS, start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 5_000)).toBe(1);
     // a completes its fresh run at start+20s+threshold → both count.
-    expect(tracker.thresholdMetCount(240_000, start + 20_000 + 240_000)).toBe(2);
+    expect(tracker.thresholdMetCount(DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS, start + 20_000 + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS)).toBe(2);
   });
 });
 
@@ -3284,7 +3284,7 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
   } = {}) {
     const cfg = {
       enabled: true,
-      thresholdMs: overrides.thresholdMs ?? 240_000,
+      thresholdMs: overrides.thresholdMs ?? DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
       requiredFreeSlots: overrides.requiredFreeSlots ?? 2,
       model: 'plan',
       cwd: '/repo',
@@ -3619,7 +3619,7 @@ describe('worker probe jitter (jitterPollIntervalMs)', () => {
     const { worker } = (() => {
       const cfg = {
         enabled: true,
-        thresholdMs: 240_000,
+        thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
         requiredFreeSlots: 0,
         model: 'plan',
         cwd: '/repo',
@@ -3633,15 +3633,15 @@ describe('worker probe jitter (jitterPollIntervalMs)', () => {
       });
       return { worker: w };
     })();
-    // rng 0.75 → factor 1.25 → 30_000 * 1.25 = 37_500
-    expect(worker.jitterPollIntervalMs(30_000)).toBe(37_500);
+    // rng 0.75 → factor 1.25 → 10_000 * 1.25 = 12_500
+    expect(worker.jitterPollIntervalMs(DEFAULT_DOWNTIME_POLL_INTERVAL_MS)).toBe(12_500);
   });
 
   it('returns the static interval when no registry is provided (fail-open)', () => {
     const { worker } = (() => {
       const cfg = {
         enabled: true,
-        thresholdMs: 240_000,
+        thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
         requiredFreeSlots: 0,
         model: 'plan',
         cwd: '/repo',
@@ -3654,7 +3654,7 @@ describe('worker probe jitter (jitterPollIntervalMs)', () => {
       });
       return { worker: w };
     })();
-    expect(worker.jitterPollIntervalMs(30_000)).toBe(30_000);
+    expect(worker.jitterPollIntervalMs(DEFAULT_DOWNTIME_POLL_INTERVAL_MS)).toBe(10_000);
   });
 
   it('two workers with different RNG produce different jitter values', () => {
@@ -3664,13 +3664,13 @@ describe('worker probe jitter (jitterPollIntervalMs)', () => {
       poller: createDowntimePoller('http://proxy:8000'),
       deps: makeDeps(),
       registry,
-      config: () => ({ enabled: true, thresholdMs: 240_000, requiredFreeSlots: 0, model: 'plan', cwd: '/repo', noCandidateCooldownMs: 3_600_000 }),
+      config: () => ({ enabled: true, thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS, requiredFreeSlots: 0, model: 'plan', cwd: '/repo', noCandidateCooldownMs: 3_600_000 }),
     });
     const w1 = mk(r1);
     const w2 = mk(r2);
-    // rng 0.1 → 0.6× = 18_000; rng 0.9 → 1.4× = 42_000
-    expect(w1.jitterPollIntervalMs(30_000)).toBe(18_000);
-    expect(w2.jitterPollIntervalMs(30_000)).toBe(42_000);
-    expect(w1.jitterPollIntervalMs(30_000)).not.toBe(w2.jitterPollIntervalMs(30_000));
+    // rng 0.1 → 0.6× = 6_000; rng 0.9 → 1.4× = 14_000
+    expect(w1.jitterPollIntervalMs(DEFAULT_DOWNTIME_POLL_INTERVAL_MS)).toBe(6_000);
+    expect(w2.jitterPollIntervalMs(DEFAULT_DOWNTIME_POLL_INTERVAL_MS)).toBe(14_000);
+    expect(w1.jitterPollIntervalMs(DEFAULT_DOWNTIME_POLL_INTERVAL_MS)).not.toBe(w2.jitterPollIntervalMs(DEFAULT_DOWNTIME_POLL_INTERVAL_MS));
   });
 });
