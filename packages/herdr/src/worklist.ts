@@ -2330,6 +2330,111 @@ export function mapMouseToAction(
   return index !== null ? { type: 'select-row', index } : null;
 }
 
+/**
+ * Wire a raw stdin chunk into the mouse path — the onData entry point
+ * (WL-0MSGHM5BQ0096BNJ AC2–AC6, fix WL-0MSZBWT500034E74). Parses SGR mouse
+ * events via {@link consumeMouseChunk}, maps them to an action via
+ * {@link mapMouseToAction}, dispatches it against `state` (mirroring the
+ * handleKeypress action handling), and tracks the double-click window in
+ * `clickState`.
+ *
+ * Returns true when the chunk was mouse-shaped (fully consumed — it must
+ * NOT reach the keyboard path); false for plain keys and foreign escape
+ * sequences (arrows, etc.) so keyboard handling is untouched (AC6). A
+ * partial SGR prefix is consumed (buffered) rather than leaked to the
+ * keyboard path, per the split-chunk risk mitigation.
+ *
+ * Double-click ordering (fix): the clickState tracker is updated to the
+ * current left-press AFTER mapMouseToAction runs, so the window compares
+ * against the PRIOR press. Updating before the call made every click
+ * self-match as a double-click (now - at === 0), opening detail instead of
+ * selecting. Only left-button presses (not releases, wheel, or motion)
+ * advance the tracker.
+ */
+export function handleMouseInput(
+  state: WorkItemListState,
+  key: string,
+  termSize: TermSize,
+  clickState: MouseClickState,
+): boolean {
+  const bufferBefore = mouseChunkBuffer;
+  const mouseEvent = consumeMouseChunk(key);
+  if (mouseEvent === null) {
+    // Not a complete mouse event. An ESC chunk that matches the partial SGR
+    // prefix, or a non-ESC chunk that touched a pending partial (grew or
+    // cleared it), is mouse-shaped — consume it so a split sequence never
+    // leaks into the keyboard path. Other input falls through to keys.
+    if (key.startsWith('\x1b')) {
+      return SGR_PARTIAL_RE.test(key);
+    }
+    return mouseChunkBuffer !== bufferBefore;
+  }
+
+  // Current clock for the double-click window (Date.now; deterministic
+  // tests inject clickState directly into mapMouseToAction instead).
+  const now = Date.now();
+  clickState.now = now;
+  const action = mapMouseToAction(state, mouseEvent, termSize, clickState);
+
+  // Advance the tracker AFTER the double-click check — the next event's
+  // window compares against THIS press (fix WL-0MSZBWT500034E74).
+  if (!mouseEvent.release && mouseEvent.button === 0) {
+    clickState.lastClick = { x: mouseEvent.x, y: mouseEvent.y, at: now };
+  }
+
+  if (action === null) return true; // consumed but inert (motion, release, chrome)
+
+  // Dispatch mouse actions (mirrors the handleKeypress action handling).
+  switch (action.type) {
+    case 'select-row': {
+      const flat = state.getFlattenedItems();
+      if (action.index >= 0 && action.index < flat.length) {
+        state.selectedIndex = action.index;
+      }
+      break;
+    }
+    case 'open-detail': {
+      const flat = state.getFlattenedItems();
+      if (state.selectedIndex >= 0 && state.selectedIndex < flat.length) {
+        const selected = flat[state.selectedIndex];
+        // Toggle expand/collapse for items with actual children data.
+        if (selected.children && selected.children.length > 0) {
+          if (state.isExpanded(selected.id)) {
+            state.clearNavigationStateFor(selected.id);
+          } else {
+            state.pushNavigationState(selected.id);
+          }
+          state.toggleExpand(selected.id);
+        } else {
+          state.selectItem();
+        }
+      }
+      break;
+    }
+    case 'back':
+      state.back();
+      break;
+    case 'wheel-up':
+      state.moveUp();
+      break;
+    case 'wheel-down':
+      state.moveDown();
+      break;
+    case 'scroll-detail-up':
+      if (state.detailItem) state.detailScrollUp(1);
+      break;
+    case 'scroll-detail-down':
+      if (state.detailItem) state.detailScrollDown(1);
+      break;
+    case 'filter-stage':
+      if (action.index >= 0 && action.index < STAGES.length) {
+        state.applyFilter(STAGES[action.index]);
+      }
+      break;
+  }
+  return true; // consumed a mouse event
+}
+
 // ── Renderer ──────────────────────────────────────────────────────────
 
 /**
@@ -3500,72 +3605,19 @@ export async function runWorklistTui(
   };
 
   // Double-click state tracker — persists across onData calls for the TUI
-  // lifetime. Updated on every left-press so mapMouseToAction can detect
+  // lifetime. Updated on every left-press so handleMouseInput can detect
   // double-clicks within {@link DOUBLE_CLICK_WINDOW_MS}. (WL-0MSGHM5BQ0096BNJ AC3)
   let clickState: MouseClickState = { lastClick: null, now: 0 };
 
   // ── Mouse event dispatch (WL-0MSGHM5BQ0096BNJ AC2–AC6) ─────────
-  // Parse SGR mouse events from the raw chunk BEFORE the keypress path.
-  // Mouse-shaped sequences are fully consumed; unknown sequences fall
-  // through to the keyboard handler untouched (AC6). (parent AC2–AC6)
-  const dispatchMouse = (key: string): boolean => {
-    const mouseEvent = consumeMouseChunk(key);
-    if (mouseEvent === null) return false; // not a mouse event — fall through to keys
-    // Track coordinates/timestamp for double-click detection.
-    clickState.lastClick = { x: mouseEvent.x, y: mouseEvent.y, at: Date.now() };
-    clickState.now = clickState.lastClick.at;
-    const action = mapMouseToAction(state, mouseEvent, termSize, clickState);
-    if (action === null) return true; // consumed but inert (motion, release, chrome)
-    // Dispatch mouse actions (mirrors handleKeypress action handling below).
-    switch (action.type) {
-      case 'select-row': {
-        const flat = state.getFlattenedItems();
-        if (action.index >= 0 && action.index < flat.length) {
-          state.selectedIndex = action.index;
-        }
-        break;
-      }
-      case 'open-detail': {
-        const flat = state.getFlattenedItems();
-        if (state.selectedIndex >= 0 && state.selectedIndex < flat.length) {
-          const selected = flat[state.selectedIndex];
-          // Toggle expand/collapse for items with actual children data
-          if (selected.children && selected.children.length > 0) {
-            if (state.isExpanded(selected.id)) {
-              state.clearNavigationStateFor(selected.id);
-            } else {
-              state.pushNavigationState(selected.id);
-            }
-            state.toggleExpand(selected.id);
-          } else {
-            state.selectItem();
-          }
-        }
-        break;
-      }
-      case 'back':
-        state.back();
-        break;
-      case 'wheel-up':
-        state.moveUp();
-        break;
-      case 'wheel-down':
-        state.moveDown();
-        break;
-      case 'scroll-detail-up':
-        if (state.detailItem) state.detailScrollUp(1);
-        break;
-      case 'scroll-detail-down':
-        if (state.detailItem) state.detailScrollDown(1);
-        break;
-      case 'filter-stage':
-        if (action.index >= 0 && action.index < STAGES.length) {
-          state.applyFilter(STAGES[action.index]);
-        }
-        break;
-    }
-    return true; // consumed a mouse event
-  };
+  // handleMouseInput parses SGR mouse events from the raw chunk BEFORE the
+  // keypress path and dispatches them (click select, double-click open,
+  // wheel/scroll, filter tap). Mouse-shaped sequences are fully consumed;
+  // plain keys and foreign escapes fall through to the keyboard handler
+  // untouched (AC6). See the fix note in handleMouseInput for the
+  // single-click-select vs double-click-open ordering (WL-0MSZBWT500034E74).
+  const dispatchMouse = (key: string): boolean =>
+    handleMouseInput(state, key, termSize, clickState);
 
   const onData = async (chunk: Buffer): Promise<void> => {
     const key = chunk.toString();

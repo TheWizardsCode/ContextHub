@@ -115,6 +115,7 @@ import {
   parseMouseEvent,
   consumeMouseChunk,
   mapMouseToAction,
+  handleMouseInput,
   DOUBLE_CLICK_WINDOW_MS,
   runWorklistTui,
 } from './worklist.js';
@@ -375,6 +376,82 @@ describe('mapMouseToAction — double-click window (AC3)', () => {
     const state = makeListState(30);
     const click: MouseClickState = { lastClick: { x: 5, y: 1, at: 1000 }, now: 1300 };
     expect(mapMouseToAction(state, press(0, 5, 1), TERM_80x24, click)).toBeNull(); // header rows stay inert
+  });
+});
+
+// ── WL-0MSZBWT500034E74: onData wiring — handleMouseInput ─────────────
+// Regression: dispatchMouse updated clickState to the CURRENT event before
+// mapMouseToAction ran, so every click self-matched as a double-click and
+// opened the detail view instead of selecting. handleMouseInput is the
+// exported wiring that onData calls; these tests pin the select-vs-open
+// semantics (parent AC2/AC3).
+
+describe('handleMouseInput — single click selects, double click opens (AC2/AC3)', () => {
+  it('a single left click on a visible row selects it WITHOUT opening the detail view', () => {
+    const state = makeListState(30);
+    const click: MouseClickState = { lastClick: null, now: 0 };
+    const consumed = handleMouseInput(state, '\x1b[<0;5;3M', TERM_80x24, click);
+    expect(consumed).toBe(true); // mouse sequence fully consumed
+    expect(state.selectedIndex).toBe(1); // row 3 → index 1 (row 2 → index 0)
+    expect(state.mode).toBe('list'); // NOT detail — selection only
+    expect(click.lastClick).toEqual({ x: 5, y: 3, at: expect.any(Number) });
+  });
+
+  it('a second click on the SAME row within the window opens the detail view', () => {
+    const state = makeListState(30);
+    const click: MouseClickState = { lastClick: null, now: 0 };
+    handleMouseInput(state, '\x1b[<0;5;3M', TERM_80x24, click); // first click — selects
+    expect(state.mode).toBe('list');
+    handleMouseInput(state, '\x1b[<0;5;3M', TERM_80x24, click); // second click (~0ms later)
+    expect(state.mode).toBe('detail');
+    expect(state.detailItem?.id).toBe('1');
+  });
+
+  it('a second click on a DIFFERENT row within the window selects that row, never opens detail', () => {
+    const state = makeListState(30);
+    const click: MouseClickState = { lastClick: null, now: 0 };
+    handleMouseInput(state, '\x1b[<0;5;3M', TERM_80x24, click); // row 3
+    handleMouseInput(state, '\x1b[<0;5;8M', TERM_80x24, click); // row 8, same instant
+    expect(state.mode).toBe('list');
+    expect(state.selectedIndex).toBe(6); // row 8 → index 6
+  });
+
+  it('release events do not advance the double-click window', () => {
+    const state = makeListState(30);
+    const click: MouseClickState = { lastClick: null, now: 0 };
+    handleMouseInput(state, '\x1b[<0;5;3M', TERM_80x24, click); // press 1
+    handleMouseInput(state, '\x1b[<0;5;3m', TERM_80x24, click); // release 1 — inert, no state change
+    handleMouseInput(state, '\x1b[<0;5;3M', TERM_80x24, click); // press 2 → still a double-click
+    expect(state.mode).toBe('detail');
+  });
+
+  it('wheel events navigate but never count as clicks for the window', () => {
+    const state = makeListState(30);
+    const click: MouseClickState = { lastClick: null, now: 0 };
+    handleMouseInput(state, '\x1b[<64;5;3M', TERM_80x24, click); // wheel up — wraps to last
+    expect(state.selectedIndex).toBe(29); // moveUp wraps to last (30 items)
+    handleMouseInput(state, '\x1b[<0;5;3M', TERM_80x24, click); // click row 3 → selects only
+    expect(state.mode).toBe('list'); // wheel did not prime a double-click
+    handleMouseInput(state, '\x1b[<0;5;3M', TERM_80x24, click); // same row again → double-click
+    expect(state.mode).toBe('detail'); // double-click still works after a wheel event
+  });
+
+  it('consumes a partial SGR prefix so it never reaches the keyboard path', () => {
+    const state = makeListState(30);
+    const click: MouseClickState = { lastClick: null, now: 0 };
+    expect(handleMouseInput(state, '\x1b[<0;5;', TERM_80x24, click)).toBe(true); // buffered partial
+    expect(handleMouseInput(state, '3M', TERM_80x24, click)).toBe(true); // completes
+    expect(state.selectedIndex).toBe(1);
+    expect(state.mode).toBe('list');
+  });
+
+  it('returns false for plain keys and foreign escapes (keyboard path untouched)', () => {
+    const state = makeListState(30);
+    const click: MouseClickState = { lastClick: null, now: 0 };
+    expect(handleMouseInput(state, 'j', TERM_80x24, click)).toBe(false);
+    expect(handleMouseInput(state, 'q', TERM_80x24, click)).toBe(false);
+    expect(handleMouseInput(state, '\x1b[A', TERM_80x24, click)).toBe(false); // arrow key stays keyboard
+    expect(state.selectedIndex).toBe(0); // untouched
   });
 });
 
