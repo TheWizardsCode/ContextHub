@@ -67,6 +67,15 @@
  *  - `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` /
  *    `clampDowntimeRequiredFreeSlots` / `clampDowntimeNoCandidateCooldownMs`
  *    — settings clamps, wired into `settings.ts`.
+ *  - `selectWithRotation` (WL-0MSSRED76008LGB6) — rotation-aware selection:
+ *    within each tier, candidates sharing the same priority level are
+ *    rotated round-robin via the shared durable cursor
+ *    (`.worklog/downtime-round-robin.json`, `downtime-round-robin.ts`);
+ *    fail-open — no registry / no priority → pre-rotation sortIndex order.
+ *  - `jitterPollIntervalMs` (WL-0MSSRED76008LGB6) — probe jitter: the
+ *    effective poll interval is jittered ±50% of
+ *    `downtimePollIntervalMs` per reschedule so instances do not probe in
+ *    lockstep; fail-open without a registry → static interval.
  *
  * Fail-closed behaviour (never dispatch, never throw) is the SAFE default
  * at every boundary.

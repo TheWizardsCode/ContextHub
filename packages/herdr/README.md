@@ -345,6 +345,27 @@ named `Downtime implement`). A `wl`/CLI error or empty result at the
 implement tier is fail-closed (never a candidate) and does **not**
 short-circuit the plan/intake fallback (AC5/AC6).
 
+**Round-robin tie-break (WL-0MSSRED76008LGB6)** — within each dispatch tier,
+candidates sharing the **same priority level** (critical/high/medium/low —
+the grouping key, not sortIndex) are rotated round-robin using a shared,
+durable cursor persisted at `.worklog/downtime-round-robin.json`. The cursor
+is advanced (and persisted) on each selection, so repeated dispatches of a
+tied group never always pick the same item, and two herdr instances selecting
+from the same group pick different items once the cursor has advanced. The
+file is the source of truth for cross-instance coordination — each selection
+re-reads it. Fail-open conventions: a missing, unreadable, or corrupt cursor
+file degrades to the pre-rotation sortIndex order (no rotation), and a
+cursor-write failure is tolerated (the dispatched-marker in
+`.worklog/downtime-dispatches.log` remains the authoritative guard against
+re-dispatch). A single-member priority group needs no rotation.
+
+**Probe jitter (WL-0MSSRED76008LGB6)** — the downtime task's effective poll
+interval is jittered ±50% of the configured `downtimePollIntervalMs` on every
+reschedule (the scheduler's `getIntervalMs` hook recomputes a fresh value per
+tick), so two instances with identical configuration do not probe in
+lockstep — other machines get a fair chance to win the dispatch race. The
+jitter factor is clamped to `[0.5×, 1.5×]` of the configured interval.
+
 **Scheduled prompts (WL-0MSS1Q5ER007QDKX)** — the FIRST dispatch stage: a
 project-local config file `.worklog/scheduled-prompts.json` (provisioned by
 `wl init` from `templates/scheduled-prompts.json`, create-if-absent) carries
