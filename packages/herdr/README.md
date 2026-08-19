@@ -211,7 +211,7 @@ Settings (all re-read each poll, so changes apply without a plugin restart):
 
 - `downtimeEnabled` — Enable the downtime worker (default: `true`)
 - `downtimeIdleThresholdMs` — Minimum continuous idle duration before a
-dispatch (default: `240000` = 4 minutes, floor 1s)
+dispatch (default: `60000` = 60 seconds, floor 1s)
 - `downtimeRequiredFreeSlots` — Required free slots; `0` means **all** slots
 must be free (default). A positive integer N is accepted; with per-slot
 identity data the worker requires the **same N slots** continuously free (see
@@ -219,7 +219,7 @@ per-slot idle tracking below) for `0 < N < total`; without per-slot data it
 fails closed to all-slots-free for `0 < N < total` (never any-N dispatch);
 `N > total` never dispatches.
 - `downtimePollIntervalMs` — Poll interval for the proxy status endpoint
-(default: `30000`, hard floor `10000`)
+(default: `10000`, hard floor `10000`)
 - `downtimeProxyUrl` — Base URL of the llama-proxy (default:
 `http://192.168.0.199:8000`)
 - `downtimeModel` — pi model pattern for dispatched panes (default: `plan`)

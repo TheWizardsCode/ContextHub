@@ -100,8 +100,8 @@ export const DOWNTIME_POLL_INTERVAL_FLOOR_MS = 10_000;
 /** Defensive floor for the idle threshold (prevents immediate dispatch). */
 export const DOWNTIME_IDLE_THRESHOLD_FLOOR_MS = 1_000;
 
-export const DEFAULT_DOWNTIME_POLL_INTERVAL_MS = 30_000;
-export const DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS = 240_000;
+export const DEFAULT_DOWNTIME_POLL_INTERVAL_MS = 10_000;
+export const DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS = 60_000;
 
 /** 0 = all slots must be free (default). Any positive integer N is accepted. */
 export const DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 0;

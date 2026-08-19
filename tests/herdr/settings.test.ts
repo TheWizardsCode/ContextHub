@@ -61,16 +61,16 @@ describe('defaultSettings', () => {
     expect(defaultSettings.downtimeEnabled).toBe(true);
   });
 
-  it('has a 4-minute idle threshold by default', () => {
-    expect(defaultSettings.downtimeIdleThresholdMs).toBe(240000);
+  it('has a 60s idle threshold by default', () => {
+    expect(defaultSettings.downtimeIdleThresholdMs).toBe(60000);
   });
 
   it('has downtimeRequiredFreeSlots 0 (all slots) by default', () => {
     expect(defaultSettings.downtimeRequiredFreeSlots).toBe(0);
   });
 
-  it('has a 30s poll interval by default', () => {
-    expect(defaultSettings.downtimePollIntervalMs).toBe(30000);
+  it('has a 10s poll interval by default', () => {
+    expect(defaultSettings.downtimePollIntervalMs).toBe(10000);
   });
 
   it('has the llama-proxy URL and plan model by default', () => {
@@ -122,7 +122,7 @@ describe('loadSettings', () => {
     }), 'utf-8');
     const settings = loadSettings(settingsPath);
     expect(settings.downtimePollIntervalMs).toBe(10000);
-    expect(settings.downtimeIdleThresholdMs).toBe(240000);
+    expect(settings.downtimeIdleThresholdMs).toBe(60000);
     expect(settings.downtimeRequiredFreeSlots).toBe(0);
     expect(settings.downtimeModel).toBe('plan');
   });
@@ -135,8 +135,8 @@ describe('loadSettings', () => {
     const settings = loadSettings(settingsPath);
     expect(settings.downtimeEnabled).toBe(false);
     expect(settings.downtimeProxyUrl).toBe('http://10.0.0.5:8000');
-    expect(settings.downtimeIdleThresholdMs).toBe(240000); // from defaults
-    expect(settings.downtimePollIntervalMs).toBe(30000); // from defaults
+    expect(settings.downtimeIdleThresholdMs).toBe(60000); // from defaults
+    expect(settings.downtimePollIntervalMs).toBe(10000); // from defaults
     expect(settings.downtimeRequiredFreeSlots).toBe(0); // from defaults
   });
 
@@ -210,9 +210,9 @@ describe('saveSettings', () => {
       browseItemCount: 25,
       showHelpText: false,
       downtimeEnabled: true,
-      downtimeIdleThresholdMs: 240000,
+      downtimeIdleThresholdMs: 60000,
       downtimeRequiredFreeSlots: 0,
-      downtimePollIntervalMs: 30000,
+      downtimePollIntervalMs: 10000,
       downtimeProxyUrl: 'http://192.168.0.199:8000',
       downtimeModel: 'plan',
     };
