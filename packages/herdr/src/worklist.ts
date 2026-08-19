@@ -2456,8 +2456,12 @@ export function handleMouseInput(
 /**
  * Render the inline downtime-worker status fragment appended to the list
  * header (AC3, WL-0MSF49FMW009M06K): `[⏳ downtime idle m:ss]`,
- * `[downtime busy]`, `[⏳ downtime dispatching]`, `[downtime disabled]`, or
+ * `[downtime busy]`, `[⏳ downtime dispatching]`, `[Downtime Off]`, or
  * `[downtime paused]` (no-candidate cooldown, WL-0MSI7DQL10016QYX).
+ * `[Downtime Off]` replaces the legacy `[downtime disabled]` text and is
+ * shown whenever dispatch is off for the instance — either globally
+ * settings-disabled or toggled off via the `d` shortcut (parent
+ * WL-0MSZ4NSOE007AQEF).
  * Inline-only — it never adds a row, so the pane-height budget is intact.
  */
 export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string {
@@ -2466,7 +2470,7 @@ export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string
     return ` ${ANSI.fg(208)}[⏳ downtime dispatching]${ANSI.reset}`;
   }
   if (!worker.enabled) {
-    return ` ${ANSI.dim}[downtime disabled]${ANSI.reset}`;
+    return ` ${ANSI.dim}[Downtime Off]${ANSI.reset}`;
   }
   if (worker.paused) {
     // No-candidate cooldown: the worker is not polling, so `idleSince` is
@@ -2985,6 +2989,11 @@ export function fetchItemsForView(
  * @param command - The resolved command string (may contain `<id>` placeholders)
  * @param state - Current work item list state (for selected item lookup)
  * @param onCommand - Optional callback to route non-/wl commands to the output mechanism
+ * @param model - Optional model for the routed command
+ * @param onDowntimeToggle - Optional callback invoked for the internal
+ *   `/downtime toggle` command (flips the per-instance worker override;
+ *   never spawns a pane, never writes to stdout — parent
+ *   WL-0MSZ4NSOE007AQEF)
  * @returns true if the command was handled, false otherwise
  */
 export function dispatchChordCommand(
@@ -2992,7 +3001,19 @@ export function dispatchChordCommand(
   state: WorkItemListState,
   onCommand?: (command: string, model?: string) => void,
   model?: string,
+  onDowntimeToggle?: () => void,
 ): boolean {
+  // ── /downtime toggle (internal action, WL-0MSZ4NSOE007AQEF) ──────
+  // Per-instance in-memory toggle of downtime dispatch for the current
+  // herdr pane. Fully internal — no pane spawned, no stdout write, no
+  // <id> substitution. The header re-renders via the worker's state.
+  if (/^\/downtime toggle$/.test(command.trim())) {
+    if (onDowntimeToggle) {
+      onDowntimeToggle();
+    }
+    return true;
+  }
+
   // ── /wl <stage> commands (internal dispatch) ──────────────
   const wlStageMatch = command.match(/^\/wl\s+(\S+)$/);
   if (wlStageMatch) {
@@ -3205,6 +3226,9 @@ export async function resolvePodcastTarget(
  * @param onCommand - Optional callback to receive resolved commands
  * @param codeFreezeActive - Whether the project is in Code Freeze (implement
  *                           commands are blocked). Defaults to false.
+ * @param model - Optional model for the routed command.
+ * @param onDowntimeToggle - Optional callback for the internal
+ *   `/downtime toggle` command (see {@link dispatchChordCommand}).
  * @returns 'dispatched' if handled by dispatchChordCommand,
  *          'callback' if passed to onCommand,
  *          'noop' if skipped (no item + <id> requirement),
@@ -3216,6 +3240,7 @@ export function executeResolvedCommand(
   onCommand?: (command: string, model?: string) => void,
   codeFreezeActive = false,
   model?: string,
+  onDowntimeToggle?: () => void,
 ): ExecuteResult {
   // Code Freeze guard: never route implement commands while frozen.
   // This runs BEFORE dispatchChordCommand so no pane spawn, claim, or
@@ -3224,9 +3249,9 @@ export function executeResolvedCommand(
     return 'blocked';
   }
 
-  // Try dispatchChordCommand first — handles /wl, /skill:, /intake, /plan,
-  // !!wl reviewed, and compound audit commands
-  if (dispatchChordCommand(command, state, onCommand, model)) {
+  // Try dispatchChordCommand first — handles /wl, /downtime, /skill:,
+  // /intake, /plan, !!wl reviewed, and compound audit commands
+  if (dispatchChordCommand(command, state, onCommand, model, onDowntimeToggle)) {
     return 'dispatched';
   }
 
@@ -3274,7 +3299,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -3292,6 +3317,7 @@ export async function runWorklistTui(
     mergeAgentStates: options?.mergeAgentStates,
     subscriber: options?.subscriber ?? null,
     agentTracker: options?.agentTracker ?? null,
+    onDowntimeToggle: options?.onDowntimeToggle,
   };
 
   let termSize = getTermSize();
@@ -3733,7 +3759,7 @@ export async function runWorklistTui(
           if (frozen) {
             codeFreezeActive = true;
           }
-          const result = executeResolvedCommand(SHIP_IT_COMMAND, state, opts.onCommand, frozen, model);
+          const result = executeResolvedCommand(SHIP_IT_COMMAND, state, opts.onCommand, frozen, model, opts.onDowntimeToggle);
           if (result === 'noop') {
             showToast('Skipped', { body: `${SHIP_IT_COMMAND} (no item)` });
           } else {
@@ -4049,7 +4075,7 @@ export async function runWorklistTui(
             if (frozen) {
               codeFreezeActive = true;
             }
-            const result = executeResolvedCommand(command, state, opts.onCommand, frozen, model ?? undefined);
+            const result = executeResolvedCommand(command, state, opts.onCommand, frozen, model ?? undefined, opts.onDowntimeToggle);
             if (result === 'blocked') {
               // Code Freeze — show the notice dialog; the command was NOT
               // routed, no pane spawned, no work item claimed.
@@ -4183,7 +4209,7 @@ export async function runWorklistTui(
           if (frozen) {
             codeFreezeActive = true;
           }
-          const result = executeResolvedCommand(singleCmd, state, opts.onCommand, frozen, singleModel);
+          const result = executeResolvedCommand(singleCmd, state, opts.onCommand, frozen, singleModel, opts.onDowntimeToggle);
           if (result === 'blocked') {
             // Code Freeze — show the notice dialog; no pane spawned.
             codeFreezeNotice = true;

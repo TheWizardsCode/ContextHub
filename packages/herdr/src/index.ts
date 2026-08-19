@@ -775,28 +775,30 @@ async function main(): Promise<void> {
   // Settings are re-read so browseItemCount (per fetch) and showHelpText
   // (per render) changes apply without a plugin restart.
   const runSettings = loadSettings();
-  // Downtime worker (local-LLM idle dispatch, WL-0MSF49FMW009M06K): built
-  // when enabled; settings are re-read every tick via `config()` so changes
-  // apply without a plugin restart. The dispatch panes open in the resolved
-  // worklog root (--cwd).
+  // Downtime worker (local-LLM idle dispatch, WL-0MSF49FMW009M06K): created
+  // UNCONDITIONALLY (parent WL-0MSZ4NSOE007AQEF) so the `d` shortcut can also
+  // force dispatch on for one pane when the global setting is off — the
+  // per-instance in-memory override gates the effective enabled state, and
+  // `tick()` short-circuits (no proxy polling, no idle tracking, no dispatch)
+  // while the effective state is off. Settings are re-read every tick via
+  // `config()` so changes apply without a plugin restart. The dispatch panes
+  // open in the resolved worklog root (--cwd).
   const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
-  const downtimeWorker: DowntimeWorker | undefined = runSettings.downtimeEnabled
-    ? createDowntimeWorker({
-        poller: createDowntimePoller(runSettings.downtimeProxyUrl),
-        deps: createDowntimeDeps(SEND_TO_PI_SCRIPT, AGENT_ASSIGNEE),
-        config: () => {
-          const s = loadSettings();
-          return {
-            enabled: s.downtimeEnabled,
-            thresholdMs: s.downtimeIdleThresholdMs,
-            requiredFreeSlots: s.downtimeRequiredFreeSlots,
-            model: s.downtimeModel,
-            cwd: targetCwd,
-            noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
-          };
-        },
-      })
-    : undefined;
+  const downtimeWorker: DowntimeWorker = createDowntimeWorker({
+    poller: createDowntimePoller(runSettings.downtimeProxyUrl),
+    deps: createDowntimeDeps(SEND_TO_PI_SCRIPT, AGENT_ASSIGNEE),
+    config: () => {
+      const s = loadSettings();
+      return {
+        enabled: s.downtimeEnabled,
+        thresholdMs: s.downtimeIdleThresholdMs,
+        requiredFreeSlots: s.downtimeRequiredFreeSlots,
+        model: s.downtimeModel,
+        cwd: targetCwd,
+        noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
+      };
+    },
+  });
   const selectedItem = await runWorklistTui(
     fetcher,
     undefined,
@@ -810,6 +812,10 @@ async function main(): Promise<void> {
       showIcons: runSettings.showIcons,
       downtimeWorker,
       downtimePollIntervalMs: runSettings.downtimePollIntervalMs,
+      // Per-instance downtime toggle (`d` shortcut, parent WL-0MSZ4NSOE007AQEF):
+      // flips the in-memory worker override; the header re-renders via the
+      // worker's enabled state on the next render (internal action, no pane).
+      onDowntimeToggle: () => downtimeWorker.toggle(),
       // Re-read on every render so a showHelpText change applies on the next
       // refresh (no plugin restart needed), matching browseItemCount behavior.
       getShowHelpText: () => loadSettings().showHelpText ?? true,

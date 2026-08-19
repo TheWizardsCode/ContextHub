@@ -161,6 +161,17 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     expect(registry.lookupChordEntry(['S'], 'list', undefined, true)).toBeDefined();
     expect(registry.getEntriesForStage(undefined, true).some(e => e.chord[0] === 'S')).toBe(true);
   });
+
+  it('registers the d downtime-toggle chord to /downtime toggle (WL-0MSZ4NSOE007AQEF)', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['d'], 'list', undefined, false);
+    expect(entry).toBeDefined();
+    expect(entry?.command).toBe('/downtime toggle');
+    expect(entry?.label).toBe('downtime toggle');
+    expect(entry?.view).toBe('both');
+    // Visible in both list and detail views.
+    expect(registry.lookupChordEntry(['d'], 'detail', undefined, false)).toBeDefined();
+  });
 });
 
 // ── parseShortcutEntry ───────────────────────────────────────────────────

@@ -36,6 +36,7 @@ import {
 } from './worklist.js';
 import type { ChordState } from './worklist.js';
 import type { DowntimeWorker } from './downtime-worker.js';
+import { createDowntimeWorker, createDowntimePoller } from './downtime-worker.js';
 import { setLogPath, resetLogPath, recordCommand, getLastCommand } from './command-log.js';
 import { loadShortcutConfig, ShortcutRegistry, type ShortcutEntry } from './shortcut-config.js';
 import { regroupWorkItems, extractFilePaths } from './grouping.js';
@@ -848,6 +849,31 @@ describe('dispatchChordCommand', () => {
     const result = dispatchChordCommand('/wl', state);
     expect(result).toBe(true);
     expect(state.activeFilter).toBeNull();
+  });
+
+  it('handles /downtime toggle internally via the callback (no pane dispatch, no stdout)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    const onCommand = vi.fn();
+    const onDowntimeToggle = vi.fn();
+    const result = dispatchChordCommand('/downtime toggle', state, onCommand, undefined, onDowntimeToggle);
+    expect(result).toBe(true);
+    expect(onDowntimeToggle).toHaveBeenCalledTimes(1);
+    expect(onCommand).not.toHaveBeenCalled(); // never routed to stdout/pane
+  });
+
+  it('handles /downtime toggle without a toggle callback (graceful no-op)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    const onCommand = vi.fn();
+    const result = dispatchChordCommand('/downtime toggle', state, onCommand);
+    expect(result).toBe(true);
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it('does not treat other /downtime commands as handled (unknown family falls through)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    const onCommand = vi.fn();
+    expect(dispatchChordCommand('/downtime other', state, onCommand)).toBe(false);
+    expect(onCommand).not.toHaveBeenCalled();
   });
 
   it('shows the sprint chord in the f-chord help line (WL-0MSGSE15000746F7)', () => {
@@ -2468,13 +2494,67 @@ describe('renderDowntimeStatus', () => {
     expect(renderDowntimeStatus(worker)).toContain('downtime dispatching');
   });
 
-  it('renders the disabled state', () => {
+  it('renders the Downtime Off state', () => {
     const worker = {
       idleSince: null,
       dispatching: false,
       enabled: false,
     } as unknown as DowntimeWorker;
-    expect(renderDowntimeStatus(worker)).toContain('downtime disabled');
+    expect(renderDowntimeStatus(worker)).toContain('Downtime Off');
+  });
+
+  it('renders idle status when enabled and idle (per-instance enabled from override)', () => {
+    const worker = {
+      idleSince: Date.now() - 65_000, // 1:05
+      dispatching: false,
+      enabled: true,
+    } as unknown as DowntimeWorker;
+    const status = renderDowntimeStatus(worker);
+    expect(status).toContain('downtime idle 1:05');
+    expect(status).toContain('⏳');
+  });
+
+  it('renders per-instance isolation: two real workers toggle independently', () => {
+    const makeWorker = (enabled: boolean) =>
+      createDowntimeWorker({
+        poller: createDowntimePoller('http://proxy:8000'),
+        deps: {} as never,
+        config: () => ({
+          enabled,
+          thresholdMs: 240_000,
+          requiredFreeSlots: 0,
+          model: 'plan',
+          cwd: '/repo',
+          noCandidateCooldownMs: 3_600_000,
+        }),
+      });
+    const w1 = makeWorker(true);
+    const w2 = makeWorker(true);
+    w1.toggle(); // disable only pane 1
+    expect(w1.enabled).toBe(false);
+    expect(w2.enabled).toBe(true);
+    expect(renderDowntimeStatus(w1)).toContain('Downtime Off');
+    expect(renderDowntimeStatus(w2)).toContain('downtime busy');
+  });
+
+  it('renders idle status when toggle forces dispatch on despite global setting off', () => {
+    // Global setting disabled, but the per-instance override forces the
+    // worker on — the header must show the live idle status, not Off.
+    const worker = createDowntimeWorker({
+      poller: createDowntimePoller('http://proxy:8000'),
+      deps: {} as never,
+      config: () => ({
+        enabled: false, // global setting off
+        thresholdMs: 240_000,
+        requiredFreeSlots: 0,
+        model: 'plan',
+        cwd: '/repo',
+        noCandidateCooldownMs: 3_600_000,
+      }),
+      override: true,
+    });
+    expect(worker.enabled).toBe(true);
+    expect(renderDowntimeStatus(worker)).toContain('downtime busy');
   });
 
   it('renders the paused state during the no-candidate cooldown (no stale idle duration)', () => {

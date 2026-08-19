@@ -1,6 +1,15 @@
 [
   {
     "chord": [
+      "d"
+    ],
+    "command": "/downtime toggle",
+    "view": "both",
+    "label": "downtime toggle",
+    "description": "Toggle downtime dispatch for the current pane (in-memory, per-instance)."
+  },
+  {
+    "chord": [
       "c"
     ],
     "command": "/intake <description> --priority <priority default='medium'>",
