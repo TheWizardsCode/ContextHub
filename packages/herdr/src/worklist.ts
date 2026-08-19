@@ -3530,6 +3530,20 @@ export async function runWorklistTui(
   const isInteractive = process.stdin.isTTY;
   let rawMode = false;
 
+  // SGR mouse tracking is enabled by default (WL-0MT0AP2LR000JFWN). This is
+  // a toggle state so the user can temporarily disable mouse tracking and use
+  // the terminal's native text-selection to copy content from the terminal.
+  let mouseTrackingEnabled = true;
+
+  // Alt+m toggle handler (WL-0MT0AP2LR000JFWN): toggles mouse tracking on/off
+  // by emitting the matching enable/disable ANSI sequences to the terminal.
+  const toggleMouseTracking = (): void => {
+    mouseTrackingEnabled = !mouseTrackingEnabled;
+    process.stdout.write(
+      mouseTrackingEnabled ? ANSI.mouseEnable : ANSI.mouseDisable,
+    );
+  };
+
   if (isInteractive) {
     try {
       process.stdin.setRawMode?.(true);
@@ -3795,6 +3809,15 @@ export async function runWorklistTui(
 
   const onData = async (chunk: Buffer): Promise<void> => {
     const key = chunk.toString();
+
+    // Alt+m toggle shortcut (WL-0MT0AP2LR000JFWN): always available,
+    // even in modal states. Toggles mouse tracking on/off so the user
+    // can use the terminal's native text-selection to copy content.
+    if (key === '\x1bm') {
+      toggleMouseTracking();
+      render();
+      return;
+    }
 
     // Try mouse event dispatch first — only runs when the pane is not in a
     // modal state (code-freeze notice, form, ship-it dialog), matching the
@@ -4408,6 +4431,17 @@ export async function runWorklistTui(
           .join('  ');
         dynamicHints = hints;
       }
+    }
+
+    // Mouse-tracking toggle hint (WL-0MT0AP2LR000JFWN): appends the Alt+m
+    // toggle to the footer shortcut hints so the user knows how to switch
+    // between mouse interaction and native text-selection (drag-select).
+    // Shown whenever help text is enabled.
+    if (opts.getShowHelpText()) {
+      const mouseHint = mouseTrackingEnabled
+        ? `alt+m mouse on`
+        : `alt+m mouse off`;
+      dynamicHints = dynamicHints ? `${dynamicHints}  ${mouseHint}` : ` ${mouseHint}`;
     }
 
     // Look up the selected item's last recorded command for the metadata

@@ -77,6 +77,12 @@ Two pollers were fixed:
   never send mouse events — the worklist remains fully keyboard-usable.
 - Mouse input is ignored during modal states (code-freeze notice, form input,
   Ship It confirmation dialog) — matching the keyboard path's modal gating.
+- **Alt+m toggle (WL-0MT0AP2LR000JFWN):** mouse tracking is enabled by
+  default on raw-mode entry. Pressing `Alt+m` (`\x1bm`) toggles it off so the
+  terminal's native text-selection (drag-select to copy content from the
+  terminal) works again, and toggles it back on to resume mouse interaction.
+  The toggle always works (handled before modal-state guards) and is reflected
+  in the footer hint (`alt+m mouse on` / `alt+m mouse off`).
 - When the TUI is paused (hidden tab), mouse input is irrelevant because the
   `onData` handler is never called — stdin is only read while the pane is
   visible (the input loop runs inside the scheduler-visible cadence).

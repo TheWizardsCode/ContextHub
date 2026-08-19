@@ -597,3 +597,164 @@ describe('runWorklistTui — mouse lifecycle emission (AC1)', () => {
     }
   });
 });
+
+// ── WL-0MT0AP2LR000JFWN: Alt+m toggle for drag-select ─────────────────
+// Regression: mouse tracking (enabled on raw-mode entry) captures ALL mouse
+// events, so the terminal's native text selection (drag-select to copy)
+// stops working. Alt+m toggles tracking off (native selection works again)
+// and back on (mouse interaction resumes).
+
+describe('runWorklistTui — Alt+m mouse-tracking toggle (WL-0MT0AP2LR000JFWN)', () => {
+  // Shared fake-TTY harness: swaps process.stdin for a fake TTY that
+  // records data listeners, and captures process.stdout writes.
+  function setupFakeTty(): {
+    dataListeners: Array<(chunk: Buffer) => void>;
+    writes: string[];
+    restore: () => void;
+  } {
+    type StdinListener = (chunk: Buffer) => void;
+    const dataListeners: StdinListener[] = [];
+    const fakeStdin = {
+      isTTY: true,
+      setRawMode: vi.fn(),
+      resume: vi.fn(),
+      pause: vi.fn(),
+      on: (ev: string, cb: StdinListener) => {
+        if (ev === 'data') dataListeners.push(cb);
+      },
+      removeListener: (ev: string, cb: StdinListener) => {
+        if (ev === 'data') {
+          const i = dataListeners.indexOf(cb);
+          if (i >= 0) dataListeners.splice(i, 1);
+        }
+      },
+    };
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: any) => {
+      writes.push(String(chunk));
+      return true;
+    }) as any);
+    const origStdin = (process as any).stdin;
+    Object.defineProperty(process, 'stdin', { value: fakeStdin, configurable: true, writable: true });
+    setExecFileAsync((async () => ({ stdout: '{"count": 0}' })) as any);
+    return {
+      dataListeners,
+      writes,
+      restore: () => {
+        Object.defineProperty(process, 'stdin', { value: origStdin, configurable: true, writable: true });
+        writeSpy.mockRestore();
+        resetExecFileAsync();
+      },
+    };
+  }
+
+  it('Alt+m toggles tracking OFF (disable sequences emitted) then ON again', async () => {
+    const { dataListeners, writes, restore } = setupFakeTty();
+    try {
+      const tui = runWorklistTui(
+        async () => [],
+        [],
+        undefined,
+        { autoRefresh: false, autoSync: false },
+      );
+
+      // Raw-mode entry → mouse tracking enabled by default.
+      await vi.waitFor(() => {
+        expect(writes.join('')).toContain(ANSI.mouseEnable);
+      });
+      const firstEnable = writes.join('').indexOf(ANSI.mouseEnable);
+
+      // Alt+m (\x1bm) → toggle OFF: disable sequences emitted.
+      dataListeners.forEach((cb) => cb(Buffer.from('\x1bm')));
+      await vi.waitFor(() => {
+        expect(writes.join('').indexOf(ANSI.mouseDisable)).toBeGreaterThan(firstEnable);
+      });
+      const disableAt = writes.join('').indexOf(ANSI.mouseDisable);
+
+      // Alt+m again → toggle back ON: a SECOND enable sequence is emitted.
+      dataListeners.forEach((cb) => cb(Buffer.from('\x1bm')));
+      await vi.waitFor(() => {
+        const enableCount = writes.join('').split(ANSI.mouseEnable).length - 1;
+        expect(enableCount).toBe(2);
+        expect(writes.join('').lastIndexOf(ANSI.mouseEnable)).toBeGreaterThan(disableAt);
+      });
+
+      // Quit via 'q' → cleanup still emits the disable sequences.
+      dataListeners.forEach((cb) => cb(Buffer.from('q')));
+      await tui;
+      expect(writes.join('')).toContain(ANSI.mouseDisable);
+    } finally {
+      restore();
+    }
+  });
+
+  it('Alt+m does not reach keyToAction (meta-down m is unaffected)', async () => {
+    const { dataListeners, writes, restore } = setupFakeTty();
+    try {
+      const tui = runWorklistTui(
+        async () => [],
+        [],
+        undefined,
+        { autoRefresh: false, autoSync: false },
+      );
+      await vi.waitFor(() => {
+        expect(writes.join('')).toContain(ANSI.mouseEnable);
+      });
+
+      // Plain 'm' (meta-down) must NOT trigger the toggle — only \x1bm does.
+      const before = writes.join('');
+      dataListeners.forEach((cb) => cb(Buffer.from('m')));
+      // Allow the render to settle, then confirm no disable sequence was
+      // emitted (plain m is a navigation key, not a toggle).
+      await new Promise((r) => setTimeout(r, 50));
+      expect(writes.join('').split(ANSI.mouseDisable).length - 1).toBe(0);
+      void before;
+
+      // Alt+m toggles OFF (disable emitted), proving the \x1bm prefix is
+      // what triggers the toggle — distinct from the bare 'm' key.
+      dataListeners.forEach((cb) => cb(Buffer.from('\x1bm')));
+      await vi.waitFor(() => {
+        expect(writes.join('').split(ANSI.mouseDisable).length - 1).toBeGreaterThan(0);
+      });
+
+      dataListeners.forEach((cb) => cb(Buffer.from('q')));
+      await tui;
+    } finally {
+      restore();
+    }
+  });
+
+  it('footer shows the current mouse-tracking state (on/off)', async () => {
+    const { dataListeners, writes, restore } = setupFakeTty();
+    try {
+      const tui = runWorklistTui(
+        async () => [],
+        [],
+        undefined,
+        { autoRefresh: false, autoSync: false },
+      );
+
+      // Initial render: hint says mouse on.
+      await vi.waitFor(() => {
+        expect(writes.join('')).toContain('alt+m mouse on');
+      });
+
+      // Alt+m → hint flips to mouse off.
+      dataListeners.forEach((cb) => cb(Buffer.from('\x1bm')));
+      await vi.waitFor(() => {
+        expect(writes.join('')).toContain('alt+m mouse off');
+      });
+
+      // Alt+m again → hint flips back to mouse on.
+      dataListeners.forEach((cb) => cb(Buffer.from('\x1bm')));
+      await vi.waitFor(() => {
+        expect(writes.join('')).toContain('alt+m mouse on');
+      });
+
+      dataListeners.forEach((cb) => cb(Buffer.from('q')));
+      await tui;
+    } finally {
+      restore();
+    }
+  });
+});
