@@ -194,6 +194,30 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     );
   });
 
+  it('a-r (audit reject) resets status/stage/priority on reject (WL-0MSM72QXN008GUP2)', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['a', 'r'], 'list', undefined, false);
+    expect(entry).toBeDefined();
+    expect(entry?.command).toContain('wl reviewed <id> false');
+    expect(entry?.command).toContain('wl update <id> --status open --stage plan_complete --priority medium');
+    expect(entry?.command).toContain("wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'");
+    expect(entry?.label).toBe('audit reject');
+    expect(entry?.stages).toEqual(['in_review']);
+  });
+
+  it('a-y (audit approve) and a-r (audit reject) differ only in the audit-set flag (WL-0MSM72QXN008GUP2)', () => {
+    const registry = loadShortcutConfig();
+    const approve = registry.lookupChordEntry(['a', 'y'], 'list', undefined, false);
+    const reject = registry.lookupChordEntry(['a', 'r'], 'list', undefined, false);
+    // Both share the reviewed reset + audit-set chain.
+    expect(approve?.command).toContain('wl reviewed <id> false');
+    expect(reject?.command).toContain('wl reviewed <id> false');
+    // Approve sets ready-to-close yes; reject sets it no plus the reset.
+    expect(approve?.command).toContain('--ready-to-close yes');
+    expect(reject?.command).toContain('--ready-to-close no');
+    expect(reject?.command).toContain('--status open --stage plan_complete --priority medium');
+  });
+
   it('registers the d downtime-toggle chord to /downtime toggle (WL-0MSZ4NSOE007AQEF)', () => {
     const registry = loadShortcutConfig();
     const entry = registry.lookupChordEntry(['d'], 'list', undefined, false);

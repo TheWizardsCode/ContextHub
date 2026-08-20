@@ -933,13 +933,13 @@ describe('dispatchChordCommand', () => {
     state.selectedIndex = 0;
     const onCommand = vi.fn();
     const result = dispatchChordCommand(
-      "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
+      "!!wl reviewed <id> false && wl update <id> --status open --stage plan_complete --priority medium && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
       state,
       onCommand,
     );
     expect(result).toBe(true);
     expect(onCommand).toHaveBeenCalledWith(
-      "!!wl reviewed TEST-123 false && wl audit-set TEST-123 --ready-to-close no --summary 'Rejected by manual review. <reason>'",
+      "!!wl reviewed TEST-123 false && wl update TEST-123 --status open --stage plan_complete --priority medium && wl audit-set TEST-123 --ready-to-close no --summary 'Rejected by manual review. <reason>'",
       undefined,
     );
   });

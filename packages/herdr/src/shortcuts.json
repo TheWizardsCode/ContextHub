@@ -123,13 +123,13 @@
       "a",
       "r"
     ],
-    "command": "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
+    "command": "!!wl reviewed <id> false && wl update <id> --status open --stage plan_complete --priority medium && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
     "view": "both",
     "stages": [
       "in_review"
     ],
     "label": "audit reject",
-    "description": "Reject the in_review item by manual audit.",
+    "description": "Reject the in_review item and reset it to open/plan_complete/medium for rework.",
     "open_pane": false
   },
   {
