@@ -161,54 +161,43 @@ export function computeMetadataPanelHeight(rows: number): number {
  * the main TUI loop (to pass the panel height into metaScrollDown for
  * correct clamping).
  *
- * @param flatItems - Flattened items to display.
- * @param scrollOffset - Current scroll offset into the item list.
+ * The display-rows model (WL-0MSL5MPSZ003TG94) passes `DisplayRow[]` —
+ * heading rows are first-class rows already counted in the window, so no
+ * extra separator accounting is needed.
+ *
+ * @param rows - Display rows (headings + items) to display.
+ * @param scrollOffset - Current scroll offset into the display rows.
  * @param bannerCount - Number of code-freeze banner rows.
  * @param termSize - Terminal size.
  * @returns The metadata panel height, the list area, and the list height.
  */
 export function computeDynamicLayout(
-  flatItems: WorkItem[],
+  rows: DisplayRow[],
   scrollOffset: number,
   bannerCount: number,
   termSize: TermSize,
 ): { panelHeight: number; listArea: number; listHeight: number } {
-  const { rows } = termSize;
+  const { rows: termRows } = termSize;
   const minMeta = 3;
   const chromeLines = 2 + bannerCount; // header + banners + footer
 
-  // Helper: count group separators in a window of items.
-  const countSeparators = (window: WorkItem[]): number => {
-    let count = 0;
-    let lastGroup: number | undefined;
-    for (const item of window) {
-      if (item.group !== undefined && item.id !== '..') {
-        if (lastGroup === undefined || item.group !== lastGroup) {
-          count++;
-        }
-        lastGroup = item.group;
-      }
-    }
-    return count;
-  };
-
   // Estimate the visible window with metadata at its minimum so the estimate
-  // reflects the list's true space need.
-  const estListHeight = Math.max(3, rows - 4 - minMeta);
-  const estVisible = flatItems.slice(scrollOffset, scrollOffset + estListHeight);
-  const estSepCount = countSeparators(estVisible);
+  // reflects the list's true space need. Heading rows are already part of the
+  // window — no separate separator count.
+  const estListHeight = Math.max(3, termRows - 4 - minMeta);
+  const estVisible = rows.slice(scrollOffset, scrollOffset + estListHeight);
   const estHasTopIndicator = scrollOffset > 0;
-  const estHasBottomIndicator = scrollOffset + estVisible.length < flatItems.length;
+  const estHasBottomIndicator = scrollOffset + estVisible.length < rows.length;
   const estIndicatorRows = (estHasTopIndicator ? 1 : 0) + (estHasBottomIndicator ? 1 : 0);
-  const contentNeed = estIndicatorRows + estVisible.length + estSepCount;
+  const contentNeed = estIndicatorRows + estVisible.length;
 
-  const panelHeight = Math.max(minMeta, Math.max(0, rows - 1 - contentNeed - chromeLines));
-  const listArea = Math.max(1, rows - 1 - panelHeight);
+  const panelHeight = Math.max(minMeta, Math.max(0, termRows - 1 - contentNeed - chromeLines));
+  const listArea = Math.max(1, termRows - 1 - panelHeight);
   // The initial visible window is the maximum possible (metadata at its
   // minimum); the caller's trimming logic reduces it to fit the actual
-  // budget (separators + fold indicators). This keeps the window generous so
+  // budget (fold indicators). This keeps the window generous so
   // a short list is never truncated just because the metadata panel expanded.
-  const listHeight = Math.max(3, rows - 4 - minMeta);
+  const listHeight = Math.max(3, termRows - 4 - minMeta);
   return { panelHeight, listArea, listHeight };
 }
 
@@ -2415,90 +2404,64 @@ export function consumeMouseChunk(chunk: string): ParsedMouseEvent | null {
 }
 
 /**
- * The list-mode row budget the renderer uses for the visible item window —
- * the header, fold indicators, group separators, footer and metadata panel
- * are chrome rows and never map to items. Mirrors createListRenderer's
- * window computation (trimming for separators and indicators) so click
- * mapping can never diverge from what is drawn.
+ * The list-mode row budget the renderer uses for the visible window — the
+ * header, fold indicators, footer and metadata panel are chrome rows and
+ * never map to display rows. Mirrors createListRenderer's window computation
+ * so click mapping can never diverge from what is drawn.
+ *
+ * With the display-rows model (WL-0MSL5MPSZ003TG94) heading rows are
+ * first-class rows in the window, so no extra separator accounting is needed.
  */
 interface ListRowLayout {
   topIndicator: boolean;
   bottomIndicator: boolean;
   visibleStart: number;
   visibleCount: number;
-  /** separatorBefore[i]: a group separator row precedes visible item i. */
-  separatorBefore: boolean[];
 }
 
 function computeListRowLayout(state: WorkItemListState, termSize: TermSize): ListRowLayout {
-  const flatItems = state.getFlattenedItems();
+  const displayRows = state.getDisplayRows();
   // Use dynamic layout with bannerCount=0 — this path is the mouse click
   // mapper and does not have the banner state; the layout is a close
   // approximation that keeps click mapping consistent with the renderer.
   const { listArea, listHeight } = computeDynamicLayout(
-    flatItems,
+    displayRows,
     state.scrollOffset,
     /* bannerCount = */ 0,
     termSize,
   );
   const chromeLines = 2; // header + footer (no banners in this path)
-  const budgetForItemsAndSeps = Math.max(0, listArea - chromeLines);
+  const budgetForRows = Math.max(0, listArea - chromeLines);
 
-  const countSeparators = (window: WorkItem[]): number => {
-    let count = 0;
-    let lastGroup: number | undefined;
-    for (const item of window) {
-      if (item.group !== undefined && item.id !== '..') {
-        if (lastGroup === undefined || item.group !== lastGroup) {
-          count++;
-        }
-        lastGroup = item.group;
-      }
-    }
-    return count;
-  };
-
-  let visible = flatItems.slice(state.scrollOffset, state.scrollOffset + listHeight);
-  while (visible.length > 0 && visible.length + countSeparators(visible) > budgetForItemsAndSeps) {
+  let visible = displayRows.slice(state.scrollOffset, state.scrollOffset + listHeight);
+  while (visible.length > 0 && visible.length > budgetForRows) {
     visible = visible.slice(0, -1);
   }
   const hasTopIndicator = state.scrollOffset > 0;
-  const hasBottomIndicator = state.scrollOffset + visible.length < flatItems.length;
+  const hasBottomIndicator = state.scrollOffset + visible.length < displayRows.length;
   const indicatorRows = (hasTopIndicator ? 1 : 0) + (hasBottomIndicator ? 1 : 0);
-  const effectiveBudget = budgetForItemsAndSeps - indicatorRows;
-  while (visible.length > 0 && visible.length + countSeparators(visible) > effectiveBudget) {
+  const effectiveBudget = budgetForRows - indicatorRows;
+  while (visible.length > 0 && visible.length > effectiveBudget) {
     visible = visible.slice(0, -1);
   }
-  const bottomIndicator = state.scrollOffset + visible.length < flatItems.length;
+  const bottomIndicator = state.scrollOffset + visible.length < displayRows.length;
 
-  const separatorBefore: boolean[] = [];
-  let lastGroup: number | undefined;
-  for (const item of visible) {
-    let sep = false;
-    if (item.group !== undefined && item.id !== '..') {
-      if (lastGroup === undefined || item.group !== lastGroup) {
-        sep = true;
-      }
-      lastGroup = item.group;
-    }
-    separatorBefore.push(sep);
-  }
   return {
     topIndicator: hasTopIndicator,
     bottomIndicator,
     visibleStart: state.scrollOffset,
     visibleCount: visible.length,
-    separatorBefore,
   };
 }
 
-/** Map a 1-based list row to the flat item index under it, or null when the
- * row is chrome (header, fold indicator, separator, footer, panel). */
+/** Map a 1-based list row to the display-row index under it, or null when
+ * the row is chrome (header, fold indicator, footer, panel). Heading rows
+ * map to their own display-row index (they are selectable, WL-0MSL5MPSZ003TG94). */
 function mapListRowToIndex(state: WorkItemListState, y: number, termSize: TermSize): number | null {
   if (y <= 1) return null; // header
-  const flatItems = state.getFlattenedItems();
+  const displayRows = state.getDisplayRows();
   const { listArea } = computeDynamicLayout(
-    flatItems,
+    displayRows,
     state.scrollOffset,
     /* bannerCount = */ 0,
     termSize,
@@ -2511,10 +2474,6 @@ function mapListRowToIndex(state: WorkItemListState, y: number, termSize: TermSi
     row = 3;
   }
   for (let i = 0; i < layout.visibleCount; i++) {
-    if (layout.separatorBefore[i]) {
-      if (y === row) return null; // group separator
-      row++;
-    }
     if (y === row) return layout.visibleStart + i;
     row++;
   }
@@ -2744,7 +2703,7 @@ export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string
 }
 
 export function createListRenderer(getShowIcons?: () => boolean): (
-  items: WorkItem[],
+  displayRows: DisplayRow[],
   selectedIndex: number,
   scrollOffset: number,
   termSize: TermSize,
@@ -2774,7 +2733,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   // compatible — callers/tests that render without options keep icons).
   const showIconsGetter = getShowIcons ?? (() => true);
   return (
-    items: WorkItem[],
+    displayRows: DisplayRow[],
     selectedIndex: number,
     scrollOffset: number,
     termSize: TermSize,
@@ -2842,8 +2801,10 @@ export function createListRenderer(getShowIcons?: () => boolean): (
 
     // ── Render list mode ──────────────────────────────────────────
 
-    // Header with total count and auto-refresh indicator
-    const totalItems = items.length;
+    // Header with total count and auto-refresh indicator. `displayRows`
+    // includes heading rows, so the item count shown is the row count — the
+    // same metric the header has always shown for the flattened list.
+    const totalItems = displayRows.length;
     const filterLabel = activeFilter ? ` (filtered: ${activeFilter})` : '';
     let header = ` ${ANSI.bold}Work Items${ANSI.reset} — ${totalItems} item(s)${filterLabel}`;
     if (totalCount !== undefined && totalCount > totalItems) {
@@ -2882,48 +2843,30 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       bannerCount++;
     }
 
-    // Items are already flattened by the caller (render callback in runWorklistTui
-    // calls state.getFlattenedItems() before passing items here). Do NOT re-flatten.
-    const flatItems = items;
+    // The caller passes the display-rows model (headings + items) — the
+    // renderer renders exactly those rows and does NOT derive group
+    // separators from group transitions (WL-0MSL5MPSZ003TG94 AC3).
 
     // Dynamic layout (WL-0MSQ44MDX008U69J): chrome rows already rendered are
-    // header + banners.  Compute the list's content need from its items, then
+    // header + banners.  Compute the list's content need from its rows, then
     // let the metadata panel fill whatever space remains (≥ 3-row minimum).
     const { panelHeight, listArea, listHeight } = computeDynamicLayout(
-      flatItems,
+      displayRows,
       scrollOffset,
       bannerCount,
       termSize,
     );
     const chromeLines = 2 + bannerCount; // header + banners + footer
-    // Count the group separators a window would render (same logic as the
-    // render loop below) so the window can be trimmed when separators would
-    // overflow the pane height.
-    const countSeparators = (window: WorkItem[]): number => {
-      let count = 0;
-      let lastGroup: number | undefined;
-      for (const item of window) {
-        if (item.group !== undefined && item.id !== '..') {
-          if (lastGroup === undefined || item.group !== lastGroup) {
-            count++;
-          }
-          lastGroup = item.group;
-        }
-      }
-      return count;
-    };
 
-    // Items with group separators. Each `── <Group> ──` separator consumes a
-    // row, so the visible window must be sized so header + items + separators
-    // + fill + footer fit in `rows - 1` lines (the last row is reserved for
-    // the notification line appended by render()). Without this accounting the
-    // output overflows the pane and the terminal scrolls the header/top items
-    // off the top (WL-0MSAAON63003N6LO). The active stage filter is indicated
-    // in the header only (filterLabel) — no standalone filter bar is rendered.
-    const budgetForItemsAndSeps = Math.max(0, listArea - chromeLines);
-    let visible = flatItems.slice(scrollOffset, scrollOffset + listHeight);
-    while (visible.length > 0 && visible.length + countSeparators(visible) > budgetForItemsAndSeps) {
-      // Drop trailing items until items + separators fit the pane height.
+    // Heading rows are first-class rows in the display model, so the visible
+    // window's row count already includes them — no separate separator
+    // accounting (WL-0MSAAON63003N6LO keeps the `rows - 1` invariant).
+    // The active stage filter is indicated in the header only (filterLabel)
+    // — no standalone filter bar is rendered.
+    const budgetForRows = Math.max(0, listArea - chromeLines);
+    let visible = displayRows.slice(scrollOffset, scrollOffset + listHeight);
+    while (visible.length > 0 && visible.length > budgetForRows) {
+      // Drop trailing rows until the window fits the pane height.
       visible = visible.slice(0, -1);
     }
 
@@ -2932,43 +2875,42 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     // is scrolled or truncated.  Indicator rows consume budget so the
     // `rows - 1` invariant still holds.
     const hasTopIndicator = scrollOffset > 0;
-    const hasBottomIndicator = scrollOffset + visible.length < flatItems.length;
+    const hasBottomIndicator = scrollOffset + visible.length < displayRows.length;
     const indicatorRows = (hasTopIndicator ? 1 : 0) + (hasBottomIndicator ? 1 : 0);
-    const effectiveBudget = budgetForItemsAndSeps - indicatorRows;
-    while (visible.length > 0 && visible.length + countSeparators(visible) > effectiveBudget) {
-      // Drop trailing items until items + separators + indicators fit.
+    const effectiveBudget = budgetForRows - indicatorRows;
+    while (visible.length > 0 && visible.length > effectiveBudget) {
+      // Drop trailing rows until rows + indicators fit.
       visible = visible.slice(0, -1);
     }
     // Edge case: the trim may have made the list fully fit — the bottom
     // indicator is then omitted. This terminates in a single pass (no loop).
-    const bottomIndicatorActive = scrollOffset + visible.length < flatItems.length;
+    const bottomIndicatorActive = scrollOffset + visible.length < displayRows.length;
     // Top indicator — first row of the items region when scrolled down.
     if (hasTopIndicator) {
       output.push(` ${ANSI.dim}▲ more${ANSI.reset}`);
     }
-    let lastDisplayedGroup: number | undefined;
-    let numSeparators = 0;
+    let numHeadings = 0;
     for (let i = 0; i < visible.length; i++) {
       const actualIndex = scrollOffset + i;
-      const item = visible[i];
+      const row = visible[i];
+      const isSelected = actualIndex === selectedIndex;
 
-      // Insert group separator when group changes
-      if (item.group !== undefined && item.id !== '..') {
-        if (lastDisplayedGroup === undefined || item.group !== lastDisplayedGroup) {
-          const label = item.groupLabel ?? `Group ${item.group}`;
-          const sepColor = stageColor(item.stage);
-          output.push(` ${ANSI.fg(sepColor)}${ANSI.bold}── ${label} ──${ANSI.reset}`);
-          numSeparators++;
-        }
-        lastDisplayedGroup = item.group;
+      // Heading row: render the label + item count + collapse arrow directly
+      // from the display model (WL-0MSL5MPSZ003TG94 AC1/AC2).
+      if (isHeadingRow(row)) {
+        numHeadings++;
+        const arrow = row.collapsed ? '▶' : '▼';
+        const line = ` ${ANSI.fg(stageColor(undefined))}${ANSI.bold}── ${row.groupLabel} (${row.count}) ${arrow} ──${ANSI.reset}`;
+        output.push(isSelected ? `${ANSI.reverse}${line}${ANSI.reset}` : line);
+        continue;
       }
 
-      // For hierarchy: apply _expanded flag for icon rendering
+      // Item row: existing hierarchy + icon rendering.
+      const item = row;
       const hasChildCount = item.childCount !== undefined && item.childCount > 0;
       const isExpanded = expandedItems?.has(item.id) ?? false;
       const expandedItem = { ...item, _expanded: hasChildCount && isExpanded };
 
-      const isSelected = actualIndex === selectedIndex;
       const line = formatItemLine(expandedItem, cols, isSelected, noIcons);
       if (isSelected) {
         output.push(`${ANSI.reverse}${line}${ANSI.reset}`);
@@ -2977,14 +2919,14 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       }
     }
 
-    // Bottom indicator — last row of the items region when items remain
+    // Bottom indicator — last row of the rows region when rows remain
     // below the fold (after the trimming edge case is resolved).
     if (bottomIndicatorActive) {
       output.push(` ${ANSI.dim}▼ more${ANSI.reset}`);
     }
 
-    // Fill remaining rows (header + indicators + items + separators)
-    const used = chromeLines + (hasTopIndicator ? 1 : 0) + (bottomIndicatorActive ? 1 : 0) + visible.length + numSeparators;
+    // Fill remaining rows (header + indicators + rows)
+    const used = chromeLines + (hasTopIndicator ? 1 : 0) + (bottomIndicatorActive ? 1 : 0) + visible.length;
     for (let i = used; i < listArea; i++) {
       output.push('');
     }
@@ -3014,13 +2956,16 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     }
 
     // ── Metadata panel ────────────────────────────────────────────
-    // Reserve the bottom `panelHeight` rows for the selected item's
+    // Reserve the bottom `panelHeight` rows for the selected row's
     // metadata (plus its last command when in_progress). The panel has its
     // own scroll offset (m/M) so long metadata never affects list
-    // navigation (WL-0MSAYNVBY006LM9X).
-    const selectedItem = selectedIndex >= 0 && selectedIndex < items.length
-      ? items[selectedIndex]
+    // navigation (WL-0MSAYNVBY006LM9X). A heading selection has no item —
+    // formatMetadataPanel renders a blank panel (group info lands here via
+    // T5).
+    const selectedRow = selectedIndex >= 0 && selectedIndex < displayRows.length
+      ? displayRows[selectedIndex]
       : null;
+    const selectedItem = selectedRow !== null && !isHeadingRow(selectedRow) ? selectedRow : null;
     const panelLines = formatMetadataPanel(
       selectedItem,
       cols,
@@ -4462,7 +4407,7 @@ export async function runWorklistTui(
     // (WL-0MSQ44MDX008U69J). The value is used only for the m/M scroll
     // clamping — the actual rendering is done by createListRenderer.
     const displayItems = state.mode === 'list'
-      ? state.getFlattenedItems()
+      ? state.getDisplayRows()
       : state.items;
     const bannerCount = (codeFreezeActive ? 1 : 0) + (codeFreezeAmbiguous ? 1 : 0);
     const { panelHeight } = computeDynamicLayout(
@@ -4713,8 +4658,10 @@ export async function runWorklistTui(
       return;
     }
 
-    // Use flattened items for hierarchy display
-    const displayItems = state.mode === 'list' ? state.getFlattenedItems() : state.items;
+    // Use the display-rows model for list rendering (headings + items,
+    // WL-0MSL5MPSZ003TG94). Heading rows have no stage/issueType, so
+    // shortcut hints fall back to defaults for heading selections.
+    const displayItems = state.mode === 'list' ? state.getDisplayRows() : state.items;
 
     // ── Compute stage-appropriate shortcut hints for the footer ──
     let dynamicHints = '';

@@ -135,12 +135,15 @@ describe('createListRenderer — line-count invariant', () => {
       { ...makeItem('LIST-REV'), stage: 'in_review', priority: 'medium', status: 'completed' },
     ];
     const regrouped = regroupWorkItems(merged, 3);
-    const output = renderer(regrouped, 0, 0, TERM_80x24, null, 'list', null);
-    const inReviewSeparators = (output.match(/── In Review ──/g) ?? []).length;
+    // The renderer renders heading rows from the display model — build a
+    // state and pass getDisplayRows() (WL-0MSL5MPSZ003TG94 AC3).
+    const state = new WorkItemListState(regrouped, TERM_80x24);
+    const output = renderer(state.getDisplayRows(), 0, 0, TERM_80x24, null, 'list', null);
+    const inReviewSeparators = (output.match(/── In Review \(\d+\)/g) ?? []).length;
     expect(inReviewSeparators).toBe(1);
-    // In Review separator appears after the Other separator in the rendered output.
-    expect(output.indexOf('── Other ──')).toBeGreaterThan(-1);
-    expect(output.indexOf('── In Review ──')).toBeGreaterThan(output.indexOf('── Other ──'));
+    // In Review heading appears after the Other heading in the rendered output.
+    expect(output.indexOf('Other (')).toBeGreaterThan(-1);
+    expect(output.indexOf('── In Review (')).toBeGreaterThan(output.indexOf('Other ('));
   });
 });
 
@@ -2101,13 +2104,16 @@ describe('createListRenderer — metadata panel in list mode', () => {
       group: i,
       groupLabel: `Group ${i}`,
     }));
+    // Pass display rows (headings + items) so the renderer renders heading
+    // rows from the model (WL-0MSL5MPSZ003TG94).
+    const state = new WorkItemListState(grouped, TERM_80x24);
     const output = renderer(
-      grouped, 0, 0, TERM_80x24, null, 'list', null,
+      state.getDisplayRows(), 0, 0, TERM_80x24, null, 'list', null,
       undefined, null, 0, false, undefined, undefined, 0, false, true, 0, '/skill:audit WL-G0',
     );
     expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
     expect(output).toContain('CODE FREEZE');
-    expect(output).toContain('── Group 0 ──');
+    expect(output).toContain('Group 0 (1)');
   });
 
   it('keeps render plus notification line within rows lines', () => {
@@ -3582,10 +3588,13 @@ describe('createListRenderer — dynamic list height (WL-0MSQ44MDX008U69J)', () 
       { ...makeItem('B'), group: 0, groupLabel: 'Group A' },
       { ...makeItem('C'), group: 0, groupLabel: 'Group A' },
     ];
-    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    // Pass display rows so the renderer renders the Group A heading with its
+    // count (WL-0MSL5MPSZ003TG94 AC1).
+    const state = new WorkItemListState(items, TERM_80x24);
+    const output = renderer(state.getDisplayRows(), 0, 0, TERM_80x24, null, 'list', null);
     const lines = output.split('\n');
     expect(lines.length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
-    expect(output).toContain('── Group A ──');
+    expect(output).toContain('Group A (2)');
     const metaSeparatorIdx = lines.findIndex(l => l.includes('── A ──'));
     expect(metaSeparatorIdx).toBeGreaterThan(-1);
     // Metadata should take at least 5 rows (more than minimum)

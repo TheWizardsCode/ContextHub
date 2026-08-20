@@ -287,15 +287,17 @@ describe('mapMouseToAction — list mode row mapping (AC2)', () => {
     expect(mapMouseToAction(state, press(0, 5, 13), TERM_80x24)).toBeNull(); // past the tail
   });
 
-  it('is inert on group separator rows and maps items correctly (AC2/A1)', () => {
+  it('maps clicks on heading rows to their display row index (headings are selectable)', () => {
     const items = [makeItem('a', 1), makeItem('b', 1), makeItem('c', 2), makeItem('d', 2)];
     const state = new WorkItemListState(items, TERM_80x24);
-    expect(mapMouseToAction(state, press(0, 5, 2), TERM_80x24)).toBeNull(); // '── G1 ──'
-    expect(mapMouseToAction(state, press(0, 5, 3), TERM_80x24)).toEqual({ type: 'select-row', index: 0 });
-    expect(mapMouseToAction(state, press(0, 5, 4), TERM_80x24)).toEqual({ type: 'select-row', index: 1 });
-    expect(mapMouseToAction(state, press(0, 5, 5), TERM_80x24)).toBeNull(); // '── G2 ──'
-    expect(mapMouseToAction(state, press(0, 5, 6), TERM_80x24)).toEqual({ type: 'select-row', index: 2 });
-    expect(mapMouseToAction(state, press(0, 5, 7), TERM_80x24)).toEqual({ type: 'select-row', index: 3 });
+    // Display rows: [h1, a, b, h2, c, d] — heading rows are selectable per
+    // WL-0MSL5MPSZ003TG94 AC2, so they map to their display row index.
+    expect(mapMouseToAction(state, press(0, 5, 2), TERM_80x24)).toEqual({ type: 'select-row', index: 0 }); // h1
+    expect(mapMouseToAction(state, press(0, 5, 3), TERM_80x24)).toEqual({ type: 'select-row', index: 1 }); // a
+    expect(mapMouseToAction(state, press(0, 5, 4), TERM_80x24)).toEqual({ type: 'select-row', index: 2 }); // b
+    expect(mapMouseToAction(state, press(0, 5, 5), TERM_80x24)).toEqual({ type: 'select-row', index: 3 }); // h2
+    expect(mapMouseToAction(state, press(0, 5, 6), TERM_80x24)).toEqual({ type: 'select-row', index: 4 }); // c
+    expect(mapMouseToAction(state, press(0, 5, 7), TERM_80x24)).toEqual({ type: 'select-row', index: 5 }); // d
   });
 });
 
