@@ -162,22 +162,36 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     expect(registry.getEntriesForStage(undefined, true).some(e => e.chord[0] === 'S')).toBe(true);
   });
 
-  it('marks the a-y audit-approve shortcut with open_pane false (WL-0MSJLD1I70045ZUL)', () => {
+  it('marks the quiet state-change shortcuts with open_pane false (WL-0MSJLD1I70045ZUL)', () => {
+    const registry = loadShortcutConfig();
+    // Chords deliberately configured to run in the background (no pane):
+    // audit approve/reject, priority updates, close/delete. Every other
+    // bundled shortcut omits the flag (default opens a pane).
+    const expectedNoPane = new Set([
+      'a,y', // audit approve
+      'a,r', // audit reject
+      'u,p,l', // update priority low
+      'u,p,m', // update priority medium
+      'u,p,h', // update priority high
+      'u,p,c', // update priority critical
+      'x,c', // close done
+      'x,d', // close deleted
+    ]);
+    const noPane: string[] = [];
+    for (const entry of registry.getEntries()) {
+      const key = entry.chord.join(',');
+      if (entry.openPane === false) noPane.push(key);
+    }
+    expect(new Set(noPane)).toEqual(expectedNoPane);
+  });
+
+  it('verifies the a-y audit-approve command text (WL-0MSJLD1I70045ZUL)', () => {
     const registry = loadShortcutConfig();
     const entry = registry.lookupChordEntry(['a', 'y'], 'list');
-    expect(entry).toBeDefined();
     expect(entry?.openPane).toBe(false);
     expect(entry?.command).toBe(
       "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
     );
-  });
-
-  it('leaves every other bundled shortcut with open_pane omitted (default opens a pane)', () => {
-    const registry = loadShortcutConfig();
-    for (const entry of registry.getEntries()) {
-      if (entry.chord.join(',') === 'a,y') continue;
-      expect(entry.openPane, `${entry.command} should not set open_pane`).toBeUndefined();
-    }
   });
 
   it('registers the d downtime-toggle chord to /downtime toggle (WL-0MSZ4NSOE007AQEF)', () => {
