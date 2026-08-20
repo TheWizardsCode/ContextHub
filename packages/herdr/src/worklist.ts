@@ -347,6 +347,33 @@ export class NavigationStack {
 export type ViewMode = 'list' | 'detail' | 'filter' | 'form';
 
 /**
+ * A group heading row in the display-rows model (WL-0MSL5MPSZ003TG94).
+ *
+ * Headings are first-class rows interleaved with item rows by
+ * `WorkItemListState.getDisplayRows()`. They carry the group number, the
+ * human-readable label, the count of top-level items in the group (current
+ * view, post stage-filter) and the in-memory collapse state.
+ */
+export interface DisplayHeadingRow {
+  kind: 'heading';
+  /** Group number (1-indexed, from regroupWorkItems). */
+  group: number;
+  /** Human-readable group label (e.g. `Group 1`, `Idea`, `In Review`). */
+  groupLabel: string;
+  /** Top-level items in this group in the current view (post stage-filter). */
+  count: number;
+  /** Whether the group's items are hidden (in-memory, session-only). */
+  collapsed: boolean;
+}
+
+/**
+ * A single row in the display-rows model: either a group heading or a work
+ * item (children of expanded parents included). Navigation, clamping and
+ * scrolling operate over these rows so the cursor can land on headings.
+ */
+export type DisplayRow = DisplayHeadingRow | WorkItem;
+
+/**
  * Mutable state for the work item list UI.
  */
 export class WorkItemListState {
@@ -438,6 +465,16 @@ export class WorkItemListState {
 
   /** Set of expanded item IDs (for hierarchical display). */
   expandedItems: Set<string> = new Set();
+
+  /**
+   * In-memory set of collapsed group numbers (WL-0MSL5MPSZ003TG94).
+   *
+   * When a group is collapsed its items are hidden from both the render and
+   * navigation.  Collapsed state survives list refreshes (keyed by group
+   * number, mirroring `expandedItems` handling) and does NOT persist across
+   * pane restarts.
+   */
+  collapsedGroups: Set<number> = new Set();
 
   /** Navigation stack for hierarchical browsing (push/pop parent contexts). */
   navigationStack: NavigationStack = new NavigationStack();
@@ -563,6 +600,96 @@ export class WorkItemListState {
     } else {
       this.expandedItems.add(id);
     }
+  }
+
+  /**
+   * Toggle the collapse state of a group by its group number.
+   *
+   * Collapsed groups hide their items from both the display rows and
+   * navigation (WL-0MSL5MPSZ003TG94). The heading row itself remains
+   * visible so the user can re-expand the group.
+   */
+  toggleGroupCollapse(group: number): void {
+    if (this.collapsedGroups.has(group)) {
+      this.collapsedGroups.delete(group);
+    } else {
+      this.collapsedGroups.add(group);
+    }
+  }
+
+  /**
+   * Produce the display-rows model that interleaves heading rows with item
+   * rows (WL-0MSL5MPSZ003TG94).
+   *
+   * The rows are derived from `getFlattenedItems()` (which includes children
+   * of expanded parents) but items belonging to collapsed groups are excluded.
+   * A heading row is emitted whenever the group changes between consecutive
+   * flattened items, matching the existing group-separator insertion logic.
+   *
+   * Heading `count` = top-level items in the group in the current view
+   * (post stage-filter), unaffected by collapse state. This is computed
+   * from `this.items` (top-level, filtered) so children of expanded parents
+   * are never counted.
+   *
+   * @returns An array of `DisplayRow` entries (headings + items).
+   */
+  getDisplayRows(): DisplayRow[] {
+    const result: DisplayRow[] = [];
+
+    // Count top-level items per group (post stage-filter, current view).
+    // Only items that carry a group number count toward their group's heading.
+    const groupCounts = new Map<number, number>();
+    for (const item of this.items) {
+      if (item.group !== undefined) {
+        groupCounts.set(item.group, (groupCounts.get(item.group) ?? 0) + 1);
+      }
+    }
+
+    let lastGroup: number | undefined;
+
+    const appendItem = (item: WorkItem, depth: number): void => {
+      // Insert a heading row when the group changes between consecutive
+      // items. Items without a group field (e.g. children, ungrouped items)
+      // never trigger a new heading.
+      if (item.group !== undefined && item.id !== '..') {
+        if (lastGroup === undefined || item.group !== lastGroup) {
+          const isCollapsed = this.collapsedGroups.has(item.group);
+          result.push({
+            kind: 'heading' as const,
+            group: item.group,
+            groupLabel: item.groupLabel ?? `Group ${item.group}`,
+            count: groupCounts.get(item.group) ?? 0,
+            collapsed: isCollapsed,
+          });
+          lastGroup = item.group;
+        }
+      }
+
+      // Skip the entire subtree of an item in a collapsed group (children
+      // carry no group metadata, so they are excluded via this early return
+      // rather than per-item group checks). The heading above was already
+      // emitted so the collapsed group stays visible and re-expandable.
+      if (item.group !== undefined && this.collapsedGroups.has(item.group)) {
+        return;
+      }
+
+      if (depth === 0) {
+        result.push(item);
+      } else {
+        result.push(item.depth === depth ? item : { ...item, depth });
+      }
+      if (item.childCount && item.children && item.children.length > 0 && this.expandedItems.has(item.id)) {
+        for (const child of item.children) {
+          appendItem(child, depth + 1);
+        }
+      }
+    };
+
+    for (const item of this.items) {
+      appendItem(item, 0);
+    }
+
+    return result;
   }
 
   /**
