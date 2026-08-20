@@ -1448,6 +1448,50 @@ export function formatMetadataPanel(
 }
 
 /**
+ * Build the metadata-panel lines for a group heading selection
+ * (WL-0MSL5MPSZ003TG94 T5 AC1). Headings have no work-item metadata, so the
+ * panel shows the group's label, its item count (post stage-filter, as
+ * computed by the display model), and the collapse state. A short hint line
+ * tells the user Tab toggles the group.
+ *
+ * @param heading - The selected heading row.
+ * @param maxCols - Terminal width.
+ * @param panelRows - Panel height in rows (from the dynamic layout).
+ * @returns The panel lines, padded to `panelRows`.
+ */
+export function formatGroupInfoPanel(
+  heading: DisplayHeadingRow,
+  maxCols: number,
+  panelRows: number,
+): string[] {
+  const lines: string[] = [];
+
+  // Header separator identifying the selected group
+  lines.push(` ${ANSI.dim}── ${heading.groupLabel} ──${ANSI.reset}`);
+
+  // Group metadata rows
+  lines.push(` Label: ${heading.groupLabel}`);
+  lines.push(` Items: ${heading.count}`);
+  lines.push(` Group: ${heading.group}`);
+  lines.push(` State: ${heading.collapsed ? 'collapsed' : 'expanded'}`);
+  lines.push(` ${ANSI.dim}Tab toggles this group's collapse state${ANSI.reset}`);
+
+  // Truncate to fit the terminal width
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].length > 0) {
+      lines[i] = truncateLine(lines[i], maxCols);
+    }
+  }
+
+  // Trim to the panel height and pad
+  const visible = lines.slice(0, panelRows);
+  while (visible.length < panelRows) {
+    visible.push('');
+  }
+  return visible;
+}
+
+/**
  * Build the Related Docs Table of Contents (ToC) lines for the detail view
  * (WL-0MSHWHULZ001FL8I).
  *
@@ -3018,15 +3062,18 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     const selectedRow = selectedIndex >= 0 && selectedIndex < displayRows.length
       ? displayRows[selectedIndex]
       : null;
-    const selectedItem = selectedRow !== null && !isHeadingRow(selectedRow) ? selectedRow : null;
-    const panelLines = formatMetadataPanel(
-      selectedItem,
-      cols,
-      panelHeight,
-      metaScrollOffset ?? 0,
-      metaLastCommand,
-      noIcons,
-    );
+    // Heading selection → group info panel (WL-0MSL5MPSZ003TG94 T5 AC1);
+    // item selection → the normal metadata panel.
+    const panelLines = selectedRow !== null && isHeadingRow(selectedRow)
+      ? formatGroupInfoPanel(selectedRow, cols, panelHeight)
+      : formatMetadataPanel(
+          selectedRow,
+          cols,
+          panelHeight,
+          metaScrollOffset ?? 0,
+          metaLastCommand,
+          noIcons,
+        );
     for (const line of panelLines) {
       output.push(line);
     }
