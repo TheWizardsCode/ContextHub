@@ -5,7 +5,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 ## Features
 
 - **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list. The top-level list is root-only: child work items are hidden and appear only under their parent via expand — **at any depth** (epic → feature → task and deeper): any item with children (its `childCount > 0`) can be expanded with Tab/Enter, its children fetched on demand via `wl list --parent` and shown indented at their hierarchy depth (WL-0MSQ3FH1K000MMJW). Expanded parents **stay expanded across refreshes**: each auto/manual refresh re-fetches their children in parallel with the top-level list and swaps both in atomically, so the hierarchy never momentarily collapses or flickers (WL-0MSBVBNGH002RDP5).
-- **Filter by stage** — Press `f` followed by a chord key (`i`=idea, `n`=intake, `p`=plan, `r`=review, `s`=sprint back to the default view), or type `/wl <stage>` (shorthand alias or canonical stage name, e.g. `/wl intake_complete` or `/wl progress`), to filter items by stage. Stage-filtered views show every root item in the selected stage matching the stage's status rule (open items for most stages; `completed`/`in-progress`/`open` for the in_review stage) — no `browseItemCount` cap and no `wl next` selection omission (WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW)
+- **Filter by stage and priority** — Press `f` then an axis key (`s`=stage, `p`=priority), then a value key, or type `/wl <stage>` / `/wl --priority <priority>`. Stage axis: `f s i`=idea, `f s n`=intake, `f s p`=plan, `f s r`=review, `f s s`=sprint back to the default view. Priority axis: `f p l`=low, `f p m`=medium, `f p h`=high, `f p c`=critical, `f p s`=clear the priority filter. Stage and priority filters are **mutually exclusive** (replace semantics — applying one clears the other); sprint clears both. Filtered views show every root item matching the filter's rule (open items for most stages; `completed`/`in-progress`/`open` for the in_review stage) — no `browseItemCount` cap and no `wl next` selection omission (WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW, WL-0MSKC8T46006999S)
 - **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority, GitHub issue number, and audit status information such as audit result, review status, and last audit timestamp)
 - **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The metadata section (list-mode panel and detail view) mirrors the list's icons with text labels — the selected item's Stage row uses the same audit-aware `in_review` icon (✅/❌/❓ fresh, ⏳ stale-passed, 🔍 otherwise), and the Audit/Reviewed rows pair their icons with text (e.g. `✅ ready to close`, `❌ needs review`). The detail view additionally shows the last audit timestamp.
 - **Chord shortcuts** — Multi-key chord sequences provide quick actions like updating priorities, stage/status, title, closing/deleting items, running workflows, and toggling review status (configurable via `shortcuts.json`)
@@ -92,15 +92,24 @@ The plugin pane will then be available via the Herdr plugin system.
    - `Tab` — Toggle expand/collapse a parent item with children (at any depth)
    - `Escape` — Go back (from detail or filter mode); in a child list, return to the parent level at the previous scroll position. When inside a child list the footer shows a `[esc] back` hint (with `(N levels)` when nested deeper than one level).
 
-3. Filter by stage using chord shortcuts (or type `/wl <stage>`):
-   - Press `f` then `i` — Filter to idea-stage items
-   - Press `f` then `n` — Filter to intake_complete items
-   - Press `f` then `p` — Filter to plan_complete items
-   - Press `f` then `r` — Filter to in_review items
-   - Press `f` then `s` (sprint) — Return to the default unfiltered browse list
+3. Filter by stage or priority using chord shortcuts (or type `/wl <stage>` / `/wl --priority <priority>`):
+   - Press `f`, `s`, then a stage key — Filter to a stage:
+     - `f`, `s`, `i` — idea-stage items
+     - `f`, `s`, `n` — intake_complete items
+     - `f`, `s`, `p` — plan_complete items
+     - `f`, `s`, `r` — in_review items
+     - `f`, `s`, `s` (sprint) — Return to the default unfiltered browse list
+   - Press `f`, `p`, then a priority key — Filter to a priority:
+     - `f`, `p`, `l` — low priority items
+     - `f`, `p`, `m` — medium priority items
+     - `f`, `p`, `h` — high priority items
+     - `f`, `p`, `c` — critical priority items
+     - `f`, `p`, `s` — Clear the priority filter (return to the unfiltered browse list)
+   - Stage and priority filters are **mutually exclusive**: applying a priority filter replaces the active stage filter and vice versa (single filter slot, replace semantics). Sprint (`f s s`, `f p s`, or `/wl` with no arguments) clears **both**.
    - `/wl <stage>` accepts shorthand aliases (`idea`, `intake`, `plan`, `progress`, `review`) and canonical stage names (`intake_complete`, `plan_complete`, `in_progress`, `in_review`)
-   - `/wl` with no stage argument returns to the default unfiltered browse list
-   - Filtered views show every root item in the selected stage matching the stage's status rule (see [Selection List Behaviour](#selection-list-behaviour))
+   - `/wl --priority <priority>` accepts the canonical priority names `critical`, `high`, `medium`, `low`; unknown values fall back gracefully (no crash, no filter change)
+   - `/wl` with no stage/priority argument returns to the default unfiltered browse list
+   - Filtered views show every root item matching the filter's rule (see [Selection List Behaviour](#selection-list-behaviour))
    - Press `Escape` to cancel an incomplete chord
 
 4. Workflow shortcuts (single-key):
@@ -653,16 +662,16 @@ Example: with `browseItemCount=15`, 2 critical + 3 completed/in_review +
 first 10 others (15 total). If there were 20 completed/in_review items
 instead of 3, all 22 mandatory items would be shown (22 > 15).
 
-The **stage-filtered** views (press `f` + stage chord, or `/wl <stage>`) show
-every root item in the selected stage matching the stage's status rule
-(WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW):
+The **stage-filtered** views (press `f` + `s` + stage chord, or `/wl
+<stage>`) show every root item in the selected stage matching the stage's
+status rule (WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW):
 
 - Most stages show **every open** item (`status=open`) in the stage — no
   `browseItemCount` cap and no `wl next` selection omission, so items the
   priority algorithm deprioritises are still visible. Items with status
   `blocked`, `in-progress`, or `completed` are excluded even when their
   stage matches.
-- The **in_review** stage (press `f` + `r`, or `/wl review`) is the
+- The **in_review** stage (press `f` + `s` + `r`, or `/wl review`) is the
   exception: it shows items with status `completed`, `in-progress`, or
   `open`. Per the project workflow, advancing an item to `in_review` sets
   its status to `completed` (or leaves it `in-progress` while being
@@ -673,8 +682,18 @@ every root item in the selected stage matching the stage's status rule
 - Results follow the standard list order (sortIndex), matching the
   unfiltered view.
 
-The default (unfiltered) worklist is unaffected — `/wl` with no stage
-argument keeps the smart-selection behaviour described above.
+The **priority-filtered** views (press `f` + `p` + priority chord, or
+`/wl --priority <priority>`) mirror the stage-filter semantics
+(WL-0MSKC8T46006999S): every **open** root item (`status=open`) with that
+priority — no `browseItemCount` cap, no `wl next` selection omission,
+children hidden and reachable via expand, standard sortIndex order. The
+stage and priority filters are mutually exclusive (replace semantics), so
+only one axis is ever active; the header shows which one
+(`(filtered: stage <stage>)` or `(filtered: priority <priority>)`).
+
+The default (unfiltered) worklist is unaffected — `/wl` with no
+stage/priority argument keeps the smart-selection behaviour described
+above.
 
 The "top N of M" header reflects the **actual displayed count** (N), which
 may exceed `browseItemCount` when the mandatory set is large.

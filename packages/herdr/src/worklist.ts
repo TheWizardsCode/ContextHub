@@ -13,7 +13,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
-import { fetchChildrenForItem, fetchActionableCount, fetchItemsByStage, getWorklogDir, type WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, fetchActionableCount, fetchItemsByStage, fetchItemsByPriority, getWorklogDir, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { HerdrEventSubscriber } from './events.js';
 import { AgentTracker, mergeAgentStatesCached } from './agent-tracker.js';
@@ -98,6 +98,17 @@ export const STAGE_MAP: Record<string, string> = {
   plan_complete: 'plan_complete',
   in_progress: 'in_progress',
   in_review: 'in_review',
+};
+
+// ── /wl --priority <priority> map (WL-0MSKC8T46006999S) ────────────────
+// Canonical priority names accepted by `/wl --priority <p>` and the
+// `f p *` priority-filter chords. Invalid/unknown values fall back
+// gracefully (no crash, no filter change), matching `/wl <bogus>`.
+export const PRIORITY_MAP: Record<string, string> = {
+  critical: 'critical',
+  high: 'high',
+  medium: 'medium',
+  low: 'low',
 };
 
 // Re-export stage colors from icons for backward compatibility
@@ -422,8 +433,27 @@ export class WorkItemListState {
   /** Currently displayed detail item (when mode === 'detail'). */
   detailItem: WorkItem | null = null;
 
-  /** Active stage filter (null = no filter). */
+  /** Active stage filter (null = no stage filter). */
   activeFilter: string | null = null;
+
+  /**
+   * Active priority filter (null = no priority filter). Mutually exclusive
+   * with `activeFilter` (replace semantics, WL-0MSKC8T46006999S): applying
+   * a priority filter clears the stage filter and vice versa, and sprint
+   * clears both. Only one axis can be active at a time.
+   */
+  activePriorityFilter: string | null = null;
+
+  /**
+   * Display label for the active filter, axis-qualified, or null when no
+   * filter is active (e.g. `stage in_review`, `priority critical`). The
+   * list header renders `(filtered: <label>)` from this value.
+   */
+  get activeFilterLabel(): string | null {
+    if (this.activeFilter) return `stage ${this.activeFilter}`;
+    if (this.activePriorityFilter) return `priority ${this.activePriorityFilter}`;
+    return null;
+  }
 
   /** Scroll offset within the detail view. */
   detailScrollOffset = 0;
@@ -875,6 +905,22 @@ export class WorkItemListState {
 
   applyFilter(stage: string): void {
     this.activeFilter = stage;
+    this.activePriorityFilter = null; // replace semantics: one axis at a time
+    this._applyFilters();
+    this.selectedIndex = 0;
+    this.scrollOffset = 0;
+    this.mode = 'list';
+    this._resetMetaScroll();
+  }
+
+  /**
+   * Apply a priority filter (replace semantics, WL-0MSKC8T46006999S):
+   * clears any active stage filter so stage and priority filters are
+   * mutually exclusive.
+   */
+  applyPriorityFilter(priority: string): void {
+    this.activePriorityFilter = priority;
+    this.activeFilter = null; // replace semantics: one axis at a time
     this._applyFilters();
     this.selectedIndex = 0;
     this.scrollOffset = 0;
@@ -884,6 +930,7 @@ export class WorkItemListState {
 
   clearFilter(): void {
     this.activeFilter = null;
+    this.activePriorityFilter = null;
     this._applyFilters();
     this.selectedIndex = 0;
     this.scrollOffset = 0;
@@ -971,6 +1018,8 @@ export class WorkItemListState {
     let filtered = [...this._allItems];
     if (this.activeFilter) {
       filtered = filtered.filter((item) => item.stage === this.activeFilter);
+    } else if (this.activePriorityFilter) {
+      filtered = filtered.filter((item) => item.priority === this.activePriorityFilter);
     }
     this.items = filtered;
   }
@@ -2707,6 +2756,10 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   selectedIndex: number,
   scrollOffset: number,
   termSize: TermSize,
+  // Display label of the active filter (axis-qualified, e.g. `stage
+  // in_review` or `priority critical`; WL-0MSKC8T46006999S) or null when
+  // unfiltered. Rendered as `(filtered: <label>)` in the header. Callers
+  // pass `state.activeFilterLabel`.
   activeFilter: string | null,
   mode: ViewMode,
   detailItem: WorkItem | null,
@@ -3174,20 +3227,28 @@ export function formatCodeFreezeDialog(maxCols: number, maxRows: number, reason?
  *
  * Without an active filter the default fetcher is used unchanged (the
  * default `/wl` view keeps its existing smart-selection behaviour). If the
- * stage fetch fails, the default fetcher is used as a fallback so a `wl`
- * error can never blank the list.
+ * stage/priority fetch fails, the default fetcher is used as a fallback so a
+ * `wl` error can never blank the list.
  *
- * @param activeFilter - The active stage filter (null = unfiltered view)
+ * @param activeFilter - The active stage filter (null = no stage filter)
+ * @param activePriorityFilter - The active priority filter (null = no
+ *   priority filter). Mutually exclusive with `activeFilter` (replace
+ *   semantics, WL-0MSKC8T46006999S): at most one is set.
  * @param defaultFetcher - The default fetcher for the unfiltered view
  */
 export function fetchItemsForView(
   activeFilter: string | null,
+  activePriorityFilter: string | null,
   defaultFetcher: () => Promise<WorkItem[]>,
 ): Promise<WorkItem[]> {
   if (activeFilter) {
     // Fail-open: a wl error must never blank the list — fall back to the
     // default fetcher (which itself fails open in index.ts).
     return fetchItemsByStage(activeFilter).catch(() => defaultFetcher());
+  }
+  if (activePriorityFilter) {
+    // Fail-open: same fallback as the stage path.
+    return fetchItemsByPriority(activePriorityFilter).catch(() => defaultFetcher());
   }
   // Unfiltered: delegate straight to the default fetcher so the refresh
   // cadence is byte-for-byte unchanged (single-flight timing preserved).
@@ -3237,6 +3298,21 @@ export function dispatchChordCommand(
     return true;
   }
 
+  // ── /wl --priority <priority> commands (internal dispatch) ─────
+  // Priority filter axis (WL-0MSKC8T46006999S): `/wl --priority <p>` with a
+  // canonical name (critical|high|medium|low) applies the priority filter;
+  // unknown values fall through unhandled (no crash, no filter change),
+  // matching the `/wl <bogus>` behaviour below.
+  const wlPriorityMatch = command.match(/^\/wl\s+--priority\s+(\S+)$/);
+  if (wlPriorityMatch) {
+    const wlPriority = wlPriorityMatch[1];
+    const internalPriority = PRIORITY_MAP[wlPriority];
+    if (internalPriority) {
+      state.applyPriorityFilter(internalPriority);
+      return true;
+    }
+  }
+
   // ── /wl <stage> commands (internal dispatch) ──────────────
   const wlStageMatch = command.match(/^\/wl\s+(\S+)$/);
   if (wlStageMatch) {
@@ -3250,8 +3326,8 @@ export function dispatchChordCommand(
 
   // ── /wl (no arguments): return to the default unfiltered view ────
   // Equivalent to the Pi TUI's `/wl` with no args (WL-0MSGSE15000746F7):
-  // clears the active stage filter so the next refresh shows the standard
-  // smart-selection list. No-op when no filter is active.
+  // clears the active stage AND priority filters so the next refresh shows
+  // the standard smart-selection list. No-op when no filter is active.
   if (/^\/wl\s*$/.test(command)) {
     state.clearFilter();
     return true;
@@ -3874,7 +3950,7 @@ export async function runWorklistTui(
           }
         };
         const [newItems] = await Promise.all([
-          fetchItemsForView(state.activeFilter, fetcher),
+          fetchItemsForView(state.activeFilter, state.activePriorityFilter, fetcher),
           ...expanded.map(fetchExpandedChildren),
         ]);
         const oldLen = state.items.length;
@@ -3940,19 +4016,22 @@ export async function runWorklistTui(
 
   /**
    * True when the resolved command is a `/wl` view command — a stage filter
-   * (`/wl <stage>`, shorthand alias or canonical name) or the clear-filter
-   * `/wl` with no arguments. Used after dispatch to trigger a view refetch:
-   * filtered views show every root item in that stage matching the stage's
-   * status rule (`wl list --status <status> --stage <stage> --root-only`;
-   * see STAGE_STATUS in fetcher.ts) — most stages show `open`-status items
-   * only, while the in_review stage additionally includes `completed` and
+   * (`/wl <stage>`, shorthand alias or canonical name), a priority filter
+   * (`/wl --priority <p>`, canonical name), or the clear-filter `/wl` with
+   * no arguments. Used after dispatch to trigger a view refetch: filtered
+   * views show every root item matching the filter's rule (`wl list --status
+   * <status> --stage <stage> --root-only` / `--priority <p>`; see
+   * STAGE_STATUS in fetcher.ts) — most stages show `open`-status items only,
+   * while the in_review stage additionally includes `completed` and
    * `in-progress` items (WL-0MSKCRX730052IIW); clearing the filter restores
    * the default view (WL-0MSGSE15000746F7).
    */
   const isWlViewCommand = (cmd: string): boolean => {
     if (/^\/wl\s*$/.test(cmd)) return true;
-    const m = cmd.match(/^\/wl\s+(\S+)$/);
-    return m !== null && STAGE_MAP[m[1]] !== undefined;
+    const stageMatch = cmd.match(/^\/wl\s+(\S+)$/);
+    if (stageMatch !== null && STAGE_MAP[stageMatch[1]] !== undefined) return true;
+    const priorityMatch = cmd.match(/^\/wl\s+--priority\s+(\S+)$/);
+    return priorityMatch !== null && PRIORITY_MAP[priorityMatch[1]] !== undefined;
   };
 
   // Run `wl sync` and surface the outcome as a toast so sync status is
@@ -4742,7 +4821,7 @@ export async function runWorklistTui(
       state.selectedIndex,
       state.scrollOffset,
       termSize,
-      state.activeFilter,
+      state.activeFilterLabel,
       state.mode,
       state.detailItem,
       totalActionableCount,

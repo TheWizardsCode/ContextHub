@@ -536,6 +536,23 @@ export async function fetchItemsByStage(stage: string): Promise<WorkItem[]> {
 }
 
 /**
+ * Fetch work items filtered by priority (via `wl list`).
+ *
+ * Mirrors the stage-filter fetch semantics (WL-0MSDT8X1V003206G): every
+ * OPEN root item with that priority — `wl list --status open --priority <p>
+ * --root-only` — no `browseItemCount` cap, no `wl next` selection omission;
+ * children stay hidden and remain reachable via expand exactly as in the
+ * unfiltered view. Results follow the standard list order and are regrouped
+ * priority-first (WL-0MSOPHLD1000EWNN) so the group sections stay
+ * consistent with the default worklist.
+ */
+export async function fetchItemsByPriority(priority: string): Promise<WorkItem[]> {
+  const output = await runWl(['list', '--status', 'open', '--priority', priority, '--root-only']);
+  const payload = extractJson(output);
+  return regroupWorkItems(extractItems(payload));
+}
+
+/**
  * Fetch details for a single work item by ID (via `wl show`).
  */
 export async function fetchItemDetails(id: string): Promise<WorkItem | null> {

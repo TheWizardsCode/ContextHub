@@ -258,52 +258,112 @@
   {
     "chord": [
       "f",
+      "s",
       "i"
     ],
     "command": "/wl idea",
     "view": "both",
-    "label": "filter idea",
-    "description": "Filter browse list to items in the idea stage."
+    "label": "filter stage idea",
+    "description": "Filter browse list to items in the idea stage (WL-0MSKC8T46006999S: stage filters moved under the f s axis)."
   },
   {
     "chord": [
       "f",
+      "s",
       "n"
     ],
     "command": "/wl intake",
     "view": "both",
-    "label": "filter intake",
-    "description": "Filter browse list to items in the intake_complete stage."
+    "label": "filter stage intake",
+    "description": "Filter browse list to items in the intake_complete stage (WL-0MSKC8T46006999S)."
   },
   {
     "chord": [
       "f",
+      "s",
       "p"
     ],
     "command": "/wl plan",
     "view": "both",
-    "label": "filter plan",
-    "description": "Filter browse list to items in the plan_complete stage."
+    "label": "filter stage plan",
+    "description": "Filter browse list to items in the plan_complete stage (WL-0MSKC8T46006999S)."
   },
   {
     "chord": [
       "f",
+      "s",
       "r"
     ],
     "command": "/wl review",
     "view": "both",
-    "label": "filter in_review",
-    "description": "Filter browse list to items in the in_review stage."
+    "label": "filter stage review",
+    "description": "Filter browse list to items in the in_review stage (WL-0MSKC8T46006999S)."
   },
   {
     "chord": [
       "f",
+      "s",
       "s"
     ],
     "command": "/wl",
     "view": "both",
     "label": "sprint",
-    "description": "Return to the default unfiltered browse list (WL-0MSGSE15000746F7)."
+    "description": "Return to the default unfiltered browse list; clears both stage and priority filters (WL-0MSGSE15000746F7)."
+  },
+  {
+    "chord": [
+      "f",
+      "p",
+      "l"
+    ],
+    "command": "/wl --priority low",
+    "view": "both",
+    "label": "filter priority low",
+    "description": "Filter browse list to items with low priority (WL-0MSKC8T46006999S)."
+  },
+  {
+    "chord": [
+      "f",
+      "p",
+      "m"
+    ],
+    "command": "/wl --priority medium",
+    "view": "both",
+    "label": "filter priority medium",
+    "description": "Filter browse list to items with medium priority (WL-0MSKC8T46006999S)."
+  },
+  {
+    "chord": [
+      "f",
+      "p",
+      "h"
+    ],
+    "command": "/wl --priority high",
+    "view": "both",
+    "label": "filter priority high",
+    "description": "Filter browse list to items with high priority (WL-0MSKC8T46006999S)."
+  },
+  {
+    "chord": [
+      "f",
+      "p",
+      "c"
+    ],
+    "command": "/wl --priority critical",
+    "view": "both",
+    "label": "filter priority critical",
+    "description": "Filter browse list to items with critical priority (WL-0MSKC8T46006999S)."
+  },
+  {
+    "chord": [
+      "f",
+      "p",
+      "s"
+    ],
+    "command": "/wl",
+    "view": "both",
+    "label": "clear priority",
+    "description": "Clear the active priority filter and return to the unfiltered browse list (WL-0MSKC8T46006999S)."
   },
   {
     "chord": ["n", "e"],

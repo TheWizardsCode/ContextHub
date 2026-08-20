@@ -8,6 +8,7 @@ import {
   fetchNextItems,
   fetchItemDetails,
   fetchItemsByStage,
+  fetchItemsByPriority,
   fetchChildrenForItem,
   fetchActionableCount,
   checkWlAvailable,
@@ -299,6 +300,74 @@ describe('fetchItemsByStage', () => {
 
     const items = await fetchItemsByStage('plan_complete');
     expect(items.map((i) => i.id)).toEqual(['WL-STAGE-CRIT', 'WL-STAGE-LOW']);
+    expect(items[0].groupLabel).toBe('Critical Group 1');
+    expect(items[1].groupLabel).toBe('Group 1');
+    expect(items[0].group).toBeLessThan(items[1].group!);
+  });
+});
+
+describe('fetchItemsByPriority', () => {
+  beforeEach(() => {
+    resetExecFileAsync();
+  });
+
+  it('filters items by priority', async () => {
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        workItems: [
+          { id: 'WL-TEST001', title: 'Critical item', priority: 'critical' },
+          { id: 'WL-TEST002', title: 'High item', priority: 'high' },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    const items = await fetchItemsByPriority('critical');
+    expect(items).toHaveLength(2);
+  });
+
+  it('returns empty array when priority filter yields no results', async () => {
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ workItems: [] }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    const items = await fetchItemsByPriority('low');
+    expect(items).toEqual([]);
+  });
+
+  it('passes --status open --priority <p> --root-only to wl list (WL-0MSKC8T46006999S)', async () => {
+    const mockFn = vi.fn().mockImplementation((_bin: string, args: string[]) => {
+      const stdout = JSON.stringify({ workItems: [] });
+      return Promise.resolve({ stdout, stderr: '' });
+    });
+    setExecFileAsync(mockFn as any);
+
+    await fetchItemsByPriority('critical');
+    const calls = mockFn.mock.calls.map((c: any) => c[1]);
+    expect(calls).toHaveLength(1);
+    // runWl appends --json automatically.
+    // Open root items only — mirrors the stage-filter semantics
+    // (WL-0MSDT8X1V003206G): every open root item at that priority, no cap.
+    expect(calls[0]).toEqual(['list', '--status', 'open', '--priority', 'critical', '--root-only', '--json']);
+  });
+
+  it('regroups results priority-first before display (WL-0MSOPHLD1000EWNN)', async () => {
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        workItems: [
+          { id: 'WL-PRIO-LOW', title: 'Low plan item', stage: 'plan_complete', priority: 'low' },
+          { id: 'WL-PRIO-CRIT', title: 'Critical plan item', stage: 'plan_complete', priority: 'critical' },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    const items = await fetchItemsByPriority('critical');
+    expect(items.map((i) => i.id)).toEqual(['WL-PRIO-CRIT', 'WL-PRIO-LOW']);
     expect(items[0].groupLabel).toBe('Critical Group 1');
     expect(items[1].groupLabel).toBe('Group 1');
     expect(items[0].group).toBeLessThan(items[1].group!);

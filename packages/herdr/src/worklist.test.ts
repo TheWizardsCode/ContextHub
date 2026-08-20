@@ -307,6 +307,19 @@ describe('createListRenderer — no blank line, no filter bar', () => {
     const unfiltered = renderer([makeItem('A')], 0, 0, TERM_80x24, null, 'list', null);
     expect(unfiltered.split('\n')[0]).not.toContain('filtered:');
   });
+
+  it('shows the axis-qualified label for a priority filter in the header (WL-0MSKC8T46006999S)', () => {
+    const output = renderer([makeItem('A')], 0, 0, TERM_80x24, 'priority critical', 'list', null);
+    const firstLine = output.split('\n')[0];
+    expect(firstLine).toContain('Work Items');
+    expect(firstLine).toContain('(filtered: priority critical)');
+  });
+
+  it('shows the axis-qualified label for a stage filter (WL-0MSKC8T46006999S)', () => {
+    const output = renderer([makeItem('A')], 0, 0, TERM_80x24, 'stage in_review', 'list', null);
+    const firstLine = output.split('\n')[0];
+    expect(firstLine).toContain('(filtered: stage in_review)');
+  });
 });
 
 describe('WorkItemListState.refreshItems — preserve selection by ID', () => {
@@ -594,6 +607,73 @@ describe('WorkItemListState.refreshItems — preserve selection by ID', () => {
   });
 });
 
+describe('WorkItemListState — priority filter slot (WL-0MSKC8T46006999S)', () => {
+  const TERM = { rows: 24, cols: 80 };
+
+  it('filters items by priority client-side via applyPriorityFilter', () => {
+    const items = [
+      { ...makeItem('A'), priority: 'critical' },
+      { ...makeItem('B'), priority: 'high' },
+      { ...makeItem('C'), priority: 'medium' },
+    ];
+    const state = new WorkItemListState(items, TERM);
+    state.applyPriorityFilter('critical');
+    expect(state.items.map((i) => i.id)).toEqual(['A']);
+  });
+
+  it('applyPriorityFilter clears the active stage filter (replace semantics)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM);
+    state.applyFilter('idea');
+    expect(state.activeFilter).toBe('idea');
+    state.applyPriorityFilter('high');
+    expect(state.activePriorityFilter).toBe('high');
+    expect(state.activeFilter).toBeNull();
+  });
+
+  it('applyFilter clears the active priority filter (replace semantics)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM);
+    state.applyPriorityFilter('critical');
+    expect(state.activePriorityFilter).toBe('critical');
+    state.applyFilter('idea');
+    expect(state.activeFilter).toBe('idea');
+    expect(state.activePriorityFilter).toBeNull();
+  });
+
+  it('clearFilter clears both stage and priority filters (sprint)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM);
+    state.applyPriorityFilter('critical');
+    state.applyFilter('idea');
+    state.clearFilter();
+    expect(state.activeFilter).toBeNull();
+    expect(state.activePriorityFilter).toBeNull();
+    expect(state.items.length).toBe(1);
+  });
+
+  it('activeFilterLabel is axis-qualified and null when unfiltered', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM);
+    expect(state.activeFilterLabel).toBeNull();
+    state.applyFilter('in_review');
+    expect(state.activeFilterLabel).toBe('stage in_review');
+    state.applyPriorityFilter('critical');
+    expect(state.activeFilterLabel).toBe('priority critical');
+    state.clearFilter();
+    expect(state.activeFilterLabel).toBeNull();
+  });
+
+  it('refreshItems preserves the priority filter across refreshes', () => {
+    const items = [
+      { ...makeItem('A'), priority: 'critical' },
+      { ...makeItem('B'), priority: 'high' },
+    ];
+    const state = new WorkItemListState(items, TERM);
+    state.applyPriorityFilter('critical');
+    expect(state.items.map((i) => i.id)).toEqual(['A']);
+    state.refreshItems(items);
+    expect(state.activePriorityFilter).toBe('critical');
+    expect(state.items.map((i) => i.id)).toEqual(['A']);
+  });
+});
+
 describe('nested expansion — 3+ level hierarchies (WL-0MSQ3FH1K000MMJW)', () => {
   /**
    * Build a 3-level hierarchy: EPIC → FEATURE → TASK. Children carry the
@@ -797,6 +877,35 @@ describe('executeResolvedCommand', () => {
     expect(onCommand).not.toHaveBeenCalled();
   });
 
+  it('returns dispatched for /wl --priority <p> priority filters (WL-0MSKC8T46006999S)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/wl --priority critical', state, onCommand);
+    expect(result).toBe('dispatched');
+    expect(state.activePriorityFilter).toBe('critical');
+    expect(state.activeFilter).toBeNull();
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it('routes unknown /wl --priority values to the callback (no crash, no filter change)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/wl --priority bogus', state, onCommand);
+    expect(result).toBe('callback');
+    expect(onCommand).toHaveBeenCalledWith('/wl --priority bogus', undefined);
+    expect(state.activePriorityFilter).toBeNull();
+  });
+
+  it('sprint clears an active priority filter (clear-all, WL-0MSKC8T46006999S)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    state.applyPriorityFilter('high');
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/wl', state, onCommand);
+    expect(result).toBe('dispatched');
+    expect(state.activePriorityFilter).toBeNull();
+    expect(state.activeFilter).toBeNull();
+  });
+
   it('returns dispatched for /skill:implement with resolved <id>', () => {
     const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
     state.selectedIndex = 0;
@@ -858,6 +967,62 @@ describe('dispatchChordCommand', () => {
     expect(state.activeFilter).toBeNull();
   });
 
+  it('handles /wl --priority <p> priority filter commands internally (WL-0MSKC8T46006999S)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    expect(dispatchChordCommand('/wl --priority critical', state)).toBe(true);
+    expect(state.activePriorityFilter).toBe('critical');
+    expect(dispatchChordCommand('/wl --priority high', state)).toBe(true);
+    expect(state.activePriorityFilter).toBe('high');
+    expect(dispatchChordCommand('/wl --priority medium', state)).toBe(true);
+    expect(state.activePriorityFilter).toBe('medium');
+    expect(dispatchChordCommand('/wl --priority low', state)).toBe(true);
+    expect(state.activePriorityFilter).toBe('low');
+  });
+
+  it('leaves unknown /wl --priority values unhandled (no crash, no filter change)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    const result = dispatchChordCommand('/wl --priority bogus', state);
+    expect(result).toBe(false);
+    expect(state.activePriorityFilter).toBeNull();
+    expect(state.activeFilter).toBeNull();
+  });
+
+  it('does not treat a bare /wl --priority (no value) as a valid command', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    expect(dispatchChordCommand('/wl --priority', state)).toBe(false);
+    expect(state.activePriorityFilter).toBeNull();
+  });
+
+  it('applying a priority filter replaces an active stage filter (replace semantics)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    state.applyFilter('idea');
+    expect(state.activeFilter).toBe('idea');
+    const result = dispatchChordCommand('/wl --priority critical', state);
+    expect(result).toBe(true);
+    expect(state.activePriorityFilter).toBe('critical');
+    expect(state.activeFilter).toBeNull();
+  });
+
+  it('applying a stage filter replaces an active priority filter (replace semantics)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    state.applyPriorityFilter('critical');
+    expect(state.activePriorityFilter).toBe('critical');
+    const result = dispatchChordCommand('/wl idea', state);
+    expect(result).toBe(true);
+    expect(state.activeFilter).toBe('idea');
+    expect(state.activePriorityFilter).toBeNull();
+  });
+
+  it('sprint /wl clears BOTH the stage and priority filters (WL-0MSKC8T46006999S)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    state.applyPriorityFilter('critical');
+    expect(state.activePriorityFilter).toBe('critical');
+    const result = dispatchChordCommand('/wl', state);
+    expect(result).toBe(true);
+    expect(state.activePriorityFilter).toBeNull();
+    expect(state.activeFilter).toBeNull();
+  });
+
   it('handles /downtime toggle internally via the callback (no pane dispatch, no stdout)', () => {
     const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
     const onCommand = vi.fn();
@@ -883,10 +1048,10 @@ describe('dispatchChordCommand', () => {
     expect(onCommand).not.toHaveBeenCalled();
   });
 
-  it('shows the sprint chord in the f-chord help line (WL-0MSGSE15000746F7)', () => {
+  it('shows the sprint chord in the f-s chord help line (WL-0MSGSE15000746F7)', () => {
     const registry = loadShortcutConfig();
-    const chords = registry.getChordByPrefix(['f'], 'list', undefined, false);
-    const hints = formatChordHintsForHelp(chords, ['f']);
+    const chords = registry.getChordByPrefix(['f', 's'], 'list', undefined, false);
+    const hints = formatChordHintsForHelp(chords, ['f', 's']);
     expect(hints).toContain('s:sprint');
   });
 
@@ -1098,7 +1263,7 @@ describe('fetchItemsForView — stage-filtered fetch', () => {
     setExecFileAsync(mockFn as any);
     const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
 
-    const items = await fetchItemsForView('idea', defaultFetcher);
+    const items = await fetchItemsForView('idea', null, defaultFetcher);
 
     expect(items.map((i) => i.id)).toEqual(['A', 'B']);
     expect(defaultFetcher).not.toHaveBeenCalled();
@@ -1125,7 +1290,7 @@ describe('fetchItemsForView — stage-filtered fetch', () => {
     setExecFileAsync(mockFn as any);
     const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
 
-    const items = await fetchItemsForView('in_review', defaultFetcher);
+    const items = await fetchItemsForView('in_review', null, defaultFetcher);
 
     expect(items.map((i) => i.id)).toEqual(['A', 'B']);
     expect(defaultFetcher).not.toHaveBeenCalled();
@@ -1140,7 +1305,7 @@ describe('fetchItemsForView — stage-filtered fetch', () => {
 
   it('uses the default fetcher when no filter is active', async () => {
     const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
-    const items = await fetchItemsForView(null, defaultFetcher);
+    const items = await fetchItemsForView(null, null, defaultFetcher);
     expect(items.map((i) => i.id)).toEqual(['C']);
     expect(defaultFetcher).toHaveBeenCalledTimes(1);
   });
@@ -1150,8 +1315,56 @@ describe('fetchItemsForView — stage-filtered fetch', () => {
     setExecFileAsync(mockFn as any);
     const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
 
-    const items = await fetchItemsForView('idea', defaultFetcher);
+    const items = await fetchItemsForView('idea', null, defaultFetcher);
     expect(items.map((i) => i.id)).toEqual(['C']);
+  });
+
+  it('fetches all open root items at the priority when a priority filter is active', async () => {
+    const criticalItems = [
+      { ...makeItem('A'), priority: 'critical' },
+      { ...makeItem('B'), priority: 'critical' },
+    ];
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ workItems: criticalItems }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
+
+    const items = await fetchItemsForView(null, 'critical', defaultFetcher);
+
+    expect(items.map((i) => i.id)).toEqual(['A', 'B']);
+    expect(defaultFetcher).not.toHaveBeenCalled();
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs).toContain('list');
+    expect(callArgs[callArgs.indexOf('--status') + 1]).toBe('open');
+    expect(callArgs[callArgs.indexOf('--priority') + 1]).toBe('critical');
+    expect(callArgs).toContain('--root-only');
+  });
+
+  it('falls back to the default fetcher when the priority fetch fails', async () => {
+    const mockFn = vi.fn().mockRejectedValue(new Error('wl failed'));
+    setExecFileAsync(mockFn as any);
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
+
+    const items = await fetchItemsForView(null, 'high', defaultFetcher);
+    expect(items.map((i) => i.id)).toEqual(['C']);
+  });
+
+  it('prefers the stage filter when both are somehow set (defensive)', async () => {
+    const stageItems = [makeItem('A', 'idea')];
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ workItems: stageItems }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
+
+    const items = await fetchItemsForView('idea', 'critical', defaultFetcher);
+    expect(items.map((i) => i.id)).toEqual(['A']);
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs).toContain('--stage');
+    expect(callArgs).not.toContain('--priority');
   });
 
   it('applies the in_review stage filter client-side regardless of status', () => {

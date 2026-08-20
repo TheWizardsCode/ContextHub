@@ -7,7 +7,7 @@
 id = "worklog-selection-list"
 name = "Worklog Selection List"
 version = "0.1.0"
-description = "Browse, filter, and select Worklog work items from a Herdr pane. Keyboard-navigable list with stage filtering and detail view."
+description = "Browse, filter, and select Worklog work items from a Herdr pane. Keyboard-navigable list with stage/priority filtering and detail view."
 min_herdr_version = "0.7.0"
 platforms = ["linux", "macos", "windows"]
 

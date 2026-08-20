@@ -131,12 +131,60 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     expect(registry.lookupChordEntry(['a', 'a'], 'list')?.workItemTypes).toBeUndefined();
   });
 
-  it('registers the f s sprint chord to return to the default view (WL-0MSGSE15000746F7)', () => {
+  it('registers the f s s sprint chord to return to the default view (WL-0MSGSE15000746F7, WL-0MSKC8T46006999S)', () => {
     const registry = loadShortcutConfig();
-    const entry = registry.lookupChordEntry(['f', 's'], 'list', undefined, false);
+    // The sprint chord moved under the stage axis: `f s s` (previously the
+    // single-key `f s`).
+    const entry = registry.lookupChordEntry(['f', 's', 's'], 'list', undefined, false);
     expect(entry).toBeDefined();
     expect(entry?.command).toBe('/wl');
     expect(entry?.label).toBe('sprint');
+  });
+
+  it('registers the stage-axis filter chords f s i|n|p|r (WL-0MSKC8T46006999S)', () => {
+    const registry = loadShortcutConfig();
+    const expected: Array<[string[], string, string]> = [
+      [['f', 's', 'i'], '/wl idea', 'filter stage idea'],
+      [['f', 's', 'n'], '/wl intake', 'filter stage intake'],
+      [['f', 's', 'p'], '/wl plan', 'filter stage plan'],
+      [['f', 's', 'r'], '/wl review', 'filter stage review'],
+    ];
+    for (const [chord, command, label] of expected) {
+      const entry = registry.lookupChordEntry(chord, 'list', undefined, false);
+      expect(entry).toBeDefined();
+      expect(entry?.command).toBe(command);
+      expect(entry?.label).toBe(label);
+    }
+  });
+
+  it('registers the priority-axis filter chords f p l|m|h|c and the f p s clear chord (WL-0MSKC8T46006999S)', () => {
+    const registry = loadShortcutConfig();
+    const expected: Array<[string[], string, string]> = [
+      [['f', 'p', 'l'], '/wl --priority low', 'filter priority low'],
+      [['f', 'p', 'm'], '/wl --priority medium', 'filter priority medium'],
+      [['f', 'p', 'h'], '/wl --priority high', 'filter priority high'],
+      [['f', 'p', 'c'], '/wl --priority critical', 'filter priority critical'],
+      [['f', 'p', 's'], '/wl', 'clear priority'],
+    ];
+    for (const [chord, command, label] of expected) {
+      const entry = registry.lookupChordEntry(chord, 'list', undefined, false);
+      expect(entry).toBeDefined();
+      expect(entry?.command).toBe(command);
+      expect(entry?.label).toBe(label);
+    }
+  });
+
+  it('no longer registers the old single-key stage filter chords (f i, f n, f p, f r) or the single f s sprint chord (WL-0MSKC8T46006999S)', () => {
+    const registry = loadShortcutConfig();
+    // The old single-key stage chords must NOT resolve — `f i`/`f n`/`f p`/
+    // `f r` previously filtered by stage, and `f s` was the sprint chord.
+    // `f s` and `f p` are now pure chord prefixes (axis leaders).
+    for (const chord of [['f', 'i'], ['f', 'n'], ['f', 'p'], ['f', 'r'], ['f', 's']]) {
+      expect(registry.lookupChordEntry(chord, 'list', undefined, false)).toBeUndefined();
+    }
+    // The axis leaders are still valid prefixes for the new scheme.
+    expect(registry.getChordByPrefix(['f', 's'], 'list', undefined, false).length).toBe(5);
+    expect(registry.getChordByPrefix(['f', 'p'], 'list', undefined, false).length).toBe(5);
   });
 
   it('registers the S ship-it chord to /skill:ship release (WL-0MSGG5N5Z0074TLY)', () => {
