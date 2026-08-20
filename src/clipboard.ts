@@ -1,7 +1,19 @@
-import { spawn } from 'child_process';
+import { spawn } from 'node:child_process';
 import * as os from 'os';
 
 export type SpawnLike = (...args: any[]) => any;
+
+/**
+ * Result of a clipboard read (paste) operation.
+ */
+export interface ClipboardReadResult {
+  /** Whether the read succeeded */
+  success: boolean;
+  /** The clipboard text content (only when success is true) */
+  data?: string;
+  /** Error description (only when success is false) */
+  error?: string;
+}
 
 /**
  * Copy text to the clipboard.
@@ -158,6 +170,127 @@ export async function copyToClipboard(
     return { success: false, error: errors.join('; ') || 'no clipboard method available' };
   } catch (err: any) {
     if (anySuccess) return { success: true };
+    return { success: false, error: err?.message || String(err) };
+  }
+}
+
+/**
+ * Read text from the OS clipboard (paste).
+ *
+ * Strategy (platform-ordered, no tmux dependency — herdr environment):
+ * 1. macOS → `pbpaste`
+ * 2. Windows → `powershell -Command Get-Clipboard`
+ * 3. Linux + Wayland → `wl-paste --no-newline`
+ * 4. Linux + X11 → `xclip -selection clipboard -o` → `xsel --clipboard --output`
+ *
+ * The function returns the clipboard content as a string. It is designed for
+ * the herdr plugin where the tmux paste buffer is NOT used.
+ *
+ * @param _text - Unused placeholder to keep signature consistent with `copyToClipboard`
+ * @param opts - Injected dependencies for testability
+ * @returns Clipboard content or an error description
+ */
+export async function readFromClipboard(
+  _text?: string,
+  opts?: { spawn?: SpawnLike; env?: Record<string, string | undefined> },
+): Promise<ClipboardReadResult> {
+  const spawnImpl = opts?.spawn ?? spawn;
+  const env = opts?.env ?? process.env;
+  let anySuccess = false;
+  let data = '';
+  const errors: string[] = [];
+
+  // --- Helper: run a command, capture stdout --------------------------------
+  const runRead = (cmd: string, args: string[]) =>
+    new Promise<{ code: number | null; error?: Error; stdout: string }>((resolve) => {
+      try {
+        const cp = spawnImpl(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+        let handled = false;
+        const chunks: Buffer[] = [];
+        cp.on('error', (err: Error) => {
+          if (!handled) { handled = true; resolve({ code: null, error: err, stdout: '' }); }
+        });
+        cp.on('close', (code: number) => {
+          if (!handled) {
+            handled = true;
+            resolve({ code, stdout: Buffer.concat(chunks).toString('utf8'), error: undefined });
+          }
+          try { if (typeof cp.unref === 'function') cp.unref(); } catch (_) {}
+        });
+        cp.stdout?.on('data', (chunk: Buffer) => chunks.push(chunk));
+        cp.stderr?.on('data', () => { /* discard stderr */ });
+      } catch (err: any) {
+        resolve({ code: null, error: err, stdout: '' });
+      }
+    });
+
+  try {
+    // ----- 1. macOS --------------------------------------------------------
+    if (process.platform === 'darwin') {
+      const res = await runRead('pbpaste', []);
+      if (res.code === 0 && res.stdout !== undefined) {
+        anySuccess = true;
+        data = res.stdout;
+      } else {
+        errors.push(res.error?.message || 'pbpaste failed');
+      }
+    }
+    // ----- 2. Windows ------------------------------------------------------
+    else if (process.platform === 'win32') {
+      const res = await runRead('powershell', ['-Command', 'Get-Clipboard']);
+      if (res.code === 0 && res.stdout !== undefined) {
+        anySuccess = true;
+        data = res.stdout.trim();
+      } else {
+        // Fallback: cmd /c clip.exe doesn't read, try Get-Clipboard via cmd
+        errors.push(res.error?.message || 'Get-Clipboard failed');
+      }
+    }
+    // ----- 3. Linux --------------------------------------------------------
+    else {
+      // Try wl-paste (Wayland) first
+      let systemClipOk = false;
+      if (env.WAYLAND_DISPLAY) {
+        const res = await runRead('wl-paste', ['--no-newline']);
+        if (res.code === 0 && res.stdout !== undefined) {
+          anySuccess = true;
+          data = res.stdout;
+          systemClipOk = true;
+        } else {
+          errors.push(res.error?.message || 'wl-paste failed');
+        }
+      }
+      // Fall back to xclip (X11)
+      if (!systemClipOk) {
+        const res = await runRead('xclip', ['-selection', 'clipboard', '-o']);
+        if (res.code === 0 && res.stdout !== undefined) {
+          anySuccess = true;
+          data = res.stdout;
+          systemClipOk = true;
+        } else {
+          errors.push(res.error?.message || 'xclip failed');
+        }
+      }
+      // Fall back to xsel (X11)
+      if (!systemClipOk) {
+        const res = await runRead('xsel', ['--clipboard', '--output']);
+        if (res.code === 0 && res.stdout !== undefined) {
+          anySuccess = true;
+          data = res.stdout;
+          systemClipOk = true;
+        } else {
+          errors.push(res.error?.message || 'xsel failed');
+        }
+      }
+      if (!systemClipOk && !anySuccess && errors.length === 0) {
+        errors.push('no clipboard reader available (install wl-paste, xclip, or xsel)');
+      }
+    }
+
+    if (anySuccess) return { success: true, data };
+    return { success: false, error: errors.join('; ') || 'no clipboard reader available' };
+  } catch (err: any) {
+    if (anySuccess) return { success: true, data };
     return { success: false, error: err?.message || String(err) };
   }
 }
