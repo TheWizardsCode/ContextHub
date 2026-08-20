@@ -2283,6 +2283,17 @@ export function handleKeypress(
             // Return action so caller can fetch children on demand
             return 'toggle-expand';
           }
+        } else {
+          // Heading row selected — Tab toggles that group's collapse state
+          // (WL-0MSL5MPSZ003TG94 AC3). Handled inline (no on-demand fetch,
+          // no navigation-stack churn); the heading row itself stays
+          // visible so the group can be re-expanded.
+          const row = state.getSelectedDisplayRow();
+          if (row !== null && isHeadingRow(row)) {
+            state.toggleGroupCollapse(row.group);
+            state._clampSelection();
+            return null;
+          }
         }
       }
       return null;
