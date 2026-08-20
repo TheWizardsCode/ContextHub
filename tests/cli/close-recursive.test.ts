@@ -733,8 +733,12 @@ describe('close command recursive close', () => {
   it('warning includes reason: audit result is not ready to close', async () => {
     const { parentId, childIds } = await createParentWithChildren(2, true);
 
-    // Set audit result with readyToClose=false
+    // Mark the parent not ready to close. Since WL-0MSKHYI5U0069FVV, this
+    // verdict reverts an in_review item to open/plan_complete, so move the
+    // parent back to in_review afterwards — the not-ready audit result is
+    // then what blocks the close.
     await runJson(`update ${parentId} --audit-text "Ready to close: No\nNot ready yet"`);
+    await runJson(`update ${parentId} --status completed --stage in_review`);
 
     const { stderr } = await runRaw(`close ${parentId} -r "done"`);
 
