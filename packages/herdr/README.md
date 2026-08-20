@@ -700,8 +700,8 @@ may exceed `browseItemCount` when the mandatory set is large.
 
 ### Fold indicators (below-the-fold / above-the-fold markers)
 
-When the flattened item list has more rows than fit in the visible list
-area (header + items + separators + footer), the renderer shows two dim
+When the display-rows list (headings + items) has more rows than fit in
+the visible list area (header + rows + footer), the renderer shows two dim
 markers so you can tell the list is truncated or scrolled
 (WL-0MSG8YXYJ008PWJJ):
 
@@ -717,8 +717,8 @@ with other non-interactive chrome such as footer hints and the filter
 indication), are never selectable, and do not consume navigation state,
 selection index, or hierarchy scroll offset — `j`/`k` scrolling behaves
 exactly as before. The marker wording is intentionally generic ("more")
-rather than an exact count because group-separator rows make exact counts
-unreliable.
+rather than an exact count; each group heading shows its own per-group
+count.
 
 Indicator rows are included in the render budget, so the `rows - 1`
 line-count invariant (the notification line always fits, the header never
@@ -729,17 +729,21 @@ without an indicator.
 
 ## Metadata panel
 
-The list view shows the **selected** item's fields in a metadata panel
-below the list. The selection list takes as much vertical space as its
-content needs — header + items + group separators + fold indicators +
-footer — up to the full available pane height. The metadata panel fills
-whatever space remains: when the list is short the panel expands into the
-leftover space; when the list fills the pane the panel keeps a minimum of
-3 rows at the bottom (its content scrolls independently, see below) so it
-stays usable. The view always starts at the top of the selection list
-(header + first items), so a long list never scrolls off the top.
+The list view shows the **selected** row's metadata in a panel below the
+list. The selection list takes as much vertical space as its content needs
+— header + display rows (headings + items) + fold indicators + footer —
+up to the full available pane height. The metadata panel fills whatever
+space remains: when the list is short the panel expands into the leftover
+space; when the list fills the pane the panel keeps a minimum of 3 rows at
+the bottom (its content scrolls independently, see below) so it stays
+usable. The view always starts at the top of the selection list (header +
+first rows), so a long list never scrolls off the top.
 
-- The panel shows the item ID as a header separator, followed by its
+- Selecting a **heading row** renders the group's info — label, item
+  count, group number, and collapse state (with a hint that Tab toggles
+  it) — instead of item metadata; heading selections have no item, so the
+  detail view is never opened from them.
+- Selecting an **item row** renders the item's fields:
   metadata (status, stage, priority, type, risk, effort, children/parent
   counts, tags, GitHub issue number, created/updated timestamps, and audit
   state).
@@ -783,8 +787,13 @@ lifecycle stages only — `idea`, `intake_complete`, `plan_complete`,
 `in_progress`, `in_review`, `done`. No custom stage values are required for
 grouping, so podcast episode items group exactly as their frontmatter
 `pipeline_stage` maps 1:1 onto the Worklog stages (PRD §7.2). Groups render
-in the canonical order (Critical → Group N → Idea → Other → In Review) with
-group separators in the list; stage changes re-group items on the next
+in the canonical order (Critical → Group N → Idea → Other → In Review) as
+**collapsible heading rows** (WL-0MSL5MPSZ003TG94): each heading shows the
+group label plus its item count (`── Group 1 (4) ▼ ──`), and pressing **Tab**
+while a heading is selected collapses/expands that group — collapsed groups
+hide their items from both the render and navigation (the heading itself
+stays). Counts reflect the top-level items in the group (post stage-filter)
+regardless of collapse state. Stage changes re-group items on the next
 refresh. Non-critical `in_progress` items join the file-path-partitioned
 `Group N` lists alongside `plan_complete`/`intake_complete` items and sort
 ahead of them (actively-worked items first); "Other" remains only as a
@@ -1004,7 +1013,7 @@ packages/herdr/
 
 - **No direct database access** — The plugin uses the `wl` CLI as the backend data source, ensuring compatibility without duplicating data-access logic.
 - **Terminal UI via raw mode** — The TUI uses raw stdin mode and ANSI escape codes for rendering, making it compatible with any Herdr pane without additional dependencies.
-- **Fixed-height pane rendering** — The list renderer budgets its output to `rows - 1` lines (header + items + group separators + fill + footer), reserving the last row for the transient notification line (e.g. `[Synced]`, `[Refresh failed]`). The active stage filter is shown in the header only (` (filtered: <stage>)`) — there is no standalone filter bar or blank chrome row. Group separator lines count against the budget, and the below/above-the-fold `▼ more`/`▲ more` indicator rows (WL-0MSG8YXYJ008PWJJ) are reserved in the budget before the visible window is trimmed, so the pane never scrolls the header or top items off the top of the view regardless of item/group count (see WL-0MSAAON63003N6LO, WL-0MSGTSPXK007POB1).
+- **Fixed-height pane rendering** — The list renderer budgets its output to `rows - 1` lines (header + display rows (headings + items) + fill + footer), reserving the last row for the transient notification line (e.g. `[Synced]`, `[Refresh failed]`). The active stage filter is shown in the header only (` (filtered: <stage>)`) — there is no standalone filter bar or blank chrome row. Heading rows count against the budget, and the below/above-the-fold `▼ more`/`▲ more` indicator rows (WL-0MSG8YXYJ008PWJJ) are reserved in the budget before the visible window is trimmed, so the pane never scrolls the header or top items off the top of the view regardless of row count (see WL-0MSAAON63003N6LO, WL-0MSGTSPXK007POB1).
 - **Testable core** — All state management, formatting, and keyboard handling is pure logic in `worklist.ts`, fully testable without a terminal.
 - **Toast notifications instead of bottom-line status** — Transient status feedback (refresh outcomes, sync outcomes, sent/skipped command feedback, errors) is surfaced via Herdr toast notifications (`herdr notification show`) instead of being appended to the bottom of the pane output. This keeps the rendered pane within the terminal height budget, so the list header and top lines are never pushed off the top of the pane. Toast delivery requires `ui.toast.delivery = "herdr"` in `~/.config/herdr/config.toml`; toasts appear in the bottom-right corner by default. The helper lives in `notify.ts` and is fire-and-forget (failures are tolerated silently).
 - **Command routing via callback** — When a chord resolves to a non-`/wl` command, it is passed to an `onCommand` callback (set by the entry point) which routes it by prefix:
