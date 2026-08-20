@@ -257,14 +257,19 @@ describe('mapMouseToAction — list mode row mapping (AC2)', () => {
   it('is inert for the header row (y=1) and panel rows', () => {
     const state = makeListState(30);
     expect(mapMouseToAction(state, press(0, 5, 1), TERM_80x24)).toBeNull();
-    expect(mapMouseToAction(state, press(0, 5, 17), TERM_80x24)).toBeNull();
+    // Dynamic layout (WL-0MSQ44MDX008U69J): with 30 items the list fills the
+    // available rows (header + 17 items + '▼ more' + footer = rows 1-20) and
+    // the metadata panel occupies the bottom rows (21-23).
+    expect(mapMouseToAction(state, press(0, 5, 21), TERM_80x24)).toBeNull(); // metadata panel
+    expect(mapMouseToAction(state, press(0, 5, 23), TERM_80x24)).toBeNull(); // metadata panel
     expect(mapMouseToAction(state, press(0, 5, 24), TERM_80x24)).toBeNull(); // notification row
   });
 
   it('is inert for the bottom fold indicator and footer rows', () => {
     const state = makeListState(30);
-    expect(mapMouseToAction(state, press(0, 5, 15), TERM_80x24)).toBeNull(); // '▼ more'
-    expect(mapMouseToAction(state, press(0, 5, 16), TERM_80x24)).toBeNull(); // footer
+    // Dynamic layout: rows 2-18 are items, row 19 is '▼ more', row 20 footer.
+    expect(mapMouseToAction(state, press(0, 5, 19), TERM_80x24)).toBeNull(); // '▼ more'
+    expect(mapMouseToAction(state, press(0, 5, 20), TERM_80x24)).toBeNull(); // footer
   });
 
   it('is inert for blank rows beyond the visible tail', () => {

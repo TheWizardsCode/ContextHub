@@ -20,7 +20,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
 - **Podcast Editing tab** — The `open-podcast-editor-tab` action (bound to `prefix+l`) opens the worklist pane in a new tab and renames that tab to **`Podcast Editing`** so it is instantly recognisable in the tab row during podcast production. See [Podcast Editing tab](#podcast-editing-tab).
 - **Quit** — Press `q` to exit
-- **Metadata panel** — The bottom portion of the list view (roughly 20–40% of the pane height, responsive to terminal size) is reserved for the selected item's metadata: ID, title, status, stage, priority, type, risk, effort, tags, audit info, and more, plus a **description preview** (first up-to-3 lines of the item's description) so you can see what an item is about at a glance. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
+- **Metadata panel** — The selected item's metadata (ID, title, status, stage, priority, type, risk, effort, tags, audit info, and more, plus a **description preview** — first up-to-3 lines of the item's description) is shown in a panel below the list. The list takes as much vertical space as its content needs, up to the full pane height; the metadata panel fills whatever space remains — expanding when the list is short, and sitting at the bottom (minimum 3 rows) when the list is long. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
 - **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` — no custom stage values). Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
 - **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, full GFM rendering: headings, lists, tables, blockquotes, code, links) as a preview. The description section is rendered with the same markdown renderer. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
@@ -703,11 +703,15 @@ without an indicator.
 
 ## Metadata panel
 
-The list view reserves the bottom rows of the pane for a metadata panel
-showing the **selected** item's fields. The panel is always on: the list
-area shrinks to `rows - 1 - panelHeight`, and `panelHeight` scales linearly
-from 20% of the pane height (on short panes) up to 40% (on tall panes),
-clamped to a minimum of 3 rows so it is always usable.
+The list view shows the **selected** item's fields in a metadata panel
+below the list. The selection list takes as much vertical space as its
+content needs — header + items + group separators + fold indicators +
+footer — up to the full available pane height. The metadata panel fills
+whatever space remains: when the list is short the panel expands into the
+leftover space; when the list fills the pane the panel keeps a minimum of
+3 rows at the bottom (its content scrolls independently, see below) so it
+stays usable. The view always starts at the top of the selection list
+(header + first items), so a long list never scrolls off the top.
 
 - The panel shows the item ID as a header separator, followed by its
   metadata (status, stage, priority, type, risk, effort, children/parent
@@ -989,7 +993,7 @@ packages/herdr/
   - The merge is **deterministic and deduplicated** (dedup key = `view` + `chord`); within the local file, later entries win for the same `view`+`chord`.
   - Local entries are validated with the same rules as bundled entries: an invalid entry is **logged and skipped**, and a missing/malformed local file (bad JSON, non-array) falls back to bundled-only with an error logged — a broken local file never crashes the plugin.
   - When no worklog root is resolved (uninitialized project) or no local file exists, the registry is exactly the bundled defaults and all dispatch behaviour is unchanged.
-- **Metadata panel** — The bottom of the list view is reserved for the selected item's metadata (`formatMetadataPanel` in `worklist.ts`). The panel height ramps linearly with pane height (20% → 40%, min 3 rows) via `computeMetadataPanelHeight`, and the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows`, so the two views never drift apart (see WL-0MSAYNVBY006LM9X).
+- **Metadata panel** — The selected item's metadata is shown in a panel below the list (`formatMetadataPanel` in `worklist.ts`). The list takes up to the full pane height and the panel fills the remaining space (minimum 3 rows), computed via `computeDynamicLayout` (WL-0MSQ44MDX008U69J); the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows`, so the two views never drift apart (see WL-0MSAYNVBY006LM9X).
 - **Command log** — Dispatched commands targeting a work item are recorded in `command-log.ts` before execution; the panel surfaces the last command for `in_progress` items. Recording is fire-and-forget (never breaks dispatch) and the log file is written atomically (see WL-0MSAYNVBY006LM9X).
 
 ## Code Freeze

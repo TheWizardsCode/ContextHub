@@ -109,12 +109,14 @@ export const STAGE_COLORS: Record<string, number> = {
   completed: 33,
 };
 
-// ── Metadata panel sizing (WL-0MSAYNVBY006LM9X) ─────────────────────────
-// The list renderer reserves the bottom of the pane for a metadata panel
-// showing the selected item's fields plus its last recorded command. The
-// panel share of the pane height ramps linearly between MIN_META_SHARE on
-// small panes and MAX_META_SHARE on tall panes, so the list always keeps at
-// least 60% of the pane.
+// ── Metadata panel sizing ───────────────────────────────────────────────
+// The list renderer shows the selected item's metadata in a panel below the
+// list. The list takes as much vertical space as its content needs (up to
+// the full pane height) and the panel fills the remainder, keeping a small
+// minimum — see computeDynamicLayout (WL-0MSQ44MDX008U69J).
+// computeMetadataPanelHeight below is retained as a legacy fallback (used by
+// metaScrollDown when no dynamic panel height is supplied) from the original
+// fixed 20–40% reservation (WL-0MSAYNVBY006LM9X).
 
 /** Minimum share of pane rows reserved for the metadata panel (small panes). */
 export const MIN_META_SHARE = 0.2;
@@ -127,12 +129,12 @@ const META_SHARE_MIN_ROWS = 12;
 const META_SHARE_MAX_ROWS = 40;
 
 /**
- * Compute the number of pane rows reserved for the metadata panel.
+ * Legacy fallback: compute a fixed metadata panel height from the pane rows.
  *
  * The share ramps linearly from MIN_META_SHARE at `META_SHARE_MIN_ROWS` to
  * MAX_META_SHARE at `META_SHARE_MAX_ROWS`. The result is clamped to a
- * minimum of 3 rows (so the panel stays usable) and to MAX_META_SHARE of the
- * pane (so the list keeps at least 60%).
+ * minimum of 3 rows. Only used by metaScrollDown when no dynamic panel
+ * height is provided; the renderer uses computeDynamicLayout instead.
  *
  * @param rows - Total pane height in rows.
  * @returns Number of panel rows (always < rows).
@@ -144,6 +146,69 @@ export function computeMetadataPanelHeight(rows: number): number {
     share = MIN_META_SHARE + (MAX_META_SHARE - MIN_META_SHARE) * t;
   }
   return Math.max(3, Math.min(Math.round(rows * share), Math.floor(rows * MAX_META_SHARE)));
+}
+
+/**
+ * Compute the dynamic list / metadata panel layout (WL-0MSQ44MDX008U69J).
+ *
+ * The selection list takes as much vertical space as its content needs, up to
+ * the maximum available (pane rows minus the reserved notification row and the
+ * metadata panel's minimum height).  The metadata panel fills whatever space
+ * remains, expanding when the list is short.
+ *
+ * This function is called both by the renderer (createListRenderer) and by
+ * the main TUI loop (to pass the panel height into metaScrollDown for
+ * correct clamping).
+ *
+ * @param flatItems - Flattened items to display.
+ * @param scrollOffset - Current scroll offset into the item list.
+ * @param bannerCount - Number of code-freeze banner rows.
+ * @param termSize - Terminal size.
+ * @returns The metadata panel height, the list area, and the list height.
+ */
+export function computeDynamicLayout(
+  flatItems: WorkItem[],
+  scrollOffset: number,
+  bannerCount: number,
+  termSize: TermSize,
+): { panelHeight: number; listArea: number; listHeight: number } {
+  const { rows } = termSize;
+  const minMeta = 3;
+  const chromeLines = 2 + bannerCount; // header + banners + footer
+
+  // Helper: count group separators in a window of items.
+  const countSeparators = (window: WorkItem[]): number => {
+    let count = 0;
+    let lastGroup: number | undefined;
+    for (const item of window) {
+      if (item.group !== undefined && item.id !== '..') {
+        if (lastGroup === undefined || item.group !== lastGroup) {
+          count++;
+        }
+        lastGroup = item.group;
+      }
+    }
+    return count;
+  };
+
+  // Estimate the visible window with metadata at its minimum so the estimate
+  // reflects the list's true space need.
+  const estListHeight = Math.max(3, rows - 4 - minMeta);
+  const estVisible = flatItems.slice(scrollOffset, scrollOffset + estListHeight);
+  const estSepCount = countSeparators(estVisible);
+  const estHasTopIndicator = scrollOffset > 0;
+  const estHasBottomIndicator = scrollOffset + estVisible.length < flatItems.length;
+  const estIndicatorRows = (estHasTopIndicator ? 1 : 0) + (estHasBottomIndicator ? 1 : 0);
+  const contentNeed = estIndicatorRows + estVisible.length + estSepCount;
+
+  const panelHeight = Math.max(minMeta, Math.max(0, rows - 1 - contentNeed - chromeLines));
+  const listArea = Math.max(1, rows - 1 - panelHeight);
+  // The initial visible window is the maximum possible (metadata at its
+  // minimum); the caller's trimming logic reduces it to fit the actual
+  // budget (separators + fold indicators). This keeps the window generous so
+  // a short list is never truncated just because the metadata panel expanded.
+  const listHeight = Math.max(3, rows - 4 - minMeta);
+  return { panelHeight, listArea, listHeight };
 }
 
 // ── Terminal helpers ─────────────────────────────────────────────────
@@ -641,12 +706,17 @@ export class WorkItemListState {
   }
 
   /** Scroll the metadata panel down (toward the end of the content). */
-  metaScrollDown(amount = 1): void {
-    const panelHeight = computeMetadataPanelHeight(this.termSize.rows);
+  metaScrollDown(amount = 1, panelHeight?: number): void {
+    // Use the provided panel height (from the renderer's new dynamic layout)
+    // or fall back to computing from termSize.
+    let ph = panelHeight;
+    if (ph === undefined) {
+      ph = computeMetadataPanelHeight(this.termSize.rows);
+    }
     const selected = this.getSelectedItem();
     if (!selected) return;
-    const allLines = formatMetadataPanel(selected, this.termSize.cols, panelHeight, 0);
-    const maxScroll = Math.max(0, allLines.length - panelHeight);
+    const allLines = formatMetadataPanel(selected, this.termSize.cols, ph, 0);
+    const maxScroll = Math.max(0, allLines.length - ph);
     this.metaScrollOffset = Math.min(maxScroll, this.metaScrollOffset + amount);
   }
 
@@ -781,9 +851,13 @@ export class WorkItemListState {
 
   /** Number of visible list rows (accounts for the metadata panel). */
   _listHeight(): number {
-    // Reserve 3 rows for header, 1 for footer, 1 for status
-    const panelHeight = computeMetadataPanelHeight(this.termSize.rows);
-    return Math.max(3, this.termSize.rows - 4 - panelHeight);
+    // Dynamic layout (WL-0MSQ44MDX008U69J): list takes up to the max available
+    // rows minus the metadata minimum (3 rows).  This approximates the renderer's
+    // computation — the state does not know the banner count, so it uses a simpler
+    // formula. The renderer's own list-height computation is the source of truth.
+    const rows = this.termSize.rows;
+    const minMeta = 3; // metadata panel minimum
+    return Math.max(3, rows - 4 - minMeta); // rows - chrome(4) - minMeta
   }
 
   _adjustScroll(): void {
@@ -1844,12 +1918,16 @@ export function keyToAction(key: string): KeyAction {
  * @param state - The current list state (mutated in place)
  * @param key - The raw keypress string
  * @param termSize - Current terminal dimensions
+ * @param panelHeight - Dynamic metadata panel height (WL-0MSQ44MDX008U69J),
+ *                      used to clamp m/M metadata scrolling; falls back to
+ *                      the legacy fixed-height computation when omitted.
  * @returns The action string, or null if unhandled
  */
 export function handleKeypress(
   state: WorkItemListState,
   key: string,
   termSize: TermSize,
+  panelHeight?: number,
 ): KeyAction {
   if (state.mode === 'detail') {
     if (key === '\x1b' || key === 'q') {
@@ -2020,7 +2098,7 @@ export function handleKeypress(
       break;
     case 'meta-down':
       // Scroll the metadata panel (independent of list navigation)
-      state.metaScrollDown(1);
+      state.metaScrollDown(1, panelHeight);
       break;
     case 'meta-up':
       state.metaScrollUp(1);
@@ -2185,11 +2263,16 @@ interface ListRowLayout {
 }
 
 function computeListRowLayout(state: WorkItemListState, termSize: TermSize): ListRowLayout {
-  const rows = termSize.rows;
-  const panelHeight = computeMetadataPanelHeight(rows);
-  const listArea = Math.max(1, rows - 1 - panelHeight);
-  const listHeight = Math.max(3, rows - 4 - panelHeight);
   const flatItems = state.getFlattenedItems();
+  // Use dynamic layout with bannerCount=0 — this path is the mouse click
+  // mapper and does not have the banner state; the layout is a close
+  // approximation that keeps click mapping consistent with the renderer.
+  const { listArea, listHeight } = computeDynamicLayout(
+    flatItems,
+    state.scrollOffset,
+    /* bannerCount = */ 0,
+    termSize,
+  );
   const chromeLines = 2; // header + footer (no banners in this path)
   const budgetForItemsAndSeps = Math.max(0, listArea - chromeLines);
 
@@ -2245,7 +2328,13 @@ function computeListRowLayout(state: WorkItemListState, termSize: TermSize): Lis
  * row is chrome (header, fold indicator, separator, footer, panel). */
 function mapListRowToIndex(state: WorkItemListState, y: number, termSize: TermSize): number | null {
   if (y <= 1) return null; // header
-  const listArea = Math.max(1, termSize.rows - 1 - computeMetadataPanelHeight(termSize.rows));
+  const flatItems = state.getFlattenedItems();
+  const { listArea } = computeDynamicLayout(
+    flatItems,
+    state.scrollOffset,
+    /* bannerCount = */ 0,
+    termSize,
+  );
   if (y > 1 + listArea) return null; // footer, metadata panel, notification
   const layout = computeListRowLayout(state, termSize);
   let row = 2;
@@ -2550,11 +2639,11 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     // icon, including audit/review icons (AC1, WL-0MSBV4RYO008JL70).
     const noIcons = !showIconsGetter();
     const output: string[] = [];
-    // The metadata panel reserves 20–40% of the pane height below the list;
-    // the list area is the remaining height minus the notification row.
-    const panelHeight = computeMetadataPanelHeight(rows);
-    const listArea = Math.max(1, rows - 1 - panelHeight);
-    const listHeight = Math.max(3, rows - 4 - panelHeight);
+    // Dynamic layout (WL-0MSQ44MDX008U69J): the selection list takes up to the
+    // full available pane height; the metadata panel fills whatever space
+    // remains, expanding when the list is short and sitting below the fold when
+    // the list is long.  The metadata panel keeps a minimum of 3 rows (see
+    // computeDynamicLayout).
 
     if (mode === 'detail' && detailItem) {
       const viewportHeight = Math.max(10, rows - 1);
@@ -2630,15 +2719,16 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     // calls state.getFlattenedItems() before passing items here). Do NOT re-flatten.
     const flatItems = items;
 
-    // Items with group separators. Each `── <Group> ──` separator consumes a
-    // row, so the visible window must be sized so header + items + separators
-    // + fill + footer fit in `rows - 1` lines (the last row is reserved for
-    // the notification line appended by render()). Without this accounting the
-    // output overflows the pane and the terminal scrolls the header/top items
-    // off the top (WL-0MSAAON63003N6LO). The active stage filter is indicated
-    // in the header only (filterLabel) — no standalone filter bar is rendered.
-    const chromeLines = 2 + bannerCount; // header + banner(s) + footer
-    const budgetForItemsAndSeps = Math.max(0, listArea - chromeLines);
+    // Dynamic layout (WL-0MSQ44MDX008U69J): chrome rows already rendered are
+    // header + banners.  Compute the list's content need from its items, then
+    // let the metadata panel fill whatever space remains (≥ 3-row minimum).
+    const { panelHeight, listArea, listHeight } = computeDynamicLayout(
+      flatItems,
+      scrollOffset,
+      bannerCount,
+      termSize,
+    );
+    const chromeLines = 2 + bannerCount; // header + banners + footer
     // Count the group separators a window would render (same logic as the
     // render loop below) so the window can be trimmed when separators would
     // overflow the pane height.
@@ -2655,6 +2745,15 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       }
       return count;
     };
+
+    // Items with group separators. Each `── <Group> ──` separator consumes a
+    // row, so the visible window must be sized so header + items + separators
+    // + fill + footer fit in `rows - 1` lines (the last row is reserved for
+    // the notification line appended by render()). Without this accounting the
+    // output overflows the pane and the terminal scrolls the header/top items
+    // off the top (WL-0MSAAON63003N6LO). The active stage filter is indicated
+    // in the header only (filterLabel) — no standalone filter bar is rendered.
+    const budgetForItemsAndSeps = Math.max(0, listArea - chromeLines);
     let visible = flatItems.slice(scrollOffset, scrollOffset + listHeight);
     while (visible.length > 0 && visible.length + countSeparators(visible) > budgetForItemsAndSeps) {
       // Drop trailing items until items + separators fit the pane height.
@@ -4141,7 +4240,20 @@ export async function runWorklistTui(
     // Save mode before processing — selectItem() changes mode to 'detail',
     // but we need to distinguish "just entered detail" from "confirm in detail".
     const prevMode = state.mode;
-    const action = handleKeypress(state, key, termSize);
+    // Compute the dynamic panel height so metaScrollDown clamps correctly
+    // (WL-0MSQ44MDX008U69J). The value is used only for the m/M scroll
+    // clamping — the actual rendering is done by createListRenderer.
+    const displayItems = state.mode === 'list'
+      ? state.getFlattenedItems()
+      : state.items;
+    const bannerCount = (codeFreezeActive ? 1 : 0) + (codeFreezeAmbiguous ? 1 : 0);
+    const { panelHeight } = computeDynamicLayout(
+      displayItems,
+      state.scrollOffset,
+      bannerCount,
+      termSize,
+    );
+    const action = handleKeypress(state, key, termSize, panelHeight);
 
     // If key wasn't handled as navigation and chord registry exists,
     // check if it's a shortcut or part of a chord sequence

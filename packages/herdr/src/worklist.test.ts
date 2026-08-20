@@ -24,6 +24,7 @@ import {
   getChordHelpHints,
   handleKeypress,
   computeMetadataPanelHeight,
+  computeDynamicLayout,
   formatMetadataPanel,
   formatTimestamp,
   buildMetaRows,
@@ -231,10 +232,13 @@ describe('createListRenderer — fold indicators', () => {
     const items: WorkItem[] = Array.from({ length: 30 }, (_, i) => makeItem(`I${i}`));
     const state = new WorkItemListState(items, TERM_80x24);
     // Unchanged: the visible window is the first listHeight items, no
-    // indicator rows are consumed from navigation state.
-    expect(state.getVisibleItems()).toHaveLength(13);
+    // indicator rows are consumed from navigation state. With the dynamic
+    // layout (WL-0MSQ44MDX008U69J) the list can use up to the full available
+    // space, so the window is the max list height (rows - 4 - minMeta = 17
+    // on 80x24).
+    expect(state.getVisibleItems()).toHaveLength(17);
     expect(state.getVisibleItems()[0].id).toBe('I0');
-    expect(state.getVisibleItems()[12].id).toBe('I12');
+    expect(state.getVisibleItems()[16].id).toBe('I16');
   });
 });
 
@@ -2049,10 +2053,17 @@ describe('WorkItemListState — metadata scroll state', () => {
 
   it('clamps metaScrollDown to the panel content height', () => {
     const state = new WorkItemListState([makeRichItem()], TERM_80x24);
-    const panelHeight = computeMetadataPanelHeight(TERM_80x24.rows);
+    // Use the dynamic layout (WL-0MSQ44MDX008U69J): for a single-item list the
+    // metadata panel expands to fill the pane, so the clamp uses that height.
+    const { panelHeight } = computeDynamicLayout(
+      state.items,
+      state.scrollOffset,
+      /* bannerCount = */ 0,
+      TERM_80x24,
+    );
     const content = formatMetadataPanel(state.getSelectedItem()!, TERM_80x24.cols, panelHeight, 0);
     const maxScroll = Math.max(0, content.length - panelHeight);
-    state.metaScrollDown(100);
+    state.metaScrollDown(100, panelHeight);
     expect(state.metaScrollOffset).toBe(maxScroll);
   });
 
@@ -2091,11 +2102,12 @@ describe('handleKeypress — metadata scroll keys', () => {
     state.pageUp();
     expect(state.selectedIndex).toBe(0);
 
-    // pageDown advances by the list page size (13 rows on 80x24 — the
-    // freed blank + filter-bar chrome rows are given back to the list)
+    // pageDown advances by the list page size (17 rows on 80x24 — the list
+    // may now use up to the full available space minus the metadata minimum,
+    // WL-0MSQ44MDX008U69J)
     state.selectedIndex = 0;
     state.pageDown();
-    expect(state.selectedIndex).toBe(13);
+    expect(state.selectedIndex).toBe(17);
 
     // pageDown clamps at the last item
     state.selectedIndex = 29;
@@ -2105,7 +2117,7 @@ describe('handleKeypress — metadata scroll keys', () => {
     // pageUp moves back exactly one page
     state.selectedIndex = 23;
     state.pageUp();
-    expect(state.selectedIndex).toBe(10);
+    expect(state.selectedIndex).toBe(6);
   });
 
   it('goToFirst/goToLast jump to the ends via state', () => {
@@ -2133,12 +2145,12 @@ describe('handleKeypress — metadata scroll keys', () => {
 
     // PgUp (\x1b[5~) → pageup
     expect(handleKeypress(state, '\x1b[5~', TERM_80x24)).toBe('pageup');
-    expect(state.selectedIndex).toBe(16); // 29 - 13
+    expect(state.selectedIndex).toBe(12); // 29 - 17
 
     // PgDn (\x1b[6~) → pagedown
     state.selectedIndex = 0;
     expect(handleKeypress(state, '\x1b[6~', TERM_80x24)).toBe('pagedown');
-    expect(state.selectedIndex).toBe(13);
+    expect(state.selectedIndex).toBe(17);
   });
 });
 
@@ -3232,5 +3244,260 @@ describe('inline-note editing — viewer integration (WL-0MSKV6SKK008MMXR)', () 
 
     expect(result.doc).not.toContain('[NOTE');
     expect(mockExec).not.toHaveBeenCalled();
+  });
+});
+
+// ── Dynamic list height & metadata panel layout (WL-0MSQ44MDX008U69J) ───
+// The list takes as much space as its content needs (up to the max available
+// rows minus the metadata minimum of 3 rows).  When the list is short the
+// metadata panel fills the leftover space.  When the list is long it fills
+// the available space and the metadata panel sits at the bottom of the pane.
+
+describe('createListRenderer — dynamic list height (WL-0MSQ44MDX008U69J)', () => {
+  const renderer = createListRenderer();
+
+  // ── Short list: metadata fills the rest ────────────────────────
+
+  it('lets a short list take only the rows it needs; metadata fills the rest', () => {
+    const items: WorkItem[] = [makeItem('A'), makeItem('B'), makeItem('C')];
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    const lines = output.split('\n');
+    // Total lines must be ≤ rows - 1 (notification row reserved)
+    expect(lines.length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    // The metadata panel (── A ── separator, selected item's id) is visible
+    expect(output).toContain('── A ──');
+    // The list header is always visible
+    expect(output).toContain('Work Items');
+    expect(output).toContain('Item A');
+    expect(output).toContain('Item B');
+    expect(output).toContain('Item C');
+    // Metadata panel has at least 3 rows (minimum)
+    const metaSeparatorIdx = lines.findIndex(l => l.includes('── A ──'));
+    expect(metaSeparatorIdx).toBeGreaterThan(-1);
+    const remainingLines = lines.length - metaSeparatorIdx;
+    expect(remainingLines).toBeGreaterThanOrEqual(3);
+  });
+
+  it('metadata panel expands to fill leftover space when list has one item', () => {
+    const items: WorkItem[] = [makeItem('A')];
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    const lines = output.split('\n');
+    expect(lines.length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    const metaSeparatorIdx = lines.findIndex(l => l.includes('── A ──'));
+    expect(metaSeparatorIdx).toBeGreaterThan(-1);
+    // Metadata should take most of the remaining space (at least half)
+    const remainingLines = lines.length - metaSeparatorIdx;
+    expect(remainingLines).toBeGreaterThan(lines.length / 2);
+  });
+
+  // ── Long list: list fills the pane ─────────────────────────────
+
+  it('lets a long list fill the available space; metadata is below the fold', () => {
+    const items: WorkItem[] = Array.from({ length: 50 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    const lines = output.split('\n');
+    expect(lines.length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    // Header + first items visible
+    expect(output).toContain('Work Items');
+    expect(output).toContain('Item I0');
+    // Bottom fold indicator visible (items below the fold)
+    expect(output).toContain('▼ more');
+    // Metadata panel is present (rendered after the list, below the fold)
+    const metaSeparatorIdx = lines.findIndex(l => l.includes('── I0 ──'));
+    expect(metaSeparatorIdx).toBeGreaterThan(-1);
+    // With a long list the metadata panel is at the very bottom (minimum
+    // height), not consuming rows the list could use.
+    const remainingLines = lines.length - metaSeparatorIdx;
+    expect(remainingLines).toBeGreaterThanOrEqual(3);
+    expect(remainingLines).toBeLessThanOrEqual(8);
+  });
+
+  // ── Initial view at top ────────────────────────────────────────
+
+  it('starts view at top of selection list (header + first items)', () => {
+    const items: WorkItem[] = Array.from({ length: 30 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    // First visible item is I0 (index 0), not a scrolled offset
+    expect(output).toContain('Item I0');
+    // Header is the first line
+    const firstLine = output.split('\n')[0];
+    expect(firstLine).toContain('Work Items');
+    // No ▲ more indicator (not scrolled down)
+    expect(output).not.toContain('▲ more');
+  });
+
+  // ── Line-count invariant ───────────────────────────────────────
+
+  it('preserves the rows - 1 line-count invariant with dynamic layout (many groups)', () => {
+    const items: WorkItem[] = Array.from({ length: 60 }, (_, i) => ({
+      ...makeItem(`G${i}`),
+      group: i,
+      groupLabel: `Group ${i}`,
+    }));
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    expect(output).toContain('Work Items');
+  });
+
+  it('preserves the rows - 1 line-count invariant with banner + dynamic layout', () => {
+    const items: WorkItem[] = Array.from({ length: 40 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(
+      items,
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      true, // codeFreezeActive
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    expect(output).toContain('CODE FREEZE');
+    expect(output).toContain('Work Items');
+  });
+
+  it('preserves the rows - 1 line-count invariant with ambiguous banner + dynamic layout', () => {
+    const items: WorkItem[] = Array.from({ length: 40 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(
+      items,
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      false, // codeFreezeActive (fail-open: browsing stays unblocked)
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true, // showHelpText
+      true, // codeFreezeAmbiguous
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    expect(output).toContain('Ambiguous Codefreeze');
+  });
+
+  it('preserves the rows - 1 invariant with panel + groups + both banners', () => {
+    const items: WorkItem[] = Array.from({ length: 50 }, (_, i) => ({
+      ...makeItem(`I${i}`),
+      group: i,
+      groupLabel: `Group ${i}`,
+    }));
+    const output = renderer(
+      items,
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      true, // codeFreezeActive
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true, // showHelpText
+      true, // codeFreezeAmbiguous
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    expect(output).toContain('CODE FREEZE');
+    expect(output).toContain('Ambiguous Codefreeze');
+  });
+
+  // ── Metadata scroll clamping with new layout ───────────────────
+
+  it('metadata scroll clamping works under the new layout', () => {
+    const state = new WorkItemListState([
+      {
+        ...makeRichItem(),
+        tags: ['tag1', 'tag2', 'tag3', 'tag4', 'tag5', 'tag6', 'tag7', 'tag8', 'tag9', 'tag10'],
+        description: 'A very long description line that will generate lots of metadata panel content to test scroll clamping. '.repeat(10),
+      },
+    ], TERM_80x24);
+    state.setSelectedIndex(0);
+    // metaScrollDown should not throw and should clamp correctly
+    expect(() => {
+      state.metaScrollDown(100);
+    }).not.toThrow();
+    // metaScrollUp should clamp at 0
+    state.metaScrollOffset = 5;
+    state.metaScrollUp(10);
+    expect(state.metaScrollOffset).toBe(0);
+  });
+
+  // ── Scroll offset 0 with long list ─────────────────────────────
+
+  it('long list at scroll offset 0 shows top items and bottom indicator', () => {
+    const items: WorkItem[] = Array.from({ length: 40 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    expect(output).toContain('Item I0');
+    expect(output).toContain('▼ more');
+    expect(output).not.toContain('▲ more');
+  });
+
+  // ── Different terminal sizes ───────────────────────────────────
+
+  it('preserves the invariant on very tall terminals (60 rows)', () => {
+    const tallTerm = { rows: 60, cols: 80 };
+    const items: WorkItem[] = Array.from({ length: 100 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 0, 0, tallTerm, null, 'list', null);
+    expect(output.split('\n').length).toBeLessThanOrEqual(tallTerm.rows - 1);
+  });
+
+  it('preserves the invariant on very short terminals (10 rows)', () => {
+    const shortTerm = { rows: 10, cols: 40 };
+    const items: WorkItem[] = Array.from({ length: 10 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 0, 0, shortTerm, null, 'list', null);
+    expect(output.split('\n').length).toBeLessThanOrEqual(shortTerm.rows - 1);
+    expect(output).toContain('Work Items');
+  });
+
+  // ── Short list with groups ─────────────────────────────────────
+
+  it('short list with groups: metadata fills the rest', () => {
+    const items: WorkItem[] = [
+      makeItem('A'),
+      { ...makeItem('B'), group: 0, groupLabel: 'Group A' },
+      { ...makeItem('C'), group: 0, groupLabel: 'Group A' },
+    ];
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    const lines = output.split('\n');
+    expect(lines.length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    expect(output).toContain('── Group A ──');
+    const metaSeparatorIdx = lines.findIndex(l => l.includes('── A ──'));
+    expect(metaSeparatorIdx).toBeGreaterThan(-1);
+    // Metadata should take at least 5 rows (more than minimum)
+    expect(lines.length - metaSeparatorIdx).toBeGreaterThanOrEqual(5);
   });
 });
