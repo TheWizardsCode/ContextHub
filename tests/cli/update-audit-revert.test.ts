@@ -184,4 +184,99 @@ describe('auto-revert on not-ready-to-close audit verdict', () => {
       expect((await showItem(doneId)).stage).toBe('done');
     });
   });
+
+  // =======================================================================
+  // wl audit-set --ready-to-close no
+  // =======================================================================
+  describe('wl audit-set', () => {
+    it('reverts an in_review/completed item and reports it in JSON output', async () => {
+      const id = await createItem('--status completed --stage in_review');
+
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json audit-set ${id} --ready-to-close no --summary "Still needs work"`
+      );
+      const result = JSON.parse(stdout);
+
+      expect(result.success).toBe(true);
+      expect(result.reverted).toBeDefined();
+      expect(result.reverted.item.id).toBe(id);
+      expect(result.reverted.from).toEqual({ status: 'completed', stage: 'in_review' });
+      expect(result.reverted.to).toEqual({ status: 'open', stage: 'plan_complete' });
+
+      const item = await showItem(id);
+      expect(item.status).toBe('open');
+      expect(item.stage).toBe('plan_complete');
+    });
+
+    it('preserves the item priority on reversion', async () => {
+      const id = await createItem('--status completed --stage in_review --priority critical');
+
+      await execAsync(
+        `tsx ${cliPath} --json audit-set ${id} --ready-to-close no --summary "Not done"`
+      );
+
+      const item = await showItem(id);
+      expect(item.status).toBe('open');
+      expect(item.stage).toBe('plan_complete');
+      expect(item.priority).toBe('critical');
+    });
+
+    it('does not revert when ready-to-close is yes', async () => {
+      const id = await createItem('--status completed --stage in_review');
+
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json audit-set ${id} --ready-to-close yes --summary "Done"`
+      );
+      const result = JSON.parse(stdout);
+
+      expect(result.success).toBe(true);
+      expect(result.reverted).toBeUndefined();
+
+      const item = await showItem(id);
+      expect(item.status).toBe('completed');
+      expect(item.stage).toBe('in_review');
+    });
+
+    it('does not revert items that are not in_review/completed', async () => {
+      const ideaId = await createItem('', 'Idea item');
+      await execAsync(`tsx ${cliPath} --json update ${ideaId} --status open --stage idea`);
+
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json audit-set ${ideaId} --ready-to-close no --summary "Nope"`
+      );
+      const result = JSON.parse(stdout);
+
+      expect(result.success).toBe(true);
+      expect(result.reverted).toBeUndefined();
+      expect((await showItem(ideaId)).stage).toBe('idea');
+    });
+
+    it('does not revert a done item', async () => {
+      const id = await createItem('--status completed --stage done');
+
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json audit-set ${id} --ready-to-close no --summary "Nope"`
+      );
+      const result = JSON.parse(stdout);
+
+      expect(result.success).toBe(true);
+      expect(result.reverted).toBeUndefined();
+
+      const item = await showItem(id);
+      expect(item.status).toBe('completed');
+      expect(item.stage).toBe('done');
+    });
+
+    it('prints a human-readable summary line on reversion', async () => {
+      const id = await createItem('--status completed --stage in_review');
+
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} audit-set ${id} --ready-to-close no --summary "More work"`
+      );
+
+      expect(stdout).toContain(
+        `[${id} reverted from completed/in_review to open/plan_complete]`
+      );
+    });
+  });
 });
