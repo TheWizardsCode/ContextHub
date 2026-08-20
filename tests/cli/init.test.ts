@@ -18,7 +18,30 @@ import { initRepo, initBareRepo } from './git-helpers.js';
 import { cleanupTempDir, createTempDir } from '../test-utils.js';
 
 describe('CLI Init Tests', () => {
-  it('should insert the AGENTS.md pointer line when an existing file is present', async () => {
+  const CANONICAL_GLOBAL_REFERENCE = '## Global agent guidance';
+  const CANONICAL_REFERENCE_LINE = 'Read the global agent instructions at `~/.pi/agent/AGENTS.md`';
+  const CANONICAL_PROJECT_SECTION = '## Project-specific guidance';
+
+  it('should install the canonical global-reference structure in a fresh project', async () => {
+    const tempState = enterTempDir();
+    try {
+      await execAsync(
+        `tsx ${cliPath} init --project-name "Test Project" --prefix TEST --auto-export yes --auto-sync no --workflow-inline no --agents-template skip --stats-plugin-overwrite no`
+      );
+
+      const updated = fs.readFileSync('AGENTS.md', 'utf-8');
+      expect(updated).toContain(CANONICAL_GLOBAL_REFERENCE);
+      expect(updated).toContain(CANONICAL_REFERENCE_LINE);
+      expect(updated).toContain(CANONICAL_PROJECT_SECTION);
+      // The template is a reference, not a copy of the global instruction set.
+      expect(updated).not.toContain('CRITICAL RULES');
+      expect(updated).not.toContain('Follow the global AGENTS.md in addition to the rules below');
+    } finally {
+      leaveTempDir(tempState);
+    }
+  }, 45000);
+
+  it('should insert the AGENTS.md global-reference template when an existing file is present', async () => {
     const tempState = enterTempDir();
     try {
       const existing = '## Local Rules\n\n- Do the local thing\n';
@@ -29,20 +52,22 @@ describe('CLI Init Tests', () => {
       );
 
       const updated = fs.readFileSync('AGENTS.md', 'utf-8');
-      const pointer = 'Follow the global AGENTS.md in addition to the rules below. The local rules below take priority in the event of a conflict.';
       const lines = updated.split(/\r?\n/).filter(line => line.trim().length > 0);
-      expect(lines[0]).toBe(pointer);
+      // The canonical global-reference section is emitted first ...
+      expect(lines[0]).toBe(CANONICAL_GLOBAL_REFERENCE);
+      expect(updated).toContain(CANONICAL_REFERENCE_LINE);
+      // ... and existing local rules are preserved below the reference.
+      expect(updated.indexOf(CANONICAL_GLOBAL_REFERENCE)).toBeLessThan(updated.indexOf(existing.trim()));
       expect(updated).toContain(existing.trim());
     } finally {
       leaveTempDir(tempState);
     }
   }, 45000);
 
-  it('should not duplicate the AGENTS.md pointer line on re-run', async () => {
+  it('should not duplicate the AGENTS.md global-reference on re-run', async () => {
     const tempState = enterTempDir();
     try {
-      const pointer = 'Follow the global AGENTS.md in addition to the rules below. The local rules below take priority in the event of a conflict.';
-      const existing = `${pointer}\n\n## Local Rules\n\n- Keep it\n`;
+      const existing = `## Global agent guidance\n\n${CANONICAL_REFERENCE_LINE}\n\n## Project-specific guidance\n\n- Keep it\n`;
       fs.writeFileSync('AGENTS.md', existing, 'utf-8');
 
       await execAsync(
@@ -50,9 +75,9 @@ describe('CLI Init Tests', () => {
       );
 
       const updated = fs.readFileSync('AGENTS.md', 'utf-8');
-      const pointerMatches = updated.split(/\r?\n/).filter(line => line.trim() === pointer).length;
-      expect(pointerMatches).toBe(1);
-      expect(updated).toContain('## Local Rules');
+      const referenceMatches = updated.split(/\r?\n/).filter(line => line.trim() === CANONICAL_GLOBAL_REFERENCE).length;
+      expect(referenceMatches).toBe(1);
+      expect(updated).toContain('- Keep it');
     } finally {
       leaveTempDir(tempState);
     }

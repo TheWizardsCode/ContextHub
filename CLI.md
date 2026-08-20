@@ -1066,7 +1066,7 @@ Other commands cover repository bootstrap and local system status. Use these to 
 
 ### `init`
 
-Initialize Worklog configuration in the repository (creates `.worklog` and default config). `wl init` also installs `AGENTS.md` in the project root, prefixed with a pointer line to the global `AGENTS.md`. If `AGENTS.md` already contains the pointer line, installation is skipped (idempotent, no prompt). If `AGENTS.md` exists without the pointer, it prompts O/A/M — **O**verwrite (destructive), **A**dd pointer (keeps existing content), **M**anual (skip) — unless you pass `--agents-template` for unattended runs. When workflow templates are available, `wl init` prompts you to choose between no formal workflow, a basic Worklog-aware workflow, or manual management (unless you pass `--workflow-inline` for unattended runs). See [AGENTS.md Install Model](docs/AGENTS-INSTALL.md) for the full install flow.
+Initialize Worklog configuration in the repository (creates `.worklog` and default config). `wl init` also installs `AGENTS.md` in the project root with the canonical global-reference structure (`## Global agent guidance` pointing at `~/.pi/agent/AGENTS.md` plus a `## Project-specific guidance` placeholder). If `AGENTS.md` already contains the global reference, installation is skipped (idempotent, no prompt). If `AGENTS.md` exists without the reference, it prompts O/A/M — **O**verwrite (destructive), **A**dd reference above existing content, **M**anual (skip) — unless you pass `--agents-template` for unattended runs. When workflow templates are available, `wl init` prompts you to choose between no formal workflow, a basic Worklog-aware workflow, or manual management (unless you pass `--workflow-inline` for unattended runs). See [AGENTS.md Install Model](docs/AGENTS-INSTALL.md) for the full install flow.
 
 Options:
 
@@ -1074,7 +1074,7 @@ Options:
 - `--prefix <prefix>` — Issue ID prefix (optional).
 - `--auto-export <yes|no>` — Auto-export data to JSONL after changes (optional).
 - `--auto-sync <yes|no>` — Auto-sync data to git after changes (optional).
-- `--agents-template <overwrite|append|skip>` — What to do when AGENTS.md exists (optional). Append inserts the pointer line at the top while keeping existing content.
+- `--agents-template <overwrite|append|skip>` — What to do when AGENTS.md exists (optional). Append inserts the global-agents reference at the top while keeping existing content below.
 - `--workflow-inline <yes|no>` — Answer the workflow prompt (yes chooses the basic workflow option; no chooses no formal workflow). Omit to prompt interactively.
 - `--stats-plugin-overwrite <yes|no>` — Overwrite existing stats plugin if present (optional).
 

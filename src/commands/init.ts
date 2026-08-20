@@ -28,7 +28,14 @@ const WORKLOG_AGENT_DESTINATION_FILENAME = 'AGENTS.md';
 const WORKFLOW_TEMPLATE_RELATIVE_PATH = 'templates/WORKFLOW.md';
 const WORKFLOW_DESTINATION_FILENAME = 'WORKFLOW.md';
 const WORKLOG_GITIGNORE_TEMPLATE_RELATIVE_PATH = 'templates/GITIGNORE_WORKLOG.txt';
-const WORKLOG_AGENT_POINTER_LINE = 'Follow the global AGENTS.md in addition to the rules below. The local rules below take priority in the event of a conflict.';
+/**
+ * Marker used to detect that the canonical "Global agent guidance" reference
+ * structure is already present in a project AGENTS.md. The template
+ * (templates/AGENTS.md) self-references the global file, so projects that
+ * install or append it must NOT duplicate the reference on re-run.
+ */
+const CANONICAL_GLOBAL_REFERENCE_MARKER = '## Global agent guidance';
+const CANONICAL_GLOBAL_REFERENCE_LINE = 'Read the global agent instructions at `~/.pi/agent/AGENTS.md`';
 
 /**
  * Scheduled-prompts provisioning (WL-0MSS1Q5ER007QDKX AC1): `wl init` copies
@@ -829,12 +836,19 @@ function normalizeContent(content: string): string {
   return content.replace(/\r\n/g, '\n').trimEnd();
 }
 
-function analyzeAgentContent(existingContent: string): { hasPointer: boolean; trimmed: string; eol: string; hasOnlyWhitespace: boolean } {
+function analyzeAgentContent(existingContent: string): { hasGlobalReference: boolean; trimmed: string; eol: string; hasOnlyWhitespace: boolean } {
   const lines = existingContent.split(/\r?\n/);
   const firstNonEmpty = lines.find(line => line.trim().length > 0);
   const eol = existingContent.includes('\r\n') ? '\r\n' : '\n';
   return {
-    hasPointer: firstNonEmpty === WORKLOG_AGENT_POINTER_LINE,
+    // Detect the canonical global-reference structure (template emits
+    // "## Global agent guidance" referencing ~/.pi/agent/AGENTS.md). Also
+    // treat the legacy pointer line as already-referenced so previously
+    // installed projects stay idempotent on re-run.
+    hasGlobalReference:
+      existingContent.includes(CANONICAL_GLOBAL_REFERENCE_MARKER) ||
+      existingContent.includes(CANONICAL_GLOBAL_REFERENCE_LINE) ||
+      firstNonEmpty?.startsWith('Follow the global AGENTS.md') === true,
     trimmed: existingContent.trimEnd(),
     eol,
     hasOnlyWhitespace: firstNonEmpty === undefined
@@ -851,7 +865,7 @@ async function promptAgentTemplateAction(): Promise<AgentTemplateAction> {
       'O - Overwrite the existing AGENTS.md\n' +
       '\tPRO: no chance of a conflict between existing AGENTS.md and the Workflow instructions\n' +
       '\tCON: DESTRUCTIVE to your existing configuration\n\n' +
-      'A - Add a pointer to the global AGENTS.md\n' +
+      'A - Add the global-agents reference above your existing rules\n' +
       '\tPRO: retains your existing instructions and simply adds to them\n' +
       '\tCON: potentially conflicting instructions between the two files\n\n' +
       'M - Manual management, read the docs and set things up as you like\n' +
@@ -887,17 +901,16 @@ async function ensureAgentTemplateInstalled(options: { silent: boolean; action?:
     const templateContent = normalizeContent(fs.readFileSync(templatePath, 'utf-8'));
     if (fs.existsSync(destinationPath)) {
       const existingRaw = fs.readFileSync(destinationPath, 'utf-8');
-      const { hasPointer, trimmed: existingContent, eol, hasOnlyWhitespace } = analyzeAgentContent(existingRaw);
-      if (hasPointer) {
-        return { installed: false, skipped: true, reason: 'pointer already present', templatePath, destinationPath };
+      const { hasGlobalReference, trimmed: existingContent, eol, hasOnlyWhitespace } = analyzeAgentContent(existingRaw);
+      if (hasGlobalReference) {
+        return { installed: false, skipped: true, reason: 'global reference already present', templatePath, destinationPath };
       }
       if (options.action === 'skip') {
         return { installed: false, skipped: true, reason: 'user chose to manage manually', templatePath, destinationPath };
       }
 
       if (options.action === 'overwrite') {
-        const pointerTemplate = `${WORKLOG_AGENT_POINTER_LINE}\n\n${templateContent}`;
-        fs.writeFileSync(destinationPath, `${pointerTemplate}\n`, { encoding: 'utf-8' });
+        fs.writeFileSync(destinationPath, `${templateContent}\n`, { encoding: 'utf-8' });
         if (!options.silent) {
           console.log(`✓ Overwrote AGENTS template at ${destinationPath}`);
         }
@@ -905,14 +918,16 @@ async function ensureAgentTemplateInstalled(options: { silent: boolean; action?:
       }
 
       if (options.action === 'append') {
+        // Prepend the canonical global-reference template above existing
+        // content so project-specific local rules stay below the reference.
         const insertion = hasOnlyWhitespace
-          ? `${WORKLOG_AGENT_POINTER_LINE}${eol}${eol}${templateContent}`
-          : `${WORKLOG_AGENT_POINTER_LINE}${existingContent ? `${eol}${eol}${existingContent}` : ''}`;
+          ? templateContent
+          : `${templateContent}${existingContent ? `${eol}${eol}${existingContent}` : ''}`;
         fs.writeFileSync(destinationPath, `${insertion}${eol}`, { encoding: 'utf-8' });
         if (!options.silent) {
-          console.log(`✓ Updated AGENTS.md with Worklog pointer at ${destinationPath}`);
+          console.log(`✓ Updated AGENTS.md with global-agents reference at ${destinationPath}`);
         }
-        return { installed: true, skipped: false, templatePath, destinationPath, insertedPointer: true };
+        return { installed: true, skipped: false, templatePath, destinationPath, insertedReference: true };
       }
 
       if (options.silent) {
@@ -926,8 +941,7 @@ async function ensureAgentTemplateInstalled(options: { silent: boolean; action?:
       }
 
       if (resolvedAction === 'overwrite') {
-        const pointerTemplate = `${WORKLOG_AGENT_POINTER_LINE}\n\n${templateContent}`;
-        fs.writeFileSync(destinationPath, `${pointerTemplate}\n`, { encoding: 'utf-8' });
+        fs.writeFileSync(destinationPath, `${templateContent}\n`, { encoding: 'utf-8' });
         if (!options.silent) {
           console.log(`✓ Overwrote AGENTS template at ${destinationPath}`);
         }
@@ -935,17 +949,16 @@ async function ensureAgentTemplateInstalled(options: { silent: boolean; action?:
       }
 
       const insertion = hasOnlyWhitespace
-        ? `${WORKLOG_AGENT_POINTER_LINE}${eol}${eol}${templateContent}`
-        : `${WORKLOG_AGENT_POINTER_LINE}${existingContent ? `${eol}${eol}${existingContent}` : ''}`;
+        ? templateContent
+        : `${templateContent}${existingContent ? `${eol}${eol}${existingContent}` : ''}`;
       fs.writeFileSync(destinationPath, `${insertion}${eol}`, { encoding: 'utf-8' });
       if (!options.silent) {
-        console.log(`✓ Updated AGENTS.md with Worklog pointer at ${destinationPath}`);
+        console.log(`✓ Updated AGENTS.md with global-agents reference at ${destinationPath}`);
       }
-      return { installed: true, skipped: false, templatePath, destinationPath, insertedPointer: true };
+      return { installed: true, skipped: false, templatePath, destinationPath, insertedReference: true };
     }
 
-    const pointerTemplate = `${WORKLOG_AGENT_POINTER_LINE}\n\n${templateContent}`;
-    fs.writeFileSync(destinationPath, `${pointerTemplate}\n`, { encoding: 'utf-8' });
+    fs.writeFileSync(destinationPath, `${templateContent}\n`, { encoding: 'utf-8' });
     if (!options.silent) {
       console.log(`✓ Installed AGENTS template at ${destinationPath}`);
     }
@@ -1021,7 +1034,7 @@ export default function register(ctx: PluginContext): void {
     .option('--prefix <prefix>', 'Issue ID prefix (e.g., WI, PROJ, TASK)')
     .option('--auto-export <yes|no>', 'Auto-export data to JSONL after changes')
     .option('--auto-sync <yes|no>', 'Auto-sync data to git after changes')
-    .option('--agents-template <overwrite|append|skip>', 'What to do when AGENTS.md exists (append inserts the pointer line; omit to prompt)')
+    .option('--agents-template <overwrite|append|skip>', 'What to do when AGENTS.md exists (append inserts the global-agents reference above existing content; omit to prompt)')
     .option('--workflow-inline <yes|no>', 'Inline workflow into AGENTS.md when prompted (omit to prompt interactively)')
     .option('--stats-plugin-overwrite <yes|no>', 'Overwrite existing stats plugin if present (default: no)')
     .action(async (_options: InitOptions) => {
@@ -1178,10 +1191,10 @@ export default function register(ctx: PluginContext): void {
               silent: false,
               action: normalizedOptions.agentsTemplateAction
             });
-            if (!agentTemplateResult.installed && agentTemplateResult.reason === 'pointer already present') {
-              console.log('AGENTS.md already contains the Worklog pointer.');
+            if (!agentTemplateResult.installed && agentTemplateResult.reason === 'global reference already present') {
+              console.log('AGENTS.md already contains the global-agents reference.');
             }
-            if (!agentTemplateResult.installed && agentTemplateResult.reason && agentTemplateResult.reason !== 'pointer already present') {
+            if (!agentTemplateResult.installed && agentTemplateResult.reason && agentTemplateResult.reason !== 'global reference already present') {
               console.log(`Note: AGENTS template not installed: ${agentTemplateResult.reason}`);
             }
             console.log('');
@@ -1294,8 +1307,8 @@ export default function register(ctx: PluginContext): void {
             // agent template
             if (agentTemplateResult.installed) {
               console.log(' - AGENTS.md: installed');
-            } else if (agentTemplateResult.skipped && agentTemplateResult.reason === 'pointer already present') {
-              console.log(' - AGENTS.md: pointer already present');
+            } else if (agentTemplateResult.skipped && agentTemplateResult.reason === 'global reference already present') {
+              console.log(' - AGENTS.md: global reference already present');
             } else if (agentTemplateResult.skipped) {
               console.log(` - AGENTS.md: skipped${agentTemplateResult.reason ? `: ${agentTemplateResult.reason}` : ''}`);
             }
@@ -1523,10 +1536,10 @@ export default function register(ctx: PluginContext): void {
             // We no longer print a workflowReport summary; helpers print output
           }
 
-          if (!agentTemplateResult.installed && agentTemplateResult.reason === 'pointer already present') {
-            console.log('AGENTS.md already contains the Worklog pointer.');
+          if (!agentTemplateResult.installed && agentTemplateResult.reason === 'global reference already present') {
+            console.log('AGENTS.md already contains the global-agents reference.');
           }
-          if (!agentTemplateResult.installed && agentTemplateResult.reason && agentTemplateResult.reason !== 'pointer already present') {
+          if (!agentTemplateResult.installed && agentTemplateResult.reason && agentTemplateResult.reason !== 'global reference already present') {
             console.log(`Note: AGENTS template not installed: ${agentTemplateResult.reason}`);
           }
           // Offer to install example stats plugin

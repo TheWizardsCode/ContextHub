@@ -41,7 +41,7 @@ Navigate to the Git repository where you want to track work, then run:
 wl init
 ```
 
-Worklog will prompt you for a project name and an ID prefix (e.g. `WI` or `PROJ`). Accept the defaults or choose your own. When asked about `AGENTS.md`, choose the option that suits your project (O = overwrite, A = add pointer, M = manual). See [AGENTS.md Install Model](../AGENTS-INSTALL.md) for what gets installed and how it relates to the global agent file.
+Worklog will prompt you for a project name and an ID prefix (e.g. `WI` or `PROJ`). Accept the defaults or choose your own. When asked about `AGENTS.md`, choose the option that suits your project (O = overwrite, A = add the global-agents reference above your content, M = manual). See [AGENTS.md Install Model](../AGENTS-INSTALL.md) for what gets installed and how it relates to the global agent file.
 
 After initialization you will have a `.worklog/` directory containing configuration and a local SQLite database. This directory is typically added to `.gitignore` since data is shared via `wl sync` rather than through direct file commits.
 
