@@ -207,6 +207,13 @@ current — i.e. the review icon is **neither** the hourglass `⏳` (stale passe
 staleness buffer of updatedAt); missing audit timestamps are treated as
 not-fresh and therefore selected.
 
+Guarantee (WL-0MSN6ZCTN0027U2R): `updatedAt` is bumped only on **content**
+changes (title, description, status, stage, priority, tags, assignee, etc.).
+Flag-only flips of `needsProducerReview` persist the flag but do **not** move
+`updatedAt`, so a previously valid audit stays fresh — the TUI keeps showing
+the passed icon (not the stale hourglass) and the audit tier does not
+re-dispatch a redundant `/skill:audit` for unchanged content.
+
 Settings (all re-read each poll, so changes apply without a plugin restart):
 
 - `downtimeEnabled` — Enable the downtime worker (default: `true`)

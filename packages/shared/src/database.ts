@@ -1116,9 +1116,12 @@ export class WorklogDatabase {
     // this comparison because the update method above explicitly preserves
     // the existing values for these fields (prevents manual update from
     // overwriting GitHub metadata). Only hasWorkItemChanged() checks them.
-    const fieldsToCompare: (keyof WorkItem)[] = [
+    const contentFieldsToCompare: (keyof WorkItem)[] = [
       'title', 'description', 'status', 'priority', 'sortIndex', 'parentId',
-      'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort',
+      'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort'
+    ];
+    const fieldsToCompare: (keyof WorkItem)[] = [
+      ...contentFieldsToCompare,
       'needsProducerReview'
     ];
     // Shared comparator: whitespace-only diffs in title/description are not
@@ -1133,8 +1136,19 @@ export class WorklogDatabase {
       return updated;
     }
 
-    // At least one field changed — bump the timestamp.
-    updated.updatedAt = new Date().toISOString();
+    // At least one tracked field changed.  Check whether a content field
+    // actually changed — only then bump the timestamp.  This prevents
+    // needsProducerReview-only flips from invalidating audits
+    // (WL-0MSN6ZCTN0027U2R).  A metadata-only change still persists the
+    // flag but preserves the timestamp so that existing audits remain fresh.
+    const contentChanged = this.compareTrackedFields(item, updated, contentFieldsToCompare);
+    if (contentChanged) {
+      updated.updatedAt = new Date().toISOString();
+    } else {
+      // Metadata-only change (e.g. needsProducerReview): preserve the
+      // original updatedAt so existing audits remain fresh.
+      updated.updatedAt = item.updatedAt;
+    }
 
     if (process.env.WL_DEBUG_SQL_BINDINGS) {
       try {

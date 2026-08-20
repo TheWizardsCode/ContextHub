@@ -246,6 +246,12 @@ export function needsProducerReviewIcon(
 /**
  * Determine whether an audit result is fresh (not stale) based on the
  * 60-second staleness buffer.
+ *
+ * Guarantees: `updatedAt` is only bumped on content changes (title, description,
+ * status, stage, priority, etc.). Flag-only flips of `needsProducerReview` do
+ * not move `updatedAt`, so a previously valid audit remains fresh — the TUI
+ * continues showing the passed icon and the downtime dispatcher does not
+ * re-dispatch a redundant audit. (WL-0MSN6ZCTN0027U2R)
  */
 export function isAuditFresh(
   auditedAt: string | null | undefined,

@@ -269,3 +269,62 @@ describe('upsertItems() no-op guard (WL-0MSORD6HC005QVZX)', () => {
     expect(stored?.updatedAt).not.toBe(FIXED_TS);
   });
 });
+
+// ── WL-0MSN6ZCTN0027U2R: needsProducerReview flag flips must not bump updatedAt ──
+
+describe('update() needsProducerReview flag-only does not bump updatedAt (WL-0MSN6ZCTN0027U2R)', () => {
+  function seed(): WorkItem {
+    const item = makeItem({ id: 'WI-NPR1', title: 'Flag test', description: 'has content', needsProducerReview: false });
+    db.import([item]);
+    return item;
+  }
+
+  it('flips needsProducerReview true but preserves updatedAt', () => {
+    const seeded = seed();
+    const updated = db.update(seeded.id, { needsProducerReview: true });
+    expect(updated?.needsProducerReview).toBe(true);
+    expect(updated?.updatedAt).toBe(FIXED_TS);
+    // Verify the change is persisted to the database.
+    expect(db.get(seeded.id)?.needsProducerReview).toBe(true);
+    expect(db.get(seeded.id)?.updatedAt).toBe(FIXED_TS);
+  });
+
+  it('flips needsProducerReview false but preserves updatedAt', () => {
+    const seeded = seed();
+    // Flip to true first so we can flip back.
+    db.update(seeded.id, { needsProducerReview: true });
+    const updated = db.update(seeded.id, { needsProducerReview: false });
+    expect(updated?.needsProducerReview).toBe(false);
+    expect(updated?.updatedAt).toBe(FIXED_TS);
+    expect(db.get(seeded.id)?.needsProducerReview).toBe(false);
+  });
+
+  it('content field + needsProducerReview flag bumps updatedAt (combined update)', () => {
+    const seeded = seed();
+    const updated = db.update(seeded.id, { title: 'Updated title', needsProducerReview: true });
+    expect(updated?.title).toBe('Updated title');
+    expect(updated?.needsProducerReview).toBe(true);
+    expect(updated?.updatedAt).not.toBe(FIXED_TS);
+    expect(db.get(seeded.id)?.updatedAt).not.toBe(FIXED_TS);
+  });
+
+  it('no-op update (needsProducerReview already true) preserves updatedAt', () => {
+    const seeded = seed();
+    db.update(seeded.id, { needsProducerReview: true });
+    const updated = db.update(seeded.id, { needsProducerReview: true });
+    expect(updated?.updatedAt).toBe(FIXED_TS);
+  });
+
+  it('no-op update (needsProducerReview already false) preserves updatedAt', () => {
+    const seeded = seed();
+    const updated = db.update(seeded.id, { needsProducerReview: false });
+    expect(updated?.updatedAt).toBe(FIXED_TS);
+  });
+
+  it('content-only update still bumps updatedAt (regression)', () => {
+    const seeded = seed();
+    const updated = db.update(seeded.id, { title: 'New title' });
+    expect(updated?.title).toBe('New title');
+    expect(updated?.updatedAt).not.toBe(FIXED_TS);
+  });
+});

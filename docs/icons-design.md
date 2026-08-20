@@ -67,6 +67,10 @@ When an audit result is `readyToClose: true` but the audit timestamp is stale
 in column 2 instead of the stage icon. This preserves the information that
 audit passed even after subsequent minor updates made the audit appear stale.
 
+Note: flag-only flips of `needsProducerReview` do **not** move `updatedAt`
+(WL-0MSN6ZCTN0027U2R), so a previously fresh audit stays fresh — the
+stale-passed icon is only reached by genuine content changes.
+
 The stale-passed icon only applies to `in_review` items. The regular audit
 icons (✅ / ❌ / ❔) are used for fresh audits, and the stage icon (🔍) is
 used when no audit exists or when the audit is stale with `readyToClose: false`.

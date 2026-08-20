@@ -1236,6 +1236,22 @@ describe('audit selection (selectAuditCandidate)', () => {
     expect(selectAuditCandidate([boundaryStale], NOW)?.id).toBe('B1');
     expect(selectAuditCandidate([boundaryFresh], NOW)).toBeNull();
   });
+
+  it('does not select an item whose updatedAt did not move (flag-only flip, WL-0MSN6ZCTN0027U2R)', () => {
+    // The worklog core guarantees (packages/shared/src/database.ts update())
+    // that flipping needsProducerReview does NOT bump updatedAt — so after
+    // the flip the item still has its pre-audit updatedAt and the audit
+    // remains fresh.  selectAuditCandidate must therefore not re-dispatch
+    // a redundant /skill:audit for it.
+    const afterFlagFlip: AuditCandidate = {
+      id: 'FLAGFLIP',
+      title: 'flagged for review',
+      auditedAt: '2026-01-01T00:00:30.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z', // unchanged by the flag flip
+      sortIndex: 10,
+    };
+    expect(selectAuditCandidate([afterFlagFlip], NOW)).toBeNull();
+  });
 });
 
 describe('audit selection 7-day recency (selectAuditCandidate)', () => {
