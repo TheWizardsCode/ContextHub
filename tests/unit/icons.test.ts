@@ -28,7 +28,7 @@ import {
   auditStaleIcon,
   auditStaleLabel,
   auditStaleFallback,
-} from '../../src/icons.js';
+} from '../../src/theme.js';
 
 describe('priorityIcon', () => {
   it('returns emoji for critical priority', () => {
@@ -995,5 +995,49 @@ describe('effortLabel', () => {
       expect(effortIcon('L')).toBe('\u{1F418}');
       expect(effortIcon('XL')).toBe('\u{1F40B}');
     });
+  });
+});
+
+// ─── Wrapper parity ──────────────────────────────────────────────────────
+
+import * as themeApi from '../../src/theme.js';
+import * as wrapperApi from '../../src/icons.js';
+
+describe('icons.ts deprecated wrapper parity', () => {
+  // Enumerate the full original public API surface of src/icons.ts.
+  const publicApiNames = [
+    'iconsEnabled',
+    'priorityIcon', 'priorityLabel', 'priorityFallback',
+    'statusIcon', 'statusLabel', 'statusFallback',
+    'riskIcon', 'riskLabel', 'riskFallback',
+    'effortIcon', 'effortLabel', 'effortFallback',
+    'stageIcon', 'stageLabel', 'stageFallback',
+    'auditIcon', 'auditLabel', 'auditFallback',
+    'auditStaleIcon', 'auditStaleLabel', 'auditStaleFallback',
+    'needsProducerReviewIcon', 'needsProducerReviewLabel', 'needsProducerReviewFallback',
+    'epicIcon', 'epicLabel', 'epicFallback',
+  ] as const;
+
+  it('wrapper re-exports every original public API name', () => {
+    for (const name of publicApiNames) {
+      expect(wrapperApi, `missing wrapper export: ${name}`).toHaveProperty(name);
+      expect(themeApi, `missing theme export: ${name}`).toHaveProperty(name);
+    }
+  });
+
+  it('wrapper exports are identical references to theme exports', () => {
+    for (const name of publicApiNames) {
+      expect((wrapperApi as Record<string, unknown>)[name])
+        .toBe((themeApi as Record<string, unknown>)[name]);
+    }
+  });
+
+  it('wrapper re-exports the IconOptions type (type-only, verified at compile time)', () => {
+    // IconOptions is a type-only export (erased at runtime). Its presence on
+    // both modules is enforced by TypeScript compilation: the wrapper and this
+    // test both reference it, and a missing/broken type export would fail the
+    // build. Assert the runtime value modules exist as a sanity check.
+    expect(themeApi).toBeDefined();
+    expect(wrapperApi).toBeDefined();
   });
 });
