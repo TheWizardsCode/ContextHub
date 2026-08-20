@@ -25,4 +25,5 @@ export {
   type NextWorkItemResult,
   type ShowJsonOutput,
   type DemotedParent,
+  type RevertedItem,
 } from '@worklog/shared/types';

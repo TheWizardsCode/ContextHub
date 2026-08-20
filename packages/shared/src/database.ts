@@ -5,7 +5,7 @@
 import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult, DemotedParent } from './types.js';
+import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult, DemotedParent, RevertedItem } from './types.js';
 import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions } from './persistent-store.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
 
@@ -1376,6 +1376,45 @@ export class WorklogDatabase {
     }
     return {
       parent: updated,
+      from,
+      to: { status: updated.status, stage: updated.stage },
+    };
+  }
+
+  /**
+   * Revert an item to `open`/`plan_complete` after a "not ready to close"
+   * audit verdict.
+   *
+   * When an item in `in_review` (status `completed`) receives a
+   * not-ready-to-close verdict ("Ready to close: No" via `--audit-text`, or
+   * `--ready-to-close no` via `wl audit-set`), it is moved back to
+   * `open`/`plan_complete` so it drops out of the ready-to-close queue and
+   * returns to the planning queue for further work. The item's priority is
+   * preserved (only status/stage change).
+   *
+   * Only items in exactly `completed`/`in_review` are reverted: a `done`
+   * item or an item already `open`/`in-progress` is left untouched.
+   *
+   * @param itemId - id of the work item whose audit verdict is not-ready-to-close
+   * @returns the reversion details (item, from status/stage, to status/stage)
+   *   or `null` when the item is not in an eligible state (or does not exist)
+   */
+  revertToPlanComplete(itemId: string): RevertedItem | null {
+    const item = this.get(itemId);
+    if (!item) {
+      return null;
+    }
+    const eligible = item.status === 'completed' && item.stage === 'in_review';
+    if (!eligible) {
+      return null;
+    }
+    const from = { status: item.status, stage: item.stage };
+    const updated = this.update(itemId, { status: 'open', stage: 'plan_complete' });
+    if (!updated) {
+      return null;
+    }
+    return {
+      item: updated,
       from,
       to: { status: updated.status, stage: updated.stage },
     };

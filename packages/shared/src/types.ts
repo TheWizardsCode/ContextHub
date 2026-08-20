@@ -333,3 +333,21 @@ export interface DemotedParent {
   /** The parent's status/stage after the demotion */
   to: { status: string; stage: string };
 }
+
+/**
+ * Result of reverting an item whose audit verdict is "not ready to close".
+ *
+ * When an `in_review` item (status `completed`) receives a not-ready-to-close
+ * audit verdict, it is moved back to `open`/`plan_complete` so it returns to
+ * the planning queue instead of being swept up by heartbeat/release tooling.
+ * This shape captures the lifecycle transition so callers can report it
+ * (e.g. `completed`/`in_review` → `open`/`plan_complete`).
+ */
+export interface RevertedItem {
+  /** The work item after the reversion */
+  item: WorkItem;
+  /** The item's status/stage before the reversion */
+  from: { status: string; stage: string };
+  /** The item's status/stage after the reversion */
+  to: { status: string; stage: string };
+}
