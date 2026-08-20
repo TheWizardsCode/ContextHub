@@ -20,11 +20,11 @@
  *   1 - wl CLI not found
  */
 
-import { spawn } from 'child_process';
+import { spawn, type ChildProcess, type SpawnOptions } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join } from 'path';
 import { tmpdir } from 'node:os';
-import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, openSync, readFileSync, unlinkSync } from 'node:fs';
 import { resolveWorklogRoot } from '@worklog/shared/worklog-paths';
 import {
   checkWlAvailable,
@@ -225,6 +225,127 @@ export function parsePaneIdFile(raw: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+// ── Background (no-pane) dispatch (WL-0MSJLD1I70045ZUL) ────────────────
+
+/**
+ * Directory (under the OS tmpdir) holding per-run background-dispatch logs.
+ * A single known directory so logs can be located for inspection; cleanup
+ * of old logs is out of scope (each filename carries a timestamp + pid).
+ */
+export const BACKGROUND_LOG_DIR = 'herdr-background-logs';
+
+/**
+ * Build a per-run log file path for a background (no-pane) shortcut
+ * dispatch (WL-0MSJLD1I70045ZUL).
+ *
+ * Returns `<tmpdir>/herdr-background-logs/herdr-<timestamp>-<pid>-<slug>.log`
+ * where the slug is a sanitised prefix of the command — concurrent
+ * dispatches never collide (timestamp + pid) and each run is individually
+ * inspectable. The caller logs the returned path to stderr so the user can
+ * locate the file.
+ */
+export function buildBackgroundLogPath(command: string): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const slug =
+    command.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) ||
+    'command';
+  return join(tmpdir(), BACKGROUND_LOG_DIR, `herdr-${stamp}-${process.pid}-${slug}.log`);
+}
+
+/**
+ * Injectable spawn/filesystem dependencies for the background spawn
+ * helpers (tests replace these so no real subprocess or log file is needed).
+ */
+export interface BackgroundSpawnDeps {
+  spawn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess;
+  openSync?: (path: string, flags: string) => number;
+}
+
+/**
+ * Open a background log file for append, creating the directory first.
+ * Returns the fd, or -1 when the log cannot be opened (caller falls back to
+ * 'ignore' stdio so a logging failure never blocks dispatch).
+ */
+function openBackgroundLog(logPath: string, open: (path: string, flags: string) => number): number {
+  try {
+    mkdirSync(dirname(logPath), { recursive: true });
+    return open(logPath, 'a');
+  } catch (err) {
+    process.stderr.write(
+      `[worklog-plugin] Could not open background log ${logPath}: ${(err as Error).message}\n`,
+    );
+    return -1;
+  }
+}
+
+/**
+ * Spawn a shell command detached with stdout/stderr redirected to a log
+ * file — the `open_pane: false` execution path for `!!`/`!` shell commands
+ * (WL-0MSJLD1I70045ZUL).
+ *
+ * Mirrors the existing pane-spawn pattern (`detached: true` + `unref()`)
+ * so the TUI event loop and process lifecycle are unaffected: the parent
+ * exits independently while the child runs to completion, appending its
+ * output to the log. When the log file cannot be opened, stdio falls back
+ * to 'ignore' (logged) — a logging failure never blocks dispatch.
+ */
+export function spawnBackgroundShell(
+  command: string,
+  targetCwd: string,
+  logPath: string,
+  deps: BackgroundSpawnDeps = {},
+): ChildProcess {
+  const spawnFn = deps.spawn ?? spawn;
+  const open = deps.openSync ?? openSync;
+  const fd = openBackgroundLog(logPath, open);
+  const child = spawnFn('bash', ['-c', command], {
+    detached: true,
+    stdio: fd >= 0 ? (['ignore', fd, fd] as const) : 'ignore',
+    cwd: targetCwd,
+    env: { ...process.env, HERDR_RESOLVED_CWD: targetCwd },
+  });
+  child.unref(); // Allow the parent to exit independently
+  return child;
+}
+
+/**
+ * Spawn a headless pi run detached with stdout/stderr redirected to a log
+ * file — the `open_pane: false` execution path for agent commands
+ * (`/skill:*`, `/intake`, `/plan`, `/prompt:`) (WL-0MSJLD1I70045ZUL).
+ *
+ * Uses the established headless pattern `pi -p --mode json` (see
+ * `~/.pi/agent/skills/audit/scripts/audit_runner.py`, WL-0MSG4VSP10020NL7):
+ * no pane is created, so the work-item ↔ pane association
+ * (WL-0MSBQUJQX005RAT9) is skipped. The entry's `model` is honored via
+ * `--model <pattern>`; free-form `/prompt:` commands have their routing
+ * prefix stripped so pi receives only the prompt text. Detached + unref'd
+ * like the pane-spawn paths; log open failure falls back to 'ignore'.
+ */
+export function spawnBackgroundPi(
+  prompt: string,
+  targetCwd: string,
+  model: string | undefined,
+  logPath: string,
+  deps: BackgroundSpawnDeps = {},
+): ChildProcess {
+  const spawnFn = deps.spawn ?? spawn;
+  const open = deps.openSync ?? openSync;
+  const fd = openBackgroundLog(logPath, open);
+  const args = ['-p', '--mode', 'json'];
+  if (model) {
+    args.push('--model', model);
+  }
+  args.push(prompt);
+  const child = spawnFn('pi', args, {
+    detached: true,
+    stdio: fd >= 0 ? (['ignore', fd, fd] as const) : 'ignore',
+    cwd: targetCwd,
+    env: { ...process.env, HERDR_RESOLVED_CWD: targetCwd },
+  });
+  child.unref(); // Allow the parent to exit independently
+  return child;
 }
 
 // ── Pane-ID capture (WL-0MSBQUJQX005RAT9) ─────────────────────────────
@@ -847,7 +968,7 @@ async function main(): Promise<void> {
       mergeAgentStates: (items) => mergeAgentStates(items, agentTracker),
       subscriber: eventSubscriber,
       agentTracker,
-      onCommand: async (command: string, model?: string) => {
+      onCommand: async (command: string, model?: string, openPane?: boolean) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
         // shortcuts like audit approve/reject, priority updates, close/delete) are
@@ -856,6 +977,14 @@ async function main(): Promise<void> {
         // user dismisses it with Enter or herdr prefix+x (close_pane).
         // Everything else is written to stdout with the CMD: prefix for
         // the calling framework (Herdr) to execute.
+        //
+        // A shortcut entry with `open_pane: false` (WL-0MSJLD1I70045ZUL)
+        // opts out of the visible pane entirely: the command runs in the
+        // background (headless `pi -p --mode json` for agent commands,
+        // `bash -c` for shell commands) with stdout/stderr captured to a
+        // per-run log file whose path is logged to stderr for inspection.
+        // The work-item ↔ pane association is skipped when no pane opens.
+        const shouldOpenPane = openPane ?? true;
         const route = routeCommand(command);
         // The new pane must start in the correct project root.  herdr's
         // "follow" CWD policy would otherwise inherit the source pane's CWD
@@ -868,13 +997,28 @@ async function main(): Promise<void> {
         // process CWD is the herdr extension directory.
         const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
         if (route === 'agent') {
-          // Claim the referenced work-item BEFORE spawning the agent pane so it
-          // appears in_progress immediately. Non-blocking: failures are logged
-          // to stderr and never prevent the pane from opening (AC2).
+          // Claim the referenced work-item BEFORE dispatching so it appears
+          // in_progress immediately — for both the pane and the headless
+          // (no-pane) path. Non-blocking: failures are logged to stderr and
+          // never prevent the dispatch (AC2).
           try {
             await claimItemForAgentCommand(command);
           } catch {
             // Belt-and-suspenders: a claim failure must never block the pane.
+          }
+          if (!shouldOpenPane) {
+            // Background (no-pane) agent dispatch: run pi headless with the
+            // entry's model, output captured to a per-run log file. No pane
+            // is created, so the work-item ↔ pane association
+            // (WL-0MSBQUJQX005RAT9) is skipped entirely.
+            const prompt = stripAgentPromptPrefix(command);
+            const logPath = buildBackgroundLogPath(command);
+            process.stderr.write(
+              `[worklog-plugin] Background dispatch (no pane): ${command}\n` +
+                `[worklog-plugin] Log file: ${logPath}\n`,
+            );
+            spawnBackgroundPi(prompt, targetCwd, model, logPath);
+            return;
           }
           // Agent-pane association capture (WL-0MSBQUJQX005RAT9): when the
           // command carries a work-item ID, ask send-to-pi.sh to write the
@@ -913,7 +1057,18 @@ async function main(): Promise<void> {
           // opens WITHOUT stealing focus from the selection list (--no-focus,
           // WL-0MSHIA53D009DJOT) so the user can keep browsing/dispatching;
           // command-send feedback is surfaced via toast notifications.
+          // With `open_pane: false` the command instead runs detached in the
+          // background with output captured to a log file (no pane).
           const clean = stripCommandPrefix(command);
+          if (!shouldOpenPane) {
+            const logPath = buildBackgroundLogPath(command);
+            process.stderr.write(
+              `[worklog-plugin] Background dispatch (no pane): ${command}\n` +
+                `[worklog-plugin] Log file: ${logPath}\n`,
+            );
+            spawnBackgroundShell(clean, targetCwd, logPath);
+            return;
+          }
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
             buildRunInPaneArgs(clean, targetCwd),
@@ -931,7 +1086,17 @@ async function main(): Promise<void> {
           // working directory (herdr v0.7.5 has no CMD: handling, so the stdout
           // CMD: protocol is not a reliable execution path). Like the pane
           // route, the command-output pane opens without stealing focus
-          // (--no-focus, WL-0MSHIA53D009DJOT).
+          // (--no-focus, WL-0MSHIA53D009DJOT). With `open_pane: false` the
+          // command runs detached in the background with a log file instead.
+          if (!shouldOpenPane) {
+            const logPath = buildBackgroundLogPath(command);
+            process.stderr.write(
+              `[worklog-plugin] Background dispatch (no pane): ${command}\n` +
+                `[worklog-plugin] Log file: ${logPath}\n`,
+            );
+            spawnBackgroundShell(command, targetCwd, logPath);
+            return;
+          }
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
             buildRunInPaneArgs(command, targetCwd),

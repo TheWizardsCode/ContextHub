@@ -162,6 +162,24 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     expect(registry.getEntriesForStage(undefined, true).some(e => e.chord[0] === 'S')).toBe(true);
   });
 
+  it('marks the a-y audit-approve shortcut with open_pane false (WL-0MSJLD1I70045ZUL)', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['a', 'y'], 'list');
+    expect(entry).toBeDefined();
+    expect(entry?.openPane).toBe(false);
+    expect(entry?.command).toBe(
+      "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
+    );
+  });
+
+  it('leaves every other bundled shortcut with open_pane omitted (default opens a pane)', () => {
+    const registry = loadShortcutConfig();
+    for (const entry of registry.getEntries()) {
+      if (entry.chord.join(',') === 'a,y') continue;
+      expect(entry.openPane, `${entry.command} should not set open_pane`).toBeUndefined();
+    }
+  });
+
   it('registers the d downtime-toggle chord to /downtime toggle (WL-0MSZ4NSOE007AQEF)', () => {
     const registry = loadShortcutConfig();
     const entry = registry.lookupChordEntry(['d'], 'list', undefined, false);
@@ -171,6 +189,74 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     expect(entry?.view).toBe('both');
     // Visible in both list and detail views.
     expect(registry.lookupChordEntry(['d'], 'detail', undefined, false)).toBeDefined();
+  });
+});
+
+// ── parseShortcutEntry ───────────────────────────────────────────────────
+
+describe('parseShortcutEntry — open_pane field (WL-0MSJLD1I70045ZUL)', () => {
+  it('parses open_pane: false', () => {
+    const entry = parseShortcutEntry({
+      chord: ['a', 'y'],
+      command: '!!wl reviewed <id> false',
+      view: 'both',
+      open_pane: false,
+    });
+    expect(entry?.openPane).toBe(false);
+  });
+
+  it('parses open_pane: true', () => {
+    const entry = parseShortcutEntry({
+      chord: ['a', 'a'],
+      command: '/skill:audit <id>',
+      view: 'both',
+      open_pane: true,
+    });
+    expect(entry?.openPane).toBe(true);
+  });
+
+  it('treats a missing open_pane as omit (backward compatible — pane opens)', () => {
+    const entry = parseShortcutEntry({
+      chord: ['s'],
+      command: '!!wl search <search_term>',
+      view: 'both',
+    });
+    expect(entry?.openPane).toBeUndefined();
+  });
+
+  it('logs and treats an invalid open_pane as omit', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const cases: unknown[] = ['sometimes', 0, 1, null, [], {}];
+    for (const bad of cases) {
+      const entry = parseShortcutEntry({
+        chord: ['x'],
+        command: '!!wl close <id>',
+        view: 'both',
+        open_pane: bad,
+      });
+      expect(entry?.openPane).toBeUndefined();
+    }
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('keeps other fields intact when open_pane is present', () => {
+    const entry = parseShortcutEntry({
+      chord: ['a', 'y'],
+      command: '!!wl reviewed <id> false',
+      view: 'both',
+      model: 'plan',
+      code_freeze: 'allow',
+      open_pane: false,
+    });
+    expect(entry).toMatchObject({
+      chord: ['a', 'y'],
+      command: '!!wl reviewed <id> false',
+      view: 'both',
+      model: 'plan',
+      codeFreeze: 'allow',
+      openPane: false,
+    });
   });
 });
 

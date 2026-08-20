@@ -1702,6 +1702,7 @@ export function createChordState(): ChordState {
     hints: '',
     resolvedCommand: null,
     resolvedModel: null,
+    resolvedOpenPane: undefined,
   };
 }
 
@@ -1741,6 +1742,9 @@ export function processChordInput(
     chordState.hints = '';
     chordState.resolvedCommand = entry.command;
     chordState.resolvedModel = entry.model ?? null;
+    // openPane is undefined when the entry did not set open_pane → the
+    // dispatch defaults to opening a pane (WL-0MSJLD1I70045ZUL).
+    chordState.resolvedOpenPane = entry.openPane ?? undefined;
     return 'chord-complete';
   }
 
@@ -1866,6 +1870,14 @@ export interface ChordState {
    * (cleared after execution). Used to spawn the pi CLI with `--model`.
    */
   resolvedModel: string | null;
+  /**
+   * Whether the resolved shortcut should open a visible pane
+   * (WL-0MSJLD1I70045ZUL). `undefined` = the entry did not set `open_pane`
+   * → open a pane (the default, backward compatible); `false` = run in the
+   * background with output captured to a log file. Cleared (undefined)
+   * after execution.
+   */
+  resolvedOpenPane: boolean | undefined;
 }
 
 /**
@@ -2933,8 +2945,9 @@ function logCommandForItem(command: string, itemId?: string): void {
 function resolveAndRouteCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean) => void,
   model?: string,
+  openPane?: boolean,
 ): boolean {
   let resolvedCommand = command;
   let itemId: string | undefined;
@@ -2956,7 +2969,15 @@ function resolveAndRouteCommand(
   logCommandForItem(resolvedCommand, itemId);
 
   if (onCommand) {
-    onCommand(resolvedCommand, model);
+    // The openPane flag is passed only when explicitly set (false): an
+    // undefined third arg keeps the 2-arg call identical to today's
+    // dispatch, so shortcuts without open_pane are byte-compatible
+    // (WL-0MSJLD1I70045ZUL).
+    if (openPane === undefined) {
+      onCommand(resolvedCommand, model);
+    } else {
+      onCommand(resolvedCommand, model, openPane);
+    }
   }
   return true;
 }
@@ -3094,14 +3115,18 @@ export function fetchItemsForView(
  *   `/downtime toggle` command (flips the per-instance worker override;
  *   never spawns a pane, never writes to stdout — parent
  *   WL-0MSZ4NSOE007AQEF)
+ * @param openPane - Optional open-pane flag (WL-0MSJLD1I70045ZUL): `false`
+ *   runs the command in the background (no pane); `undefined`/`true` open a
+ *   pane as today. Passed to onCommand only when explicitly set.
  * @returns true if the command was handled, false otherwise
  */
 export function dispatchChordCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean) => void,
   model?: string,
   onDowntimeToggle?: () => void,
+  openPane?: boolean,
 ): boolean {
   // ── /downtime toggle (internal action, WL-0MSZ4NSOE007AQEF) ──────
   // Per-instance in-memory toggle of downtime dispatch for the current
@@ -3136,33 +3161,33 @@ export function dispatchChordCommand(
 
   // ── Agent skill invocations ─────────────────────────────
   if (command.startsWith('/skill:implement')) {
-    return resolveAndRouteCommand(command, state, onCommand, model);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane);
   }
   if (command.startsWith('/skill:audit')) {
-    return resolveAndRouteCommand(command, state, onCommand, model);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane);
   }
   if (command.startsWith('/skill:ship')) {
     // Dev→main release (Ship It shortcut, WL-0MSGG5N5Z0074TLY). Global
     // release — no <id> substitution; routed to the agent channel like
     // other /skill:* commands. NOT blocked during a Code Freeze (the ship
     // skill gates itself); only the confirmation dialog precedes dispatch.
-    return resolveAndRouteCommand(command, state, onCommand, model);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane);
   }
 
   // ── Agent workflow commands ─────────────────────────────
   if (command.startsWith('/intake')) {
-    return resolveAndRouteCommand(command, state, onCommand, model);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane);
   }
   if (command.startsWith('/plan')) {
-    return resolveAndRouteCommand(command, state, onCommand, model);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane);
   }
 
   // ── Producer review / audit compound commands ───────────
   if (command.startsWith('!!wl reviewed')) {
-    return resolveAndRouteCommand(command, state, onCommand, model);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane);
   }
   if (command.includes('&& wl audit-set')) {
-    return resolveAndRouteCommand(command, state, onCommand, model);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane);
   }
 
   // Unknown command — not handled
@@ -3329,6 +3354,9 @@ export async function resolvePodcastTarget(
  * @param model - Optional model for the routed command.
  * @param onDowntimeToggle - Optional callback for the internal
  *   `/downtime toggle` command (see {@link dispatchChordCommand}).
+ * @param openPane - Optional open-pane flag (WL-0MSJLD1I70045ZUL): `false`
+ *   runs the command in the background (no pane); `undefined`/`true` open a
+ *   pane as today. Passed to onCommand only when explicitly set.
  * @returns 'dispatched' if handled by dispatchChordCommand,
  *          'callback' if passed to onCommand,
  *          'noop' if skipped (no item + <id> requirement),
@@ -3337,10 +3365,11 @@ export async function resolvePodcastTarget(
 export function executeResolvedCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean) => void,
   codeFreezeActive = false,
   model?: string,
   onDowntimeToggle?: () => void,
+  openPane?: boolean,
 ): ExecuteResult {
   // Code Freeze guard: never route implement commands while frozen.
   // This runs BEFORE dispatchChordCommand so no pane spawn, claim, or
@@ -3351,7 +3380,7 @@ export function executeResolvedCommand(
 
   // Try dispatchChordCommand first — handles /wl, /downtime, /skill:,
   // /intake, /plan, !!wl reviewed, and compound audit commands
-  if (dispatchChordCommand(command, state, onCommand, model, onDowntimeToggle)) {
+  if (dispatchChordCommand(command, state, onCommand, model, onDowntimeToggle, openPane)) {
     return 'dispatched';
   }
 
@@ -3377,7 +3406,15 @@ export function executeResolvedCommand(
   logCommandForItem(resolvedCommand, itemId);
 
   if (onCommand) {
-    onCommand(resolvedCommand, model);
+    // The openPane flag is passed only when explicitly set (false): an
+    // undefined third arg keeps the 2-arg call identical to today's
+    // dispatch, so shortcuts without open_pane are byte-compatible
+    // (WL-0MSJLD1I70045ZUL).
+    if (openPane === undefined) {
+      onCommand(resolvedCommand, model);
+    } else {
+      onCommand(resolvedCommand, model, openPane);
+    }
   }
   return 'callback';
 }
@@ -3399,7 +3436,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -4026,8 +4063,12 @@ export async function runWorklistTui(
         // Chord resolved — execute the command
         let command = chordState.resolvedCommand;
         const model = chordState.resolvedModel;
+        // openPane: undefined (default) = open a pane; false = background,
+        // no pane (WL-0MSJLD1I70045ZUL). Cleared after execution.
+        const openPane = chordState.resolvedOpenPane;
         chordState.resolvedCommand = null;
         chordState.resolvedModel = null;
+        chordState.resolvedOpenPane = undefined;
         if (command) {
           // Podcast-progression markers (<podcast-target>/<podcast-script>/
           // <podcast-review>/<podcast-both>) are resolved from the selected
@@ -4223,7 +4264,7 @@ export async function runWorklistTui(
             if (frozen) {
               codeFreezeActive = true;
             }
-            const result = executeResolvedCommand(command, state, opts.onCommand, frozen, model ?? undefined, opts.onDowntimeToggle);
+            const result = executeResolvedCommand(command, state, opts.onCommand, frozen, model ?? undefined, opts.onDowntimeToggle, openPane);
             if (result === 'blocked') {
               // Code Freeze — show the notice dialog; the command was NOT
               // routed, no pane spawned, no work item claimed.
@@ -4295,6 +4336,9 @@ export async function runWorklistTui(
       if (singleEntry) {
         let singleCmd = singleEntry.command;
         const singleModel = singleEntry.model ?? undefined;
+        // openPane: undefined (default) = open a pane; false = background,
+        // no pane (WL-0MSJLD1I70045ZUL).
+        const singleOpenPane = singleEntry.openPane ?? undefined;
         // Podcast-progression markers (<podcast-target>/<podcast-script>/
         // <podcast-review>/<podcast-both>) are resolved from the selected
         // item's context BEFORE the generic modal-form check so they never
@@ -4370,7 +4414,7 @@ export async function runWorklistTui(
           if (frozen) {
             codeFreezeActive = true;
           }
-          const result = executeResolvedCommand(singleCmd, state, opts.onCommand, frozen, singleModel, opts.onDowntimeToggle);
+          const result = executeResolvedCommand(singleCmd, state, opts.onCommand, frozen, singleModel, opts.onDowntimeToggle, singleOpenPane);
           if (result === 'blocked') {
             // Code Freeze — show the notice dialog; no pane spawned.
             codeFreezeNotice = true;

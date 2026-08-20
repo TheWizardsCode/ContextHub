@@ -15,6 +15,9 @@ import {
   createDowntimeDeps,
   capturePaneIdFromFile,
   parsePaneIdFile,
+  buildBackgroundLogPath,
+  spawnBackgroundShell,
+  spawnBackgroundPi,
   CAPTURE_TIMEOUT_MS,
 } from './index.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE, readDowntimeLogEntries } from './downtime-log.js';
@@ -1974,5 +1977,88 @@ describe('createDowntimeDeps rotation wiring (WL-0MSSRED76008LGB6)', () => {
 
     const second = await deps.getNextItem('intake_complete', cwd);
     expect(second.ok && second.candidate?.id).toBe('WL-B'); // cursor advanced → 1 % 2 = 1
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Background (no-pane) dispatch helpers (WL-0MSJLD1I70045ZUL)
+// ---------------------------------------------------------------------------
+
+describe('buildBackgroundLogPath', () => {
+  it('places logs under the tmpdir herdr-background-logs directory', () => {
+    const path = buildBackgroundLogPath('wl update <id> --priority high');
+    expect(path).toContain('herdr-background-logs');
+    expect(path.endsWith('.log')).toBe(true);
+  });
+
+  it('produces distinct paths for different commands', () => {
+    const a = buildBackgroundLogPath('wl update <id> --priority high');
+    const b = buildBackgroundLogPath('wl update <id> --priority low');
+    expect(a).not.toBe(b);
+  });
+});
+
+describe('spawnBackgroundShell', () => {
+  it('spawns bash -c detached with stdout/stderr redirected to the log file', () => {
+    const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
+    const openSyncFn = vi.fn(() => 7);
+    const child = spawnBackgroundShell(
+      'wl reviewed WL-1 false',
+      '/project',
+      '/tmp/herdr-background-logs/x.log',
+      { spawn: spawnFn as never, openSync: openSyncFn },
+    );
+    expect(spawnFn).toHaveBeenCalledWith(
+      'bash',
+      ['-c', 'wl reviewed WL-1 false'],
+      expect.objectContaining({
+        detached: true,
+        stdio: ['ignore', 7, 7],
+        cwd: '/project',
+      }),
+    );
+    expect(openSyncFn).toHaveBeenCalledWith('/tmp/herdr-background-logs/x.log', 'a');
+    expect(child.unref).toHaveBeenCalled();
+  });
+});
+
+describe('spawnBackgroundPi', () => {
+  it('spawns pi -p --mode json with the model and prompt, detached with log redirect', () => {
+    const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
+    const openSyncFn = vi.fn(() => 9);
+    const child = spawnBackgroundPi(
+      '/skill:audit WL-1',
+      '/project',
+      'plan',
+      '/tmp/herdr-background-logs/y.log',
+      { spawn: spawnFn as never, openSync: openSyncFn },
+    );
+    expect(spawnFn).toHaveBeenCalledWith(
+      'pi',
+      ['-p', '--mode', 'json', '--model', 'plan', '/skill:audit WL-1'],
+      expect.objectContaining({
+        detached: true,
+        stdio: ['ignore', 9, 9],
+        cwd: '/project',
+      }),
+    );
+    expect(child.unref).toHaveBeenCalled();
+  });
+
+  it('omits --model when no model is provided', () => {
+    const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
+    const openSyncFn = vi.fn(() => 9);
+    spawnBackgroundPi(
+      '/intake My item',
+      '/project',
+      undefined,
+      '/tmp/herdr-background-logs/z.log',
+      { spawn: spawnFn as never, openSync: openSyncFn },
+    );
+    expect(spawnFn).toHaveBeenCalledWith(
+      'pi',
+      ['-p', '--mode', 'json', '/intake My item'],
+      expect.any(Object),
+    );
   });
 });

@@ -993,6 +993,7 @@ packages/herdr/
   - Everything else is written to stdout with a `CMD:` prefix for the calling framework (Herdr) to execute.
 - **Selection-list dispatch keeps focus** — Every pane spawned from the worklist selection list (pi agent panes via `send-to-pi.sh`, and command-output panes via `run-in-pane.sh`) opens **without moving focus** (WL-0MSHIA53D009DJOT): the dispatch passes `--no-focus` to both launchers, so the final zoom/focus step is skipped and the selection list keeps the keyboard focus. The user can read dispatch feedback via toasts and inspect the opened pane with herdr pane navigation (`prefix+o`, `prefix+x` to close). Out of scope and unchanged: the downtime worker (already `--no-focus`), the `open-pi-agent` unbound plugin action, and `open.sh`/`toggle.sh`.
 - **Pi agent dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are intercepted by the entry point and routed to a new pi agent pane. The `send-to-pi.sh` script splits the current pane to the right, creates a new pane, runs `pi` with the command as the initial prompt, and renames the pane to "Pi Agent". The dispatch passes `--no-focus` (selection-list dispatch keeps focus, see above), so the new pi pane does not steal focus from the list. Agent commands are routed before any prefix handling, so they are unaffected by `!!`/`!` processing.
+- **No-pane dispatch via `open_pane: false`** — A shortcut entry may carry an optional `open_pane: false` flag (WL-0MSJLD1I70045ZUL) to run its command **in the background without opening a pane**: shell (`!!`/`!`) commands execute via detached `bash -c` and agent commands run headless (`pi -p --mode json`, honoring the entry's `model`), with stdout/stderr captured to a per-run log file under `<tmpdir>/herdr-background-logs/` (the path is written to stderr so it can be located for inspection). No pane is created, so the work-item ↔ pane association is skipped for agent commands. The bundled `a-y` audit-approve shortcut is the built-in example: it approves the item quietly and the worklist refresh shows the updated state. Shortcuts without the flag (all other bundled entries) open a pane exactly as today.
 - **Model lease release on pane close** — Pi agent panes launched by `send-to-pi.sh` or `open-pi-agent.sh` run pi via `shared/run-pi-agent.sh`, which gives the session a deterministic id (`pi --session-id herdr-<timestamp>-<pid>-<rand>`) and registers EXIT/TERM/HUP/INT traps. When the pi session ends — normal exit or pane close (`prefix+x`) — the wrapper runs `shared/release-lease-on-exit.mjs`, which posts to the Local Proxy's `POST {baseUrl}/leases/release` using the **same shared implementation** as the Pi extension (`@worklog/shared/lease-release`), so the proxy's dispatch lease is reclaimed promptly instead of lingering until timeout. The release is strictly best-effort: failures (unreachable proxy, missing `~/.pi/agent/models.json`, unconfigured provider) are silently discarded, a 5s request timeout bounds the pane-close path, and the wrapper always propagates pi's exit status (WL-0MSGI7UIH008USVB).
 - **Podcast Editing tab naming** — `herdr plugin pane open` creates tabs with generated numeric labels. The `open-podcast-editor-tab` action wraps the same pane-open command and renames the created tab to "Podcast Editing" via `herdr tab rename` (socket API, not session-state editing), so podcast production is instantly recognisable in the tab row. Each press still opens a new tab; only the label changes.
 - **Model selection per shortcut** — Each LLM-bound shortcut entry in `shortcuts.json` may carry an optional `model` field (a pi model pattern such as `plan`, `code`, or `author`). When the command is dispatched to the agent channel, `--model <pattern>` is forwarded to the spawned `pi` CLI (e.g. `pi --model code '/skill:implement <id>'`), so every workflow runs on an appropriately specialised model without manual model switching. Agent-bound entries without a `model` field default to `plan`; shell (`!!`) and `/wl` filter entries never carry a model and never receive a `--model` flag. The default mapping in `src/shortcuts.json`: `/plan`, `/intake`, `/skill:audit`, `/prompt:` → `plan`; `/skill:implement` → `code`.
@@ -1000,7 +1001,7 @@ packages/herdr/
 - **Correct project directory for new panes** — Panes created by `send-to-pi.sh`, `open-pi-agent.sh`, and `run-in-pane.sh` are started in the correct project root. Herdr's `follow` CWD policy would otherwise inherit the source pane's CWD (the plugin directory), so each script resolves a target CWD (`--cwd` arg > `HERDR_RESOLVED_CWD` > `$PWD`) and applies it in both launch modes: `--no-resize` passes it to `herdr pane split --cwd`, and the default resize mode forwards it to `grid.py --cwd` which includes it in the `pane.split` RPC params. The entry point passes the resolved worklog root (`wlRoot`) so skills, `wl` commands, and relative paths operate on the user's project rather than the plugin's installation directory.
 - **`<id>` placeholder resolution** — Before output, any `<id>` placeholders in the resolved command are replaced with the currently selected work item's ID. If no item is selected and the command requires `<id>`, the command is silently dropped (graceful no-op).
 - **Parameter input form** — Chord commands containing unknown `<identifier>` placeholders open a modal input form (`form-dialog.ts`) before dispatch. The form renders as a **simple full-pane page**: no border or centering decorations, content starts at the top-left of the pane, and the description and field values wrap at the full pane width — bounded by the terminal height (see WL-0MSFZUS4Z006IRI3). The form supports **OS-clipboard paste (`Ctrl+V`), whole-field cut (`Ctrl+X`), and newline insertion (`Ctrl+Enter`)** plus **bracketed-paste unwrapping**, all via the herdr-local `clipboard.ts` helper (no tmux branch) so pasted multi-line text never submits the form (see WL-0MSW6KCTA0092DCV).
-- **Chord shortcut system** — Multi-key chord sequences are defined in `shortcuts.json` and resolved via `ShortcutRegistry`. Chords can be filtered by view (list/detail), stage, and work-item issue type. Entries may carry an optional `model` field (see **Model selection per shortcut** above).
+- **Chord shortcut system** — Multi-key chord sequences are defined in `shortcuts.json` and resolved via `ShortcutRegistry`. Chords can be filtered by view (list/detail), stage, and work-item issue type. Entries may carry an optional `model` field (see **Model selection per shortcut** above) and an optional `open_pane` flag (see **No-pane dispatch via `open_pane: false`** above).
 - **Project-local shortcut overrides** — A consumer project can add chords or override bundled defaults **without editing the plugin bundle** by placing a `shortcuts.json` at its **worklog root** (the project root resolved via `configureWorklogTarget`; the plugin reads `<worklog-root>/shortcuts.json` when it exists). Semantics:
   - The bundled `src/shortcuts.json` is loaded first and remains the base config; a local entry with the **same `chord` + `view`** replaces the bundled entry, while local entries with new chords are appended.
   - The merge is **deterministic and deduplicated** (dedup key = `view` + `chord`); within the local file, later entries win for the same `view`+`chord`.
@@ -1117,6 +1118,30 @@ should additionally be stage-limited to the podcast lifecycle
 (`w s`: `intake_complete`, `plan_complete`, `in_review`, `done`; `w r` /
 `w b`: `plan_complete`, `in_review`, `done` — the stages where a script
 exists).
+
+### Background dispatch via `open_pane`
+
+Each entry in `shortcuts.json` may carry an optional `open_pane` boolean
+controlling whether dispatching the shortcut opens a visible pane
+(WL-0MSJLD1I70045ZUL):
+
+| `open_pane` value | Behaviour on dispatch |
+|---|---|
+| `false` | Command runs **in the background — no pane opens**. Shell (`!!`/`!`) commands run via detached `bash -c`; agent commands (`/skill:*`, `/intake`, `/plan`, `/prompt:`) run headless via `pi -p --mode json` (honoring the entry's `model`). stdout/stderr are captured to a per-run log file under `<tmpdir>/herdr-background-logs/`; the path is written to stderr so it can be located for inspection. The work-item ↔ pane association is skipped when no pane is created. |
+| omitted (or `true`) | A pane opens exactly as today — shell commands in a visible "Command Output" herdr pane, agent commands in a pi agent pane (backward compatible). |
+
+Semantics:
+
+- The JSON key is snake_case (`open_pane`); the parsed TS field is camelCase
+  (`openPane`) — matching the `code_freeze`→`codeFreeze` convention.
+- Any non-boolean value is logged as invalid and treated as omitted (a pane
+  opens) — a bad value never hides or breaks a shortcut.
+- The bundled `a-y` (audit approve) shortcut is the built-in test case: it
+  approves the `in_review` item without opening a pane, and the worklist
+  refresh shows the updated state. All other bundled shortcuts omit the
+  field and keep today's pane-opening behaviour.
+- Form-edited commands (unknown `<identifier>` placeholders) always open a
+  pane — the flag applies to direct shortcut dispatch only.
 
 ### Shortcut filtering during a freeze
 

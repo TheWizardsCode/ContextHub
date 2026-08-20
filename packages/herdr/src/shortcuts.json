@@ -115,7 +115,8 @@
       "in_review"
     ],
     "label": "audit approve",
-    "description": "Approve the in_review item by manual audit."
+    "description": "Approve the in_review item by manual audit.",
+    "open_pane": false
   },
   {
     "chord": [

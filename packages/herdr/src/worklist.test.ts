@@ -990,6 +990,97 @@ describe('dispatchChordCommand', () => {
   });
 });
 
+describe('openPane plumbing (WL-0MSJLD1I70045ZUL)', () => {
+  it('processChordInput stores resolvedOpenPane=false for a chord with open_pane: false', () => {
+    const registry = loadShortcutConfig();
+    const chordState = createChordState();
+    const step1 = processChordInput(chordState, 'a', registry, 'list', 'in_review');
+    const step2 = processChordInput(chordState, 'y', registry, 'list', 'in_review');
+    expect(step1).toBeNull(); // still collecting
+    expect(step2).toBe('chord-complete');
+    expect(chordState.resolvedOpenPane).toBe(false);
+    expect(chordState.resolvedCommand).toContain('wl reviewed <id> false');
+  });
+
+  it('processChordInput leaves resolvedOpenPane undefined for chords without open_pane', () => {
+    const registry = loadShortcutConfig();
+    const chordState = createChordState();
+    processChordInput(chordState, 'a', registry, 'list', 'in_review');
+    const step2 = processChordInput(chordState, 'a', registry, 'list', 'in_review');
+    expect(step2).toBe('chord-complete');
+    expect(chordState.resolvedOpenPane).toBeUndefined();
+  });
+
+  it('dispatchChordCommand passes openPane=false through to onCommand', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = dispatchChordCommand(
+      "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
+      state,
+      onCommand,
+      undefined,
+      undefined,
+      false,
+    );
+    expect(result).toBe(true);
+    expect(onCommand).toHaveBeenCalledWith(
+      "!!wl reviewed TEST-123 false && wl audit-set TEST-123 --ready-to-close yes --summary 'Approved by manual review'",
+      undefined,
+      false,
+    );
+  });
+
+  it('dispatchChordCommand without openPane keeps the 2-arg onCommand call (default open)', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    dispatchChordCommand('/skill:audit <id>', state, onCommand);
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', undefined);
+  });
+
+  it('executeResolvedCommand passes openPane=false through to onCommand', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand(
+      'wl update <id> --priority high',
+      state,
+      onCommand,
+      false,
+      undefined,
+      undefined,
+      false,
+    );
+    expect(result).toBe('callback');
+    expect(onCommand).toHaveBeenCalledWith('wl update TEST-123 --priority high', undefined, false);
+  });
+
+  it('executeResolvedCommand passes openPane through for agent commands via dispatchChordCommand', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand(
+      '/skill:audit <id>',
+      state,
+      onCommand,
+      false,
+      'plan',
+      undefined,
+      false,
+    );
+    expect(result).toBe('dispatched');
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', 'plan', false);
+  });
+
+  it('executeResolvedCommand without openPane keeps the 2-arg onCommand call', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    const onCommand = vi.fn();
+    executeResolvedCommand('echo hello', state, onCommand);
+    expect(onCommand).toHaveBeenCalledWith('echo hello', undefined);
+  });
+});
+
 describe('fetchItemsForView — stage-filtered fetch', () => {
   beforeEach(() => {
     resetExecFileAsync();
