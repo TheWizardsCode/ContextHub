@@ -374,6 +374,13 @@ export interface DisplayHeadingRow {
 export type DisplayRow = DisplayHeadingRow | WorkItem;
 
 /**
+ * Type guard: is this display row a group heading row?
+ */
+export function isHeadingRow(row: DisplayRow): row is DisplayHeadingRow {
+  return 'kind' in row && row.kind === 'heading';
+}
+
+/**
  * Mutable state for the work item list UI.
  */
 export class WorkItemListState {
@@ -397,9 +404,9 @@ export class WorkItemListState {
     this._resetMetaScroll();
   }
 
-  /** Number of items in the flattened (display) list. */
+  /** Number of rows in the display-rows model (headings + items). */
   get flatCount(): number {
-    return this.getFlattenedItems().length;
+    return this.getDisplayRows().length;
   }
 
   /**
@@ -770,8 +777,11 @@ export class WorkItemListState {
 
   selectItem(): void {
     if (this.items.length === 0) return;
-    const flat = this.getFlattenedItems();
-    const item = flat[this.selectedIndex] ?? this.items[this.selectedIndex];
+    const row = this.getSelectedDisplayRow();
+    // Enter on a heading is a no-op (only Tab toggles group collapse,
+    // WL-0MSL5MPSZ003TG94 AC5).
+    if (row === null || isHeadingRow(row)) return;
+    const item = row;
     this.detailItem = item;
     this.mode = 'detail';
     this.detailScrollOffset = 0;
@@ -817,15 +827,26 @@ export class WorkItemListState {
   // ── Metadata panel scroll ───────────────────────────────────────
 
   /**
-   * Return the currently selected flattened item, or null when the list is
-   * empty or the selection is out of range.
+   * Return the display row at the current selection (heading or item), or
+   * null when the list is empty or the selection is out of range.
+   */
+  getSelectedDisplayRow(): DisplayRow | null {
+    const rows = this.getDisplayRows();
+    if (rows.length === 0) return null;
+    const idx = this.selectedIndex;
+    if (idx < 0 || idx >= rows.length) return null;
+    return rows[idx];
+  }
+
+  /**
+   * Return the currently selected item, or null when the selection is a
+   * heading row (the metadata panel then renders group info), the list is
+   * empty, or the selection is out of range.
    */
   getSelectedItem(): WorkItem | null {
-    const flat = this.getFlattenedItems();
-    if (flat.length === 0) return null;
-    const idx = this.selectedIndex;
-    if (idx < 0 || idx >= flat.length) return null;
-    return flat[idx];
+    const row = this.getSelectedDisplayRow();
+    if (row === null || isHeadingRow(row)) return null;
+    return row;
   }
 
   /** Scroll the metadata panel up (toward the start of the content). */
@@ -929,28 +950,27 @@ export class WorkItemListState {
   }
 
   /**
-   * Capture the ID of the currently selected item, or undefined if
-   * the flattened list is empty or nothing is selected.
+   * Capture the ID of the currently selected item, or undefined if the
+   * display rows are empty, the selection is a heading, or nothing is
+   * selected.
    */
   private _captureSelectedId(): string | undefined {
-    const flat = this.getFlattenedItems();
-    if (flat.length === 0) return undefined;
-    const idx = this.selectedIndex;
-    if (idx < 0 || idx >= flat.length) return undefined;
-    return flat[idx].id;
+    const row = this.getSelectedDisplayRow();
+    if (row === null || isHeadingRow(row)) return undefined;
+    return row.id;
   }
 
   /**
-   * Search the new flattened list for an item matching `id` and
-   * set selectedIndex to its position.
+   * Search the display rows for an item matching `id` and set
+   * selectedIndex to its position.
    *
    * @returns true if the item was found and selection restored;
    *          false if the item is no longer visible.
    */
   private _restoreSelectionById(id: string | undefined): boolean {
     if (id === undefined) return false;
-    const flat = this.getFlattenedItems();
-    const newIndex = flat.findIndex((item) => item.id === id);
+    const rows = this.getDisplayRows();
+    const newIndex = rows.findIndex((row) => !isHeadingRow(row) && (row as WorkItem).id === id);
     if (newIndex === -1) return false;
     this.selectedIndex = newIndex;
     return true;
@@ -2185,26 +2205,24 @@ export function handleKeypress(
       break;
     case 'select':
       if (state.mode === 'list' && state.selectedIndex >= 0) {
-        const flat = state.getFlattenedItems();
-        if (state.selectedIndex < flat.length) {
-          const selected = flat[state.selectedIndex];
-          // Toggle expand/collapse for items with actual children data at
-          // ANY depth (WL-0MSQ3FH1K000MMJW): Enter on a child with children
-          // expands it like a top-level parent, instead of opening the
-          // detail view.
-          if (selected.children && selected.children.length > 0) {
-            if (state.isExpanded(selected.id)) {
-              // Collapsing — remove the matching navigation-stack entry so
-              // a later Escape does not pop back into a collapsed parent.
-              state.clearNavigationStateFor(selected.id);
-            } else {
-              // Drilling down — save the current (parent) scroll/selection
-              // state so Escape can return to it.
-              state.pushNavigationState(selected.id);
-            }
-            state.toggleExpand(selected.id);
-            return 'toggle-expand';
+        const selected = state.getSelectedItem();
+        // Toggle expand/collapse for items with actual children data at
+        // ANY depth (WL-0MSQ3FH1K000MMJW): Enter on a child with children
+        // expands it like a top-level parent, instead of opening the
+        // detail view. Heading rows have no item (null) and fall through
+        // to selectItem(), which is a no-op for headings.
+        if (selected && selected.children && selected.children.length > 0) {
+          if (state.isExpanded(selected.id)) {
+            // Collapsing — remove the matching navigation-stack entry so
+            // a later Escape does not pop back into a collapsed parent.
+            state.clearNavigationStateFor(selected.id);
+          } else {
+            // Drilling down — save the current (parent) scroll/selection
+            // state so Escape can return to it.
+            state.pushNavigationState(selected.id);
           }
+          state.toggleExpand(selected.id);
+          return 'toggle-expand';
         }
       }
       state.selectItem();
@@ -2245,9 +2263,8 @@ export function handleKeypress(
       break;
     case 'toggle-expand':
       if (state.mode === 'list' && state.selectedIndex >= 0 && state.items.length > 0) {
-        const flat = state.getFlattenedItems();
-        if (state.selectedIndex < flat.length) {
-          const selected = flat[state.selectedIndex];
+        const selected = state.getSelectedItem();
+        if (selected) {
           // Any item with children — at ANY depth — can be expanded/
           // collapsed with Tab (WL-0MSQ3FH1K000MMJW). Children data is
           // fetched on demand by the caller when not yet loaded.
@@ -2625,16 +2642,15 @@ export function handleMouseInput(
   // Dispatch mouse actions (mirrors the handleKeypress action handling).
   switch (action.type) {
     case 'select-row': {
-      const flat = state.getFlattenedItems();
-      if (action.index >= 0 && action.index < flat.length) {
+      const rows = state.getDisplayRows();
+      if (action.index >= 0 && action.index < rows.length) {
         state.selectedIndex = action.index;
       }
       break;
     }
     case 'open-detail': {
-      const flat = state.getFlattenedItems();
-      if (state.selectedIndex >= 0 && state.selectedIndex < flat.length) {
-        const selected = flat[state.selectedIndex];
+      const selected = state.getSelectedItem();
+      if (selected) {
         // Toggle expand/collapse for items with actual children data.
         if (selected.children && selected.children.length > 0) {
           if (state.isExpanded(selected.id)) {
@@ -3080,11 +3096,10 @@ function resolveAndRouteCommand(
   let itemId: string | undefined;
 
   if (resolvedCommand.includes('<id>')) {
-    const flat = state.getFlattenedItems();
-    const idx = state.selectedIndex;
-    if (idx >= 0 && idx < flat.length) {
-      resolvedCommand = resolvedCommand.replace(/<id>/g, flat[idx].id);
-      itemId = flat[idx].id;
+    const selected = state.getSelectedItem();
+    if (selected) {
+      resolvedCommand = resolvedCommand.replace(/<id>/g, selected.id);
+      itemId = selected.id;
     } else {
       // No item selected and command requires <id> — graceful no-op
       return false;
@@ -3516,11 +3531,10 @@ export function executeResolvedCommand(
   let itemId: string | undefined;
 
   if (resolvedCommand.includes('<id>')) {
-    const flat = state.getFlattenedItems();
-    const idx = state.selectedIndex;
-    if (idx >= 0 && idx < flat.length) {
-      resolvedCommand = resolvedCommand.replace(/<id>/g, flat[idx].id);
-      itemId = flat[idx].id;
+    const selected = state.getSelectedItem();
+    if (selected) {
+      resolvedCommand = resolvedCommand.replace(/<id>/g, selected.id);
+      itemId = selected.id;
     } else {
       // No item selected and command requires <id> — graceful no-op
       return 'noop';
@@ -4354,10 +4368,9 @@ export async function runWorklistTui(
                 // Handle <id> resolution
                 let finalCmd = resolved;
                 if (finalCmd.includes('<id>')) {
-                  const flat = state.getFlattenedItems();
-                  const idx = state.selectedIndex;
-                  if (idx >= 0 && idx < flat.length) {
-                    finalCmd = finalCmd.replace(/<id>/g, flat[idx].id);
+                  const selected = state.getSelectedItem();
+                  if (selected) {
+                    finalCmd = finalCmd.replace(/<id>/g, selected.id);
                   }
                 }
                 // Record the submitted command against its work item before
@@ -4506,10 +4519,9 @@ export async function runWorklistTui(
             (resolved: string) => {
               let finalCmd = resolved;
               if (finalCmd.includes('<id>')) {
-                const flat = state.getFlattenedItems();
-                const idx = state.selectedIndex;
-                if (idx >= 0 && idx < flat.length) {
-                  finalCmd = finalCmd.replace(/<id>/g, flat[idx].id);
+                const selected = state.getSelectedItem();
+                if (selected) {
+                  finalCmd = finalCmd.replace(/<id>/g, selected.id);
                 }
               }
               // Record the submitted command against its work item before
@@ -4595,9 +4607,8 @@ export async function runWorklistTui(
     }
 
     if (action === 'toggle-expand' && state.mode === 'list') {
-      const flat = state.getFlattenedItems();
-      if (state.selectedIndex < flat.length) {
-        const selected = flat[state.selectedIndex];
+      const selected = state.getSelectedItem();
+      if (selected) {
         // If children data not yet loaded, fetch them on demand
         if (selected.childCount && selected.childCount > 0 && (!selected.children || selected.children.length === 0)) {
           render(); // immediate render while fetch is pending
