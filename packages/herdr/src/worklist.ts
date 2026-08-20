@@ -45,6 +45,7 @@ import {
   FormState,
   substituteIdentifiers,
 } from './form-dialog.js';
+import { readFromClipboard, writeToClipboard } from './clipboard.js';
 import { ShipItDialogState, overlayShipItDialog } from './ship-it-dialog.js';
 import { extractFilePaths } from './grouping.js';
 import { renderMarkdown, renderMarkdownViewer } from './md-viewer.js';
@@ -3943,7 +3944,7 @@ export async function runWorklistTui(
     // ── Form mode handling ──────────────────────────────────────
     if (formState !== null) {
       const result = formState.handleInput(key);
-      if (result === 'submitted') {
+      if (result.type === 'submitted') {
         const resolved = formState.getResult();
         formState = null;
         state.mode = preFormMode;
@@ -3952,9 +3953,34 @@ export async function runWorklistTui(
         // every form submission spawns TWO agent panes (WL-0MSAL0RN1009YNJ7).
         showToast('Sent', { body: resolved.length > 60 ? resolved.substring(0, 57) + '...' : resolved });
         render();
-      } else if (result === 'cancelled') {
+      } else if (result.type === 'cancelled') {
         formState = null;
         state.mode = preFormMode;
+        render();
+      } else if (result.type === 'paste') {
+        // Ctrl+V: read the OS clipboard asynchronously (never freezes the
+        // TUI), then commit the text verbatim or surface a graceful failure
+        // and keep the form open (WL-0MSW6KCTA0092DCV).
+        const read = await readFromClipboard();
+        if (read.success && read.text !== undefined) {
+          formState.pasteText(read.text);
+        } else {
+          const reason = read.error ?? 'Clipboard read failed';
+          formState.notifyPasteFailed(reason);
+          showToast('Paste failed', { body: reason });
+        }
+        render();
+      } else if (result.type === 'cut') {
+        // Ctrl+X: copy the active field value to the OS clipboard
+        // asynchronously and surface feedback. On failure the field value is
+        // restored so no data is lost (WL-0MSW6KCTA0092DCV).
+        const copy = await writeToClipboard(result.text);
+        if (copy.success) {
+          showToast('Copied', { body: result.text.length > 40 ? result.text.substring(0, 37) + '...' : (result.text || '(empty)') });
+        } else {
+          formState.pasteText(result.text);
+          showToast('Copy failed', { body: copy.error ?? 'Clipboard unavailable' });
+        }
         render();
       } else {
         render();
