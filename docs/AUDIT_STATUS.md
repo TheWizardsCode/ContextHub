@@ -65,6 +65,32 @@ wl show SA-123 --json
   - `error: audit-invalid-first-line`
   - a `message` containing the found trimmed first line and indicators for BOM/non-printable/gutter characters.
 
+## Auto-revert on "not ready to close" verdict
+
+When an item in `in_review` (status `completed`) receives a **not-ready-to-close** verdict, it is automatically reverted to status `open` / stage `plan_complete` so it drops out of the ready-to-close queue (heartbeat/release tooling) and returns to the planning queue for further work. The item's priority is preserved.
+
+Triggers (both produce the same behavior):
+
+- `wl update <id> --audit-text "Ready to close: No\n..."`
+- `wl audit-set <id> --ready-to-close no`
+- REST API `PUT /items/:id` (or `/projects/:prefix/items/:id`) with an `audit` body field whose first line is `Ready to close: No`
+
+The reversion fires **only** when all of these hold:
+
+1. The audit verdict is exactly "Ready to close: No" (no other audit text triggers it).
+2. The item's current state is exactly `completed` / `in_review` (a `done` item, an already-`open`/`in-progress` item, or any other state is left untouched).
+3. The reversion was not already applied (it is idempotent — a second not-ready write on an already-open item is a no-op).
+
+Reporting (mirrors the priority-downgrade cascade / `demotedParent` convention):
+
+- **JSON output** of `wl update` / `wl audit-set` includes a `reverted` field: `{ item, from: { status, stage }, to: { status, stage } }`, e.g. `{ "from": { "status": "completed", "stage": "in_review" }, "to": { "status": "open", "stage": "plan_complete" } }`. When no reversion occurs the field is absent.
+- **Human output** prints a summary line: `[WL-XXX reverted from completed/in_review to open/plan_complete]`.
+- **REST API** `PUT` responses include the same `reverted` field when the update caused a reversion.
+
+The reversion is **best-effort**: if the lifecycle write fails (e.g. database lock), the audit write still succeeds and a warning is surfaced — the command never crashes.
+
+The REST API path applies the same reversion for consistency with the CLI (decision recorded in WL-0MT0T1EQJ009DHO8). The `audit` field in a `PUT` body is routed to the `audit_results` table (the sole source of truth); a not-ready verdict then triggers the same reversion as the CLI commands.
+
 ## Valid Examples
 
 ```text

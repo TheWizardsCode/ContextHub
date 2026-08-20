@@ -152,6 +152,8 @@ Automatic re-sort:
 
 Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--needs-producer-review <true|false>` (set needsProducerReview flag), and `--do-not-delegate <true|false>` (set or clear the do-not-delegate tag).
 
+> **Auto-revert:** when `--audit-text`/`--audit-file` carries a `Ready to close: No` verdict for an item in `in_review` (status `completed`), the item is automatically reverted to `open`/`plan_complete` (priority preserved) and the output reports the transition (`reverted` field in JSON, `[ID reverted from completed/in_review to open/plan_complete]` in human mode). See docs/AUDIT_STATUS.md.
+
 Automatic re-sort:
 
 - `wl update` will automatically invoke a re-sort when one or more updated fields are among: `status`, `priority`, `risk`, `effort`, or `stage`. By default this re-sort runs asynchronously so the CLI is not blocked. This helps `wl next` and other selection-based commands reflect recent priority or status changes without requiring a manual `wl re-sort`.
@@ -260,6 +262,8 @@ Behavior:
 - Uses INSERT OR REPLACE to maintain latest-only audit state.
 - Automatically sets `audited_at` to the current ISO 8601 timestamp.
 - Derives `author` from `WL_USER` / `USER` / `USERNAME` environment variables unless overridden by `--author`.
+
+> **Auto-revert:** when `--ready-to-close no` is set on an item in `in_review` (status `completed`), the item is automatically reverted to `open`/`plan_complete` (priority preserved) and the output reports the transition (`reverted` field in JSON, `[ID reverted from completed/in_review to open/plan_complete]` in human mode). See docs/AUDIT_STATUS.md.
 
 Options:
 

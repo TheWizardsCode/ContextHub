@@ -51,6 +51,10 @@ npm start
 
 **Note:** All endpoints also support project prefix routing via `/projects/:prefix/...`
 
+### Audit field on updates
+
+`PUT /items/:id` (and the prefixed variant) accepts an `audit` body field containing structured audit text whose first non-empty line is `Ready to close: Yes` or `Ready to close: No`. The audit is routed to the `audit_results` table (the sole source of truth for audit state). When the verdict is `Ready to close: No` and the item is in `in_review` (status `completed`), the item is automatically reverted to `open`/`plan_complete` (priority preserved) and the response includes a `reverted` field (`{ item, from: { status, stage }, to: { status, stage } }`) — consistent with the CLI audit write paths. See docs/AUDIT_STATUS.md.
+
 ## Examples
 
 ### Create a Work Item
