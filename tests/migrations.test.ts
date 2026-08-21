@@ -93,3 +93,46 @@ describe('migrations: add audit field', () => {
     }
   });
 });
+
+describe('migrations: add last_export_timestamps table', () => {
+  it('lists the migration as pending for a legacy db without the table', () => {
+    const tempDir = createTempDir();
+    try {
+      const dbPath = path.join(tempDir, 'worklog.db');
+      createLegacyDbWithoutAudit(dbPath);
+
+      const pending = listPendingMigrations(dbPath);
+      const ids = pending.map(p => p.id);
+      expect(ids).toContain('20260821-add-last-export-timestamps');
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  });
+
+  it('creates the last_export_timestamps table and is idempotent', () => {
+    const tempDir = createTempDir();
+    try {
+      const dbPath = path.join(tempDir, 'worklog.db');
+      createLegacyDbWithoutAudit(dbPath);
+
+      const applied = runMigrations({ confirm: true }, dbPath);
+      expect(applied.applied.map(a => a.id)).toContain('20260821-add-last-export-timestamps');
+
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='last_export_timestamps'").all() as any[];
+        expect(tables.length).toBe(1);
+        // The table starts empty (rows are upserted at runtime by the store)
+        const rows = db.prepare('SELECT * FROM last_export_timestamps').all();
+        expect(rows.length).toBe(0);
+      } finally {
+        db.close();
+      }
+
+      const secondRun = runMigrations({ confirm: true }, dbPath);
+      expect(secondRun.applied.map(a => a.id)).not.toContain('20260821-add-last-export-timestamps');
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  });
+});

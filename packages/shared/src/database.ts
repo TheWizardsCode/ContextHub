@@ -6,7 +6,7 @@ import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult, DemotedParent, RevertedItem } from './types.js';
-import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions } from './persistent-store.js';
+import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions, LastExportTimestamps } from './persistent-store.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
 
 // ── Injectable service types ────────────────────────────────────────────
@@ -396,7 +396,17 @@ export class WorklogDatabase {
    * Export current database state to JSONL for sync operations.
    * This is used by the sync command before pushing to Git.
    * The JSONL file should be deleted after successful push (ephemeral pattern).
-   * 
+   *
+   * Dirty-tracking integration (WL-0MT2KWFUJ001OGHF / WL-0MSAKUBKW006FN8Q):
+   * when `options.since` provides per-type watermarks, only records that
+   * changed after those watermarks are exported (delta). When any type has no
+   * watermark, ALL records of that type are exported (full baseline per type).
+   *
+   * After a **full** export (no `since`, or omitted watermarks) the current
+   * per-type watermarks are advanced to `now` so a subsequent delta knows what
+   * is already published. Callers that push a delta must advance the
+   * watermarks themselves after a successful push (markLastExportTimestamps).
+   *
    * @returns The path to the exported JSONL file
    */
   async exportForSync(options?: any): Promise<string> {
@@ -405,15 +415,55 @@ export class WorklogDatabase {
       throw new Error('jsonl services not provided to WorklogDatabase — cannot export for sync');
     }
 
-    const items = this.store.getAllWorkItems();
-    const comments = this.store.getAllComments();
-    const dependencyEdges = this.store.getAllDependencyEdges();
-    const auditResults = this.store.getAllAuditResults();
+    const since: LastExportTimestamps | undefined = options?.since;
+    const items = since?.workitems
+      ? this.store.getAllWorkItems().filter(i => i.updatedAt && new Date(i.updatedAt).getTime() > new Date(since.workitems!).getTime())
+      : this.store.getAllWorkItems();
+    const comments = since?.comments
+      ? this.store.getAllComments().filter(c => c.createdAt && new Date(c.createdAt).getTime() > new Date(since.comments!).getTime())
+      : this.store.getAllComments();
+    const dependencyEdges = since?.edges
+      ? this.store.getAllDependencyEdges().filter(e => e.createdAt && new Date(e.createdAt).getTime() > new Date(since.edges!).getTime())
+      : this.store.getAllDependencyEdges();
+    const auditResults = since?.audit_results
+      ? this.store.getAllAuditResults().filter(a => a.auditedAt && new Date(a.auditedAt).getTime() > new Date(since.audit_results!).getTime())
+      : this.store.getAllAuditResults();
 
     // Export to JSONL
     await jsonlSvc.exportToJsonlAsync(items, comments, this.jsonlPath, dependencyEdges, auditResults, { onProgress: options?.onProgress });
 
+    // After a full export, advance all per-type watermarks to now so the next
+    // delta knows exactly what has already been published. (Delta exports do
+    // NOT auto-advance here — the pusher advances them on success.)
+    const isFull = options?.mode !== 'delta' && !since;
+    if (isFull) {
+      this.markLastExportTimestamps({
+        workitems: new Date().toISOString(),
+        comments: new Date().toISOString(),
+        edges: new Date().toISOString(),
+        audit_results: new Date().toISOString(),
+      });
+    }
+
     return this.jsonlPath;
+  }
+
+  /**
+   * Read the per-record-type last-export watermarks used by delta sync
+   * (WL-0MT2KWFUJ001OGHF). If none have ever been recorded, returns an empty
+   * object — callers treat that as "no baseline → full export".
+   */
+  getLastExportTimestamps(): LastExportTimestamps {
+    return this.store.getLastExportTimestamps();
+  }
+
+  /**
+   * Advance the per-record-type last-export watermarks (after a successful
+   * delta push, or a whole-store import that publishes all records). Only the
+   * provided types are updated; others are left untouched.
+   */
+  markLastExportTimestamps(ts: LastExportTimestamps): void {
+    this.store.setLastExportTimestamps(ts);
   }
 
   /**

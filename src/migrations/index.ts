@@ -140,6 +140,22 @@ const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; requir
         db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('audit_column_dropped', '1');
       } catch (_e) { /* best-effort */ }
     }
+  },
+  {
+    id: '20260821-add-last-export-timestamps',
+    description: 'Add last_export_timestamps table for per-record-type delta sync watermarks',
+    safe: true,
+    requiredColumn: '__table:last_export_timestamps',
+    apply: (db: Database.Database) => {
+      // Idempotent table creation for existing databases (new DBs get it in
+      // initializeSchema). Row values are upserted at runtime by the store.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS last_export_timestamps (
+          record_type TEXT PRIMARY KEY,
+          exported_at TEXT NOT NULL
+        )
+      `);
+    }
   }
 ];
 

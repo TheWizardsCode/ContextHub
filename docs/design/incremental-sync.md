@@ -87,35 +87,45 @@ Because deltas are a subset of the full format:
 
 ## 4. Dirty tracking (per-type export timestamps)
 
-### 4.1 Mechanism: `updatedAt` threshold, not write interception
+### 4.1 Mechanism: `updatedAt` threshold, persisted in SQLite, not write interception
 
 Per the intake risk mitigation ("track at the export boundary using `updatedAt`
 thresholds rather than write interception"), dirty tracking is based on a
-**per-type export timestamp** recorded after each successful export/push:
+**per-type export watermark** recorded after each successful export/push:
 
-- `last-export-time` state file under `.worklog/` records four timestamps
-  (ISO 8601), one per record type:
-  - `workitem`
-  - `comment`
-  - `audit_result`
-- On the next sync, a record is **dirty** if `updatedAt > lastExportTime[type]`.
+- a `last_export_timestamps` DB table (one row per record type, ISO-8601
+  watermark), backed by the `SqlitePersistentStore`:
+  - `workitems`
+  - `comments`
+  - `edges`
+  - `audit_results`
+- The table is created for new databases in `initializeSchema` and for existing
+databases by the `20260821-add-last-export-timestamps` migration
+(`src/migrations/index.ts`).
+- On the next sync, a record is **dirty** if `updatedAt > watermark[type]`.
 
-**Why this is robust:** because it is computed at the export boundary against
-the data's own `updatedAt` timestamps, it cannot miss changes written by any
-path (ORM writes, direct DB writes, imports, migrations) that bump `updatedAt`.
+**Why this is robust:** because it is computed at the export boundary against the
+data's own `updatedAt` timestamps, it cannot miss changes written by any path
+(ORM writes, direct DB writes, imports, migrations) that bump `updatedAt`.
 The same threshold mechanism naturally covers comments (keyed by `createdAt`
-as the effective update time) and audit results (by `updatedAt`).
+as the effective update time), dependency edges (by `createdAt`) and audit
+results (by `auditedAt`).
 
-**No-baseline rule:** when `last-export-time` is absent (first sync), every
-record is dirty → full export.
+**No-baseline rule:** when the table has no watermark (first sync), every
+record is dirty → full export. The watermark is advanced only after a
+successful export/push, under the existing file lock, so a concurrent sync
+can never advance the baseline past data that was never published.
+
+**API surface** (`WorklogDatabase`): `getLastExportTimestamps()`, `markLastExportTimestamps(ts)`, and `exportForSync({ since })` which filters each record type by its watermark.
 
 ### 4.2 Per-type coverage
 
 | Type | Dirty predicate |
 |------|-----------------|
-| `workitem` | `item.updatedAt > lastExportTime.workitem` |
-| `comment` | `comment.createdAt > lastExportTime.comment` (comments are immutable after creation) |
-| `audit_result` | `audit.updatedAt > lastExportTime.audit_result` |
+| `workitem` | `item.updatedAt > watermark.workitems` |
+| `comment` | `comment.createdAt > watermark.comments` (comments are immutable after creation) |
+| `edge` | `edge.createdAt > watermark.edges` |
+| `audit_result` | `audit.auditedAt > watermark.audit_results` |
 
 > **Design note:** comments are treated as immutable-by-`id` (the merge
 > dedupes by `id`), so `createdAt` is the correct dirty key — a comment that
@@ -171,7 +181,8 @@ configurable (`sync.fullSnapshotEveryN`, `sync.deltaSizeThreshold`).
 Rationale (per plan): preempting that the remote retains a recent full
 snapshot bounds any delta-replay cost, and a conservative threshold keeps the
 rare slow syncs infrequent. A counter + accumulated-delta-size is persisted in
-the last-export-time state file.
+the `last_export_timestamps` table (as additional metadata rows) or a
+companion metadata key.
 
 ### 5.4 Zero-change fast path
 
@@ -263,7 +274,9 @@ the records changed since the last full snapshot — not unbounded history.
 
 | File | Change |
 |------|--------|
-| `packages/shared/src/database.ts` | `exportForSync()` accepts `{mode, since}`; add dirty query support; persist `last-export-time` state (per-type timestamps, delta counter, accumulated size) |
+| `packages/shared/src/persistent-store.ts` | `last_export_timestamps` table in `initializeSchema`; `LastExportTimestamps` type; `getLastExportTimestamps()` / `setLastExportTimestamps()` store accessors |
+| `packages/shared/src/database.ts` | `exportForSync()` accepts `{mode, since}`; dirty query filtering per record type; `getLastExportTimestamps()` / `markLastExportTimestamps()`; watermark advance after full export |
+| `src/migrations/index.ts` | `20260821-add-last-export-timestamps` migration for existing DBs |
 | `src/jsonl.ts` | header emission/parsing; a delta writer (`buildJsonlContent` with `since`) |
 | `src/sync.ts` | pull side detects header kind; `exportForSync` call sites; full-snapshot fallback decision |
 | `src/commands/sync.ts` | orchestration: decide full vs delta, cadence policy, zero-change skip |
@@ -278,7 +291,7 @@ inherits unchanged:
 - the single-flight guard and `--if-idle` skip semantics (WL-0MSAB7ZUC004SK7E),
 - the ephemeral JSONL pattern (SQLite → JSONL → push → delete).
 
-The last-export-time state file is written only after a **successful** push,
+The `last_export_timestamps` table is written only after a **successful** push,
 under the same lock, so concurrent syncs cannot advance the baseline past data
 that was never published. **(AC: no regression to concurrency protections)**
 
