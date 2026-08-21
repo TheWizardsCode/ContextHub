@@ -19,6 +19,12 @@ import {
   DEFAULT_DOWNTIME_PROXY_URL,
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
 } from './downtime-worker.js';
+import {
+  clampModeSwitchIdleThresholdMs,
+  clampModeSwitchPollIntervalMs,
+  DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
+  DEFAULT_MODE_SWITCH_POLL_INTERVAL_MS,
+} from './mode-switch-worker.js';
 import { dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -58,6 +64,16 @@ export interface PluginSettings {
    * Floor 60s; default 3_600_000 ms (60 min).
    */
   downtimeNoCandidateCooldownMs: number;
+  /** Enable activity-gated mode-switching (fast on agent command, cheap on idle). */
+  modeSwitchEnabled: boolean;
+  /**
+   * Idle window before switching to cheap mode (ms). Default 900_000 (15 min).
+   * A new operator agent-route command resets this timer.
+   */
+  modeSwitchIdleThresholdMs: number;
+  /** Poll interval for the mode-switch worker (ms). Defaults to the same
+   * cadence as the downtime poller; clamped to a sensible range. */
+  modeSwitchPollIntervalMs: number;
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────
@@ -77,6 +93,9 @@ export const defaultSettings: PluginSettings = {
   downtimeProxyUrl: DEFAULT_DOWNTIME_PROXY_URL,
   downtimeModel: DEFAULT_DOWNTIME_MODEL,
   downtimeNoCandidateCooldownMs: DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
+  modeSwitchEnabled: false,
+  modeSwitchIdleThresholdMs: DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
+  modeSwitchPollIntervalMs: DEFAULT_MODE_SWITCH_POLL_INTERVAL_MS,
 };
 
 /** Minimum allowed browseItemCount. */
@@ -164,6 +183,14 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       downtimeNoCandidateCooldownMs: typeof parsed.downtimeNoCandidateCooldownMs === 'number'
         ? clampDowntimeNoCandidateCooldownMs(parsed.downtimeNoCandidateCooldownMs)
         : defaultSettings.downtimeNoCandidateCooldownMs,
+      modeSwitchEnabled: typeof parsed.modeSwitchEnabled === 'boolean'
+        ? parsed.modeSwitchEnabled : defaultSettings.modeSwitchEnabled,
+      modeSwitchIdleThresholdMs: typeof parsed.modeSwitchIdleThresholdMs === 'number'
+        ? clampModeSwitchIdleThresholdMs(parsed.modeSwitchIdleThresholdMs)
+        : defaultSettings.modeSwitchIdleThresholdMs,
+      modeSwitchPollIntervalMs: typeof parsed.modeSwitchPollIntervalMs === 'number'
+        ? clampModeSwitchPollIntervalMs(parsed.modeSwitchPollIntervalMs)
+        : defaultSettings.modeSwitchPollIntervalMs,
     };
   } catch {
     return { ...defaultSettings };
