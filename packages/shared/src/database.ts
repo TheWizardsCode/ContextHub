@@ -19,6 +19,8 @@ export interface JsonlImportResult {
   comments: Comment[];
   dependencyEdges: DependencyEdge[];
   auditResults: AuditResult[];
+  /** Sync header kind when the file starts with a sync header (incremental sync). */
+  kind?: 'full' | 'delta';
 }
 
 /**
@@ -397,15 +399,23 @@ export class WorklogDatabase {
    * This is used by the sync command before pushing to Git.
    * The JSONL file should be deleted after successful push (ephemeral pattern).
    *
-   * Dirty-tracking integration (WL-0MT2KWFUJ001OGHF / WL-0MSAKUBKW006FN8Q):
-   * when `options.since` provides per-type watermarks, only records that
-   * changed after those watermarks are exported (delta). When any type has no
-   * watermark, ALL records of that type are exported (full baseline per type).
+   * Delta-aware export (WL-0MT2KXPOQ009G026 / WL-0MSAKUBKW006FN8Q):
    *
-   * After a **full** export (no `since`, or omitted watermarks) the current
-   * per-type watermarks are advanced to `now` so a subsequent delta knows what
-   * is already published. Callers that push a delta must advance the
-   * watermarks themselves after a successful push (markLastExportTimestamps).
+   * - `options.mode: 'full'` (default) — export ALL records, then advance the
+   *   per-type last-export watermarks to `now` so a subsequent delta knows what
+   *   is already published.
+   * - `options.mode: 'delta'` — export only records changed after the
+   *   per-type watermarks. If `options.since` is provided it is used as the
+   *   watermark set; otherwise the stored watermarks
+   *   (`getLastExportTimestamps()`) are read automatically. When a type has no
+   *   watermark (no baseline), ALL records of that type are exported for that
+   *   type (full baseline per type). When NO watermarks exist at all, the
+   *   delta degrades to a full export (the design's "no-baseline → full
+   *   export" rule), because a delta with empty watermarks would be empty
+   *   and lose data on the push side.
+   *
+   * Delta exports do NOT auto-advance the watermarks here — the push path
+   * advances them only after a successful push (markLastExportTimestamps).
    *
    * @returns The path to the exported JSONL file
    */
@@ -415,28 +425,51 @@ export class WorklogDatabase {
       throw new Error('jsonl services not provided to WorklogDatabase — cannot export for sync');
     }
 
-    const since: LastExportTimestamps | undefined = options?.since;
-    const items = since?.workitems
-      ? this.store.getAllWorkItems().filter(i => i.updatedAt && new Date(i.updatedAt).getTime() > new Date(since.workitems!).getTime())
+    const mode: 'full' | 'delta' =
+      options?.mode === 'delta' && process.env.WL_DELTA_EXPORT_DISABLED !== '1' ? 'delta' : 'full';
+
+    // In delta mode resolve the per-type watermarks: explicit `since` wins,
+    // otherwise read the stored watermarks (no baseline → full fallback).
+    let since: LastExportTimestamps | undefined;
+    if (mode === 'delta') {
+      const candidate = options?.since ?? this.getLastExportTimestamps();
+      const hasAnyWatermark = Boolean(candidate.workitems || candidate.comments || candidate.edges || candidate.audit_results);
+      if (hasAnyWatermark) {
+        since = candidate;
+      }
+      // No baseline at all — a delta would export nothing. Fall back to full
+      // so the remote always receives a complete snapshot on first sync.
+    }
+
+    // Capture the resolved watermarks so the filter callbacks close over a
+    // definite value (narrowing does not survive into the closures).
+    const wItems = since?.workitems;
+    const wComments = since?.comments;
+    const wEdges = since?.edges;
+    const wAudits = since?.audit_results;
+
+    const items = wItems
+      ? this.store.getAllWorkItems().filter(i => i.updatedAt && new Date(i.updatedAt).getTime() > new Date(wItems).getTime())
       : this.store.getAllWorkItems();
-    const comments = since?.comments
-      ? this.store.getAllComments().filter(c => c.createdAt && new Date(c.createdAt).getTime() > new Date(since.comments!).getTime())
+    const comments = wComments
+      ? this.store.getAllComments().filter(c => c.createdAt && new Date(c.createdAt).getTime() > new Date(wComments).getTime())
       : this.store.getAllComments();
-    const dependencyEdges = since?.edges
-      ? this.store.getAllDependencyEdges().filter(e => e.createdAt && new Date(e.createdAt).getTime() > new Date(since.edges!).getTime())
+    const dependencyEdges = wEdges
+      ? this.store.getAllDependencyEdges().filter(e => e.createdAt && new Date(e.createdAt).getTime() > new Date(wEdges).getTime())
       : this.store.getAllDependencyEdges();
-    const auditResults = since?.audit_results
-      ? this.store.getAllAuditResults().filter(a => a.auditedAt && new Date(a.auditedAt).getTime() > new Date(since.audit_results!).getTime())
+    const auditResults = wAudits
+      ? this.store.getAllAuditResults().filter(a => a.auditedAt && new Date(a.auditedAt).getTime() > new Date(wAudits).getTime())
       : this.store.getAllAuditResults();
 
-    // Export to JSONL
-    await jsonlSvc.exportToJsonlAsync(items, comments, this.jsonlPath, dependencyEdges, auditResults, { onProgress: options?.onProgress });
+    // Export to JSONL — the `kind` is surfaced to the JSONL writer so the
+    // output carries a sync header distinguishing full vs delta
+    // (WL-0MT2KXPOQ009G026).
+    await jsonlSvc.exportToJsonlAsync(items, comments, this.jsonlPath, dependencyEdges, auditResults, { onProgress: options?.onProgress, kind: mode });
 
     // After a full export, advance all per-type watermarks to now so the next
     // delta knows exactly what has already been published. (Delta exports do
     // NOT auto-advance here — the pusher advances them on success.)
-    const isFull = options?.mode !== 'delta' && !since;
-    if (isFull) {
+    if (mode !== 'delta') {
       this.markLastExportTimestamps({
         workitems: new Date().toISOString(),
         comments: new Date().toISOString(),

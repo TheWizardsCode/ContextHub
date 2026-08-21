@@ -500,4 +500,91 @@ describe('JSONL Import/Export', () => {
       expect(result.dependencyEdges).toHaveLength(0);
     });
   });
+
+  describe('sync header (incremental sync, WL-0MT2KXPOQ009G026)', () => {
+    it('emits a full header line as the first line when kind is full', () => {
+      const items: WorkItem[] = [
+        {
+          id: 'WI-001',
+          title: 'Task 1',
+          description: '',
+          status: 'open',
+          priority: 'medium',
+          sortIndex: 0,
+          parentId: null,
+          createdAt: '2024-01-01T00:00:00.000Z',
+          updatedAt: '2024-01-01T00:00:00.000Z',
+          tags: [],
+          assignee: '',
+          stage: '',
+        },
+      ];
+
+      exportToJsonl(items, [], testFilePath, [], [], 'full');
+
+      const lines = fs.readFileSync(testFilePath, 'utf-8').trim().split('\n');
+      const header = JSON.parse(lines[0]);
+      expect(header.__worklog_sync__.kind).toBe('full');
+      expect(header.__worklog_sync__.version).toBe(1);
+      // Records follow the header (unaffected record format)
+      expect(lines[1]).toContain('"type":"workitem"');
+    });
+
+    it('emits a delta header and imports it as kind delta with records intact', () => {
+      const items: WorkItem[] = [
+        {
+          id: 'WI-001',
+          title: 'Task 1',
+          description: '',
+          status: 'open',
+          priority: 'medium',
+          sortIndex: 0,
+          parentId: null,
+          createdAt: '2024-01-01T00:00:00.000Z',
+          updatedAt: '2024-01-01T00:00:00.000Z',
+          tags: [],
+          assignee: '',
+          stage: '',
+        },
+      ];
+
+      exportToJsonl(items, [], testFilePath, [], [], 'delta');
+
+      const result = importFromJsonl(testFilePath);
+      expect(result.kind).toBe('delta');
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].id).toBe('WI-001');
+    });
+
+    it('imports full header files with kind full', () => {
+      exportToJsonl([], [], testFilePath, [], [], 'full');
+      const result = importFromJsonl(testFilePath);
+      expect(result.kind).toBe('full');
+      expect(result.items).toHaveLength(0);
+    });
+
+    it('legacy files without a header import with undefined kind', () => {
+      const content = JSON.stringify({ type: 'workitem', data: { id: 'WI-001', title: 'T', description: '', status: 'open', priority: 'medium', sortIndex: 0, parentId: null, createdAt: '2024-01-01T00:00:00.000Z', updatedAt: '2024-01-01T00:00:00.000Z', tags: [], assignee: '', stage: '' } }) + '\n';
+      fs.writeFileSync(testFilePath, content, 'utf-8');
+      const result = importFromJsonl(testFilePath);
+      expect(result.kind).toBeUndefined();
+      expect(result.items).toHaveLength(1);
+    });
+
+    it('exportToJsonlAsync emits the header in delta mode', async () => {
+      await exportToJsonlAsync([], [], testFilePath, [], [], { kind: 'delta' });
+      const lines = fs.readFileSync(testFilePath, 'utf-8').trim().split('\n');
+      expect(lines[0]).toContain('"kind":"delta"');
+      const result = importFromJsonl(testFilePath);
+      expect(result.kind).toBe('delta');
+    });
+
+    it('exportToJsonlAsync without kind emits a headerless (legacy) file', async () => {
+      await exportToJsonlAsync([], [], testFilePath, [], []);
+      const lines = fs.readFileSync(testFilePath, 'utf-8').trim().split('\n');
+      expect(lines[0]).not.toContain('__worklog_sync__');
+      const result = importFromJsonl(testFilePath);
+      expect(result.kind).toBeUndefined();
+    });
+  });
 });

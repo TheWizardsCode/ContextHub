@@ -56,9 +56,9 @@ function makeItem(overrides: Partial<WorkItem> = {}): WorkItem {
 
 /** A mock jsonl service that records the arrays handed to exportToJsonlAsync. */
 function makeJsonlService() {
-  const calls: Array<{ items: WorkItem[] }> = [];
-  const exportToJsonlAsync = vi.fn(async (items: WorkItem[], _comments: any[], _path: string, _deps: any[], _audits: any[], _options?: any): Promise<number> => {
-    calls.push({ items: items as WorkItem[] });
+  const calls: Array<{ items: WorkItem[]; kind?: string }> = [];
+  const exportToJsonlAsync = vi.fn(async (items: WorkItem[], _comments: any[], _path: string, _deps: any[], _audits: any[], options?: any): Promise<number> => {
+    calls.push({ items: items as WorkItem[], kind: options?.kind });
     return 0;
   });
   return {
@@ -123,12 +123,59 @@ describe('last-export watermark round-trip (WL-0MT2KWFUJ001OGHF)', () => {
   });
 });
 
-describe('exportForSync delta filtering by watermark (WL-0MT2KWFUJ001OGHF)', () => {
+describe('exportForSync delta filtering by watermark (WL-0MT2KXPOQ009G026)', () => {
+  it('delta mode with no watermarks falls back to a full export (no baseline)', async () => {
+    const { service, calls } = makeJsonlService();
+    db = new WorklogDatabase('TEST', join(tempDir, 'worklog.db'), join(tempDir, 'data.jsonl'), true, false, undefined, service);
+    db.import([makeItem({ id: 'WI-0001', updatedAt: FIXED_TS }), makeItem({ id: 'WI-0002', updatedAt: LATER_TS })]);
+
+    // No baseline has ever been recorded → delta must degrade to full export.
+    await db.exportForSync({ mode: 'delta' });
+
+    expect(calls.length).toBe(1);
+    expect(calls[0].items.length).toBe(2);
+  });
+
+  it('delta mode reads stored watermarks automatically (no explicit since)', async () => {
+    const { service, calls } = makeJsonlService();
+    db = new WorklogDatabase('TEST', join(tempDir, 'worklog.db'), join(tempDir, 'data.jsonl'), true, false, undefined, service);
+    db.import([makeItem({ id: 'WI-0001', updatedAt: FIXED_TS }), makeItem({ id: 'WI-0002', updatedAt: LATER_TS })]);
+    db.markLastExportTimestamps({ workitems: FIXED_TS });
+
+    // Only WI-0002 was updated after the stored watermark (strict >).
+    await db.exportForSync({ mode: 'delta' });
+
+    expect(calls.length).toBe(1);
+    expect(calls[0].items.map((i: WorkItem) => i.id)).toEqual(['WI-0002']);
+    // The writer must receive the delta kind so the JSONL carries a delta header.
+    expect(calls[0].kind).toBe('delta');
+  });
+
+  it('delta mode advances no watermarks on export', async () => {
+    const { service } = makeJsonlService();
+    db = new WorklogDatabase('TEST', join(tempDir, 'worklog.db'), join(tempDir, 'data.jsonl'), true, false, undefined, service);
+    db.markLastExportTimestamps({ workitems: FIXED_TS });
+    await db.exportForSync({ mode: 'delta' });
+    expect(db.getLastExportTimestamps().workitems).toBe(FIXED_TS);
+  });
+
+  it('explicit since overrides stored watermarks in delta mode', async () => {
+    const { service, calls } = makeJsonlService();
+    db = new WorklogDatabase('TEST', join(tempDir, 'worklog.db'), join(tempDir, 'data.jsonl'), true, false, undefined, service);
+    db.import([makeItem({ id: 'WI-0001', updatedAt: FIXED_TS }), makeItem({ id: 'WI-0002', updatedAt: LATER_TS })]);
+    db.markLastExportTimestamps({ workitems: LATER_TS });
+
+    // Stored watermark LATER_TS would export nothing; the explicit since=FIXED_TS
+    // takes precedence and leaves WI-0002 dirty.
+    await db.exportForSync({ mode: 'delta', since: { workitems: FIXED_TS } });
+    expect(calls[0].items.map((i: WorkItem) => i.id)).toEqual(['WI-0002']);
+  });
+
   it('exports only items updated after the workitems watermark', async () => {
     const { service, calls } = makeJsonlService();
     db = new WorklogDatabase('TEST', join(tempDir, 'worklog.db'), join(tempDir, 'data.jsonl'), true, false, undefined, service);
     db.import([makeItem({ id: 'WI-0001', updatedAt: FIXED_TS }), makeItem({ id: 'WI-0002', updatedAt: LATER_TS })]);
-    await db.exportForSync({ since: { workitems: FIXED_TS } });
+    await db.exportForSync({ mode: 'delta', since: { workitems: FIXED_TS } });
 
     expect(calls.length).toBe(1);
     const ids = calls[0].items.map((i: WorkItem) => i.id);
@@ -141,7 +188,7 @@ describe('exportForSync delta filtering by watermark (WL-0MT2KWFUJ001OGHF)', () 
     db.import([makeItem({ id: 'WI-0001' })]);
     db.createComment({ workItemId: 'WI-0001', author: 'a', comment: 'old', references: [] });
     const oldComment = db.getAllComments()[0];
-    await db.exportForSync({ since: { comments: oldComment.createdAt } });
+    await db.exportForSync({ mode: 'delta', since: { comments: oldComment.createdAt } });
 
     const commentCalls = (service.jsonl as any).exportToJsonlAsync.mock.calls;
     const exportedComments = commentCalls[0][1];
@@ -154,7 +201,7 @@ describe('exportForSync delta filtering by watermark (WL-0MT2KWFUJ001OGHF)', () 
     db.import([makeItem({ id: 'WI-0001' }), makeItem({ id: 'WI-0002' })]);
     db.addDependencyEdge('WI-0001', 'WI-0002');
     const edge = db.getAllDependencyEdges()[0];
-    await db.exportForSync({ since: { edges: edge.createdAt } });
+    await db.exportForSync({ mode: 'delta', since: { edges: edge.createdAt } });
 
     const edgeCalls = (service.jsonl as any).exportToJsonlAsync.mock.calls;
     const exportedEdges = edgeCalls[0][3];
@@ -166,7 +213,7 @@ describe('exportForSync delta filtering by watermark (WL-0MT2KWFUJ001OGHF)', () 
     db = new WorklogDatabase('TEST', join(tempDir, 'worklog.db'), join(tempDir, 'data.jsonl'), true, false, undefined, service);
     db.import([makeItem({ id: 'WI-0001' })]);
     db.saveAuditResult({ workItemId: 'WI-0001', readyToClose: true, auditedAt: LATER_TS, summary: 's', rawOutput: null, author: 'a' });
-    await db.exportForSync({ since: { audit_results: FIXED_TS } });
+    await db.exportForSync({ mode: 'delta', since: { audit_results: FIXED_TS } });
 
     const auditCalls = (service.jsonl as any).exportToJsonlAsync.mock.calls;
     const exportedAudits = auditCalls[0][4];
