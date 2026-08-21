@@ -1000,12 +1000,6 @@ async function main(): Promise<void> {
         // The work-item ↔ pane association is skipped when no pane opens.
         const shouldOpenPane = openPane ?? true;
         const route = routeCommand(command);
-        // Agent-route hook: record operator activity and fire fast-switch
-        // (fail-open: never blocks command dispatch). Only runs for agent
-        // commands — /skill:*, /intake, /plan, /prompt:. The worker's
-        // onOperatorCommand updates the idle clock and POSTs mode=fast
-        // (when not already fast) via fire-and-forget.
-        modeSwitchWorker.onOperatorCommand(runSettings.downtimeProxyUrl);
         // The new pane must start in the correct project root.  herdr's
         // "follow" CWD policy would otherwise inherit the source pane's CWD
         // (the plugin directory), so we pass the resolved project root
@@ -1017,6 +1011,13 @@ async function main(): Promise<void> {
         // process CWD is the herdr extension directory.
         const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
         if (route === 'agent') {
+          // Agent-route hook: record operator activity and fire fast-switch
+          // (fail-open: never blocks command dispatch). Only runs for agent
+          // commands — /skill:*, /intake, /plan, /prompt:. Shell shortcuts
+          // (!!/!) and plain commands do NOT count as operator activity
+          // (AC2). The worker's onOperatorCommand updates the idle clock
+          // and POSTs mode=fast (when not already fast) fire-and-forget.
+          modeSwitchWorker.onOperatorCommand(runSettings.downtimeProxyUrl);
           // Claim the referenced work-item BEFORE dispatching so it appears
           // in_progress immediately — for both the pane and the headless
           // (no-pane) path. Non-blocking: failures are logged to stderr and
