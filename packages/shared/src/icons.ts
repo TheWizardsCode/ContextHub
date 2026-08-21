@@ -1,10 +1,20 @@
 /**
- * packages/shared/src/icons.ts — Shared icon/colour data for Worklog
+ * packages/shared/src/icons.ts — Shared icon/colour data for the herdr plugin
  *
  * Dependency-free module providing icon maps, icon functions, stage-colour
- * helpers, and display-width utilities.  This is the single source of truth
- * for icon/colour data consumed by both the CLI (src/theme.ts re-exports)
- * and the herdr plugin (packages/herdr).
+ * helpers, and display-width utilities.  Herdr imported its own adapted copy
+ * (packages/herdr/src/icons.ts); this module is that data's single canonical
+ * home so the plugin no longer carries a duplicate that can drift.
+ *
+ * The icon glyphs deliberately preserve the values the herdr worklist has
+ * always rendered (❓ unknown audit, ⏳ stale-passed, ⊙ epic, 💥 critical
+ * risk, `[ready]`/`[?]` text fallbacks) so removing the local copy does not
+ * change any rendered output (parent WL-0MSJ4BT4Z002HH9B AC3: "the worklist
+ * renders icons/colours identically").
+ *
+ * The CLI (src/theme.ts) keeps its own self-contained icons with slightly
+ * different glyph choices; this module serves herdr's needs without pulling
+ * in chalk or other Pi dependencies.
  *
  * No external dependencies — pure data + functions.
  */
@@ -16,38 +26,15 @@ export interface IconOptions {
   noIcons?: boolean;
 }
 
-// ── Priority Icons ────────────────────────────────────────────────────
-
-const PRIORITY_ICONS: Record<string, string> = {
-  critical: '\u{1F6A8}',  // 🚨 Rotating light
-  high:     '\u{2B50}',   // ⭐ Star
-  medium:   '\u{1F4CB}',  // 📋 Clipboard
-  low:      '\u{1F422}',  // 🐢 Turtle
-};
-
-const PRIORITY_FALLBACK: Record<string, string> = {
-  critical: '[CRIT]',
-  high:     '[HIGH]',
-  medium:   '[MED ]',
-  low:      '[LOW ]',
-};
-
-const PRIORITY_LABEL: Record<string, string> = {
-  critical: 'Critical priority',
-  high:     'High priority',
-  medium:   'Medium priority',
-  low:      'Low priority',
-};
-
-// ── Status Icons ───────────────────────────────────────────────────────
+// ── Icon maps ─────────────────────────────────────────────────────────
 
 const STATUS_ICONS: Record<string, string> = {
-  open:          '\u{1F513}',   // 🔓 Unlocked
-  'in-progress': '\u{1F504}',  // 🔄 Arrows
-  completed:     '\u{2714}\u{FE0F}', // ✔️ Heavy check mark
-  blocked:       '\u{26D4}',   // ⛔ No entry
-  deleted:       '\u{1F5D1}\u{FE0F}', // 🗑️ Wastebasket
-  input_needed:  '\u{1F4AC}',  // 💬 Speech balloon
+  open:          '\u{1F513}',   // 🔓
+  'in-progress': '\u{1F504}',  // 🔄
+  completed:     '\u{2714}\u{FE0F}', // ✔️
+  blocked:       '\u{26D4}',   // ⛔
+  deleted:       '\u{1F5D1}\u{FE0F}', // 🗑️
+  input_needed:  '\u{1F4AC}',  // 💬
 };
 
 const STATUS_FALLBACK: Record<string, string> = {
@@ -59,186 +46,68 @@ const STATUS_FALLBACK: Record<string, string> = {
   input_needed:  '[HELP]',
 };
 
-const STATUS_LABEL: Record<string, string> = {
-  open:          'Status: Open',
-  'in-progress': 'Status: In progress',
-  completed:     'Status: Completed',
-  blocked:       'Status: Blocked',
-  deleted:       'Status: Deleted',
-  input_needed:  'Status: Input needed',
-};
-
-// ── Risk Icons ─────────────────────────────────────────────────────────
-
-const RISK_ICONS: Record<string, string> = {
-  low:    '\u{1F331}',  // 🌱 Seedling
-  medium: '\u{26A0}\u{FE0F}', // ⚠️ Warning
-  high:   '\u{1F525}',  // 🔥 Fire
-  severe: '\u{1F6A8}',  // 🚨 Rotating light
-};
-
-const RISK_FALLBACK: Record<string, string> = {
-  low:    '[LOW]',
-  medium: '[MED]',
-  high:   '[HIGH]',
-  severe: '[SEV]',
-};
-
-const RISK_LABEL: Record<string, string> = {
-  low:    'Risk: Low',
-  medium: 'Risk: Medium',
-  high:   'Risk: High',
-  severe: 'Risk: Severe',
-};
-
-// ── Effort Icons ───────────────────────────────────────────────────────
-
-const EFFORT_ICONS: Record<string, string> = {
-  xs:        '\u{1F41C}',  // 🐜 Ant
-  s:         '\u{1F407}',  // 🐇 Rabbit
-  m:         '\u{1F415}',  // 🐕 Dog
-  l:         '\u{1F418}',  // 🐘 Elephant
-  xl:        '\u{1F40B}',  // 🐋 Whale
-  'extra small': '\u{1F41C}',
-  small:       '\u{1F407}',
-  medium:      '\u{1F415}',
-  large:       '\u{1F418}',
-  'extra large': '\u{1F40B}',
-  xlarge:      '\u{1F40B}',
-};
-
-const EFFORT_FALLBACK: Record<string, string> = {
-  xs:        '[XS]',
-  s:         '[S]',
-  m:         '[M]',
-  l:         '[L]',
-  xl:        '[XL]',
-  'extra small': '[XS]',
-  small:       '[S]',
-  medium:      '[M]',
-  large:       '[L]',
-  'extra large': '[XL]',
-  xlarge:      '[XL]',
-};
-
-const EFFORT_LABEL: Record<string, string> = {
-  xs:        'Effort: XS (extra small)',
-  s:         'Effort: S (small)',
-  m:         'Effort: M (medium)',
-  l:         'Effort: L (large)',
-  xl:        'Effort: XL (extra large)',
-  'extra small': 'Effort: XS (extra small)',
-  small:       'Effort: S (small)',
-  medium:      'Effort: M (medium)',
-  large:       'Effort: L (large)',
-  'extra large': 'Effort: XL (extra large)',
-  xlarge:      'Effort: XL (extra large)',
-};
-
-// ── Epic Icons ──────────────────────────────────────────────────────────
-
-const EPIC_ICON = '\u{1F3F0}';  // 🏰 Castle
-const EPIC_FALLBACK = '[EPIC]';
-const EPIC_LABEL = 'Issue Type: Epic';
-
-// ── Stage Icons ───────────────────────────────────────────────────────
-
 const STAGE_ICONS: Record<string, string> = {
-  idea:            '\u{1F4A1}',          // 💡
-  intake_complete: '\u{1F4E5}',          // 📥
-  plan_complete:   '\u{1F4CB}',          // 📋
-  in_progress:     '\u{1F6E0}\u{FE0F}', // 🛠️
-  in_review:       '\u{1F50D}',          // 🔍
-  done:            '\u{1F3C1}',          // 🏁
+  idea:             '\u{1F4A1}',           // 💡
+  intake_complete:  '\u{1F4E5}',           // 📥
+  plan_complete:    '\u{1F4CB}',           // 📋
+  in_progress:      '\u{1F6E0}\u{FE0F}',  // 🛠️
+  in_review:        '\u{1F50D}',           // 🔍
+  completed:        '\u{2714}\u{FE0F}',   // ✔️
 };
 
 const STAGE_FALLBACK: Record<string, string> = {
-  idea:            '[IDEA]',
-  intake_complete: '[INTAKE]',
-  plan_complete:   '[PLAN]',
-  in_progress:     '[PROG]',
-  in_review:       '[REVIEW]',
-  done:            '[DONE]',
+  idea:             '[IDEA]',
+  intake_complete:  '[INTAKE]',
+  plan_complete:    '[PLAN]',
+  in_progress:      '[IN PR]',
+  in_review:        '[REVIEW]',
+  completed:        '[DONE]',
 };
 
-const STAGE_LABEL: Record<string, string> = {
-  idea:            'Stage: Idea',
-  intake_complete: 'Stage: Intake Complete',
-  plan_complete:   'Stage: Plan Complete',
-  in_progress:     'Stage: In Progress',
-  in_review:       'Stage: In Review',
-  done:            'Stage: Done',
+const PRIORITY_ICONS: Record<string, string> = {
+  critical: '\u{1F6A8}',  // 🚨
+  high:     '\u{2B50}',   // ⭐
+  medium:   '\u{1F4CB}',  // 📋
+  low:      '\u{1F422}',  // 🐢
 };
 
-// ── Audit Result Icons ────────────────────────────────────────────────
-
-function auditKey(result: boolean | null | undefined): string {
-  if (result === true) return 'yes';
-  if (result === false) return 'no';
-  return 'unknown';
-}
-
-const AUDIT_ICON: Record<string, string> = {
-  yes:     '\u{2705}',  // ✅
-  no:      '\u{274C}',  // ❌
-  unknown: '\u{2754}',  // ❔
+const PRIORITY_FALLBACK: Record<string, string> = {
+  critical: '[CRIT]',
+  high:     '[HIGH]',
+  medium:   '[MED ]',
+  low:      '[LOW ]',
 };
 
-const AUDIT_FALLBACK: Record<string, string> = {
-  yes:     '[YES]',
-  no:      '[NO]',
-  unknown: '[UNKN]',
+const RISK_ICONS: Record<string, string> = {
+  low:      '\u{1F7E2}',  // 🟢
+  medium:   '\u{1F7E1}',  // 🟡
+  high:     '\u{1F534}',  // 🔴
+  critical: '\u{1F4A5}',  // 💥
 };
 
-const AUDIT_LABEL: Record<string, string> = {
-  yes:     'Audit: Passed',
-  no:      'Audit: Failed',
-  unknown: 'Audit: Not run',
+const EFFORT_ICONS: Record<string, string> = {
+  small:   '\u{1F539}',  // 🔹
+  medium:  '\u{1F537}',  // 🔷
+  large:   '\u{1F536}',  // 🔶
+  xlarge:  '\u{1F4A0}',  // 💠
 };
 
-// ── Stale Audit Result Icons ───────────────────────────────────────────
+const EPIC_ICON = '\u{2299}';    // ⊙
+const EPIC_FALLBACK = '[EPIC]';
 
-const STALE_AUDIT_ICON: Record<string, string> = {
-  yes: '\u{1F7E9}',  // 🟩 Green square button
-};
+const AUDIT_READY = '\u{2705}';      // ✅
+const AUDIT_NOT_READY = '\u{274C}';  // ❌
+const AUDIT_UNKNOWN = '\u{2753}';     // ❓
 
-const STALE_AUDIT_FALLBACK: Record<string, string> = {
-  yes: '[YES_STALE]',
-};
+const AUDIT_STALE_PASSED = '\u{23F3}';  // ⏳
+const AUDIT_STALE_FAILED = '\u{26A0}';   // ⚠️
 
-const STALE_AUDIT_LABEL: Record<string, string> = {
-  yes: 'Audit: Passed (stale)',
-};
+const NEEDS_REVIEW_ICON = '\u{274C}';  // ❌
+const REVIEW_DONE_ICON = '\u{2705}';    // ✅
 
-// ── Producer Review Flag Icons ────────────────────────────────────────
-
-function producerReviewKey(needsProducerReview: boolean | null | undefined): string {
-  if (needsProducerReview === true) return 'needed';
-  return 'not_needed';
-}
-
-const PRODUCER_REVIEW_ICON: Record<string, string> = {
-  needed:    '\u{274C}',   // ❌
-  not_needed: '\u{2705}',  // ✅
-};
-
-const PRODUCER_REVIEW_FALLBACK: Record<string, string> = {
-  needed:    '[NEEDS_PRODUCER]',
-  not_needed: '[PRODUCER_OK]',
-};
-
-const PRODUCER_REVIEW_LABEL: Record<string, string> = {
-  needed:     'Needs producer review',
-  not_needed: 'Producer review complete',
-};
-
-// ── Agent-State Icons ──────────────────────────────────────────────────
-
-/**
- * Agent-status icons (WL-0MSBQUJQX005RAT9).
- * working → 🟢, blocked → ⛔, idle → ⚪.
- * done/unknown/absent → no icon.
- */
+// Agent-status icons (WL-0MSBQUJQX005RAT9). Glyph mapping confirmed by the
+// user: working → 🟢 (green circle), blocked → ⛔ (no-entry sign), idle → ⚪
+// (white circle). `done`/`unknown`/absent → no icon.
 const AGENT_STATE_ICONS: Record<string, string> = {
   idle:    '\u{26AA}',   // ⚪
   working: '\u{1F7E2}',  // 🟢
@@ -253,7 +122,8 @@ const AGENT_STATE_FALLBACK: Record<string, string> = {
 
 /**
  * Fixed display width (in terminal cells) of the reserved agent-status
- * slot at the start of the icon prefix.
+ * slot at the start of the icon prefix. Rows with and without an agent keep
+ * the remaining icons and the item-ID column at identical columns (AC3).
  */
 export const AGENT_SLOT_WIDTH = 2;
 
@@ -264,170 +134,124 @@ export const AGENT_SLOT_WIDTH = 2;
  */
 export function iconsEnabled(opts?: { noIcons?: boolean }): boolean {
   if (opts?.noIcons === true) return false;
-  if (opts?.noIcons === false) return true;
-  if (typeof process !== 'undefined' && process.env?.WL_NO_ICONS === '1') return false;
   return true;
 }
 
-// ── Priority API ───────────────────────────────────────────────────────
-
-export function priorityIcon(priority: string, opts?: IconOptions): string {
-  const key = (priority || '').toLowerCase().trim();
-  if (opts?.noIcons === true) return PRIORITY_FALLBACK[key] ?? '';
-  return PRIORITY_ICONS[key] ?? '';
-}
-
-export function priorityLabel(priority: string): string {
-  return PRIORITY_LABEL[(priority || '').toLowerCase().trim()] ?? '';
-}
-
-export function priorityFallback(priority: string): string {
-  return PRIORITY_FALLBACK[(priority || '').toLowerCase().trim()] ?? '';
-}
-
-// ── Status API ──────────────────────────────────────────────────────────
-
+/**
+ * Get the icon for a work item status.
+ */
 export function statusIcon(status: string, opts?: IconOptions): string {
-  const key = (status || '').toLowerCase().trim();
-  if (opts?.noIcons === true) return STATUS_FALLBACK[key] ?? '';
-  return STATUS_ICONS[key] ?? '';
+  const key = (status || '').toLowerCase().replace(/_/g, '-');
+  if (opts?.noIcons) {
+    return STATUS_FALLBACK[key] || `[${key.toUpperCase()}]`;
+  }
+  return STATUS_ICONS[key] || '\u{2753}'; // ❓
 }
 
-export function statusLabel(status: string): string {
-  return STATUS_LABEL[(status || '').toLowerCase().trim()] ?? '';
+/**
+ * Get the icon for a work item stage.
+ */
+export function stageIcon(stage: string | undefined | null, opts?: IconOptions): string {
+  const key = (stage || '').toLowerCase();
+  if (opts?.noIcons) {
+    return STAGE_FALLBACK[key] || `[${key.toUpperCase()}]`;
+  }
+  return STAGE_ICONS[key] || '\u{2753}'; // ❓
 }
 
-export function statusFallback(status: string): string {
-  return STATUS_FALLBACK[(status || '').toLowerCase().trim()] ?? '';
+/**
+ * Get the icon for a work item priority.
+ */
+export function priorityIcon(priority: string | undefined | null, opts?: IconOptions): string {
+  const key = (priority || '').toLowerCase().trim();
+  if (opts?.noIcons) {
+    return PRIORITY_FALLBACK[key] || '';
+  }
+  return PRIORITY_ICONS[key] || '';
 }
 
-// ── Risk API ────────────────────────────────────────────────────────────
-
-export function riskIcon(risk: string | undefined | null, opts?: IconOptions): string {
-  const key = (risk || '').toLowerCase().trim();
-  if (opts?.noIcons === true) return RISK_FALLBACK[key] ?? '';
-  return RISK_ICONS[key] ?? '';
+/**
+ * Get the audit icon based on audit result.
+ * @param result - true = ready to close, false = not ready, null = unknown
+ */
+export function auditIcon(result: boolean | null | undefined, opts?: IconOptions): string {
+  if (opts?.noIcons) {
+    if (result === true) return '[ready]';
+    if (result === false) return '[fail]';
+    return '[?]';
+  }
+  if (result === true) return AUDIT_READY;
+  if (result === false) return AUDIT_NOT_READY;
+  return AUDIT_UNKNOWN;
 }
 
-export function riskLabel(risk: string | undefined | null): string {
-  return RISK_LABEL[(risk || '').toLowerCase().trim()] ?? '';
+/**
+ * Get the stale audit icon.
+ * @param result - true means the last audit passed, false/null means it didn't
+ */
+export function auditStaleIcon(result: boolean | null | undefined, opts?: IconOptions): string {
+  if (opts?.noIcons) {
+    return result === true ? '[stale ok]' : '[stale]';
+  }
+  if (result === true) return AUDIT_STALE_PASSED;
+  return AUDIT_STALE_FAILED;
 }
 
-export function riskFallback(risk: string | undefined | null): string {
-  return RISK_FALLBACK[(risk || '').toLowerCase().trim()] ?? '';
-}
-
-// ── Effort API ──────────────────────────────────────────────────────────
-
-export function effortIcon(effort: string | undefined | null, opts?: IconOptions): string {
-  const key = (effort || '').toLowerCase().trim();
-  if (opts?.noIcons === true) return EFFORT_FALLBACK[key] ?? '';
-  return EFFORT_ICONS[key] ?? '';
-}
-
-export function effortLabel(effort: string | undefined | null): string {
-  return EFFORT_LABEL[(effort || '').toLowerCase().trim()] ?? '';
-}
-
-export function effortFallback(effort: string | undefined | null): string {
-  return EFFORT_FALLBACK[(effort || '').toLowerCase().trim()] ?? '';
-}
-
-// ── Epic API ────────────────────────────────────────────────────────────
-
+/**
+ * Get the epic icon.
+ */
 export function epicIcon(opts?: IconOptions): string {
-  if (opts?.noIcons === true) return EPIC_FALLBACK;
+  if (opts?.noIcons) return EPIC_FALLBACK;
   return EPIC_ICON;
 }
-
-export function epicLabel(): string {
-  return EPIC_LABEL;
-}
-
-export function epicFallback(): string {
-  return EPIC_FALLBACK;
-}
-
-// ── Stage API ──────────────────────────────────────────────────────────
-
-export function stageIcon(stage: string | undefined | null, opts?: IconOptions): string {
-  const key = (stage || '').toLowerCase().trim();
-  if (opts?.noIcons === true) return STAGE_FALLBACK[key] ?? '';
-  return STAGE_ICONS[key] ?? '';
-}
-
-export function stageLabel(stage: string | undefined | null): string {
-  return STAGE_LABEL[(stage || '').toLowerCase().trim()] ?? '';
-}
-
-export function stageFallback(stage: string | undefined | null): string {
-  return STAGE_FALLBACK[(stage || '').toLowerCase().trim()] ?? '';
-}
-
-// ── Audit API ──────────────────────────────────────────────────────────
-
-export function auditIcon(result: boolean | null | undefined, opts?: IconOptions): string {
-  const key = auditKey(result);
-  if (opts?.noIcons === true) return AUDIT_FALLBACK[key] ?? '';
-  return AUDIT_ICON[key] ?? '';
-}
-
-export function auditLabel(result: boolean | null | undefined): string {
-  return AUDIT_LABEL[auditKey(result)] ?? '';
-}
-
-export function auditFallback(result: boolean | null | undefined): string {
-  return AUDIT_FALLBACK[auditKey(result)] ?? '';
-}
-
-// ── Stale Audit API ────────────────────────────────────────────────────
-
-export function auditStaleIcon(result: boolean | null | undefined, opts?: IconOptions): string {
-  if (result === true) {
-    if (opts?.noIcons === true) return STALE_AUDIT_FALLBACK.yes;
-    return STALE_AUDIT_ICON.yes;
-  }
-  return auditIcon(result, opts);
-}
-
-export function auditStaleLabel(result: boolean | null | undefined): string {
-  if (result === true) return STALE_AUDIT_LABEL.yes;
-  return auditLabel(result);
-}
-
-export function auditStaleFallback(result: boolean | null | undefined): string {
-  if (result === true) return STALE_AUDIT_FALLBACK.yes;
-  return auditFallback(result);
-}
-
-// ── Producer Review API ────────────────────────────────────────────────
-
-export function needsProducerReviewIcon(needsProducerReview: boolean | null | undefined, opts?: IconOptions): string {
-  const key = producerReviewKey(needsProducerReview);
-  if (opts?.noIcons === true) return PRODUCER_REVIEW_FALLBACK[key] ?? '';
-  return PRODUCER_REVIEW_ICON[key] ?? '';
-}
-
-export function needsProducerReviewLabel(needsProducerReview: boolean | null | undefined): string {
-  return PRODUCER_REVIEW_LABEL[producerReviewKey(needsProducerReview)] ?? '';
-}
-
-export function needsProducerReviewFallback(needsProducerReview: boolean | null | undefined): string {
-  return PRODUCER_REVIEW_FALLBACK[producerReviewKey(needsProducerReview)] ?? '';
-}
-
-// ── Agent Status API ───────────────────────────────────────────────────
 
 /**
  * Get the icon for a tracked agent's current state.
  *
  * `working → 🟢`, `blocked → ⛔`, `idle → ⚪`. `done`, `unknown`, or an
- * absent state render no icon.
+ * absent state render no icon (the agent finished or the pane is gone).
+ * Text fallbacks follow the `[TEXT]` convention for noIcons mode.
  */
 export function agentStatusIcon(state: string | undefined, opts?: IconOptions): string {
   const key = (state || '').toLowerCase();
-  if (opts?.noIcons) return AGENT_STATE_FALLBACK[key] || '';
+  if (opts?.noIcons) {
+    return AGENT_STATE_FALLBACK[key] || '';
+  }
   return AGENT_STATE_ICONS[key] || '';
+}
+
+/**
+ * Get the risk icon.
+ */
+export function riskIcon(risk: string | undefined | null, opts?: IconOptions): string {
+  const key = (risk || '').toLowerCase().trim();
+  if (!key) return '';
+  if (opts?.noIcons) return `[${key.toUpperCase()}]`;
+  return RISK_ICONS[key] || '';
+}
+
+/**
+ * Get the effort icon.
+ */
+export function effortIcon(effort: string | undefined | null, opts?: IconOptions): string {
+  const key = (effort || '').toLowerCase().trim();
+  if (!key) return '';
+  if (opts?.noIcons) return `[${key.toUpperCase()}]`;
+  return EFFORT_ICONS[key] || '';
+}
+
+/**
+ * Get the "needs producer review" icon.
+ */
+export function needsProducerReviewIcon(
+  needsReview: boolean | undefined,
+  opts?: IconOptions,
+): string {
+  if (needsReview === undefined) return '';
+  if (opts?.noIcons) {
+    return needsReview ? '[REVIEW]' : '[OK]';
+  }
+  return needsReview ? NEEDS_REVIEW_ICON : REVIEW_DONE_ICON;
 }
 
 // ── Audit freshness ───────────────────────────────────────────────────
@@ -435,6 +259,12 @@ export function agentStatusIcon(state: string | undefined, opts?: IconOptions): 
 /**
  * Determine whether an audit result is fresh (not stale) based on the
  * 60-second staleness buffer.
+ *
+ * Guarantees: `updatedAt` is only bumped on content changes (title, description,
+ * status, stage, priority, etc.). Flag-only flips of `needsProducerReview` do
+ * not move `updatedAt`, so a previously valid audit remains fresh — the TUI
+ * continues showing the passed icon and the downtime dispatcher does not
+ * re-dispatch a redundant audit. (WL-0MSN6ZCTN0027U2R)
  */
 export function isAuditFresh(
   auditedAt: string | null | undefined,
@@ -450,9 +280,12 @@ export function isAuditFresh(
 /**
  * Get the display icon for an item's stage with the list's audit-aware
  * `in_review` handling: a fresh audit shows the audit-result icon
- * (✅/❌/❓), a stale-but-passed audit shows the stale-passed icon (🟩),
- * a stale or missing audit on an `in_review` item falls back to the
+ * (✅/❌/❓), a stale-but-passed audit shows the stale-passed hourglass
+ * (⏳), a stale or missing audit on an `in_review` item falls back to the
  * plain stage icon (🔍), and every other stage shows the plain stage icon.
+ *
+ * Shared by the list row prefix (`getIconPrefix`) and the metadata Stage
+ * row so the two sections can never diverge (WL-0MSGIXHHI009KFW9 AC2).
  */
 export function stageDisplayIcon(
   item: { stage?: string; auditResult?: boolean | null; auditedAt?: string | null; updatedAt?: string },
@@ -473,6 +306,9 @@ export function stageDisplayIcon(
 
 // ── Stage colour ──────────────────────────────────────────────────────
 
+/**
+ * Map stage to ANSI 256-color code.
+ */
 export function stageColor(stage: string | undefined): number {
   const colors: Record<string, number> = {
     idea: 247,             // grey
@@ -485,6 +321,9 @@ export function stageColor(stage: string | undefined): number {
   return colors[stage || ''] ?? 241;
 }
 
+/**
+ * Apply stage colour to text using ANSI escape codes.
+ */
 export function applyStageColour(text: string, stage: string | undefined): string {
   const color = stageColor(stage);
   return `\x1b[38;5;${color}m${text}\x1b[0m`;
@@ -494,13 +333,24 @@ export function applyStageColour(text: string, stage: string | undefined): strin
 
 /**
  * Estimate the terminal display width of a string (cells/columns).
+ *
+ * Accounts for:
+ *   - Supplementary-plane characters (> U+FFFF): 2 cells
+ *   - Emoticons/dingbats (U+2300-U+27BF, U+2934-U+2935, U+2B05-U+2B55,
+ *     U+3030 etc.): 2 cells (modern terminals render these as emoji)
+ *   - CJK fullwidth ranges: 2 cells
+ *   - Variation Selectors (U+FE00-U+FE0F), ZWJ (U+200D): 0 cells
+ *   - Everything else: 1 cell
  */
 export function stringDisplayWidth(s: string): number {
   let width = 0;
   for (const ch of s) {
     const cp = ch.codePointAt(0) ?? 0;
+    // Zero-width characters
     if (cp === 0x200D || (cp >= 0xFE00 && cp <= 0xFE0F)) continue;
+    // Supplementary plane — almost always 2 cells (modern emoji)
     if (cp > 0xFFFF) { width += 2; continue; }
+    // Emoji / Dingbat ranges that render as 2 cells in modern terminals
     if ((cp >= 0x2300 && cp <= 0x27BF) ||
         (cp >= 0x2934 && cp <= 0x2935) ||
         (cp >= 0x2B05 && cp <= 0x2B55) ||
@@ -508,6 +358,7 @@ export function stringDisplayWidth(s: string): number {
         (cp >= 0x3297 && cp <= 0x3299)) {
       width += 2; continue;
     }
+    // CJK fullwidth ranges
     if ((cp >= 0x1100 && cp <= 0x115F) ||
         (cp >= 0x2E80 && cp <= 0x9FFF) ||
         (cp >= 0xAC00 && cp <= 0xD7AF) ||
@@ -518,6 +369,7 @@ export function stringDisplayWidth(s: string): number {
         (cp >= 0xFFE0 && cp <= 0xFFE6)) {
       width += 2; continue;
     }
+    // Default: 1 cell
     width += 1;
   }
   return width;
@@ -526,10 +378,20 @@ export function stringDisplayWidth(s: string): number {
 /** Fixed target width for icon prefix alignment (terminal cells). */
 const ICON_PREFIX_WIDTH = 12;
 
+// ── Icon prefix composition ───────────────────────────────────────────
+
 /**
  * Compute the icon prefix string for a work item (just icon characters,
- * no trailing space). Icons are concatenated and padded to a fixed
- * display width so the item-ID column aligns vertically.
+ * no trailing space).  Icons are concatenated without spaces and padded
+ * to a fixed display width so the item-ID column aligns vertically
+ * regardless of how many icon fields are present.
+ *
+ * Column layout (left to right):
+ *   0. Agent status (fixed-width reserved slot, WL-0MSBQUJQX005RAT9)
+ *   1. Status icon
+ *   2. Stage icon (for in_review items, shows audit-aware icon instead)
+ *   3. Producer review flag
+ *   4. Optional epic icon + child count
  */
 export function getIconPrefix(
   item: { status: string; stage?: string; priority?: string; auditResult?: boolean | null; auditedAt?: string | null; needsProducerReview?: boolean; updatedAt?: string; issueType?: string; childCount?: number; agentState?: string },
@@ -537,16 +399,31 @@ export function getIconPrefix(
 ): string {
   const noIcons = opts?.noIcons ?? false;
 
+  // Column 0: agent status — fixed-width reserved slot so rows with and
+  // without an agent keep the remaining icons and the item-ID column at
+  // identical columns (AC3, WL-0MSBQUJQX005RAT9).
   const agentIcon = agentStatusIcon(item.agentState, { noIcons });
   const agentSlot = agentIcon !== '' ? agentIcon : ' '.repeat(AGENT_SLOT_WIDTH);
 
   const sIcon = statusIcon(item.status, { noIcons });
+
+  // Column 2: stage or audit-aware icon for in_review — via the shared
+  // stageDisplayIcon helper so the list prefix and the metadata Stage row
+  // can never diverge (WL-0MSGIXHHI009KFW9).
   const secondIcon = stageDisplayIcon(item, { noIcons });
+
+  // Column 3: producer review flag
   const prIcon = needsProducerReviewIcon(item.needsProducerReview, { noIcons });
 
+  // Concatenate core icons without spaces between them
   const coreIcons = [sIcon, secondIcon, prIcon].filter(Boolean).join('');
+
+  // Column 4: epic icon (child count is no longer shown in prefix)
   const epicSuffix = item.issueType === 'epic' ? epicIcon({ noIcons }) : '';
 
+  // Build full prefix and pad to fixed width for alignment. The agent slot
+  // is included in the total, so rows with and without an agent still land
+  // at exactly ICON_PREFIX_WIDTH cells.
   let prefix = [agentSlot, coreIcons, epicSuffix].filter(Boolean).join('');
   const width = stringDisplayWidth(prefix);
   if (width < ICON_PREFIX_WIDTH) {

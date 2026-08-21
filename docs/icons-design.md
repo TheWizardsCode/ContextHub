@@ -7,10 +7,15 @@
 > [dcb09ac](https://github.com/TheWizardsCode/ContextHub/commit/dcb09ac),
 > [f3ca18b](https://github.com/TheWizardsCode/ContextHub/commit/f3ca18b)
 
-> **Note:** All icon content lives in `src/theme.ts`.  The deprecated
-> `src/icons.ts` wrapper was removed in WL-0MSJ4BT4Z002HH9B.  The
-> `@worklog/shared/icons` module provides a dependency-free copy of icon/
-> colour data for the herdr plugin.
+> **Note:** The CLI's icon content lives in `src/theme.ts`; the deprecated
+> `src/icons.ts` wrapper was removed in WL-0MSJ4BT4Z002HH9B.  Herdr's icon
+> data lives in the dependency-free `@worklog/shared/icons` module
+> (`packages/shared/src/icons.ts`) — the plugin's local copy
+> (`packages/herdr/src/icons.ts`) was removed in WL-0MSJ4BT4Z002HH9B and its
+> consumers now import from the shared module.  For parity (AC3), the shared
+> module keeps the glyph values the herdr worklist has always rendered; a few
+> of those intentionally differ from the CLI's `src/theme.ts` choices (see
+> §13.1).
 
 ## Overview
 
@@ -308,8 +313,23 @@ export function iconsEnabled(opts?: { noIcons?: boolean }): boolean;
 Icon maps and functions are defined in `src/theme.ts` alongside the chalk colour
 theme.  The `src/icons.ts` wrapper was removed in WL-0MSJ4BT4Z002HH9B;
 CLI consumers import directly from `src/theme.js`.  Herdr consumers import
-from `@worklog/shared/icons` (a dependency-free copy in
-`packages/shared/src/icons.ts`).
+from `@worklog/shared/icons` (the canonical home in
+`packages/shared/src/icons.ts` of what used to be
+`packages/herdr/src/icons.ts`).
+
+**Parity note (WL-0MSJ4BT4Z002HH9B AC3):** the shared module preserves the
+glyph values the herdr worklist has always rendered, so removing the plugin's
+local copy changes no rendered output.  Where the CLI (`src/theme.ts`) and the
+old herdr copy had diverged, the shared module keeps the *herdr* choices:
+
+| Item | Shared module (herdr) | CLI `src/theme.ts` |
+|------|----------------------|--------------------|
+| Audit unknown | `❓` | `❔` |
+| Audit stale-passed | `⏳` | `🟩` (see §3a) |
+| Epic | `⊙` | `🏰` |
+| Risk critical | `💥` | `🚨` (key `severe`) |
+| Effort levels | `🔹 🔷 🔶 💠` | `🐜 🐇 🐕 🐘 🐋` |
+| Producer review undefined | `''` (nothing shown) | `✅` (defaults to complete) |
 
 ### 13.2 CLI List Rendering
 
@@ -323,8 +343,8 @@ Icons are prepended before the title in CLI list output:
 > The Pi-based TUI browse list (which rendered status/stage/producer-review/
 > epic icons via `getIconPrefix` in `packages/tui/extensions/Worklog/lib/browse.ts`)
 > has been removed — work item browsing is now provided by the Herdr plugin.
-> The shared `@worklog/shared/icons` functions are used by both the CLI (via
-> re-export from `src/theme.js`) and the Herdr plugin (direct import).
+> `src/theme.ts` remains the CLI's self-contained icon source; the Herdr
+> plugin imports from the shared `@worklog/shared/icons` module.
 
 ### 13.3 CLI Detail Output
 
@@ -376,7 +396,8 @@ lines.push(`Priority: ${pIcon} ${item.priority}`);
 |------|--------|
 | `src/theme.ts` | Single source of truth: chalk colours + all icon maps/functions + `IconOptions` interface |
 | `src/icons.ts` | REMOVED (WL-0MSJ4BT4Z002HH9B) — consumers import from `src/theme.js` |
-| `@worklog/shared/icons` | NEW — dependency-free icon/colour data for herdr |
+| `@worklog/shared/icons` | NEW — canonical dependency-free icon/colour data for herdr (replaces `packages/herdr/src/icons.ts`) |
+| `packages/herdr/src/icons.ts` | REMOVED (WL-0MSJ4BT4Z002HH9B) — herdr consumers import from `@worklog/shared/icons` |
 | `src/commands/helpers.ts` | Rewired to import from `src/theme.js` |
 | `src/commands/list.ts` | Added `--no-icons` CLI flag |
 | `src/commands/show.ts` | Added `--no-icons` CLI flag |

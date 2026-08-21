@@ -1,4 +1,8 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import {
   priorityIcon,
   statusIcon,
@@ -998,6 +1002,39 @@ describe('effortLabel', () => {
   });
 });
 
-// ─── All tests above confirm that src/theme.ts exports the complete icon/colour API.
-// The deprecated src/icons.ts wrapper has been removed; consumers import from
-// theme.ts directly.  See WL-0MSJ4BT4Z002HH9B for removal details.
+// ─── Repo-wide grep guard (WL-0MT2GMTAZ003VKVL) ───────────────────────
+// The deprecated icons.ts wrappers were removed in WL-0MSJ4BT4Z002HH9B:
+//   src/icons.ts            (consumers import from src/theme.js)
+//   packages/herdr/src/icons.ts (consumers import from @worklog/shared/icons)
+// Any import of an `icons.js`/`icons.ts` path would regress that removal, so
+// this guard fails the test suite if such an import ever reappears.
+
+const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
+const EXCLUDED_DIRS = new Set(['node_modules', 'dist', '.git', '.worklog', 'coverage']);
+const ICONS_FILE_RE = /(?:from\s+['"]|require\(\s*['"])([^'"]*icons\.(?:js|ts))(?:['"])/;
+
+function collectRepoFiles(dir: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    if (EXCLUDED_DIRS.has(entry)) continue;
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) {
+      files.push(...collectRepoFiles(full));
+    } else if (/\.(ts|js|mjs|cjs)$/.test(entry)) {
+      files.push(full);
+    }
+  }
+  return files;
+}
+
+describe('repo-wide grep guard (WL-0MT2GMTAZ003VKVL)', () => {
+  it('no file imports from a removed icons.js/icons.ts path', () => {
+    const offenders: string[] = [];
+    for (const file of collectRepoFiles(REPO_ROOT)) {
+      const content = readFileSync(file, 'utf8');
+      if (ICONS_FILE_RE.test(content)) offenders.push(file);
+    }
+    expect(offenders).toEqual([]);
+  });
+});
+
