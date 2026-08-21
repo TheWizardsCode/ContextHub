@@ -621,39 +621,55 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
             modelPart = '—';
           }
 
-          // Cap the model identifier at a fixed maximum so the command
-          // preview gets as much of the line as possible. truncateToTerminalWidth
-          // appends an ellipsis when the model part exceeds the cap.
-          const modelPartMaxWidth = 30;
-          const cappedModelPart = truncateToTerminalWidth(modelPart, modelPartMaxWidth);
-
           // Separator between the command preview (left) and the model
           // identifier (right).
           const separator = '  │  ';
 
           // Build initial prompt portion — unquoted preview with generous
-          // space allocation. The line is ultimately truncated to `width` by
-          // truncateToTerminalWidth, so we use a dynamic limit.
+          // space allocation. The model part is never capped; the prompt
+          // yields space to it so the full model name always renders.
           let promptPart: string | null = null;
           if (initialPrompt) {
             // Truncate work item IDs to compact form (e.g., WL-0MQL0T5TR0060AEH
             // → WL...68HD) before applying length truncation.
             const compacted = truncateWorkItemId(initialPrompt);
-            // Reserve only what the (capped) model part and separator need;
-            // everything else goes to the command preview. The final
-            // truncateToTerminalWidth(…, width) clamp below still guards
-            // against overflow at very narrow widths.
             const separatorWidth = visibleWidth(separator);
-            const modelWidth = visibleWidth(cappedModelPart);
-            const maxLen = Math.max(0, width - modelWidth - separatorWidth);
+            const modelWidth = visibleWidth(modelPart);
+            // The prompt gets whatever budget remains after reserving room
+            // for the full model and separator.
+            const promptBudget = Math.max(0, width - modelWidth - separatorWidth);
             const preview =
-              compacted.length > maxLen && maxLen > 3
-                ? `${compacted.slice(0, maxLen - 3)}...`
+              promptBudget > 3 && compacted.length > promptBudget
+                ? `${compacted.slice(0, promptBudget - 3)}...`
                 : compacted;
-            promptPart = preview;
+            promptPart = promptBudget > 3 ? preview : null;
           }
 
-          const label = promptPart ? `${promptPart}${separator}${cappedModelPart}` : modelPart;
+          // Right-align the model: its right edge is flush with the terminal
+          // width.  If there is no room for prompt + separator + model
+          // (ultra-narrow), drop the prompt/separator so the model alone
+          // right-aligns.  The final clamp clips only when the model itself
+          // exceeds the terminal width (physically unavoidable).
+          const modelWidth = visibleWidth(modelPart);
+          const separatorWidth = visibleWidth(separator);
+
+          const promptFits =
+            promptPart !== null &&
+            width - visibleWidth(promptPart) - separatorWidth - modelWidth >= 0;
+
+          let label: string;
+          if (promptFits) {
+            const pad = width - visibleWidth(promptPart) - separatorWidth - modelWidth;
+            label = `${promptPart}${' '.repeat(pad)}${separator}${modelPart}`;
+          } else {
+            // Model-only fallback, right-aligned.
+            if (width >= modelWidth) {
+              label = ' '.repeat(width - modelWidth) + modelPart;
+            } else {
+              label = modelPart;
+            }
+          }
+
           lines.push(truncateToTerminalWidth(theme.fg('dim', label), width));
 
           return lines;
