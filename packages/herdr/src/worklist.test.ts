@@ -1247,6 +1247,49 @@ describe('openPane plumbing (WL-0MSJLD1I70045ZUL)', () => {
     executeResolvedCommand('echo hello', state, onCommand);
     expect(onCommand).toHaveBeenCalledWith('echo hello', undefined);
   });
+
+  it('passes onRefresh through to onCommand for background (openPane false) dispatch', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const onRefresh = vi.fn();
+    const result = executeResolvedCommand(
+      'wl update <id> --priority high',
+      state,
+      onCommand,
+      false,
+      undefined,
+      undefined,
+      false, // openPane: false → background dispatch
+      onRefresh,
+    );
+    expect(result).toBe('callback');
+    expect(onCommand).toHaveBeenCalledWith(
+      'wl update TEST-123 --priority high',
+      undefined,
+      false,
+      onRefresh,
+    );
+  });
+
+  it('passes onRefresh through for background agent dispatch (dispatchChordCommand path)', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const onRefresh = vi.fn();
+    const result = executeResolvedCommand(
+      '/skill:audit <id>',
+      state,
+      onCommand,
+      false,
+      'plan',
+      undefined,
+      false, // openPane: false → background dispatch
+      onRefresh,
+    );
+    expect(result).toBe('dispatched');
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', 'plan', false, onRefresh);
+  });
 });
 
 describe('fetchItemsForView — stage-filtered fetch', () => {

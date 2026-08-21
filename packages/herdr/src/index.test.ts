@@ -2020,6 +2020,46 @@ describe('spawnBackgroundShell', () => {
     expect(openSyncFn).toHaveBeenCalledWith('/tmp/herdr-background-logs/x.log', 'a');
     expect(child.unref).toHaveBeenCalled();
   });
+
+  it('fires onExit when the background child exits (completion → refresh)', () => {
+    let exitHandler: ((code: number | null, signal: string | null) => void) | undefined;
+    const child = {
+      unref: vi.fn(),
+      on: vi.fn((_event: string, cb: (code: number | null, signal: string | null) => void) => {
+        exitHandler = cb;
+        return child;
+      }),
+    } as never;
+    const onExit = vi.fn();
+    spawnBackgroundShell('wl reviewed WL-1 false', '/project', '/tmp/log', {
+      spawn: vi.fn(() => child),
+      openSync: () => 7,
+      onExit,
+    });
+    expect(child.on).toHaveBeenCalledWith('exit', expect.any(Function));
+    // Simulate the child exiting with code 0 — the refresh is triggered.
+    exitHandler?.(0, null);
+    expect(onExit).toHaveBeenCalledWith(0, null);
+  });
+
+  it('fires onExit for a non-zero exit (failure still refreshes)', () => {
+    let exitHandler: ((code: number | null, signal: string | null) => void) | undefined;
+    const child = {
+      unref: vi.fn(),
+      on: vi.fn((_event: string, cb: (code: number | null, signal: string | null) => void) => {
+        exitHandler = cb;
+        return child;
+      }),
+    } as never;
+    const onExit = vi.fn();
+    spawnBackgroundShell('false', '/project', '/tmp/log', {
+      spawn: vi.fn(() => child),
+      openSync: () => 7,
+      onExit,
+    });
+    exitHandler?.(1, null);
+    expect(onExit).toHaveBeenCalledWith(1, null);
+  });
 });
 
 describe('spawnBackgroundPi', () => {
@@ -2060,5 +2100,17 @@ describe('spawnBackgroundPi', () => {
       ['-p', '--mode', 'json', '/intake My item'],
       expect.any(Object),
     );
+  });
+
+  it('registers an exit handler when onExit is provided (completion → refresh)', () => {
+    const on = vi.fn();
+    const child = { on, unref: vi.fn() } as never;
+    const onExit = vi.fn();
+    spawnBackgroundPi('/skill:audit WL-1', '/project', undefined, '/tmp/log', {
+      spawn: vi.fn(() => child),
+      openSync: () => 9,
+      onExit,
+    });
+    expect(on).toHaveBeenCalledWith('exit', expect.any(Function));
   });
 });

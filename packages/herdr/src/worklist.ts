@@ -3145,9 +3145,10 @@ function logCommandForItem(command: string, itemId?: string): void {
 function resolveAndRouteCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string, openPane?: boolean) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void,
   model?: string,
   openPane?: boolean,
+  onRefresh?: () => Promise<void>,
 ): boolean {
   let resolvedCommand = command;
   let itemId: string | undefined;
@@ -3171,9 +3172,14 @@ function resolveAndRouteCommand(
     // The openPane flag is passed only when explicitly set (false): an
     // undefined third arg keeps the 2-arg call identical to today's
     // dispatch, so shortcuts without open_pane are byte-compatible
-    // (WL-0MSJLD1I70045ZUL).
+    // (WL-0MSJLD1I70045ZUL). The onRefresh hook is appended only for
+    // background (no-pane) dispatches (openPane === false) so they can
+    // trigger a refresh when the child exits (WL-0MT1KB70U0012X6T);
+    // pane-opening paths keep their existing arity.
     if (openPane === undefined) {
       onCommand(resolvedCommand, model);
+    } else if (onRefresh) {
+      onCommand(resolvedCommand, model, openPane, onRefresh);
     } else {
       onCommand(resolvedCommand, model, openPane);
     }
@@ -3330,10 +3336,11 @@ export function fetchItemsForView(
 export function dispatchChordCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string, openPane?: boolean) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void,
   model?: string,
   onDowntimeToggle?: () => void,
   openPane?: boolean,
+  onRefresh?: () => Promise<void>,
 ): boolean {
   // ── /downtime toggle (internal action, WL-0MSZ4NSOE007AQEF) ──────
   // Per-instance in-memory toggle of downtime dispatch for the current
@@ -3383,33 +3390,33 @@ export function dispatchChordCommand(
 
   // ── Agent skill invocations ─────────────────────────────
   if (command.startsWith('/skill:implement')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }
   if (command.startsWith('/skill:audit')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }
   if (command.startsWith('/skill:ship')) {
     // Dev→main release (Ship It shortcut, WL-0MSGG5N5Z0074TLY). Global
     // release — no <id> substitution; routed to the agent channel like
     // other /skill:* commands. NOT blocked during a Code Freeze (the ship
     // skill gates itself); only the confirmation dialog precedes dispatch.
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }
 
   // ── Agent workflow commands ─────────────────────────────
   if (command.startsWith('/intake')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }
   if (command.startsWith('/plan')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }
 
   // ── Producer review / audit compound commands ───────────
   if (command.startsWith('!!wl reviewed')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }
   if (command.includes('&& wl audit-set')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }
 
   // Unknown command — not handled
@@ -3587,11 +3594,12 @@ export async function resolvePodcastTarget(
 export function executeResolvedCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string, openPane?: boolean) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void,
   codeFreezeActive = false,
   model?: string,
   onDowntimeToggle?: () => void,
   openPane?: boolean,
+  onRefresh?: () => Promise<void>,
 ): ExecuteResult {
   // Code Freeze guard: never route implement commands while frozen.
   // This runs BEFORE dispatchChordCommand so no pane spawn, claim, or
@@ -3602,7 +3610,7 @@ export function executeResolvedCommand(
 
   // Try dispatchChordCommand first — handles /wl, /downtime, /skill:,
   // /intake, /plan, !!wl reviewed, and compound audit commands
-  if (dispatchChordCommand(command, state, onCommand, model, onDowntimeToggle, openPane)) {
+  if (dispatchChordCommand(command, state, onCommand, model, onDowntimeToggle, openPane, onRefresh)) {
     return 'dispatched';
   }
 
@@ -3630,9 +3638,14 @@ export function executeResolvedCommand(
     // The openPane flag is passed only when explicitly set (false): an
     // undefined third arg keeps the 2-arg call identical to today's
     // dispatch, so shortcuts without open_pane are byte-compatible
-    // (WL-0MSJLD1I70045ZUL).
+    // (WL-0MSJLD1I70045ZUL). The onRefresh hook is appended only for
+    // background (no-pane) dispatches (openPane === false) so they can
+    // trigger a refresh when the child exits (WL-0MT1KB70U0012X6T);
+    // pane-opening paths keep their existing arity.
     if (openPane === undefined) {
       onCommand(resolvedCommand, model);
+    } else if (onRefresh) {
+      onCommand(resolvedCommand, model, openPane, onRefresh);
     } else {
       onCommand(resolvedCommand, model, openPane);
     }
@@ -3657,7 +3670,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; onRefresh?: () => Promise<void> },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -3679,6 +3692,7 @@ export async function runWorklistTui(
     modeSwitchWorker: options?.modeSwitchWorker,
     modeSwitchPollIntervalMs: options?.modeSwitchPollIntervalMs ?? 10_000,
     modeSwitchEnabled: options?.modeSwitchEnabled ?? true,
+    onRefresh: options?.onRefresh,
   };
 
   let termSize = getTermSize();
@@ -4065,6 +4079,15 @@ export async function runWorklistTui(
     }
   };
 
+  // Wire the completion-triggered refresh hook (WL-0MT1KB70U0012X6T):
+  // background (no-pane) shortcut dispatches receive this callback so their
+  // child's 'exit' event can trigger a refresh of the current view. The
+  // callback is fire-and-forget and non-blocking — doRefresh has its own
+  // single-flight guard and never blocks the TUI event loop or the
+  // dispatched command's own execution. Scoped to this TUI instance (no
+  // global watcher, no cross-instance effects).
+  opts.onRefresh = opts.onRefresh ?? (() => doRefresh(false));
+
   /**
    * True when the resolved command is a `/wl` view command — a stage filter
    * (`/wl <stage>`, shorthand alias or canonical name), a priority filter
@@ -4137,7 +4160,7 @@ export async function runWorklistTui(
           if (frozen) {
             codeFreezeActive = true;
           }
-          const result = executeResolvedCommand(SHIP_IT_COMMAND, state, opts.onCommand, frozen, model, opts.onDowntimeToggle);
+          const result = executeResolvedCommand(SHIP_IT_COMMAND, state, opts.onCommand, frozen, model, opts.onDowntimeToggle, undefined, opts.onRefresh);
           if (result === 'noop') {
             showToast('Skipped', { body: `${SHIP_IT_COMMAND} (no item)` });
           } else {
@@ -4490,7 +4513,7 @@ export async function runWorklistTui(
             if (frozen) {
               codeFreezeActive = true;
             }
-            const result = executeResolvedCommand(command, state, opts.onCommand, frozen, model ?? undefined, opts.onDowntimeToggle, openPane);
+            const result = executeResolvedCommand(command, state, opts.onCommand, frozen, model ?? undefined, opts.onDowntimeToggle, openPane, opts.onRefresh);
             if (result === 'blocked') {
               // Code Freeze — show the notice dialog; the command was NOT
               // routed, no pane spawned, no work item claimed.
@@ -4639,7 +4662,7 @@ export async function runWorklistTui(
           if (frozen) {
             codeFreezeActive = true;
           }
-          const result = executeResolvedCommand(singleCmd, state, opts.onCommand, frozen, singleModel, opts.onDowntimeToggle, singleOpenPane);
+          const result = executeResolvedCommand(singleCmd, state, opts.onCommand, frozen, singleModel, opts.onDowntimeToggle, singleOpenPane, opts.onRefresh);
           if (result === 'blocked') {
             // Code Freeze — show the notice dialog; no pane spawned.
             codeFreezeNotice = true;

@@ -8,6 +8,7 @@ import type { DependencyEdge } from '../types.js';
 import { initConfig, loadConfig, configExists, isInitialized, readInitSemaphore, writeInitSemaphore, type InitConfigOptions } from '../config.js';
 import { resolveWorklogDir } from '../worklog-paths.js';
 import { exportToJsonlAsync } from '../jsonl.js';
+import { PRE_PUSH_HOOK_CONTENT } from '../doctor/hook-upgrade.js';
 import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, mergeAuditResults } from '../sync.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
 import { importFromJsonlContent } from '../jsonl.js';
@@ -18,7 +19,7 @@ import * as readline from 'readline';
 import { fileURLToPath } from 'url';
 import { theme } from '../theme.js';
 
-const WORKLOG_PRE_PUSH_HOOK_MARKER = 'worklog:pre-push-hook:v1';
+const WORKLOG_PRE_PUSH_HOOK_MARKER = 'worklog:pre-push-hook:v2';
 const WORKLOG_POST_PULL_HOOK_MARKER = 'worklog:post-pull-hook:v1';
 const WORKLOG_POST_CHECKOUT_HOOK_MARKER = 'worklog:post-checkout-hook:v1';
 const WORKLOG_GITIGNORE_SECTION_START = 'Worklog Specific Ignores';
@@ -182,57 +183,10 @@ function installPrePushHook(options: { silent: boolean }): { installed: boolean;
   const hooksDir = path.isAbsolute(hooksPath) ? hooksPath : path.join(repoRoot, hooksPath);
   const hookFile = path.join(hooksDir, 'pre-push');
 
-  const hookScript =
-    `#!/bin/sh\n` +
-    `# ${WORKLOG_PRE_PUSH_HOOK_MARKER}\n` +
-    `# Auto-sync Worklog data before pushing.\n` +
-    `# Set WORKLOG_SKIP_PRE_PUSH=1 to bypass.\n` +
-    `\n` +
-    `set -e\n` +
-    `\n` +
-    `if [ \"$WORKLOG_SKIP_PRE_PUSH\" = \"1\" ]; then\n` +
-    `  exit 0\n` +
-    `fi\n` +
-    `\n` +
-    `# Skip when inside a temp worktree created by withTempWorktree.\n` +
-    `case \"$PWD\" in\n` +
-    `  *tmp-worktree-*)\n` +
-    `    exit 0\n` +
-    `    ;;\n` +
-    `esac\n` +
-    `\n` +
-    `# Skip when inside a git worktree (not the main checkout).\n` +
-    `if [ \"$(git rev-parse --git-dir 2>/dev/null)\" != \"$(git rev-parse --git-common-dir 2>/dev/null)\" ]; then\n` +
-    `  exit 0\n` +
-    `fi\n` +
-    `\n` +
-    `# Avoid recursion when worklog sync pushes refs/worklog/data.\n` +
-    `skip=0\n` +
-    `while read local_ref local_sha remote_ref remote_sha; do\n` +
-    `  if [ \"$remote_ref\" = \"refs/worklog/data\" ]; then\n` +
-    `    skip=1\n` +
-    `  fi\n` +
-    `done\n` +
-    `\n` +
-    `if [ \"$skip\" = \"1\" ]; then\n` +
-    `  exit 0\n` +
-    `fi\n` +
-    `\n` +
-    `if command -v wl >/dev/null 2>&1; then\n` +
-    `  WL=wl\n` +
-    `elif command -v worklog >/dev/null 2>&1; then\n` +
-    `  WL=worklog\n` +
-    `else\n` +
-    `  echo \"worklog: wl/worklog not found; skipping pre-push sync\" >&2\n` +
-    `  exit 0\n` +
-    `fi\n` +
-    `\n` +
-    `$WL sync --git-branch refs/worklog/data || {\n` +
-    `  echo \"worklog: pre-push sync failed (pushing anyway)\" >&2\n` +
-    `  exit 0\n` +
-    `}\n` +
-    `\n` +
-    `exit 0\n`;
+  // Canonical v2 pre-push hook (branch policy + context-budget gate + sync),
+  // shared with hook-upgrade.ts and matching the committed `.githooks/pre-push`
+  // template (WL-0MT33QNTL006LHQA).
+  const hookScript = PRE_PUSH_HOOK_CONTENT;
 
   try {
     fs.mkdirSync(hooksDir, { recursive: true });
@@ -437,76 +391,7 @@ function installCommittedHooks(options: { silent: boolean }): { installed: boole
     `exec \"${centralPath}\" \"$@\"\n`
   );
 
-   const prePushContent = [
-     '#!/bin/sh',
-     `# ${WORKLOG_PRE_PUSH_HOOK_MARKER}`,
-     '#',
-     '# Auto-sync Worklog data before pushing.',
-     '#',
-     '# This hook runs `wl sync` before any push to ensure worklog data is',
-     '# committed and pushed to the dedicated refs/worklog/data branch.',
-     '# It uses a temporary worktree to avoid corrupting the project working tree',
-     '# (see WL-0MQRBT8BS00355AB for the bug this prevents).',
-     '#',
-     '# BYPASS: Set WORKLOG_SKIP_PRE_PUSH=1 to skip the sync entirely.',
-     '#   export WORKLOG_SKIP_PRE_PUSH=1',
-     '#   git push origin HEAD:refs/heads/dev',
-     '#',
-     'set -e',
-     '',
-     'if [ "$WORKLOG_SKIP_PRE_PUSH" = "1" ]; then',
-     '  echo "worklog: pre-push sync skipped (WORKLOG_SKIP_PRE_PUSH=1)"',
-     '  exit 0',
-     'fi',
-     '',
-     '# Skip when running inside a temp worktree created by withTempWorktree',
-     "# for internal sync operations. These worktrees don't have worklog",
-     '# initialized and the push is already done with --no-verify as defense.',
-     'case "$PWD" in',
-     '  *tmp-worktree-*)',
-     '    exit 0',
-     '    ;;',
-     'esac',
-     '',
-     '# Skip when inside a git worktree (not the main checkout).',
-     "# Worktrees are for feature development and typically don't have worklog",
-     '# initialized. The sync should run from the main checkout.',
-     'if [ "$(git rev-parse --git-dir 2>/dev/null)" != "$(git rev-parse --git-common-dir 2>/dev/null)" ]; then',
-     '  exit 0',
-     'fi',
-     '',
-     '# Read stdin to check which refs are being pushed.',
-     '# If pushing to refs/worklog/data, skip the sync to avoid infinite loops.',
-     'skip=0',
-     'while read local_ref local_sha remote_ref remote_sha; do',
-     '  if [ "$remote_ref" = "refs/worklog/data" ]; then',
-     '    skip=1',
-     '  fi',
-     'done',
-     '',
-     'if [ "$skip" = "1" ]; then',
-     '  exit 0',
-     'fi',
-     '',
-     'if command -v wl >/dev/null 2>&1; then',
-     '  WL=wl',
-     'elif command -v worklog >/dev/null 2>&1; then',
-     '  WL=worklog',
-     'else',
-     '  echo "worklog: wl/worklog not found; skipping pre-push sync" >&2',
-     '  exit 0',
-     'fi',
-     '',
-     '# Force the data branch to refs/worklog/data regardless of config.',
-     '# This prevents the sync from accidentally pushing to a standard branch',
-     '# if the user has overridden syncBranch in their worklog config.',
-     '"$WL" sync --git-branch refs/worklog/data || {',
-     '  echo "worklog: pre-push sync failed (pushing anyway)" >&2',
-     '  exit 0',
-     '}',
-     'exit 0',
-     '',
-   ].join('\n');
+   const prePushContent = PRE_PUSH_HOOK_CONTENT;
 
     const postCheckoutContent =
       `#!/bin/sh\n` +

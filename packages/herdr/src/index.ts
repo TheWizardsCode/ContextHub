@@ -265,6 +265,8 @@ export function buildBackgroundLogPath(command: string): string {
 export interface BackgroundSpawnDeps {
   spawn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess;
   openSync?: (path: string, flags: string) => number;
+  /** Called when the background child process exits — triggers a TUI refresh. */
+  onExit?: (exitCode: number | null, signal: string | null) => void;
 }
 
 /**
@@ -311,6 +313,12 @@ export function spawnBackgroundShell(
     env: { ...process.env, HERDR_RESOLVED_CWD: targetCwd },
   });
   child.unref(); // Allow the parent to exit independently
+
+  // On exit, fire the refresh callback (fire-and-forget — never blocks).
+  if (deps.onExit) {
+    child.on('exit', deps.onExit);
+  }
+
   return child;
 }
 
@@ -349,6 +357,12 @@ export function spawnBackgroundPi(
     env: { ...process.env, HERDR_RESOLVED_CWD: targetCwd },
   });
   child.unref(); // Allow the parent to exit independently
+
+  // On exit, fire the refresh callback (fire-and-forget — never blocks).
+  if (deps.onExit) {
+    child.on('exit', deps.onExit);
+  }
+
   return child;
 }
 
@@ -982,7 +996,7 @@ async function main(): Promise<void> {
       modeSwitchWorker,
       modeSwitchPollIntervalMs: runSettings.modeSwitchPollIntervalMs,
       modeSwitchEnabled: runSettings.modeSwitchEnabled,
-      onCommand: async (command: string, model?: string, openPane?: boolean) => {
+      onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
         // shortcuts like audit approve/reject, priority updates, close/delete) are
@@ -1038,7 +1052,13 @@ async function main(): Promise<void> {
               `[worklog-plugin] Background dispatch (no pane): ${command}\n` +
                 `[worklog-plugin] Log file: ${logPath}\n`,
             );
-            spawnBackgroundPi(prompt, targetCwd, model, logPath);
+            spawnBackgroundPi(
+              prompt,
+              targetCwd,
+              model,
+              logPath,
+              { onExit: () => onRefresh?.() },
+            );
             return;
           }
           // Agent-pane association capture (WL-0MSBQUJQX005RAT9): when the
@@ -1087,7 +1107,12 @@ async function main(): Promise<void> {
               `[worklog-plugin] Background dispatch (no pane): ${command}\n` +
                 `[worklog-plugin] Log file: ${logPath}\n`,
             );
-            spawnBackgroundShell(clean, targetCwd, logPath);
+            spawnBackgroundShell(
+              clean,
+              targetCwd,
+              logPath,
+              { onExit: () => onRefresh?.() },
+            );
             return;
           }
           const child = spawn(
@@ -1115,7 +1140,12 @@ async function main(): Promise<void> {
               `[worklog-plugin] Background dispatch (no pane): ${command}\n` +
                 `[worklog-plugin] Log file: ${logPath}\n`,
             );
-            spawnBackgroundShell(command, targetCwd, logPath);
+            spawnBackgroundShell(
+              command,
+              targetCwd,
+              logPath,
+              { onExit: () => onRefresh?.() },
+            );
             return;
           }
           const child = spawn(
