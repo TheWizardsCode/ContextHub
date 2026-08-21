@@ -72,6 +72,10 @@ import {
   buildDowntimeDispatchComment,
   DOWNTIME_WL_TIMEOUT_MS,
 } from './downtime-worker.js';
+import {
+  createModeSwitchWorker,
+  type ModeSwitchWorker,
+} from './mode-switch-worker.js';
 import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
 import {
   appendDowntimeLogEntry,
@@ -939,6 +943,13 @@ async function main(): Promise<void> {
       };
     },
   });
+
+  // Mode-switch worker: automatically switches the llama-proxy between fast
+  // (cloud) and cheap (local) modes based on operator activity and proxy
+  // idle state. Created with settings.downtimeProxyUrl (reuse, no new URL
+  // key). Passes `enabled` via the settings flag (modeSwitchEnabled).
+  const modeSwitchWorker: ModeSwitchWorker = createModeSwitchWorker();
+
   const selectedItem = await runWorklistTui(
     fetcher,
     undefined,
@@ -968,6 +979,9 @@ async function main(): Promise<void> {
       mergeAgentStates: (items) => mergeAgentStates(items, agentTracker),
       subscriber: eventSubscriber,
       agentTracker,
+      modeSwitchWorker,
+      modeSwitchPollIntervalMs: runSettings.modeSwitchPollIntervalMs,
+      modeSwitchEnabled: runSettings.modeSwitchEnabled,
       onCommand: async (command: string, model?: string, openPane?: boolean) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
@@ -986,6 +1000,12 @@ async function main(): Promise<void> {
         // The work-item ↔ pane association is skipped when no pane opens.
         const shouldOpenPane = openPane ?? true;
         const route = routeCommand(command);
+        // Agent-route hook: record operator activity and fire fast-switch
+        // (fail-open: never blocks command dispatch). Only runs for agent
+        // commands — /skill:*, /intake, /plan, /prompt:. The worker's
+        // onOperatorCommand updates the idle clock and POSTs mode=fast
+        // (when not already fast) via fire-and-forget.
+        modeSwitchWorker.onOperatorCommand(runSettings.downtimeProxyUrl);
         // The new pane must start in the correct project root.  herdr's
         // "follow" CWD policy would otherwise inherit the source pane's CWD
         // (the plugin directory), so we pass the resolved project root

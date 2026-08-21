@@ -182,6 +182,36 @@ export async function setAdminMode(
 
 // ── Mode-switch worker ────────────────────────────────────────────────
 
+/** Path for the llama-proxy's local status endpoint (idle evaluation). */
+export const PROXY_STATUS_PATH = '/llama/local/status';
+
+/**
+ * Fetch and parse the llama-proxy's `/llama/local/status` payload for idle
+ * evaluation. Returns null on any failure mode (network error, timeout,
+ * non-2xx, invalid JSON) — propagated as proxyStatus null ⇒ fail-closed
+ * (treated as busy, no cheap switch).
+ */
+export async function fetchProxyStatus(
+  proxyUrl: string,
+  fetcher: AdminApiFetcher = globalThis.fetch as unknown as AdminApiFetcher,
+): Promise<LlamaStatus | null> {
+  const url = `${proxyUrl.replace(/\/+$/, '')}${PROXY_STATUS_PATH}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ADMIN_API_TIMEOUT_MS);
+  try {
+    const res = await fetcher(url, { signal: controller.signal });
+    if (!res.ok) return null;
+    const raw = (await res.json()) as LlamaStatus;
+    if (typeof raw !== 'object' || raw === null) return null;
+    return raw as LlamaStatus;
+  } catch {
+    return null; // network errors / timeouts → unknown, never throw
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+
 /** Tick inputs for the mode-switch worker (settings re-read per tick). */
 export interface ModeSwitchTickOptions {
   /** Whether activity-gated mode switching is enabled (modeSwitchEnabled). */
@@ -288,12 +318,20 @@ export function createModeSwitchWorker(deps?: {
       const elapsed = now() - lastOperatorCommandAt;
       if (elapsed < opts.idleThresholdMs) return;
 
+      // Fetch proxy status when not provided (the worker fetches its own
+      // idle state from the proxy so the caller doesn't need to). null
+      // proxyStatus ⇒ fetch it; a fetch failure is fail-closed.
+      const proxyStatus =
+        opts.proxyStatus !== null
+          ? opts.proxyStatus
+          : await fetchProxyStatus(opts.proxyUrl, fetcher);
+
       // Proxy idle gate: a busy proxy (active local query / lease / model
       // switch / missing fields) DELAYS the switch — never kills in-flight
       // work (operator decision Q4b). Reuses evaluateIdle with
       // requiredFreeSlots = 0 (all slots free). proxyStatus null (endpoint
       // failure, timeout, ambiguous) ⇒ busy (fail-closed).
-      if (opts.proxyStatus === null || !evaluateIdle(opts.proxyStatus, 0)) return;
+      if (proxyStatus === null || !evaluateIdle(proxyStatus, 0)) return;
 
       // Refresh last-known mode via GET /admin/mode before deciding (AC:
       // "track last-known mode; refresh via GET /admin/mode on poll").

@@ -37,6 +37,7 @@ import {
 import { runSync, heartbeatTtlForInterval } from './auto-sync.js';
 import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
+import { type ModeSwitchWorker, DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS } from './mode-switch-worker.js';
 import { showToast } from './notify.js';
 import { recordCommand, getLastCommand } from './command-log.js';
 import {
@@ -3656,7 +3657,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -3675,6 +3676,9 @@ export async function runWorklistTui(
     subscriber: options?.subscriber ?? null,
     agentTracker: options?.agentTracker ?? null,
     onDowntimeToggle: options?.onDowntimeToggle,
+    modeSwitchWorker: options?.modeSwitchWorker,
+    modeSwitchPollIntervalMs: options?.modeSwitchPollIntervalMs ?? 10_000,
+    modeSwitchEnabled: options?.modeSwitchEnabled ?? true,
   };
 
   let termSize = getTermSize();
@@ -5063,6 +5067,30 @@ export async function runWorklistTui(
       runTimeoutMs: DOWNTIME_RUN_TIMEOUT_MS,
       run: async () => {
         await opts.downtimeWorker?.tick();
+      },
+    });
+  }
+
+  // Mode-switch worker task — polls the llama-proxy for idle state and,
+  // after the configured idle threshold, switches from fast (cloud) to
+  // cheap (local) mode (parent WL-0MSN3FWV5008KQE9). Unlike the downtime
+  // worker this task runs continuously while the plugin is alive (not
+  // visibility-gated). Single-flight: overlapping ticks are deduped.
+  if (opts.modeSwitchWorker) {
+    scheduler.addTask({
+      id: 'mode-switch',
+      intervalMs: opts.modeSwitchPollIntervalMs,
+      singleFlight: true,
+      run: async () => {
+        // Re-read settings every tick so modeSwitchEnabled / idle threshold
+        // changes apply without a plugin restart (matching downtime config).
+        const s = loadSettings();
+        await opts.modeSwitchWorker?.tick({
+          enabled: s.modeSwitchEnabled ?? opts.modeSwitchEnabled,
+          idleThresholdMs: s.modeSwitchIdleThresholdMs ?? DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
+          proxyUrl: s.downtimeProxyUrl,
+          proxyStatus: null, // worker fetches its own proxy status
+        });
       },
     });
   }

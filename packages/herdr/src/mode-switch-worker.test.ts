@@ -11,6 +11,7 @@ import {
   createModeSwitchWorker,
   getAdminMode,
   setAdminMode,
+  fetchProxyStatus,
   clampModeSwitchIdleThresholdMs,
   clampModeSwitchPollIntervalMs,
   DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
@@ -19,6 +20,7 @@ import {
   MODE_SWITCH_POLL_INTERVAL_CAP_MS,
   ADMIN_MODE_PATH,
   ADMIN_SET_MODE_PATH,
+  PROXY_STATUS_PATH,
   type AdminApiFetcher,
   type ProxyMode,
 } from './mode-switch-worker.js';
@@ -510,6 +512,89 @@ describe('settings clamps (contract)', () => {
 });
 
 // ── Admin API client ─────────────────────────────────────────────────
+
+describe('fetchProxyStatus', () => {
+  it('fetchProxyStatus parses a valid idle status payload', async () => {
+    const fetcher: AdminApiFetcher = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        llama_server_running: true,
+        active_query: false,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: false,
+        available_slots: 3,
+        total_slots: 3,
+      }),
+    });
+    const status = await fetchProxyStatus('http://proxy', fetcher);
+    expect(status).not.toBeNull();
+    expect(status!.llama_server_running).toBe(true);
+    expect(status!.available_slots).toBe(3);
+  });
+
+  it('fetchProxyStatus returns null on non-2xx response', async () => {
+    const fetcher: AdminApiFetcher = async () => ({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: 'boom' }),
+    });
+    expect(await fetchProxyStatus('http://proxy', fetcher)).toBeNull();
+  });
+
+  it('fetchProxyStatus returns null on network error', async () => {
+    const fetcher: AdminApiFetcher = async () => {
+      throw new Error('ECONNREFUSED');
+    };
+    expect(await fetchProxyStatus('http://proxy', fetcher)).toBeNull();
+  });
+
+  it('tick uses fetchProxyStatus when proxyStatus is null', async () => {
+    clock = 1_000_000;
+    // Use a single counting fetcher that tracks all calls.
+    const fetcherCount = { status: 0, adminMode: 0, setMode: 0 };
+    const countingFetcher: AdminApiFetcher = async (url, init) => {
+      if (url.endsWith(PROXY_STATUS_PATH)) {
+        fetcherCount.status++;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            llama_server_running: true,
+            active_query: false,
+            local_active_query: false,
+            model_switch_in_progress: false,
+            local_lease_active: false,
+            available_slots: 3,
+            total_slots: 3,
+          }),
+        };
+      }
+      if (url.endsWith(ADMIN_MODE_PATH)) {
+        fetcherCount.adminMode++;
+        return { ok: true, status: 200, json: async () => ({ mode: 'fast' }) };
+      }
+      if (url.endsWith(ADMIN_SET_MODE_PATH)) {
+        fetcherCount.setMode++;
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
+    };
+    const worker = createModeSwitchWorker({ fetcher: countingFetcher, now });
+    advance(900_000);
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: null, // null → worker fetches its own status
+    });
+    await flushAsync();
+    expect(fetcherCount.status).toBe(1); // fetched its own proxy status
+    expect(fetcherCount.adminMode).toBeGreaterThanOrEqual(1); // read mode
+    expect(fetcherCount.setMode).toBeGreaterThanOrEqual(1); // switched to cheap
+  });
+});
 
 describe('admin API client', () => {
   it('getAdminMode parses a valid mode payload', async () => {
