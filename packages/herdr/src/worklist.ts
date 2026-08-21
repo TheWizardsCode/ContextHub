@@ -33,7 +33,7 @@ import {
   applyStageColour,
   stageColor,
   type IconOptions,
-} from './icons.js';
+} from '@worklog/shared/icons';
 import { runSync, heartbeatTtlForInterval } from './auto-sync.js';
 import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { loadSettings } from './settings.js';

@@ -7,9 +7,10 @@
 > [dcb09ac](https://github.com/TheWizardsCode/ContextHub/commit/dcb09ac),
 > [f3ca18b](https://github.com/TheWizardsCode/ContextHub/commit/f3ca18b)
 
-> **Note:** As of WL-0MSJ4BT4Z009LIB4, all icon content is now in
-> `src/theme.ts`.  `src/icons.ts` is a deprecated re-export wrapper that will
-> be removed in a future release.
+> **Note:** All icon content lives in `src/theme.ts`.  The deprecated
+> `src/icons.ts` wrapper was removed in WL-0MSJ4BT4Z002HH9B.  The
+> `@worklog/shared/icons` module provides a dependency-free copy of icon/
+> colour data for the herdr plugin.
 
 ## Overview
 
@@ -260,8 +261,8 @@ requests are involved.
 
 **Design decision:** Create a single module (`src/theme.ts`) that exports pure
 functions. (As of WL-0MSJ4BT4Z009LIB4, icon definitions were merged into
-`src/theme.ts` alongside the chalk colour theme; `src/icons.ts` is now a
-@deprecated re-export wrapper.)
+`src/theme.ts` alongside the chalk colour theme; `src/icons.ts` was removed
+in WL-0MSJ4BT4Z002HH9B.)
 
 ```ts
 // src/theme.ts
@@ -305,8 +306,10 @@ export function iconsEnabled(opts?: { noIcons?: boolean }): boolean;
 ### 13.1 Module Layout
 
 Icon maps and functions are defined in `src/theme.ts` alongside the chalk colour
-theme.  The former `src/icons.ts` is a deprecated re-export wrapper that
-re-exports everything from `src/theme.js`.
+theme.  The `src/icons.ts` wrapper was removed in WL-0MSJ4BT4Z002HH9B;
+CLI consumers import directly from `src/theme.js`.  Herdr consumers import
+from `@worklog/shared/icons` (a dependency-free copy in
+`packages/shared/src/icons.ts`).
 
 ### 13.2 CLI List Rendering
 
@@ -320,8 +323,8 @@ Icons are prepended before the title in CLI list output:
 > The Pi-based TUI browse list (which rendered status/stage/producer-review/
 > epic icons via `getIconPrefix` in `packages/tui/extensions/Worklog/lib/browse.ts`)
 > has been removed — work item browsing is now provided by the Herdr plugin.
-> The `dist/icons.ts` functions remain in use by the CLI and the retained
-> session-health footer.
+> The shared `@worklog/shared/icons` functions are used by both the CLI (via
+> re-export from `src/theme.js`) and the Herdr plugin (direct import).
 
 ### 13.3 CLI Detail Output
 
@@ -372,12 +375,13 @@ lines.push(`Priority: ${pIcon} ${item.priority}`);
 | File | Change |
 |------|--------|
 | `src/theme.ts` | Single source of truth: chalk colours + all icon maps/functions + `IconOptions` interface |
-| `src/icons.ts` | Deprecated re-export wrapper (re-exports from `theme.js`) — will be removed in WL-0MSJ4BT4Z002HH9B |
-| `src/commands/helpers.ts` | Added icon formatting to CLI output (summary, concise, normal, full) |
+| `src/icons.ts` | REMOVED (WL-0MSJ4BT4Z002HH9B) — consumers import from `src/theme.js` |
+| `@worklog/shared/icons` | NEW — dependency-free icon/colour data for herdr |
+| `src/commands/helpers.ts` | Rewired to import from `src/theme.js` |
 | `src/commands/list.ts` | Added `--no-icons` CLI flag |
 | `src/commands/show.ts` | Added `--no-icons` CLI flag |
 | `src/cli-types.ts` | Added `noIcons` to ListOptions and ShowOptions |
-| `tests/unit/icons.test.ts` | 58 unit tests for icon functions |
+| `tests/unit/icons.test.ts` | Unit tests for icon functions (wrapper parity tests removed) |
 
 ### CLI Usage
 

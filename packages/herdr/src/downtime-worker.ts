@@ -82,7 +82,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { isAuditFresh } from './icons.js';
+import { isAuditFresh } from '@worklog/shared/icons';
 import type { CodeFreezeStatus } from './code-freeze.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
 import type { RoundRobinRegistry } from './downtime-round-robin.js';
@@ -1922,7 +1922,8 @@ export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | n
 /**
  * Select the next audit candidate from parsed in_review items: the first
  * item WITHOUT a valid audit, sorted ascending by `sortIndex` (heartbeat
- * convention). "Valid audit" reuses `isAuditFresh` from icons.ts (fresh = a
+ * convention). "Valid audit" reuses `isAuditFresh` from @worklog/shared/icons
+ * (fresh = a
  * review icon that is neither ⏳ nor 🔍). Returns null when no candidate is
  * unaudited/stale (or the list is empty). Missing auditedAt/updatedAt means
  * not fresh → selected.

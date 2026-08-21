@@ -18,7 +18,7 @@ import {
   isAuditFresh,
   stageDisplayIcon,
   stringDisplayWidth,
-} from './icons.js';
+} from '@worklog/shared/icons';
 import { formatItemLine } from './worklist.js';
 import type { WorkItem } from './fetcher.js';
 

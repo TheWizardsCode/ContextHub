@@ -28,7 +28,7 @@ vi.mock('./notify.js', () => ({
 
 import { runWorklistTui } from './worklist.js';
 import { setExecFileAsync, resetExecFileAsync } from './fetcher.js';
-import { stringDisplayWidth } from './icons.js';
+import { stringDisplayWidth } from '@worklog/shared/icons';
 import type { WorkItem } from './fetcher.js';
 
 let dataHandler: ((chunk: Buffer) => void) | undefined;
