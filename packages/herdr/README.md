@@ -15,6 +15,8 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Mouse and touch** — Click/tap a row to select; double-click to open detail; mouse wheel or touch-scroll to navigate (list mode) or scroll detail; tap stage options in the filter prompt. Requires SGR mouse reporting (enabled on raw-mode entry, disabled on exit). Terminals without it fall back to keyboard-only. **Alt+m toggles mouse tracking** on/off (WL-0MT0AP2LR000JFWN): while tracking is off, the terminal's native drag-select-to-copy works; press Alt+m again to resume mouse interaction. The current state is shown in the footer (`alt+m mouse on/off`).
 - **Fold indicators** — When the worklist has more items than fit the visible list area, the list shows dim `▼ more` / `▲ more` markers so you always know when items are hidden below the fold or above the current scroll position (WL-0MSG8YXYJ008PWJJ). See [Selection List Behaviour](#selection-list-behaviour).
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text. The agent pane opens **without stealing focus** from the selection list (see [Design decisions](#design-decisions)).
+- **Downtime worker (local-LLM idle dispatch)** — During operator idle time the plugin dispatches pi agent panes to run audits/refactors of completed items against the local llama-server (see [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
+- **Mode-switch worker (activity-gated proxy mode switching)** — Automatically switches the llama-proxy between fast (cloud) and cheap (local) modes: agent-route commands fire an immediate fast switch (fail-open), while a full operator-idle window plus a proxy-idle check triggers the cheap switch (fail-closed). The proxy URL reuses `downtimeProxyUrl` and the plugin's switches are manual overrides that the proxy's own time schedule reclaims. See [Mode-switch worker](#mode-switch-worker-activity-gated-proxy-mode-switching-wl-0msn3fwv5008kqe9).
 - **Agent status tracking** — When an agent command carrying a work-item ID is dispatched, the worklist records which pi agent pane is attached to that item (persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes). The list shows a live agent-status icon at the start of each row's icon prefix: 🟢 working, ⛔ blocked, ⚪ idle. Done/closed items (and items without an agent) show no icon. The icon is a fixed-width slot so the item-ID column never shifts. See [Agent status icons](#agent-status-icons).
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
@@ -381,6 +383,50 @@ reschedule (the scheduler's `getIntervalMs` hook recomputes a fresh value per
 tick), so two instances with identical configuration do not probe in
 lockstep — other machines get a fair chance to win the dispatch race. The
 jitter factor is clamped to `[0.5×, 1.5×]` of the configured interval.
+
+### Mode-switch worker (activity-gated proxy mode switching, WL-0MSN3FWV5008KQE9)
+
+The mode-switch worker automatically switches the llama-proxy between
+**fast** (cloud) and **cheap** (local) modes based on operator presence and
+proxy idle state:
+
+- **Fast on command (fire-and-forget, fail-open)** — an operator dispatching
+  an **agent-route** command (`/skill:*`, `/intake`, `/plan`, `/prompt:`)
+  records operator activity and triggers a switch to fast mode via `POST
+  {proxyUrl}/admin/set-mode` when the proxy is not already in fast mode.
+  The POST is fire-and-forget and cannot block command dispatch (fail-open),
+  so a slow or unresponsive proxy never delays the operator.
+- **Cheap on idle (fail-closed)** — once the operator has been inactive for
+  `modeSwitchIdleThresholdMs` **and** the proxy reports idle (via backend
+  `GET {proxyUrl}/llama/local/status`; no local query, no model switch, no
+  active lease), the worker POSTs `mode=cheap`. Any ambiguity — an
+  unparseable status payload, a non-2xx admin response, or a fetch failure —
+  is treated as busy (fail-closed) so the proxy is never switched cheap
+  while real work might be in flight. The single-flight task means a hung
+  tick can never wedge the task; the proxy URL reuses `downtimeProxyUrl`.
+- **Restart resets to active now** — on plugin/pane restart the idle clock
+  starts from the worker's construction time, so a fresh pane begins with a
+  full idle window before any cheap switch is eligible.
+
+New settings (all optional):
+
+- `modeSwitchEnabled` — Enable the mode-switch worker (default: `true`;
+  when `false` the scheduler registers no mode-switch task and the
+  agent-route hook is a no-op)
+- `modeSwitchIdleThresholdMs` — Operator-inactivity window before a cheap
+  switch is considered (default: `900000` = 15 minutes, hard floor `60000`)
+- `modeSwitchPollIntervalMs` — Poll interval for the proxy idle check when
+  evaluating the idle window (default: `10000`, clamped to `[5000, 60000]`)
+
+The proxy URL is **not** a new setting — it reuses `downtimeProxyUrl`.
+
+**Coexistence with the proxy's built-in time schedule** — the plugin's
+switches are manual overrides (LP-0MSMF25V9002AY1J semantics): they set the
+proxy mode immediately but do not change or disable the proxy's own
+scheduled switching (e.g. cloud hours). The proxy's schedule reclaims control
+at its next boundary — a documented behavior, not a conflict. The worker
+deduplicates by querying the current mode before switching, so it never issues
+redundant `set-mode` calls.
 
 **Scheduled prompts (WL-0MSS1Q5ER007QDKX)** — the FIRST dispatch stage: a
 project-local config file `.worklog/scheduled-prompts.json` (provisioned by
