@@ -100,6 +100,31 @@ wl show WI-123 --json
 # Returns: workItem.auditResult = { readyToClose, summary, auditedAt, author }
 ```
 
+### Tolerant ID Resolution
+
+`wl show` tolerates truncated, case-differing, or partial ID references:
+
+```bash
+# Full ID — works as before
+wl show WI-123
+
+# Partial ID — resolves if unique
+wl show WI-1
+# → Returns WI-123 (unique substring match)
+
+# Case-insensitive substring
+wl show wi-1
+# → Returns WI-123
+
+# Ambiguous — multiple items match
+wl show WI-
+# → {"success": false, "error": "ambiguous-match", "candidates": ["WI-123", "WI-456"]}
+
+# Strict exact match only (skip substring)
+wl show --exact WI-1
+# → Error: Work item not found (no exact match)
+```
+
 ### Deleting Work Items
 
 ```bash

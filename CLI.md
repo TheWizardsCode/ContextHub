@@ -444,6 +444,35 @@ Options:
 `-c, --children` — Also display descendants in a tree layout (optional).
 `--prefix <prefix>` (optional)
 `--no-icons` — Disable icon rendering for clean text output. When icons are disabled, priority and status display as plain text (e.g., `[CRIT]`, `[OPEN]`) instead of emoji. This is useful for scripting or copy-paste operations.
+`--exact` — Force strict exact-match only (skip the tolerant substring fallback).
+
+#### Tolerant ID resolution
+
+`wl show` resolves work-item IDs with a two-tier strategy:
+
+1. **Exact match** — `normalizeCliId` normalises the ID (adds prefix if missing,
+   normalises case/prefix). If an item with that normalised ID exists, it is
+   returned.
+2. **Substring fallback** — If no exact match is found and `--exact` is *not*
+   specified, the CLI scans all item IDs for a **case-insensitive substring**
+   match. When exactly one item matches, it is returned transparently. When
+   multiple items match, the CLI reports an `ambiguous-match` error listing the
+   candidate IDs so the caller can disambiguate. When nothing matches, the
+   CLI reports "Work item not found" (same as before).
+
+This tolerant resolution is especially useful for agent tooling that may hold
+truncated, case-differing, or partial ID references.
+
+The `--exact` flag disables the substring fallback, restoring strict
+exact-match semantics for callers that need deterministic behaviour.
+
+#### JSON error formats
+
+When `--json` is used the error output is always valid JSON:
+
+- **Ambiguous match** — `{"success": false, "error": "ambiguous-match",
+  "candidates": ["WL-XXX1", "WL-XXX2"]}`
+- **Not found** — `{"success": false, "error": "Work item not found: <id>"}`
 
 The output always includes `Risk` and `Effort` fields. When a field has no value a placeholder `—` is shown so the field is consistently visible for triage and prioritization.
 
@@ -453,6 +482,9 @@ Examples:
 wl show WL-ABC123
 wl --json show WL-ABC123
 wl show WL-ABC123 -c
+wl show WL-ABC          # tolerant: resolves if unique substring
+wl --json show WL-ABC   # tolerant JSON output
+wl show --exact WL-ABC  # strict: fails if not an exact match
 ```
 
 ### `next` [options]
