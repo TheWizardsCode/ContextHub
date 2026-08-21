@@ -36,8 +36,9 @@ import {
 } from './icons.js';
 import { runSync, heartbeatTtlForInterval } from './auto-sync.js';
 import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
+import { loadSettings } from './settings.js';
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
-import { type ModeSwitchWorker, DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS } from './mode-switch-worker.js';
+import { type ModeSwitchWorker, DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS, MODE_SWITCH_RUN_TIMEOUT_MS } from './mode-switch-worker.js';
 import { showToast } from './notify.js';
 import { recordCommand, getLastCommand } from './command-log.js';
 import {
@@ -5096,14 +5097,23 @@ export async function runWorklistTui(
 
   // Mode-switch worker task — polls the llama-proxy for idle state and,
   // after the configured idle threshold, switches from fast (cloud) to
-  // cheap (local) mode (parent WL-0MSN3FWV5008KQE9). Unlike the downtime
-  // worker this task runs continuously while the plugin is alive (not
-  // visibility-gated). Single-flight: overlapping ticks are deduped.
-  if (opts.modeSwitchWorker) {
+  // cheap (local) mode (parent WL-0MSN3FWV5008KQE9). Pattern-matched on the
+  // downtime task: single-flight + runTimeoutMs watchdog (a hung tick can
+  // never wedge the task), visibility-independent (runs while the worklist
+  // pane is open). The task is only registered when the feature is enabled
+  // at startup (modeSwitchEnabled); the run ALSO re-reads settings every
+  // tick so a disable or threshold change applies without a plugin restart.
+  // Probe jitter is intentionally NOT applied: each instance's idle clock
+  // resets at construction, so panes' cheap-switch timings are already
+  // naturally desynchronized (unlike the downtime poller's shared registry).
+  const modeSwitchEnabledAtStartup =
+    loadSettings().modeSwitchEnabled ?? opts.modeSwitchEnabled;
+  if (opts.modeSwitchWorker && modeSwitchEnabledAtStartup) {
     scheduler.addTask({
       id: 'mode-switch',
       intervalMs: opts.modeSwitchPollIntervalMs,
       singleFlight: true,
+      runTimeoutMs: MODE_SWITCH_RUN_TIMEOUT_MS,
       run: async () => {
         // Re-read settings every tick so modeSwitchEnabled / idle threshold
         // changes apply without a plugin restart (matching downtime config).

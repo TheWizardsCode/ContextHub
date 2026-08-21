@@ -22,6 +22,8 @@ import {
   MODE_SWITCH_POLL_INTERVAL_CAP_MS,
   DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
   MODE_SWITCH_IDLE_THRESHOLD_FLOOR_MS,
+  MODE_SWITCH_RUN_TIMEOUT_MS,
+  ADMIN_API_TIMEOUT_MS,
 } from './mode-switch-worker.js';
 
 // ── Settings integration ──────────────────────────────────────────────
@@ -113,6 +115,16 @@ describe('scheduler task configuration', () => {
   it('idle threshold floor is at least 60s', () => {
     expect(MODE_SWITCH_IDLE_THRESHOLD_FLOOR_MS).toBeGreaterThanOrEqual(60_000);
     expect(DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS).toBe(900_000); // 15 minutes
+  });
+
+  it('run timeout watchdog exceeds the admin API timeout (hung ticks get abandoned)', () => {
+    // The scheduler task has a runTimeoutMs watchdog (mirror of the downtime
+    // task): a hung tick must be abandoned so the single-flight flag resets
+    // and the next tick retries. The watchdog must be generous enough to
+    // outlive the admin API's own 5s AbortController plus a slow mode-switch
+    // restart while the proxy reloads its model pool.
+    expect(MODE_SWITCH_RUN_TIMEOUT_MS).toBeGreaterThan(ADMIN_API_TIMEOUT_MS);
+    expect(MODE_SWITCH_RUN_TIMEOUT_MS).toBe(30_000);
   });
 });
 

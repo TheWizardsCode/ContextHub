@@ -70,6 +70,16 @@ export const MODE_SWITCH_POLL_INTERVAL_CAP_MS = 60_000;
 /** Timeout for admin API calls (an unresponsive proxy must fail closed). */
 export const ADMIN_API_TIMEOUT_MS = 5_000;
 
+/**
+ * Scheduler watchdog for the mode-switch task: a tick run that hangs (e.g. a
+ * stuck admin fetch that outlived its 5s AbortController) is abandoned after
+ * this and the single-flight flag resets so the next tick retries — a hung
+ * run can never permanently wedge the task until a pane restart (mirror of
+ * DOWNTIME_RUN_TIMEOUT_MS). Generous: a mode-switch restart may take longer
+ * than ADMIN_API_TIMEOUT_MS while the proxy reloads its model pool.
+ */
+export const MODE_SWITCH_RUN_TIMEOUT_MS = 30_000;
+
 // ── Settings clamps ───────────────────────────────────────────────────
 
 /**
