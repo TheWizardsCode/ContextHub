@@ -1103,6 +1103,43 @@ describe('implement selection (selectImplementCandidate)', () => {
     expect(selectImplementCandidate([medium])?.id).toBe('WL-M');
     expect(selectImplementCandidate([extraSmall])?.id).toBe('WL-ES');
   });
+
+  it('handles verbose risk/effort descriptions (agent-produced fields)', () => {
+    const verboseRisk = { ...open, id: 'WL-VERBOSE-RISK', risk: 'medium — NVIDIA driver changes can affect GPU functionality system-wide. Wrong driver version could worsen the problem. Mitigation: test in non-production context first if possible; have rollback plan.' };
+    const verboseEffort = { ...open, id: 'WL-VERBOSE-EFFORT', effort: '1–4 hours (estimate: o=1, m=2, p=4) — Small. Diagnostic investigation + targeted fix on a single system. No code changes expected.' };
+    // Verbose descriptions with em-dash should extract the leading keyword
+    expect(selectImplementCandidate([verboseRisk])?.id).toBe('WL-VERBOSE-RISK');
+    expect(selectImplementCandidate([verboseEffort])?.id).toBe('WL-VERBOSE-EFFORT');
+    // High risk should still be excluded even with verbose description
+    const highVerbose = { ...open, id: 'WL-HIGH-V', risk: 'high — something went wrong' };
+    expect(selectImplementCandidate([highVerbose])).toBeNull();
+  });
+
+  it('regression: a critical item with verbose risk/effort fields wins over a medium item (WL-0MSN3FWV5008KQE9 dispatch)', () => {
+    // Real-world regression: the downtime dispatcher skipped the critical NVIDIA
+    // item because its risk/effort fields carry descriptions, selecting the
+    // medium mode-switch item instead.
+    const nvidia = {
+      ...open,
+      id: 'WL-0MT1KJNDK004SNPK',
+      title: 'Fix NVIDIA kernel/userspace driver API mismatch (chrome-headless)',
+      risk: 'Medium — NVIDIA driver changes can affect GPU functionality system-wide. Wrong driver version could worsen the problem. Mitigation: test in non-production context first if possible; have rollback plan.',
+      effort: '1–4 hours (estimate: o=1, m=2, p=4) — Small. Diagnostic investigation + targeted fix on a single system. No code changes expected.',
+      sortIndex: 900,
+      priority: 'critical',
+    };
+    const modeSwitch = {
+      ...open,
+      id: 'WL-0MSN3FWV5008KQE9',
+      title: 'Herdr plugin: activity-gated proxy mode switching',
+      risk: 'Medium',
+      effort: 'Small',
+      sortIndex: 1600,
+      priority: 'medium',
+    };
+    // Critical (sortIndex 900) must be selected ahead of medium (sortIndex 1600)
+    expect(selectImplementCandidate([modeSwitch, nvidia])?.id).toBe('WL-0MT1KJNDK004SNPK');
+  });
 });
 
 describe('parseImplementCandidatesOutput', () => {

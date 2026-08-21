@@ -1981,7 +1981,11 @@ export function toDowntimeCandidate(candidate: AuditCandidate): DowntimeCandidat
  * client-side guard. Unset/unknown values map to null (fail-closed).
  */
 function riskOrdinal(risk: string | undefined | null): number | null {
-  switch ((risk ?? '').trim().toLowerCase()) {
+  // Extract the leading keyword before any delimiter (—, -, :, whitespace).
+  // Agents may produce verbose risk fields like "Medium — NVIDIA driver changes…";
+  // the belt-and-suspenders guard must recognise the level regardless.
+  const normalized = (risk ?? '').trim().toLowerCase().split(/[-:–—\s]+/)[0];
+  switch (normalized) {
     case 'low': return 1;
     case 'medium': return 2;
     case 'high': return 3;
@@ -2000,7 +2004,13 @@ function riskOrdinal(risk: string | undefined | null): number | null {
  * (fail-closed).
  */
 function effortOrdinal(effort: string | undefined | null): number | null {
-  switch ((effort ?? '').trim().toLowerCase().replace(/[\s-]+/g, '')) {
+  const normalized = (effort ?? '').trim().toLowerCase();
+  // Try exact match on stripped version first (simple cases: "small", "medium",
+  // "Extra Small" → "extrasmall"). If that fails, fall back to searching for
+  // the keyword anywhere in the string — agents produce verbose fields like
+  // "1–4 hours — Small. Diagnostic investigation…" (keyword after the dash).
+  const stripped = normalized.replace(/[\s-]+/g, '');
+  switch (stripped) {
     case 'xs':
     case 'extrasmall': return 1;
     case 's':
@@ -2011,7 +2021,20 @@ function effortOrdinal(effort: string | undefined | null): number | null {
     case 'large': return 4;
     case 'xl':
     case 'extralarge': return 5;
-    default: return null;
+    default:
+      // Fallback: search for the keyword bounded by non-word characters.
+      // Checked in order of specificity (longest first) so "small" wins over "s".
+      if (/(?:^|\W)extrasmall(?:\W|$)/.test(normalized)) return 1;
+      if (/(?:^|\W)xs(?:\W|$)/.test(normalized)) return 1;
+      if (/(?:^|\W)small(?:\W|$)/.test(normalized)) return 2;
+      if (/(?:^|\W)s(?:\W|$)/.test(normalized)) return 2;
+      if (/(?:^|\W)extralarge(?:\W|$)/.test(normalized)) return 5;
+      if (/(?:^|\W)large(?:\W|$)/.test(normalized)) return 4;
+      if (/(?:^|\W)xl(?:\W|$)/.test(normalized)) return 5;
+      if (/(?:^|\W)l(?:\W|$)/.test(normalized)) return 4;
+      if (/(?:^|\W)m(?:\W|$)/.test(normalized)) return 3;
+      if (/(?:^|\W)medium(?:\W|$)/.test(normalized)) return 3;
+      return null;
   }
 }
 
