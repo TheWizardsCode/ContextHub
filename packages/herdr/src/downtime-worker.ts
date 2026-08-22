@@ -1164,13 +1164,34 @@ async function dispatchScheduledPrompt(
  * WL-0MSLIY8ZR004QUSY, is applied by `deps.getNextAuditCandidate`). The
  * audit tier is ROOT-ONLY (WL-0MSTLFW14000KPEC): `wl list --root-only`
  * excludes completed/in_review children, so only parent items are ever
- * dispatched for audit — sub-tasks are never audited independently; then the
+ * dispatched for audit — sub-tasks are never audited independently; then —
+ * BEFORE the non-critical implement tier — the critical-first tier
+ * (WL-0MT3FM8VA005XBHE): the highest-priority open CRITICAL item at ANY
+ * stage (idea / intake_complete / plan_complete), including
+ * dependency-blocked ones (`wl list --priority critical --status open` does
+ * NOT exclude them — unlike `wl next`), dispatched with the
+ * stage-appropriate skill (Q2 caps retained + Q3 dependency-frontier
+ * resolution — see `getNextCriticalCandidate`); then the non-critical
  * implement tier (WL-0MSMAYPQP001FLR6): the highest-priority open
  * plan_complete item with risk ≤ Medium / effort ≤ Medium → `/skill:implement <id>`
  * (fail-closed null on wl error or no candidate — never short-circuits the
  * fallback, AC5/AC6); if none, `wl next --stage intake_complete` →
  * `/skill:plan <id>`; if none, `wl next --stage idea` → `/skill:intake <id>`;
- * if all four are empty, no dispatch.
+ * if all are empty, no dispatch.
+ *
+ * Critical-tier semantics: the lookup resolves through the same
+ * `DowntimeNextResult` error channel as the audit tier — a GENUINELY empty
+ * critical tier (`{ok:true, candidate:null}`) falls through to the
+ * non-critical tiers, while `{ok:false}` is a wl-error strike (never a
+ * silent fall-through, so a broken critical lookup can never look like "no
+ * critical work"). The stage-appropriate skill comes from
+ * `criticalSkillKind(candidate.stage)`; a dependency-blocked candidate is
+ * dispatched as its nearest OPEN frontier blocker with the blocker's own
+ * stage (Q3). The critical dispatch runs through the SAME
+ * `dispatchClaimedTier` pipeline (CAS claim with the TIER_EXPECTED stage
+ * entry → marker → spawn), so the claim-CAS, the dispatched-marker
+ * change-guard (rolling-log kind is the skill-mapped implement/plan/intake)
+ * and the single-flight guard compose unchanged.
  *
  * The audit tier resolves through the same `DowntimeNextResult` error
  * channel as the plan/intake tiers (WL-0MSLWJ2KP0002SV0): a GENUINELY empty
@@ -1182,10 +1203,15 @@ async function dispatchScheduledPrompt(
  *
  * Code-freeze gate (WL-0MSQ0RPQP00636JY): the marker is re-read fresh on
  * EVERY dispatch (never cached). While the marker is frozen OR ambiguous
- * (fail-closed), the audit and implement tiers are skipped — no new
+ * (fail-closed), the audit and non-critical implement tiers are skipped — no new
  * implementation work (or audits) starts during a release freeze — and
  * dispatch continues with the plan/intake tiers, which are low-risk prep
- * and still allowed. A freeze skip with an empty plan/intake backlog is
+ * and still allowed. The critical tier is STILL consulted during a freeze,
+ * with the split-by-skill rule (Q1): a critical plan_complete
+ * (implement-kind) candidate is skipped (no new code mid-release), while
+ * critical idea/intake_complete (intake/plan-kind) candidates STILL
+ * dispatch — critical prep is as low-risk as non-critical prep. A freeze
+ * skip with an empty plan/intake backlog is
  * reported as reason 'code-freeze' (NEVER 'no-candidate'), so it never
  * triggers the worker's no-candidate cooldown: polling continues and
  * implement/audit dispatch resumes immediately when the freeze lifts.
@@ -1232,8 +1258,10 @@ export async function dispatchDowntimeWork(
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): re-read the marker fresh on
     // every dispatch — never cached, so a freeze that starts or ends
     // mid-idle-period is honored on the next dispatch attempt. Frozen OR
-    // ambiguous (fail-closed) → the audit and implement tiers are skipped
-    // and dispatch falls through to the plan/intake tiers below.
+    // ambiguous (fail-closed) → the audit and non-critical implement tiers
+    // are skipped and dispatch falls through to the plan/intake tiers
+    // below; the critical tier below is STILL consulted, pausing only its
+    // implement-kind candidate (Q1 split-by-skill) — see the tier comment.
     const freezeStatus = deps.readCodeFreezeStatus(opts.cwd);
     const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
 

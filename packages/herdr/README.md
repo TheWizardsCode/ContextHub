@@ -203,12 +203,16 @@ When the local LLM (llama-server behind the llama-proxy) is idle, the plugin
 can use that compute to advance the worklog backlog automatically: after the
 proxy reports idle continuously for the configured threshold, it opens a
 visible (non-focus-stealing) pi agent pane. Dispatch priority
-(WL-0MSS1Q5ER007QDKX, WL-0MSI8H3HP000K0RG, WL-0MSMAYPQP001FLR6):
+(WL-0MSS1Q5ER007QDKX, WL-0MSI8H3HP000K0RG, WL-0MSMAYPQP001FLR6,
+WL-0MT3FM8VA005XBHE):
 first a due **scheduled prompt** (see *Scheduled prompts* below) dispatches
 its prompt text; else a completed/in_review item **without a valid audit** →
-`/skill:audit <id>`; else the highest-priority open `plan_complete` item with
-risk `Low` and effort `Small`/`Extra Small` → `/skill:implement <id>`; else
-`/skill:plan` on the next `intake_complete` item; else falls back
+`/skill:audit <id>`; else the highest-priority open **critical** item at ANY
+stage (or its dependency-frontier blocker) → stage-appropriate
+`/skill:intake`/`/skill:plan`/`/skill:implement` (see *Critical-first tier*
+below, WL-0MT3FM8VA005XBHE); else the highest-priority open `plan_complete`
+item with risk `Low` and effort `Small`/`Extra Small` → `/skill:implement <id>`;
+else `/skill:plan` on the next `intake_complete` item; else falls back
 to `/skill:intake` on the next `idea` item (parent WL-0MSF49FMW009M06K).
 
 A "valid" audit is defined by the review-icon freshness rule: the audit is
@@ -299,10 +303,10 @@ selection time, against the latest polled status, each dispatch tier
 additionally requires a minimum number of free slots (independent of the
 idle-duration gate): the **audit** tier needs **≥ 2 free slots** (a parent
 audit plus its Phase 2 child at `AUDIT_PHASE2_PARALLELISM=1` needs two
-local slots), while the single-pane tiers (scheduled prompts, implement,
-plan, intake) need **≥ 1 free slot**. An unmet minimum skips that tier to
-the next eligible one — an ineligible skip, never a three-strike error and
-never an empty-backlog cooldown (mirrors the code-freeze skip).
+local slots), while the single-pane tiers (scheduled prompts, critical,
+implement, plan, intake) need **≥ 1 free slot**. An unmet minimum skips that
+tier to the next eligible one — an ineligible skip, never a three-strike
+error and never an empty-backlog cooldown (mirrors the code-freeze skip).
 
 **Dispatch behaviour** — once idle has been continuous for the threshold, the
 worker first runs `wl list --status completed --stage in_review --root-only
@@ -357,9 +361,10 @@ fresh worklog.
 > include completed children in the audit tier. `wl next` conversion remains
 > scoped to the implement tier only (AC5 escape hatch — decision recorded).
 
-If no scheduled prompt is due, it runs `wl next --stage intake_complete
+If no scheduled prompt is due, it runs the **critical-first tier** (see below);
+if no critical candidate, it runs `wl next --stage intake_complete
 --json` and dispatches `/skill:plan <id>`; if no such item it runs `wl next
---stage idea --json` and dispatches `/skill:intake <id>`; if all four are
+--stage idea --json` and dispatches `/skill:intake <id>`; if all five are
 empty nothing is dispatched. A `wl`/CLI error on the `intake_complete` lookup
 does **not** skip the `idea` lookup — a tier-3 candidate can still dispatch.
 The item is claimed (`wl update <id> --status in_progress`) *before* the pane
@@ -383,6 +388,51 @@ are excluded by `wl next` itself. Dispatch is `/skill:implement <id>` (pane
 named `Downtime implement`). A `wl`/CLI error or empty result at the
 implement tier is fail-closed (never a candidate) and does **not**
 short-circuit the plan/intake fallback (AC5/AC6).
+
+**Critical-first tier (WL-0MT3FM8VA005XBHE)** — after the audit tier and
+BEFORE the non-critical implement/plan/intake tiers, the worker looks up the
+highest-priority open **critical** item at ANY stage via `wl list --priority
+critical --status open --json` (which — unlike `wl next` — does NOT exclude
+dependency-blocked items) and dispatches it with the stage-appropriate skill:
+`idea` → `/skill:intake <id>`, `intake_complete` → `/skill:plan <id>`, and
+`plan_complete` → `/skill:implement <id>`. Selection is deterministic
+(WL-0MSSRED76008LGB6 round-robin over the `critical` priority group). The
+critical tier consults its lookup on EVERY dispatch — including during a
+code freeze — and resolves through the same `DowntimeNextResult` error
+channel as the audit/plan/intake tiers: `{ok:true, candidate:null}` is a
+GENUINELY empty critical tier and falls through to the non-critical tiers;
+`{ok:false}` is a `wl`/parse failure — a CLI-error strike, never a silent
+fall-through (a broken critical lookup can never masquerade as "no critical
+work" and quietly disable the tier). It needs **≥ 1 free slot** (single-pane
+tier, parent WL-0MT32F90V008UAD2 AC3).
+
+Three decision points govern the critical tier (Q1/Q2/Q3):
+
+- **Freeze split-by-skill (Q1, WL-0MSQ0RPQP00636JY composition)** — while
+the code-freeze marker is frozen OR ambiguous (fail-closed), a critical
+`plan_complete` (implement-kind) candidate is SKIPPED — no new code changes
+land mid-release — but critical `idea`/`intake_complete` (intake/plan-kind)
+candidates STILL dispatch: prep work (intake/plan) is low-risk and allowed
+during a freeze, exactly matching the non-critical plan/intake tiers.
+- **Caps retention (Q2)** — a critical `plan_complete` item dispatches with
+`/skill:implement` only when risk ≤ Medium AND effort ≤ Medium (the caps
+from the F2 selection guard); an above-caps critical item is not a
+valid candidate and the tier falls through.
+- **Dependency-frontier dispatch (Q3)** — when the selected critical item is
+dependency-blocked (`wl dep list <id>` outbound `depends-on` edges — a
+candidate's blockers), the worker follows the blocking chain to the nearest
+OPEN blocker and dispatches THAT blocker with its OWN stage-appropriate
+skill (intake/plan/implement). The chain bottoms (blocker closed,
+non-dispatchable stage, above-caps, or a cycle — bounded) → no frontier
+candidate → the tier falls through to the non-critical order.
+
+The critical dispatch flows through the same `dispatchClaimedTier` pipeline
+as every other tier — CAS claim (with the stage-appropriate `TIER_EXPECTED`
+entry, stale-claim aborts), dispatched-marker write before spawn, then the
+pane — so the claim-CAS, dispatched-marker change-guard, and single-flight
+guards compose unchanged. The rolling-log kind is the skill-mapped
+`implement`/`plan`/`intake` (never a distinct critical kind), keeping the
+change-guard and observability consistent.
 
 **Round-robin tie-break (WL-0MSSRED76008LGB6)** — within each dispatch tier,
 candidates sharing the **same priority level** (critical/high/medium/low —
@@ -500,8 +550,9 @@ cooldown; when none are due and the backlog is genuinely empty, the existing
 no-candidate cooldown applies unchanged.
 
 **Empty-backlog cooldown** — when the implement, plan, and intake `wl next`
-lookups genuinely return no candidate (the tab's project has nothing to
-dispatch), the worker enters a full **pause** for `downtimeNoCandidateCooldownMs`
+lookups and the critical-tier lookup genuinely return no candidate (the
+tab's project has nothing to dispatch), the worker enters a full **pause**
+for `downtimeNoCandidateCooldownMs`
 (default 60 minutes): no
 proxy polling, no idle tracking, and no dispatch until the pause expires — so
 it stops burning cycles (proxy polling + `wl` spawns) during empty periods.
@@ -516,10 +567,15 @@ the next cooldown entry without a plugin restart.
 ship-it code-freeze marker (see [Code Freeze](#code-freeze)): the marker is
 re-read **fresh on every dispatch attempt** (never cached), so a freeze that
 starts or ends mid-idle-period is honored on the next dispatch. While the
-marker is **frozen or ambiguous** (fail-closed), the audit and implement tiers
-are skipped — no new audits or implementation work starts during a release —
-and dispatch continues with the plan/intake tiers, which are low-risk prep
-work. A freeze skip is never treated as an empty backlog: it reports reason
+marker is **frozen or ambiguous** (fail-closed), the audit and non-critical
+implement tiers are skipped — no new audits or implementation work starts
+during a release — and dispatch continues with the plan/intake tiers, which
+are low-risk prep work. The critical tier is **still consulted** during a
+freeze, but with the split-by-skill rule (Q1): a critical `plan_complete`
+(implement-kind) candidate is skipped while critical `idea`/`intake_complete`
+(intake/plan-kind) candidates still dispatch — critical prep is as low-risk
+as non-critical prep and stays allowed (see *Critical-first tier* above). A
+freeze skip is never treated as an empty backlog: it reports reason
 `code-freeze` (never `no-candidate`), so it does **not** trigger the
 no-candidate cooldown — polling continues and implement/audit dispatch
 resumes immediately when the freeze lifts. The implement skill's own
@@ -1146,7 +1202,7 @@ Fail-open is deliberate: a broken or missing marker must never block browsing th
 - **Implement shortcut hidden** — The `i` / `/skill:implement` shortcut in `shortcuts.json` carries `"code_freeze": "block"`, so while a freeze is active it is filtered out of the shortcut registry: it does not appear in the footer/chord help hints and pressing it does nothing (no dialog, no dispatch). See [Shortcut filtering during a freeze](#shortcut-filtering-during-a-freeze).
 - **Implement commands blocked** — Any implement command (`/skill:implement`, `/skill:implement-single`, `/skill:implementall`, via single-key `i`, chord, or typed dispatch) is **not** routed: no pi agent pane is spawned, no work item is claimed, and no `<id>` substitution happens. The marker is re-read at dispatch time, so a freeze that starts between refreshes is still enforced.
 - **Notice dialog** — When an implement command is attempted during a freeze, a modal dialog explains that implementation is blocked until the release finishes. Dismiss with `Esc`, `Enter`, or `q` to return to the list.
-- **Downtime dispatcher freeze gate** — While the marker is frozen **or ambiguous**, the downtime worker skips its audit and implement dispatch tiers (no new audits/implementations during a release); the plan/intake tiers continue. See [Downtime worker](#downtime-worker-local-llm-idle-dispatch).
+- **Downtime dispatcher freeze gate** — While the marker is frozen **or ambiguous**, the downtime worker skips its audit and non-critical implement dispatch tiers (no new audits/implementations during a release); the plan/intake tiers continue, and the critical tier pauses only its implement-kind (plan_complete) candidates (Q1 split-by-skill — critical intake/plan prep continues). See [Downtime worker](#downtime-worker-local-llm-idle-dispatch).
 - **Other commands unaffected** — Audit, intake, plan, review, priority,
   search, and navigation continue to work normally during a freeze. The Ship
   It shortcut (`S`) also stays available during a freeze: the release
