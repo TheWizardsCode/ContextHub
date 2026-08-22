@@ -230,9 +230,11 @@ export interface LlamaSlot {
 // ── Idle detection (implemented) ──────────────────────────────────────
 
 /**
- * The global (slot-count-independent) idle checks shared by `isIdleStatus`
- * and the per-slot branch of `evaluateIdle`: llama-server up, no active
- * query (local signal preferred), no model switch, no local lease.
+ * The FULL global idle checks used by `isIdleStatus` and the count-based
+ * (non-per-slot) path of `evaluateIdle`: llama-server up, no active
+ * query (local signal preferred), no model switch, no local lease. The
+ * per-slot branch uses the relaxed `perSlotGlobalIdleChecks` instead
+ * (spare-capacity dispatch, parent WL-0MT32F90V008UAD2).
  */
 function globalIdleChecks(status: LlamaStatus): boolean {
   if (!status.llama_server_running) return false;

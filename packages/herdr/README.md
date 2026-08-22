@@ -230,12 +230,14 @@ Settings (all re-read each poll, so changes apply without a plugin restart):
 - `downtimeEnabled` — Enable the downtime worker (default: `true`)
 - `downtimeIdleThresholdMs` — Minimum continuous idle duration before a
 dispatch (default: `60000` = 60 seconds, floor 1s)
-- `downtimeRequiredFreeSlots` — Required free slots; `0` means **all** slots
-must be free (default). A positive integer N is accepted; with per-slot
-identity data the worker requires the **same N slots** continuously free (see
-per-slot idle tracking below) for `0 < N < total`; without per-slot data it
-fails closed to all-slots-free for `0 < N < total` (never any-N dispatch);
-`N > total` never dispatches.
+- `downtimeRequiredFreeSlots` — Required free slots (default: `2` of 3 —
+**spare-capacity dispatch**, parent WL-0MT32F90V008UAD2: at least two
+slots must be free so one slot stays reserved for the operator session).
+`0` means **all** slots must be free. A positive integer N is accepted;
+with per-slot identity data the worker requires the **same N slots**
+continuously free (see per-slot idle tracking below) for `0 < N < total`;
+without per-slot data it fails closed to all-slots-free for `0 < N < total`
+(never any-N dispatch); `N > total` never dispatches.
 - `downtimePollIntervalMs` — Poll interval for the proxy status endpoint
 (default: `10000`, hard floor `10000`)
 - `downtimeProxyUrl` — Base URL of the llama-proxy (default:
@@ -252,6 +254,12 @@ serves `local_active_query` — preferred over the global `active_query`, so
 remote-only streams with free local slots do not block dispatch; absent on
 pre-fix proxies, the global `active_query` is used as the fallback), no model
 switch, no active local lease, and the required free-slot condition met.
+**In per-slot identity mode with `0 < N < total` the query/lease checks are
+relaxed** (spare-capacity dispatch, parent WL-0MT32F90V008UAD2): a query or
+lease tied to a busy slot is the operator's own session and must not block
+dispatch into the free slots — the per-slot `is_processing` signal is the
+authoritative busy signal and only llama-server-down and model-switch remain
+global gates.
 Endpoint failures, timeouts, and ambiguous responses are treated as **busy**
 (no dispatch) and never crash the plugin. Each poll is single-flight with a
 per-poll timeout.
@@ -272,16 +280,29 @@ AND `downtimeRequiredFreeSlots` is `0 < N < total`, the worker tracks the
 idle duration of **each slot individually** and dispatches only when the
 **same N slots** have each been continuously free for the full
 `downtimeIdleThresholdMs` — a slot that starts processing resets only its
-*own* idle timer, so transient any-N availability never counts. Any *global*
-busy condition (active query, model switch, local lease, server down, or an
-ambiguous/unparseable poll) resets **all** slot timers, requiring a fresh
-full idle period. This assumes `slot_id` values are stable across polls
-(they identify the physical slots on the llama-server). Malformed per-slot
-data (non-array, missing/empty `slot_id`, non-boolean `is_processing`, or
-duplicate ids) is treated as busy (fail-closed). Without per-slot data — or
-when N is `0` or ≥ `total` — the worker falls back to the count-based
-all-slots-free logic: N of `total` slots free never dispatches without
-per-slot identity.
+*own* idle timer, so transient any-N availability never counts (and a busy
+slot holding the operator's query/lease does not reset the free slots'
+timers — spare-capacity dispatch, parent WL-0MT32F90V008UAD2). In per-slot
+mode only **server down** and **model switch** remain GLOBAL busy
+conditions that reset **all** slot timers and require a fresh full idle
+period; an ambiguous/unparseable poll also resets all timers (fail-closed).
+This assumes `slot_id` values are stable across polls (they identify the
+physical slots on the llama-server). Malformed per-slot data (non-array,
+missing/empty `slot_id`, non-boolean `is_processing`, or duplicate ids) is
+treated as busy (fail-closed). Without per-slot data — or when N is `0` or
+≥ `total` — the worker falls back to the count-based all-slots-free logic
+with the FULL global checks (server, local query, model switch, lease): N
+of `total` slots free never dispatches without per-slot identity.
+
+**Per-tier free-slot minimums** (parent WL-0MT32F90V008UAD2 AC3) — at
+selection time, against the latest polled status, each dispatch tier
+additionally requires a minimum number of free slots (independent of the
+idle-duration gate): the **audit** tier needs **≥ 2 free slots** (a parent
+audit plus its Phase 2 child at `AUDIT_PHASE2_PARALLELISM=1` needs two
+local slots), while the single-pane tiers (scheduled prompts, implement,
+plan, intake) need **≥ 1 free slot**. An unmet minimum skips that tier to
+the next eligible one — an ineligible skip, never a three-strike error and
+never an empty-backlog cooldown (mirrors the code-freeze skip).
 
 **Dispatch behaviour** — once idle has been continuous for the threshold, the
 worker first runs `wl list --status completed --stage in_review --root-only
