@@ -6,7 +6,7 @@ import type { PluginContext } from '../plugin-types.js';
 import type { SyncOptions, SyncDebugOptions } from '../cli-types.js';
 import type { WorkItem, Comment, DependencyEdge } from '../types.js';
 import type { GitTarget, SyncResult } from '../sync.js';
-import { getRemoteDataFileContent, getRemoteDataFileContentWithRef, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, assertDataFileInCwdRepo, filterRemoteDataByPrefix, enforceAuthorIdentityGate, getConfiguredUserEmail, getRemoteTrackingRefSha, writeLastSyncedRef } from '../sync.js';
+import { getRemoteDataFileContent, getRemoteDataFileContentWithRef, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, assertDataFileInCwdRepo, filterRemoteDataByPrefix, enforceAuthorIdentityGate, getConfiguredUserEmail, getRemoteTrackingRefSha, writeLastSyncedRef, replayRemoteDeltaChain } from '../sync.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
 import { importFromJsonlContent } from '../jsonl.js';
 import { mergeAuditResults } from '../sync.js';
@@ -125,36 +125,93 @@ export async function performSync(
   }
 
   let remoteAudits: any[] = [];
+  // Full-snapshot fallback (WL-0MT2KZ5GJ000OJIP, §6.2 trigger 1): a remote
+  // DELTA tip with NO local records cannot be applied — a delta only carries
+  // *changed* records, so merging it onto an empty store would lose every
+  // record untouched since the last full snapshot (brand-new clone, or a
+  // store recovered from corruption). Reconstruct the full chain from the
+  // remote ref history instead (replayRemoteDeltaChain). If the chain is
+  // unrepairable we fail closed: never merge the partial delta and never push
+  // a (possibly empty) full snapshot over a populated remote (AC5).
+  let brokenDeltaChain = false;
   if (remoteContent) {
-    const remoteData = importFromJsonlContent(remoteContent);
+    let remoteData = importFromJsonlContent(remoteContent);
     remoteSyncKind = remoteData.kind;
+    if (
+      remoteSyncKind === 'delta' &&
+      localItems.length === 0 &&
+      localComments.length === 0 &&
+      remoteContentResult.remoteTrackingRef
+    ) {
+      const replay = await replayRemoteDeltaChain(
+        options.file,
+        remoteContentResult.remoteTrackingRef
+      );
+      if (replay) {
+        // Reconstructed state = newest full snapshot + every delta after it,
+        // i.e. a complete remote view. Treat it as a FULL snapshot so the
+        // normal merge applies and the subsequent export is full (no baseline
+        // → §5.1), re-anchoring the remote for other readers (AC4 resets the
+        // delta counters on the full push).
+        remoteData = {
+          items: replay.items,
+          comments: replay.comments,
+          dependencyEdges: replay.dependencyEdges,
+          auditResults: replay.auditResults,
+          kind: 'full' as const,
+        };
+        remoteSyncKind = 'full';
+        logLine(`Delta-chain fallback: reconstructed full state from remote history (${replay.items.length} items, ${replay.comments.length} comments)`);
+        if (!isJsonMode && !isSilent) {
+          console.log(`\nDelta-chain fallback: remote tip is a delta but local has no base — replaying remote history to reconstruct the full snapshot (${replay.items.length} items)`);
+        }
+      } else {
+        brokenDeltaChain = true;
+        remoteSyncKind = undefined;
+        logLine('Delta-chain fallback FAILED: no repairable full snapshot in remote history — failing closed (no merge, no push)');
+        if (!isJsonMode && !isSilent) {
+          console.log('\nDelta-chain fallback FAILED: the remote ref history contains no repairable full snapshot. ' +
+            'Skipping the pull and push to avoid data loss. Manual intervention required (AC5).');
+        }
+      }
+    }
     // Cross-project prefix filter (SA-0MSC0BM1V0032UYT): never import work
     // items whose ID prefix does not match the project prefix, and drop their
     // comments/edges/audits too. Defense-in-depth behind the repo-context
     // guard (WL-0MSAH26DD001XXST) for stale/daemon processes that loaded
     // pre-fix code: foreign items cannot re-enter even if a sync reaches the
     // merge step with a polluted remote snapshot.
-    const configForPrefix = loadConfig();
-    const projectPrefix = (options.prefix || configForPrefix?.prefix || 'WI').toUpperCase();
-    const filtered = filterRemoteDataByPrefix(
-      remoteData.items,
-      remoteData.comments,
-      remoteData.dependencyEdges || [],
-      remoteData.auditResults || [],
-      projectPrefix
-    );
-    if (filtered.droppedItems.length > 0) {
-      const preview = filtered.droppedItems.slice(0, 5).join(', ');
-      const ellipsis = filtered.droppedItems.length > 5 ? ', …' : '';
-      logLine(`Foreign-prefix filter: dropped ${filtered.droppedItems.length} remote item(s) not matching prefix '${projectPrefix}' (${preview}${ellipsis})`);
-      if (!isJsonMode && !isSilent) {
-        console.log(`\nForeign-prefix filter: dropped ${filtered.droppedItems.length} remote item(s) not matching project prefix '${projectPrefix}' (${preview}${ellipsis})`);
+    if (!brokenDeltaChain) {
+      const configForPrefix = loadConfig();
+      const projectPrefix = (options.prefix || configForPrefix?.prefix || 'WI').toUpperCase();
+      const filtered = filterRemoteDataByPrefix(
+        remoteData.items,
+        remoteData.comments,
+        remoteData.dependencyEdges || [],
+        remoteData.auditResults || [],
+        projectPrefix
+      );
+      if (filtered.droppedItems.length > 0) {
+        const preview = filtered.droppedItems.slice(0, 5).join(', ');
+        const ellipsis = filtered.droppedItems.length > 5 ? ', …' : '';
+        logLine(`Foreign-prefix filter: dropped ${filtered.droppedItems.length} remote item(s) not matching prefix '${projectPrefix}' (${preview}${ellipsis})`);
+        if (!isJsonMode && !isSilent) {
+          console.log(`\nForeign-prefix filter: dropped ${filtered.droppedItems.length} remote item(s) not matching project prefix '${projectPrefix}' (${preview}${ellipsis})`);
+        }
       }
+      remoteItems = filtered.items;
+      remoteComments = filtered.comments;
+      remoteEdges = filtered.edges;
+      remoteAudits = filtered.audits;
+    } else {
+      // Fail-closed (AC5): do not merge the partial delta into local state —
+      // a delta alone does not represent the remote store, so importing it
+      // would silently drop every record untouched since the last full.
+      remoteItems = [];
+      remoteComments = [];
+      remoteEdges = [];
+      remoteAudits = [];
     }
-    remoteItems = filtered.items;
-    remoteComments = filtered.comments;
-    remoteEdges = filtered.edges;
-    remoteAudits = filtered.audits;
   }
 
   if (!isJsonMode && !isSilent) {
@@ -313,6 +370,20 @@ export async function performSync(
   // - Otherwise → delta (incremental) export
   const lastTs = db.getLastExportTimestamps();
   const deltaDisabled = process.env.WL_DELTA_EXPORT_DISABLED === '1';
+
+  // Fail-closed (WL-0MT2KZ5GJ000OJIP §6.2/AC5): when the remote delta chain
+  // is unrepairable we must NOT push anything — a full snapshot rebuilt from
+  // an empty/partial local store would overwrite a populated remote with less
+  // data. Throw so the command layer reports the error (exit 1) and local
+  // state stays untouched.
+  if (brokenDeltaChain) {
+    throw new Error(
+      'Unrepairable remote delta chain: the remote ref history contains no full snapshot ' +
+      'base, so the delta tip cannot be applied without data loss. No changes were made. ' +
+      'Manual intervention required (e.g. force a full snapshot from a trusted store).'
+    );
+  }
+
   const hasBaseline = Boolean(
     lastTs.workitems || lastTs.comments || lastTs.edges || lastTs.audit_results
   );
