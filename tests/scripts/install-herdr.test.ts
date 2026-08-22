@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 const KEYBINDING_BLOCK = `[[keys.command]]
 key = "prefix+l"
 command = "herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab"
-description = "Open the Podcast Editing tab (Worklog work item selection pane)."
+description = "Open the Worklog tab (Worklog work item selection pane)."
 `;
 
 // Marker the script uses for its existence check.
