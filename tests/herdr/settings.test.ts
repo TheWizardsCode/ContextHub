@@ -65,8 +65,10 @@ describe('defaultSettings', () => {
     expect(defaultSettings.downtimeIdleThresholdMs).toBe(60000);
   });
 
-  it('has downtimeRequiredFreeSlots 0 (all slots) by default', () => {
-    expect(defaultSettings.downtimeRequiredFreeSlots).toBe(0);
+  it('has downtimeRequiredFreeSlots 2 (spare-capacity default) by default', () => {
+    // Default N=2 of 3 slots (parent WL-0MT32F90V008UAD2): spare-capacity
+    // dispatch works out-of-the-box with one slot reserved for the operator.
+    expect(defaultSettings.downtimeRequiredFreeSlots).toBe(2);
   });
 
   it('has a 10s poll interval by default', () => {
@@ -117,13 +119,13 @@ describe('loadSettings', () => {
     writeFileSync(settingsPath, JSON.stringify({
       downtimePollIntervalMs: 5000,          // below the 10s floor
       downtimeIdleThresholdMs: -1,           // negative → default
-      downtimeRequiredFreeSlots: -2,         // negative → 0 (all slots)
+      downtimeRequiredFreeSlots: -2,         // negative → default N=2 (spare-capacity)
       downtimeModel: '',                     // empty → default
     }), 'utf-8');
     const settings = loadSettings(settingsPath);
     expect(settings.downtimePollIntervalMs).toBe(10000);
     expect(settings.downtimeIdleThresholdMs).toBe(60000);
-    expect(settings.downtimeRequiredFreeSlots).toBe(0);
+    expect(settings.downtimeRequiredFreeSlots).toBe(2);
     expect(settings.downtimeModel).toBe('plan');
   });
 
@@ -137,7 +139,7 @@ describe('loadSettings', () => {
     expect(settings.downtimeProxyUrl).toBe('http://10.0.0.5:8000');
     expect(settings.downtimeIdleThresholdMs).toBe(60000); // from defaults
     expect(settings.downtimePollIntervalMs).toBe(10000); // from defaults
-    expect(settings.downtimeRequiredFreeSlots).toBe(0); // from defaults
+    expect(settings.downtimeRequiredFreeSlots).toBe(2); // default N=2 (spare-capacity)
   });
 
   it('loads showIcons: false from the config file', () => {

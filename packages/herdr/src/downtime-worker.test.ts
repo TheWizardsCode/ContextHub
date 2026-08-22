@@ -2184,9 +2184,12 @@ describe('downtime settings clamps', () => {
     expect(clampDowntimeIdleThresholdMs(0)).toBe(1_000);
   });
 
-  it('clampDowntimeRequiredFreeSlots maps negative/non-finite to 0 (all slots) and rounds', () => {
-    expect(clampDowntimeRequiredFreeSlots(-3)).toBe(0);
-    expect(clampDowntimeRequiredFreeSlots(Number.NaN)).toBe(0);
+  it('clampDowntimeRequiredFreeSlots maps negative/non-finite to the default N=2 and rounds', () => {
+    // Spare-capacity default (parent WL-0MT32F90V008UAD2): negative/non-
+    // finite input falls back to DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS (2)
+    // — the out-of-the-box spare-capacity default, still fail-closed safe.
+    expect(clampDowntimeRequiredFreeSlots(-3)).toBe(DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS);
+    expect(clampDowntimeRequiredFreeSlots(Number.NaN)).toBe(DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS);
     expect(clampDowntimeRequiredFreeSlots(2.7)).toBe(3);
     expect(clampDowntimeRequiredFreeSlots(2)).toBe(2);
   });
@@ -3330,11 +3333,16 @@ describe('evaluateIdle per-slot mode (0 < N < total with slots present)', () => 
     expect(evaluateIdle(twoFree, 3)).toBe(false); // needs 3 — not enough
   });
 
-  it('per-slot mode still requires the base idle checks (global busy → false)', () => {
-    expect(evaluateIdle({ ...twoFree, active_query: true }, 2)).toBe(false);
-    expect(evaluateIdle({ ...twoFree, model_switch_in_progress: true }, 2)).toBe(false);
-    expect(evaluateIdle({ ...twoFree, local_lease_active: true }, 2)).toBe(false);
-    expect(evaluateIdle({ ...twoFree, llama_server_running: false }, 2)).toBe(false);
+  it('per-slot mode still requires the relaxed global checks (server up + no model switch)', () => {
+    // Spare-capacity relaxation (parent WL-0MT32F90V008UAD2 AC2): in per-slot
+    // mode ONLY llama_server_running and model_switch_in_progress remain
+    // global gates — query/lease signals are superseded by per-slot
+    // is_processing (a busy slot's query/lease is the operator's own session).
+    expect(evaluateIdle({ ...twoFree, active_query: true }, 2)).toBe(true); // relaxed: query does NOT block
+    expect(evaluateIdle({ ...twoFree, local_active_query: true }, 2)).toBe(true); // relaxed
+    expect(evaluateIdle({ ...twoFree, local_lease_active: true }, 2)).toBe(true); // relaxed: lease does NOT block
+    expect(evaluateIdle({ ...twoFree, model_switch_in_progress: true }, 2)).toBe(false); // still global
+    expect(evaluateIdle({ ...twoFree, llama_server_running: false }, 2)).toBe(false); // still global
   });
 
   it('N=0 (default) still requires ALL slots free even when per-slot data is present', () => {
@@ -3605,6 +3613,70 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
   });
 
+  it('AC1 spare-capacity: 3 slots/1 busy with the operator session active (query+lease) still dispatches into the 2 free slots', async () => {
+    // parent ACL1: 2 of 3 slots continuously free for the full threshold →
+    // dispatch fires even though 1 slot is occupied by an active
+    // (query + lease) session — exactly the operator working in the TUI
+    // while the downtime worker uses the spare capacity.
+    const operatorSessionPayload = {
+      llama_server_running: true,
+      active_query: true,
+      local_active_query: true,
+      model_switch_in_progress: false,
+      local_lease_active: true,
+      available_slots: 2,
+      total_slots: 3,
+      slots: [
+        { slot_id: 'slot-1', is_processing: true },
+        { slot_id: 'slot-2', is_processing: false },
+        { slot_id: 'slot-3', is_processing: false },
+      ],
+    };
+    const { worker, deps, cfg, fetcher } = makePerSlotWorker({
+      requiredFreeSlots: 2,
+      status: operatorSessionPayload,
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick(); // 2 free → per-slot idle run starts
+    expect(worker.idleSince ?? null).not.toBeNull();
+
+    vi.setSystemTime(start + cfg.thresholdMs - 1);
+    const before = await worker.tick();
+    expect(before.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    const at = await worker.tick();
+    expect(at.dispatched).toBe(true); // dispatch into the 2 free slots
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalled();
+  });
+
+  it('AC2 spare-capacity: a mid-query (processing) busy slot does NOT reset the free slots\' timers', async () => {
+    // parent AC2: with N free of total in per-slot mode, idle is evaluated
+    // from the free slots only. A processing slot 1 does not reset slot-2 /
+    // slot-3 timers — dispatch still fires once the free slots have been
+    // continuously free for the full threshold (the busy slot is the
+    // operator's own mid-query session).
+    const { worker, deps, cfg, fetcher } = makePerSlotWorker({ requiredFreeSlots: 2 });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick(); // perSlotTwoFree (slot-1, slot-2 free) → timers start
+
+    // slot-1 goes mid-query while slot-2 stays free; the global query signal
+    // also fires. Spare-capacity relaxation: only slot-1's timer resets.
+    fetcher.mockResolvedValueOnce(jsonResponseFixture({ ...perSlotTwoFree, active_query: true }));
+    vi.setSystemTime(start + cfg.thresholdMs - 10_000);
+    const mid = await worker.tick();
+    expect(mid.idle).toBe(true); // free count still ≥ N=2 (slot-1 busy)
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    const at = await worker.tick();
+    expect(at.dispatched).toBe(true); // slot-2 ran the full threshold
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
   it('regression: a live proxy payload (integer slot_ids) idles and dispatches (WL-0MSVRMAWM007QNR5)', async () => {
     // observability.py serves `"slot_id": slot.get("id", i)` — an integer —
     // for each slot. Before the fix, parseLlamaStatus rejected the numeric
@@ -3701,7 +3773,11 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     vi.setSystemTime(start);
     await worker.tick(); // all free → timers start
 
-    fetcher.mockResolvedValueOnce(jsonResponseFixture({ ...perSlotAllFree, active_query: true }));
+    // model_switch_in_progress is a GLOBAL gate in per-slot mode (spare-
+    // capacity relaxation, parent WL-0MT32F90V008UAD2 AC2) — it resets
+    // every slot timer. A per-slot query/lease (active_query) is NOT global
+    // anymore and is covered by the dedicated spare-capacity tests.
+    fetcher.mockResolvedValueOnce(jsonResponseFixture({ ...perSlotAllFree, model_switch_in_progress: true }));
     vi.setSystemTime(start + 10_000);
     await worker.tick(); // global busy → every slot timer reset
 

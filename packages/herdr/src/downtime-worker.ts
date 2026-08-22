@@ -8,7 +8,9 @@
  *
  *  - `isIdleStatus` — idle detection from a `/llama/local/status` payload.
  *  - `evaluateIdle` — runtime idle evaluation with the fail-closed
- *    degradation for a configured N < total slots (no per-slot data yet).
+ *    degradation for a configured N < total slots (no per-slot data yet) and
+ *    the spare-capacity per-slot mode (relaxed global gate, parent
+ *    WL-0MT32F90V008UAD2).
  *  - `parseLlamaStatus` / `fetchLocalStatus` / `createDowntimePoller` — the
  *    single-flight poller for `GET {proxyUrl}/llama/local/status` with
  *    per-poll timeout and fail-closed parsing.
@@ -103,8 +105,14 @@ export const DOWNTIME_IDLE_THRESHOLD_FLOOR_MS = 1_000;
 export const DEFAULT_DOWNTIME_POLL_INTERVAL_MS = 10_000;
 export const DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS = 60_000;
 
-/** 0 = all slots must be free (default). Any positive integer N is accepted. */
-export const DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 0;
+/**
+ * Default required-free-slots count: 2 of 3 slots (spare-capacity dispatch,
+ * parent WL-0MT32F90V008UAD2). At least two slots must be free before
+ * downtime work is dispatched, so one operator session slot is always
+ * reserved for interactive work. A value of 0 means ALL slots must be free
+ * (the pre-spare-capacity default); any positive integer N is accepted.
+ */
+export const DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 2;
 
 /** Sane floor for the no-candidate cooldown (the pause cannot be disabled or set trivially small). */
 export const DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS = 60_000;
@@ -224,6 +232,23 @@ function globalIdleChecks(status: LlamaStatus): boolean {
 }
 
 /**
+ * Per-slot-safe global checks (spare-capacity dispatch, parent
+ * WL-0MT32F90V008UAD2): in per-slot identity mode, ONLY llama-server-up and
+ * no-model-switch remain GLOBAL gates — `active_query` /
+ * `local_active_query` / `local_lease_active` are superseded by the per-slot
+ * `is_processing` signal (the busy slot holding the operator's query/lease IS
+ * the active work the operator wants to run alongside; it must not block
+ * dispatch into the free slots, LP-0MSG5TA7Y002GN39 Q&A). Used exclusively by
+ * the per-slot branches of `evaluateIdle` and `createDowntimeWorker.tick()`;
+ * the count-based path keeps the full `globalIdleChecks` (fail-closed).
+ */
+function perSlotGlobalIdleChecks(status: LlamaStatus): boolean {
+  if (!status.llama_server_running) return false;
+  if (status.model_switch_in_progress) return false;
+  return true;
+}
+
+/**
  * True when the proxy reports an idle state for the required free-slot
  * count:
  *
@@ -262,19 +287,25 @@ export function isIdleStatus(status: LlamaStatus, requiredFreeSlots: number): bo
  * identity AND 0 < N < total, the free count comes from the slots array
  * (which identifies WHICH slots are free) so the same N slots can be
  * required; the count-based logic is unchanged for N ≤ 0 / N ≥ total.
+ *
+ * Spare-capacity relaxation (parent WL-0MT32F90V008UAD2): in per-slot mode
+ * the global gate is the per-slot-safe subset (server up + no model switch
+ * only) — a query/lease tied to a busy slot is the operator's own session
+ * and must not block dispatch into the free slots (F1 tests AC1/AC2).
  */
 export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): boolean {
   const total = status.total_slots;
   if (!Number.isFinite(total) || total <= 0) return false; // ambiguous → busy
 
-  // Per-slot mode: per-slot identity present AND 0 < N < total. Base global
-  // checks still apply; the slot requirement is the per-slot free count.
+  // Per-slot mode: per-slot identity present AND 0 < N < total. The relaxed
+  // global gate applies (server up + no model switch); the slot requirement
+  // is the per-slot free count.
   if (
     Array.isArray(status.slots) &&
     requiredFreeSlots > 0 &&
     requiredFreeSlots < total
   ) {
-    if (!globalIdleChecks(status)) return false;
+    if (!perSlotGlobalIdleChecks(status)) return false;
     // Fail-closed counting: an entry without an explicit boolean
     // `is_processing` is treated as processing (busy), never free.
     const free = status.slots.filter(
@@ -1595,9 +1626,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // Per-slot routing (LP-0MSG5TA7Y002GN39): when the proxy serves
       // per-slot identity AND the config asks for 0 < N < total, idle
       // duration is tracked PER SLOT so dispatch requires the SAME N slots
-      // continuously free for the full threshold. Any global busy condition
-      // (query / model switch / lease / server down / ambiguous) resets ALL
-      // slot timers; a slot reporting processing resets only its own.
+      // continuously free for the full threshold. The global gate in
+      // per-slot mode is the per-slot-safe subset (server up + no model
+      // switch): a query/lease tied to a busy slot is the operator's own
+      // session and must not reset the free slots' timers (spare-capacity
+      // dispatch, parent WL-0MT32F90V008UAD2). A slot reporting processing
+      // resets only its own timer.
       const perSlotMode =
         Array.isArray(status.slots) &&
         cfg.requiredFreeSlots > 0 &&
@@ -1606,7 +1640,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       let idle: boolean;
       let ready: boolean;
       if (perSlotMode && Array.isArray(status.slots)) {
-        const globalIdle = globalIdleChecks(status);
+        const globalIdle = perSlotGlobalIdleChecks(status);
         // Keep the worker's idleSince view in sync with the run state.
         tracker.record(globalIdle);
         if (globalIdle) {

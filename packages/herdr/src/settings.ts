@@ -50,7 +50,11 @@ export interface PluginSettings {
   downtimeEnabled: boolean;
   /** Minimum continuous idle duration before dispatch (ms). */
   downtimeIdleThresholdMs: number;
-  /** Required free slots; 0 = all slots (default), or a positive integer N. */
+  /**
+   * Required free slots; 0 = all slots, or a positive integer N (default 2
+   * of 3 — spare-capacity dispatch, at least one slot reserved for the
+   * operator session).
+   */
   downtimeRequiredFreeSlots: number;
   /** Poll interval for the proxy status endpoint (hard floor 10s). */
   downtimePollIntervalMs: number;
