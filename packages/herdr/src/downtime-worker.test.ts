@@ -525,6 +525,126 @@ describe('dispatch audit tier', () => {
   });
 });
 
+describe('dispatch tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3)', () => {
+  const auditCandidate: DowntimeCandidate = {
+    id: 'WL-AUD',
+    title: 'Audit me',
+    stage: 'audit',
+  };
+  const planCandidate: DowntimeCandidate = {
+    id: 'WL-PLAN',
+    title: 'Prep task',
+    stage: 'intake_complete',
+    status: 'open',
+  };
+
+  it('audit tier is skipped below 2 free slots: with 1 free slot an audit candidate is NOT dispatched (AC3)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: planCandidate,
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 1 });
+
+    // 1 free slot: audit needs ≥2 → skipped WITHOUT consulting the lookup
+    // (ineligible, not a strike); plan needs ≥1 → dispatches.
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(outcome.candidate?.id).toBe('WL-PLAN');
+  });
+
+  it('audit tier dispatches with ≥2 free slots (AC3)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 2 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
+  });
+
+  it('with exactly 1 free slot the audit skip is ineligible — a genuinely empty plan tier is no-candidate, not a strike', async () => {
+    // Mirror of the code-freeze skip: an unmet tier minimum never produces
+    // a wl-error strike and never short-circuits the fallback tiers.
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 1 });
+
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('no-candidate'); // plan tier answered empty
+  });
+
+  it('pane tiers (plan/intake) still dispatch with exactly 1 free slot (AC2)', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 1 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+
+  it('free-slots gate is independent of the idle gate: no freeSlots arg means no gating (backward compatible)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // Legacy direct callers (undefined freeSlots) are not gated — existing
+    // dispatch behaviour unchanged.
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+  });
+
+  it('scheduled-prompts tier requires the pane minimum ≥1 free slot: 0 free skips it and falls through', async () => {
+    const deps = makeDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue({
+        id: 'SP-1',
+        prompt: 'Run /skill:refactor',
+        frequency: '3d',
+      }),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 0 });
+
+    // 0 free slots: the scheduled prompt (a pane) is ineligible; the plan
+    // tier also needs ≥1 — the outcome is a neutral no-candidate (defensive
+    // path — via the worker the idle gate already guarantees ≥1 free).
+    expect(deps.getDueScheduledPrompt).not.toHaveBeenCalled();
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('no-candidate');
+  });
+
+  it('scheduled-prompts tier dispatches with ≥1 free slot (AC3)', async () => {
+    const deps = makeDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue({
+        id: 'SP-1',
+        prompt: 'Run /skill:refactor',
+        frequency: '3d',
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 1 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('scheduled');
+    expect(deps.recordScheduledPromptTrigger).toHaveBeenCalled();
+  });
+});
+
 // ── Implement dispatch tier (WL-0MSMAYIKX005LLO4) ────────────────────
 
 describe('dispatch implement tier', () => {
@@ -3675,6 +3795,51 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     const at = await worker.tick();
     expect(at.dispatched).toBe(true); // slot-2 ran the full threshold
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC3 tier minimums flow from the poll: 1 free slot skips the audit tier, plan dispatches (worker end-to-end)', async () => {
+    // N=1 with a single free slot: the idle gate is satisfied (1 ≥ N), but
+    // the AUDIT tier needs ≥2 free slots (parent WL-0MT32F90V008UAD2 AC3) —
+    // the worker must pass the polled free count into the tier selection so
+    // the audit candidate is skipped and the plan pane dispatches instead.
+    const oneFreePayload = {
+      llama_server_running: true,
+      active_query: true,
+      model_switch_in_progress: false,
+      local_lease_active: true,
+      available_slots: 1,
+      total_slots: 3,
+      slots: [
+        { slot_id: 'slot-1', is_processing: true },
+        { slot_id: 'slot-2', is_processing: true },
+        { slot_id: 'slot-3', is_processing: false },
+      ],
+    };
+    const { worker, deps, cfg } = makePerSlotWorker({
+      requiredFreeSlots: 1,
+      status: oneFreePayload,
+      deps: {
+        getNextAuditCandidate: vi.fn().mockResolvedValue({
+          ok: true,
+          candidate: { id: 'WL-AUD', title: 'Audit me', stage: 'audit' },
+        }),
+        getNextItem: vi.fn().mockResolvedValue({
+          ok: true,
+          candidate: { id: 'WL-PLAN', title: 'Prep task', stage: 'intake_complete', status: 'open' },
+        }),
+      },
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick(); // 1 free slot ≥ N=1 → per-slot idle run starts
+    vi.setSystemTime(start + cfg.thresholdMs);
+    const at = await worker.tick();
+
+    // The worker saw freeSlots=1: the audit candidate was never consulted
+    // and the plan pane dispatched.
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(at.dispatched).toBe(true);
+    expect((deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain('/skill:plan WL-PLAN');
   });
 
   it('regression: a live proxy payload (integer slot_ids) idles and dispatches (WL-0MSVRMAWM007QNR5)', async () => {

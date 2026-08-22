@@ -114,6 +114,24 @@ export const DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS = 60_000;
  */
 export const DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 2;
 
+/**
+ * Minimum free slots required for an AUDIT dispatch (parent
+ * WL-0MT32F90V008UAD2 AC3): an audit pane needs a second slot for its
+ * Phase 2 child deep-analysis (`AUDIT_PHASE2_PARALLELISM=1` — the child
+ * runs strictly after the parent, so parent + one child = 2 local slots,
+ * WL-0MSORQ1RG005DGUS). Applied as an ADDITIONAL selection-time check on
+ * the latest polled status; the idle-duration gate (configured N) is
+ * unchanged. `AUDIT_PHASE2_PARALLELISM=1` → 2 slots minimum.
+ */
+export const DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2;
+
+/**
+ * Minimum free slots required for a single-pane dispatch (implement /
+ * plan / intake / scheduled tiers, parent WL-0MT32F90V008UAD2 AC3): each
+ * pane consumes exactly one local slot, so ≥1 free slot suffices.
+ */
+export const DOWNTIME_PANE_MIN_FREE_SLOTS = 1;
+
 /** Sane floor for the no-candidate cooldown (the pause cannot be disabled or set trivially small). */
 export const DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS = 60_000;
 
@@ -1184,13 +1202,31 @@ async function dispatchScheduledPrompt(
  */
 export async function dispatchDowntimeWork(
   deps: DowntimeWorkerDeps,
-  opts: { model: string; cwd: string },
+  opts: { model: string; cwd: string; freeSlots?: number },
 ): Promise<DowntimeDispatchOutcome> {
   if (dispatchInFlight) {
     return { dispatched: false, reason: 'dispatch-in-flight' };
   }
   dispatchInFlight = true;
   try {
+    // Per-tier free-slot minimums at selection time (parent
+    // WL-0MT32F90V008UAD2 AC3): each tier requires a minimum number of
+    // FREE slots on the LATEST polled status before its candidate is even
+    // considered — audit needs 2 (parent + Phase 2 child at
+    // `AUDIT_PHASE2_PARALLELISM=1`, WL-0MSORQ1RG005DGUS), every single-
+    // pane tier (scheduled/implement/plan/intake) needs 1. These are
+    // ADDITIONAL selection-time checks — the idle-duration gate (configured
+    // N) is unchanged. `freeSlots` is computed by the caller from the
+    // latest poll (per-slot free count when per-slot identity is served,
+    // else `available_slots`). When absent (direct legacy callers), the
+    // tier minimums do not gate (fail-open for direct API use; the worker
+    // always passes the polled count). An unmet minimum skips that tier to
+    // the next eligible one — ineligible, never a strike and never a
+    // wl-error (mirrors the code-freeze skip).
+    const freeSlots = opts.freeSlots;
+    const panesEligible = freeSlots === undefined || freeSlots >= DOWNTIME_PANE_MIN_FREE_SLOTS;
+    const auditEligible = freeSlots === undefined || freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
+
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): re-read the marker fresh on
     // every dispatch — never cached, so a freeze that starts or ends
     // mid-idle-period is honored on the next dispatch attempt. Frozen OR
@@ -1199,7 +1235,7 @@ export async function dispatchDowntimeWork(
     const freezeStatus = deps.readCodeFreezeStatus(opts.cwd);
     const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
 
-    if (!frozen) {
+    if (!frozen && panesEligible) {
       // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): FIRST dispatch stage,
       // gated by the SAME fresh-read code-freeze marker as the audit/
       // implement tiers (AC5) — while frozen OR ambiguous (fail-closed)
@@ -1228,13 +1264,22 @@ export async function dispatchDowntimeWork(
       // {ok:false} is a wl/parse failure — fail closed to busy (a strike),
       // never a silent fall-through, so a broken audit query cannot look
       // like "no audit candidates" and silently disable the audit tier.
-      const audit = await deps.getNextAuditCandidate(opts.cwd);
-      if (audit.ok) {
-        if (audit.candidate !== null) {
-          return await dispatchClaimedTier(deps, 'audit', audit.candidate, opts);
+      //
+      // Per-tier minimum (parent WL-0MT32F90V008UAD2 AC3): the audit tier
+      // requires ≥ 2 free slots (parent + Phase 2 child at
+      // `AUDIT_PHASE2_PARALLELISM=1`). When fewer are free the audit
+      // lookup is skipped entirely — ineligible, not a strike and not a
+      // wl-error (mirrors the code-freeze skip) — and dispatch falls
+      // through to the implement tier (which needs only ≥ 1).
+      if (auditEligible) {
+        const audit = await deps.getNextAuditCandidate(opts.cwd);
+        if (audit.ok) {
+          if (audit.candidate !== null) {
+            return await dispatchClaimedTier(deps, 'audit', audit.candidate, opts);
+          }
+        } else {
+          return { dispatched: false, reason: 'wl-error' };
         }
-      } else {
-        return { dispatched: false, reason: 'wl-error' };
       }
       // Implement tier (WL-0MSMAYPQP001FLR6): after the audit gate, dispatch
       // /skill:implement for the highest-priority open plan_complete item with
@@ -1242,6 +1287,7 @@ export async function dispatchDowntimeWork(
       // (null on wl failure or no candidate), so a null here means the tier is
       // exhausted and the plan/intake tiers below still run (AC5/AC6 — a wl
       // error at the implement tier does NOT short-circuit the fallback).
+      // Pane minimum: ≥ 1 free slot (parent AC3).
       const implementCandidate = await deps.getNextImplementCandidate(opts.cwd);
       if (implementCandidate !== null) {
         return await dispatchClaimedTier(deps, 'implement', implementCandidate, opts);
@@ -1249,15 +1295,24 @@ export async function dispatchDowntimeWork(
     }
     // Tier 2 (intake_complete → /skill:plan). A CLI error here does NOT
     // short-circuit: tier 3 is still attempted so a tier-3 candidate can
-    // still dispatch (operator refinement).
+    // still dispatch (operator refinement). Pane minimum (parent
+    // WL-0MT32F90V008UAD2 AC3): plan/intake need ≥ 1 free slot — via the
+    // worker this is always true (the idle-duration gate has already
+    // required ≥ N ≥ 1 free), the gate is defensive for direct API callers.
     let tier2Error = false;
-    const intakeComplete = await deps.getNextItem('intake_complete', opts.cwd);
-    if (intakeComplete.ok) {
-      if (intakeComplete.candidate !== null) {
-        return await dispatchClaimedTier(deps, 'plan', intakeComplete.candidate, opts);
+    if (panesEligible) {
+      const intakeComplete = await deps.getNextItem('intake_complete', opts.cwd);
+      if (intakeComplete.ok) {
+        if (intakeComplete.candidate !== null) {
+          return await dispatchClaimedTier(deps, 'plan', intakeComplete.candidate, opts);
+        }
+      } else {
+        tier2Error = true;
       }
     } else {
-      tier2Error = true;
+      // 0 free slots (defensive, unreachable via the worker): the panes
+      // cannot run — treat as an empty backlog (no candidate dispatchable).
+      return { dispatched: false, reason: 'no-candidate' };
     }
 
     // Tier 3 (idea → /skill:intake) is ALWAYS attempted when tier 2 produced
@@ -1664,11 +1719,24 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       if (!ready) return { polled: true, dispatched: false, idle: true };
       if (dispatching) return { polled: true, dispatched: false, idle: true };
 
+      // Per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3): the
+      // latest polled free-slot count flows into dispatch selection. Per-slot
+      // free count when per-slot identity is served (fail-closed counting:
+      // an entry without an explicit boolean `is_processing` is busy, never
+      // free), else `available_slots`.
+      const freeSlots =
+        Array.isArray(status.slots)
+          ? status.slots.filter(
+              (s) => typeof s.is_processing === 'boolean' && !s.is_processing,
+            ).length
+          : status.available_slots;
+
       dispatching = true;
       try {
         const outcome = await dispatchDowntimeWork(opts.deps, {
           model: cfg.model,
           cwd: cfg.cwd,
+          freeSlots,
         });
         if (outcome.dispatched) {
           lastDispatchAt = Date.now();
