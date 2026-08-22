@@ -83,6 +83,7 @@ import {
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS,
+  DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
   type LlamaStatus,
   type LlamaSlot,
   type LlamaStatusFetcher,
@@ -102,6 +103,8 @@ import {
   perSlotAllFree,
   perSlotTwoFree,
   perSlotOneProcessing,
+  perSlotThreeOfFourFree,
+  perSlotOneOfThreeFree,
   networkErrorFixture,
   timeoutErrorFixture,
   httpErrorResponseFixture,
@@ -3346,6 +3349,194 @@ describe('evaluateIdle per-slot mode (0 < N < total with slots present)', () => 
 
   it('N > total never idles even with per-slot data', () => {
     expect(evaluateIdle(perSlot([free('s1'), free('s2'), free('s3'), free('s4')], 4, 4), 5)).toBe(false);
+  });
+});
+
+// ── Spare-capacity dispatch (parent WL-0MT32F90V008UAD2, F1) ──────────
+// Tests for the spare-capacity dispatch feature: relaxed global gate in
+// per-slot mode (local_active_query / local_lease_active do NOT block),
+// the new DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 2, per-tier free-slot
+// minimums at dispatch selection, and unchanged pre-fix proxy degradation.
+
+/** Per-slot status: 3 of 4 slots free (slot-1 busy), with global query/lease
+ * signals active — exactly the "operator session" pattern the spare-capacity
+ * dispatch must handle. */
+function perSlotThreeOfFourFreeActiveQuery(): LlamaStatus {
+  return {
+    llama_server_running: true,
+    active_query: true,
+    model_switch_in_progress: false,
+    local_lease_active: true,
+    available_slots: 3,
+    total_slots: 4,
+    slots: [
+      { slot_id: 'slot-1', is_processing: true },
+      { slot_id: 'slot-2', is_processing: false },
+      { slot_id: 'slot-3', is_processing: false },
+      { slot_id: 'slot-4', is_processing: false },
+    ],
+  };
+}
+
+describe('spare-capacity dispatch: relaxed global idle gate (per-slot mode)', () => {
+  it('per-slot mode: a mid-query (active_query) busy slot does NOT block dispatch into free slots (AC1)', () => {
+    // 3 of 4 slots free with active_query=true, local_active_query=true,
+    // local_lease_active=true. In the relaxed global gate (AC1), these
+    // per-slot query/lease signals are superseded by per-slot is_processing.
+    // Only llama_server_running and model_switch_in_progress stay global.
+    const status = perSlotThreeOfFourFreeActiveQuery();
+    // The new relaxed check: active_query/local_active_query/local_lease
+    // are NOT blocking in per-slot mode — 3 free >= N=2.
+    expect(evaluateIdle(status, 2)).toBe(true); // spare capacity: 3 >= 2 free
+  });
+
+  it('per-slot mode: local_lease_active on a busy slot does NOT block dispatch (AC1)', () => {
+    const status: LlamaStatus = {
+      llama_server_running: true,
+      active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: true,
+      available_slots: 3,
+      total_slots: 4,
+      slots: [
+        { slot_id: 'slot-1', is_processing: true },
+        { slot_id: 'slot-2', is_processing: false },
+        { slot_id: 'slot-3', is_processing: false },
+        { slot_id: 'slot-4', is_processing: false },
+      ],
+    };
+    // local_lease_active is per-slot; in per-slot mode it does NOT block.
+    expect(evaluateIdle(status, 2)).toBe(true); // 3 free >= 2
+  });
+
+  it('per-slot mode: local_active_query on a busy slot does NOT block dispatch (AC2)', () => {
+    const status: LlamaStatus = {
+      llama_server_running: true,
+      active_query: true,
+      model_switch_in_progress: false,
+      local_active_query: true,
+      local_lease_active: false,
+      available_slots: 2,
+      total_slots: 3,
+      slots: [
+        { slot_id: 'slot-1', is_processing: true },
+        { slot_id: 'slot-2', is_processing: false },
+        { slot_id: 'slot-3', is_processing: false },
+      ],
+    };
+    // 2 of 3 free with a mid-query busy slot — per-slot mode should fire.
+    expect(evaluateIdle(status, 2)).toBe(true); // AC2: mid-query busy slot
+  });
+
+  it('per-slot mode: model_switch_in_progress still blocks dispatch (global gate)', () => {
+    const status = perSlotThreeOfFourFreeActiveQuery();
+    // model_switch_in_progress is ALWAYS global — even in per-slot mode.
+    expect(evaluateIdle({ ...status, model_switch_in_progress: true }, 2)).toBe(false);
+  });
+
+  it('per-slot mode: llama_server_running=false still blocks dispatch (global gate)', () => {
+    const status = perSlotThreeOfFourFreeActiveQuery();
+    // server down is ALWAYS global — even in per-slot mode.
+    expect(evaluateIdle({ ...status, llama_server_running: false }, 2)).toBe(false);
+  });
+});
+
+describe('spare-capacity dispatch: DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 2 (AC1)', () => {
+  it('DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS should be 2 for out-of-the-box spare-capacity', () => {
+    // The new default: 2 of 3 slots must be free for dispatch.
+    expect(DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS).toBe(2);
+  });
+});
+
+describe('spare-capacity dispatch: pre-fix proxy degradation unchanged (AC4)', () => {
+  it('pre-fix proxy (no per-slot data): a configured N (0<N<total) degrades to all-slots-free', () => {
+    // Without per-slot identity, N=2 with 4 slots should still require ALL
+    // slots free (fail-closed degradation, parent AC4).
+    const status: LlamaStatus = {
+      llama_server_running: true,
+      active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 2,
+      total_slots: 4,
+    };
+    // No slots array — all-slots-free path: 2 free < 4 required → busy.
+    expect(evaluateIdle(status, 2)).toBe(false); // 2 < 4 → busy (all-slots-free)
+    // Even when N equals total (4), 2 < 4 available → still busy.
+    expect(evaluateIdle(status, 4)).toBe(false); // 2 < 4 → busy
+    // Now with all slots free: 4 === 4 → idle.
+    const allFree: LlamaStatus = {
+      llama_server_running: true,
+      active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 4,
+      total_slots: 4,
+    };
+    expect(evaluateIdle(allFree, 2)).toBe(true); // 4 >= 4 (all-slots-free) → idle
+  });
+
+  it('pre-fix proxy with N=0 (default): all-slots-free behavior unchanged', () => {
+    const status: LlamaStatus = {
+      llama_server_running: true,
+      active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 2,
+      total_slots: 4,
+    };
+    // N=0 requires all slots free regardless of per-slot mode.
+    expect(evaluateIdle(status, 0)).toBe(false); // 2 < 4 → busy
+  });
+});
+
+describe('spare-capacity dispatch: ambiguous payloads are busy (AC5)', () => {
+  it('missing slot_id fields are treated as busy (fail-closed)', () => {
+    const malformed: LlamaStatus = {
+      llama_server_running: true,
+      active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 3,
+      total_slots: 4,
+      slots: [
+        { slot_id: 'slot-1', is_processing: true },
+        { slot_id: 'slot-2', is_processing: false },
+      ],
+    };
+    // The slots array has only 2 entries for 4 total — this is ambiguous.
+    // With per-slot mode active (0 < N < total), the free count is 1 < 2.
+    expect(evaluateIdle(malformed, 2)).toBe(false);
+  });
+
+  it('total_slots 0 is always busy', () => {
+    const status: LlamaStatus = {
+      llama_server_running: true,
+      active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 0,
+      total_slots: 0,
+    };
+    expect(evaluateIdle(status, 2)).toBe(false);
+  });
+
+  it('N > total can never be idle', () => {
+    const status: LlamaStatus = {
+      llama_server_running: true,
+      active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 3,
+      total_slots: 3,
+      slots: [
+        { slot_id: 'slot-1', is_processing: false },
+        { slot_id: 'slot-2', is_processing: false },
+        { slot_id: 'slot-3', is_processing: false },
+      ],
+    };
+    // 3 free < 4 required — never idle.
+    expect(evaluateIdle(status, 4)).toBe(false);
   });
 });
 

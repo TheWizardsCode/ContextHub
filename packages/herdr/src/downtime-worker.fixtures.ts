@@ -75,6 +75,34 @@ export const perSlotOneProcessing: LlamaStatus = {
   ],
 };
 
+/**
+ * 3 of 4 slots free — only slot-1 processing, with the GLOBAL query/lease
+ * signals active (the processing slot IS the operator's active session;
+ * spare-capacity dispatch must still fire into the 3 free slots).
+ */
+export const perSlotThreeOfFourFree: LlamaStatus = {
+  ...perSlotOneProcessing,
+  active_query: true,
+  local_active_query: true,
+  local_lease_active: true,
+};
+
+/**
+ * 1 of 3 slots free (slot-3 free — the 3-slot proxy with an operator
+ * session occupying a slot). Spare-capacity dispatch must NOT fire: N=2 of
+ * 3 requires TWO slots continuously free (default N=2, parent AC1).
+ */
+export const perSlotOneOfThreeFree: LlamaStatus = {
+  ...idleAllSlotsFree,
+  available_slots: 1,
+  total_slots: 3,
+  slots: [
+    { slot_id: 'slot-1', is_processing: true },
+    { slot_id: 'slot-2', is_processing: true },
+    { slot_id: 'slot-3', is_processing: false },
+  ],
+};
+
 /** Raw (unparsed) response missing the numeric slot fields → ambiguous. */
 export const ambiguousMissingFieldsRaw: Record<string, unknown> = {
   llama_server_running: true,
