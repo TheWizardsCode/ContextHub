@@ -527,7 +527,26 @@ function mergeSameTimestampItems(
     // When one version has a close and the other has a different non-close status/stage,
     // prefer the close values. This prevents an unrelated field change on a different
     // client from silently reverting a close operation.
+    //
+    // DELETION PROPAGATION (WL-0MT2KZH0I005XUWE §4.3/AC2): at equal timestamps a
+    // `deleted` status wins deterministically over any non-deleted value (including a
+    // close) — deletion is terminal intent, and the same-timestamp strategy must not
+    // resurrect a soft-deleted record (AC3 remote/local convergence).
     if (field === 'status') {
+      if (localValue === 'deleted' || remoteValue === 'deleted') {
+        const chosenValue = localValue === 'deleted' ? localValue : remoteValue;
+        (merged as any)[field] = chosenValue;
+        mergedFields.push(`${field} (deleted preserved)`);
+        fieldDetails.push({
+          field,
+          localValue,
+          remoteValue,
+          chosenValue,
+          chosenSource: chosenValue === localValue ? 'local' : 'remote',
+          reason: 'soft delete is terminal and wins at equal timestamps'
+        });
+        continue;
+      }
       const localIsClose = localValue === 'completed' && (isTerminalStage(localItem.stage) || isTerminalStage(remoteItem.stage));
       const remoteIsClose = remoteValue === 'completed' && (isTerminalStage(remoteItem.stage) || isTerminalStage(localItem.stage));
       if (localIsClose && !remoteIsClose) {
@@ -718,7 +737,39 @@ function mergeDifferentTimestampItems(
       // In mergeDifferentTimestampItems, close-preservation for the REMOTE side is
       // only applied when isRemoteNewer is true. If local is newer, the local intent
       // (e.g., reopening a closed item) is respected rather than the remote close.
+      //
+      // DELETION PROPAGATION (WL-0MT2KZH0I005XUWE §4.3/AC2): `deleted` is TERMINAL
+      // intent and must never be blocked by close-preservation — deleting a
+      // completed/in_review item (the delete command preserves the stage) would
+      // otherwise never converge to the remote. When the NEWER side is `deleted`, its
+      // status always wins; the newer timestamp already reflects the deletion time.
       if (field === 'status') {
+        if (remoteValue === 'deleted' && isRemoteNewer) {
+          (merged as any)[field] = remoteValue;
+          mergedFields.push(`${field} (deleted from remote)`);
+          fieldDetails.push({
+            field,
+            localValue,
+            remoteValue,
+            chosenValue: remoteValue,
+            chosenSource: 'remote',
+            reason: 'remote records a soft delete (newer timestamp)'
+          });
+          continue;
+        }
+        if (localValue === 'deleted' && !isRemoteNewer) {
+          (merged as any)[field] = localValue;
+          mergedFields.push(`${field} (deleted from local)`);
+          fieldDetails.push({
+            field,
+            localValue,
+            remoteValue,
+            chosenValue: localValue,
+            chosenSource: 'local',
+            reason: 'local records a soft delete (newer timestamp)'
+          });
+          continue;
+        }
         const localIsClose = localValue === 'completed' && (isTerminalStage(localItem.stage) || isTerminalStage(remoteItem.stage));
         const remoteIsClose = remoteValue === 'completed' && (isTerminalStage(remoteItem.stage) || isTerminalStage(localItem.stage));
         if (localIsClose && !remoteIsClose) {
