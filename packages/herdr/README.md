@@ -20,7 +20,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Agent status tracking** — When an agent command carrying a work-item ID is dispatched, the worklist records which pi agent pane is attached to that item (persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes). The list shows a live agent-status icon at the start of each row's icon prefix: 🟢 working, ⛔ blocked, ⚪ idle. Done/closed items (and items without an agent) show no icon. The icon is a fixed-width slot so the item-ID column never shifts. See [Agent status icons](#agent-status-icons).
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
-- **Podcast Editing tab** — The `open-podcast-editor-tab` action (bound to `prefix+l`) opens the worklist pane in a new tab and renames that tab to **`Podcast Editing`** so it is instantly recognisable in the tab row during podcast production. See [Podcast Editing tab](#podcast-editing-tab).
+- **Worklog tab** — The `open-podcast-editor-tab` action (bound to `prefix+l`) opens the worklist pane in a new tab and renames that tab to **`Worklog`** so it is instantly recognisable in the tab row among other open tabs. See [Worklog tab](#worklog-tab).
 - **Quit** — Press `q` to exit
 - **Metadata panel** — The selected item's metadata (ID, title, status, stage, priority, type, risk, effort, tags, audit info, and more, plus a **description preview** — first up-to-3 lines of the item's description) is shown in a panel below the list. The list takes as much vertical space as its content needs, up to the full pane height; the metadata panel fills whatever space remains — expanding when the list is short, and sitting at the bottom (minimum 3 rows) when the list is long. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
@@ -54,7 +54,7 @@ cd packages/herdr && npm run build
 
 - Links the plugin from the **main checkout** with `herdr plugin link <main-checkout>/packages/herdr/herdr-plugin.toml`. When the build runs inside a linked git worktree (as happens during `/skill:implement`), the main checkout is resolved via `git worktree list` so the global herdr plugin is never registered against a transient worktree path — a worktree-based link would dangle once the worktree is cleaned up and silently break `prefix+l` (WL-0MSRG481O007QVEA). `herdr plugin link` updates an existing link in place, so a stale link from an older build is corrected automatically.
 - Inserts the `prefix+l` → `worklog-selection-list.open-podcast-editor-tab` keybinding into your herdr config (`~/.config/herdr/config.toml`, or `$HERDR_CONFIG_PATH` when set) **only if** it is not already present — re-running the build never creates duplicate keybindings.
-- Migrates a legacy `prefix+l` → `worklog-selection-list.open-worklist` binding in-place to the new action, so the Podcast Editing tab name takes effect without a manual config edit.
+- Migrates a legacy `prefix+l` → `worklog-selection-list.open-worklist` binding in-place to the new action, so the Worklog tab name takes effect without a manual config edit.
 - Warns (without failing the build) when `herdr` is not on PATH or the config cannot be written, so `npm run build` succeeds in CI/offline environments.
 
 Alternatively, `npm run install` (or `npm run install:plugin` for the herdr step alone) runs the same install script outside of a build context.
@@ -69,7 +69,7 @@ herdr plugin link packages/herdr/herdr-plugin.toml
 # [[keys.command]]
 # key = "prefix+l"
 # command = "herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab"
-# description = "Open the Podcast Editing tab (Worklog work item selection pane)."
+# description = "Open the Worklog tab (Worklog work item selection pane)."
 ```
 
 The plugin pane will then be available via the Herdr plugin system.
@@ -79,7 +79,7 @@ The plugin pane will then be available via the Herdr plugin system.
 ### From the Herdr UI
 
 1. Open the worklist pane:
-   - Press `prefix+l` to open the Podcast Editing tab (worklist pane in a new tab named `Podcast Editing`)
+   - Press `prefix+l` to open the Worklog tab (worklist pane in a new tab named `Worklog`)
    - Right-click in any pane → Plugins → Worklog Selection List → Open worklist
    - Or use the Herdr command palette: `herdr plugin action run worklog-selection-list open-worklist`
 
@@ -168,13 +168,13 @@ The icon occupies a fixed-width slot, so the remaining icons and the item-ID col
 # Direct invocation (opens in a new tab)
 herdr plugin action run worklog-selection-list open-worklist
 
-# Open the Podcast Editing tab (worklist pane renamed to "Podcast Editing")
+# Open the Worklog tab (worklist pane renamed to "Worklog")
 herdr plugin action run worklog-selection-list open-podcast-editor-tab
 ```
 
-### Podcast Editing tab
+### Worklog tab
 
-`herdr plugin pane open` has no tab-title option, so a worklist pane opened in a tab gets a generated numeric label. The `open-podcast-editor-tab` action (bound to `prefix+l`) fixes that: it opens the worklist pane in a new tab exactly like `open-worklist` (same flags and working-directory resolution) and then renames the created tab to **`Podcast Editing`** via `herdr tab rename`, so the podcast production tab is instantly recognisable among several open tabs. Each press opens a new tab — there is deliberately no focus-if-open toggle.
+`herdr plugin pane open` has no tab-title option, so a worklist pane opened in a tab gets a generated numeric label. The `open-podcast-editor-tab` action (bound to `prefix+l`) fixes that: it opens the worklist pane in a new tab exactly like `open-worklist` (same flags and working-directory resolution) and then renames the created tab to **`Worklog`** via `herdr tab rename`, so the worklog pane is instantly recognisable among several open tabs. Each press opens a new tab — there is deliberately no focus-if-open toggle.
 
 The underlying script (`scripts/open-podcast-editor-tab.sh`) fails fast with a clear error and non-zero exit when the herdr CLI is unavailable, the pane open fails, or the created `tab_id` cannot be parsed — a missing rename is never silently skipped. The tab label can be overridden with the `TAB_LABEL` environment variable.
 
@@ -1047,7 +1047,7 @@ packages/herdr/
 │   └── worklist.ts         # List state, rendering, keyboard handling, command output
 ├── scripts/
 │   ├── open.sh             # Open the worklist pane
-│   ├── open-podcast-editor-tab.sh  # Open the worklist pane in a tab renamed "Podcast Editing"
+│   ├── open-podcast-editor-tab.sh  # Open the worklist pane in a tab renamed "Worklog"
 │   ├── toggle.sh           # Toggle the worklist pane
 │   ├── send-to-pi.sh       # Split pane to right, launch pi with agent command (via run-pi-agent.sh)
 │   ├── run-in-pane.sh      # Run a shell command visibly in a new pane (stays open for inspection)
@@ -1069,7 +1069,7 @@ packages/herdr/
 - **Pi agent dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are intercepted by the entry point and routed to a new pi agent pane. The `send-to-pi.sh` script splits the current pane to the right, creates a new pane, runs `pi` with the command as the initial prompt, and renames the pane to "Pi Agent". The dispatch passes `--no-focus` (selection-list dispatch keeps focus, see above), so the new pi pane does not steal focus from the list. Agent commands are routed before any prefix handling, so they are unaffected by `!!`/`!` processing.
 - **No-pane dispatch via `open_pane: false`** — A shortcut entry may carry an optional `open_pane: false` flag (WL-0MSJLD1I70045ZUL) to run its command **in the background without opening a pane**: shell (`!!`/`!`) commands execute via detached `bash -c` and agent commands run headless (`pi -p --mode json`, honoring the entry's `model`), with stdout/stderr captured to a per-run log file under `<tmpdir>/herdr-background-logs/` (the path is written to stderr so it can be located for inspection). No pane is created, so the work-item ↔ pane association is skipped for agent commands. The bundled quiet state-change shortcuts use it: `a-y` audit approve, `a-r` audit reject, `u-p-*` priority updates, and `x-c`/`x-d` close/delete — they complete silently and the worklist refresh shows the updated state. Shortcuts without the flag (all other bundled entries) open a pane exactly as today.
 - **Model lease release on pane close** — Pi agent panes launched by `send-to-pi.sh` or `open-pi-agent.sh` run pi via `shared/run-pi-agent.sh`, which gives the session a deterministic id (`pi --session-id herdr-<timestamp>-<pid>-<rand>`) and registers EXIT/TERM/HUP/INT traps. When the pi session ends — normal exit or pane close (`prefix+x`) — the wrapper runs `shared/release-lease-on-exit.mjs`, which posts to the Local Proxy's `POST {baseUrl}/leases/release` using the **same shared implementation** as the Pi extension (`@worklog/shared/lease-release`), so the proxy's dispatch lease is reclaimed promptly instead of lingering until timeout. The release is strictly best-effort: failures (unreachable proxy, missing `~/.pi/agent/models.json`, unconfigured provider) are silently discarded, a 5s request timeout bounds the pane-close path, and the wrapper always propagates pi's exit status (WL-0MSGI7UIH008USVB).
-- **Podcast Editing tab naming** — `herdr plugin pane open` creates tabs with generated numeric labels. The `open-podcast-editor-tab` action wraps the same pane-open command and renames the created tab to "Podcast Editing" via `herdr tab rename` (socket API, not session-state editing), so podcast production is instantly recognisable in the tab row. Each press still opens a new tab; only the label changes.
+- **Worklog tab naming** — `herdr plugin pane open` creates tabs with generated numeric labels. The `open-podcast-editor-tab` action wraps the same pane-open command and renames the created tab to "Worklog" via `herdr tab rename` (socket API, not session-state editing), so the worklog pane is instantly recognisable in the tab row. Each press still opens a new tab; only the label changes.
 - **Model selection per shortcut** — Each LLM-bound shortcut entry in `shortcuts.json` may carry an optional `model` field (a pi model pattern such as `plan`, `code`, or `author`). When the command is dispatched to the agent channel, `--model <pattern>` is forwarded to the spawned `pi` CLI (e.g. `pi --model code '/skill:implement <id>'`), so every workflow runs on an appropriately specialised model without manual model switching. Agent-bound entries without a `model` field default to `plan`; shell (`!!`) and `/wl` filter entries never carry a model and never receive a `--model` flag. The default mapping in `src/shortcuts.json`: `/plan`, `/intake`, `/skill:audit`, `/prompt:` → `plan`; `/skill:implement` → `code`.
 - **Free-form prompts via `/prompt:`** — Commands starting with `/prompt:` are also routed to the agent pane, but the `/prompt:` routing prefix is stripped before `send-to-pi.sh` runs, so pi receives only the bare prompt text (e.g. `pi "What are the audit gaps reported in the most recent audit for WL-123"`). This lets a chord shortcut open a new pi instance with an arbitrary injected prompt, not just a skill/workflow invocation. The `P-p` chord opens the command input form so you can type any free-form prompt, `P-a` opens pi with `What are the audit gaps reported in the most recent audit for <id>` (the selected item's ID is substituted automatically), and `P-n` opens a brand-new blank session (`/prompt:` with an empty prompt — no form dialog, no injected text, and no work-item association). Edit `src/shortcuts.json` to bind your own prompt text to any free chord.
 - **Correct project directory for new panes** — Panes created by `send-to-pi.sh`, `open-pi-agent.sh`, and `run-in-pane.sh` are started in the correct project root. Herdr's `follow` CWD policy would otherwise inherit the source pane's CWD (the plugin directory), so each script resolves a target CWD (`--cwd` arg > `HERDR_RESOLVED_CWD` > `$PWD`) and applies it in both launch modes: `--no-resize` passes it to `herdr pane split --cwd`, and the default resize mode forwards it to `grid.py --cwd` which includes it in the `pane.split` RPC params. The entry point passes the resolved worklog root (`wlRoot`) so skills, `wl` commands, and relative paths operate on the user's project rather than the plugin's installation directory.

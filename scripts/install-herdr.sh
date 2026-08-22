@@ -55,7 +55,7 @@ CONFIG_PATH="${HERDR_CONFIG_PATH:-${HOME}/.config/herdr/config.toml}"
 KEYBINDING_BLOCK='[[keys.command]]
 key = "prefix+l"
 command = "herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab"
-description = "Open the Podcast Editing tab (Worklog work item selection pane)."'
+description = "Open the Worklog tab (Worklog work item selection pane)."'
 
 # Legacy binding command (v0.1.x) that prefix+l previously pointed at.
 # Migrated in-place to the new action so re-running a build never leaves
