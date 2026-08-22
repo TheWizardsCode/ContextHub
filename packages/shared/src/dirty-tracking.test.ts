@@ -346,3 +346,39 @@ describe('delta-sync cadence metadata (WL-0MT2KY0RQ008F50Q §5.3)', () => {
     expect(all).toEqual({ deltaSyncCount: 2, deltaBytes: 42 });
   });
 });
+// ── WL-0MT2KZH0I005XUWE: deletion propagation through delta export/merge ──
+
+describe('deletion propagation (WL-0MT2KZH0I005XUWE §4.3)', () => {
+  it('AC1: a soft-deleted record is included in the delta export (updatedAt bumped by delete)', async () => {
+    const { service, calls } = makeJsonlService();
+    db = new WorklogDatabase('TEST', join(tempDir, 'worklog.db'), join(tempDir, 'data.jsonl'), true, false, undefined, service);
+    db.import([makeItem({ id: 'WI-0001', updatedAt: FIXED_TS }), makeItem({ id: 'WI-0002', updatedAt: FIXED_TS })]);
+    db.markLastExportTimestamps({ workitems: FIXED_TS });
+
+    // Delete WI-0002: deleteSingle bumps updatedAt to now → dirty predicate fires.
+    db.delete('WI-0002');
+    const deleted = db.get('WI-0002');
+    expect(deleted?.status).toBe('deleted');
+    expect(deleted?.updatedAt).not.toBe(FIXED_TS);
+
+    await db.exportForSync({ mode: 'delta' });
+    expect(calls.length).toBe(1);
+    const ids = calls[0].items.map((i: WorkItem) => i.id);
+    expect(ids).toContain('WI-0002');
+    const deletedExported = calls[0].items.find((i: WorkItem) => i.id === 'WI-0002');
+    expect(deletedExported?.status).toBe('deleted');
+  });
+
+  it('AC3: upserting a delta deleted record into the local store converges (pull side)', async () => {
+    db = new WorklogDatabase('TEST', join(tempDir, 'worklog.db'), join(tempDir, 'data.jsonl'), true, false, undefined, makeJsonlService() as any);
+    db.import([makeItem({ id: 'WI-0001', status: 'completed', stage: 'in_review', updatedAt: FIXED_TS })]);
+    expect(db.get('WI-0001')?.status).toBe('completed');
+
+    // A peer deleted WI-0001; its delta record carries status deleted + newer ts.
+    const now = new Date().toISOString();
+    db.upsertItems([makeItem({ id: 'WI-0001', status: 'deleted', stage: 'in_review', updatedAt: now })]);
+
+    // Converged: local must reflect the remote delete even though it was completed.
+    expect(db.get('WI-0001')?.status).toBe('deleted');
+  });
+});
