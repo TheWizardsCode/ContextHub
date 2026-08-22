@@ -65,6 +65,8 @@ import {
   selectImplementCandidate,
   selectNextCandidate,
   parseCriticalCandidatesOutput,
+  parseDepListBlockersOutput,
+  parseShownWorkItem,
   selectCriticalCandidate,
   criticalSkillKind,
   resolveDependencyFrontier,
@@ -4491,6 +4493,76 @@ describe('resolveDependencyFrontier', () => {
       async (id) => (id === 'WL-CRIT-C' ? [capped] : []),
     );
     expect(result).toBeNull();
+  });
+});
+
+describe('parseDepListBlockersOutput', () => {
+  it('parses outbound depends-on edges as the blockers of the queried item', () => {
+    const blockers = parseDepListBlockersOutput(
+      JSON.stringify({
+        success: true,
+        item: 'WL-CRIT-C',
+        inbound: [{ id: 'WL-DEPENDENT', title: 'Depends on me', status: 'open', direction: 'depended-on-by' }],
+        outbound: [
+          { id: 'WL-BLOCKER', title: 'Blocking item', status: 'open', priority: 'critical', direction: 'depends-on' },
+        ],
+      }),
+    );
+    expect(blockers).toEqual([
+      { id: 'WL-BLOCKER', title: 'Blocking item', status: 'open', priority: 'critical' },
+    ]);
+  });
+
+  it('ignores inbound depended-on-by edges (they are dependents, not blockers)', () => {
+    const blockers = parseDepListBlockersOutput(
+      JSON.stringify({
+        success: true,
+        item: 'WL-CRIT-C',
+        inbound: [{ id: 'WL-DEPENDENT', title: 'Depends on me', status: 'open', direction: 'depended-on-by' }],
+        outbound: [],
+      }),
+    );
+    expect(blockers).toEqual([]);
+  });
+
+  it('malformed JSON or a missing outbound list yields null (fail-closed)', () => {
+    expect(parseDepListBlockersOutput('not json')).toBeNull();
+    expect(parseDepListBlockersOutput(JSON.stringify({ success: true, item: 'WL-CRIT-C' }))).toBeNull();
+  });
+});
+
+describe('parseShownWorkItem', () => {
+  it('parses the wl show single-item shape into a full critical candidate', () => {
+    const item = parseShownWorkItem(
+      JSON.stringify({
+        success: true,
+        workItem: {
+          id: 'WL-BLOCKER',
+          title: 'Blocking item',
+          status: 'open',
+          stage: 'plan_complete',
+          risk: 'medium',
+          effort: 'medium',
+          sortIndex: 3,
+          priority: 'critical',
+        },
+      }),
+    );
+    expect(item).toEqual({
+      id: 'WL-BLOCKER',
+      title: 'Blocking item',
+      status: 'open',
+      stage: 'plan_complete',
+      risk: 'medium',
+      effort: 'medium',
+      sortIndex: 3,
+      priority: 'critical',
+    });
+  });
+
+  it('malformed output or a missing workItem yields null (fail-closed)', () => {
+    expect(parseShownWorkItem('not json')).toBeNull();
+    expect(parseShownWorkItem(JSON.stringify({ success: true }))).toBeNull();
   });
 });
 

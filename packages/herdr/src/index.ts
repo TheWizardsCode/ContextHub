@@ -50,16 +50,20 @@ import {
   parseAuditCandidatesOutput,
   parseImplementCandidatesOutput,
   parseCriticalCandidatesOutput,
+  parseDepListBlockersOutput,
+  parseShownWorkItem,
   selectAuditCandidate,
   selectImplementCandidate,
   selectCriticalCandidate,
   selectNextCandidate,
+  resolveDependencyFrontier,
   toDowntimeCandidate,
   toImplementCandidate,
   skillKindFromPrompt,
   type DowntimeWorker,
   type DowntimeWorkerDeps,
   type DowntimeStage,
+  type CriticalCandidate,
   type DowntimeCandidate,
   type DowntimeDispatchEvent,
   type DowntimeDispatchFailureEvent,
@@ -510,6 +514,39 @@ export async function claimItemForAgentCommand(command: string): Promise<void> {
 }
 
 /**
+ * Resolve the dependency blockers of a work item via `wl dep list`
+ * (F3, decision Q3). The outbound `depends-on` edges of the queried item
+ * are its blockers; the dep-list edges carry only id/title/status/
+ * priority, so each blocker is enriched via `wl show` to obtain the full
+ * stage/risk/effort/sortIndex fields the frontier resolution needs
+ * (stage→skill mapping + implement caps, Q2). THROWS on a wl or parse
+ * failure — the caller's fail-closed catch converts it into a strike
+ * (`{ok:false}`), so a dependency look-up failure never masquerades as an
+ * empty frontier (AC5: no silent fall-through).
+ */
+async function fetchCriticalBlockers(cwd: string, itemId: string): Promise<CriticalCandidate[]> {
+  const { stdout } = await getExecFileAsync()(
+    'wl',
+    buildWlArgs(['dep', 'list', itemId, '--json']),
+    { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+  );
+  const blockerRefs = parseDepListBlockersOutput(stdout);
+  if (blockerRefs === null) throw new Error('wl dep list parse failure');
+  const blockers: CriticalCandidate[] = [];
+  for (const ref of blockerRefs) {
+    const { stdout: showOut } = await getExecFileAsync()(
+      'wl',
+      buildWlArgs(['show', ref.id, '--json']),
+      { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+    );
+    const full = parseShownWorkItem(showOut);
+    if (full === null) throw new Error(`wl show parse failure for ${ref.id}`);
+    blockers.push(full);
+  }
+  return blockers;
+}
+
+/**
  * Build the real downtime-worker dependencies (WL-0MSF49FMW009M06K):
  * `wl next --stage <stage> --json` for dispatch selection, `wl update
  * <id> --status in_progress` for the pre-dispatch claim, and
@@ -713,22 +750,35 @@ export function createDowntimeDeps(
           }
         }
         const selected = selectCriticalCandidate(candidates, dispatched, registryFor(cwd));
-        return selected === null
-          ? { ok: true, candidate: null }
-          : {
-              ok: true,
-              candidate: {
-                id: selected.id,
-                title: selected.title,
-                // The candidate's WORKLOG stage (idea / intake_complete /
-                // plan_complete) rides on the field the tier maps through
-                // `criticalSkillKind` (a type widening of the legacy
-                // DowntimeStage — the value is verified client-side by the
-                // selector, so a plan_complete critical candidate reaches
-                // the tier as a plan_complete dispatch target).
-                stage: selected.stage as DowntimeStage,
-              },
-            };
+        if (selected === null) return { ok: true, candidate: null };
+        // Dependency-frontier resolution (F3, decision Q3): when the
+        // selected critical candidate is dependency-blocked, the dispatch
+        // target is the NEAREST OPEN blocker (with the blocker's own
+        // stage-appropriate skill). The lookup returns that frontier
+        // blocker — the same contract the dispatch tier already consumes
+        // (like getNextItem returns a wl next candidate).
+        const frontier = await resolveDependencyFrontier(selected, (itemId) =>
+          fetchCriticalBlockers(cwd, itemId),
+        );
+        if (frontier === null) {
+          // Chain bottomed in closed / non-dispatchable items (or a
+          // cycle): no critical dispatch this tick — fall through to the
+          // normal tier order. A wl failure NEVER lands here: the fetcher
+          // throws and the catch below fails closed to a strike.
+          return { ok: true, candidate: null };
+        }
+        return {
+          ok: true,
+          candidate: {
+            id: frontier.id,
+            title: frontier.title,
+            // The frontier blocker's WORKLOG stage (idea / intake_complete
+            // / plan_complete) rides on the field the tier maps through
+            // `criticalSkillKind` — the blocker is dispatched with ITS
+            // stage-appropriate skill (Q3).
+            stage: frontier.stage as DowntimeStage,
+          },
+        };
       } catch {
         // Fail-closed: a wl failure yields a CLI-error outcome, never a
         // candidate and never a null that looks like an empty tier — the
