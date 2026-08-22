@@ -401,9 +401,7 @@ export class WorklogDatabase {
    *
    * Delta-aware export (WL-0MT2KXPOQ009G026 / WL-0MSAKUBKW006FN8Q):
    *
-   * - `options.mode: 'full'` (default) — export ALL records, then advance the
-   *   per-type last-export watermarks to `now` so a subsequent delta knows what
-   *   is already published.
+   * - `options.mode: 'full'` (default) — export ALL records.
    * - `options.mode: 'delta'` — export only records changed after the
    *   per-type watermarks. If `options.since` is provided it is used as the
    *   watermark set; otherwise the stored watermarks
@@ -414,8 +412,10 @@ export class WorklogDatabase {
    *   export" rule), because a delta with empty watermarks would be empty
    *   and lose data on the push side.
    *
-   * Delta exports do NOT auto-advance the watermarks here — the push path
-   * advances them only after a successful push (markLastExportTimestamps).
+   * Exporting NEVER auto-advances the watermarks in any mode — the push path
+   * advances them only AFTER a successful push (markLastExportTimestamps,
+   * WL-0MT2KY0RQ008F50Q AC5). A failed push must not advance the baseline
+   * past data that was never published.
    *
    * @returns The path to the exported JSONL file
    */
@@ -466,17 +466,10 @@ export class WorklogDatabase {
     // (WL-0MT2KXPOQ009G026).
     await jsonlSvc.exportToJsonlAsync(items, comments, this.jsonlPath, dependencyEdges, auditResults, { onProgress: options?.onProgress, kind: mode });
 
-    // After a full export, advance all per-type watermarks to now so the next
-    // delta knows exactly what has already been published. (Delta exports do
-    // NOT auto-advance here — the pusher advances them on success.)
-    if (mode !== 'delta') {
-      this.markLastExportTimestamps({
-        workitems: new Date().toISOString(),
-        comments: new Date().toISOString(),
-        edges: new Date().toISOString(),
-        audit_results: new Date().toISOString(),
-      });
-    }
+    // Watermark advancement is deliberately NOT performed here in any mode:
+    // the push path advances them only AFTER a successful push
+    // (markLastExportTimestamps, WL-0MT2KY0RQ008F50Q AC5). A failed push must
+    // not advance the baseline past data that was never published.
 
     return this.jsonlPath;
   }
@@ -497,6 +490,55 @@ export class WorklogDatabase {
    */
   markLastExportTimestamps(ts: LastExportTimestamps): void {
     this.store.setLastExportTimestamps(ts);
+  }
+
+  /**
+   * Total number of dirty records across all four types given the stored
+   * per-type watermarks (WL-0MT2KY0RQ008F50Q / WL-0MSAKUBKW006FN8Q §5.4
+   * zero-change fast path). A record is dirty when its timestamp is strictly
+   * greater than the watermark of its type. When a type has no watermark (no
+   * baseline), every record of that type counts as dirty, and when NO
+   * watermarks exist at all the store is treated as fully dirty (this is what
+   * makes the very first sync a full export).
+   */
+  countDirtyRecords(): { items: number; comments: number; edges: number; audits: number; total: number } {
+    const wm = this.getLastExportTimestamps();
+    const wItems = wm.workitems;
+    const wComments = wm.comments;
+    const wEdges = wm.edges;
+    const wAudits = wm.audit_results;
+
+    const items = wItems
+      ? this.store.getAllWorkItems().filter(i => i.updatedAt && new Date(i.updatedAt).getTime() > new Date(wItems).getTime()).length
+      : this.store.getAllWorkItems().length;
+    const comments = wComments
+      ? this.store.getAllComments().filter(c => c.createdAt && new Date(c.createdAt).getTime() > new Date(wComments).getTime()).length
+      : this.store.getAllComments().length;
+    const edges = wEdges
+      ? this.store.getAllDependencyEdges().filter(e => e.createdAt && new Date(e.createdAt).getTime() > new Date(wEdges).getTime()).length
+      : this.store.getAllDependencyEdges().length;
+    const audits = wAudits
+      ? this.store.getAllAuditResults().filter(a => a.auditedAt && new Date(a.auditedAt).getTime() > new Date(wAudits).getTime()).length
+      : this.store.getAllAuditResults().length;
+
+    return { items, comments, edges, audits, total: items + comments + edges + audits };
+  }
+
+  /**
+   * Read the delta-sync cadence metadata (WL-0MT2KY0RQ008F50Q §5.3): the
+   * number of consecutive delta syncs since the last full snapshot, and the
+   * accumulated JSONL bytes pushed in that window. Used to decide when the
+   * next full snapshot is due (defaults: every 10 delta syncs OR 1 MB).
+   */
+  getDeltaSyncMetadata(): { deltaSyncCount: number; deltaBytes: number } {
+    return this.store.getDeltaSyncMetadata();
+  }
+
+  /**
+   * Persist the delta-sync cadence metadata ({@link getDeltaSyncMetadata}).
+   */
+  setDeltaSyncMetadata(deltaSyncCount: number, deltaBytes: number): void {
+    this.store.setDeltaSyncMetadata(deltaSyncCount, deltaBytes);
   }
 
   /**

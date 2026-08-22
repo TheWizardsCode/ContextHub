@@ -184,6 +184,18 @@ export interface WorklogConfig {
   syncRemote?: string;
   syncBranch?: string;
   /**
+   * Force a full (non-incremental) JSONL snapshot after this many consecutive
+   * delta syncs (WL-0MT2KY0RQ008F50Q / WL-0MSAKUBKW006FN8Q §5.3).
+   * Default 10. The counter is reset whenever a full snapshot is pushed.
+   */
+  syncFullSnapshotEveryN?: number;
+  /**
+   * Force a full (non-incremental) JSONL snapshot when the accumulated delta
+   * payload exceeds this many bytes (WL-0MT2KY0RQ008F50Q §5.3, advisory
+   * threshold). Default 1_000_000 (1 MB).
+   */
+  syncDeltaSizeThreshold?: number;
+  /**
    * Allow `wl sync` to merge commits authored by a different identity than
    * the store's configured `user.email` (identity gate WL-0MSOYWWS4009HTCB).
    * Default false — the sync refuses foreign-author commits. The CLI flag

@@ -514,6 +514,18 @@ export default function register(ctx: PluginContext): void {
               'Rewrite worklog ref: remove foreign items',
               gitTarget
             );
+            // The rewritten ref is a full clean snapshot — advance the
+            // per-type watermarks so the next sync runs an incremental delta
+            // from this baseline (WL-0MT2KY0RQ008F50Q AC5: advance only after
+            // a successful push).
+            const now = new Date().toISOString();
+            db.markLastExportTimestamps({
+              workitems: now,
+              comments: now,
+              edges: now,
+              audit_results: now,
+            });
+            db.setDeltaSyncMetadata(0, 0);
             // Ephemeral JSONL pattern: remove the local file after a successful push.
             try { db.deleteLocalJsonl(); } catch (_) { /* best-effort */ }
             return tipSha;

@@ -467,6 +467,46 @@ export class SqlitePersistentStore {
   }
 
   /**
+   * Delta-sync cadence metadata (WL-0MT2KY0RQ008F50Q / WL-0MSAKUBKW006FN8Q),
+   * persisted by the push path after each successful delta/full sync:
+   *   - `deltaSyncCount` — number of consecutive delta syncs since the last
+   *     full snapshot (full snapshots reset it to 0).
+   *   - `deltaBytes`     — accumulated JSONL bytes pushed since the last full
+   *     snapshot.
+   *
+   * Stored as dedicated rows in `last_export_timestamps` (special record
+   * types `__delta_count__` / `__delta_bytes__`); the watermark reader
+   * (`getLastExportTimestamps`) ignores these rows, so they never collide
+   * with per-type watermarks. When no full-snapshot cadence policy is in
+   * place the rows simply never appear and the default (0, 0) is returned.
+   */
+  getDeltaSyncMetadata(): { deltaSyncCount: number; deltaBytes: number } {
+    const stmt = this.db.prepare('SELECT record_type, exported_at FROM last_export_timestamps WHERE record_type IN (?, ?)');
+    const rows = stmt.all('__delta_count__', '__delta_bytes__') as Array<{ record_type: string; exported_at: string }>;
+    let deltaSyncCount = 0;
+    let deltaBytes = 0;
+    for (const row of rows) {
+      const parsed = Number(row.exported_at);
+      if (Number.isFinite(parsed)) {
+        if (row.record_type === '__delta_count__') deltaSyncCount = parsed;
+        else deltaBytes = parsed;
+      }
+    }
+    return { deltaSyncCount, deltaBytes };
+  }
+
+  /**
+   * Persist the delta-sync cadence metadata ({@link getDeltaSyncMetadata}).
+   */
+  setDeltaSyncMetadata(deltaSyncCount: number, deltaBytes: number): void {
+    const upsert = this.db.prepare(
+      'INSERT OR REPLACE INTO last_export_timestamps (record_type, exported_at) VALUES (?, ?)'
+    );
+    upsert.run('__delta_count__', String(deltaSyncCount));
+    upsert.run('__delta_bytes__', String(deltaBytes));
+  }
+
+  /**
    * Save a work item
    */
   saveWorkItem(item: WorkItem): void {

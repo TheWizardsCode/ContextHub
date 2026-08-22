@@ -31,6 +31,13 @@ export function getSyncDefaults(config?: ReturnType<typeof loadConfig>) {
   };
 }
 
+// Full-snapshot cadence defaults (WL-0MT2KY0RQ008F50Q §5.3): force a full
+// (non-incremental) JSONL snapshot after every N delta syncs, or once the
+// accumulated delta payload exceeds this many bytes. Configurable via
+// `sync.fullSnapshotEveryN` / `sync.deltaSizeThreshold`.
+export const DEFAULT_FULL_SNAPSHOT_EVERY_N = 10;
+export const DEFAULT_DELTA_SIZE_THRESHOLD = 1_000_000;
+
 export async function performSync(
   dataPath: string,
   getDatabase: (prefix?: string) => any,
@@ -274,37 +281,117 @@ export async function performSync(
     }
   };
 
-  const jsonlPath = await db.exportForSync({ onProgress: progressHandler });
+  // Delta vs full export decision (WL-0MT2KY0RQ008F50Q AC1, §5.1-§5.4):
+  //
+  // - First sync / no baseline (no watermarks ever recorded) → full snapshot
+  // - Full snapshot cadence due (delta count/bytes threshold, §5.3) → full
+  // - WL_DELTA_EXPORT_DISABLED=1 → full
+  // - Nothing on remote base (ref not yet created / first push onto a remote)
+  //   → full, so readers always have a full snapshot to anchor on
+  // - Otherwise → delta (incremental) export
+  const lastTs = db.getLastExportTimestamps();
+  const deltaDisabled = process.env.WL_DELTA_EXPORT_DISABLED === '1';
+  const hasBaseline = Boolean(
+    lastTs.workitems || lastTs.comments || lastTs.edges || lastTs.audit_results
+  );
+  const deltaMeta = db.getDeltaSyncMetadata();
+  const fullSnapshotEveryN =
+    config?.syncFullSnapshotEveryN ?? DEFAULT_FULL_SNAPSHOT_EVERY_N;
+  const deltaSizeThreshold =
+    config?.syncDeltaSizeThreshold ?? DEFAULT_DELTA_SIZE_THRESHOLD;
+  const fullSnapshotDue =
+    // 0 disables the count-based cadence; a non-positive bytes threshold is
+    // corrected to the default.
+    (fullSnapshotEveryN > 0 &&
+      deltaMeta.deltaSyncCount >= fullSnapshotEveryN) ||
+    (deltaSizeThreshold > 0 && deltaMeta.deltaBytes >= deltaSizeThreshold);
+  const needsFullSnapshot =
+    !hasBaseline || fullSnapshotDue || deltaDisabled || remoteContent === null;
+  const syncMode: 'full' | 'delta' = needsFullSnapshot ? 'full' : 'delta';
+
+  // §5.4 zero-change fast path: skip export+push entirely when nothing is
+  // dirty and no full snapshot is due (a 0-record delta is useless — the
+  // remote tip would hold an effectively empty file). This preserves the
+  // existing last-sync-time optimization.
+  const dirty = db.countDirtyRecords();
+  const zeroChangeFastPath = syncMode === 'delta' && dirty.total === 0;
+
+  let jsonlPath: string | null = null;
+  if (!zeroChangeFastPath) {
+    jsonlPath = await db.exportForSync({ mode: syncMode, onProgress: progressHandler });
+  }
   
   if (options.push) {
-    if (!isJsonMode && !isSilent) {
-      console.log('\nPushing changes to git...');
-    }
-    
-    try {
-      await gitPushDataFileToBranch(jsonlPath, 'Sync work items and comments', gitTarget);
+    if (jsonlPath === null) {
+      // Zero-change fast path (§5.4) — nothing exported, nothing to push.
       if (!isJsonMode && !isSilent) {
-        console.log('Changes pushed successfully');
+        console.log('\nNo changes to sync — skipping export and push');
+      }
+    } else {
+      if (!isJsonMode && !isSilent) {
+        console.log('\nPushing changes to git...');
       }
       
-      // Delete local JSONL file after successful push (ephemeral pattern)
-      // Only delete if push succeeded - keep for retry on failure
-      db.deleteLocalJsonl();
-      
-      if (!isJsonMode && !isSilent) {
-        console.log('Local JSONL file cleaned up (ephemeral pattern)');
+      try {
+        await gitPushDataFileToBranch(jsonlPath, 'Sync work items and comments', gitTarget);
+        if (!isJsonMode && !isSilent) {
+          console.log('Changes pushed successfully');
+        }
+
+        // AC5: advance the per-type watermarks ONLY after a successful push.
+        // (exportForSync never auto-advances; a failed push must not advance
+        // the baseline past data that was never published.)
+        const now = new Date().toISOString();
+        db.markLastExportTimestamps({
+          workitems: now,
+          comments: now,
+          edges: now,
+          audit_results: now,
+        });
+
+        // §5.3 cadence tracking: each delta accumulates count + JSONL bytes;
+        // a full snapshot resets the counters.
+        let pushedBytes = 0;
+        try {
+          pushedBytes = fs.statSync(jsonlPath).size;
+        } catch {
+          /* best-effort; keep 0 */
+        }
+        if (syncMode === 'delta') {
+          db.setDeltaSyncMetadata(
+            deltaMeta.deltaSyncCount + 1,
+            deltaMeta.deltaBytes + pushedBytes
+          );
+        } else {
+          db.setDeltaSyncMetadata(0, 0);
+        }
+
+        // Delete local JSONL file after successful push (ephemeral pattern)
+        // Only delete if push succeeded - keep for retry on failure
+        db.deleteLocalJsonl();
+        
+        if (!isJsonMode && !isSilent) {
+          console.log('Local JSONL file cleaned up (ephemeral pattern)');
+        }
+      } catch (pushError) {
+        // Push failed - keep JSONL for retry, but report the error
+        if (!isJsonMode && !isSilent) {
+          console.log('\nPush failed - local JSONL file retained for retry');
+        }
+        throw pushError;
       }
-    } catch (pushError) {
-      // Push failed - keep JSONL for retry, but report the error
-      if (!isJsonMode && !isSilent) {
-        console.log('\nPush failed - local JSONL file retained for retry');
-      }
-      throw pushError;
     }
   } else {
-    if (!isJsonMode && !isSilent) {
-      console.log('\nSkipping git push (--no-push flag)');
-      console.log('Local JSONL file retained (ephemeral pattern - file will be deleted on next successful push)');
+    if (jsonlPath === null) {
+      // Zero-change fast path with --no-push: nothing to export either.
+      if (!isJsonMode && !isSilent) {
+        console.log('\nNo changes to sync — skipping export (--no-push)');
+      }
+    } else {
+      if (!isJsonMode && !isSilent) {
+        console.log('\nSkipping git push (--no-push flag)');
+        console.log('Local JSONL file retained (ephemeral pattern - file will be deleted on next successful push)');
+      }
     }
   }
   
