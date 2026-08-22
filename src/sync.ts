@@ -1407,6 +1407,17 @@ async function withTempWorktree<T>(
   }
 }
 
+/**
+ * Push the serialized worklog data file to the dedicated remote ref.
+ *
+ * Delta-aware behavior (WL-0MSAKUBKW006FN8Q): the file passed in is the
+ * output of `exportForSync`, which may be either a FULL snapshot or a DELTA
+ * (a JSONL subset carrying the sync header). Both are committed to the remote
+ * ref tip as a new commit on the existing branch history — which is what
+ * allows `replayRemoteDeltaChain` to walk back to the newest full snapshot
+ * when a reader has no local base. This function itself is kind-agnostic: it
+ * pushes whatever JSONL it is given onto `refs/worklog/data`.
+ */
 export async function gitPushDataFileToBranch(
   repoDataFilePath: string,
   commitMessage: string,
@@ -1415,7 +1426,6 @@ export async function gitPushDataFileToBranch(
   // Cross-project safety guard: never push the data file to a different
   // repository's remote ref than the one owning the file.
   await assertDataFileInCwdRepo(repoDataFilePath);
-
   // SAFETY GUARD: reject pushes to regular branches or tags.
   // Worklog data must only be stored on dedicated refs under refs/worklog/
   // to prevent accidental corruption of the project working tree.

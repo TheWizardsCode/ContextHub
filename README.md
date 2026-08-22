@@ -107,6 +107,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 |----------|-------------|
 | [DATA_FORMAT.md](DATA_FORMAT.md) | JSONL data format, storage architecture, and field reference |
 | [DATA_SYNCING.md](DATA_SYNCING.md) | Git-backed syncing and GitHub Issue mirroring |
+| [docs/design/incremental-sync.md](docs/design/incremental-sync.md) | Incremental (delta) sync architecture: delta format, full-snapshot cadence, fallback, backward compatibility (WL-0MSAKUBKW006FN8Q) |
 | [GIT_WORKFLOW.md](GIT_WORKFLOW.md) | Team collaboration patterns and Git hooks |
 
 ### Features
