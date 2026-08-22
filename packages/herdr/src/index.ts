@@ -49,8 +49,10 @@ import {
   parseNextCandidatesOutput,
   parseAuditCandidatesOutput,
   parseImplementCandidatesOutput,
+  parseCriticalCandidatesOutput,
   selectAuditCandidate,
   selectImplementCandidate,
+  selectCriticalCandidate,
   selectNextCandidate,
   toDowntimeCandidate,
   toImplementCandidate,
@@ -83,6 +85,7 @@ import {
   implementDispatchedItemIds,
   planDispatchedItemStages,
   intakeDispatchedItemStages,
+  dispatchedItemStages,
   readDowntimeLogEntries,
 } from './downtime-log.js';
 import {
@@ -670,6 +673,67 @@ export function createDowntimeDeps(
       } catch {
         // Fail-closed: a wl failure yields no candidate (no dispatch).
         return null;
+      }
+    },
+    async getNextCriticalCandidate(cwd: string): Promise<DowntimeNextResult> {
+      try {
+        // Critical-first tier (WL-0MT3FM8VA005XBHE): enumerate open
+        // critical items across ALL stages via `wl list --priority critical
+        // --status open -n 10 --json`. Unlike `wl next --stage X` (which
+        // excludes dependency-blocked items by default), `wl list` returns
+        // blocked critical items too — the looked-up candidate may be
+        // dependency-blocked, and the frontier resolution (F3) decides the
+        // dispatch target if it is. A generous batch (-n 10) is fetched so
+        // a change-guard-excluded top candidate does not starve selection
+        // of the next one. The bounded timeout (WL-0MSJIPHD0001L1J9) kills
+        // a hung wl child so the lookup fails closed to a strike instead
+        // of wedging the dispatch task.
+        const { stdout } = await getExecFileAsync()(
+          'wl',
+          buildWlArgs(['list', '--priority', 'critical', '--status', 'open', '-n', '10', '--json']),
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+        );
+        const candidates = parseCriticalCandidatesOutput(stdout);
+        if (candidates === null) return { ok: false };
+        // Dispatched-marker change-guard (WL-0MSRBFFLN005W3VT design point
+        // 3 semantics): read the shared rolling dispatch log for THIS
+        // worklog root and exclude any critical item the downtime worker
+        // has already dispatched for its stage-appropriate skill (kind
+        // intake/plan/implement markers) while the item is still at its
+        // dispatched-at stage; a stage advancement releases it. Fail-safe:
+        // readDowntimeLogEntries never throws — a missing or unreadable
+        // log is treated as empty.
+        const entries = await readDowntimeLogEntries(cwd);
+        // Any dispatched kind (intake/plan/implement) guards the critical
+        // item while it is still at its dispatched-at stage.
+        const dispatched = new Map<string, string>();
+        for (const kind of ['intake', 'plan', 'implement'] as const) {
+          for (const [id, stageAt] of dispatchedItemStages(entries, kind)) {
+            dispatched.set(id, stageAt);
+          }
+        }
+        const selected = selectCriticalCandidate(candidates, dispatched, registryFor(cwd));
+        return selected === null
+          ? { ok: true, candidate: null }
+          : {
+              ok: true,
+              candidate: {
+                id: selected.id,
+                title: selected.title,
+                // The candidate's WORKLOG stage (idea / intake_complete /
+                // plan_complete) rides on the field the tier maps through
+                // `criticalSkillKind` (a type widening of the legacy
+                // DowntimeStage — the value is verified client-side by the
+                // selector, so a plan_complete critical candidate reaches
+                // the tier as a plan_complete dispatch target).
+                stage: selected.stage as DowntimeStage,
+              },
+            };
+      } catch {
+        // Fail-closed: a wl failure yields a CLI-error outcome, never a
+        // candidate and never a null that looks like an empty tier — the
+        // caller counts it as a strike.
+        return { ok: false };
       }
     },
     // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): read the project-local

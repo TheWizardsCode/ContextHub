@@ -1182,6 +1182,241 @@ describe('createDowntimeDeps', () => {
     );
   });
 
+  it('getNextCriticalCandidate runs wl list --priority critical --status open across ALL stages', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 3,
+        workItems: [
+          { id: 'WL-CRIT-IDEA', title: 'Critical idea', status: 'open', stage: 'idea', risk: 'low', effort: 'small', sortIndex: 100 },
+          { id: 'WL-CRIT-READY', title: 'Critical ready', status: 'open', stage: 'intake_complete', risk: 'low', effort: 'small', sortIndex: 200 },
+          { id: 'WL-CRIT-PLAN', title: 'Critical planned', status: 'open', stage: 'plan_complete', risk: 'medium', effort: 'medium', sortIndex: 300 },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextCriticalCandidate('/repo');
+
+    // The critical lookup must NOT be stage-gated: every open critical
+    // stage is enumerated, and the lowest sortIndex wins deterministically.
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      ['list', '--priority', 'critical', '--status', 'open', '-n', expect.any(String), '--json'],
+      expect.anything(),
+    );
+    expect(result).toEqual({
+      ok: true,
+      candidate: { id: 'WL-CRIT-IDEA', title: 'Critical idea', stage: 'idea' },
+    });
+  });
+
+  it('getNextCriticalCandidate includes dependency-blocked items (no wl next exclusion)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 1,
+        workItems: [
+          { id: 'WL-CRIT-BLOCKED', title: 'Blocked critical', status: 'open', stage: 'plan_complete', risk: 'low', effort: 'small', sortIndex: 10 },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.getNextCriticalCandidate('/repo');
+
+    const [, args] = mockExec.mock.calls[0];
+    // wl list does not exclude dependency-blocked items — the critical
+    // lookup must never opt into wl next's --include-blocked machinery or
+    // add a stage filter, or blocked critical items would vanish from the
+    // dispatch queue (Q3 needs them for frontier resolution).
+    expect(args).not.toContain('--include-blocked');
+    expect(args).not.toContain('--stage');
+  });
+
+  it('getNextCriticalCandidate honors the plan_complete implement caps (Q2: above caps not selected)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 2,
+        workItems: [
+          { id: 'WL-CRIT-HIRISK', title: 'High-risk critical', status: 'open', stage: 'plan_complete', risk: 'high', effort: 'small', sortIndex: 10 },
+          { id: 'WL-CRIT-READY', title: 'Critical ready', status: 'open', stage: 'intake_complete', risk: 'low', effort: 'small', sortIndex: 900 },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextCriticalCandidate('/repo');
+
+    // The plan_complete critical is above the risk cap → never
+    // implement-dispatched; the intake_complete critical wins instead.
+    expect(result).toEqual({
+      ok: true,
+      candidate: { id: 'WL-CRIT-READY', title: 'Critical ready', stage: 'intake_complete' },
+    });
+  });
+
+  it('getNextCriticalCandidate excludes items still at their dispatched-at stage (change-guard)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 2,
+        workItems: [
+          { id: 'WL-CRIT-ONCE', title: 'already dispatched at idea', status: 'open', stage: 'idea', risk: 'low', effort: 'small', sortIndex: 5 },
+          { id: 'WL-CRIT-NEXT', title: 'next critical', status: 'open', stage: 'intake_complete', risk: 'low', effort: 'small', sortIndex: 20 },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+      JSON.stringify({ itemId: 'WL-CRIT-ONCE', kind: 'intake', stage: 'idea', dispatchedAt: new Date(Date.now() - 3_600_000).toISOString(), cwd }) + '\n',
+      'utf8',
+    );
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextCriticalCandidate(cwd);
+
+    // WL-CRIT-ONCE was dispatched for /skill:intake at idea and is still at
+    // idea → excluded by the change-guard; the next critical is selected.
+    expect(result).toEqual({
+      ok: true,
+      candidate: { id: 'WL-CRIT-NEXT', title: 'next critical', stage: 'intake_complete' },
+    });
+  });
+
+  it('getNextCriticalCandidate releases an item whose stage advanced past its dispatched-at stage', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 1,
+        workItems: [
+          { id: 'WL-CRIT-ADV', title: 'advanced critical', status: 'open', stage: 'plan_complete', risk: 'low', effort: 'small', sortIndex: 5 },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+      JSON.stringify({ itemId: 'WL-CRIT-ADV', kind: 'plan', stage: 'intake_complete', dispatchedAt: new Date(Date.now() - 3_600_000).toISOString(), cwd }) + '\n',
+      'utf8',
+    );
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextCriticalCandidate(cwd);
+
+    // Marked at intake_complete, now at plan_complete → released.
+    expect(result).toEqual({
+      ok: true,
+      candidate: { id: 'WL-CRIT-ADV', title: 'advanced critical', stage: 'plan_complete' },
+    });
+  });
+
+  it('getNextCriticalCandidate treats a missing dispatch log as empty (fail-safe, dispatch still works)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 1,
+        workItems: [
+          { id: 'WL-CRIT-FRESH', title: 'fresh worklog critical', status: 'open', stage: 'idea', risk: 'low', effort: 'small', sortIndex: 5 },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const cwd = makeTempDir(); // no .worklog/downtime-dispatches.log
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextCriticalCandidate(cwd);
+    expect(result).toEqual({
+      ok: true,
+      candidate: { id: 'WL-CRIT-FRESH', title: 'fresh worklog critical', stage: 'idea' },
+    });
+  });
+
+  it('getNextCriticalCandidate reports ok:true with no candidate when the critical tier is empty', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ success: true, count: 0, workItems: [] }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getNextCriticalCandidate('/repo')).toEqual({ ok: true, candidate: null });
+  });
+
+  it('getNextCriticalCandidate fails closed ({ok:false}) on wl error (never a silent empty)', async () => {
+    setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getNextCriticalCandidate('/repo')).toEqual({ ok: false });
+  });
+
+  it('getNextCriticalCandidate fails closed ({ok:false}) on malformed wl output', async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: 'not json', stderr: '' });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(await deps.getNextCriticalCandidate('/repo')).toEqual({ ok: false });
+  });
+
+  it('getNextCriticalCandidate passes a bounded timeout so a hung wl fails closed', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ success: true, count: 0, workItems: [] }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.getNextCriticalCandidate('/repo');
+
+    const [, , options] = mockExec.mock.calls[0];
+    expect(options).toMatchObject({ timeout: DOWNTIME_WL_TIMEOUT_MS });
+  });
+
+  it('getNextCriticalCandidate applies --worklog-dir when the tab resolved a worklog root', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ success: true, count: 0, workItems: [] }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+    setWorklogDir('/home/user/projects/SorraAgents/.worklog');
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.getNextCriticalCandidate('/repo');
+
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      [
+        '--worklog-dir',
+        '/home/user/projects/SorraAgents/.worklog',
+        'list',
+        '--priority',
+        'critical',
+        '--status',
+        'open',
+        '-n',
+        expect.any(String),
+        '--json',
+      ],
+      expect.anything(),
+    );
+  });
+
   it('end-to-end: two consecutive idle windows dispatch a single unaudited candidate exactly once', async () => {
     // AC5 (parent): with one unaudited completed/in_review candidate and two
     // consecutive idle windows (no audit recorded between), the worker

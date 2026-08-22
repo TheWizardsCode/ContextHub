@@ -724,6 +724,23 @@ export interface DowntimeWorkerDeps {
    */
   getNextImplementCandidate(cwd: string): Promise<DowntimeCandidate | null>;
   /**
+   * Look up the next critical-first candidate (WL-0MT3FM8VA005XBHE): the
+   * highest-priority open CRITICAL item at ANY stage (idea /
+   * intake_complete / plan_complete), including dependency-blocked ones
+   * (`wl list --priority critical --status open` does NOT exclude them —
+   * unlike `wl next`), with the stage-appropriate skill mapping and the
+   * plan_complete implement caps (decision Q2). The returned candidate is
+   * the stage-appropriate dispatch target (kind derived via
+   * `criticalSkillKind(candidate.stage)` by the tier). Fail-closed: a wl
+   * failure resolves `{ok:false}` via the `DowntimeNextResult` error
+   * channel (never a silent empty — a broken critical lookup must not
+   * look like "no critical work"). `cwd` is the worklog root whose
+   * `.worklog/downtime-dispatches.log` is consulted for the dispatched-
+   * marker change-guard (an item already dispatched for its tier while
+   * still at its dispatched-at stage is excluded).
+   */
+  getNextCriticalCandidate(cwd: string): Promise<DowntimeNextResult>;
+  /**
    * Read the current code-freeze marker status (tri-state: 'frozen' /
    * 'not-frozen' / 'ambiguous'). `cwd` is the worklog root; the marker
    * lives at `<cwd>/.worklog/code-freeze.json`. Read fresh on EVERY
@@ -2151,6 +2168,140 @@ export function selectNextCandidate(
       const dispatchedAt = dispatchedStages?.get(c.id);
       // Exclude while still at the dispatched-at stage; a missing recorded
       // stage (legacy entry) never suppresses selection.
+      return dispatchedAt === undefined || dispatchedAt !== c.stage;
+    })
+    .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
+  return selectWithRotation(filtered, registry);
+}
+
+// ── Critical-first selection (WL-0MT3FM8VA005XBHE, F2) ───────────────
+// The critical-first pre-tier dispatches an open critical item at ANY
+// stage (idea / intake_complete / plan_complete) with its stage-
+// appropriate skill — ahead of EVERY non-critical candidate. Stage→skill
+// mapping: idea → /skill:intake, intake_complete → /skill:plan,
+// plan_complete → /skill:implement. Implement dispatch keeps the
+// implement tier's risk/effort caps (decision Q2); every existing guard
+// (CAS claim, dispatched-marker change-guard, single-flight) composes
+// unchanged.
+
+/**
+ * An open critical work-item candidate, enumerated by
+ * `wl list --priority critical --status open` (blocked items included —
+ * `wl list` does not exclude dependency-blocked items). Carries the
+ * worklog `stage` (needed for the stage→skill mapping), the client-side
+ * `status` guard, and the risk/effort fields for the plan_complete caps
+ * (decision Q2).
+ */
+export interface CriticalCandidate {
+  id: string;
+  title: string;
+  /** Worklog status (`open` for selectable items; fail-closed on missing). */
+  status: string;
+  /** Worklog stage: idea | intake_complete | plan_complete | in_progress | … */
+  stage: string;
+  risk?: string;
+  effort?: string;
+  /** wl priority order preserved for deterministic selection. */
+  sortIndex?: number;
+  /** Worklog priority level (critical) — round-robin grouping key. */
+  priority?: string;
+}
+
+/**
+ * Map a critical candidate's worklog stage to the dispatch skill kind.
+ * Only dispatchable stages map: `idea` → `intake`, `intake_complete` →
+ * `plan`, `plan_complete` → `implement`. Every other stage (in_progress,
+ * in_review, completed, …) is NOT a critical-tier dispatch target and
+ * maps to null (the tier falls through to the normal order).
+ */
+export function criticalSkillKind(stage: string): DowntimeSkillKind | null {
+  if (stage === 'idea') return 'intake';
+  if (stage === 'intake_complete') return 'plan';
+  if (stage === 'plan_complete') return 'implement';
+  return null;
+}
+
+/**
+ * Parse the stdout of `wl list --priority critical --status open --json`
+ * into typed critical candidates. Accepts the shape the CLI emits for a
+ * batch (`{ workItems: [...] }`, flat entries carrying the enriched
+ * workItem fields). Entries without an id are skipped; malformed JSON or
+ * output without a workItems list yields null (fail-closed); an empty
+ * list yields `[]` (a genuine empty critical tier).
+ */
+export function parseCriticalCandidatesOutput(stdout: string): CriticalCandidate[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  const items =
+    parsed !== null &&
+    typeof parsed === 'object' &&
+    Array.isArray((parsed as { workItems?: unknown }).workItems)
+      ? (parsed as { workItems: unknown[] }).workItems
+      : null;
+  if (items === null) return null;
+
+  const candidates: CriticalCandidate[] = [];
+  for (const raw of items) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const o = raw as Record<string, unknown>;
+    if (typeof o.id !== 'string' || o.id.length === 0) continue;
+    candidates.push({
+      id: o.id,
+      title: typeof o.title === 'string' ? o.title : '',
+      status: typeof o.status === 'string' ? o.status : '',
+      stage: typeof o.stage === 'string' ? o.stage : '',
+      risk: typeof o.risk === 'string' ? o.risk : undefined,
+      effort: typeof o.effort === 'string' ? o.effort : undefined,
+      sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
+      priority: typeof o.priority === 'string' ? o.priority : undefined,
+    });
+  }
+  return candidates;
+}
+
+/**
+ * Select the next critical-tier candidate from parsed wl list output:
+ * the first open candidate at a dispatchable stage (idea /
+ * intake_complete / plan_complete), with `plan_complete` gated by the
+ * implement caps (risk ≤ Medium / effort ≤ Medium, decision Q2 — an
+ * above-caps critical is never implement-dispatched by the downtime
+ * worker), excluding candidates in the dispatched-marker change-guard
+ * map (id → stage at dispatch — excluded while still at the dispatched-
+ * at stage; a stage advancement releases it). Sorted ascending by
+ * `sortIndex` (wl priority order) with round-robin tie-break within the
+ * critical group (reused `selectWithRotation`; the rotation cursor keys
+ * on the `critical` priority, so critical rotation never disturbs
+ * non-critical tier cursors). Returns null when no candidate qualifies
+ * (or the list is empty).
+ */
+export function selectCriticalCandidate(
+  candidates: CriticalCandidate[],
+  dispatchedStages?: ReadonlyMap<string, string>,
+  registry?: RoundRobinRegistry,
+): CriticalCandidate | null {
+  const filtered = candidates
+    .filter((c) => c.status === 'open')
+    // Dispatchable stages only (idea / intake_complete / plan_complete).
+    .filter((c) => criticalSkillKind(c.stage) !== null)
+    // Caps retained (Q2): a plan_complete candidate must be risk ≤ Medium
+    // / effort ≤ Medium to be implement-dispatched — same ordinal filter
+    // semantics as selectImplementCandidate (fail-closed on unset).
+    .filter((c) => {
+      if (c.stage !== 'plan_complete') return true;
+      const risk = riskOrdinal(c.risk);
+      if (risk === null || risk > 2) return false; // risk ≤ Medium
+      const effort = effortOrdinal(c.effort);
+      if (effort === null || effort > 3) return false; // effort ≤ Medium
+      return true;
+    })
+    .filter((c) => {
+      const dispatchedAt = dispatchedStages?.get(c.id);
+      // Change-guard: exclude while still at the dispatched-at stage; a
+      // missing recorded stage (legacy entry) never suppresses selection.
       return dispatchedAt === undefined || dispatchedAt !== c.stage;
     })
     .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
