@@ -1283,8 +1283,52 @@ export async function dispatchDowntimeWork(
           return { dispatched: false, reason: 'wl-error' };
         }
       }
-      // Implement tier (WL-0MSMAYPQP001FLR6): after the audit gate, dispatch
-      // /skill:implement for the highest-priority open plan_complete item with
+    }
+
+    // Critical-first tier (WL-0MT3FM8VA005XBHE): consulted on EVERY
+    // dispatch — including during a freeze. The lookup
+    // (getNextCriticalCandidate) returns the stage-appropriate critical
+    // candidate (F2: stage→skill via criticalSkillKind, plan_complete
+    // implement caps Q2; F3: dependency-blocked items resolve to their
+    // nearest open frontier blocker with the blocker's own stage). It
+    // runs AFTER the audit tier (a completed/in_review item needing audit
+    // keeps its slot) and BEFORE the non-critical implement/plan/intake
+    // tiers — a critical item at ANY stage always wins over any
+    // non-critical item (parent AC3). Error channel parity with the audit
+    // tier (WL-0MSLWJ2KP0002SV0): {ok:true, candidate:null} is a GENUINELY
+    // empty critical tier and falls through to the non-critical tiers;
+    // {ok:false} is a wl/parse failure — fail closed to a wl-error strike
+    // (never a silent fall-through, so a broken critical lookup cannot
+    // silently look like "no critical work").
+    //
+    // Freeze split-by-skill (Q1): the marker is re-read fresh above, and
+    // while frozen OR ambiguous (fail-closed) a critical IMPLEMENT
+    // candidate (plan_complete) is SKIPPED — no new code changes land
+    // mid-release — but a critical plan/intake candidate STILL dispatches
+    // (low-risk prep allowed, matching the non-critical plan/intake tiers).
+    // Pane minimum (parent WL-0MT32F90V008UAD2 AC3): the critical tier
+    // needs ≥ 1 free slot like every single-pane tier.
+    if (panesEligible) {
+      const critical = await deps.getNextCriticalCandidate(opts.cwd);
+      if (critical.ok) {
+        if (critical.candidate !== null) {
+          const kind = criticalSkillKind(critical.candidate.stage);
+          if (kind !== null && !(frozen && kind === 'implement')) {
+            return await dispatchClaimedTier(deps, kind, critical.candidate, opts);
+          }
+          // Frozen implement-kind critical (or a non-dispatchable stage):
+          // skip this candidate (fail-closed pause) and fall through to
+          // the non-critical tiers.
+        }
+      } else {
+        return { dispatched: false, reason: 'wl-error' };
+      }
+    }
+
+    if (!frozen) {
+      // Implement tier (WL-0MSMAYPQP001FLR6): after the critical-first
+      // gate, dispatch /skill:implement for the highest-priority open
+      // plan_complete item with
       // risk ≤ Medium / effort ≤ Medium. getNextImplementCandidate is fail-closed
       // (null on wl failure or no candidate), so a null here means the tier is
       // exhausted and the plan/intake tiers below still run (AC5/AC6 — a wl
