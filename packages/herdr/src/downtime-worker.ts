@@ -2412,6 +2412,193 @@ export function selectCriticalCandidate(
   return selectWithRotation(filtered, registry);
 }
 
+/**
+ * Parse the stdout of `wl dep list <id> --json` into the blocker refs of
+ * the queried item: the outbound edges with direction `depends-on` (items
+ * the queried item depends on — its blockers). Edge entries carry only
+ * id/title/status/priority; the caller enriches via `wl show` when the
+ * full stage/risk/effort/sortIndex fields are needed (frontier caps
+ * check, Q2). Malformed JSON or output without an outbound edge list
+ * yields null (fail-closed); an item with no outbound depends-on edges
+ * yields `[]` (unblocked).
+ */
+export function parseDepListBlockersOutput(
+  stdout: string,
+): Array<{ id: string; title: string; status: string; priority?: string }> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  const outbound =
+    parsed !== null &&
+    typeof parsed === 'object' &&
+    Array.isArray((parsed as { outbound?: unknown }).outbound)
+      ? (parsed as { outbound: unknown[] }).outbound
+      : null;
+  if (outbound === null) return null;
+
+  const blockers: Array<{ id: string; title: string; status: string; priority?: string }> = [];
+  for (const raw of outbound as unknown[]) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const o = raw as Record<string, unknown>;
+    // Only dependency edges count as blockers (the item depends on them
+    // and is therefore blocked by them).
+    if (o.direction !== 'depends-on') continue;
+    if (typeof o.id !== 'string' || o.id.length === 0) continue;
+    blockers.push({
+      id: o.id,
+      title: typeof o.title === 'string' ? o.title : '',
+      status: typeof o.status === 'string' ? o.status : '',
+      priority: typeof o.priority === 'string' ? o.priority : undefined,
+    });
+  }
+  return blockers;
+}
+
+/**
+ * Parse the stdout of `wl show <id> --json` into a full critical
+ * candidate (the shape the frontier resolution needs for its
+ * stage→skill mapping and implement caps checks). Accepts the CLI's
+ * single-item shape `{ workItem: {...} }` with the enriched fields.
+ * Malformed output or a missing workItem yields null (fail-closed).
+ */
+export function parseShownWorkItem(stdout: string): CriticalCandidate | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  const raw =
+    parsed !== null &&
+    typeof parsed === 'object' &&
+    (parsed as { workItem?: unknown }).workItem !== null &&
+    (parsed as { workItem?: unknown }).workItem !== undefined
+      ? (parsed as { workItem: Record<string, unknown> }).workItem
+      : null;
+  if (typeof raw !== 'object' || raw === null) return null;
+  if (typeof raw.id !== 'string' || raw.id.length === 0) return null;
+  return {
+    id: raw.id,
+    title: typeof raw.title === 'string' ? raw.title : '',
+    status: typeof raw.status === 'string' ? raw.status : '',
+    stage: typeof raw.stage === 'string' ? raw.stage : '',
+    risk: typeof raw.risk === 'string' ? raw.risk : undefined,
+    effort: typeof raw.effort === 'string' ? raw.effort : undefined,
+    sortIndex: typeof raw.sortIndex === 'number' && Number.isFinite(raw.sortIndex) ? raw.sortIndex : undefined,
+    priority: typeof raw.priority === 'string' ? raw.priority : undefined,
+  };
+}
+
+// ── Dependency frontier resolution (WL-0MT3FM8VA005XBHE, F3) ────────
+// Decision Q3: when the selected critical candidate is dependency-blocked,
+// the downtime worker follows the blocking chain to the nearest OPEN
+// blocker and dispatches IT with the blocker's own stage-appropriate
+// skill (the dependency frontier). Recursion walks while blockers are
+// themselves dependency-blocked; a chain that bottoms in closed or
+// non-dispatchable items yields null and the critical tier falls through
+// to the normal tier order.
+
+/**
+ * Resolve the dependency frontier for a selected critical candidate
+ * (decision Q3). When the candidate is dependency-blocked, follow the
+ * blocking chain and return the nearest OPEN, dispatchable blocker — the
+ * item to dispatch with its own stage-appropriate skill (a blocker at
+ * idea → /skill:intake, intake_complete → /skill:plan, plan_complete →
+ * /skill:implement with the implement caps applied to the blocker too,
+ * Q2). Semantics:
+ *
+ * - Not dependency-blocked (no blockers under the candidate) → the
+ *   candidate itself (dispatch it normally — no frontier redirect).
+ * - A direct blocker that is open + dispatchable + within caps and not
+ *   itself dependency-blocked → that blocker (nearest open blocker, in
+ *   sortIndex order among direct blockers).
+ * - A direct blocker that is open but itself dependency-blocked → recurse
+ *   into its chain (the blocking chain is followed to the nearest open
+ *   unblocked ancestor).
+ * - A direct blocker at a non-dispatchable stage (in_progress,
+ *   in_review) or above the implement caps → not itself a frontier target;
+ *   if it has open blockers beneath, the recursion surfaces the deeper
+ *   open ancestor, otherwise the chain bottoms.
+ * - Chain bottoms in closed / non-dispatchable items, or a cycle (bounded
+ *   recursion) → null: no dispatch from the critical tier, fall through to
+ *   the normal tier order.
+ * - The injected `fetchBlockers` resolves the blocker edges for an item
+ *   (`wl dep list` outbound depends-on edges) and returns null on a wl
+ *   failure — fail-closed: resolution yields null (no dispatch) rather
+ *   than a silent wrong target.
+ *
+ * @param candidate The selected open critical candidate.
+ * @param fetchBlockers Resolves the blockers of an item id (null = wl
+ *   failure).
+ * @param opts.maxDepth Upper bound on recursion depth (cycle guard).
+ * @returns The frontier dispatch target, or null when the chain bottoms /
+ *   cycles / the blocker lookup fails (fall through to normal tiers).
+ */
+export async function resolveDependencyFrontier(
+  candidate: CriticalCandidate,
+  fetchBlockers: (itemId: string) => Promise<CriticalCandidate[] | null>,
+  opts: { maxDepth?: number } = {},
+): Promise<CriticalCandidate | null> {
+  const maxDepth = opts.maxDepth ?? 8;
+  const visited = new Set<string>();
+
+  /** Caps guard shared with selectCriticalCandidate (Q2 applies to blockers). */
+  const dispatchable = (c: CriticalCandidate): boolean =>
+    c.status === 'open' &&
+    criticalSkillKind(c.stage) !== null &&
+    (c.stage !== 'plan_complete' ||
+      ((riskOrdinal(c.risk) ?? 9) <= 2 && (effortOrdinal(c.effort) ?? 9) <= 3));
+
+  // Recursive walk: returns the nearest OPEN dispatchable blocker in the
+  // chain beneath `item` (or the item itself when it is unblocked and
+  // dispatchable). OPEN dispatchable blockers are tried first (nearest by
+  // sortIndex); when an open blocker is itself dependency-blocked, its own
+  // chain is walked before accepting it (an open blocker with open
+  // descendants must not shadow a deeper unblocked ancestor). Non-
+  // dispatchable blockers (in_progress / in_review / closed / capped) are
+  // never dispatched themselves but their open descendants are still
+  // surfaced by recursing through them. Cycles bottom the walk via
+  // `visited` (bounded recursion, decision Q3).
+  async function walk(item: CriticalCandidate, depth: number): Promise<CriticalCandidate | null> {
+    if (visited.has(item.id) || depth > maxDepth) return null; // cycle / bound
+    visited.add(item.id);
+    const blockers = await fetchBlockers(item.id);
+    if (blockers === null) return null; // wl failure → fail-closed
+    if (blockers.length === 0) {
+      // Not dependency-blocked: this item IS the frontier target, but only
+      // when it is itself a dispatchable open item (a closed / in_progress
+      // / in_review / capped leaf is never dispatched).
+      return dispatchable(item) ? item : null;
+    }
+    const sorted = [...blockers].sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
+    // 1) Nearest OPEN dispatchable blocker (recursing into its own chain
+    //    when it is dependency-blocked).
+    for (const blocker of sorted) {
+      if (!dispatchable(blocker)) continue;
+      const deeper = await walk(blocker, depth + 1);
+      if (deeper !== null) return deeper;
+    }
+    // 2) No open blocker yielded a frontier — recurse through the non-
+    //    dispatchable blockers (they may have open ancestors beneath).
+    for (const blocker of sorted) {
+      if (dispatchable(blocker)) continue;
+      const deeper = await walk(blocker, depth + 1);
+      if (deeper !== null) return deeper;
+    }
+    // Chain bottoms in closed / non-dispatchable / capped items → fall
+    // through to the normal tier order.
+    return null;
+  }
+
+  const blockers = await fetchBlockers(candidate.id);
+  if (blockers === null) return null; // wl failure → fail-closed
+  if (blockers.length === 0) return candidate; // not dependency-blocked
+  return walk(candidate, 0);
+}
+
 // ── Settings clamps (implemented — wired into settings.ts by F2) ──────
 
 /**
