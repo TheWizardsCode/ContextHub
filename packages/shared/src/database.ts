@@ -3295,6 +3295,20 @@ export class WorklogDatabase {
   }
 
   /**
+   * Upsert comments non-destructively (incremental-sync delta pull,
+   * WL-0MT2KYCNB000CYWV). Unlike {@link importComments} this does NOT clear
+   * existing comments first: each provided comment is saved via the store's
+   * INSERT OR REPLACE so local comments absent from the incoming delta are
+   * preserved, while overlapping ids converge to the merged value.
+   */
+  upsertComments(comments: Comment[]): void {
+    for (const comment of comments) {
+      this.store.saveComment(comment);
+    }
+    this.triggerAutoSync();
+  }
+
+  /**
    * Import comments
    */
   importComments(comments: Comment[]): void {

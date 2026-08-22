@@ -97,6 +97,15 @@ export async function performSync(
   let remoteComments: Comment[] = [];
   let remoteEdges: DependencyEdge[] = [];
 
+  // Incremental-sync pull header detection (WL-0MT2KYCNB000CYWV, §6.1): the
+  // remote JSONL's first line may carry the sync header describing whether
+  // the file is a FULL snapshot or a DELTA (records changed since the last
+  // export). Legacy files are headerless and mean full. This decides how the
+  // pulled records are persisted (§6.1/AC3): full → replace local state with
+  // the merged set (existing behavior); delta → merge onto the local base
+  // non-destructively so local records absent from the delta are kept (AC2).
+  let remoteSyncKind: 'full' | 'delta' | undefined;
+
   const localAudits = db.getAllAuditResults();
 
   const remoteContentResult = await getRemoteDataFileContentWithRef(options.file, gitTarget);
@@ -118,6 +127,7 @@ export async function performSync(
   let remoteAudits: any[] = [];
   if (remoteContent) {
     const remoteData = importFromJsonlContent(remoteContent);
+    remoteSyncKind = remoteData.kind;
     // Cross-project prefix filter (SA-0MSC0BM1V0032UYT): never import work
     // items whose ID prefix does not match the project prefix, and drop their
     // comments/edges/audits too. Defense-in-depth behind the repo-context
@@ -247,11 +257,23 @@ export async function performSync(
   if (autoSyncEnabled) {
     db.setAutoSync(false);
   }
-  // SAFETY: db.import() is destructive (clears all items before inserting).
-  // This is safe here because itemMergeResult.merged is the complete merged
-  // set of local + remote items — no data is lost.
-  db.import(itemMergeResult.merged, edgeMergeResult.merged, auditMergeResult.merged);
-  db.importComments(commentMergeResult.merged);
+  // Persist the merged pull result. Delta remotes are merged onto the local
+  // base non-destructively (upsert by ID — local records absent from the
+  // delta are untouched, AC2/AC5); full snapshots (and legacy headerless
+  // files) replace local state with the merged set, the existing behavior
+  // (AC3/AC6).
+  if (isVerbose && !isSilent) {
+    console.log(`Remote sync kind: ${remoteSyncKind ?? 'full (legacy headerless)'}`);
+  }
+  logLine(`Remote sync kind: ${remoteSyncKind ?? 'full (legacy headerless)'}`);
+  if (remoteSyncKind === 'delta') {
+    db.upsertItems(itemMergeResult.merged, edgeMergeResult.merged);
+    db.upsertComments(commentMergeResult.merged);
+    db.importAuditResults(auditMergeResult.merged);
+  } else {
+    db.import(itemMergeResult.merged, edgeMergeResult.merged, auditMergeResult.merged);
+    db.importComments(commentMergeResult.merged);
+  }
   if (autoSyncEnabled) {
     db.setAutoSync(true, () => Promise.resolve());
   }
