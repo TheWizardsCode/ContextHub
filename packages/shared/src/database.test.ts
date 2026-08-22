@@ -22,7 +22,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { WorklogDatabase } from './database.js';
-import { WorkItem } from './types.js';
+import { WorkItem, Comment } from './types.js';
 
 const FIXED_TS = '2026-01-01T00:00:00.000Z';
 
@@ -326,5 +326,42 @@ describe('update() needsProducerReview flag-only does not bump updatedAt (WL-0MS
     const updated = db.update(seeded.id, { title: 'New title' });
     expect(updated?.title).toBe('New title');
     expect(updated?.updatedAt).not.toBe(FIXED_TS);
+  });
+});
+
+// ── WL-0MT2KYCNB000CYWV: delta pull persists COMMENTS non-destructively ──
+
+describe('upsertComments() non-destructive merge (WL-0MT2KYCNB000CYWV)', () => {
+  function makeComment(id: string, itemId: string, text: string): Comment {
+    return {
+      id,
+      workItemId: itemId,
+      author: 'test@example.com',
+      comment: text,
+      createdAt: FIXED_TS,
+      references: [],
+    };
+  }
+
+  it('keeps local comments absent from the incoming delta and adds new ones', () => {
+    // Comments carry a FOREIGN KEY to a work item — seed both items first.
+    db.import([makeItem({ id: 'WI-0001' }), makeItem({ id: 'WI-0002' })]);
+    const localComment = makeComment('C-1', 'WI-0001', 'local comment');
+    db.importComments([localComment]);
+
+    // A delta arrives containing an overlap (C-1 updated) and a brand-new
+    // comment for a different item—but NOT a comment the local store has.
+    db.upsertComments([
+      { ...localComment, comment: 'local comment updated by remote' },
+      makeComment('C-3', 'WI-0002', 'new remote comment'),
+    ]);
+
+    const all = db.getAllComments();
+    // Non-destructive: C-1 kept (converged to the remote value); C-3 added.
+    expect(all.some(c => c.id === 'C-1' && c.comment === 'local comment updated by remote')).toBe(true);
+    expect(all.some(c => c.id === 'C-3' && c.workItemId === 'WI-0002')).toBe(true);
+    // No duplicates after the overlap upsert (INSERT OR REPLACE by id).
+    expect(all.filter(c => c.id === 'C-1').length).toBe(1);
+    expect(all.some(c => c.id === 'C-2')).toBe(false);
   });
 });

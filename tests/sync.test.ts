@@ -1244,6 +1244,92 @@ describe('Sync Operations', () => {
     });
   });
 
+  // ── WL-0MT2KYCNB000CYWV: delta pull merge semantics (AC7) ──
+  // A delta remote contains only *changed* records. The by-ID merge seeds
+  // from the local base, so merging a delta must produce the full local base
+  // ∪ changed records — no missing records, no duplicates.
+  describe('delta merge logic (WL-0MT2KYCNB000CYWV)', () => {
+    const dItem = (id: string, overrides: Partial<WorkItem> = {}): WorkItem => ({
+      id,
+      title: `Item ${id}`,
+      description: '',
+      status: 'open',
+      priority: 'medium',
+      sortIndex: 0,
+      parentId: null,
+      createdAt: '2024-01-01T00:00:00.000Z',
+      updatedAt: '2024-01-02T00:00:00.000Z',
+      tags: [],
+      assignee: '',
+      stage: 'idea',
+      issueType: '',
+      createdBy: '',
+      deletedBy: '',
+      deleteReason: '',
+      risk: '' as const,
+      effort: '' as const,
+      ...overrides,
+    });
+
+    it('merges a delta onto the local base: base records not in the delta survive', () => {
+      const localBase = [
+        dItem('WI-B1'),
+        dItem('WI-B2', { updatedAt: '2024-02-01T00:00:00.000Z' }),
+        dItem('WI-B3', { updatedAt: '2024-03-01T00:00:00.000Z' }),
+      ];
+      // Delta: ONE record only (a brand-new item) — the other two local base
+      // records are absent from the delta.
+      const delta = [dItem('WI-D1', { updatedAt: '2024-04-01T00:00:00.000Z' })];
+
+      const result = mergeWorkItems(localBase, delta);
+
+      expect(result.merged).toHaveLength(4);
+      const ids = result.merged.map(i => i.id);
+      // No missing records: every local base id survives.
+      expect(ids).toContain('WI-B1');
+      expect(ids).toContain('WI-B2');
+      expect(ids).toContain('WI-B3');
+      // Delta record added.
+      expect(ids).toContain('WI-D1');
+      // No duplicates.
+      expect(new Set(ids).size).toBe(4);
+    });
+
+    it('applies an updated record from the delta when the delta copy is newer', () => {
+      const localBase = [dItem('WI-B1', { status: 'open', updatedAt: '2024-01-02T00:00:00.000Z' })];
+      const delta = [dItem('WI-B1', { status: 'completed', updatedAt: '2024-05-01T00:00:00.000Z' })];
+
+      const result = mergeWorkItems(localBase, delta);
+
+      expect(result.merged).toHaveLength(1);
+      expect(result.merged[0].id).toBe('WI-B1');
+      expect(result.merged[0].status).toBe('completed');
+    });
+
+    it('keeps the local base value when the delta record is a stale duplicate (local newer)', () => {
+      const localBase = [dItem('WI-B1', { status: 'completed', updatedAt: '2024-05-01T00:00:00.000Z' })];
+      const delta = [dItem('WI-B1', { status: 'open', updatedAt: '2024-01-02T00:00:00.000Z' })];
+
+      const result = mergeWorkItems(localBase, delta);
+
+      expect(result.merged).toHaveLength(1);
+      expect(result.merged[0].status).toBe('completed');
+    });
+
+    it('a full-snapshot remote (same by-ID merge) also never drops base records', () => {
+      const localBase = [dItem('WI-B1'), dItem('WI-B2')];
+      // Full snapshot arrives missing WI-B2 (e.g. authored before it existed).
+      const snapshot = [dItem('WI-B1', { updatedAt: '2024-06-01T00:00:00.000Z' })];
+
+      const result = mergeWorkItems(localBase, snapshot);
+
+      const ids = result.merged.map(i => i.id);
+      expect(ids).toContain('WI-B1');
+      expect(ids).toContain('WI-B2');
+      expect(new Set(ids).size).toBe(2);
+    });
+  });
+
   describe('merge utils', () => {
     it('treats empty values as defaults unless configured otherwise', () => {
       expect(isDefaultValue('', 'title')).toBe(true);
