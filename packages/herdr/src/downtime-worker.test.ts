@@ -28,6 +28,19 @@
  * global-busy resets all slot timers; all-slots-free fallback without
  * per-slot data). Red phase: these fail until the implementation lands
  * (WL-0MSP28LSY007NDYX).
+ *
+ * Critical-first tier tests (WL-0MT3I9QJU002S34W, parent
+ * WL-0MT3FM8VA005XBHE): test-first matrix for the critical-first pre-tier —
+ * an open critical item at ANY stage (idea/intake_complete/plan_complete)
+ * wins over every non-critical candidate. Pins the F2/F3/F4 contract:
+ * parseCriticalCandidatesOutput / selectCriticalCandidate / criticalSkillKind
+ * (critical lookup & selection), resolveDependencyFrontier (dependency
+ * frontier, Q3), the getNextCriticalCandidate dep, and the tier order
+ * (scheduled-prompts → audit → critical → implement → plan → intake) with
+ * freeze split-by-skill (Q1) and cap retention (Q2). Red phase: the new
+ * exports do not exist yet — the new tests fail and the existing suite
+ * stays green (zero regression) until the implementation slices land
+ * (WL-0MT3I9UVU004722X, WL-0MT3I9YNZ007IC5V, WL-0MT3IA1UB005TLVJ).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -51,6 +64,10 @@ import {
   parseImplementCandidatesOutput,
   selectImplementCandidate,
   selectNextCandidate,
+  parseCriticalCandidatesOutput,
+  selectCriticalCandidate,
+  criticalSkillKind,
+  resolveDependencyFrontier,
   parseAuditCandidatesOutput,
   selectAuditCandidate,
   selectWithRotation,
@@ -109,6 +126,12 @@ function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     // default, so existing tier tests exercise the unchanged backlog tiers.
     getDueScheduledPrompt: vi.fn().mockResolvedValue(null),
     recordScheduledPromptTrigger: vi.fn().mockResolvedValue(true),
+    // Critical-first tier (WL-0MT3FM8VA005XBHE): no critical candidate by
+    // default, so the existing tier tests exercise the unchanged backlog
+    // tiers (regression guard — after F4 the critical tier must fall
+    // through to implement → plan → intake when the critical tier is
+    // genuinely empty).
+    getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): not frozen by default, so
     // existing dispatch tests exercise the unchanged audit/implement tiers.
     readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
@@ -3725,5 +3748,619 @@ describe('worker probe jitter (jitterPollIntervalMs)', () => {
     expect(w1.jitterPollIntervalMs(DEFAULT_DOWNTIME_POLL_INTERVAL_MS)).toBe(6_000);
     expect(w2.jitterPollIntervalMs(DEFAULT_DOWNTIME_POLL_INTERVAL_MS)).toBe(14_000);
     expect(w1.jitterPollIntervalMs(DEFAULT_DOWNTIME_POLL_INTERVAL_MS)).not.toBe(w2.jitterPollIntervalMs(DEFAULT_DOWNTIME_POLL_INTERVAL_MS));
+  });
+});
+
+// ── Critical-first tier (parent WL-0MT3FM8VA005XBHE) ────────────────────
+// Test-first matrix for the critical-first pre-tier: an open critical item
+// at ANY stage (idea / intake_complete / plan_complete) is dispatched with
+// its stage-appropriate skill ahead of every non-critical candidate. The
+// F2/F3/F4 contract being pinned here (parseCriticalCandidatesOutput,
+// selectCriticalCandidate, criticalSkillKind, resolveDependencyFrontier,
+// the getNextCriticalCandidate dep, and the tier order) is RED until the
+// implementation slices land (WL-0MT3I9UVU004722X, WL-0MT3I9YNZ007IC5V,
+// WL-0MT3IA1UB005TLVJ) — the tests reference exports that do not exist yet
+// and fail as a unit (the rest of this file stays green).
+
+// ── Candidate shapes reused across the critical matrix ──────────────
+
+/** Open critical worklog item at a dispatchable stage. */
+function criticalIdea(
+  id = 'WL-CRIT-I',
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id,
+    title: `Critical idea ${id}`,
+    status: 'open',
+    stage: 'idea',
+    priority: 'critical',
+    sortIndex: 100,
+    risk: 'low',
+    effort: 'small',
+    ...overrides,
+  };
+}
+
+/** Open critical worklog item at intake_complete (plan-ready). */
+function criticalReady(
+  id = 'WL-CRIT-R',
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id,
+    title: `Critical ready ${id}`,
+    status: 'open',
+    stage: 'intake_complete',
+    priority: 'critical',
+    sortIndex: 100,
+    risk: 'low',
+    effort: 'small',
+    ...overrides,
+  };
+}
+
+/** Open critical worklog item at plan_complete (implement-ready). */
+function criticalPlanned(
+  id = 'WL-CRIT-P',
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id,
+    title: `Critical planned ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    priority: 'critical',
+    sortIndex: 100,
+    risk: 'medium',
+    effort: 'medium',
+    ...overrides,
+  };
+}
+
+// ── Critical-first: selection helpers (F2) ───────────────────────────
+
+describe('critical selection (selectCriticalCandidate)', () => {
+  it('selects a critical idea candidate (stage-appropriate intake)', () => {
+    const selected = selectCriticalCandidate([criticalIdea()] as never);
+    expect(selected?.id).toBe('WL-CRIT-I');
+    expect(selected?.stage).toBe('idea');
+    expect(criticalSkillKind(selected?.stage ?? '')).toBe('intake');
+  });
+
+  it('selects a critical intake_complete candidate (stage-appropriate plan)', () => {
+    const selected = selectCriticalCandidate([criticalReady()] as never);
+    expect(selected?.id).toBe('WL-CRIT-R');
+    expect(selected?.stage).toBe('intake_complete');
+    expect(criticalSkillKind(selected?.stage ?? '')).toBe('plan');
+  });
+
+  it('selects a critical plan_complete candidate within caps (stage-appropriate implement)', () => {
+    const selected = selectCriticalCandidate([criticalPlanned()] as never);
+    expect(selected?.id).toBe('WL-CRIT-P');
+    expect(selected?.stage).toBe('plan_complete');
+    expect(criticalSkillKind(selected?.stage ?? '')).toBe('implement');
+  });
+
+  it('stage→skill mapping is exact: idea→intake, intake_complete→plan, plan_complete→implement', () => {
+    expect(criticalSkillKind('idea')).toBe('intake');
+    expect(criticalSkillKind('intake_complete')).toBe('plan');
+    expect(criticalSkillKind('plan_complete')).toBe('implement');
+  });
+
+  it('non-dispatchable stages map to null (in_progress / in_review are not targets)', () => {
+    expect(criticalSkillKind('in_progress')).toBeNull();
+    expect(criticalSkillKind('in_review')).toBeNull();
+    expect(criticalSkillKind('completed')).toBeNull();
+    expect(criticalSkillKind('')).toBeNull();
+  });
+
+  it('deterministic selection: lowest sortIndex wins across stages (sortIndex priority order)', () => {
+    const candidates = [
+      criticalReady('WL-CRIT-HIGH-IDX', { sortIndex: 900 }),
+      criticalIdea('WL-CRIT-LOW-IDX', { sortIndex: 10 }),
+      criticalPlanned('WL-CRIT-MID', { sortIndex: 500 }),
+    ] as never;
+    expect(selectCriticalCandidate(candidates)?.id).toBe('WL-CRIT-LOW-IDX');
+  });
+
+  it('plan_complete above the risk cap is NOT implement-selected (caps retained, Q2)', () => {
+    const highRisk = criticalPlanned('WL-CRIT-HI-RISK', { risk: 'high' });
+    expect(selectCriticalCandidate([highRisk] as never)).toBeNull();
+  });
+
+  it('plan_complete above the effort cap is NOT implement-selected (caps retained, Q2)', () => {
+    const largeEffort = criticalPlanned('WL-CRIT-HI-EFFORT', { effort: 'large' });
+    expect(selectCriticalCandidate([largeEffort] as never)).toBeNull();
+  });
+
+  it('a capped-out plan_complete critical does not shadow a within-cap critical sibling', () => {
+    const candidates = [
+      criticalPlanned('WL-CRIT-HI-RISK', { risk: 'high', sortIndex: 10 }),
+      criticalReady('WL-CRIT-OK', { sortIndex: 900 }),
+    ] as never;
+    // The capped critical is excluded, so the next critical wins (even with
+    // a higher sortIndex) — caps never multi-starve the critical tier.
+    expect(selectCriticalCandidate(candidates)?.id).toBe('WL-CRIT-OK');
+  });
+
+  it('excludes non-open items (status=open client-side guard)', () => {
+    const inProgress = criticalIdea('WL-CRIT-INPROG', { status: 'in_progress' });
+    expect(selectCriticalCandidate([inProgress] as never)).toBeNull();
+  });
+
+  it('excludes candidates still at their dispatched-at stage (dispatched-marker change-guard)', () => {
+    const dispatched = new Map([['WL-CRIT-I', 'idea']]);
+    const other = criticalReady('WL-CRIT-OTHER');
+    const selected = selectCriticalCandidate(
+      [criticalIdea(), other] as never,
+      dispatched,
+    );
+    // WL-CRIT-I was dispatched for /skill:intake at idea and is still at idea
+    // → excluded; the next critical candidate is selected.
+    expect(selected?.id).toBe('WL-CRIT-OTHER');
+  });
+
+  it('releases a candidate whose stage advanced past its dispatched-at stage', () => {
+    const dispatched = new Map([['WL-CRIT-R', 'intake_complete']]);
+    // Now at plan_complete (a different stage) → not suppressed.
+    const advanced = criticalPlanned('WL-CRIT-R');
+    expect(selectCriticalCandidate([advanced] as never, dispatched)?.id).toBe('WL-CRIT-R');
+  });
+
+  it('round-robins within the critical group when a registry is given (tie-break)', () => {
+    const registry = createRoundRobinRegistry({ worklogDir: '/tmp/rr-critical', rng: () => 0.5 });
+    const candidates = [
+      criticalIdea('WL-CRIT-A', { sortIndex: 1 }),
+      criticalIdea('WL-CRIT-B', { sortIndex: 2 }),
+    ] as never;
+    expect(selectCriticalCandidate(candidates, undefined, registry)?.id).toBe('WL-CRIT-A');
+    expect(selectCriticalCandidate(candidates, undefined, registry)?.id).toBe('WL-CRIT-B');
+    expect(selectCriticalCandidate(candidates, undefined, registry)?.id).toBe('WL-CRIT-A');
+  });
+
+  it('critical rotation does not disturb the non-critical implement tier cursor', () => {
+    const registry = createRoundRobinRegistry({ worklogDir: '/tmp/rr-critical-isolated', rng: () => 0.5 });
+    const criticals = [
+      criticalIdea('WL-CRIT-A', { sortIndex: 1 }),
+      criticalIdea('WL-CRIT-B', { sortIndex: 2 }),
+    ] as never;
+    const implements_: ImplementCandidate[] = [
+      { id: 'WL-IMP-A', title: 'A', status: 'open', priority: 'high', sortIndex: 1, risk: 'low', effort: 'small' },
+      { id: 'WL-IMP-B', title: 'B', status: 'open', priority: 'high', sortIndex: 2, risk: 'low', effort: 'small' },
+    ];
+    // Rotate the critical group twice…
+    selectCriticalCandidate(criticals, undefined, registry);
+    selectCriticalCandidate(criticals, undefined, registry);
+    // …the implement tier's own cursor is untouched: still starts at A.
+    expect(selectImplementCandidate(implements_, undefined, registry)?.id).toBe('WL-IMP-A');
+  });
+
+  it('returns null on an empty list', () => {
+    expect(selectCriticalCandidate([] as never)).toBeNull();
+  });
+});
+
+describe('parseCriticalCandidatesOutput', () => {
+  it('parses the wl list batch shape preserving status/stage/risk/effort/sortIndex/priority', () => {
+    const candidates = parseCriticalCandidatesOutput(
+      JSON.stringify({
+        success: true,
+        count: 2,
+        workItems: [
+          criticalIdea('WL-CRIT-I', { sortIndex: 7 }),
+          criticalReady('WL-CRIT-R', { sortIndex: 3 }),
+        ],
+      }),
+    );
+    expect(candidates).toEqual([
+      expect.objectContaining({ id: 'WL-CRIT-I', stage: 'idea', sortIndex: 7, priority: 'critical' }),
+      expect.objectContaining({ id: 'WL-CRIT-R', stage: 'intake_complete', sortIndex: 3, priority: 'critical' }),
+    ]);
+  });
+
+  it('malformed JSON yields null (fail-closed)', () => {
+    expect(parseCriticalCandidatesOutput('not json')).toBeNull();
+  });
+
+  it('entries without an id are skipped; empty workItems yields []', () => {
+    const candidates = parseCriticalCandidatesOutput(
+      JSON.stringify({
+        success: true,
+        count: 0,
+        workItems: [{ title: 'no id', stage: 'idea' }],
+      }),
+    );
+    expect(candidates).toEqual([]);
+  });
+});
+
+// ── Critical-first: dependency frontier (F3, decision Q3) ────────────
+
+describe('resolveDependencyFrontier', () => {
+  it('an unblocked critical candidate resolves to itself (no frontier redirect)', async () => {
+    const candidate = criticalIdea('WL-CRIT-C');
+    const result = await resolveDependencyFrontier(
+      candidate as never,
+      async () => [],
+    );
+    expect(result?.id).toBe('WL-CRIT-C');
+  });
+
+  it('dispatches the nearest OPEN blocker when the critical candidate is dependency-blocked', async () => {
+    const blocker = criticalReady('WL-BLOCK');
+    const candidate = criticalIdea('WL-CRIT-C');
+    const result = await resolveDependencyFrontier(
+      candidate as never,
+      async (id) => (id === 'WL-CRIT-C' ? [blocker] : []),
+    );
+    expect(result?.id).toBe('WL-BLOCK');
+    expect(result?.stage).toBe('intake_complete');
+  });
+
+  it('recurses through dependency-blocked blockers to the nearest open ancestor', async () => {
+    const ancestor = criticalPlanned('WL-ANCESTOR');
+    const midBlocker = criticalReady('WL-MID', { status: 'in_progress' });
+    const candidate = criticalIdea('WL-CRIT-C');
+    const result = await resolveDependencyFrontier(
+      candidate as never,
+      async (id) => {
+        if (id === 'WL-CRIT-C') return [midBlocker];
+        if (id === 'WL-MID') return [ancestor];
+        return [];
+      },
+    );
+    expect(result?.id).toBe('WL-ANCESTOR');
+  });
+
+  it('a chain bottoming in a closed blocker resolves to null (fall through to tiers)', async () => {
+    const closed = criticalIdea('WL-CLOSED', { status: 'completed' });
+    const candidate = criticalIdea('WL-CRIT-C');
+    const result = await resolveDependencyFrontier(
+      candidate as never,
+      async (id) => (id === 'WL-CRIT-C' ? [closed] : []),
+    );
+    expect(result).toBeNull();
+  });
+
+  it('an in_progress/in_review frontier blocker resolves to null (non-dispatchable stage)', async () => {
+    const busy = criticalReady('WL-BUSY', { status: 'in_progress' });
+    const candidate = criticalIdea('WL-CRIT-C');
+    const result = await resolveDependencyFrontier(
+      candidate as never,
+      async (id) => (id === 'WL-CRIT-C' ? [busy] : []),
+    );
+    expect(result).toBeNull();
+  });
+
+  it('tolerates cycles (bounded recursion, no infinite loop)', async () => {
+    const a = criticalIdea('WL-A');
+    const b = criticalReady('WL-B');
+    const candidate = criticalIdea('WL-CRIT-C');
+    const result = await resolveDependencyFrontier(
+      candidate as never,
+      async (id) => {
+        if (id === 'WL-CRIT-C') return [a];
+        if (id === 'WL-A') return [b];
+        if (id === 'WL-B') return [a]; // cycle: A ↔ B
+        return [];
+      },
+    );
+    // Resolves without hanging; a cycle has no nearest open unblocked
+    // ancestor, so the frontier yields null (fall through).
+    expect(result).toBeNull();
+  });
+
+  it('a blocker above the implement caps is not a valid frontier (caps apply to blockers, Q2)', async () => {
+    const capped = criticalPlanned('WL-CAPPED', { risk: 'high' });
+    const candidate = criticalIdea('WL-CRIT-C');
+    const result = await resolveDependencyFrontier(
+      candidate as never,
+      async (id) => (id === 'WL-CRIT-C' ? [capped] : []),
+    );
+    expect(result).toBeNull();
+  });
+});
+
+// ── Critical-first: tier wiring (F4, decisions Q1/Q2/Q3) ─────────────
+
+describe('dispatch critical-first tier', () => {
+  it('dispatches a critical idea candidate with /skill:intake ahead of ANY non-critical candidate', async () => {
+    const deps = makeDeps({
+      // Non-critical implement candidate exists and is the old winner —
+      // the critical tier must win regardless.
+      getNextImplementCandidate: vi.fn().mockResolvedValue({
+        id: 'WL-IMP',
+        title: 'Non-critical implement',
+        stage: 'implement',
+      } as DowntimeCandidate),
+      getNextCriticalCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: criticalIdea('WL-CRIT-I'),
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('intake');
+    expect(outcome.candidate?.id).toBe('WL-CRIT-I');
+    expect(deps.getNextCriticalCandidate).toHaveBeenCalledWith('/repo');
+    expect(deps.getNextImplementCandidate).not.toHaveBeenCalled();
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-I', { status: 'open', stage: 'idea' });
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:intake WL-CRIT-I'),
+      { model: 'plan', cwd: '/repo' },
+    );
+  });
+
+  it('dispatches a critical intake_complete candidate with /skill:plan ahead of the implement tier', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue({
+        id: 'WL-IMP',
+        title: 'Non-critical implement',
+        stage: 'implement',
+      } as DowntimeCandidate),
+      getNextCriticalCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: criticalReady('WL-CRIT-R'),
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(outcome.candidate?.id).toBe('WL-CRIT-R');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-R', { status: 'open', stage: 'intake_complete' });
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-CRIT-R'),
+      expect.anything(),
+    );
+  });
+
+  it('dispatches a critical plan_complete candidate within caps with /skill:implement first', async () => {
+    const deps = makeDeps({
+      getNextCriticalCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: criticalPlanned('WL-CRIT-P'),
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.candidate?.id).toBe('WL-CRIT-P');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-P', { status: 'open', stage: 'plan_complete' });
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:implement WL-CRIT-P'),
+      expect.anything(),
+    );
+  });
+
+  it('critical-first tier runs AFTER the audit tier (audit keeps its slot)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-AUD', title: 'Audit me', stage: 'audit' },
+      }),
+      getNextCriticalCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: criticalIdea('WL-CRIT-I'),
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.kind).toBe('audit');
+    expect(deps.getNextCriticalCandidate).not.toHaveBeenCalled();
+  });
+
+  it('scheduled-prompts tier still runs FIRST (ahead of the critical tier)', async () => {
+    const deps = makeDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue({
+        id: 'refactor',
+        prompt: '/skill:refactor',
+        intervalDays: 3,
+        lastTriggeredAt: null,
+      } as ScheduledPrompt),
+      getNextCriticalCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: criticalIdea('WL-CRIT-I'),
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.kind).toBe('scheduled');
+    expect(deps.getNextCriticalCandidate).not.toHaveBeenCalled();
+  });
+
+  it('empty critical tier falls through to the non-critical tiers unchanged (regression)', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue({
+        id: 'WL-IMP',
+        title: 'Implement me',
+        stage: 'implement',
+      } as DowntimeCandidate),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.kind).toBe('implement');
+    expect(deps.getNextCriticalCandidate).toHaveBeenCalledTimes(1);
+    expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
+  });
+
+  it('a critical-tier wl failure fails closed to wl-error (never a silent fall-through)', async () => {
+    const deps = makeDeps({
+      getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: false }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('wl-error');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('during a code freeze critical implement dispatch PAUSES (fail-closed) while plan/intake tiers still run', async () => {
+    const deps = makeDeps({
+      readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+      getNextCriticalCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: criticalPlanned('WL-CRIT-P'), // implement-ready, but frozen
+      }),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-PLAN', title: 'Prep task', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // Frozen → the critical tier is still consulted (a critical plan/intake
+    // candidate could still dispatch, Q1), but the implement-ready critical
+    // is NOT dispatched (no new code lands mid-release); the non-critical
+    // plan/intake tiers still dispatch.
+    expect(deps.getNextCriticalCandidate).toHaveBeenCalledTimes(1);
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(outcome.candidate?.id).toBe('WL-PLAN');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-PLAN'),
+      expect.anything(),
+    );
+    expect(deps.claimItem).not.toHaveBeenCalledWith('WL-CRIT-P', expect.anything());
+  });
+
+  it('freeze split-by-skill: critical plan/intake dispatch CONTINUES while frozen (Q1)', async () => {
+    const deps = makeDeps({
+      readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+      getNextCriticalCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: criticalReady('WL-CRIT-R'), // plan-ready
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-R', { status: 'open', stage: 'intake_complete' });
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-CRIT-R'),
+      expect.anything(),
+    );
+  });
+
+  it('ambiguous marker is treated as frozen (fail-closed): critical implement pauses, plan/intake continue', async () => {
+    const deps = makeDeps({
+      readCodeFreezeStatus: vi.fn().mockReturnValue('ambiguous'),
+      getNextCriticalCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: criticalPlanned('WL-CRIT-P'),
+      }),
+      getNextItem: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, candidate: null }) // intake_complete empty
+        .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-IDEA', title: 'An idea', stage: 'idea' } }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // Frozen: the critical implement candidate is skipped (fail-closed on
+    // the ambiguous marker); the intake tier still dispatches.
+    expect(outcome.kind).toBe('intake');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:intake WL-IDEA'),
+      expect.anything(),
+    );
+    expect(deps.claimItem).not.toHaveBeenCalledWith('WL-CRIT-P', expect.anything());
+  });
+
+  it('no double-dispatch: claim CAS applies to the critical tier (stale claim aborts)', async () => {
+    const deps = makeDeps({
+      getNextCriticalCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: criticalIdea('WL-CRIT-I'),
+      }),
+      claimItem: vi.fn().mockResolvedValue({ ok: false, reason: 'stale' }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('claim-failed');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('dependency-blocked critical candidate dispatches its frontier blocker with the blocker stage-appropriate skill (Q3)', async () => {
+    // The dep returns the frontier-resolved blocker (like getNextItem does):
+    // the critical item is dependency-blocked, so the selected candidate IS
+    // the nearest open blocker, carrying ITS stage.
+    const deps = makeDeps({
+      getNextCriticalCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: criticalReady('WL-BLOCKER', { title: 'Blocking work item' }),
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(outcome.candidate?.id).toBe('WL-BLOCKER');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-BLOCKER', { status: 'open', stage: 'intake_complete' });
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-BLOCKER'),
+      expect.anything(),
+    );
+  });
+
+  it('records the critical dispatch with the skill-mapped kind (rolling log + change-guard consistency)', async () => {
+    const deps = makeDeps({
+      getNextCriticalCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: criticalIdea('WL-CRIT-I'),
+      }),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    const event = (deps.recordDispatch as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(event.itemId).toBe('WL-CRIT-I');
+    expect(event.kind).toBe('intake');
+    expect(event.stage).toBe('idea');
+    expect(event.cwd).toBe('/repo');
+  });
+
+  it('single-flight: a concurrent dispatch refuses the critical tier (dispatch-in-flight)', async () => {
+    // Gate the pane spawn so the first dispatch is verifiably in flight
+    // when the second call arrives (same pattern as the existing
+    // single-flight guard test, using the critical-tier candidate).
+    let release!: () => void;
+    const gate = new Promise<{ ok: true }>((resolve) => {
+      release = () => resolve({ ok: true });
+    });
+    const deps = makeDeps({
+      getNextCriticalCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: criticalIdea('WL-CRIT-I'),
+      }),
+      spawnAgentPane: vi.fn().mockImplementation(() => gate),
+    });
+
+    const first = dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+    const second = dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+    release();
+    const [firstOutcome, secondOutcome] = await Promise.all([first, second]);
+
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    expect(firstOutcome.dispatched).toBe(true);
+    expect(firstOutcome.kind).toBe('intake');
+    expect(secondOutcome.dispatched).toBe(false);
+    expect(secondOutcome.reason).toBe('dispatch-in-flight');
   });
 });
