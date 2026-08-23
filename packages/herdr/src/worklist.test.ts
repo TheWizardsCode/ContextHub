@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import {
   WorkItemListState,
   getTermSize,
@@ -2955,6 +2955,152 @@ describe('renderDowntimeStatus', () => {
     expect(output).toContain('Work Items');
     expect(output).toContain('[⏳ downtime idle 0:05]');
     expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+  });
+
+  // Header honesty (WL-0MT5SFX1S002YUYZ / WL-0MT5SG0VU005ARUR): the rendered
+  // state must ALWAYS agree with the worker's effective dispatch gate, and a
+  // worker restored from the persisted disable marker must be visible.
+  it.each([
+    [
+      'disabled (override=false, global enabled)',
+      { idleSince: Date.now() - 60_000, dispatching: false, enabled: false, restoredFromMarker: false },
+      'Downtime Off',
+    ],
+    [
+      'disabled (restored from marker)',
+      { idleSince: Date.now() - 60_000, dispatching: false, enabled: false, restoredFromMarker: true },
+      'Downtime Off (restored)',
+    ],
+    [
+      'enabled + idle',
+      { idleSince: Date.now() - 60_000, dispatching: false, enabled: true, restoredFromMarker: false },
+      'downtime idle',
+    ],
+    [
+      'enabled + paused',
+      { idleSince: null, dispatching: false, enabled: true, paused: true, restoredFromMarker: false },
+      'downtime paused',
+    ],
+    [
+      'dispatching',
+      { idleSince: Date.now() - 60_000, dispatching: true, enabled: true, restoredFromMarker: false },
+      'downtime dispatching',
+    ],
+    [
+      'enabled + busy',
+      { idleSince: null, dispatching: false, enabled: true, restoredFromMarker: false },
+      'downtime busy',
+    ],
+  ])('renders %s agreeing with the effective gate (never lies, AC1)', (_label, worker, expected) => {
+    const status = renderDowntimeStatus(worker as unknown as DowntimeWorker);
+    expect(status).toContain(expected);
+    // A pane whose dispatch gate is disabled must NEVER render the
+    // enabled-idle string (AC1):
+    if ((worker as { enabled: boolean }).enabled === false) {
+      expect(status).not.toContain('downtime idle');
+    }
+  });
+
+  it('disabled override renders [Downtime Off] regardless of global settings (AC2)', () => {
+    const worker = {
+      idleSince: Date.now() - 5_000,
+      dispatching: false,
+      enabled: false, // override=false ⇒ effective off even with global on
+      restoredFromMarker: false,
+    } as unknown as DowntimeWorker;
+    const status = renderDowntimeStatus(worker);
+    expect(status).toContain('Downtime Off');
+    expect(status).not.toContain('downtime idle');
+    expect(status).not.toContain('restored');
+  });
+
+  it('restored-from-marker worker renders an explicit notice (AC4)', () => {
+    const worker = {
+      idleSince: null,
+      dispatching: false,
+      enabled: false, // restored from .herdr-downtime-disabled
+      restoredFromMarker: true,
+    } as unknown as DowntimeWorker;
+    expect(renderDowntimeStatus(worker)).toContain('Downtime Off (restored)');
+  });
+
+  it('after re-enable the restored notice is gone (AC5)', () => {
+    const worker = {
+      idleSince: null,
+      dispatching: false,
+      enabled: true, // override null + no marker ⇒ follows settings
+      restoredFromMarker: false,
+    } as unknown as DowntimeWorker;
+    const status = renderDowntimeStatus(worker);
+    expect(status).toContain('downtime busy');
+    expect(status).not.toContain('restored');
+  });
+
+  it('a real worker restored from the marker exposes restoredFromMarker and renders the notice (AC4, integration)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-hdr-'));
+    const cwd = join(root, 'wlroot');
+    mkdirSync(cwd, { recursive: true });
+    try {
+      // Marker present ⇒ construction restores override=false + flag.
+      writeFileSync(join(cwd, '.herdr-downtime-disabled'), '', 'utf8');
+      const worker = createDowntimeWorker({
+        poller: createDowntimePoller('http://proxy:8000'),
+        deps: {} as never,
+        config: () => ({
+          enabled: true,
+          thresholdMs: 240_000,
+          requiredFreeSlots: 0,
+          model: 'plan',
+          cwd,
+          noCandidateCooldownMs: 3_600_000,
+        }),
+      });
+      expect(worker.override).toBe(false);
+      expect(worker.restoredFromMarker).toBe(true);
+      expect(renderDowntimeStatus(worker)).toContain('Downtime Off (restored)');
+
+      // Explicit re-enable (second press) clears the flag, removes the
+      // marker, and the notice disappears (AC3/AC5).
+      worker.toggle(); // → null
+      expect(worker.override).toBe(null);
+      expect(worker.restoredFromMarker).toBe(false);
+      expect(existsSync(join(cwd, '.herdr-downtime-disabled'))).toBe(false);
+      const status = renderDowntimeStatus(worker);
+      expect(status).not.toContain('restored');
+      expect(status).toContain('downtime busy');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a live d-press disable is NOT flagged as restored (AC4)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-hdr-'));
+    const cwd = join(root, 'wlroot');
+    mkdirSync(cwd, { recursive: true });
+    try {
+      const worker = createDowntimeWorker({
+        poller: createDowntimePoller('http://proxy:8000'),
+        deps: {} as never,
+        config: () => ({
+          enabled: true,
+          thresholdMs: 240_000,
+          requiredFreeSlots: 0,
+          model: 'plan',
+          cwd,
+          noCandidateCooldownMs: 3_600_000,
+        }),
+      });
+      expect(worker.restoredFromMarker).toBe(false);
+      worker.toggle(); // live disable (marker written, but NOT 'restored')
+      expect(worker.override).toBe(false);
+      expect(worker.restoredFromMarker).toBe(false);
+      expect(renderDowntimeStatus(worker)).toContain('Downtime Off');
+      expect(renderDowntimeStatus(worker)).not.toContain('restored');
+      // The marker was written so a future restart will restore it.
+      expect(existsSync(join(cwd, '.herdr-downtime-disabled'))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

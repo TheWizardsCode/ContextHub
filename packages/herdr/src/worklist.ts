@@ -2780,6 +2780,13 @@ export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string
     return ` ${ANSI.fg(208)}[⏳ downtime dispatching]${ANSI.reset}`;
   }
   if (!worker.enabled) {
+    // Header honesty (WL-0MT5SG0VU005ARUR): a worker whose disable was
+    // RESTORED from the persisted marker (.herdr-downtime-disabled) shows an
+    // explicit notice so the restored-disabled state is never silent — the
+    // operator always sees why this pane is off even after a restart.
+    if (worker.restoredFromMarker) {
+      return ` ${ANSI.dim}[Downtime Off (restored)]${ANSI.reset}`;
+    }
     return ` ${ANSI.dim}[Downtime Off]${ANSI.reset}`;
   }
   if (worker.paused) {

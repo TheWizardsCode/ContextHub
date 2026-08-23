@@ -1752,6 +1752,15 @@ export interface DowntimeWorker {
    */
   readonly override: boolean | null;
   /**
+   * True when the current `override === false` was restored from the
+   * persisted disable marker (`.herdr-downtime-disabled`) at construction
+   * — i.e. the disable survived a pane/plugin restart. False for a live
+   * toggle() press and after any explicit re-enable; lets the header show a
+   * "restored" notice so a restored disable is never silent
+   * (WL-0MT5SG0VU005ARUR).
+   */
+  readonly restoredFromMarker: boolean;
+  /**
    * Flip the per-instance in-memory override: `null` → `false` (disable
    * dispatch for this instance) → `true` (force dispatch on for this
    * instance) → `null` (return to following the global setting), and so on.
@@ -1806,8 +1815,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // exists, the worker starts disabled so a previous `d` press survives a
   // restart. Explicit opts.override wins over the marker (marker is only the
   // fallback when no override is passed).
+  let restoredFromMarker = false;
   if (opts.override === undefined && disableMarkerExists(opts.config().cwd)) {
     override = false;
+    restoredFromMarker = true;
   }
 
   return {
@@ -1830,17 +1841,24 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     get override(): boolean | null {
       return override;
     },
+    get restoredFromMarker(): boolean {
+      return restoredFromMarker;
+    },
     toggle(): void {
       // null → false → null cycle: pressing `d` disables dispatch;
       // pressing again returns to following the global setting.
       // No force-enable: a second press never sets override to true.
       // The per-worklog-root marker (WL-0MT5SFP990001FNW) is written on
       // disable and removed on re-enable so the disable survives restarts.
+      // A live press (or an explicit re-enable) clears the restored flag so
+      // the header notice only reflects the marker-restored state.
       if (override === null) {
         override = false;
+        restoredFromMarker = false;
         writeDisableMarker(opts.config().cwd);
       } else {
         override = null;
+        restoredFromMarker = false;
         removeDisableMarker(opts.config().cwd);
       }
     },
