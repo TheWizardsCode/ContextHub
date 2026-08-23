@@ -1624,11 +1624,15 @@ export class WorklogDatabase {
    * Ordinal rank of a risk level on the canonical scale
    * (Low < Medium < High < Severe/Critical). Both the type-level spelling
    * ('Severe') and the icon-scale spelling ('critical') map to the top
-   * rank. Unset/unknown values map to null (fail-closed: they are never
+   * rank. Agents may produce verbose risk fields like "Medium — NVIDIA
+   * driver changes…"; extract the leading keyword before any delimiter.
+   * Unset/unknown values map to null (fail-closed: they are never
    * matched by an at-most risk filter).
    */
   private riskOrdinal(risk: string | undefined | null): number | null {
-    switch ((risk ?? '').trim().toLowerCase()) {
+    // Extract the leading keyword before any delimiter (—, -, :, whitespace).
+    const normalized = (risk ?? '').trim().toLowerCase().split(/[-:–—\s]+/)[0];
+    switch (normalized) {
       case 'low': return 1;
       case 'medium': return 2;
       case 'high': return 3;
@@ -1643,11 +1647,21 @@ export class WorklogDatabase {
    * (Extra Small < Small < Medium < Large < Extra Large). Accepts both the
    * short CLI spellings (XS/S/M/L/XL) and the long-form effort-and-risk
    * skill spellings (extra small/small/medium/large/extra large),
-   * normalized case-insensitively. Unset/unknown values map to null
-   * (fail-closed: they are never matched by an at-most effort filter).
+   * normalized case-insensitively. Agents may produce verbose effort fields
+   * like "1–4 hours — Small. Diagnostic investigation…"; extract the
+   * keyword via exact match on stripped string first, then fall back to
+   * word-boundary search.
+   * Unset/unknown values map to null (fail-closed: they are never matched
+   * by an at-most effort filter).
    */
   private effortOrdinal(effort: string | undefined | null): number | null {
-    switch ((effort ?? '').trim().toLowerCase().replace(/[\s-]+/g, '')) {
+    const normalized = (effort ?? '').trim().toLowerCase();
+    // Try exact match on stripped version first (simple cases: "small", "medium",
+    // "Extra Small" → "extrasmall"). If that fails, fall back to searching for
+    // the keyword anywhere in the string — agents produce verbose fields like
+    // "1–4 hours — Small. Diagnostic investigation…" (keyword after the dash).
+    const stripped = normalized.replace(/[\s-]+/g, '');
+    switch (stripped) {
       case 'xs':
       case 'extrasmall': return 1;
       case 's':
@@ -1658,7 +1672,17 @@ export class WorklogDatabase {
       case 'large': return 4;
       case 'xl':
       case 'extralarge': return 5;
-      default: return null;
+      default:
+        // Fallback: search for the keyword bounded by non-word characters.
+        // Checked in order of specificity (longest first) so "small" wins over "s".
+        if (/(?:^|\W)extrasmall(?:\W|$)/.test(normalized)) return 1;
+        if (/(?:^|\W)xs(?:\W|$)/.test(normalized)) return 1;
+        if (/(?:^|\W)small(?:\W|$)/.test(normalized)) return 2;
+        if (/(?:^|\W)s(?:\W|$)/.test(normalized)) return 2;
+        if (/(?:^|\W)extralarge(?:\W|$)/.test(normalized)) return 5;
+        if (/(?:^|\W)large(?:\W|$)/.test(normalized)) return 4;
+        if (/(?:^|\W)xl(?:\W|$)/.test(normalized)) return 5;
+        return null;
     }
   }
 
