@@ -6,7 +6,7 @@
     "command": "/downtime toggle",
     "view": "both",
     "label": "downtime toggle",
-    "description": "Toggle downtime dispatch for the current pane (in-memory, per-instance)."
+    "description": "Toggle downtime dispatch for the current pane (d = disable; d again = follow settings; persists across restarts via marker)."
   },
   {
     "chord": [

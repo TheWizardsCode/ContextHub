@@ -116,7 +116,7 @@ The plugin pane will then be available via the Herdr plugin system.
 
 4. Workflow shortcuts (single-key):
    - Press `c` — Create a new work item
-   - Press `d` — **Toggle downtime dispatch for the current pane** (per-instance in-memory; the header shows `[Downtime Off]` while off, the live status when on; other panes and the shared settings file are unaffected — see [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
+   - Press `d` — **Toggle downtime dispatch for the current pane** (per-pane only — sibling panes and other worklog roots are unaffected; the header shows `[Downtime Off]` while off and the live status when on. The disable persists across plugin restarts via a `.herdr-downtime-disabled` marker in the worklog root; press `d` again to return to following the global setting. See [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
    - Press `i` — Run the implement workflow on the selected item (intake_complete, plan_complete, in_progress)
    - Press `n` — Run the intake workflow on the selected item (idea stage)
    - Press `p` — Run the plan workflow on the selected item (intake_complete stage)
@@ -304,13 +304,25 @@ per-poll timeout.
 
 **Per-pane toggle** (parent WL-0MSZ4NSOE007AQEF) — pressing `d` in the
 worklist toggles downtime dispatch for the **current pane only**: a
-per-instance in-memory override flips the worker's effective enabled state
-(override takes precedence over the global `downtimeEnabled` setting, so `d`
-can also force dispatch on for one pane when the setting is off). While
-overridden off, the worker performs no proxy polling, idle tracking, or
-dispatch (identical to the settings-disabled path); the override is
-forgotten when the plugin restarts and never touches the shared settings
-file, so other panes are unaffected.
+per-instance override flips the worker's effective enabled state
+(override takes precedence over the global `downtimeEnabled` setting). The
+cycle is a strict disable/follow double-toggle — `d` disables; `d` again
+returns to following the global setting. There is **no force-enable state**
+(repeated presses can never force dispatch on). While overridden off, the
+worker performs no proxy polling, idle tracking, or dispatch (identical to
+the settings-disabled path).
+
+**Durability** (WL-0MT5SFP990001FNW) — unlike the original in-memory-only
+override, a disable is **persisted per worklog root** in a small marker file
+`.herdr-downtime-disabled` created next to the worklog data (in the pane's
+resolved worklog root). The marker is written when you press `d` and removed
+when you press `d` again (or when you delete the file). On plugin restart
+the worker reads the marker back and starts **disabled**, and the header
+shows `[Downtime Off (restored)]` so a restored disable is always visible
+(never a silent return to the enabled-idle header). Re-enable by pressing
+`d` (removes the marker), or delete the marker file manually. The marker is
+per root — sibling panes on other roots are unaffected, and the shared
+settings file is never written.
 
 **Per-slot idle tracking** (LP-0MSG5TA7Y002GN39) — when the proxy serves
 per-slot detail (`slots: [{slot_id, is_processing}]`) in the status payload

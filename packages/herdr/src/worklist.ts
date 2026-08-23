@@ -2776,12 +2776,16 @@ export function handleMouseInput(
 /**
  * Render the inline downtime-worker status fragment appended to the list
  * header (AC3, WL-0MSF49FMW009M06K): `[⏳ downtime idle m:ss]`,
- * `[downtime busy]`, `[⏳ downtime dispatching]`, `[Downtime Off]`, or
- * `[downtime paused]` (no-candidate cooldown, WL-0MSI7DQL10016QYX).
+ * `[downtime busy]`, `[⏳ downtime dispatching]`, `[Downtime Off]`,
+ * `[Downtime Off (restored)]` (disable restored from the persisted marker,
+ * WL-0MT5SG0VU005ARUR), or `[downtime paused]` (no-candidate cooldown,
+ * WL-0MSI7DQL10016QYX).
  * `[Downtime Off]` replaces the legacy `[downtime disabled]` text and is
  * shown whenever dispatch is off for the instance — either globally
  * settings-disabled or toggled off via the `d` shortcut (parent
- * WL-0MSZ4NSOE007AQEF).
+ * WL-0MSZ4NSOE007AQEF). The rendered state ALWAYS agrees with the worker's
+ * effective gate (override ?? settings); a disabled pane never shows the
+ * enabled-idle string.
  * Inline-only — it never adds a row, so the pane-height budget is intact.
  */
 export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string {
