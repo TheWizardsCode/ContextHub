@@ -645,6 +645,67 @@ describe('dispatch tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3)', ()
     expect(outcome.kind).toBe('scheduled');
     expect(deps.recordScheduledPromptTrigger).toHaveBeenCalled();
   });
+
+  it('implement tier is NOT dispatched with 0 free slots: pane minimum ≥1 honored at selection time (F3-fix AC1/AC4)', async () => {
+    // Regression for the audit finding (F3 AC2 partial): the implement tier
+    // had a 'Pane minimum' comment but no panesEligible guard — a direct
+    // dispatchDowntimeWork({freeSlots:0}) dispatched implement. It must be
+    // skipped exactly like the other pane tiers (ineligible, never a
+    // strike), falling through to the plan tier's defensive no-candidate.
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      getNextImplementCandidate: vi.fn().mockResolvedValue({
+        id: 'WL-IMP',
+        title: 'Implement me',
+        stage: 'implement',
+      }),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 0 });
+
+    // The implement lookup is never consulted at 0 free slots — ineligible,
+    // not a strike, and falls through to the plan tier's defensive
+    // no-candidate (via the worker the idle gate already guarantees ≥1).
+    expect(deps.getNextImplementCandidate).not.toHaveBeenCalled();
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('no-candidate');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('implement tier still dispatches with ≥1 free slot (F3-fix AC2)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      getNextImplementCandidate: vi.fn().mockResolvedValue({
+        id: 'WL-IMP',
+        title: 'Implement me',
+        stage: 'implement',
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 1 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.candidate?.id).toBe('WL-IMP');
+  });
+
+  it('implement tier is not gated when freeSlots is undefined: direct legacy callers unaffected (F3-fix AC3)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      getNextImplementCandidate: vi.fn().mockResolvedValue({
+        id: 'WL-IMP',
+        title: 'Implement me',
+        stage: 'implement',
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.candidate?.id).toBe('WL-IMP');
+  });
 });
 
 // ── Implement dispatch tier (WL-0MSMAYIKX005LLO4) ────────────────────
