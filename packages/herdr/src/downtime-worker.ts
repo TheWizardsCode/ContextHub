@@ -211,7 +211,10 @@ export const DEFAULT_COORDINATION_CHECK_IN_MS = 30 * 60 * 1000;
 /**
  * Coordinator tier priority (parent AC4): the leader dispatches the
  * highest-priority tier first — audit, then implement, then plan, then
- * intake.
+ * intake. The scheduled-prompts tier (WL-0MSS1Q5ER007QDKX) is NOT part of
+ * this order: like the legacy path, the coordination path checks it as a
+ * FIRST dispatch stage (freeze-gated, before ANY coordination-tier work),
+ * so a due prompt dispatches instead of reaching these tiers.
  */
 export const COORDINATION_TIER_ORDER = ['audit', 'implement', 'plan', 'intake'] as const;
 
@@ -1536,6 +1539,25 @@ export async function dispatchFromCoordination(
     // No slot can host a pane — nothing to dispatch (mirrors the legacy
     // tier chain's 0-free-slots defensive no-candidate).
     return { dispatched: false, reason: 'no-candidate' };
+  }
+
+  // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): FIRST dispatch stage,
+  // gated by the SAME fresh-read code-freeze marker as the audit/implement
+  // tiers (AC5) — while frozen OR ambiguous (fail-closed) scheduled prompts
+  // are skipped so no new code changes land mid-release, and dispatch falls
+  // through to the coordination tiers below. A due prompt dispatches its
+  // prompt text immediately — it never reaches the backlog tiers, so it
+  // never triggers the no-candidate cooldown (AC6). Absent or malformed
+  // config resolves null (fail-closed, logged by the dep): no scheduled
+  // dispatch and the tiers below are unaffected (AC2).
+  if (!frozen) {
+    const duePrompt = await deps.getDueScheduledPrompt(opts.cwd);
+    if (duePrompt !== null) {
+      return await dispatchScheduledPrompt(deps, duePrompt, {
+        model: opts.model,
+        cwd: opts.cwd,
+      });
+    }
   }
 
   // Re-fetch + classify every entry once, grouped by tier.

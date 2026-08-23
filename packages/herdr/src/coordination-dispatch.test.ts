@@ -30,6 +30,7 @@ import {
   type DowntimeWorker,
   type DowntimeWorkerDeps,
   type DowntimeItemInfo,
+  type ScheduledPrompt,
 } from './downtime-worker.js';
 import { createLeaderElectionManager, LEASE_FILE } from './leader-election.js';
 import {
@@ -265,6 +266,120 @@ describe('dispatchFromCoordination', () => {
     const outcome = await dispatchFromCoordination(deps, entries, { model: 'plan', cwd: '/repo', coordinationDir: testDir });
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('intake');
+  });
+
+  // ── Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX) ────────────────────
+  // The coordination (leader) path must check due scheduled prompts FIRST,
+  // before ANY coordination-tier work — a due prompt dispatches instead of
+  // reaching the backlog tiers (AC3/AC6), gated by the same code-freeze
+  // marker as the audit/implement tiers (AC5).
+
+  it('dispatches a due scheduled prompt FIRST in the coordination path', async () => {
+    const duePrompt: ScheduledPrompt = { id: 'refactor', prompt: '/skill:refactor', intervalDays: 3, lastTriggeredAt: null };
+    const deps = makeCoordinationDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
+      // The coordination tiers must never be reached — the prompt dispatches
+      // instead (AC3 first-stage + AC6 no-cooldown).
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-IMPL', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' }) }),
+    });
+    const entries = [makeEntry('inst-impl', 'WL-IMPL')];
+
+    const outcome = await dispatchFromCoordination(deps, entries, { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+
+    expect(deps.getDueScheduledPrompt).toHaveBeenCalledWith('/repo');
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('scheduled');
+    // The prompt text is the dispatch payload — no work item wrap, pane
+    // named `Downtime <id>` (AC3 spawn path).
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith('/skill:refactor', {
+      model: 'plan',
+      cwd: '/repo',
+      paneName: 'Downtime refactor',
+    });
+    // No pre-dispatch claim and NO coordination-tier work (AC3/AC4/AC6).
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.fetchItem).not.toHaveBeenCalled();
+  });
+
+  it('persists lastTriggeredAt and writes the scheduled log marker before the spawn (AC4)', async () => {
+    const duePrompt: ScheduledPrompt = { id: 'refactor', prompt: '/skill:refactor', intervalDays: 3, lastTriggeredAt: null };
+    const deps = makeCoordinationDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('scheduled');
+    // The trigger timestamp is persisted (atomic config update) and the
+    // rolling log marker is written with kind scheduled + noItemComment.
+    expect(deps.recordScheduledPromptTrigger).toHaveBeenCalledWith(
+      '/repo',
+      'refactor',
+      expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+    );
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ itemId: 'refactor', kind: 'scheduled', cwd: '/repo', noItemComment: true }),
+    );
+    // Marker + persist before spawn: the dispatch is recorded before the
+    // pane opens (fail-closed: an unrecorded dispatch never runs).
+    const persistOrder = (deps.recordScheduledPromptTrigger as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const markerOrder = (deps.recordDispatch as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const spawnOrder = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    expect(persistOrder).toBeLessThan(markerOrder);
+    expect(markerOrder).toBeLessThan(spawnOrder);
+  });
+
+  it('aborts the coordination-path spawn when the marker write fails (fail-closed, AC4)', async () => {
+    const duePrompt: ScheduledPrompt = { id: 'refactor', prompt: '/skill:refactor', intervalDays: 3, lastTriggeredAt: null };
+    const deps = makeCoordinationDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
+      recordScheduledPromptTrigger: vi.fn().mockResolvedValue(false),
+      spawnAgentPane: vi.fn(),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+
+    // Fail-closed: an unrecorded dispatch never runs — the prompt stays due
+    // for the next idle slot and the backlog tiers are NOT reached either.
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('marker-write-failed');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('gates the coordination-path scheduled tier by the code-freeze marker (frozen → tiers still run)', async () => {
+    const duePrompt: ScheduledPrompt = { id: 'refactor', prompt: '/skill:refactor', intervalDays: 3, lastTriggeredAt: null };
+    const deps = makeCoordinationDeps({
+      readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-PLAN', status: 'open', stage: 'intake_complete' }) }),
+    });
+    const entries = [makeEntry('inst-plan', 'WL-PLAN')];
+
+    const outcome = await dispatchFromCoordination(deps, entries, { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+
+    // Scheduled prompts are held during a freeze (AC5); the audit/implement
+    // coordination tiers are skipped but plan/intake still run unchanged.
+    expect(deps.getDueScheduledPrompt).not.toHaveBeenCalled();
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+
+  it('falls through to the coordination tiers when no prompt is due (AC6)', async () => {
+    const deps = makeCoordinationDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(null),
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-IMPL', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' }) }),
+    });
+    const entries = [makeEntry('inst-impl', 'WL-IMPL')];
+
+    const outcome = await dispatchFromCoordination(deps, entries, { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+
+    expect(deps.getDueScheduledPrompt).toHaveBeenCalledWith('/repo');
+    // No prompt due → the existing tier pipeline runs unchanged.
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    const spawnCall = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(spawnCall).toContain('/skill:implement WL-IMPL');
   });
 });
 

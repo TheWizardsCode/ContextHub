@@ -215,9 +215,12 @@ dispatches; the other herdr instances coordinate instead of polling:
   `<worklog-root>/.worklog/downtime-coordination.json`:
   `{instanceId, workItemId, directory, assignedAt, lastUpdated}`.
 - **Leader dispatch** — only the leader polls the proxy; once the LLM has
-  been idle continuously for the threshold, it reads the coordination
-  list, classifies each offer (tier priority: **audit → implement → plan →
-  intake**), and dispatches the highest-priority available item when a slot
+  been idle continuously for the threshold, it first checks the
+  **scheduled-prompts** config (a due prompt dispatches immediately,
+  WL-0MSS1Q5ER007QDKX — see *Scheduled prompts* below), and only when none
+  is due does it read the coordination
+  list, classify each offer (tier priority: **audit → implement → plan →
+  intake**), and dispatch the highest-priority available item when a slot
   opens. The dispatched entry is **removed**, and its owning instance
   re-offers its next most-important item at its next check-in.
 - **Non-leaders** — skip proxy polling and dispatch entirely; they only
