@@ -41,6 +41,18 @@
  * exports do not exist yet — the new tests fail and the existing suite
  * stays green (zero regression) until the implementation slices land
  * (WL-0MT3I9UVU004722X, WL-0MT3I9YNZ007IC5V, WL-0MT3IA1UB005TLVJ).
+ *
+ * Single-active-audit tests (WL-0MT47BMR7003ZQ66, parent
+ * WL-0MT3PHW4I002SNOV): test-first matrix for the audit-tier single-flight
+ * guard — audits stay strictly sequential across idle periods (never
+ * fan-out). Pins the getActiveAudit dep contract ({ok:true, active:boolean}
+ * | {ok:false}), the audit-in-flight tier skip with implement fall-through,
+ * the 2h stale-window expiry (recentAuditDispatchedItemIds coverage in
+ * downtime-log.test.ts), fail-open on check failure, the 'audit-in-flight'
+ * outcome reason (never 'no-candidate'), and the guard composition with
+ * code-freeze + free-slot minimums. Red phase: the new exports do not
+ * exist yet — the new tests fail and the existing suite stays green (zero
+ * regression) until the implementation slice lands (WL-0MT47BQAT00375VB).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -96,6 +108,7 @@ import {
   type AuditCandidate,
   type ImplementCandidate,
   type ScheduledPrompt,
+  type DowntimeActiveAuditResult,
 } from './downtime-worker.js';
 import { createRoundRobinRegistry } from './downtime-round-robin.js';
 import {
@@ -121,6 +134,12 @@ function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     // Audit tier answers a GENUINELY empty tier by default ({ok:true,
     // candidate:null}); a wl/parse failure is {ok:false} (WL-0MSLWJ2KP0002SV0).
     getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    // Active-audit single-flight (WL-0MT3PHW4I002SNOV): no active audit by
+    // default ({ok:true, active:false}), so the existing tier tests exercise
+    // the unchanged audit tier (backward-compatible default — the audit
+    // tier proceeds). The dispatcher consults this dep only after F2 lands;
+    // existing tests are unaffected either way.
+    getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
     getNextImplementCandidate: vi.fn().mockResolvedValue(null),
     claimItem: vi.fn().mockResolvedValue({ ok: true }),
     spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
@@ -524,6 +543,188 @@ describe('dispatch audit tier', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('implement');
     expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Single-active-audit enforcement (WL-0MT3PHW4I002SNOV) ─────────────
+
+describe('dispatch active-audit single-flight (parent WL-0MT3PHW4I002SNOV)', () => {
+  const auditCandidate: DowntimeCandidate = {
+    id: 'WL-AUD',
+    title: 'Audit me',
+    stage: 'audit',
+  };
+  const implementCandidate: DowntimeCandidate = {
+    id: 'WL-IMP',
+    title: 'Implement me',
+    stage: 'implement',
+  };
+
+  // Contract of the injected active-audit check (implemented in F2,
+  // WL-0MT47BQAT00375VB): {ok:true, active:true} = a non-stale kind=audit
+  // dispatch marker maps to an item still in_progress (an audit is running
+  // — the audit tier must be skipped); {ok:true, active:false} = none
+  // (audit tier proceeds); {ok:false} = the check could not complete
+  // (fail-open — skip the audit tier, never block all dispatch).
+  const noActiveAudit: DowntimeActiveAuditResult = { ok: true, active: false };
+  const activeAudit: DowntimeActiveAuditResult = { ok: true, active: true };
+  const checkFailed: DowntimeActiveAuditResult = { ok: false };
+
+  it('dispatches /skill:audit when no non-stale audit marker maps to an in_progress item (AC1/AC3)', async () => {
+    // No active audit — including a marker older than the 2h stale window
+    // (treated as expired: the audit pane may have crashed without updating
+    // the work item) — the audit tier proceeds as today. The stale-window
+    // arithmetic itself is pinned in downtime-log.test.ts
+    // (recentAuditDispatchedItemIds); here the dep reports the resolved
+    // state (active:false).
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue(noActiveAudit),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // The single-flight check runs first, then the candidate lookup.
+    expect(deps.getActiveAudit).toHaveBeenCalledWith('/repo');
+    expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(outcome.candidate?.id).toBe('WL-AUD');
+  });
+
+  it('one active audit skips the audit tier and falls through to the implement tier (AC2/AC4)', async () => {
+    // A non-stale kind=audit marker maps to an in_progress item: an audit is
+    // running. The audit tier is skipped (audits strictly sequential — no
+    // fan-out), the candidate lookup is never consulted, and dispatch falls
+    // through to the implement tier.
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue(activeAudit),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(deps.getActiveAudit).toHaveBeenCalledTimes(1);
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.candidate?.id).toBe('WL-IMP');
+  });
+
+  it('an active-audit-check failure fails open: audit tier skipped, dispatch falls through to implement', async () => {
+    // Fail-safe (parent constraint): if the active-audit check cannot
+    // complete (e.g. worklog query fails) the audit tier is skipped and
+    // dispatch falls through to the next tier — it never blocks all
+    // dispatch. No audit candidate is consulted this cycle.
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue(checkFailed),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.candidate?.id).toBe('WL-IMP');
+  });
+
+  it('an audit-in-flight skip with an empty remaining backlog reports reason audit-in-flight (never no-candidate)', async () => {
+    // Mirrors the code-freeze precedent (WL-0MSQ0RPQP00636JY): a skip that
+    // is NOT a genuine empty backlog must never enter the no-candidate
+    // cooldown — polling continues and the next idle tick re-checks while
+    // the audit is still running.
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue(activeAudit),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+      // plan (intake_complete) and intake (idea) tiers answer genuinely empty.
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('audit-in-flight');
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+  });
+
+  it('a failed active-audit check with an empty remaining backlog is a wl-error strike, never no-candidate', async () => {
+    // Partial information must not pause the worker: when the check failed
+    // and every fallback tier answered empty, the backlog is NOT provably
+    // empty (an audit may be in flight we could not see) — fail closed to
+    // busy (a strike, three-strike rule), never the no-candidate cooldown.
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue(checkFailed),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('wl-error');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('runs the active-audit check BEFORE the audit candidate lookup (single check per tick)', async () => {
+    // Ordering guard: the single-flight check gates the tier — a candidate
+    // is never selected while an active audit exists, and the check is
+    // consulted exactly once per tick.
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue(noActiveAudit),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    const checkOrder = (deps.getActiveAudit as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const lookupOrder = (deps.getNextAuditCandidate as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    expect(checkOrder).toBeLessThan(lookupOrder);
+    expect(deps.getActiveAudit).toHaveBeenCalledTimes(1);
+  });
+
+  it('during a code freeze the audit block is skipped without consulting the active-audit check (guard composition)', async () => {
+    // Existing guards preserved (AC6): the code-freeze gate (WL-0MSQ0RPQP00636JY)
+    // short-circuits the entire audit tier before the single-flight check —
+    // no audits run during a release, active or not.
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue(activeAudit),
+      readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(deps.getActiveAudit).not.toHaveBeenCalled();
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    // Empty plan/intake backlog during a freeze reports code-freeze (the
+    // freeze never enters the no-candidate cooldown — unchanged).
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('code-freeze');
+  });
+
+  it('is not consulted when the audit tier is ineligible (1 free slot < the 2-slot audit minimum)', async () => {
+    // Free-slot minimum preserved (parent WL-0MT32F90V008UAD2 AC3): below the
+    // audit tier's 2-slot minimum the whole audit block is skipped — the
+    // single-flight check is not even run; plan (≥1 slot) dispatches.
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue(activeAudit),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-PLAN', title: 'Prep task', stage: 'intake_complete', status: 'open' },
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 1 });
+
+    expect(deps.getActiveAudit).not.toHaveBeenCalled();
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
   });
 });
 
