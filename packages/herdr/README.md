@@ -759,6 +759,12 @@ failed claim or spawn can no longer produce a false success record.
 
 These were closed by WL-0MSRDEWES0059TZN (implement RCA fix design):
 
+- **Disable honesty + durability** (see
+  [docs/downtime-disable-incident-rca-2026-08-22.md](docs/downtime-disable-incident-rca-2026-08-22.md))
+  — a `d`-disable now persists across restarts via the
+  `.herdr-downtime-disabled` marker (restored header notice `[Downtime Off (restored)]`),
+  and the toggle cycle can never force-enable (WL-0MT4BWUHW008LIFE).
+
 - **Same-instant cross-pane race (closed)** — the pre-dispatch claim is now a
   compare-and-swap (`--if-status`/`--if-stage`) executed atomically at the
   SQLite layer, so exactly one pane wins; a losing pane aborts with no pane,
