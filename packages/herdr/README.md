@@ -612,7 +612,8 @@ directory.
 if it cannot proceed because it needs answers, record the questions in a
 comment on the work item (`wl comment add <id> --comment ...`) and mark the
 item as needing producer review (`wl update <id> --needs-producer-review
-true`), then stop — it never blocks indefinitely.
+true`), repeat the questions in the final summary, then stop — it never
+blocks indefinitely.
 
 **No lock file (cross-pane decision Q5)** — concurrent panes are serialized
 by the idle→busy cadence (a dispatch consumes the local slot, so the proxy

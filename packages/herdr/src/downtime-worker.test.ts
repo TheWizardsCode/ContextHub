@@ -2542,6 +2542,15 @@ describe('blocked-questions prompt instruction', () => {
     expect(BLOCKED_QUESTIONS_INSTRUCTION).toContain('wl comment add');
     expect(BLOCKED_QUESTIONS_INSTRUCTION).toContain('wl update <id> --needs-producer-review true');
   });
+
+  it('BLOCKED_QUESTIONS_INSTRUCTION includes the final-summary directive', () => {
+    expect(BLOCKED_QUESTIONS_INSTRUCTION).toContain('repeat the questions in your final summary');
+  });
+
+  it('buildDowntimePrompt output includes the final-summary directive', () => {
+    const prompt = buildDowntimePrompt('implement', candidate);
+    expect(prompt).toContain('repeat the questions in your final summary');
+  });
 });
 
 // ── Settings clamps (AC8) ─────────────────────────────────────────────

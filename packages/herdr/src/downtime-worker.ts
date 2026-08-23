@@ -1876,14 +1876,16 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
 /**
  * Instruction appended to every dispatched prompt: when the skill run
  * cannot proceed because answers are needed, record the questions in a
- * comment on the work item, mark it as needing producer review, and stop —
- * never block indefinitely (parent AC6).
+ * comment on the work item, mark it as needing producer review, repeat the
+ * questions in the final summary, and stop — never block indefinitely (parent
+ * AC6).
  */
 export const BLOCKED_QUESTIONS_INSTRUCTION =
   'If you cannot proceed because you need answers, record the questions in a ' +
   'comment on the work item (wl comment add <id> --comment "question: ...") and ' +
   'mark the item as needing producer review (wl update <id> --needs-producer-review ' +
-  'true), then stop — do not block indefinitely.';
+  'true), repeat the questions in your final summary, then stop — do not block ' +
+  'indefinitely.';
 
 /** Build the prompt dispatched to a pi agent pane for the given candidate. */
 export function buildDowntimePrompt(kind: DowntimeSkillKind, candidate: DowntimeCandidate): string {
