@@ -328,6 +328,32 @@ dispatch still governs (fresh → not a candidate). A missing or unreadable
 log is treated as empty (fail-safe), so audit dispatch keeps working on a
 fresh worklog.
 
+> **Single-active-audit guarantee (WL-0MT3PHW4I002SNOV):** exactly one
+> audit is dispatched at a time during downtime dispatch — strictly
+> sequential, never fan-out across candidates. Before the audit tier
+> selects a candidate, the worker runs the active-audit check
+> (`getActiveAudit`): it reads the shared `.worklog/downtime-dispatches.log`
+> (the cross-instance source of truth — an audit dispatched by ANY
+> instance, leader or not, is seen here) and keeps only `kind:audit`
+> markers dispatched within the last **2 hours**
+> (`DOWNTIME_AUDIT_STALE_WINDOW_MS`). A marker older than the window is
+> **stale** — the audit pane may have crashed without updating the work
+> item — and is ignored, so a NEW audit dispatch can proceed. The non-stale
+> marker ids are intersected with a single `wl list --status in_progress
+> --json` query: when a marker maps to an item still `in_progress`
+> (dispatched but not yet completed/reviewed), an audit is **in flight**
+> and the audit tier is skipped, falling through to the implement tier. The
+> skip is logged as reason `audit-in-flight` (never `no-candidate`, so the
+> empty-backlog cooldown is not entered while an audit runs — mirrors the
+> code-freeze skip) and the worker re-checks on the next idle tick.
+> **Fail-open:** if the check cannot complete (e.g. worklog query failure),
+> the audit tier is skipped and dispatch falls through to the next tier —
+> all dispatch is never blocked by an unanswerable check (a check failure
+> with an otherwise empty backlog reports a wl-error strike, never a false
+> no-candidate). Only the elected leader dispatches audits (unchanged —
+> the check lives in the audit-tier dispatch path with no new
+> instance-local state, so non-leader instances never dispatch audits).
+
 > **Bounded audit fan-out (WL-0MSORQ1RG005DGUS):** dispatched panes run
 > with `AUDIT_PHASE2_PARALLELISM=1` in the pane environment (inherited by
 > the pi process via `send-to-pi.sh`). The audit skill's Phase 2 deep
@@ -338,7 +364,11 @@ fresh worklog.
 > fitting cheap mode's full capacity (2 × 262144 ctx) where the default
 > fan-out of 2 would need 3 and spill children to remote. Wall-clock
 > tradeoff: child-heavy audits take longer — acceptable for overnight
-> downtime work. Interactive (non-downtime) panes are unaffected.
+> downtime work. Interactive (non-downtime) panes are unaffected. (Scope:
+> this bounds parallelism WITHIN one audit pane; fan-out ACROSS audit
+> dispatches is prevented outright by the single-active-audit guarantee
+> above — WL-0MT3PHW4I002SNOV — so at most one `/skill:audit` pane can
+> ever be dispatched at a time.)
 
 > **Audit-tier error channel (WL-0MSLWJ2KP0002SV0):** the audit lookup
 > resolves through the same `DowntimeNextResult` error channel as the

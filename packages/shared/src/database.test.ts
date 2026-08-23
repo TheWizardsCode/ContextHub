@@ -438,8 +438,16 @@ describe('matchesRiskEffort filters correctly with verbose descriptions (WL-0MT3
   function matches(): any {
     return (db as any).matchesRiskEffort.bind(db);
   }
-  function item(overrides: Partial<WorkItem> = {}): WorkItem {
-    return makeFactoryItem(overrides);
+  // The item fields below intentionally carry lowercase/verbose/unknown
+  // VALUES (test-data realism): worklog items store raw strings and
+  // `matchesRiskEffort` normalizes them. `Partial<WorkItem>` types risk/
+  // effort as the Capitalized unions, so widen the helper's accepted
+  // fields and delegate via an explicit cast (build-greening fix,
+  // WL-0MT4TBXMB00SKZZZ — keeps the runtime assertions untouched).
+  function item(
+    overrides: Omit<Partial<WorkItem>, 'risk' | 'effort'> & { risk?: string; effort?: string } = {},
+  ): WorkItem {
+    return makeFactoryItem(overrides as Partial<WorkItem>);
   }
 
   it('at-most medium risk filter accepts plain medium and verbose medium', () => {

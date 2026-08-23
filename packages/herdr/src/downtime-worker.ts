@@ -1212,7 +1212,20 @@ async function dispatchScheduledPrompt(
  * WL-0MSLIY8ZR004QUSY, is applied by `deps.getNextAuditCandidate`). The
  * audit tier is ROOT-ONLY (WL-0MSTLFW14000KPEC): `wl list --root-only`
  * excludes completed/in_review children, so only parent items are ever
- * dispatched for audit — sub-tasks are never audited independently; then —
+ * dispatched for audit — sub-tasks are never audited independently; and
+ * exactly one audit is active at a time (WL-0MT3PHW4I002SNOV,
+ * single-flight): before any candidate is selected the active-audit check
+ * (`deps.getActiveAudit`) skips the audit tier while a non-stale
+ * `kind=audit` dispatch marker (within `DOWNTIME_AUDIT_STALE_WINDOW_MS`,
+ * 2h) maps to an item still `in_progress` — an audit dispatched by ANY
+ * instance is honoured via the shared dispatch log (the stickiest
+ * cross-instance single-flight signal), and a marker older than the
+ * window is stale (the audit pane may have crashed without updating the
+ * work item) and is ignored so a NEW audit can proceed. The skip reports
+ * reason 'audit-in-flight' (never 'no-candidate' — the empty-backlog
+ * cooldown is not entered while the audit runs) and the check fails open
+ * (an unanswerable check just falls through to the next tier — dispatch
+ * is never blocked); then —
  * BEFORE the non-critical implement tier — the critical-first tier
  * (WL-0MT3FM8VA005XBHE): the highest-priority open CRITICAL item at ANY
  * stage (idea / intake_complete / plan_complete), including
