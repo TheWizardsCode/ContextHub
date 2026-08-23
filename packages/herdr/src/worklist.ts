@@ -1037,6 +1037,16 @@ export class WorkItemListState {
     }
   }
 
+  /**
+   * Public wrapper around the private `_clampSelection` for external
+   * handlers (the private member is not accessible outside the class).
+   * Clamps the selected index back into the visible row range (e.g. after
+   * collapsing a group removes rows).
+   */
+  clampSelection(): void {
+    this._clampSelection();
+  }
+
   /** Number of visible list rows (accounts for the metadata panel). */
   _listHeight(): number {
     // Dynamic layout (WL-0MSQ44MDX008U69J): list takes up to the max available
@@ -2375,7 +2385,7 @@ export function handleKeypress(
           const row = state.getSelectedDisplayRow();
           if (row !== null && isHeadingRow(row)) {
             state.toggleGroupCollapse(row.group);
-            state._clampSelection();
+            state.clampSelection();
             return null;
           }
         }
@@ -4832,8 +4842,12 @@ export async function runWorklistTui(
       const selItem = displayItems.length > 0 && selIdx < displayItems.length
         ? displayItems[selIdx]
         : undefined;
-      const selStage = selItem?.stage;
-      const selIssueType = selItem?.issueType;
+      // Narrow the display-row union: heading rows carry no work-item
+      // fields (stage/issueType belong to WorkItem rows only).
+      const selStage =
+        selItem !== undefined && !isHeadingRow(selItem) ? selItem.stage : undefined;
+      const selIssueType =
+        selItem !== undefined && !isHeadingRow(selItem) ? selItem.issueType : undefined;
       const isEmpty = displayItems.length === 0;
 
       const relevantEntries = reg.getEntriesForStage(selStage, codeFreezeActive, selIssueType)

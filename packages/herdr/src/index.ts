@@ -74,6 +74,8 @@ import {
   type DowntimeSpawn,
   type DowntimeSpawnResult,
   type ScheduledPrompt,
+  type DowntimeItemResult,
+  parseShowItemOutput,
   defaultDowntimeSpawn,
   buildDowntimeDispatchComment,
   DOWNTIME_WL_TIMEOUT_MS,
@@ -837,6 +839,43 @@ export function createDowntimeDeps(
         return { ok: false };
       }
     },
+    // Leader-coordination item fetch (parent WL-0MST3OJ8S0001ROL AC4):
+    // resolve ONE item by id for the leader's per-entry tier
+    // classification. `wl show` does not serve the audit timestamp, so for
+    // completed/in_review items the audit tier's list query (which DOES
+    // enrich auditedAt) is run against the entry's worklog root to attach
+    // the freshness signal — otherwise an item with a valid audit could
+    // be re-audited on classification alone. Fail-closed: {ok:false} on
+    // any wl failure or unparseable output — the coordinator treats it as
+    // a strike (never a silent skip).
+    async fetchItem(itemId: string, cwd: string): Promise<DowntimeItemResult> {
+      try {
+        const { stdout } = await getExecFileAsync()(
+          'wl',
+          buildWlArgs(['show', itemId, '--json']),
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+        );
+        const info = parseShowItemOutput(stdout);
+        if (info === null) return { ok: false };
+        if (info.status === 'completed' && info.stage === 'in_review') {
+          // Enrich auditedAt via the audit-tier list query (the only CLI
+          // shape that carries it). A wl failure here fails closed — the
+          // item cannot be classified confidently.
+          const { stdout: listOut } = await getExecFileAsync()(
+            'wl',
+            buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']),
+            { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+          );
+          const audits = parseAuditCandidatesOutput(listOut);
+          if (audits === null) return { ok: false };
+          const found = audits.find((a) => a.id === itemId);
+          info.auditedAt = found?.auditedAt ?? null;
+        }
+        return { ok: true, info };
+      } catch {
+        return { ok: false };
+      }
+    },
     // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): read the project-local
     // config at <cwd>/.worklog/scheduled-prompts.json and select the first
     // DUE entry in config order. Fail-closed: an absent or malformed config
@@ -1110,6 +1149,14 @@ async function main(): Promise<void> {
     registry: createRoundRobinRegistry({
       worklogDir: join(targetCwd, '.worklog'),
     }),
+    // Leader-election + coordination refactor (parent WL-0MST3OJ8S0001ROL):
+    // the shared coordination dir is THIS worklog's .worklog (single-machine
+    // v1 — every herdr instance contributing to the same list passes its own
+    // root; the coordination file + leader lock/lease live there). The
+    // instance id is auto-generated at worker construction (stable for the
+    // process lifetime; re-offers under a fresh id after a restart, the dead
+    // lease expiring in the TTL).
+    coordinationDir: join(targetCwd, '.worklog'),
     config: () => {
       const s = loadSettings();
       return {

@@ -98,6 +98,15 @@ export interface LeaderElectionManager {
   detectStaleLeader(): boolean;
 
   /**
+   * True when a lease file exists at all (held by ANY instance, current
+   * or expired). Callers use it to decide between "no leader yet — run a
+   * fresh election" and "a leader exists with a valid lease — stay
+   * non-leader" (the worker attempts an election on no-lease as well as
+   * on stale-lease).
+   */
+  hasLease(): boolean;
+
+  /**
    * Attempt to acquire leadership. Runs a new election: tries to
    * acquire the file lock and write a new lease. Returns true if this
    * instance became the leader.
@@ -303,6 +312,11 @@ export function createLeaderElectionManager(options: {
       if (lease.leaderId === instanceId) return false;
       // Check if the lease is expired
       return isLeaseExpired(lease);
+    },
+
+    hasLease(): boolean {
+      if (closed) return false;
+      return readLeaseFile(worklogDir) !== null;
     },
 
     attemptElection(): boolean {

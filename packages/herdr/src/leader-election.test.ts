@@ -193,6 +193,34 @@ describe('detectStaleLeader', () => {
   });
 });
 
+describe('hasLease', () => {
+  it('returns false when no lease exists', () => {
+    const manager = makeManager();
+    expect(manager.hasLease()).toBe(false);
+    manager.close();
+  });
+
+  it('returns true after a successful election', async () => {
+    const manager = makeManager({ instanceId: 'inst-1' });
+    await runElectionWithRetry({ worklogDir: testDir, instanceId: 'inst-1' });
+    expect(manager.hasLease()).toBe(true);
+    manager.close();
+  });
+
+  it('returns true for an expired lease (stale detection still sees it)', () => {
+    const leasePath = join(testDir, LEASE_FILE);
+    writeFileSync(leasePath, JSON.stringify({
+      leaderId: 'dead',
+      acquiredAt: new Date(Date.now() - 400_000).toISOString(),
+      ttlSeconds: 300,
+    }), 'utf-8');
+    const manager = makeManager();
+    expect(manager.hasLease()).toBe(true);
+    expect(manager.detectStaleLeader()).toBe(true);
+    manager.close();
+  });
+});
+
 describe('attemptElection', () => {
   it('wins election when no one else is leader', () => {
     const manager = makeManager({ instanceId: 'test-instance-1' });
