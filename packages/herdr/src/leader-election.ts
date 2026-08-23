@@ -176,6 +176,9 @@ function readLockFile(worklogDir: string): string | null {
 function writeLockFile(worklogDir: string, instanceId: string): boolean {
   try {
     const fp = lockFilePath(worklogDir);
+    // Ensure the coordination dir exists (a fresh worklog may not have it
+    // yet — same provisioning as writeCoordinationFile's recursive mkdir).
+    fs.mkdirSync(worklogDir, { recursive: true });
     // O_CREAT|O_EXCL: atomic exclusive creation — fails if file exists
     const fd = fs.openSync(fp, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o644);
     fs.writeSync(fd, instanceId);
@@ -213,6 +216,7 @@ function writeLeaseFile(worklogDir: string, lease: LeaderLease): boolean {
   try {
     const fp = leaseFilePath(worklogDir);
     const tmpPath = fp + '.tmp';
+    fs.mkdirSync(worklogDir, { recursive: true });
     fs.writeFileSync(tmpPath, JSON.stringify(lease), 'utf-8');
     fs.renameSync(tmpPath, fp);
     return true;

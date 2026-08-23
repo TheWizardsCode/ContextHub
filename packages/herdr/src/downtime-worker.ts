@@ -1516,6 +1516,12 @@ export async function dispatchFromCoordination(
       prunedCount: pruned,
       at: new Date(now).toISOString(),
     });
+    // The coordination FILE is the source of truth: the passed snapshot is
+    // stale after a prune — re-read it so a pruned (crashed-instance)
+    // entry can never classify or dispatch this cycle. Fail-safe: a failed
+    // re-read falls back to the snapshot (already pruned entries are then
+    // skipped by classify → non-dispatchable).
+    entries = readCoordinationFile(opts.coordinationDir)?.entries ?? entries;
   }
 
   // Per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3): the
