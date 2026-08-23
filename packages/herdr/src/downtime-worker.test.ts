@@ -55,6 +55,9 @@
  * regression) until the implementation slice lands (WL-0MT47BQAT00375VB).
  */
 
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   isIdleStatus,
@@ -111,6 +114,11 @@ import {
   type ScheduledPrompt,
   type DowntimeActiveAuditResult,
 } from './downtime-worker.js';
+import {
+  DOWNTIME_DISABLE_MARKER_FILE,
+  disableMarkerPath,
+  writeDisableMarker,
+} from './downtime-disable-marker.js';
 import { createRoundRobinRegistry } from './downtime-round-robin.js';
 import {
   statusFixtures,
@@ -2837,6 +2845,162 @@ describe('downtime worker per-instance override', () => {
     const { worker } = makeWorker(false, true);
     expect(worker.override).toBe(false);
     expect(worker.enabled).toBe(false);
+  });
+});
+
+// ── Persisted disable marker (WL-0MT5SFP990001FNW) ───────────────────
+
+describe('persisted downtime disable marker (.herdr-downtime-disabled)', () => {
+  let root: string;
+  let cwd: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'herdr-dt-marker-'));
+    cwd = join(root, 'worklog-root');
+    mkdirSync(cwd, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  function markerPath(): string {
+    return join(cwd, DOWNTIME_DISABLE_MARKER_FILE);
+  }
+
+  function makeWorkerWithCwd(
+    extra: Partial<Parameters<typeof createDowntimeWorker>[0]> = {},
+  ) {
+    const cfg = {
+      enabled: true,
+      thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+      requiredFreeSlots: 0,
+      model: 'plan',
+      cwd,
+      noCandidateCooldownMs: DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
+    };
+    const merged = {
+      poller: createDowntimePoller('http://proxy:8000'),
+      deps: makeDeps(),
+      config: () => ({ ...cfg }),
+      ...extra,
+    };
+    const worker = createDowntimeWorker(merged);
+    return { worker, cfg };
+  }
+
+  it('creates the marker file when toggle() disables (AC1)', () => {
+    const { worker } = makeWorkerWithCwd();
+    expect(existsSync(markerPath())).toBe(false);
+    worker.toggle(); // disable
+    expect(worker.override).toBe(false);
+    expect(existsSync(markerPath())).toBe(true);
+  });
+
+  it('does not rewrite an existing marker (no write when already present, AC1)', () => {
+    writeFileSync(markerPath(), 'existing', 'utf8');
+    // Direct helper-level check (a worker constructed with a marker present
+    // restores override=false, so toggle() would remove it — the no-rewrite
+    // guarantee of AC1 belongs to the write helper itself).
+    writeDisableMarker(cwd);
+    expect(readFileSync(markerPath(), 'utf8')).toBe('existing');
+  });
+
+  it('removes the marker when toggle() returns to follow-settings (AC2)', () => {
+    const { worker } = makeWorkerWithCwd();
+    worker.toggle(); // → false, marker written
+    expect(existsSync(markerPath())).toBe(true);
+    worker.toggle(); // → null, marker removed
+    expect(worker.override).toBe(null);
+    expect(existsSync(markerPath())).toBe(false);
+  });
+
+  it('removing an absent marker is a no-op (AC2)', () => {
+    const { worker } = makeWorkerWithCwd({ override: false });
+    worker.toggle(); // → null → remove absent marker
+    expect(worker.override).toBe(null);
+    expect(existsSync(markerPath())).toBe(false);
+  });
+
+  it('restores override=false at init when the marker exists (AC3)', () => {
+    writeFileSync(markerPath(), '', 'utf8');
+    const { worker } = makeWorkerWithCwd();
+    expect(worker.override).toBe(false);
+    expect(worker.enabled).toBe(false);
+  });
+
+  it('explicit opts.override wins over the marker (AC3)', () => {
+    writeFileSync(markerPath(), '', 'utf8');
+    const { worker } = makeWorkerWithCwd({ override: true });
+    expect(worker.override).toBe(true);
+    expect(worker.enabled).toBe(true);
+  });
+
+  it('with no marker, override starts null and follows settings (AC4)', () => {
+    const { worker } = makeWorkerWithCwd();
+    expect(worker.override).toBe(null);
+    expect(worker.enabled).toBe(true);
+  });
+
+  it('the marker is scoped to the worklog root (AC5)', () => {
+    const otherRoot = join(root, 'other-root');
+    mkdirSync(otherRoot, { recursive: true });
+    writeFileSync(markerPath(), '', 'utf8'); // marker in cwd only
+    const { worker: a } = makeWorkerWithCwd();
+    const cfgB = {
+      enabled: true,
+      thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+      requiredFreeSlots: 0,
+      model: 'plan',
+      cwd: otherRoot,
+      noCandidateCooldownMs: DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
+    };
+    const b = createDowntimeWorker({
+      poller: createDowntimePoller('http://proxy:8000'),
+      deps: makeDeps(),
+      config: () => ({ ...cfgB }),
+    });
+    expect(a.override).toBe(false);
+    expect(b.override).toBe(null);
+    expect(b.enabled).toBe(true);
+  });
+
+  it('marker-restored disable yields zero dispatch across idle + cooldown windows (AC1/AC6)', async () => {
+    writeFileSync(markerPath(), '', 'utf8');
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
+      }),
+    });
+    const worker = createDowntimeWorker({
+      poller: createDowntimePoller('http://proxy:8000'),
+      deps,
+      config: () => ({
+        enabled: true,
+        thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+        requiredFreeSlots: 0,
+        model: 'plan',
+        cwd,
+        noCandidateCooldownMs: DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
+      }),
+    });
+    expect(worker.override).toBe(false); // restored from marker
+    vi.useFakeTimers();
+    try {
+      // Advance well past the idle threshold and the no-candidate cooldown:
+      // a disabled worker must short-circuit on EVERY tick (zero polls,
+      // zero dispatch, zero pane spawns) regardless of elapsed time.
+      vi.setSystemTime(Date.now() + DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS + 60_000);
+      const r1 = await worker.tick();
+      expect(r1).toEqual({ polled: false, dispatched: false, idle: false });
+      const r2 = await worker.tick();
+      expect(r2).toEqual({ polled: false, dispatched: false, idle: false });
+      expect(deps.getNextItem).not.toHaveBeenCalled();
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

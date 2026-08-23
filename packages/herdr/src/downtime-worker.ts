@@ -86,6 +86,7 @@
 import { spawn } from 'node:child_process';
 import { isAuditFresh } from '@worklog/shared/icons';
 import type { CodeFreezeStatus } from './code-freeze.js';
+import { disableMarkerExists, removeDisableMarker, writeDisableMarker } from './downtime-disable-marker.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
 import type { RoundRobinRegistry } from './downtime-round-robin.js';
 
@@ -1801,6 +1802,13 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // never written to the shared settings file. Initialized from the optional
   // config so callers can construct a pre-toggled worker.
   let override: boolean | null = opts.override ?? null;
+  // Durable disable (WL-0MT5SFP990001FNW): when the per-worklog-root marker
+  // exists, the worker starts disabled so a previous `d` press survives a
+  // restart. Explicit opts.override wins over the marker (marker is only the
+  // fallback when no override is passed).
+  if (opts.override === undefined && disableMarkerExists(opts.config().cwd)) {
+    override = false;
+  }
 
   return {
     get idleSince(): number | null {
@@ -1826,7 +1834,15 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // null → false → null cycle: pressing `d` disables dispatch;
       // pressing again returns to following the global setting.
       // No force-enable: a second press never sets override to true.
-      override = override === null ? false : null;
+      // The per-worklog-root marker (WL-0MT5SFP990001FNW) is written on
+      // disable and removed on re-enable so the disable survives restarts.
+      if (override === null) {
+        override = false;
+        writeDisableMarker(opts.config().cwd);
+      } else {
+        override = null;
+        removeDisableMarker(opts.config().cwd);
+      }
     },
     jitterPollIntervalMs(baseIntervalMs: number): number {
       // Fail-open: no registry → static interval (no jitter).
