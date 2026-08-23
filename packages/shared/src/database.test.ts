@@ -329,6 +329,186 @@ describe('update() needsProducerReview flag-only does not bump updatedAt (WL-0MS
   });
 });
 
+// ── WL-0MT3FLZJ20076X9B: riskOrdinal / effortOrdinal verbose matching ──
+
+describe('riskOrdinal handles verbose agent-produced descriptions (WL-0MT3FLZJ20076X9B)', () => {
+  // Access private method via any-cast (consistent with the test file's pattern).
+  // db is (re)initialized per-test in the top-level beforeEach; grab it lazily.
+  function ordinal(): any {
+    return (db as any).riskOrdinal.bind(db);
+  }
+
+  it('recognises plain risk levels', () => {
+    const o = ordinal();
+    expect(o('low')).toBe(1);
+    expect(o('medium')).toBe(2);
+    expect(o('high')).toBe(3);
+    expect(o('severe')).toBe(4);
+    expect(o('critical')).toBe(4);
+  });
+
+  it('recognises verbose risk descriptions with em-dash', () => {
+    const o = ordinal();
+    expect(o('Medium — NVIDIA driver changes can affect GPU functionality')).toBe(2);
+    expect(o('High — Critical security vulnerability in authentication module')).toBe(3);
+    expect(o('Low — Minor cosmetic issue in settings page')).toBe(1);
+  });
+
+  it('recognises verbose risk with en-dash and colon', () => {
+    const o = ordinal();
+    expect(o('Severe — System stability impact')).toBe(4);
+    expect(o('Critical: Data loss possible')).toBe(4);
+  });
+
+  it('handles case-insensitive matching', () => {
+    const o = ordinal();
+    expect(o('MEDIUM')).toBe(2);
+    expect(o('Medium — test')).toBe(2);
+    expect(o(' mEdIuM ')).toBe(2);
+  });
+
+  it('returns null for unknown / unset values (fail-closed)', () => {
+    const o = ordinal();
+    expect(o(null)).toBe(null);
+    expect(o(undefined)).toBe(null);
+    expect(o('')).toBe(null);
+    expect(o('unknown')).toBe(null);
+    expect(o('Medium — ')).toBe(2); // keyword still extracted
+  });
+});
+
+describe('effortOrdinal handles verbose agent-produced descriptions (WL-0MT3FLZJ20076X9B)', () => {
+  function ordinal(): any {
+    return (db as any).effortOrdinal.bind(db);
+  }
+
+  it('recognises plain effort levels and short spellings', () => {
+    const o = ordinal();
+    expect(o('xs')).toBe(1);
+    expect(o('s')).toBe(2);
+    expect(o('m')).toBe(3);
+    expect(o('l')).toBe(4);
+    expect(o('xl')).toBe(5);
+    expect(o('extra small')).toBe(1);
+    expect(o('small')).toBe(2);
+    expect(o('medium')).toBe(3);
+    expect(o('large')).toBe(4);
+    expect(o('extra large')).toBe(5);
+  });
+
+  it('recognises verbose effort descriptions with word-boundary fallback', () => {
+    const o = ordinal();
+    expect(o('1–4 hours — Small. Diagnostic investigation')).toBe(2);
+    expect(o('2–6 hours — Medium. Refactoring needed')).toBe(3);
+    expect(o('1–2 days — Large. Major rewrite')).toBe(4);
+    expect(o('2–6 hours — Small. Diagnostic')).toBe(2);
+  });
+
+  it('short spellings work in verbose strings', () => {
+    const o = ordinal();
+    expect(o('1–4 hours — S. Small task')).toBe(2);
+    expect(o('Quick — M. Medium complexity')).toBe(3);
+  });
+
+  it('long forms still work (regression)', () => {
+    const o = ordinal();
+    expect(o('Extra Small')).toBe(1);
+    expect(o('extra small')).toBe(1);
+    expect(o('Extra Large')).toBe(5);
+    expect(o('extra large')).toBe(5);
+  });
+
+  it('handles case-insensitive matching', () => {
+    const o = ordinal();
+    expect(o('MEDIUM')).toBe(3);
+    expect(o('Small — test')).toBe(2);
+    expect(o(' XL ')).toBe(5);
+  });
+
+  it('returns null for unknown / unset values (fail-closed)', () => {
+    const o = ordinal();
+    expect(o(null)).toBe(null);
+    expect(o(undefined)).toBe(null);
+    expect(o('')).toBe(null);
+    expect(o('unknown')).toBe(null);
+  });
+});
+
+describe('matchesRiskEffort filters correctly with verbose descriptions (WL-0MT3FLZJ20076X9B)', () => {
+  function matches(): any {
+    return (db as any).matchesRiskEffort.bind(db);
+  }
+  function item(overrides: Partial<WorkItem> = {}): WorkItem {
+    return makeFactoryItem(overrides);
+  }
+
+  it('at-most medium risk filter accepts plain medium and verbose medium', () => {
+    const m = matches();
+    expect(m(item({ risk: 'medium' }), 'medium', undefined)).toBe(true);
+    expect(m(item({ risk: 'Medium — something' }), 'medium', undefined)).toBe(true);
+    expect(m(item({ risk: 'low' }), 'medium', undefined)).toBe(true);
+  });
+
+  it('at-most medium risk filter rejects high / severe risk', () => {
+    const m = matches();
+    expect(m(item({ risk: 'high' }), 'medium', undefined)).toBe(false);
+    expect(m(item({ risk: 'Severe — stability' }), 'medium', undefined)).toBe(false);
+    expect(m(item({ risk: 'Critical: data loss' }), 'medium', undefined)).toBe(false);
+  });
+
+  it('at-most medium effort filter accepts plain small and verbose small', () => {
+    const m = matches();
+    expect(m(item({ effort: 'small' }), undefined, 'medium')).toBe(true);
+    expect(m(item({ effort: '1–4 hours — Small. Investigation' }), undefined, 'medium')).toBe(true);
+    expect(m(item({ effort: 'extra small' }), undefined, 'medium')).toBe(true);
+  });
+
+  it('at-most small effort filter rejects medium / large effort', () => {
+    const m = matches();
+    expect(m(item({ effort: 'medium' }), undefined, 'small')).toBe(false);
+    expect(m(item({ effort: 'Large. Major rewrite' }), undefined, 'small')).toBe(false);
+  });
+
+  it('both filters applied together work correctly', () => {
+    const m = matches();
+    expect(m(item({ risk: 'Medium — something', effort: 'Small — quick fix' }), 'medium', 'medium')).toBe(true);
+    expect(m(item({ risk: 'High', effort: 'Small' }), 'medium', 'medium')).toBe(false);
+    expect(m(item({ risk: 'Medium', effort: 'Large' }), 'medium', 'medium')).toBe(false);
+  });
+
+  it('unknown risk / effort on item causes fail-closed', () => {
+    const m = matches();
+    expect(m(item({ risk: 'unknown', effort: 'medium' }), 'medium', 'medium')).toBe(false);
+    expect(m(item({ risk: 'medium', effort: 'unknown' }), 'medium', 'medium')).toBe(false);
+  });
+});
+
+// Helper to build items for matchesRiskEffort tests (avoids circular dependency with makeItem).
+function makeFactoryItem(overrides: Partial<WorkItem> = {}): WorkItem {
+  return {
+    id: 'WI-0001',
+    title: 'Test item',
+    description: 'Test description',
+    status: 'open',
+    priority: 'medium',
+    sortIndex: 0,
+    parentId: null,
+    createdAt: FIXED_TS,
+    updatedAt: FIXED_TS,
+    tags: [],
+    assignee: '',
+    stage: 'idea',
+    issueType: 'bug',
+    createdBy: '',
+    deletedBy: '',
+    deleteReason: '',
+    risk: '',
+    effort: '',
+    needsProducerReview: false,
+    ...overrides,
+  };
+}
+
 // ── WL-0MT2KYCNB000CYWV: delta pull persists COMMENTS non-destructively ──
 
 describe('upsertComments() non-destructive merge (WL-0MT2KYCNB000CYWV)', () => {

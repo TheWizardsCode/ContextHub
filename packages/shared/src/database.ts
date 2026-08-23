@@ -1682,6 +1682,9 @@ export class WorklogDatabase {
         if (/(?:^|\W)extralarge(?:\W|$)/.test(normalized)) return 5;
         if (/(?:^|\W)large(?:\W|$)/.test(normalized)) return 4;
         if (/(?:^|\W)xl(?:\W|$)/.test(normalized)) return 5;
+        if (/(?:^|\W)l(?:\W|$)/.test(normalized)) return 4;
+        if (/(?:^|\W)m(?:\W|$)/.test(normalized)) return 3;
+        if (/(?:^|\W)medium(?:\W|$)/.test(normalized)) return 3;
         return null;
     }
   }
