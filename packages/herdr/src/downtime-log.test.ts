@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   appendDowntimeLogEntry,
+  appendCoordinationLogEntry,
   auditDispatchedItemIds,
   implementDispatchedItemIds,
   planDispatchedItemStages,
@@ -29,6 +30,7 @@ import {
   dispatchedItemStages,
   readDowntimeLogEntries,
   DOWNTIME_LOG_FILE,
+  COORDINATION_LOG_FILE,
   DOWNTIME_LOG_MAX_ENTRIES,
   recentAuditDispatchedItemIds,
 } from './downtime-log.js';
@@ -52,6 +54,40 @@ function readLog(cwd: string): string[] {
   return raw
     .split('\n')
     .filter((line) => line.trim() !== '');
+}
+
+describe('coordination log (WL-0MSXHAE290067VAL)', () => {
+  it('appends coordination operations to a SEPARATE rolling file', async () => {
+    const cwd = makeTempCwd();
+    await appendCoordinationLogEntry(cwd, {
+      kind: 'coordination',
+      operation: 'checkin',
+      instanceId: 'inst-1',
+      workItemId: 'WL-A',
+      at: '2026-01-01T00:00:00.000Z',
+    });
+    // The DISPATCH log is untouched by coordination entries (the marker
+    // readers that scan it must never see coordination records).
+    expect(existsInLog(cwd, DOWNTIME_LOG_FILE)).toBe(false);
+    // The COORDINATION log carries the entry.
+    const raw = readFileSync(join(cwd, '.worklog', COORDINATION_LOG_FILE), 'utf8');
+    expect(raw).toContain('"operation":"checkin"');
+    expect(raw).toContain('"workItemId":"WL-A"');
+  });
+
+  it('never throws when the worklog dir is unwritable (fail-closed)', async () => {
+    const cwd = '/nonexistent/path/' + Math.random().toString(36).slice(2);
+    await expect(appendCoordinationLogEntry(cwd, { kind: 'coordination', operation: 'election', at: 'x' })).resolves.toBeUndefined();
+  });
+});
+
+function existsInLog(cwd: string, file: string): boolean {
+  try {
+    readFileSync(join(cwd, '.worklog', file), 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 describe('downtime rolling log', () => {

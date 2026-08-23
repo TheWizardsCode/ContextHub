@@ -94,12 +94,15 @@ import {
   getEntry,
   upsertEntry,
   removeEntry,
+  pruneStaleEntries,
   type CoordinationEntry,
 } from './coordination.js';
 import {
   createLeaderElectionManager,
   cleanupStaleElection,
+  DEFAULT_LEASE_TTL_SECONDS,
 } from './leader-election.js';
+import { appendCoordinationLogEntry } from './downtime-log.js';
 
 export type { ScheduledPrompt } from './scheduled-prompts.js';
 export type { CoordinationEntry } from './coordination.js';
@@ -1482,7 +1485,7 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number },
+  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // The leader path REQUIRES the item-fetch dep: without it the leader can
@@ -1493,6 +1496,27 @@ export async function dispatchFromCoordination(
   }
   const freezeStatus = deps.readCodeFreezeStatus(opts.cwd);
   const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
+
+  // Stale-entry pruning (parent AC3 risk mitigation): the leader prunes
+  // entries whose owner has not refreshed within the lease TTL (crashed or
+  // idle instances) at the START of every dispatch cycle, so dead offers
+  // never starve the queue and their owners re-queue on their next
+  // check-in. Fail-safe: pruneStaleEntries never throws (lock contention or
+  // IO → 0 removed).
+  const pruned = pruneStaleEntries(
+    opts.coordinationDir,
+    (opts.leaseTtlMs ?? DEFAULT_LEASE_TTL_SECONDS * 1000),
+    now,
+  );
+  if (pruned > 0) {
+    // Audit trail (WL-0MSXHAE290067VAL).
+    void appendCoordinationLogEntry(opts.cwd, {
+      kind: 'coordination',
+      operation: 'prune',
+      prunedCount: pruned,
+      at: new Date(now).toISOString(),
+    });
+  }
 
   // Per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3): the
   // audit tier needs ≥ 2 slots (parent + Phase 2 child at
@@ -1609,6 +1633,14 @@ export async function runCoordinationCheckIn(
   if ('noCandidate' in result && result.noCandidate) {
     // Genuinely nothing dispatchable — remove the own entry (no dead offers).
     const removed = removeEntry(coordinator.coordinationDir, coordinator.instanceId) !== null;
+    // Audit trail (WL-0MSXHAE290067VAL): log the emptied check-in.
+    void appendCoordinationLogEntry(coordinator.cwd, {
+      kind: 'coordination',
+      operation: 'checkin',
+      instanceId: coordinator.instanceId,
+      workItemId: null,
+      at: new Date(now).toISOString(),
+    });
     return { offered: null, updated: removed };
   }
   if (!('candidate' in result) || result.candidate === undefined) {
@@ -1623,6 +1655,17 @@ export async function runCoordinationCheckIn(
     lastUpdated: new Date(now).toISOString(),
   };
   const updated = upsertEntry(coordinator.coordinationDir, entry);
+  // Audit trail (WL-0MSXHAE290067VAL): log the offered item on every
+  // successful check-in write.
+  if (updated) {
+    void appendCoordinationLogEntry(coordinator.cwd, {
+      kind: 'coordination',
+      operation: 'checkin',
+      instanceId: coordinator.instanceId,
+      workItemId: entry.workItemId,
+      at: new Date(now).toISOString(),
+    });
+  }
   return { offered: entry.workItemId, updated };
 }
 
@@ -2398,6 +2441,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // In legacy mode (no coordinationDir) this whole block is skipped: no
       // election, no check-in — the worker is always the leader and uses the
       // direct tier chain below (pre-refactor behavior).
+      const tickNow = Date.now();
       if (leaderManager !== null) {
         // Every tick resolves leadership (a single cheap lease-file read):
         //  - While leader: refresh the 5-minute lease (each proxy-poll cycle
@@ -2427,6 +2471,16 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           leaderManager.attemptElection();
           leaderState = leaderManager.isLeader();
           if (leaderState) leaderManager.refreshLease();
+          // Audit trail (WL-0MSXHAE290067VAL): log the leadership win —
+          // initial election or takeover after a stale-lease detection.
+          if (leaderState) {
+            void appendCoordinationLogEntry(cfg.cwd, {
+              kind: 'coordination',
+              operation: 'election',
+              instanceId,
+              at: new Date(tickNow).toISOString(),
+            });
+          }
         }
 
         // Coordination check-in (parent AC3 — first on startup, then every
@@ -2434,7 +2488,6 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         // verify/update its entry in the shared coordination file. Runs for
         // leader AND non-leader alike — every instance contributes its most
         // important item; the single elected leader dispatches from the list.
-        const tickNow = Date.now();
         if (lastCheckInAt === null || tickNow - lastCheckInAt >= checkInIntervalMs) {
           lastCheckInAt = tickNow;
           try {
@@ -2547,6 +2600,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   cwd: cfg.cwd,
                   coordinationDir: opts.coordinationDir,
                   freeSlots,
+                  leaseTtlMs: opts.leaseTtlSeconds
+                    ? opts.leaseTtlSeconds * 1000
+                    : DEFAULT_LEASE_TTL_SECONDS * 1000,
                 },
               )
             : await dispatchDowntimeWork(opts.deps, {

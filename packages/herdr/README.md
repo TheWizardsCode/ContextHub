@@ -199,6 +199,40 @@ Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings in
 
 ### Downtime worker (local-LLM idle dispatch)
 
+**Leader-election + shared coordination list (parent WL-0MST3OJ8S0001ROL):**
+since the refactor, ONE elected leader handles all llama-proxy polling and
+dispatches; the other herdr instances coordinate instead of polling:
+
+- **Leader election** — the first instance to acquire a file lock at
+  `<worklog-root>/.worklog/downtime-leader.lock` wins (single-machine v1,
+  flock-equivalent `O_CREAT|O_EXCL`). The leader holds a **5-minute lease**
+  (`downtime-leader-lease.json`), refreshed on every proxy-poll cycle; if
+  the lease expires (leader crashed or idle) another instance detects it
+  and takes over within the TTL.
+- **Shared coordination file** — every instance (leader and non-leader
+  alike) checks in on startup and every **30 minutes**, offering its own
+  worklog's **most-important item** at
+  `<worklog-root>/.worklog/downtime-coordination.json`:
+  `{instanceId, workItemId, directory, assignedAt, lastUpdated}`.
+- **Leader dispatch** — only the leader polls the proxy; once the LLM has
+  been idle continuously for the threshold, it reads the coordination
+  list, classifies each offer (tier priority: **audit → implement → plan →
+  intake**), and dispatches the highest-priority available item when a slot
+  opens. The dispatched entry is **removed**, and its owning instance
+  re-offers its next most-important item at its next check-in.
+- **Non-leaders** — skip proxy polling and dispatch entirely; they only
+  refresh their lease check (a cheap local file read) and their
+  coordination entry.
+- **Fail-safe** — a missing/unreadable coordination file or a failed
+  election degrades to the pre-refactor behavior for that instance (no
+  dispatch from it); the existing dispatched-marker exclusion and CAS
+  claim guards are preserved unchanged.
+
+Coordination operations (check-ins, elections/takeovers, stale-entry
+pruning) are recorded in `.worklog/downtime-coordination.log` — a separate
+rolling log from the dispatch log, so the dispatch-marker readers never see
+coordination records.
+
 When the local LLM (llama-server behind the llama-proxy) is idle, the plugin
 can use that compute to advance the worklog backlog automatically: after the
 proxy reports idle continuously for the configured threshold, it opens a

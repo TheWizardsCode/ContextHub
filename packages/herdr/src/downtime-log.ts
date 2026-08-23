@@ -23,6 +23,51 @@ import { join } from 'node:path';
 /** File name of the downtime dispatch audit log inside `.worklog/`. */
 export const DOWNTIME_LOG_FILE = 'downtime-dispatches.log';
 
+/**
+ * File name of the coordination ops log inside `.worklog/` — a separate
+ * rolling log for leader-election / coordination-file operations
+ * (WL-0MSXHAE290067VAL, parent WL-0MST3OJ8S0001ROL): check-ins,
+ * elections/re-elections, and stale-entry pruning. Kept SEPARATE from the
+ * dispatch log so the dispatch-marker readers (which scan
+ * `downtime-dispatches.log` by kind) never see coordination entries.
+ */
+export const COORDINATION_LOG_FILE = 'downtime-coordination.log';
+
+/**
+ * One parsed coordination-log entry: a `kind: 'coordination'` record of a
+ * check-in (`operation: 'checkin'`), an election win / leadership takeover
+ * (`operation: 'election'`), or stale-entry pruning (`operation: 'prune'`).
+ * All fields optional so malformed or foreign lines never break parsing.
+ */
+export interface CoordinationLogEntry {
+  kind?: string;
+  operation?: string;
+  instanceId?: string;
+  /** Work item id offered at a check-in (or null/absent when emptied). */
+  workItemId?: string | null;
+  /** Number of entries removed by a prune operation. */
+  prunedCount?: number;
+  at?: string;
+}
+
+/**
+ * Append one coordination operation to `.worklog/downtime-coordination.log`
+ * (same bounded-rolling behavior as the dispatch log — most recent
+ * DOWNTIME_LOG_MAX_ENTRIES). Fail-closed: never throws; a write failure
+ * is swallowed (audit logging must never crash the worker).
+ */
+export async function appendCoordinationLogEntry(
+  cwd: string,
+  entry: CoordinationLogEntry,
+): Promise<void> {
+  try {
+    // Reuse the bounded JSONL append machinery with a different filename.
+    await appendRollingJsonl(cwd, COORDINATION_LOG_FILE, JSON.stringify(entry));
+  } catch {
+    // fail-closed: coordination logging must never crash the worker
+  }
+}
+
 /** Rolling bound: keep at most this many entries in the log file. */
 export const DOWNTIME_LOG_MAX_ENTRIES = 100;
 
@@ -222,21 +267,31 @@ export function intakeDispatchedItemStages(entries: DowntimeLogEntry[]): Map<str
  * callers must catch (fail-closed).
  */
 export async function appendDowntimeLogEntry(cwd: string, entry: string): Promise<void> {
+  await appendRollingJsonl(cwd, DOWNTIME_LOG_FILE, entry);
+}
+
+/**
+ * Bounded JSONL append shared by the dispatch and coordination logs:
+ * write `line` to `<cwd>/.worklog/<file>`, creating `.worklog` if needed
+ * and trimming to the most recent DOWNTIME_LOG_MAX_ENTRIES lines. Throws
+ * on I/O failure — callers must catch (fail-closed).
+ */
+async function appendRollingJsonl(cwd: string, file: string, line: string): Promise<void> {
   const dir = join(cwd, '.worklog');
-  const file = join(dir, DOWNTIME_LOG_FILE);
+  const filePath = join(dir, file);
   await mkdir(dir, { recursive: true });
 
   let lines: string[] = [];
   try {
-    const existing = await readFile(file, 'utf8');
-    lines = existing.split('\n').filter((line) => line.trim() !== '');
+    const existing = await readFile(filePath, 'utf8');
+    lines = existing.split('\n').filter((ln) => ln.trim() !== '');
   } catch {
     lines = []; // first entry or unreadable file → start fresh
   }
 
-  lines.push(entry);
+  lines.push(line);
   if (lines.length > DOWNTIME_LOG_MAX_ENTRIES) {
     lines = lines.slice(lines.length - DOWNTIME_LOG_MAX_ENTRIES);
   }
-  await writeFile(file, lines.join('\n') + '\n', 'utf8');
+  await writeFile(filePath, lines.join('\n') + '\n', 'utf8');
 }
