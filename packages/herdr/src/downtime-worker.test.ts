@@ -83,6 +83,7 @@ import {
   criticalSkillKind,
   resolveDependencyFrontier,
   parseAuditCandidatesOutput,
+  parseInProgressOutput,
   selectAuditCandidate,
   selectWithRotation,
   toDowntimeCandidate,
@@ -1862,6 +1863,35 @@ describe('parseAuditCandidatesOutput', () => {
 
   it('returns an empty array for an empty workItems list', () => {
     expect(parseAuditCandidatesOutput(JSON.stringify({ workItems: [] }))).toEqual([]);
+  });
+});
+
+describe('parseInProgressOutput (active-audit single-flight)', () => {
+  it('parses bare workItems entries into their ids', () => {
+    const stdout = JSON.stringify({ success: true, count: 2, workItems: [{ id: 'WL-A' }, { id: 'WL-B' }] });
+    expect([...parseInProgressOutput(stdout)!]).toEqual(['WL-A', 'WL-B']);
+  });
+
+  it('also accepts the { workItem } wrapper shape inside workItems', () => {
+    const stdout = JSON.stringify({ workItems: [{ workItem: { id: 'WL-A' } }, { workItem: { id: 'WL-B' } }] });
+    expect([...parseInProgressOutput(stdout)!]).toEqual(['WL-A', 'WL-B']);
+  });
+
+  it('fails closed (null) on malformed JSON', () => {
+    expect(parseInProgressOutput('not json')).toBeNull();
+  });
+
+  it('fails closed (null) on output without a list', () => {
+    expect(parseInProgressOutput(JSON.stringify({ success: false }))).toBeNull();
+  });
+
+  it('skips entries without an id but keeps valid ones', () => {
+    const stdout = JSON.stringify({ workItems: [{ title: 'no id' }, { id: 'WL-A' }] });
+    expect([...parseInProgressOutput(stdout)!]).toEqual(['WL-A']);
+  });
+
+  it('returns an empty set for an empty workItems list', () => {
+    expect([...parseInProgressOutput(JSON.stringify({ workItems: [] }))!]).toEqual([]);
   });
 });
 

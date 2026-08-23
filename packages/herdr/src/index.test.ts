@@ -1500,8 +1500,12 @@ describe('createDowntimeDeps', () => {
     // AC5 (parent): with one unaudited completed/in_review candidate and two
     // consecutive idle windows (no audit recorded between), the worker
     // dispatches exactly once. The first dispatch writes the durable marker
-    // (kind:audit) to the shared log; the second window's candidate selection
-    // reads the marker back and excludes the item, so no second dispatch.
+    // (kind:audit) to the shared log. The second window's ACTIVE-AUDIT
+    // single-flight check (WL-0MT3PHW4I002SNOV) then sees the non-stale
+    // marker mapping to the still-in_progress item and skips the audit tier
+    // outright — reporting reason 'audit-in-flight' (never 'no-candidate',
+    // so the no-candidate cooldown is not entered while the audit runs) —
+    // so no second dispatch.
     const now = Date.now();
     const candidate = {
       id: 'WL-ONCE',
@@ -1510,9 +1514,18 @@ describe('createDowntimeDeps', () => {
       updatedAt: new Date(now - 60_000).toISOString(),
       sortIndex: 100,
     };
-    // wl list always returns the same single candidate; wl next returns no
-    // candidate so a second (wrong) audit dispatch would be the only path.
+    // wl list always returns the same single candidate (both for the
+    // audit-candidate lookup and, as the still-in_progress item, for the
+    // active-audit check); wl next returns no candidate so a second (wrong)
+    // audit dispatch would be the only path.
     const mockExec = vi.fn((_bin: string, args: string[]) => {
+      if (args.includes('--status') && args.includes('in_progress')) {
+        // Active-audit check: the dispatched item is still in_progress.
+        return Promise.resolve({
+          stdout: JSON.stringify({ success: true, count: 1, workItems: [candidate] }),
+          stderr: '',
+        });
+      }
       if (args[0] === 'list') {
         return Promise.resolve({
           stdout: JSON.stringify({ success: true, count: 1, workItems: [candidate] }),
@@ -1536,10 +1549,12 @@ describe('createDowntimeDeps', () => {
     const entries = await readDowntimeLogEntries(cwd);
     expect(entries.some((e) => e.itemId === 'WL-ONCE' && e.kind === 'audit')).toBe(true);
 
-    // Idle window 2: the marker excludes the item; nothing else to dispatch.
+    // Idle window 2: the active-audit check skips the audit tier
+    // (audit-in-flight); nothing else to dispatch.
     const second = await dispatchDowntimeWork(deps, { model: 'plan', cwd });
     expect(second.dispatched).toBe(false);
-    expect(second.reason).toBe('no-candidate');
+    expect(second.reason).toBe('audit-in-flight');
+    expect(second.kind).toBeUndefined();
     expect(spawnFn).toHaveBeenCalledTimes(1);
   });
 

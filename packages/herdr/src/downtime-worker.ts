@@ -145,6 +145,15 @@ export const DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS = 3_600_000;
 export const DOWNTIME_AUDIT_RECENCY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
+ * Stale-audit window (WL-0MT3PHW4I002SNOV): an audit dispatch marker older
+ * than this is treated as stale — the audit pane may have crashed without
+ * updating the work item — and is ignored by the active-audit single-flight
+ * check, so a NEW audit dispatch can proceed. Only one audit is active at a
+ * time during downtime dispatch.
+ */
+export const DOWNTIME_AUDIT_STALE_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+/**
  * Three-strike rule: this many consecutive CLI-error dispatch outcomes
  * pause the worker entirely (after logging the persistent error).
  */
@@ -732,6 +741,25 @@ export type DowntimeClaimResult =
   | { ok: true }
   | { ok: false; reason: 'stale' | 'error' };
 
+/**
+ * Result of the active-audit single-flight check (WL-0MT3PHW4I002SNOV).
+ *
+ *  - `{ok:true, active:true}` — a non-stale `kind=audit` dispatch marker
+ *    maps to an item still `in_progress` (dispatched but not yet
+ *    completed/reviewed): an audit is running, so the audit tier must be
+ *    skipped this tick (outcome reason `audit-in-flight`).
+ *  - `{ok:true, active:false}` — no non-stale marker maps to an
+ *    `in_progress` item: the audit tier may proceed (audits stay strictly
+ *    sequential — never fan-out).
+ *  - `{ok:false}` — the check could not complete (e.g. worklog query
+ *    failure): fail-open — the audit tier is skipped and dispatch falls
+ *    through to the next tier; all dispatch is never blocked by an
+ *    unanswerable check.
+ */
+export type DowntimeActiveAuditResult =
+  | { ok: true; active: boolean }
+  | { ok: false };
+
 /** External boundaries injected so the dispatch logic is testable. */
 export interface DowntimeWorkerDeps {
   /**
@@ -764,6 +792,22 @@ export interface DowntimeWorkerDeps {
    * never re-selected while they still lack a fresh audit.
    */
   getNextAuditCandidate(cwd: string): Promise<DowntimeNextResult>;
+  /**
+   * Active-audit single-flight check (WL-0MT3PHW4I002SNOV): true when any
+   * non-stale `kind=audit` dispatch marker in the shared rolling dispatch
+   * log (`<cwd>/.worklog/downtime-dispatches.log`) maps to an item still
+   * `in_progress` — an audit was dispatched (by ANY instance, leader or
+   * not) and has not yet completed/reviewed. The dispatcher consults this
+   * before selecting an audit candidate and skips the audit tier while one
+   * is active, keeping audits strictly sequential (never fan-out). A marker
+   * older than `DOWNTIME_AUDIT_STALE_WINDOW_MS` (2h) is treated as stale
+   * (the audit pane may have crashed without updating the work item) and
+   * ignored. Fail-open: `{ok:false}` on a worklog-query failure — the
+   * dispatcher then skips the audit tier and falls through to the next
+   * tier rather than blocking all dispatch (fail-safe). `cwd` is the
+   * worklog root the dispatch log lives under.
+   */
+  getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult>;
   /**
    * Look up the next implement-tier candidate (WL-0MSMAYPQP001FLR6): the
    * highest-priority open plan_complete item with risk ≤ Medium / effort ≤ Medium,
@@ -933,7 +977,11 @@ export interface DowntimeDispatchOutcome {
    * another pane won; neutral) | 'marker-write-failed' (fail-closed abort
    * BEFORE spawn — includes the scheduled-prompt persist failure) |
    * 'spawn-failed' (handled spawn error or non-zero script exit; outcome is
-   * not success).
+   * not success) | 'audit-in-flight' (WL-0MT3PHW4I002SNOV: an audit is
+   * already running — a non-stale kind=audit dispatch marker maps to an
+   * `in_progress` item — so the audit tier was skipped; a skip that leaves
+   * an empty remaining backlog reports this reason, NEVER 'no-candidate',
+   * so the no-candidate cooldown is not entered while the audit runs).
    */
   reason?: string;
   /**
@@ -1255,6 +1303,15 @@ export async function dispatchDowntimeWork(
     const panesEligible = freeSlots === undefined || freeSlots >= DOWNTIME_PANE_MIN_FREE_SLOTS;
     const auditEligible = freeSlots === undefined || freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
 
+    // Active-audit single-flight outcome flags (WL-0MT3PHW4I002SNOV), read
+    // at the final empty-backlog return below: an `audit-in-flight` skip is
+    // reported as such (never 'no-candidate', so the cooldown is not
+    // entered while an audit runs); a failed active-audit check with an
+    // otherwise empty backlog reports wl-error (partial information must
+    // not pause the worker).
+    let auditInFlight = false;
+    let auditCheckFailed = false;
+
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): re-read the marker fresh on
     // every dispatch — never cached, so a freeze that starts or ends
     // mid-idle-period is honored on the next dispatch attempt. Frozen OR
@@ -1302,14 +1359,50 @@ export async function dispatchDowntimeWork(
       // wl-error (mirrors the code-freeze skip) — and dispatch falls
       // through to the implement tier (which needs only ≥ 1).
       if (auditEligible) {
-        const audit = await deps.getNextAuditCandidate(opts.cwd);
-        if (audit.ok) {
-          if (audit.candidate !== null) {
-            return await dispatchClaimedTier(deps, 'audit', audit.candidate, opts);
+        // Active-audit single-flight (WL-0MT3PHW4I002SNOV): before any
+        // audit candidate is selected, check whether an audit-tier item is
+        // currently in flight — a non-stale `kind=audit` dispatch marker
+        // (within DOWNTIME_AUDIT_STALE_WINDOW_MS, 2h) maps to an item
+        // still `in_progress` (the shared dispatch log makes this
+        // cross-instance: an audit dispatched by ANY instance, leader or
+        // not, is seen here). While one is active the audit tier is skipped
+        // so audits stay strictly sequential — never fan-out consuming
+        // extra LLM capacity. The skip reports reason 'audit-in-flight'
+        // (never 'no-candidate') when the remaining backlog is empty, so
+        // the no-candidate cooldown is not entered while the audit runs
+        // (mirrors the code-freeze skip, WL-0MSQ0RPQP00636JY) and the next
+        // idle tick re-checks. `{ok:false}` (the check could not complete,
+        // e.g. a worklog query failure) fails open: the audit tier is
+        // skipped and dispatch falls through to the next tier — the
+        // dispatch loop is never blocked by an unanswerable check, and
+        // when the fallback backlog is also empty the outcome is a
+        // wl-error strike (partial information must not pause the worker
+        // with no-candidate).
+        const activeAudit = await deps.getActiveAudit(opts.cwd);
+        if (activeAudit.ok) {
+          if (activeAudit.active) {
+            auditInFlight = true;
+            process.stderr.write(
+              `[worklog-plugin] Downtime audit tier skipped: audit-in-flight\n`,
+            );
+          } else {
+            // No active audit: proceed with the candidate lookup unchanged.
+            const audit = await deps.getNextAuditCandidate(opts.cwd);
+            if (audit.ok) {
+              if (audit.candidate !== null) {
+                return await dispatchClaimedTier(deps, 'audit', audit.candidate, opts);
+              }
+            } else {
+              return { dispatched: false, reason: 'wl-error' };
+            }
           }
         } else {
-          return { dispatched: false, reason: 'wl-error' };
+          // Fail-open: the check could not complete — skip the audit tier
+          // and fall through to the next tier (never block all dispatch).
+          auditCheckFailed = true;
         }
+        // auditInFlight || auditCheckFailed → the audit tier is skipped and
+        // dispatch falls through to the implement tier below.
       }
     }
 
@@ -1416,7 +1509,11 @@ export async function dispatchDowntimeWork(
       // lifts (WL-0MSQ0RPQP00636JY).
       return frozen
         ? { dispatched: false, reason: 'code-freeze' }
-        : { dispatched: false, reason: 'no-candidate' };
+        : auditInFlight
+          ? { dispatched: false, reason: 'audit-in-flight' }
+          : auditCheckFailed
+            ? { dispatched: false, reason: 'wl-error' }
+            : { dispatched: false, reason: 'no-candidate' };
     }
     // Tier 3 errored (with or without a tier-2 error): fail closed to busy.
     // The worker counts this as one CLI-error strike; the backlog is not
@@ -2117,6 +2214,48 @@ export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | n
     });
   }
   return candidates;
+}
+
+/**
+ * Parse the item ids from `wl list --status in_progress --json` output
+ * (WL-0MT3PHW4I002SNOV): returns the ids of every item currently
+ * `in_progress`, or null on malformed output (fail-closed — the
+ * active-audit single-flight check treats an unparseable worklog query as
+ * a failed check, `{ok:false}`). Accepts the same shapes as the other wl
+ * parsers: a `{workItems: [...]}` object with bare item objects, a
+ * `{workItems: [{workItem: {...}}]}` wrapper shape, or a bare array.
+ * Entries without a usable id are skipped.
+ */
+export function parseInProgressOutput(stdout: string): Set<string> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  const items = Array.isArray(parsed)
+    ? parsed
+    : parsed !== null && typeof parsed === 'object' && Array.isArray((parsed as { workItems?: unknown }).workItems)
+      ? (parsed as { workItems: unknown[] }).workItems
+      : null;
+  if (items === null) return null;
+
+  const ids = new Set<string>();
+  for (const raw of items) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const o = raw as Record<string, unknown>;
+    // Accept both bare item objects and the {workItem: {...}} wrapper.
+    const wrapped = typeof o.workItem === 'object' && o.workItem !== null
+      ? (o.workItem as Record<string, unknown>)
+      : undefined;
+    const id = typeof wrapped?.id === 'string'
+      ? wrapped.id
+      : typeof o.id === 'string'
+        ? o.id
+        : undefined;
+    if (typeof id === 'string' && id.length > 0) ids.add(id);
+  }
+  return ids;
 }
 
 /**

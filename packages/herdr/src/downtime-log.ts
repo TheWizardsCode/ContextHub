@@ -124,6 +124,48 @@ export function auditDispatchedItemIds(entries: DowntimeLogEntry[]): Set<string>
 }
 
 /**
+ * Build the set of itemIds with a `kind` marker whose `dispatchedAt` falls
+ * within `windowMs` of `now` (fresh markers only, WL-0MT3PHW4I002SNOV).
+ * Powers the active-audit single-flight check: an audit dispatch marker
+ * older than the stale window (`DOWNTIME_AUDIT_STALE_WINDOW_MS`, 2h) is
+ * treated as stale — the audit pane may have crashed without updating the
+ * work item — and ignored, so a NEW audit dispatch can proceed. Entries
+ * without an itemId, without a parseable `dispatchedAt`, or of another
+ * kind are ignored (fail-closed: missing evidence never claims an active
+ * audit).
+ */
+export function recentDispatchedItemIds(
+  entries: DowntimeLogEntry[],
+  kind: string,
+  windowMs: number,
+  now: number = Date.now(),
+): Set<string> {
+  const cutoff = now - windowMs;
+  const ids = new Set<string>();
+  for (const e of entries) {
+    if (e.kind !== kind || typeof e.itemId !== 'string' || e.itemId.length === 0) continue;
+    if (typeof e.dispatchedAt !== 'string') continue; // unrecognized timestamp → no active evidence
+    const t = Date.parse(e.dispatchedAt);
+    if (Number.isNaN(t) || t < cutoff) continue; // unparseable or stale
+    ids.add(e.itemId);
+  }
+  return ids;
+}
+
+/**
+ * Build the set of itemIds with a NON-STALE audit dispatch marker
+ * (`kind === 'audit'`, dispatched within `windowMs` of `now`). Plan/intake/
+ * implement markers are scoped out (audit-tier-only, WL-0MT3PHW4I002SNOV).
+ */
+export function recentAuditDispatchedItemIds(
+  entries: DowntimeLogEntry[],
+  windowMs: number,
+  now: number = Date.now(),
+): Set<string> {
+  return recentDispatchedItemIds(entries, 'audit', windowMs, now);
+}
+
+/**
  * Build the set of itemIds the downtime worker has already dispatched for
  * `/skill:implement` (`kind === 'implement'` entries only). Audit/plan/
  * intake markers are scoped to their own tiers and must NOT suppress

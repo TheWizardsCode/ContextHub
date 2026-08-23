@@ -77,6 +77,9 @@ import {
   defaultDowntimeSpawn,
   buildDowntimeDispatchComment,
   DOWNTIME_WL_TIMEOUT_MS,
+  DOWNTIME_AUDIT_STALE_WINDOW_MS,
+  parseInProgressOutput,
+  type DowntimeActiveAuditResult,
 } from './downtime-worker.js';
 import {
   createModeSwitchWorker,
@@ -91,6 +94,7 @@ import {
   intakeDispatchedItemStages,
   dispatchedItemStages,
   readDowntimeLogEntries,
+  recentAuditDispatchedItemIds,
 } from './downtime-log.js';
 import {
   getDueScheduledPrompt as getFirstDuePrompt,
@@ -664,6 +668,53 @@ export function createDowntimeDeps(
         // Fail-closed: a wl failure yields a CLI-error outcome, never a
         // candidate and never a null that looks like an empty tier — the
         // caller counts it as a strike (WL-0MSLWJ2KP0002SV0).
+        return { ok: false };
+      }
+    },
+    async getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult> {
+      try {
+        // Active-audit single-flight (WL-0MT3PHW4I002SNOV): does any
+        // non-stale kind=audit dispatch marker map to an item still
+        // `in_progress`? Dispatch-log-first (per plan decision Q2): read the
+        // shared rolling dispatch log — the cross-instance source of truth
+        // (an audit dispatched by ANY instance, leader or not, is seen
+        // here) — and keep only markers within the 2h stale window
+        // (DOWNTIME_AUDIT_STALE_WINDOW_MS). A marker older than the window
+        // is treated as stale (the audit pane may have crashed without
+        // updating the work item) and ignored. Fail-safe: readDowntimeLog
+        // Entries never throws — a missing or unreadable log is empty, so
+        // a fresh worklog never reports a phantom active audit.
+        const entries = await readDowntimeLogEntries(cwd);
+        const auditCandidateIds = recentAuditDispatchedItemIds(
+          entries,
+          DOWNTIME_AUDIT_STALE_WINDOW_MS,
+        );
+        if (auditCandidateIds.size === 0) {
+          // Cheap fast-path: no non-stale audit markers → no active audit
+          // (no worklog query needed).
+          return { ok: true, active: false };
+        }
+        // Intersect with the worklog's in_progress items: a marker only
+        // counts as an ACTIVE audit while its item is still in_progress
+        // (dispatched but not yet completed/reviewed — the audit pane
+        // transitions the item when it finishes). The bounded timeout
+        // (WL-0MSJIPHD0001L1J9) kills a hung wl child.
+        const { stdout } = await getExecFileAsync()(
+          'wl',
+          buildWlArgs(['list', '--status', 'in_progress', '--json']),
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+        );
+        const inProgress = parseInProgressOutput(stdout);
+        if (inProgress === null) {
+          // Unparseable query → the check cannot complete → fail-open.
+          return { ok: false };
+        }
+        const active = [...auditCandidateIds].some((id) => inProgress.has(id));
+        return { ok: true, active };
+      } catch {
+        // Fail-open: a wl failure yields {ok:false} — the dispatcher skips
+        // the audit tier and falls through to the next tier; dispatch is
+        // never blocked by an unanswerable check (fail-safe).
         return { ok: false };
       }
     },
