@@ -1353,7 +1353,7 @@ export async function dispatchDowntimeWork(
       }
     }
 
-    if (!frozen) {
+    if (!frozen && panesEligible) {
       // Implement tier (WL-0MSMAYPQP001FLR6): after the critical-first
       // gate, dispatch /skill:implement for the highest-priority open
       // plan_complete item with
@@ -1361,7 +1361,12 @@ export async function dispatchDowntimeWork(
       // (null on wl failure or no candidate), so a null here means the tier is
       // exhausted and the plan/intake tiers below still run (AC5/AC6 — a wl
       // error at the implement tier does NOT short-circuit the fallback).
-      // Pane minimum: ≥ 1 free slot (parent AC3).
+      // Pane minimum (parent WL-0MT32F90V008UAD2 AC3 / F3-fix
+      // WL-0MT4RQTID000GT69): ≥ 1 free slot at selection time, matching the
+      // critical/audit/plan/intake tiers — a direct dispatchDowntimeWork(
+      // {freeSlots:0}) must never dispatch implement. 0 free slots is
+      // ineligible (never a strike): the lookup is skipped entirely and
+      // dispatch falls through to the plan tier's defensive no-candidate.
       const implementCandidate = await deps.getNextImplementCandidate(opts.cwd);
       if (implementCandidate !== null) {
         return await dispatchClaimedTier(deps, 'implement', implementCandidate, opts);

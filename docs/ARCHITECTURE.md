@@ -81,6 +81,72 @@ Worklog uses a hybrid architecture with **SQLite as the runtime source of truth*
                                         └─────────────┘
 ```
 
+## Incremental (Delta) Sync
+
+Sync reads/writes are **incremental**: after the first full snapshot, each
+sync pushes only the records that changed since the last successful push
+(a *delta*), instead of re-emitting the entire store. The full design lives in
+[docs/design/incremental-sync.md](design/incremental-sync.md) (spec from
+WL-0MT2KVIGP0004C8V).
+
+### Delta format
+
+Every synced JSONL file carries an optional first-line sync header:
+
+```json
+{"__worklog_sync__": {"version": 1, "kind": "full"}}
+{"__worklog_sync__": {"version": 1, "kind": "delta"}}
+```
+
+- **`full`** — a complete snapshot of the store.
+- **`delta`** — only the records whose per-type timestamp (`updatedAt` for
+  work items, `createdAt` for comments, `createdAt` for edges, `auditedAt`
+  for audit results) is newer than the last export watermark.
+- **no header** — a legacy full snapshot; treated as `full`.
+
+Deltas are a JSONL subset of the full format, so the existing by-ID merge
+backbone applies unchanged to both kinds.
+
+### Dirty tracking & watermarks
+
+- A per-type `last_export_timestamps` table (SQLite) records the watermark
+  after each **successful push** (`markLastExportTimestamps`).
+- A record is **dirty** when its timestamp is strictly newer than the
+  watermark for its type (`countDirtyRecords`).
+- **No-baseline rule**: no watermark at all → everything is dirty → full
+  export. Watermarks are advanced only post-push, under the file lock.
+- Soft-deleted records (`status: 'deleted'`) bump `updatedAt` on delete and
+  are captured by the same predicate, so deletions propagate in deltas.
+
+### Full vs. delta decision (push side)
+
+`performSync` chooses **full** when: no baseline exists (first sync), the
+full-snapshot cadence is due (every `syncFullSnapshotEveryN` delta syncs,
+default 10, or when accumulated delta bytes exceed
+`syncDeltaSizeThreshold`, default 1 MB), `WL_DELTA_EXPORT_DISABLED=1`, or
+the remote ref is absent. Otherwise it exports a **delta**. A zero-change
+delta (nothing dirty) skips export+push entirely.
+
+### Pull side & fallback
+
+- A remote **`full`** (or legacy headerless) file replaces local state with
+the by-ID merged result (existing behavior).
+- A remote **`delta`** is merged **onto the local base** non-destructively
+(upsert by ID) — local records absent from the delta are preserved.
+- **Full-snapshot fallback**: a reader with NO local base (brand-new clone,
+or a store recovered from corruption) cannot apply a delta alone (a delta
+carries only *changes*). The pull side replays the remote ref history
+(newest full snapshot + every delta after it) via `replayRemoteDeltaChain`,
+and re-anchors the remote with a full push. An unrepairable chain fails
+closed — no merge, no push, no data loss.
+
+### Backward compatibility
+
+- Old readers see a delta as a valid (partial) JSONL subset, not corruption.
+- The first sync after enabling incremental sync always pushes a full
+snapshot, and the cadence guarantees the remote ref always carries a recent
+full snapshot — any reader can anchor.
+
 ## Migration from Persistent JSONL
 
 ### Background
@@ -327,10 +393,13 @@ simulates a 6-pane refresh and asserts ≥60% fewer work spawns.
 ## Future Considerations
 
 ### Potential Enhancements
-1. **Incremental sync**: Only sync changed items
-2. **Background sync**: Async sync without blocking UI
-3. **Compression**: Compress JSONL for large datasets
-4. **Delta encoding**: Send only diffs for efficiency
+1. **Background sync**: Async sync without blocking UI
+2. **Compression**: Compress JSONL for large datasets
+3. **Delta encoding**: Send only diffs for efficiency
+
+> **Incremental sync** is implemented (see
+> [Incremental (Delta) Sync](#incremental-delta-sync) above) and is no longer a
+> future consideration.
 
 ### Migration Timeline
 - **Phase 1** (Complete): Remove autoExport infrastructure
