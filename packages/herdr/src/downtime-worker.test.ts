@@ -4236,7 +4236,10 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     const start = 1_000_000;
     vi.setSystemTime(start);
     await worker.tick();
-    expect(worker.idleSince ?? null).not.toBeNull(); // idle run starts
+    // idleSince is null because slots 3,4 are processing — the title bar
+    // must show "busy", not "idle". Dispatch is unaffected (perSlotTracker
+    // still counts the 2 free slots for spare-capacity dispatch).
+    expect(worker.idleSince).toBeNull();
 
     vi.setSystemTime(start + cfg.thresholdMs - 1);
     const before = await worker.tick();
@@ -4275,7 +4278,9 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     const start = 1_000_000;
     vi.setSystemTime(start);
     await worker.tick(); // 2 free → per-slot idle run starts
-    expect(worker.idleSince ?? null).not.toBeNull();
+    // idleSince is null because slot-1 is processing — title bar shows
+    // "busy" even though dispatch fires into free slots.
+    expect(worker.idleSince).toBeNull();
 
     vi.setSystemTime(start + cfg.thresholdMs - 1);
     const before = await worker.tick();
@@ -4536,6 +4541,131 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     const at = await worker.tick();
     expect(at.dispatched).toBe(false);
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  // ── Title bar idle display (parent WL-0MT65T14L002HTWB) ────────────
+  // The global idle tracker (`worker.idleSince`) drives the title bar
+  // `[⏳ downtime idle Xs]` indicator. In per-slot mode the relaxed
+  // per-slot global gate deliberately ignores query/busy signals for
+  // DISPATCH; the DISPLAY must still reflect actual per-slot activity.
+  // idleSince (the display signal) is null whenever ANY slot is
+  // processing — the title bar shows `[downtime busy]` — while dispatch
+  // into free slots is unaffected.
+
+  it('display: title bar shows busy when ANY slot is processing (incl. the operator\'s)', async () => {
+    // perSlotTwoFree: slots 3,4 processing. The title-bar display must show
+    // "busy" (idleSince null) even though the per-slot dispatch gate (2
+    // free slots) is satisfied.
+    const { worker, cfg } = makePerSlotWorker({ requiredFreeSlots: 2 });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    expect(worker.idleSince).toBeNull(); // → `[downtime busy]` in the title bar
+
+    // Even after the dispatch threshold elapses, the display stays busy
+    // while a slot is processing (dispatch itself fires per usual).
+    vi.setSystemTime(start + cfg.thresholdMs);
+    const at = await worker.tick();
+    expect(at.dispatched).toBe(true); // dispatch still fires (spare capacity)
+    expect(worker.idleSince).toBeNull(); // display never flips to idle mid-query
+  });
+
+  it('display: title bar shows idle ONLY when every slot is free', async () => {
+    // perSlotAllFree: all 4 slots free — no active processing anywhere, so
+    // the display can honestly show the idle counter.
+    const { worker, fetcher, cfg } = makePerSlotWorker({
+      requiredFreeSlots: 2,
+      status: perSlotAllFree,
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    expect(worker.idleSince).toBe(start); // → `[⏳ downtime idle 0:00]`
+
+    // Keep the status for the second tick (default is perSlotTwoFree which
+    // has processing slots). Check BELOW the dispatch threshold so the tick
+    // does not dispatch (which would reset idleSince by design).
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(perSlotAllFree));
+    vi.setSystemTime(start + cfg.thresholdMs - 10_000);
+    await worker.tick();
+    expect(worker.idleSince).toBe(start); // run start stays fixed while free
+  });
+
+  it('display: a slot starting processing resets the idle counter; freeing it restarts a fresh run', async () => {
+    // Demonstrates that the display (idleSince) tracks actual per-slot
+    // processing state — completely independent of dispatch logic.
+    const { worker, fetcher, cfg } = makePerSlotWorker({ requiredFreeSlots: 2 });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick(); // perSlotTwoFree: slots 3,4 processing → display busy
+    expect(worker.idleSince).toBeNull();
+
+    // All slots free → the idle counter starts.
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(perSlotAllFree));
+    vi.setSystemTime(start + 10_000);
+    await worker.tick();
+    expect(worker.idleSince).toBe(start + 10_000); // → `[⏳ downtime idle 0:00]`
+
+    // slot-1 goes processing → display flips back to busy.
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(perSlotOneProcessing));
+    vi.setSystemTime(start + 20_000);
+    await worker.tick();
+    expect(worker.idleSince).toBeNull(); // → `[downtime busy]`
+
+    // Free slots (3) ≥ N=2 and their timers (since +10s) exceed threshold.
+    // Dispatch fires into the 3 free slots while display shows busy.
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(perSlotOneProcessing));
+    vi.setSystemTime(start + 20_000 + cfg.thresholdMs);
+    const at = await worker.tick();
+    expect(worker.idleSince).toBeNull(); // display stays busy (slot still processing)
+    expect(at.dispatched).toBe(true); // dispatch fires (3 ≥ 2 free)
+  });
+
+  it('display: transition back to all-free after processing restarts the idle counter', async () => {
+    // After a busy period, the display should start counting again once
+    // all slots are free.
+    const { worker, fetcher } = makePerSlotWorker({ requiredFreeSlots: 2 });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick(); // perSlotTwoFree: slots 3,4 processing → busy
+    expect(worker.idleSince).toBeNull();
+
+    // All slots free → idle counter starts at current time.
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(perSlotAllFree));
+    vi.setSystemTime(start + 10_000);
+    await worker.tick();
+    expect(worker.idleSince).toBe(start + 10_000);
+
+    // slot-1 goes processing → display resets to busy.
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(perSlotOneProcessing));
+    vi.setSystemTime(start + 20_000);
+    await worker.tick();
+    expect(worker.idleSince).toBeNull();
+
+    // All slots free again → display should now count from +20s.
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(perSlotAllFree));
+    vi.setSystemTime(start + 30_000);
+    await worker.tick();
+    expect(worker.idleSince).toBe(start + 30_000); // fresh count from +30s
+  });
+
+  it('display: global busy (server down / model switch) also resets idleSince to busy', async () => {
+    const { worker, fetcher } = makePerSlotWorker({
+      requiredFreeSlots: 2,
+      status: perSlotAllFree,
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    expect(worker.idleSince).toBe(start);
+
+    // model_switch_in_progress is a GLOBAL gate — display shows busy.
+    fetcher.mockResolvedValueOnce(
+      jsonResponseFixture({ ...perSlotAllFree, model_switch_in_progress: true }),
+    );
+    vi.setSystemTime(start + 10_000);
+    await worker.tick();
+    expect(worker.idleSince).toBeNull(); // → `[downtime busy]`
   });
 });
 

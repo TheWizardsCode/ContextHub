@@ -2544,8 +2544,16 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       let ready: boolean;
       if (perSlotMode && Array.isArray(status.slots)) {
         const globalIdle = perSlotGlobalIdleChecks(status);
-        // Keep the worker's idleSince view in sync with the run state.
-        tracker.record(globalIdle);
+        // Display-only: the global idle tracker also reflects per-slot query
+        // activity for the title bar idle indicator — when any slot is
+        // processing (including the operator's), the title bar shows "busy",
+        // not "idle". The dispatch logic (spare-capacity relaxation) is
+        // unaffected because free-slot count comes from perSlotTracker, not
+        // tracker.idleSince. (parent WL-0MT65T14L002HTWB)
+        const anySlotProcessing = status.slots.some(
+          (s) => typeof s.is_processing === 'boolean' && s.is_processing,
+        );
+        tracker.record(globalIdle && !anySlotProcessing);
         if (globalIdle) {
           perSlotTracker.record(status.slots);
           idle = true;
