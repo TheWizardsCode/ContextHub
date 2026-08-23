@@ -2715,15 +2715,65 @@ describe('downtime worker per-instance override', () => {
     expect(worker.enabled).toBe(true);
   });
 
-  it('toggle() cycles null → false → true → null', () => {
+  it('toggle() cycles null → false → null (no force-enable)', () => {
     const { worker } = makeWorker();
+    // null → false (first press disables)
     expect(worker.override).toBe(null);
     worker.toggle();
     expect(worker.override).toBe(false);
-    worker.toggle();
-    expect(worker.override).toBe(true);
+    // false → null (second press returns to follow settings)
     worker.toggle();
     expect(worker.override).toBe(null);
+  });
+
+  it('two consecutive toggles return to follow-settings (null→false→null)', () => {
+    const { worker, cfg } = makeWorker();
+    // First press: disable
+    worker.toggle();
+    expect(worker.override).toBe(false);
+    expect(worker.enabled).toBe(false);
+    // Second press: back to follow settings
+    worker.toggle();
+    expect(worker.override).toBe(null);
+    expect(worker.enabled).toBe(cfg.enabled); // follows global
+  });
+
+  it('three presses cycle null → false → null → false', () => {
+    const { worker } = makeWorker();
+    expect(worker.override).toBe(null);
+    worker.toggle(); // → false
+    expect(worker.override).toBe(false);
+    worker.toggle(); // → null
+    expect(worker.override).toBe(null);
+    worker.toggle(); // → false again (not true)
+    expect(worker.override).toBe(false);
+  });
+
+  it('tick() short-circuits after disable (override=false)', async () => {
+    const { worker } = makeWorker();
+    worker.toggle(); // → false
+    const result = await worker.tick();
+    expect(result).toEqual({ polled: false, dispatched: false, idle: false });
+  });
+
+  it('tick() follows global setting after second press (null → false → null)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { worker, cfg } = makeWorker(null, true);
+      // First press: disable
+      worker.toggle();
+      expect(worker.override).toBe(false);
+      let result = await worker.tick();
+      expect(result).toEqual({ polled: false, dispatched: false, idle: false });
+
+      // Second press: back to follow settings
+      worker.toggle();
+      expect(worker.override).toBe(null);
+      result = await worker.tick();
+      expect(result.idle).toBe(false); // normal behavior (global busy)
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('enabled returns override ?? cfg.enabled (null)', () => {
@@ -2733,16 +2783,14 @@ describe('downtime worker per-instance override', () => {
     cfg.enabled = false;
     expect(worker.enabled).toBe(false);
     cfg.enabled = true;
-    // back to follow settings
-    worker.toggle(); // → false
+    // toggle: null → false
+    worker.toggle();
     expect(worker.override).toBe(false);
     expect(worker.enabled).toBe(false);
-    worker.toggle(); // → true
-    expect(worker.override).toBe(true);
-    expect(worker.enabled).toBe(true);
-    worker.toggle(); // → null again
+    // toggle: false → null
+    worker.toggle();
     expect(worker.override).toBe(null);
-    expect(worker.enabled).toBe(true);
+    expect(worker.enabled).toBe(cfg.enabled); // follows global
   });
 
   it('tick() short-circuits when override is false (even if global is true)', async () => {
@@ -2771,10 +2819,11 @@ describe('downtime worker per-instance override', () => {
     expect(w2.override).toBe(null);
     expect(w1.enabled).toBe(false);
     expect(w2.enabled).toBe(true);
-    w2.toggle();
-    w2.toggle();
-    expect(w2.override).toBe(true);
-    expect(w2.enabled).toBe(true);
+    w2.toggle(); // → false
+    expect(w2.override).toBe(false);
+    w2.toggle(); // → null
+    expect(w2.override).toBe(null);
+    expect(w2.enabled).toBe(true); // follows global
   });
 
   it('override forces dispatch on when global setting is false', () => {

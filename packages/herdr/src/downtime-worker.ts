@@ -1823,10 +1823,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       return override;
     },
     toggle(): void {
-      // null → false → true → null cycle: pressing `d` while enabled
-      // disables dispatch for this instance; pressing again re-enables it;
-      // a third press returns to following the global setting.
-      override = override === null ? false : override === false ? true : null;
+      // null → false → null cycle: pressing `d` disables dispatch;
+      // pressing again returns to following the global setting.
+      // No force-enable: a second press never sets override to true.
+      override = override === null ? false : null;
     },
     jitterPollIntervalMs(baseIntervalMs: number): number {
       // Fail-open: no registry → static interval (no jitter).
