@@ -722,6 +722,10 @@ enhancement degrades gracefully when no embedder is configured.
 - **Partial ID** — Tokens of 8+ alphanumeric characters are matched as substrings against all work item IDs; partial matches appear below exact matches.
 - **Mixed queries** — `wl search WL-XXXXX some text` returns the ID match first, followed by FTS results for the full query (duplicates removed).
 
+**Fresh index:** The FTS index is updated on every save path — creating/updating items, adding/updating/deleting comments, `import`, `upsert-items`, and status reconciliation — so `wl search` always reflects the latest data without a manual `--rebuild-index`.
+
+**Quoting punctuated terms:** Unquoted punctuated terms (version strings like `v0.1.11`, file paths like `src/lib/util.ts`, and IDs) are not valid FTS5 syntax, so the command auto-quotes the query as a phrase and prints a **warning** (also emitted as a `warning` field in `--json` output) — it is never a silent empty result. If auto-quoting also fails, the command exits non-zero with `Invalid search query: ...`. To search a literal punctuated phrase explicitly, quote it yourself: `wl search "v0.1.11"`. Genuinely zero-match queries return "No results found." with no warning.
+
 Options:
 
 `-s, --status <status>` (optional) — Filter results by status
@@ -741,7 +745,7 @@ Query embeddings are cached in-memory to avoid redundant API calls.
 `--semantic-only` (optional) — Return only semantic (embedding-based) results.
 Requires an embedder; errors if OPENAI_API_KEY is not set.
 `--prefix <prefix>` (optional)
-`--json` (optional) — Output structured JSON with `id`, `title`, `status`, `priority`, `score`, `snippet`, `matchedField`. When `--semantic` is used, includes `semanticAvailable: true/false`.
+`--json` (optional) — Output structured JSON with `id`, `title`, `status`, `priority`, `score`, `snippet`, `matchedField`. When the query was auto-quoted as a phrase (invalid FTS5 syntax), a `warning` field is included. When `--semantic` is used, includes `semanticAvailable: true/false`.
 
 Examples:
 

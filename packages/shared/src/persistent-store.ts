@@ -967,6 +967,8 @@ export class SqlitePersistentStore {
    */
   clearWorkItems(): void {
     this.db.prepare('DELETE FROM workitems').run();
+    // Also clear FTS entries to avoid stale results after import
+    this.db.prepare('DELETE FROM worklog_fts').run();
     this.invalidateWorkItemCaches();
     this.invalidateCommentCaches();
     this.invalidateDependencyEdgeCaches();
@@ -1066,6 +1068,10 @@ export class SqlitePersistentStore {
    */
   clearComments(): void {
     this.db.prepare('DELETE FROM comments').run();
+    // Clear all FTS entries — comments are embedded in item FTS rows,
+    // so without a full rebuild we'd have stale comment data. The caller
+    // (e.g. importComments) re-upserts FTS entries after this.
+    this.db.prepare('DELETE FROM worklog_fts').run();
     this.invalidateCommentCaches();
   }
 
@@ -1620,9 +1626,13 @@ export class SqlitePersistentStore {
       }
 
       return results;
-    } catch (_err) {
-      // If the query syntax is invalid, return empty results
-      return [];
+    } catch (err) {
+      // Never swallow FTS5 failures silently — the caller (WorklogDatabase.search)
+      // classifies them: FTS5 syntax errors (e.g. unquoted punctuated terms like
+      // `v0.1.11`, `path/to/file`) trigger an auto-quoted phrase retry, and only
+      // when that also fails is the error surfaced to the user.
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(message);
     }
   }
 

@@ -804,7 +804,7 @@ export class WorklogDatabase {
       needsProducerReview?: boolean;
       issueType?: string;
     }
-  ): { results: FtsSearchResult[]; ftsUsed: boolean } {
+  ): { results: FtsSearchResult[]; ftsUsed: boolean; warning?: string } {
     this.services.searchMetrics?.increment?.('search.total');
     const idResults: FtsSearchResult[] = [];
     const seenIds = new Set<string>();
@@ -876,11 +876,36 @@ export class WorklogDatabase {
     // --- Regular FTS / fallback search ---
     let ftsUsed = false;
     let ftsResults: FtsSearchResult[] = [];
+    let warning: string | undefined;
 
     if (this.store.ftsAvailable) {
-      ftsResults = this.store.searchFts(query, options);
-      ftsUsed = true;
-      this.services.searchMetrics?.increment?.('search.fts');
+      try {
+        ftsResults = this.store.searchFts(query, options);
+        ftsUsed = true;
+        this.services.searchMetrics?.increment?.('search.fts');
+      } catch (err) {
+        // The raw query tripped the FTS5 parser (e.g. an unquoted punctuated
+        // term like `v0.1.11` or a file path). Retry as a quoted phrase so
+        // users searching for version strings / paths still get results, and
+        // signal the auto-quote with a warning so it is never silent.
+        const message = err instanceof Error ? err.message : String(err);
+        const escaped = query.replace(/\\"/g, '').replace(/"/g, '""');
+        let quotedResults: FtsSearchResult[];
+        try {
+          quotedResults = this.store.searchFts(`"${escaped}"`, options);
+        } catch (err2) {
+          // Auto-quoting also failed — surface a hard, distinguishable error
+          // so the user knows the query is invalid (never a silent empty list).
+          const inner = err2 instanceof Error ? err2.message : String(err2);
+          throw new Error(
+            `invalid query syntax: "${query}" — quote phrases or punctuated terms. ${inner}`
+          );
+        }
+        ftsResults = quotedResults;
+        ftsUsed = true;
+        this.services.searchMetrics?.increment?.('search.fts');
+        warning = `query "${query}" was auto-quoted as a phrase because it is not valid FTS5 syntax: ${message}`;
+      }
     } else {
       if (!this.silent) {
         this.debug('FTS5 is not available; falling back to application-level search');
@@ -898,7 +923,7 @@ export class WorklogDatabase {
       }
     }
 
-    return { results: merged, ftsUsed };
+    return { results: merged, ftsUsed, warning };
   }
 
   /**
@@ -2945,6 +2970,14 @@ export class WorklogDatabase {
       }
     });
 
+    // Rebuild FTS index for all imported items — the transaction cleared the
+    // FTS table via clearWorkItems, so every imported item needs a fresh row.
+    if (this.store.ftsAvailable) {
+      for (const item of items) {
+        this.store.upsertFtsEntry(item);
+      }
+    }
+
     this.triggerAutoSync();
   }
 
@@ -2983,6 +3016,10 @@ export class WorklogDatabase {
         ? { ...item, updatedAt: new Date().toISOString() }
         : item;
       this.store.saveWorkItem(itemToSave);
+      // Keep the FTS index fresh for the upserted item
+      if (this.store.ftsAvailable) {
+        this.store.upsertFtsEntry(itemToSave);
+      }
     }
 
     if (dependencyEdges) {
@@ -3130,6 +3167,10 @@ export class WorklogDatabase {
       updatedAt: new Date().toISOString(),
     };
     this.store.saveWorkItem(updated);
+    // Keep the FTS index fresh so status-filtered search reflects the change
+    if (this.store.ftsAvailable) {
+      this.store.upsertFtsEntry(updated);
+    }
     this.triggerAutoSync();
     return true;
   }
@@ -3153,6 +3194,10 @@ export class WorklogDatabase {
         updatedAt: new Date().toISOString(),
       };
       this.store.saveWorkItem(updated);
+      // Keep the FTS index fresh so status-filtered search reflects the change
+      if (this.store.ftsAvailable) {
+        this.store.upsertFtsEntry(updated);
+      }
       this.triggerAutoSync();
       if (process.env.WL_DEBUG) {
         process.stderr.write(`[wl:dep] re-blocked ${itemId} (active blockers remain)\n`);
@@ -3170,6 +3215,10 @@ export class WorklogDatabase {
       updatedAt: new Date().toISOString(),
     };
     this.store.saveWorkItem(updated);
+    // Keep the FTS index fresh so status-filtered search reflects the change
+    if (this.store.ftsAvailable) {
+      this.store.upsertFtsEntry(updated);
+    }
     this.triggerAutoSync();
     if (process.env.WL_DEBUG) {
       process.stderr.write(`[wl:dep] unblocked ${itemId} (no active blockers remain)\n`);
@@ -3332,6 +3381,17 @@ export class WorklogDatabase {
     for (const comment of comments) {
       this.store.saveComment(comment);
     }
+    // Comment text is embedded in the parent item's FTS row, so update
+    // all parent items to keep the index fresh.
+    if (this.store.ftsAvailable && comments.length > 0) {
+      const affectedIds = new Set(comments.map(c => c.workItemId));
+      const items = this.store.getAllWorkItems();
+      for (const item of items) {
+        if (affectedIds.has(item.id)) {
+          this.store.upsertFtsEntry(item);
+        }
+      }
+    }
     this.triggerAutoSync();
   }
 
@@ -3342,6 +3402,13 @@ export class WorklogDatabase {
     this.store.clearComments();
     for (const comment of comments) {
       this.store.saveComment(comment);
+    }
+    // Re-index all items whose comments changed (FTS rows embed comment text)
+    if (this.store.ftsAvailable) {
+      const items = this.store.getAllWorkItems();
+      for (const item of items) {
+        this.store.upsertFtsEntry(item);
+      }
     }
     this.triggerAutoSync();
   }
