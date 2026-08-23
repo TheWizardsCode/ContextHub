@@ -5,6 +5,15 @@
  * The log lives at `<cwd>/.worklog/downtime-dispatches.log` and is bounded
  * (rolling): the file keeps only the most recent DOWNTIME_LOG_MAX_ENTRIES
  * entries so it cannot grow unbounded over a long-lived plugin pane.
+ *
+ * Stale-window marker filter tests (WL-0MT47BMR7003ZQ66, parent
+ * WL-0MT3PHW4I002SNOV): recentAuditDispatchedItemIds pins the 2h stale
+ * window that powers the single-active-audit guard — an audit dispatch
+ * marker older than the window is treated as stale (the audit pane may
+ * have crashed without updating the work item) and ignored, so a new audit
+ * dispatch can proceed. Red phase: the helper does not exist yet — the new
+ * tests fail and the existing suite stays green until the implementation
+ * slice lands (WL-0MT47BQAT00375VB).
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -21,6 +30,7 @@ import {
   readDowntimeLogEntries,
   DOWNTIME_LOG_FILE,
   DOWNTIME_LOG_MAX_ENTRIES,
+  recentAuditDispatchedItemIds,
 } from './downtime-log.js';
 
 const tempDirs: string[] = [];
@@ -133,6 +143,73 @@ describe('auditDispatchedItemIds (audit-tier-only scope guard)', () => {
 
   it('returns an empty set for empty input', () => {
     expect([...auditDispatchedItemIds([])]).toEqual([]);
+  });
+});
+
+describe('recentAuditDispatchedItemIds (stale-window marker filter)', () => {
+  // Stale-audit window shared with the dispatcher (WL-0MT3PHW4I002SNOV): an
+  // audit dispatch marker older than 2h is treated as stale — the audit
+  // pane may have crashed without updating the work item — so it must not
+  // block a new audit dispatch.
+  const WINDOW_MS = 2 * 60 * 60 * 1000; // 2h
+  const NOW = new Date('2026-01-01T12:00:00.000Z').getTime();
+  const freshAudit = {
+    itemId: 'WL-FRESH',
+    kind: 'audit',
+    dispatchedAt: new Date(NOW - 10 * 60 * 1000).toISOString(), // 10m ago
+  };
+  const staleAudit = {
+    itemId: 'WL-STALE',
+    kind: 'audit',
+    dispatchedAt: new Date(NOW - WINDOW_MS - 60 * 1000).toISOString(), // >2h ago
+  };
+
+  it('keeps only audit-kind markers whose dispatchedAt is within the stale window', () => {
+    const ids = recentAuditDispatchedItemIds(
+      [
+        freshAudit,
+        staleAudit,
+        { itemId: 'WL-PLAN', kind: 'plan', dispatchedAt: freshAudit.dispatchedAt }, // other kind → scoped out
+        { kind: 'audit' }, // error-style entry without itemId → ignored
+      ],
+      WINDOW_MS,
+      NOW,
+    );
+    expect([...ids]).toEqual(['WL-FRESH']);
+  });
+
+  it('boundary inclusive: a marker dispatched exactly windowMs ago is kept', () => {
+    const ids = recentAuditDispatchedItemIds(
+      [{ itemId: 'WL-EDGE', kind: 'audit', dispatchedAt: new Date(NOW - WINDOW_MS).toISOString() }],
+      WINDOW_MS,
+      NOW,
+    );
+    expect([...ids]).toEqual(['WL-EDGE']);
+  });
+
+  it('boundary: a marker just past the window is dropped (stale)', () => {
+    const ids = recentAuditDispatchedItemIds(
+      [{ itemId: 'WL-PAST', kind: 'audit', dispatchedAt: new Date(NOW - WINDOW_MS - 1).toISOString() }],
+      WINDOW_MS,
+      NOW,
+    );
+    expect([...ids]).toEqual([]);
+  });
+
+  it('a marker without a parseable dispatchedAt is excluded (fail-closed: no active evidence)', () => {
+    const ids = recentAuditDispatchedItemIds(
+      [
+        { itemId: 'WL-NODATE', kind: 'audit' }, // missing dispatchedAt
+        { itemId: 'WL-BADDATE', kind: 'audit', dispatchedAt: 'not-a-date' },
+      ],
+      WINDOW_MS,
+      NOW,
+    );
+    expect([...ids]).toEqual([]);
+  });
+
+  it('returns an empty set for empty input', () => {
+    expect([...recentAuditDispatchedItemIds([], WINDOW_MS, NOW)]).toEqual([]);
   });
 });
 
