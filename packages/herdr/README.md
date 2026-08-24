@@ -1198,7 +1198,7 @@ packages/herdr/
 │   ├── auto-sync.ts       # Background `wl sync` with configurable timer
 │   ├── shortcut-config.ts  # Chord shortcut registry and config loader
 │   ├── shortcuts.json      # Shortcut/chord definitions
-│   ├── icons.ts            # Icon and colour helpers
+│   ├── (icons)              # Icon & colour helpers via @worklog/shared/icons (packages/shared/src/icons.ts)
 │   ├── code-freeze.ts      # Code Freeze marker detection (fail-open)
 │   ├── form-dialog.ts      # Form state + rendering for parameter input (unknown <identifiers>, paste/cut/newline)
 │   ├── clipboard.ts        # OS clipboard read/paste + write/copy helpers (no tmux branch)
