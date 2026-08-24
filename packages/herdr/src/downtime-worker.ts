@@ -3597,7 +3597,8 @@ export async function resolveDependencyFrontier(
 
 /**
  * Clamp the downtime poll interval: never below the 10s hard floor, default
- * 30s for non-finite input.
+ * 10s for non-finite input (matches DEFAULT_DOWNTIME_POLL_INTERVAL_MS; the
+ * spec's '30s proxy poll' refers to the 30s proxy status refresh).
  */
 export function clampDowntimePollInterval(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_DOWNTIME_POLL_INTERVAL_MS;
@@ -3606,7 +3607,8 @@ export function clampDowntimePollInterval(value: number): number {
 
 /**
  * Clamp the idle threshold: reject negative/non-finite (fall back to the
- * 4-minute default) and floor at 1s to prevent immediate dispatch.
+ * 60s default, DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS) and floor at 1s to
+ * prevent immediate dispatch.
  */
 export function clampDowntimeIdleThresholdMs(value: number): number {
   if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS;
