@@ -25,6 +25,10 @@
     "./icons": {
       "types": "./dist/icons.d.ts",
       "import": "./dist/icons.js"
+    },
+    "./fields": {
+      "types": "./dist/fields.d.ts",
+      "import": "./dist/fields.js"
     }
   },
   "files": [

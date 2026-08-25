@@ -64,6 +64,8 @@ export interface ListOptions {
   number?: string;
   /** Disable icon rendering for scripting/copy-paste */
   icons?: boolean;
+  /** Comma-separated list of fields to include in output (id always included) */
+  fields?: string;
 }
 
 export interface ShowOptions { children?: boolean; prefix?: string; noPager?: boolean; icons?: boolean; exact?: boolean }
