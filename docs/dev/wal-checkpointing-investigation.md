@@ -166,3 +166,40 @@ concurrent `wl` processes** each opening its own SQLite connection to the same
   pragma calls; WAL-only configuration matches the docs above.
 - Reproduction + read-latency before/after numbers: see the benchmark child
   WL-0MT5J3X1R009A6I6 (`docs/benchmarks/wal-read-latency-benchmark.md`).
+
+## 7. Recommendation (WL-0MT5J4Q290025O0L)
+
+**Decision: add an explicit `PRAGMA wal_checkpoint(PASSIVE)` after
+`importData()` (the `wl sync` / doctor / init bulk-import path) and keep the
+SQLite-default auto-checkpoint threshold (1000 pages ≈ 4MB).** Implemented in
+`src/persistent-store.ts` and `packages/shared/src/persistent-store.ts`.
+
+### Rationale
+
+1. **Measured read cost is real**: the benchmark (WL-0MT5J3X1R009A6I6) shows
+   full-table scans (`getAllWorkItems`) are 5–15% slower with a 16MiB WAL and
+   18–34% slower with a 30MiB WAL vs a checkpointed DB. Point reads and FTS
+   queries are unaffected.
+2. **Pre-plan Option C (raise `wal_autocheckpoint` to 10000 pages ≈ 40MB) is
+   rejected**: a larger threshold allows the WAL to *grow bigger before any
+   checkpoint* — the measured data shows larger WALs are slower to read, so
+   this would make the problem worse, not better.
+3. **A PASSIVE checkpoint after the largest regular write batch is cheap and
+   safe**: it merges WAL frames back into `worklog.db` immediately (bounded
+   WAL growth across repeated imports), never blocks concurrent readers or
+   writers (unlike `TRUNCATE`, which may report busy=1 under an active
+   reader), and adds negligible overhead to `importData`.
+4. **Steady-state behavior is unchanged**: normal single-write paths
+   (create/update/comment) still rely on auto-checkpoint + checkpoint-on-
+   close; only the bulk-import path explicitly bounds the WAL.
+
+### Risks and notes
+
+- **Low risk.** PASSIVE never blocks; worst case it does nothing under heavy
+  concurrent readers (frames remain until the next auto-checkpoint).
+- `TRUNCATE` was considered and rejected: it can be blocked (busy=1) when a
+  reader holds the WAL, and file shrinkage is cosmetic — non-blocking PASSIVE
+  achieves the read-latency goal (merged frames) without contention.
+- The 16MB WAL root cause is the concurrent-writer storm (206 processes),
+  addressed separately by spawn-rate fixes (WL-0MSB19J56006E87J); the
+  checkpoint addition bounds WAL growth for the remaining bulk paths.
