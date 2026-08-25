@@ -398,11 +398,13 @@ describe('fetchChildrenForItem', () => {
     expect(children[1].id).toBe('WL-001-C2');
     expect(children[1].depth).toBe(1);
 
-    // Verify correct CLI args — runWl adds --json automatically
+    // Verify correct CLI args — runWl adds --json automatically and always
+    // passes a bounded timeout (DEFAULT_WL_TIMEOUT_MS) so a hung wl child
+    // cannot wedge the refresh path (WL-0MSJNJXX2001NMHS).
     expect(mockFn).toHaveBeenCalledWith(
       expect.any(String),
       ['list', '--parent', 'WL-001', '--json'],
-      { maxBuffer: 5242880 },
+      { maxBuffer: 5242880, timeout: 60_000 },
     );
   });
 

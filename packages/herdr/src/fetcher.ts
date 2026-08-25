@@ -288,6 +288,15 @@ function extractItems(payload: unknown): WorkItem[] {
 
 // ── CLI execution ─────────────────────────────────────────────────────
 
+/**
+ * Default timeout (in milliseconds) for all wl CLI spawns in the refresh/
+ * sync fetch path. 60_000 ms — matches the auto-sync safety timeout and the
+ * Pi TUI extension convention (auto-sync.ts:227). A hung wl spawn (e.g.
+ * waiting on a lock during a long `wl sync`) will reject after this period
+ * instead of blocking the `refreshInFlight` guard forever (WL-0MSJNJXX2001NMHS).
+ */
+export const DEFAULT_WL_TIMEOUT_MS = 60_000;
+
 const CLI_BINARIES = ['wl', 'worklog'];
 
 // ── In-process fetch memoization (F4 — WL-0MSGAEPOJ002824S) ───────────
@@ -351,9 +360,14 @@ async function runWlInner(args: string[], includeJson: boolean, timeoutMs?: numb
       // Prepend --worklog-dir when set (global option before the subcommand).
       fullArgs = buildWlArgs(fullArgs);
 
+      // Bounded timeout: use the caller's override if supplied, otherwise
+      // apply DEFAULT_WL_TIMEOUT_MS so a hung wl process cannot block the
+      // refreshInFlight guard forever (WL-0MSJNJXX2001NMHS).
+      const timeout = timeoutMs ?? DEFAULT_WL_TIMEOUT_MS;
+
       const result = await execFileAsync(binary, fullArgs, {
         maxBuffer: 1024 * 1024 * 5,
-        ...(timeoutMs !== undefined ? { timeout: timeoutMs } : {}),
+        timeout,
       });
       return result.stdout;
     } catch (error: any) {
@@ -414,11 +428,12 @@ async function runWl(args: string[], includeJson = true, timeoutMs?: number): Pr
 
 /**
  * Check whether the wl CLI is available on PATH.
+ * Uses DEFAULT_WL_TIMEOUT_MS so a hung --version probe cannot block startup.
  */
 export async function checkWlAvailable(): Promise<boolean> {
   for (const binary of CLI_BINARIES) {
     try {
-      await execFileAsync(binary, ['--version'], { maxBuffer: 1024 });
+      await execFileAsync(binary, ['--version'], { maxBuffer: 1024, timeout: DEFAULT_WL_TIMEOUT_MS });
       return true;
     } catch {
       continue;
