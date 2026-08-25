@@ -77,14 +77,67 @@ Lifecycle (`packages/herdr/src/coordination.ts`):
 2. When a **scheduled prompt** is due, it dispatches immediately
    (WL-0MSS1Q5ER007QDKX).
 3. Otherwise the leader reads the coordination list, classifies each offered
-   item by tier priority **audit → implement → plan → intake**, and
-   dispatches the highest-priority available item when a slot opens.
+   item by tier priority — **audit → critical-first** (stage-appropriate
+   intake/plan/implement, see *Critical-first tier & freeze split-by-skill*
+   below) **→ non-critical implement → plan → intake** — and dispatches the
+   highest-priority available item when a slot opens.
 4. The dispatched entry is **removed** from the coordination file. The
    existing dispatched-marker exclusion and CAS claim mechanisms are
    preserved unchanged.
 5. **Non-leaders** skip proxy polling and dispatch entirely — they only
    refresh their lease check (a cheap local file read) and their
    coordination entry.
+
+### Critical-first tier & freeze split-by-skill
+
+**Critical-first dispatch (WL-0MT3FM8VA005XBHE):** before the non-critical
+implement/plan/intake tiers, the leader looks up the highest-priority open
+**critical** item at ANY stage via `wl list --priority critical --status open
+--json` (which — unlike `wl next` — does NOT exclude dependency-blocked
+items) and dispatches it with the **stage-appropriate skill**:
+
+- `idea` → `/skill:intake <id>`
+- `intake_complete` → `/skill:plan <id>`
+- `plan_complete` → `/skill:implement <id>` (only when risk ≤ Medium AND
+  effort ≤ Medium — the F2 caps are retained for the implement kind)
+
+Selection is **deterministic**: a shared round-robin cursor over the
+`critical` priority group (`.worklog/downtime-round-robin.json`, see
+WL-0MSSRED76008LGB6). The tier needs ≥ 1 free slot (single-pane tier) and
+flows through the same `dispatchClaimedTier` pipeline as every other tier —
+CAS claim with the stage-appropriate `TIER_EXPECTED` entry
+(stale-claim aborts), dispatched-marker write before spawn — so the claim-
+CAS, dispatched-marker change-guard, and single-flight guards compose
+unchanged. The rolling-log kind is the skill-mapped
+`implement`/`plan`/`intake` (never a distinct critical kind).
+
+**Freeze split-by-skill (Q1):** while the code-freeze marker is frozen OR
+ambiguous (fail-closed), a critical `plan_complete` (implement-kind)
+candidate is SKIPPED — no new code changes land mid-release — but critical
+`idea`/`intake_complete` (intake/plan-kind) candidates STILL dispatch: prep
+work (intake/plan) is low-risk and allowed during a freeze, exactly matching
+the non-critical plan/intake tiers.
+
+**Caps retention (Q2):** a critical `plan_complete` item dispatches with
+`/skill:implement` only when risk ≤ Medium AND effort ≤ Medium; an
+above-caps critical item is not a valid candidate and the tier falls
+through.
+
+**Dependency-frontier dispatch (Q3):** when the selected critical item is
+dependency-blocked (`wl dep list <id>` outbound `depends-on` edges), the
+worker follows the blocking chain to the nearest OPEN blocker and dispatches
+THAT blocker with its own stage-appropriate skill
+(intake/plan/implement). Chains bottoming out in closed/non-dispatchable/
+above-caps items (or cycles) → no frontier candidate → the tier falls
+through to the non-critical order.
+
+**Fail-closed lookup:** the critical tier consults its lookup on EVERY
+dispatch — including during a code freeze — and resolves through the same
+`DowntimeNextResult` error channel as the other tiers: `{ok:true,
+candidate:null}` is a GENUINELY empty critical tier (falls through to the
+non-critical tiers); `{ok:false}` is a `wl`/parse failure — a CLI-error
+strike, never a silent fall-through (a broken critical lookup can never
+masquerade as "no critical work").
 
 ### Multi-worklog support
 
@@ -150,6 +203,9 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
 - Work item: **WL-0MST3OJ8S0001ROL** *Refactor Downtime Dispatcher: leader
   election with shared coordination file* (+ its children H3UF5/H9UT6/HA1B/
   HA7LP/HAE2/HAKDT)
+- Work item: **WL-0MT3FM8VA005XBHE** *Downtime dispatcher: critical items
+  always progress first regardless of stage* (critical-first tier + freeze
+  split-by-skill + caps retention + dependency-frontier dispatch)
 - Package README: `packages/herdr/README.md` → *Downtime worker (local-LLM
   idle dispatch)*
 - Docs work item: **WL-0MT76H3Z900908TV** (this page)
