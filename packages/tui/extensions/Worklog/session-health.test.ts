@@ -31,10 +31,17 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
 }));
 
 // ── Mock @earendil-works/pi-tui ───────────────────────────────────────
+// Real pi-tui's visibleWidth/truncateToWidth are ANSI-aware (escape codes
+// occupy zero terminal columns). The mock reproduces that behavior so
+// theme-styled strings measure the same way they do in the real TUI.
 
 vi.mock('@earendil-works/pi-tui', () => ({
-  truncateToWidth: (text: string, width: number) => text.slice(0, width),
-  visibleWidth: (text: string) => text.length,
+  truncateToWidth: (text: string, width: number) => {
+    const stripped = text.replace(/\x1b\[[0-9;]*m/g, '');
+    if (stripped.length <= width) return text;
+    return stripped.slice(0, width);
+  },
+  visibleWidth: (text: string) => text.replace(/\x1b\[[0-9;]*m/g, '').length,
 }));
 
 // ── Mock ./model-display.js ────────────────────────────────────────────
@@ -1049,6 +1056,11 @@ describe('session-health', () => {
       return footerObj.render(width);
     }
 
+    /** Helper to strip ANSI dim/reset codes from a rendered footer line. */
+    function unstyle(line: string): string {
+      return line.replace(/\x1b\[[0-9;]*m/g, '');
+    }
+
     beforeEach(() => {
       // Reset mock return values before each test
       mocks.mockGetResolvedModel.mockReturnValue(null);
@@ -1063,50 +1075,55 @@ describe('session-health', () => {
       mocks.mockGetResolvedModel.mockReturnValue('openai/gpt-4');
       mocks.mockGetSelectedModel.mockReturnValue('code');
 
-      const lines = fabricateFooterLines({ ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } });
+      const lines = fabricateFooterLines({ ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) } } });
 
       // With no extension statuses: lines[0]=session health, lines[1]=model info
       expect(lines.length).toBe(2);
       // Format: "<alias> → <provider/model>"
       expect(lines[1]).toContain('code → openai/gpt-4');
-      expect(lines[1]).toContain('[dim');
+      // Model is right-aligned: the visible content fills the line width and
+      // the model's right edge is at the final column.
+      const visible = unstyle(lines[1]);
+      expect(visible.length).toBe(500);
+      expect(visible.endsWith('code → openai/gpt-4')).toBe(true);
+      expect(lines[1]).toContain('\x1b[2m');
     });
 
     it('shows "alias → (resolving)" when model selected but not yet resolved', () => {
       mocks.mockGetResolvedModel.mockReturnValue(null);
       mocks.mockGetSelectedModel.mockReturnValue('code');
 
-      const lines = fabricateFooterLines({ ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } });
+      const lines = fabricateFooterLines({ ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) } } });
 
       // With no extension statuses: lines[0]=session health, lines[1]=alias → (resolving)
       expect(lines.length).toBe(2);
       expect(lines[1]).toContain('code → (resolving)');
-      expect(lines[1]).toContain('[dim');
+      expect(lines[1]).toContain('\x1b[2m');
     });
 
     it('shows a grey dash when no model selected and no resolved model', () => {
       mocks.mockGetResolvedModel.mockReturnValue(null);
       mocks.mockGetSelectedModel.mockReturnValue(null);
 
-      const lines = fabricateFooterLines({ ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } });
+      const lines = fabricateFooterLines({ ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) } } });
 
       // With no extension statuses: lines[0]=session health, lines[1]=dash
       expect(lines.length).toBe(2);
       expect(lines[1]).toContain('—');
-      expect(lines[1]).toContain('[dim');
+      expect(lines[1]).toContain('\x1b[2m');
     });
 
     it('shows just the resolved model when no model alias is selected', () => {
       mocks.mockGetResolvedModel.mockReturnValue('openai/gpt-4');
       mocks.mockGetSelectedModel.mockReturnValue(null);
 
-      const lines = fabricateFooterLines({ ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } });
+      const lines = fabricateFooterLines({ ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) } } });
 
       // With no extension statuses: lines[0]=session health, lines[1]=resolved model only
       expect(lines.length).toBe(2);
       expect(lines[1]).toContain('openai/gpt-4');
       expect(lines[1]).not.toContain('→');
-      expect(lines[1]).toContain('[dim');
+      expect(lines[1]).toContain('\x1b[2m');
     });
 
     it('shows initial prompt preview alongside model info on line 3', () => {
@@ -1114,18 +1131,22 @@ describe('session-health', () => {
       mocks.mockGetSelectedModel.mockReturnValue('code');
 
       const lines = fabricateFooterLines(
-        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } },
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) } } },
         'Fix the bug by adding validation',
       );
 
       expect(lines.length).toBe(2);
-      // Format: "<preview>  │  <alias> → <provider/model>" — command preview on
-      // the left, model identifier on the right (no quotes).
+      // Format: "<preview> … <separator> <alias> → <provider/model>" — the
+      // prompt is left-aligned, the model is flush right, with flexible
+      // padding between them (no quotes).
       expect(lines[1]).toContain('Fix the bug by adding validation');
       expect(lines[1]).toContain('code → openai/gpt-4');
-      expect(lines[1]).toContain('Fix the bug by adding validation  │  code → openai/gpt-4');
+      expect(lines[1]).toContain('│  code → openai/gpt-4');
       expect(lines[1]).not.toContain('"');
-      expect(lines[1]).toContain('[dim');
+      expect(lines[1]).toContain('\x1b[2m');
+      // Right-aligned: the model's right edge is at the line's width.
+      const visible = unstyle(lines[1]);
+      expect(visible.endsWith('code → openai/gpt-4')).toBe(true);
     });
 
     it('gives the command preview the majority of the line width', () => {
@@ -1135,44 +1156,103 @@ describe('session-health', () => {
       const longPrompt =
         'Implement the authentication flow with refresh token rotation and session persistence across restarts';
       const lines = fabricateFooterLines(
-        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } },
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) } } },
         longPrompt,
         500,
       );
 
       expect(lines.length).toBe(2);
-      // Command budget = width(500) − model(17) − separator(5) = 478, so the
-      // prompt fits untruncated and the model sits after the separator at the
-      // end of the line.
-      expect(lines[1]).toContain(`${longPrompt}  │  code → openai/gpt-4`);
+      // Right-aligned model: the prompt is left-aligned and the model is flush
+      // right. The separator directly precedes the model at the line's end.
+      expect(lines[1]).toContain(longPrompt);
+      expect(lines[1]).toContain('│  code → openai/gpt-4');
 
       // Measure the two parts around the │ separator: the command part must
       // be (a) the full untruncated prompt and (b) longer than the model part.
-      // (The mock theme wraps the label as `[dim` + label + `]`.)
-      const content = lines[1].replace(/^\[dim/, '').replace(/\]$/, '');
-      const sepIndex = content.indexOf('│');
+      // (The mock theme wraps the label in ANSI dim codes; strip them first.)
+      const content = unstyle(lines[1]);
+      const sepIndex = content.lastIndexOf('│');
       const commandPart = content.slice(0, sepIndex).trim();
       const modelPart = content.slice(sepIndex + 1).trim();
       expect(commandPart).toBe(longPrompt);
       expect(modelPart).toBe('code → openai/gpt-4');
       expect(commandPart.length).toBeGreaterThan(modelPart.length);
+      // Right edge flush with terminal width.
+      expect(content.endsWith('code → openai/gpt-4')).toBe(true);
     });
 
-    it('caps the model identifier width so the command preview gets the space', () => {
+    it('shows the complete model name (no 30-col cap)', () => {
       mocks.mockGetResolvedModel.mockReturnValue('openai/gpt-4-abcdefghijklmnopqrstuvwxyz');
       mocks.mockGetSelectedModel.mockReturnValue('code');
 
       const lines = fabricateFooterLines(
-        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } },
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) } } },
         'Fix the bug',
         500,
       );
 
       // modelPart = "code → openai/gpt-4-abcdefghijklmnopqrstuvwxyz" (46 cols)
-      // → capped to 30 visible columns; the rest of the line goes to the prompt.
+      // → NOT capped; full model name visible.
       expect(lines.length).toBe(2);
-      expect(lines[1]).toContain('Fix the bug  │  code → openai/gpt-4-abcdefghij');
-      expect(lines[1]).not.toContain('qrstuvwxyz');
+      expect(lines[1]).toContain('code → openai/gpt-4-abcdefghijklmnopqrstuvwxyz');
+      expect(lines[1]).toContain('qrstuvwxyz');
+    });
+
+    it('right-aligns the model so its right edge is at terminal width', () => {
+      mocks.mockGetResolvedModel.mockReturnValue('openai/gpt-4');
+      mocks.mockGetSelectedModel.mockReturnValue('code');
+
+      const lines = fabricateFooterLines(
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) } } },
+        'Fix the bug',
+        500,
+      );
+
+      // Model is right-aligned: the line content (after removing theme
+      // ANSI codes) should fill the full width with the model flush right.
+      const visible = unstyle(lines[1]);
+      expect(visible.length).toBe(500);
+      // The last character should be the model's last char, not a space.
+      expect(visible[499]).not.toBe(' ');
+      expect(visible.endsWith('code → openai/gpt-4')).toBe(true);
+    });
+
+    it('truncates the prompt to yield space for the model on narrow widths', () => {
+      mocks.mockGetResolvedModel.mockReturnValue('openai/gpt-4-abcdefghijklmnopqrstuvwxyz');
+      mocks.mockGetSelectedModel.mockReturnValue('code');
+
+      // With a 70-col terminal the long model (46 cols) + separator (5) = 51,
+      // leaving only 19 cols for the prompt — should be truncated.
+      const lines = fabricateFooterLines(
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) } } },
+        'Fix the bug by adding validation here',
+        70,
+      );
+
+      expect(lines.length).toBe(2);
+      // The prompt should be truncated with '...'
+      expect(lines[1]).toContain('...');
+      // The model should still be complete
+      expect(lines[1]).toContain('openai/gpt-4-abcdefghijklmnopqrstuvwxyz');
+      // Line should not exceed width (ANSI codes aside)
+      expect(unstyle(lines[1]).length).toBeLessThanOrEqual(70);
+    });
+
+    it('drops the prompt when the model alone exceeds terminal width', () => {
+      mocks.mockGetResolvedModel.mockReturnValue('openai/gpt-4-abcdefghijklmnopqrstuvwxyz');
+      mocks.mockGetSelectedModel.mockReturnValue('code');
+
+      // Model part = "code → openai/gpt-4-abcdefghijklmnopqrstuvwxyz" (46 cols).
+      // At width 40 the model cannot fit; the final clamp clips it.
+      const lines = fabricateFooterLines(
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) } } },
+        'Fix the bug by adding validation',
+        40,
+      );
+
+      expect(lines.length).toBe(2);
+      // Line must not exceed width (ANSI codes aside)
+      expect(unstyle(lines[1]).length).toBeLessThanOrEqual(40);
     });
 
     it('never overflows the line at very narrow widths', () => {
@@ -1182,13 +1262,13 @@ describe('session-health', () => {
       // Width 20 < model cap (30) + separator (5): the command budget is 0,
       // the label overflows, and the final clamp keeps the line at 20 cols.
       const lines = fabricateFooterLines(
-        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } },
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) } } },
         'Fix the bug by adding validation',
         20,
       );
 
       expect(lines.length).toBe(2);
-      expect(lines[1].length).toBeLessThanOrEqual(20);
+      expect(unstyle(lines[1]).length).toBeLessThanOrEqual(20);
     });
 
     it('truncates long initial prompt preview', () => {
@@ -1200,18 +1280,18 @@ describe('session-health', () => {
       // With width=120, model="code → (resolving)" (19 cols), separator=5,
       // available=max(15, 120-19-5)=96, prompt length=151 > 96
       const lines = fabricateFooterLines(
-        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } },
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) } } },
         longPrompt,
         120,
       );
 
       expect(lines.length).toBe(2);
       // Truncated prompt with ... followed by the model identifier after the
-      // separator; the final clamp keeps the line at most `width` columns
-      // (may clip the model tail at very narrow widths — documented edge case).
+      // separator; the final clamp keeps the line at most `width` visible
+      // columns (ANSI codes aside).
       expect(lines[1]).toContain('...  │  code →');
-      expect(lines[1].length).toBeLessThanOrEqual(120);
-      expect(lines[1]).toContain('[dim');
+      expect(unstyle(lines[1]).length).toBeLessThanOrEqual(120);
+      expect(lines[1]).toContain('\x1b[2m');
     });
 
     it('shows just model info when no initial prompt available', () => {
@@ -1219,7 +1299,7 @@ describe('session-health', () => {
       mocks.mockGetSelectedModel.mockReturnValue('code');
 
       const lines = fabricateFooterLines(
-        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) } } },
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) } } },
         null, // no initial prompt
       );
 
@@ -1240,7 +1320,7 @@ describe('session-health', () => {
         mode: 'tui',
         ui: {
           ...mockCtx.ui,
-          theme: { fg: vi.fn((c: string, t: string) => `[${c}${t}]`) },
+          theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) },
           setFooter: vi.fn((factory: Function) => {
             // Call factory to get dispose/invalidate/render
             const result = factory(

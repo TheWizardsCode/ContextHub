@@ -57,13 +57,61 @@ function mergeDependencyEdges(edges: DependencyEdge[]): DependencyEdge[] {
   return Array.from(merged.values());
 }
 
+/**
+ * Sync header metadata (incremental sync, WL-0MSAKUBKW006FN8Q).
+ *
+ * The first line of a sync JSONL identifies whether the rest of the file is a
+ * full snapshot or a delta (subset) of records. The header is a single JSON
+ * object so the parser can detect it before processing records, and so old
+ * parsers that only know the workitem/comment/audit formats never treat the
+ * header as a record (the `data`/`type` fields are absent).
+ */
+export interface SyncHeader {
+  version: number;
+  kind: 'full' | 'delta';
+}
+
+export const SYNC_HEADER_KEY = '__worklog_sync__';
+export const SYNC_HEADER_VERSION = 1;
+
+/**
+ * Build the header line for a given sync kind. Returns null when no header is
+ * requested (legacy callers keep producing plain files).
+ */
+export function buildSyncHeader(kind?: 'full' | 'delta'): string | null {
+  if (!kind) return null;
+  return stableStringify({ [SYNC_HEADER_KEY]: { version: SYNC_HEADER_VERSION, kind } });
+}
+
+/**
+ * Parse a sync header line. Returns null when the line is not a known header.
+ *
+ * @param line - A single JSONL line (first line of a sync file).
+ */
+export function parseSyncHeader(line: string): SyncHeader | null {
+  try {
+    const parsed = JSON.parse(line);
+    const h = parsed?.[SYNC_HEADER_KEY];
+    if (!h || typeof h !== 'object') return null;
+    const kind = h.kind;
+    if (kind !== 'full' && kind !== 'delta') return null;
+    return { version: typeof h.version === 'number' ? h.version : SYNC_HEADER_VERSION, kind };
+  } catch {
+    return null;
+  }
+}
+
 function buildJsonlContent(
   items: WorkItem[],
   comments: Comment[],
   dependencyEdges: DependencyEdge[] = [],
-  auditResults: AuditResult[] = []
+  auditResults: AuditResult[] = [],
+  kind?: 'full' | 'delta'
 ): string {
   const lines: string[] = [];
+
+  const header = buildSyncHeader(kind);
+  if (header) lines.push(header);
 
   const sortedItems = [...items].sort((a, b) => a.id.localeCompare(b.id));
   const normalizedEdges = mergeDependencyEdges(dependencyEdges);
@@ -112,9 +160,10 @@ export function exportToJsonl(
   comments: Comment[],
   filepath: string,
   dependencyEdges: DependencyEdge[] = [],
-  auditResults: AuditResult[] = []
+  auditResults: AuditResult[] = [],
+  kind?: 'full' | 'delta'
 ): number {
-  const content = buildJsonlContent(items, comments, dependencyEdges, auditResults);
+  const content = buildJsonlContent(items, comments, dependencyEdges, auditResults, kind);
 
   // Ensure directory exists
   const dir = path.dirname(filepath);
@@ -153,6 +202,9 @@ export async function exportToJsonlAsync(
   // main event loop. If worker_threads are unavailable or worker construction
   // fails, fall back to the previous in-process async implementation.
   const onProgress = options?.onProgress;
+  const kind: 'full' | 'delta' | undefined = options?.kind;
+  // Build the header string ONCE (both for the worker path and the fallback).
+  const headerLine = buildSyncHeader(kind);
 
   // Inline worker code that performs stable JSONL serialization and reports
   // progress back to the parent via parentPort.postMessage(). Using an
@@ -186,11 +238,12 @@ export async function exportToJsonlAsync(
       "function mergeDependencyEdges(edges) { const merged = new Map(); for (const edge of edges || []) { merged.set(edge.fromId + '::' + edge.toId, edge); } return Array.from(merged.values()); }",
       "function dependenciesFromEdges(edges, itemId) { return (edges || []).filter(function(e){ return e.fromId === itemId; }).map(function(e){ return { from: e.fromId, to: e.toId }; }).sort(function(a,b){ const d = a.from.localeCompare(b.from); return d !== 0 ? d : a.to.localeCompare(b.to); }); }",
       "try {",
-      "  const { items, comments, dependencyEdges, auditResults, filepath } = workerData;",
+      "  const { items, comments, dependencyEdges, auditResults, filepath, headerLine } = workerData;",
       "  const dir = path.dirname(filepath); if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });",
       "  const tempName = path.basename(filepath) + '.tmp-' + Math.random().toString(36).slice(2,10);",
       "  const tempPath = path.join(dir, tempName);",
       "  const out = fs.createWriteStream(tempPath, { encoding: 'utf8' });",
+      "  if (headerLine) out.write(headerLine + '\\n');",
       "  const sortedItems = (items || []).slice().sort(function(a,b){ return a.id.localeCompare(b.id); });",
       "  const normalizedEdges = mergeDependencyEdges(dependencyEdges || []);",
       "  const sortedComments = (comments || []).slice().sort(function(a,b){ const wi = a.workItemId.localeCompare(b.workItemId); if (wi !== 0) return wi; const ca = a.createdAt.localeCompare(b.createdAt); if (ca !== 0) return ca; return a.id.localeCompare(b.id); });",
@@ -205,7 +258,7 @@ export async function exportToJsonlAsync(
     ].join('\n');
 
     return new Promise<number>((resolve, reject) => {
-      const worker = new Worker(workerCode, { eval: true, workerData: { items, comments, dependencyEdges, auditResults, filepath } });
+      const worker = new Worker(workerCode, { eval: true, workerData: { items, comments, dependencyEdges, auditResults, filepath, headerLine } });
 
       worker.on('message', (msg: any) => {
         if (!msg || typeof msg !== 'object') return;
@@ -240,7 +293,7 @@ export async function exportToJsonlAsync(
   } catch (err) {
     // Worker-based export failed; fall back to previous in-process path.
     try {
-      const content = buildJsonlContent(items, comments, dependencyEdges, auditResults);
+      const content = buildJsonlContent(items, comments, dependencyEdges, auditResults, kind);
       const dir = path.dirname(filepath);
       const tempName = `${path.basename(filepath)}.tmp-${Math.random().toString(36).slice(2, 10)}`;
       const tempPath = path.join(dir, tempName);
@@ -279,13 +332,26 @@ export function importFromJsonl(filepath: string): { items: WorkItem[], comments
   return importFromJsonlContent(content);
 }
 
-export function importFromJsonlContent(content: string): { items: WorkItem[], comments: Comment[], dependencyEdges: DependencyEdge[], auditResults: AuditResult[] } {
+export function importFromJsonlContent(content: string): { items: WorkItem[], comments: Comment[], dependencyEdges: DependencyEdge[], auditResults: AuditResult[], kind?: 'full' | 'delta' } {
   const lines = content.split('\n').filter(line => line.trim() !== '');
   
   const items: WorkItem[] = [];
   const comments: Comment[] = [];
   const dependencyEdges: DependencyEdge[] = [];
   const auditResults: AuditResult[] = [];
+
+  // Detect + consume a sync header on the FIRST line (incremental sync,
+  // WL-0MSAKUBKW006FN8Q). The header is emitted by exportToJsonlAsync with
+  // options.kind set. Files without a header are treated as `undefined` kind
+  // (legacy full snapshot), preserving existing behavior.
+  let kind: 'full' | 'delta' | undefined;
+  if (lines.length > 0) {
+    const header = parseSyncHeader(lines[0]);
+    if (header) {
+      kind = header.kind;
+      lines.shift();
+    }
+  }
   
   for (const line of lines) {
     try {
@@ -431,7 +497,7 @@ export function importFromJsonlContent(content: string): { items: WorkItem[], co
     }
   }
   
-  return { items, comments, dependencyEdges, auditResults };
+  return { items, comments, dependencyEdges, auditResults, kind };
 }
 
 /**

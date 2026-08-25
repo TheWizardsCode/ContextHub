@@ -1,9 +1,22 @@
 /**
- * packages/herdr/src/icons.ts — Icon utilities for Herdr work item display
+ * packages/shared/src/icons.ts — Shared icon/colour data for the herdr plugin
  *
- * Provides consistent icon rendering (emoji or text fallback) for work
- * item status, priority, stage, audit results, and metadata indicators.
- * Adapted from the main project src/icons.ts without Pi dependencies.
+ * Dependency-free module providing icon maps, icon functions, stage-colour
+ * helpers, and display-width utilities.  Herdr imported its own adapted copy
+ * (packages/herdr/src/icons.ts); this module is that data's single canonical
+ * home so the plugin no longer carries a duplicate that can drift.
+ *
+ * The icon glyphs deliberately preserve the values the herdr worklist has
+ * always rendered (❓ unknown audit, ⏳ stale-passed, ⊙ epic, 💥 critical
+ * risk, `[ready]`/`[?]` text fallbacks) so removing the local copy does not
+ * change any rendered output (parent WL-0MSJ4BT4Z002HH9B AC3: "the worklist
+ * renders icons/colours identically").
+ *
+ * The CLI (src/theme.ts) keeps its own self-contained icons with slightly
+ * different glyph choices; this module serves herdr's needs without pulling
+ * in chalk or other Pi dependencies.
+ *
+ * No external dependencies — pure data + functions.
  */
 
 // ── Options ───────────────────────────────────────────────────────────
@@ -138,18 +151,18 @@ export function statusIcon(status: string, opts?: IconOptions): string {
 /**
  * Get the icon for a work item stage.
  */
-export function stageIcon(stage: string | undefined, opts?: IconOptions): string {
+export function stageIcon(stage: string | undefined | null, opts?: IconOptions): string {
   const key = (stage || '').toLowerCase();
   if (opts?.noIcons) {
     return STAGE_FALLBACK[key] || `[${key.toUpperCase()}]`;
   }
-  return STAGE_ICONS[key] || '\u{2753}';
+  return STAGE_ICONS[key] || '\u{2753}'; // ❓
 }
 
 /**
  * Get the icon for a work item priority.
  */
-export function priorityIcon(priority: string | undefined, opts?: IconOptions): string {
+export function priorityIcon(priority: string | undefined | null, opts?: IconOptions): string {
   const key = (priority || '').toLowerCase().trim();
   if (opts?.noIcons) {
     return PRIORITY_FALLBACK[key] || '';
@@ -210,7 +223,7 @@ export function agentStatusIcon(state: string | undefined, opts?: IconOptions): 
 /**
  * Get the risk icon.
  */
-export function riskIcon(risk: string | undefined, opts?: IconOptions): string {
+export function riskIcon(risk: string | undefined | null, opts?: IconOptions): string {
   const key = (risk || '').toLowerCase().trim();
   if (!key) return '';
   if (opts?.noIcons) return `[${key.toUpperCase()}]`;
@@ -220,7 +233,7 @@ export function riskIcon(risk: string | undefined, opts?: IconOptions): string {
 /**
  * Get the effort icon.
  */
-export function effortIcon(effort: string | undefined, opts?: IconOptions): string {
+export function effortIcon(effort: string | undefined | null, opts?: IconOptions): string {
   const key = (effort || '').toLowerCase().trim();
   if (!key) return '';
   if (opts?.noIcons) return `[${key.toUpperCase()}]`;
@@ -246,6 +259,12 @@ export function needsProducerReviewIcon(
 /**
  * Determine whether an audit result is fresh (not stale) based on the
  * 60-second staleness buffer.
+ *
+ * Guarantees: `updatedAt` is only bumped on content changes (title, description,
+ * status, stage, priority, etc.). Flag-only flips of `needsProducerReview` do
+ * not move `updatedAt`, so a previously valid audit remains fresh — the TUI
+ * continues showing the passed icon and the downtime dispatcher does not
+ * re-dispatch a redundant audit. (WL-0MSN6ZCTN0027U2R)
  */
 export function isAuditFresh(
   auditedAt: string | null | undefined,
@@ -256,6 +275,33 @@ export function isAuditFresh(
   const updateTime = new Date(updatedAt).getTime();
   if (isNaN(auditTime) || isNaN(updateTime)) return false;
   return auditTime > updateTime - 60000;
+}
+
+/**
+ * Get the display icon for an item's stage with the list's audit-aware
+ * `in_review` handling: a fresh audit shows the audit-result icon
+ * (✅/❌/❓), a stale-but-passed audit shows the stale-passed hourglass
+ * (⏳), a stale or missing audit on an `in_review` item falls back to the
+ * plain stage icon (🔍), and every other stage shows the plain stage icon.
+ *
+ * Shared by the list row prefix (`getIconPrefix`) and the metadata Stage
+ * row so the two sections can never diverge (WL-0MSGIXHHI009KFW9 AC2).
+ */
+export function stageDisplayIcon(
+  item: { stage?: string; auditResult?: boolean | null; auditedAt?: string | null; updatedAt?: string },
+  opts?: IconOptions,
+): string {
+  const noIcons = opts?.noIcons ?? false;
+  if (item.stage === 'in_review') {
+    const fresh = isAuditFresh(item.auditedAt, item.updatedAt);
+    if (fresh) {
+      return auditIcon(item.auditResult, { noIcons });
+    }
+    if (item.auditResult === true) {
+      return auditStaleIcon(item.auditResult, { noIcons });
+    }
+  }
+  return stageIcon(item.stage, { noIcons });
 }
 
 // ── Stage colour ──────────────────────────────────────────────────────
@@ -361,24 +407,10 @@ export function getIconPrefix(
 
   const sIcon = statusIcon(item.status, { noIcons });
 
-  // Column 2: stage or audit-aware icon for in_review
-  let secondIcon: string;
-  if (item.stage === 'in_review') {
-    const fresh = isAuditFresh(item.auditedAt, item.updatedAt);
-    if (fresh) {
-      // Fresh audit: show based on audit result
-      secondIcon = auditIcon(item.auditResult, { noIcons });
-    } else {
-      // No audit or stale audit: show stale-passed icon if passed, else stage icon
-      if (item.auditResult === true) {
-        secondIcon = auditStaleIcon(item.auditResult, { noIcons });
-      } else {
-        secondIcon = stageIcon(item.stage, { noIcons });
-      }
-    }
-  } else {
-    secondIcon = stageIcon(item.stage, { noIcons });
-  }
+  // Column 2: stage or audit-aware icon for in_review — via the shared
+  // stageDisplayIcon helper so the list prefix and the metadata Stage row
+  // can never diverge (WL-0MSGIXHHI009KFW9).
+  const secondIcon = stageDisplayIcon(item, { noIcons });
 
   // Column 3: producer review flag
   const prIcon = needsProducerReviewIcon(item.needsProducerReview, { noIcons });

@@ -20,11 +20,11 @@
  *   1 - wl CLI not found
  */
 
-import { spawn } from 'child_process';
+import { spawn, type ChildProcess, type SpawnOptions } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join } from 'path';
 import { tmpdir } from 'node:os';
-import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, openSync, readFileSync, unlinkSync } from 'node:fs';
 import { resolveWorklogRoot } from '@worklog/shared/worklog-paths';
 import {
   checkWlAvailable,
@@ -36,6 +36,7 @@ import {
   buildWlArgs,
 } from './fetcher.js';
 import { AgentTracker, AGENT_PANES_FILE, mergeAgentStates } from './agent-tracker.js';
+import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { readCodeFreezeStatusForRoot } from './code-freeze.js';
@@ -48,15 +49,21 @@ import {
   parseNextCandidatesOutput,
   parseAuditCandidatesOutput,
   parseImplementCandidatesOutput,
+  parseCriticalCandidatesOutput,
+  parseDepListBlockersOutput,
+  parseShownWorkItem,
   selectAuditCandidate,
   selectImplementCandidate,
+  selectCriticalCandidate,
   selectNextCandidate,
+  resolveDependencyFrontier,
   toDowntimeCandidate,
   toImplementCandidate,
   skillKindFromPrompt,
   type DowntimeWorker,
   type DowntimeWorkerDeps,
   type DowntimeStage,
+  type CriticalCandidate,
   type DowntimeCandidate,
   type DowntimeDispatchEvent,
   type DowntimeDispatchFailureEvent,
@@ -66,18 +73,36 @@ import {
   type DowntimeClaimResult,
   type DowntimeSpawn,
   type DowntimeSpawnResult,
+  type ScheduledPrompt,
+  type DowntimeItemResult,
+  parseShowItemOutput,
   defaultDowntimeSpawn,
   buildDowntimeDispatchComment,
   DOWNTIME_WL_TIMEOUT_MS,
+  DOWNTIME_AUDIT_STALE_WINDOW_MS,
+  parseInProgressOutput,
+  type DowntimeActiveAuditResult,
 } from './downtime-worker.js';
+import {
+  createModeSwitchWorker,
+  type ModeSwitchWorker,
+} from './mode-switch-worker.js';
+import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
 import {
   appendDowntimeLogEntry,
   auditDispatchedItemIds,
   implementDispatchedItemIds,
   planDispatchedItemStages,
   intakeDispatchedItemStages,
+  dispatchedItemStages,
   readDowntimeLogEntries,
+  recentAuditDispatchedItemIds,
 } from './downtime-log.js';
+import {
+  getDueScheduledPrompt as getFirstDuePrompt,
+  loadScheduledPrompts,
+  updateScheduledPromptLastTriggered,
+} from './scheduled-prompts.js';
 
 // Resolve path to the send-to-pi.sh script (relative to this source file)
 // At runtime (tsx or dist), __dirname equivalent from import.meta.url
@@ -163,6 +188,11 @@ export function stripAgentPromptPrefix(command: string): string {
  * WL-0MSBQUJQX005RAT9), `--pane-id-file <path>` is forwarded so the script
  * writes the new pane ID immediately after the split succeeds — the plugin
  * reads it back to record the work-item ↔ pane association.
+ *
+ * Every selection-list agent dispatch passes `--no-focus` (WL-0MSHIA53D009DJOT)
+ * so shared/send-to-pi.sh skips its final zoom and the selection list keeps
+ * focus while the pi agent pane opens in the background. The shared script's
+ * own default (focus on) is unchanged for its other consumers.
  */
 export function buildSendToPiArgs(
   command: string,
@@ -171,7 +201,7 @@ export function buildSendToPiArgs(
   paneIdFile?: string,
 ): string[] {
   const agentPrompt = stripAgentPromptPrefix(command);
-  const args = ['--cwd', targetCwd];
+  const args = ['--no-focus', '--cwd', targetCwd];
   if (model) {
     args.push('--model', model);
   }
@@ -180,6 +210,19 @@ export function buildSendToPiArgs(
   }
   args.push(agentPrompt);
   return args;
+}
+
+/**
+ * Build the argument vector for spawning `scripts/run-in-pane.sh` for a
+ * command-output pane (`!!`/`!`-prefixed pane route and plain shell stdout
+ * route). Mirrors `buildSendToPiArgs`: `--no-focus` (WL-0MSHIA53D009DJOT) is
+ * always passed so opening the command-output pane does not steal focus from
+ * the selection list, followed by `--cwd <targetCwd>` so the pane starts in
+ * the resolved project root. `run-in-pane.sh` parses both options at the
+ * head of argv; everything else is the command itself.
+ */
+export function buildRunInPaneArgs(command: string, targetCwd: string): string[] {
+  return ['--no-focus', '--cwd', targetCwd, command];
 }
 
 /**
@@ -199,6 +242,141 @@ export function parsePaneIdFile(raw: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+// ── Background (no-pane) dispatch (WL-0MSJLD1I70045ZUL) ────────────────
+
+/**
+ * Directory (under the OS tmpdir) holding per-run background-dispatch logs.
+ * A single known directory so logs can be located for inspection; cleanup
+ * of old logs is out of scope (each filename carries a timestamp + pid).
+ */
+export const BACKGROUND_LOG_DIR = 'herdr-background-logs';
+
+/**
+ * Build a per-run log file path for a background (no-pane) shortcut
+ * dispatch (WL-0MSJLD1I70045ZUL).
+ *
+ * Returns `<tmpdir>/herdr-background-logs/herdr-<timestamp>-<pid>-<slug>.log`
+ * where the slug is a sanitised prefix of the command — concurrent
+ * dispatches never collide (timestamp + pid) and each run is individually
+ * inspectable. The caller logs the returned path to stderr so the user can
+ * locate the file.
+ */
+export function buildBackgroundLogPath(command: string): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const slug =
+    command.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) ||
+    'command';
+  return join(tmpdir(), BACKGROUND_LOG_DIR, `herdr-${stamp}-${process.pid}-${slug}.log`);
+}
+
+/**
+ * Injectable spawn/filesystem dependencies for the background spawn
+ * helpers (tests replace these so no real subprocess or log file is needed).
+ */
+export interface BackgroundSpawnDeps {
+  spawn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess;
+  openSync?: (path: string, flags: string) => number;
+  /** Called when the background child process exits — triggers a TUI refresh. */
+  onExit?: (exitCode: number | null, signal: string | null) => void;
+}
+
+/**
+ * Open a background log file for append, creating the directory first.
+ * Returns the fd, or -1 when the log cannot be opened (caller falls back to
+ * 'ignore' stdio so a logging failure never blocks dispatch).
+ */
+function openBackgroundLog(logPath: string, open: (path: string, flags: string) => number): number {
+  try {
+    mkdirSync(dirname(logPath), { recursive: true });
+    return open(logPath, 'a');
+  } catch (err) {
+    process.stderr.write(
+      `[worklog-plugin] Could not open background log ${logPath}: ${(err as Error).message}\n`,
+    );
+    return -1;
+  }
+}
+
+/**
+ * Spawn a shell command detached with stdout/stderr redirected to a log
+ * file — the `open_pane: false` execution path for `!!`/`!` shell commands
+ * (WL-0MSJLD1I70045ZUL).
+ *
+ * Mirrors the existing pane-spawn pattern (`detached: true` + `unref()`)
+ * so the TUI event loop and process lifecycle are unaffected: the parent
+ * exits independently while the child runs to completion, appending its
+ * output to the log. When the log file cannot be opened, stdio falls back
+ * to 'ignore' (logged) — a logging failure never blocks dispatch.
+ */
+export function spawnBackgroundShell(
+  command: string,
+  targetCwd: string,
+  logPath: string,
+  deps: BackgroundSpawnDeps = {},
+): ChildProcess {
+  const spawnFn = deps.spawn ?? spawn;
+  const open = deps.openSync ?? openSync;
+  const fd = openBackgroundLog(logPath, open);
+  const child = spawnFn('bash', ['-c', command], {
+    detached: true,
+    stdio: fd >= 0 ? (['ignore', fd, fd] as const) : 'ignore',
+    cwd: targetCwd,
+    env: { ...process.env, HERDR_RESOLVED_CWD: targetCwd },
+  });
+  child.unref(); // Allow the parent to exit independently
+
+  // On exit, fire the refresh callback (fire-and-forget — never blocks).
+  if (deps.onExit) {
+    child.on('exit', deps.onExit);
+  }
+
+  return child;
+}
+
+/**
+ * Spawn a headless pi run detached with stdout/stderr redirected to a log
+ * file — the `open_pane: false` execution path for agent commands
+ * (`/skill:*`, `/intake`, `/plan`, `/prompt:`) (WL-0MSJLD1I70045ZUL).
+ *
+ * Uses the established headless pattern `pi -p --mode json` (see
+ * `~/.pi/agent/skills/audit/scripts/audit_runner.py`, WL-0MSG4VSP10020NL7):
+ * no pane is created, so the work-item ↔ pane association
+ * (WL-0MSBQUJQX005RAT9) is skipped. The entry's `model` is honored via
+ * `--model <pattern>`; free-form `/prompt:` commands have their routing
+ * prefix stripped so pi receives only the prompt text. Detached + unref'd
+ * like the pane-spawn paths; log open failure falls back to 'ignore'.
+ */
+export function spawnBackgroundPi(
+  prompt: string,
+  targetCwd: string,
+  model: string | undefined,
+  logPath: string,
+  deps: BackgroundSpawnDeps = {},
+): ChildProcess {
+  const spawnFn = deps.spawn ?? spawn;
+  const open = deps.openSync ?? openSync;
+  const fd = openBackgroundLog(logPath, open);
+  const args = ['-p', '--mode', 'json'];
+  if (model) {
+    args.push('--model', model);
+  }
+  args.push(prompt);
+  const child = spawnFn('pi', args, {
+    detached: true,
+    stdio: fd >= 0 ? (['ignore', fd, fd] as const) : 'ignore',
+    cwd: targetCwd,
+    env: { ...process.env, HERDR_RESOLVED_CWD: targetCwd },
+  });
+  child.unref(); // Allow the parent to exit independently
+
+  // On exit, fire the refresh callback (fire-and-forget — never blocks).
+  if (deps.onExit) {
+    child.on('exit', deps.onExit);
+  }
+
+  return child;
 }
 
 // ── Pane-ID capture (WL-0MSBQUJQX005RAT9) ─────────────────────────────
@@ -342,6 +520,39 @@ export async function claimItemForAgentCommand(command: string): Promise<void> {
 }
 
 /**
+ * Resolve the dependency blockers of a work item via `wl dep list`
+ * (F3, decision Q3). The outbound `depends-on` edges of the queried item
+ * are its blockers; the dep-list edges carry only id/title/status/
+ * priority, so each blocker is enriched via `wl show` to obtain the full
+ * stage/risk/effort/sortIndex fields the frontier resolution needs
+ * (stage→skill mapping + implement caps, Q2). THROWS on a wl or parse
+ * failure — the caller's fail-closed catch converts it into a strike
+ * (`{ok:false}`), so a dependency look-up failure never masquerades as an
+ * empty frontier (AC5: no silent fall-through).
+ */
+async function fetchCriticalBlockers(cwd: string, itemId: string): Promise<CriticalCandidate[]> {
+  const { stdout } = await getExecFileAsync()(
+    'wl',
+    buildWlArgs(['dep', 'list', itemId, '--json']),
+    { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+  );
+  const blockerRefs = parseDepListBlockersOutput(stdout);
+  if (blockerRefs === null) throw new Error('wl dep list parse failure');
+  const blockers: CriticalCandidate[] = [];
+  for (const ref of blockerRefs) {
+    const { stdout: showOut } = await getExecFileAsync()(
+      'wl',
+      buildWlArgs(['show', ref.id, '--json']),
+      { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+    );
+    const full = parseShownWorkItem(showOut);
+    if (full === null) throw new Error(`wl show parse failure for ${ref.id}`);
+    blockers.push(full);
+  }
+  return blockers;
+}
+
+/**
  * Build the real downtime-worker dependencies (WL-0MSF49FMW009M06K):
  * `wl next --stage <stage> --json` for dispatch selection, `wl update
  * <id> --status in_progress` for the pre-dispatch claim, and
@@ -354,6 +565,21 @@ export function createDowntimeDeps(
   assignee: string,
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
 ): DowntimeWorkerDeps {
+  // Shared round-robin registry (WL-0MSSRED76008LGB6): one per worklog root
+  // (`<cwd>/.worklog/downtime-round-robin.json`), created lazily so each
+  // selection re-reads the durable cursor from disk — cross-instance
+  // rotation works because the file is the source of truth. Fail-open: a
+  // missing/unreadable file degrades to no rotation (cursor 0).
+  const registries = new Map<string, RoundRobinRegistry>();
+  const registryFor = (cwd: string): RoundRobinRegistry => {
+    const worklogDir = join(cwd, '.worklog');
+    let registry = registries.get(worklogDir);
+    if (!registry) {
+      registry = createRoundRobinRegistry({ worklogDir });
+      registries.set(worklogDir, registry);
+    }
+    return registry;
+  };
   return {
     async getNextItem(stage: DowntimeStage, cwd: string): Promise<DowntimeNextResult> {
       try {
@@ -388,7 +614,7 @@ export function createDowntimeDeps(
             : stage === 'idea'
               ? intakeDispatchedItemStages(entries)
               : new Map<string, string>();
-        const selected = selectNextCandidate(candidates, dispatched);
+        const selected = selectNextCandidate(candidates, dispatched, registryFor(cwd));
         return { ok: true, candidate: selected };
       } catch {
         // Transient wl failure → fail closed to busy: no dispatch, and the
@@ -406,15 +632,19 @@ export function createDowntimeDeps(
       try {
         // Audit tier (WL-0MSI8H3HP000K0RG): select the first completed /
         // in_review item WITHOUT a valid audit so the producer-review queue
-        // (the release gate) is drained during idle time. Same fail-closed
-        // semantics as getNextItem, with the same error channel
+        // (the release gate) is drained during idle time. --root-only
+        // (WL-0MSTLFW14000KPEC): only PARENT items are audit candidates —
+        // completed/in_review children (sub-tasks) are never dispatched
+        // independently; the producer reviews deliverable units (parents),
+        // whose audits cover their children. Same fail-closed semantics as
+        // getNextItem, with the same error channel
         // (WL-0MSLWJ2KP0002SV0): a wl/parse failure resolves {ok:false} — a
         // CLI-error strike — NOT a null that is indistinguishable from a
         // genuinely empty audit tier. The bounded timeout
         // (WL-0MSJIPHD0001L1J9) applies here too.
         const { stdout } = await getExecFileAsync()(
           'wl',
-          buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--json']),
+          buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
         );
         const candidates = parseAuditCandidatesOutput(stdout);
@@ -430,7 +660,7 @@ export function createDowntimeDeps(
         // the audit tier).
         const entries = await readDowntimeLogEntries(cwd);
         const dispatchedAuditIds = auditDispatchedItemIds(entries);
-        const selected = selectAuditCandidate(candidates, Date.now(), dispatchedAuditIds);
+        const selected = selectAuditCandidate(candidates, Date.now(), dispatchedAuditIds, registryFor(cwd));
         // Genuinely empty audit tier → ok:true with no candidate (unchanged
         // empty behaviour); a selected item → ok:true with the candidate.
         return selected === null
@@ -443,11 +673,58 @@ export function createDowntimeDeps(
         return { ok: false };
       }
     },
+    async getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult> {
+      try {
+        // Active-audit single-flight (WL-0MT3PHW4I002SNOV): does any
+        // non-stale kind=audit dispatch marker map to an item still
+        // `in_progress`? Dispatch-log-first (per plan decision Q2): read the
+        // shared rolling dispatch log — the cross-instance source of truth
+        // (an audit dispatched by ANY instance, leader or not, is seen
+        // here) — and keep only markers within the 2h stale window
+        // (DOWNTIME_AUDIT_STALE_WINDOW_MS). A marker older than the window
+        // is treated as stale (the audit pane may have crashed without
+        // updating the work item) and ignored. Fail-safe: readDowntimeLog
+        // Entries never throws — a missing or unreadable log is empty, so
+        // a fresh worklog never reports a phantom active audit.
+        const entries = await readDowntimeLogEntries(cwd);
+        const auditCandidateIds = recentAuditDispatchedItemIds(
+          entries,
+          DOWNTIME_AUDIT_STALE_WINDOW_MS,
+        );
+        if (auditCandidateIds.size === 0) {
+          // Cheap fast-path: no non-stale audit markers → no active audit
+          // (no worklog query needed).
+          return { ok: true, active: false };
+        }
+        // Intersect with the worklog's in_progress items: a marker only
+        // counts as an ACTIVE audit while its item is still in_progress
+        // (dispatched but not yet completed/reviewed — the audit pane
+        // transitions the item when it finishes). The bounded timeout
+        // (WL-0MSJIPHD0001L1J9) kills a hung wl child.
+        const { stdout } = await getExecFileAsync()(
+          'wl',
+          buildWlArgs(['list', '--status', 'in_progress', '--json']),
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+        );
+        const inProgress = parseInProgressOutput(stdout);
+        if (inProgress === null) {
+          // Unparseable query → the check cannot complete → fail-open.
+          return { ok: false };
+        }
+        const active = [...auditCandidateIds].some((id) => inProgress.has(id));
+        return { ok: true, active };
+      } catch {
+        // Fail-open: a wl failure yields {ok:false} — the dispatcher skips
+        // the audit tier and falls through to the next tier; dispatch is
+        // never blocked by an unanswerable check (fail-safe).
+        return { ok: false };
+      }
+    },
     async getNextImplementCandidate(cwd: string): Promise<DowntimeCandidate | null> {
       try {
         // Implement tier (WL-0MSMAYPQP001FLR6): select the highest-priority
-        // open plan_complete item with risk Low / effort Small|XS. The wl
-        // next server-side at-most filters (--risk low --effort small,
+        // open plan_complete item with risk ≤ Medium / effort ≤ Medium. The wl
+        // next server-side at-most filters (--risk medium --effort medium,
         // delivered by WL-0MSMAIP5F003WAGG) do the heavy lifting; a
         // generous batch (-n 10) is fetched so completed epics (which wl
         // next keeps under a stage filter) can be filtered out client-side
@@ -462,9 +739,9 @@ export function createDowntimeDeps(
             '--stage',
             'plan_complete',
             '--risk',
-            'low',
+            'medium',
             '--effort',
-            'small',
+            'medium',
             '-n',
             '10',
             '--json',
@@ -481,12 +758,142 @@ export function createDowntimeDeps(
         // implement-tier dispatch still works on a fresh worklog.
         const entries = await readDowntimeLogEntries(cwd);
         const dispatchedImplementIds = implementDispatchedItemIds(entries);
-        const selected = selectImplementCandidate(candidates, dispatchedImplementIds);
+        const selected = selectImplementCandidate(candidates, dispatchedImplementIds, registryFor(cwd));
         return selected === null ? null : toImplementCandidate(selected);
       } catch {
         // Fail-closed: a wl failure yields no candidate (no dispatch).
         return null;
       }
+    },
+    async getNextCriticalCandidate(cwd: string): Promise<DowntimeNextResult> {
+      try {
+        // Critical-first tier (WL-0MT3FM8VA005XBHE): enumerate open
+        // critical items across ALL stages via `wl list --priority critical
+        // --status open -n 10 --json`. Unlike `wl next --stage X` (which
+        // excludes dependency-blocked items by default), `wl list` returns
+        // blocked critical items too — the looked-up candidate may be
+        // dependency-blocked, and the frontier resolution (F3) decides the
+        // dispatch target if it is. A generous batch (-n 10) is fetched so
+        // a change-guard-excluded top candidate does not starve selection
+        // of the next one. The bounded timeout (WL-0MSJIPHD0001L1J9) kills
+        // a hung wl child so the lookup fails closed to a strike instead
+        // of wedging the dispatch task.
+        const { stdout } = await getExecFileAsync()(
+          'wl',
+          buildWlArgs(['list', '--priority', 'critical', '--status', 'open', '-n', '10', '--json']),
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+        );
+        const candidates = parseCriticalCandidatesOutput(stdout);
+        if (candidates === null) return { ok: false };
+        // Dispatched-marker change-guard (WL-0MSRBFFLN005W3VT design point
+        // 3 semantics): read the shared rolling dispatch log for THIS
+        // worklog root and exclude any critical item the downtime worker
+        // has already dispatched for its stage-appropriate skill (kind
+        // intake/plan/implement markers) while the item is still at its
+        // dispatched-at stage; a stage advancement releases it. Fail-safe:
+        // readDowntimeLogEntries never throws — a missing or unreadable
+        // log is treated as empty.
+        const entries = await readDowntimeLogEntries(cwd);
+        // Any dispatched kind (intake/plan/implement) guards the critical
+        // item while it is still at its dispatched-at stage.
+        const dispatched = new Map<string, string>();
+        for (const kind of ['intake', 'plan', 'implement'] as const) {
+          for (const [id, stageAt] of dispatchedItemStages(entries, kind)) {
+            dispatched.set(id, stageAt);
+          }
+        }
+        const selected = selectCriticalCandidate(candidates, dispatched, registryFor(cwd));
+        if (selected === null) return { ok: true, candidate: null };
+        // Dependency-frontier resolution (F3, decision Q3): when the
+        // selected critical candidate is dependency-blocked, the dispatch
+        // target is the NEAREST OPEN blocker (with the blocker's own
+        // stage-appropriate skill). The lookup returns that frontier
+        // blocker — the same contract the dispatch tier already consumes
+        // (like getNextItem returns a wl next candidate).
+        const frontier = await resolveDependencyFrontier(selected, (itemId) =>
+          fetchCriticalBlockers(cwd, itemId),
+        );
+        if (frontier === null) {
+          // Chain bottomed in closed / non-dispatchable items (or a
+          // cycle): no critical dispatch this tick — fall through to the
+          // normal tier order. A wl failure NEVER lands here: the fetcher
+          // throws and the catch below fails closed to a strike.
+          return { ok: true, candidate: null };
+        }
+        return {
+          ok: true,
+          candidate: {
+            id: frontier.id,
+            title: frontier.title,
+            // The frontier blocker's WORKLOG stage (idea / intake_complete
+            // / plan_complete) rides on the field the tier maps through
+            // `criticalSkillKind` — the blocker is dispatched with ITS
+            // stage-appropriate skill (Q3).
+            stage: frontier.stage as DowntimeStage,
+          },
+        };
+      } catch {
+        // Fail-closed: a wl failure yields a CLI-error outcome, never a
+        // candidate and never a null that looks like an empty tier — the
+        // caller counts it as a strike.
+        return { ok: false };
+      }
+    },
+    // Leader-coordination item fetch (parent WL-0MST3OJ8S0001ROL AC4):
+    // resolve ONE item by id for the leader's per-entry tier
+    // classification. `wl show` does not serve the audit timestamp, so for
+    // completed/in_review items the audit tier's list query (which DOES
+    // enrich auditedAt) is run against the entry's worklog root to attach
+    // the freshness signal — otherwise an item with a valid audit could
+    // be re-audited on classification alone. Fail-closed: {ok:false} on
+    // any wl failure or unparseable output — the coordinator treats it as
+    // a strike (never a silent skip).
+    async fetchItem(itemId: string, cwd: string): Promise<DowntimeItemResult> {
+      try {
+        const { stdout } = await getExecFileAsync()(
+          'wl',
+          buildWlArgs(['show', itemId, '--json']),
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+        );
+        const info = parseShowItemOutput(stdout);
+        if (info === null) return { ok: false };
+        if (info.status === 'completed' && info.stage === 'in_review') {
+          // Enrich auditedAt via the audit-tier list query (the only CLI
+          // shape that carries it). A wl failure here fails closed — the
+          // item cannot be classified confidently.
+          const { stdout: listOut } = await getExecFileAsync()(
+            'wl',
+            buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']),
+            { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+          );
+          const audits = parseAuditCandidatesOutput(listOut);
+          if (audits === null) return { ok: false };
+          const found = audits.find((a) => a.id === itemId);
+          info.auditedAt = found?.auditedAt ?? null;
+        }
+        return { ok: true, info };
+      } catch {
+        return { ok: false };
+      }
+    },
+    // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): read the project-local
+    // config at <cwd>/.worklog/scheduled-prompts.json and select the first
+    // DUE entry in config order. Fail-closed: an absent or malformed config
+    // resolves null (logged notice/error inside loadScheduledPrompts) — no
+    // scheduled dispatch and the existing tiers are unaffected; `wl init` is
+    // the provisioning path (AC2).
+    async getDueScheduledPrompt(cwd: string): Promise<ScheduledPrompt | null> {
+      const { entries } = loadScheduledPrompts(cwd);
+      return getFirstDuePrompt(entries);
+    },
+    // Scheduled-prompts persist (WL-0MSS1Q5ER007QDKX): atomic tmp+rename
+    // write of the prompt's lastTriggeredAt AFTER a successful dispatch so a
+    // delayed dispatch never fires more often than its frequency. Resolves
+    // false on any failure (absent/malformed file, unknown id, I/O error) —
+    // the dispatcher ABORTS the spawn (an unrecorded dispatch never runs)
+    // and the entry stays due for the next idle slot (AC4). Never throws.
+    async recordScheduledPromptTrigger(cwd: string, promptId: string, at: string): Promise<boolean> {
+      return updateScheduledPromptLastTriggered(cwd, promptId, at);
     },
     async claimItem(itemId: string, expected: DowntimeClaimExpected): Promise<DowntimeClaimResult> {
       // CAS claim (RCA WL-0MSRBFFLN005W3VT design point 1): the transition
@@ -508,7 +915,10 @@ export function createDowntimeDeps(
         ? { ok: false, reason: 'stale' }
         : { ok: false, reason: 'error' };
     },
-    async spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<DowntimeSpawnResult> {
+    async spawnAgentPane(
+      prompt: string,
+      opts: { model: string; cwd: string; paneName?: string },
+    ): Promise<DowntimeSpawnResult> {
       const kind = skillKindFromPrompt(prompt);
       return spawnDowntimePane(
         scriptPath,
@@ -523,24 +933,28 @@ export function createDowntimeDeps(
       // comment lands on the item in ITS project's DB, not the plugin
       // process's own cwd (WL-0MSI7DQL10016QYX). A comment failure is
       // tolerated — the comment is the durable cross-machine trail, not the
-      // marker.
-      try {
-        await getExecFileAsync()(
-          'wl',
-          buildWlArgs([
-            'comment',
-            'add',
-            event.itemId,
-            '--comment',
-            buildDowntimeDispatchComment(event.itemId, event.kind, event.dispatchedAt),
-            '--author',
-            'herdr-downtime',
-            '--json',
-          ]),
-          { timeout: 5000 },
-        );
-      } catch {
-        // fail-closed: audit logging must never crash the worker
+      // marker. Scheduled-prompt dispatches (noItemComment, AC4) have no
+      // work item — the comment is skipped entirely (there is no item to
+      // comment on).
+      if (!event.noItemComment) {
+        try {
+          await getExecFileAsync()(
+            'wl',
+            buildWlArgs([
+              'comment',
+              'add',
+              event.itemId,
+              '--comment',
+              buildDowntimeDispatchComment(event.itemId, event.kind, event.dispatchedAt),
+              '--author',
+              'herdr-downtime',
+              '--json',
+            ]),
+            { timeout: 5000 },
+          );
+        } catch {
+          // fail-closed: audit logging must never crash the worker
+        }
       }
       // 2. Rolling local log (bounded JSONL under <cwd>/.worklog) — the
       // dispatched MARKER. Written BEFORE the pane spawns (RCA design point
@@ -669,6 +1083,24 @@ async function main(): Promise<void> {
     stateFile: wlRoot ? join(wlRoot, '.worklog', AGENT_PANES_FILE) : undefined,
   });
 
+  // Event subscriber (WL-0MSHB7DHO004RHBJ): subscribes to herdr window
+  // events (pane focus/visibility + agent status) over the herdr socket so
+  // the worklist reacts immediately instead of polling. Fail-open: an
+  // unreachable socket keeps today's polling cadence (the worklist gates
+  // the resume-poll and icon updates behind the events-health flag). The
+  // subscriber is constructed here (once per plugin instance) and handed to
+  // the worklist, which wires the event callbacks to its internal state and
+  // closes it on TUI exit. Initial per-pane subscriptions are synced from
+  // the tracker's shared state file when the subscription starts.
+  const socketPath = resolveSocketPath();
+  const eventSubscriber = socketPath
+    ? new HerdrEventSubscriber({
+        socketPath,
+        callbacks: {},
+        trackedPaneIds: agentTracker.snapshot().map((e) => e.paneId),
+      })
+    : null;
+
   // Create a fetcher that loads items using the current browseItemCount setting
   // Each call reads from settings so changes take effect on next auto-refresh
   // Smart selection (see fetchNextItems) guarantees all critical and
@@ -702,28 +1134,48 @@ async function main(): Promise<void> {
   // Settings are re-read so browseItemCount (per fetch) and showHelpText
   // (per render) changes apply without a plugin restart.
   const runSettings = loadSettings();
-  // Downtime worker (local-LLM idle dispatch, WL-0MSF49FMW009M06K): built
-  // when enabled; settings are re-read every tick via `config()` so changes
-  // apply without a plugin restart. The dispatch panes open in the resolved
-  // worklog root (--cwd).
+  // Downtime worker (local-LLM idle dispatch, WL-0MSF49FMW009M06K): created
+  // UNCONDITIONALLY (parent WL-0MSZ4NSOE007AQEF) so the `d` shortcut can also
+  // force dispatch on for one pane when the global setting is off — the
+  // per-instance in-memory override gates the effective enabled state, and
+  // `tick()` short-circuits (no proxy polling, no idle tracking, no dispatch)
+  // while the effective state is off. Settings are re-read every tick via
+  // `config()` so changes apply without a plugin restart. The dispatch panes
+  // open in the resolved worklog root (--cwd).
   const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
-  const downtimeWorker: DowntimeWorker | undefined = runSettings.downtimeEnabled
-    ? createDowntimeWorker({
-        poller: createDowntimePoller(runSettings.downtimeProxyUrl),
-        deps: createDowntimeDeps(SEND_TO_PI_SCRIPT, AGENT_ASSIGNEE),
-        config: () => {
-          const s = loadSettings();
-          return {
-            enabled: s.downtimeEnabled,
-            thresholdMs: s.downtimeIdleThresholdMs,
-            requiredFreeSlots: s.downtimeRequiredFreeSlots,
-            model: s.downtimeModel,
-            cwd: targetCwd,
-            noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
-          };
-        },
-      })
-    : undefined;
+  const downtimeWorker: DowntimeWorker = createDowntimeWorker({
+    poller: createDowntimePoller(runSettings.downtimeProxyUrl),
+    deps: createDowntimeDeps(SEND_TO_PI_SCRIPT, AGENT_ASSIGNEE),
+    registry: createRoundRobinRegistry({
+      worklogDir: join(targetCwd, '.worklog'),
+    }),
+    // Leader-election + coordination refactor (parent WL-0MST3OJ8S0001ROL):
+    // the shared coordination dir is THIS worklog's .worklog (single-machine
+    // v1 — every herdr instance contributing to the same list passes its own
+    // root; the coordination file + leader lock/lease live there). The
+    // instance id is auto-generated at worker construction (stable for the
+    // process lifetime; re-offers under a fresh id after a restart, the dead
+    // lease expiring in the TTL).
+    coordinationDir: join(targetCwd, '.worklog'),
+    config: () => {
+      const s = loadSettings();
+      return {
+        enabled: s.downtimeEnabled,
+        thresholdMs: s.downtimeIdleThresholdMs,
+        requiredFreeSlots: s.downtimeRequiredFreeSlots,
+        model: s.downtimeModel,
+        cwd: targetCwd,
+        noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
+      };
+    },
+  });
+
+  // Mode-switch worker: automatically switches the llama-proxy between fast
+  // (cloud) and cheap (local) modes based on operator activity and proxy
+  // idle state. Created with settings.downtimeProxyUrl (reuse, no new URL
+  // key). Passes `enabled` via the settings flag (modeSwitchEnabled).
+  const modeSwitchWorker: ModeSwitchWorker = createModeSwitchWorker();
+
   const selectedItem = await runWorklistTui(
     fetcher,
     undefined,
@@ -737,6 +1189,10 @@ async function main(): Promise<void> {
       showIcons: runSettings.showIcons,
       downtimeWorker,
       downtimePollIntervalMs: runSettings.downtimePollIntervalMs,
+      // Per-instance downtime toggle (`d` shortcut, parent WL-0MSZ4NSOE007AQEF):
+      // flips the in-memory worker override; the header re-renders via the
+      // worker's enabled state on the next render (internal action, no pane).
+      onDowntimeToggle: () => downtimeWorker.toggle(),
       // Re-read on every render so a showHelpText change applies on the next
       // refresh (no plugin restart needed), matching browseItemCount behavior.
       getShowHelpText: () => loadSettings().showHelpText ?? true,
@@ -747,7 +1203,12 @@ async function main(): Promise<void> {
       // expanded children) on every refresh cycle (WL-0MSBQUJQX005RAT9).
       // Fail-open: herdr errors yield no icons; the list keeps working.
       mergeAgentStates: (items) => mergeAgentStates(items, agentTracker),
-      onCommand: async (command: string, model?: string) => {
+      subscriber: eventSubscriber,
+      agentTracker,
+      modeSwitchWorker,
+      modeSwitchPollIntervalMs: runSettings.modeSwitchPollIntervalMs,
+      modeSwitchEnabled: runSettings.modeSwitchEnabled,
+      onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
         // shortcuts like audit approve/reject, priority updates, close/delete) are
@@ -756,6 +1217,14 @@ async function main(): Promise<void> {
         // user dismisses it with Enter or herdr prefix+x (close_pane).
         // Everything else is written to stdout with the CMD: prefix for
         // the calling framework (Herdr) to execute.
+        //
+        // A shortcut entry with `open_pane: false` (WL-0MSJLD1I70045ZUL)
+        // opts out of the visible pane entirely: the command runs in the
+        // background (headless `pi -p --mode json` for agent commands,
+        // `bash -c` for shell commands) with stdout/stderr captured to a
+        // per-run log file whose path is logged to stderr for inspection.
+        // The work-item ↔ pane association is skipped when no pane opens.
+        const shouldOpenPane = openPane ?? true;
         const route = routeCommand(command);
         // The new pane must start in the correct project root.  herdr's
         // "follow" CWD policy would otherwise inherit the source pane's CWD
@@ -768,13 +1237,41 @@ async function main(): Promise<void> {
         // process CWD is the herdr extension directory.
         const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
         if (route === 'agent') {
-          // Claim the referenced work-item BEFORE spawning the agent pane so it
-          // appears in_progress immediately. Non-blocking: failures are logged
-          // to stderr and never prevent the pane from opening (AC2).
+          // Agent-route hook: record operator activity and fire fast-switch
+          // (fail-open: never blocks command dispatch). Only runs for agent
+          // commands — /skill:*, /intake, /plan, /prompt:. Shell shortcuts
+          // (!!/!) and plain commands do NOT count as operator activity
+          // (AC2). The worker's onOperatorCommand updates the idle clock
+          // and POSTs mode=fast (when not already fast) fire-and-forget.
+          modeSwitchWorker.onOperatorCommand(runSettings.downtimeProxyUrl);
+          // Claim the referenced work-item BEFORE dispatching so it appears
+          // in_progress immediately — for both the pane and the headless
+          // (no-pane) path. Non-blocking: failures are logged to stderr and
+          // never prevent the dispatch (AC2).
           try {
             await claimItemForAgentCommand(command);
           } catch {
             // Belt-and-suspenders: a claim failure must never block the pane.
+          }
+          if (!shouldOpenPane) {
+            // Background (no-pane) agent dispatch: run pi headless with the
+            // entry's model, output captured to a per-run log file. No pane
+            // is created, so the work-item ↔ pane association
+            // (WL-0MSBQUJQX005RAT9) is skipped entirely.
+            const prompt = stripAgentPromptPrefix(command);
+            const logPath = buildBackgroundLogPath(command);
+            process.stderr.write(
+              `[worklog-plugin] Background dispatch (no pane): ${command}\n` +
+                `[worklog-plugin] Log file: ${logPath}\n`,
+            );
+            spawnBackgroundPi(
+              prompt,
+              targetCwd,
+              model,
+              logPath,
+              { onExit: () => onRefresh?.() },
+            );
+            return;
           }
           // Agent-pane association capture (WL-0MSBQUJQX005RAT9): when the
           // command carries a work-item ID, ask send-to-pi.sh to write the
@@ -809,11 +1306,30 @@ async function main(): Promise<void> {
           }
         } else if (route === 'pane') {
           // Strip `!!` / `!` bash history-expansion prefixes, then run the
-          // command visibly in a new herdr pane via run-in-pane.sh.
+          // command visibly in a new herdr pane via run-in-pane.sh. The pane
+          // opens WITHOUT stealing focus from the selection list (--no-focus,
+          // WL-0MSHIA53D009DJOT) so the user can keep browsing/dispatching;
+          // command-send feedback is surfaced via toast notifications.
+          // With `open_pane: false` the command instead runs detached in the
+          // background with output captured to a log file (no pane).
           const clean = stripCommandPrefix(command);
+          if (!shouldOpenPane) {
+            const logPath = buildBackgroundLogPath(command);
+            process.stderr.write(
+              `[worklog-plugin] Background dispatch (no pane): ${command}\n` +
+                `[worklog-plugin] Log file: ${logPath}\n`,
+            );
+            spawnBackgroundShell(
+              clean,
+              targetCwd,
+              logPath,
+              { onExit: () => onRefresh?.() },
+            );
+            return;
+          }
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            ['--cwd', targetCwd, clean],
+            buildRunInPaneArgs(clean, targetCwd),
             {
               detached: true,
               stdio: 'ignore',
@@ -826,10 +1342,27 @@ async function main(): Promise<void> {
           // Plain (non-!!) shell commands: run them visibly in a new herdr pane
           // from the resolved project root so they always execute in the tab's
           // working directory (herdr v0.7.5 has no CMD: handling, so the stdout
-          // CMD: protocol is not a reliable execution path).
+          // CMD: protocol is not a reliable execution path). Like the pane
+          // route, the command-output pane opens without stealing focus
+          // (--no-focus, WL-0MSHIA53D009DJOT). With `open_pane: false` the
+          // command runs detached in the background with a log file instead.
+          if (!shouldOpenPane) {
+            const logPath = buildBackgroundLogPath(command);
+            process.stderr.write(
+              `[worklog-plugin] Background dispatch (no pane): ${command}\n` +
+                `[worklog-plugin] Log file: ${logPath}\n`,
+            );
+            spawnBackgroundShell(
+              command,
+              targetCwd,
+              logPath,
+              { onExit: () => onRefresh?.() },
+            );
+            return;
+          }
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            ['--cwd', targetCwd, command],
+            buildRunInPaneArgs(command, targetCwd),
             {
               detached: true,
               stdio: 'ignore',

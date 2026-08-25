@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# open-podcast-editor-tab.sh — Open the podcast editing tab
+# open-podcast-editor-tab.sh — Open the Worklog tab
 #
-# Opens the Worklog work item selection pane (the podcast production
-# workflow) in a NEW TAB and renames that tab to "Podcast Editing" so it
-# is instantly recognisable in the tab row among several open tabs.
+# Opens the Worklog work item selection pane in a NEW TAB and renames
+# that tab to "Worklog" so it is instantly recognisable in the tab row
+# among several open tabs.
 #
 # `herdr plugin pane open` (herdr 0.7.5) has no tab-title option — the
 # created tab gets a generated numeric label. This script therefore opens
@@ -19,7 +19,7 @@
 #
 # Environment variables:
 #   HERDR_BIN_PATH       Path to the herdr CLI binary (default: herdr on PATH)
-#   TAB_LABEL            Tab label to apply (default: "Podcast Editing")
+#   TAB_LABEL            Tab label to apply (default: "Worklog")
 #
 # Returns:
 #   0 on success (tab opened and renamed)
@@ -31,7 +31,7 @@
 set -uo pipefail
 
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
-TAB_LABEL="${TAB_LABEL:-Podcast Editing}"
+TAB_LABEL="${TAB_LABEL:-Worklog}"
 
 fail() {
   echo "error: $*" >&2
@@ -156,4 +156,4 @@ $open_output"
 "$herdr_bin" tab rename "$tab_id" "$TAB_LABEL" >/dev/null 2>&1 \
   || fail "'herdr tab rename $tab_id \"$TAB_LABEL\"' failed. Is the herdr server running?"
 
-echo "Opened podcast editing tab '$TAB_LABEL' ($tab_id)." >&2
+echo "Opened worklog tab '$TAB_LABEL' ($tab_id)." >&2

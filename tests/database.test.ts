@@ -602,6 +602,69 @@ describe('WorklogDatabase', () => {
     });
   });
 
+  describe('revertToPlanComplete', () => {
+    it('should revert a completed/in_review item to open/plan_complete', () => {
+      const item = db.create({ title: 'Item', status: 'completed', stage: 'in_review' });
+
+      const reverted = db.revertToPlanComplete(item.id);
+
+      expect(reverted).not.toBeNull();
+      expect(reverted!.item.id).toBe(item.id);
+      expect(reverted!.from).toEqual({ status: 'completed', stage: 'in_review' });
+      expect(reverted!.to).toEqual({ status: 'open', stage: 'plan_complete' });
+      // Persisted in the DB
+      const refreshed = db.get(item.id);
+      expect(refreshed?.status).toBe('open');
+      expect(refreshed?.stage).toBe('plan_complete');
+    });
+
+    it('should preserve the item priority on reversion', () => {
+      const item = db.create({ title: 'Item', status: 'completed', stage: 'in_review', priority: 'high' });
+
+      const reverted = db.revertToPlanComplete(item.id);
+
+      expect(reverted).not.toBeNull();
+      expect(reverted!.item.priority).toBe('high');
+      expect(db.get(item.id)?.priority).toBe('high');
+    });
+
+    it('should be a no-op for done items', () => {
+      const doneItem = db.create({ title: 'Done item', status: 'completed', stage: 'done' });
+
+      expect(db.revertToPlanComplete(doneItem.id)).toBeNull();
+      expect(db.get(doneItem.id)?.status).toBe('completed');
+      expect(db.get(doneItem.id)?.stage).toBe('done');
+    });
+
+    it('should be a no-op for items that are not completed/in_review', () => {
+      const openItem = db.create({ title: 'Open item', status: 'open', stage: 'plan_complete' });
+      const inProgressItem = db.create({ title: 'In-progress item', status: 'in-progress', stage: 'in_progress' });
+      const ideaItem = db.create({ title: 'Idea item', status: 'open', stage: 'idea' });
+
+      expect(db.revertToPlanComplete(openItem.id)).toBeNull();
+      expect(db.revertToPlanComplete(inProgressItem.id)).toBeNull();
+      expect(db.revertToPlanComplete(ideaItem.id)).toBeNull();
+      // Untouched
+      expect(db.get(openItem.id)?.status).toBe('open');
+      expect(db.get(openItem.id)?.stage).toBe('plan_complete');
+      expect(db.get(inProgressItem.id)?.status).toBe('in-progress');
+      expect(db.get(ideaItem.id)?.stage).toBe('idea');
+    });
+
+    it('should return null for a missing item', () => {
+      expect(db.revertToPlanComplete('TEST-NONEXISTENT')).toBeNull();
+    });
+
+    it('should be idempotent: reverting an already-open item is a no-op', () => {
+      const item = db.create({ title: 'Item', status: 'completed', stage: 'in_review' });
+
+      db.revertToPlanComplete(item.id);
+      expect(db.revertToPlanComplete(item.id)).toBeNull();
+      expect(db.get(item.id)?.status).toBe('open');
+      expect(db.get(item.id)?.stage).toBe('plan_complete');
+    });
+  });
+
   describe('comments', () => {
     let workItemId: string;
 

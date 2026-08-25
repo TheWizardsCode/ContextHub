@@ -7,6 +7,16 @@
 > [dcb09ac](https://github.com/TheWizardsCode/ContextHub/commit/dcb09ac),
 > [f3ca18b](https://github.com/TheWizardsCode/ContextHub/commit/f3ca18b)
 
+> **Note:** The CLI's icon content lives in `src/theme.ts`; the deprecated
+> `src/icons.ts` wrapper was removed in WL-0MSJ4BT4Z002HH9B.  Herdr's icon
+> data lives in the dependency-free `@worklog/shared/icons` module
+> (`packages/shared/src/icons.ts`) — the plugin's local copy
+> (`packages/herdr/src/icons.ts`) was removed in WL-0MSJ4BT4Z002HH9B and its
+> consumers now import from the shared module.  For parity (AC3), the shared
+> module keeps the glyph values the herdr worklist has always rendered; a few
+> of those intentionally differ from the CLI's `src/theme.ts` choices (see
+> §13.1).
+
 ## Overview
 
 This document defines the icon set for work item **priority** and **status** used
@@ -66,6 +76,10 @@ When an audit result is `readyToClose: true` but the audit timestamp is stale
 (more than 60 seconds before `updatedAt`), the stale-passed icon is displayed
 in column 2 instead of the stage icon. This preserves the information that
 audit passed even after subsequent minor updates made the audit appear stale.
+
+Note: flag-only flips of `needsProducerReview` do **not** move `updatedAt`
+(WL-0MSN6ZCTN0027U2R), so a previously fresh audit stays fresh — the
+stale-passed icon is only reached by genuine content changes.
 
 The stale-passed icon only applies to `in_review` items. The regular audit
 icons (✅ / ❌ / ❔) are used for fresh audits, and the stage icon (🔍) is
@@ -250,11 +264,13 @@ The icon lookup is a simple `Map<string, string>` or plain object lookup —
 O(1) per call, negligible runtime cost. No SVG, image loading, or network
 requests are involved.
 
-**Design decision:** Create a single `src/icons.ts` module that exports pure
-functions:
+**Design decision:** Create a single module (`src/theme.ts`) that exports pure
+functions. (As of WL-0MSJ4BT4Z009LIB4, icon definitions were merged into
+`src/theme.ts` alongside the chalk colour theme; `src/icons.ts` was removed
+in WL-0MSJ4BT4Z002HH9B.)
 
 ```ts
-// src/icons.ts
+// src/theme.ts
 
 export interface IconOptions {
   /** When true, use text fallback instead of emoji/icon glyph */
@@ -292,7 +308,30 @@ export function iconsEnabled(opts?: { noIcons?: boolean }): boolean;
 
 ## 13. Implementation Guide
 
-### 13.1 CLI List Rendering
+### 13.1 Module Layout
+
+Icon maps and functions are defined in `src/theme.ts` alongside the chalk colour
+theme.  The `src/icons.ts` wrapper was removed in WL-0MSJ4BT4Z002HH9B;
+CLI consumers import directly from `src/theme.js`.  Herdr consumers import
+from `@worklog/shared/icons` (the canonical home in
+`packages/shared/src/icons.ts` of what used to be
+`packages/herdr/src/icons.ts`).
+
+**Parity note (WL-0MSJ4BT4Z002HH9B AC3):** the shared module preserves the
+glyph values the herdr worklist has always rendered, so removing the plugin's
+local copy changes no rendered output.  Where the CLI (`src/theme.ts`) and the
+old herdr copy had diverged, the shared module keeps the *herdr* choices:
+
+| Item | Shared module (herdr) | CLI `src/theme.ts` |
+|------|----------------------|--------------------|
+| Audit unknown | `❓` | `❔` |
+| Audit stale-passed | `⏳` | `🟩` (see §3a) |
+| Epic | `⊙` | `🏰` |
+| Risk critical | `💥` | `🚨` (key `severe`) |
+| Effort levels | `🔹 🔷 🔶 💠` | `🐜 🐇 🐕 🐘 🐋` |
+| Producer review undefined | `''` (nothing shown) | `✅` (defaults to complete) |
+
+### 13.2 CLI List Rendering
 
 Icons are prepended before the title in CLI list output:
 
@@ -304,10 +343,10 @@ Icons are prepended before the title in CLI list output:
 > The Pi-based TUI browse list (which rendered status/stage/producer-review/
 > epic icons via `getIconPrefix` in `packages/tui/extensions/Worklog/lib/browse.ts`)
 > has been removed — work item browsing is now provided by the Herdr plugin.
-> The `dist/icons.ts` functions remain in use by the CLI and the retained
-> session-health footer.
+> `src/theme.ts` remains the CLI's self-contained icon source; the Herdr
+> plugin imports from the shared `@worklog/shared/icons` module.
 
-### 13.2 CLI Detail Output
+### 13.3 CLI Detail Output
 
 File: `src/cli-output.ts`, `src/commands/helpers.ts` (`humanFormatWorkItem`)
 
@@ -318,7 +357,7 @@ Status:   🟢 [OPEN]
 Priority: 🔴 [CRIT]
 ```
 
-### 13.3 Tests
+### 13.4 Tests
 
 Tests should verify:
 - Icon functions return expected emoji for valid inputs
@@ -332,7 +371,7 @@ Tests should verify:
 ## 14. Appendix: Example Usage
 
 ```ts
-import { priorityIcon, statusIcon, iconsEnabled } from '../icons.js';
+import { priorityIcon, statusIcon, iconsEnabled } from './theme.js';
 
 const useIcons = iconsEnabled({ noIcons: opts.noIcons });
 
@@ -355,12 +394,15 @@ lines.push(`Priority: ${pIcon} ${item.priority}`);
 
 | File | Change |
 |------|--------|
-| `src/icons.ts` | Core icon module with emoji, fallback, and label functions |
-| `src/commands/helpers.ts` | Added icon formatting to CLI output (summary, concise, normal, full) |
+| `src/theme.ts` | Single source of truth: chalk colours + all icon maps/functions + `IconOptions` interface |
+| `src/icons.ts` | REMOVED (WL-0MSJ4BT4Z002HH9B) — consumers import from `src/theme.js` |
+| `@worklog/shared/icons` | NEW — canonical dependency-free icon/colour data for herdr (replaces `packages/herdr/src/icons.ts`) |
+| `packages/herdr/src/icons.ts` | REMOVED (WL-0MSJ4BT4Z002HH9B) — herdr consumers import from `@worklog/shared/icons` |
+| `src/commands/helpers.ts` | Rewired to import from `src/theme.js` |
 | `src/commands/list.ts` | Added `--no-icons` CLI flag |
 | `src/commands/show.ts` | Added `--no-icons` CLI flag |
 | `src/cli-types.ts` | Added `noIcons` to ListOptions and ShowOptions |
-| `tests/unit/icons.test.ts` | 58 unit tests for icon functions |
+| `tests/unit/icons.test.ts` | Unit tests for icon functions (wrapper parity tests removed) |
 
 ### CLI Usage
 

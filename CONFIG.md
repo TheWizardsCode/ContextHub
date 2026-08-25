@@ -16,7 +16,7 @@ This will prompt you for:
 - **Issue ID prefix**: A short prefix for your issue IDs (e.g., WI, PROJ, TASK)
 - **Auto-sync**: Enable automatic git sync after changes (optional)
 
-`wl init` installs `AGENTS.md` in the project root with a pointer line to the global `AGENTS.md`. If `AGENTS.md` already exists, it prompts before inserting the pointer and preserves the existing content (unless you pass `--agents-template` for unattended runs). When workflow templates are available, `wl init` prompts you to choose between no formal workflow, a basic Worklog-aware workflow, or manual management (unless you pass `--workflow-inline` for unattended runs).
+`wl init` installs `AGENTS.md` in the project root with the canonical global-reference structure: a `## Global agent guidance` section pointing at the global `~/.pi/agent/AGENTS.md` file, plus a `## Project-specific guidance` placeholder for the project owner to fill in (never a copy of the global instruction set). If `AGENTS.md` already exists, it prompts before adding the global reference and preserves the existing content (unless you pass `--agents-template` for unattended runs). When workflow templates are available, `wl init` prompts you to choose between no formal workflow, a basic Worklog-aware workflow, or manual management (unless you pass `--workflow-inline` for unattended runs).
 
 **Note:** If you haven't installed the CLI globally, you can use `npm run cli -- init` for development.
 
@@ -29,7 +29,7 @@ wl init --project-name "My Project" --prefix PROJ --auto-export yes --auto-sync 
 ```
 
 - `--workflow-inline yes` selects the basic workflow option. Use `--workflow-inline no` to skip workflow setup.
-- `--agents-template append` inserts the global `AGENTS.md` pointer line at the top of your local `AGENTS.md` while preserving existing content.
+- `--agents-template append` inserts the canonical global-agents reference at the top of your local `AGENTS.md` while preserving existing content below it.
 
 ### Example
 
@@ -39,6 +39,46 @@ Issue ID prefix: MP
 ```
 
 This will create issues with IDs like `MP-0J8L1JQ3H8ZQ2K6D`, `MP-0J8L1JQ3H8ZQ2K6E`, etc.
+
+## Scheduled-prompts config (`.worklog/scheduled-prompts.json`)
+
+`wl init` provisions a project-local scheduled-prompts config file at
+`.worklog/scheduled-prompts.json` (create-if-absent — re-running `wl init`
+never clobbers an existing file, so user edits and runtime state are
+preserved). The file is consumed by the herdr plugin's downtime worker:
+the worker dispatches each due prompt's text in a pi agent pane during
+local-LLM idle time on a best-effort cadence (WL-0MSS1Q5ER007QDKX).
+
+The base set provisioned on a fresh init:
+
+```json
+{
+  "entries": [
+    {
+      "id": "refactor",
+      "prompt": "/skill:refactor",
+      "intervalDays": 3,
+      "lastTriggeredAt": null
+    }
+  ]
+}
+```
+
+Each entry carries:
+
+- `id` — stable entry id (used for the pane name `Downtime <id>` and the
+  rolling dispatch-log marker),
+- `prompt` — any text the pi agent pane can run (e.g. `/skill:refactor`),
+- `intervalDays` — best-effort frequency in whole days (a delayed dispatch
+  never fires more often than the frequency),
+- `lastTriggeredAt` — ISO-8601 UTC datetime of the last dispatch
+  (`null` = never run; missing is treated as due).
+
+Add, remove, or adjust entries by editing the file directly — no code
+changes needed. The file is gitignored (part of `.worklog/`). See the herdr
+downtime-worker docs in `packages/herdr/README.md` for the dispatch
+semantics (freeze gating, fail-closed absent/malformed handling, cooldown
+interaction).
 
 ## Configuration Override System
 
@@ -74,7 +114,7 @@ See [DATA_SYNCING.md](DATA_SYNCING.md) for full sync workflow details (git-backe
 
 ## Agent Onboarding (AGENTS.md)
 
-AGENTS.md (the repository-facing onboarding/instructions file) is installed or updated by `wl init` when you consent during initialization. `wl init` is the canonical setup command: it writes config, attempts to install hooks, and can add the Worklog-aware AGENTS.md template into your repository.
+AGENTS.md (the repository-facing onboarding/instructions file) is installed or updated by `wl init` when you consent during initialization. `wl init` is the canonical setup command: it writes config, attempts to install hooks, and can add the Worklog-aware AGENTS.md template into your repository. The installed template contains only a reference to the global `~/.pi/agent/AGENTS.md` (which carries the core work-item workflow and coding disciplines) plus a `## Project-specific guidance` placeholder — project-specific rules are added by the project owner, never by copying the global file.
 
 If you prefer to manage onboarding files manually, create an `AGENTS.md` in your project root with guidance for agents and contributors (the `templates/AGENTS.md` in the Worklog package is a good starting point). If you want concise Copilot guidance, add a `.github/copilot-instructions.md` file pointing at your AGENTS.md and key commands.
 

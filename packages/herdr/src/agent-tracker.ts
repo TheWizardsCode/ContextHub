@@ -253,6 +253,84 @@ export class AgentTracker {
     }
   }
 
+  // ── Event-applied path (WL-0MSHB7DHO004RHBJ F5) ────────────────────
+
+  /**
+   * Snapshot the CURRENT cached agent states WITHOUT the TTL/memo check
+   * and without any herdr exec. Used by the event path to re-render icons
+   * immediately after an event updates the cache.
+   */
+  snapshotStates(): Map<string, AgentState> {
+    return new Map(this.cachedStates);
+  }
+
+  /**
+   * Apply a `pane_agent_status_changed` event to the cached state map.
+   *
+   * Finds every tracked association whose pane matches the event's
+   * pane_id and updates its state immediately (no `herdr agent list`
+   * exec). A `done` status prunes the entry (mirrors refreshStates).
+   * Extends the memo window so the next refreshStates() call returns the
+   * event-applied states instead of re-polling.
+   *
+   * Returns the affected work-item ids (empty when the pane is untracked).
+   */
+  applyAgentStatusChanged(paneId: string, status: string): string[] {
+    const affected: string[] = [];
+    const state = normalizeAgentState(status);
+    for (const [workItemId, entry] of [...this.entries]) {
+      if (entry.paneId !== paneId) continue;
+      if (state === 'done') {
+        this.entries.delete(workItemId);
+        this.cachedStates.delete(workItemId);
+      } else {
+        this.cachedStates.set(workItemId, state);
+      }
+      affected.push(workItemId);
+    }
+    if (affected.length > 0) {
+      this.persist();
+      this.cachedAt = Date.now();
+    }
+    return affected;
+  }
+
+  /**
+   * Apply a `pane_agent_detected` event: re-read the shared
+   * `.worklog/agent-panes.json` so associations recorded by OTHER plugin
+   * instances (cross-instance coverage, AC3) and late-spawned agents are
+   * picked up without waiting for the next refresh cycle.
+   *
+   * Returns true when the pane set grew (callers should add per-pane
+   * subscriptions for the newly tracked panes).
+   */
+  applyAgentDetected(): boolean {
+    const before = this.entries.size;
+    this.loadFromDisk();
+    this.cachedAt = Date.now();
+    return this.entries.size > before;
+  }
+
+  /**
+   * Apply a `pane_closed` / `pane_exited` event: prune every association
+   * whose pane is gone so its icon disappears immediately (no poll wait).
+   * Returns the affected work-item ids.
+   */
+  applyPaneGone(paneId: string): string[] {
+    const affected: string[] = [];
+    for (const [workItemId, entry] of [...this.entries]) {
+      if (entry.paneId !== paneId) continue;
+      this.entries.delete(workItemId);
+      this.cachedStates.delete(workItemId);
+      affected.push(workItemId);
+    }
+    if (affected.length > 0) {
+      this.persist();
+      this.cachedAt = Date.now();
+    }
+    return affected;
+  }
+
   // ── Persistence ────────────────────────────────────────────────────
 
   /**
@@ -335,4 +413,45 @@ export async function mergeAgentStates(items: WorkItem[], tracker: AgentTracker)
     }
   };
   walk(items);
+}
+
+/**
+ * Merge the CURRENT cached agent states into a list of work items
+ * (recursively into children) WITHOUT the TTL/memo check and without any
+ * herdr exec (WL-0MSHB7DHO004RHBJ F5).
+ *
+ * Used by the event path: after a `pane_agent_status_changed` event
+ * updates the tracker's cache, this re-applies the updated states to the
+ * currently rendered items so their icons flip immediately. Same
+ * icon-eligibility rules as mergeAgentStates (`idle`/`working`/`blocked`
+ * render; `done`/`unknown`/absent do not). Never throws.
+ */
+export function mergeAgentStatesCached(items: WorkItem[], tracker: AgentTracker): void {
+  try {
+    const states = tracker.snapshotStates();
+    const apply = (item: WorkItem): void => {
+      const state = states.get(item.id);
+      if (state === 'idle' || state === 'working' || state === 'blocked') {
+        item.agentState = state;
+      } else {
+        // A state that is no longer icon-eligible (done/unknown/gone)
+        // must clear a previously rendered icon. Unlike mergeAgentStates
+        // (fresh items never carry stale icons), the event path re-applies
+        // to LIVE items, so the walk must always run — even when the
+        // tracker currently has no states (all pruned).
+        delete item.agentState;
+      }
+    };
+    const walk = (list: WorkItem[]): void => {
+      for (const item of list) {
+        apply(item);
+        if (item.children && item.children.length > 0) {
+          walk(item.children);
+        }
+      }
+    };
+    walk(items);
+  } catch {
+    // Fail-open: no icon updates this cycle.
+  }
 }

@@ -557,13 +557,26 @@ describe('createListRenderer', () => {
   });
 
   it('renders group separators when items have groups', () => {
-    const groupedItems = [
+    const items = [
       makeItem({ id: 'T1', title: 'Item 1', group: 0, groupLabel: 'Priority' }),
       makeItem({ id: 'T2', title: 'Item 2', group: 0 }),
       makeItem({ id: 'T3', title: 'Item 3', group: 1, groupLabel: 'Backlog' }),
     ];
+    // Build DisplayRow[] with heading rows, matching getDisplayRows() output
+    // (WL-0MSL5MPSZ003TG94) — the renderer expects first-class heading rows,
+    // not auto-generated separators from WorkItem group transitions.
+    const displayRows: Array<
+      | { kind: 'heading'; group: number; groupLabel: string; count: number; collapsed: boolean }
+      | WorkItem
+    > = [];
+    displayRows.push({ kind: 'heading', group: 0, groupLabel: 'Priority', count: 2, collapsed: false });
+    displayRows.push(items[0]);
+    displayRows.push(items[1]);
+    displayRows.push({ kind: 'heading', group: 1, groupLabel: 'Backlog', count: 1, collapsed: false });
+    displayRows.push(items[2]);
+
     const renderer = createListRenderer();
-    const output = renderer(groupedItems, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null);
+    const output = renderer(displayRows, 0, 0, DEFAULT_TERM_SIZE, null, 'list', null);
     expect(output).toContain('Priority');
     expect(output).toContain('Backlog');
   });

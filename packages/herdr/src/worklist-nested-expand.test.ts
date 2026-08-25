@@ -190,8 +190,13 @@ describe('nested expansion (WL-0MSQ3FH1K000MMJW)', () => {
     expect(writes.join('')).toContain('FEATURE');
     expect(parentFetches).toEqual([{ parentId: 'P' }]);
 
-    // Select FEATURE (flattened index 1) with ↓.
+    // Select FEATURE with ↓: the first ↓ lands on the group heading row
+    // (FEATURE carries an "Other" group stamp from regroupWorkItems while P
+    // has none, so a heading row is interleaved — selectable per
+    // WL-0MSL5MPSZ003TG94 AC2), the second ↓ lands on FEATURE.
     writes.length = 0;
+    dataHandler?.(Buffer.from('j'));
+    await vi.advanceTimersByTimeAsync(0);
     dataHandler?.(Buffer.from('j'));
     await vi.advanceTimersByTimeAsync(0);
 
@@ -221,8 +226,12 @@ describe('nested expansion (WL-0MSQ3FH1K000MMJW)', () => {
     });
     await vi.advanceTimersByTimeAsync(0);
 
-    // Expand P, move to FEATURE, expand FEATURE.
+    // Expand P, move to FEATURE (↓ lands on the group heading first —
+    // headings are selectable rows per WL-0MSL5MPSZ003TG94 AC2), expand
+    // FEATURE.
     dataHandler?.(Buffer.from('\t'));
+    await vi.advanceTimersByTimeAsync(0);
+    dataHandler?.(Buffer.from('j'));
     await vi.advanceTimersByTimeAsync(0);
     dataHandler?.(Buffer.from('j'));
     await vi.advanceTimersByTimeAsync(0);
@@ -263,8 +272,12 @@ describe('nested expansion (WL-0MSQ3FH1K000MMJW)', () => {
     await vi.advanceTimersByTimeAsync(0);
     fetcher.mockClear();
 
-    // Expand P → FEATURE, then FEATURE → TASK-1/TASK-2.
+    // Expand P → FEATURE, then FEATURE → TASK-1/TASK-2. The ↓ keys pass
+    // through the interleaved heading row (selectable per
+    // WL-0MSL5MPSZ003TG94 AC2).
     dataHandler?.(Buffer.from('\t'));
+    await vi.advanceTimersByTimeAsync(0);
+    dataHandler?.(Buffer.from('j'));
     await vi.advanceTimersByTimeAsync(0);
     dataHandler?.(Buffer.from('j'));
     await vi.advanceTimersByTimeAsync(0);
@@ -300,9 +313,12 @@ describe('nested expansion (WL-0MSQ3FH1K000MMJW)', () => {
     });
     await vi.advanceTimersByTimeAsync(0);
 
-    // Expand P with Tab (fetches FEATURE), select FEATURE, then Tab-expand
-    // FEATURE so its grandchildren are loaded.
+    // Expand P with Tab (fetches FEATURE), select FEATURE (↓ lands on the
+    // interleaved heading row first — selectable per WL-0MSL5MPSZ003TG94
+    // AC2), then Tab-expand FEATURE so its grandchildren are loaded.
     dataHandler?.(Buffer.from('\t'));
+    await vi.advanceTimersByTimeAsync(0);
+    dataHandler?.(Buffer.from('j'));
     await vi.advanceTimersByTimeAsync(0);
     dataHandler?.(Buffer.from('j'));
     await vi.advanceTimersByTimeAsync(0);

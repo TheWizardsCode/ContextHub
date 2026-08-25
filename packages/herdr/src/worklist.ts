@@ -13,24 +13,32 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
-import { fetchChildrenForItem, fetchActionableCount, fetchItemsByStage, getWorklogDir, type WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, fetchActionableCount, fetchItemsByStage, fetchItemsByPriority, getWorklogDir, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
+import { HerdrEventSubscriber } from './events.js';
+import { AgentTracker, mergeAgentStatesCached } from './agent-tracker.js';
 import { readCodeFreezeState, readCodeFreezeStatus } from './code-freeze.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
   statusIcon,
   stageIcon,
   priorityIcon,
+  epicIcon,
+  riskIcon,
+  effortIcon,
   auditIcon,
   needsProducerReviewIcon,
+  stageDisplayIcon,
   getIconPrefix,
   applyStageColour,
   stageColor,
   type IconOptions,
-} from './icons.js';
+} from '@worklog/shared/icons';
 import { runSync, heartbeatTtlForInterval } from './auto-sync.js';
 import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
+import { loadSettings } from './settings.js';
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
+import { type ModeSwitchWorker, DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS, MODE_SWITCH_RUN_TIMEOUT_MS } from './mode-switch-worker.js';
 import { showToast } from './notify.js';
 import { recordCommand, getLastCommand } from './command-log.js';
 import {
@@ -39,6 +47,7 @@ import {
   FormState,
   substituteIdentifiers,
 } from './form-dialog.js';
+import { readFromClipboard, writeToClipboard } from './clipboard.js';
 import { ShipItDialogState, overlayShipItDialog } from './ship-it-dialog.js';
 import { extractFilePaths } from './grouping.js';
 import { renderMarkdown, renderMarkdownViewer } from './md-viewer.js';
@@ -93,6 +102,17 @@ export const STAGE_MAP: Record<string, string> = {
   in_review: 'in_review',
 };
 
+// ── /wl --priority <priority> map (WL-0MSKC8T46006999S) ────────────────
+// Canonical priority names accepted by `/wl --priority <p>` and the
+// `f p *` priority-filter chords. Invalid/unknown values fall back
+// gracefully (no crash, no filter change), matching `/wl <bogus>`.
+export const PRIORITY_MAP: Record<string, string> = {
+  critical: 'critical',
+  high: 'high',
+  medium: 'medium',
+  low: 'low',
+};
+
 // Re-export stage colors from icons for backward compatibility
 export const STAGE_COLORS: Record<string, number> = {
   idea: 247,
@@ -103,12 +123,14 @@ export const STAGE_COLORS: Record<string, number> = {
   completed: 33,
 };
 
-// ── Metadata panel sizing (WL-0MSAYNVBY006LM9X) ─────────────────────────
-// The list renderer reserves the bottom of the pane for a metadata panel
-// showing the selected item's fields plus its last recorded command. The
-// panel share of the pane height ramps linearly between MIN_META_SHARE on
-// small panes and MAX_META_SHARE on tall panes, so the list always keeps at
-// least 60% of the pane.
+// ── Metadata panel sizing ───────────────────────────────────────────────
+// The list renderer shows the selected item's metadata in a panel below the
+// list. The list takes as much vertical space as its content needs (up to
+// the full pane height) and the panel fills the remainder, keeping a small
+// minimum — see computeDynamicLayout (WL-0MSQ44MDX008U69J).
+// computeMetadataPanelHeight below is retained as a legacy fallback (used by
+// metaScrollDown when no dynamic panel height is supplied) from the original
+// fixed 20–40% reservation (WL-0MSAYNVBY006LM9X).
 
 /** Minimum share of pane rows reserved for the metadata panel (small panes). */
 export const MIN_META_SHARE = 0.2;
@@ -121,12 +143,12 @@ const META_SHARE_MIN_ROWS = 12;
 const META_SHARE_MAX_ROWS = 40;
 
 /**
- * Compute the number of pane rows reserved for the metadata panel.
+ * Legacy fallback: compute a fixed metadata panel height from the pane rows.
  *
  * The share ramps linearly from MIN_META_SHARE at `META_SHARE_MIN_ROWS` to
  * MAX_META_SHARE at `META_SHARE_MAX_ROWS`. The result is clamped to a
- * minimum of 3 rows (so the panel stays usable) and to MAX_META_SHARE of the
- * pane (so the list keeps at least 60%).
+ * minimum of 3 rows. Only used by metaScrollDown when no dynamic panel
+ * height is provided; the renderer uses computeDynamicLayout instead.
  *
  * @param rows - Total pane height in rows.
  * @returns Number of panel rows (always < rows).
@@ -138,6 +160,58 @@ export function computeMetadataPanelHeight(rows: number): number {
     share = MIN_META_SHARE + (MAX_META_SHARE - MIN_META_SHARE) * t;
   }
   return Math.max(3, Math.min(Math.round(rows * share), Math.floor(rows * MAX_META_SHARE)));
+}
+
+/**
+ * Compute the dynamic list / metadata panel layout (WL-0MSQ44MDX008U69J).
+ *
+ * The selection list takes as much vertical space as its content needs, up to
+ * the maximum available (pane rows minus the reserved notification row and the
+ * metadata panel's minimum height).  The metadata panel fills whatever space
+ * remains, expanding when the list is short.
+ *
+ * This function is called both by the renderer (createListRenderer) and by
+ * the main TUI loop (to pass the panel height into metaScrollDown for
+ * correct clamping).
+ *
+ * The display-rows model (WL-0MSL5MPSZ003TG94) passes `DisplayRow[]` —
+ * heading rows are first-class rows already counted in the window, so no
+ * extra separator accounting is needed.
+ *
+ * @param rows - Display rows (headings + items) to display.
+ * @param scrollOffset - Current scroll offset into the display rows.
+ * @param bannerCount - Number of code-freeze banner rows.
+ * @param termSize - Terminal size.
+ * @returns The metadata panel height, the list area, and the list height.
+ */
+export function computeDynamicLayout(
+  rows: DisplayRow[],
+  scrollOffset: number,
+  bannerCount: number,
+  termSize: TermSize,
+): { panelHeight: number; listArea: number; listHeight: number } {
+  const { rows: termRows } = termSize;
+  const minMeta = 3;
+  const chromeLines = 2 + bannerCount; // header + banners + footer
+
+  // Estimate the visible window with metadata at its minimum so the estimate
+  // reflects the list's true space need. Heading rows are already part of the
+  // window — no separate separator count.
+  const estListHeight = Math.max(3, termRows - 4 - minMeta);
+  const estVisible = rows.slice(scrollOffset, scrollOffset + estListHeight);
+  const estHasTopIndicator = scrollOffset > 0;
+  const estHasBottomIndicator = scrollOffset + estVisible.length < rows.length;
+  const estIndicatorRows = (estHasTopIndicator ? 1 : 0) + (estHasBottomIndicator ? 1 : 0);
+  const contentNeed = estIndicatorRows + estVisible.length;
+
+  const panelHeight = Math.max(minMeta, Math.max(0, termRows - 1 - contentNeed - chromeLines));
+  const listArea = Math.max(1, termRows - 1 - panelHeight);
+  // The initial visible window is the maximum possible (metadata at its
+  // minimum); the caller's trimming logic reduces it to fit the actual
+  // budget (fold indicators). This keeps the window generous so
+  // a short list is never truncated just because the metadata panel expanded.
+  const listHeight = Math.max(3, termRows - 4 - minMeta);
+  return { panelHeight, listArea, listHeight };
 }
 
 // ── Terminal helpers ─────────────────────────────────────────────────
@@ -186,6 +260,11 @@ export const ANSI = {
   hideCursor: '\x1b[?25l',
   showCursor: '\x1b[?25h',
   scrollRegion: (top: number, bottom: number) => `\x1b[${top};${bottom}r`,
+  // SGR mouse tracking (WL-0MSGHM5BQ0096BNJ AC1): enable/disable sequences
+  // for button-event (1000), button-event-motion (1002) and SGR-encoded
+  // (1006) reporting, emitted on raw-mode entry / cleanup respectively.
+  mouseEnable: '\x1b[?1000h\x1b[?1002h\x1b[?1006h',
+  mouseDisable: '\x1b[?1000l\x1b[?1002l\x1b[?1006l',
 };
 
 // ── Navigation Stack ──────────────────────────────────────────────────
@@ -270,6 +349,40 @@ export class NavigationStack {
 export type ViewMode = 'list' | 'detail' | 'filter' | 'form';
 
 /**
+ * A group heading row in the display-rows model (WL-0MSL5MPSZ003TG94).
+ *
+ * Headings are first-class rows interleaved with item rows by
+ * `WorkItemListState.getDisplayRows()`. They carry the group number, the
+ * human-readable label, the count of top-level items in the group (current
+ * view, post stage-filter) and the in-memory collapse state.
+ */
+export interface DisplayHeadingRow {
+  kind: 'heading';
+  /** Group number (1-indexed, from regroupWorkItems). */
+  group: number;
+  /** Human-readable group label (e.g. `Group 1`, `Idea`, `In Review`). */
+  groupLabel: string;
+  /** Top-level items in this group in the current view (post stage-filter). */
+  count: number;
+  /** Whether the group's items are hidden (in-memory, session-only). */
+  collapsed: boolean;
+}
+
+/**
+ * A single row in the display-rows model: either a group heading or a work
+ * item (children of expanded parents included). Navigation, clamping and
+ * scrolling operate over these rows so the cursor can land on headings.
+ */
+export type DisplayRow = DisplayHeadingRow | WorkItem;
+
+/**
+ * Type guard: is this display row a group heading row?
+ */
+export function isHeadingRow(row: DisplayRow): row is DisplayHeadingRow {
+  return 'kind' in row && row.kind === 'heading';
+}
+
+/**
  * Mutable state for the work item list UI.
  */
 export class WorkItemListState {
@@ -293,9 +406,9 @@ export class WorkItemListState {
     this._resetMetaScroll();
   }
 
-  /** Number of items in the flattened (display) list. */
+  /** Number of rows in the display-rows model (headings + items). */
   get flatCount(): number {
-    return this.getFlattenedItems().length;
+    return this.getDisplayRows().length;
   }
 
   /**
@@ -322,8 +435,27 @@ export class WorkItemListState {
   /** Currently displayed detail item (when mode === 'detail'). */
   detailItem: WorkItem | null = null;
 
-  /** Active stage filter (null = no filter). */
+  /** Active stage filter (null = no stage filter). */
   activeFilter: string | null = null;
+
+  /**
+   * Active priority filter (null = no priority filter). Mutually exclusive
+   * with `activeFilter` (replace semantics, WL-0MSKC8T46006999S): applying
+   * a priority filter clears the stage filter and vice versa, and sprint
+   * clears both. Only one axis can be active at a time.
+   */
+  activePriorityFilter: string | null = null;
+
+  /**
+   * Display label for the active filter, axis-qualified, or null when no
+   * filter is active (e.g. `stage in_review`, `priority critical`). The
+   * list header renders `(filtered: <label>)` from this value.
+   */
+  get activeFilterLabel(): string | null {
+    if (this.activeFilter) return `stage ${this.activeFilter}`;
+    if (this.activePriorityFilter) return `priority ${this.activePriorityFilter}`;
+    return null;
+  }
 
   /** Scroll offset within the detail view. */
   detailScrollOffset = 0;
@@ -361,6 +493,16 @@ export class WorkItemListState {
 
   /** Set of expanded item IDs (for hierarchical display). */
   expandedItems: Set<string> = new Set();
+
+  /**
+   * In-memory set of collapsed group numbers (WL-0MSL5MPSZ003TG94).
+   *
+   * When a group is collapsed its items are hidden from both the render and
+   * navigation.  Collapsed state survives list refreshes (keyed by group
+   * number, mirroring `expandedItems` handling) and does NOT persist across
+   * pane restarts.
+   */
+  collapsedGroups: Set<number> = new Set();
 
   /** Navigation stack for hierarchical browsing (push/pop parent contexts). */
   navigationStack: NavigationStack = new NavigationStack();
@@ -489,6 +631,96 @@ export class WorkItemListState {
   }
 
   /**
+   * Toggle the collapse state of a group by its group number.
+   *
+   * Collapsed groups hide their items from both the display rows and
+   * navigation (WL-0MSL5MPSZ003TG94). The heading row itself remains
+   * visible so the user can re-expand the group.
+   */
+  toggleGroupCollapse(group: number): void {
+    if (this.collapsedGroups.has(group)) {
+      this.collapsedGroups.delete(group);
+    } else {
+      this.collapsedGroups.add(group);
+    }
+  }
+
+  /**
+   * Produce the display-rows model that interleaves heading rows with item
+   * rows (WL-0MSL5MPSZ003TG94).
+   *
+   * The rows are derived from `getFlattenedItems()` (which includes children
+   * of expanded parents) but items belonging to collapsed groups are excluded.
+   * A heading row is emitted whenever the group changes between consecutive
+   * flattened items, matching the existing group-separator insertion logic.
+   *
+   * Heading `count` = top-level items in the group in the current view
+   * (post stage-filter), unaffected by collapse state. This is computed
+   * from `this.items` (top-level, filtered) so children of expanded parents
+   * are never counted.
+   *
+   * @returns An array of `DisplayRow` entries (headings + items).
+   */
+  getDisplayRows(): DisplayRow[] {
+    const result: DisplayRow[] = [];
+
+    // Count top-level items per group (post stage-filter, current view).
+    // Only items that carry a group number count toward their group's heading.
+    const groupCounts = new Map<number, number>();
+    for (const item of this.items) {
+      if (item.group !== undefined) {
+        groupCounts.set(item.group, (groupCounts.get(item.group) ?? 0) + 1);
+      }
+    }
+
+    let lastGroup: number | undefined;
+
+    const appendItem = (item: WorkItem, depth: number): void => {
+      // Insert a heading row when the group changes between consecutive
+      // items. Items without a group field (e.g. children, ungrouped items)
+      // never trigger a new heading.
+      if (item.group !== undefined && item.id !== '..') {
+        if (lastGroup === undefined || item.group !== lastGroup) {
+          const isCollapsed = this.collapsedGroups.has(item.group);
+          result.push({
+            kind: 'heading' as const,
+            group: item.group,
+            groupLabel: item.groupLabel ?? `Group ${item.group}`,
+            count: groupCounts.get(item.group) ?? 0,
+            collapsed: isCollapsed,
+          });
+          lastGroup = item.group;
+        }
+      }
+
+      // Skip the entire subtree of an item in a collapsed group (children
+      // carry no group metadata, so they are excluded via this early return
+      // rather than per-item group checks). The heading above was already
+      // emitted so the collapsed group stays visible and re-expandable.
+      if (item.group !== undefined && this.collapsedGroups.has(item.group)) {
+        return;
+      }
+
+      if (depth === 0) {
+        result.push(item);
+      } else {
+        result.push(item.depth === depth ? item : { ...item, depth });
+      }
+      if (item.childCount && item.children && item.children.length > 0 && this.expandedItems.has(item.id)) {
+        for (const child of item.children) {
+          appendItem(child, depth + 1);
+        }
+      }
+    };
+
+    for (const item of this.items) {
+      appendItem(item, 0);
+    }
+
+    return result;
+  }
+
+  /**
    * Get the flattened item list, inserting children of expanded parents.
    *
    * Recurses into any depth (WL-0MSQ3FH1K000MMJW): after inserting a child
@@ -566,8 +798,11 @@ export class WorkItemListState {
 
   selectItem(): void {
     if (this.items.length === 0) return;
-    const flat = this.getFlattenedItems();
-    const item = flat[this.selectedIndex] ?? this.items[this.selectedIndex];
+    const row = this.getSelectedDisplayRow();
+    // Enter on a heading is a no-op (only Tab toggles group collapse,
+    // WL-0MSL5MPSZ003TG94 AC5).
+    if (row === null || isHeadingRow(row)) return;
+    const item = row;
     this.detailItem = item;
     this.mode = 'detail';
     this.detailScrollOffset = 0;
@@ -599,27 +834,40 @@ export class WorkItemListState {
   detailScrollDown(amount = 1): void {
     const maxCols = this.termSize.cols;
     const viewportHeight = Math.max(10, this.termSize.rows - 4);
-    // The ToC is pinned at the top of the detail view, so the scrollable
-    // region is the body below it (WL-0MSHWHULZ001FL8I).
+    // The header + ToC block is pinned at the top; only the body below
+    // scrolls (WL-0MSHWHULZ001FL8I / WL-0MSI28AP80002F5S).
     const allLines = formatDetailContent(this.detailItem, maxCols);
     const tocLines = formatDetailToC(this.detailItem, maxCols).length;
-    const bodyLines = Math.max(0, allLines.length - tocLines);
-    const maxScroll = Math.max(0, bodyLines - viewportHeight);
+    const pinnedHeight = DETAIL_HEADER_LINES + tocLines;
+    const bodyLines = Math.max(0, allLines.length - pinnedHeight);
+    const bodyViewport = Math.max(1, viewportHeight - pinnedHeight);
+    const maxScroll = Math.max(0, bodyLines - bodyViewport);
     this.detailScrollOffset = Math.min(maxScroll, this.detailScrollOffset + amount);
   }
 
   // ── Metadata panel scroll ───────────────────────────────────────
 
   /**
-   * Return the currently selected flattened item, or null when the list is
-   * empty or the selection is out of range.
+   * Return the display row at the current selection (heading or item), or
+   * null when the list is empty or the selection is out of range.
+   */
+  getSelectedDisplayRow(): DisplayRow | null {
+    const rows = this.getDisplayRows();
+    if (rows.length === 0) return null;
+    const idx = this.selectedIndex;
+    if (idx < 0 || idx >= rows.length) return null;
+    return rows[idx];
+  }
+
+  /**
+   * Return the currently selected item, or null when the selection is a
+   * heading row (the metadata panel then renders group info), the list is
+   * empty, or the selection is out of range.
    */
   getSelectedItem(): WorkItem | null {
-    const flat = this.getFlattenedItems();
-    if (flat.length === 0) return null;
-    const idx = this.selectedIndex;
-    if (idx < 0 || idx >= flat.length) return null;
-    return flat[idx];
+    const row = this.getSelectedDisplayRow();
+    if (row === null || isHeadingRow(row)) return null;
+    return row;
   }
 
   /** Scroll the metadata panel up (toward the start of the content). */
@@ -628,12 +876,17 @@ export class WorkItemListState {
   }
 
   /** Scroll the metadata panel down (toward the end of the content). */
-  metaScrollDown(amount = 1): void {
-    const panelHeight = computeMetadataPanelHeight(this.termSize.rows);
+  metaScrollDown(amount = 1, panelHeight?: number): void {
+    // Use the provided panel height (from the renderer's new dynamic layout)
+    // or fall back to computing from termSize.
+    let ph = panelHeight;
+    if (ph === undefined) {
+      ph = computeMetadataPanelHeight(this.termSize.rows);
+    }
     const selected = this.getSelectedItem();
     if (!selected) return;
-    const allLines = formatMetadataPanel(selected, this.termSize.cols, panelHeight, 0);
-    const maxScroll = Math.max(0, allLines.length - panelHeight);
+    const allLines = formatMetadataPanel(selected, this.termSize.cols, ph, 0);
+    const maxScroll = Math.max(0, allLines.length - ph);
     this.metaScrollOffset = Math.min(maxScroll, this.metaScrollOffset + amount);
   }
 
@@ -654,6 +907,22 @@ export class WorkItemListState {
 
   applyFilter(stage: string): void {
     this.activeFilter = stage;
+    this.activePriorityFilter = null; // replace semantics: one axis at a time
+    this._applyFilters();
+    this.selectedIndex = 0;
+    this.scrollOffset = 0;
+    this.mode = 'list';
+    this._resetMetaScroll();
+  }
+
+  /**
+   * Apply a priority filter (replace semantics, WL-0MSKC8T46006999S):
+   * clears any active stage filter so stage and priority filters are
+   * mutually exclusive.
+   */
+  applyPriorityFilter(priority: string): void {
+    this.activePriorityFilter = priority;
+    this.activeFilter = null; // replace semantics: one axis at a time
     this._applyFilters();
     this.selectedIndex = 0;
     this.scrollOffset = 0;
@@ -663,6 +932,7 @@ export class WorkItemListState {
 
   clearFilter(): void {
     this.activeFilter = null;
+    this.activePriorityFilter = null;
     this._applyFilters();
     this.selectedIndex = 0;
     this.scrollOffset = 0;
@@ -718,28 +988,27 @@ export class WorkItemListState {
   }
 
   /**
-   * Capture the ID of the currently selected item, or undefined if
-   * the flattened list is empty or nothing is selected.
+   * Capture the ID of the currently selected item, or undefined if the
+   * display rows are empty, the selection is a heading, or nothing is
+   * selected.
    */
   private _captureSelectedId(): string | undefined {
-    const flat = this.getFlattenedItems();
-    if (flat.length === 0) return undefined;
-    const idx = this.selectedIndex;
-    if (idx < 0 || idx >= flat.length) return undefined;
-    return flat[idx].id;
+    const row = this.getSelectedDisplayRow();
+    if (row === null || isHeadingRow(row)) return undefined;
+    return row.id;
   }
 
   /**
-   * Search the new flattened list for an item matching `id` and
-   * set selectedIndex to its position.
+   * Search the display rows for an item matching `id` and set
+   * selectedIndex to its position.
    *
    * @returns true if the item was found and selection restored;
    *          false if the item is no longer visible.
    */
   private _restoreSelectionById(id: string | undefined): boolean {
     if (id === undefined) return false;
-    const flat = this.getFlattenedItems();
-    const newIndex = flat.findIndex((item) => item.id === id);
+    const rows = this.getDisplayRows();
+    const newIndex = rows.findIndex((row) => !isHeadingRow(row) && (row as WorkItem).id === id);
     if (newIndex === -1) return false;
     this.selectedIndex = newIndex;
     return true;
@@ -751,6 +1020,8 @@ export class WorkItemListState {
     let filtered = [...this._allItems];
     if (this.activeFilter) {
       filtered = filtered.filter((item) => item.stage === this.activeFilter);
+    } else if (this.activePriorityFilter) {
+      filtered = filtered.filter((item) => item.priority === this.activePriorityFilter);
     }
     this.items = filtered;
   }
@@ -766,11 +1037,25 @@ export class WorkItemListState {
     }
   }
 
+  /**
+   * Public wrapper around the private `_clampSelection` for external
+   * handlers (the private member is not accessible outside the class).
+   * Clamps the selected index back into the visible row range (e.g. after
+   * collapsing a group removes rows).
+   */
+  clampSelection(): void {
+    this._clampSelection();
+  }
+
   /** Number of visible list rows (accounts for the metadata panel). */
   _listHeight(): number {
-    // Reserve 3 rows for header, 1 for footer, 1 for status
-    const panelHeight = computeMetadataPanelHeight(this.termSize.rows);
-    return Math.max(3, this.termSize.rows - 4 - panelHeight);
+    // Dynamic layout (WL-0MSQ44MDX008U69J): list takes up to the max available
+    // rows minus the metadata minimum (3 rows).  This approximates the renderer's
+    // computation — the state does not know the banner count, so it uses a simpler
+    // formula. The renderer's own list-height computation is the source of truth.
+    const rows = this.termSize.rows;
+    const minMeta = 3; // metadata panel minimum
+    return Math.max(3, rows - 4 - minMeta); // rows - chrome(4) - minMeta
   }
 
   _adjustScroll(): void {
@@ -956,6 +1241,14 @@ export function formatTimestamp(iso: string): string {
  * (WL-0MSGTLSUT002NF29). Fields that are unset are omitted.
  * Timestamps (Created, Updated, Audited At) are rendered in local time as
  * `DD/MM/YY HH:MM` via {@link formatTimestamp}.
+ *
+ * Icon-bearing fields (Status, Stage, Priority, Type, Risk, Effort, Audit,
+ * Reviewed) render as **icon + text label**, using the same icon helpers as
+ * the list rows (statusIcon, stageDisplayIcon, priorityIcon, epicIcon,
+ * riskIcon, effortIcon, auditIcon, needsProducerReviewIcon) so the metadata
+ * section and the list can never diverge (WL-0MSGIXHHI009KFW9). With icons
+ * disabled the values fall back to plain text — the metadata deliberately
+ * does NOT use the list's `[BRACKET]` fallbacks.
  * Shared by the detail view and the list-mode metadata panel so both stay
  * consistent (WL-0MSAYNVBY006LM9X-FT4).
  */
@@ -966,14 +1259,40 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
       metaRows.push([label, value]);
     }
   };
+
+  // Prefix a display value with its icon (`icon + text`, e.g. `🔄
+  // in_progress`). Unknown icon keys return '' (e.g. free-form effort `3`),
+  // so those rows stay text-only — consistent with the list
+  // (WL-0MSGIXHHI009KFW9). When icons are disabled the icon is omitted
+  // entirely: plain text only, no emoji, no [BRACKET] fallbacks.
+  const iconText = (icon: string, text: string | undefined | null): string | undefined => {
+    if (text == null || text === '') return undefined;
+    return icon ? `${icon} ${text}` : text;
+  };
+
+  // Text labels paired with the Audit/Reviewed icons (AC5).
+  const auditLabel = (result: boolean | null | undefined): string | undefined => {
+    if (result === true) return 'ready to close';
+    if (result === false) return 'not ready';
+    return 'unknown';
+  };
+  const reviewLabel = (needsReview: boolean | undefined): string | undefined => {
+    if (needsReview === undefined) return undefined;
+    return needsReview ? 'needs review' : 'reviewed';
+  };
+
   addMeta('ID', item.id);
   addMeta('Title', item.title);
-  addMeta('Status', item.status);
-  addMeta('Stage', item.stage);
-  addMeta('Priority', item.priority);
-  addMeta('Type', item.issueType);
-  addMeta('Risk', item.risk);
-  addMeta('Effort', item.effort);
+  addMeta('Status', iconText(noIcons ? '' : statusIcon(item.status), item.status));
+  // Stage mirrors the list's audit-aware in_review icon via the shared
+  // stageDisplayIcon helper (AC2).
+  addMeta('Stage', iconText(noIcons ? '' : stageDisplayIcon(item), item.stage));
+  addMeta('Priority', iconText(noIcons ? '' : priorityIcon(item.priority), item.priority));
+  // Type shows the epic icon (⊙) for epic items only, matching the list;
+  // non-epic types remain text-only (AC3).
+  addMeta('Type', iconText(noIcons ? '' : (item.issueType === 'epic' ? epicIcon() : ''), item.issueType));
+  addMeta('Risk', iconText(noIcons ? '' : riskIcon(item.risk), item.risk));
+  addMeta('Effort', iconText(noIcons ? '' : effortIcon(item.effort), item.effort));
   addMeta('Children', item.childCount !== undefined ? String(item.childCount) : undefined);
   addMeta('Parent', item.parentId);
   if (item.tags && item.tags.length > 0) {
@@ -982,8 +1301,8 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
   addMeta('GitHub Issue', item.githubIssueNumber ? `#${item.githubIssueNumber}` : undefined);
   addMeta('Created', item.createdAt ? formatTimestamp(item.createdAt) : undefined);
   addMeta('Updated', item.updatedAt ? formatTimestamp(item.updatedAt) : undefined);
-  addMeta('Audit', auditIcon(item.auditResult, { noIcons }));
-  addMeta('Reviewed', needsProducerReviewIcon(item.needsProducerReview, { noIcons }));
+  addMeta('Audit', iconText(noIcons ? '' : auditIcon(item.auditResult), auditLabel(item.auditResult)));
+  addMeta('Reviewed', iconText(noIcons ? '' : needsProducerReviewIcon(item.needsProducerReview), reviewLabel(item.needsProducerReview)));
   addMeta('Audited At', item.auditedAt ? formatTimestamp(item.auditedAt) : undefined);
 
   // Related Docs — every .md path referenced in the item's `Key Files:`
@@ -1141,6 +1460,50 @@ export function formatMetadataPanel(
 }
 
 /**
+ * Build the metadata-panel lines for a group heading selection
+ * (WL-0MSL5MPSZ003TG94 T5 AC1). Headings have no work-item metadata, so the
+ * panel shows the group's label, its item count (post stage-filter, as
+ * computed by the display model), and the collapse state. A short hint line
+ * tells the user Tab toggles the group.
+ *
+ * @param heading - The selected heading row.
+ * @param maxCols - Terminal width.
+ * @param panelRows - Panel height in rows (from the dynamic layout).
+ * @returns The panel lines, padded to `panelRows`.
+ */
+export function formatGroupInfoPanel(
+  heading: DisplayHeadingRow,
+  maxCols: number,
+  panelRows: number,
+): string[] {
+  const lines: string[] = [];
+
+  // Header separator identifying the selected group
+  lines.push(` ${ANSI.dim}── ${heading.groupLabel} ──${ANSI.reset}`);
+
+  // Group metadata rows
+  lines.push(` Label: ${heading.groupLabel}`);
+  lines.push(` Items: ${heading.count}`);
+  lines.push(` Group: ${heading.group}`);
+  lines.push(` State: ${heading.collapsed ? 'collapsed' : 'expanded'}`);
+  lines.push(` ${ANSI.dim}Tab toggles this group's collapse state${ANSI.reset}`);
+
+  // Truncate to fit the terminal width
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].length > 0) {
+      lines[i] = truncateLine(lines[i], maxCols);
+    }
+  }
+
+  // Trim to the panel height and pad
+  const visible = lines.slice(0, panelRows);
+  while (visible.length < panelRows) {
+    visible.push('');
+  }
+  return visible;
+}
+
+/**
  * Build the Related Docs Table of Contents (ToC) lines for the detail view
  * (WL-0MSHWHULZ001FL8I).
  *
@@ -1185,8 +1548,10 @@ export function formatDetailToC(
  *
  * Metadata section includes: Status, Priority, Stage, Type, Risk, Effort,
  * Children, Tags, GitHub Issue (number), Created, Updated, Audit
- * (auditResult icon), Reviewed (needsProducerReview icon), and Audited At
- * (ISO timestamp). Rendered as a markdown table. ID and Title are shown in
+ * (auditResult icon + text label), Reviewed (needsProducerReview icon +
+ * text label), and Audited At (ISO timestamp). Rendered as a markdown
+ * table; icon-bearing values are `icon + text` via the shared
+ * {@link buildMetaRows} (WL-0MSGIXHHI009KFW9). ID and Title are shown in
  * the header (from the shared {@link buildMetaRows} set they are omitted
  * from the table to avoid duplication).
  *
@@ -1286,7 +1651,7 @@ export function formatDetailContent(
   }
 
   lines.push(separator);
-  lines.push(` ${ANSI.dim}[↑↓/j:k] scroll  [g/G] top/bot  [esc] back  [q] quit${ANSI.reset}`);
+  lines.push(` ${ANSI.dim}[↑↓/j:k] scroll  [g/G] top/bot  [esc] back  [q] quit  [click] select  [dbl-click] open  [wheel] scroll${ANSI.reset}`);
 
   return lines;
 }
@@ -1498,6 +1863,9 @@ export function resolveKeyFilePath(filePath: string): string | null {
  * @param viewportHeight - Number of visible lines (default: terminal rows - 4)
  * @returns The rendered detail view string
  */
+/** Fixed height of the detail-view header block (blank, id, title, separator). */
+const DETAIL_HEADER_LINES = 4;
+
 export function formatDetailView(
   item: WorkItem | null,
   maxCols: number,
@@ -1515,22 +1883,24 @@ export function formatDetailView(
   const allLines = formatDetailContent(item, maxCols, readFile, noIcons, detailToCIndex, detailToCFocus, detailRenderedIndex);
   if (allLines.length === 0) return '';
 
-  const bodyLines = allLines.slice(tocLines.length);
-  const totalLines = bodyLines.length;
-  const maxScroll = Math.max(0, totalLines - viewportHeight);
+  const pinnedHeight = DETAIL_HEADER_LINES + tocLines.length;
+  const bodyLines = allLines.slice(pinnedHeight);
+  const bodyViewport = Math.max(1, viewportHeight - pinnedHeight);
+  const totalBodyLines = bodyLines.length;
+  const maxScroll = Math.max(0, totalBodyLines - bodyViewport);
   const safeOffset = Math.min(scrollOffset, maxScroll);
 
   const visible = [
-    ...tocLines,
-    ...bodyLines.slice(safeOffset, safeOffset + viewportHeight),
+    ...allLines.slice(0, pinnedHeight),
+    ...bodyLines.slice(safeOffset, safeOffset + bodyViewport),
   ];
 
   // Add scroll indicator if the body is long
-  if (totalLines > viewportHeight && safeOffset <= maxScroll) {
-    const percent = totalLines > 0
-      ? Math.round(((safeOffset + viewportHeight) / totalLines) * 100)
+  if (totalBodyLines > bodyViewport && safeOffset <= maxScroll) {
+    const percent = totalBodyLines > 0
+      ? Math.round(((safeOffset + bodyViewport) / totalBodyLines) * 100)
       : 0;
-    const scrollInfo = ` ${ANSI.dim}Lines ${safeOffset + 1}-${Math.min(safeOffset + viewportHeight, totalLines)} of ${totalLines} (${percent}%)  ` +
+    const scrollInfo = ` ${ANSI.dim}Lines ${safeOffset + 1}-${Math.min(safeOffset + bodyViewport, totalBodyLines)} of ${totalBodyLines} (${percent}%)  ` +
       `[↑↓/j:k scroll  g/G top/bot]${ANSI.reset}`;
     visible[visible.length - 1] = scrollInfo;
   }
@@ -1573,6 +1943,7 @@ export function createChordState(): ChordState {
     hints: '',
     resolvedCommand: null,
     resolvedModel: null,
+    resolvedOpenPane: undefined,
   };
 }
 
@@ -1612,6 +1983,9 @@ export function processChordInput(
     chordState.hints = '';
     chordState.resolvedCommand = entry.command;
     chordState.resolvedModel = entry.model ?? null;
+    // openPane is undefined when the entry did not set open_pane → the
+    // dispatch defaults to opening a pane (WL-0MSJLD1I70045ZUL).
+    chordState.resolvedOpenPane = entry.openPane ?? undefined;
     return 'chord-complete';
   }
 
@@ -1737,6 +2111,14 @@ export interface ChordState {
    * (cleared after execution). Used to spawn the pi CLI with `--model`.
    */
   resolvedModel: string | null;
+  /**
+   * Whether the resolved shortcut should open a visible pane
+   * (WL-0MSJLD1I70045ZUL). `undefined` = the entry did not set `open_pane`
+   * → open a pane (the default, backward compatible); `false` = run in the
+   * background with output captured to a log file. Cleared (undefined)
+   * after execution.
+   */
+  resolvedOpenPane: boolean | undefined;
 }
 
 /**
@@ -1790,12 +2172,16 @@ export function keyToAction(key: string): KeyAction {
  * @param state - The current list state (mutated in place)
  * @param key - The raw keypress string
  * @param termSize - Current terminal dimensions
+ * @param panelHeight - Dynamic metadata panel height (WL-0MSQ44MDX008U69J),
+ *                      used to clamp m/M metadata scrolling; falls back to
+ *                      the legacy fixed-height computation when omitted.
  * @returns The action string, or null if unhandled
  */
 export function handleKeypress(
   state: WorkItemListState,
   key: string,
   termSize: TermSize,
+  panelHeight?: number,
 ): KeyAction {
   if (state.mode === 'detail') {
     if (key === '\x1b' || key === 'q') {
@@ -1913,26 +2299,24 @@ export function handleKeypress(
       break;
     case 'select':
       if (state.mode === 'list' && state.selectedIndex >= 0) {
-        const flat = state.getFlattenedItems();
-        if (state.selectedIndex < flat.length) {
-          const selected = flat[state.selectedIndex];
-          // Toggle expand/collapse for items with actual children data at
-          // ANY depth (WL-0MSQ3FH1K000MMJW): Enter on a child with children
-          // expands it like a top-level parent, instead of opening the
-          // detail view.
-          if (selected.children && selected.children.length > 0) {
-            if (state.isExpanded(selected.id)) {
-              // Collapsing — remove the matching navigation-stack entry so
-              // a later Escape does not pop back into a collapsed parent.
-              state.clearNavigationStateFor(selected.id);
-            } else {
-              // Drilling down — save the current (parent) scroll/selection
-              // state so Escape can return to it.
-              state.pushNavigationState(selected.id);
-            }
-            state.toggleExpand(selected.id);
-            return 'toggle-expand';
+        const selected = state.getSelectedItem();
+        // Toggle expand/collapse for items with actual children data at
+        // ANY depth (WL-0MSQ3FH1K000MMJW): Enter on a child with children
+        // expands it like a top-level parent, instead of opening the
+        // detail view. Heading rows have no item (null) and fall through
+        // to selectItem(), which is a no-op for headings.
+        if (selected && selected.children && selected.children.length > 0) {
+          if (state.isExpanded(selected.id)) {
+            // Collapsing — remove the matching navigation-stack entry so
+            // a later Escape does not pop back into a collapsed parent.
+            state.clearNavigationStateFor(selected.id);
+          } else {
+            // Drilling down — save the current (parent) scroll/selection
+            // state so Escape can return to it.
+            state.pushNavigationState(selected.id);
           }
+          state.toggleExpand(selected.id);
+          return 'toggle-expand';
         }
       }
       state.selectItem();
@@ -1966,16 +2350,15 @@ export function handleKeypress(
       break;
     case 'meta-down':
       // Scroll the metadata panel (independent of list navigation)
-      state.metaScrollDown(1);
+      state.metaScrollDown(1, panelHeight);
       break;
     case 'meta-up':
       state.metaScrollUp(1);
       break;
     case 'toggle-expand':
       if (state.mode === 'list' && state.selectedIndex >= 0 && state.items.length > 0) {
-        const flat = state.getFlattenedItems();
-        if (state.selectedIndex < flat.length) {
-          const selected = flat[state.selectedIndex];
+        const selected = state.getSelectedItem();
+        if (selected) {
           // Any item with children — at ANY depth — can be expanded/
           // collapsed with Tab (WL-0MSQ3FH1K000MMJW). Children data is
           // fetched on demand by the caller when not yet loaded.
@@ -1994,11 +2377,391 @@ export function handleKeypress(
             // Return action so caller can fetch children on demand
             return 'toggle-expand';
           }
+        } else {
+          // Heading row selected — Tab toggles that group's collapse state
+          // (WL-0MSL5MPSZ003TG94 AC3). Handled inline (no on-demand fetch,
+          // no navigation-stack churn); the heading row itself stays
+          // visible so the group can be re-expanded.
+          const row = state.getSelectedDisplayRow();
+          if (row !== null && isHeadingRow(row)) {
+            state.toggleGroupCollapse(row.group);
+            state.clampSelection();
+            return null;
+          }
         }
       }
       return null;
   }
   return action;
+}
+
+// ── Mouse / touch input (WL-0MSGHM5BQ0096BNJ) ─────────────────────────
+// SGR mouse-event parsing, split-chunk buffering, and click/wheel/filter
+// row mapping for the selection list. Implements the contract pinned by the
+// test-first suite packages/herdr/src/worklist-mouse.test.ts
+// (WL-0MSI720DX002E9WC): ANSI mouseEnable/mouseDisable lifecycle constants
+// (on the ANSI object), the pure SGR parser, the chunk consumer, and the
+// state-aware action mapper.
+
+/** Raw SGR mouse sequence: ESC [ < b ; x ; y M|m (M = press, m = release). */
+const SGR_MOUSE_RE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
+
+/** A plausible partial SGR body: the ESC prefix plus digits/semicolons only
+ * (e.g. '\x1b[<0;10;') — still awaiting its terminating M/m. */
+const SGR_PARTIAL_RE = /^\x1b\[<[0-9;]*$/;
+
+/**
+ * A parsed SGR mouse event with 1-based terminal coordinates.
+ */
+export interface ParsedMouseEvent {
+  /** Raw SGR button code: 0=left, 1=middle, 2=right, 64=wheel up,
+   * 65=wheel down; bit 32 = motion. */
+  button: number;
+  /** 1-based column. */
+  x: number;
+  /** 1-based row. */
+  y: number;
+  /** True for '\x1b[<...m' (release), false for '\x1b[<...M' (press). */
+  release: boolean;
+}
+
+/** Double-click window in ms (WL-0MSGHM5BQ0096BNJ AC3); boundary
+ * inclusive (<=). */
+export const DOUBLE_CLICK_WINDOW_MS = 400;
+
+/** Prior left-press coordinates plus an injectable clock for deterministic
+ * double-click tests. */
+export interface MouseClickState {
+  /** The previous left-press position/time, or null when none. */
+  lastClick: { x: number; y: number; at: number } | null;
+  /** Current clock (ms) — injected for deterministic tests. */
+  now: number;
+}
+
+/** Dispatchable mouse action — mirrors the list/detail/filter key paths. */
+export type MouseAction =
+  | { type: 'select-row'; index: number } // list: click/tap an item row
+  | { type: 'open-detail' } // list: double-click (Enter-equivalent)
+  | { type: 'back' } // detail: double-click (to the list)
+  | { type: 'wheel-up' } // list: wheel/touch-scroll up
+  | { type: 'wheel-down' } // list: wheel/touch-scroll down
+  | { type: 'scroll-detail-up' } // detail: wheel up (k-equivalent)
+  | { type: 'scroll-detail-down' } // detail: wheel down (j-equivalent)
+  | { type: 'filter-stage'; index: number } // filter: tap a stage option
+  | null; // inert: chrome rows, motion, releases, unknown buttons
+
+/**
+ * Parse a COMPLETE SGR mouse sequence ('\x1b[<b;x;yM' press or
+ * '\x1b[<b;x;y m' release). Pure: returns null for any non-mouse input and
+ * never buffers — split sequences are handled by {@link consumeMouseChunk}.
+ */
+export function parseMouseEvent(key: string): ParsedMouseEvent | null {
+  const m = SGR_MOUSE_RE.exec(key);
+  if (!m) return null;
+  return {
+    button: parseInt(m[1], 10),
+    x: parseInt(m[2], 10),
+    y: parseInt(m[3], 10),
+    release: m[4] === 'm',
+  };
+}
+
+/** Module-level buffer holding a partial SGR prefix across stdin chunks. */
+let mouseChunkBuffer = '';
+
+/**
+ * Feed a stdin chunk to the SGR parser, holding a partial prefix
+ * ('\x1b[<0;10;') in a module-level buffer until the terminating M/m
+ * arrives in a later chunk (AC1 risk mitigation). Foreign escape sequences
+ * (cursor moves, screen clears) leave a pending partial untouched; plain
+ * input clears any stale pending partial so a stale tail can never complete
+ * later.
+ */
+export function consumeMouseChunk(chunk: string): ParsedMouseEvent | null {
+  if (chunk.startsWith('\x1b')) {
+    // Escape-sequence chunk: a complete SGR parses and clears; a partial
+    // SGR prefix starts buffering; any other control sequence is ignored.
+    const complete = parseMouseEvent(chunk);
+    if (complete) {
+      mouseChunkBuffer = '';
+      return complete;
+    }
+    if (mouseChunkBuffer === '' && SGR_PARTIAL_RE.test(chunk)) {
+      mouseChunkBuffer = chunk;
+    }
+    return null;
+  }
+  // Non-escape chunk: the tail of a split sequence, or plain input.
+  const combined = mouseChunkBuffer + chunk;
+  const complete = parseMouseEvent(combined);
+  if (complete) {
+    mouseChunkBuffer = '';
+    return complete;
+  }
+  if (SGR_PARTIAL_RE.test(combined)) {
+    // Still a plausible partial body — keep buffering.
+    mouseChunkBuffer = combined;
+    return null;
+  }
+  // Plain input clears any stale pending partial.
+  mouseChunkBuffer = '';
+  return null;
+}
+
+/**
+ * The list-mode row budget the renderer uses for the visible window — the
+ * header, fold indicators, footer and metadata panel are chrome rows and
+ * never map to display rows. Mirrors createListRenderer's window computation
+ * so click mapping can never diverge from what is drawn.
+ *
+ * With the display-rows model (WL-0MSL5MPSZ003TG94) heading rows are
+ * first-class rows in the window, so no extra separator accounting is needed.
+ */
+interface ListRowLayout {
+  topIndicator: boolean;
+  bottomIndicator: boolean;
+  visibleStart: number;
+  visibleCount: number;
+}
+
+function computeListRowLayout(state: WorkItemListState, termSize: TermSize): ListRowLayout {
+  const displayRows = state.getDisplayRows();
+  // Use dynamic layout with bannerCount=0 — this path is the mouse click
+  // mapper and does not have the banner state; the layout is a close
+  // approximation that keeps click mapping consistent with the renderer.
+  const { listArea, listHeight } = computeDynamicLayout(
+    displayRows,
+    state.scrollOffset,
+    /* bannerCount = */ 0,
+    termSize,
+  );
+  const chromeLines = 2; // header + footer (no banners in this path)
+  const budgetForRows = Math.max(0, listArea - chromeLines);
+
+  let visible = displayRows.slice(state.scrollOffset, state.scrollOffset + listHeight);
+  while (visible.length > 0 && visible.length > budgetForRows) {
+    visible = visible.slice(0, -1);
+  }
+  const hasTopIndicator = state.scrollOffset > 0;
+  const hasBottomIndicator = state.scrollOffset + visible.length < displayRows.length;
+  const indicatorRows = (hasTopIndicator ? 1 : 0) + (hasBottomIndicator ? 1 : 0);
+  const effectiveBudget = budgetForRows - indicatorRows;
+  while (visible.length > 0 && visible.length > effectiveBudget) {
+    visible = visible.slice(0, -1);
+  }
+  const bottomIndicator = state.scrollOffset + visible.length < displayRows.length;
+
+  return {
+    topIndicator: hasTopIndicator,
+    bottomIndicator,
+    visibleStart: state.scrollOffset,
+    visibleCount: visible.length,
+  };
+}
+
+/** Map a 1-based list row to the display-row index under it, or null when
+ * the row is chrome (header, fold indicator, footer, panel). Heading rows
+ * map to their own display-row index (they are selectable, WL-0MSL5MPSZ003TG94). */
+function mapListRowToIndex(state: WorkItemListState, y: number, termSize: TermSize): number | null {
+  if (y <= 1) return null; // header
+  const displayRows = state.getDisplayRows();
+  const { listArea } = computeDynamicLayout(
+    displayRows,
+    state.scrollOffset,
+    /* bannerCount = */ 0,
+    termSize,
+  );
+  if (y > 1 + listArea) return null; // footer, metadata panel, notification
+  const layout = computeListRowLayout(state, termSize);
+  let row = 2;
+  if (layout.topIndicator) {
+    if (y === 2) return null; // '▲ more'
+    row = 3;
+  }
+  for (let i = 0; i < layout.visibleCount; i++) {
+    if (y === row) return layout.visibleStart + i;
+    row++;
+  }
+  return null; // '▼ more' or blank fill
+}
+
+/** Map a tapped column on the filter-prompt options row (y=3) to a stage
+ * index — the option spans '[i] name' (AC5). */
+function filterStageIndexForColumn(x: number): number | null {
+  let col = 1; // leading space — '[i]' starts at column 2
+  for (let i = 0; i < STAGES.length; i++) {
+    const start = col + 1;
+    const span = `[${i}] ${STAGES[i]}`.length;
+    if (x >= start && x < start + span) return i;
+    col += span + 2; // two-space separator
+  }
+  return null;
+}
+
+/**
+ * Map a parsed SGR mouse event to a dispatchable action for the current
+ * state. Gate rules (WL-0MSGHM5BQ0096BNJ AC2–AC6): release events and
+ * motion (button & 32) are inert; wheel 64/65 navigate (list) or scroll the
+ * detail (detail) and are ignored in filter mode; only the left button
+ * selects; two left presses on the same row within
+ * {@link DOUBLE_CLICK_WINDOW_MS} open the detail view (list mode) or go
+ * back (detail mode); filter-mode taps on the stage-options row select a
+ * stage.
+ */
+export function mapMouseToAction(
+  state: WorkItemListState,
+  ev: ParsedMouseEvent,
+  termSize: TermSize,
+  clickState?: MouseClickState,
+): MouseAction {
+  // Release events are consumed but inert — presses drive selection (AC6).
+  if (ev.release) return null;
+  // Drag-motion guard: motion events never navigate (AC6).
+  if ((ev.button & 32) !== 0) return null;
+  // Wheel buttons 64/65 (AC4).
+  if (ev.button === 64) {
+    if (state.mode === 'list') return { type: 'wheel-up' };
+    if (state.mode === 'detail') return { type: 'scroll-detail-up' };
+    return null; // filter mode: wheel ignored (plan A2)
+  }
+  if (ev.button === 65) {
+    if (state.mode === 'list') return { type: 'wheel-down' };
+    if (state.mode === 'detail') return { type: 'scroll-detail-down' };
+    return null;
+  }
+  // Only the left button (0) selects/taps; middle/right are inert.
+  if (ev.button !== 0) return null;
+
+  // Double-click: same coordinates within DOUBLE_CLICK_WINDOW_MS (AC3,
+  // inclusive boundary), mirroring the previous press.
+  const isDoubleClick = clickState !== undefined
+    && clickState.lastClick !== null
+    && clickState.lastClick.x === ev.x
+    && clickState.lastClick.y === ev.y
+    && clickState.now - clickState.lastClick.at <= DOUBLE_CLICK_WINDOW_MS;
+
+  if (isDoubleClick) {
+    if (state.mode === 'detail') return { type: 'back' };
+    if (state.mode === 'list') {
+      const index = mapListRowToIndex(state, ev.y, termSize);
+      // Repeated clicks on inert rows stay inert (AC3).
+      return index !== null ? { type: 'open-detail' } : null;
+    }
+    // filter mode: fall through to the single-tap mapping below.
+  }
+
+  if (state.mode === 'detail') return null; // single clicks are inert
+  if (state.mode === 'filter') {
+    if (ev.y !== 3) return null; // AC5: only the options row is tappable
+    const index = filterStageIndexForColumn(ev.x);
+    return index !== null ? { type: 'filter-stage', index } : null;
+  }
+  const index = mapListRowToIndex(state, ev.y, termSize);
+  return index !== null ? { type: 'select-row', index } : null;
+}
+
+/**
+ * Wire a raw stdin chunk into the mouse path — the onData entry point
+ * (WL-0MSGHM5BQ0096BNJ AC2–AC6, fix WL-0MSZBWT500034E74). Parses SGR mouse
+ * events via {@link consumeMouseChunk}, maps them to an action via
+ * {@link mapMouseToAction}, dispatches it against `state` (mirroring the
+ * handleKeypress action handling), and tracks the double-click window in
+ * `clickState`.
+ *
+ * Returns true when the chunk was mouse-shaped (fully consumed — it must
+ * NOT reach the keyboard path); false for plain keys and foreign escape
+ * sequences (arrows, etc.) so keyboard handling is untouched (AC6). A
+ * partial SGR prefix is consumed (buffered) rather than leaked to the
+ * keyboard path, per the split-chunk risk mitigation.
+ *
+ * Double-click ordering (fix): the clickState tracker is updated to the
+ * current left-press AFTER mapMouseToAction runs, so the window compares
+ * against the PRIOR press. Updating before the call made every click
+ * self-match as a double-click (now - at === 0), opening detail instead of
+ * selecting. Only left-button presses (not releases, wheel, or motion)
+ * advance the tracker.
+ */
+export function handleMouseInput(
+  state: WorkItemListState,
+  key: string,
+  termSize: TermSize,
+  clickState: MouseClickState,
+): boolean {
+  const bufferBefore = mouseChunkBuffer;
+  const mouseEvent = consumeMouseChunk(key);
+  if (mouseEvent === null) {
+    // Not a complete mouse event. An ESC chunk that matches the partial SGR
+    // prefix, or a non-ESC chunk that touched a pending partial (grew or
+    // cleared it), is mouse-shaped — consume it so a split sequence never
+    // leaks into the keyboard path. Other input falls through to keys.
+    if (key.startsWith('\x1b')) {
+      return SGR_PARTIAL_RE.test(key);
+    }
+    return mouseChunkBuffer !== bufferBefore;
+  }
+
+  // Current clock for the double-click window (Date.now; deterministic
+  // tests inject clickState directly into mapMouseToAction instead).
+  const now = Date.now();
+  clickState.now = now;
+  const action = mapMouseToAction(state, mouseEvent, termSize, clickState);
+
+  // Advance the tracker AFTER the double-click check — the next event's
+  // window compares against THIS press (fix WL-0MSZBWT500034E74).
+  if (!mouseEvent.release && mouseEvent.button === 0) {
+    clickState.lastClick = { x: mouseEvent.x, y: mouseEvent.y, at: now };
+  }
+
+  if (action === null) return true; // consumed but inert (motion, release, chrome)
+
+  // Dispatch mouse actions (mirrors the handleKeypress action handling).
+  switch (action.type) {
+    case 'select-row': {
+      const rows = state.getDisplayRows();
+      if (action.index >= 0 && action.index < rows.length) {
+        state.selectedIndex = action.index;
+      }
+      break;
+    }
+    case 'open-detail': {
+      const selected = state.getSelectedItem();
+      if (selected) {
+        // Toggle expand/collapse for items with actual children data.
+        if (selected.children && selected.children.length > 0) {
+          if (state.isExpanded(selected.id)) {
+            state.clearNavigationStateFor(selected.id);
+          } else {
+            state.pushNavigationState(selected.id);
+          }
+          state.toggleExpand(selected.id);
+        } else {
+          state.selectItem();
+        }
+      }
+      break;
+    }
+    case 'back':
+      state.back();
+      break;
+    case 'wheel-up':
+      state.moveUp();
+      break;
+    case 'wheel-down':
+      state.moveDown();
+      break;
+    case 'scroll-detail-up':
+      if (state.detailItem) state.detailScrollUp(1);
+      break;
+    case 'scroll-detail-down':
+      if (state.detailItem) state.detailScrollDown(1);
+      break;
+    case 'filter-stage':
+      if (action.index >= 0 && action.index < STAGES.length) {
+        state.applyFilter(STAGES[action.index]);
+      }
+      break;
+  }
+  return true; // consumed a mouse event
 }
 
 // ── Renderer ──────────────────────────────────────────────────────────
@@ -2013,8 +2776,16 @@ export function handleKeypress(
 /**
  * Render the inline downtime-worker status fragment appended to the list
  * header (AC3, WL-0MSF49FMW009M06K): `[⏳ downtime idle m:ss]`,
- * `[downtime busy]`, `[⏳ downtime dispatching]`, `[downtime disabled]`, or
- * `[downtime paused]` (no-candidate cooldown, WL-0MSI7DQL10016QYX).
+ * `[downtime busy]`, `[⏳ downtime dispatching]`, `[Downtime Off]`,
+ * `[Downtime Off (restored)]` (disable restored from the persisted marker,
+ * WL-0MT5SG0VU005ARUR), or `[downtime paused]` (no-candidate cooldown,
+ * WL-0MSI7DQL10016QYX).
+ * `[Downtime Off]` replaces the legacy `[downtime disabled]` text and is
+ * shown whenever dispatch is off for the instance — either globally
+ * settings-disabled or toggled off via the `d` shortcut (parent
+ * WL-0MSZ4NSOE007AQEF). The rendered state ALWAYS agrees with the worker's
+ * effective gate (override ?? settings); a disabled pane never shows the
+ * enabled-idle string.
  * Inline-only — it never adds a row, so the pane-height budget is intact.
  */
 export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string {
@@ -2023,7 +2794,14 @@ export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string
     return ` ${ANSI.fg(208)}[⏳ downtime dispatching]${ANSI.reset}`;
   }
   if (!worker.enabled) {
-    return ` ${ANSI.dim}[downtime disabled]${ANSI.reset}`;
+    // Header honesty (WL-0MT5SG0VU005ARUR): a worker whose disable was
+    // RESTORED from the persisted marker (.herdr-downtime-disabled) shows an
+    // explicit notice so the restored-disabled state is never silent — the
+    // operator always sees why this pane is off even after a restart.
+    if (worker.restoredFromMarker) {
+      return ` ${ANSI.dim}[Downtime Off (restored)]${ANSI.reset}`;
+    }
+    return ` ${ANSI.dim}[Downtime Off]${ANSI.reset}`;
   }
   if (worker.paused) {
     // No-candidate cooldown: the worker is not polling, so `idleSince` is
@@ -2041,10 +2819,14 @@ export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string
 }
 
 export function createListRenderer(getShowIcons?: () => boolean): (
-  items: WorkItem[],
+  displayRows: DisplayRow[],
   selectedIndex: number,
   scrollOffset: number,
   termSize: TermSize,
+  // Display label of the active filter (axis-qualified, e.g. `stage
+  // in_review` or `priority critical`; WL-0MSKC8T46006999S) or null when
+  // unfiltered. Rendered as `(filtered: <label>)` in the header. Callers
+  // pass `state.activeFilterLabel`.
   activeFilter: string | null,
   mode: ViewMode,
   detailItem: WorkItem | null,
@@ -2071,7 +2853,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   // compatible — callers/tests that render without options keep icons).
   const showIconsGetter = getShowIcons ?? (() => true);
   return (
-    items: WorkItem[],
+    displayRows: DisplayRow[],
     selectedIndex: number,
     scrollOffset: number,
     termSize: TermSize,
@@ -2103,11 +2885,11 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     // icon, including audit/review icons (AC1, WL-0MSBV4RYO008JL70).
     const noIcons = !showIconsGetter();
     const output: string[] = [];
-    // The metadata panel reserves 20–40% of the pane height below the list;
-    // the list area is the remaining height minus the notification row.
-    const panelHeight = computeMetadataPanelHeight(rows);
-    const listArea = Math.max(1, rows - 1 - panelHeight);
-    const listHeight = Math.max(3, rows - 4 - panelHeight);
+    // Dynamic layout (WL-0MSQ44MDX008U69J): the selection list takes up to the
+    // full available pane height; the metadata panel fills whatever space
+    // remains, expanding when the list is short and sitting below the fold when
+    // the list is long.  The metadata panel keeps a minimum of 3 rows (see
+    // computeDynamicLayout).
 
     if (mode === 'detail' && detailItem) {
       const viewportHeight = Math.max(10, rows - 1);
@@ -2139,8 +2921,10 @@ export function createListRenderer(getShowIcons?: () => boolean): (
 
     // ── Render list mode ──────────────────────────────────────────
 
-    // Header with total count and auto-refresh indicator
-    const totalItems = items.length;
+    // Header with total count and auto-refresh indicator. `displayRows`
+    // includes heading rows, so the item count shown is the row count — the
+    // same metric the header has always shown for the flattened list.
+    const totalItems = displayRows.length;
     const filterLabel = activeFilter ? ` (filtered: ${activeFilter})` : '';
     let header = ` ${ANSI.bold}Work Items${ANSI.reset} — ${totalItems} item(s)${filterLabel}`;
     if (totalCount !== undefined && totalCount > totalItems) {
@@ -2179,63 +2963,74 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       bannerCount++;
     }
 
-    // Items are already flattened by the caller (render callback in runWorklistTui
-    // calls state.getFlattenedItems() before passing items here). Do NOT re-flatten.
-    const flatItems = items;
+    // The caller passes the display-rows model (headings + items) — the
+    // renderer renders exactly those rows and does NOT derive group
+    // separators from group transitions (WL-0MSL5MPSZ003TG94 AC3).
 
-    // Items with group separators. Each `── <Group> ──` separator consumes a
-    // row, so the visible window must be sized so header + items + separators
-    // + fill + footer fit in `rows - 1` lines (the last row is reserved for
-    // the notification line appended by render()). Without this accounting the
-    // output overflows the pane and the terminal scrolls the header/top items
-    // off the top (WL-0MSAAON63003N6LO). The active stage filter is indicated
-    // in the header only (filterLabel) — no standalone filter bar is rendered.
-    const chromeLines = 2 + bannerCount; // header + banner(s) + footer
-    const budgetForItemsAndSeps = Math.max(0, listArea - chromeLines);
-    // Count the group separators a window would render (same logic as the
-    // render loop below) so the window can be trimmed when separators would
-    // overflow the pane height.
-    const countSeparators = (window: WorkItem[]): number => {
-      let count = 0;
-      let lastGroup: number | undefined;
-      for (const item of window) {
-        if (item.group !== undefined && item.id !== '..') {
-          if (lastGroup === undefined || item.group !== lastGroup) {
-            count++;
-          }
-          lastGroup = item.group;
-        }
-      }
-      return count;
-    };
-    let visible = flatItems.slice(scrollOffset, scrollOffset + listHeight);
-    while (visible.length > 0 && visible.length + countSeparators(visible) > budgetForItemsAndSeps) {
-      // Drop trailing items until items + separators fit the pane height.
+    // Dynamic layout (WL-0MSQ44MDX008U69J): chrome rows already rendered are
+    // header + banners.  Compute the list's content need from its rows, then
+    // let the metadata panel fill whatever space remains (≥ 3-row minimum).
+    const { panelHeight, listArea, listHeight } = computeDynamicLayout(
+      displayRows,
+      scrollOffset,
+      bannerCount,
+      termSize,
+    );
+    const chromeLines = 2 + bannerCount; // header + banners + footer
+
+    // Heading rows are first-class rows in the display model, so the visible
+    // window's row count already includes them — no separate separator
+    // accounting (WL-0MSAAON63003N6LO keeps the `rows - 1` invariant).
+    // The active stage filter is indicated in the header only (filterLabel)
+    // — no standalone filter bar is rendered.
+    const budgetForRows = Math.max(0, listArea - chromeLines);
+    let visible = displayRows.slice(scrollOffset, scrollOffset + listHeight);
+    while (visible.length > 0 && visible.length > budgetForRows) {
+      // Drop trailing rows until the window fits the pane height.
       visible = visible.slice(0, -1);
     }
-    let lastDisplayedGroup: number | undefined;
-    let numSeparators = 0;
+
+    // ── Fold indicators (WL-0MSG8YXYJ008PWJJ) ─────────────────────
+    // Show dim `▲ more` / `▼ more` markers so users can tell the list
+    // is scrolled or truncated.  Indicator rows consume budget so the
+    // `rows - 1` invariant still holds.
+    const hasTopIndicator = scrollOffset > 0;
+    const hasBottomIndicator = scrollOffset + visible.length < displayRows.length;
+    const indicatorRows = (hasTopIndicator ? 1 : 0) + (hasBottomIndicator ? 1 : 0);
+    const effectiveBudget = budgetForRows - indicatorRows;
+    while (visible.length > 0 && visible.length > effectiveBudget) {
+      // Drop trailing rows until rows + indicators fit.
+      visible = visible.slice(0, -1);
+    }
+    // Edge case: the trim may have made the list fully fit — the bottom
+    // indicator is then omitted. This terminates in a single pass (no loop).
+    const bottomIndicatorActive = scrollOffset + visible.length < displayRows.length;
+    // Top indicator — first row of the items region when scrolled down.
+    if (hasTopIndicator) {
+      output.push(` ${ANSI.dim}▲ more${ANSI.reset}`);
+    }
+    let numHeadings = 0;
     for (let i = 0; i < visible.length; i++) {
       const actualIndex = scrollOffset + i;
-      const item = visible[i];
+      const row = visible[i];
+      const isSelected = actualIndex === selectedIndex;
 
-      // Insert group separator when group changes
-      if (item.group !== undefined && item.id !== '..') {
-        if (lastDisplayedGroup === undefined || item.group !== lastDisplayedGroup) {
-          const label = item.groupLabel ?? `Group ${item.group}`;
-          const sepColor = stageColor(item.stage);
-          output.push(` ${ANSI.fg(sepColor)}${ANSI.bold}── ${label} ──${ANSI.reset}`);
-          numSeparators++;
-        }
-        lastDisplayedGroup = item.group;
+      // Heading row: render the label + item count + collapse arrow directly
+      // from the display model (WL-0MSL5MPSZ003TG94 AC1/AC2).
+      if (isHeadingRow(row)) {
+        numHeadings++;
+        const arrow = row.collapsed ? '▶' : '▼';
+        const line = ` ${ANSI.fg(stageColor(undefined))}${ANSI.bold}── ${row.groupLabel} (${row.count}) ${arrow} ──${ANSI.reset}`;
+        output.push(isSelected ? `${ANSI.reverse}${line}${ANSI.reset}` : line);
+        continue;
       }
 
-      // For hierarchy: apply _expanded flag for icon rendering
+      // Item row: existing hierarchy + icon rendering.
+      const item = row;
       const hasChildCount = item.childCount !== undefined && item.childCount > 0;
       const isExpanded = expandedItems?.has(item.id) ?? false;
       const expandedItem = { ...item, _expanded: hasChildCount && isExpanded };
 
-      const isSelected = actualIndex === selectedIndex;
       const line = formatItemLine(expandedItem, cols, isSelected, noIcons);
       if (isSelected) {
         output.push(`${ANSI.reverse}${line}${ANSI.reset}`);
@@ -2244,8 +3039,14 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       }
     }
 
-    // Fill remaining rows (header + items + separators)
-    const used = chromeLines + visible.length + numSeparators;
+    // Bottom indicator — last row of the rows region when rows remain
+    // below the fold (after the trimming edge case is resolved).
+    if (bottomIndicatorActive) {
+      output.push(` ${ANSI.dim}▼ more${ANSI.reset}`);
+    }
+
+    // Fill remaining rows (header + indicators + rows)
+    const used = chromeLines + (hasTopIndicator ? 1 : 0) + (bottomIndicatorActive ? 1 : 0) + visible.length;
     for (let i = used; i < listArea; i++) {
       output.push('');
     }
@@ -2275,21 +3076,27 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     }
 
     // ── Metadata panel ────────────────────────────────────────────
-    // Reserve the bottom `panelHeight` rows for the selected item's
+    // Reserve the bottom `panelHeight` rows for the selected row's
     // metadata (plus its last command when in_progress). The panel has its
     // own scroll offset (m/M) so long metadata never affects list
-    // navigation (WL-0MSAYNVBY006LM9X).
-    const selectedItem = selectedIndex >= 0 && selectedIndex < items.length
-      ? items[selectedIndex]
+    // navigation (WL-0MSAYNVBY006LM9X). A heading selection has no item —
+    // formatMetadataPanel renders a blank panel (group info lands here via
+    // T5).
+    const selectedRow = selectedIndex >= 0 && selectedIndex < displayRows.length
+      ? displayRows[selectedIndex]
       : null;
-    const panelLines = formatMetadataPanel(
-      selectedItem,
-      cols,
-      panelHeight,
-      metaScrollOffset ?? 0,
-      metaLastCommand,
-      noIcons,
-    );
+    // Heading selection → group info panel (WL-0MSL5MPSZ003TG94 T5 AC1);
+    // item selection → the normal metadata panel.
+    const panelLines = selectedRow !== null && isHeadingRow(selectedRow)
+      ? formatGroupInfoPanel(selectedRow, cols, panelHeight)
+      : formatMetadataPanel(
+          selectedRow,
+          cols,
+          panelHeight,
+          metaScrollOffset ?? 0,
+          metaLastCommand,
+          noIcons,
+        );
     for (const line of panelLines) {
       output.push(line);
     }
@@ -2360,18 +3167,19 @@ function logCommandForItem(command: string, itemId?: string): void {
 function resolveAndRouteCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void,
   model?: string,
+  openPane?: boolean,
+  onRefresh?: () => Promise<void>,
 ): boolean {
   let resolvedCommand = command;
   let itemId: string | undefined;
 
   if (resolvedCommand.includes('<id>')) {
-    const flat = state.getFlattenedItems();
-    const idx = state.selectedIndex;
-    if (idx >= 0 && idx < flat.length) {
-      resolvedCommand = resolvedCommand.replace(/<id>/g, flat[idx].id);
-      itemId = flat[idx].id;
+    const selected = state.getSelectedItem();
+    if (selected) {
+      resolvedCommand = resolvedCommand.replace(/<id>/g, selected.id);
+      itemId = selected.id;
     } else {
       // No item selected and command requires <id> — graceful no-op
       return false;
@@ -2383,7 +3191,20 @@ function resolveAndRouteCommand(
   logCommandForItem(resolvedCommand, itemId);
 
   if (onCommand) {
-    onCommand(resolvedCommand, model);
+    // The openPane flag is passed only when explicitly set (false): an
+    // undefined third arg keeps the 2-arg call identical to today's
+    // dispatch, so shortcuts without open_pane are byte-compatible
+    // (WL-0MSJLD1I70045ZUL). The onRefresh hook is appended only for
+    // background (no-pane) dispatches (openPane === false) so they can
+    // trigger a refresh when the child exits (WL-0MT1KB70U0012X6T);
+    // pane-opening paths keep their existing arity.
+    if (openPane === undefined) {
+      onCommand(resolvedCommand, model);
+    } else if (onRefresh) {
+      onCommand(resolvedCommand, model, openPane, onRefresh);
+    } else {
+      onCommand(resolvedCommand, model, openPane);
+    }
   }
   return true;
 }
@@ -2482,20 +3303,28 @@ export function formatCodeFreezeDialog(maxCols: number, maxRows: number, reason?
  *
  * Without an active filter the default fetcher is used unchanged (the
  * default `/wl` view keeps its existing smart-selection behaviour). If the
- * stage fetch fails, the default fetcher is used as a fallback so a `wl`
- * error can never blank the list.
+ * stage/priority fetch fails, the default fetcher is used as a fallback so a
+ * `wl` error can never blank the list.
  *
- * @param activeFilter - The active stage filter (null = unfiltered view)
+ * @param activeFilter - The active stage filter (null = no stage filter)
+ * @param activePriorityFilter - The active priority filter (null = no
+ *   priority filter). Mutually exclusive with `activeFilter` (replace
+ *   semantics, WL-0MSKC8T46006999S): at most one is set.
  * @param defaultFetcher - The default fetcher for the unfiltered view
  */
 export function fetchItemsForView(
   activeFilter: string | null,
+  activePriorityFilter: string | null,
   defaultFetcher: () => Promise<WorkItem[]>,
 ): Promise<WorkItem[]> {
   if (activeFilter) {
     // Fail-open: a wl error must never blank the list — fall back to the
     // default fetcher (which itself fails open in index.ts).
     return fetchItemsByStage(activeFilter).catch(() => defaultFetcher());
+  }
+  if (activePriorityFilter) {
+    // Fail-open: same fallback as the stage path.
+    return fetchItemsByPriority(activePriorityFilter).catch(() => defaultFetcher());
   }
   // Unfiltered: delegate straight to the default fetcher so the refresh
   // cadence is byte-for-byte unchanged (single-flight timing preserved).
@@ -2516,14 +3345,51 @@ export function fetchItemsForView(
  * @param command - The resolved command string (may contain `<id>` placeholders)
  * @param state - Current work item list state (for selected item lookup)
  * @param onCommand - Optional callback to route non-/wl commands to the output mechanism
+ * @param model - Optional model for the routed command
+ * @param onDowntimeToggle - Optional callback invoked for the internal
+ *   `/downtime toggle` command (flips the per-instance worker override;
+ *   never spawns a pane, never writes to stdout — parent
+ *   WL-0MSZ4NSOE007AQEF)
+ * @param openPane - Optional open-pane flag (WL-0MSJLD1I70045ZUL): `false`
+ *   runs the command in the background (no pane); `undefined`/`true` open a
+ *   pane as today. Passed to onCommand only when explicitly set.
  * @returns true if the command was handled, false otherwise
  */
 export function dispatchChordCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void,
   model?: string,
+  onDowntimeToggle?: () => void,
+  openPane?: boolean,
+  onRefresh?: () => Promise<void>,
 ): boolean {
+  // ── /downtime toggle (internal action, WL-0MSZ4NSOE007AQEF) ──────
+  // Per-instance in-memory toggle of downtime dispatch for the current
+  // herdr pane. Fully internal — no pane spawned, no stdout write, no
+  // <id> substitution. The header re-renders via the worker's state.
+  if (/^\/downtime toggle$/.test(command.trim())) {
+    if (onDowntimeToggle) {
+      onDowntimeToggle();
+    }
+    return true;
+  }
+
+  // ── /wl --priority <priority> commands (internal dispatch) ─────
+  // Priority filter axis (WL-0MSKC8T46006999S): `/wl --priority <p>` with a
+  // canonical name (critical|high|medium|low) applies the priority filter;
+  // unknown values fall through unhandled (no crash, no filter change),
+  // matching the `/wl <bogus>` behaviour below.
+  const wlPriorityMatch = command.match(/^\/wl\s+--priority\s+(\S+)$/);
+  if (wlPriorityMatch) {
+    const wlPriority = wlPriorityMatch[1];
+    const internalPriority = PRIORITY_MAP[wlPriority];
+    if (internalPriority) {
+      state.applyPriorityFilter(internalPriority);
+      return true;
+    }
+  }
+
   // ── /wl <stage> commands (internal dispatch) ──────────────
   const wlStageMatch = command.match(/^\/wl\s+(\S+)$/);
   if (wlStageMatch) {
@@ -2537,8 +3403,8 @@ export function dispatchChordCommand(
 
   // ── /wl (no arguments): return to the default unfiltered view ────
   // Equivalent to the Pi TUI's `/wl` with no args (WL-0MSGSE15000746F7):
-  // clears the active stage filter so the next refresh shows the standard
-  // smart-selection list. No-op when no filter is active.
+  // clears the active stage AND priority filters so the next refresh shows
+  // the standard smart-selection list. No-op when no filter is active.
   if (/^\/wl\s*$/.test(command)) {
     state.clearFilter();
     return true;
@@ -2546,33 +3412,33 @@ export function dispatchChordCommand(
 
   // ── Agent skill invocations ─────────────────────────────
   if (command.startsWith('/skill:implement')) {
-    return resolveAndRouteCommand(command, state, onCommand, model);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }
   if (command.startsWith('/skill:audit')) {
-    return resolveAndRouteCommand(command, state, onCommand, model);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }
   if (command.startsWith('/skill:ship')) {
     // Dev→main release (Ship It shortcut, WL-0MSGG5N5Z0074TLY). Global
     // release — no <id> substitution; routed to the agent channel like
     // other /skill:* commands. NOT blocked during a Code Freeze (the ship
     // skill gates itself); only the confirmation dialog precedes dispatch.
-    return resolveAndRouteCommand(command, state, onCommand, model);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }
 
   // ── Agent workflow commands ─────────────────────────────
   if (command.startsWith('/intake')) {
-    return resolveAndRouteCommand(command, state, onCommand, model);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }
   if (command.startsWith('/plan')) {
-    return resolveAndRouteCommand(command, state, onCommand, model);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }
 
   // ── Producer review / audit compound commands ───────────
   if (command.startsWith('!!wl reviewed')) {
-    return resolveAndRouteCommand(command, state, onCommand, model);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }
   if (command.includes('&& wl audit-set')) {
-    return resolveAndRouteCommand(command, state, onCommand, model);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }
 
   // Unknown command — not handled
@@ -2736,6 +3602,12 @@ export async function resolvePodcastTarget(
  * @param onCommand - Optional callback to receive resolved commands
  * @param codeFreezeActive - Whether the project is in Code Freeze (implement
  *                           commands are blocked). Defaults to false.
+ * @param model - Optional model for the routed command.
+ * @param onDowntimeToggle - Optional callback for the internal
+ *   `/downtime toggle` command (see {@link dispatchChordCommand}).
+ * @param openPane - Optional open-pane flag (WL-0MSJLD1I70045ZUL): `false`
+ *   runs the command in the background (no pane); `undefined`/`true` open a
+ *   pane as today. Passed to onCommand only when explicitly set.
  * @returns 'dispatched' if handled by dispatchChordCommand,
  *          'callback' if passed to onCommand,
  *          'noop' if skipped (no item + <id> requirement),
@@ -2744,9 +3616,12 @@ export async function resolvePodcastTarget(
 export function executeResolvedCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void,
   codeFreezeActive = false,
   model?: string,
+  onDowntimeToggle?: () => void,
+  openPane?: boolean,
+  onRefresh?: () => Promise<void>,
 ): ExecuteResult {
   // Code Freeze guard: never route implement commands while frozen.
   // This runs BEFORE dispatchChordCommand so no pane spawn, claim, or
@@ -2755,9 +3630,9 @@ export function executeResolvedCommand(
     return 'blocked';
   }
 
-  // Try dispatchChordCommand first — handles /wl, /skill:, /intake, /plan,
-  // !!wl reviewed, and compound audit commands
-  if (dispatchChordCommand(command, state, onCommand, model)) {
+  // Try dispatchChordCommand first — handles /wl, /downtime, /skill:,
+  // /intake, /plan, !!wl reviewed, and compound audit commands
+  if (dispatchChordCommand(command, state, onCommand, model, onDowntimeToggle, openPane, onRefresh)) {
     return 'dispatched';
   }
 
@@ -2766,11 +3641,10 @@ export function executeResolvedCommand(
   let itemId: string | undefined;
 
   if (resolvedCommand.includes('<id>')) {
-    const flat = state.getFlattenedItems();
-    const idx = state.selectedIndex;
-    if (idx >= 0 && idx < flat.length) {
-      resolvedCommand = resolvedCommand.replace(/<id>/g, flat[idx].id);
-      itemId = flat[idx].id;
+    const selected = state.getSelectedItem();
+    if (selected) {
+      resolvedCommand = resolvedCommand.replace(/<id>/g, selected.id);
+      itemId = selected.id;
     } else {
       // No item selected and command requires <id> — graceful no-op
       return 'noop';
@@ -2783,7 +3657,20 @@ export function executeResolvedCommand(
   logCommandForItem(resolvedCommand, itemId);
 
   if (onCommand) {
-    onCommand(resolvedCommand, model);
+    // The openPane flag is passed only when explicitly set (false): an
+    // undefined third arg keeps the 2-arg call identical to today's
+    // dispatch, so shortcuts without open_pane are byte-compatible
+    // (WL-0MSJLD1I70045ZUL). The onRefresh hook is appended only for
+    // background (no-pane) dispatches (openPane === false) so they can
+    // trigger a refresh when the child exits (WL-0MT1KB70U0012X6T);
+    // pane-opening paths keep their existing arity.
+    if (openPane === undefined) {
+      onCommand(resolvedCommand, model);
+    } else if (onRefresh) {
+      onCommand(resolvedCommand, model, openPane, onRefresh);
+    } else {
+      onCommand(resolvedCommand, model, openPane);
+    }
   }
   return 'callback';
 }
@@ -2805,7 +3692,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void> },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; onRefresh?: () => Promise<void> },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -2821,6 +3708,13 @@ export async function runWorklistTui(
     downtimeWorker: options?.downtimeWorker,
     downtimePollIntervalMs: options?.downtimePollIntervalMs ?? DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
     mergeAgentStates: options?.mergeAgentStates,
+    subscriber: options?.subscriber ?? null,
+    agentTracker: options?.agentTracker ?? null,
+    onDowntimeToggle: options?.onDowntimeToggle,
+    modeSwitchWorker: options?.modeSwitchWorker,
+    modeSwitchPollIntervalMs: options?.modeSwitchPollIntervalMs ?? 10_000,
+    modeSwitchEnabled: options?.modeSwitchEnabled ?? true,
+    onRefresh: options?.onRefresh,
   };
 
   let termSize = getTermSize();
@@ -2901,15 +3795,161 @@ export async function runWorklistTui(
   // Updated by the gate check on each timer tick; fail-open defaults to false.
   let panePaused = false;
 
+  // ── Event-driven window status (WL-0MSHB7DHO004RHBJ) ──────────────
+  // The herdr event subscriber (when available) replaces the polling paths:
+  //  - `pane_focused` for the CURRENT pane → immediate visibility update
+  //    + refresh (replaces the 2s resume-poll for hidden→visible).
+  //  - `pane_agent_status_changed` / `pane_agent_detected` / `pane_closed` /
+  //    `pane_exited` → immediate icon updates (replaces the agent-list poll).
+  // Polling stays the fail-open fallback whenever events are unavailable.
+  const subscriber = opts.subscriber;
+  const agentTracker = opts.agentTracker;
+
+  /** True while the event subscription is healthy (drives resume-poll gating). */
+  let eventsActive = false;
+
+  /**
+   * Sync the subscriber's per-pane subscriptions with the tracker's pane
+   * set (from the shared `.worklog/agent-panes.json`). Per-pane
+   * `pane.agent_status_changed` subscriptions must exist for every tracked
+   * pane so status events are received (AC1/AC3). Late-spawned agents are
+   * covered by `pane_agent_detected` + re-reading the shared file.
+   * Best-effort: subscription failures never break the event loop.
+   */
+  const syncPaneSubscriptions = async (): Promise<void> => {
+    if (!subscriber || !agentTracker) return;
+    try {
+      const current = new Set(subscriber.getTrackedPaneIds());
+      for (const entry of agentTracker.snapshot()) {
+        if (!current.has(entry.paneId)) {
+          await subscriber.addPaneSubscription(entry.paneId);
+        }
+      }
+    } catch {
+      // Fail-open: a subscription sync failure keeps polling as fallback.
+    }
+  };
+
+  /**
+   * Re-apply the tracker's cached states to the live items and re-render
+   * (coalesced per microtask so event storms do not thrash the TUI).
+   */
+  let agentEventRenderPending = false;
+  const scheduleAgentEventRender = (): void => {
+    if (agentEventRenderPending) return;
+    agentEventRenderPending = true;
+    Promise.resolve().then(() => {
+      agentEventRenderPending = false;
+      try {
+        if (agentTracker) {
+          mergeAgentStatesCached(state.items, agentTracker);
+        }
+        render();
+      } catch {
+        // Fail-open: render failures never crash the TUI.
+      }
+    });
+  };
+
+  if (subscriber) {
+    subscriber.setCallbacks({
+      // A pane_focused event for the CURRENT pane means its tab is focused
+      // (a pane cannot hold focus while its tab is hidden) → visible.
+      // Applies the event value to the gate (no `herdr tab get` exec),
+      // clears the paused indicator, and refreshes immediately — replacing
+      // the 2s resume-poll for the hidden → visible transition.
+      onPaneFocused: (data) => {
+        const currentPaneId = process.env.HERDR_PANE_ID;
+        if (!currentPaneId || data.pane_id !== currentPaneId) return;
+        if (data.focused === false) {
+          paneGate.setVisibleFromEvent(false);
+          panePaused = true;
+          return;
+        }
+        paneGate.setVisibleFromEvent(true);
+        panePaused = false;
+        stopResumePoll();
+        doRefresh(true);
+      },
+      // Agent-status events update the tracker's cached state map and
+      // re-render the icons immediately (no `herdr agent list` exec).
+      onAgentStatusChanged: (data) => {
+        if (!agentTracker) return;
+        agentTracker.applyAgentStatusChanged(data.pane_id, data.agent_status);
+        scheduleAgentEventRender();
+      },
+      // A new agent pane appeared (possibly from another herdr instance):
+      // re-read the shared file for late associations and add the pane to
+      // the per-pane subscription set (AC3).
+      onAgentDetected: (data) => {
+        if (!agentTracker || !subscriber) return;
+        const grew = agentTracker.applyAgentDetected();
+        if (grew) void syncPaneSubscriptions();
+        void subscriber.addPaneSubscription(data.pane_id).catch(() => {});
+        scheduleAgentEventRender();
+      },
+      // A pane closed/exited: prune its associations so its icons disappear
+      // immediately and drop the per-pane subscription (best-effort).
+      onPaneClosed: (data) => {
+        if (!agentTracker || !subscriber) return;
+        agentTracker.applyPaneGone(data.pane_id);
+        void subscriber.removePaneSubscription(data.pane_id).catch(() => {});
+        scheduleAgentEventRender();
+      },
+      onPaneExited: (data) => {
+        if (!agentTracker || !subscriber) return;
+        agentTracker.applyPaneGone(data.pane_id);
+        void subscriber.removePaneSubscription(data.pane_id).catch(() => {});
+        scheduleAgentEventRender();
+      },
+      onError: () => {
+        // Socket errors are already handled by the subscriber's reconnect
+        // logic; no TUI action needed (fail-open).
+      },
+    });
+
+    // Start the subscription (fail-open: an unreachable socket keeps the
+    // existing polling cadence and the resume-poll fallback).
+    subscriber.connect().then((result) => {
+      eventsActive = result.type === 'subscribed';
+      if (eventsActive) {
+        // The event path now handles hidden → visible transitions; stop the
+        // resume-poll fallback (it may have started during the connect
+        // window while eventsActive was still false).
+        stopResumePoll();
+        void syncPaneSubscriptions();
+      }
+    });
+  }
+
+
   // Check if we're in raw mode (stdin is a TTY)
   const isInteractive = process.stdin.isTTY;
   let rawMode = false;
+
+  // SGR mouse tracking is enabled by default (WL-0MT0AP2LR000JFWN). This is
+  // a toggle state so the user can temporarily disable mouse tracking and use
+  // the terminal's native text-selection to copy content from the terminal.
+  let mouseTrackingEnabled = true;
+
+  // Alt+m toggle handler (WL-0MT0AP2LR000JFWN): toggles mouse tracking on/off
+  // by emitting the matching enable/disable ANSI sequences to the terminal.
+  const toggleMouseTracking = (): void => {
+    mouseTrackingEnabled = !mouseTrackingEnabled;
+    process.stdout.write(
+      mouseTrackingEnabled ? ANSI.mouseEnable : ANSI.mouseDisable,
+    );
+  };
 
   if (isInteractive) {
     try {
       process.stdin.setRawMode?.(true);
       process.stdin.resume();
       rawMode = true;
+      // SGR mouse tracking (WL-0MSGHM5BQ0096BNJ AC1): emit the enable
+      // sequences when raw mode is entered so the terminal starts
+      // delivering mouse events to stdin.
+      process.stdout.write(ANSI.mouseEnable);
     } catch {
       // Not a TTY, use line-buffered mode
     }
@@ -2926,10 +3966,22 @@ export async function runWorklistTui(
       } catch {
         // ignore
       }
+      // Disable SGR mouse tracking on exit (AC1) — only when raw mode was
+      // entered.
+      process.stdout.write(ANSI.mouseDisable);
     }
     process.stdin.pause();
     process.stdout.write(ANSI.showCursor);
     process.stdout.write(ANSI.reset);
+  };
+
+  // Event-subscriber teardown on TUI exit (WL-0MSHB7DHO004RHBJ F6): close
+  // the socket and cancel reconnect timers so no connection leaks when the
+  // plugin pane exits. Fail-open: a close failure is swallowed.
+  const closeEventSubscriber = (): void => {
+    if (subscriber) {
+      subscriber.close().catch(() => {});
+    }
   };
 
   // Data reading callback
@@ -2985,7 +4037,7 @@ export async function runWorklistTui(
           }
         };
         const [newItems] = await Promise.all([
-          fetchItemsForView(state.activeFilter, fetcher),
+          fetchItemsForView(state.activeFilter, state.activePriorityFilter, fetcher),
           ...expanded.map(fetchExpandedChildren),
         ]);
         const oldLen = state.items.length;
@@ -3049,21 +4101,33 @@ export async function runWorklistTui(
     }
   };
 
+  // Wire the completion-triggered refresh hook (WL-0MT1KB70U0012X6T):
+  // background (no-pane) shortcut dispatches receive this callback so their
+  // child's 'exit' event can trigger a refresh of the current view. The
+  // callback is fire-and-forget and non-blocking — doRefresh has its own
+  // single-flight guard and never blocks the TUI event loop or the
+  // dispatched command's own execution. Scoped to this TUI instance (no
+  // global watcher, no cross-instance effects).
+  opts.onRefresh = opts.onRefresh ?? (() => doRefresh(false));
+
   /**
    * True when the resolved command is a `/wl` view command — a stage filter
-   * (`/wl <stage>`, shorthand alias or canonical name) or the clear-filter
-   * `/wl` with no arguments. Used after dispatch to trigger a view refetch:
-   * filtered views show every root item in that stage matching the stage's
-   * status rule (`wl list --status <status> --stage <stage> --root-only`;
-   * see STAGE_STATUS in fetcher.ts) — most stages show `open`-status items
-   * only, while the in_review stage additionally includes `completed` and
+   * (`/wl <stage>`, shorthand alias or canonical name), a priority filter
+   * (`/wl --priority <p>`, canonical name), or the clear-filter `/wl` with
+   * no arguments. Used after dispatch to trigger a view refetch: filtered
+   * views show every root item matching the filter's rule (`wl list --status
+   * <status> --stage <stage> --root-only` / `--priority <p>`; see
+   * STAGE_STATUS in fetcher.ts) — most stages show `open`-status items only,
+   * while the in_review stage additionally includes `completed` and
    * `in-progress` items (WL-0MSKCRX730052IIW); clearing the filter restores
    * the default view (WL-0MSGSE15000746F7).
    */
   const isWlViewCommand = (cmd: string): boolean => {
     if (/^\/wl\s*$/.test(cmd)) return true;
-    const m = cmd.match(/^\/wl\s+(\S+)$/);
-    return m !== null && STAGE_MAP[m[1]] !== undefined;
+    const stageMatch = cmd.match(/^\/wl\s+(\S+)$/);
+    if (stageMatch !== null && STAGE_MAP[stageMatch[1]] !== undefined) return true;
+    const priorityMatch = cmd.match(/^\/wl\s+--priority\s+(\S+)$/);
+    return priorityMatch !== null && PRIORITY_MAP[priorityMatch[1]] !== undefined;
   };
 
   // Run `wl sync` and surface the outcome as a toast so sync status is
@@ -3118,7 +4182,7 @@ export async function runWorklistTui(
           if (frozen) {
             codeFreezeActive = true;
           }
-          const result = executeResolvedCommand(SHIP_IT_COMMAND, state, opts.onCommand, frozen, model);
+          const result = executeResolvedCommand(SHIP_IT_COMMAND, state, opts.onCommand, frozen, model, opts.onDowntimeToggle, undefined, opts.onRefresh);
           if (result === 'noop') {
             showToast('Skipped', { body: `${SHIP_IT_COMMAND} (no item)` });
           } else {
@@ -3137,8 +4201,42 @@ export async function runWorklistTui(
     render();
   };
 
+  // Double-click state tracker — persists across onData calls for the TUI
+  // lifetime. Updated on every left-press so handleMouseInput can detect
+  // double-clicks within {@link DOUBLE_CLICK_WINDOW_MS}. (WL-0MSGHM5BQ0096BNJ AC3)
+  let clickState: MouseClickState = { lastClick: null, now: 0 };
+
+  // ── Mouse event dispatch (WL-0MSGHM5BQ0096BNJ AC2–AC6) ─────────
+  // handleMouseInput parses SGR mouse events from the raw chunk BEFORE the
+  // keypress path and dispatches them (click select, double-click open,
+  // wheel/scroll, filter tap). Mouse-shaped sequences are fully consumed;
+  // plain keys and foreign escapes fall through to the keyboard handler
+  // untouched (AC6). See the fix note in handleMouseInput for the
+  // single-click-select vs double-click-open ordering (WL-0MSZBWT500034E74).
+  const dispatchMouse = (key: string): boolean =>
+    handleMouseInput(state, key, termSize, clickState);
+
   const onData = async (chunk: Buffer): Promise<void> => {
     const key = chunk.toString();
+
+    // Alt+m toggle shortcut (WL-0MT0AP2LR000JFWN): always available,
+    // even in modal states. Toggles mouse tracking on/off so the user
+    // can use the terminal's native text-selection to copy content.
+    if (key === '\x1bm') {
+      toggleMouseTracking();
+      render();
+      return;
+    }
+
+    // Try mouse event dispatch first — only runs when the pane is not in a
+    // modal state (code-freeze notice, form, ship-it dialog), matching the
+    // keyboard path. Mouse input is ignored during those modal states.
+    if (!codeFreezeNotice && formState === null && shipItDialog === null) {
+      if (dispatchMouse(key)) {
+        render();
+        return;
+      }
+    }
 
     // ── Code Freeze notice handling ─────────────────────────────
     // While the notice is showing, Esc/Enter/q dismiss it and return to the
@@ -3155,7 +4253,7 @@ export async function runWorklistTui(
     // ── Form mode handling ──────────────────────────────────────
     if (formState !== null) {
       const result = formState.handleInput(key);
-      if (result === 'submitted') {
+      if (result.type === 'submitted') {
         const resolved = formState.getResult();
         formState = null;
         state.mode = preFormMode;
@@ -3164,9 +4262,34 @@ export async function runWorklistTui(
         // every form submission spawns TWO agent panes (WL-0MSAL0RN1009YNJ7).
         showToast('Sent', { body: resolved.length > 60 ? resolved.substring(0, 57) + '...' : resolved });
         render();
-      } else if (result === 'cancelled') {
+      } else if (result.type === 'cancelled') {
         formState = null;
         state.mode = preFormMode;
+        render();
+      } else if (result.type === 'paste') {
+        // Ctrl+V: read the OS clipboard asynchronously (never freezes the
+        // TUI), then commit the text verbatim or surface a graceful failure
+        // and keep the form open (WL-0MSW6KCTA0092DCV).
+        const read = await readFromClipboard();
+        if (read.success && read.text !== undefined) {
+          formState.pasteText(read.text);
+        } else {
+          const reason = read.error ?? 'Clipboard read failed';
+          formState.notifyPasteFailed(reason);
+          showToast('Paste failed', { body: reason });
+        }
+        render();
+      } else if (result.type === 'cut') {
+        // Ctrl+X: copy the active field value to the OS clipboard
+        // asynchronously and surface feedback. On failure the field value is
+        // restored so no data is lost (WL-0MSW6KCTA0092DCV).
+        const copy = await writeToClipboard(result.text);
+        if (copy.success) {
+          showToast('Copied', { body: result.text.length > 40 ? result.text.substring(0, 37) + '...' : (result.text || '(empty)') });
+        } else {
+          formState.pasteText(result.text);
+          showToast('Copy failed', { body: copy.error ?? 'Clipboard unavailable' });
+        }
         render();
       } else {
         render();
@@ -3212,8 +4335,12 @@ export async function runWorklistTui(
         // Chord resolved — execute the command
         let command = chordState.resolvedCommand;
         const model = chordState.resolvedModel;
+        // openPane: undefined (default) = open a pane; false = background,
+        // no pane (WL-0MSJLD1I70045ZUL). Cleared after execution.
+        const openPane = chordState.resolvedOpenPane;
         chordState.resolvedCommand = null;
         chordState.resolvedModel = null;
+        chordState.resolvedOpenPane = undefined;
         if (command) {
           // Podcast-progression markers (<podcast-target>/<podcast-script>/
           // <podcast-review>/<podcast-both>) are resolved from the selected
@@ -3372,10 +4499,9 @@ export async function runWorklistTui(
                 // Handle <id> resolution
                 let finalCmd = resolved;
                 if (finalCmd.includes('<id>')) {
-                  const flat = state.getFlattenedItems();
-                  const idx = state.selectedIndex;
-                  if (idx >= 0 && idx < flat.length) {
-                    finalCmd = finalCmd.replace(/<id>/g, flat[idx].id);
+                  const selected = state.getSelectedItem();
+                  if (selected) {
+                    finalCmd = finalCmd.replace(/<id>/g, selected.id);
                   }
                 }
                 // Record the submitted command against its work item before
@@ -3409,7 +4535,7 @@ export async function runWorklistTui(
             if (frozen) {
               codeFreezeActive = true;
             }
-            const result = executeResolvedCommand(command, state, opts.onCommand, frozen, model ?? undefined);
+            const result = executeResolvedCommand(command, state, opts.onCommand, frozen, model ?? undefined, opts.onDowntimeToggle, openPane, opts.onRefresh);
             if (result === 'blocked') {
               // Code Freeze — show the notice dialog; the command was NOT
               // routed, no pane spawned, no work item claimed.
@@ -3452,7 +4578,20 @@ export async function runWorklistTui(
     // Save mode before processing — selectItem() changes mode to 'detail',
     // but we need to distinguish "just entered detail" from "confirm in detail".
     const prevMode = state.mode;
-    const action = handleKeypress(state, key, termSize);
+    // Compute the dynamic panel height so metaScrollDown clamps correctly
+    // (WL-0MSQ44MDX008U69J). The value is used only for the m/M scroll
+    // clamping — the actual rendering is done by createListRenderer.
+    const displayItems = state.mode === 'list'
+      ? state.getDisplayRows()
+      : state.items;
+    const bannerCount = (codeFreezeActive ? 1 : 0) + (codeFreezeAmbiguous ? 1 : 0);
+    const { panelHeight } = computeDynamicLayout(
+      displayItems,
+      state.scrollOffset,
+      bannerCount,
+      termSize,
+    );
+    const action = handleKeypress(state, key, termSize, panelHeight);
 
     // If key wasn't handled as navigation and chord registry exists,
     // check if it's a shortcut or part of a chord sequence
@@ -3468,6 +4607,9 @@ export async function runWorklistTui(
       if (singleEntry) {
         let singleCmd = singleEntry.command;
         const singleModel = singleEntry.model ?? undefined;
+        // openPane: undefined (default) = open a pane; false = background,
+        // no pane (WL-0MSJLD1I70045ZUL).
+        const singleOpenPane = singleEntry.openPane ?? undefined;
         // Podcast-progression markers (<podcast-target>/<podcast-script>/
         // <podcast-review>/<podcast-both>) are resolved from the selected
         // item's context BEFORE the generic modal-form check so they never
@@ -3508,10 +4650,9 @@ export async function runWorklistTui(
             (resolved: string) => {
               let finalCmd = resolved;
               if (finalCmd.includes('<id>')) {
-                const flat = state.getFlattenedItems();
-                const idx = state.selectedIndex;
-                if (idx >= 0 && idx < flat.length) {
-                  finalCmd = finalCmd.replace(/<id>/g, flat[idx].id);
+                const selected = state.getSelectedItem();
+                if (selected) {
+                  finalCmd = finalCmd.replace(/<id>/g, selected.id);
                 }
               }
               // Record the submitted command against its work item before
@@ -3543,7 +4684,7 @@ export async function runWorklistTui(
           if (frozen) {
             codeFreezeActive = true;
           }
-          const result = executeResolvedCommand(singleCmd, state, opts.onCommand, frozen, singleModel);
+          const result = executeResolvedCommand(singleCmd, state, opts.onCommand, frozen, singleModel, opts.onDowntimeToggle, singleOpenPane, opts.onRefresh);
           if (result === 'blocked') {
             // Code Freeze — show the notice dialog; no pane spawned.
             codeFreezeNotice = true;
@@ -3597,9 +4738,8 @@ export async function runWorklistTui(
     }
 
     if (action === 'toggle-expand' && state.mode === 'list') {
-      const flat = state.getFlattenedItems();
-      if (state.selectedIndex < flat.length) {
-        const selected = flat[state.selectedIndex];
+      const selected = state.getSelectedItem();
+      if (selected) {
         // If children data not yet loaded, fetch them on demand
         if (selected.childCount && selected.childCount > 0 && (!selected.children || selected.children.length === 0)) {
           render(); // immediate render while fetch is pending
@@ -3693,8 +4833,10 @@ export async function runWorklistTui(
       return;
     }
 
-    // Use flattened items for hierarchy display
-    const displayItems = state.mode === 'list' ? state.getFlattenedItems() : state.items;
+    // Use the display-rows model for list rendering (headings + items,
+    // WL-0MSL5MPSZ003TG94). Heading rows have no stage/issueType, so
+    // shortcut hints fall back to defaults for heading selections.
+    const displayItems = state.mode === 'list' ? state.getDisplayRows() : state.items;
 
     // ── Compute stage-appropriate shortcut hints for the footer ──
     let dynamicHints = '';
@@ -3704,8 +4846,12 @@ export async function runWorklistTui(
       const selItem = displayItems.length > 0 && selIdx < displayItems.length
         ? displayItems[selIdx]
         : undefined;
-      const selStage = selItem?.stage;
-      const selIssueType = selItem?.issueType;
+      // Narrow the display-row union: heading rows carry no work-item
+      // fields (stage/issueType belong to WorkItem rows only).
+      const selStage =
+        selItem !== undefined && !isHeadingRow(selItem) ? selItem.stage : undefined;
+      const selIssueType =
+        selItem !== undefined && !isHeadingRow(selItem) ? selItem.issueType : undefined;
       const isEmpty = displayItems.length === 0;
 
       const relevantEntries = reg.getEntriesForStage(selStage, codeFreezeActive, selIssueType)
@@ -3744,6 +4890,17 @@ export async function runWorklistTui(
       }
     }
 
+    // Mouse-tracking toggle hint (WL-0MT0AP2LR000JFWN): appends the Alt+m
+    // toggle to the footer shortcut hints so the user knows how to switch
+    // between mouse interaction and native text-selection (drag-select).
+    // Shown whenever help text is enabled.
+    if (opts.getShowHelpText()) {
+      const mouseHint = mouseTrackingEnabled
+        ? `alt+m mouse on`
+        : `alt+m mouse off`;
+      dynamicHints = dynamicHints ? `${dynamicHints}  ${mouseHint}` : ` ${mouseHint}`;
+    }
+
     // Look up the selected item's last recorded command for the metadata
     // panel (only shown for in_progress items). Best effort: a missing or
     // unreadable log yields undefined and the panel falls back gracefully.
@@ -3764,7 +4921,7 @@ export async function runWorklistTui(
       state.selectedIndex,
       state.scrollOffset,
       termSize,
-      state.activeFilter,
+      state.activeFilterLabel,
       state.mode,
       state.detailItem,
       totalActionableCount,
@@ -3846,6 +5003,14 @@ export async function runWorklistTui(
     scheduler.setDisabled('resume-poll', false);
   };
 
+  /**
+   * Whether the resume-poll fallback should run. The resume-poll is only
+   * the FALLBACK for the hidden → visible transition — when the event
+   * subscription is active, `pane_focused` events handle it instead, so the
+   * polling task stays disabled (WL-0MSHB7DHO004RHBJ F3).
+   */
+  const resumePollEnabled = (): boolean => !eventsActive;
+
   // Auto-refresh task — fetches fresh items on an interval. NOTE: this task
   // does NOT run `wl sync`; the dedicated sync task below is the single sync
   // source. Running sync from both tasks caused a double-spawn per pane that
@@ -3860,7 +5025,7 @@ export async function runWorklistTui(
       run: async () => {
         if (!(await paneGate.visible())) {
           panePaused = true;
-          startResumePoll();
+          if (resumePollEnabled()) startResumePoll();
           return;
         }
         stopResumePoll();
@@ -3890,7 +5055,7 @@ export async function runWorklistTui(
       run: async () => {
         if (!(await paneGate.visible())) {
           panePaused = true;
-          startResumePoll();
+          if (resumePollEnabled()) startResumePoll();
           return;
         }
         stopResumePoll();
@@ -3938,10 +5103,52 @@ export async function runWorklistTui(
     scheduler.addTask({
       id: 'downtime',
       intervalMs: opts.downtimePollIntervalMs,
+      // Probe jitter (WL-0MSSRED76008LGB6): the effective poll interval is
+      // jittered ±50% of the configured downtimePollIntervalMs per tick
+      // (random, injectable via the registry's RNG) so instances with
+      // identical configuration do not probe in lockstep — the jittered
+      // interval is recomputed fresh on EVERY reschedule. Fallback: when
+      // the worker's registry is unavailable, the static interval stands.
+      getIntervalMs: opts.downtimeWorker
+        ? () => opts.downtimeWorker!.jitterPollIntervalMs(opts.downtimePollIntervalMs)
+        : undefined,
       singleFlight: true,
       runTimeoutMs: DOWNTIME_RUN_TIMEOUT_MS,
       run: async () => {
         await opts.downtimeWorker?.tick();
+      },
+    });
+  }
+
+  // Mode-switch worker task — polls the llama-proxy for idle state and,
+  // after the configured idle threshold, switches from fast (cloud) to
+  // cheap (local) mode (parent WL-0MSN3FWV5008KQE9). Pattern-matched on the
+  // downtime task: single-flight + runTimeoutMs watchdog (a hung tick can
+  // never wedge the task), visibility-independent (runs while the worklist
+  // pane is open). The task is only registered when the feature is enabled
+  // at startup (modeSwitchEnabled); the run ALSO re-reads settings every
+  // tick so a disable or threshold change applies without a plugin restart.
+  // Probe jitter is intentionally NOT applied: each instance's idle clock
+  // resets at construction, so panes' cheap-switch timings are already
+  // naturally desynchronized (unlike the downtime poller's shared registry).
+  const modeSwitchEnabledAtStartup =
+    loadSettings().modeSwitchEnabled ?? opts.modeSwitchEnabled;
+  if (opts.modeSwitchWorker && modeSwitchEnabledAtStartup) {
+    scheduler.addTask({
+      id: 'mode-switch',
+      intervalMs: opts.modeSwitchPollIntervalMs,
+      singleFlight: true,
+      runTimeoutMs: MODE_SWITCH_RUN_TIMEOUT_MS,
+      run: async () => {
+        // Re-read settings every tick so modeSwitchEnabled / idle threshold
+        // changes apply without a plugin restart (matching downtime config).
+        const s = loadSettings();
+        await opts.modeSwitchWorker?.tick({
+          enabled: s.modeSwitchEnabled ?? opts.modeSwitchEnabled,
+          idleThresholdMs: s.modeSwitchIdleThresholdMs ?? DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
+          proxyUrl: s.downtimeProxyUrl,
+          proxyStatus: null, // worker fetches its own proxy status
+        });
       },
     });
   }
@@ -3951,6 +5158,7 @@ export async function runWorklistTui(
   // Cleanup on promise resolution
   promise.finally(() => {
     scheduler.stop();
+    closeEventSubscriber();
     cleanup();
     process.stdout.removeListener('resize', onResize);
     process.stdin.removeListener('data', onData);

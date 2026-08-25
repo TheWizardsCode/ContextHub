@@ -146,12 +146,13 @@ export function createAPI(db: WorklogDatabase) {
         res.status(404).json({ error: 'Work item not found' });
         return;
       }
-      let normalizedBody: any = req.body;
       // If the caller provided an `audit` field, route it to the audit_results table
       // instead of the legacy `workitems.audit` column.
-      const rawAudit = (req.body as any).audit;
-      delete normalizedBody.audit;
-      const { input: updateInput, auditResult: updateAuditResult } = normalizeUpdateInputWithAudit(normalizedBody, req.params.id, db);
+      // NOTE: normalizeUpdateInputWithAudit strips the `audit` field from the
+      // input and returns it as an auditResult; deleting it here first would
+      // defeat the audit write entirely (pre-existing bug fixed in
+      // WL-0MT0T1EQJ009DHO8).
+      const { input: updateInput, auditResult: updateAuditResult } = normalizeUpdateInputWithAudit(req.body, req.params.id, db);
       const item = db.update(req.params.id, updateInput);
       if (!item) {
         res.status(404).json({ error: 'Work item not found' });
@@ -161,7 +162,19 @@ export function createAPI(db: WorklogDatabase) {
       if (updateAuditResult) {
         writeAuditResult(db, updateAuditResult);
       }
-      res.json(item);
+      // Reversion: a "not ready to close" audit verdict on an in_review
+      // (completed) item moves it back to open/plan_complete so it leaves the
+      // ready-to-close queue — consistent with the CLI audit write paths
+      // (WL-0MSKHYI5U0069FVV). Best-effort; failures never fail the request.
+      let reverted: any = null;
+      if (updateAuditResult && !updateAuditResult.readyToClose) {
+        try {
+          reverted = db.revertToPlanComplete(req.params.id);
+        } catch (_e) {
+          // Best-effort: surface in the response but do not fail the request
+        }
+      }
+      res.json(reverted ? { ...reverted.item, reverted } : item);
     } catch (error) {
       const message = (error as Error).message || 'Invalid request';
       res.status(400).json({ error: message });
@@ -356,10 +369,12 @@ export function createAPI(db: WorklogDatabase) {
         res.status(404).json({ error: 'Work item not found' });
         return;
       }
-      let normalizedBody: any = req.body;
       // Route audit field to the audit_results table
-      delete normalizedBody.audit;
-      const { input: updateInput, auditResult: updateAuditResult } = normalizeUpdateInputWithAudit(normalizedBody, req.params.id, db);
+      // NOTE: normalizeUpdateInputWithAudit strips the `audit` field from the
+      // input and returns it as an auditResult; deleting it here first would
+      // defeat the audit write entirely (pre-existing bug fixed in
+      // WL-0MT0T1EQJ009DHO8).
+      const { input: updateInput, auditResult: updateAuditResult } = normalizeUpdateInputWithAudit(req.body, req.params.id, db);
       const item = db.update(req.params.id, updateInput);
       if (!item) {
         res.status(404).json({ error: 'Work item not found' });
@@ -369,7 +384,18 @@ export function createAPI(db: WorklogDatabase) {
       if (updateAuditResult) {
         writeAuditResult(db, updateAuditResult);
       }
-      res.json(item);
+      // Reversion: a "not ready to close" audit verdict on an in_review
+      // (completed) item moves it back to open/plan_complete — consistent
+      // with the CLI audit write paths (WL-0MSKHYI5U0069FVV). Best-effort.
+      let reverted: any = null;
+      if (updateAuditResult && !updateAuditResult.readyToClose) {
+        try {
+          reverted = db.revertToPlanComplete(req.params.id);
+        } catch (_e) {
+          // Best-effort: surface in the response but do not fail the request
+        }
+      }
+      res.json(reverted ? { ...reverted.item, reverted } : item);
     } catch (error) {
       const message = (error as Error).message || 'Invalid request';
       res.status(400).json({ error: message });

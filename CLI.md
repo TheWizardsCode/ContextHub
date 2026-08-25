@@ -152,6 +152,8 @@ Automatic re-sort:
 
 Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--needs-producer-review <true|false>` (set needsProducerReview flag), and `--do-not-delegate <true|false>` (set or clear the do-not-delegate tag).
 
+> **Auto-revert:** when `--audit-text`/`--audit-file` carries a `Ready to close: No` verdict for an item in `in_review` (status `completed`), the item is automatically reverted to `open`/`plan_complete` (priority preserved) and the output reports the transition (`reverted` field in JSON, `[ID reverted from completed/in_review to open/plan_complete]` in human mode). See docs/AUDIT_STATUS.md.
+
 Automatic re-sort:
 
 - `wl update` will automatically invoke a re-sort when one or more updated fields are among: `status`, `priority`, `risk`, `effort`, or `stage`. By default this re-sort runs asynchronously so the CLI is not blocked. This helps `wl next` and other selection-based commands reflect recent priority or status changes without requiring a manual `wl re-sort`.
@@ -260,6 +262,8 @@ Behavior:
 - Uses INSERT OR REPLACE to maintain latest-only audit state.
 - Automatically sets `audited_at` to the current ISO 8601 timestamp.
 - Derives `author` from `WL_USER` / `USER` / `USERNAME` environment variables unless overridden by `--author`.
+
+> **Auto-revert:** when `--ready-to-close no` is set on an item in `in_review` (status `completed`), the item is automatically reverted to `open`/`plan_complete` (priority preserved) and the output reports the transition (`reverted` field in JSON, `[ID reverted from completed/in_review to open/plan_complete]` in human mode). See docs/AUDIT_STATUS.md.
 
 Options:
 
@@ -440,6 +444,35 @@ Options:
 `-c, --children` — Also display descendants in a tree layout (optional).
 `--prefix <prefix>` (optional)
 `--no-icons` — Disable icon rendering for clean text output. When icons are disabled, priority and status display as plain text (e.g., `[CRIT]`, `[OPEN]`) instead of emoji. This is useful for scripting or copy-paste operations.
+`--exact` — Force strict exact-match only (skip the tolerant substring fallback).
+
+#### Tolerant ID resolution
+
+`wl show` resolves work-item IDs with a two-tier strategy:
+
+1. **Exact match** — `normalizeCliId` normalises the ID (adds prefix if missing,
+   normalises case/prefix). If an item with that normalised ID exists, it is
+   returned.
+2. **Substring fallback** — If no exact match is found and `--exact` is *not*
+   specified, the CLI scans all item IDs for a **case-insensitive substring**
+   match. When exactly one item matches, it is returned transparently. When
+   multiple items match, the CLI reports an `ambiguous-match` error listing the
+   candidate IDs so the caller can disambiguate. When nothing matches, the
+   CLI reports "Work item not found" (same as before).
+
+This tolerant resolution is especially useful for agent tooling that may hold
+truncated, case-differing, or partial ID references.
+
+The `--exact` flag disables the substring fallback, restoring strict
+exact-match semantics for callers that need deterministic behaviour.
+
+#### JSON error formats
+
+When `--json` is used the error output is always valid JSON:
+
+- **Ambiguous match** — `{"success": false, "error": "ambiguous-match",
+  "candidates": ["WL-XXX1", "WL-XXX2"]}`
+- **Not found** — `{"success": false, "error": "Work item not found: <id>"}`
 
 The output always includes `Risk` and `Effort` fields. When a field has no value a placeholder `—` is shown so the field is consistently visible for triage and prioritization.
 
@@ -449,6 +482,9 @@ Examples:
 wl show WL-ABC123
 wl --json show WL-ABC123
 wl show WL-ABC123 -c
+wl show WL-ABC          # tolerant: resolves if unique substring
+wl --json show WL-ABC   # tolerant JSON output
+wl show --exact WL-ABC  # strict: fails if not an exact match
 ```
 
 ### `next` [options]
@@ -686,6 +722,10 @@ enhancement degrades gracefully when no embedder is configured.
 - **Partial ID** — Tokens of 8+ alphanumeric characters are matched as substrings against all work item IDs; partial matches appear below exact matches.
 - **Mixed queries** — `wl search WL-XXXXX some text` returns the ID match first, followed by FTS results for the full query (duplicates removed).
 
+**Fresh index:** The FTS index is updated on every save path — creating/updating items, adding/updating/deleting comments, `import`, `upsert-items`, and status reconciliation — so `wl search` always reflects the latest data without a manual `--rebuild-index`.
+
+**Quoting punctuated terms:** Unquoted punctuated terms (version strings like `v0.1.11`, file paths like `src/lib/util.ts`, and IDs) are not valid FTS5 syntax, so the command auto-quotes the query as a phrase and prints a **warning** (also emitted as a `warning` field in `--json` output) — it is never a silent empty result. If auto-quoting also fails, the command exits non-zero with `Invalid search query: ...`. To search a literal punctuated phrase explicitly, quote it yourself: `wl search "v0.1.11"`. Genuinely zero-match queries return "No results found." with no warning.
+
 Options:
 
 `-s, --status <status>` (optional) — Filter results by status
@@ -705,7 +745,7 @@ Query embeddings are cached in-memory to avoid redundant API calls.
 `--semantic-only` (optional) — Return only semantic (embedding-based) results.
 Requires an embedder; errors if OPENAI_API_KEY is not set.
 `--prefix <prefix>` (optional)
-`--json` (optional) — Output structured JSON with `id`, `title`, `status`, `priority`, `score`, `snippet`, `matchedField`. When `--semantic` is used, includes `semanticAvailable: true/false`.
+`--json` (optional) — Output structured JSON with `id`, `title`, `status`, `priority`, `score`, `snippet`, `matchedField`. When the query was auto-quoted as a phrase (invalid FTS5 syntax), a `warning` field is included. When `--semantic` is used, includes `semanticAvailable: true/false`.
 
 Examples:
 
@@ -1066,7 +1106,7 @@ Other commands cover repository bootstrap and local system status. Use these to 
 
 ### `init`
 
-Initialize Worklog configuration in the repository (creates `.worklog` and default config). `wl init` also installs `AGENTS.md` in the project root, prefixed with a pointer line to the global `AGENTS.md`. If `AGENTS.md` already contains the pointer line, installation is skipped (idempotent, no prompt). If `AGENTS.md` exists without the pointer, it prompts O/A/M — **O**verwrite (destructive), **A**dd pointer (keeps existing content), **M**anual (skip) — unless you pass `--agents-template` for unattended runs. When workflow templates are available, `wl init` prompts you to choose between no formal workflow, a basic Worklog-aware workflow, or manual management (unless you pass `--workflow-inline` for unattended runs). See [AGENTS.md Install Model](docs/AGENTS-INSTALL.md) for the full install flow.
+Initialize Worklog configuration in the repository (creates `.worklog` and default config). `wl init` also installs `AGENTS.md` in the project root with the canonical global-reference structure (`## Global agent guidance` pointing at `~/.pi/agent/AGENTS.md` plus a `## Project-specific guidance` placeholder). If `AGENTS.md` already contains the global reference, installation is skipped (idempotent, no prompt). If `AGENTS.md` exists without the reference, it prompts O/A/M — **O**verwrite (destructive), **A**dd reference above existing content, **M**anual (skip) — unless you pass `--agents-template` for unattended runs. When workflow templates are available, `wl init` prompts you to choose between no formal workflow, a basic Worklog-aware workflow, or manual management (unless you pass `--workflow-inline` for unattended runs). See [AGENTS.md Install Model](docs/AGENTS-INSTALL.md) for the full install flow.
 
 Options:
 
@@ -1074,7 +1114,7 @@ Options:
 - `--prefix <prefix>` — Issue ID prefix (optional).
 - `--auto-export <yes|no>` — Auto-export data to JSONL after changes (optional).
 - `--auto-sync <yes|no>` — Auto-sync data to git after changes (optional).
-- `--agents-template <overwrite|append|skip>` — What to do when AGENTS.md exists (optional). Append inserts the pointer line at the top while keeping existing content.
+- `--agents-template <overwrite|append|skip>` — What to do when AGENTS.md exists (optional). Append inserts the global-agents reference at the top while keeping existing content below.
 - `--workflow-inline <yes|no>` — Answer the workflow prompt (yes chooses the basic workflow option; no chooses no formal workflow). Omit to prompt interactively.
 - `--stats-plugin-overwrite <yes|no>` — Overwrite existing stats plugin if present (optional).
 

@@ -10,7 +10,7 @@ import type { WorklogDatabase } from '../database.js';
 import { loadConfig } from '../config.js';
 import { renderCliMarkdown, shouldUseFormattedOutput, isTty, resolveMarkdownEnabled } from '../cli-output.js';
 import { getStageLabel, getStatusLabel, loadStatusStageRules } from '../status-stage-rules.js';
-import { priorityIcon, statusIcon, priorityFallback, statusFallback, iconsEnabled } from '../icons.js';
+import { priorityIcon, statusIcon, priorityFallback, statusFallback, iconsEnabled } from '../theme.js';
 import type { Command } from 'commander';
 
 // Priority ordering for sorting work items (higher number = higher priority)

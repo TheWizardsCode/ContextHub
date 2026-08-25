@@ -560,3 +560,110 @@ describe('worklist TUI visibility gating — hidden → visible transition (WL-0
 
 // Silence unused-var lint for showToast in the manual-sync assertion import.
 void showToast;
+
+// ── Event-driven focus/visibility path (WL-0MSHB7DHO004RHBJ F3) ───────
+// A pane_focused event for the CURRENT pane updates the visibility gate
+// directly (no `herdr tab get` exec) and triggers an immediate refresh on
+// the hidden → visible transition — replacing the 2s resume-poll.
+
+describe('worklist — event-driven focus/visibility (WL-0MSHB7DHO004RHBJ)', () => {
+  it('a pane_focused event for the current pane triggers an immediate refresh with no tab-get exec', async () => {
+    const { createMockSocket } = await import('./test-utils/mock-herdr-socket.js');
+    const { HerdrEventSubscriber } = await import('./events.js');
+    const mockServer = await createMockSocket();
+    const subscriber = new HerdrEventSubscriber({ socketPath: mockServer.getAddress(), callbacks: {} });
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    setExecFileAsync(makeExecMock(true) as any);
+
+    const fetcher = vi.fn().mockResolvedValue([]);
+    const p = runWorklistTui(fetcher, undefined, undefined, {
+      autoRefresh: true,
+      refreshIntervalMs: 30_000,
+      autoSync: false,
+      showHelpText: false,
+      subscriber,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const client = mockServer.getFirstClient();
+    expect(client).toBeDefined();
+    fetcher.mockClear();
+
+    // A pane_focused event for the current pane triggers doRefresh(true).
+    client!.pushEvent({ event: 'pane_focused', data: { pane_id: 'w1:pCM', focused: true } });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(fetcher).toHaveBeenCalled();
+
+    await subscriber.close();
+    await mockServer.stop();
+    await quit(p);
+  });
+
+  it('a pane_focused(unfocused) event for the current pane sets the paused indicator without a tab-get exec', async () => {
+    const { createMockSocket } = await import('./test-utils/mock-herdr-socket.js');
+    const { HerdrEventSubscriber } = await import('./events.js');
+    const mockServer = await createMockSocket();
+    const subscriber = new HerdrEventSubscriber({ socketPath: mockServer.getAddress(), callbacks: {} });
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    const tabGetCalls = { count: 0 };
+    setExecFileAsync(makeExecMock(true, tabGetCalls) as any);
+
+    const fetcher = vi.fn().mockResolvedValue([]);
+    const p = runWorklistTui(fetcher, undefined, undefined, {
+      autoRefresh: true,
+      refreshIntervalMs: 30_000,
+      autoSync: false,
+      showHelpText: false,
+      subscriber,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const client = mockServer.getFirstClient();
+
+    // Unfocus event → pane marked hidden immediately without a tab-get exec.
+    const before = tabGetCalls.count;
+    client!.pushEvent({ event: 'pane_focused', data: { pane_id: 'w1:pCM', focused: false } });
+    await new Promise((r) => setTimeout(r, 100));
+    writes.length = 0;
+    dataHandler?.(Buffer.from('j')); // navigation re-renders the header
+    await new Promise((r) => setTimeout(r, 20));
+    expect(writes.join('')).toContain('[paused — hidden]');
+    // No tab-get exec happened for this transition.
+    expect(tabGetCalls.count).toBe(before);
+
+    await subscriber.close();
+    await mockServer.stop();
+    await quit(p);
+  });
+
+  it('fail-open: unreachable socket keeps today\'s polling cadence (no crash, fetcher ticks as before)', async () => {
+    const { HerdrEventSubscriber } = await import('./events.js');
+    const subscriber = new HerdrEventSubscriber({
+      socketPath: '/tmp/herdr-unreachable-test-socket-never-exists.sock',
+      callbacks: {},
+      maxReconnectAttempts: 0,
+    });
+    vi.useFakeTimers();
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    process.env.HERDR_TAB_ID = 'w1:t11';
+    setExecFileAsync(makeExecMock(true) as any);
+
+    const fetcher = vi.fn().mockResolvedValue([]);
+    const p = runWorklistTui(fetcher, undefined, undefined, {
+      autoRefresh: true,
+      refreshIntervalMs: 30_000,
+      autoSync: false,
+      showHelpText: false,
+      subscriber,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    fetcher.mockClear();
+
+    // The events path is unavailable → the polling cadence is preserved.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // The resume-poll fallback is active while events are unavailable: a
+    // hidden → visible transition is still caught by the 2s resume-poll.
+    await subscriber.close();
+    await quit(p);
+  });
+});

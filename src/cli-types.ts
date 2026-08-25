@@ -66,7 +66,7 @@ export interface ListOptions {
   icons?: boolean;
 }
 
-export interface ShowOptions { children?: boolean; prefix?: string; noPager?: boolean; icons?: boolean }
+export interface ShowOptions { children?: boolean; prefix?: string; noPager?: boolean; icons?: boolean; exact?: boolean }
 
 export interface AuditOptions { prefix?: string }
 

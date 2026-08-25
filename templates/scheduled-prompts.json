@@ -1,0 +1,10 @@
+{
+  "entries": [
+    {
+      "id": "refactor",
+      "prompt": "/skill:refactor",
+      "intervalDays": 3,
+      "lastTriggeredAt": null
+    }
+  ]
+}

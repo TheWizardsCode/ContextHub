@@ -184,6 +184,18 @@ export interface WorklogConfig {
   syncRemote?: string;
   syncBranch?: string;
   /**
+   * Force a full (non-incremental) JSONL snapshot after this many consecutive
+   * delta syncs (WL-0MT2KY0RQ008F50Q / WL-0MSAKUBKW006FN8Q §5.3).
+   * Default 10. The counter is reset whenever a full snapshot is pushed.
+   */
+  syncFullSnapshotEveryN?: number;
+  /**
+   * Force a full (non-incremental) JSONL snapshot when the accumulated delta
+   * payload exceeds this many bytes (WL-0MT2KY0RQ008F50Q §5.3, advisory
+   * threshold). Default 1_000_000 (1 MB).
+   */
+  syncDeltaSizeThreshold?: number;
+  /**
    * Allow `wl sync` to merge commits authored by a different identity than
    * the store's configured `user.email` (identity gate WL-0MSOYWWS4009HTCB).
    * Default false — the sync refuses foreign-author commits. The CLI flag
@@ -331,5 +343,23 @@ export interface DemotedParent {
   /** The parent's status/stage before the demotion */
   from: { status: string; stage: string };
   /** The parent's status/stage after the demotion */
+  to: { status: string; stage: string };
+}
+
+/**
+ * Result of reverting an item whose audit verdict is "not ready to close".
+ *
+ * When an `in_review` item (status `completed`) receives a not-ready-to-close
+ * audit verdict, it is moved back to `open`/`plan_complete` so it returns to
+ * the planning queue instead of being swept up by heartbeat/release tooling.
+ * This shape captures the lifecycle transition so callers can report it
+ * (e.g. `completed`/`in_review` → `open`/`plan_complete`).
+ */
+export interface RevertedItem {
+  /** The work item after the reversion */
+  item: WorkItem;
+  /** The item's status/stage before the reversion */
+  from: { status: string; stage: string };
+  /** The item's status/stage after the reversion */
   to: { status: string; stage: string };
 }

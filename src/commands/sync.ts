@@ -6,7 +6,7 @@ import type { PluginContext } from '../plugin-types.js';
 import type { SyncOptions, SyncDebugOptions } from '../cli-types.js';
 import type { WorkItem, Comment, DependencyEdge } from '../types.js';
 import type { GitTarget, SyncResult } from '../sync.js';
-import { getRemoteDataFileContent, getRemoteDataFileContentWithRef, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, assertDataFileInCwdRepo, filterRemoteDataByPrefix, enforceAuthorIdentityGate, getConfiguredUserEmail, getRemoteTrackingRefSha, writeLastSyncedRef } from '../sync.js';
+import { getRemoteDataFileContent, getRemoteDataFileContentWithRef, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, assertDataFileInCwdRepo, filterRemoteDataByPrefix, enforceAuthorIdentityGate, getConfiguredUserEmail, getRemoteTrackingRefSha, writeLastSyncedRef, replayRemoteDeltaChain } from '../sync.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
 import { importFromJsonlContent } from '../jsonl.js';
 import { mergeAuditResults } from '../sync.js';
@@ -30,6 +30,13 @@ export function getSyncDefaults(config?: ReturnType<typeof loadConfig>) {
     allowForeignAuthor: config?.syncAllowForeignAuthor === true,
   };
 }
+
+// Full-snapshot cadence defaults (WL-0MT2KY0RQ008F50Q §5.3): force a full
+// (non-incremental) JSONL snapshot after every N delta syncs, or once the
+// accumulated delta payload exceeds this many bytes. Configurable via
+// `sync.fullSnapshotEveryN` / `sync.deltaSizeThreshold`.
+export const DEFAULT_FULL_SNAPSHOT_EVERY_N = 10;
+export const DEFAULT_DELTA_SIZE_THRESHOLD = 1_000_000;
 
 export async function performSync(
   dataPath: string,
@@ -90,6 +97,15 @@ export async function performSync(
   let remoteComments: Comment[] = [];
   let remoteEdges: DependencyEdge[] = [];
 
+  // Incremental-sync pull header detection (WL-0MT2KYCNB000CYWV, §6.1): the
+  // remote JSONL's first line may carry the sync header describing whether
+  // the file is a FULL snapshot or a DELTA (records changed since the last
+  // export). Legacy files are headerless and mean full. This decides how the
+  // pulled records are persisted (§6.1/AC3): full → replace local state with
+  // the merged set (existing behavior); delta → merge onto the local base
+  // non-destructively so local records absent from the delta are kept (AC2).
+  let remoteSyncKind: 'full' | 'delta' | undefined;
+
   const localAudits = db.getAllAuditResults();
 
   const remoteContentResult = await getRemoteDataFileContentWithRef(options.file, gitTarget);
@@ -109,35 +125,93 @@ export async function performSync(
   }
 
   let remoteAudits: any[] = [];
+  // Full-snapshot fallback (WL-0MT2KZ5GJ000OJIP, §6.2 trigger 1): a remote
+  // DELTA tip with NO local records cannot be applied — a delta only carries
+  // *changed* records, so merging it onto an empty store would lose every
+  // record untouched since the last full snapshot (brand-new clone, or a
+  // store recovered from corruption). Reconstruct the full chain from the
+  // remote ref history instead (replayRemoteDeltaChain). If the chain is
+  // unrepairable we fail closed: never merge the partial delta and never push
+  // a (possibly empty) full snapshot over a populated remote (AC5).
+  let brokenDeltaChain = false;
   if (remoteContent) {
-    const remoteData = importFromJsonlContent(remoteContent);
+    let remoteData = importFromJsonlContent(remoteContent);
+    remoteSyncKind = remoteData.kind;
+    if (
+      remoteSyncKind === 'delta' &&
+      localItems.length === 0 &&
+      localComments.length === 0 &&
+      remoteContentResult.remoteTrackingRef
+    ) {
+      const replay = await replayRemoteDeltaChain(
+        options.file,
+        remoteContentResult.remoteTrackingRef
+      );
+      if (replay) {
+        // Reconstructed state = newest full snapshot + every delta after it,
+        // i.e. a complete remote view. Treat it as a FULL snapshot so the
+        // normal merge applies and the subsequent export is full (no baseline
+        // → §5.1), re-anchoring the remote for other readers (AC4 resets the
+        // delta counters on the full push).
+        remoteData = {
+          items: replay.items,
+          comments: replay.comments,
+          dependencyEdges: replay.dependencyEdges,
+          auditResults: replay.auditResults,
+          kind: 'full' as const,
+        };
+        remoteSyncKind = 'full';
+        logLine(`Delta-chain fallback: reconstructed full state from remote history (${replay.items.length} items, ${replay.comments.length} comments)`);
+        if (!isJsonMode && !isSilent) {
+          console.log(`\nDelta-chain fallback: remote tip is a delta but local has no base — replaying remote history to reconstruct the full snapshot (${replay.items.length} items)`);
+        }
+      } else {
+        brokenDeltaChain = true;
+        remoteSyncKind = undefined;
+        logLine('Delta-chain fallback FAILED: no repairable full snapshot in remote history — failing closed (no merge, no push)');
+        if (!isJsonMode && !isSilent) {
+          console.log('\nDelta-chain fallback FAILED: the remote ref history contains no repairable full snapshot. ' +
+            'Skipping the pull and push to avoid data loss. Manual intervention required (AC5).');
+        }
+      }
+    }
     // Cross-project prefix filter (SA-0MSC0BM1V0032UYT): never import work
     // items whose ID prefix does not match the project prefix, and drop their
     // comments/edges/audits too. Defense-in-depth behind the repo-context
     // guard (WL-0MSAH26DD001XXST) for stale/daemon processes that loaded
     // pre-fix code: foreign items cannot re-enter even if a sync reaches the
     // merge step with a polluted remote snapshot.
-    const configForPrefix = loadConfig();
-    const projectPrefix = (options.prefix || configForPrefix?.prefix || 'WI').toUpperCase();
-    const filtered = filterRemoteDataByPrefix(
-      remoteData.items,
-      remoteData.comments,
-      remoteData.dependencyEdges || [],
-      remoteData.auditResults || [],
-      projectPrefix
-    );
-    if (filtered.droppedItems.length > 0) {
-      const preview = filtered.droppedItems.slice(0, 5).join(', ');
-      const ellipsis = filtered.droppedItems.length > 5 ? ', …' : '';
-      logLine(`Foreign-prefix filter: dropped ${filtered.droppedItems.length} remote item(s) not matching prefix '${projectPrefix}' (${preview}${ellipsis})`);
-      if (!isJsonMode && !isSilent) {
-        console.log(`\nForeign-prefix filter: dropped ${filtered.droppedItems.length} remote item(s) not matching project prefix '${projectPrefix}' (${preview}${ellipsis})`);
+    if (!brokenDeltaChain) {
+      const configForPrefix = loadConfig();
+      const projectPrefix = (options.prefix || configForPrefix?.prefix || 'WI').toUpperCase();
+      const filtered = filterRemoteDataByPrefix(
+        remoteData.items,
+        remoteData.comments,
+        remoteData.dependencyEdges || [],
+        remoteData.auditResults || [],
+        projectPrefix
+      );
+      if (filtered.droppedItems.length > 0) {
+        const preview = filtered.droppedItems.slice(0, 5).join(', ');
+        const ellipsis = filtered.droppedItems.length > 5 ? ', …' : '';
+        logLine(`Foreign-prefix filter: dropped ${filtered.droppedItems.length} remote item(s) not matching prefix '${projectPrefix}' (${preview}${ellipsis})`);
+        if (!isJsonMode && !isSilent) {
+          console.log(`\nForeign-prefix filter: dropped ${filtered.droppedItems.length} remote item(s) not matching project prefix '${projectPrefix}' (${preview}${ellipsis})`);
+        }
       }
+      remoteItems = filtered.items;
+      remoteComments = filtered.comments;
+      remoteEdges = filtered.edges;
+      remoteAudits = filtered.audits;
+    } else {
+      // Fail-closed (AC5): do not merge the partial delta into local state —
+      // a delta alone does not represent the remote store, so importing it
+      // would silently drop every record untouched since the last full.
+      remoteItems = [];
+      remoteComments = [];
+      remoteEdges = [];
+      remoteAudits = [];
     }
-    remoteItems = filtered.items;
-    remoteComments = filtered.comments;
-    remoteEdges = filtered.edges;
-    remoteAudits = filtered.audits;
   }
 
   if (!isJsonMode && !isSilent) {
@@ -240,11 +314,23 @@ export async function performSync(
   if (autoSyncEnabled) {
     db.setAutoSync(false);
   }
-  // SAFETY: db.import() is destructive (clears all items before inserting).
-  // This is safe here because itemMergeResult.merged is the complete merged
-  // set of local + remote items — no data is lost.
-  db.import(itemMergeResult.merged, edgeMergeResult.merged, auditMergeResult.merged);
-  db.importComments(commentMergeResult.merged);
+  // Persist the merged pull result. Delta remotes are merged onto the local
+  // base non-destructively (upsert by ID — local records absent from the
+  // delta are untouched, AC2/AC5); full snapshots (and legacy headerless
+  // files) replace local state with the merged set, the existing behavior
+  // (AC3/AC6).
+  if (isVerbose && !isSilent) {
+    console.log(`Remote sync kind: ${remoteSyncKind ?? 'full (legacy headerless)'}`);
+  }
+  logLine(`Remote sync kind: ${remoteSyncKind ?? 'full (legacy headerless)'}`);
+  if (remoteSyncKind === 'delta') {
+    db.upsertItems(itemMergeResult.merged, edgeMergeResult.merged);
+    db.upsertComments(commentMergeResult.merged);
+    db.importAuditResults(auditMergeResult.merged);
+  } else {
+    db.import(itemMergeResult.merged, edgeMergeResult.merged, auditMergeResult.merged);
+    db.importComments(commentMergeResult.merged);
+  }
   if (autoSyncEnabled) {
     db.setAutoSync(true, () => Promise.resolve());
   }
@@ -274,37 +360,131 @@ export async function performSync(
     }
   };
 
-  const jsonlPath = await db.exportForSync({ onProgress: progressHandler });
+  // Delta vs full export decision (WL-0MT2KY0RQ008F50Q AC1, §5.1-§5.4):
+  //
+  // - First sync / no baseline (no watermarks ever recorded) → full snapshot
+  // - Full snapshot cadence due (delta count/bytes threshold, §5.3) → full
+  // - WL_DELTA_EXPORT_DISABLED=1 → full
+  // - Nothing on remote base (ref not yet created / first push onto a remote)
+  //   → full, so readers always have a full snapshot to anchor on
+  // - Otherwise → delta (incremental) export
+  const lastTs = db.getLastExportTimestamps();
+  const deltaDisabled = process.env.WL_DELTA_EXPORT_DISABLED === '1';
+
+  // Fail-closed (WL-0MT2KZ5GJ000OJIP §6.2/AC5): when the remote delta chain
+  // is unrepairable we must NOT push anything — a full snapshot rebuilt from
+  // an empty/partial local store would overwrite a populated remote with less
+  // data. Throw so the command layer reports the error (exit 1) and local
+  // state stays untouched.
+  if (brokenDeltaChain) {
+    throw new Error(
+      'Unrepairable remote delta chain: the remote ref history contains no full snapshot ' +
+      'base, so the delta tip cannot be applied without data loss. No changes were made. ' +
+      'Manual intervention required (e.g. force a full snapshot from a trusted store).'
+    );
+  }
+
+  const hasBaseline = Boolean(
+    lastTs.workitems || lastTs.comments || lastTs.edges || lastTs.audit_results
+  );
+  const deltaMeta = db.getDeltaSyncMetadata();
+  const fullSnapshotEveryN =
+    config?.syncFullSnapshotEveryN ?? DEFAULT_FULL_SNAPSHOT_EVERY_N;
+  const deltaSizeThreshold =
+    config?.syncDeltaSizeThreshold ?? DEFAULT_DELTA_SIZE_THRESHOLD;
+  const fullSnapshotDue =
+    // 0 disables the count-based cadence; a non-positive bytes threshold is
+    // corrected to the default.
+    (fullSnapshotEveryN > 0 &&
+      deltaMeta.deltaSyncCount >= fullSnapshotEveryN) ||
+    (deltaSizeThreshold > 0 && deltaMeta.deltaBytes >= deltaSizeThreshold);
+  const needsFullSnapshot =
+    !hasBaseline || fullSnapshotDue || deltaDisabled || remoteContent === null;
+  const syncMode: 'full' | 'delta' = needsFullSnapshot ? 'full' : 'delta';
+
+  // §5.4 zero-change fast path: skip export+push entirely when nothing is
+  // dirty and no full snapshot is due (a 0-record delta is useless — the
+  // remote tip would hold an effectively empty file). This preserves the
+  // existing last-sync-time optimization.
+  const dirty = db.countDirtyRecords();
+  const zeroChangeFastPath = syncMode === 'delta' && dirty.total === 0;
+
+  let jsonlPath: string | null = null;
+  if (!zeroChangeFastPath) {
+    jsonlPath = await db.exportForSync({ mode: syncMode, onProgress: progressHandler });
+  }
   
   if (options.push) {
-    if (!isJsonMode && !isSilent) {
-      console.log('\nPushing changes to git...');
-    }
-    
-    try {
-      await gitPushDataFileToBranch(jsonlPath, 'Sync work items and comments', gitTarget);
+    if (jsonlPath === null) {
+      // Zero-change fast path (§5.4) — nothing exported, nothing to push.
       if (!isJsonMode && !isSilent) {
-        console.log('Changes pushed successfully');
+        console.log('\nNo changes to sync — skipping export and push');
+      }
+    } else {
+      if (!isJsonMode && !isSilent) {
+        console.log('\nPushing changes to git...');
       }
       
-      // Delete local JSONL file after successful push (ephemeral pattern)
-      // Only delete if push succeeded - keep for retry on failure
-      db.deleteLocalJsonl();
-      
-      if (!isJsonMode && !isSilent) {
-        console.log('Local JSONL file cleaned up (ephemeral pattern)');
+      try {
+        await gitPushDataFileToBranch(jsonlPath, 'Sync work items and comments', gitTarget);
+        if (!isJsonMode && !isSilent) {
+          console.log('Changes pushed successfully');
+        }
+
+        // AC5: advance the per-type watermarks ONLY after a successful push.
+        // (exportForSync never auto-advances; a failed push must not advance
+        // the baseline past data that was never published.)
+        const now = new Date().toISOString();
+        db.markLastExportTimestamps({
+          workitems: now,
+          comments: now,
+          edges: now,
+          audit_results: now,
+        });
+
+        // §5.3 cadence tracking: each delta accumulates count + JSONL bytes;
+        // a full snapshot resets the counters.
+        let pushedBytes = 0;
+        try {
+          pushedBytes = fs.statSync(jsonlPath).size;
+        } catch {
+          /* best-effort; keep 0 */
+        }
+        if (syncMode === 'delta') {
+          db.setDeltaSyncMetadata(
+            deltaMeta.deltaSyncCount + 1,
+            deltaMeta.deltaBytes + pushedBytes
+          );
+        } else {
+          db.setDeltaSyncMetadata(0, 0);
+        }
+
+        // Delete local JSONL file after successful push (ephemeral pattern)
+        // Only delete if push succeeded - keep for retry on failure
+        db.deleteLocalJsonl();
+        
+        if (!isJsonMode && !isSilent) {
+          console.log('Local JSONL file cleaned up (ephemeral pattern)');
+        }
+      } catch (pushError) {
+        // Push failed - keep JSONL for retry, but report the error
+        if (!isJsonMode && !isSilent) {
+          console.log('\nPush failed - local JSONL file retained for retry');
+        }
+        throw pushError;
       }
-    } catch (pushError) {
-      // Push failed - keep JSONL for retry, but report the error
-      if (!isJsonMode && !isSilent) {
-        console.log('\nPush failed - local JSONL file retained for retry');
-      }
-      throw pushError;
     }
   } else {
-    if (!isJsonMode && !isSilent) {
-      console.log('\nSkipping git push (--no-push flag)');
-      console.log('Local JSONL file retained (ephemeral pattern - file will be deleted on next successful push)');
+    if (jsonlPath === null) {
+      // Zero-change fast path with --no-push: nothing to export either.
+      if (!isJsonMode && !isSilent) {
+        console.log('\nNo changes to sync — skipping export (--no-push)');
+      }
+    } else {
+      if (!isJsonMode && !isSilent) {
+        console.log('\nSkipping git push (--no-push flag)');
+        console.log('Local JSONL file retained (ephemeral pattern - file will be deleted on next successful push)');
+      }
     }
   }
   

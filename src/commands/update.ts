@@ -4,7 +4,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { UpdateOptions } from '../cli-types.js';
-import type { UpdateWorkItemInput, WorkItem, WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel, DemotedParent } from '../types.js';
+import type { UpdateWorkItemInput, WorkItem, WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel, DemotedParent, RevertedItem } from '../types.js';
 import { promises as fs } from 'fs';
 import { humanFormatWorkItem, resolveFormat, extractFilePaths } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
@@ -214,6 +214,10 @@ export default function register(ctx: PluginContext): void {
       for (const rawId of idsRaw) {
         const normalizedId = utils.normalizeCliId(rawId, options.prefix) || rawId;
         const updates: UpdateWorkItemInput = {};
+        // Reversion record: set when a "Ready to close: No" audit verdict on
+        // an in_review (completed) item moves it back to open/plan_complete
+        // (WL-0MSKHYI5U0069FVV). Null when no reversion occurred.
+        let reverted: RevertedItem | null = null;
         if (titleCandidate) updates.title = titleCandidate;
         if (descriptionCandidate) updates.description = descriptionCandidate;
         if (priorityCandidate) updates.priority = priorityCandidate as WorkItemPriority;
@@ -283,6 +287,22 @@ export default function register(ctx: PluginContext): void {
             });
             // Skip remaining validation and success push for this item
             continue;
+          }
+
+          // Reversion: when the verdict is "Ready to close: No" on an item in
+          // `in_review` (status `completed`), move it back to `open` /
+          // `plan_complete` so it drops out of the ready-to-close queue and
+          // returns to the planning queue (WL-0MSKHYI5U0069FVV). This is an
+          // intentional lifecycle consequence of the audit verdict, applied
+          // here (before the no-field-changed guard below) so the guard never
+          // blocks it. Best-effort: a reversion failure must not abort the
+          // update — surface a warning instead.
+          if (auditEntry.status === 'Partial') {
+            try {
+              reverted = db.revertToPlanComplete(normalizedId);
+            } catch (err) {
+              console.error(`Warning: failed to revert ${normalizedId} to open/plan_complete: ${err instanceof Error ? err.message : String(err)}`);
+            }
           }
         }
 
@@ -398,7 +418,12 @@ export default function register(ctx: PluginContext): void {
             (current as any).auditResult = db.getAuditResult(normalizedId);
             (current as any).audit = { time: auditEntryForOutput.time, author: auditEntryForOutput.author, text: auditEntryForOutput.text, status: auditEntryForOutput.status };
           }
-          results.push({ id: normalizedId, success: true, workItem: current });
+          results.push({
+            id: normalizedId,
+            success: true,
+            workItem: current,
+            ...(reverted ? { reverted } : {}),
+          });
           continue;
         }
 
@@ -503,6 +528,7 @@ export default function register(ctx: PluginContext): void {
           workItem: item,
           ...(downgradedChildren.length > 0 ? { downgradedChildren } : {}),
           ...(demotedParent ? { demotedParent } : {}),
+          ...(reverted ? { reverted } : {}),
         });
       }
 
@@ -521,6 +547,9 @@ export default function register(ctx: PluginContext): void {
             }
             if (r.demotedParent) {
               jsonOut.demotedParent = r.demotedParent;
+            }
+            if (r.reverted) {
+              jsonOut.reverted = r.reverted;
             }
             output.json(jsonOut);
           }
@@ -542,6 +571,9 @@ export default function register(ctx: PluginContext): void {
             }
             if (r.demotedParent) {
               console.log(`[Parent ${r.demotedParent.parent.id} demoted from ${r.demotedParent.from.status}/${r.demotedParent.from.stage} to ${r.demotedParent.to.status}/${r.demotedParent.to.stage}]`);
+            }
+            if (r.reverted) {
+              console.log(`[${r.reverted.item.id} reverted from ${r.reverted.from.status}/${r.reverted.from.stage} to ${r.reverted.to.status}/${r.reverted.to.stage}]`);
             }
           } else {
             output.error(r.message ?? r.error, { success: false, error: r.error });

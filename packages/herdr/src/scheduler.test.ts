@@ -416,3 +416,54 @@ describe('TaskScheduler', () => {
     });
   });
 });
+
+describe('getIntervalMs hook (per-schedule jitter, WL-0MSSRED76008LGB6)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('recomputes the interval on every reschedule when the hook is set', async () => {
+    const run = vi.fn();
+    const hook = vi.fn().mockReturnValueOnce(30_000).mockReturnValueOnce(45_000).mockReturnValue(15_000);
+    const scheduler = new TaskScheduler(1000);
+    scheduler.addTask({ id: 'a', intervalMs: 30_000, getIntervalMs: hook, run });
+    scheduler.start();
+
+    await vi.advanceTimersByTimeAsync(30_000); // first fire at 30s (static arm)
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(hook).toHaveBeenCalledTimes(1); // asked for the NEXT interval (30s → 60s)
+
+    await vi.advanceTimersByTimeAsync(30_000); // next fire at 60s (30 + 30 from hook)
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(hook).toHaveBeenCalledTimes(2); // asked again (45s → next at 105s)
+
+    await vi.advanceTimersByTimeAsync(45_000); // next fire at 105s (60 + 45 from hook)
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(hook).toHaveBeenCalledTimes(3);
+
+    scheduler.stop();
+  });
+
+  it('first arm uses the static interval; the hook applies from the second fire', async () => {
+    const run = vi.fn();
+    const hook = vi.fn().mockReturnValue(45_000);
+    const scheduler = new TaskScheduler(1000);
+    scheduler.addTask({ id: 'a', intervalMs: 30_000, getIntervalMs: hook, run });
+    scheduler.start();
+
+    // First fire at the static 30s (addTask arms from intervalMs, not the hook)
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(hook).toHaveBeenCalledTimes(1);
+
+    // Second fire uses the hooked 45s
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(run).toHaveBeenCalledTimes(2);
+
+    scheduler.stop();
+  });
+});

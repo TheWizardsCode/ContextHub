@@ -15,8 +15,10 @@ import {
   agentStatusIcon,
   getIconPrefix,
   iconsEnabled,
+  isAuditFresh,
+  stageDisplayIcon,
   stringDisplayWidth,
-} from './icons.js';
+} from '@worklog/shared/icons';
 import { formatItemLine } from './worklist.js';
 import type { WorkItem } from './fetcher.js';
 
@@ -64,6 +66,37 @@ describe('agentStatusIcon', () => {
     expect(agentStatusIcon('blocked', { noIcons: true })).toBe('[BLKD]');
     expect(agentStatusIcon('idle', { noIcons: true })).toBe('[IDLE]');
     expect(agentStatusIcon('done', { noIcons: true })).toBe('');
+  });
+});
+
+describe('stageDisplayIcon — audit-aware stage icon shared by list and metadata (WL-0MSGIXHHI009KFW9)', () => {
+  const item = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    stage: 'in_review',
+    auditResult: null,
+    auditedAt: null,
+    updatedAt: '2026-08-02T10:00:00.000Z',
+    ...over,
+  });
+
+  it('shows the audit-result icon for a fresh audit (✅/❌/❓)', () => {
+    expect(stageDisplayIcon(item({ auditResult: true, auditedAt: '2026-08-02T10:00:30.000Z' }))).toBe('\u{2705}');
+    expect(stageDisplayIcon(item({ auditResult: false, auditedAt: '2026-08-02T10:00:30.000Z' }))).toBe('\u{274C}');
+    expect(stageDisplayIcon(item({ auditedAt: '2026-08-02T10:00:30.000Z' }))).toBe('\u{2753}');
+  });
+
+  it('shows the stale-passed hourglass when the audit is stale but passed', () => {
+    expect(stageDisplayIcon(item({ auditResult: true, auditedAt: '2026-08-01T10:00:00.000Z' }))).toBe('\u{23F3}');
+  });
+
+  it('falls back to the plain stage icon otherwise (stale/no audit, non-in_review stages)', () => {
+    expect(stageDisplayIcon(item())).toBe('\u{1F50D}'); // 🔍 no audit
+    expect(stageDisplayIcon(item({ stage: 'idea' }))).toBe('\u{1F4A1}'); // 💡
+    expect(stageDisplayIcon({ stage: 'in_progress' })).toBe('\u{1F6E0}\u{FE0F}'); // 🛠️
+  });
+
+  it('honours the noIcons flag like the other icon helpers', () => {
+    expect(stageDisplayIcon(item({ stage: 'idea' }), { noIcons: true })).toBe('[IDEA]');
+    expect(stageDisplayIcon(item({ auditResult: true, auditedAt: '2026-08-02T10:00:30.000Z' }), { noIcons: true })).toBe('[ready]');
   });
 });
 
@@ -125,5 +158,38 @@ describe('getIconPrefix — fixed-width agent slot (AC3 alignment invariance)', 
     // agent does.
     const blockedRow = formatItemLine(makeItem('blocked'), 120);
     expect(idCol(withRow)).toBe(idCol(blockedRow));
+  });
+});
+
+describe('isAuditFresh — flag-only updates must not make a valid audit stale (WL-0MSN6ZCTN0027U2R)', () => {
+  // The worklog core guarantees (packages/shared/src/database.ts update())
+  // that flipping needsProducerReview does NOT bump updatedAt; only content
+  // changes do.  These tests pin the herdr-side consequence: a previously
+  // fresh audit stays fresh and the passed icon is shown (not the stale
+  // hourglass).  herdr itself is unchanged.
+  it('stays fresh when updatedAt does not move after the flag flip', () => {
+    const auditedAt = '2026-08-02T10:00:30.000Z';
+    const updatedAtAfterFlagFlip = '2026-08-02T10:00:00.000Z'; // unchanged by the flip
+    expect(isAuditFresh(auditedAt, updatedAtAfterFlagFlip)).toBe(true);
+  });
+
+  it('shows the passed icon (not the stale hourglass) after a flag-only flip', () => {
+    // Audit at 10:00:30, item updated at 10:00:00 — with the worklog
+    // guarantee the updatedAt is unchanged by a flag flip, so the audit
+    // remains within the 60 s buffer and the passed icon is shown.
+    expect(
+      stageDisplayIcon({
+        stage: 'in_review',
+        auditResult: true,
+        auditedAt: '2026-08-02T10:00:30.000Z',
+        updatedAt: '2026-08-02T10:00:00.000Z',
+      }),
+    ).toBe('\u{2705}'); // ✅ — not ⏳ (stale hourglass)
+  });
+
+  it('still reports stale when updatedAt genuinely moves (content change)', () => {
+    const auditedAt = '2026-08-02T10:00:30.000Z';
+    const updatedAtAfterContentChange = '2026-08-02T10:05:00.000Z'; // content edit bumps
+    expect(isAuditFresh(auditedAt, updatedAtAfterContentChange)).toBe(false);
   });
 });

@@ -10,11 +10,23 @@
 #     with Enter or herdr `close_pane` (default `prefix+x`)
 #
 # Usage:
-#   run-in-pane.sh <command>
+#   run-in-pane.sh [--cwd <path>] [--no-focus] <command>
 #
 # The command is executed via `bash -c`, so compound commands (`&&`),
 # single-quoted arguments (e.g. `--summary 'Approved by manual review'`),
 # and shell constructs all work.
+#
+# Options (parsed only at the head of argv):
+#   --cwd <path>     Working directory for the new pane
+#                    (default: $HERDR_RESOLVED_CWD, then $PWD)
+#   --no-focus       Skip the final pane zoom so the current pane (e.g. the
+#                    worklist selection list) keeps focus while the command
+#                    pane opens in the background (WL-0MSHIA53D009DJOT).
+#                    Without the flag the new pane is focused as before
+#                    (backward compatible).
+#
+# Everything after the options — including commands whose first token
+# starts with `--` — is treated as the command to run.
 #
 # Environment variables:
 #   HERDR_BIN_PATH       Path to the herdr CLI binary (default: herdr on PATH)
@@ -79,14 +91,26 @@ fi
 
 # ── Main mode: split, run, rename ────────────────────────────────────────
 pane_name="${RUN_IN_PANE_NAME:-Command Output}"
-# The command is everything after the leading options. Currently the only
-# supported option is --cwd (target project root for the new pane);
-# everything else is treated as the command to run.
+# The command is everything after the leading options. Only --cwd and
+# --no-focus are parsed as options at the head of argv; everything else
+# (including commands whose first token begins with --) is the command.
 target_cwd=""
-if [ "${1:-}" = "--cwd" ]; then
-  target_cwd="$2"
-  shift 2
-fi
+no_focus=false
+while [ $# -gt 0 ]; do
+  case "${1:-}" in
+    --cwd)
+      target_cwd="$2"
+      shift 2
+      ;;
+    --no-focus)
+      no_focus=true
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 COMMAND="$*"
 
 if [ -z "$COMMAND" ]; then
@@ -133,6 +157,11 @@ quoted_pane="$(printf '%q' "$np")"
 # Rename the pane
 "$herdr_bin" pane rename "$np" "$pane_name" >/dev/null 2>&1 || true
 
-# Focus the new pane so the user sees the command run
-"$herdr_bin" pane zoom "$np" --on >/dev/null 2>&1 || true
-"$herdr_bin" pane zoom "$np" --off >/dev/null 2>&1 || true
+# Focus the new pane so the user sees the command run — unless --no-focus
+# (WL-0MSHIA53D009DJOT): selection-list dispatches pass --no-focus so the
+# command-output pane opens without stealing focus; the user can focus it
+# manually with herdr pane navigation.
+if [ "$no_focus" = false ]; then
+  "$herdr_bin" pane zoom "$np" --on >/dev/null 2>&1 || true
+  "$herdr_bin" pane zoom "$np" --off >/dev/null 2>&1 || true
+fi

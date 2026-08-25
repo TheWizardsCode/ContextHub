@@ -18,7 +18,30 @@ import { initRepo, initBareRepo } from './git-helpers.js';
 import { cleanupTempDir, createTempDir } from '../test-utils.js';
 
 describe('CLI Init Tests', () => {
-  it('should insert the AGENTS.md pointer line when an existing file is present', async () => {
+  const CANONICAL_GLOBAL_REFERENCE = '## Global agent guidance';
+  const CANONICAL_REFERENCE_LINE = 'Read the global agent instructions at `~/.pi/agent/AGENTS.md`';
+  const CANONICAL_PROJECT_SECTION = '## Project-specific guidance';
+
+  it('should install the canonical global-reference structure in a fresh project', async () => {
+    const tempState = enterTempDir();
+    try {
+      await execAsync(
+        `tsx ${cliPath} init --project-name "Test Project" --prefix TEST --auto-export yes --auto-sync no --workflow-inline no --agents-template skip --stats-plugin-overwrite no`
+      );
+
+      const updated = fs.readFileSync('AGENTS.md', 'utf-8');
+      expect(updated).toContain(CANONICAL_GLOBAL_REFERENCE);
+      expect(updated).toContain(CANONICAL_REFERENCE_LINE);
+      expect(updated).toContain(CANONICAL_PROJECT_SECTION);
+      // The template is a reference, not a copy of the global instruction set.
+      expect(updated).not.toContain('CRITICAL RULES');
+      expect(updated).not.toContain('Follow the global AGENTS.md in addition to the rules below');
+    } finally {
+      leaveTempDir(tempState);
+    }
+  }, 45000);
+
+  it('should insert the AGENTS.md global-reference template when an existing file is present', async () => {
     const tempState = enterTempDir();
     try {
       const existing = '## Local Rules\n\n- Do the local thing\n';
@@ -29,20 +52,22 @@ describe('CLI Init Tests', () => {
       );
 
       const updated = fs.readFileSync('AGENTS.md', 'utf-8');
-      const pointer = 'Follow the global AGENTS.md in addition to the rules below. The local rules below take priority in the event of a conflict.';
       const lines = updated.split(/\r?\n/).filter(line => line.trim().length > 0);
-      expect(lines[0]).toBe(pointer);
+      // The canonical global-reference section is emitted first ...
+      expect(lines[0]).toBe(CANONICAL_GLOBAL_REFERENCE);
+      expect(updated).toContain(CANONICAL_REFERENCE_LINE);
+      // ... and existing local rules are preserved below the reference.
+      expect(updated.indexOf(CANONICAL_GLOBAL_REFERENCE)).toBeLessThan(updated.indexOf(existing.trim()));
       expect(updated).toContain(existing.trim());
     } finally {
       leaveTempDir(tempState);
     }
   }, 45000);
 
-  it('should not duplicate the AGENTS.md pointer line on re-run', async () => {
+  it('should not duplicate the AGENTS.md global-reference on re-run', async () => {
     const tempState = enterTempDir();
     try {
-      const pointer = 'Follow the global AGENTS.md in addition to the rules below. The local rules below take priority in the event of a conflict.';
-      const existing = `${pointer}\n\n## Local Rules\n\n- Keep it\n`;
+      const existing = `## Global agent guidance\n\n${CANONICAL_REFERENCE_LINE}\n\n## Project-specific guidance\n\n- Keep it\n`;
       fs.writeFileSync('AGENTS.md', existing, 'utf-8');
 
       await execAsync(
@@ -50,9 +75,9 @@ describe('CLI Init Tests', () => {
       );
 
       const updated = fs.readFileSync('AGENTS.md', 'utf-8');
-      const pointerMatches = updated.split(/\r?\n/).filter(line => line.trim() === pointer).length;
-      expect(pointerMatches).toBe(1);
-      expect(updated).toContain('## Local Rules');
+      const referenceMatches = updated.split(/\r?\n/).filter(line => line.trim() === CANONICAL_GLOBAL_REFERENCE).length;
+      expect(referenceMatches).toBe(1);
+      expect(updated).toContain('- Keep it');
     } finally {
       leaveTempDir(tempState);
     }
@@ -337,6 +362,71 @@ describe('CLI Init Tests', () => {
         .split(/\r?\n/)
         .filter(line => line.trim() === '<!-- WORKFLOW: start -->').length;
       expect(markers).toBe(1);
+    } finally {
+      leaveTempDir(tempState);
+    }
+  }, 45000);
+
+  // ---------------------------------------------------------------------
+  // Scheduled-prompts provisioning (WL-0MSS1Q5ER007QDKX AC1): `wl init`
+  // copies templates/scheduled-prompts.json into
+  // .worklog/scheduled-prompts.json on first init (create-if-absent) and
+  // never clobbers an existing file on re-run — user edits and
+  // lastTriggeredAt state are preserved.
+  // ---------------------------------------------------------------------
+  it('should provision .worklog/scheduled-prompts.json with the base set on first init', async () => {
+    const tempState = enterTempDir();
+    try {
+      await execAsync(
+        `tsx ${cliPath} init --project-name "Test Project" --prefix TEST --auto-export yes --auto-sync no --workflow-inline no --agents-template skip --stats-plugin-overwrite no`
+      );
+
+      const configPath = path.join('.worklog', 'scheduled-prompts.json');
+      expect(fs.existsSync(configPath)).toBe(true);
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(Array.isArray(config.entries)).toBe(true);
+      // The base set starts with a single /skill:refactor entry
+      // (intervalDays 3, lastTriggeredAt null).
+      expect(config.entries).toEqual([
+        {
+          id: 'refactor',
+          prompt: '/skill:refactor',
+          intervalDays: 3,
+          lastTriggeredAt: null,
+        },
+      ]);
+    } finally {
+      leaveTempDir(tempState);
+    }
+  }, 45000);
+
+  it('should never clobber an existing scheduled-prompts.json on re-init (create-if-absent)', async () => {
+    const tempState = enterTempDir();
+    try {
+      const cmd = `tsx ${cliPath} init --project-name "Test Project" --prefix TEST --auto-export yes --auto-sync no --workflow-inline no --agents-template skip --stats-plugin-overwrite no`;
+      await execAsync(cmd);
+
+      // Simulate operator edits + runtime state: a new entry and a set
+      // lastTriggeredAt on the base entry.
+      const configPath = path.join('.worklog', 'scheduled-prompts.json');
+      const edited = {
+        entries: [
+          {
+            id: 'refactor',
+            prompt: '/skill:refactor',
+            intervalDays: 3,
+            lastTriggeredAt: '2026-08-17T12:00:00.000Z',
+          },
+          { id: 'custom', prompt: '/skill:code-review', intervalDays: 1, lastTriggeredAt: null },
+        ],
+      };
+      fs.writeFileSync(configPath, JSON.stringify(edited, null, 2), 'utf-8');
+
+      // Re-running init must NOT overwrite the edited file.
+      await execAsync(cmd);
+
+      const after = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(after).toEqual(edited);
     } finally {
       leaveTempDir(tempState);
     }

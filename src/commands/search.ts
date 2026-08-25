@@ -8,6 +8,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { SearchOptions } from '../cli-types.js';
+import type { FtsSearchResult } from '../persistent-store.js';
 import { formatTitleAndId } from './helpers.js';
 import { theme } from '../theme.js';
 import { resolveWorklogDir } from '../worklog-paths.js';
@@ -132,20 +133,32 @@ export default function register(ctx: PluginContext): void {
       }
 
       // Execute search
-      const rawResults = db.search(query, {
-        status: options.status,
-        parentId,
-        tags,
-        limit: isNaN(limit) || limit < 1 ? 20 : limit,
-        priority: options.priority,
-        assignee: options.assignee,
-        stage: options.stage,
-        deleted: options.deleted,
-        needsProducerReview,
-        issueType: options.issueType,
-      });
+      let rawResults: { results: FtsSearchResult[]; ftsUsed: boolean; warning?: string };
+      try {
+        rawResults = db.search(query, {
+          status: options.status,
+          parentId,
+          tags,
+          limit: isNaN(limit) || limit < 1 ? 20 : limit,
+          priority: options.priority,
+          assignee: options.assignee,
+          stage: options.stage,
+          deleted: options.deleted,
+          needsProducerReview,
+          issueType: options.issueType,
+        });
+      } catch (err) {
+        // An invalid query (e.g. an unquoted punctuated term that could not
+        // be auto-quoted either) must never look like a silent "no results".
+        const message = err instanceof Error ? err.message : String(err);
+        output.error(`Invalid search query: ${message}`, {
+          success: false,
+          error: 'invalid-query',
+        });
+        process.exit(1);
+      }
 
-      let { results, ftsUsed } = rawResults;
+      let { results, ftsUsed, warning } = rawResults;
 
       // ── Semantic search enhancement ──────────────────────────────
       if (options.semantic || options.semanticOnly) {
@@ -229,6 +242,9 @@ export default function register(ctx: PluginContext): void {
           workItems: jsonResults,
           results: jsonResults,
         };
+        if (warning) {
+          outputPayload.warning = warning;
+        }
         if (options.semantic || options.semanticOnly) {
           outputPayload.semanticAvailable = rawResults.ftsUsed;
         }
@@ -244,6 +260,11 @@ export default function register(ctx: PluginContext): void {
 
       if (options.semantic && results.length > 0) {
         console.log(theme.text.muted('(Semantic search enabled)'));
+        console.log('');
+      }
+
+      if (warning) {
+        console.log(theme.text.warning(`Warning: ${warning}`));
         console.log('');
       }
 
@@ -274,7 +295,7 @@ export default function register(ctx: PluginContext): void {
           const snippetLabel = theme.text.muted(`[${result.matchedColumn}]`);
           // Replace highlight markers << >> with chalk bold
           const highlighted = result.snippet
-            .replace(/<<(.*?)>>/g, (_, match) => theme.text.warning(match));
+            .replace(/<<(.*?)>>/g, (_: string, match: string) => theme.text.warning(match));
           console.log(`  ${snippetLabel} ${highlighted}`);
         }
 
