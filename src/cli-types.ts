@@ -201,6 +201,8 @@ export interface SearchOptions {
   semantic?: boolean;
   semanticOnly?: boolean;
   prefix?: string;
+  /** Comma-separated list of fields to include in output (id always included) */
+  fields?: string;
 }
 
 export interface UnlockOptions { force?: boolean }
