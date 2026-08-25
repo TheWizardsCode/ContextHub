@@ -75,6 +75,12 @@ Install the extension globally:
 npm run install:pi-extension
 ```
 
+For a single-command install of all integrations (herdr plugin + Pi extension):
+
+```bash
+npm run install
+```
+
 Then start (or restart) `pi` and run:
 
 ```text
@@ -101,6 +107,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 |----------|-------------|
 | [DATA_FORMAT.md](DATA_FORMAT.md) | JSONL data format, storage architecture, and field reference |
 | [DATA_SYNCING.md](DATA_SYNCING.md) | Git-backed syncing and GitHub Issue mirroring |
+| [docs/design/incremental-sync.md](docs/design/incremental-sync.md) | Incremental (delta) sync architecture: delta format, full-snapshot cadence, fallback, backward compatibility (WL-0MSAKUBKW006FN8Q) |
 | [GIT_WORKFLOW.md](GIT_WORKFLOW.md) | Team collaboration patterns and Git hooks |
 
 ### Features
@@ -138,6 +145,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | [docs/validation/status-stage-inventory.md](docs/validation/status-stage-inventory.md) | Status/stage validation rules |
 | [docs/SKILL_AUTHORING.md](docs/SKILL_AUTHORING.md) | Skill authoring guide with script best practices |
 | [docs/dev/wl-process-healthcheck.md](docs/dev/wl-process-healthcheck.md) | wl process healthcheck watchdog usage (cron/systemd, thresholds) |
+| [docs/dev/downtime-dispatcher.md](docs/dev/downtime-dispatcher.md) | Leader-election + shared-coordination downtime dispatcher architecture (herdr); critical-first dispatch tier + freeze split-by-skill |
 
 ## Tutorials
 
@@ -202,11 +210,12 @@ See [tests/README.md](tests/README.md) for detailed testing documentation.
 
 ### Test Mock Patterns
 
-The `tests/extensions/worklog-browse-extension.test.ts` file (1700+ lines, 68 tests) demonstrates key mock patterns used by this project:
+Work item tests under `tests/cli/` and `tests/unit/` demonstrate the mock
+patterns used by this project:
 
-- **Comprehensive `node:fs` mock:** Rather than stubbing only the 4 fs functions used directly by the code under test, the mock covers ~12 functions (`existsSync`, `statSync`, `lstatSync`, `readdirSync`, `accessSync`, `watch`, `promises`, `constants`, `readFileSync`, `writeFileSync`, `mkdirSync`, `realpathSync`) that may be called during module initialization. This prevents cascading errors and heap OOM during import.
-- **`icons.js` mock:** The dynamic `require('dist/icons.js')` in the browse module is mocked with stub implementations for all 8 exported functions (`priorityIcon`, `statusIcon`, `stageIcon`, `auditIcon`, `epicIcon`, `iconsEnabled`, `riskIcon`, `effortIcon`), preventing uncontrolled file resolution during import.
-- **Infinite loop guard:** `custom()` mocks return `{ type: 'shortcut', command: '/test-exit' }` instead of `null` to break the `runBrowseFlow` while(true) loop, preventing infinite-loop-based OOM in test mocks.
+- **Comprehensive `node:fs` mock:** Rather than stubbing only the few fs functions used directly by the code under test, the mock covers the broader set that may be called during module initialization, preventing cascading errors and heap OOM during import.
+- **Stale-import grep guard:** `tests/unit/icons.test.ts` fails the build if any file imports from the removed `icons.js` wrapper paths, preventing the deprecated `icons.ts` files from drifting back in.
+- **Infinite loop guard:** `custom()` mocks return a terminating shortcut instead of `null` to break long-running TUI loops, preventing infinite-loop-based OOM in test mocks.
 
 ## License
 

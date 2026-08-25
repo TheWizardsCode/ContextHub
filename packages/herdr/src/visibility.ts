@@ -115,4 +115,17 @@ export class PollGate {
     this.cachedAt = Date.now();
     return this.cachedVisible;
   }
+
+  /**
+   * Apply an event-driven visibility update (e.g. a `pane_focused` event
+   * for the current pane, WL-0MSHB7DHO004RHBJ). Records the value in the
+   * memoizer cache so subsequent `visible()` calls within the TTL return
+   * the event value WITHOUT a `herdr tab get` exec — the event path
+   * replaces the poll for that window. Fails open: the underlying polling
+   * check resumes automatically once the TTL expires.
+   */
+  setVisibleFromEvent(visible: boolean): void {
+    this.cachedVisible = visible;
+    this.cachedAt = Date.now();
+  }
 }

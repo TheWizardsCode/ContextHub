@@ -229,4 +229,72 @@ describe('PollGate', () => {
     // refresh + sync ticks in one cycle share a single herdr tab get call.
     expect(mockFn).toHaveBeenCalledTimes(1);
   });
+
+  it('setVisibleFromEvent records an event-driven visibility value within the TTL (no exec)', async () => {
+    // WL-0MSHB7DHO004RHBJ (F3): a pane_focused event must update the
+    // visibility gate without a herdr exec, until the TTL expires.
+    process.env.HERDR_TAB_ID = 'w1:t11';
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: tabGetEnvelope(false),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    const gate = new PollGate();
+    // Initially the polling path reports hidden.
+    expect(await gate.visible()).toBe(false);
+    expect(mockFn).toHaveBeenCalledTimes(1);
+
+    // A pane_focused event says the pane is now visible — this must take
+    // effect IMMEDIATELY with no further herdr exec.
+    gate.setVisibleFromEvent(true);
+    expect(await gate.visible()).toBe(true);
+    expect(await gate.visible()).toBe(true);
+    expect(mockFn).toHaveBeenCalledTimes(1); // still just the one poll
+  });
+
+  it('setVisibleFromEvent(false) marks the pane hidden for the event path', async () => {
+    process.env.HERDR_TAB_ID = 'w1:t11';
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: tabGetEnvelope(true),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    const gate = new PollGate();
+    expect(await gate.visible()).toBe(true);
+    expect(mockFn).toHaveBeenCalledTimes(1);
+
+    // A pane_focused/unfocused event reports the pane hidden.
+    gate.setVisibleFromEvent(false);
+    expect(await gate.visible()).toBe(false);
+    expect(mockFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('polling resumes after the TTL expires following a setVisibleFromEvent', async () => {
+    vi.useFakeTimers();
+    try {
+      process.env.HERDR_TAB_ID = 'w1:t11';
+      const mockFn = vi
+        .fn()
+        .mockResolvedValueOnce({ stdout: tabGetEnvelope(false), stderr: '' }) // first poll: hidden
+        .mockResolvedValueOnce({ stdout: tabGetEnvelope(true), stderr: '' }); // poll after TTL: visible
+      setExecFileAsync(mockFn as any);
+
+      const gate = new PollGate(undefined, 2000);
+      expect(await gate.visible()).toBe(false); // poll says hidden
+
+      // Event says visible — cache updated, no exec.
+      gate.setVisibleFromEvent(true);
+      expect(await gate.visible()).toBe(true);
+      expect(mockFn).toHaveBeenCalledTimes(1);
+
+      // TTL expires → polling resumes and re-stats a fresh value.
+      vi.advanceTimersByTime(2001);
+      expect(await gate.visible()).toBe(true);
+      expect(mockFn).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

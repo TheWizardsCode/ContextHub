@@ -18,7 +18,7 @@ import {
   getIconPrefix,
   stageColor,
   stringDisplayWidth,
-} from '../../packages/herdr/src/icons.js';
+} from '@worklog/shared/icons';
 
 import type { WorkItem } from '../../packages/herdr/src/fetcher.js';
 

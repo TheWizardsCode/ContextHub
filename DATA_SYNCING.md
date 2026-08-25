@@ -31,6 +31,14 @@ Worklog stores work items and comments in `.worklog/worklog-data.jsonl` (the mos
   - Writes local DB + JSONL
   - Pushes the updated JSONL ref
 
+> **Incremental sync (delta):** after the first full snapshot, `wl sync`
+> pushes only the records that changed since the last successful push (a
+> delta), keeping payloads proportional to the change set. The remote file
+> carries a header distinguishing `full` vs `delta`; readers without a local
+> base automatically fall back to a full snapshot. See
+> [docs/design/incremental-sync.md](docs/design/incremental-sync.md) for the
+> full architecture.
+
 ### Typical Flow
 
 1. Update local items (`wl create`, `wl update`, etc.)

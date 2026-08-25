@@ -59,6 +59,34 @@ Two pollers were fixed:
 - `PollGate` (TTL ~2s) shares one `herdr tab get` call across refresh+sync
   ticks in a cycle (≤1 visibility exec per cycle).
 
+#### Mouse and touch input (SGR reporting)
+
+- The worklist enables SGR mouse reporting (`\x1b[?1000h\x1b[?1002h\x1b[?1006h`)
+  on raw-mode entry and disables it on cleanup (parent WL-0MSGHM5BQ0096BNJ
+  AC1). Mouse events are parsed from raw stdin chunks in the `onData` handler
+  via `consumeMouseChunk()` — SGR sequences (`\x1b[<b;x;yM`/`m`) are consumed
+  before the keyboard path, so they never reach `handleKeypress`.
+- Split-chunk buffering: partial SGR prefixes (`\x1b[<0;10;`) are held in a
+  module-level buffer until the terminating `M`/`m` arrives in a subsequent
+  chunk. Non-mouse chunks clear the buffer.
+- Mouse actions dispatched: left-click selects a row, double-click (same row,
+  ≤400 ms) opens detail; wheel/touch-scroll navigates list or scrolls detail
+  (j/k-equivalent); filter-prompt taps apply a stage filter. Drag-motion and
+  release events are inert. Middle/right buttons are ignored.
+- **Fail-soft:** terminals that do not support SGR mouse reporting (1006)
+  never send mouse events — the worklist remains fully keyboard-usable.
+- Mouse input is ignored during modal states (code-freeze notice, form input,
+  Ship It confirmation dialog) — matching the keyboard path's modal gating.
+- **Alt+m toggle (WL-0MT0AP2LR000JFWN):** mouse tracking is enabled by
+  default on raw-mode entry. Pressing `Alt+m` (`\x1bm`) toggles it off so the
+  terminal's native text-selection (drag-select to copy content from the
+  terminal) works again, and toggles it back on to resume mouse interaction.
+  The toggle always works (handled before modal-state guards) and is reflected
+  in the footer hint (`alt+m mouse on` / `alt+m mouse off`).
+- When the TUI is paused (hidden tab), mouse input is irrelevant because the
+  `onData` handler is never called — stdin is only read while the pane is
+  visible (the input loop runs inside the scheduler-visible cadence).
+
 ## Verification procedure
 
 ### 1. Count `wl` processes per session/pane

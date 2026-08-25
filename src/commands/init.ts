@@ -8,6 +8,7 @@ import type { DependencyEdge } from '../types.js';
 import { initConfig, loadConfig, configExists, isInitialized, readInitSemaphore, writeInitSemaphore, type InitConfigOptions } from '../config.js';
 import { resolveWorklogDir } from '../worklog-paths.js';
 import { exportToJsonlAsync } from '../jsonl.js';
+import { PRE_PUSH_HOOK_CONTENT } from '../doctor/hook-upgrade.js';
 import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, mergeAuditResults } from '../sync.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
 import { importFromJsonlContent } from '../jsonl.js';
@@ -18,7 +19,7 @@ import * as readline from 'readline';
 import { fileURLToPath } from 'url';
 import { theme } from '../theme.js';
 
-const WORKLOG_PRE_PUSH_HOOK_MARKER = 'worklog:pre-push-hook:v1';
+const WORKLOG_PRE_PUSH_HOOK_MARKER = 'worklog:pre-push-hook:v2';
 const WORKLOG_POST_PULL_HOOK_MARKER = 'worklog:post-pull-hook:v1';
 const WORKLOG_POST_CHECKOUT_HOOK_MARKER = 'worklog:post-checkout-hook:v1';
 const WORKLOG_GITIGNORE_SECTION_START = 'Worklog Specific Ignores';
@@ -28,7 +29,24 @@ const WORKLOG_AGENT_DESTINATION_FILENAME = 'AGENTS.md';
 const WORKFLOW_TEMPLATE_RELATIVE_PATH = 'templates/WORKFLOW.md';
 const WORKFLOW_DESTINATION_FILENAME = 'WORKFLOW.md';
 const WORKLOG_GITIGNORE_TEMPLATE_RELATIVE_PATH = 'templates/GITIGNORE_WORKLOG.txt';
-const WORKLOG_AGENT_POINTER_LINE = 'Follow the global AGENTS.md in addition to the rules below. The local rules below take priority in the event of a conflict.';
+/**
+ * Marker used to detect that the canonical "Global agent guidance" reference
+ * structure is already present in a project AGENTS.md. The template
+ * (templates/AGENTS.md) self-references the global file, so projects that
+ * install or append it must NOT duplicate the reference on re-run.
+ */
+const CANONICAL_GLOBAL_REFERENCE_MARKER = '## Global agent guidance';
+const CANONICAL_GLOBAL_REFERENCE_LINE = 'Read the global agent instructions at `~/.pi/agent/AGENTS.md`';
+
+/**
+ * Scheduled-prompts provisioning (WL-0MSS1Q5ER007QDKX AC1): `wl init` copies
+ * templates/scheduled-prompts.json into .worklog/scheduled-prompts.json when
+ * the file is absent (create-if-absent — never clobbers user edits or
+ * lastTriggeredAt state). The file is consumed by the herdr downtime
+ * worker's scheduled-prompts dispatch tier.
+ */
+const SCHEDULED_PROMPTS_TEMPLATE_RELATIVE_PATH = 'templates/scheduled-prompts.json';
+const SCHEDULED_PROMPTS_DESTINATION_FILENAME = 'scheduled-prompts.json';
 
 const DEFAULT_COMMITTED_HOOKS_DIR = '.githooks';
 
@@ -165,57 +183,10 @@ function installPrePushHook(options: { silent: boolean }): { installed: boolean;
   const hooksDir = path.isAbsolute(hooksPath) ? hooksPath : path.join(repoRoot, hooksPath);
   const hookFile = path.join(hooksDir, 'pre-push');
 
-  const hookScript =
-    `#!/bin/sh\n` +
-    `# ${WORKLOG_PRE_PUSH_HOOK_MARKER}\n` +
-    `# Auto-sync Worklog data before pushing.\n` +
-    `# Set WORKLOG_SKIP_PRE_PUSH=1 to bypass.\n` +
-    `\n` +
-    `set -e\n` +
-    `\n` +
-    `if [ \"$WORKLOG_SKIP_PRE_PUSH\" = \"1\" ]; then\n` +
-    `  exit 0\n` +
-    `fi\n` +
-    `\n` +
-    `# Skip when inside a temp worktree created by withTempWorktree.\n` +
-    `case \"$PWD\" in\n` +
-    `  *tmp-worktree-*)\n` +
-    `    exit 0\n` +
-    `    ;;\n` +
-    `esac\n` +
-    `\n` +
-    `# Skip when inside a git worktree (not the main checkout).\n` +
-    `if [ \"$(git rev-parse --git-dir 2>/dev/null)\" != \"$(git rev-parse --git-common-dir 2>/dev/null)\" ]; then\n` +
-    `  exit 0\n` +
-    `fi\n` +
-    `\n` +
-    `# Avoid recursion when worklog sync pushes refs/worklog/data.\n` +
-    `skip=0\n` +
-    `while read local_ref local_sha remote_ref remote_sha; do\n` +
-    `  if [ \"$remote_ref\" = \"refs/worklog/data\" ]; then\n` +
-    `    skip=1\n` +
-    `  fi\n` +
-    `done\n` +
-    `\n` +
-    `if [ \"$skip\" = \"1\" ]; then\n` +
-    `  exit 0\n` +
-    `fi\n` +
-    `\n` +
-    `if command -v wl >/dev/null 2>&1; then\n` +
-    `  WL=wl\n` +
-    `elif command -v worklog >/dev/null 2>&1; then\n` +
-    `  WL=worklog\n` +
-    `else\n` +
-    `  echo \"worklog: wl/worklog not found; skipping pre-push sync\" >&2\n` +
-    `  exit 0\n` +
-    `fi\n` +
-    `\n` +
-    `$WL sync --git-branch refs/worklog/data || {\n` +
-    `  echo \"worklog: pre-push sync failed (pushing anyway)\" >&2\n` +
-    `  exit 0\n` +
-    `}\n` +
-    `\n` +
-    `exit 0\n`;
+  // Canonical v2 pre-push hook (branch policy + context-budget gate + sync),
+  // shared with hook-upgrade.ts and matching the committed `.githooks/pre-push`
+  // template (WL-0MT33QNTL006LHQA).
+  const hookScript = PRE_PUSH_HOOK_CONTENT;
 
   try {
     fs.mkdirSync(hooksDir, { recursive: true });
@@ -420,76 +391,7 @@ function installCommittedHooks(options: { silent: boolean }): { installed: boole
     `exec \"${centralPath}\" \"$@\"\n`
   );
 
-   const prePushContent = [
-     '#!/bin/sh',
-     `# ${WORKLOG_PRE_PUSH_HOOK_MARKER}`,
-     '#',
-     '# Auto-sync Worklog data before pushing.',
-     '#',
-     '# This hook runs `wl sync` before any push to ensure worklog data is',
-     '# committed and pushed to the dedicated refs/worklog/data branch.',
-     '# It uses a temporary worktree to avoid corrupting the project working tree',
-     '# (see WL-0MQRBT8BS00355AB for the bug this prevents).',
-     '#',
-     '# BYPASS: Set WORKLOG_SKIP_PRE_PUSH=1 to skip the sync entirely.',
-     '#   export WORKLOG_SKIP_PRE_PUSH=1',
-     '#   git push origin HEAD:refs/heads/dev',
-     '#',
-     'set -e',
-     '',
-     'if [ "$WORKLOG_SKIP_PRE_PUSH" = "1" ]; then',
-     '  echo "worklog: pre-push sync skipped (WORKLOG_SKIP_PRE_PUSH=1)"',
-     '  exit 0',
-     'fi',
-     '',
-     '# Skip when running inside a temp worktree created by withTempWorktree',
-     "# for internal sync operations. These worktrees don't have worklog",
-     '# initialized and the push is already done with --no-verify as defense.',
-     'case "$PWD" in',
-     '  *tmp-worktree-*)',
-     '    exit 0',
-     '    ;;',
-     'esac',
-     '',
-     '# Skip when inside a git worktree (not the main checkout).',
-     "# Worktrees are for feature development and typically don't have worklog",
-     '# initialized. The sync should run from the main checkout.',
-     'if [ "$(git rev-parse --git-dir 2>/dev/null)" != "$(git rev-parse --git-common-dir 2>/dev/null)" ]; then',
-     '  exit 0',
-     'fi',
-     '',
-     '# Read stdin to check which refs are being pushed.',
-     '# If pushing to refs/worklog/data, skip the sync to avoid infinite loops.',
-     'skip=0',
-     'while read local_ref local_sha remote_ref remote_sha; do',
-     '  if [ "$remote_ref" = "refs/worklog/data" ]; then',
-     '    skip=1',
-     '  fi',
-     'done',
-     '',
-     'if [ "$skip" = "1" ]; then',
-     '  exit 0',
-     'fi',
-     '',
-     'if command -v wl >/dev/null 2>&1; then',
-     '  WL=wl',
-     'elif command -v worklog >/dev/null 2>&1; then',
-     '  WL=worklog',
-     'else',
-     '  echo "worklog: wl/worklog not found; skipping pre-push sync" >&2',
-     '  exit 0',
-     'fi',
-     '',
-     '# Force the data branch to refs/worklog/data regardless of config.',
-     '# This prevents the sync from accidentally pushing to a standard branch',
-     '# if the user has overridden syncBranch in their worklog config.',
-     '"$WL" sync --git-branch refs/worklog/data || {',
-     '  echo "worklog: pre-push sync failed (pushing anyway)" >&2',
-     '  exit 0',
-     '}',
-     'exit 0',
-     '',
-   ].join('\n');
+   const prePushContent = PRE_PUSH_HOOK_CONTENT;
 
     const postCheckoutContent =
       `#!/bin/sh\n` +
@@ -631,6 +533,44 @@ function locateGitignoreTemplate(): string | null {
   const packageRoot = path.resolve(moduleDir, '..', '..');
   const candidate = path.join(packageRoot, WORKLOG_GITIGNORE_TEMPLATE_RELATIVE_PATH);
   return fs.existsSync(candidate) ? candidate : null;
+}
+
+function locateScheduledPromptsTemplate(): string | null {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const packageRoot = path.resolve(moduleDir, '..', '..');
+  const candidate = path.join(packageRoot, SCHEDULED_PROMPTS_TEMPLATE_RELATIVE_PATH);
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * Provision the scheduled-prompts config (WL-0MSS1Q5ER007QDKX AC1): copy
+ * templates/scheduled-prompts.json into `<worklog-dir>/scheduled-prompts.json`
+ * CREATE-IF-ABSENT — an existing file (user edits or runtime lastTriggeredAt
+ * state) is never clobbered. A missing template is skipped (never fatal).
+ */
+function ensureScheduledPromptsInstalled(options: {
+  silent: boolean;
+}): { installed: boolean; skipped: boolean; destinationPath?: string; reason?: string } {
+  const templatePath = locateScheduledPromptsTemplate();
+  if (!templatePath) {
+    return { installed: false, skipped: true, reason: 'scheduled-prompts template not found' };
+  }
+  const worklogDir = resolveWorklogDir();
+  const destinationPath = path.join(worklogDir, SCHEDULED_PROMPTS_DESTINATION_FILENAME);
+  try {
+    if (fs.existsSync(destinationPath)) {
+      // Create-if-absent: never clobber user edits or lastTriggeredAt state.
+      return { installed: false, skipped: true, reason: 'already in place', destinationPath };
+    }
+    fs.mkdirSync(worklogDir, { recursive: true });
+    fs.copyFileSync(templatePath, destinationPath);
+    if (!options.silent) {
+      console.log(`✓ Provisioned scheduled prompts at ${destinationPath}`);
+    }
+    return { installed: true, skipped: false, destinationPath };
+  } catch (e) {
+    return { installed: false, skipped: true, reason: (e as Error).message, destinationPath };
+  }
 }
 
 function hasWorklogGitignoreSection(content: string): boolean {
@@ -781,12 +721,19 @@ function normalizeContent(content: string): string {
   return content.replace(/\r\n/g, '\n').trimEnd();
 }
 
-function analyzeAgentContent(existingContent: string): { hasPointer: boolean; trimmed: string; eol: string; hasOnlyWhitespace: boolean } {
+function analyzeAgentContent(existingContent: string): { hasGlobalReference: boolean; trimmed: string; eol: string; hasOnlyWhitespace: boolean } {
   const lines = existingContent.split(/\r?\n/);
   const firstNonEmpty = lines.find(line => line.trim().length > 0);
   const eol = existingContent.includes('\r\n') ? '\r\n' : '\n';
   return {
-    hasPointer: firstNonEmpty === WORKLOG_AGENT_POINTER_LINE,
+    // Detect the canonical global-reference structure (template emits
+    // "## Global agent guidance" referencing ~/.pi/agent/AGENTS.md). Also
+    // treat the legacy pointer line as already-referenced so previously
+    // installed projects stay idempotent on re-run.
+    hasGlobalReference:
+      existingContent.includes(CANONICAL_GLOBAL_REFERENCE_MARKER) ||
+      existingContent.includes(CANONICAL_GLOBAL_REFERENCE_LINE) ||
+      firstNonEmpty?.startsWith('Follow the global AGENTS.md') === true,
     trimmed: existingContent.trimEnd(),
     eol,
     hasOnlyWhitespace: firstNonEmpty === undefined
@@ -803,7 +750,7 @@ async function promptAgentTemplateAction(): Promise<AgentTemplateAction> {
       'O - Overwrite the existing AGENTS.md\n' +
       '\tPRO: no chance of a conflict between existing AGENTS.md and the Workflow instructions\n' +
       '\tCON: DESTRUCTIVE to your existing configuration\n\n' +
-      'A - Add a pointer to the global AGENTS.md\n' +
+      'A - Add the global-agents reference above your existing rules\n' +
       '\tPRO: retains your existing instructions and simply adds to them\n' +
       '\tCON: potentially conflicting instructions between the two files\n\n' +
       'M - Manual management, read the docs and set things up as you like\n' +
@@ -839,17 +786,16 @@ async function ensureAgentTemplateInstalled(options: { silent: boolean; action?:
     const templateContent = normalizeContent(fs.readFileSync(templatePath, 'utf-8'));
     if (fs.existsSync(destinationPath)) {
       const existingRaw = fs.readFileSync(destinationPath, 'utf-8');
-      const { hasPointer, trimmed: existingContent, eol, hasOnlyWhitespace } = analyzeAgentContent(existingRaw);
-      if (hasPointer) {
-        return { installed: false, skipped: true, reason: 'pointer already present', templatePath, destinationPath };
+      const { hasGlobalReference, trimmed: existingContent, eol, hasOnlyWhitespace } = analyzeAgentContent(existingRaw);
+      if (hasGlobalReference) {
+        return { installed: false, skipped: true, reason: 'global reference already present', templatePath, destinationPath };
       }
       if (options.action === 'skip') {
         return { installed: false, skipped: true, reason: 'user chose to manage manually', templatePath, destinationPath };
       }
 
       if (options.action === 'overwrite') {
-        const pointerTemplate = `${WORKLOG_AGENT_POINTER_LINE}\n\n${templateContent}`;
-        fs.writeFileSync(destinationPath, `${pointerTemplate}\n`, { encoding: 'utf-8' });
+        fs.writeFileSync(destinationPath, `${templateContent}\n`, { encoding: 'utf-8' });
         if (!options.silent) {
           console.log(`✓ Overwrote AGENTS template at ${destinationPath}`);
         }
@@ -857,14 +803,16 @@ async function ensureAgentTemplateInstalled(options: { silent: boolean; action?:
       }
 
       if (options.action === 'append') {
+        // Prepend the canonical global-reference template above existing
+        // content so project-specific local rules stay below the reference.
         const insertion = hasOnlyWhitespace
-          ? `${WORKLOG_AGENT_POINTER_LINE}${eol}${eol}${templateContent}`
-          : `${WORKLOG_AGENT_POINTER_LINE}${existingContent ? `${eol}${eol}${existingContent}` : ''}`;
+          ? templateContent
+          : `${templateContent}${existingContent ? `${eol}${eol}${existingContent}` : ''}`;
         fs.writeFileSync(destinationPath, `${insertion}${eol}`, { encoding: 'utf-8' });
         if (!options.silent) {
-          console.log(`✓ Updated AGENTS.md with Worklog pointer at ${destinationPath}`);
+          console.log(`✓ Updated AGENTS.md with global-agents reference at ${destinationPath}`);
         }
-        return { installed: true, skipped: false, templatePath, destinationPath, insertedPointer: true };
+        return { installed: true, skipped: false, templatePath, destinationPath, insertedReference: true };
       }
 
       if (options.silent) {
@@ -878,8 +826,7 @@ async function ensureAgentTemplateInstalled(options: { silent: boolean; action?:
       }
 
       if (resolvedAction === 'overwrite') {
-        const pointerTemplate = `${WORKLOG_AGENT_POINTER_LINE}\n\n${templateContent}`;
-        fs.writeFileSync(destinationPath, `${pointerTemplate}\n`, { encoding: 'utf-8' });
+        fs.writeFileSync(destinationPath, `${templateContent}\n`, { encoding: 'utf-8' });
         if (!options.silent) {
           console.log(`✓ Overwrote AGENTS template at ${destinationPath}`);
         }
@@ -887,17 +834,16 @@ async function ensureAgentTemplateInstalled(options: { silent: boolean; action?:
       }
 
       const insertion = hasOnlyWhitespace
-        ? `${WORKLOG_AGENT_POINTER_LINE}${eol}${eol}${templateContent}`
-        : `${WORKLOG_AGENT_POINTER_LINE}${existingContent ? `${eol}${eol}${existingContent}` : ''}`;
+        ? templateContent
+        : `${templateContent}${existingContent ? `${eol}${eol}${existingContent}` : ''}`;
       fs.writeFileSync(destinationPath, `${insertion}${eol}`, { encoding: 'utf-8' });
       if (!options.silent) {
-        console.log(`✓ Updated AGENTS.md with Worklog pointer at ${destinationPath}`);
+        console.log(`✓ Updated AGENTS.md with global-agents reference at ${destinationPath}`);
       }
-      return { installed: true, skipped: false, templatePath, destinationPath, insertedPointer: true };
+      return { installed: true, skipped: false, templatePath, destinationPath, insertedReference: true };
     }
 
-    const pointerTemplate = `${WORKLOG_AGENT_POINTER_LINE}\n\n${templateContent}`;
-    fs.writeFileSync(destinationPath, `${pointerTemplate}\n`, { encoding: 'utf-8' });
+    fs.writeFileSync(destinationPath, `${templateContent}\n`, { encoding: 'utf-8' });
     if (!options.silent) {
       console.log(`✓ Installed AGENTS template at ${destinationPath}`);
     }
@@ -973,7 +919,7 @@ export default function register(ctx: PluginContext): void {
     .option('--prefix <prefix>', 'Issue ID prefix (e.g., WI, PROJ, TASK)')
     .option('--auto-export <yes|no>', 'Auto-export data to JSONL after changes')
     .option('--auto-sync <yes|no>', 'Auto-sync data to git after changes')
-    .option('--agents-template <overwrite|append|skip>', 'What to do when AGENTS.md exists (append inserts the pointer line; omit to prompt)')
+    .option('--agents-template <overwrite|append|skip>', 'What to do when AGENTS.md exists (append inserts the global-agents reference above existing content; omit to prompt)')
     .option('--workflow-inline <yes|no>', 'Inline workflow into AGENTS.md when prompted (omit to prompt interactively)')
     .option('--stats-plugin-overwrite <yes|no>', 'Overwrite existing stats plugin if present (default: no)')
     .action(async (_options: InitOptions) => {
@@ -1031,6 +977,7 @@ export default function register(ctx: PluginContext): void {
             }
           }
           const statsPluginResult = await ensureStatsPluginInstalled({ silent: true, overwrite: normalizedOptions.statsPluginOverwrite });
+          const scheduledPromptsResult = ensureScheduledPromptsInstalled({ silent: true });
           output.json({
             success: true,
             message: 'Configuration already exists',
@@ -1045,7 +992,8 @@ export default function register(ctx: PluginContext): void {
             postPullHooks: postPullResult,
             committedHooks: committedHooksResult,
             agentTemplate: agentTemplateResult,
-            statsPlugin: statsPluginResult
+            statsPlugin: statsPluginResult,
+            scheduledPrompts: scheduledPromptsResult
           });
           return;
         } else {
@@ -1128,10 +1076,10 @@ export default function register(ctx: PluginContext): void {
               silent: false,
               action: normalizedOptions.agentsTemplateAction
             });
-            if (!agentTemplateResult.installed && agentTemplateResult.reason === 'pointer already present') {
-              console.log('AGENTS.md already contains the Worklog pointer.');
+            if (!agentTemplateResult.installed && agentTemplateResult.reason === 'global reference already present') {
+              console.log('AGENTS.md already contains the global-agents reference.');
             }
-            if (!agentTemplateResult.installed && agentTemplateResult.reason && agentTemplateResult.reason !== 'pointer already present') {
+            if (!agentTemplateResult.installed && agentTemplateResult.reason && agentTemplateResult.reason !== 'global reference already present') {
               console.log(`Note: AGENTS template not installed: ${agentTemplateResult.reason}`);
             }
             console.log('');
@@ -1244,8 +1192,8 @@ export default function register(ctx: PluginContext): void {
             // agent template
             if (agentTemplateResult.installed) {
               console.log(' - AGENTS.md: installed');
-            } else if (agentTemplateResult.skipped && agentTemplateResult.reason === 'pointer already present') {
-              console.log(' - AGENTS.md: pointer already present');
+            } else if (agentTemplateResult.skipped && agentTemplateResult.reason === 'global reference already present') {
+              console.log(' - AGENTS.md: global reference already present');
             } else if (agentTemplateResult.skipped) {
               console.log(` - AGENTS.md: skipped${agentTemplateResult.reason ? `: ${agentTemplateResult.reason}` : ''}`);
             }
@@ -1258,6 +1206,15 @@ export default function register(ctx: PluginContext): void {
               console.log(' - Stats plugin: skipped by user');
             } else if (statsPluginResult.skipped) {
               console.log(` - Stats plugin: skipped${statsPluginResult.reason ? `: ${statsPluginResult.reason}` : ''}`);
+            }
+            // scheduled prompts (WL-0MSS1Q5ER007QDKX AC1)
+            const scheduledPromptsResult = ensureScheduledPromptsInstalled({ silent: true });
+            if (scheduledPromptsResult.installed) {
+              console.log(` - Scheduled prompts: provisioned at ${scheduledPromptsResult.destinationPath} (base set: /skill:refactor every 3 days)`);
+            } else if (scheduledPromptsResult.skipped && scheduledPromptsResult.reason === 'already in place') {
+              console.log(' - Scheduled prompts: already in place (not overwritten)');
+            } else if (scheduledPromptsResult.skipped) {
+              console.log(` - Scheduled prompts: skipped${scheduledPromptsResult.reason ? `: ${scheduledPromptsResult.reason}` : ''}`);
             }
 
             console.log('\nNote: `wl init` is idempotent and can safely be run again if any options need to be changed.');
@@ -1307,6 +1264,7 @@ export default function register(ctx: PluginContext): void {
             }
           }
           const statsPluginResult = await ensureStatsPluginInstalled({ silent: true, overwrite: normalizedOptions.statsPluginOverwrite });
+          const scheduledPromptsResult = ensureScheduledPromptsInstalled({ silent: true });
           output.json({
             success: true,
             message: 'Configuration initialized',
@@ -1321,7 +1279,8 @@ export default function register(ctx: PluginContext): void {
             postPullHooks: postPullResult,
             committedHooks: committedHooksResult,
             agentTemplate: agentTemplateResult,
-            statsPlugin: statsPluginResult
+            statsPlugin: statsPluginResult,
+            scheduledPrompts: scheduledPromptsResult
           });
         }
         
@@ -1462,10 +1421,10 @@ export default function register(ctx: PluginContext): void {
             // We no longer print a workflowReport summary; helpers print output
           }
 
-          if (!agentTemplateResult.installed && agentTemplateResult.reason === 'pointer already present') {
-            console.log('AGENTS.md already contains the Worklog pointer.');
+          if (!agentTemplateResult.installed && agentTemplateResult.reason === 'global reference already present') {
+            console.log('AGENTS.md already contains the global-agents reference.');
           }
-          if (!agentTemplateResult.installed && agentTemplateResult.reason && agentTemplateResult.reason !== 'pointer already present') {
+          if (!agentTemplateResult.installed && agentTemplateResult.reason && agentTemplateResult.reason !== 'global reference already present') {
             console.log(`Note: AGENTS template not installed: ${agentTemplateResult.reason}`);
           }
           // Offer to install example stats plugin
@@ -1479,6 +1438,18 @@ export default function register(ctx: PluginContext): void {
             console.log('Stats plugin installation skipped by user.');
           } else if (statsPluginResult.skipped && statsPluginResult.reason) {
             console.log(`Stats plugin: ${statsPluginResult.reason}`);
+          }
+
+          // Scheduled-prompts provisioning (WL-0MSS1Q5ER007QDKX AC1):
+          // create-if-absent — never clobber user edits or lastTriggeredAt
+          // state on re-init.
+          const scheduledPromptsResult = ensureScheduledPromptsInstalled({ silent: false });
+          if (scheduledPromptsResult.installed) {
+            console.log(`✓ Provisioned scheduled prompts at ${scheduledPromptsResult.destinationPath} (base set: /skill:refactor every 3 days)`);
+          } else if (scheduledPromptsResult.skipped && scheduledPromptsResult.reason === 'already in place') {
+            console.log('Scheduled prompts config already present (not overwritten).');
+          } else if (scheduledPromptsResult.skipped && scheduledPromptsResult.reason) {
+            console.log(`Scheduled prompts: ${scheduledPromptsResult.reason}`);
           }
         }
       } catch (error) {

@@ -131,12 +131,60 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     expect(registry.lookupChordEntry(['a', 'a'], 'list')?.workItemTypes).toBeUndefined();
   });
 
-  it('registers the f s sprint chord to return to the default view (WL-0MSGSE15000746F7)', () => {
+  it('registers the f s s sprint chord to return to the default view (WL-0MSGSE15000746F7, WL-0MSKC8T46006999S)', () => {
     const registry = loadShortcutConfig();
-    const entry = registry.lookupChordEntry(['f', 's'], 'list', undefined, false);
+    // The sprint chord moved under the stage axis: `f s s` (previously the
+    // single-key `f s`).
+    const entry = registry.lookupChordEntry(['f', 's', 's'], 'list', undefined, false);
     expect(entry).toBeDefined();
     expect(entry?.command).toBe('/wl');
     expect(entry?.label).toBe('sprint');
+  });
+
+  it('registers the stage-axis filter chords f s i|n|p|r (WL-0MSKC8T46006999S)', () => {
+    const registry = loadShortcutConfig();
+    const expected: Array<[string[], string, string]> = [
+      [['f', 's', 'i'], '/wl idea', 'filter stage idea'],
+      [['f', 's', 'n'], '/wl intake', 'filter stage intake'],
+      [['f', 's', 'p'], '/wl plan', 'filter stage plan'],
+      [['f', 's', 'r'], '/wl review', 'filter stage review'],
+    ];
+    for (const [chord, command, label] of expected) {
+      const entry = registry.lookupChordEntry(chord, 'list', undefined, false);
+      expect(entry).toBeDefined();
+      expect(entry?.command).toBe(command);
+      expect(entry?.label).toBe(label);
+    }
+  });
+
+  it('registers the priority-axis filter chords f p l|m|h|c and the f p s clear chord (WL-0MSKC8T46006999S)', () => {
+    const registry = loadShortcutConfig();
+    const expected: Array<[string[], string, string]> = [
+      [['f', 'p', 'l'], '/wl --priority low', 'filter priority low'],
+      [['f', 'p', 'm'], '/wl --priority medium', 'filter priority medium'],
+      [['f', 'p', 'h'], '/wl --priority high', 'filter priority high'],
+      [['f', 'p', 'c'], '/wl --priority critical', 'filter priority critical'],
+      [['f', 'p', 's'], '/wl', 'clear priority'],
+    ];
+    for (const [chord, command, label] of expected) {
+      const entry = registry.lookupChordEntry(chord, 'list', undefined, false);
+      expect(entry).toBeDefined();
+      expect(entry?.command).toBe(command);
+      expect(entry?.label).toBe(label);
+    }
+  });
+
+  it('no longer registers the old single-key stage filter chords (f i, f n, f p, f r) or the single f s sprint chord (WL-0MSKC8T46006999S)', () => {
+    const registry = loadShortcutConfig();
+    // The old single-key stage chords must NOT resolve — `f i`/`f n`/`f p`/
+    // `f r` previously filtered by stage, and `f s` was the sprint chord.
+    // `f s` and `f p` are now pure chord prefixes (axis leaders).
+    for (const chord of [['f', 'i'], ['f', 'n'], ['f', 'p'], ['f', 'r'], ['f', 's']]) {
+      expect(registry.lookupChordEntry(chord, 'list', undefined, false)).toBeUndefined();
+    }
+    // The axis leaders are still valid prefixes for the new scheme.
+    expect(registry.getChordByPrefix(['f', 's'], 'list', undefined, false).length).toBe(5);
+    expect(registry.getChordByPrefix(['f', 'p'], 'list', undefined, false).length).toBe(5);
   });
 
   it('registers the S ship-it chord to /skill:ship release (WL-0MSGG5N5Z0074TLY)', () => {
@@ -160,6 +208,141 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     const registry = loadShortcutConfig();
     expect(registry.lookupChordEntry(['S'], 'list', undefined, true)).toBeDefined();
     expect(registry.getEntriesForStage(undefined, true).some(e => e.chord[0] === 'S')).toBe(true);
+  });
+
+  it('marks the quiet state-change shortcuts with open_pane false (WL-0MSJLD1I70045ZUL)', () => {
+    const registry = loadShortcutConfig();
+    // Chords deliberately configured to run in the background (no pane):
+    // audit approve/reject, priority updates, close/delete. Every other
+    // bundled shortcut omits the flag (default opens a pane).
+    const expectedNoPane = new Set([
+      'a,y', // audit approve
+      'a,r', // audit reject
+      'u,p,l', // update priority low
+      'u,p,m', // update priority medium
+      'u,p,h', // update priority high
+      'u,p,c', // update priority critical
+      'x,c', // close done
+      'x,d', // close deleted
+    ]);
+    const noPane: string[] = [];
+    for (const entry of registry.getEntries()) {
+      const key = entry.chord.join(',');
+      if (entry.openPane === false) noPane.push(key);
+    }
+    expect(new Set(noPane)).toEqual(expectedNoPane);
+  });
+
+  it('verifies the a-y audit-approve command text (WL-0MSJLD1I70045ZUL)', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['a', 'y'], 'list');
+    expect(entry?.openPane).toBe(false);
+    expect(entry?.command).toBe(
+      "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
+    );
+  });
+
+  it('a-r (audit reject) resets status/stage/priority on reject (WL-0MSM72QXN008GUP2)', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['a', 'r'], 'list', undefined, false);
+    expect(entry).toBeDefined();
+    expect(entry?.command).toContain('wl reviewed <id> false');
+    expect(entry?.command).toContain('wl update <id> --status open --stage plan_complete --priority medium');
+    expect(entry?.command).toContain("wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'");
+    expect(entry?.label).toBe('audit reject');
+    expect(entry?.stages).toEqual(['in_review']);
+  });
+
+  it('a-y (audit approve) and a-r (audit reject) differ only in the audit-set flag (WL-0MSM72QXN008GUP2)', () => {
+    const registry = loadShortcutConfig();
+    const approve = registry.lookupChordEntry(['a', 'y'], 'list', undefined, false);
+    const reject = registry.lookupChordEntry(['a', 'r'], 'list', undefined, false);
+    // Both share the reviewed reset + audit-set chain.
+    expect(approve?.command).toContain('wl reviewed <id> false');
+    expect(reject?.command).toContain('wl reviewed <id> false');
+    // Approve sets ready-to-close yes; reject sets it no plus the reset.
+    expect(approve?.command).toContain('--ready-to-close yes');
+    expect(reject?.command).toContain('--ready-to-close no');
+    expect(reject?.command).toContain('--status open --stage plan_complete --priority medium');
+  });
+
+  it('registers the d downtime-toggle chord to /downtime toggle (WL-0MSZ4NSOE007AQEF)', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['d'], 'list', undefined, false);
+    expect(entry).toBeDefined();
+    expect(entry?.command).toBe('/downtime toggle');
+    expect(entry?.label).toBe('downtime toggle');
+    expect(entry?.view).toBe('both');
+    // Visible in both list and detail views.
+    expect(registry.lookupChordEntry(['d'], 'detail', undefined, false)).toBeDefined();
+  });
+});
+
+// ── parseShortcutEntry ───────────────────────────────────────────────────
+
+describe('parseShortcutEntry — open_pane field (WL-0MSJLD1I70045ZUL)', () => {
+  it('parses open_pane: false', () => {
+    const entry = parseShortcutEntry({
+      chord: ['a', 'y'],
+      command: '!!wl reviewed <id> false',
+      view: 'both',
+      open_pane: false,
+    });
+    expect(entry?.openPane).toBe(false);
+  });
+
+  it('parses open_pane: true', () => {
+    const entry = parseShortcutEntry({
+      chord: ['a', 'a'],
+      command: '/skill:audit <id>',
+      view: 'both',
+      open_pane: true,
+    });
+    expect(entry?.openPane).toBe(true);
+  });
+
+  it('treats a missing open_pane as omit (backward compatible — pane opens)', () => {
+    const entry = parseShortcutEntry({
+      chord: ['s'],
+      command: '!!wl search <search_term>',
+      view: 'both',
+    });
+    expect(entry?.openPane).toBeUndefined();
+  });
+
+  it('logs and treats an invalid open_pane as omit', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const cases: unknown[] = ['sometimes', 0, 1, null, [], {}];
+    for (const bad of cases) {
+      const entry = parseShortcutEntry({
+        chord: ['x'],
+        command: '!!wl close <id>',
+        view: 'both',
+        open_pane: bad,
+      });
+      expect(entry?.openPane).toBeUndefined();
+    }
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('keeps other fields intact when open_pane is present', () => {
+    const entry = parseShortcutEntry({
+      chord: ['a', 'y'],
+      command: '!!wl reviewed <id> false',
+      view: 'both',
+      model: 'plan',
+      code_freeze: 'allow',
+      open_pane: false,
+    });
+    expect(entry).toMatchObject({
+      chord: ['a', 'y'],
+      command: '!!wl reviewed <id> false',
+      view: 'both',
+      model: 'plan',
+      codeFreeze: 'allow',
+      openPane: false,
+    });
   });
 });
 

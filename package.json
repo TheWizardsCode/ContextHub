@@ -26,6 +26,8 @@
     "benchmark:sort-index": "tsx scripts/benchmark-sort-index.ts",
     "benchmark:wl-next": "tsx bench/wl-next-perf.ts",
     "benchmark:wl-next:json": "tsx bench/wl-next-perf.ts --json",
+    "install": "npm run install:plugin && npm run install:pi-extension",
+    "install:plugin": "bash ./scripts/install-herdr.sh",
     "install:pi-extension": "bash ./scripts/install-pi-extension.sh"
   },
   "keywords": [

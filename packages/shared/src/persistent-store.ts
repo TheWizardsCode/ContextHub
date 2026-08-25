@@ -48,6 +48,22 @@ interface DbMetadata {
   schemaVersion: number;
 }
 
+/**
+ * Per-record-type last-export timestamps used for delta-aware export
+ * (WL-0MT2KWFUJ001OGHF / WL-0MSAKUBKW006FN8Q).
+ *
+ * Records whose `updatedAt` (or `createdAt` for comments) is strictly greater
+ * than the corresponding timestamp are considered dirty and eligible for a
+ * delta (incremental) export. An absent/missing type timestamp means "no
+ * baseline" → treat all records of that type as dirty (full export).
+ */
+export interface LastExportTimestamps {
+  workitems?: string; // ISO 8601 — items changed after this are dirty
+  comments?: string;  // ISO 8601 — comments created after this are dirty
+  edges?: string;     // ISO 8601 — dependency edges created after this are dirty
+  audit_results?: string; // ISO 8601 — audit results after this are dirty
+}
+
 const SCHEMA_VERSION = 8;
 
 // ── In-memory cache types (Phase 5) ────────────────────────────────
@@ -350,6 +366,17 @@ export class SqlitePersistentStore {
       )
     `);
 
+    // Create last_export_timestamps table for tracking per-record-type
+    // last-export watermarks used by delta (incremental) sync
+    // (WL-0MT2KWFUJ001OGHF / WL-0MSAKUBKW006FN8Q). Only the four known
+    // record types are stored; each holds a single ISO-8601 watermark.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS last_export_timestamps (
+        record_type TEXT PRIMARY KEY,
+        exported_at TEXT NOT NULL
+      )
+    `);
+
     // Create indexes for common queries
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_workitems_status ON workitems(status);
@@ -403,6 +430,80 @@ export class SqlitePersistentStore {
       lastJsonlImportAt,
       lastJsonlImportMtime,
     };
+  }
+
+  /**
+   * Read the per-record-type last-export watermarks used by delta (incremental)
+   * sync (WL-0MT2KWFUJ001OGHF). Returns an object with the watermark timestamp
+   * for each record type that has one; absent types are `undefined` (treated as
+   * "no baseline" → full export by the caller).
+   */
+  getLastExportTimestamps(): LastExportTimestamps {
+    const stmt = this.db.prepare('SELECT record_type, exported_at FROM last_export_timestamps');
+    const rows = stmt.all() as Array<{ record_type: string; exported_at: string }>;
+    const out: LastExportTimestamps = {};
+    for (const row of rows) {
+      if (row.record_type === 'workitems') out.workitems = row.exported_at;
+      else if (row.record_type === 'comments') out.comments = row.exported_at;
+      else if (row.record_type === 'edges') out.edges = row.exported_at;
+      else if (row.record_type === 'audit_results') out.audit_results = row.exported_at;
+    }
+    return out;
+  }
+
+  /**
+   * Upsert the per-record-type last-export watermarks. Passing `undefined` for
+   * a type leaves that type's existing watermark untouched (or absent if never
+   * set).
+   */
+  setLastExportTimestamps(ts: LastExportTimestamps): void {
+    const upsert = this.db.prepare(
+      'INSERT OR REPLACE INTO last_export_timestamps (record_type, exported_at) VALUES (?, ?)'
+    );
+    if (ts.workitems !== undefined) upsert.run('workitems', ts.workitems);
+    if (ts.comments !== undefined) upsert.run('comments', ts.comments);
+    if (ts.edges !== undefined) upsert.run('edges', ts.edges);
+    if (ts.audit_results !== undefined) upsert.run('audit_results', ts.audit_results);
+  }
+
+  /**
+   * Delta-sync cadence metadata (WL-0MT2KY0RQ008F50Q / WL-0MSAKUBKW006FN8Q),
+   * persisted by the push path after each successful delta/full sync:
+   *   - `deltaSyncCount` — number of consecutive delta syncs since the last
+   *     full snapshot (full snapshots reset it to 0).
+   *   - `deltaBytes`     — accumulated JSONL bytes pushed since the last full
+   *     snapshot.
+   *
+   * Stored as dedicated rows in `last_export_timestamps` (special record
+   * types `__delta_count__` / `__delta_bytes__`); the watermark reader
+   * (`getLastExportTimestamps`) ignores these rows, so they never collide
+   * with per-type watermarks. When no full-snapshot cadence policy is in
+   * place the rows simply never appear and the default (0, 0) is returned.
+   */
+  getDeltaSyncMetadata(): { deltaSyncCount: number; deltaBytes: number } {
+    const stmt = this.db.prepare('SELECT record_type, exported_at FROM last_export_timestamps WHERE record_type IN (?, ?)');
+    const rows = stmt.all('__delta_count__', '__delta_bytes__') as Array<{ record_type: string; exported_at: string }>;
+    let deltaSyncCount = 0;
+    let deltaBytes = 0;
+    for (const row of rows) {
+      const parsed = Number(row.exported_at);
+      if (Number.isFinite(parsed)) {
+        if (row.record_type === '__delta_count__') deltaSyncCount = parsed;
+        else deltaBytes = parsed;
+      }
+    }
+    return { deltaSyncCount, deltaBytes };
+  }
+
+  /**
+   * Persist the delta-sync cadence metadata ({@link getDeltaSyncMetadata}).
+   */
+  setDeltaSyncMetadata(deltaSyncCount: number, deltaBytes: number): void {
+    const upsert = this.db.prepare(
+      'INSERT OR REPLACE INTO last_export_timestamps (record_type, exported_at) VALUES (?, ?)'
+    );
+    upsert.run('__delta_count__', String(deltaSyncCount));
+    upsert.run('__delta_bytes__', String(deltaBytes));
   }
 
   /**
@@ -866,6 +967,8 @@ export class SqlitePersistentStore {
    */
   clearWorkItems(): void {
     this.db.prepare('DELETE FROM workitems').run();
+    // Also clear FTS entries to avoid stale results after import
+    this.db.prepare('DELETE FROM worklog_fts').run();
     this.invalidateWorkItemCaches();
     this.invalidateCommentCaches();
     this.invalidateDependencyEdgeCaches();
@@ -965,6 +1068,10 @@ export class SqlitePersistentStore {
    */
   clearComments(): void {
     this.db.prepare('DELETE FROM comments').run();
+    // Clear all FTS entries — comments are embedded in item FTS rows,
+    // so without a full rebuild we'd have stale comment data. The caller
+    // (e.g. importComments) re-upserts FTS entries after this.
+    this.db.prepare('DELETE FROM worklog_fts').run();
     this.invalidateCommentCaches();
   }
 
@@ -1519,9 +1626,13 @@ export class SqlitePersistentStore {
       }
 
       return results;
-    } catch (_err) {
-      // If the query syntax is invalid, return empty results
-      return [];
+    } catch (err) {
+      // Never swallow FTS5 failures silently — the caller (WorklogDatabase.search)
+      // classifies them: FTS5 syntax errors (e.g. unquoted punctuated terms like
+      // `v0.1.11`, `path/to/file`) trigger an auto-quoted phrase retry, and only
+      // when that also fails is the error surfaced to the user.
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(message);
     }
   }
 

@@ -3,7 +3,7 @@
 #
 # Covers the parse-and-rename wiring with a mock herdr CLI:
 #   - happy path: pane opened, tab_id parsed from the pane-open JSON,
-#     tab renamed to "Podcast Editing"
+#     tab renamed to "Worklog"
 #   - herdr CLI unavailable → clear error, non-zero exit
 #   - unparseable tab_id → clear error, non-zero exit, rename never called
 #   - `plugin pane open` failure → clear error, non-zero exit
@@ -144,14 +144,14 @@ else
   echo "  log: $(cat "$HERDR_LOG" 2>/dev/null)"
 fi
 
-if grep -q 'tab rename w9:tPE Podcast Editing' "$HERDR_LOG" 2>/dev/null; then
-  pass "tab renamed to 'Podcast Editing' with the parsed tab_id"
+if grep -q 'tab rename w9:tPE Worklog' "$HERDR_LOG" 2>/dev/null; then
+  pass "tab renamed to 'Worklog' with the parsed tab_id"
 else
-  fail "tab rename command missing or wrong (expected 'tab rename w9:tPE Podcast Editing')"
+  fail "tab rename command missing or wrong (expected 'tab rename w9:tPE Worklog')"
   echo "  log: $(cat "$HERDR_LOG" 2>/dev/null)"
 fi
 
-if echo "$out" | grep -q 'Opened podcast editing tab'; then
+if echo "$out" | grep -q 'Opened worklog tab'; then
   pass "success message printed"
 else
   fail "success message missing"

@@ -22,7 +22,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { WorklogDatabase } from './database.js';
-import { WorkItem } from './types.js';
+import { WorkItem, Comment } from './types.js';
 
 const FIXED_TS = '2026-01-01T00:00:00.000Z';
 
@@ -267,5 +267,289 @@ describe('upsertItems() no-op guard (WL-0MSORD6HC005QVZX)', () => {
     const stored = db.get(original.id);
     expect(stored?.description).toBe('new content');
     expect(stored?.updatedAt).not.toBe(FIXED_TS);
+  });
+});
+
+// ── WL-0MSN6ZCTN0027U2R: needsProducerReview flag flips must not bump updatedAt ──
+
+describe('update() needsProducerReview flag-only does not bump updatedAt (WL-0MSN6ZCTN0027U2R)', () => {
+  function seed(): WorkItem {
+    const item = makeItem({ id: 'WI-NPR1', title: 'Flag test', description: 'has content', needsProducerReview: false });
+    db.import([item]);
+    return item;
+  }
+
+  it('flips needsProducerReview true but preserves updatedAt', () => {
+    const seeded = seed();
+    const updated = db.update(seeded.id, { needsProducerReview: true });
+    expect(updated?.needsProducerReview).toBe(true);
+    expect(updated?.updatedAt).toBe(FIXED_TS);
+    // Verify the change is persisted to the database.
+    expect(db.get(seeded.id)?.needsProducerReview).toBe(true);
+    expect(db.get(seeded.id)?.updatedAt).toBe(FIXED_TS);
+  });
+
+  it('flips needsProducerReview false but preserves updatedAt', () => {
+    const seeded = seed();
+    // Flip to true first so we can flip back.
+    db.update(seeded.id, { needsProducerReview: true });
+    const updated = db.update(seeded.id, { needsProducerReview: false });
+    expect(updated?.needsProducerReview).toBe(false);
+    expect(updated?.updatedAt).toBe(FIXED_TS);
+    expect(db.get(seeded.id)?.needsProducerReview).toBe(false);
+  });
+
+  it('content field + needsProducerReview flag bumps updatedAt (combined update)', () => {
+    const seeded = seed();
+    const updated = db.update(seeded.id, { title: 'Updated title', needsProducerReview: true });
+    expect(updated?.title).toBe('Updated title');
+    expect(updated?.needsProducerReview).toBe(true);
+    expect(updated?.updatedAt).not.toBe(FIXED_TS);
+    expect(db.get(seeded.id)?.updatedAt).not.toBe(FIXED_TS);
+  });
+
+  it('no-op update (needsProducerReview already true) preserves updatedAt', () => {
+    const seeded = seed();
+    db.update(seeded.id, { needsProducerReview: true });
+    const updated = db.update(seeded.id, { needsProducerReview: true });
+    expect(updated?.updatedAt).toBe(FIXED_TS);
+  });
+
+  it('no-op update (needsProducerReview already false) preserves updatedAt', () => {
+    const seeded = seed();
+    const updated = db.update(seeded.id, { needsProducerReview: false });
+    expect(updated?.updatedAt).toBe(FIXED_TS);
+  });
+
+  it('content-only update still bumps updatedAt (regression)', () => {
+    const seeded = seed();
+    const updated = db.update(seeded.id, { title: 'New title' });
+    expect(updated?.title).toBe('New title');
+    expect(updated?.updatedAt).not.toBe(FIXED_TS);
+  });
+});
+
+// ── WL-0MT3FLZJ20076X9B: riskOrdinal / effortOrdinal verbose matching ──
+
+describe('riskOrdinal handles verbose agent-produced descriptions (WL-0MT3FLZJ20076X9B)', () => {
+  // Access private method via any-cast (consistent with the test file's pattern).
+  // db is (re)initialized per-test in the top-level beforeEach; grab it lazily.
+  function ordinal(): any {
+    return (db as any).riskOrdinal.bind(db);
+  }
+
+  it('recognises plain risk levels', () => {
+    const o = ordinal();
+    expect(o('low')).toBe(1);
+    expect(o('medium')).toBe(2);
+    expect(o('high')).toBe(3);
+    expect(o('severe')).toBe(4);
+    expect(o('critical')).toBe(4);
+  });
+
+  it('recognises verbose risk descriptions with em-dash', () => {
+    const o = ordinal();
+    expect(o('Medium — NVIDIA driver changes can affect GPU functionality')).toBe(2);
+    expect(o('High — Critical security vulnerability in authentication module')).toBe(3);
+    expect(o('Low — Minor cosmetic issue in settings page')).toBe(1);
+  });
+
+  it('recognises verbose risk with en-dash and colon', () => {
+    const o = ordinal();
+    expect(o('Severe — System stability impact')).toBe(4);
+    expect(o('Critical: Data loss possible')).toBe(4);
+  });
+
+  it('handles case-insensitive matching', () => {
+    const o = ordinal();
+    expect(o('MEDIUM')).toBe(2);
+    expect(o('Medium — test')).toBe(2);
+    expect(o(' mEdIuM ')).toBe(2);
+  });
+
+  it('returns null for unknown / unset values (fail-closed)', () => {
+    const o = ordinal();
+    expect(o(null)).toBe(null);
+    expect(o(undefined)).toBe(null);
+    expect(o('')).toBe(null);
+    expect(o('unknown')).toBe(null);
+    expect(o('Medium — ')).toBe(2); // keyword still extracted
+  });
+});
+
+describe('effortOrdinal handles verbose agent-produced descriptions (WL-0MT3FLZJ20076X9B)', () => {
+  function ordinal(): any {
+    return (db as any).effortOrdinal.bind(db);
+  }
+
+  it('recognises plain effort levels and short spellings', () => {
+    const o = ordinal();
+    expect(o('xs')).toBe(1);
+    expect(o('s')).toBe(2);
+    expect(o('m')).toBe(3);
+    expect(o('l')).toBe(4);
+    expect(o('xl')).toBe(5);
+    expect(o('extra small')).toBe(1);
+    expect(o('small')).toBe(2);
+    expect(o('medium')).toBe(3);
+    expect(o('large')).toBe(4);
+    expect(o('extra large')).toBe(5);
+  });
+
+  it('recognises verbose effort descriptions with word-boundary fallback', () => {
+    const o = ordinal();
+    expect(o('1–4 hours — Small. Diagnostic investigation')).toBe(2);
+    expect(o('2–6 hours — Medium. Refactoring needed')).toBe(3);
+    expect(o('1–2 days — Large. Major rewrite')).toBe(4);
+    expect(o('2–6 hours — Small. Diagnostic')).toBe(2);
+  });
+
+  it('short spellings work in verbose strings', () => {
+    const o = ordinal();
+    expect(o('1–4 hours — S. Small task')).toBe(2);
+    expect(o('Quick — M. Medium complexity')).toBe(3);
+  });
+
+  it('long forms still work (regression)', () => {
+    const o = ordinal();
+    expect(o('Extra Small')).toBe(1);
+    expect(o('extra small')).toBe(1);
+    expect(o('Extra Large')).toBe(5);
+    expect(o('extra large')).toBe(5);
+  });
+
+  it('handles case-insensitive matching', () => {
+    const o = ordinal();
+    expect(o('MEDIUM')).toBe(3);
+    expect(o('Small — test')).toBe(2);
+    expect(o(' XL ')).toBe(5);
+  });
+
+  it('returns null for unknown / unset values (fail-closed)', () => {
+    const o = ordinal();
+    expect(o(null)).toBe(null);
+    expect(o(undefined)).toBe(null);
+    expect(o('')).toBe(null);
+    expect(o('unknown')).toBe(null);
+  });
+});
+
+describe('matchesRiskEffort filters correctly with verbose descriptions (WL-0MT3FLZJ20076X9B)', () => {
+  function matches(): any {
+    return (db as any).matchesRiskEffort.bind(db);
+  }
+  // The item fields below intentionally carry lowercase/verbose/unknown
+  // VALUES (test-data realism): worklog items store raw strings and
+  // `matchesRiskEffort` normalizes them. `Partial<WorkItem>` types risk/
+  // effort as the Capitalized unions, so widen the helper's accepted
+  // fields and delegate via an explicit cast (build-greening fix,
+  // WL-0MT4TBXMB00SKZZZ — keeps the runtime assertions untouched).
+  function item(
+    overrides: Omit<Partial<WorkItem>, 'risk' | 'effort'> & { risk?: string; effort?: string } = {},
+  ): WorkItem {
+    return makeFactoryItem(overrides as Partial<WorkItem>);
+  }
+
+  it('at-most medium risk filter accepts plain medium and verbose medium', () => {
+    const m = matches();
+    expect(m(item({ risk: 'medium' }), 'medium', undefined)).toBe(true);
+    expect(m(item({ risk: 'Medium — something' }), 'medium', undefined)).toBe(true);
+    expect(m(item({ risk: 'low' }), 'medium', undefined)).toBe(true);
+  });
+
+  it('at-most medium risk filter rejects high / severe risk', () => {
+    const m = matches();
+    expect(m(item({ risk: 'high' }), 'medium', undefined)).toBe(false);
+    expect(m(item({ risk: 'Severe — stability' }), 'medium', undefined)).toBe(false);
+    expect(m(item({ risk: 'Critical: data loss' }), 'medium', undefined)).toBe(false);
+  });
+
+  it('at-most medium effort filter accepts plain small and verbose small', () => {
+    const m = matches();
+    expect(m(item({ effort: 'small' }), undefined, 'medium')).toBe(true);
+    expect(m(item({ effort: '1–4 hours — Small. Investigation' }), undefined, 'medium')).toBe(true);
+    expect(m(item({ effort: 'extra small' }), undefined, 'medium')).toBe(true);
+  });
+
+  it('at-most small effort filter rejects medium / large effort', () => {
+    const m = matches();
+    expect(m(item({ effort: 'medium' }), undefined, 'small')).toBe(false);
+    expect(m(item({ effort: 'Large. Major rewrite' }), undefined, 'small')).toBe(false);
+  });
+
+  it('both filters applied together work correctly', () => {
+    const m = matches();
+    expect(m(item({ risk: 'Medium — something', effort: 'Small — quick fix' }), 'medium', 'medium')).toBe(true);
+    expect(m(item({ risk: 'High', effort: 'Small' }), 'medium', 'medium')).toBe(false);
+    expect(m(item({ risk: 'Medium', effort: 'Large' }), 'medium', 'medium')).toBe(false);
+  });
+
+  it('unknown risk / effort on item causes fail-closed', () => {
+    const m = matches();
+    expect(m(item({ risk: 'unknown', effort: 'medium' }), 'medium', 'medium')).toBe(false);
+    expect(m(item({ risk: 'medium', effort: 'unknown' }), 'medium', 'medium')).toBe(false);
+  });
+});
+
+// Helper to build items for matchesRiskEffort tests (avoids circular dependency with makeItem).
+function makeFactoryItem(overrides: Partial<WorkItem> = {}): WorkItem {
+  return {
+    id: 'WI-0001',
+    title: 'Test item',
+    description: 'Test description',
+    status: 'open',
+    priority: 'medium',
+    sortIndex: 0,
+    parentId: null,
+    createdAt: FIXED_TS,
+    updatedAt: FIXED_TS,
+    tags: [],
+    assignee: '',
+    stage: 'idea',
+    issueType: 'bug',
+    createdBy: '',
+    deletedBy: '',
+    deleteReason: '',
+    risk: '',
+    effort: '',
+    needsProducerReview: false,
+    ...overrides,
+  };
+}
+
+// ── WL-0MT2KYCNB000CYWV: delta pull persists COMMENTS non-destructively ──
+
+describe('upsertComments() non-destructive merge (WL-0MT2KYCNB000CYWV)', () => {
+  function makeComment(id: string, itemId: string, text: string): Comment {
+    return {
+      id,
+      workItemId: itemId,
+      author: 'test@example.com',
+      comment: text,
+      createdAt: FIXED_TS,
+      references: [],
+    };
+  }
+
+  it('keeps local comments absent from the incoming delta and adds new ones', () => {
+    // Comments carry a FOREIGN KEY to a work item — seed both items first.
+    db.import([makeItem({ id: 'WI-0001' }), makeItem({ id: 'WI-0002' })]);
+    const localComment = makeComment('C-1', 'WI-0001', 'local comment');
+    db.importComments([localComment]);
+
+    // A delta arrives containing an overlap (C-1 updated) and a brand-new
+    // comment for a different item—but NOT a comment the local store has.
+    db.upsertComments([
+      { ...localComment, comment: 'local comment updated by remote' },
+      makeComment('C-3', 'WI-0002', 'new remote comment'),
+    ]);
+
+    const all = db.getAllComments();
+    // Non-destructive: C-1 kept (converged to the remote value); C-3 added.
+    expect(all.some(c => c.id === 'C-1' && c.comment === 'local comment updated by remote')).toBe(true);
+    expect(all.some(c => c.id === 'C-3' && c.workItemId === 'WI-0002')).toBe(true);
+    // No duplicates after the overlap upsert (INSERT OR REPLACE by id).
+    expect(all.filter(c => c.id === 'C-1').length).toBe(1);
+    expect(all.some(c => c.id === 'C-2')).toBe(false);
   });
 });

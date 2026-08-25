@@ -105,7 +105,7 @@ describe('ShortcutRegistry', () => {
         { chord: ['x', 'd'], command: '!!wl delete <id>', view: 'both', label: 'close deleted' },
         { chord: ['a', 'a'], command: '/skill:audit <id>', view: 'both', label: 'audit automatic', stages: ['in_review'] },
         { chord: ['a', 'y'], command: "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'", view: 'both', label: 'audit approve', stages: ['in_review'] },
-        { chord: ['a', 'r'], command: "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'", view: 'both', label: 'audit reject', stages: ['in_review'] },
+        { chord: ['a', 'r'], command: "!!wl reviewed <id> false && wl update <id> --status open --stage plan_complete --priority medium && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'", view: 'both', label: 'audit reject', stages: ['in_review'] },
       ];
     });
 
@@ -704,7 +704,7 @@ describe('dispatchChordCommand', () => {
     const items = [makeWorkItem('WL-001')];
     const templates = [
       ["!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'", "!!wl reviewed WL-001 false && wl audit-set WL-001 --ready-to-close yes --summary 'Approved by manual review'"],
-      ["!!wl reviewed <id> false && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'", "!!wl reviewed WL-001 false && wl audit-set WL-001 --ready-to-close no --summary 'Rejected by manual review. <reason>'"],
+      ["!!wl reviewed <id> false && wl update <id> --status open --stage plan_complete --priority medium && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'", "!!wl reviewed WL-001 false && wl update WL-001 --status open --stage plan_complete --priority medium && wl audit-set WL-001 --ready-to-close no --summary 'Rejected by manual review. <reason>'"],
     ] as const;
     for (const [template, expected] of templates) {
       const commands: string[] = [];

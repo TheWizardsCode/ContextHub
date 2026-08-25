@@ -261,6 +261,77 @@ The planned ContextHub Rust migration should follow the same protocol.
 The TypeScript equivalent (if needed) would use `net.Socket` or equivalent
 for Unix socket communication.
 
+## Inbound event subscription (events.subscribe)
+
+The outbound reporting protocol above is complemented by an **inbound**
+event subscription (herdr ≥ 0.7.5, WL-0MSHB7DHO004RHBJ): the worklist
+plugin keeps a long-lived JSON-RPC connection to the same Unix socket and
+receives window/agent events pushed by herdr. Events drive the per-item
+agent-status icons and pane focus/visibility gating **immediately**, keeping
+polling (`herdr agent list` / `herdr tab get`) only as a fail-open fallback.
+
+### Subscription request
+
+`events.subscribe` accepts an array of subscriptions; multiple subscriptions
+in one call are supported:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "sub-1",
+  "method": "events.subscribe",
+  "params": {
+    "subscriptions": [
+      { "type": "pane.focused" },
+      { "type": "pane.agent_detected" },
+      { "type": "pane.closed" },
+      { "type": "pane.exited" },
+      { "type": "pane.agent_status_changed", "pane_id": "w1:p41" }
+    ]
+  }
+}
+```
+
+- `pane.focused`, `pane.agent_detected`, `pane.closed`, `pane.exited` are
+  **global** (no `pane_id`).
+- `pane.agent_status_changed` **requires** a `pane_id` — per-pane
+  subscriptions are (re)created as tracked panes appear/close. Multiple
+  subscriptions in one `events.subscribe` call work.
+- Successful subscription replies `{ "result": { "type":
+  "subscription_started" } }`.
+
+### Pushed event frames
+
+Events are pushed as newline-delimited frames:
+
+```json
+{"data": { "pane_id": "w1:p41", "agent_status": "working" }, "event": "pane_agent_status_changed"}
+{"data": { "pane_id": "w1:p41" }, "event": "pane_focused"}
+{"data": { "pane_id": "w1:p99" }, "event": "pane_agent_detected"}
+{"data": { "pane_id": "w1:p41" }, "event": "pane_closed"}
+{"data": { "pane_id": "w1:p41" }, "event": "pane_exited"}
+```
+
+Event types include `pane_agent_status_changed`, `pane_focused`,
+`pane_agent_detected`, `pane_created`, `pane_closed`, `pane_exited`,
+`pane_output_changed`, `pane_updated`, `tab_focused`, `workspace_focused`.
+
+### Subscriber lifecycle
+
+- The subscriber (`packages/herdr/src/events.ts`) connects at plugin start,
+  reconnects with exponential backoff (500ms base, capped at 10s) on socket
+  errors, and closes/unsubscribes on TUI exit (no leaked connections).
+- Per-pane subscriptions are synced from the shared
+  `.worklog/agent-panes.json` pane set and updated on `pane_agent_detected`
+  (add) and `pane_closed`/`pane_exited` (drop).
+- **Session scope (limitation):** events are scoped to the herdr **session**
+  the client attaches to. Multiple herdr instances attached to the same
+  session share events (covers the multi-instance requirement); a project
+  split across **different** sessions does not share events.
+- **Fail-open:** an unreachable socket / older herdr (pre-0.7.5) / transient
+  reconnect keeps today's polling (`herdr agent list`, `herdr tab get`);
+  socket errors never crash the TUI.
+
 ## Related
 
 - Reference Rust implementation: `herdr.rs` in `herdr-podcast-editor`

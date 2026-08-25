@@ -4,6 +4,7 @@
 
 import { WorkItem, Comment, ConflictDetail, ConflictFieldDetail, DependencyEdge, AuditResult } from './types.js';
 import { isDefaultValue, stableValueKey, stableItemKey, mergeTags } from './sync/merge-utils.js';
+import { importFromJsonlContent } from './jsonl.js';
 import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -526,7 +527,26 @@ function mergeSameTimestampItems(
     // When one version has a close and the other has a different non-close status/stage,
     // prefer the close values. This prevents an unrelated field change on a different
     // client from silently reverting a close operation.
+    //
+    // DELETION PROPAGATION (WL-0MT2KZH0I005XUWE §4.3/AC2): at equal timestamps a
+    // `deleted` status wins deterministically over any non-deleted value (including a
+    // close) — deletion is terminal intent, and the same-timestamp strategy must not
+    // resurrect a soft-deleted record (AC3 remote/local convergence).
     if (field === 'status') {
+      if (localValue === 'deleted' || remoteValue === 'deleted') {
+        const chosenValue = localValue === 'deleted' ? localValue : remoteValue;
+        (merged as any)[field] = chosenValue;
+        mergedFields.push(`${field} (deleted preserved)`);
+        fieldDetails.push({
+          field,
+          localValue,
+          remoteValue,
+          chosenValue,
+          chosenSource: chosenValue === localValue ? 'local' : 'remote',
+          reason: 'soft delete is terminal and wins at equal timestamps'
+        });
+        continue;
+      }
       const localIsClose = localValue === 'completed' && (isTerminalStage(localItem.stage) || isTerminalStage(remoteItem.stage));
       const remoteIsClose = remoteValue === 'completed' && (isTerminalStage(remoteItem.stage) || isTerminalStage(localItem.stage));
       if (localIsClose && !remoteIsClose) {
@@ -717,7 +737,39 @@ function mergeDifferentTimestampItems(
       // In mergeDifferentTimestampItems, close-preservation for the REMOTE side is
       // only applied when isRemoteNewer is true. If local is newer, the local intent
       // (e.g., reopening a closed item) is respected rather than the remote close.
+      //
+      // DELETION PROPAGATION (WL-0MT2KZH0I005XUWE §4.3/AC2): `deleted` is TERMINAL
+      // intent and must never be blocked by close-preservation — deleting a
+      // completed/in_review item (the delete command preserves the stage) would
+      // otherwise never converge to the remote. When the NEWER side is `deleted`, its
+      // status always wins; the newer timestamp already reflects the deletion time.
       if (field === 'status') {
+        if (remoteValue === 'deleted' && isRemoteNewer) {
+          (merged as any)[field] = remoteValue;
+          mergedFields.push(`${field} (deleted from remote)`);
+          fieldDetails.push({
+            field,
+            localValue,
+            remoteValue,
+            chosenValue: remoteValue,
+            chosenSource: 'remote',
+            reason: 'remote records a soft delete (newer timestamp)'
+          });
+          continue;
+        }
+        if (localValue === 'deleted' && !isRemoteNewer) {
+          (merged as any)[field] = localValue;
+          mergedFields.push(`${field} (deleted from local)`);
+          fieldDetails.push({
+            field,
+            localValue,
+            remoteValue,
+            chosenValue: localValue,
+            chosenSource: 'local',
+            reason: 'local records a soft delete (newer timestamp)'
+          });
+          continue;
+        }
         const localIsClose = localValue === 'completed' && (isTerminalStage(localItem.stage) || isTerminalStage(remoteItem.stage));
         const remoteIsClose = remoteValue === 'completed' && (isTerminalStage(remoteItem.stage) || isTerminalStage(localItem.stage));
         if (localIsClose && !remoteIsClose) {
@@ -1132,6 +1184,109 @@ export async function getRemoteDataFileContent(dataFilePath: string, target: Git
   return (await getRemoteDataFileContentWithRef(dataFilePath, target)).content;
 }
 
+/**
+ * Result of reconstructing a remote worklog stream from ref history.
+ */
+export interface DeltaReplayResult {
+  items: WorkItem[];
+  comments: Comment[];
+  dependencyEdges: DependencyEdge[];
+  auditResults: AuditResult[];
+}
+
+/**
+ * Full-snapshot fallback for the pull side (WL-0MT2KZ5GJ000OJIP, design
+ * §6.2 trigger 1): a reader that has NO full snapshot base (brand-new clone,
+ * or a store corrupted/cleared since watermarks were lost) cannot apply a
+ * remote DELTA tip meaningfully — a delta only carries *changed* records, so
+ * merging it onto an empty local store would produce a fragmentary database
+ * missing every record untouched since the last full export.
+ *
+ * This function walks the remote tracking ref HISTORY (`git rev-list`) from
+ * oldest to newest and replays each commit's JSONL in order:
+ *
+ * - a commit whose file parses as a FULL snapshot (kind `full` or legacy
+ *   headerless) resets the accumulated state to that commit's records;
+ * - each subsequent DELTA commit is merged by-ID onto the accumulated state
+ *   (adds/updates only);
+ *
+ * The newest full snapshot found is therefore the base, and every delta
+ * published after it is applied on top — the exact chain a delta tip
+ * describes. The full-snapshot cadence (§5.3, default every 10 syncs)
+ * guarantees this replay is bounded.
+ *
+ * Returns null when the chain is unrepairable (no full snapshot anywhere in
+ * history, or a commit's file cannot be read) — callers must fail closed and
+ * NOT merge the partial delta / push an empty snapshot over a populated
+ * remote (AC5 no data loss).
+ *
+ * @param dataFilePath - path of the local JSONL data file (for the repo-relative path)
+ * @param remoteTrackingRef - materialized local tracking ref (e.g.
+ *   refs/worklog/remotes/origin/worklog/data) whose history to walk
+ */
+export async function replayRemoteDeltaChain(
+  dataFilePath: string,
+  remoteTrackingRef: string
+): Promise<DeltaReplayResult | null> {
+  await assertDataFileInCwdRepo(dataFilePath);
+  await execAsync('git rev-parse --git-dir');
+
+  const repoRootPath = await getRepoRoot();
+  const { relativePath } = getRepoRelativePath(repoRootPath, dataFilePath);
+
+  // Oldest → newest so a full snapshot found later replaces earlier state and
+  // deltas are applied in publish order. Bounded by the cadence guarantee; cap
+  // defensively at 200 commits.
+  let revs: string[] = [];
+  try {
+    const { stdout } = await execAsync(
+      `git rev-list --reverse --max-count=200 ${escapeShellArg(remoteTrackingRef)}`
+    );
+    revs = stdout.split('\n').map(s => s.trim()).filter(Boolean);
+  } catch {
+    return null;
+  }
+  if (revs.length === 0) return null;
+
+  let accItems: WorkItem[] = [];
+  let accComments: Comment[] = [];
+  let accEdges: DependencyEdge[] = [];
+  let accAudits: AuditResult[] = [];
+  let foundFull = false;
+
+  for (const rev of revs) {
+    let content: string;
+    try {
+      content = await execGitCaptureStdout(['show', `${rev}:${relativePath}`]);
+    } catch {
+      // Commit does not contain the data file (e.g. pre-sync init commits).
+      continue;
+    }
+    let parsed: ReturnType<typeof importFromJsonlContent>;
+    try {
+      parsed = importFromJsonlContent(content);
+    } catch {
+      return null; // unreadable stream in history — cannot repair
+    }
+    if (parsed.kind === 'delta') {
+      // Delta: merge onto accumulated state by-ID.
+      accItems = mergeWorkItems(accItems, parsed.items).merged;
+      accComments = mergeComments(accComments, parsed.comments).merged;
+      accEdges = mergeDependencyEdges(accEdges, parsed.dependencyEdges || []).merged;
+      accAudits = mergeAuditResults(accAudits, parsed.auditResults || []).merged;
+    } else {
+      // Full snapshot (or legacy headerless): becomes the new base.
+      accItems = parsed.items;
+      accComments = parsed.comments;
+      accEdges = parsed.dependencyEdges || [];
+      accAudits = parsed.auditResults || [];
+      foundFull = true;
+    }
+  }
+
+  return foundFull ? { items: accItems, comments: accComments, dependencyEdges: accEdges, auditResults: accAudits } : null;
+}
+
 function removeWorktreeFiles(worktreePath: string): void {
   for (const name of fs.readdirSync(worktreePath)) {
     if (name === '.git') continue;
@@ -1252,6 +1407,17 @@ async function withTempWorktree<T>(
   }
 }
 
+/**
+ * Push the serialized worklog data file to the dedicated remote ref.
+ *
+ * Delta-aware behavior (WL-0MSAKUBKW006FN8Q): the file passed in is the
+ * output of `exportForSync`, which may be either a FULL snapshot or a DELTA
+ * (a JSONL subset carrying the sync header). Both are committed to the remote
+ * ref tip as a new commit on the existing branch history — which is what
+ * allows `replayRemoteDeltaChain` to walk back to the newest full snapshot
+ * when a reader has no local base. This function itself is kind-agnostic: it
+ * pushes whatever JSONL it is given onto `refs/worklog/data`.
+ */
 export async function gitPushDataFileToBranch(
   repoDataFilePath: string,
   commitMessage: string,
@@ -1260,7 +1426,6 @@ export async function gitPushDataFileToBranch(
   // Cross-project safety guard: never push the data file to a different
   // repository's remote ref than the one owning the file.
   await assertDataFileInCwdRepo(repoDataFilePath);
-
   // SAFETY GUARD: reject pushes to regular branches or tags.
   // Worklog data must only be stored on dedicated refs under refs/worklog/
   // to prevent accidental corruption of the project working tree.

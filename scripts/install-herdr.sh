@@ -4,6 +4,10 @@
 # Links the `worklog-selection-list` Herdr plugin and registers the
 # `prefix+l` keybinding in the Herdr config, so the worklist works out of
 # the box after `npm run build` (invoked via the root `postbuild` hook).
+# Hook step 0 installs the plugin's npm dependencies (marked, the
+# @worklog/shared file dep) into packages/herdr first, so a fresh clone or
+# a node_modules cleanup does not leave the plugin crashing with
+# ERR_MODULE_NOT_FOUND on startup.
 #
 # Safe to run on every build:
 #   - The plugin is always linked from the MAIN checkout, even when the
@@ -11,7 +15,9 @@
 #     linking from a worktree leaves a dangling registry entry once the
 #     worktree is deleted, silently breaking the prefix+l keybinding.
 #     `herdr plugin link` updates an existing link in place, so a stale
-#     worktree link is corrected automatically on the next build.
+#     worktree link is corrected automatically on the next build. The
+#     dependency install (step 0) also targets the MAIN checkout for the
+#     same reason (WL-0MSRLH52R003CK49).
 #   - The keybinding block is inserted only when a binding for
 #     `worklog-selection-list.open-podcast-editor-tab` is not already present.
 #   - A legacy `open-worklist` prefix+l binding is migrated in-place to the
@@ -49,13 +55,40 @@ CONFIG_PATH="${HERDR_CONFIG_PATH:-${HOME}/.config/herdr/config.toml}"
 KEYBINDING_BLOCK='[[keys.command]]
 key = "prefix+l"
 command = "herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab"
-description = "Open the Podcast Editing tab (Worklog work item selection pane)."'
+description = "Open the Worklog tab (Worklog work item selection pane)."'
 
 # Legacy binding command (v0.1.x) that prefix+l previously pointed at.
 # Migrated in-place to the new action so re-running a build never leaves
 # a stale duplicate keybinding.
 LEGACY_BINDING='herdr plugin action invoke worklog-selection-list.open-worklist'
 NEW_BINDING='herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab'
+
+# ── 0. Install herdr plugin dependencies ─────────────────────────────────
+# Ensures marked and @worklog/shared are available so the plugin does not
+# crash on startup (ERR_MODULE_NOT_FOUND). Uses npm ci when a lockfile
+# exists (faster, deterministic), falling back to npm install.
+HERDR_DIR="${REPO_ROOT}/packages/herdr"
+if [ -d "${HERDR_DIR}" ] && [ -f "${HERDR_DIR}/package.json" ]; then
+  if command -v npm >/dev/null 2>&1; then
+    if [ -f "${HERDR_DIR}/package-lock.json" ]; then
+      if npm ci --prefix "${HERDR_DIR}" 2>/dev/null; then
+        echo "Installed herdr plugin dependencies (npm ci: ${HERDR_DIR})"
+      else
+        echo "Warning: 'npm ci' failed in ${HERDR_DIR}, trying 'npm install'..." >&2
+        npm install --prefix "${HERDR_DIR}" 2>/dev/null || \
+          echo "Warning: both 'npm ci' and 'npm install' failed in ${HERDR_DIR} — plugin may crash on startup." >&2
+      fi
+    else
+      if npm install --prefix "${HERDR_DIR}" 2>/dev/null; then
+        echo "Installed herdr plugin dependencies (npm install: ${HERDR_DIR})"
+      else
+        echo "Warning: 'npm install' failed in ${HERDR_DIR} — plugin may crash on startup." >&2
+      fi
+    fi
+  else
+    echo "Warning: 'npm' not found on PATH — skipping herdr dependency install." >&2
+  fi
+fi
 
 # ── 1. Link the plugin (updates an existing link in place) ───────────────
 if command -v herdr >/dev/null 2>&1; then

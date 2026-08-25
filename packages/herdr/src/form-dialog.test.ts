@@ -17,6 +17,9 @@ import {
   extractIdentifiers,
   getUnknownIdentifiers,
   substituteIdentifiers,
+  unwrapBracketedPaste,
+  BRACKETED_PASTE_START,
+  BRACKETED_PASTE_END,
 } from './form-dialog.js';
 
 const visible = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
@@ -201,6 +204,18 @@ describe('FormState.render — downward expansion', () => {
     const lNonBlank = long.split('\n').filter((l) => visible(l).trim().length > 0).length;
     expect(lNonBlank).toBeGreaterThan(sNonBlank);
   });
+
+  it('renders multi-line field values wrapped without layout breakage', () => {
+    const out = makeForm({ fields: [{ name: 'status', value: 'line one\nline two\nline three' }] }).render(40, 40);
+    const vis = out.split('\n').map(visible);
+    expect(vis.some((l) => /line one/.test(l))).toBe(true);
+    expect(vis.some((l) => /line two/.test(l))).toBe(true);
+    expect(vis.some((l) => /line three/.test(l))).toBe(true);
+    // No line exceeds the pane width.
+    for (const line of vis) {
+      expect(line.length).toBeLessThanOrEqual(40);
+    }
+  });
 });
 
 // ── Interactions preserved ──────────────────────────────────────────────
@@ -218,7 +233,7 @@ describe('FormState interactions', () => {
     for (const ch of 'in') state.handleInput(ch);
     state.handleInput('\t');
     for (const ch of 'prod') state.handleInput(ch);
-    expect(state.handleInput('\r')).toBe('submitted');
+    expect(state.handleInput('\r')).toEqual({ type: 'submitted' });
     expect(result).toBe('wl update <id> --status in --stage prod');
   });
 
@@ -227,7 +242,7 @@ describe('FormState interactions', () => {
     const state = new FormState('cmd <x>', 'd', [{ name: 'x', default: '' }], () => {}, () => {
       cancelled = true;
     });
-    expect(state.handleInput('\x1b')).toBe('cancelled');
+    expect(state.handleInput('\x1b')).toEqual({ type: 'cancelled' });
     expect(cancelled).toBe(true);
   });
 
@@ -285,6 +300,132 @@ describe('FormState interactions', () => {
     for (let i = 0; i < 'medium'.length; i++) state.handleInput('\x7f');
     for (const ch of 'high') state.handleInput(ch);
     expect(state.getResult()).toBe('wl create  --priority high');
+  });
+});
+
+// ── Paste / cut / newline / bracketed-paste (WL-0MSW6KCTA0092DCV) ────
+
+describe('FormState paste & cut', () => {
+  it('Ctrl+V returns a paste request without touching the field', () => {
+    const state = makeForm({ fields: [{ name: 'status', value: 'abc' }] });
+    expect(state.handleInput('\x16')).toEqual({ type: 'paste' });
+    expect(state.fields[0].value).toBe('abc');
+  });
+
+  it('pasteText inserts clipboard text verbatim (newlines preserved)', () => {
+    const state = makeForm({ fields: [{ name: 'status', value: 'abc' }] });
+    state.pasteText('line1\nline2\r\nline3');
+    expect(state.fields[0].value).toBe('abcline1\nline2\r\nline3');
+  });
+
+  it('a pasted newline does not submit the form', () => {
+    let submitted = false;
+    const state = new FormState('cmd <x>', 'd', [{ name: 'x', default: '' }],
+      () => { submitted = true; }, () => {});
+    state.pasteText('multi\nline');
+    expect(submitted).toBe(false);
+    expect(state.fields[0].value).toBe('multi\nline');
+    // A subsequent plain Enter still submits normally.
+    expect(state.handleInput('\r')).toEqual({ type: 'submitted' });
+    expect(submitted).toBe(true);
+  });
+
+  it('Ctrl+X clears the field and returns the copied text', () => {
+    const state = makeForm({ fields: [{ name: 'status', value: 'copy me' }] });
+    const res = state.handleInput('\x18');
+    expect(res).toEqual({ type: 'cut', text: 'copy me' });
+    expect(state.fields[0].value).toBe('');
+  });
+
+  it('Ctrl+X on an empty field returns empty text and stays empty', () => {
+    const state = makeForm({ fields: [{ name: 'status', value: '' }] });
+    const res = state.handleInput('\x18');
+    expect(res).toEqual({ type: 'cut', text: '' });
+    expect(state.fields[0].value).toBe('');
+  });
+
+  it('cut operates on the active field only', () => {
+    const state = makeForm({ fields: [{ name: 'a', value: 'first' }, { name: 'b', value: 'second' }] });
+    state.activeFieldIndex = 1;
+    const res = state.handleInput('\x18');
+    expect(res).toEqual({ type: 'cut', text: 'second' });
+    expect(state.fields[1].value).toBe('');
+    expect(state.fields[0].value).toBe('first');
+  });
+
+  it('notifyPasteFailed exposes the failure reason (additive, no data loss)', () => {
+    const state = makeForm({ fields: [{ name: 'status', value: 'keep' }] });
+    expect(state.notifyPasteFailed('no clipboard reader available')).toBe(
+      'no clipboard reader available',
+    );
+    expect(state.fields[0].value).toBe('keep');
+  });
+});
+
+describe('FormState Ctrl+Enter newline', () => {
+  it('inserts a newline into the active field instead of submitting', () => {
+    let submitted = false;
+    const state = new FormState('cmd <x>', 'd', [{ name: 'x', default: '' }],
+      () => { submitted = true; }, () => {});
+    state.handleInput('f');
+    state.handleInput('i');
+    state.handleInput('r');
+    state.handleInput('s');
+    state.handleInput('t');
+    state.handleInput('\x1b[13;5u');
+    expect(state.fields[0].value).toBe('first\n');
+    expect(submitted).toBe(false);
+  });
+
+  it('plain Enter still submits after a Ctrl+Enter newline', () => {
+    let submitted = false;
+    const state = new FormState('cmd <x>', 'd', [{ name: 'x', default: '' }],
+      () => { submitted = true; }, () => {});
+    state.handleInput('a');
+    state.handleInput('\x1b[13;5u');
+    state.handleInput('b');
+    expect(state.handleInput('\r')).toEqual({ type: 'submitted' });
+    expect(submitted).toBe(true);
+  });
+});
+
+describe('bracketed-paste unwrapping', () => {
+  it('extracts inner text from a fully wrapped chunk', () => {
+    expect(unwrapBracketedPaste(`${BRACKETED_PASTE_START}hello\nworld${BRACKETED_PASTE_END}`)).toBe('hello\nworld');
+  });
+
+  it('returns undefined for a chunk with no wrapper', () => {
+    expect(unwrapBracketedPaste('plain text')).toBeUndefined();
+  });
+
+  it('inserts a full self-contained bracketed paste verbatim', () => {
+    const state = makeForm({ fields: [{ name: 'status', value: '' }] });
+    state.handleInput(`${BRACKETED_PASTE_START}multi\nline content${BRACKETED_PASTE_END}`);
+    expect(state.fields[0].value).toBe('multi\nline content');
+  });
+
+  it('accumulates char-by-char bracketed paste across open/close markers', () => {
+    const state = makeForm({ fields: [{ name: 'status', value: '' }] });
+    state.handleInput(BRACKETED_PASTE_START);
+    for (const ch of ['h', 'i', '\n', 'y', 'o', 'u']) state.handleInput(ch);
+    state.handleInput(BRACKETED_PASTE_END);
+    expect(state.fields[0].value).toBe('hi\nyou');
+  });
+
+  it('does not submit on a newline inside a bracketed paste', () => {
+    let submitted = false;
+    const state = new FormState('cmd <x>', 'd', [{ name: 'x', default: '' }],
+      () => { submitted = true; }, () => {});
+    state.handleInput(BRACKETED_PASTE_START);
+    state.handleInput('\n');
+    state.handleInput(BRACKETED_PASTE_END);
+    expect(submitted).toBe(false);
+    expect(state.fields[0].value).toBe('\n');
+  });
+
+  it('strips wrapper markers when they bracket the chunk', () => {
+    expect(unwrapBracketedPaste(`${BRACKETED_PASTE_START}tail`)).toBe('tail');
+    expect(unwrapBracketedPaste(`head${BRACKETED_PASTE_END}`)).toBe('head');
   });
 });
 

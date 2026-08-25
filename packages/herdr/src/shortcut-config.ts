@@ -51,6 +51,22 @@ export interface ShortcutEntry {
    * convention); invalid values are logged and treated as omitted.
    */
   workItemTypes?: string[];
+  /**
+   * Whether dispatching this shortcut should open a visible pane
+   * (WL-0MSJLD1I70045ZUL). Omitted (or `true`) opens a pane exactly as
+   * today:
+   *   - `!!`/`!` shell commands open a "Command Output" herdr pane via
+   *     run-in-pane.sh;
+   *   - agent commands (`/skill:*`, `/intake`, `/plan`, `/prompt:`) open a
+   *     pi agent pane via send-to-pi.sh.
+   * `false` runs the command in the background with stdout/stderr captured
+   * to a per-run log file — no pane is created, so the work-item ↔ pane
+   * association (WL-0MSBQUJQX005RAT9) is skipped for agent commands.
+   * Parsed from the `open_pane` key in shortcuts.json; invalid values are
+   * logged and treated as omitted (open a pane), mirroring the
+   * `code_freeze` pattern.
+   */
+  openPane?: boolean;
 }
 
 // ── Registry ──────────────────────────────────────────────────────────
@@ -262,6 +278,16 @@ export function parseShortcutEntry(raw: unknown): ShortcutEntry | undefined {
     // — a bad value must never hide or break a shortcut
     // (WL-0MSKH1J0R003BM2M).
     console.error(`[shortcut-config] Invalid work_item_types value for shortcut "${command}"; expected a non-empty array of strings, treating as omitted`);
+  }
+
+  const openPane = entry.open_pane;
+  if (openPane === true || openPane === false) {
+    shortcutEntry.openPane = openPane;
+  } else if (openPane !== undefined) {
+    // Invalid values are logged and treated as omit (open a pane — the
+    // default) — a bad value must never hide or break a shortcut
+    // (WL-0MSJLD1I70045ZUL).
+    console.error(`[shortcut-config] Invalid open_pane value "${String(openPane)}" for shortcut "${command}"; expected true or false, treating as omitted (open a pane)`);
   }
 
   // Agent-bound commands without an explicit model run on the default

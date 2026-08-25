@@ -16,13 +16,20 @@ async function isAlive(pid: number): Promise<boolean> {
 
 /**
  * Return the PID of the first process whose command line EXACTLY matches the
- * pattern. The pattern is anchored (^...$) so shell wrappers whose cmdline
- * merely CONTAINS the pattern (e.g. `sh -c 'sleep 0.2 && sleep 30'`) never
- * match — only the real target process does (WL-0MSCA645J005YM1E).
+ * pattern AND belongs to the given process group (pgid). Scoping the lookup
+ * to our own spawned process group makes the assertion deterministic even
+ * when unrelated processes on the host run the same command line (e.g. a
+ * background `while ...; do sleep 30; done` watcher): those live in a
+ * different process group, are never touched by our group-kill, and must
+ * not be the subject of the assertion (WL-0MSCA645J005YM1E,
+ * WL-0MSKSMRFP001Q3XU).
+ *
+ * The pattern is anchored (^...$) so shell wrappers whose cmdline merely
+ * CONTAINS the pattern (e.g. `sh -c 'sleep 0.2 && sleep 30'`) never match.
  */
-async function findPidByPattern(pattern: string): Promise<number | null> {
+async function findPidByPatternInGroup(pattern: string, pgid: number): Promise<number | null> {
   try {
-    const { stdout } = await exec(`pgrep -f "^${pattern}$" | head -1`)
+    const { stdout } = await exec(`pgrep -g ${pgid} -f "^${pattern}$" | head -1`)
     const pid = Number(stdout.trim())
     return Number.isInteger(pid) && pid > 0 ? pid : null
   } catch {
@@ -158,10 +165,10 @@ describe('tracking set edge cases', () => {
 
 describe('orphaned process prevention (WL-0MSB447TJ000R3N8)', () => {
   beforeEach(async () => {
-    // Kill any stale `sleep 30` left behind by a previous failed run. Without
-    // this, findPidByPattern('sleep 30') -> `pgrep -f ... | head -1` returns
-    // the OLDEST match (lowest PID), so the test asserts on a process it did
-    // not spawn and the suite fails spuriously (flaky, WL-0MSCA645J005YM1E).
+    // Kill any stale `sleep 30` left behind by a previous failed run. The
+    // per-test process-group scoping in findPidByPatternInGroup makes the
+    // assertion immune to foreign `sleep 30` processes regardless, but this
+    // sweep keeps the host clean across runs (WL-0MSCA645J005YM1E).
     await killAllMatching('sleep 30')
   })
 
@@ -184,12 +191,17 @@ describe('orphaned process prevention (WL-0MSB447TJ000R3N8)', () => {
     // Give it time to spawn the sleep grandchild
     await new Promise((r) => setTimeout(r, 800))
 
-    const sleepPid = await findPidByPattern('sleep 30')
+    // Scope the lookup to OUR process group: execAsync spawns detached, so
+    // the tracked shell PID is its own process-group leader and the sleep
+    // grandchild shares that group. Never consult the global process table —
+    // a foreign `sleep 30` (e.g. from a background queue watcher) would be
+    // picked by head -1 and survive our group-kill, failing spuriously.
+    const tracked = [...pidTrackingSet]
+    expect(tracked.length).toBeGreaterThan(0)
+    const sleepPid = await findPidByPatternInGroup('sleep 30', tracked[0])
     expect(sleepPid).not.toBeNull()
 
     // Kill the tracked shell PID only (old behaviour would leave sleep alive)
-    const tracked = [...pidTrackingSet]
-    expect(tracked.length).toBeGreaterThan(0)
     killTrackedProcesses()
 
     // The sleep grandchild must also be dead now (process-tree kill)
@@ -215,7 +227,11 @@ describe('orphaned process prevention (WL-0MSB447TJ000R3N8)', () => {
     promise.catch(() => {})
 
     await new Promise((r) => setTimeout(r, 800))
-    const sleepPid = await findPidByPattern('sleep 30')
+    // Scope to our own process group (see the sibling test above): the
+    // tracked shell PID is our detached spawn's group leader.
+    const tracked = [...pidTrackingSet]
+    expect(tracked.length).toBeGreaterThan(0)
+    const sleepPid = await findPidByPatternInGroup('sleep 30', tracked[0])
     expect(sleepPid).not.toBeNull()
 
     await expect(promise).rejects.toThrow()

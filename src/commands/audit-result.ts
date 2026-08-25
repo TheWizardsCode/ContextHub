@@ -180,10 +180,25 @@ export default function register(ctx: PluginContext): void {
         process.exit(1);
       }
 
+      // Reversion: when the verdict is "not ready to close" on an item in
+      // `in_review` (status `completed`), move it back to `open` /
+      // `plan_complete` so it drops out of the ready-to-close queue and
+      // returns to the planning queue (WL-0MSKHYI5U0069FVV). Best-effort:
+      // a reversion failure must not abort the command — surface a warning.
+      let reverted = null;
+      if (rtc === 'no') {
+        try {
+          reverted = db.revertToPlanComplete(normalizedId);
+        } catch (err) {
+          console.error(`Warning: failed to revert ${normalizedId} to open/plan_complete: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
       if (options.json || utils.isJsonMode()) {
         output.json({
           success: true,
           workItemId: normalizedId,
+          ...(reverted ? { reverted } : {}),
           audit: {
             workItemId: normalizedId,
             readyToClose,
@@ -200,5 +215,8 @@ export default function register(ctx: PluginContext): void {
       console.log(`  Ready to close: ${readyToClose ? 'Yes' : 'No'}`);
       console.log(`  Audited at:    ${auditedAt}`);
       if (author) console.log(`  Author:        ${author}`);
+      if (reverted) {
+        console.log(`[${reverted.item.id} reverted from ${reverted.from.status}/${reverted.from.stage} to ${reverted.to.status}/${reverted.to.stage}]`);
+      }
     });
 }

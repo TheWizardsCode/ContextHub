@@ -1,6 +1,15 @@
 [
   {
     "chord": [
+      "d"
+    ],
+    "command": "/downtime toggle",
+    "view": "both",
+    "label": "downtime toggle",
+    "description": "Toggle downtime dispatch for the current pane (d = disable; d again = follow settings; persists across restarts via marker)."
+  },
+  {
+    "chord": [
       "c"
     ],
     "command": "/intake <description> --priority <priority default='medium'>",
@@ -106,20 +115,22 @@
       "in_review"
     ],
     "label": "audit approve",
-    "description": "Approve the in_review item by manual audit."
+    "description": "Approve the in_review item by manual audit.",
+    "open_pane": false
   },
   {
     "chord": [
       "a",
       "r"
     ],
-    "command": "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
+    "command": "!!wl reviewed <id> false && wl update <id> --status open --stage plan_complete --priority medium && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
     "view": "both",
     "stages": [
       "in_review"
     ],
     "label": "audit reject",
-    "description": "Reject the in_review item by manual audit."
+    "description": "Reject the in_review item and reset it to open/plan_complete/medium for rework.",
+    "open_pane": false
   },
   {
     "chord": [
@@ -130,7 +141,8 @@
     "command": "!!wl update <id> --priority low",
     "view": "both",
     "label": "update priority low",
-    "description": "Update the priority of the selected work item to low."
+    "description": "Update the priority of the selected work item to low.",
+    "open_pane": false
   },
   {
     "chord": [
@@ -141,7 +153,8 @@
     "command": "!!wl update <id> --priority medium",
     "view": "both",
     "label": "update priority medium",
-    "description": "Update the priority of the selected work item to medium."
+    "description": "Update the priority of the selected work item to medium.",
+    "open_pane": false
   },
   {
     "chord": [
@@ -152,7 +165,8 @@
     "command": "!!wl update <id> --priority high",
     "view": "both",
     "label": "update priority high",
-    "description": "Update the priority of the selected work item to high."
+    "description": "Update the priority of the selected work item to high.",
+    "open_pane": false
   },
   {
     "chord": [
@@ -163,7 +177,8 @@
     "command": "!!wl update <id> --priority critical",
     "view": "both",
     "label": "update priority critical",
-    "description": "Update the priority of the selected work item to critical."
+    "description": "Update the priority of the selected work item to critical.",
+    "open_pane": false
   },
   {
     "chord": [
@@ -193,7 +208,8 @@
     "command": "!!wl close <id>",
     "view": "both",
     "label": "close done",
-    "description": "Close the work item as done."
+    "description": "Close the work item as done.",
+    "open_pane": false
   },
   {
     "chord": [
@@ -203,7 +219,8 @@
     "command": "!!wl delete <id>",
     "view": "both",
     "label": "close deleted",
-    "description": "Delete the work item."
+    "description": "Delete the work item.",
+    "open_pane": false
   },
   {
     "chord": [
@@ -241,52 +258,112 @@
   {
     "chord": [
       "f",
+      "s",
       "i"
     ],
     "command": "/wl idea",
     "view": "both",
-    "label": "filter idea",
-    "description": "Filter browse list to items in the idea stage."
+    "label": "filter stage idea",
+    "description": "Filter browse list to items in the idea stage (WL-0MSKC8T46006999S: stage filters moved under the f s axis)."
   },
   {
     "chord": [
       "f",
+      "s",
       "n"
     ],
     "command": "/wl intake",
     "view": "both",
-    "label": "filter intake",
-    "description": "Filter browse list to items in the intake_complete stage."
+    "label": "filter stage intake",
+    "description": "Filter browse list to items in the intake_complete stage (WL-0MSKC8T46006999S)."
   },
   {
     "chord": [
       "f",
+      "s",
       "p"
     ],
     "command": "/wl plan",
     "view": "both",
-    "label": "filter plan",
-    "description": "Filter browse list to items in the plan_complete stage."
+    "label": "filter stage plan",
+    "description": "Filter browse list to items in the plan_complete stage (WL-0MSKC8T46006999S)."
   },
   {
     "chord": [
       "f",
+      "s",
       "r"
     ],
     "command": "/wl review",
     "view": "both",
-    "label": "filter in_review",
-    "description": "Filter browse list to items in the in_review stage."
+    "label": "filter stage review",
+    "description": "Filter browse list to items in the in_review stage (WL-0MSKC8T46006999S)."
   },
   {
     "chord": [
       "f",
+      "s",
       "s"
     ],
     "command": "/wl",
     "view": "both",
     "label": "sprint",
-    "description": "Return to the default unfiltered browse list (WL-0MSGSE15000746F7)."
+    "description": "Return to the default unfiltered browse list; clears both stage and priority filters (WL-0MSGSE15000746F7)."
+  },
+  {
+    "chord": [
+      "f",
+      "p",
+      "l"
+    ],
+    "command": "/wl --priority low",
+    "view": "both",
+    "label": "filter priority low",
+    "description": "Filter browse list to items with low priority (WL-0MSKC8T46006999S)."
+  },
+  {
+    "chord": [
+      "f",
+      "p",
+      "m"
+    ],
+    "command": "/wl --priority medium",
+    "view": "both",
+    "label": "filter priority medium",
+    "description": "Filter browse list to items with medium priority (WL-0MSKC8T46006999S)."
+  },
+  {
+    "chord": [
+      "f",
+      "p",
+      "h"
+    ],
+    "command": "/wl --priority high",
+    "view": "both",
+    "label": "filter priority high",
+    "description": "Filter browse list to items with high priority (WL-0MSKC8T46006999S)."
+  },
+  {
+    "chord": [
+      "f",
+      "p",
+      "c"
+    ],
+    "command": "/wl --priority critical",
+    "view": "both",
+    "label": "filter priority critical",
+    "description": "Filter browse list to items with critical priority (WL-0MSKC8T46006999S)."
+  },
+  {
+    "chord": [
+      "f",
+      "p",
+      "s"
+    ],
+    "command": "/wl",
+    "view": "both",
+    "label": "clear priority",
+    "description": "Clear the active priority filter and return to the unfiltered browse list (WL-0MSKC8T46006999S)."
   },
   {
     "chord": ["n", "e"],

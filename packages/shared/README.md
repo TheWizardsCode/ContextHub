@@ -118,3 +118,16 @@ and never re-timestamp items (WL-0MSORD6HC005QVZX). The incoming normalized
 content is still persisted — only `updatedAt` is preserved. All other fields
 (tags, status, priority, …) use strict comparison; genuine content changes
 still bump `updatedAt`.
+
+### Metadata flag flips do not bump `updatedAt` (WL-0MSN6ZCTN0027U2R)
+
+In `update()`, `needsProducerReview` is treated as **metadata**, not content:
+a flag-only flip is persisted (written to the store) but does **not** bump
+`updatedAt`. Content fields (title, description, status, stage, priority,
+sortIndex, parentId, tags, assignee, issueType, risk, effort) still bump the
+timestamp exactly as before, and a combined content+flag update bumps too.
+
+Rationale: the flag is a review-state signal, not item content. Bumping
+`updatedAt` on a flag flip made previously valid audits look stale to herdr's
+`isAuditFresh` predicate, degrading the TUI icon and re-dispatching
+redundant `/skill:audit` runs for unchanged content.

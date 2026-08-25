@@ -8,7 +8,9 @@
  *
  *  - `isIdleStatus` — idle detection from a `/llama/local/status` payload.
  *  - `evaluateIdle` — runtime idle evaluation with the fail-closed
- *    degradation for a configured N < total slots (no per-slot data yet).
+ *    degradation for a configured N < total slots (no per-slot data yet) and
+ *    the spare-capacity per-slot mode (relaxed global gate, parent
+ *    WL-0MT32F90V008UAD2).
  *  - `parseLlamaStatus` / `fetchLocalStatus` / `createDowntimePoller` — the
  *    single-flight poller for `GET {proxyUrl}/llama/local/status` with
  *    per-poll timeout and fail-closed parsing.
@@ -16,9 +18,11 @@
  *    threshold).
  *  - `dispatchDowntimeWork` — dispatch orchestration: completed/in_review
  *    items without a valid audit (modified within the last 7 days) →
- *    `/skill:audit <id>` (audit tier, WL-0MSI8H3HP000K0RG), then the
+ *    `/skill:audit <id>` (audit tier, WL-0MSI8H3HP000K0RG; ROOT-ONLY —
+ *    children are never dispatched independently,
+ *    WL-0MSTLFW14000KPEC), then the
  *    implement tier (WL-0MSMAYPQP001FLR6): the highest-priority open
- *    plan_complete item with risk Low / effort Small|XS →
+ *    plan_complete item with risk ≤ Medium / effort ≤ Medium →
  *    `/skill:implement <id>`, then `wl next --stage intake_complete` →
  *    `/skill:plan <id>`, fallback `--stage idea` → `/skill:intake <id>`,
  *    pre-dispatch claim, per-process single-flight. Code-freeze gate
@@ -65,14 +69,43 @@
  *  - `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` /
  *    `clampDowntimeRequiredFreeSlots` / `clampDowntimeNoCandidateCooldownMs`
  *    — settings clamps, wired into `settings.ts`.
+ *  - `selectWithRotation` (WL-0MSSRED76008LGB6) — rotation-aware selection:
+ *    within each tier, candidates sharing the same priority level are
+ *    rotated round-robin via the shared durable cursor
+ *    (`.worklog/downtime-round-robin.json`, `downtime-round-robin.ts`);
+ *    fail-open — no registry / no priority → pre-rotation sortIndex order.
+ *  - `jitterPollIntervalMs` (WL-0MSSRED76008LGB6) — probe jitter: the
+ *    effective poll interval is jittered ±50% of
+ *    `downtimePollIntervalMs` per reschedule so instances do not probe in
+ *    lockstep; fail-open without a registry → static interval.
  *
  * Fail-closed behaviour (never dispatch, never throw) is the SAFE default
  * at every boundary.
  */
 
 import { spawn } from 'node:child_process';
-import { isAuditFresh } from './icons.js';
+import { isAuditFresh } from '@worklog/shared/icons';
 import type { CodeFreezeStatus } from './code-freeze.js';
+import { disableMarkerExists, removeDisableMarker, writeDisableMarker } from './downtime-disable-marker.js';
+import type { ScheduledPrompt } from './scheduled-prompts.js';
+import type { RoundRobinRegistry } from './downtime-round-robin.js';
+import {
+  readCoordinationFile,
+  getEntry,
+  upsertEntry,
+  removeEntry,
+  pruneStaleEntries,
+  type CoordinationEntry,
+} from './coordination.js';
+import {
+  createLeaderElectionManager,
+  cleanupStaleElection,
+  DEFAULT_LEASE_TTL_SECONDS,
+} from './leader-election.js';
+import { appendCoordinationLogEntry } from './downtime-log.js';
+
+export type { ScheduledPrompt } from './scheduled-prompts.js';
+export type { CoordinationEntry } from './coordination.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -85,11 +118,35 @@ export const DOWNTIME_POLL_INTERVAL_FLOOR_MS = 10_000;
 /** Defensive floor for the idle threshold (prevents immediate dispatch). */
 export const DOWNTIME_IDLE_THRESHOLD_FLOOR_MS = 1_000;
 
-export const DEFAULT_DOWNTIME_POLL_INTERVAL_MS = 30_000;
-export const DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS = 240_000;
+export const DEFAULT_DOWNTIME_POLL_INTERVAL_MS = 10_000;
+export const DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS = 60_000;
 
-/** 0 = all slots must be free (default). Any positive integer N is accepted. */
-export const DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 0;
+/**
+ * Default required-free-slots count: 2 of 3 slots (spare-capacity dispatch,
+ * parent WL-0MT32F90V008UAD2). At least two slots must be free before
+ * downtime work is dispatched, so one operator session slot is always
+ * reserved for interactive work. A value of 0 means ALL slots must be free
+ * (the pre-spare-capacity default); any positive integer N is accepted.
+ */
+export const DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 2;
+
+/**
+ * Minimum free slots required for an AUDIT dispatch (parent
+ * WL-0MT32F90V008UAD2 AC3): an audit pane needs a second slot for its
+ * Phase 2 child deep-analysis (`AUDIT_PHASE2_PARALLELISM=1` — the child
+ * runs strictly after the parent, so parent + one child = 2 local slots,
+ * WL-0MSORQ1RG005DGUS). Applied as an ADDITIONAL selection-time check on
+ * the latest polled status; the idle-duration gate (configured N) is
+ * unchanged. `AUDIT_PHASE2_PARALLELISM=1` → 2 slots minimum.
+ */
+export const DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2;
+
+/**
+ * Minimum free slots required for a single-pane dispatch (implement /
+ * plan / intake / scheduled tiers, parent WL-0MT32F90V008UAD2 AC3): each
+ * pane consumes exactly one local slot, so ≥1 free slot suffices.
+ */
+export const DOWNTIME_PANE_MIN_FREE_SLOTS = 1;
 
 /** Sane floor for the no-candidate cooldown (the pause cannot be disabled or set trivially small). */
 export const DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS = 60_000;
@@ -102,6 +159,15 @@ export const DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS = 3_600_000;
  * dispatched for audit when it was modified within the last 7 days.
  */
 export const DOWNTIME_AUDIT_RECENCY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Stale-audit window (WL-0MT3PHW4I002SNOV): an audit dispatch marker older
+ * than this is treated as stale — the audit pane may have crashed without
+ * updating the work item — and is ignored by the active-audit single-flight
+ * check, so a NEW audit dispatch can proceed. Only one audit is active at a
+ * time during downtime dispatch.
+ */
+export const DOWNTIME_AUDIT_STALE_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 /**
  * Three-strike rule: this many consecutive CLI-error dispatch outcomes
@@ -134,6 +200,25 @@ export const DOWNTIME_RUN_TIMEOUT_MS = 60_000;
 
 export const DEFAULT_DOWNTIME_PROXY_URL = 'http://192.168.0.199:8000';
 export const DEFAULT_DOWNTIME_MODEL = 'plan';
+
+/**
+ * Default coordination check-in interval: 30 minutes (parent AC3).
+ * Every instance re-verifies/updates its entry in the shared coordination
+ * file at this cadence — including the leader.
+ */
+export const DEFAULT_COORDINATION_CHECK_IN_MS = 30 * 60 * 1000;
+
+/**
+ * Coordinator tier priority (parent AC4): the leader dispatches the
+ * highest-priority tier first — audit, then implement, then plan, then
+ * intake. The scheduled-prompts tier (WL-0MSS1Q5ER007QDKX) is NOT part of
+ * this order: like the legacy path, the coordination path checks it as a
+ * FIRST dispatch stage (freeze-gated, before ANY coordination-tier work),
+ * so a due prompt dispatches instead of reaching these tiers.
+ */
+export const COORDINATION_TIER_ORDER = ['audit', 'implement', 'plan', 'intake'] as const;
+
+export type CoordinationTierKind = (typeof COORDINATION_TIER_ORDER)[number];
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -173,7 +258,14 @@ export interface LlamaStatus {
   slots?: LlamaSlot[];
 }
 
-/** Per-slot detail served inside `LlamaStatus.slots`. */
+/**
+ * Per-slot detail served inside `LlamaStatus.slots` (NORMALIZED by
+ * `parseLlamaStatus`). The proxy (observability.py) serves `slot_id` as an
+ * INTEGER (`slot.get("id", i)`); the parser coerces numeric ids to strings
+ * and clamps negatives to 0 (WL-0MSVRMAWM007QNR5), so the normalized
+ * `slot_id` is always a non-empty string — the per-slot idle tracker keys
+ * its timers by it.
+ */
 export interface LlamaSlot {
   slot_id: string;
   is_processing: boolean;
@@ -182,9 +274,11 @@ export interface LlamaSlot {
 // ── Idle detection (implemented) ──────────────────────────────────────
 
 /**
- * The global (slot-count-independent) idle checks shared by `isIdleStatus`
- * and the per-slot branch of `evaluateIdle`: llama-server up, no active
- * query (local signal preferred), no model switch, no local lease.
+ * The FULL global idle checks used by `isIdleStatus` and the count-based
+ * (non-per-slot) path of `evaluateIdle`: llama-server up, no active
+ * query (local signal preferred), no model switch, no local lease. The
+ * per-slot branch uses the relaxed `perSlotGlobalIdleChecks` instead
+ * (spare-capacity dispatch, parent WL-0MT32F90V008UAD2).
  */
 function globalIdleChecks(status: LlamaStatus): boolean {
   if (!status.llama_server_running) return false;
@@ -198,6 +292,23 @@ function globalIdleChecks(status: LlamaStatus): boolean {
   if (queryActive) return false;
   if (status.model_switch_in_progress) return false;
   if (status.local_lease_active) return false;
+  return true;
+}
+
+/**
+ * Per-slot-safe global checks (spare-capacity dispatch, parent
+ * WL-0MT32F90V008UAD2): in per-slot identity mode, ONLY llama-server-up and
+ * no-model-switch remain GLOBAL gates — `active_query` /
+ * `local_active_query` / `local_lease_active` are superseded by the per-slot
+ * `is_processing` signal (the busy slot holding the operator's query/lease IS
+ * the active work the operator wants to run alongside; it must not block
+ * dispatch into the free slots, LP-0MSG5TA7Y002GN39 Q&A). Used exclusively by
+ * the per-slot branches of `evaluateIdle` and `createDowntimeWorker.tick()`;
+ * the count-based path keeps the full `globalIdleChecks` (fail-closed).
+ */
+function perSlotGlobalIdleChecks(status: LlamaStatus): boolean {
+  if (!status.llama_server_running) return false;
+  if (status.model_switch_in_progress) return false;
   return true;
 }
 
@@ -240,19 +351,25 @@ export function isIdleStatus(status: LlamaStatus, requiredFreeSlots: number): bo
  * identity AND 0 < N < total, the free count comes from the slots array
  * (which identifies WHICH slots are free) so the same N slots can be
  * required; the count-based logic is unchanged for N ≤ 0 / N ≥ total.
+ *
+ * Spare-capacity relaxation (parent WL-0MT32F90V008UAD2): in per-slot mode
+ * the global gate is the per-slot-safe subset (server up + no model switch
+ * only) — a query/lease tied to a busy slot is the operator's own session
+ * and must not block dispatch into the free slots (F1 tests AC1/AC2).
  */
 export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): boolean {
   const total = status.total_slots;
   if (!Number.isFinite(total) || total <= 0) return false; // ambiguous → busy
 
-  // Per-slot mode: per-slot identity present AND 0 < N < total. Base global
-  // checks still apply; the slot requirement is the per-slot free count.
+  // Per-slot mode: per-slot identity present AND 0 < N < total. The relaxed
+  // global gate applies (server up + no model switch); the slot requirement
+  // is the per-slot free count.
   if (
     Array.isArray(status.slots) &&
     requiredFreeSlots > 0 &&
     requiredFreeSlots < total
   ) {
-    if (!globalIdleChecks(status)) return false;
+    if (!perSlotGlobalIdleChecks(status)) return false;
     // Fail-closed counting: an entry without an explicit boolean
     // `is_processing` is treated as processing (busy), never free.
     const free = status.slots.filter(
@@ -426,10 +543,14 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
 
   // Optional per-slot identity (LP-0MSG5TA7Y002GN39): absent on pre-feature
   // proxies (slots stays undefined — backward compatible). A malformed
-  // array (non-array, entry missing/empty/non-string slot_id, non-boolean
+  // array (non-array, entry missing/empty slot_id, non-boolean
   // is_processing, duplicate slot_ids) is ambiguous → null (busy,
   // fail-closed): per-slot tracking must never run on identity it cannot
-  // trust. An empty array is valid (zero slots reported free).
+  // trust. slot_id accepts BOTH the string contract and the proxy's
+  // integer contract (`slot.get("id", i)` in observability.py): numeric
+  // ids are coerced to strings and negatives clamped to 0
+  // (WL-0MSVRMAWM007QNR5 — the Aug 15-16 zero-dispatch regression). An
+  // empty array is valid (zero slots reported free).
   let slots: LlamaSlot[] | undefined;
   if (o.slots !== undefined) {
     if (!Array.isArray(o.slots)) return null;
@@ -438,11 +559,25 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     for (const entry of o.slots) {
       if (typeof entry !== 'object' || entry === null) return null;
       const slot = entry as Record<string, unknown>;
-      if (typeof slot.slot_id !== 'string' || slot.slot_id.length === 0) return null;
+      // slot_id: string contract preserves the existing zero-length
+      // rejection guard (empty identity is ambiguous); the proxy's
+      // integer contract is accepted and coerced to string with negative
+      // values clamped to 0 (WL-0MSVRMAWM007QNR5). A non-finite or
+      // non-integer number is ambiguous → null (busy, fail-closed).
+      let slotId: string;
+      if (typeof slot.slot_id === 'string') {
+        if (slot.slot_id.length === 0) return null;
+        slotId = slot.slot_id;
+      } else if (typeof slot.slot_id === 'number') {
+        if (!Number.isFinite(slot.slot_id) || !Number.isInteger(slot.slot_id)) return null;
+        slotId = String(Math.max(0, slot.slot_id));
+      } else {
+        return null;
+      }
       if (typeof slot.is_processing !== 'boolean') return null;
-      if (seen.has(slot.slot_id)) return null; // duplicate identity → ambiguous
-      seen.add(slot.slot_id);
-      parsed.push({ slot_id: slot.slot_id, is_processing: slot.is_processing });
+      if (seen.has(slotId)) return null; // duplicate identity → ambiguous
+      seen.add(slotId);
+      parsed.push({ slot_id: slotId, is_processing: slot.is_processing });
     }
     slots = parsed;
   }
@@ -542,6 +677,13 @@ export function createDowntimePoller(
 export type DowntimeStage = 'intake_complete' | 'idea' | 'audit' | 'implement';
 export type DowntimeSkillKind = 'plan' | 'intake' | 'audit' | 'implement';
 
+/**
+ * Every dispatch kind recorded in the rolling audit log: the worklog tiers
+ * plus the scheduled-prompts tier (WL-0MSS1Q5ER007QDKX), which has no work
+ * item (kind `scheduled`, log-only markers).
+ */
+export type DowntimeDispatchKind = DowntimeSkillKind | 'scheduled';
+
 export interface DowntimeCandidate {
   id: string;
   title: string;
@@ -557,6 +699,8 @@ export interface DowntimeCandidate {
   status?: string;
   /** wl next priority order preserved for deterministic selection. */
   sortIndex?: number;
+  /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
+  priority?: string;
 }
 
 /**
@@ -574,11 +718,16 @@ export interface ImplementCandidate {
   risk?: string;
   effort?: string;
   sortIndex?: number;
+  /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
+  priority?: string;
 }
 
 /**
  * A completed/in_review item candidate for the downtime audit tier.
- * Parsed from `wl list --status completed --stage in_review --json`.
+ * Parsed from `wl list --status completed --stage in_review --root-only
+ * --json` — root-only (WL-0MSTLFW14000KPEC): only parent items (no
+ * parentId) can be audit candidates; children are never dispatched
+ * independently.
  */
 export interface AuditCandidate {
   id: string;
@@ -586,6 +735,8 @@ export interface AuditCandidate {
   auditedAt?: string | null;
   updatedAt?: string;
   sortIndex?: number;
+  /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
+  priority?: string;
 }
 
 /**
@@ -601,6 +752,56 @@ export interface AuditCandidate {
 export type DowntimeNextResult =
   | { ok: true; candidate: DowntimeCandidate | null }
   | { ok: false };
+
+/**
+ * Enriched single-item view fetched by the leader for a coordination entry
+ * (via `deps.fetchItem` — `wl show <id>` enriched with the audit timestamp
+ * from the completed/in_review list query). Carries the fields the
+ * coordinator needs to classify an item into its dispatch tier.
+ */
+export interface DowntimeItemInfo {
+  id: string;
+  title?: string;
+  /** Worklog status (`open` | `completed` | `in_progress` | …). */
+  status?: string;
+  /** Worklog stage (idea | intake_complete | plan_complete | in_review | …). */
+  stage?: string;
+  /** Worklog priority level (critical/high/medium/low). */
+  priority?: string;
+  /** Risk level (Low/Medium/High/…). */
+  risk?: string;
+  /** Effort level (XS/S/M/L/XL). */
+  effort?: string;
+  /** Latest audit timestamp (enriched; absent on show-only items). */
+  auditedAt?: string | null;
+  /** Item update timestamp (audit-tier recency window). */
+  updatedAt?: string;
+  /** wl priority order preserved for deterministic ordering. */
+  sortIndex?: number;
+}
+
+/**
+ * Outcome of one `fetchItem` lookup: `{ok:true}` with the item info, or
+ * `{ok:false}` on a wl/CLI failure or an unparseable item (fail-closed —
+ * never a silent skip).
+ */
+export type DowntimeItemResult =
+  | { ok: true; info: DowntimeItemInfo }
+  | { ok: false };
+
+/**
+ * Outcome of the check-in most-important-item computation. `{ok:true,
+ * kind/candidate}` — a dispatchable item was found; `{ok:true,
+ * noCandidate:true}` — the instance genuinely has nothing dispatchable
+ * (its own entry may be removed); `{ok:false}` — wl/CLI errors occurred
+ * during the computation (fail-open: keep the existing entry, retry at
+ * the next check-in).
+ */
+export type MostImportantItemResult =
+  | { ok: true; kind: DowntimeSkillKind; candidate: DowntimeCandidate }
+  | { ok: true; noCandidate: true }
+  | { ok: false };
+
 
 /**
  * Expected state for the pre-dispatch claim (compare-and-swap, RCA
@@ -625,6 +826,25 @@ export type DowntimeClaimResult =
   | { ok: true }
   | { ok: false; reason: 'stale' | 'error' };
 
+/**
+ * Result of the active-audit single-flight check (WL-0MT3PHW4I002SNOV).
+ *
+ *  - `{ok:true, active:true}` — a non-stale `kind=audit` dispatch marker
+ *    maps to an item still `in_progress` (dispatched but not yet
+ *    completed/reviewed): an audit is running, so the audit tier must be
+ *    skipped this tick (outcome reason `audit-in-flight`).
+ *  - `{ok:true, active:false}` — no non-stale marker maps to an
+ *    `in_progress` item: the audit tier may proceed (audits stay strictly
+ *    sequential — never fan-out).
+ *  - `{ok:false}` — the check could not complete (e.g. worklog query
+ *    failure): fail-open — the audit tier is skipped and dispatch falls
+ *    through to the next tier; all dispatch is never blocked by an
+ *    unanswerable check.
+ */
+export type DowntimeActiveAuditResult =
+  | { ok: true; active: boolean }
+  | { ok: false };
+
 /** External boundaries injected so the dispatch logic is testable. */
 export interface DowntimeWorkerDeps {
   /**
@@ -640,6 +860,11 @@ export interface DowntimeWorkerDeps {
   /**
    * Look up the next completed/in_review item WITHOUT a valid audit (the
    * audit dispatch tier, which runs before the implement/plan/intake tiers).
+   * ROOT-ONLY (WL-0MSTLFW14000KPEC): the `wl list` lookup carries
+   * `--root-only`, so completed/in_review children (items with a parentId)
+   * are excluded server-side and are never dispatched independently — only
+   * parent items are audit candidates (the producer reviews deliverable
+   * units, whose audits cover their children).
    * Uses the same `DowntimeNextResult` error channel as `getNextItem`
    * (WL-0MSLWJ2KP0002SV0): `{ok:false}` is a wl/parse failure (a CLI-error
    * strike — never a candidate), while `{ok:true, candidate:null}` is a
@@ -653,8 +878,24 @@ export interface DowntimeWorkerDeps {
    */
   getNextAuditCandidate(cwd: string): Promise<DowntimeNextResult>;
   /**
+   * Active-audit single-flight check (WL-0MT3PHW4I002SNOV): true when any
+   * non-stale `kind=audit` dispatch marker in the shared rolling dispatch
+   * log (`<cwd>/.worklog/downtime-dispatches.log`) maps to an item still
+   * `in_progress` — an audit was dispatched (by ANY instance, leader or
+   * not) and has not yet completed/reviewed. The dispatcher consults this
+   * before selecting an audit candidate and skips the audit tier while one
+   * is active, keeping audits strictly sequential (never fan-out). A marker
+   * older than `DOWNTIME_AUDIT_STALE_WINDOW_MS` (2h) is treated as stale
+   * (the audit pane may have crashed without updating the work item) and
+   * ignored. Fail-open: `{ok:false}` on a worklog-query failure — the
+   * dispatcher then skips the audit tier and falls through to the next
+   * tier rather than blocking all dispatch (fail-safe). `cwd` is the
+   * worklog root the dispatch log lives under.
+   */
+  getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult>;
+  /**
    * Look up the next implement-tier candidate (WL-0MSMAYPQP001FLR6): the
-   * highest-priority open plan_complete item with risk Low / effort Small|XS,
+   * highest-priority open plan_complete item with risk ≤ Medium / effort ≤ Medium,
    * excluding dependency-blocked items (wl next default) and items already
    * dispatched for `/skill:implement` (kind `implement` dispatched markers,
    * AC6). Fail-closed: a wl failure yields null (no dispatch) — the
@@ -662,6 +903,38 @@ export interface DowntimeWorkerDeps {
    * `.worklog/downtime-dispatches.log` is consulted for the marker set.
    */
   getNextImplementCandidate(cwd: string): Promise<DowntimeCandidate | null>;
+  /**
+   * Look up the next critical-first candidate (WL-0MT3FM8VA005XBHE): the
+   * highest-priority open CRITICAL item at ANY stage (idea /
+   * intake_complete / plan_complete), including dependency-blocked ones
+   * (`wl list --priority critical --status open` does NOT exclude them —
+   * unlike `wl next`), with the stage-appropriate skill mapping and the
+   * plan_complete implement caps (decision Q2). The returned candidate is
+   * the stage-appropriate dispatch target (kind derived via
+   * `criticalSkillKind(candidate.stage)` by the tier). Fail-closed: a wl
+   * failure resolves `{ok:false}` via the `DowntimeNextResult` error
+   * channel (never a silent empty — a broken critical lookup must not
+   * look like "no critical work"). `cwd` is the worklog root whose
+   * `.worklog/downtime-dispatches.log` is consulted for the dispatched-
+   * marker change-guard (an item already dispatched for its tier while
+   * still at its dispatched-at stage is excluded).
+   */
+  getNextCriticalCandidate(cwd: string): Promise<DowntimeNextResult>;
+  /**
+   * Fetch ONE work item by id (leader-only coordination path): the leader
+   * re-checks each coordination entry's item against its CURRENT worklog
+   * state so a stale entry can never be dispatched on faith alone.
+   * `cwd` is the entry's worklog root (the item lives in that worklog).
+   * Fail-closed: `{ok:false}` on a wl failure or an unparseable/missing
+   * item — the caller treats it as a CLI-error strike (never a silent
+   * skip).
+   *
+   * Optional for backward compatibility: the legacy (non-coordination)
+   * dispatch path never consults it; `createDowntimeDeps` always provides
+   * it and `dispatchFromCoordination` (the leader path) fails closed
+   * (`wl-error`) when it is absent.
+   */
+  fetchItem?(itemId: string, cwd: string): Promise<DowntimeItemResult>;
   /**
    * Read the current code-freeze marker status (tri-state: 'frozen' /
    * 'not-frozen' / 'ambiguous'). `cwd` is the worklog root; the marker
@@ -688,8 +961,13 @@ export interface DowntimeWorkerDeps {
    * with no failure — fire-and-forget); `{ok:false, error|exitCode}` on a
    * handled spawn `error` event or a non-zero script exit within the probe
    * window (no unhandled-exception crash, WL-0MSLWJ3I70031Z8U absorbed).
+   * `paneName` overrides the default `Downtime <kind>` pane name — the
+   * scheduled-prompts tier passes `Downtime <entryId>` (WL-0MSS1Q5ER007QDKX).
    */
-  spawnAgentPane(prompt: string, opts: { model: string; cwd: string }): Promise<DowntimeSpawnResult>;
+  spawnAgentPane(
+    prompt: string,
+    opts: { model: string; cwd: string; paneName?: string },
+  ): Promise<DowntimeSpawnResult>;
   /**
    * Audit trail for a successful dispatch: comment on the item + rolling
    * log entry under `.worklog`. Resolves TRUE only when the rolling-log
@@ -697,8 +975,28 @@ export interface DowntimeWorkerDeps {
    * tolerated (the comment is a durable cross-machine trail, not the
    * marker). A false result makes the dispatcher ABORT before spawning — an
    * unmarked item is never dispatched (fail-closed, RCA design point 2).
+   * Scheduled-prompt dispatches pass `noItemComment: true` — there is no
+   * work item, so only the rolling-log marker is written (no wl comment).
    */
   recordDispatch(event: DowntimeDispatchEvent): Promise<boolean>;
+  /**
+   * Look up the first DUE scheduled prompt (WL-0MSS1Q5ER007QDKX): reads the
+   * project-local config at `<cwd>/.worklog/scheduled-prompts.json` and
+   * returns the first entry whose frequency threshold is met, in config
+   * order. Absent or malformed config → null (fail-closed, logged): no
+   * scheduled dispatch and the existing tiers are unaffected (`wl init` is
+   * the provisioning path). A due entry resolves non-null — the caller
+   * dispatches it instead of reaching the backlog tiers.
+   */
+  getDueScheduledPrompt(cwd: string): Promise<ScheduledPrompt | null>;
+  /**
+   * Persist a scheduled prompt's `lastTriggeredAt` (atomic tmp+rename) so a
+   * delayed dispatch never fires more often than its frequency. Resolves
+   * false on any failure — the dispatcher ABORTS the spawn (an unrecorded
+   * dispatch never runs) and the entry stays due for the next idle slot.
+   * Must never throw (fail-closed).
+   */
+  recordScheduledPromptTrigger(cwd: string, promptId: string, at: string): Promise<boolean>;
   /**
    * Record a spawn-failure trace for an attempted dispatch (audit-log
    * integrity, WL-0MSLWJ3I70031Z8U AC2): a failed pane spawn appends an
@@ -718,12 +1016,19 @@ export interface DowntimeWorkerDeps {
 /** Audit event recorded for every successful downtime dispatch. */
 export interface DowntimeDispatchEvent {
   itemId: string;
-  kind: DowntimeSkillKind;
+  kind: DowntimeDispatchKind;
   /** ISO-8601 UTC timestamp of the dispatch. */
   dispatchedAt: string;
   /** Worklog root (the rolling log lives at `<cwd>/.worklog`). */
   cwd: string;
   title?: string;
+  /**
+   * When true, `recordDispatch` skips the work-item comment (scheduled-prompt
+   * dispatches have no work item — there is no item to comment; the rolling
+   * log marker is the only trace, WL-0MSS1Q5ER007QDKX AC4). Absent/false on
+   * normal tier dispatches (comment added, unchanged).
+   */
+  noItemComment?: boolean;
   /**
    * Worklog stage of the item at dispatch (plan/intake change-guard, RCA
    * WL-0MSRBFFLN005W3VT design point 3): a candidate is excluded while it is
@@ -765,13 +1070,18 @@ export interface DowntimeErrorEvent {
 export interface DowntimeDispatchOutcome {
   dispatched: boolean;
   candidate?: DowntimeCandidate;
-  kind?: DowntimeSkillKind;
+  kind?: DowntimeDispatchKind;
   /**
    * Non-dispatch reasons: 'dispatch-in-flight' | 'no-candidate' |
    * 'wl-error' | 'code-freeze' | 'claim-failed' (lost the CAS race —
    * another pane won; neutral) | 'marker-write-failed' (fail-closed abort
-   * BEFORE spawn) | 'spawn-failed' (handled spawn error or non-zero script
-   * exit; outcome is not success).
+   * BEFORE spawn — includes the scheduled-prompt persist failure) |
+   * 'spawn-failed' (handled spawn error or non-zero script exit; outcome is
+   * not success) | 'audit-in-flight' (WL-0MT3PHW4I002SNOV: an audit is
+   * already running — a non-stale kind=audit dispatch marker maps to an
+   * `in_progress` item — so the audit tier was skipped; a skip that leaves
+   * an empty remaining backlog reports this reason, NEVER 'no-candidate',
+   * so the no-candidate cooldown is not entered while the audit runs).
    */
   reason?: string;
   /**
@@ -898,17 +1208,549 @@ async function dispatchClaimedTier(
 }
 
 /**
- * dispatch one downtime work item. Selection priority (audit tier first,
- * WL-0MSI8H3HP000K0RG): a completed/in_review item WITHOUT a valid audit AND
+ * Dispatch one due scheduled prompt (WL-0MSS1Q5ER007QDKX). Unlike the
+ * worklog tiers there is NO work item: no pre-dispatch claim, no wl item
+ * comment. Fixed pipeline, fail-closed at every boundary:
+ *
+ *  1. PERSIST first: `lastTriggeredAt` is written to the config (atomic
+ *     tmp+rename) BEFORE anything else. A persist failure ABORTS the
+ *     dispatch — an unrecorded dispatch never runs (AC4) — and the entry
+ *     stays due for the next idle slot.
+ *  2. Rolling-log MARKER (kind `scheduled`) before the pane spawns: a
+ *     marker failure ALSO aborts before the spawn (fail-closed).
+ *  3. SPAWN the pane through the existing send-to-pi.sh path running the
+ *     prompt text, named `Downtime <entryId>` (--no-focus, --cwd, --model).
+ *     A handled spawn failure appends an outcome:'spawn-failed' trace and
+ *     resolves 'spawn-failed' (the outcome is NOT success); the marker and
+ *     the persisted lastTriggeredAt stand (the entry is not re-selected
+ *     until its frequency elapses — a best-effort cadence tolerates the
+ *     failed run).
+ */
+async function dispatchScheduledPrompt(
+  deps: DowntimeWorkerDeps,
+  prompt: ScheduledPrompt,
+  opts: { model: string; cwd: string },
+): Promise<DowntimeDispatchOutcome> {
+  const at = new Date().toISOString();
+
+  // 1. Persist lastTriggeredAt (atomic tmp+rename). A failure aborts BEFORE
+  // the log marker or the spawn — an unrecorded dispatch never runs and the
+  // entry remains due (AC4 fail-closed).
+  const persisted = await deps.recordScheduledPromptTrigger(opts.cwd, prompt.id, at);
+  if (!persisted) {
+    return { dispatched: false, reason: 'marker-write-failed' };
+  }
+
+  // 2. Rolling-log marker (kind `scheduled`, noItemComment — there is no
+  // work item to comment). A marker failure aborts BEFORE the spawn.
+  let marked = false;
+  try {
+    marked = await deps.recordDispatch({
+      itemId: prompt.id,
+      kind: 'scheduled',
+      dispatchedAt: at,
+      cwd: opts.cwd,
+      title: `Scheduled prompt: ${prompt.prompt}`,
+      noItemComment: true,
+    });
+  } catch {
+    // Fail-closed: a throwing recordDispatch (stub or regression) is a
+    // marker write failure — abort before spawn.
+    marked = false;
+  }
+  if (!marked) {
+    return { dispatched: false, reason: 'marker-write-failed' };
+  }
+
+  // 3. Spawn the pane running the prompt text, named `Downtime <entryId>`.
+  const spawn = await deps.spawnAgentPane(prompt.prompt, {
+    model: opts.model,
+    cwd: opts.cwd,
+    paneName: `Downtime ${prompt.id}`,
+  });
+  if (!spawn.ok) {
+    // Failure trace (WL-0MSLWJ3I70031Z8U AC2 pattern): the audit log
+    // distinguishes "attempted" (failed spawn) from "opened" (success
+    // marker). Fail-closed: audit logging must never crash the worker, so a
+    // throwing trace is swallowed (the marker + persisted trigger already
+    // stand).
+    try {
+      await deps.recordDispatchFailure({
+        itemId: prompt.id,
+        kind: 'scheduled',
+        dispatchedAt: new Date().toISOString(),
+        cwd: opts.cwd,
+        title: `Scheduled prompt: ${prompt.prompt}`,
+        noItemComment: true,
+        error: spawn.error,
+        exitCode: spawn.exitCode,
+      });
+    } catch {
+      // fail-closed: audit logging must never crash the worker
+    }
+    return {
+      dispatched: false,
+      reason: 'spawn-failed',
+      error: spawn.error,
+      exitCode: spawn.exitCode,
+    };
+  }
+
+  return { dispatched: true, kind: 'scheduled' };
+}
+
+// ── Leader-election coordination dispatch (parent WL-0MST3OJ8S0001ROL) ──
+
+/**
+ * Rank of a dispatch kind in the coordinator tier priority (audit >>
+ * implement >> plan >> intake). Unknown/null kinds rank below every tier
+ * (-1) — never dispatchable.
+ */
+export function coordinationTierRank(kind: DowntimeSkillKind | null): number {
+  if (kind === null) return -1;
+  const idx = COORDINATION_TIER_ORDER.indexOf(kind as CoordinationTierKind);
+  return idx === -1 ? -1 : idx;
+}
+
+/**
+ * Classify a fetched work item into its coordinator dispatch tier, or null
+ * when it is not currently dispatchable (fail-closed on ambiguous state):
+ *
+ *  - `completed` + `in_review` + no fresh audit + within the 7-day audit
+ *    recency window → `audit` (same freshness/recency semantics as the
+ *    audit tier's `selectAuditCandidate`; `auditedAt` enriched by the
+ *    fetchItem dep — absent auditedAt means not fresh → audit-eligible).
+ *  - `open` + `plan_complete` + risk ≤ Medium + effort ≤ Medium →
+ *    `implement` (the implement tier's caps, belt-and-suspenders
+ *    client-side).
+ *  - `open` + `intake_complete` → `plan`.
+ *  - `open` + `idea` → `intake`.
+ *  - Every other state (in_progress already claimed, completed with a
+ *    fresh audit, past the recency window, above the implement caps,
+ *    unknown status/stage) → null (never dispatched).
+ *
+ * `now` is injectable for deterministic tests.
+ */
+export function classifyItemForDispatch(
+  info: DowntimeItemInfo,
+  now: number = Date.now(),
+): DowntimeSkillKind | null {
+  const status = typeof info.status === 'string' ? info.status : '';
+  const stage = typeof info.stage === 'string' ? info.stage : '';
+  if (status === 'completed') {
+    if (stage !== 'in_review') return null;
+    // Audit tier: no FRESH audit (auditedAt absent/older than updatedAt
+    // semantics per isAuditFresh). A missing auditedAt means not fresh →
+    // audit-eligible (the audit tier's conservative default).
+    if (isAuditFresh(info.auditedAt, info.updatedAt)) return null;
+    // 7-day recency window (mirrors selectAuditCandidate): an item not
+    // modified within the window is not a candidate; missing updatedAt is
+    // included (absent data must not silently drop candidates).
+    if (typeof info.updatedAt === 'string' && info.updatedAt.length > 0) {
+      const updated = new Date(info.updatedAt).getTime();
+      if (Number.isNaN(updated)) return null; // unparseable → fail-closed
+      if (now - updated > DOWNTIME_AUDIT_RECENCY_WINDOW_MS) return null;
+    }
+    return 'audit';
+  }
+  if (status !== 'open') return null;
+  if (stage === 'idea') return 'intake';
+  if (stage === 'intake_complete') return 'plan';
+  if (stage === 'plan_complete') {
+    // Implement caps (risk ≤ Medium, effort ≤ Medium) — same ordinal
+    // semantics as selectImplementCandidate (fail-closed on unset).
+    const risk = riskOrdinal(info.risk);
+    if (risk === null || risk > 2) return null;
+    const effort = effortOrdinal(info.effort);
+    if (effort === null || effort > 3) return null;
+    return 'implement';
+  }
+  return null;
+}
+
+/** Build a dispatch candidate from fetched item info. */
+export function toCoordinationCandidate(info: DowntimeItemInfo): DowntimeCandidate {
+  return {
+    id: info.id,
+    title: info.title ?? '',
+    stage: (info.stage as DowntimeStage) ?? 'idea',
+    status: info.status,
+    priority: info.priority,
+    sortIndex: info.sortIndex,
+  };
+}
+
+/**
+ * Compute this instance's most-important dispatchable work item (parent
+ * AC3 / AC5): the highest-priority item in ITS OWN worklog, following the
+ * standard tier order (scheduled prompts are skipped — they have no work
+ * item — then audit, then critical, then implement, then plan, then
+ * intake), with the code-freeze gate applied to the audit/implement tiers.
+ * This is the same selection `dispatchDowntimeWork` used pre-refactor, now
+ * feeding the coordination check-in instead of an immediate dispatch.
+ *
+ * The lookups apply the existing dispatched-marker exclusions (audit /[
+ * implement/plan/intake marker sets) and the client-side `open` guards, so
+ * an item already dispatched by this worker for its tier is never offered
+ * to the coordinator again — the durable marker stays the source of truth.
+ *
+ * A wl failure at any tier does NOT short-circuit: the remaining tiers are
+ * still tried (same resilience as the old dispatcher); the result carries
+ * `{ok:false}` ONLY when the computation ended on a CLI error with no
+ * candidate found at all (the caller then keeps the existing entry,
+ * fail-open).
+ */
+export async function computeMostImportantItem(
+  deps: DowntimeWorkerDeps,
+  cwd: string,
+  now: number = Date.now(),
+): Promise<MostImportantItemResult> {
+  if (typeof deps.getNextAuditCandidate !== 'function') return { ok: false };
+  const freezeStatus = deps.readCodeFreezeStatus(cwd);
+  const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
+  let sawError = false;
+
+  if (!frozen) {
+    const audit = await deps.getNextAuditCandidate(cwd);
+    if (audit.ok) {
+      if (audit.candidate !== null) {
+        return { ok: true, kind: 'audit', candidate: audit.candidate };
+      }
+    } else {
+      sawError = true;
+    }
+  }
+
+  const critical = await deps.getNextCriticalCandidate(cwd);
+  if (critical.ok) {
+    if (critical.candidate !== null) {
+      const kind = criticalSkillKind(critical.candidate.stage);
+      if (kind !== null && !(frozen && kind === 'implement')) {
+        return { ok: true, kind, candidate: critical.candidate };
+      }
+    }
+  } else {
+    sawError = true;
+  }
+
+  if (!frozen) {
+    const implement = await deps.getNextImplementCandidate(cwd);
+    if (implement !== null) {
+      return { ok: true, kind: 'implement', candidate: implement };
+    }
+  }
+
+  const intakeComplete = await deps.getNextItem('intake_complete', cwd);
+  if (intakeComplete.ok) {
+    if (intakeComplete.candidate !== null) {
+      return { ok: true, kind: 'plan', candidate: intakeComplete.candidate };
+    }
+  } else {
+    sawError = true;
+  }
+
+  const idea = await deps.getNextItem('idea', cwd);
+  if (idea.ok) {
+    if (idea.candidate !== null) {
+      return { ok: true, kind: 'intake', candidate: idea.candidate };
+    }
+  } else {
+    sawError = true;
+  }
+
+  // Genuinely empty backlog (both prep tiers answered) → no candidate. A
+  // CLI error with no candidate → {ok:false} (the check-in keeps the
+  // existing entry, fail-open — a transient wl error must never drop a
+  // valid offer).
+  return sawError ? { ok: false } : { ok: true, noCandidate: true };
+}
+
+/**
+ * Leader-only dispatch from the shared coordination list (parent AC4):
+ * re-fetch each entry's item, classify it into its tier, apply the
+ * code-freeze gate (audit/implement skipped while frozen, plan/intake
+ * still run) and dispatch the highest-priority available item via the
+ * existing `dispatchClaimedTier` pipeline (CAS claim → marker write →
+ * spawn) — the dispatched-marker exclusion and CAS claim guards are
+ * preserved by construction (AC5). On a successful dispatch (or a
+ * claimed-but-failed spawn), the entry is removed from the coordination
+ * file so its owner re-queues its next item at the next check-in (AC3).
+ *
+ * Tier priority: audit → implement → plan → intake. Within a tier,
+ * entries dispatch in file order (the instances' offers are equally
+ * weighted; round-robin is superseded by the shared-list model).
+ *
+ * Fail-closed at every boundary: a wl failure fetching an entry resolves
+ * `wl-error` only when EVERY entry failed (a fully broken lookup — a
+ * strike); a per-entry failure skips that entry (fail-open per instance,
+ * parent risk mitigation — one broken worklog must not starve the rest).
+ */
+export async function dispatchFromCoordination(
+  deps: DowntimeWorkerDeps,
+  entries: CoordinationEntry[],
+  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number },
+  now: number = Date.now(),
+): Promise<DowntimeDispatchOutcome> {
+  // The leader path REQUIRES the item-fetch dep: without it the leader can
+  // never classify an entry — fail closed to a strike (a misconfigured
+  // deployment must be visible, not silently idle).
+  if (typeof deps.fetchItem !== 'function') {
+    return { dispatched: false, reason: 'wl-error' };
+  }
+  const freezeStatus = deps.readCodeFreezeStatus(opts.cwd);
+  const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
+
+  // Stale-entry pruning (parent AC3 risk mitigation): the leader prunes
+  // entries whose owner has not refreshed within the lease TTL (crashed or
+  // idle instances) at the START of every dispatch cycle, so dead offers
+  // never starve the queue and their owners re-queue on their next
+  // check-in. Fail-safe: pruneStaleEntries never throws (lock contention or
+  // IO → 0 removed).
+  const pruned = pruneStaleEntries(
+    opts.coordinationDir,
+    (opts.leaseTtlMs ?? DEFAULT_LEASE_TTL_SECONDS * 1000),
+    now,
+  );
+  if (pruned > 0) {
+    // Audit trail (WL-0MSXHAE290067VAL).
+    void appendCoordinationLogEntry(opts.cwd, {
+      kind: 'coordination',
+      operation: 'prune',
+      prunedCount: pruned,
+      at: new Date(now).toISOString(),
+    });
+    // The coordination FILE is the source of truth: the passed snapshot is
+    // stale after a prune — re-read it so a pruned (crashed-instance)
+    // entry can never classify or dispatch this cycle. Fail-safe: a failed
+    // re-read falls back to the snapshot (already pruned entries are then
+    // skipped by classify → non-dispatchable).
+    entries = readCoordinationFile(opts.coordinationDir)?.entries ?? entries;
+  }
+
+  // Per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3): the
+  // audit tier needs ≥ 2 slots (parent + Phase 2 child at
+  // AUDIT_PHASE2_PARALLELISM=1); every single-pane tier needs ≥ 1. When
+  // freeSlots is absent (direct API callers), the minimums do not gate
+  // (fail-open for direct API use — the worker always passes the count).
+  const freeSlots = opts.freeSlots;
+  const auditEligible = freeSlots === undefined || freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
+  const panesEligible = freeSlots === undefined || freeSlots >= DOWNTIME_PANE_MIN_FREE_SLOTS;
+  if (!panesEligible) {
+    // No slot can host a pane — nothing to dispatch (mirrors the legacy
+    // tier chain's 0-free-slots defensive no-candidate).
+    return { dispatched: false, reason: 'no-candidate' };
+  }
+
+  // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): FIRST dispatch stage,
+  // gated by the SAME fresh-read code-freeze marker as the audit/implement
+  // tiers (AC5) — while frozen OR ambiguous (fail-closed) scheduled prompts
+  // are skipped so no new code changes land mid-release, and dispatch falls
+  // through to the coordination tiers below. A due prompt dispatches its
+  // prompt text immediately — it never reaches the backlog tiers, so it
+  // never triggers the no-candidate cooldown (AC6). Absent or malformed
+  // config resolves null (fail-closed, logged by the dep): no scheduled
+  // dispatch and the tiers below are unaffected (AC2).
+  if (!frozen) {
+    const duePrompt = await deps.getDueScheduledPrompt(opts.cwd);
+    if (duePrompt !== null) {
+      return await dispatchScheduledPrompt(deps, duePrompt, {
+        model: opts.model,
+        cwd: opts.cwd,
+      });
+    }
+  }
+
+  // Re-fetch + classify every entry once, grouped by tier.
+  const byTier = new Map<DowntimeSkillKind, Array<{ entry: CoordinationEntry; info: DowntimeItemInfo }>>();
+  let fetchAttempts = 0;
+  let fetchFailures = 0;
+  for (const entry of entries) {
+    if (entry.instanceId.length === 0 || entry.workItemId.length === 0) continue;
+    fetchAttempts += 1;
+    const result = await deps.fetchItem(entry.workItemId, entry.directory);
+    if (!result.ok) {
+      fetchFailures += 1;
+      continue;
+    }
+    const kind = classifyItemForDispatch(result.info, now);
+    if (kind === null) continue;
+    if (frozen && (kind === 'audit' || kind === 'implement')) continue;
+    const group = byTier.get(kind) ?? [];
+    group.push({ entry, info: result.info });
+    byTier.set(kind, group);
+  }
+
+  // A wl lookup that failed for EVERY entry is a persistent CLI/parse
+  // failure — a strike (never a silent no-candidate). Per-instance
+  // failures are tolerated (fail-open).
+  if (fetchAttempts > 0 && fetchFailures === fetchAttempts) {
+    return { dispatched: false, reason: 'wl-error' };
+  }
+
+  for (const tier of COORDINATION_TIER_ORDER) {
+    const group = byTier.get(tier) ?? [];
+    // Audit-tier slot minimum: an audit pane needs a second slot for its
+    // Phase 2 child (WL-0MSORQ1RG005DGUS) — skip the whole audit group
+    // when too few slots are free (ineligible, never a strike).
+    if (tier === 'audit' && !auditEligible) continue;
+    for (const { entry, info } of group) {
+      const outcome = await dispatchClaimedTier(
+        deps,
+        tier as DowntimeSkillKind,
+        toCoordinationCandidate(info),
+        { model: opts.model, cwd: entry.directory },
+      );
+      if (outcome.dispatched) {
+        // Dispatched — remove the entry so the owner re-queues its next
+        // most-important item at the next check-in (AC3 re-queue).
+        removeEntry(opts.coordinationDir, entry.instanceId);
+        return outcome;
+      }
+      if (outcome.reason === 'claim-failed') {
+        // Another pane won the CAS race — neutral; try the next entry.
+        continue;
+      }
+      if (outcome.reason === 'wl-error') {
+        // A wl failure is a strike — stop the cycle (three-strike rule
+        // decides when to pause).
+        return outcome;
+      }
+      if (outcome.reason === 'spawn-failed' || outcome.reason === 'marker-write-failed') {
+        // The item is claimed (+ marked) but the pane never appeared:
+        // remove the entry so the owner re-queues; the standing marker and
+        // the in_progress claim prevent double-dispatch.
+        removeEntry(opts.coordinationDir, entry.instanceId);
+        return outcome;
+      }
+    }
+  }
+
+  // No tier had a dispatchable entry (or a freeze skip with an empty
+  // plan/intake list). The caller decides cooldown vs. resume via the
+  // same reason semantics as the legacy dispatcher.
+  return frozen
+    ? { dispatched: false, reason: 'code-freeze' }
+    : { dispatched: false, reason: 'no-candidate' };
+}
+
+/**
+ * One 30-minute coordination check-in (parent AC3): recompute this
+ * instance's most-important item and upsert its entry in the shared
+ * coordination file. When the instance has NOTHING dispatchable (genuine
+ * empty backlog, no CLI errors) the own entry is removed — the leader must
+ * not float a dead offer; the owner re-offers when work appears. On a
+ * CLI-error computation the existing entry is kept (fail-open) — a
+ * transient wl failure must never drop a valid offer. Returns the stored
+ * item id (or null when nothing was offered).
+ */
+export async function runCoordinationCheckIn(
+  deps: DowntimeWorkerDeps,
+  coordinator: {
+    cwd: string;
+    coordinationDir: string;
+    instanceId: string;
+  },
+  now: number = Date.now(),
+): Promise<{ offered: string | null; updated: boolean }> {
+  const current = getEntry(coordinator.coordinationDir, coordinator.instanceId);
+  const result = await computeMostImportantItem(deps, coordinator.cwd, now);
+  if (!result.ok) {
+    // wl/CLI errors — keep the existing entry (fail-open), retry next check-in.
+    return { offered: current?.workItemId ?? null, updated: false };
+  }
+  if ('noCandidate' in result && result.noCandidate) {
+    // Genuinely nothing dispatchable — remove the own entry (no dead offers).
+    const removed = removeEntry(coordinator.coordinationDir, coordinator.instanceId) !== null;
+    // Audit trail (WL-0MSXHAE290067VAL): log the emptied check-in.
+    void appendCoordinationLogEntry(coordinator.cwd, {
+      kind: 'coordination',
+      operation: 'checkin',
+      instanceId: coordinator.instanceId,
+      workItemId: null,
+      at: new Date(now).toISOString(),
+    });
+    return { offered: null, updated: removed };
+  }
+  if (!('candidate' in result) || result.candidate === undefined) {
+    // Defensive: a malformed result (stub/regression) keeps the entry.
+    return { offered: current?.workItemId ?? null, updated: false };
+  }
+  const entry: CoordinationEntry = {
+    instanceId: coordinator.instanceId,
+    workItemId: result.candidate.id,
+    directory: coordinator.cwd,
+    assignedAt: current?.assignedAt ?? new Date(now).toISOString(),
+    lastUpdated: new Date(now).toISOString(),
+  };
+  const updated = upsertEntry(coordinator.coordinationDir, entry);
+  // Audit trail (WL-0MSXHAE290067VAL): log the offered item on every
+  // successful check-in write.
+  if (updated) {
+    void appendCoordinationLogEntry(coordinator.cwd, {
+      kind: 'coordination',
+      operation: 'checkin',
+      instanceId: coordinator.instanceId,
+      workItemId: entry.workItemId,
+      at: new Date(now).toISOString(),
+    });
+  }
+  return { offered: entry.workItemId, updated };
+}
+
+/**
+ * dispatch one downtime work item. Selection priority: FIRST the
+ * scheduled-prompts tier (WL-0MSS1Q5ER007QDKX) — a due scheduled prompt
+ * (e.g. `/skill:refactor` every 3 days) dispatches its prompt text before
+ * any backlog tier, gated by the same code-freeze marker as audit/implement
+ * (frozen OR ambiguous ⇒ skipped, plan/intake still run) and never
+ * triggering the no-candidate cooldown; then the audit tier
+ * (WL-0MSI8H3HP000K0RG): a completed/in_review item WITHOUT a valid audit AND
  * NOT already dispatched for audit by this worker →
  * `/skill:audit <id>` (the dispatched-marker exclusion,
- * WL-0MSLIY8ZR004QUSY, is applied by `deps.getNextAuditCandidate`); then the
+ * WL-0MSLIY8ZR004QUSY, is applied by `deps.getNextAuditCandidate`). The
+ * audit tier is ROOT-ONLY (WL-0MSTLFW14000KPEC): `wl list --root-only`
+ * excludes completed/in_review children, so only parent items are ever
+ * dispatched for audit — sub-tasks are never audited independently; and
+ * exactly one audit is active at a time (WL-0MT3PHW4I002SNOV,
+ * single-flight): before any candidate is selected the active-audit check
+ * (`deps.getActiveAudit`) skips the audit tier while a non-stale
+ * `kind=audit` dispatch marker (within `DOWNTIME_AUDIT_STALE_WINDOW_MS`,
+ * 2h) maps to an item still `in_progress` — an audit dispatched by ANY
+ * instance is honoured via the shared dispatch log (the stickiest
+ * cross-instance single-flight signal), and a marker older than the
+ * window is stale (the audit pane may have crashed without updating the
+ * work item) and is ignored so a NEW audit can proceed. The skip reports
+ * reason 'audit-in-flight' (never 'no-candidate' — the empty-backlog
+ * cooldown is not entered while the audit runs) and the check fails open
+ * (an unanswerable check just falls through to the next tier — dispatch
+ * is never blocked); then —
+ * BEFORE the non-critical implement tier — the critical-first tier
+ * (WL-0MT3FM8VA005XBHE): the highest-priority open CRITICAL item at ANY
+ * stage (idea / intake_complete / plan_complete), including
+ * dependency-blocked ones (`wl list --priority critical --status open` does
+ * NOT exclude them — unlike `wl next`), dispatched with the
+ * stage-appropriate skill (Q2 caps retained + Q3 dependency-frontier
+ * resolution — see `getNextCriticalCandidate`); then the non-critical
  * implement tier (WL-0MSMAYPQP001FLR6): the highest-priority open
- * plan_complete item with risk Low / effort Small|XS → `/skill:implement <id>`
+ * plan_complete item with risk ≤ Medium / effort ≤ Medium → `/skill:implement <id>`
  * (fail-closed null on wl error or no candidate — never short-circuits the
  * fallback, AC5/AC6); if none, `wl next --stage intake_complete` →
  * `/skill:plan <id>`; if none, `wl next --stage idea` → `/skill:intake <id>`;
- * if all four are empty, no dispatch.
+ * if all are empty, no dispatch.
+ *
+ * Critical-tier semantics: the lookup resolves through the same
+ * `DowntimeNextResult` error channel as the audit tier — a GENUINELY empty
+ * critical tier (`{ok:true, candidate:null}`) falls through to the
+ * non-critical tiers, while `{ok:false}` is a wl-error strike (never a
+ * silent fall-through, so a broken critical lookup can never look like "no
+ * critical work"). The stage-appropriate skill comes from
+ * `criticalSkillKind(candidate.stage)`; a dependency-blocked candidate is
+ * dispatched as its nearest OPEN frontier blocker with the blocker's own
+ * stage (Q3). The critical dispatch runs through the SAME
+ * `dispatchClaimedTier` pipeline (CAS claim with the TIER_EXPECTED stage
+ * entry → marker → spawn), so the claim-CAS, the dispatched-marker
+ * change-guard (rolling-log kind is the skill-mapped implement/plan/intake)
+ * and the single-flight guard compose unchanged.
  *
  * The audit tier resolves through the same `DowntimeNextResult` error
  * channel as the plan/intake tiers (WL-0MSLWJ2KP0002SV0): a GENUINELY empty
@@ -920,10 +1762,15 @@ async function dispatchClaimedTier(
  *
  * Code-freeze gate (WL-0MSQ0RPQP00636JY): the marker is re-read fresh on
  * EVERY dispatch (never cached). While the marker is frozen OR ambiguous
- * (fail-closed), the audit and implement tiers are skipped — no new
+ * (fail-closed), the audit and non-critical implement tiers are skipped — no new
  * implementation work (or audits) starts during a release freeze — and
  * dispatch continues with the plan/intake tiers, which are low-risk prep
- * and still allowed. A freeze skip with an empty plan/intake backlog is
+ * and still allowed. The critical tier is STILL consulted during a freeze,
+ * with the split-by-skill rule (Q1): a critical plan_complete
+ * (implement-kind) candidate is skipped (no new code mid-release), while
+ * critical idea/intake_complete (intake/plan-kind) candidates STILL
+ * dispatch — critical prep is as low-risk as non-critical prep. A freeze
+ * skip with an empty plan/intake backlog is
  * reported as reason 'code-freeze' (NEVER 'no-candidate'), so it never
  * triggers the worker's no-candidate cooldown: polling continues and
  * implement/audit dispatch resumes immediately when the freeze lifts.
@@ -942,44 +1789,188 @@ async function dispatchClaimedTier(
  */
 export async function dispatchDowntimeWork(
   deps: DowntimeWorkerDeps,
-  opts: { model: string; cwd: string },
+  opts: { model: string; cwd: string; freeSlots?: number },
 ): Promise<DowntimeDispatchOutcome> {
   if (dispatchInFlight) {
     return { dispatched: false, reason: 'dispatch-in-flight' };
   }
   dispatchInFlight = true;
   try {
+    // Per-tier free-slot minimums at selection time (parent
+    // WL-0MT32F90V008UAD2 AC3): each tier requires a minimum number of
+    // FREE slots on the LATEST polled status before its candidate is even
+    // considered — audit needs 2 (parent + Phase 2 child at
+    // `AUDIT_PHASE2_PARALLELISM=1`, WL-0MSORQ1RG005DGUS), every single-
+    // pane tier (scheduled/implement/plan/intake) needs 1. These are
+    // ADDITIONAL selection-time checks — the idle-duration gate (configured
+    // N) is unchanged. `freeSlots` is computed by the caller from the
+    // latest poll (per-slot free count when per-slot identity is served,
+    // else `available_slots`). When absent (direct legacy callers), the
+    // tier minimums do not gate (fail-open for direct API use; the worker
+    // always passes the polled count). An unmet minimum skips that tier to
+    // the next eligible one — ineligible, never a strike and never a
+    // wl-error (mirrors the code-freeze skip).
+    const freeSlots = opts.freeSlots;
+    const panesEligible = freeSlots === undefined || freeSlots >= DOWNTIME_PANE_MIN_FREE_SLOTS;
+    const auditEligible = freeSlots === undefined || freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
+
+    // Active-audit single-flight outcome flags (WL-0MT3PHW4I002SNOV), read
+    // at the final empty-backlog return below: an `audit-in-flight` skip is
+    // reported as such (never 'no-candidate', so the cooldown is not
+    // entered while an audit runs); a failed active-audit check with an
+    // otherwise empty backlog reports wl-error (partial information must
+    // not pause the worker).
+    let auditInFlight = false;
+    let auditCheckFailed = false;
+
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): re-read the marker fresh on
     // every dispatch — never cached, so a freeze that starts or ends
     // mid-idle-period is honored on the next dispatch attempt. Frozen OR
-    // ambiguous (fail-closed) → the audit and implement tiers are skipped
-    // and dispatch falls through to the plan/intake tiers below.
+    // ambiguous (fail-closed) → the audit and non-critical implement tiers
+    // are skipped and dispatch falls through to the plan/intake tiers
+    // below; the critical tier below is STILL consulted, pausing only its
+    // implement-kind candidate (Q1 split-by-skill) — see the tier comment.
     const freezeStatus = deps.readCodeFreezeStatus(opts.cwd);
     const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
 
+    if (!frozen && panesEligible) {
+      // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): FIRST dispatch stage,
+      // gated by the SAME fresh-read code-freeze marker as the audit/
+      // implement tiers (AC5) — while frozen OR ambiguous (fail-closed)
+      // scheduled prompts are skipped so no new code changes land mid-
+      // release, and dispatch falls through to the plan/intake tiers below.
+      // A due prompt dispatches its prompt text immediately — it never
+      // reaches the backlog tiers, so it never triggers the no-candidate
+      // cooldown (AC6). Absent or malformed config resolves null (fail-
+      // closed, logged by the dep): no scheduled dispatch and the tiers
+      // below are unaffected (AC2).
+      const duePrompt = await deps.getDueScheduledPrompt(opts.cwd);
+      if (duePrompt !== null) {
+        return await dispatchScheduledPrompt(deps, duePrompt, opts);
+      }
+    }
+
     if (!frozen) {
       // Audit tier (WL-0MSI8H3HP000K0RG): dispatch /skill:audit for the
-      // first completed/in_review item without a valid audit. The lookup
+      // first completed/in_review item without a valid audit. Root-only
+      // (WL-0MSTLFW14000KPEC): only PARENT items are candidates —
+      // completed/in_review children are excluded server-side and never
+      // dispatched independently. The lookup
       // resolves through the DowntimeNextResult error channel
       // (WL-0MSLWJ2KP0002SV0): {ok:true, candidate:null} is a GENUINELY
       // empty audit tier and falls through to the implement tier below;
       // {ok:false} is a wl/parse failure — fail closed to busy (a strike),
       // never a silent fall-through, so a broken audit query cannot look
       // like "no audit candidates" and silently disable the audit tier.
-      const audit = await deps.getNextAuditCandidate(opts.cwd);
-      if (audit.ok) {
-        if (audit.candidate !== null) {
-          return await dispatchClaimedTier(deps, 'audit', audit.candidate, opts);
+      //
+      // Per-tier minimum (parent WL-0MT32F90V008UAD2 AC3): the audit tier
+      // requires ≥ 2 free slots (parent + Phase 2 child at
+      // `AUDIT_PHASE2_PARALLELISM=1`). When fewer are free the audit
+      // lookup is skipped entirely — ineligible, not a strike and not a
+      // wl-error (mirrors the code-freeze skip) — and dispatch falls
+      // through to the implement tier (which needs only ≥ 1).
+      if (auditEligible) {
+        // Active-audit single-flight (WL-0MT3PHW4I002SNOV): before any
+        // audit candidate is selected, check whether an audit-tier item is
+        // currently in flight — a non-stale `kind=audit` dispatch marker
+        // (within DOWNTIME_AUDIT_STALE_WINDOW_MS, 2h) maps to an item
+        // still `in_progress` (the shared dispatch log makes this
+        // cross-instance: an audit dispatched by ANY instance, leader or
+        // not, is seen here). While one is active the audit tier is skipped
+        // so audits stay strictly sequential — never fan-out consuming
+        // extra LLM capacity. The skip reports reason 'audit-in-flight'
+        // (never 'no-candidate') when the remaining backlog is empty, so
+        // the no-candidate cooldown is not entered while the audit runs
+        // (mirrors the code-freeze skip, WL-0MSQ0RPQP00636JY) and the next
+        // idle tick re-checks. `{ok:false}` (the check could not complete,
+        // e.g. a worklog query failure) fails open: the audit tier is
+        // skipped and dispatch falls through to the next tier — the
+        // dispatch loop is never blocked by an unanswerable check, and
+        // when the fallback backlog is also empty the outcome is a
+        // wl-error strike (partial information must not pause the worker
+        // with no-candidate).
+        const activeAudit = await deps.getActiveAudit(opts.cwd);
+        if (activeAudit.ok) {
+          if (activeAudit.active) {
+            auditInFlight = true;
+            process.stderr.write(
+              `[worklog-plugin] Downtime audit tier skipped: audit-in-flight\n`,
+            );
+          } else {
+            // No active audit: proceed with the candidate lookup unchanged.
+            const audit = await deps.getNextAuditCandidate(opts.cwd);
+            if (audit.ok) {
+              if (audit.candidate !== null) {
+                return await dispatchClaimedTier(deps, 'audit', audit.candidate, opts);
+              }
+            } else {
+              return { dispatched: false, reason: 'wl-error' };
+            }
+          }
+        } else {
+          // Fail-open: the check could not complete — skip the audit tier
+          // and fall through to the next tier (never block all dispatch).
+          auditCheckFailed = true;
+        }
+        // auditInFlight || auditCheckFailed → the audit tier is skipped and
+        // dispatch falls through to the implement tier below.
+      }
+    }
+
+    // Critical-first tier (WL-0MT3FM8VA005XBHE): consulted on EVERY
+    // dispatch — including during a freeze. The lookup
+    // (getNextCriticalCandidate) returns the stage-appropriate critical
+    // candidate (F2: stage→skill via criticalSkillKind, plan_complete
+    // implement caps Q2; F3: dependency-blocked items resolve to their
+    // nearest open frontier blocker with the blocker's own stage). It
+    // runs AFTER the audit tier (a completed/in_review item needing audit
+    // keeps its slot) and BEFORE the non-critical implement/plan/intake
+    // tiers — a critical item at ANY stage always wins over any
+    // non-critical item (parent AC3). Error channel parity with the audit
+    // tier (WL-0MSLWJ2KP0002SV0): {ok:true, candidate:null} is a GENUINELY
+    // empty critical tier and falls through to the non-critical tiers;
+    // {ok:false} is a wl/parse failure — fail closed to a wl-error strike
+    // (never a silent fall-through, so a broken critical lookup cannot
+    // silently look like "no critical work").
+    //
+    // Freeze split-by-skill (Q1): the marker is re-read fresh above, and
+    // while frozen OR ambiguous (fail-closed) a critical IMPLEMENT
+    // candidate (plan_complete) is SKIPPED — no new code changes land
+    // mid-release — but a critical plan/intake candidate STILL dispatches
+    // (low-risk prep allowed, matching the non-critical plan/intake tiers).
+    // Pane minimum (parent WL-0MT32F90V008UAD2 AC3): the critical tier
+    // needs ≥ 1 free slot like every single-pane tier.
+    if (panesEligible) {
+      const critical = await deps.getNextCriticalCandidate(opts.cwd);
+      if (critical.ok) {
+        if (critical.candidate !== null) {
+          const kind = criticalSkillKind(critical.candidate.stage);
+          if (kind !== null && !(frozen && kind === 'implement')) {
+            return await dispatchClaimedTier(deps, kind, critical.candidate, opts);
+          }
+          // Frozen implement-kind critical (or a non-dispatchable stage):
+          // skip this candidate (fail-closed pause) and fall through to
+          // the non-critical tiers.
         }
       } else {
         return { dispatched: false, reason: 'wl-error' };
       }
-      // Implement tier (WL-0MSMAYPQP001FLR6): after the audit gate, dispatch
-      // /skill:implement for the highest-priority open plan_complete item with
-      // risk Low / effort Small|XS. getNextImplementCandidate is fail-closed
+    }
+
+    if (!frozen && panesEligible) {
+      // Implement tier (WL-0MSMAYPQP001FLR6): after the critical-first
+      // gate, dispatch /skill:implement for the highest-priority open
+      // plan_complete item with
+      // risk ≤ Medium / effort ≤ Medium. getNextImplementCandidate is fail-closed
       // (null on wl failure or no candidate), so a null here means the tier is
       // exhausted and the plan/intake tiers below still run (AC5/AC6 — a wl
       // error at the implement tier does NOT short-circuit the fallback).
+      // Pane minimum (parent WL-0MT32F90V008UAD2 AC3 / F3-fix
+      // WL-0MT4RQTID000GT69): ≥ 1 free slot at selection time, matching the
+      // critical/audit/plan/intake tiers — a direct dispatchDowntimeWork(
+      // {freeSlots:0}) must never dispatch implement. 0 free slots is
+      // ineligible (never a strike): the lookup is skipped entirely and
+      // dispatch falls through to the plan tier's defensive no-candidate.
       const implementCandidate = await deps.getNextImplementCandidate(opts.cwd);
       if (implementCandidate !== null) {
         return await dispatchClaimedTier(deps, 'implement', implementCandidate, opts);
@@ -987,15 +1978,24 @@ export async function dispatchDowntimeWork(
     }
     // Tier 2 (intake_complete → /skill:plan). A CLI error here does NOT
     // short-circuit: tier 3 is still attempted so a tier-3 candidate can
-    // still dispatch (operator refinement).
+    // still dispatch (operator refinement). Pane minimum (parent
+    // WL-0MT32F90V008UAD2 AC3): plan/intake need ≥ 1 free slot — via the
+    // worker this is always true (the idle-duration gate has already
+    // required ≥ N ≥ 1 free), the gate is defensive for direct API callers.
     let tier2Error = false;
-    const intakeComplete = await deps.getNextItem('intake_complete', opts.cwd);
-    if (intakeComplete.ok) {
-      if (intakeComplete.candidate !== null) {
-        return await dispatchClaimedTier(deps, 'plan', intakeComplete.candidate, opts);
+    if (panesEligible) {
+      const intakeComplete = await deps.getNextItem('intake_complete', opts.cwd);
+      if (intakeComplete.ok) {
+        if (intakeComplete.candidate !== null) {
+          return await dispatchClaimedTier(deps, 'plan', intakeComplete.candidate, opts);
+        }
+      } else {
+        tier2Error = true;
       }
     } else {
-      tier2Error = true;
+      // 0 free slots (defensive, unreachable via the worker): the panes
+      // cannot run — treat as an empty backlog (no candidate dispatchable).
+      return { dispatched: false, reason: 'no-candidate' };
     }
 
     // Tier 3 (idea → /skill:intake) is ALWAYS attempted when tier 2 produced
@@ -1020,7 +2020,11 @@ export async function dispatchDowntimeWork(
       // lifts (WL-0MSQ0RPQP00636JY).
       return frozen
         ? { dispatched: false, reason: 'code-freeze' }
-        : { dispatched: false, reason: 'no-candidate' };
+        : auditInFlight
+          ? { dispatched: false, reason: 'audit-in-flight' }
+          : auditCheckFailed
+            ? { dispatched: false, reason: 'wl-error' }
+            : { dispatched: false, reason: 'no-candidate' };
     }
     // Tier 3 errored (with or without a tier-2 error): fail closed to busy.
     // The worker counts this as one CLI-error strike; the backlog is not
@@ -1034,17 +2038,19 @@ export async function dispatchDowntimeWork(
 
 /**
  * Argument vector for spawning `send-to-pi.sh`: visible pane named
- * `Downtime <kind>`, `--no-focus` (visible but never steals focus),
- * `--cwd <wlRoot>`, `--model <downtimeModel>`, then the prompt.
+ * `Downtime <kind>` (`paneName` overrides it — the scheduled-prompts tier
+ * passes `Downtime <entryId>`, WL-0MSS1Q5ER007QDKX), `--no-focus` (visible but
+ * never steals focus), `--cwd <wlRoot>`, `--model <downtimeModel>`, then the
+ * prompt.
  */
 export function buildDowntimePaneArgs(
   kind: DowntimeSkillKind,
   prompt: string,
-  opts: { model: string; cwd: string },
+  opts: { model: string; cwd: string; paneName?: string },
 ): string[] {
   return [
     '--pane-name',
-    `Downtime ${kind}`,
+    opts.paneName ?? `Downtime ${kind}`,
     '--no-focus',
     '--cwd',
     opts.cwd,
@@ -1178,10 +2184,23 @@ export async function spawnDowntimePane(
 
 // ── Worker orchestrator (implemented — F3) ────────────────────────────
 
-/** Per-tick configuration; re-read every tick so settings apply live. */
+/**
+ * Per-tick configuration; re-read every tick so settings apply live.
+ *
+ * `override` (optional) is the per-instance in-memory enabled-state override:
+ * `null` (default) follows the global setting; `true`/`false` force dispatch
+ * on/off for THIS worker regardless of the global config. The override is
+ * purely in-memory — it resets on plugin restart and never touches the shared
+ * settings file (per-instance scoping, parent WL-0MSZ4NSOE007AQEF).
+ */
 export interface DowntimeWorkerConfig {
   poller: DowntimePoller;
   deps: DowntimeWorkerDeps;
+  /**
+   * Per-instance in-memory enabled override. `null` (default) = follow the
+   * global setting; `true`/`false` force dispatch on/off for this worker.
+   */
+  override?: boolean | null;
   /** Re-read each tick so settings changes apply without a restart. */
   config(): {
     enabled: boolean;
@@ -1192,6 +2211,42 @@ export interface DowntimeWorkerConfig {
     /** Pause duration after a genuine empty backlog (no-candidate), ms. */
     noCandidateCooldownMs: number;
   };
+  /**
+   * Optional shared round-robin registry (WL-0MSSRED76008LGB6) used for
+   * rotation-aware selection and probe jitter. When absent, selection falls
+   * back to the pre-rotation sortIndex order and probes use the static
+   * interval (fail-open).
+   */
+  registry?: RoundRobinRegistry;
+  /**
+   * Shared coordination directory — the `.worklog` dir where
+   * `downtime-coordination.json` (+ the leader lock/lease) lives. All
+   * herdr instances contributing to the same coordination list pass the
+   * same value (parent AC3 — single-machine v1).
+   *
+   * Optional for backward compatibility / fail-open: when ABSENT the
+   * worker runs the LEGACY non-coordination flow — every instance polls
+   * and dispatches through the direct tier chain (`dispatchDowntimeWork`)
+   * exactly as before the refactor (used by existing tests and by
+   * configurations that have not wired coordination). Production wiring
+   * (`createDowntimeWorker` in index.ts) always passes it.
+   */
+  coordinationDir?: string;
+  /**
+   * Stable per-instance id used for leader election and the coordination
+   * entry key (parent AC3 `instanceId`). Omitted → generated once at
+   * worker construction (per-process id; a restarted instance re-offers
+   * under a fresh id and its dead lease expires in the TTL).
+   */
+  instanceId?: string;
+  /** Leader lease TTL seconds (parent AC2 — default 5 minutes). */
+  leaseTtlSeconds?: number;
+  /**
+   * Coordination check-in interval (parent AC3 — default 30 minutes):
+   * every instance re-verifies/updates its entry at this cadence, whether
+   * leader or not.
+   */
+  checkInIntervalMs?: number;
 }
 
 export interface DowntimeWorkerTickResult {
@@ -1209,8 +2264,43 @@ export interface DowntimeWorker {
   readonly dispatching: boolean;
   /** Timestamp of the last successful dispatch (null until the first). */
   readonly lastDispatchAt: number | null;
-  /** Whether the worker is enabled per the current settings (re-read). */
+  /**
+   * Whether the worker is enabled per the current settings (re-read) AND the
+   * per-instance in-memory override: effective enabled = `override ??
+   * cfg.enabled` (the override takes precedence when set). The getter re-reads
+   * the global setting each call, so a settings change applies live while the
+   * override stays in force.
+   */
   readonly enabled: boolean;
+  /**
+   * The current per-instance in-memory override (`null` = follow settings;
+   * `true`/`false` = force dispatch on/off for this instance).
+   */
+  readonly override: boolean | null;
+  /**
+   * True when the current `override === false` was restored from the
+   * persisted disable marker (`.herdr-downtime-disabled`) at construction
+   * — i.e. the disable survived a pane/plugin restart. False for a live
+   * toggle() press and after any explicit re-enable; lets the header show a
+   * "restored" notice so a restored disable is never silent
+   * (WL-0MT5SG0VU005ARUR).
+   */
+  readonly restoredFromMarker: boolean;
+  /**
+   * Flip the per-instance in-memory override: `null` → `false` (disable
+   * dispatch for this instance) → `true` (force dispatch on for this
+   * instance) → `null` (return to following the global setting), and so on.
+   * In-memory only — never written to the settings file, never persisted.
+   */
+  toggle(): void;
+  /**
+   * Compute a jittered probe interval (WL-0MSSRED76008LGB6): the effective
+   * poll interval is jittered ±50% of the configured `downtimePollIntervalMs`
+   * per call (random, injectable RNG via the worker's registry) so instances
+   * with identical configuration do not probe in lockstep. Returns the
+   * clamped interval for the NEXT probe.
+   */
+  jitterPollIntervalMs(baseIntervalMs: number): number;
   /**
    * True while the worker is paused in the no-candidate cooldown: no proxy
    * polling, no idle tracking, and no dispatch until the pause expires
@@ -1223,6 +2313,18 @@ export interface DowntimeWorker {
    * when a cooldown expires.
    */
   readonly errorStrikes: number;
+  /**
+   * Whether THIS instance currently holds the elected leadership (parent
+   * WL-0MST3OJ8S0001ROL AC1): true while the leader lease is valid and
+   * owned by this instance. Only the leader polls the proxy and dispatches.
+   */
+  readonly isLeader: boolean;
+  /**
+   * The instance id this worker uses for leader election and its
+   * coordination entry key (parent AC3 `instanceId`). Stored per worker
+   * construction for the process lifetime.
+   */
+  readonly instanceId: string;
 }
 
 /**
@@ -1241,6 +2343,48 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // Three-strike rule: consecutive CLI-error dispatch outcomes. A successful
   // dispatch, a genuine no-candidate outcome, or an expired cooldown resets it.
   let errorStrikes = 0;
+  // Per-instance in-memory enabled override (parent WL-0MSZ4NSOE007AQEF):
+  // null (default) = follow the global setting; true/false force dispatch
+  // on/off for THIS instance. In-memory only — resets on plugin restart,
+  // never written to the shared settings file. Initialized from the optional
+  // config so callers can construct a pre-toggled worker.
+  let override: boolean | null = opts.override ?? null;
+  // Durable disable (WL-0MT5SFP990001FNW): when the per-worklog-root marker
+  // exists, the worker starts disabled so a previous `d` press survives a
+  // restart. Explicit opts.override wins over the marker (marker is only the
+  // fallback when no override is passed).
+  let restoredFromMarker = false;
+  if (opts.override === undefined && disableMarkerExists(opts.config().cwd)) {
+    override = false;
+    restoredFromMarker = true;
+  }
+
+  // ── Leader-election + coordination state (parent WL-0MST3OJ8S0001ROL) ──
+  // One leader-election manager per worker (per process): the instance id
+  // is fixed at construction so the lease file owner and the coordination
+  // entry key stay stable for the process lifetime. The manager owns the
+  // file lock/lease at `<coordinationDir>/downtime-leader.lock` +
+  // `downtime-leader-lease.json`. When `coordinationDir` is ABSENT the
+  // worker runs the legacy flow (self is always the leader — no election)
+  // so existing non-coordination configurations/tests keep working
+  // unchanged (fail-open).
+  const leaderManager = opts.coordinationDir
+    ? createLeaderElectionManager({
+        worklogDir: opts.coordinationDir,
+        instanceId: opts.instanceId,
+        leaseTtlSeconds: opts.leaseTtlSeconds,
+      })
+    : null;
+  const instanceId = leaderManager ? leaderManager.getInstanceId() : (opts.instanceId ?? 'legacy');
+  const checkInIntervalMs = opts.checkInIntervalMs ?? DEFAULT_COORDINATION_CHECK_IN_MS;
+  // Timestamp of the last coordination check-in (30-min cadence, parent
+  // AC3). null until the first tick so every instance checks in on startup
+  // (first check-in on startup — parent Constraint).
+  let lastCheckInAt: number | null = null;
+  // Per-tick cached leadership decision (the lease read is cheap but let a
+  // tick observe ONE consistent state — an election win mid-tick applies
+  // next tick). Legacy mode (no coordinationDir) is always the leader.
+  let leaderState = leaderManager ? leaderManager.isLeader() : true;
 
   return {
     get idleSince(): number | null {
@@ -1252,8 +2396,48 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     get lastDispatchAt(): number | null {
       return lastDispatchAt;
     },
+    get isLeader(): boolean {
+      return leaderState;
+    },
+    get instanceId(): string {
+      return instanceId;
+    },
     get enabled(): boolean {
-      return opts.config().enabled;
+      // Effective enabled = override ?? cfg.enabled: the per-instance
+      // override takes precedence when set (so `d` can force dispatch on
+      // for one pane even when the global setting is off); with no override
+      // the worker follows the global setting exactly as before.
+      return override ?? opts.config().enabled;
+    },
+    get override(): boolean | null {
+      return override;
+    },
+    get restoredFromMarker(): boolean {
+      return restoredFromMarker;
+    },
+    toggle(): void {
+      // null → false → null cycle: pressing `d` disables dispatch;
+      // pressing again returns to following the global setting.
+      // No force-enable: a second press never sets override to true.
+      // The per-worklog-root marker (WL-0MT5SFP990001FNW) is written on
+      // disable and removed on re-enable so the disable survives restarts.
+      // A live press (or an explicit re-enable) clears the restored flag so
+      // the header notice only reflects the marker-restored state.
+      if (override === null) {
+        override = false;
+        restoredFromMarker = false;
+        writeDisableMarker(opts.config().cwd);
+      } else {
+        override = null;
+        restoredFromMarker = false;
+        removeDisableMarker(opts.config().cwd);
+      }
+    },
+    jitterPollIntervalMs(baseIntervalMs: number): number {
+      // Fail-open: no registry → static interval (no jitter).
+      return opts.registry
+        ? opts.registry.getEffectivePollInterval(baseIntervalMs)
+        : baseIntervalMs;
     },
     get paused(): boolean {
       return cooldownUntil !== null && Date.now() < cooldownUntil;
@@ -1263,7 +2447,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     },
     async tick(): Promise<DowntimeWorkerTickResult> {
       const cfg = opts.config();
-      if (!cfg.enabled) return { polled: false, dispatched: false, idle: false };
+      // Short-circuit on the EFFECTIVE enabled state (override ?? settings):
+      // while toggled off the worker performs no proxy polling, no idle
+      // tracking, and no dispatch — exactly the settings-disabled path.
+      if (!(override ?? cfg.enabled)) return { polled: false, dispatched: false, idle: false };
       // Cooldown gate: while paused the worker performs NO proxy polling, NO
       // idle tracking, and NO dispatch. The pause is a full stop (user
       // confirmed "pause completely"); once it expires the idle tracker is
@@ -1276,7 +2463,83 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         cooldownUntil = null; // pause expired — resume normal polling
         errorStrikes = 0; // fresh strike counter after the pause
       }
+
+      // ── Leader election + coordination check-in (parent
+      // WL-0MST3OJ8S0001ROL AC1/AC2/AC3) ───────────────────────────────────
+      // In legacy mode (no coordinationDir) this whole block is skipped: no
+      // election, no check-in — the worker is always the leader and uses the
+      // direct tier chain below (pre-refactor behavior).
+      const tickNow = Date.now();
+      if (leaderManager !== null) {
+        // Every tick resolves leadership (a single cheap lease-file read):
+        //  - While leader: refresh the 5-minute lease (each proxy-poll cycle
+        //    extends it — AC2).
+        //  - While non-leader: NO proxy polling and NO dispatch (AC4); only
+        //    detect a stale/expired lease (leader crashed or idle) and run a
+        //    new election — takeover lands within the lease TTL, well inside
+        //    the 5-minute user-story bound.
+        //  - Fail-safe (constraint): a missing/unreadable lease file is
+        //    treated as "not leader" — the instance continues operating
+        //    without dispatching.
+        if (leaderState) {
+          // Refresh the lease first (each poll cycle extends the TTL). A
+          // failed refresh (rename/IO) is fail-safe: the existing lease
+          // stands until it expires, then a new election runs.
+          leaderManager.refreshLease();
+        } else if (!leaderManager.hasLease() || leaderManager.detectStaleLeader()) {
+          // No leader exists yet (fresh election) OR the elected leader's
+          // lease expired (crash / idle) — try to take over NOW. Stale
+          // state is cleaned first (an expired lease, or an orphaned lock
+          // without a lease, must not block the new election). On success
+          // we become the leader this tick; on lock contention (another
+          // instance won first — its cleanup+no-op or a valid lease) we
+          // stay non-leader and retry on a later tick. Fail-safe: a failed
+          // election leaves us non-leader (no dispatch).
+          cleanupStaleElection({ worklogDir: opts.coordinationDir! });
+          leaderManager.attemptElection();
+          leaderState = leaderManager.isLeader();
+          if (leaderState) leaderManager.refreshLease();
+          // Audit trail (WL-0MSXHAE290067VAL): log the leadership win —
+          // initial election or takeover after a stale-lease detection.
+          if (leaderState) {
+            void appendCoordinationLogEntry(cfg.cwd, {
+              kind: 'coordination',
+              operation: 'election',
+              instanceId,
+              at: new Date(tickNow).toISOString(),
+            });
+          }
+        }
+
+        // Coordination check-in (parent AC3 — first on startup, then every
+        // 30 minutes): recompute THIS instance's most-important item and
+        // verify/update its entry in the shared coordination file. Runs for
+        // leader AND non-leader alike — every instance contributes its most
+        // important item; the single elected leader dispatches from the list.
+        if (lastCheckInAt === null || tickNow - lastCheckInAt >= checkInIntervalMs) {
+          lastCheckInAt = tickNow;
+          try {
+            await runCoordinationCheckIn(opts.deps, {
+              cwd: cfg.cwd,
+              coordinationDir: opts.coordinationDir!,
+              instanceId,
+            }, tickNow);
+          } catch {
+            // Fail-safe: a throwing check-in (stub or regression) must never
+            // crash the worker — retried at the next cadence.
+          }
+        }
+
+        // Non-leader short-circuit (AC4): no proxy polling, no idle
+        // tracking, no dispatch — the check-in above is the instance's only
+        // coordination activity. (Lease takeover was handled above.)
+        if (!leaderState) {
+          return { polled: false, dispatched: false, idle: false };
+        }
+      }
+
       if (opts.poller.isPolling()) return { polled: false, dispatched: false, idle: tracker.idleSince !== null };
+
 
       const status = await opts.poller.poll();
       if (status === null) {
@@ -1288,9 +2551,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // Per-slot routing (LP-0MSG5TA7Y002GN39): when the proxy serves
       // per-slot identity AND the config asks for 0 < N < total, idle
       // duration is tracked PER SLOT so dispatch requires the SAME N slots
-      // continuously free for the full threshold. Any global busy condition
-      // (query / model switch / lease / server down / ambiguous) resets ALL
-      // slot timers; a slot reporting processing resets only its own.
+      // continuously free for the full threshold. The global gate in
+      // per-slot mode is the per-slot-safe subset (server up + no model
+      // switch): a query/lease tied to a busy slot is the operator's own
+      // session and must not reset the free slots' timers (spare-capacity
+      // dispatch, parent WL-0MT32F90V008UAD2). A slot reporting processing
+      // resets only its own timer.
       const perSlotMode =
         Array.isArray(status.slots) &&
         cfg.requiredFreeSlots > 0 &&
@@ -1299,9 +2565,17 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       let idle: boolean;
       let ready: boolean;
       if (perSlotMode && Array.isArray(status.slots)) {
-        const globalIdle = globalIdleChecks(status);
-        // Keep the worker's idleSince view in sync with the run state.
-        tracker.record(globalIdle);
+        const globalIdle = perSlotGlobalIdleChecks(status);
+        // Display-only: the global idle tracker also reflects per-slot query
+        // activity for the title bar idle indicator — when any slot is
+        // processing (including the operator's), the title bar shows "busy",
+        // not "idle". The dispatch logic (spare-capacity relaxation) is
+        // unaffected because free-slot count comes from perSlotTracker, not
+        // tracker.idleSince. (parent WL-0MT65T14L002HTWB)
+        const anySlotProcessing = status.slots.some(
+          (s) => typeof s.is_processing === 'boolean' && s.is_processing,
+        );
+        tracker.record(globalIdle && !anySlotProcessing);
         if (globalIdle) {
           perSlotTracker.record(status.slots);
           idle = true;
@@ -1323,12 +2597,55 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       if (!ready) return { polled: true, dispatched: false, idle: true };
       if (dispatching) return { polled: true, dispatched: false, idle: true };
 
+      // ── Dispatch (parent WL-0MST3OJ8S0001ROL AC4) ──
+      // Per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3): the
+      // latest polled free-slot count flows into dispatch selection — per-slot
+      // free count when per-slot identity is served (fail-closed counting:
+      // an entry without an explicit boolean `is_processing` is busy, never
+      // free), else `available_slots`. The coordination path uses it to gate
+      // the audit tier (needs ≥ 2 slots: parent + Phase 2 child); the legacy
+      // path passes it through to the direct tier chain unchanged.
+      const freeSlots =
+        Array.isArray(status.slots)
+          ? status.slots.filter(
+              (s) => typeof s.is_processing === 'boolean' && !s.is_processing,
+            ).length
+          : status.available_slots;
+
+      // Coordination mode: the elected leader reads the shared coordination
+      // list, re-fetches and classifies each entry's item (tier priority:
+      // audit → implement → plan → intake) and dispatches the
+      // highest-priority available item when a slot opens, removing its
+      // entry. The CAS claim + dispatched-marker guards are preserved
+      // inside `dispatchClaimedTier` (AC5). The idle-duration gate above
+      // has already required ≥ N ≥ 1 free slots continuously, so the
+      // dispatch runs only with a real slot available.
+      //
+      // Legacy mode (no coordinationDir / no fetchItem dep): the direct
+      // per-instance tier chain (`dispatchDowntimeWork`) — pre-refactor
+      // behavior, retained as the fail-open fallback.
       dispatching = true;
       try {
-        const outcome = await dispatchDowntimeWork(opts.deps, {
-          model: cfg.model,
-          cwd: cfg.cwd,
-        });
+        const outcome =
+          opts.coordinationDir && typeof opts.deps.fetchItem === 'function'
+            ? await dispatchFromCoordination(
+                opts.deps,
+                readCoordinationFile(opts.coordinationDir)?.entries ?? [],
+                {
+                  model: cfg.model,
+                  cwd: cfg.cwd,
+                  coordinationDir: opts.coordinationDir,
+                  freeSlots,
+                  leaseTtlMs: opts.leaseTtlSeconds
+                    ? opts.leaseTtlSeconds * 1000
+                    : DEFAULT_LEASE_TTL_SECONDS * 1000,
+                },
+              )
+            : await dispatchDowntimeWork(opts.deps, {
+                model: cfg.model,
+                cwd: cfg.cwd,
+                freeSlots,
+              });
         if (outcome.dispatched) {
           lastDispatchAt = Date.now();
           errorStrikes = 0; // a successful dispatch proves the CLI is healthy
@@ -1388,14 +2705,16 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
 /**
  * Instruction appended to every dispatched prompt: when the skill run
  * cannot proceed because answers are needed, record the questions in a
- * comment on the work item, mark it as needing producer review, and stop —
- * never block indefinitely (parent AC6).
+ * comment on the work item, mark it as needing producer review, repeat the
+ * questions in the final summary, and stop — never block indefinitely (parent
+ * AC6).
  */
 export const BLOCKED_QUESTIONS_INSTRUCTION =
   'If you cannot proceed because you need answers, record the questions in a ' +
   'comment on the work item (wl comment add <id> --comment "question: ...") and ' +
   'mark the item as needing producer review (wl update <id> --needs-producer-review ' +
-  'true), then stop — do not block indefinitely.';
+  'true), repeat the questions in your final summary, then stop — do not block ' +
+  'indefinitely.';
 
 /** Build the prompt dispatched to a pi agent pane for the given candidate. */
 export function buildDowntimePrompt(kind: DowntimeSkillKind, candidate: DowntimeCandidate): string {
@@ -1418,7 +2737,7 @@ export function buildDowntimePrompt(kind: DowntimeSkillKind, candidate: Downtime
  */
 export function buildDowntimeDispatchComment(
   itemId: string,
-  kind: DowntimeSkillKind,
+  kind: DowntimeDispatchKind,
   dispatchedAt: string,
   title?: string,
 ): string {
@@ -1426,6 +2745,7 @@ export function buildDowntimeDispatchComment(
     kind === 'plan' ? '/skill:plan'
     : kind === 'audit' ? '/skill:audit'
     : kind === 'implement' ? '/skill:implement'
+    : kind === 'scheduled' ? 'scheduled prompt'
     : '/skill:intake';
   const suffix = title ? ` (${title.replace(/[\r\n]+/g, ' ')})` : '';
   return `Auto-dispatched by the herdr downtime worker at ${dispatchedAt} — running ${skill} ${itemId}${suffix}.`;
@@ -1485,6 +2805,7 @@ export function parseNextCandidatesOutput(
         typeof nested.sortIndex === 'number' && Number.isFinite(nested.sortIndex)
           ? nested.sortIndex
           : undefined,
+      priority: typeof nested.priority === 'string' ? nested.priority : undefined,
     });
   }
   return candidates;
@@ -1529,13 +2850,72 @@ export function skillKindFromPrompt(prompt: string): DowntimeSkillKind {
   return prompt.includes('/skill:plan ') ? 'plan' : 'intake';
 }
 
+// ── Rotation-aware selection (WL-0MSSRED76008LGB6) ────────────────────
+
+/**
+ * A candidate carrying the fields needed for rotation-aware selection:
+ * a stable id, an optional priority level (the round-robin grouping key),
+ * and an optional sortIndex (wl next priority order preserved).
+ */
+export interface RotatableCandidate {
+  id: string;
+  priority?: string;
+  sortIndex?: number;
+}
+
+/**
+ * Apply round-robin rotation within the highest-priority group of a
+ * candidate list. Fail-open design (WL-0MSSRED76008LGB6):
+ *
+ * - No registry (or an empty/closed registry) → fall back to the plain
+ *   sortIndex order (first candidate wins) — the pre-rotation behaviour.
+ * - Candidates with no `priority` field → fall back to sortIndex order
+ *   (rotation needs the priority grouping key).
+ * - The highest-priority group with multiple members rotates through a
+ *   shared durable cursor (`advanceCursor` persists the advance).
+ * - A single-member group needs no rotation → sortIndex order stands.
+ *
+ * Candidates are sorted ascending by sortIndex (wl next priority order)
+ * before grouping, so the first group always holds the top priority.
+ *
+ * @param candidates Candidates already filtered/validated by the caller.
+ * @param registry Optional shared round-robin registry. When absent,
+ *   rotation is skipped entirely (fail-open).
+ * @returns The selected candidate, or null when the list is empty.
+ */
+export function selectWithRotation<T extends RotatableCandidate>(
+  candidates: T[],
+  registry?: RoundRobinRegistry,
+): T | null {
+  if (candidates.length === 0) return null;
+  const sorted = [...candidates].sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
+  if (sorted.length === 1) return sorted[0] ?? null;
+  if (!registry) return sorted[0] ?? null;
+
+  // Group by priority level; only rotate within the highest-priority group
+  // (candidates are sorted ascending by sortIndex, so the first group holds
+  // the top priority). Missing priority on the leader → no rotation
+  // possible (fail-open).
+  const topPriority = sorted[0]?.priority;
+  if (!topPriority) return sorted[0] ?? null;
+
+  const topGroup = sorted.filter((c) => c.priority === topPriority);
+  if (topGroup.length <= 1) return sorted[0] ?? null;
+
+  // Rotate: the cursor selects the next member of the tied group and
+  // persists the advance (write-then-spawn ordering handled by callers).
+  const index = registry.advanceCursor(topPriority, topGroup.length);
+  return topGroup[index] ?? topGroup[0] ?? null;
+}
+
 // ── Audit-tier selection (WL-0MSI8H3HP000K0RG) ────────────────────────
 
 /**
- * Parse the stdout of `wl list --status completed --stage in_review --json`
- * into typed audit candidates. Accepts both the bare array shape and the
- * `{ workItems: [...] }` wrapper. Malformed/empty output yields null
- * (fail-closed).
+ * Parse the stdout of `wl list --status completed --stage in_review
+ * --root-only --json` (root-only, WL-0MSTLFW14000KPEC: only parent items
+ * are audit candidates) into typed audit candidates. Accepts both the bare
+ * array shape and the `{ workItems: [...] }` wrapper. Malformed/empty
+ * output yields null (fail-closed).
  */
 export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | null {
   let parsed: unknown;
@@ -1562,15 +2942,59 @@ export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | n
       auditedAt: typeof o.auditedAt === 'string' ? o.auditedAt : undefined,
       updatedAt: typeof o.updatedAt === 'string' ? o.updatedAt : undefined,
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
+      priority: typeof o.priority === 'string' ? o.priority : undefined,
     });
   }
   return candidates;
 }
 
 /**
+ * Parse the item ids from `wl list --status in_progress --json` output
+ * (WL-0MT3PHW4I002SNOV): returns the ids of every item currently
+ * `in_progress`, or null on malformed output (fail-closed — the
+ * active-audit single-flight check treats an unparseable worklog query as
+ * a failed check, `{ok:false}`). Accepts the same shapes as the other wl
+ * parsers: a `{workItems: [...]}` object with bare item objects, a
+ * `{workItems: [{workItem: {...}}]}` wrapper shape, or a bare array.
+ * Entries without a usable id are skipped.
+ */
+export function parseInProgressOutput(stdout: string): Set<string> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  const items = Array.isArray(parsed)
+    ? parsed
+    : parsed !== null && typeof parsed === 'object' && Array.isArray((parsed as { workItems?: unknown }).workItems)
+      ? (parsed as { workItems: unknown[] }).workItems
+      : null;
+  if (items === null) return null;
+
+  const ids = new Set<string>();
+  for (const raw of items) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const o = raw as Record<string, unknown>;
+    // Accept both bare item objects and the {workItem: {...}} wrapper.
+    const wrapped = typeof o.workItem === 'object' && o.workItem !== null
+      ? (o.workItem as Record<string, unknown>)
+      : undefined;
+    const id = typeof wrapped?.id === 'string'
+      ? wrapped.id
+      : typeof o.id === 'string'
+        ? o.id
+        : undefined;
+    if (typeof id === 'string' && id.length > 0) ids.add(id);
+  }
+  return ids;
+}
+
+/**
  * Select the next audit candidate from parsed in_review items: the first
  * item WITHOUT a valid audit, sorted ascending by `sortIndex` (heartbeat
- * convention). "Valid audit" reuses `isAuditFresh` from icons.ts (fresh = a
+ * convention). "Valid audit" reuses `isAuditFresh` from @worklog/shared/icons
+ * (fresh = a
  * review icon that is neither ⏳ nor 🔍). Returns null when no candidate is
  * unaudited/stale (or the list is empty). Missing auditedAt/updatedAt means
  * not fresh → selected.
@@ -1596,9 +3020,10 @@ export function selectAuditCandidate(
   candidates: AuditCandidate[],
   now: number = Date.now(),
   dispatchedItemIds?: ReadonlySet<string>,
+  registry?: RoundRobinRegistry,
 ): AuditCandidate | null {
   const recencyCutoff = now - DOWNTIME_AUDIT_RECENCY_WINDOW_MS;
-  const target = candidates
+  const filtered = candidates
     .filter((c) => !isAuditFresh(c.auditedAt, c.updatedAt))
     .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
     .filter((c) => {
@@ -1608,7 +3033,7 @@ export function selectAuditCandidate(
       return updated >= recencyCutoff;
     })
     .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
-  return target[0] ?? null;
+  return selectWithRotation(filtered, registry);
 }
 
 /**
@@ -1628,7 +3053,11 @@ export function toDowntimeCandidate(candidate: AuditCandidate): DowntimeCandidat
  * client-side guard. Unset/unknown values map to null (fail-closed).
  */
 function riskOrdinal(risk: string | undefined | null): number | null {
-  switch ((risk ?? '').trim().toLowerCase()) {
+  // Extract the leading keyword before any delimiter (—, -, :, whitespace).
+  // Agents may produce verbose risk fields like "Medium — NVIDIA driver changes…";
+  // the belt-and-suspenders guard must recognise the level regardless.
+  const normalized = (risk ?? '').trim().toLowerCase().split(/[-:–—\s]+/)[0];
+  switch (normalized) {
     case 'low': return 1;
     case 'medium': return 2;
     case 'high': return 3;
@@ -1647,7 +3076,13 @@ function riskOrdinal(risk: string | undefined | null): number | null {
  * (fail-closed).
  */
 function effortOrdinal(effort: string | undefined | null): number | null {
-  switch ((effort ?? '').trim().toLowerCase().replace(/[\s-]+/g, '')) {
+  const normalized = (effort ?? '').trim().toLowerCase();
+  // Try exact match on stripped version first (simple cases: "small", "medium",
+  // "Extra Small" → "extrasmall"). If that fails, fall back to searching for
+  // the keyword anywhere in the string — agents produce verbose fields like
+  // "1–4 hours — Small. Diagnostic investigation…" (keyword after the dash).
+  const stripped = normalized.replace(/[\s-]+/g, '');
+  switch (stripped) {
     case 'xs':
     case 'extrasmall': return 1;
     case 's':
@@ -1658,7 +3093,20 @@ function effortOrdinal(effort: string | undefined | null): number | null {
     case 'large': return 4;
     case 'xl':
     case 'extralarge': return 5;
-    default: return null;
+    default:
+      // Fallback: search for the keyword bounded by non-word characters.
+      // Checked in order of specificity (longest first) so "small" wins over "s".
+      if (/(?:^|\W)extrasmall(?:\W|$)/.test(normalized)) return 1;
+      if (/(?:^|\W)xs(?:\W|$)/.test(normalized)) return 1;
+      if (/(?:^|\W)small(?:\W|$)/.test(normalized)) return 2;
+      if (/(?:^|\W)s(?:\W|$)/.test(normalized)) return 2;
+      if (/(?:^|\W)extralarge(?:\W|$)/.test(normalized)) return 5;
+      if (/(?:^|\W)large(?:\W|$)/.test(normalized)) return 4;
+      if (/(?:^|\W)xl(?:\W|$)/.test(normalized)) return 5;
+      if (/(?:^|\W)l(?:\W|$)/.test(normalized)) return 4;
+      if (/(?:^|\W)m(?:\W|$)/.test(normalized)) return 3;
+      if (/(?:^|\W)medium(?:\W|$)/.test(normalized)) return 3;
+      return null;
   }
 }
 
@@ -1699,6 +3147,7 @@ export function parseImplementCandidatesOutput(stdout: string): ImplementCandida
       risk: typeof o.risk === 'string' ? o.risk : undefined,
       effort: typeof o.effort === 'string' ? o.effort : undefined,
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
+      priority: typeof o.priority === 'string' ? o.priority : undefined,
     });
   }
   return candidates;
@@ -1707,33 +3156,34 @@ export function parseImplementCandidatesOutput(stdout: string): ImplementCandida
 /**
  * Select the next implement candidate from parsed wl next output: the
  * first candidate that is open (`status === 'open'`, AC2), carries risk
- * exactly Low and effort Small/Extra Small (AC1 threshold boundaries,
+ * risk ≤ Medium and effort ≤ Medium (AC1 threshold boundaries,
  * fail-closed on unset/unknown), is not in the dispatched-marker set
  * (kind `implement`, AC6), sorted ascending by `sortIndex` (wl next
  * priority order preserved). Returns null when no candidate qualifies
  * (or the list is empty).
  *
  * Belt-and-suspenders client-side guard (AC1): even though `wl next
- * --risk low --effort small` filters server-side, the herdr tier verifies
+ * --risk medium --effort medium` filters server-side, the herdr tier verifies
  * the thresholds again so a malformed/absent server filter can never
  * dispatch a Medium+/Large+ item.
  */
 export function selectImplementCandidate(
   candidates: ImplementCandidate[],
   dispatchedItemIds?: ReadonlySet<string>,
+  registry?: RoundRobinRegistry,
 ): ImplementCandidate | null {
-  const target = candidates
+  const filtered = candidates
     .filter((c) => c.status === 'open')
     .filter((c) => {
       const risk = riskOrdinal(c.risk);
-      if (risk === null || risk !== 1) return false; // only risk exactly Low
+      if (risk === null || risk > 2) return false; // risk ≤ Medium (1=Low, 2=Medium)
       const effort = effortOrdinal(c.effort);
-      if (effort === null || effort > 2) return false; // Small (2) + Extra Small (1)
+      if (effort === null || effort > 3) return false; // effort ≤ Medium (1=XS, 2=S, 3=M)
       return true;
     })
     .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
     .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
-  return target[0] ?? null;
+  return selectWithRotation(filtered, registry);
 }
 
 /**
@@ -1764,8 +3214,9 @@ export function toImplementCandidate(candidate: ImplementCandidate): DowntimeCan
 export function selectNextCandidate(
   candidates: DowntimeCandidate[],
   dispatchedStages?: ReadonlyMap<string, string>,
+  registry?: RoundRobinRegistry,
 ): DowntimeCandidate | null {
-  const target = candidates
+  const filtered = candidates
     .filter((c) => c.status === 'open')
     .filter((c) => {
       const dispatchedAt = dispatchedStages?.get(c.id);
@@ -1774,14 +3225,380 @@ export function selectNextCandidate(
       return dispatchedAt === undefined || dispatchedAt !== c.stage;
     })
     .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
-  return target[0] ?? null;
+  return selectWithRotation(filtered, registry);
+}
+
+// ── Critical-first selection (WL-0MT3FM8VA005XBHE, F2) ───────────────
+// The critical-first pre-tier dispatches an open critical item at ANY
+// stage (idea / intake_complete / plan_complete) with its stage-
+// appropriate skill — ahead of EVERY non-critical candidate. Stage→skill
+// mapping: idea → /skill:intake, intake_complete → /skill:plan,
+// plan_complete → /skill:implement. Implement dispatch keeps the
+// implement tier's risk/effort caps (decision Q2); every existing guard
+// (CAS claim, dispatched-marker change-guard, single-flight) composes
+// unchanged.
+
+/**
+ * An open critical work-item candidate, enumerated by
+ * `wl list --priority critical --status open` (blocked items included —
+ * `wl list` does not exclude dependency-blocked items). Carries the
+ * worklog `stage` (needed for the stage→skill mapping), the client-side
+ * `status` guard, and the risk/effort fields for the plan_complete caps
+ * (decision Q2).
+ */
+export interface CriticalCandidate {
+  id: string;
+  title: string;
+  /** Worklog status (`open` for selectable items; fail-closed on missing). */
+  status: string;
+  /** Worklog stage: idea | intake_complete | plan_complete | in_progress | … */
+  stage: string;
+  risk?: string;
+  effort?: string;
+  /** wl priority order preserved for deterministic selection. */
+  sortIndex?: number;
+  /** Worklog priority level (critical) — round-robin grouping key. */
+  priority?: string;
+}
+
+/**
+ * Map a critical candidate's worklog stage to the dispatch skill kind.
+ * Only dispatchable stages map: `idea` → `intake`, `intake_complete` →
+ * `plan`, `plan_complete` → `implement`. Every other stage (in_progress,
+ * in_review, completed, …) is NOT a critical-tier dispatch target and
+ * maps to null (the tier falls through to the normal order).
+ */
+export function criticalSkillKind(stage: string): DowntimeSkillKind | null {
+  if (stage === 'idea') return 'intake';
+  if (stage === 'intake_complete') return 'plan';
+  if (stage === 'plan_complete') return 'implement';
+  return null;
+}
+
+/**
+ * Parse the stdout of `wl list --priority critical --status open --json`
+ * into typed critical candidates. Accepts the shape the CLI emits for a
+ * batch (`{ workItems: [...] }`, flat entries carrying the enriched
+ * workItem fields). Entries without an id are skipped; malformed JSON or
+ * output without a workItems list yields null (fail-closed); an empty
+ * list yields `[]` (a genuine empty critical tier).
+ */
+export function parseCriticalCandidatesOutput(stdout: string): CriticalCandidate[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  const items =
+    parsed !== null &&
+    typeof parsed === 'object' &&
+    Array.isArray((parsed as { workItems?: unknown }).workItems)
+      ? (parsed as { workItems: unknown[] }).workItems
+      : null;
+  if (items === null) return null;
+
+  const candidates: CriticalCandidate[] = [];
+  for (const raw of items) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const o = raw as Record<string, unknown>;
+    if (typeof o.id !== 'string' || o.id.length === 0) continue;
+    candidates.push({
+      id: o.id,
+      title: typeof o.title === 'string' ? o.title : '',
+      status: typeof o.status === 'string' ? o.status : '',
+      stage: typeof o.stage === 'string' ? o.stage : '',
+      risk: typeof o.risk === 'string' ? o.risk : undefined,
+      effort: typeof o.effort === 'string' ? o.effort : undefined,
+      sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
+      priority: typeof o.priority === 'string' ? o.priority : undefined,
+    });
+  }
+  return candidates;
+}
+
+/**
+ * Select the next critical-tier candidate from parsed wl list output:
+ * the first open candidate at a dispatchable stage (idea /
+ * intake_complete / plan_complete), with `plan_complete` gated by the
+ * implement caps (risk ≤ Medium / effort ≤ Medium, decision Q2 — an
+ * above-caps critical is never implement-dispatched by the downtime
+ * worker), excluding candidates in the dispatched-marker change-guard
+ * map (id → stage at dispatch — excluded while still at the dispatched-
+ * at stage; a stage advancement releases it). Sorted ascending by
+ * `sortIndex` (wl priority order) with round-robin tie-break within the
+ * critical group (reused `selectWithRotation`; the rotation cursor keys
+ * on the `critical` priority, so critical rotation never disturbs
+ * non-critical tier cursors). Returns null when no candidate qualifies
+ * (or the list is empty).
+ */
+export function selectCriticalCandidate(
+  candidates: CriticalCandidate[],
+  dispatchedStages?: ReadonlyMap<string, string>,
+  registry?: RoundRobinRegistry,
+): CriticalCandidate | null {
+  const filtered = candidates
+    .filter((c) => c.status === 'open')
+    // Dispatchable stages only (idea / intake_complete / plan_complete).
+    .filter((c) => criticalSkillKind(c.stage) !== null)
+    // Caps retained (Q2): a plan_complete candidate must be risk ≤ Medium
+    // / effort ≤ Medium to be implement-dispatched — same ordinal filter
+    // semantics as selectImplementCandidate (fail-closed on unset).
+    .filter((c) => {
+      if (c.stage !== 'plan_complete') return true;
+      const risk = riskOrdinal(c.risk);
+      if (risk === null || risk > 2) return false; // risk ≤ Medium
+      const effort = effortOrdinal(c.effort);
+      if (effort === null || effort > 3) return false; // effort ≤ Medium
+      return true;
+    })
+    .filter((c) => {
+      const dispatchedAt = dispatchedStages?.get(c.id);
+      // Change-guard: exclude while still at the dispatched-at stage; a
+      // missing recorded stage (legacy entry) never suppresses selection.
+      return dispatchedAt === undefined || dispatchedAt !== c.stage;
+    })
+    .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
+  return selectWithRotation(filtered, registry);
+}
+
+/**
+ * Parse the stdout of `wl dep list <id> --json` into the blocker refs of
+ * the queried item: the outbound edges with direction `depends-on` (items
+ * the queried item depends on — its blockers). Edge entries carry only
+ * id/title/status/priority; the caller enriches via `wl show` when the
+ * full stage/risk/effort/sortIndex fields are needed (frontier caps
+ * check, Q2). Malformed JSON or output without an outbound edge list
+ * yields null (fail-closed); an item with no outbound depends-on edges
+ * yields `[]` (unblocked).
+ */
+export function parseDepListBlockersOutput(
+  stdout: string,
+): Array<{ id: string; title: string; status: string; priority?: string }> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  const outbound =
+    parsed !== null &&
+    typeof parsed === 'object' &&
+    Array.isArray((parsed as { outbound?: unknown }).outbound)
+      ? (parsed as { outbound: unknown[] }).outbound
+      : null;
+  if (outbound === null) return null;
+
+  const blockers: Array<{ id: string; title: string; status: string; priority?: string }> = [];
+  for (const raw of outbound as unknown[]) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const o = raw as Record<string, unknown>;
+    // Only dependency edges count as blockers (the item depends on them
+    // and is therefore blocked by them).
+    if (o.direction !== 'depends-on') continue;
+    if (typeof o.id !== 'string' || o.id.length === 0) continue;
+    blockers.push({
+      id: o.id,
+      title: typeof o.title === 'string' ? o.title : '',
+      status: typeof o.status === 'string' ? o.status : '',
+      priority: typeof o.priority === 'string' ? o.priority : undefined,
+    });
+  }
+  return blockers;
+}
+
+/**
+ * Parse the stdout of `wl show <id> --json` into a full critical
+ * candidate (the shape the frontier resolution needs for its
+ * stage→skill mapping and implement caps checks). Accepts the CLI's
+ * single-item shape `{ workItem: {...} }` with the enriched fields.
+ * Malformed output or a missing workItem yields null (fail-closed).
+ */
+export function parseShownWorkItem(stdout: string): CriticalCandidate | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  const raw =
+    parsed !== null &&
+    typeof parsed === 'object' &&
+    (parsed as { workItem?: unknown }).workItem !== null &&
+    (parsed as { workItem?: unknown }).workItem !== undefined
+      ? (parsed as { workItem: Record<string, unknown> }).workItem
+      : null;
+  if (typeof raw !== 'object' || raw === null) return null;
+  if (typeof raw.id !== 'string' || raw.id.length === 0) return null;
+  return {
+    id: raw.id,
+    title: typeof raw.title === 'string' ? raw.title : '',
+    status: typeof raw.status === 'string' ? raw.status : '',
+    stage: typeof raw.stage === 'string' ? raw.stage : '',
+    risk: typeof raw.risk === 'string' ? raw.risk : undefined,
+    effort: typeof raw.effort === 'string' ? raw.effort : undefined,
+    sortIndex: typeof raw.sortIndex === 'number' && Number.isFinite(raw.sortIndex) ? raw.sortIndex : undefined,
+    priority: typeof raw.priority === 'string' ? raw.priority : undefined,
+  };
+}
+
+/**
+ * Parse the stdout of `wl show <id> --json` into a coordination item view
+ * (`DowntimeItemInfo` — the leader's per-entry classification input).
+ * Accepts the same `{ workItem: {...} }` single-item shape as
+ * `parseShownWorkItem`, additionally capturing `updatedAt` and (when the
+ * CLI serves it) `auditedAt` for the audit-tier freshness check. Malformed
+ * output or a missing id yields null (fail-closed).
+ */
+export function parseShowItemOutput(stdout: string): DowntimeItemInfo | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  const raw =
+    parsed !== null &&
+    typeof parsed === 'object' &&
+    (parsed as { workItem?: unknown }).workItem !== null &&
+    (parsed as { workItem?: unknown }).workItem !== undefined
+      ? (parsed as { workItem: Record<string, unknown> }).workItem
+      : null;
+  if (typeof raw !== 'object' || raw === null) return null;
+  if (typeof raw.id !== 'string' || raw.id.length === 0) return null;
+  const info: DowntimeItemInfo = {
+    id: raw.id,
+    title: typeof raw.title === 'string' ? raw.title : undefined,
+    status: typeof raw.status === 'string' ? raw.status : undefined,
+    stage: typeof raw.stage === 'string' ? raw.stage : undefined,
+    priority: typeof raw.priority === 'string' ? raw.priority : undefined,
+    risk: typeof raw.risk === 'string' ? raw.risk : undefined,
+    effort: typeof raw.effort === 'string' ? raw.effort : undefined,
+    auditedAt:
+      typeof raw.auditedAt === 'string'
+        ? raw.auditedAt
+        : raw.auditedAt === null
+          ? null
+          : undefined,
+    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : undefined,
+    sortIndex: typeof raw.sortIndex === 'number' && Number.isFinite(raw.sortIndex) ? raw.sortIndex : undefined,
+  };
+  return info;
+}
+
+// ── Dependency frontier resolution (WL-0MT3FM8VA005XBHE, F3) ────────
+// Decision Q3: when the selected critical candidate is dependency-blocked,
+// the downtime worker follows the blocking chain to the nearest OPEN
+// blocker and dispatches IT with the blocker's own stage-appropriate
+// skill (the dependency frontier). Recursion walks while blockers are
+// themselves dependency-blocked; a chain that bottoms in closed or
+// non-dispatchable items yields null and the critical tier falls through
+// to the normal tier order.
+
+/**
+ * Resolve the dependency frontier for a selected critical candidate
+ * (decision Q3). When the candidate is dependency-blocked, follow the
+ * blocking chain and return the nearest OPEN, dispatchable blocker — the
+ * item to dispatch with its own stage-appropriate skill (a blocker at
+ * idea → /skill:intake, intake_complete → /skill:plan, plan_complete →
+ * /skill:implement with the implement caps applied to the blocker too,
+ * Q2). Semantics:
+ *
+ * - Not dependency-blocked (no blockers under the candidate) → the
+ *   candidate itself (dispatch it normally — no frontier redirect).
+ * - A direct blocker that is open + dispatchable + within caps and not
+ *   itself dependency-blocked → that blocker (nearest open blocker, in
+ *   sortIndex order among direct blockers).
+ * - A direct blocker that is open but itself dependency-blocked → recurse
+ *   into its chain (the blocking chain is followed to the nearest open
+ *   unblocked ancestor).
+ * - A direct blocker at a non-dispatchable stage (in_progress,
+ *   in_review) or above the implement caps → not itself a frontier target;
+ *   if it has open blockers beneath, the recursion surfaces the deeper
+ *   open ancestor, otherwise the chain bottoms.
+ * - Chain bottoms in closed / non-dispatchable items, or a cycle (bounded
+ *   recursion) → null: no dispatch from the critical tier, fall through to
+ *   the normal tier order.
+ * - The injected `fetchBlockers` resolves the blocker edges for an item
+ *   (`wl dep list` outbound depends-on edges) and returns null on a wl
+ *   failure — fail-closed: resolution yields null (no dispatch) rather
+ *   than a silent wrong target.
+ *
+ * @param candidate The selected open critical candidate.
+ * @param fetchBlockers Resolves the blockers of an item id (null = wl
+ *   failure).
+ * @param opts.maxDepth Upper bound on recursion depth (cycle guard).
+ * @returns The frontier dispatch target, or null when the chain bottoms /
+ *   cycles / the blocker lookup fails (fall through to normal tiers).
+ */
+export async function resolveDependencyFrontier(
+  candidate: CriticalCandidate,
+  fetchBlockers: (itemId: string) => Promise<CriticalCandidate[] | null>,
+  opts: { maxDepth?: number } = {},
+): Promise<CriticalCandidate | null> {
+  const maxDepth = opts.maxDepth ?? 8;
+  const visited = new Set<string>();
+
+  /** Caps guard shared with selectCriticalCandidate (Q2 applies to blockers). */
+  const dispatchable = (c: CriticalCandidate): boolean =>
+    c.status === 'open' &&
+    criticalSkillKind(c.stage) !== null &&
+    (c.stage !== 'plan_complete' ||
+      ((riskOrdinal(c.risk) ?? 9) <= 2 && (effortOrdinal(c.effort) ?? 9) <= 3));
+
+  // Recursive walk: returns the nearest OPEN dispatchable blocker in the
+  // chain beneath `item` (or the item itself when it is unblocked and
+  // dispatchable). OPEN dispatchable blockers are tried first (nearest by
+  // sortIndex); when an open blocker is itself dependency-blocked, its own
+  // chain is walked before accepting it (an open blocker with open
+  // descendants must not shadow a deeper unblocked ancestor). Non-
+  // dispatchable blockers (in_progress / in_review / closed / capped) are
+  // never dispatched themselves but their open descendants are still
+  // surfaced by recursing through them. Cycles bottom the walk via
+  // `visited` (bounded recursion, decision Q3).
+  async function walk(item: CriticalCandidate, depth: number): Promise<CriticalCandidate | null> {
+    if (visited.has(item.id) || depth > maxDepth) return null; // cycle / bound
+    visited.add(item.id);
+    const blockers = await fetchBlockers(item.id);
+    if (blockers === null) return null; // wl failure → fail-closed
+    if (blockers.length === 0) {
+      // Not dependency-blocked: this item IS the frontier target, but only
+      // when it is itself a dispatchable open item (a closed / in_progress
+      // / in_review / capped leaf is never dispatched).
+      return dispatchable(item) ? item : null;
+    }
+    const sorted = [...blockers].sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
+    // 1) Nearest OPEN dispatchable blocker (recursing into its own chain
+    //    when it is dependency-blocked).
+    for (const blocker of sorted) {
+      if (!dispatchable(blocker)) continue;
+      const deeper = await walk(blocker, depth + 1);
+      if (deeper !== null) return deeper;
+    }
+    // 2) No open blocker yielded a frontier — recurse through the non-
+    //    dispatchable blockers (they may have open ancestors beneath).
+    for (const blocker of sorted) {
+      if (dispatchable(blocker)) continue;
+      const deeper = await walk(blocker, depth + 1);
+      if (deeper !== null) return deeper;
+    }
+    // Chain bottoms in closed / non-dispatchable / capped items → fall
+    // through to the normal tier order.
+    return null;
+  }
+
+  const blockers = await fetchBlockers(candidate.id);
+  if (blockers === null) return null; // wl failure → fail-closed
+  if (blockers.length === 0) return candidate; // not dependency-blocked
+  return walk(candidate, 0);
 }
 
 // ── Settings clamps (implemented — wired into settings.ts by F2) ──────
 
 /**
  * Clamp the downtime poll interval: never below the 10s hard floor, default
- * 30s for non-finite input.
+ * 10s for non-finite input (matches DEFAULT_DOWNTIME_POLL_INTERVAL_MS; the
+ * spec's '30s proxy poll' refers to the 30s proxy status refresh).
  */
 export function clampDowntimePollInterval(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_DOWNTIME_POLL_INTERVAL_MS;
@@ -1790,7 +3607,8 @@ export function clampDowntimePollInterval(value: number): number {
 
 /**
  * Clamp the idle threshold: reject negative/non-finite (fall back to the
- * 4-minute default) and floor at 1s to prevent immediate dispatch.
+ * 60s default, DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS) and floor at 1s to
+ * prevent immediate dispatch.
  */
 export function clampDowntimeIdleThresholdMs(value: number): number {
   if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS;

@@ -110,6 +110,26 @@ export interface FormResult {
   command: string;
 }
 
+/**
+ * Result of processing a single keypress in form mode.
+ *
+ * Broadened from the old `'submitted' | 'cancelled' | null` union so the
+ * caller can route async clipboard work (paste/cut) without ever freezing
+ * the TUI event loop (WL-0MSW6KCTA0092DCV).
+ */
+export type FormInputResult =
+  | { type: 'submitted' }
+  | { type: 'cancelled' }
+  | /** Ctrl+V: no data yet — the caller should read the OS clipboard and
+     * feed the result back via {@link FormState.pasteText} or
+     * {@link FormState.notifyPasteFailed}. */
+    { type: 'paste' }
+  | /** Ctrl+X: the active field has been cleared; `text` holds the value the
+     * caller should copy to the OS clipboard (then surface feedback). */
+    { type: 'cut'; text: string }
+  | /** Ordinary keystroke / navigation — nothing for the caller to do. */
+    { type: 'none' };
+
 // ── ANSI helpers ──────────────────────────────────────────────────────
 
 const ANSI = {
@@ -128,6 +148,47 @@ const SGR_RE = /\x1b\[[0-9;]*m/g;
 
 /** Non-global matcher for testing whether a segment is an SGR sequence. */
 const IS_SGR_RE = /^\x1b\[[0-9;]*m$/;
+
+// ── Bracketed-paste sequences (WL-0MSW6KCTA0092DCV) ───────────────────
+/** Opening bracketed-paste control sequence. */
+export const BRACKETED_PASTE_START = '\x1b[200~';
+/** Closing bracketed-paste control sequence. */
+export const BRACKETED_PASTE_END = '\x1b[201~';
+
+/**
+ * Ctrl+Enter key encodings that map to a verbatim newline insert.
+ *
+ * Terminals that report modified keys (kitty / xterm ʼCSI uʼ) encode
+ * Ctrl+Enter as `ESC [ 13 ; 5 u`. Herdr may also deliver Enter-with-Ctrl as
+ * `ESC [ 1 ; 5 A`-style variants, so both are accepted here.
+ */
+const CTRL_ENTER_SEQS = ['\x1b[13;5u', '\x1b[13;5~', '\x1b[1;5A'];
+
+/**
+ * Extract the inner text from bracketed-paste wrapping, if present.
+ *
+ * Returns `undefined` when the chunk does not carry a bracketed-paste
+ * wrapper. A fully wrapped chunk (`ESC [ 200 ~ … ESC [ 201 ~`) yields its
+ * inner content verbatim; leading/trailing lone wrapper markers are stripped
+ * so the remaining text can be inserted. Newlines inside are data.
+ */
+export function unwrapBracketedPaste(chunk: string): string | undefined {
+  const startIdx = chunk.indexOf(BRACKETED_PASTE_START);
+  const endIdx = chunk.indexOf(BRACKETED_PASTE_END);
+  const hasStart = startIdx >= 0;
+  const hasEnd = endIdx >= 0;
+  if (!hasStart && !hasEnd) return undefined;
+  // Full wrap: everything between the markers.
+  if (hasStart && hasEnd && endIdx > startIdx) {
+    return chunk.slice(startIdx + BRACKETED_PASTE_START.length, endIdx);
+  }
+  // Lone start marker: strip it, keep the rest.
+  if (hasStart) {
+    return chunk.slice(startIdx + BRACKETED_PASTE_START.length);
+  }
+  // Lone end marker: strip it, keep the rest.
+  return chunk.slice(0, endIdx);
+}
 
 /**
  * Measure the visible (displayed) width of a string, ignoring ANSI SGR
@@ -266,6 +327,14 @@ export class FormState {
   /** Called when the user cancels the form */
   private onCancel: () => void;
 
+  /**
+   * Bracketed-paste accumulation state (WL-0MSW6KCTA0092DCV). While true,
+   * every subsequent key is pushed verbatim (newlines stay data) until the
+   * closing `\x1b[201~` arrives. Herdr may deliver the bracketed sequence
+   * char-by-char, so the open/close markers are tracked across calls.
+   */
+  private bracketedPasteOpen = false;
+
   constructor(
     commandTemplate: string,
     description: string,
@@ -289,40 +358,84 @@ export class FormState {
    * Process a single keypress in form mode.
    *
    * @param key - The raw keypress string
-   * @returns 'submitted' if form was submitted, 'cancelled' if cancelled,
-   *          or null if still editing
+   * @returns A {@link FormInputResult} describing the outcome. `submitted` /
+   *          `cancelled` are terminal; `paste`/`cut` signal the caller to
+   *          perform an async OS-clipboard operation; `none` means the
+   *          key was consumed by editing/navigation.
    */
-  handleInput(key: string): 'submitted' | 'cancelled' | null {
+  handleInput(key: string): FormInputResult {
+    // ── Bracketed-paste unwrapping (WL-0MSW6KCTA0092DCV) ──────────
+    // When a chunk arrives inside an open bracketed-paste region — or the
+    // whole chunk is a self-contained bracketed paste — insert the inner
+    // content verbatim (newlines are data, never submit).
+    if (this.bracketedPasteOpen) {
+      if (key === BRACKETED_PASTE_END) {
+        this.bracketedPasteOpen = false;
+        return { type: 'none' };
+      }
+      this.insertIntoActiveField(key);
+      return { type: 'none' };
+    }
+    if (key === BRACKETED_PASTE_START) {
+      this.bracketedPasteOpen = true;
+      return { type: 'none' };
+    }
+    const unwrapped = unwrapBracketedPaste(key);
+    if (unwrapped !== undefined) {
+      this.insertIntoActiveField(unwrapped);
+      return { type: 'none' };
+    }
+
     if (key === '\r' || key === '\n') {
       // Submit the form
       const result = this.getResult();
       this.onSubmit(result);
-      return 'submitted';
+      return { type: 'submitted' };
+    }
+
+    // Ctrl+Enter: insert a newline (data) instead of submitting.
+    if (CTRL_ENTER_SEQS.includes(key)) {
+      this.insertIntoActiveField('\n');
+      return { type: 'none' };
+    }
+
+    // Ctrl+V: request an OS-clipboard paste (async — done by the caller).
+    if (key === '\x16') {
+      return { type: 'paste' };
+    }
+
+    // Ctrl+X: copy the whole active-field value to the OS clipboard and
+    // clear the field. The copy itself is async — performed by the caller.
+    if (key === '\x18') {
+      const field = this.fields[this.activeFieldIndex];
+      const text = field.value;
+      field.value = '';
+      return { type: 'cut', text };
     }
 
     if (key === '\x1b') {
       // Cancel the form
       this.onCancel();
-      return 'cancelled';
+      return { type: 'cancelled' };
     }
 
     if (key === '\t') {
       // Tab: advance to next field (wrap around)
       this.activeFieldIndex = (this.activeFieldIndex + 1) % this.fields.length;
-      return null;
+      return { type: 'none' };
     }
 
     if (key === '\x1b[A') {
       // Arrow up: previous field (wrap around)
       this.activeFieldIndex =
         (this.activeFieldIndex - 1 + this.fields.length) % this.fields.length;
-      return null;
+      return { type: 'none' };
     }
 
     if (key === '\x1b[B') {
       // Arrow down: next field (wrap around)
       this.activeFieldIndex = (this.activeFieldIndex + 1) % this.fields.length;
-      return null;
+      return { type: 'none' };
     }
 
     if (key === '\x7f' || key === '\b') {
@@ -331,18 +444,54 @@ export class FormState {
       if (field.value.length > 0) {
         field.value = field.value.slice(0, -1);
       }
-      return null;
+      return { type: 'none' };
     }
 
     // Regular character input
     if (key.length === 1 && key.charCodeAt(0) >= 0x20) {
       const field = this.fields[this.activeFieldIndex];
       field.value += key;
-      return null;
+      return { type: 'none' };
     }
 
     // Ignore other control sequences
-    return null;
+    return { type: 'none' };
+  }
+
+  /**
+   * Insert text at the end of the active field verbatim (newlines preserved).
+   * Used by the paste path (Ctrl+V) and bracketed-paste unwrapping.
+   *
+   * @param text - The text to append to the active field.
+   */
+  insertIntoActiveField(text: string): void {
+    const field = this.fields[this.activeFieldIndex];
+    field.value += text;
+  }
+
+  /**
+   * Feed a successful clipboard read into the active field.
+   *
+   * The paste path is asynchronous: {@link handleInput} returns
+   * `{ type: 'paste' }`, the caller reads the OS clipboard, and on success
+   * calls this method to commit the text.
+   *
+   * @param text - The clipboard contents (newlines preserved verbatim).
+   */
+  pasteText(text: string): void {
+    this.insertIntoActiveField(text);
+  }
+
+  /**
+   * Signal that an OS-clipboard read failed (no reader available, read
+   * error, or empty content). The form itself is left untouched so the user
+   * can retry or type; the caller uses the return value to surface a visible
+   * message (e.g. a toast/hint) without closing the form.
+   *
+   * @returns The failure reason, for the caller to display.
+   */
+  notifyPasteFailed(reason: string): string {
+    return reason;
   }
 
   /**
@@ -453,8 +602,12 @@ export class FormState {
     pushContent('');
 
     // Instructions
-    const fullHint = '[Tab/↑↓] navigate  [Enter] submit  [Esc] cancel';
-    const hint = visibleWidth(fullHint) <= maxCols ? fullHint : '[Tab] next [Enter] ok [Esc] cancel';
+    const fullHint =
+      '[Tab/↑↓] navigate  [Enter] submit  [Ctrl+Enter] newline  [Ctrl+V] paste  [Ctrl+X] cut  [Esc] cancel';
+    const hint =
+      visibleWidth(fullHint) <= maxCols
+        ? fullHint
+        : '[Tab] next [Enter] ok [Ctrl+V] paste [Ctrl+X] cut [Esc] cancel';
     pushContent(truncateToWidth(`${ANSI.dim}${hint}${ANSI.reset}`, maxCols));
 
     // Fill remaining rows with blank lines (never exceeding maxRows).

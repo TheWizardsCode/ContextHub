@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import {
   WorkItemListState,
   getTermSize,
@@ -24,6 +24,7 @@ import {
   getChordHelpHints,
   handleKeypress,
   computeMetadataPanelHeight,
+  computeDynamicLayout,
   formatMetadataPanel,
   formatTimestamp,
   buildMetaRows,
@@ -36,6 +37,7 @@ import {
 } from './worklist.js';
 import type { ChordState } from './worklist.js';
 import type { DowntimeWorker } from './downtime-worker.js';
+import { createDowntimeWorker, createDowntimePoller } from './downtime-worker.js';
 import { setLogPath, resetLogPath, recordCommand, getLastCommand } from './command-log.js';
 import { loadShortcutConfig, ShortcutRegistry, type ShortcutEntry } from './shortcut-config.js';
 import { regroupWorkItems, extractFilePaths } from './grouping.js';
@@ -133,12 +135,113 @@ describe('createListRenderer — line-count invariant', () => {
       { ...makeItem('LIST-REV'), stage: 'in_review', priority: 'medium', status: 'completed' },
     ];
     const regrouped = regroupWorkItems(merged, 3);
-    const output = renderer(regrouped, 0, 0, TERM_80x24, null, 'list', null);
-    const inReviewSeparators = (output.match(/── In Review ──/g) ?? []).length;
+    // The renderer renders heading rows from the display model — build a
+    // state and pass getDisplayRows() (WL-0MSL5MPSZ003TG94 AC3).
+    const state = new WorkItemListState(regrouped, TERM_80x24);
+    const output = renderer(state.getDisplayRows(), 0, 0, TERM_80x24, null, 'list', null);
+    const inReviewSeparators = (output.match(/── In Review \(\d+\)/g) ?? []).length;
     expect(inReviewSeparators).toBe(1);
-    // In Review separator appears after the Other separator in the rendered output.
-    expect(output.indexOf('── Other ──')).toBeGreaterThan(-1);
-    expect(output.indexOf('── In Review ──')).toBeGreaterThan(output.indexOf('── Other ──'));
+    // In Review heading appears after the Other heading in the rendered output.
+    expect(output.indexOf('Other (')).toBeGreaterThan(-1);
+    expect(output.indexOf('── In Review (')).toBeGreaterThan(output.indexOf('Other ('));
+  });
+});
+
+// ── Fold indicators (WL-0MSG8YXYJ008PWJJ) ─────────────────────────────
+// When the flattened item list overflows the visible list area, the renderer
+// emits dim `▲ more` / `▼ more` markers so users know items are hidden above
+// or below the fold. Indicators are display-only rows: they consume no
+// navigation state or selection index, and they are included in the render
+// budget so the `rows - 1` invariant still holds.
+
+describe('createListRenderer — fold indicators', () => {
+  const renderer = createListRenderer();
+
+  it('shows ▼ more when items exist below the fold at scroll offset 0', () => {
+    const items: WorkItem[] = Array.from({ length: 30 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    expect(output).toContain('▼ more');
+    expect(output).not.toContain('▲ more');
+  });
+
+  it('shows ▲ more when scrolled down (items above the viewport)', () => {
+    const items: WorkItem[] = Array.from({ length: 30 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 5, 5, TERM_80x24, null, 'list', null);
+    expect(output).toContain('▲ more');
+  });
+
+  it('shows both ▲ more and ▼ more when scrolled with items remaining below', () => {
+    const items: WorkItem[] = Array.from({ length: 30 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 5, 5, TERM_80x24, null, 'list', null);
+    expect(output).toContain('▲ more');
+    expect(output).toContain('▼ more');
+  });
+
+  it('renders no indicators when all items fit in the visible area', () => {
+    const items: WorkItem[] = [makeItem('A'), makeItem('B'), makeItem('C')];
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    expect(output).not.toContain('▼ more');
+    expect(output).not.toContain('▲ more');
+  });
+
+  it('renders no ▼ more at the last scroll position (nothing below the fold)', () => {
+    const items: WorkItem[] = Array.from({ length: 20 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 19, 19, TERM_80x24, null, 'list', null);
+    expect(output).not.toContain('▼ more');
+  });
+
+  it('preserves the rows - 1 line-count invariant with both indicators active', () => {
+    const items: WorkItem[] = Array.from({ length: 30 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 5, 5, TERM_80x24, null, 'list', null);
+    expect(output).toContain('▲ more');
+    expect(output).toContain('▼ more');
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    // Simulate render()'s notification append: still fits within the pane.
+    const withNotification =
+      output.split('\n').slice(0, TERM_80x24.rows - 1).join('\n') + '\n' + ' [Synced]';
+    expect(withNotification.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows);
+  });
+
+  it('preserves the line-count invariant with indicators and group separators', () => {
+    const grouped: WorkItem[] = Array.from({ length: 30 }, (_, i) => ({
+      ...makeItem(`G${i}`),
+      group: i % 3,
+      groupLabel: `Group ${i % 3}`,
+    }));
+    const output = renderer(grouped, 5, 5, TERM_80x24, null, 'list', null);
+    expect(output).toContain('▲ more');
+    expect(output).toContain('▼ more');
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+  });
+
+  it('renders indicators as dim, non-selectable display-only rows', () => {
+    const items: WorkItem[] = Array.from({ length: 30 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 3, 3, TERM_80x24, null, 'list', null);
+    expect(output).toContain('▲ more');
+    expect(output).toContain('▼ more');
+    const lines = output.split('\n');
+    // Indicators are dim-styled and carry no selection marker.
+    const topLine = lines.find((l) => l.includes('▲ more'))!;
+    expect(topLine).toContain(ANSI.dim);
+    expect(topLine).not.toContain('▸');
+    const bottomLine = lines.find((l) => l.includes('▼ more'))!;
+    expect(bottomLine).toContain(ANSI.dim);
+    expect(bottomLine).not.toContain('▸');
+    // The selected item (index 3) is still rendered with the selection marker.
+    expect(output).toContain('▸');
+  });
+
+  it('does not change getVisibleItems semantics (indicators are renderer-only)', () => {
+    const items: WorkItem[] = Array.from({ length: 30 }, (_, i) => makeItem(`I${i}`));
+    const state = new WorkItemListState(items, TERM_80x24);
+    // Unchanged: the visible window is the first listHeight items, no
+    // indicator rows are consumed from navigation state. With the dynamic
+    // layout (WL-0MSQ44MDX008U69J) the list can use up to the full available
+    // space, so the window is the max list height (rows - 4 - minMeta = 17
+    // on 80x24).
+    expect(state.getVisibleItems()).toHaveLength(17);
+    expect(state.getVisibleItems()[0].id).toBe('I0');
+    expect(state.getVisibleItems()[16].id).toBe('I16');
   });
 });
 
@@ -203,6 +306,19 @@ describe('createListRenderer — no blank line, no filter bar', () => {
     expect(firstLine).toContain('(filtered: in_review)');
     const unfiltered = renderer([makeItem('A')], 0, 0, TERM_80x24, null, 'list', null);
     expect(unfiltered.split('\n')[0]).not.toContain('filtered:');
+  });
+
+  it('shows the axis-qualified label for a priority filter in the header (WL-0MSKC8T46006999S)', () => {
+    const output = renderer([makeItem('A')], 0, 0, TERM_80x24, 'priority critical', 'list', null);
+    const firstLine = output.split('\n')[0];
+    expect(firstLine).toContain('Work Items');
+    expect(firstLine).toContain('(filtered: priority critical)');
+  });
+
+  it('shows the axis-qualified label for a stage filter (WL-0MSKC8T46006999S)', () => {
+    const output = renderer([makeItem('A')], 0, 0, TERM_80x24, 'stage in_review', 'list', null);
+    const firstLine = output.split('\n')[0];
+    expect(firstLine).toContain('(filtered: stage in_review)');
   });
 });
 
@@ -491,6 +607,73 @@ describe('WorkItemListState.refreshItems — preserve selection by ID', () => {
   });
 });
 
+describe('WorkItemListState — priority filter slot (WL-0MSKC8T46006999S)', () => {
+  const TERM = { rows: 24, cols: 80 };
+
+  it('filters items by priority client-side via applyPriorityFilter', () => {
+    const items = [
+      { ...makeItem('A'), priority: 'critical' },
+      { ...makeItem('B'), priority: 'high' },
+      { ...makeItem('C'), priority: 'medium' },
+    ];
+    const state = new WorkItemListState(items, TERM);
+    state.applyPriorityFilter('critical');
+    expect(state.items.map((i) => i.id)).toEqual(['A']);
+  });
+
+  it('applyPriorityFilter clears the active stage filter (replace semantics)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM);
+    state.applyFilter('idea');
+    expect(state.activeFilter).toBe('idea');
+    state.applyPriorityFilter('high');
+    expect(state.activePriorityFilter).toBe('high');
+    expect(state.activeFilter).toBeNull();
+  });
+
+  it('applyFilter clears the active priority filter (replace semantics)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM);
+    state.applyPriorityFilter('critical');
+    expect(state.activePriorityFilter).toBe('critical');
+    state.applyFilter('idea');
+    expect(state.activeFilter).toBe('idea');
+    expect(state.activePriorityFilter).toBeNull();
+  });
+
+  it('clearFilter clears both stage and priority filters (sprint)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM);
+    state.applyPriorityFilter('critical');
+    state.applyFilter('idea');
+    state.clearFilter();
+    expect(state.activeFilter).toBeNull();
+    expect(state.activePriorityFilter).toBeNull();
+    expect(state.items.length).toBe(1);
+  });
+
+  it('activeFilterLabel is axis-qualified and null when unfiltered', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM);
+    expect(state.activeFilterLabel).toBeNull();
+    state.applyFilter('in_review');
+    expect(state.activeFilterLabel).toBe('stage in_review');
+    state.applyPriorityFilter('critical');
+    expect(state.activeFilterLabel).toBe('priority critical');
+    state.clearFilter();
+    expect(state.activeFilterLabel).toBeNull();
+  });
+
+  it('refreshItems preserves the priority filter across refreshes', () => {
+    const items = [
+      { ...makeItem('A'), priority: 'critical' },
+      { ...makeItem('B'), priority: 'high' },
+    ];
+    const state = new WorkItemListState(items, TERM);
+    state.applyPriorityFilter('critical');
+    expect(state.items.map((i) => i.id)).toEqual(['A']);
+    state.refreshItems(items);
+    expect(state.activePriorityFilter).toBe('critical');
+    expect(state.items.map((i) => i.id)).toEqual(['A']);
+  });
+});
+
 describe('nested expansion — 3+ level hierarchies (WL-0MSQ3FH1K000MMJW)', () => {
   /**
    * Build a 3-level hierarchy: EPIC → FEATURE → TASK. Children carry the
@@ -694,6 +877,35 @@ describe('executeResolvedCommand', () => {
     expect(onCommand).not.toHaveBeenCalled();
   });
 
+  it('returns dispatched for /wl --priority <p> priority filters (WL-0MSKC8T46006999S)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/wl --priority critical', state, onCommand);
+    expect(result).toBe('dispatched');
+    expect(state.activePriorityFilter).toBe('critical');
+    expect(state.activeFilter).toBeNull();
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it('routes unknown /wl --priority values to the callback (no crash, no filter change)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/wl --priority bogus', state, onCommand);
+    expect(result).toBe('callback');
+    expect(onCommand).toHaveBeenCalledWith('/wl --priority bogus', undefined);
+    expect(state.activePriorityFilter).toBeNull();
+  });
+
+  it('sprint clears an active priority filter (clear-all, WL-0MSKC8T46006999S)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    state.applyPriorityFilter('high');
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand('/wl', state, onCommand);
+    expect(result).toBe('dispatched');
+    expect(state.activePriorityFilter).toBeNull();
+    expect(state.activeFilter).toBeNull();
+  });
+
   it('returns dispatched for /skill:implement with resolved <id>', () => {
     const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
     state.selectedIndex = 0;
@@ -755,10 +967,91 @@ describe('dispatchChordCommand', () => {
     expect(state.activeFilter).toBeNull();
   });
 
-  it('shows the sprint chord in the f-chord help line (WL-0MSGSE15000746F7)', () => {
+  it('handles /wl --priority <p> priority filter commands internally (WL-0MSKC8T46006999S)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    expect(dispatchChordCommand('/wl --priority critical', state)).toBe(true);
+    expect(state.activePriorityFilter).toBe('critical');
+    expect(dispatchChordCommand('/wl --priority high', state)).toBe(true);
+    expect(state.activePriorityFilter).toBe('high');
+    expect(dispatchChordCommand('/wl --priority medium', state)).toBe(true);
+    expect(state.activePriorityFilter).toBe('medium');
+    expect(dispatchChordCommand('/wl --priority low', state)).toBe(true);
+    expect(state.activePriorityFilter).toBe('low');
+  });
+
+  it('leaves unknown /wl --priority values unhandled (no crash, no filter change)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    const result = dispatchChordCommand('/wl --priority bogus', state);
+    expect(result).toBe(false);
+    expect(state.activePriorityFilter).toBeNull();
+    expect(state.activeFilter).toBeNull();
+  });
+
+  it('does not treat a bare /wl --priority (no value) as a valid command', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    expect(dispatchChordCommand('/wl --priority', state)).toBe(false);
+    expect(state.activePriorityFilter).toBeNull();
+  });
+
+  it('applying a priority filter replaces an active stage filter (replace semantics)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    state.applyFilter('idea');
+    expect(state.activeFilter).toBe('idea');
+    const result = dispatchChordCommand('/wl --priority critical', state);
+    expect(result).toBe(true);
+    expect(state.activePriorityFilter).toBe('critical');
+    expect(state.activeFilter).toBeNull();
+  });
+
+  it('applying a stage filter replaces an active priority filter (replace semantics)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    state.applyPriorityFilter('critical');
+    expect(state.activePriorityFilter).toBe('critical');
+    const result = dispatchChordCommand('/wl idea', state);
+    expect(result).toBe(true);
+    expect(state.activeFilter).toBe('idea');
+    expect(state.activePriorityFilter).toBeNull();
+  });
+
+  it('sprint /wl clears BOTH the stage and priority filters (WL-0MSKC8T46006999S)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    state.applyPriorityFilter('critical');
+    expect(state.activePriorityFilter).toBe('critical');
+    const result = dispatchChordCommand('/wl', state);
+    expect(result).toBe(true);
+    expect(state.activePriorityFilter).toBeNull();
+    expect(state.activeFilter).toBeNull();
+  });
+
+  it('handles /downtime toggle internally via the callback (no pane dispatch, no stdout)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    const onCommand = vi.fn();
+    const onDowntimeToggle = vi.fn();
+    const result = dispatchChordCommand('/downtime toggle', state, onCommand, undefined, onDowntimeToggle);
+    expect(result).toBe(true);
+    expect(onDowntimeToggle).toHaveBeenCalledTimes(1);
+    expect(onCommand).not.toHaveBeenCalled(); // never routed to stdout/pane
+  });
+
+  it('handles /downtime toggle without a toggle callback (graceful no-op)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    const onCommand = vi.fn();
+    const result = dispatchChordCommand('/downtime toggle', state, onCommand);
+    expect(result).toBe(true);
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it('does not treat other /downtime commands as handled (unknown family falls through)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    const onCommand = vi.fn();
+    expect(dispatchChordCommand('/downtime other', state, onCommand)).toBe(false);
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it('shows the sprint chord in the f-s chord help line (WL-0MSGSE15000746F7)', () => {
     const registry = loadShortcutConfig();
-    const chords = registry.getChordByPrefix(['f'], 'list', undefined, false);
-    const hints = formatChordHintsForHelp(chords, ['f']);
+    const chords = registry.getChordByPrefix(['f', 's'], 'list', undefined, false);
+    const hints = formatChordHintsForHelp(chords, ['f', 's']);
     expect(hints).toContain('s:sprint');
   });
 
@@ -808,13 +1101,13 @@ describe('dispatchChordCommand', () => {
     state.selectedIndex = 0;
     const onCommand = vi.fn();
     const result = dispatchChordCommand(
-      "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
+      "!!wl reviewed <id> false && wl update <id> --status open --stage plan_complete --priority medium && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
       state,
       onCommand,
     );
     expect(result).toBe(true);
     expect(onCommand).toHaveBeenCalledWith(
-      "!!wl reviewed TEST-123 false && wl audit-set TEST-123 --ready-to-close no --summary 'Rejected by manual review. <reason>'",
+      "!!wl reviewed TEST-123 false && wl update TEST-123 --status open --stage plan_complete --priority medium && wl audit-set TEST-123 --ready-to-close no --summary 'Rejected by manual review. <reason>'",
       undefined,
     );
   });
@@ -865,6 +1158,140 @@ describe('dispatchChordCommand', () => {
   });
 });
 
+describe('openPane plumbing (WL-0MSJLD1I70045ZUL)', () => {
+  it('processChordInput stores resolvedOpenPane=false for a chord with open_pane: false', () => {
+    const registry = loadShortcutConfig();
+    const chordState = createChordState();
+    const step1 = processChordInput(chordState, 'a', registry, 'list', 'in_review');
+    const step2 = processChordInput(chordState, 'y', registry, 'list', 'in_review');
+    expect(step1).toBeNull(); // still collecting
+    expect(step2).toBe('chord-complete');
+    expect(chordState.resolvedOpenPane).toBe(false);
+    expect(chordState.resolvedCommand).toContain('wl reviewed <id> false');
+  });
+
+  it('processChordInput leaves resolvedOpenPane undefined for chords without open_pane', () => {
+    const registry = loadShortcutConfig();
+    const chordState = createChordState();
+    processChordInput(chordState, 'a', registry, 'list', 'in_review');
+    const step2 = processChordInput(chordState, 'a', registry, 'list', 'in_review');
+    expect(step2).toBe('chord-complete');
+    expect(chordState.resolvedOpenPane).toBeUndefined();
+  });
+
+  it('dispatchChordCommand passes openPane=false through to onCommand', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = dispatchChordCommand(
+      "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
+      state,
+      onCommand,
+      undefined,
+      undefined,
+      false,
+    );
+    expect(result).toBe(true);
+    expect(onCommand).toHaveBeenCalledWith(
+      "!!wl reviewed TEST-123 false && wl audit-set TEST-123 --ready-to-close yes --summary 'Approved by manual review'",
+      undefined,
+      false,
+    );
+  });
+
+  it('dispatchChordCommand without openPane keeps the 2-arg onCommand call (default open)', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    dispatchChordCommand('/skill:audit <id>', state, onCommand);
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', undefined);
+  });
+
+  it('executeResolvedCommand passes openPane=false through to onCommand', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand(
+      'wl update <id> --priority high',
+      state,
+      onCommand,
+      false,
+      undefined,
+      undefined,
+      false,
+    );
+    expect(result).toBe('callback');
+    expect(onCommand).toHaveBeenCalledWith('wl update TEST-123 --priority high', undefined, false);
+  });
+
+  it('executeResolvedCommand passes openPane through for agent commands via dispatchChordCommand', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = executeResolvedCommand(
+      '/skill:audit <id>',
+      state,
+      onCommand,
+      false,
+      'plan',
+      undefined,
+      false,
+    );
+    expect(result).toBe('dispatched');
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', 'plan', false);
+  });
+
+  it('executeResolvedCommand without openPane keeps the 2-arg onCommand call', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    const onCommand = vi.fn();
+    executeResolvedCommand('echo hello', state, onCommand);
+    expect(onCommand).toHaveBeenCalledWith('echo hello', undefined);
+  });
+
+  it('passes onRefresh through to onCommand for background (openPane false) dispatch', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const onRefresh = vi.fn();
+    const result = executeResolvedCommand(
+      'wl update <id> --priority high',
+      state,
+      onCommand,
+      false,
+      undefined,
+      undefined,
+      false, // openPane: false → background dispatch
+      onRefresh,
+    );
+    expect(result).toBe('callback');
+    expect(onCommand).toHaveBeenCalledWith(
+      'wl update TEST-123 --priority high',
+      undefined,
+      false,
+      onRefresh,
+    );
+  });
+
+  it('passes onRefresh through for background agent dispatch (dispatchChordCommand path)', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const onRefresh = vi.fn();
+    const result = executeResolvedCommand(
+      '/skill:audit <id>',
+      state,
+      onCommand,
+      false,
+      'plan',
+      undefined,
+      false, // openPane: false → background dispatch
+      onRefresh,
+    );
+    expect(result).toBe('dispatched');
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', 'plan', false, onRefresh);
+  });
+});
+
 describe('fetchItemsForView — stage-filtered fetch', () => {
   beforeEach(() => {
     resetExecFileAsync();
@@ -879,7 +1306,7 @@ describe('fetchItemsForView — stage-filtered fetch', () => {
     setExecFileAsync(mockFn as any);
     const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
 
-    const items = await fetchItemsForView('idea', defaultFetcher);
+    const items = await fetchItemsForView('idea', null, defaultFetcher);
 
     expect(items.map((i) => i.id)).toEqual(['A', 'B']);
     expect(defaultFetcher).not.toHaveBeenCalled();
@@ -906,7 +1333,7 @@ describe('fetchItemsForView — stage-filtered fetch', () => {
     setExecFileAsync(mockFn as any);
     const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
 
-    const items = await fetchItemsForView('in_review', defaultFetcher);
+    const items = await fetchItemsForView('in_review', null, defaultFetcher);
 
     expect(items.map((i) => i.id)).toEqual(['A', 'B']);
     expect(defaultFetcher).not.toHaveBeenCalled();
@@ -921,7 +1348,7 @@ describe('fetchItemsForView — stage-filtered fetch', () => {
 
   it('uses the default fetcher when no filter is active', async () => {
     const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
-    const items = await fetchItemsForView(null, defaultFetcher);
+    const items = await fetchItemsForView(null, null, defaultFetcher);
     expect(items.map((i) => i.id)).toEqual(['C']);
     expect(defaultFetcher).toHaveBeenCalledTimes(1);
   });
@@ -931,8 +1358,56 @@ describe('fetchItemsForView — stage-filtered fetch', () => {
     setExecFileAsync(mockFn as any);
     const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
 
-    const items = await fetchItemsForView('idea', defaultFetcher);
+    const items = await fetchItemsForView('idea', null, defaultFetcher);
     expect(items.map((i) => i.id)).toEqual(['C']);
+  });
+
+  it('fetches all open root items at the priority when a priority filter is active', async () => {
+    const criticalItems = [
+      { ...makeItem('A'), priority: 'critical' },
+      { ...makeItem('B'), priority: 'critical' },
+    ];
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ workItems: criticalItems }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
+
+    const items = await fetchItemsForView(null, 'critical', defaultFetcher);
+
+    expect(items.map((i) => i.id)).toEqual(['A', 'B']);
+    expect(defaultFetcher).not.toHaveBeenCalled();
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs).toContain('list');
+    expect(callArgs[callArgs.indexOf('--status') + 1]).toBe('open');
+    expect(callArgs[callArgs.indexOf('--priority') + 1]).toBe('critical');
+    expect(callArgs).toContain('--root-only');
+  });
+
+  it('falls back to the default fetcher when the priority fetch fails', async () => {
+    const mockFn = vi.fn().mockRejectedValue(new Error('wl failed'));
+    setExecFileAsync(mockFn as any);
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
+
+    const items = await fetchItemsForView(null, 'high', defaultFetcher);
+    expect(items.map((i) => i.id)).toEqual(['C']);
+  });
+
+  it('prefers the stage filter when both are somehow set (defensive)', async () => {
+    const stageItems = [makeItem('A', 'idea')];
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ workItems: stageItems }),
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('C')]);
+
+    const items = await fetchItemsForView('idea', 'critical', defaultFetcher);
+    expect(items.map((i) => i.id)).toEqual(['A']);
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs).toContain('--stage');
+    expect(callArgs).not.toContain('--priority');
   });
 
   it('applies the in_review stage filter client-side regardless of status', () => {
@@ -1885,13 +2360,16 @@ describe('createListRenderer — metadata panel in list mode', () => {
       group: i,
       groupLabel: `Group ${i}`,
     }));
+    // Pass display rows (headings + items) so the renderer renders heading
+    // rows from the model (WL-0MSL5MPSZ003TG94).
+    const state = new WorkItemListState(grouped, TERM_80x24);
     const output = renderer(
-      grouped, 0, 0, TERM_80x24, null, 'list', null,
+      state.getDisplayRows(), 0, 0, TERM_80x24, null, 'list', null,
       undefined, null, 0, false, undefined, undefined, 0, false, true, 0, '/skill:audit WL-G0',
     );
     expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
     expect(output).toContain('CODE FREEZE');
-    expect(output).toContain('── Group 0 ──');
+    expect(output).toContain('Group 0 (1)');
   });
 
   it('keeps render plus notification line within rows lines', () => {
@@ -1928,10 +2406,17 @@ describe('WorkItemListState — metadata scroll state', () => {
 
   it('clamps metaScrollDown to the panel content height', () => {
     const state = new WorkItemListState([makeRichItem()], TERM_80x24);
-    const panelHeight = computeMetadataPanelHeight(TERM_80x24.rows);
+    // Use the dynamic layout (WL-0MSQ44MDX008U69J): for a single-item list the
+    // metadata panel expands to fill the pane, so the clamp uses that height.
+    const { panelHeight } = computeDynamicLayout(
+      state.items,
+      state.scrollOffset,
+      /* bannerCount = */ 0,
+      TERM_80x24,
+    );
     const content = formatMetadataPanel(state.getSelectedItem()!, TERM_80x24.cols, panelHeight, 0);
     const maxScroll = Math.max(0, content.length - panelHeight);
-    state.metaScrollDown(100);
+    state.metaScrollDown(100, panelHeight);
     expect(state.metaScrollOffset).toBe(maxScroll);
   });
 
@@ -1970,11 +2455,12 @@ describe('handleKeypress — metadata scroll keys', () => {
     state.pageUp();
     expect(state.selectedIndex).toBe(0);
 
-    // pageDown advances by the list page size (13 rows on 80x24 — the
-    // freed blank + filter-bar chrome rows are given back to the list)
+    // pageDown advances by the list page size (17 rows on 80x24 — the list
+    // may now use up to the full available space minus the metadata minimum,
+    // WL-0MSQ44MDX008U69J)
     state.selectedIndex = 0;
     state.pageDown();
-    expect(state.selectedIndex).toBe(13);
+    expect(state.selectedIndex).toBe(17);
 
     // pageDown clamps at the last item
     state.selectedIndex = 29;
@@ -1984,7 +2470,7 @@ describe('handleKeypress — metadata scroll keys', () => {
     // pageUp moves back exactly one page
     state.selectedIndex = 23;
     state.pageUp();
-    expect(state.selectedIndex).toBe(10);
+    expect(state.selectedIndex).toBe(6);
   });
 
   it('goToFirst/goToLast jump to the ends via state', () => {
@@ -2012,12 +2498,12 @@ describe('handleKeypress — metadata scroll keys', () => {
 
     // PgUp (\x1b[5~) → pageup
     expect(handleKeypress(state, '\x1b[5~', TERM_80x24)).toBe('pageup');
-    expect(state.selectedIndex).toBe(16); // 29 - 13
+    expect(state.selectedIndex).toBe(12); // 29 - 17
 
     // PgDn (\x1b[6~) → pagedown
     state.selectedIndex = 0;
     expect(handleKeypress(state, '\x1b[6~', TERM_80x24)).toBe('pagedown');
-    expect(state.selectedIndex).toBe(13);
+    expect(state.selectedIndex).toBe(17);
   });
 });
 
@@ -2226,6 +2712,126 @@ describe('buildMetaRows — timestamps rendered via formatTimestamp', () => {
   });
 });
 
+// ── Icon + text metadata values (WL-0MSGIXHHI009KFW9) ──────────────────
+// The metadata section (list-mode panel and detail view) renders the same
+// icons as the list rows, paired with their text label (icon + text, e.g.
+// `🔄 in_progress`, `⭐ high`, `📥 intake_complete`). The Stage row mirrors
+// the list's audit-aware in_review icon via the shared stageDisplayIcon
+// helper; the Type row shows the epic icon for epic items only; Audit and
+// Reviewed rows pair their icons with text labels. With icons disabled the
+// values fall back to plain text — no emoji, no bracketed fallbacks.
+
+describe('buildMetaRows — icon + text metadata values (WL-0MSGIXHHI009KFW9)', () => {
+  it('prefixes Status, Stage, Priority, Risk and Effort with the list icons', () => {
+    const rows = new Map(buildMetaRows(makeRichItem()));
+    // makeRichItem: status in_progress, stage in_progress, priority high,
+    // risk medium, effort 3 (free-form — no icon key).
+    expect(rows.get('Status')).toBe('\u{1F504} in_progress'); // 🔄
+    expect(rows.get('Stage')).toBe('\u{1F6E0}\u{FE0F} in_progress'); // 🛠️
+    expect(rows.get('Priority')).toBe('\u{2B50} high'); // ⭐
+    expect(rows.get('Risk')).toBe('\u{1F7E1} medium'); // 🟡
+  });
+
+  it('keeps unknown free-form Effort values text-only (consistent with the list)', () => {
+    const rows = new Map(buildMetaRows(makeRichItem())); // effort: '3'
+    expect(rows.get('Effort')).toBe('3');
+  });
+
+  it('shows the epic icon on the Type row for epic items only', () => {
+    const epic = { ...makeRichItem(), issueType: 'epic' };
+    expect(new Map(buildMetaRows(epic)).get('Type')).toBe('\u{2299} epic'); // ⊙
+    expect(new Map(buildMetaRows(makeRichItem())).get('Type')).toBe('feature');
+  });
+
+  it('pairs Audit and Reviewed icons with text labels', () => {
+    // makeRichItem: auditResult true → `✅ ready to close`,
+    // needsProducerReview true → `❌ needs review`.
+    const rows = new Map(buildMetaRows(makeRichItem()));
+    expect(rows.get('Audit')).toBe('\u{2705} ready to close'); // ✅
+    expect(rows.get('Reviewed')).toBe('\u{274C} needs review'); // ❌
+    const reviewed = new Map(buildMetaRows({ ...makeRichItem(), needsProducerReview: false }));
+    expect(reviewed.get('Reviewed')).toBe('\u{2705} reviewed'); // ✅
+  });
+
+  it('renders plain text values when icons are disabled (no emoji, no [BRACKET] fallbacks)', () => {
+    const rows = new Map(buildMetaRows(makeRichItem(), true));
+    expect(rows.get('Status')).toBe('in_progress');
+    expect(rows.get('Stage')).toBe('in_progress');
+    expect(rows.get('Priority')).toBe('high');
+    expect(rows.get('Type')).toBe('feature');
+    expect(rows.get('Risk')).toBe('medium');
+    expect(rows.get('Effort')).toBe('3');
+    expect(rows.get('Audit')).toBe('ready to close');
+    expect(rows.get('Reviewed')).toBe('needs review');
+    // No icon glyphs leak into the noIcons values.
+    for (const [label, value] of rows) {
+      if (['Status', 'Stage', 'Priority', 'Type', 'Risk', 'Effort', 'Audit', 'Reviewed'].includes(label)) {
+        expect(value).not.toMatch(/[\u{1F300}-\u{1FAFF}\u{2700}-\u{27BF}\u{2600}-\u{26FF}\u{2299}]/u);
+        expect(value).not.toMatch(/^\[/);
+      }
+    }
+  });
+});
+
+describe('buildMetaRows — audit-aware in_review Stage row (WL-0MSGIXHHI009KFW9 AC2)', () => {
+  const base = (over: Partial<WorkItem> = {}): WorkItem => ({
+    ...makeRichItem(),
+    stage: 'in_review',
+    auditResult: null,
+    auditedAt: null,
+    updatedAt: '2026-08-02T10:00:00.000Z',
+    ...over,
+  });
+
+  it('shows the fresh audit result icon (✅/❌/❓) when the audit is fresh', () => {
+    const updatedAt = '2026-08-02T10:00:00.000Z';
+    const freshPass = base({ auditResult: true, auditedAt: '2026-08-02T10:00:30.000Z', updatedAt });
+    expect(new Map(buildMetaRows(freshPass)).get('Stage')).toBe('\u{2705} in_review'); // ✅
+    const freshFail = base({ auditResult: false, auditedAt: '2026-08-02T10:00:30.000Z', updatedAt });
+    expect(new Map(buildMetaRows(freshFail)).get('Stage')).toBe('\u{274C} in_review'); // ❌
+    const freshUnknown = base({ auditResult: null, auditedAt: '2026-08-02T10:00:30.000Z', updatedAt });
+    expect(new Map(buildMetaRows(freshUnknown)).get('Stage')).toBe('\u{2753} in_review'); // ❓
+  });
+
+  it('shows the stale-passed hourglass when the audit is stale but passed', () => {
+    const stalePass = base({ auditResult: true, auditedAt: '2026-08-01T10:00:00.000Z' });
+    expect(new Map(buildMetaRows(stalePass)).get('Stage')).toBe('\u{23F3} in_review'); // ⏳
+  });
+
+  it('falls back to the plain in_review stage icon otherwise (no audit / stale fail)', () => {
+    const noAudit = base();
+    expect(new Map(buildMetaRows(noAudit)).get('Stage')).toBe('\u{1F50D} in_review'); // 🔍
+  });
+});
+
+describe('metadata panel and detail view — icon + text values (WL-0MSGIXHHI009KFW9 AC6)', () => {
+  it('renders icon+text in the list-mode metadata panel', () => {
+    const joined = formatMetadataPanel(makeRichItem(), 80, 20, 0).join('\n');
+    expect(joined).toContain('\u{1F504} in_progress'); // 🔄 status
+    expect(joined).toContain('\u{2B50} high'); // ⭐ priority
+    expect(joined).toContain('\u{2705} ready to close'); // ✅ audit
+  });
+
+  it('renders icon+text in the detail-view metadata table', () => {
+    const joined = formatDetailContent(makeRichItem(), 80).join('\n');
+    expect(joined).toContain('\u{1F504} in_progress');
+    expect(joined).toContain('\u{2B50} high');
+    expect(joined).toContain('\u{2705} ready to close');
+  });
+
+  it('renders plain text in both views when icons are disabled', () => {
+    const panel = formatMetadataPanel(makeRichItem(), 80, 20, 0, undefined, true).join('\n');
+    expect(panel).toContain(' in_progress');
+    expect(panel).toContain(' ready to close');
+    expect(panel).not.toContain('\u{1F504}');
+    expect(panel).not.toContain('[INPR]');
+    const detail = formatDetailContent(makeRichItem(), 80, undefined, true).join('\n');
+    expect(detail).toContain('in_progress');
+    expect(detail).toContain('ready to close');
+    expect(detail).not.toContain('\u{1F504}');
+  });
+});
+
 // ── Downtime status indicator (WL-0MSF49FMW009M06K, F4) ───────────────
 
 describe('renderDowntimeStatus', () => {
@@ -2253,13 +2859,67 @@ describe('renderDowntimeStatus', () => {
     expect(renderDowntimeStatus(worker)).toContain('downtime dispatching');
   });
 
-  it('renders the disabled state', () => {
+  it('renders the Downtime Off state', () => {
     const worker = {
       idleSince: null,
       dispatching: false,
       enabled: false,
     } as unknown as DowntimeWorker;
-    expect(renderDowntimeStatus(worker)).toContain('downtime disabled');
+    expect(renderDowntimeStatus(worker)).toContain('Downtime Off');
+  });
+
+  it('renders idle status when enabled and idle (per-instance enabled from override)', () => {
+    const worker = {
+      idleSince: Date.now() - 65_000, // 1:05
+      dispatching: false,
+      enabled: true,
+    } as unknown as DowntimeWorker;
+    const status = renderDowntimeStatus(worker);
+    expect(status).toContain('downtime idle 1:05');
+    expect(status).toContain('⏳');
+  });
+
+  it('renders per-instance isolation: two real workers toggle independently', () => {
+    const makeWorker = (enabled: boolean) =>
+      createDowntimeWorker({
+        poller: createDowntimePoller('http://proxy:8000'),
+        deps: {} as never,
+        config: () => ({
+          enabled,
+          thresholdMs: 240_000,
+          requiredFreeSlots: 0,
+          model: 'plan',
+          cwd: '/repo',
+          noCandidateCooldownMs: 3_600_000,
+        }),
+      });
+    const w1 = makeWorker(true);
+    const w2 = makeWorker(true);
+    w1.toggle(); // disable only pane 1
+    expect(w1.enabled).toBe(false);
+    expect(w2.enabled).toBe(true);
+    expect(renderDowntimeStatus(w1)).toContain('Downtime Off');
+    expect(renderDowntimeStatus(w2)).toContain('downtime busy');
+  });
+
+  it('renders idle status when toggle forces dispatch on despite global setting off', () => {
+    // Global setting disabled, but the per-instance override forces the
+    // worker on — the header must show the live idle status, not Off.
+    const worker = createDowntimeWorker({
+      poller: createDowntimePoller('http://proxy:8000'),
+      deps: {} as never,
+      config: () => ({
+        enabled: false, // global setting off
+        thresholdMs: 240_000,
+        requiredFreeSlots: 0,
+        model: 'plan',
+        cwd: '/repo',
+        noCandidateCooldownMs: 3_600_000,
+      }),
+      override: true,
+    });
+    expect(worker.enabled).toBe(true);
+    expect(renderDowntimeStatus(worker)).toContain('downtime busy');
   });
 
   it('renders the paused state during the no-candidate cooldown (no stale idle duration)', () => {
@@ -2296,6 +2956,152 @@ describe('renderDowntimeStatus', () => {
     expect(output).toContain('[⏳ downtime idle 0:05]');
     expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
   });
+
+  // Header honesty (WL-0MT5SFX1S002YUYZ / WL-0MT5SG0VU005ARUR): the rendered
+  // state must ALWAYS agree with the worker's effective dispatch gate, and a
+  // worker restored from the persisted disable marker must be visible.
+  it.each([
+    [
+      'disabled (override=false, global enabled)',
+      { idleSince: Date.now() - 60_000, dispatching: false, enabled: false, restoredFromMarker: false },
+      'Downtime Off',
+    ],
+    [
+      'disabled (restored from marker)',
+      { idleSince: Date.now() - 60_000, dispatching: false, enabled: false, restoredFromMarker: true },
+      'Downtime Off (restored)',
+    ],
+    [
+      'enabled + idle',
+      { idleSince: Date.now() - 60_000, dispatching: false, enabled: true, restoredFromMarker: false },
+      'downtime idle',
+    ],
+    [
+      'enabled + paused',
+      { idleSince: null, dispatching: false, enabled: true, paused: true, restoredFromMarker: false },
+      'downtime paused',
+    ],
+    [
+      'dispatching',
+      { idleSince: Date.now() - 60_000, dispatching: true, enabled: true, restoredFromMarker: false },
+      'downtime dispatching',
+    ],
+    [
+      'enabled + busy',
+      { idleSince: null, dispatching: false, enabled: true, restoredFromMarker: false },
+      'downtime busy',
+    ],
+  ])('renders %s agreeing with the effective gate (never lies, AC1)', (_label, worker, expected) => {
+    const status = renderDowntimeStatus(worker as unknown as DowntimeWorker);
+    expect(status).toContain(expected);
+    // A pane whose dispatch gate is disabled must NEVER render the
+    // enabled-idle string (AC1):
+    if ((worker as { enabled: boolean }).enabled === false) {
+      expect(status).not.toContain('downtime idle');
+    }
+  });
+
+  it('disabled override renders [Downtime Off] regardless of global settings (AC2)', () => {
+    const worker = {
+      idleSince: Date.now() - 5_000,
+      dispatching: false,
+      enabled: false, // override=false ⇒ effective off even with global on
+      restoredFromMarker: false,
+    } as unknown as DowntimeWorker;
+    const status = renderDowntimeStatus(worker);
+    expect(status).toContain('Downtime Off');
+    expect(status).not.toContain('downtime idle');
+    expect(status).not.toContain('restored');
+  });
+
+  it('restored-from-marker worker renders an explicit notice (AC4)', () => {
+    const worker = {
+      idleSince: null,
+      dispatching: false,
+      enabled: false, // restored from .herdr-downtime-disabled
+      restoredFromMarker: true,
+    } as unknown as DowntimeWorker;
+    expect(renderDowntimeStatus(worker)).toContain('Downtime Off (restored)');
+  });
+
+  it('after re-enable the restored notice is gone (AC5)', () => {
+    const worker = {
+      idleSince: null,
+      dispatching: false,
+      enabled: true, // override null + no marker ⇒ follows settings
+      restoredFromMarker: false,
+    } as unknown as DowntimeWorker;
+    const status = renderDowntimeStatus(worker);
+    expect(status).toContain('downtime busy');
+    expect(status).not.toContain('restored');
+  });
+
+  it('a real worker restored from the marker exposes restoredFromMarker and renders the notice (AC4, integration)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-hdr-'));
+    const cwd = join(root, 'wlroot');
+    mkdirSync(cwd, { recursive: true });
+    try {
+      // Marker present ⇒ construction restores override=false + flag.
+      writeFileSync(join(cwd, '.herdr-downtime-disabled'), '', 'utf8');
+      const worker = createDowntimeWorker({
+        poller: createDowntimePoller('http://proxy:8000'),
+        deps: {} as never,
+        config: () => ({
+          enabled: true,
+          thresholdMs: 240_000,
+          requiredFreeSlots: 0,
+          model: 'plan',
+          cwd,
+          noCandidateCooldownMs: 3_600_000,
+        }),
+      });
+      expect(worker.override).toBe(false);
+      expect(worker.restoredFromMarker).toBe(true);
+      expect(renderDowntimeStatus(worker)).toContain('Downtime Off (restored)');
+
+      // Explicit re-enable (second press) clears the flag, removes the
+      // marker, and the notice disappears (AC3/AC5).
+      worker.toggle(); // → null
+      expect(worker.override).toBe(null);
+      expect(worker.restoredFromMarker).toBe(false);
+      expect(existsSync(join(cwd, '.herdr-downtime-disabled'))).toBe(false);
+      const status = renderDowntimeStatus(worker);
+      expect(status).not.toContain('restored');
+      expect(status).toContain('downtime busy');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a live d-press disable is NOT flagged as restored (AC4)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-hdr-'));
+    const cwd = join(root, 'wlroot');
+    mkdirSync(cwd, { recursive: true });
+    try {
+      const worker = createDowntimeWorker({
+        poller: createDowntimePoller('http://proxy:8000'),
+        deps: {} as never,
+        config: () => ({
+          enabled: true,
+          thresholdMs: 240_000,
+          requiredFreeSlots: 0,
+          model: 'plan',
+          cwd,
+          noCandidateCooldownMs: 3_600_000,
+        }),
+      });
+      expect(worker.restoredFromMarker).toBe(false);
+      worker.toggle(); // live disable (marker written, but NOT 'restored')
+      expect(worker.override).toBe(false);
+      expect(worker.restoredFromMarker).toBe(false);
+      expect(renderDowntimeStatus(worker)).toContain('Downtime Off');
+      expect(renderDowntimeStatus(worker)).not.toContain('restored');
+      // The marker was written so a future restart will restore it.
+      expect(existsSync(join(cwd, '.herdr-downtime-disabled'))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 // ── showIcons gating (WL-0MSBV4RYO008JL70) ─────────────────────────────
@@ -2322,7 +3128,7 @@ describe('createListRenderer — showIcons gating', () => {
     expect(output).toContain('[OPEN]'); // status text fallback
     expect(output).toContain('[IDEA]'); // stage text fallback
     expect(output).not.toContain(AUDIT_UNKNOWN_ICON); // metadata panel audit icon
-    expect(output).toContain('[?]'); // audit text fallback
+    expect(output).toContain('unknown'); // audit text label (metadata falls back to plain text, WL-0MSGIXHHI009KFW9)
   });
 
   it('re-reads the getter on every render (settings re-read path)', () => {
@@ -2618,6 +3424,53 @@ describe('detail view ToC for Related Docs (WL-0MSHWHULZ001FL8I)', () => {
     expect(firstLines).toContain('Related Docs');
     expect(firstLines).toContain('1. docs/prd.md');
   });
+
+  // ── Overflow regression: header+ToC pinned, body scrolls (WL-0MSI28AP80002F5S) ──
+
+  const LONG_ITEM = (): WorkItem => {
+    const item = makeKeyFilesItem('WL-OVF', ['docs/prd.md', 'docs/episode.podcast.md']);
+    item.description += '\n\n' + Array.from({ length: 60 }, (_, i) => `lorem ipsum dolor line ${i}`).join('\n');
+    return item;
+  };
+
+  it('formatDetailView with ToC respects the line-count invariant (≤ viewportHeight lines)', () => {
+    const item = LONG_ITEM();
+    // viewportHeight = 24 → output must be exactly 24 lines
+    const view = formatDetailView(item, 80, 0, 24, undefined, true, 0, false, 0);
+    const lines = view.split('\n');
+    expect(lines.length).toBe(24);
+  });
+
+  it('formatDetailView at scroll 0 shows header id, title, and full ToC', () => {
+    const item = LONG_ITEM();
+    const view = formatDetailView(item, 80, 0, 24, undefined, true, 0, false, 0);
+    const lines = view.split('\n');
+    const all = lines.join('\n');
+    // Header id and title must be visible
+    expect(all).toContain('WL-OVF');
+    expect(all).toMatch(/title/i);
+    // Full ToC must be visible (both entries)
+    expect(all).toContain('1. docs/prd.md');
+    expect(all).toContain('2. docs/episode.podcast.md');
+  });
+
+  it('ToC is rendered exactly once — no duplication', () => {
+    const item = LONG_ITEM();
+    const view = formatDetailView(item, 80, 0, 24, undefined, true, 0, false, 0);
+    const lines = view.split('\n');
+    const tocEntryCount = lines.filter(l => l.includes('1. docs/prd.md')).length;
+    expect(tocEntryCount).toBe(1);
+  });
+
+  it('no-ToC items retain full-scroll behavior unchanged', () => {
+    const item = makeItem('WL-PLAIN');
+    item.description = Array.from({ length: 50 }, (_, i) => `line ${i}`).join('\n');
+    const view = formatDetailView(item, 80, 0, 24, undefined, true);
+    const lines = view.split('\n');
+    expect(lines.length).toBe(24);
+    // No ToC markers should appear
+    expect(lines.join('\n')).not.toContain('Related Docs');
+  });
 });
 
 describe('Related Docs — open in markdown viewer (WL-0MSGTLSUT002NF29)', () => {
@@ -2890,5 +3743,263 @@ describe('inline-note editing — viewer integration (WL-0MSKV6SKK008MMXR)', () 
 
     expect(result.doc).not.toContain('[NOTE');
     expect(mockExec).not.toHaveBeenCalled();
+  });
+});
+
+// ── Dynamic list height & metadata panel layout (WL-0MSQ44MDX008U69J) ───
+// The list takes as much space as its content needs (up to the max available
+// rows minus the metadata minimum of 3 rows).  When the list is short the
+// metadata panel fills the leftover space.  When the list is long it fills
+// the available space and the metadata panel sits at the bottom of the pane.
+
+describe('createListRenderer — dynamic list height (WL-0MSQ44MDX008U69J)', () => {
+  const renderer = createListRenderer();
+
+  // ── Short list: metadata fills the rest ────────────────────────
+
+  it('lets a short list take only the rows it needs; metadata fills the rest', () => {
+    const items: WorkItem[] = [makeItem('A'), makeItem('B'), makeItem('C')];
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    const lines = output.split('\n');
+    // Total lines must be ≤ rows - 1 (notification row reserved)
+    expect(lines.length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    // The metadata panel (── A ── separator, selected item's id) is visible
+    expect(output).toContain('── A ──');
+    // The list header is always visible
+    expect(output).toContain('Work Items');
+    expect(output).toContain('Item A');
+    expect(output).toContain('Item B');
+    expect(output).toContain('Item C');
+    // Metadata panel has at least 3 rows (minimum)
+    const metaSeparatorIdx = lines.findIndex(l => l.includes('── A ──'));
+    expect(metaSeparatorIdx).toBeGreaterThan(-1);
+    const remainingLines = lines.length - metaSeparatorIdx;
+    expect(remainingLines).toBeGreaterThanOrEqual(3);
+  });
+
+  it('metadata panel expands to fill leftover space when list has one item', () => {
+    const items: WorkItem[] = [makeItem('A')];
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    const lines = output.split('\n');
+    expect(lines.length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    const metaSeparatorIdx = lines.findIndex(l => l.includes('── A ──'));
+    expect(metaSeparatorIdx).toBeGreaterThan(-1);
+    // Metadata should take most of the remaining space (at least half)
+    const remainingLines = lines.length - metaSeparatorIdx;
+    expect(remainingLines).toBeGreaterThan(lines.length / 2);
+  });
+
+  // ── Long list: list fills the pane ─────────────────────────────
+
+  it('lets a long list fill the available space; metadata is below the fold', () => {
+    const items: WorkItem[] = Array.from({ length: 50 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    const lines = output.split('\n');
+    expect(lines.length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    // Header + first items visible
+    expect(output).toContain('Work Items');
+    expect(output).toContain('Item I0');
+    // Bottom fold indicator visible (items below the fold)
+    expect(output).toContain('▼ more');
+    // Metadata panel is present (rendered after the list, below the fold)
+    const metaSeparatorIdx = lines.findIndex(l => l.includes('── I0 ──'));
+    expect(metaSeparatorIdx).toBeGreaterThan(-1);
+    // With a long list the metadata panel is at the very bottom (minimum
+    // height), not consuming rows the list could use.
+    const remainingLines = lines.length - metaSeparatorIdx;
+    expect(remainingLines).toBeGreaterThanOrEqual(3);
+    expect(remainingLines).toBeLessThanOrEqual(8);
+  });
+
+  // ── Initial view at top ────────────────────────────────────────
+
+  it('starts view at top of selection list (header + first items)', () => {
+    const items: WorkItem[] = Array.from({ length: 30 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    // First visible item is I0 (index 0), not a scrolled offset
+    expect(output).toContain('Item I0');
+    // Header is the first line
+    const firstLine = output.split('\n')[0];
+    expect(firstLine).toContain('Work Items');
+    // No ▲ more indicator (not scrolled down)
+    expect(output).not.toContain('▲ more');
+  });
+
+  // ── Line-count invariant ───────────────────────────────────────
+
+  it('preserves the rows - 1 line-count invariant with dynamic layout (many groups)', () => {
+    const items: WorkItem[] = Array.from({ length: 60 }, (_, i) => ({
+      ...makeItem(`G${i}`),
+      group: i,
+      groupLabel: `Group ${i}`,
+    }));
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    expect(output).toContain('Work Items');
+  });
+
+  it('preserves the rows - 1 line-count invariant with banner + dynamic layout', () => {
+    const items: WorkItem[] = Array.from({ length: 40 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(
+      items,
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      true, // codeFreezeActive
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    expect(output).toContain('CODE FREEZE');
+    expect(output).toContain('Work Items');
+  });
+
+  it('preserves the rows - 1 line-count invariant with ambiguous banner + dynamic layout', () => {
+    const items: WorkItem[] = Array.from({ length: 40 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(
+      items,
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      false, // codeFreezeActive (fail-open: browsing stays unblocked)
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true, // showHelpText
+      true, // codeFreezeAmbiguous
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    expect(output).toContain('Ambiguous Codefreeze');
+  });
+
+  it('preserves the rows - 1 invariant with panel + groups + both banners', () => {
+    const items: WorkItem[] = Array.from({ length: 50 }, (_, i) => ({
+      ...makeItem(`I${i}`),
+      group: i,
+      groupLabel: `Group ${i}`,
+    }));
+    const output = renderer(
+      items,
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      0,
+      false,
+      true, // codeFreezeActive
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true, // showHelpText
+      true, // codeFreezeAmbiguous
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    expect(output).toContain('CODE FREEZE');
+    expect(output).toContain('Ambiguous Codefreeze');
+  });
+
+  // ── Metadata scroll clamping with new layout ───────────────────
+
+  it('metadata scroll clamping works under the new layout', () => {
+    const state = new WorkItemListState([
+      {
+        ...makeRichItem(),
+        tags: ['tag1', 'tag2', 'tag3', 'tag4', 'tag5', 'tag6', 'tag7', 'tag8', 'tag9', 'tag10'],
+        description: 'A very long description line that will generate lots of metadata panel content to test scroll clamping. '.repeat(10),
+      },
+    ], TERM_80x24);
+    state.setSelectedIndex(0);
+    // metaScrollDown should not throw and should clamp correctly
+    expect(() => {
+      state.metaScrollDown(100);
+    }).not.toThrow();
+    // metaScrollUp should clamp at 0
+    state.metaScrollOffset = 5;
+    state.metaScrollUp(10);
+    expect(state.metaScrollOffset).toBe(0);
+  });
+
+  // ── Scroll offset 0 with long list ─────────────────────────────
+
+  it('long list at scroll offset 0 shows top items and bottom indicator', () => {
+    const items: WorkItem[] = Array.from({ length: 40 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 0, 0, TERM_80x24, null, 'list', null);
+    expect(output).toContain('Item I0');
+    expect(output).toContain('▼ more');
+    expect(output).not.toContain('▲ more');
+  });
+
+  // ── Different terminal sizes ───────────────────────────────────
+
+  it('preserves the invariant on very tall terminals (60 rows)', () => {
+    const tallTerm = { rows: 60, cols: 80 };
+    const items: WorkItem[] = Array.from({ length: 100 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 0, 0, tallTerm, null, 'list', null);
+    expect(output.split('\n').length).toBeLessThanOrEqual(tallTerm.rows - 1);
+  });
+
+  it('preserves the invariant on very short terminals (10 rows)', () => {
+    const shortTerm = { rows: 10, cols: 40 };
+    const items: WorkItem[] = Array.from({ length: 10 }, (_, i) => makeItem(`I${i}`));
+    const output = renderer(items, 0, 0, shortTerm, null, 'list', null);
+    expect(output.split('\n').length).toBeLessThanOrEqual(shortTerm.rows - 1);
+    expect(output).toContain('Work Items');
+  });
+
+  // ── Short list with groups ─────────────────────────────────────
+
+  it('short list with groups: metadata fills the rest', () => {
+    const items: WorkItem[] = [
+      makeItem('A'),
+      { ...makeItem('B'), group: 0, groupLabel: 'Group A' },
+      { ...makeItem('C'), group: 0, groupLabel: 'Group A' },
+    ];
+    // Pass display rows so the renderer renders the Group A heading with its
+    // count (WL-0MSL5MPSZ003TG94 AC1).
+    const state = new WorkItemListState(items, TERM_80x24);
+    const output = renderer(state.getDisplayRows(), 0, 0, TERM_80x24, null, 'list', null);
+    const lines = output.split('\n');
+    expect(lines.length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    expect(output).toContain('Group A (2)');
+    const metaSeparatorIdx = lines.findIndex(l => l.includes('── A ──'));
+    expect(metaSeparatorIdx).toBeGreaterThan(-1);
+    // Metadata should take at least 5 rows (more than minimum)
+    expect(lines.length - metaSeparatorIdx).toBeGreaterThanOrEqual(5);
   });
 });

@@ -503,7 +503,7 @@ describe('hook-upgrade module', () => {
     it('returns content for pre-push hook', () => {
       const content = generateCanonicalHookContent('pre-push');
       expect(content).not.toBeNull();
-      expect(content!).toContain('worklog:pre-push-hook:v1');
+      expect(content!).toContain('worklog:pre-push-hook:v2');
       expect(content!).toContain('--git-branch refs/worklog/data');
     });
 

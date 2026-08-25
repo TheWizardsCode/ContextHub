@@ -7,7 +7,7 @@
 id = "worklog-selection-list"
 name = "Worklog Selection List"
 version = "0.1.0"
-description = "Browse, filter, and select Worklog work items from a Herdr pane. Keyboard-navigable list with stage filtering and detail view."
+description = "Browse, filter, and select Worklog work items from a Herdr pane. Keyboard-navigable list with stage/priority filtering and detail view."
 min_herdr_version = "0.7.0"
 platforms = ["linux", "macos", "windows"]
 
@@ -35,11 +35,11 @@ title = "Open worklist"
 description = "Open the Worklog work item selection pane."
 command = ["bash", "scripts/open.sh"]
 
-# Action: open the podcast editing tab (worklist pane renamed to "Podcast Editing")
+# Action: open the worklog tab (worklist pane renamed to "Worklog")
 [[actions]]
 id = "open-podcast-editor-tab"
-title = "Open Podcast Editing tab"
-description = "Open the Worklog work item selection pane in a new tab renamed to 'Podcast Editing'."
+title = "Open Worklog tab"
+description = "Open the Worklog work item selection pane in a new tab renamed to 'Worklog'."
 command = ["bash", "scripts/open-podcast-editor-tab.sh"]
 
 # Action: open pi agent pane

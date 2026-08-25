@@ -5,8 +5,8 @@
 import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult, DemotedParent } from './types.js';
-import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions } from './persistent-store.js';
+import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult, DemotedParent, RevertedItem } from './types.js';
+import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions, LastExportTimestamps } from './persistent-store.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
 
 // ── Injectable service types ────────────────────────────────────────────
@@ -19,6 +19,8 @@ export interface JsonlImportResult {
   comments: Comment[];
   dependencyEdges: DependencyEdge[];
   auditResults: AuditResult[];
+  /** Sync header kind when the file starts with a sync header (incremental sync). */
+  kind?: 'full' | 'delta';
 }
 
 /**
@@ -396,7 +398,25 @@ export class WorklogDatabase {
    * Export current database state to JSONL for sync operations.
    * This is used by the sync command before pushing to Git.
    * The JSONL file should be deleted after successful push (ephemeral pattern).
-   * 
+   *
+   * Delta-aware export (WL-0MT2KXPOQ009G026 / WL-0MSAKUBKW006FN8Q):
+   *
+   * - `options.mode: 'full'` (default) — export ALL records.
+   * - `options.mode: 'delta'` — export only records changed after the
+   *   per-type watermarks. If `options.since` is provided it is used as the
+   *   watermark set; otherwise the stored watermarks
+   *   (`getLastExportTimestamps()`) are read automatically. When a type has no
+   *   watermark (no baseline), ALL records of that type are exported for that
+   *   type (full baseline per type). When NO watermarks exist at all, the
+   *   delta degrades to a full export (the design's "no-baseline → full
+   *   export" rule), because a delta with empty watermarks would be empty
+   *   and lose data on the push side.
+   *
+   * Exporting NEVER auto-advances the watermarks in any mode — the push path
+   * advances them only AFTER a successful push (markLastExportTimestamps,
+   * WL-0MT2KY0RQ008F50Q AC5). A failed push must not advance the baseline
+   * past data that was never published.
+   *
    * @returns The path to the exported JSONL file
    */
   async exportForSync(options?: any): Promise<string> {
@@ -405,15 +425,120 @@ export class WorklogDatabase {
       throw new Error('jsonl services not provided to WorklogDatabase — cannot export for sync');
     }
 
-    const items = this.store.getAllWorkItems();
-    const comments = this.store.getAllComments();
-    const dependencyEdges = this.store.getAllDependencyEdges();
-    const auditResults = this.store.getAllAuditResults();
+    const mode: 'full' | 'delta' =
+      options?.mode === 'delta' && process.env.WL_DELTA_EXPORT_DISABLED !== '1' ? 'delta' : 'full';
 
-    // Export to JSONL
-    await jsonlSvc.exportToJsonlAsync(items, comments, this.jsonlPath, dependencyEdges, auditResults, { onProgress: options?.onProgress });
+    // In delta mode resolve the per-type watermarks: explicit `since` wins,
+    // otherwise read the stored watermarks (no baseline → full fallback).
+    let since: LastExportTimestamps | undefined;
+    if (mode === 'delta') {
+      const candidate = options?.since ?? this.getLastExportTimestamps();
+      const hasAnyWatermark = Boolean(candidate.workitems || candidate.comments || candidate.edges || candidate.audit_results);
+      if (hasAnyWatermark) {
+        since = candidate;
+      }
+      // No baseline at all — a delta would export nothing. Fall back to full
+      // so the remote always receives a complete snapshot on first sync.
+    }
+
+    // Capture the resolved watermarks so the filter callbacks close over a
+    // definite value (narrowing does not survive into the closures).
+    const wItems = since?.workitems;
+    const wComments = since?.comments;
+    const wEdges = since?.edges;
+    const wAudits = since?.audit_results;
+
+    const items = wItems
+      ? this.store.getAllWorkItems().filter(i => i.updatedAt && new Date(i.updatedAt).getTime() > new Date(wItems).getTime())
+      : this.store.getAllWorkItems();
+    const comments = wComments
+      ? this.store.getAllComments().filter(c => c.createdAt && new Date(c.createdAt).getTime() > new Date(wComments).getTime())
+      : this.store.getAllComments();
+    const dependencyEdges = wEdges
+      ? this.store.getAllDependencyEdges().filter(e => e.createdAt && new Date(e.createdAt).getTime() > new Date(wEdges).getTime())
+      : this.store.getAllDependencyEdges();
+    const auditResults = wAudits
+      ? this.store.getAllAuditResults().filter(a => a.auditedAt && new Date(a.auditedAt).getTime() > new Date(wAudits).getTime())
+      : this.store.getAllAuditResults();
+
+    // Export to JSONL — the `kind` is surfaced to the JSONL writer so the
+    // output carries a sync header distinguishing full vs delta
+    // (WL-0MT2KXPOQ009G026).
+    await jsonlSvc.exportToJsonlAsync(items, comments, this.jsonlPath, dependencyEdges, auditResults, { onProgress: options?.onProgress, kind: mode });
+
+    // Watermark advancement is deliberately NOT performed here in any mode:
+    // the push path advances them only AFTER a successful push
+    // (markLastExportTimestamps, WL-0MT2KY0RQ008F50Q AC5). A failed push must
+    // not advance the baseline past data that was never published.
 
     return this.jsonlPath;
+  }
+
+  /**
+   * Read the per-record-type last-export watermarks used by delta sync
+   * (WL-0MT2KWFUJ001OGHF). If none have ever been recorded, returns an empty
+   * object — callers treat that as "no baseline → full export".
+   */
+  getLastExportTimestamps(): LastExportTimestamps {
+    return this.store.getLastExportTimestamps();
+  }
+
+  /**
+   * Advance the per-record-type last-export watermarks (after a successful
+   * delta push, or a whole-store import that publishes all records). Only the
+   * provided types are updated; others are left untouched.
+   */
+  markLastExportTimestamps(ts: LastExportTimestamps): void {
+    this.store.setLastExportTimestamps(ts);
+  }
+
+  /**
+   * Total number of dirty records across all four types given the stored
+   * per-type watermarks (WL-0MT2KY0RQ008F50Q / WL-0MSAKUBKW006FN8Q §5.4
+   * zero-change fast path). A record is dirty when its timestamp is strictly
+   * greater than the watermark of its type. When a type has no watermark (no
+   * baseline), every record of that type counts as dirty, and when NO
+   * watermarks exist at all the store is treated as fully dirty (this is what
+   * makes the very first sync a full export).
+   */
+  countDirtyRecords(): { items: number; comments: number; edges: number; audits: number; total: number } {
+    const wm = this.getLastExportTimestamps();
+    const wItems = wm.workitems;
+    const wComments = wm.comments;
+    const wEdges = wm.edges;
+    const wAudits = wm.audit_results;
+
+    const items = wItems
+      ? this.store.getAllWorkItems().filter(i => i.updatedAt && new Date(i.updatedAt).getTime() > new Date(wItems).getTime()).length
+      : this.store.getAllWorkItems().length;
+    const comments = wComments
+      ? this.store.getAllComments().filter(c => c.createdAt && new Date(c.createdAt).getTime() > new Date(wComments).getTime()).length
+      : this.store.getAllComments().length;
+    const edges = wEdges
+      ? this.store.getAllDependencyEdges().filter(e => e.createdAt && new Date(e.createdAt).getTime() > new Date(wEdges).getTime()).length
+      : this.store.getAllDependencyEdges().length;
+    const audits = wAudits
+      ? this.store.getAllAuditResults().filter(a => a.auditedAt && new Date(a.auditedAt).getTime() > new Date(wAudits).getTime()).length
+      : this.store.getAllAuditResults().length;
+
+    return { items, comments, edges, audits, total: items + comments + edges + audits };
+  }
+
+  /**
+   * Read the delta-sync cadence metadata (WL-0MT2KY0RQ008F50Q §5.3): the
+   * number of consecutive delta syncs since the last full snapshot, and the
+   * accumulated JSONL bytes pushed in that window. Used to decide when the
+   * next full snapshot is due (defaults: every 10 delta syncs OR 1 MB).
+   */
+  getDeltaSyncMetadata(): { deltaSyncCount: number; deltaBytes: number } {
+    return this.store.getDeltaSyncMetadata();
+  }
+
+  /**
+   * Persist the delta-sync cadence metadata ({@link getDeltaSyncMetadata}).
+   */
+  setDeltaSyncMetadata(deltaSyncCount: number, deltaBytes: number): void {
+    this.store.setDeltaSyncMetadata(deltaSyncCount, deltaBytes);
   }
 
   /**
@@ -679,7 +804,7 @@ export class WorklogDatabase {
       needsProducerReview?: boolean;
       issueType?: string;
     }
-  ): { results: FtsSearchResult[]; ftsUsed: boolean } {
+  ): { results: FtsSearchResult[]; ftsUsed: boolean; warning?: string } {
     this.services.searchMetrics?.increment?.('search.total');
     const idResults: FtsSearchResult[] = [];
     const seenIds = new Set<string>();
@@ -751,11 +876,36 @@ export class WorklogDatabase {
     // --- Regular FTS / fallback search ---
     let ftsUsed = false;
     let ftsResults: FtsSearchResult[] = [];
+    let warning: string | undefined;
 
     if (this.store.ftsAvailable) {
-      ftsResults = this.store.searchFts(query, options);
-      ftsUsed = true;
-      this.services.searchMetrics?.increment?.('search.fts');
+      try {
+        ftsResults = this.store.searchFts(query, options);
+        ftsUsed = true;
+        this.services.searchMetrics?.increment?.('search.fts');
+      } catch (err) {
+        // The raw query tripped the FTS5 parser (e.g. an unquoted punctuated
+        // term like `v0.1.11` or a file path). Retry as a quoted phrase so
+        // users searching for version strings / paths still get results, and
+        // signal the auto-quote with a warning so it is never silent.
+        const message = err instanceof Error ? err.message : String(err);
+        const escaped = query.replace(/\\"/g, '').replace(/"/g, '""');
+        let quotedResults: FtsSearchResult[];
+        try {
+          quotedResults = this.store.searchFts(`"${escaped}"`, options);
+        } catch (err2) {
+          // Auto-quoting also failed — surface a hard, distinguishable error
+          // so the user knows the query is invalid (never a silent empty list).
+          const inner = err2 instanceof Error ? err2.message : String(err2);
+          throw new Error(
+            `invalid query syntax: "${query}" — quote phrases or punctuated terms. ${inner}`
+          );
+        }
+        ftsResults = quotedResults;
+        ftsUsed = true;
+        this.services.searchMetrics?.increment?.('search.fts');
+        warning = `query "${query}" was auto-quoted as a phrase because it is not valid FTS5 syntax: ${message}`;
+      }
     } else {
       if (!this.silent) {
         this.debug('FTS5 is not available; falling back to application-level search');
@@ -773,7 +923,7 @@ export class WorklogDatabase {
       }
     }
 
-    return { results: merged, ftsUsed };
+    return { results: merged, ftsUsed, warning };
   }
 
   /**
@@ -1116,9 +1266,12 @@ export class WorklogDatabase {
     // this comparison because the update method above explicitly preserves
     // the existing values for these fields (prevents manual update from
     // overwriting GitHub metadata). Only hasWorkItemChanged() checks them.
-    const fieldsToCompare: (keyof WorkItem)[] = [
+    const contentFieldsToCompare: (keyof WorkItem)[] = [
       'title', 'description', 'status', 'priority', 'sortIndex', 'parentId',
-      'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort',
+      'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort'
+    ];
+    const fieldsToCompare: (keyof WorkItem)[] = [
+      ...contentFieldsToCompare,
       'needsProducerReview'
     ];
     // Shared comparator: whitespace-only diffs in title/description are not
@@ -1133,8 +1286,19 @@ export class WorklogDatabase {
       return updated;
     }
 
-    // At least one field changed — bump the timestamp.
-    updated.updatedAt = new Date().toISOString();
+    // At least one tracked field changed.  Check whether a content field
+    // actually changed — only then bump the timestamp.  This prevents
+    // needsProducerReview-only flips from invalidating audits
+    // (WL-0MSN6ZCTN0027U2R).  A metadata-only change still persists the
+    // flag but preserves the timestamp so that existing audits remain fresh.
+    const contentChanged = this.compareTrackedFields(item, updated, contentFieldsToCompare);
+    if (contentChanged) {
+      updated.updatedAt = new Date().toISOString();
+    } else {
+      // Metadata-only change (e.g. needsProducerReview): preserve the
+      // original updatedAt so existing audits remain fresh.
+      updated.updatedAt = item.updatedAt;
+    }
 
     if (process.env.WL_DEBUG_SQL_BINDINGS) {
       try {
@@ -1368,6 +1532,45 @@ export class WorklogDatabase {
   }
 
   /**
+   * Revert an item to `open`/`plan_complete` after a "not ready to close"
+   * audit verdict.
+   *
+   * When an item in `in_review` (status `completed`) receives a
+   * not-ready-to-close verdict ("Ready to close: No" via `--audit-text`, or
+   * `--ready-to-close no` via `wl audit-set`), it is moved back to
+   * `open`/`plan_complete` so it drops out of the ready-to-close queue and
+   * returns to the planning queue for further work. The item's priority is
+   * preserved (only status/stage change).
+   *
+   * Only items in exactly `completed`/`in_review` are reverted: a `done`
+   * item or an item already `open`/`in-progress` is left untouched.
+   *
+   * @param itemId - id of the work item whose audit verdict is not-ready-to-close
+   * @returns the reversion details (item, from status/stage, to status/stage)
+   *   or `null` when the item is not in an eligible state (or does not exist)
+   */
+  revertToPlanComplete(itemId: string): RevertedItem | null {
+    const item = this.get(itemId);
+    if (!item) {
+      return null;
+    }
+    const eligible = item.status === 'completed' && item.stage === 'in_review';
+    if (!eligible) {
+      return null;
+    }
+    const from = { status: item.status, stage: item.stage };
+    const updated = this.update(itemId, { status: 'open', stage: 'plan_complete' });
+    if (!updated) {
+      return null;
+    }
+    return {
+      item: updated,
+      from,
+      to: { status: updated.status, stage: updated.stage },
+    };
+  }
+
+  /**
    * Get the number of direct children for each work item.
    * Returns a Map<itemId, count>.
    * If items is provided, only counts within that subset; otherwise uses all items.
@@ -1446,11 +1649,15 @@ export class WorklogDatabase {
    * Ordinal rank of a risk level on the canonical scale
    * (Low < Medium < High < Severe/Critical). Both the type-level spelling
    * ('Severe') and the icon-scale spelling ('critical') map to the top
-   * rank. Unset/unknown values map to null (fail-closed: they are never
+   * rank. Agents may produce verbose risk fields like "Medium — NVIDIA
+   * driver changes…"; extract the leading keyword before any delimiter.
+   * Unset/unknown values map to null (fail-closed: they are never
    * matched by an at-most risk filter).
    */
   private riskOrdinal(risk: string | undefined | null): number | null {
-    switch ((risk ?? '').trim().toLowerCase()) {
+    // Extract the leading keyword before any delimiter (—, -, :, whitespace).
+    const normalized = (risk ?? '').trim().toLowerCase().split(/[-:–—\s]+/)[0];
+    switch (normalized) {
       case 'low': return 1;
       case 'medium': return 2;
       case 'high': return 3;
@@ -1465,11 +1672,21 @@ export class WorklogDatabase {
    * (Extra Small < Small < Medium < Large < Extra Large). Accepts both the
    * short CLI spellings (XS/S/M/L/XL) and the long-form effort-and-risk
    * skill spellings (extra small/small/medium/large/extra large),
-   * normalized case-insensitively. Unset/unknown values map to null
-   * (fail-closed: they are never matched by an at-most effort filter).
+   * normalized case-insensitively. Agents may produce verbose effort fields
+   * like "1–4 hours — Small. Diagnostic investigation…"; extract the
+   * keyword via exact match on stripped string first, then fall back to
+   * word-boundary search.
+   * Unset/unknown values map to null (fail-closed: they are never matched
+   * by an at-most effort filter).
    */
   private effortOrdinal(effort: string | undefined | null): number | null {
-    switch ((effort ?? '').trim().toLowerCase().replace(/[\s-]+/g, '')) {
+    const normalized = (effort ?? '').trim().toLowerCase();
+    // Try exact match on stripped version first (simple cases: "small", "medium",
+    // "Extra Small" → "extrasmall"). If that fails, fall back to searching for
+    // the keyword anywhere in the string — agents produce verbose fields like
+    // "1–4 hours — Small. Diagnostic investigation…" (keyword after the dash).
+    const stripped = normalized.replace(/[\s-]+/g, '');
+    switch (stripped) {
       case 'xs':
       case 'extrasmall': return 1;
       case 's':
@@ -1480,7 +1697,20 @@ export class WorklogDatabase {
       case 'large': return 4;
       case 'xl':
       case 'extralarge': return 5;
-      default: return null;
+      default:
+        // Fallback: search for the keyword bounded by non-word characters.
+        // Checked in order of specificity (longest first) so "small" wins over "s".
+        if (/(?:^|\W)extrasmall(?:\W|$)/.test(normalized)) return 1;
+        if (/(?:^|\W)xs(?:\W|$)/.test(normalized)) return 1;
+        if (/(?:^|\W)small(?:\W|$)/.test(normalized)) return 2;
+        if (/(?:^|\W)s(?:\W|$)/.test(normalized)) return 2;
+        if (/(?:^|\W)extralarge(?:\W|$)/.test(normalized)) return 5;
+        if (/(?:^|\W)large(?:\W|$)/.test(normalized)) return 4;
+        if (/(?:^|\W)xl(?:\W|$)/.test(normalized)) return 5;
+        if (/(?:^|\W)l(?:\W|$)/.test(normalized)) return 4;
+        if (/(?:^|\W)m(?:\W|$)/.test(normalized)) return 3;
+        if (/(?:^|\W)medium(?:\W|$)/.test(normalized)) return 3;
+        return null;
     }
   }
 
@@ -2740,6 +2970,14 @@ export class WorklogDatabase {
       }
     });
 
+    // Rebuild FTS index for all imported items — the transaction cleared the
+    // FTS table via clearWorkItems, so every imported item needs a fresh row.
+    if (this.store.ftsAvailable) {
+      for (const item of items) {
+        this.store.upsertFtsEntry(item);
+      }
+    }
+
     this.triggerAutoSync();
   }
 
@@ -2778,6 +3016,10 @@ export class WorklogDatabase {
         ? { ...item, updatedAt: new Date().toISOString() }
         : item;
       this.store.saveWorkItem(itemToSave);
+      // Keep the FTS index fresh for the upserted item
+      if (this.store.ftsAvailable) {
+        this.store.upsertFtsEntry(itemToSave);
+      }
     }
 
     if (dependencyEdges) {
@@ -2925,6 +3167,10 @@ export class WorklogDatabase {
       updatedAt: new Date().toISOString(),
     };
     this.store.saveWorkItem(updated);
+    // Keep the FTS index fresh so status-filtered search reflects the change
+    if (this.store.ftsAvailable) {
+      this.store.upsertFtsEntry(updated);
+    }
     this.triggerAutoSync();
     return true;
   }
@@ -2948,6 +3194,10 @@ export class WorklogDatabase {
         updatedAt: new Date().toISOString(),
       };
       this.store.saveWorkItem(updated);
+      // Keep the FTS index fresh so status-filtered search reflects the change
+      if (this.store.ftsAvailable) {
+        this.store.upsertFtsEntry(updated);
+      }
       this.triggerAutoSync();
       if (process.env.WL_DEBUG) {
         process.stderr.write(`[wl:dep] re-blocked ${itemId} (active blockers remain)\n`);
@@ -2965,6 +3215,10 @@ export class WorklogDatabase {
       updatedAt: new Date().toISOString(),
     };
     this.store.saveWorkItem(updated);
+    // Keep the FTS index fresh so status-filtered search reflects the change
+    if (this.store.ftsAvailable) {
+      this.store.upsertFtsEntry(updated);
+    }
     this.triggerAutoSync();
     if (process.env.WL_DEBUG) {
       process.stderr.write(`[wl:dep] unblocked ${itemId} (no active blockers remain)\n`);
@@ -3117,12 +3371,44 @@ export class WorklogDatabase {
   }
 
   /**
+   * Upsert comments non-destructively (incremental-sync delta pull,
+   * WL-0MT2KYCNB000CYWV). Unlike {@link importComments} this does NOT clear
+   * existing comments first: each provided comment is saved via the store's
+   * INSERT OR REPLACE so local comments absent from the incoming delta are
+   * preserved, while overlapping ids converge to the merged value.
+   */
+  upsertComments(comments: Comment[]): void {
+    for (const comment of comments) {
+      this.store.saveComment(comment);
+    }
+    // Comment text is embedded in the parent item's FTS row, so update
+    // all parent items to keep the index fresh.
+    if (this.store.ftsAvailable && comments.length > 0) {
+      const affectedIds = new Set(comments.map(c => c.workItemId));
+      const items = this.store.getAllWorkItems();
+      for (const item of items) {
+        if (affectedIds.has(item.id)) {
+          this.store.upsertFtsEntry(item);
+        }
+      }
+    }
+    this.triggerAutoSync();
+  }
+
+  /**
    * Import comments
    */
   importComments(comments: Comment[]): void {
     this.store.clearComments();
     for (const comment of comments) {
       this.store.saveComment(comment);
+    }
+    // Re-index all items whose comments changed (FTS rows embed comment text)
+    if (this.store.ftsAvailable) {
+      const items = this.store.getAllWorkItems();
+      for (const item of items) {
+        this.store.upsertFtsEntry(item);
+      }
     }
     this.triggerAutoSync();
   }
