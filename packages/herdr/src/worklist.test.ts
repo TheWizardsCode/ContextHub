@@ -28,6 +28,7 @@ import {
   formatMetadataPanel,
   formatTimestamp,
   buildMetaRows,
+  pairMetaRows,
   resolveKeyFilePath,
   formatDetailContent,
   formatDetailView,
@@ -2328,7 +2329,11 @@ describe('formatMetadataPanel — description preview (WL-0MSFZKQL700381P3)', ()
     const item = { ...makeRichItem(), description: ['p1', 'p2', 'p3'].join('\n') };
     const top = formatMetadataPanel(item, 80, 3, 0).join('\n');
     expect(top).not.toContain('p1');
-    const previewView = formatMetadataPanel(item, 80, 3, 19).join('\n');
+    // The four compacted field pairs (Status+Stage, Priority+Type,
+    // Created+Updated, Audit+AuditedAt, WL-0MSNIX4V60012266) remove 4
+    // rows from the rich item, so the p1..p3 preview window sits 4 rows
+    // earlier than before (offset 15 instead of 19).
+    const previewView = formatMetadataPanel(item, 80, 3, 15).join('\n');
     expect(previewView).toContain('p1');
     expect(previewView).toContain('p3');
     // [m/M scroll] indicator still shown when content overflows
@@ -2709,6 +2714,134 @@ describe('buildMetaRows — timestamps rendered via formatTimestamp', () => {
     expect(rows.has('Created')).toBe(false);
     expect(rows.has('Updated')).toBe(false);
     expect(rows.has('Audited At')).toBe(false);
+  });
+});
+
+// ── Compound row compression (WL-0MSNIX4V60012266) ─────────────────────
+// The metadata display pairs four field combinations onto single rows to
+// save vertical space: Status+Stage, Priority+Type, Created+Updated,
+// Audit+AuditedAt. `pairMetaRows` is a pure post-processing step over
+// `buildMetaRows` output — it never touches the data model, it affects
+// only the rendered label/value list.
+
+describe('pairMetaRows — compound row compression (WL-0MSNIX4V60012266)', () => {
+  it('pairs Status+Stage on a single row with the ` / ` separator', () => {
+    const rows = pairMetaRows(buildMetaRows(makeRichItem()));
+    const map = new Map(rows);
+    expect(map.get('Status+Stage')).toBe('\u{1F504} in_progress / \u{1F6E0}\u{FE0F} in_progress');
+    // The individual rows are consumed — no stray Status/Stage rows remain.
+    expect(rows.some(([label]) => label === 'Status' || label === 'Stage')).toBe(false);
+  });
+
+  it('pairs Priority+Type on a single row', () => {
+    const map = new Map(pairMetaRows(buildMetaRows(makeRichItem())));
+    expect(map.get('Priority+Type')).toBe('\u{2B50} high / feature');
+    expect(map.has('Priority')).toBe(false);
+    expect(map.has('Type')).toBe(false);
+  });
+
+  it('pairs Created+Updated on a single row (local timestamps)', () => {
+    const map = new Map(pairMetaRows(buildMetaRows(makeRichItem())));
+    expect(map.get('Created+Updated')).toBe(
+      `${localDDMMYY('2026-08-01T10:00:00.000Z')} / ${localDDMMYY('2026-08-02T10:00:00.000Z')}`,
+    );
+    expect(map.has('Created')).toBe(false);
+    expect(map.has('Updated')).toBe(false);
+  });
+
+  it('pairs Audit+AuditedAt on a single row', () => {
+    const map = new Map(pairMetaRows(buildMetaRows(makeRichItem())));
+    expect(map.get('Audit+AuditedAt')).toBe(
+      `\u{2705} ready to close / ${localDDMMYY('2026-08-03T10:00:00.000Z')}`,
+    );
+    expect(map.has('Audit')).toBe(false);
+    expect(map.has('Audited At')).toBe(false);
+  });
+
+  it('keeps the present half as a single row when only one side of a pair exists', () => {
+    // Status only (no Stage) — incomplete pair stays a single Status row.
+    // (noIcons mode so the values are plain text.)
+    const statusOnly = pairMetaRows(buildMetaRows({ ...makeItem('WL-P1'), status: 'open' }, true));
+    expect(new Map(statusOnly).get('Status')).toBe('open');
+    expect(new Map(statusOnly).has('Status+Stage')).toBe(false);
+
+    // Audit only (no Audited At) — the audit verdict row is preserved.
+    const auditOnly = pairMetaRows(buildMetaRows({ ...makeItem('WL-P2'), auditResult: false }, true));
+    expect(new Map(auditOnly).get('Audit')).toBe('not ready');
+    expect(new Map(auditOnly).has('Audit+AuditedAt')).toBe(false);
+
+    // Created only — the single Created row survives.
+    const createdOnly = pairMetaRows(
+      buildMetaRows({ ...makeItem('WL-P3'), createdAt: '2026-08-01T10:00:00.000Z' }, true),
+    );
+    expect(new Map(createdOnly).get('Created')).toBe(localDDMMYY('2026-08-01T10:00:00.000Z'));
+    expect(new Map(createdOnly).has('Created+Updated')).toBe(false);
+  });
+
+  it('keeps all other rows (ID, Title, Risk, Effort, Children, Parent, Tags, GitHub Issue, Reviewed) unchanged', () => {
+    const raw = buildMetaRows(makeRichItem());
+    const rawMap = new Map(raw);
+    const paired = new Map(pairMetaRows(raw));
+    for (const label of ['ID', 'Title', 'Risk', 'Effort', 'Children', 'Parent', 'Tags', 'GitHub Issue', 'Reviewed']) {
+      expect(paired.get(label)).toBe(rawMap.get(label));
+    }
+    // The four pairs are the ONLY rows that change shape.
+    expect(paired.size).toBe(rawMap.size - 4);
+  });
+
+  it('preserves row order with compounds in their natural position', () => {
+    const paired = pairMetaRows(buildMetaRows(makeRichItem()));
+    const labels = paired.map(([lbl]) => lbl);
+    // Positional anchors relative to the surrounding (unchanged) rows.
+    expect(labels[0]).toBe('ID');
+    expect(labels[1]).toBe('Title');
+    expect(labels[2]).toBe('Status+Stage');
+    expect(labels[3]).toBe('Priority+Type');
+    expect(labels[labels.length - 1]).toBe('Reviewed');
+  });
+});
+
+// ── Rendered views apply the compression (WL-0MSNIX4V60012266) ─────────
+
+describe('metadata views — paired-row compression (WL-0MSNIX4V60012266)', () => {
+  it('renders the four compound rows in the list-mode metadata panel', () => {
+    const joined = formatMetadataPanel(makeRichItem(), 80, 20, 0).join('\n');
+    expect(joined).toContain('Status+Stage');
+    expect(joined).toContain('Priority+Type');
+    expect(joined).toContain('Created+Updated');
+    expect(joined).toContain('Audit+AuditedAt');
+  });
+
+  it('renders the four compound rows in the detail-view metadata table', () => {
+    const joined = formatDetailContent(makeRichItem(), 80).join('\n');
+    expect(joined).toContain('Status+Stage');
+    expect(joined).toContain('Priority+Type');
+    expect(joined).toContain('Created+Updated');
+    expect(joined).toContain('Audit+AuditedAt');
+  });
+
+  it('applies the same compression in noIcons (plain text) mode', () => {
+    const panel = formatMetadataPanel(makeRichItem(), 80, 20, 0, undefined, true).join('\n');
+    // Labels are padded to the shared field width, so assert on the
+    // visible value runs rather than exact label-adjacent strings.
+    expect(panel).toMatch(/Status\+Stage\s+in_progress \/ in_progress/);
+    expect(panel).toMatch(/Priority\+Type\s+high \/ feature/);
+    expect(panel).not.toContain('\u{1F504}');
+    const detail = formatDetailContent(makeRichItem(), 80, undefined, true).join('\n');
+    expect(detail).toContain('Status+Stage');
+    expect(detail).toContain('Priority+Type');
+    expect(detail).toMatch(/Status\+Stage\s+\|\s+in_progress \/ in_progress/);
+  });
+
+  it('saves 4 vertical rows for a fully-populated item', () => {
+    const panelRows = (rows: Array<[string, string]>): number => {
+      const pairs = pairMetaRows(rows);
+      const singles = rows.length;
+      return singles - pairs.length;
+    };
+    expect(panelRows(buildMetaRows(makeRichItem()))).toBe(4);
+    // A minimal item (only status) compresses nothing — single row stays.
+    expect(panelRows(buildMetaRows(makeItem('WL-MIN')))).toBe(0);
   });
 });
 

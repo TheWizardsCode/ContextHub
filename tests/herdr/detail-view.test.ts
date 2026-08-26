@@ -142,7 +142,9 @@ describe('formatDetailContent', () => {
     const item = makeItem({ auditedAt: '2025-06-15T10:30:00Z' });
     const lines = formatDetailContent(item, 80);
     const joined = lines.join('\n');
-    expect(joined).toContain('Audited At');
+    // Compressed pairing (WL-0MSNIX4V60012266): Audit + Audited At share
+    // one row, so the timestamp appears on the `Audit+AuditedAt` row.
+    expect(joined).toContain('Audit+AuditedAt');
     // Formatted as DD/MM/YY HH:MM in local time (WL-0MSF8HYUX0012WA9)
     const d = new Date('2025-06-15T10:30:00Z');
     const pad = (n: number): string => String(n).padStart(2, '0');
@@ -204,9 +206,9 @@ describe('formatDetailContent', () => {
     });
     const lines = formatDetailContent(item, 80);
     const joined = lines.join('\n');
-    // All three audit labels should be present
-    expect(joined).toContain('Audit');
-    expect(joined).toContain('Audited At');
+    // Audit + Audited At are compressed onto one row (WL-0MSNIX4V60012266);
+    // Reviewed stays a separate row.
+    expect(joined).toContain('Audit+AuditedAt');
     expect(joined).toContain('Reviewed');
   });
 });

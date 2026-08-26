@@ -1318,6 +1318,69 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
   return metaRows;
 }
 
+// ── Compound metadata rows (WL-0MSNIX4V60012266) ──────────────────────────
+// The four field pairs that should be rendered on a single compressed row.
+
+/** Metadata field-pair definitions for compressed rendering. */
+const META_ROW_PAIRS: Array<[string, string, string]> = [
+  ['Status+Stage', 'Status', 'Stage'],
+  ['Priority+Type', 'Priority', 'Type'],
+  ['Created+Updated', 'Created', 'Updated'],
+  ['Audit+AuditedAt', 'Audit', 'Audited At'],
+] as const;
+
+/**
+ * Post-process `buildMetaRows` output to pair four field combinations onto
+ * single rows, reducing the vertical space used in the metadata panel.
+ *
+ * Pairs: Status+Stage, Priority+Type, Created+Updated, Audit+AuditedAt.
+ * Each pair is joined with ` / ` as a separator when BOTH values are
+ * present. When only one half of a pair is present, the present half is
+ * kept as its own single row (with its original label) so no field
+ * information is ever lost (e.g. an item with an audit verdict but no
+ * audited-at timestamp still shows its `Audit` row).
+ *
+ * All other rows pass through unchanged. The original row order is
+ * preserved (pairs appear where their first component originally appeared).
+ *
+ * @param metaRows - Raw label/value pairs from {@link buildMetaRows}.
+ * @returns A new array with the four pairs compressed into single rows.
+ */
+export function pairMetaRows(
+  metaRows: Array<[string, string]>,
+): Array<[string, string]> {
+  const rows = new Map<string, string>(metaRows);
+  const consumed = new Set<string>();
+
+  const result: Array<[string, string]> = [];
+  for (const [label, value] of metaRows) {
+    // Second key of a pair already emitted inside a compound row — skip.
+    if (consumed.has(label)) continue;
+
+    // First key of a pair (buildMetaRows always emits the first key before
+    // the second, so the compound row lands in its natural position).
+    const pairDef = META_ROW_PAIRS.find(([, keyA]) => keyA === label);
+    if (pairDef) {
+      const [compoundLabel, keyA, keyB] = pairDef;
+      const valA = rows.get(keyA);
+      const valB = rows.get(keyB);
+      if (valA != null && valB != null) {
+        result.push([compoundLabel, `${valA} / ${valB}`]);
+        consumed.add(keyB);
+      } else {
+        // Incomplete pair — keep the present half as a single row.
+        result.push([label, value]);
+      }
+    } else {
+      // Regular row, or the lone second key of an incomplete pair —
+      // pass through unchanged.
+      result.push([label, value]);
+    }
+  }
+
+  return result;
+}
+
 /**
  * Maximum number of description preview lines shown in the metadata panel.
  */
@@ -1407,8 +1470,9 @@ export function formatMetadataPanel(
   // Header separator identifying the selected item
   lines.push(` ${ANSI.dim}── ${item.id} ──${ANSI.reset}`);
 
-  // Metadata rows
-  const metaRows = buildMetaRows(item, noIcons);
+  // Metadata rows — pair Status+Stage, Priority+Type, Created+Updated,
+  // Audit+AuditedAt onto single rows for a more compact display (WL-0MSNIX4V60012266).
+  const metaRows = pairMetaRows(buildMetaRows(item, noIcons));
   if (metaRows.length > 0) {
     const fieldWidth = Math.max(...metaRows.map(([l]) => l.length), 6);
     for (const [label, value] of metaRows) {
@@ -1587,8 +1651,11 @@ export function formatDetailContent(
 
   // Metadata — rendered as a markdown table (shared row builder; ID and
   // Title are already shown in the header above, so they are filtered out
-  // here to avoid duplicating them).
-  const metaRows = buildMetaRows(item, noIcons).filter(([label]) => label !== 'ID' && label !== 'Title');
+  // here to avoid duplicating them). Apply compound row pairing for a
+  // more compact display (WL-0MSNIX4V60012266).
+  const metaRows = pairMetaRows(
+    buildMetaRows(item, noIcons).filter(([label]) => label !== 'ID' && label !== 'Title'),
+  );
 
   // Render the metadata as a markdown table
   if (metaRows.length > 0) {
