@@ -835,13 +835,17 @@ describe('per-slot operator gate', () => {
   it('AC6: malformed per-slot payloads → fetchProxyStatus resolves null (fail-closed, no switch)', async () => {
     // Each of these is ambiguous per `parseLlamaStatus`: non-array `slots`,
     // non-boolean `is_processing`, missing/empty `slot_id`, duplicate ids,
-    // and a negative id colliding with the clamped `0` (WL-0MSVRMAWM007QNR5
-    // clamp → duplicate). fetchProxyStatus must resolve null → proxy busy.
+    // a non-finite `slot_id` (NaN/Infinity — rejected by the shared parser's
+    // Number.isFinite/Number.isInteger guard, parent AC6), and a negative id
+    // colliding with the clamped `0` (WL-0MSVRMAWM007QNR5 clamp → duplicate).
+    // fetchProxyStatus must resolve null → proxy busy.
     const malformed: Record<string, unknown>[] = [
       { ...rawStatusPayload(), slots: 'not-an-array' },
       { ...rawStatusPayload(), slots: [{ slot_id: 'x', is_processing: 'yes' }] },
       { ...rawStatusPayload(), slots: [{ is_processing: false }] },
       { ...rawStatusPayload(), slots: [{ slot_id: '', is_processing: false }] },
+      { ...rawStatusPayload(), slots: [{ slot_id: NaN, is_processing: false }] },
+      { ...rawStatusPayload(), slots: [{ slot_id: Infinity, is_processing: false }] },
       {
         ...rawStatusPayload(),
         slots: [
